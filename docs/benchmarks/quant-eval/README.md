@@ -11,7 +11,7 @@ tables.
 
 | tool | file | quantity used | notes |
 |---|---|---|---|
-| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, and `evidence_type` of the same file; `quantity_normalized` is not used |
+| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, `measurement_q` (when present) and `evidence_type` of the same file; `quantity_normalized` is not used |
 | MaxQuant | `evidence.txt` | `Intensity`, summed over the evidence rows of a precursor x run | reverse and contaminants removed; the LFQ columns are not used |
 | FragPipe | IonQuant `combined_ion.tsv` | `<run> Intensity` | IonQuant must be run with normalisation off (`--normalization 0`); rows with `Match Type` MBR are transfers |
 | FlashLFQ (PIP-ECHO) | `QuantifiedPeaks.tsv` (`--flashlfq NAME:PEAKS[:PIPQ]`) | `Peak intensity` | key = `Full Sequence` + `/` + `Precursor Charge`, so the identifications given to FlashLFQ must carry andes-form full sequences; `Peak Detection Type` MBR = transfer, its `PIP Q-Value` is kept (`PIPQ` keeps transfers up to that value); decoy-peptide and random-RT peaks are dropped. FlashLFQ sums the charge states of a peptide into one intensity unless run charge-specific |
@@ -30,7 +30,7 @@ andes row rules (`--andes NAME:RULE[@LIBQ]:PATH`), all with `library_q <= 0.01` 
 | `default` | identified rows + transfers with `transfer_q <= 0.01` |
 | `all` | identified rows + every transfer the finalize output carries |
 | `hard-cut` | identified rows + transfers with `quant_q <= --hard-cut` (default 0.01) |
-| `weights` | rows of `all`, with the per-transfer error probability recovered from `quant_q` (running mean of p over a run's transfers sorted by p); the roll-up then uses learned precision weights (the "V" view) |
+| `weights` | rows of `all`, with the per-transfer error probability recovered from `measurement_q` (running mean of p over a run's accepted transfers sorted by p, rows with equal p sharing one value; `quant_q` holds that mean in tables without the column); the roll-up then uses learned precision weights (the "V" view) |
 | `weights-bias` | rows of `weights`; where the table carries `quantity_bias` and `quantity_bias_se` (log2) for a transfer, its quantity is divided by `2**quantity_bias` and the learned class variance of the transfer is scaled by its `quantity_bias_se**2` relative to its class mean. A table without these columns gives the `weights` rows |
 
 MaxQuant and FragPipe rows are used as the tools report them (their own match-between-runs rows included).
@@ -131,8 +131,9 @@ One manifest drives the whole truth suite; nothing is searched or quantified by 
 runs stays with the cluster scripts of the user).
 
 ```
-python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7]
+python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7] [--jobs 3]
 python3 -m quant_eval.board --results results/ > scoreboard.md
+python3 -m quant_eval.compare --results results/ [--build cand] [--arm V] [--tools MQ,FP] [--seed 42] [--only ups27]
 python3 -m quant_eval.gate  --results results/ --candidate cand [--baseline main]
 python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --fasta hye.fasta --rule hard-cut --out-prefix sub/QE
 ```
@@ -146,6 +147,15 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   PXD014415 false-transfer rate are not above the reference build's at its own quant_q <= 0.01 plus the reference's own seed-to-seed spread of that rate
   (max - min over the quant-model seeds of the manifest; recorded as `matched_tolerance` in the result JSON, 0 with one seed); depth, accuracy and DE are read at that cut.
 - Arms: `X` (transfer_q <= 0.01), `X_V`, `X_H`, `X_I` (identified rows only, the run without match between runs) and `X_M`; a tool's output with match between runs off is another entry of the manifest's `tools` (e.g. `"maxquant": {"MQ": ..., "MQ_noMBR": ...}`).
+- `suite --jobs N`: every (dataset, seed) pair is one unit that writes its own result JSON; with `--jobs` above 1 the units run in N worker
+  processes. The result files do not depend on `--jobs`; the progress lines of the units are interleaved on stderr.
+- `compare.py`: one short table per dataset for one andes build against the tools (default: the last build of the results, and the MaxQuant
+  and FragPipe arms with match between runs). One row per metric: depth, cell accuracy, replicate spread, protein CV, DE calls in the
+  common family and on the arm's own rows, low spike levels. Per tool its value, the difference of andes to it (relative to the tool; a
+  factor from 2x on) and a marker: `✅` andes better, `❌` worse, `≈` equal or the ranges over the quant-model seeds overlap. It reads the
+  result JSONs as `board.py` does and computes nothing new. A manifest with one build (that build as `reference_build`) and the tool
+  outputs is enough for it. The two rows on the brightest cells depend on the reference build (its quantities, with those of the tools,
+  rank the cells), so they can differ between a run with the build as reference and a run with another reference.
 - `board.py`: the one scoreboard table. `gate.py`: pass / fail per criterion of the adoption gate (identified rows, wrong-peak, UPS1
   within 2x, DE by the pairwise TP-and-FDP rule, depth at the matched cut, cost); exit status 1 on any failure.
 - `proteobench.py`: Custom-input file (and metadata JSON) for the ProteoBench DDA precursor-ion modules.
@@ -153,4 +163,43 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   any result flagged held-out; they never enter a gate or tuning run.
 - `--hard-cut` accepts `hard-cut=<tau>` as an andes rule (`--andes NAME:hard-cut=0.004:finalize.parquet`).
 
+## Board metrics: low-level UPS1, absence classes, blank split
+
+`board.py` keeps its legacy columns (`--legacy` prints exactly those) and adds, to their right, columns from `lowlevel.py` and `absence.py`
+(computed by `downstream.py` into the result JSON, so a rerun of the suite is needed to produce them; `--detail` adds the long tables):
+
+- L1 with its levels named (the amol levels summed, flagged when one is also a reference level, `ref_skip` = 3 lowest levels excluded from the
+  references), the UPS1 rows the arm reports at those levels, the share of them within 2x and their median |log2 error|, and the L1 count at a matched
+  number of rows (per level, every arm limited to the smallest row count among andes, MaxQuant and FragPipe; the headline is the expected count for rows drawn at random, the best-first reading orders
+  andes by its quality column and the other arms by intensity, so its order differs per arm); the rows of precursors without a design reference are printed (+ unscored) and counted as not within 2x in a second precision column. The L1 count alone grows with the number of rows an arm reports; the diagnostic andes rule `every-row`
+  (all rows including the below-threshold ones) shows the count-only effect.
+- A2: error of the transferred rows (median signed and absolute error, within-2x share) at each level, identified rows next to them.
+- PXD014415: the yeast rows in the human-only runs by class of the precursor's own profile (yeast-enriched, not yeast-specific, only in absent runs),
+  with the boundary learned from the control species' spread (per bin of absent-run rows, the control count of each bin printed; a bin with fewer than 100 control precursors uses the pooled cutoff) and the fixed 2x next to it. Profile and cutoffs are derived once from a reference table (the andes every-row table) and every arm is classified against it; a precursor missing from the reference is `not_in_reference`. The noise-removed rate is a lower bound of the species-specific errors; the board prints the enriched rate and, in brackets, enriched + the rows without a yeast-run reference.
+- Blank run: rows split into identified and transferred, and the carry-over-like rows (below a fraction of the precursor's median in the other runs,
+  the fraction learned from the ordinary runs).
+
+- DE: the intersection family is a set of candidate proteins and each arm still tests only those with at least 2 finite values on both sides of a pair,
+  so the tested (protein, pair) rows differ between arms. The `common` family (proteins testable in the pair in every match-between-runs arm; `common_all`
+  over every shared arm) has identical tested rows; the board prints it next to the legacy column, with the tested-row counts. `TPs` (expected sign)
+  is the sign-aware true-positive count, `WS` the wrong-sign calls, and the sign-aware false count is FP + WS (`tp_at_fdp_signed` for the pooled-FDP reading).
+  The legacy DE column is unchanged (unsigned TP, intersection family, each arm's own testable rows) and is labelled so on the default board.
+- Board cosmetics: `within 2x %` (equal to 100 - `err>1 %`) is dropped from the default board, an empty absence rate prints `-`, FlashLFQ is labelled
+  peptide-level (charge states summed) and Sage as having no transfer flag (its MBR fills count as identified). `--legacy` prints the earlier columns and labels.
+
+Tests: `python3 tests/test_board_metrics.py`, `python3 tests/test_compare.py`.
+
 Refs #299.
+
+## Roll-up sensitivity (mokume)
+
+`rollup_sens.py` scores the protein level of every arm after several roll-ups of the same raw precursor intensities: the harness
+median polish and the quantification methods of mokume (`rollup_mokume.py`: MaxLFQ, DirectLFQ, Top3, sum, median) under the harness
+run normalisation and under mokume's own `globalMedian` normalisation. The tool's own protein intensity (MaxQuant `LFQ intensity`
+of `proteinGroups.txt`) is added as a reference row. No roll-up is implemented in the package: mokume-py must be importable
+(`pip install mokume-py directlfq`). The default of every other module is unchanged.
+
+```
+python3 -m quant_eval.rollup_sens --manifest manifest.json --dataset u9740 --seed 42 --out results/u9740_s42.json
+python3 -m quant_eval.rollup_sens_table --results results/ > rollup_sensitivity.md
+```

@@ -14,15 +14,15 @@ use crate::cli::{
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
 use crate::model_select::{
-    cli_fragment_tol_override, default_aa_set_with_tag, label_from_mods, load_param_from_store,
-    parse_enzymes, resolve_metadataless_selection, routing_protocol,
-    warn_if_universal_protease_combo,
+    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, default_aa_set_with_tag,
+    label_from_mods, load_param_from_store, parse_enzymes, resolve_metadataless_selection,
+    routing_protocol, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
-    add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
+    add_mzml_skipped, compare_with_first_input, detect_acquisition_metadata,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
     prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_ms2_meta,
     sample_spectra, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
@@ -584,6 +584,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    // andes is about to generate the decoys: the database must not hold any.
+    if decoy_strategy != search::decoy::DecoyStrategy::None {
+        if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
+            eprintln!("{warning}");
+        }
+    }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
@@ -665,35 +671,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
     }
 
-    // Detect (activation, instrument) from the input for auto-routing.
+    // Detect the activation and the analyzer from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
-    // bearing format; an explicit `--fragmentation` still overrides the
-    // detected activation (see the resolution below).
-    let auto_route_eligible = is_mzml || is_raw || is_d;
-    let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
-        if !auto_route_eligible {
-            None
-        } else if is_mzml {
-            detect_dominant_activation(&spectrum_path)
-                .map(|m| (m, detect_instrument_type_for_path(&spectrum_path)))
-        } else if is_raw {
-            #[cfg(feature = "thermo")]
-            {
-                input::thermo::detect_activation_instrument(&spectrum_path, 64)
-            }
-            #[cfg(not(feature = "thermo"))]
-            {
-                None
-            }
-        } else {
-            // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
-            Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
-        };
-    // Pre-compute before the routing match consumes `detected_activation_instrument`.
-    let instrument_was_detected = detected_activation_instrument
-        .map(|(_, inst)| inst.is_some())
-        .unwrap_or(false);
+    // is always CID/TimsTOF (DDA-PASEF). The two are read independently, so a
+    // file that names its analyzer but no activation still routes by the
+    // analyzer. An explicit `--fragmentation` overrides the detected
+    // activation (see the resolution below).
+    let (detected_activation, detected_instrument) = detect_acquisition_metadata(&spectrum_path);
+    let instrument_was_detected = detected_instrument.is_some();
+    // The model, the fragment tolerance and the score features are chosen once,
+    // from the first input: every further input must be of the same class.
+    for other_path in &spectrum_paths[1..] {
+        let other = detect_acquisition_metadata(other_path);
+        if let Some(warning) = compare_with_first_input(
+            &spectrum_path,
+            (detected_activation, detected_instrument),
+            other_path,
+            other,
+        )? {
+            eprintln!("{warning}");
+        }
+    }
 
     // The acquisition context, carried separately from the model chosen below.
     // Without analyzer metadata and without a `--fragment-tol-*` unit, the
@@ -720,7 +718,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let acquisition = Acquisition::resolve(
-        detected_activation_instrument,
+        detected_activation,
+        detected_instrument,
         cli.fragment_tol_ppm,
         cli.fragment_tol_da,
         peak_evidence,
@@ -772,14 +771,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // metadata-less resolver folds in `--fragmentation` (which wins over the
         // detected activation) and the `--fragment-tol-*` flags. Default when no metadata: CID / low-res
         // (cid_lowres_tryp).
+        let detected = (detected_activation, detected_instrument);
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
-            match detected_activation_instrument {
+            match detected {
                 // An EXPLICIT --fragmentation must win over detection. It previously
                 // only applied when detection returned no instrument, so on any normal
                 // mzML it was silently discarded — including the EThcD case, where the
                 // reader relabels ETD to HCD and the warning tells the user to "pass
                 // --fragmentation to override". It could not override anything.
-                Some((method, Some(inst))) => {
+                (Some(method), Some(inst)) => {
                     let chosen = match cli.fragmentation {
                         Fragmentation::Auto => method,
                         Fragmentation::Cid => ActivationMethod::CID,
@@ -801,15 +801,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     (chosen, Some(inst))
                 }
-                Some((method, None)) => resolve_metadataless_selection(
-                    Some(method),
-                    cli.fragmentation,
-                    cli.fragment_tol_ppm,
-                    cli.fragment_tol_da,
-                    acquisition.inferred_high_res(),
-                ),
-                None => resolve_metadataless_selection(
-                    None,
+                // The analyzer is recorded but no scan names its activation:
+                // keep the analyzer and take the activation from
+                // `--fragmentation`, else the default of the analyzer's class.
+                (None, Some(inst)) => {
+                    let explicit = cli_fragmentation_to_activation_opt(cli.fragmentation);
+                    let chosen = explicit.unwrap_or(if inst.is_high_resolution() {
+                        ActivationMethod::HCD
+                    } else {
+                        ActivationMethod::CID
+                    });
+                    eprintln!(
+                        "Param resolver: instrument = {} from {}, no activation recorded; \
+                         activation = {} [{}]",
+                        inst.name(),
+                        spectrum_path.display(),
+                        chosen.name(),
+                        if explicit.is_some() {
+                            "--fragmentation"
+                        } else {
+                            "default of the analyzer class"
+                        }
+                    );
+                    (chosen, Some(inst))
+                }
+                (method, None) => resolve_metadataless_selection(
+                    method,
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
@@ -1342,7 +1359,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  model          : {resolved_model_id} [{model_source}]");
     let activation_source = if cli.fragmentation != Fragmentation::Auto {
         "--fragmentation"
-    } else if detected_activation_instrument.is_some() {
+    } else if detected_activation.is_some() {
         "detected"
     } else {
         "default"

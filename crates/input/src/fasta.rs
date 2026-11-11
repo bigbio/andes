@@ -110,6 +110,12 @@ impl<R: BufRead> Iterator for FastaReader<R> {
                 }
             }
         }
+        // A trailing `*` is the translation-stop marker written by ORF and
+        // six-frame translators, not a residue: kept, it would make every span
+        // reaching the protein C-terminus contain a non-residue.
+        while sequence.last() == Some(&b'*') {
+            sequence.pop();
+        }
 
         Some(Ok(Protein {
             accession,
@@ -168,6 +174,16 @@ mod tests {
         let (a, d) = split_header("");
         assert_eq!(a, "");
         assert_eq!(d, "");
+    }
+
+    #[test]
+    fn trailing_stop_marker_is_not_a_residue() {
+        let fasta = b">orf1\nMKTAYR\nPEPTIDE*\n>orf2\nMK*AYR**\n>plain\nMKR\n" as &[u8];
+        let db = FastaReader::load_all(fasta).unwrap();
+        assert_eq!(db.proteins[0].sequence, b"MKTAYRPEPTIDE");
+        // Only the trailing markers go; an internal stop stays a non-residue.
+        assert_eq!(db.proteins[1].sequence, b"MK*AYR");
+        assert_eq!(db.proteins[2].sequence, b"MKR");
     }
 
     #[test]

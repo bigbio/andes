@@ -27,12 +27,13 @@ earlier session.
 | Comet 2025.01 (2026-10-05) | 31,435 | 10,504 | 14,734 |
 | Java MS-GF+ v20240326 † | 26,542 | 10,651 | 15,904 |
 | *andes wall time* | *114–117 s* | *40–47 s* | *30–48 s* |
-| *Comet wall time* | *215 s* | *76 s* | *46 s* |
+| *Comet wall time* | *217 s* | *77 s* | *42 s* |
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
 FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-core VM, 8 threads); seeds 1
-and 2 give andes counts within 1.2% of seed 42. **†** Java MS-GF+ was not re-run; its counts are
-from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/E measured per
+and 2 give andes counts within 1.2% of seed 42. With the current defaults (2 missed cleavages) and
+an entrapment database, UPS1 reads 16,567–16,675 PSMs at `2ee76dd6` (2026-11-07); the benchmark
+page reports that run. **†** Java MS-GF+ was not re-run; its counts are from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/E measured per
 database): andes's nominal 1% is 0.89–1.08% true FDP on Astral (peptide-level shuffled
 entrapment), 0.67–0.76% on TMT a05058, 0.80–0.99% on phospho, and 0.92–0.94% on UPS1 against a
 peptide-level shuffle (1.95–2.07% against the natural *E. coli* entrapment, of which about half
@@ -68,33 +69,47 @@ roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03
 settings and the cases where other tools do better:
 [`docs/benchmarks/`](docs/benchmarks/README.md#quantification-truth-designs-match-between-runs-on-and-off).
 
-Legend: 🟢 andes better · 🟡 similar · 🔴 andes worse · ⚪ no comparison. The last column says whether a gap can be closed downstream of andes (filtering on its quality columns, a fold-change cut, normalisation or roll-up) or needs a change in the engine, and how much the gap matters: **minor** (usable as is), **moderate** (usable with the care stated), **major** (default results are hurt badly; use the fix). No result is unusable, and no gap is major. "Best other tool" is the strongest result another tool reported on the same data for that metric; percentages are andes relative to it.
+One row per metric. 🟢 andes better · 🟡 similar · 🔴 andes worse, with how much: **minor** (usable
+as is), **moderate** (usable with care), **major** (results hurt). ⚪ no other tool measured. DE counts
+are the common-tested family, sign-aware, MBR on.
 
-| benchmark (data) | metric | andes | best other tool | result | impact · can it be fixed downstream? |
-|---|---|---:|---|---|---|
-| ProteoBench QExactive, PXD028735 (6 runs) | median \|ε\| (lower is better) | 0.161 | FragPipe 23.0: 0.190 | 🟢 15% lower error | — |
-| ProteoBench QExactive | precursors in ≥ 3 runs | 63,796 | i2MassChroQ 1.0.16: 74,697 (\|ε\| 0.222); FragPipe 23.0: 63,701 | 🟡 similar to FragPipe; fewer than submissions with higher error | — |
-| ProteoBench QExactive | CV | 0.117 | i2MassChroQ 1.2.0: 0.120 | 🟢 lowest | — |
-| ProteoBench Astral, PXD070049 (6 runs) | median \|ε\| at similar depth (36–39k) | 0.186 | i2MassChroQ 1.2.6: 0.197; FragPipe 23.0: 0.212 | 🟢 lowest at this depth | — |
-| ProteoBench Astral | median \|ε\|, any depth | 0.186 | MaxQuant 2.6.7.0: 0.160 (20,283 precursors); Sage 0.14.6: 0.167 (30,319) | 🔴 higher than tools reporting fewer precursors | **minor**, usable. Partly: a stricter transfer q trades depth for error, but identified rows alone also read 0.186, so the rest is in the engine (peak fit) |
-| ProteoBench Astral | precursors in ≥ 3 runs | 36,675 | FragPipe 23.0: 39,057 | 🟡 similar | — |
-| ProteoBench Astral | CV | 0.112 | Sage 0.14.6: 0.070 | 🔴 higher | **minor**, usable. Partly: identified rows alone give 0.100; normalisation changes little (0.113 raw) |
-| Truth designs (8 sets) | precursors quantified | 10.7k–93.6k | MaxQuant 2.7 / FragPipe 21.1 per set | 🟢 +19% to +51% on 7 sets, 🟡 +3% on PXD001819 | — |
-| Truth designs, PXD009740 / PXD009815 / QE / Astral | DE true positives (MBR on; common-tested family, sign-aware) | 1,300 / 844 / 1,047 / 685 | MaxQuant 1,304 / 844 / 857 / 650; FragPipe 1,237 / 849 / 946 / 689 | 🟡 tie / 🟡 tie / 🟢 +22% over MaxQuant, +11% over FragPipe / 🟡 tie | — |
-| Truth designs, PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut (common-tested family; wrong-sign calls included) | 305 / 153 / 110 / 296 | MaxQuant 129 / 92 / 37 / 210; FragPipe 302 / 301 / 43 / 389 | 🔴 more than MaxQuant on all four (2.4x / 1.7x / 3.0x / 1.4x) | **moderate**: apply a fold-change cut. Partly: with \|log2 FC\| ≥ 0.5 (previous counting, not recomputed on the common family) QE is level with MaxQuant (16 against 19); PXD009740 stays 2.5x (256 against 101) |
-| Truth designs, PXD009740 / PXD009815 / QE / Astral | DE true positives / false calls against MaxQuant with its match rows filtered at Match q-value ≤ 0.01 (common-tested family of andes, filtered MaxQuant and FragPipe; sign-aware) | 1,156 / 272; 763 / 151; 983 / 105; 568 / 297 | MaxQuant, matches q ≤ 0.01: 1,077 / 131; 725 / 62; 851 / 42; 518 / 154. FragPipe: 1,089 / 274; 768 / 265; 905 / 41; 569 / 388 | 🟢 TP +7% / +5% / +15% / +10% over filtered MaxQuant; 🔴 false calls 2.1x / 2.4x / 2.5x / 1.9x of it | **moderate**: the filtered MaxQuant arm is the cleanest; andes' extra true positives come with more false calls |
-| Truth designs, all sets | bright identified cells off by > 2x | 1.2–7.2% | MaxQuant 0.3–1.6% | 🔴 | **moderate**, few cells, usable. Partly: quality columns let a downstream weighting down-weight them; the fix is in the engine (template misfit on fronting or tailing peaks) |
-| Truth designs, 6 sets | protein CV | 4.4–10.1% | FragPipe 4.9–13.5%, MaxQuant 7.0–11.6% | 🟢 on 3 sets, 🔴 on Astral and PXD001819 | **minor**, usable. Partly: dropping transfers or weighting by quality columns |
-| UPS1 lowest three levels, PXD009740 (170/382/859 amol) / PXD009815 (10/50/100 amol) | precursors within 2x of truth, as reported | 502 / 24 | MaxQuant 417 / 23; FragPipe 458 / 50 | 🟢 ahead of both on PXD009740 and 🔴 behind FragPipe on PXD009815 as reported; at equal rows FragPipe leads on both (458 against 437; 50 against 22) and andes leads MaxQuant on PXD009740 (437 against 341) | **minor**, lowest amounts only. No: engine (faint-transfer detection) |
-| Known-absent yeast, PXD014415 | false-transfer rate, all yeast rows (classified: enriched only 0.052%; with no-reference rows 0.052%) | 0.20% (0.08% at `quant_q ≤ 0.01`) | FragPipe 21.1: 0.09% (enriched only 0.010%; with no-reference rows 0.072%) | 🔴 at default, 🟡 at `quant_q ≤ 0.01`; classified: 🔴 on enriched rows (the no-reference reading uses andes' table as reference, not neutral) | **minor**, usable. Yes: filter `quant_q ≤ 0.01` (0.08%, at fewer transfers) |
-| Blank run, PXD016921 | rows reported in the blank | 150 (85 identified, 65 transferred) | MaxQuant 105 (20 / 85, unfiltered matches; 29 (20 / 9) at Match q-value ≤ 0.01); FragPipe 21.1: 8 (8 / 0) | 🔴 | **moderate** for low-input or blank-adjacent runs. No: `quant_q ≤ 0.01` still leaves 144; mostly carry-over (real ions) |
-| TMT knockout, PXD017803 SPS / RTS / hrMS2 | interference (lower is better) | 0.062 / 0.027 / 0.192 | MaxQuant 2.7: 0.054 / 0.038 / 0.156 | 🟡 / 🟢 / 🔴 (🟢 0.000 with `--tmt-unmix on`) | **moderate** on hrMS2, usable with the option. Yes for hrMS2: `--tmt-unmix on` (0.000) or a purity ≥ 0.9 filter (0.135) |
-| TMT knockout, hrMS2 | PSMs with reporter ions evaluated (scans whose range records the reporters) | 3,278 | FragPipe 21.1: 3,038; MaxQuant 2.7: 2,241 | 🟢 | — |
-| TMT known ratios, PXD007683 | PSMs | 149,121 | MaxQuant 2.7: 97,107 | 🟢 +54% | — |
-| TMT known ratios, PXD007683 | protein ratio error (MAE A/C) | 0.213 | MaxQuant 2.7: 0.159 | 🔴 | **moderate**, usable. Partly: a stricter purity filter; the rest is extraction and roll-up |
-| TMT match between runs, PXD014750 hrMS2 | excess wrong-value rate of transfers | −0.05 points | SIMSI-Transfer 0.8: +0.40; MaxQuant isobaric MBR: +1.53 | 🟢 | — |
-| TMT match between runs | cells transferred | 3,636 | SIMSI-Transfer 0.8: 16,511 | 🔴 fewer | **minor** (opt-in mode). Yes: a looser `quant_q` keeps all 7,841 candidates at +0.40 points, the same as SIMSI-Transfer |
-| Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | not measured | ⚪ | — |
+| data | metric | andes | MaxQuant 2.7 | FragPipe | result |
+|---|---|---:|---:|---:|---|
+| ProteoBench QE | median \|ε\| (lower is better) | 0.161 | 0.210 | 0.200 | 🟢 23% / 20% lower |
+| ProteoBench QE | precursors in ≥ 3 runs | 63,796 | 44,299 | 63,701 | 🟢 +44% / 🟡 same |
+| ProteoBench QE | CV | 0.117 | 0.219 | 0.156 | 🟢 47% / 25% lower |
+| ProteoBench Astral | median \|ε\| | 0.186 | 0.160 | 0.212 | 🔴 1.16x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
+| ProteoBench Astral | precursors in ≥ 3 runs | 36,675 | 20,283 | 39,057 | 🟢 +81% / 🟡 6% fewer |
+| ProteoBench Astral | CV | 0.112 | 0.092 | 0.127 | 🔴 1.2x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower |
+| Truth designs, 8 sets | precursors quantified, each tool at its own search settings | 10.7k–93.6k | | | 🟢 +19% to +51% on 7 sets, 🟡 on 1 |
+| PXD009740 / PXD009815 / QE / Astral | precursors quantified, andes at matched search settings (no `--chimeric`, no `--refine`) | 27,226 / 29,600 / 81,987 / 51,798 | 29,293 / 27,459 / 51,609 / 24,745 | 25,888 / 28,286 / 71,377 / 46,347 | 🟡 −7% / 🟡 +5% / 🟢 +15% / 🟢 +12% over the best other tool |
+| PXD009740 / PXD009815 / QE / Astral | DE true positives | 1,300 / 844 / 1,047 / 685 | 1,304 / 844 / 857 / 650 | 1,237 / 849 / 946 / 689 | 🟡 / 🟡 / 🟢 +22% / 🟡 |
+| PXD009740 / PXD009815 / QE / Astral | DE false calls, no fold-change cut | 305 / 153 / 110 / 296 | 129 / 92 / 37 / 210 | 302 / 301 / 43 / 389 | 🔴 1.4–3.0x MaxQuant (moderate); mostly real small shifts, see note |
+| PXD009740 / PXD009815 / QE | DE false calls at \|log2 FC\| ≥ 0.5 (seed 42) | 167 / 39 / 11 | 74 / 36 / 18 | 259 / 102 / 20 | 🔴 2.3x / 🟡 / 🟢 |
+| PXD009740 / PXD009815 / QE / Astral | DE true positives / false calls, MaxQuant matches filtered at q ≤ 0.01 | 1,156 / 763 / 983 / 568; 272 / 151 / 105 / 297 | 1,077 / 725 / 851 / 518; 131 / 62 / 42 / 154 | | 🟢 +5% to +15% true positives; 🔴 1.9–2.5x false calls (moderate) |
+| PXD009740 / PXD009815 / QE / Astral | precision of unchanged proteins (within-condition spread, tool ÷ andes) | 1 | 1.15 / 1.55 / 1.26 / — | 1.40 / 1.30 / 1.25 / — | 🟢 tighter than both |
+| UPS1 lowest 3 levels, PXD009740 / PXD009815 | precursors within 2x of truth | 502 / 24 | 417 / 23 | 458 / 50 | 🟢 as reported, 🔴 at FragPipe's row count (437 against 458) / 🔴 2x fewer than FragPipe (minor) |
+| Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
+| Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
+| Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
+| Blank run, PXD016921 | rows identified in the blank | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| Blank run, PXD016921 | rows transferred into the blank | 0, not attempted | 85 unfiltered (9 at `Match q-value ≤ 0.01`) | 0, not scored | ⚪ not tested: andes and FragPipe make no transfer decision |
+| TMT knockout, PXD017803 hrMS2 | interference (lower is better) | 0.192 (0.000 with `--tmt-unmix on`) | 0.156 | | 🔴 default, 🟢 with the option |
+| TMT known ratios, PXD007683 | PSMs | 149,121 | 97,107 | | 🟢 +54% |
+| TMT known ratios, PXD007683 | protein ratio error | 0.213 | 0.159 | | 🔴 1.3x (moderate) |
+| TMT match between runs, PXD014750 | excess wrong-value rate of transfers | −0.05 points | +1.53 | | 🟢 (SIMSI-Transfer +0.40) |
+| TMT match between runs | cells transferred | 3,636 | | | 🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in) |
+| Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | | | ⚪ |
+
+ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the most precursors
+(MaxQuant 1.5.3.30 on QE, 2.6.7.0 on Astral; FragPipe 23.0); every other submission is on the
+[benchmark page](docs/benchmarks/README.md).
+
+Note on DE false calls: andes' protein values are tighter than the other tools', so small real
+shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls (seed
+42 on current main; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
+level; without that level andes has 955 true positives and 24 false calls
+against MaxQuant's 953 and 31. Analysis on the [benchmark page](docs/benchmarks/README.md).
 
 <sub>DE: proteins with ≥ 2 precursors tested by every tool of the set, moderated t, Benjamini–Hochberg
 5%. Knockout interference rests on 26–91 knockout PSMs per value, so read it as a direction.
@@ -367,11 +382,11 @@ reaches 39,470–39,592 PSMs and 15,107–15,156 peptides, above top-1 (39,404�
 On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
 hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with
 fragment-ion retrieval. On Astral with an entrapment database (Percolator, three seeds), at an
-equal 1% true FDP, it gives 60,403–60,435 PSMs against 43,076–43,145 without `--chimeric`
-(+40%) and 57,003–57,054 with `--chimeric` on the former in-RAM candidate path. Distinct peptides stay flat
-(26,432–26,454 vs 26,513–26,534): the second-peptide rows mostly re-identify peptides found
-elsewhere, which deepens PSM counts rather than coverage. At nominal q ≤ 0.01 the true FDP is
-1.18% (1.05% without `--chimeric`).
+equal 1% true FDP, it gives 66,377–66,424 PSMs against 43,076–43,145 without `--chimeric`
+(+54%) and 29,384–29,400 distinct peptides against 26,723–26,746 (+10%); measured 2026-10-05 to
+2026-10-13 on earlier builds. The true FDP at nominal q ≤ 0.01 was measured only with one
+candidate kept per scan in pass 1 (1.18%, against 1.05% without `--chimeric`), not with the
+alternatives kept.
 
 ## Secondary modifications (`--refine`, experimental)
 

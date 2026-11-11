@@ -1812,7 +1812,8 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   the fit evidence alone (the identified features above plus the fitted quantity), trained on the pseudo-transfers, labels a
   measurement wrong when its apex lies beyond the identified fit's width or its fitted quantity differs from the identified one
   by more than a factor of 2 (the area of each fit at its own width, which is not the reported quantity), and a
-  held-out calibration turns its margin into a probability. The `quant_q` of an accepted transfer is the larger of its
+  held-out calibration turns its margin into a probability. It covers a wrong peak as seen on pseudo-transfers
+  (identified cells re-measured blind); it does not see an absent peptide or a wrong donor identity. The `quant_q` of an accepted transfer is the larger of its
   `transfer_q` and its `measurement_q`. `quant_q` is therefore the largest error estimate made for a row (one estimate for an identified
   row or a transfer below the threshold, two for an accepted transfer): a cut at t keeps a row only when each of its estimates is
   at most t. It is not the error rate of the rows the cut keeps, which mix rows judged by different estimates. Every row and its
@@ -1842,7 +1843,9 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   deviations are fit noise keeps the relative width. The finalize log lists how many runs took
   each weight. A precursor without such an identified fit, and a
   row without a width prior, reports its own per-run area. `<stem>.extract.parquet` keeps the
-  per-run `quantity` and `quantity_se` (`A · w · √(2π)`) for provenance.
+  per-run `quantity` and `quantity_se` (`A · w · √(2π)`) for provenance. `quantity_se` is `amplitude_se × area` with
+  `amplitude_se = 1/√den`, the least-squares standard error of the fitted amplitude at the fixed peak shape: the fit error
+  of the amplitude, not the cell's run-to-run uncertainty (measured 16-64x below the run-to-run spread of the cell).
 * **Trace area of the brightest precursors.** `<stem>.extract.parquet` also keeps a
   template-free area, `trace_quantity`: each isotope trace of the fit, minus its baseline,
   integrated by the trapezoid rule over `[t0 − 3w', t0 + 4w']` with `w' = max(w, w_prior)`

@@ -289,7 +289,7 @@ impl QuantSettings {
                             }
                             None => 10.0,
                         },
-                        mbr_fdr: cli.mbr.then_some(cli.mbr_fdr),
+                        mbr_fdr: cli.mbr.then_some(cli.label_mbr_fdr),
                         arg_pro: cli.label_arg_pro,
                     })
                 }

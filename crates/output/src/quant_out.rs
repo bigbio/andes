@@ -782,6 +782,9 @@ pub struct LabelRow {
     /// `--label-arg-pro`: the share of the channel's quantity carried by its
     /// heavy-proline form (converted heavy arginine); null when not fitted.
     pub converted_fraction: Option<f64>,
+    /// Shape-free quantity (the channel's own traces integrated around the
+    /// apex, other channels' parts removed).
+    pub trace_quantity: f64,
 }
 
 const LABEL_TABLE: TableVersion = TableVersion {
@@ -842,6 +845,7 @@ fn label_schema() -> Schema {
         f("log2_ratio_se", DataType::Float64, true),
         f("log2_ratio_normalized", DataType::Float64, true),
         f("converted_fraction", DataType::Float64, true),
+        f("trace_quantity", DataType::Float64, false),
     ])
 }
 
@@ -868,6 +872,7 @@ fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, S
     let mut ratio_se = Float64Builder::new();
     let mut ratio_norm = Float64Builder::new();
     let mut converted = Float64Builder::new();
+    let mut trace_q = Float64Builder::new();
     for r in rows {
         filename.append_value(&r.run);
         peptide.append_value(&r.peptide);
@@ -906,6 +911,7 @@ fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, S
         ratio_se.append_option(r.log2_ratio_se);
         ratio_norm.append_option(r.log2_ratio_normalized);
         converted.append_option(r.converted_fraction);
+        trace_q.append_value(r.trace_quantity);
     }
     let mut cols: Vec<ArrayRef> = vec![
         Arc::new(filename.finish()),
@@ -934,6 +940,7 @@ fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, S
         Arc::new(ratio_se.finish()),
         Arc::new(ratio_norm.finish()),
         Arc::new(converted.finish()),
+        Arc::new(trace_q.finish()),
     ]);
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
@@ -1061,6 +1068,7 @@ mod tests {
             log2_ratio_se: Some(0.02),
             log2_ratio_normalized: Some(-0.9),
             converted_fraction: None,
+            trace_quantity: 0.0,
         };
         let channels = vec!["light".to_string(), "Lys8+Arg10".to_string()];
         let runs = vec!["r1".to_string()];
@@ -1078,7 +1086,7 @@ mod tests {
         let t = read_label_parquet(&path).unwrap();
         let n: usize = t.batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(n, 1);
-        assert_eq!(t.batches[0].num_columns(), 33);
+        assert_eq!(t.batches[0].num_columns(), 34);
         std::fs::remove_dir_all(&dir).ok();
     }
 

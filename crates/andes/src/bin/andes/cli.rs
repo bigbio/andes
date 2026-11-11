@@ -961,11 +961,19 @@ pub(crate) struct SearchArgs {
     pub(crate) label_reference: usize,
 
     /// Quality q-value cut of a channel measured without an identification
-    /// (match between channels): from the target/decoy competition of its
-    /// fit against the same fit at a non-label mass shift. An internal
-    /// quant-quality q-value. Default 0.01.
-    #[arg(long = "label-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    /// (match between channels): from the target/decoy competition, within
+    /// its run, of its fit against the same fit at non-label mass shifts. An
+    /// internal quant-quality q-value. Default 0.05: on known-ratio SILAC
+    /// data (PXD022659 1:1) the channels matched at q <= 0.05 are as accurate
+    /// as pairs whose channels are both identified.
+    #[arg(long = "label-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) label_fdr: f64,
+
+    /// Transfer q-value cut of `--label --mbr` (the label-free and isobaric
+    /// transfers use `--mbr-fdr`). An internal quant-quality q-value, with
+    /// the identity-decoy false-donor rate added. Default 0.05.
+    #[arg(long = "label-mbr-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) label_mbr_fdr: f64,
 
     /// SILAC: fit the heavy proline that cells make from heavy arginine
     /// (Arg6 -> 13C5 Pro, Arg10 -> 13C5 15N1 Pro) as a satellite of each

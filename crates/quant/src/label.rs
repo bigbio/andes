@@ -845,6 +845,18 @@ pub struct ChannelFit {
     /// Intensity-weighted ppm error of the monoisotopic centroids over
     /// `t0 ± w` (0 when none).
     pub mass_err_ppm: f64,
+    /// Elution centroid of the channel's own signal (monoisotope and M+1,
+    /// the other channels' modelled parts removed, positive values over
+    /// `t0 ± 2w` of the channel's profile) minus the profile's apex, seconds;
+    /// 0 when it has no signal there. A real channel elutes with its partner
+    /// channels; another species' envelope at its position, at a random
+    /// offset.
+    pub apex_offset: f64,
+    /// Shape-free quantity: the channel's own isotope traces (M..M+3, the
+    /// other channels' modelled parts and the fitted background removed)
+    /// integrated over `t0 − 3w … t0 + 4w` (trapezoids), divided by the
+    /// pattern share they hold. Not clamped (an absent channel averages 0).
+    pub trace_quantity: f64,
 }
 
 /// The joint fit of a group.
@@ -1061,6 +1073,21 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         })
         .collect();
     let w_inv: Vec<f64> = sigma.iter().map(|s| 1.0 / (s * s)).collect();
+    // The amplitudes are fitted over the peak's own neighbourhood only
+    // (`t_hat ± (3 s + 3 w)`): the wide window serves the noise estimate, and
+    // other species eluting in it would otherwise pull on the background.
+    let reach = 3.0 * s + 3.0 * w_max + max_shift;
+    let j0 = rt.partition_point(|&t| t < probe.t_hat - reach);
+    let j1 = rt.partition_point(|&t| t <= probe.t_hat + reach);
+    let (rt, y, window) = if j1 >= j0 + 5 {
+        (
+            rt[j0..j1].to_vec(),
+            y.iter().map(|t| t[j0..j1].to_vec()).collect::<Vec<_>>(),
+            window.start + j0..window.start + j1,
+        )
+    } else {
+        (rt, y, window)
+    };
     let n_j = rt.len();
     let ybar: Vec<f64> = y
         .iter()
@@ -1086,40 +1113,41 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             })
             .collect()
     };
-    let normal = |gc: &[Vec<f64>]| -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>) {
-        // proj[t][c] = Σ_j yc_t g_c ; sgg[c][c'] = Σ_j g_c g_c'
-        let mut sgg = vec![0.0; n_ch * n_ch];
-        for a in 0..n_ch {
-            for b in a..n_ch {
-                let v: f64 = gc[a].iter().zip(&gc[b]).map(|(x, y)| x * y).sum();
-                sgg[a * n_ch + b] = v;
-                sgg[b * n_ch + a] = v;
-            }
-        }
-        let proj: Vec<Vec<f64>> = yc
-            .iter()
-            .map(|t| {
-                (0..n_ch)
-                    .map(|c| t.iter().zip(&gc[c]).map(|(x, y)| x * y).sum())
-                    .collect()
-            })
-            .collect();
-        let mut h = vec![0.0; n_ch * n_ch];
-        let mut b = vec![0.0; n_ch];
-        for t in 0..n_t {
-            let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
+    let normal =
+        |gc: &[Vec<f64>], w_inv: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>) {
+            // proj[t][c] = Σ_j yc_t g_c ; sgg[c][c'] = Σ_j g_c g_c'
+            let mut sgg = vec![0.0; n_ch * n_ch];
             for a in 0..n_ch {
-                if mt[a] == 0.0 {
-                    continue;
-                }
-                b[a] += w_inv[t] * mt[a] * proj[t][a];
-                for c in 0..n_ch {
-                    h[a * n_ch + c] += w_inv[t] * mt[a] * mt[c] * sgg[a * n_ch + c];
+                for b in a..n_ch {
+                    let v: f64 = gc[a].iter().zip(&gc[b]).map(|(x, y)| x * y).sum();
+                    sgg[a * n_ch + b] = v;
+                    sgg[b * n_ch + a] = v;
                 }
             }
-        }
-        (h, b, proj, sgg)
-    };
+            let proj: Vec<Vec<f64>> = yc
+                .iter()
+                .map(|t| {
+                    (0..n_ch)
+                        .map(|c| t.iter().zip(&gc[c]).map(|(x, y)| x * y).sum())
+                        .collect()
+                })
+                .collect();
+            let mut h = vec![0.0; n_ch * n_ch];
+            let mut b = vec![0.0; n_ch];
+            for t in 0..n_t {
+                let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
+                for a in 0..n_ch {
+                    if mt[a] == 0.0 {
+                        continue;
+                    }
+                    b[a] += w_inv[t] * mt[a] * proj[t][a];
+                    for c in 0..n_ch {
+                        h[a * n_ch + c] += w_inv[t] * mt[a] * mt[c] * sgg[a * n_ch + c];
+                    }
+                }
+            }
+            (h, b, proj, sgg)
+        };
 
     let lo = probe.t_hat - 3.0 * s;
     let hi = probe.t_hat + 3.0 * s;
@@ -1147,7 +1175,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             {
                 continue;
             }
-            let (h, b, _, _) = normal(&gc);
+            let (h, b, _, _) = normal(&gc, &w_inv);
             let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
             let obj = llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s);
             if best.is_none_or(|(o, _, _)| obj > o) {
@@ -1160,7 +1188,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     // best grid apex and its neighbours (same width), when it improves on it.
     let objective = |t0: f64| -> f64 {
         let gc = profiles(t0, w);
-        let (h, b, _, _) = normal(&gc);
+        let (h, b, _, _) = normal(&gc, &w_inv);
         let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
         llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s)
     };
@@ -1183,8 +1211,51 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         }
     }
     let gc = profiles(t0, w);
-    let (h, b, proj, sgg) = normal(&gc);
-    let (a, llr, passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
+    // Interference: a trace whose residual at the optimum is far above its
+    // noise carries another species (an interfered isotope of one channel);
+    // its weight is divided by its excess (robust reweighting, twice), so
+    // the amplitudes rest on the traces that follow the model.
+    let mut w_fit = w_inv.clone();
+    let (mut h, mut b, mut proj, mut sgg) = normal(&gc, &w_fit);
+    let (mut a, mut llr, mut passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
+    for _ in 0..2 {
+        let mut changed = false;
+        for t in 0..n_t {
+            let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
+            if mt.iter().all(|&m| m == 0.0) {
+                continue;
+            }
+            let mut ss = 0.0;
+            let mut n = 0usize;
+            for (j, &tj) in rt.iter().enumerate() {
+                if (tj - t0).abs() > 2.0 * w {
+                    continue;
+                }
+                let model: f64 = (0..n_ch).map(|c| mt[c] * a[c] * gc[c][j]).sum();
+                let r = yc[t][j] - model;
+                ss += r * r;
+                n += 1;
+            }
+            if n < 3 {
+                continue;
+            }
+            let chi = ss / n as f64 * w_inv[t];
+            let target = if chi > 9.0 {
+                w_inv[t] * 9.0 / chi
+            } else {
+                w_inv[t]
+            };
+            if (target - w_fit[t]).abs() > 1e-12 * w_inv[t] {
+                w_fit[t] = target;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        (h, b, proj, sgg) = normal(&gc, &w_fit);
+        (a, llr, passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
+    }
     let area = w * (2.0 * std::f64::consts::PI).sqrt();
 
     // Standard errors: inverse of the passive block; 1/sqrt(H_cc) otherwise.
@@ -1265,6 +1336,75 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             }
             let pi0 = probe.envelopes[c].at(0).max(1e-9);
             let m1_ratio = (r / s_cc).max(0.0) / (pi0 * a[c].max(se[c]).max(1e-300));
+            // Elution centroid of the channel's own monoisotope and M+1.
+            let tc = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
+            let (mut sy, mut syt) = (0.0, 0.0);
+            for k in [1usize, 2] {
+                let tr = traces.own[c][k];
+                for (j, &t) in rt.iter().enumerate() {
+                    if (t - tc).abs() > 2.0 * w {
+                        continue;
+                    }
+                    let mut v = y[tr][j] - ybar[tr];
+                    for c2 in 0..n_ch {
+                        if c2 != c {
+                            v -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
+                        }
+                    }
+                    if v > 0.0 {
+                        sy += v;
+                        syt += v * (t - tc);
+                    }
+                }
+            }
+            let apex_offset = if sy > 0.0 { syt / sy } else { 0.0 };
+            // Shape-free quantity over t0 - 3w .. t0 + 4w.
+            let trace_quantity = {
+                let (lo, hi) = (tc - 3.0 * w, tc + 4.0 * w);
+                let mut area = 0.0;
+                let mut share = 0.0;
+                for k in 1..READ_OFFSETS.len() {
+                    let tr = traces.own[c][k];
+                    let pi = traces.mix[tr * n_ch + c];
+                    if pi <= 0.0 {
+                        continue;
+                    }
+                    share += pi;
+                    let v: Vec<f64> = (0..rt.len())
+                        .map(|j| {
+                            let mut x = yc[tr][j];
+                            for c2 in 0..n_ch {
+                                if c2 != c {
+                                    x -= traces.mix[tr * n_ch + c2] * a[c2] * gc[c2][j];
+                                }
+                            }
+                            x
+                        })
+                        .collect();
+                    // Background: the trace's mean outside the window.
+                    let out: Vec<f64> = (0..rt.len())
+                        .filter(|&j| rt[j] < lo || rt[j] > hi)
+                        .map(|j| v[j])
+                        .collect();
+                    let b = if out.is_empty() {
+                        0.0
+                    } else {
+                        out.iter().sum::<f64>() / out.len() as f64
+                    };
+                    for j in 1..rt.len() {
+                        if rt[j - 1] >= lo && rt[j] <= hi {
+                            area += 0.5 * (v[j - 1] + v[j] - 2.0 * b) * (rt[j] - rt[j - 1]);
+                        }
+                    }
+                }
+                // The traces hold `share` of the channel's pattern; scale to
+                // the whole pattern.
+                if share > 0.0 {
+                    area / share
+                } else {
+                    0.0
+                }
+            };
             // Mass error of the monoisotopic centroids near the apex.
             let mz = probe.channel_mz[c];
             let tol = mz * params.tol_ppm * 1e-6;
@@ -1288,6 +1428,8 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                 coherence,
                 m1_ratio,
                 mass_err_ppm: if sw > 0.0 { swe / sw } else { 0.0 },
+                apex_offset,
+                trace_quantity,
             }
         })
         .collect();
@@ -1382,6 +1524,14 @@ pub fn decoy_min_sep(mass: f64, tol_ppm: f64) -> f64 {
 /// channel sits where its identified channels do.
 pub fn mass_factor(err_ppm: f64, expected_ppm: f64, sigma_ppm: f64) -> f64 {
     let d = (err_ppm - expected_ppm) / sigma_ppm.max(1e-3);
+    (-0.5 * d * d).exp()
+}
+
+/// The co-elution factor of a measured channel: `exp(−½ (offset / σ)²)` for
+/// its [`ChannelFit::apex_offset`] against the run's spread `sigma_s` of the
+/// identified channels' offsets.
+pub fn coelution_factor(offset: f64, sigma_s: f64) -> f64 {
+    let d = offset / sigma_s.max(1e-3);
     (-0.5 * d * d).exp()
 }
 

@@ -34,8 +34,8 @@ use std::collections::HashMap;
 use model::mass::PROTON;
 use quant::formula::Formula;
 use quant::label::{
-    channel_score, classify_channel, classify_identified, classify_transferred, fit_group,
-    learn_rt_shifts, log2_ratio, mass_factor, median, weighted_qvalues, ChannelEnvelope,
+    channel_score, classify_channel, classify_identified, classify_transferred, coelution_factor,
+    fit_group, learn_rt_shifts, log2_ratio, mass_factor, median, weighted_qvalues, ChannelEnvelope,
     ChannelFit, ChannelStatus, ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site,
     FREE_WIDTHS,
 };
@@ -268,7 +268,7 @@ struct Fitted {
     ids: Vec<Option<ChannelHit>>,
     /// Per channel, the decoy fits' scores and monoisotopic mass errors
     /// (missing channels).
-    decoy_scores: Vec<Vec<(f64, f64)>>,
+    decoy_scores: Vec<Vec<(f64, f64, f64)>>,
     /// Per channel, another identified peptide of the run sits on it.
     claimed: Vec<bool>,
     transfer_q: Option<f64>,
@@ -344,6 +344,7 @@ fn fit_folded(
         });
         c.amplitude = total;
         c.quantity += sat.quantity;
+        c.trace_quantity += sat.trace_quantity;
         c.amplitude_se = c.amplitude_se.hypot(sat.amplitude_se);
         c.quantity_se = c.quantity_se.hypot(sat.quantity_se);
         c.llr += sat.llr;
@@ -767,8 +768,9 @@ pub(super) fn quantify(
                         for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
-                                decoy_scores[c].push(df.as_ref().map_or((0.0, 0.0), |d| {
-                                    (channel_score(&d.channels[c]), d.channels[c].mass_err_ppm)
+                                decoy_scores[c].push(df.as_ref().map_or((0.0, 0.0, 0.0), |d| {
+                                    let ch = &d.channels[c];
+                                    (channel_score(ch), ch.mass_err_ppm, ch.apex_offset)
                                 }));
                             }
                         }
@@ -834,10 +836,36 @@ pub(super) fn quantify(
             (m, (1.4826 * mad).max(0.5))
         })
         .collect();
+    // Spread of the identified channels' apex offsets per run, floored at a
+    // quarter of the MS1 spacing.
+    let offset_sd: Vec<f64> = (0..n_runs)
+        .map(|r| {
+            let v: Vec<f64> = fitted
+                .iter()
+                .filter(|f| f.run == r && f.transfer_q.is_none())
+                .flat_map(|f| {
+                    (0..n_ch)
+                        .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
+                        .map(|c| f.fit.channels[c].apex_offset)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let dt = run_scales
+                .get(r)
+                .and_then(|s| s.iter().flatten().map(|x| x.dt).reduce(f64::min))
+                .unwrap_or(1.0);
+            if v.len() < MIN_WIDTH_FITS {
+                return dt;
+            }
+            let m = median(v.clone());
+            (1.4826 * median(v.iter().map(|x| (x - m).abs()).collect())).max(0.25 * dt)
+        })
+        .collect();
     for (r, (m, sd)) in calib.iter().enumerate() {
         eprintln!(
-            "quant: label: {}: mass error of the identified channels {m:+.2} ppm, spread {sd:.2} ppm",
-            collector.runs[r].stem
+            "quant: label: {}: mass error of the identified channels {m:+.2} ppm, spread {sd:.2} \
+             ppm; apex offset spread {:.2} s",
+            collector.runs[r].stem, offset_sd[r]
         );
     }
 
@@ -857,15 +885,17 @@ pub(super) fn quantify(
         meta = stats;
     }
 
-    // ── Channel q-values (match between channels), pooled over runs ───────
+    // ── Channel q-values (match between channels), per run ─────────────────
     // (fitted index, channel) of every unidentified channel of an identified
-    // group, its score against its decoys'.
+    // group, its score against its decoys'. Each run competes on its own:
+    // runs differ in MS1 density and design (a 1:10 run's weak light channels
+    // would drag a 1:1 run's q-values down).
     let mut channel_q: HashMap<(usize, usize), f64> = HashMap::new();
-    {
+    for run_idx in 0..n_runs {
         let mut rows: Vec<(f64, f64)> = Vec::new();
         let mut at: Vec<((usize, usize), usize)> = Vec::new();
         for (fi, f) in fitted.iter().enumerate() {
-            if f.transfer_q.is_some() || groups[f.gid].identity_decoy {
+            if f.run != run_idx || f.transfer_q.is_some() || groups[f.gid].identity_decoy {
                 continue;
             }
             for c in 0..n_ch {
@@ -889,16 +919,21 @@ pub(super) fn quantify(
                 // Two channels' errors differ by √2 of one's spread.
                 let sd = sigma * std::f64::consts::SQRT_2;
                 let ch = &f.fit.channels[c];
+                // Two channels' apex offsets differ by √2 of one's spread.
+                let st = offset_sd[f.run] * std::f64::consts::SQRT_2;
                 rows.push((
-                    channel_score(ch) * mass_factor(ch.mass_err_ppm, expected, sd),
+                    channel_score(ch)
+                        * mass_factor(ch.mass_err_ppm, expected, sd)
+                        * coelution_factor(ch.apex_offset, st),
                     0.0,
                 ));
                 let w = 1.0 / f.decoy_scores[c].len() as f64;
-                rows.extend(
-                    f.decoy_scores[c]
-                        .iter()
-                        .map(|&(d, e)| (d * mass_factor(e, expected, sd), w)),
-                );
+                rows.extend(f.decoy_scores[c].iter().map(|&(d, e, o)| {
+                    (
+                        d * mass_factor(e, expected, sd) * coelution_factor(o, st),
+                        w,
+                    )
+                }));
             }
         }
         let q = weighted_qvalues(&rows);
@@ -1020,6 +1055,7 @@ pub(super) fn quantify(
                 log2_ratio_normalized: ratio
                     .and_then(|x| offsets.get(&(f.run, c)).map(|o| x.0 - o)),
                 converted_fraction: f.converted[c],
+                trace_quantity: ch.trace_quantity,
             });
         }
         // QPX: one feature per (group, run), quantified channels. A transfer
@@ -1567,6 +1603,7 @@ mod tests {
             log2_ratio_se: None,
             log2_ratio_normalized: Some(v - 0.5),
             converted_fraction: None,
+            trace_quantity: 0.0,
         };
         // Peptide A: charges 2 and 3 (median 1.0); B: 3.0; C: -1.0.
         let rows = vec![

@@ -679,7 +679,8 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `accepted` in `lfq.parquet`, from the target/decoy competition of each feature against its +11 Th twin. |
 | `--label` | spec | *(off)* | MS1 labelled-pair quantification (SILAC, reductive dimethyl; §10 *Labelled pairs*): a preset (`silac2` = `[][Lys8,Arg10]`, `silac3` = `[][Lys4,Arg6][Lys8,Arg10]`, `dimethyl2` = `[Dimethyl0][Dimethyl4]`, `dimethyl3` = `[Dimethyl0][Dimethyl4][Dimethyl8]`) or one bracket per channel in increasing mass order, in the syntax of OpenMS FeatureFinderMultiplex (labels `Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6 Dimethyl8`, or `<site>+<mass>[:<n>D]`, e.g. `K+8.014199`, `Nterm+32.056407:4D`). The labels join the search as variable mods that every labelable site of a peptide carries alike; the variable-mod allowance is raised by the most labelled sites a peptide can carry (missed cleavages + 1, + 1 for an N-terminal label). Writes `<stem>.label.parquet` (§3f). With `--mbr`, groups are transferred between runs. mzML / `.raw` with high-resolution MS1. Not combined with `--lfq` or `--tmt`. |
 | `--label-reference` | channel | `1` | Reference channel (1-based) of the `--label` log-ratios. |
-| `--label-fdr` | 0..1 | `0.01` | Quality q-value cut of a channel measured without an identification (match between channels): target/decoy competition of its fit against the same fit at four non-label mass shifts. An internal quant-quality q-value. |
+| `--label-fdr` | 0..1 | `0.05` | Quality q-value cut of a channel measured without an identification (match between channels): target/decoy competition, within its run, of its fit against the same fit at up to four non-label mass shifts. An internal quant-quality q-value. On known-ratio SILAC data (PXD022659, 1:1) the channels matched at q ≤ 0.05 are as accurate as pairs whose channels are both identified, and accuracy falls off beyond 0.1 (§10). |
+| `--label-mbr-fdr` | 0..1 | `0.05` | Transfer q-value cut of `--label --mbr` (`--mbr-fdr` stays the label-free and isobaric one): transfers at or below it, the identity-decoy false-donor rate included, are reported. |
 | `--label-arg-pro` | flag | off | SILAC: fit the heavy proline cells make from heavy arginine (Arg6 → 13C5 Pro, +5.0168 Da; Arg10 → 13C5 15N1 Pro, +6.0138 Da) as a satellite of every proline-containing peptide's arginine-labelled channels and add it back to the channel; `converted_fraction` in `label.parquet`. Without it, conversion lowers the heavy/light ratios of proline peptides by the converted share. |
 | `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` | 0..1 | `0.96`, `0.99`, `0.99` | *(advanced)* Per-atom enrichment of metabolic 2H labels (Lys4, Leu3), chemical 2H labels (dimethyl) and 13C/15N labels: the lower isotopologues of each channel's pattern. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
@@ -1076,7 +1077,7 @@ major version marks an incompatible layout, a new minor version only adds column
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value; `psm_q_value` is the per-run q-value when the PIN had several runs) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
-| `<stem>.label.parquet` (`--label`) | one per (label group, run, channel) for every group identified in the run (in any channel) or transferred into it (`--mbr`) | `filename peptide sequence charge proteins channel channel_name label status spec_id psm_q_value rt_psm labelled_peptidoform mz rt_apex rt_shift width quantity quantity_se quantity_upper llr envelope_cos coherence m1_ratio mass_err_ppm channel_q_value group_llr transfer transfer_q_value log2_ratio log2_ratio_se log2_ratio_normalized converted_fraction`; `peptide` is the peptide identity (the peptidoform without its channel labels), `labelled_peptidoform` the identified channel's peptidoform as searched; `channel` is 1-based, `label` the SDRF/QPX label (null outside that vocabulary); `status` is `identified` (a PSM of the run in this channel), `match_channel` (no PSM, measured at the channel's position at `channel_q_value` ≤ `--label-fdr`), `transfer` (the group transferred from another run at `transfer_q_value` ≤ `--mbr-fdr`), `below_detection` (no signal: `quantity_upper` = quantity + 2 SE bounds it) or `not_quantifiable` (something else is there: another identified peptide, a pattern or elution that is not the channel's, or a quality q-value above the cut); `quantity` is the area of the channel's fitted profile (its whole isotope pattern), `rt_apex` the channel's apex (the shared profile's plus `rt_shift`); `log2_ratio` is log2(channel / reference) when both are measured (`identified`, `match_channel` or `transfer`), `log2_ratio_normalized` the same minus the run's median log-ratio of the channel over its groups identified in both; `converted_fraction` (`--label-arg-pro`) the share of the channel's quantity in its heavy-proline form (null when not fitted). Metadata `andes.label.channels` (`<n>: <name>` per line), `andes.label.reference`, `andes.label.runs`, and with `--mbr` `andes.label.identity_decoy_transfers` (accepted / probed) and `andes.label.identity_decoy_rate` |
+| `<stem>.label.parquet` (`--label`) | one per (label group, run, channel) for every group identified in the run (in any channel) or transferred into it (`--mbr`) | `filename peptide sequence charge proteins channel channel_name label status spec_id psm_q_value rt_psm labelled_peptidoform mz rt_apex rt_shift width quantity quantity_se quantity_upper llr envelope_cos coherence m1_ratio mass_err_ppm channel_q_value group_llr transfer transfer_q_value log2_ratio log2_ratio_se log2_ratio_normalized converted_fraction trace_quantity`; `peptide` is the peptide identity (the peptidoform without its channel labels), `labelled_peptidoform` the identified channel's peptidoform as searched; `channel` is 1-based, `label` the SDRF/QPX label (null outside that vocabulary); `status` is `identified` (a PSM of the run in this channel), `match_channel` (no PSM, measured at the channel's position at `channel_q_value` ≤ `--label-fdr`), `transfer` (the group transferred from another run at `transfer_q_value` ≤ `--label-mbr-fdr`), `below_detection` (no signal: `quantity_upper` = quantity + 2 SE bounds it) or `not_quantifiable` (something else is there: another identified peptide, a pattern or elution that is not the channel's, or a quality q-value above the cut); `quantity` is the area of the channel's fitted profile (its whole isotope pattern), `rt_apex` the channel's apex (the shared profile's plus `rt_shift`); `log2_ratio` is log2(channel / reference) when both are measured (`identified`, `match_channel` or `transfer`), `log2_ratio_normalized` the same minus the run's median log-ratio of the channel over its groups identified in both; `converted_fraction` (`--label-arg-pro`) the share of the channel's quantity in its heavy-proline form (null when not fitted); `trace_quantity` a shape-free quantity of the channel (its own isotope traces, the other channels' modelled parts and the background removed, integrated over the apex ± (−3 w, +4 w), scaled to the whole pattern), for checks against the profile fit. Metadata `andes.label.channels` (`<n>: <name>` per line), `andes.label.reference`, `andes.label.runs`, and with `--mbr` `andes.label.identity_decoy_transfers` (accepted / probed) and `andes.label.identity_decoy_rate` |
 | `<stem>.label_proteins.tsv` (`--label`) | one per (protein group, run, channel other than the reference) with at least 2 peptide ratios | `protein_group lead filename channel channel_name log2_ratio log2_ratio_normalized ratio_count inferred_ratio_count`: the median of the peptides' log-ratios, each the median of its evidence (charges, channel rows) in `label.parquet`, as MaxQuant computes protein ratios; `log2_ratio_normalized` from the normalised evidence (`NA` below 2 peptides); `inferred_ratio_count` counts the peptides whose channel is only matched or transferred in the run. The group is the protein group at `--protein-fdr` when protein inference ran, else the peptide's accessions |
 | `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex` (the last six: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the running mean of its probability of a wrong measurement, §10; `transfer_q` for a transfer below the threshold); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
@@ -2110,7 +2111,11 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   exactly under non-negativity. A trace that two channels share is explained by both: the light
   M+4 lies about 9 ppm below a Lys4 or Dimethyl4 channel's monoisotope, and is part of the model,
   never an interferer. The apex is searched over the scans near the prior and refined between
-  scans; the noise of a trace is taken away from the expected peak. Per channel: amplitude and
+  scans; the noise of a trace is taken away from the expected peak, and the amplitudes are fitted
+  over the peak's neighbourhood (apex prior ± 3 s + 3 w). A trace whose residual at the optimum is
+  more than three times its noise (an isotope another species interferes with) has its weight
+  divided by its excess and the amplitudes are refitted (twice), so they rest on the traces that
+  follow the model. Per channel: amplitude and
   standard error, the likelihood ratio it adds, the cosine of its own isotope heights to its
   pattern, the coherence of its monoisotopic trace with the profile, and the residual at its M−1
   after its own lower isotopologues (above 0.3 of the monoisotope: another envelope one isotope
@@ -2124,12 +2129,16 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   four non-label mass shifts (nominal ±7…23 Da in the peptide mass-defect band, none within three
   tolerances of any isotope of any channel; each decoy weighs 1/k for a channel with k admissible
   shifts); target/decoy competition of `√(2·LLR) · cosine ·
-  coherence · exp(−½ (Δppm / σ)²)`, pooled over runs, gives `channel_q_value`. `Δppm` is the
+  coherence · exp(−½ (Δppm / σ)²) · exp(−½ (Δt / σ_t)²)`, within each run, gives `channel_q_value`. `Δppm` is the
   channel's monoisotopic mass error against the group's identified channels', `σ` √2 times the run's
   robust spread of identified-channel mass errors: in dense MS1 about 1 % of positions at a
   non-label shift hold another peptide's co-eluting envelope, anywhere in the tolerance window,
   while a real channel sits at its identified channel's mass error (on PXD003327 this factor takes
-  the 99th percentile decoy score from 75 to 2 and the matched channels from 0 to 1,073 at q 0.01). A channel is `match_channel` at
+  the 99th percentile decoy score from 75 to 2 and the matched channels from 0 to 1,073 at q 0.01).
+  `Δt` is the channel's elution centroid (its monoisotope and M+1, the other channels' parts
+  removed) against the shared apex, `σ_t` √2 times the run's spread of identified-channel offsets:
+  a real channel elutes with its partners, another species' envelope at a random offset, which
+  separates them where mass accuracy cannot (TOF). A channel is `match_channel` at
   `--label-fdr` with an envelope cosine of at least 0.7, no strong residual M−1, and, when weaker
   than a fifth of the identified channel, a coherence of at least 0.5 (OpenMS's co-elution check
   for weak re-quantified channels); `below_detection` without signal; `not_quantifiable` when
@@ -2142,7 +2151,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   target/decoy competition of the group score (its strongest channel's score, its mass-accuracy
   factor against the receiving run's calibration, and `exp(−½ rt_z²)`, since the alignment's
   uncertainty is calibrated and a decoy hit sits anywhere in the search window) over every run gives
-  `transfer_q_value`, and transfers at `--mbr-fdr` are reported, each channel `transfer`,
+  `transfer_q_value`, and transfers at `--label-mbr-fdr` are reported, each channel `transfer`,
   `below_detection` or `not_quantifiable`. Transfers never enter the alignment.
   *Identity decoys* count the transfers of false donor identifications, which the mass-shifted
   decoys cannot see (a false donor's "peptide" may still find a real peak): the decoy PSMs at the
@@ -2150,7 +2159,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   it is fitted (they move no run map) and transferred like targets. The share of accepted
   identity-decoy transfers among the accepted target transfers estimates the false-donor share of
   the targets (one identity decoy per false target entry, by target/decoy symmetry), and is added
-  to every transfer q-value before the `--mbr-fdr` cut.
+  to every transfer q-value before the `--label-mbr-fdr` cut.
 * **Arginine-to-proline conversion** (`--label-arg-pro`). Cells convert part of the heavy arginine
   to heavy proline, so a proline-containing peptide's heavy signal splits into the expected
   channel and a form one heavy proline heavier. With the flag, that form (one converted proline)
@@ -2166,43 +2175,65 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
 
-**Real data: PXD003327** (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap; runs
-`Chris_Ecoli_1-2-4` and `Chris_Ecoli_4-1` against the E. coli proteome, defaults with
-`--rescore-native`, 4 threads, release build, 2026-11-11). In these files lysine and arginine
-peptides carry opposite designs (K: M/L and H/L near +1 and +2, R near −1 and −2 in `1-2-4`;
-mirrored in `4-1`), and the identified-in-both-channels groups show the same split, so the classes
-are read separately:
+**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated, 2026-11-11).
+OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
+with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
+m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant was not run: its download needs a
+registration this environment cannot complete.
 
-| run | channel | class | identified (n, median, IQR) | matched between channels | transferred (`--mbr-fdr 0.05`) |
+*PXD022659* (E. coli SILAC `[][Lys8]` at known light:heavy mixtures, TripleTOF 6600 DDA, 20 ppm
+MS1 tolerance; runs `Ecoli_LH_1_1_66_DDA1` and `Ecoli_LH_1_10_66_DDA1` with `--mbr`; 3 min in all,
+9 s for `--label`). Expected log2 H/L 0 and 3.32:
+
+| run | values | n | median log2 H/L | IQR | median abs. error |
 |---|---|---|---|---|---|
-| 1-2-4 | M/L | K | 5, 0.81, 0.23 | 177, 0.75, 0.25 | 41, 0.78, 0.30 |
-| 1-2-4 | M/L | R | 191, −0.94, 0.15 | 210, −0.96, 0.38 | 97, −1.06, 0.51 |
-| 1-2-4 | H/L | K | 200, 1.92, 0.26 | 2, 2.66, 0.45 | 50, 1.94, 0.40 |
-| 1-2-4 | H/L | R | 40, −1.76, 0.18 | 254, −1.79, 0.23 | 80, −1.93, 0.54 |
-| 4-1 | H/L | K | 170, −1.85, 0.15 | 176, −1.90, 0.36 | 23, −1.94, 0.51 |
-| 4-1 | H/L | R | 427, 2.08, 0.20 | 21, 2.15, 0.31 | 39, 2.13, 0.41 |
+| 1:1 | andes, all channel ratios | 1,369 | −0.13 | 0.69 | 0.32 |
+| 1:1 | OpenMS, all complete multiplets | 1,087 | −0.03 | 0.49 | 0.24 |
+| 1:1 | same 568 peptides: andes / OpenMS | 568 | −0.04 / −0.08 | 0.48 / 0.42 | 0.23 / 0.21 |
+| 1:10 | andes, all channel ratios | 540 | 2.69 | 0.99 | 0.68 |
+| 1:10 | OpenMS, all complete multiplets | 458 | 2.43 | 1.08 | 0.91 |
+| 1:10 | same 163 peptides: andes / OpenMS | 163 | 2.66 / 2.56 | 0.74 / 0.81 | 0.67 / 0.77 |
 
-Matched channels and transfers agree with the identified ones to 0.1 log2 in median, at a wider
-spread. The single run (`1-2-4`) takes 21 s in all, 0.85 s of it for `--label` (940 groups, 3
-channels, 5 fits per group with the decoys); both runs with `--mbr` 39 s, 2.4 s for `--label`.
-At `--mbr-fdr 0.01` this pair transfers nothing (lowest transfer q 0.0105: two runs of different
-mixtures and acquisitions, 1.18 s against 2.46 s MS1 spacing, share few strong transfers); at 0.05,
-396 of 1,095, with 7 of 15 identity decoys accepted (false-donor rate 0.014 added to the q-values).
-The mass-accuracy factor is what makes match between channels work on this dense MS1 (about 1,850
-centroids per scan): without it no channel reaches q 0.01.
+Both tools compress the 1:10 ratio (as SILAC on this instrument does); andes less, at a lower
+error, and on the 1:1 run OpenMS's peak-pair ratios are slightly tighter. In the 1:1 run, the
+channels andes matches between channels at q ≤ 0.05 have median −0.06 and IQR 0.58 against −0.10
+and 0.72 for groups whose two channels are both identified; between 0.05 and 0.1, −0.12 and 0.97;
+between 0.1 and 0.2, −0.21 and 1.26 (so the default `--label-fdr` is 0.05). With `--mbr`, 681 of
+1,948 transfers are accepted at `--label-mbr-fdr 0.05` (10 of 26 identity decoys, false-donor rate
+0.012 added), and in the 1:10 run the transferred ratios' median is 2.75 against 2.67 for the
+identified ones.
 
-**Real data: PXD000714** (yeast mitochondria, dimethyl triplex, one fraction
-`20120524_Renvoise_Triplex_rep1F3`, converted from mzXML, against the reviewed yeast proteome):
-4,362 PSMs, 2,608 label groups, deuterium RT offsets learned at −0.64 s (Dimethyl4) and −0.97 s
-(Dimethyl8), mass-error spread 0.93 ppm; 36.5 s in all, 2.6 s for `--label`. This dense MS1
-(0.32 s spacing) keeps the decoy share near 2 % at every score, so no channel reaches
-`--label-fdr 0.01`; at 0.05, 896 / 790 / 582 channels are matched. The ratios here are biological
-(no known answer) and widely spread (IQR 1–2 log2 even between two identified channels), and a
-matched channel is by selection the weaker one, so this run shows coverage and run scales, not
-accuracy. The heavy dimethyl labels are scored by the RT and MS2 predictors as the light Dimethyl
-(and the SILAC labels as the unlabelled peptide), which `--predict` needs to score these PSMs at
-all. PXD022659 (the SILAC dilution series OpenMS used) is hosted on PanoramaPublic as vendor raw
-files and was not run.
+*PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
+21.7 s in all, 0.83 s for `--label`, 944 groups; 275 / 537 / 341 channels matched between
+channels). In this file lysine and arginine peptides carry opposite designs (K: M/L and H/L near
++1 and +2, R near −1 and −2), which the groups with both channels identified show too, so the
+classes are read separately; on 536 groups matched to OpenMS multiplets:
+
+| ratio | class | andes n, median, IQR | OpenMS n, median, IQR | median abs. difference |
+|---|---|---|---|---|
+| M/L | K | 118, 0.74, 0.22 | 123, 0.66, 0.27 | 0.145 |
+| M/L | R | 391, −0.96, 0.25 | 330, −0.93, 0.19 | 0.110 |
+| H/L | K | 122, 1.89, 0.23 | 111, 1.84, 0.16 | 0.112 |
+| H/L | R | 326, −1.80, 0.27 | 192, −1.70, 0.23 | 0.102 |
+
+andes's medians are nearer the nominal ±1 / ±2 in every cell and it quantifies more groups
+(arginine H/L 326 against 192); OpenMS's spread is lower in three of the four cells. OpenMS took
+2 min 8 s for the multiplet detection of this run (andes 0.83 s, its identifications from the same
+search).
+
+*PXD000714* (yeast mitochondria, dimethyl triplex, fraction `20120524_Renvoise_Triplex_rep1F3`,
+converted from mzXML, against the reviewed yeast proteome; 39 s in all, 2.7 s for `--label`):
+4,362 PSMs, 2,608 groups, deuterium offsets learned at −0.64 s (Dimethyl4) and −0.99 s
+(Dimethyl8), 927 / 812 / 588 channels matched between channels. The ratios are biological (no
+known answer); against OpenMS on 1,696 matched groups the median per-peptide difference is 0.075
+(M/L, correlation 0.74 over a narrow range) and 0.101 (H/L, correlation 0.985), andes quantifying
+1,393 H/L ratios where OpenMS has 1,065.
+
+What made match between channels and runs work on real data, in this order: the mass-accuracy
+factor (dense Orbitrap MS1, about 1,850 centroids per scan: 0 → 1,073 channels at q 0.01 on
+PXD003327); per-run competition (a 1:10 run's weak channels no longer drag a 1:1 run down); the
+co-elution factor (TOF data, whose mass accuracy separates little); and robust reweighting of
+interfered traces (PXD022659: matched channels 154 → 616, transfers 275 → 681).
 
 On the synthetic fixtures (`scripts/make_quant_fixtures.py --silac` / `--dimethyl`), the median
 error of the log-ratios is below 0.002 for identified, matched and transferred channels of a

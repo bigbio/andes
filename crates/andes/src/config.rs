@@ -173,6 +173,7 @@ pub struct QuantCfg {
     pub label_reference: Option<usize>,
     pub label_fdr: Option<f64>,
     pub label_arg_pro: Option<bool>,
+    pub label_mbr_fdr: Option<f64>,
     pub label_2h_enrichment_silac: Option<f64>,
     pub label_2h_enrichment_chemical: Option<f64>,
     pub label_heavy_enrichment: Option<f64>,
@@ -581,6 +582,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set!("label_fdr", label_fdr, cfg.quant.label_fdr);
     set!("label_arg_pro", label_arg_pro, cfg.quant.label_arg_pro);
+    set!("label_mbr_fdr", label_mbr_fdr, cfg.quant.label_mbr_fdr);
     set!(
         "label_2h_enrichment_silac",
         label_2h_enrichment_silac,
@@ -707,6 +709,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
     check_unit_fraction("label_fdr", args.label_fdr)?;
+    check_unit_fraction("label_mbr_fdr", args.label_mbr_fdr)?;
     check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
     check_unit_fraction(
         "label_2h_enrichment_chemical",

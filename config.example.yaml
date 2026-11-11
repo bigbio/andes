@@ -114,7 +114,8 @@ quant:
   # lfq_feature_fdr: 0.05
   # label: silac2               # labelled pairs: silac2|silac3|dimethyl2|dimethyl3 or [][Lys8,Arg10]-style channels
   # label_reference: 1           # reference channel of the label log-ratios (1-based)
-  # label_fdr: 0.01              # quality q-value of a channel matched without an identification (internal)
+  # label_fdr: 0.05              # quality q-value of a channel matched without an identification (internal)
+  # label_mbr_fdr: 0.05          # transfer q-value of --label --mbr (internal)
   # label_arg_pro: false         # SILAC: fit heavy proline from converted heavy arginine
   # dir: quant_out              # per-run <stem>.ms1.parquet + <stem>.quant.parquet for multi-run quantification
   # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)

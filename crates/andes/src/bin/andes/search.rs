@@ -3140,6 +3140,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The rows `psms.parquet` leaves out, from the full rescore map (before the
+    // knockoff rows leave it): the feature parquet numbers its `psm_ids` over
+    // the other rows.
+    let omitted_psms = match (&quant, rescore_map.as_ref()) {
+        (Some(_), Some(map)) => output::omitted_psm_rows(
+            &spectra,
+            &queues,
+            &pin_candidates,
+            Some(map),
+            rescore_decoys.as_ref(),
+            &knockoff_rows,
+        )
+        .map_err(|e| format!("quant: {e}"))?,
+        _ => std::collections::HashSet::new(),
+    };
     if let Some(ref mut map) = rescore_map {
         map.retain(|id, _| !knockoff_rows.contains(id));
     }
@@ -3170,6 +3185,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &pin_candidates,
             &pin_index,
             rescore_map.as_ref(),
+            &omitted_psms,
             cutoffs.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),

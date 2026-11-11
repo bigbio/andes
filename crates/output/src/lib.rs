@@ -32,7 +32,7 @@ pub use stats::{
 };
 
 pub mod qpx;
-pub use qpx::write_qpx;
+pub use qpx::{omitted_psm_rows, write_qpx};
 
 pub mod rt_wiring;
 pub use rt_wiring::populate_rt_features;

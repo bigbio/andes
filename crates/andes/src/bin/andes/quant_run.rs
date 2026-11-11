@@ -7,7 +7,7 @@
 //! roll-up, statistics) is left to quantms / OpenMS, which know the
 //! experimental design.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -832,18 +832,20 @@ struct Hit<'a> {
 /// Select the quantification targets: rank-1 target PSMs (and the best PSM of
 /// each co-isolated precursor), at `q <= quant_fdr` (a variant-class row at
 /// its `cutoffs` level) and `pep <= --pep` when a rescoring result is
-/// available. The running `psm_index` reproduces the row
-/// order of `psms.parquet`.
+/// available. The running `psm_index` reproduces the row order of
+/// `psms.parquet`: it counts the emitted rows not in `omitted`
+/// ([`output::omitted_psm_rows`]).
 fn select_hits<'a>(
     collector: &QuantCollector,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    omitted: &HashSet<String>,
     cutoffs: Option<&output::Cutoffs>,
 ) -> Vec<Hit<'a>> {
     select_rank1(
-        collector, spectra, queues, candidates, rescore, cutoffs, false,
+        collector, spectra, queues, candidates, rescore, Some(omitted), cutoffs, false,
     )
 }
 
@@ -856,7 +858,7 @@ fn select_rank1_all<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
 ) -> Vec<Hit<'a>> {
-    select_rank1(collector, spectra, queues, candidates, None, None, true)
+    select_rank1(collector, spectra, queues, candidates, None, None, None, true)
 }
 
 fn select_rank1<'a>(
@@ -865,6 +867,7 @@ fn select_rank1<'a>(
     queues: &[TopNQueue],
     candidates: &'a [Candidate],
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    omitted: Option<&HashSet<String>>,
     cutoffs: Option<&output::Cutoffs>,
     include_decoys: bool,
 ) -> Vec<Hit<'a>> {
@@ -905,9 +908,12 @@ fn select_rank1<'a>(
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let spec_id = output::format_spec_id(&spec_id_base, scan, rank, hit, multi_row);
             let rescored = rescore.map(|m| m.get(&spec_id));
-            // A rescored bundle leaves out the target rows target-decoy
-            // competition removed (no target result), so they take no row.
-            if !cand.is_decoy && matches!(rescored, Some(None)) {
+            // A rescored bundle leaves out the rows target-decoy competition
+            // removed (targets and decoys) and the knockoff rows, so they
+            // take no row index. A target without a result takes none either.
+            if omitted.is_some_and(|o| o.contains(&spec_id))
+                || (!cand.is_decoy && matches!(rescored, Some(None)))
+            {
                 continue;
             }
             let this_index = psm_index;
@@ -1444,6 +1450,7 @@ pub(crate) fn run_quant(
     candidates: &[Candidate],
     index: &SearchIndex,
     rescore: Option<&HashMap<String, PercolatorPsm>>,
+    omitted: &HashSet<String>,
     cutoffs: Option<&output::Cutoffs>,
     report_base: &Path,
     parquet_dir: Option<&Path>,
@@ -1457,7 +1464,7 @@ pub(crate) fn run_quant(
     if let Some(dir) = &s.quant_dir {
         write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
     }
-    let hits = select_hits(collector, spectra, queues, candidates, rescore, cutoffs);
+    let hits = select_hits(collector, spectra, queues, candidates, rescore, omitted, cutoffs);
     eprintln!(
         "quant: {} rank-1 target PSMs selected{} ({})",
         hits.len(),
@@ -2264,7 +2271,7 @@ mod tests {
             ]
         );
         // Without decoys (the per-run quantification), the decoy winner goes.
-        let hits = select_hits(&c, &spectra, &queues, &cands, None, None);
+        let hits = select_hits(&c, &spectra, &queues, &cands, None, &HashSet::new(), None);
         assert_eq!(hits.len(), 2);
         // A rescoring result decides each co-isolated PSM on its own q-value.
         let mut rescore = HashMap::new();
@@ -2282,11 +2289,41 @@ mod tests {
                 },
             );
         }
-        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), None);
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &HashSet::new(), None);
         assert_eq!(
             selected(&hits),
             vec![("Scan 1_1_2_1".to_string(), false, false)]
         );
+        assert_eq!(hits[0].psm_index, 1);
+    }
+
+    #[test]
+    fn a_row_psms_parquet_leaves_out_takes_no_psm_index() {
+        // Rank 1 is a decoy that lost its competition group: `psms.parquet`
+        // leaves it out, so the target after it is row 0 of the bundle and its
+        // `psm_ids` entry must be 0, not 1.
+        let cands = vec![candidate(b"KEDITPEP", true), candidate(b"PEPTIDEK", false)];
+        let (c, spectra, queues) = one_spectrum(vec![psm(12.0, 0, Some(600.3)), psm(10.0, 1, None)]);
+        let mut rescore = HashMap::new();
+        rescore.insert(
+            "Scan 1_1_2_1".to_string(),
+            PercolatorPsm {
+                pooled_q_value: None,
+                psm_id: "Scan 1_1_2_1".to_string(),
+                q_value: 0.001,
+                pep: 0.0,
+                score: Some(1.0),
+                peptide: String::new(),
+                proteins: String::new(),
+            },
+        );
+        let omitted: HashSet<String> = ["Scan 1_1_1_0".to_string()].into();
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &omitted, None);
+        assert_eq!(selected(&hits), vec![("Scan 1_1_2_1".to_string(), false, false)]);
+        assert_eq!(hits[0].psm_index, 0);
+        // Without the omitted set the losing decoy shifts the index.
+        let hits = select_hits(&c, &spectra, &queues, &cands, Some(&rescore), &HashSet::new(), None);
+        assert_eq!(hits[0].psm_index, 1);
     }
 
     fn settings(lfq: bool, quant_dir: Option<&str>) -> QuantSettings {

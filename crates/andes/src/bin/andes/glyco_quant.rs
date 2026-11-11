@@ -185,6 +185,10 @@ impl Target {
             charge: self.charge,
             anchor_rt: self.anchor_rt,
             envelope: self.envelope.clone(),
+            // 1: `FeatureQuant::area` stays the summed traced isotopes, as
+            // before the whole-pattern scaling of the peptide path; the
+            // reported `Area` is computed here from the monoisotopic trace.
+            isotope_share: 1.0,
         }
     }
 }

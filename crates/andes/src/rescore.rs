@@ -714,6 +714,10 @@ pub fn native_rescore_pin(
 pub struct NativeRescore {
     pub targets: HashMap<String, PercolatorPsm>,
     pub decoys: HashMap<String, PercolatorPsm>,
+    /// The held-out score of every target row and every decoy row, winners
+    /// and losers of their competition group: the rows of a spectrum compete
+    /// on them for the site posteriors.
+    pub row_scores: output::RowScores,
     /// Rows that lost target-decoy competition in their group.
     pub competed_away: usize,
     /// Cross-validation folds whose training split had too few confident
@@ -730,6 +734,7 @@ pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore
         return Ok(NativeRescore {
             targets: HashMap::new(),
             decoys: HashMap::new(),
+            row_scores: (HashMap::new(), HashMap::new()),
             competed_away: 0,
             untrained_folds: 0,
         });
@@ -768,9 +773,19 @@ pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore
             ));
         }
     }
+    let mut row_scores = (HashMap::with_capacity(n), HashMap::new());
+    for i in 0..n {
+        let map = if d.is_decoy[i] {
+            &mut row_scores.1
+        } else {
+            &mut row_scores.0
+        };
+        map.insert(d.spec_ids[i].clone(), scores[i]);
+    }
     Ok(NativeRescore {
         targets,
         decoys,
+        row_scores,
         competed_away: n - win.len(),
         untrained_folds,
     })
@@ -1058,6 +1073,10 @@ mod tests {
             );
             assert!(r.targets.contains_key(&format!("s{i}_{i}_1_2")));
         }
+        // Every row keeps its score, the competition's losers included.
+        assert_eq!(r.row_scores.0.len(), 800);
+        assert_eq!(r.row_scores.1.len(), 400);
+        assert!((0..400).all(|i| r.row_scores.1.contains_key(&format!("s{i}_{i}_2_1"))));
         // PEP: within [0, 1], never above 1, and falls as the score rises.
         let mut v: Vec<(f64, f64)> = r
             .targets

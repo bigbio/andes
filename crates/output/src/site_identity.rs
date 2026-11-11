@@ -19,8 +19,6 @@ use std::collections::HashMap;
 
 use search::site_evidence::SiteEvidence;
 
-use crate::percolator::PercolatorPsm;
-
 /// Weights of the fixed part of a row's logit, per unit of each feature.
 const W_SCORE: f64 = 2.0;
 const W_ISOTOPE_1: f64 = -1.0;
@@ -108,18 +106,21 @@ fn signatures(e: &SiteEvidence) -> impl Iterator<Item = (Signature, bool)> + '_ 
     })
 }
 
-/// Each target row's posterior among its spectrum's rows. Rows the search
-/// kept no evidence for (spectra without a variable modification) are left
-/// out.
+/// Each target row's posterior among its spectrum's rows. `targets` and
+/// `decoys` hold the rescored score of every row, not only the winner of each
+/// target-decoy competition group (see [`crate::percolator::score_all_rows`]):
+/// with winners only, a spectrum has one row and every posterior is 1. Rows
+/// the search kept no evidence for (spectra without a variable modification)
+/// are left out.
 pub fn row_posteriors(
-    targets: &HashMap<String, PercolatorPsm>,
-    decoys: &HashMap<String, PercolatorPsm>,
+    targets: &HashMap<String, f64>,
+    decoys: &HashMap<String, f64>,
     rows: &HashMap<String, RowEvidence>,
 ) -> HashMap<String, f64> {
     let mut spectra: HashMap<u32, Vec<Row<'_>>> = HashMap::new();
     for (map, decoy) in [(targets, false), (decoys, true)] {
-        for (id, psm) in map {
-            let (Some(r), Some(score)) = (rows.get(id), psm.score) else {
+        for (id, &score) in map {
+            let Some(r) = rows.get(id) else {
                 continue;
             };
             spectra.entry(r.spectrum).or_default().push(Row {
@@ -210,19 +211,8 @@ mod tests {
     use model::modification::{leak_mod, Modification};
     use search::site_evidence::ModMark;
 
-    fn psm(id: &str, score: f64) -> (String, PercolatorPsm) {
-        (
-            id.into(),
-            PercolatorPsm {
-                pooled_q_value: None,
-                psm_id: id.into(),
-                q_value: 0.001,
-                pep: 0.0,
-                score: Some(score),
-                peptide: String::new(),
-                proteins: String::new(),
-            },
-        )
+    fn psm(id: &str, score: f64) -> (String, f64) {
+        (id.into(), score)
     }
 
     fn ev(spectrum: u32, m: &'static Modification, diagnostic: bool) -> RowEvidence {
@@ -291,7 +281,7 @@ mod tests {
         let rows = HashMap::from([("t".to_string(), row(0)), ("d".to_string(), row(0))]);
         let p = row_posteriors(&targets, &decoys, &rows)["t"];
         assert!(p > 0.99 && p < 1.0, "{p}");
-        targets.insert("x".into(), targets["t"].clone());
+        targets.insert("x".into(), targets["t"]);
         assert!(!row_posteriors(&targets, &decoys, &rows).contains_key("x"));
     }
 }

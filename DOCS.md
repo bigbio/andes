@@ -461,7 +461,10 @@ Each accepted site also gets two probabilities:
   `identity_spectra` is the posterior mass placing a modification there, in spectra.
 
 The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
-one spectrum compete. A row's logit combines:
+one spectrum compete. Target-decoy competition keeps one row per spectrum and precursor mass, so
+the rows are scored apart from it: with Percolator, a static pass of the trained model without
+`-Y` scores every PIN row (run only when the database has site claims); the native rescorer
+keeps the held-out score of every row. A row's logit combines:
 - its rescored score;
 - its precursor isotope offset;
 - its fragment ions, and those no other form of the same peptide among the spectrum's rows has;

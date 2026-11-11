@@ -2685,6 +2685,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
+    // Site claims need every row of a spectrum scored, not only the winner of
+    // each target-decoy competition group, so the rows can compete.
+    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
+        p.annotation
+            .as_deref()
+            .is_some_and(|a| !a.site_claims.is_empty())
+    });
+    let mut row_scores: Option<output::RowScores> = None;
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
@@ -2715,6 +2723,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             rescore_decoy_psms =
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            if has_site_claims {
+                row_scores = Some(
+                    output::score_all_rows(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("scoring every PIN row for the site posteriors: {e}"))?,
+                );
+            }
             if cli.mbr {
                 mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
@@ -2742,6 +2756,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // which target rows lost their scan/ExpMass group.
             rescore_decoys = Some(all.decoys.keys().cloned().collect());
             rescore_decoy_psms = all.decoys;
+            if has_site_claims {
+                row_scores = Some(all.row_scores);
+            }
             if cli.mbr {
                 mbr_source = "the native rescoring result".to_string();
             }
@@ -2844,12 +2861,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Site claims: annotated sites against their knockoff sites; each
         // accepted site also gets its occupancy and identity from the
         // posterior of every row among its spectrum's rows.
-        let has_site_claims = pin_index.iter_target_proteins().any(|p| {
-            p.annotation
-                .as_deref()
-                .is_some_and(|a| !a.site_claims.is_empty())
-        });
-        let posteriors = has_site_claims.then(|| {
+        let posteriors = row_scores.as_ref().map(|(target_scores, decoy_scores)| {
             let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
                 queues
                     .iter()
@@ -2870,7 +2882,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             })
                     })
                     .collect();
-            output::site_identity::row_posteriors(map, &rescore_decoy_psms, &rows)
+            output::site_identity::row_posteriors(target_scores, decoy_scores, &rows)
         });
         let sites = output::site_claims(
             map,

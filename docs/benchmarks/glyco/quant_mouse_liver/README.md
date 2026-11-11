@@ -22,26 +22,26 @@ engine's areas.
 
 | | value |
 |---|---|
-| glyco-PSMs at 1% FDR (pooled Percolator) | **33,625** |
-| unique glycopeptides at 1% (topology-resolved) | **6,476** |
-| entrapment FDP at 1% (sequon-corrected) | **0.92%** (95% CI 0.78–1.08) |
-| of those PSMs quantified by `--lfq` | **97.4%** |
-| ID-gated quantified features (identified + transferred) | **40,430** (32,765 + 7,665) |
-| glycopeptides at composition / topology resolution | **4,622 / 6,359** |
-| matrix fill, identified-only → +MBR | **58.6% → 85.5%** |
-| glycopeptides in ≥3 runs, identified → +MBR | **2,457 → 4,121** |
-| cross-run Pearson (log2 area), identified → +MBR | **0.888 → 0.830** |
-| glycoform-share mean \|Δ\|, identified → +MBR | **0.076 → 0.063** |
-| protein Top3 cross-run r, identified → +MBR | **0.942 → 0.918** |
+| glyco-PSMs at 1% FDR (pooled Percolator) | **33,823** |
+| unique glycopeptides at 1% (topology-resolved) | **6,509** |
+| entrapment FDP at 1% (sequon-corrected) | **0.93%** (95% CI 0.79–1.10) |
+| of those PSMs quantified by `--lfq` | **97.5%** |
+| ID-gated quantified features (identified + transferred) | **40,416** (32,967 + 7,449) |
+| glycopeptides at composition / topology resolution | **4,661 / 6,392** |
+| matrix fill, identified-only → +MBR | **58.6% → 84.6%** |
+| glycopeptides in ≥3 runs, identified → +MBR | **2,466 → 4,150** |
+| cross-run Pearson (log2 area), identified → +MBR | **0.889 → 0.827** |
+| glycoform-share mean \|Δ\|, identified → +MBR | **0.075 → 0.063** |
+| protein Top3 cross-run r, identified → +MBR | **0.940 → 0.911** |
 
 **The most important result is a measurement-semantics one.** The `Accepted`
 flag in the emitted tables is a *feature/measurement* q-value (XIC target vs its
 +11 Th decoy twin), not an identification FDR. Used as shipped, the tables
-report 250,804 quantified features whose entrapment share is **42.7%**
-(sequon-corrected FDP ≈ **90.9%**). Joining each feature to the Percolator
+report 254,240 quantified features whose entrapment share is **42.7%**
+(sequon-corrected FDP ≈ **91.1%**). Joining each feature to the Percolator
 q-value of its PSM (the `.lfq.tsv` `SpecId` matches the PIN byte for byte; a
-transferred row carries `{donor SpecId}_mbr_{run}`) leaves 40,430 features
-(16.1%) with a 0.97% entrapment share (FDP 2.08%; 0.88% for identified
+transferred row carries `{donor SpecId}_mbr_{run}`) leaves 40,416 features
+(15.9%) with a 0.85% entrapment share (FDP 1.82%; 0.88% for identified
 features alone). Every quantification number below is computed **after** that
 join. This is the documented workflow, but the emitted `Accepted` column alone
 is easy to misread, and the gap between the two readings is large enough to
@@ -53,12 +53,12 @@ dominate any conclusion drawn from the tables.
 |---|---|
 | spectra | `MouseLiver-Z-T-1.raw` … `MouseLiver-Z-T-5.raw` (PXD005553, HCD, Q Exactive) |
 | database | `mouse_entrap.fasta`: 17,229 mouse + 17,229 same-length shuffled `ENTRAP_` proteins |
-| decoys | `--decoy-strategy sequon-reverse` (sequon density preserved) |
+| decoys | `--decoy-strategy sequon` (shuffle, then restore the target sequon count; this replaced the older `sequon-reverse` name and recipe upstream) |
 | glycan DB | `pGlyco-N-Mouse.gdb`, 6,660 entries with structure (topology) preserved |
 | search | trypsin, ≤3 missed cleavages, 6–50 aa, 20 ppm, charge 2–5, oxidation M |
 | quant | MS1, 10 ppm, ±60 s, ≥4 isotopes, cosine ≥ 0.7, feature FDR 0.05 |
-| runtime | ≈11 min end-to-end (PIN phase 666 s); 112 threads; candidate index cached |
-| andes | 0.4.0 (working tree `glyco/topology-wurcs`) |
+| runtime | ≈14 min end-to-end (PIN phase 796 s); 112 threads; candidate index cached |
+| andes | 0.4.0 (branch `glyco/lfq-mbr` @ 0866a63, on `origin/main` f25ca32) |
 
 Outputs are written next to the PIN. Because `--output-pin` was given a name
 already ending in `.glyco.pin`, andes appends its own suffix, so the files are
@@ -66,13 +66,13 @@ already ending in `.glyco.pin`, andes appends its own suffix, so the files are
 
 ## 1. Identification layer (context)
 
-Pooled Percolator 3.7.1 (`--seed 42 -Y --only-psms=false`) on the 211,994-row
+Pooled Percolator 3.7.1 (`--seed 42 -Y --only-psms=false`) on the 211,392-row
 PIN:
 
 | gate | target PSMs | entrapment hits | sequon-corrected FDP |
 |---|---:|---:|---:|
-| q ≤ 0.01 | 33,625 | 145 | **0.92%** |
-| q ≤ 0.05 | 35,455 | 681 | 4.09% |
+| q ≤ 0.01 | 33,823 | 148 | **0.93%** |
+| q ≤ 0.05 | 35,747 | 690 | 4.11% |
 
 The search-space correction is 2.13× (sample 50,425 N-X-S/T sequons vs
 entrapment 44,593). Agreement with the two reference engines on the same
@@ -80,11 +80,11 @@ spectra:
 
 | reference | spectra | recovered at andes 1% |
 |---|---:|---:|
-| pGlyco2 (depositors') | 17,855 | **88.9%** (15,873) |
-| MSFragger-Glyco | 14,626 | **89.7%** (13,114) |
+| pGlyco2 (depositors') | 17,855 | **89.1%** (15,912) |
+| MSFragger-Glyco | 14,626 | **89.9%** (13,152) |
 
-`eval_yield.py`: 33,625 glyco-PSMs, 6,476 unique glycopeptides, 2,329
-compositions, 1,209 glycosites.
+`eval_yield.py`: 33,823 glyco-PSMs, 6,509 unique glycopeptides, 2,306
+compositions, 1,223 glycosites.
 
 ## 2. What the quantification tables contain
 
@@ -92,18 +92,18 @@ compositions, 1,209 glycosites.
 
 | run | identified rows | transferred rows | accepted identified | accepted transferred |
 |---|---:|---:|---:|---:|
-| T-1 | 23,472 | 44,756 | 20,869 | 27,874 |
-| T-2 | 21,395 | 46,515 | 19,046 | 29,923 |
-| T-3 | 22,673 | 45,157 | 20,094 | 31,928 |
-| T-4 | 22,775 | 45,361 | 19,989 | 30,536 |
-| T-5 | 23,232 | 44,946 | 20,364 | 30,181 |
-| **all** | **113,547** | **226,735** | **100,362** | **150,442** |
+| T-1 | 23,839 | 45,859 | 21,243 | 28,427 |
+| T-2 | 21,801 | 47,586 | 19,387 | 29,765 |
+| T-3 | 23,115 | 46,223 | 20,554 | 32,378 |
+| T-4 | 23,293 | 46,314 | 20,532 | 31,215 |
+| T-5 | 23,581 | 46,046 | 20,737 | 30,002 |
+| **all** | **115,629** | **232,028** | **102,453** | **151,787** |
 
-That is 250,804 accepted features over 59,337 (peptide, site, composition)
+That is 254,240 accepted features over 60,790 (peptide, site, composition)
 glycopeptides. The emitted tables agree with each other: `.glyco.matrix.tsv` has
-59,337 rows and 222,242 filled cells, exactly the rows of `.glyco.quant.tsv`;
-`site.tsv` glycoform shares sum to 1.0 per (run, peptide, site) at every one of
-130,946 sites; and no protein has Top3 > summed area.
+60,790 rows and 225,633 filled cells, exactly the rows of `.glyco.quant.tsv`;
+`site.tsv` glycoform shares sum to 1.0 within 1e-5 per (run, peptide, site) at
+every one of 132,753 sites; and no protein has Top3 > summed area.
 
 Their entrapment share and the effect of the identification gate:
 
@@ -111,34 +111,34 @@ Their entrapment share and the effect of the identification gate:
 
 | feature set | features | entrapment | sequon-corrected FDP |
 |---|---:|---:|---:|
-| accepted, no ID gate | 250,804 | 42.7% | 90.9% |
-| accepted + ID q ≤ 0.01 | 40,430 | 0.97% | 2.08% |
-| accepted + ID q > 0.05 / no q | 206,478 | 51.0% | 108.6% |
+| accepted, no ID gate | 254,240 | 42.7% | 91.1% |
+| accepted + ID q ≤ 0.01 | 40,416 | 0.85% | 1.82% |
+| accepted + ID q > 0.05 / no q | 209,773 | 51.0% | 108.6% |
 
-By evidence class, at the 1% gate: identified 135/32,765 entrap (0.41%),
-transferred 259/7,665 (3.38%). Transfers are discussed in §6.
+By evidence class, at the 1% gate: identified 136/32,967 entrap (0.41%),
+transferred 209/7,449 (2.81%). Transfers are discussed in §6.
 
-Gated feature counts per run (identified + transferred): 8,191 / 8,130 / 8,122 /
-7,939 / 8,048 — flat across fractions, as replicates should be. Quantification
-recovers 32,765 of the 33,625 accepted PSMs (97.4%); the remaining 2.6% did not
+Gated feature counts per run (identified + transferred): 8,252 / 8,016 / 8,171 /
+7,945 / 8,032 — flat across fractions, as replicates should be. Quantification
+recovers 32,967 of the 33,823 accepted PSMs (97.5%); the remaining 2.5% did not
 produce an accepted feature (XIC cosine/envelope gates or no usable MS1 scan).
 
 ## 3. Matrix completeness
 
-4,622 glycopeptides × 5 runs. Without MBR, 13,551 cells are filled (58.6%);
-MBR fills 6,197 more, for 19,748 (85.5%). The number of *identified*
-glycopeptides does not change (4,622); MBR only adds measurements of existing
+4,661 glycopeptides × 5 runs. Without MBR, 13,664 cells are filled (58.6%);
+MBR fills 6,060 more, for 19,724 (84.6%). The number of *identified*
+glycopeptides does not change (4,661); MBR only adds measurements of existing
 identifications.
 
 ![Matrix completeness](fig2_matrix_completeness.png)
 
 | presence | identified | identified + MBR |
 |---|---:|---:|
-| ≥1 run | 4,622 | 4,622 |
-| ≥2 runs | 3,097 | 4,434 |
-| ≥3 runs | 2,457 | 4,121 |
-| ≥4 runs | 1,945 | 3,695 |
-| ≥5 runs | 1,430 | 2,876 |
+| ≥1 run | 4,661 | 4,661 |
+| ≥2 runs | 3,134 | 4,454 |
+| ≥3 runs | 2,466 | 4,150 |
+| ≥4 runs | 1,962 | 3,646 |
+| ≥5 runs | 1,441 | 2,813 |
 
 ## 4. Cross-run consistency
 
@@ -146,8 +146,8 @@ Pearson r on log2 area, pairwise over glycopeptides measured in both runs:
 
 | | identified | identified + MBR |
 |---|---:|---:|
-| median pairwise r | **0.888** | **0.830** |
-| range | 0.850–0.923 | 0.795–0.859 |
+| median pairwise r | **0.889** | **0.827** |
+| range | 0.853–0.921 | 0.797–0.861 |
 
 ![Cross-run consistency](fig3_cross_run.png)
 
@@ -156,43 +156,43 @@ Splitting each pair by how the two measurements were obtained:
 
 | class | median r | range | n per pair |
 |---|---:|---|---:|
-| both identified | **0.896** | 0.858–0.928 | 1,830–2,086 |
-| one transferred | **0.552** | 0.496–0.654 | 893–1,119 |
-| both transferred | **0.603** | 0.532–0.667 | 445–709 |
+| both identified | **0.896** | 0.862–0.926 | 1,838–2,106 |
+| one transferred | **0.555** | 0.499–0.660 | 880–1,091 |
+| both transferred | **0.620** | 0.551–0.702 | 437–636 |
 
 Glycoform shares agree better after MBR, because MBR adds the missing glycoforms
-of a site in runs that identified only part of the family: mean |Δshare| 0.0758
-→ **0.0630** (19,566 → 35,265 site-glycan pairs).
+of a site in runs that identified only part of the family: mean |Δshare| 0.0752
+→ **0.0631** (19,716 → 34,944 site-glycan pairs).
 
 ## 5. Protein roll-up
 
-647 protein groups have at least one ID-gated glycopeptide. Summed glycopeptide
+657 protein groups have at least one ID-gated glycopeptide. Summed glycopeptide
 area vs Top3 (three most intense glycopeptides) is internally consistent, and
 Top3 reproduces across runs:
 
-- median cross-run Top3 Pearson r: **0.942** (identified) → **0.918** (+MBR).
+- median cross-run Top3 Pearson r: **0.940** (identified) → **0.911** (+MBR).
 
-Only 647 proteins is expected at this FDR with the 17,229-protein mouse
-database; the ungated tables inflate this to 13,382, another symptom of
+Only 657 proteins is expected at this FDR with the 17,229-protein mouse
+database; the ungated tables inflate this to 13,498, another symptom of
 quantifying unfiltered rank-1 matches.
 
 ## 6. Transfers and their quality
 
-- 226,735 transfers attempted across all runs; 173,542 measured; 150,442 at
-  feature q ≤ 0.05; **7,665** also pass the source-identification gate.
-- Transfer feature q: median 0.0167, p90 0.0321, max 0.0481 — the transfer
+- 232,028 transfers attempted across all runs; 175,379 measured; 151,787 at
+  feature q ≤ 0.05; **7,449** also pass the source-identification gate.
+- Transfer feature q: median 0.0174, p90 0.0337, max 0.0499 — the transfer
   competition uses its own target/decoy class, as designed.
-- 7,665 transfers come from **3,402 distinct donor PSMs** (mean 2.25 target runs
+- 7,449 transfers come from **3,346 distinct donor PSMs** (mean 2.23 target runs
   per donor).
 - The donor subset that is actually transferable is **enriched in entrapment:
-  2.70% of donor PSMs (92/3,402) vs 0.41% of identified features (135/32,765)**.
-  Every q bin shows the same effect (in the 0.008–0.01 bin, 15.3% of transfers
-  vs 6.6% of identified features are entrapment). Transferability selects for
-  abundant precursors, and false rank-1 matches are enriched among abundant
-  features; the source q-value alone therefore does not make an MBR-only cell
-  as trustworthy as a directly identified one.
-- Consequence in the numbers: cross-run r for "one transferred" is ~0.55 vs
-  ~0.90 for "both identified", and the gated transferred features carry 3.4%
+  2.18% of donor PSMs (73/3,346) vs 0.41% of identified features (136/32,967)**.
+  Every feature-q bin shows the same effect (3.5% vs 0.41% in 0.010–0.015;
+  1.5% vs 0.49% in 0.015–0.020). Transferability selects for abundant
+  precursors, and false rank-1 matches are enriched among abundant features;
+  the source q-value alone therefore does not make an MBR-only cell as
+  trustworthy as a directly identified one.
+- Consequence in the numbers: cross-run r for "one transferred" is ~0.56 vs
+  ~0.90 for "both identified", and the gated transferred features carry 2.8%
   entrapment. MBR is a coverage tool, not an identification tool; the transfer
   q already separates the two classes, and downstream analysis should keep them
   distinguishable.
@@ -205,14 +205,14 @@ mass), while the search, scoring and output keep the tree:
 
 | | compositions | topologies | compositions with >1 topology |
 |---|---:|---:|---:|
-| all accepted (no gate) | 59,337 | 62,618 | 2,436 |
-| ID-gated | 4,622 | 6,359 | 1,124 |
+| all accepted (no gate) | 60,790 | 64,070 | 2,439 |
+| ID-gated | 4,661 | 6,392 | 1,131 |
 
-At the identification gate, **24% of quantified compositions (1,124/4,622)
+At the identification gate, **24% of quantified compositions (1,131/4,661)
 retain more than one topology** — the isomer ambiguity is carried through to the
 output rather than collapsed away, which is the point of the topology-retention
-change. `eval_yield.py` counts 6,476 topology-resolved glycopeptides at 1%;
-6,359 survive quantification. The two counters key the peptide slightly
+change. `eval_yield.py` counts 6,509 topology-resolved glycopeptides at 1%;
+6,392 survive quantification. The two counters key the peptide slightly
 differently (the PIN counter folds modified residues and reads the full tag), so
 read this as agreement in scale, not an exact identity.
 
@@ -232,18 +232,28 @@ read this as agreement in scale, not an exact identity.
   decoy). The feature q here is a picked target/decoy q-value against the
   +11 Th twin, and the transfer q is a separate class.
 - **MBR RT model** is piecewise-linear per run with one knot per 300 anchors
-  (14,264 anchors over 5 maps) and a narrow XIC window; it is designed for
+  (14,560 anchors over 5 maps) and a narrow XIC window; it is designed for
   replicate/fraction matching, not for large RT shifts.
+- **Numbers move with the search baseline.** This run is on `origin/main`
+  (f25ca32) with `--decoy-strategy sequon`; an earlier version of this file
+  was measured on the `glyco/topology-wurcs` tree with the retired
+  `sequon-reverse` decoy recipe, which produces different decoy sequences.
+  Compare runs within one baseline, not across decoy strategies.
 
 ## 9. Reproduction
 
+The analysis scripts need `numpy`, `pandas`, `matplotlib` and `scipy`.
+
 ```bash
+# 0. Thermo .raw input needs the `thermo` feature
+cargo build --release -p andes --bin andes --features thermo
+
 # 1. search + quantify (5 fractions -> one PIN + lfq/matrix tables)
 DOTNET_ROOT=/home/daichengxin/.dotnet \
 /home/daichengxin/gitrepo/andes/target/release/andes \
   --spectrum /Data/daicx/glyco-mouse/MouseLiver-Z-T-{1,2,3,4,5}.raw \
   --database /home/daichengxin/andes-bench/databases/mouse_entrap.fasta \
-  --decoy-strategy sequon-reverse \
+  --decoy-strategy sequon \
   --glyco --glyco-glycan-gdb /home/daichengxin/gitrepo/pro/pGlyco-N-Mouse.gdb \
   --fragmentation HCD --fragment-tol-ppm 20 \
   --lfq --glyco-mbr --threads 112 \

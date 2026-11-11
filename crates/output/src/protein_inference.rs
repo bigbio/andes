@@ -17,7 +17,10 @@
 //! at or above each group's score, with a running minimum.
 //!
 //! A decoy accession `<prefix>_<accession>` is the decoy of `<accession>`'s
-//! family, so pairs are named, not guessed.
+//! family, so pairs are named, not guessed. A decoy peptide with the residues
+//! of a target peptide is searched as a target, so a target row can name decoy
+//! accessions: they are dropped, and a target row naming only decoy accessions
+//! is evidence for no group.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -322,6 +325,9 @@ pub fn infer_protein_groups(
                 .proteins
                 .split(';')
                 .filter(|a| !a.is_empty())
+                // A target row can name a decoy entry that holds the same
+                // peptide: that entry is no target family.
+                .filter(|a| decoy || !idx.is_decoy_accession(a))
                 .map(|a| if decoy { target_of(a) } else { a.to_string() })
                 .filter(|a| !knockoff(a))
                 .map(|a| family_of(&a))
@@ -721,6 +727,26 @@ mod tests {
         assert_eq!((g.peptides, g.score), (1, 2.0));
         assert_eq!(g.accessions, vec!["A"]);
         assert!(inf.group_of(&targets["2"]).is_none());
+    }
+
+    #[test]
+    fn decoy_accessions_on_target_rows_are_no_target_families() {
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 5.0, "K.AAAK.R", "A"),
+            // The peptide is in A and in the decoy of B.
+            psm("2", 4.0, "K.CCCK.R", "A;XXX_B"),
+            // The row names only a decoy entry.
+            psm("3", 9.0, "K.DDDK.R", "XXX_C"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &index(), |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        let g = &inf.groups[0];
+        assert_eq!(g.accessions, vec!["A"]);
+        assert_eq!((g.peptides, g.unique, g.score), (2, 2, 5.0));
+        assert!(inf.group_of(&targets["3"]).is_none());
+        assert!(inf.decoy_groups.is_empty());
     }
 
     #[test]

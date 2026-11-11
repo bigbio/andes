@@ -242,15 +242,15 @@ fn rescoring_estimates_fdr_within_each_class() {
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     assert_eq!(
         &header[..5],
-        ["family", "member", "kind", "feature", "confidence"]
+        ["family", "member", "kind", "feature", "q_value"]
     );
     let first: Vec<&str> = lines.next().expect("a family member").split('\t').collect();
     assert_eq!(
         (first[0], first[1], first[2]),
         ("P02769", "sp|P02769|ALBU_BOVIN", "reference")
     );
-    let confidence: f64 = first[4].parse().unwrap();
-    assert!((0.0..=1.0).contains(&confidence), "{first:?}");
+    let q_value: f64 = first[4].parse().unwrap();
+    assert!((0.0..=1.0).contains(&q_value), "{first:?}");
     // One class (FASTA): the step reports nothing and changes nothing.
     let plain = search(
         "test-fixtures/BSA.fasta",

@@ -30,7 +30,7 @@ COPY . .
 # mzML + MGF input; no native-format C/.NET dependencies.
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release -p andes \
+    cargo build --release --locked -p andes \
     && cp target/release/andes /usr/local/bin/andes
 
 # ---- Stage 2: runtime ------------------------------------------------------

@@ -14,6 +14,7 @@ use search::SearchIndex;
 
 use crate::cli::{InferenceArgs, ProteinArgs};
 use crate::model_select::parse_enzymes;
+use crate::search::load_claim_database;
 
 /// A run name from a Percolator result file name.
 fn run_name(path: &Path) -> String {
@@ -93,6 +94,24 @@ fn id_hash(id: &str) -> u128 {
     (u128::from(half(0)) << 64) | u128::from(half(1))
 }
 
+/// Masses of the `sites=annotated` modifications in the search's `--mods`
+/// file; none without a file, as the built-in modifications have none.
+fn annotated_site_masses(mods: Option<&Path>) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    let Some(path) = mods else {
+        return Ok(Vec::new());
+    };
+    let aa = model::AminoAcidSetBuilder::new_standard()
+        .add_mods_from_file(path)
+        .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
+        .build()
+        .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
+    Ok(aa
+        .distinct_mods()
+        .iter()
+        .filter_map(|m| m.annotated_site_mass)
+        .collect())
+}
+
 /// Protein groups over the rescored PSMs in `psms` and `decoy_psms` (as
 /// `andes inference`), from `database` read with the search's options.
 pub(crate) fn infer_from_files(
@@ -110,6 +129,7 @@ pub(crate) fn infer_from_files(
         .into());
     }
     let (enzyme, _) = parse_enzymes(&a.enzyme)?;
+    let restricted = annotated_site_masses(a.mods.as_deref())?;
     let opts = input::UniProtOptions {
         variants: a.uniprot_variants,
         isoforms: a.uniprot_isoforms,
@@ -120,11 +140,9 @@ pub(crate) fn infer_from_files(
             enzyme,
         }),
     };
-    let loaded = input::load_protein_database(database, &opts)?;
-    let mut db = loaded.db;
-    if !a.annotations.is_empty() {
-        input::load_annotations(&a.annotations, &mut db, opts.knockoffs)?;
-    }
+    let db = load_claim_database(database, &a.annotations, &opts)?
+        .loaded
+        .db;
     let mut idx = SearchIndex::from_target_db(&db, &a.decoy_prefix);
     idx.decoy_suffix = a.decoy_suffix.clone();
 
@@ -135,8 +153,17 @@ pub(crate) fn infer_from_files(
         output::share_isobaric_references(&mut targets, &idx, a.fdr.max(proteoform_fdr));
     }
     output::apply_class_fdr(&mut targets, &decoys, &idx);
-    let knockoffs = output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
-        .knockoff_rows;
+    let mut knockoffs =
+        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
+            .knockoff_rows;
+    // Placements of a `sites=annotated` modification on a knockoff site exist
+    // only for the site q-values. Only those modifications make such rows.
+    if !restricted.is_empty() {
+        knockoffs.extend(
+            output::site_claims(&mut targets, &idx, a.fdr, proteoform_fdr, &restricted, None)
+                .knockoff_rows,
+        );
+    }
     let cutoffs = output::Cutoffs::new(&targets, &idx, a.fdr, proteoform_fdr);
     Ok(output::infer_protein_groups(
         &targets,
@@ -229,5 +256,73 @@ mod tests {
         let a = write(dir.path(), "a.txt", &[row, row]);
         let err = read_all(&[a]).unwrap_err();
         assert!(err.contains("duplicate PSMId `a_1_1`"), "{err}");
+    }
+
+    #[derive(clap::Parser)]
+    struct ProteinWrap {
+        #[command(flatten)]
+        proteins: ProteinArgs,
+    }
+
+    /// Peptides and PSMs counted for the group of a protein with one
+    /// annotated phosphosite (S15) and three knockoff sites (S5, S25, S35),
+    /// from three PSMs: phospho on the real site, phospho on a knockoff site,
+    /// and an unmodified peptide. `mods` is the content of the `--mods` file.
+    fn counted_with(mods: Option<&str>) -> (usize, usize) {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db.peff");
+        std::fs::write(
+            &db,
+            "# PEFF 1.0\n# //\n# DbName=test\n# //\n\
+             >sp:P1 \\DbUniqueId=P1 \\PName=Site test \\Length=40 \
+             \\ModResUnimod=(15|UNIMOD:21|Phospho)\n\
+             MGGGSPGGGKAGGGSPGGGKLGGGSPGGGKVGGGSPGGGK\n",
+        )
+        .unwrap();
+        let targets = write(
+            dir.path(),
+            "t.txt",
+            &[
+                "s_1_1\t5.0\t0.001\t0.001\tK.AGGGS+79.96633PGGGK.L\tsp:P1",
+                "s_2_1\t4.0\t0.001\t0.001\tK.LGGGS+79.96633PGGGK.V\tsp:P1",
+                "s_3_1\t3.0\t0.001\t0.001\tK.VGGGSPGGGK.-\tsp:P1",
+            ],
+        );
+        let decoys = write(
+            dir.path(),
+            "d.txt",
+            &["s_4_1\t-1.0\t0.5\t0.9\tK.GGPGSGGAGK.L\tXXX_sp:P1"],
+        );
+        let mut argv = vec!["andes".to_string()];
+        if let Some(content) = mods {
+            let path = dir.path().join("mods.txt");
+            std::fs::write(&path, content).unwrap();
+            argv.extend(["--mods".to_string(), path.display().to_string()]);
+        }
+        let a = ProteinWrap::try_parse_from(argv).unwrap().proteins;
+        let inf = infer_from_files(&db, &a, &[targets], &[decoys]).unwrap();
+        let group = inf
+            .groups
+            .iter()
+            .find(|g| g.accessions.iter().any(|acc| acc == "sp:P1"))
+            .expect("a group for sp:P1");
+        (group.peptides, group.psms)
+    }
+
+    #[test]
+    fn annotated_site_mods_on_knockoff_sites_count_for_no_group() {
+        assert_eq!(
+            counted_with(Some("79.966331,S,opt,any,Phospho,sites=annotated\n")),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn knockoff_site_placements_count_without_an_annotated_site_mod() {
+        // The same modification allowed on any S: a placement on a knockoff
+        // site is an ordinary identification.
+        assert_eq!(counted_with(Some("79.966331,S,opt,any,Phospho\n")), (3, 3));
+        assert_eq!(counted_with(None), (3, 3));
     }
 }

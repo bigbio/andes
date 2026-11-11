@@ -19,6 +19,9 @@ name: Release
 #     per-protocol partitioned Parquet store), plus `unimod.obo`
 #   - LICENSE, NOTICE, README.md, and THERMO_LICENSE.txt (thermo targets)
 #
+# The Linux archives are built on Ubuntu 22.04 (glibc 2.35), so the binary
+# also runs on distributions older than the newest runner image.
+#
 # Thermo's RawFileReader is redistributed under Thermo's license (see the crate
 # `dotnetrawfilereader-sys`); using the .raw feature constitutes acceptance.
 
@@ -42,11 +45,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             thermo: true
             dotnet_arch: x64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             thermo: false
             linker_pkg: gcc-aarch64-linux-gnu
             cargo_linker: aarch64-linux-gnu-gcc
@@ -101,9 +104,9 @@ jobs:
           # timsrust's zstd C dependency complicates the cross build.
           if [ "${{ matrix.thermo }}" = "true" ]; then
             export RUSTUP_TOOLCHAIN=stable
-            cargo build --release --target ${{ matrix.target }} -p andes --features "thermo timstof"
+            cargo build --release --locked --target ${{ matrix.target }} -p andes --features "thermo timstof"
           else
-            cargo build --release --target ${{ matrix.target }} --bin andes
+            cargo build --release --locked --target ${{ matrix.target }} --bin andes
           fi
 
       # Download the .NET 8 runtime matching the TARGET architecture (the

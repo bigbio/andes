@@ -492,8 +492,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             enzyme: search_enzyme,
         }),
     };
-    let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
-    let mut target_db = loaded.db;
+    let ClaimDatabase {
+        loaded,
+        annotations,
+        site_knockoffs,
+    } = load_claim_database(&database_path, &cli.annotations, &uniprot_opts)?;
+    let target_db = loaded.db;
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
         if peff.sites_without_mass + peff.processing_not_chain > 0 {
@@ -504,22 +508,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    if !cli.annotations.is_empty() {
-        let stats =
-            input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
-        log_claims("Annotations", &stats);
+    if let Some(stats) = &annotations {
+        log_claims("Annotations", stats);
     }
-    // Knockoff sites for every annotated site, before decoys are built so they
-    // follow to the decoys like real sites.
-    if let Some(ko) = uniprot_opts.knockoffs {
-        let stats = input::add_site_knockoffs(&mut target_db, ko);
-        if stats.knockoffs > 0 {
-            eprintln!(
-                "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position \
-                 for one)",
-                stats.sites, stats.knockoffs, stats.untested
-            );
-        }
+    if site_knockoffs.knockoffs > 0 {
+        eprintln!(
+            "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position for \
+             one)",
+            site_knockoffs.sites, site_knockoffs.knockoffs, site_knockoffs.untested
+        );
     }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
@@ -3147,7 +3144,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Proteoform table: per protein family, the canonical entry and each
-    // isoform, variant and chain entry with accepted evidence, its confidence
+    // isoform, variant and chain entry with accepted evidence, its q-value
     // and quantity. Written with rescoring when the database holds such entries.
     if let (Some(map), Some(cutoffs), true) = (
         rescore_map.as_ref(),
@@ -3267,6 +3264,45 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         qpx_groups.as_ref(),
     )?;
     Ok(())
+}
+
+/// The target database of a search, with what each source added to it.
+pub(crate) struct ClaimDatabase {
+    pub(crate) loaded: input::LoadedDatabase,
+    /// Present when `--annotations` files were given.
+    pub(crate) annotations: Option<input::AnnotationLoadStats>,
+    pub(crate) site_knockoffs: input::SiteKnockoffStats,
+}
+
+/// Load the target database with every claim a search tests: the file's own,
+/// those of the `annotations` tables, then the knockoff sites of every
+/// annotated site, which are added before decoys are built so they follow to
+/// the decoys like real sites. `andes inference` and `quant finalize` load
+/// through here as well, so they hold the entries and sites of the search.
+pub(crate) fn load_claim_database(
+    path: &Path,
+    annotations: &[PathBuf],
+    opts: &input::UniProtOptions,
+) -> Result<ClaimDatabase, Box<dyn std::error::Error>> {
+    let mut loaded = input::load_protein_database(path, opts)?;
+    let annotations = if annotations.is_empty() {
+        None
+    } else {
+        Some(input::load_annotations(
+            annotations,
+            &mut loaded.db,
+            opts.knockoffs,
+        )?)
+    };
+    let site_knockoffs = opts
+        .knockoffs
+        .map(|ko| input::add_site_knockoffs(&mut loaded.db, ko))
+        .unwrap_or_default();
+    Ok(ClaimDatabase {
+        loaded,
+        annotations,
+        site_knockoffs,
+    })
 }
 
 /// Log what a UniProt XML load kept: annotated sites, variant entries, and

@@ -72,9 +72,10 @@ use quant::shared;
 use rayon::prelude::*;
 
 use crate::quant_mbr::{
-    amplitude_snr, cosine, donor_fit, family, identified_features, iso_profile, local_slope,
-    median, relative_fit_width, reported_quantity, transfer_features, whole_pattern, DonorFit,
-    ExtractRow, Role, ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    amplitude_snr, cosine, describe_width_weights, donor_fit, family, identified_features,
+    iso_profile, local_slope, median, relative_fit_width, reported_quantity, transfer_features,
+    weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role, ShapeReference,
+    NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -2175,7 +2176,7 @@ pub(crate) fn finalize_stream(
     // Pass 4: the reference cells of the run normalisation, from the
     // identified rows' scores of pass 3.
     let t0 = Instant::now();
-    let cells: Mutex<TrainingSample<Key, NormCell>> =
+    let cells: Mutex<TrainingSample<Key, (NormCell, Option<f64>)>> =
         Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
     for_each_block(
         source,
@@ -2213,17 +2214,20 @@ pub(crate) fn finalize_stream(
                     continue;
                 };
                 let (k, trace) = quantity_rule(summaries, r.precursor);
-                let q = reported_quantity(e, k, trace).0;
+                let q = reported_quantity(e, k, trace, 0.0).0;
                 if q > 0.0 && q.is_finite() {
                     local.push((
                         (chunk as u32, first + i as u64),
                         u64::from(r.precursor),
-                        NormCell {
-                            precursor: r.precursor,
-                            run: r.run,
-                            log2_quantity: q.log2(),
-                            rt: e.t0,
-                        },
+                        (
+                            NormCell {
+                                precursor: r.precursor,
+                                run: r.run,
+                                log2_quantity: q.log2(),
+                                rt: e.t0,
+                            },
+                            width_deviation(e, k, trace),
+                        ),
                     ));
                 }
             }
@@ -2243,7 +2247,12 @@ pub(crate) fn finalize_stream(
         );
     }
     let t1 = Instant::now();
-    let norm = fit_normalization(&cells.into_items(), stems.len(), &NormParams::default());
+    let (cells, width_weights) = weigh_widths(cells.into_items(), stems.len());
+    eprintln!(
+        "[mbr] finalize: run width weights (0 = relative width, 1 = own fitted width), runs per weight: {}",
+        describe_width_weights(&width_weights)
+    );
+    let norm = fit_normalization(&cells, stems.len(), &NormParams::default());
     eprintln!(
         "[mbr] finalize: normalisation cells {:.1} s, fit {:.1} s",
         (t1 - t0).as_secs_f64(),
@@ -2327,7 +2336,7 @@ pub(crate) fn finalize_stream(
                 let (k, trace) = quantity_rule(summaries, r.precursor);
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
-                        reported_quantity(e, k, trace),
+                        reported_quantity(e, k, trace, width_weights[r.run as usize]),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
                 })

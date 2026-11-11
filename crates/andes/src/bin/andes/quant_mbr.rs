@@ -93,9 +93,17 @@
 //! positive amplitude, of `width_ratio`: the fitted width over the width
 //! prior `w_prior(t)` of the row's run at the row's expected RT. A row with
 //! fitted width `w` reports `A * w' * sqrt(2 pi)` and
-//! `amplitude_se * w' * sqrt(2 pi)` with `w' = k * w / width_ratio`: the
-//! relative width times the width prior of the row's own run, aligned or
-//! not. A row of a precursor without such a fit reports the extract's own
+//! `amplitude_se * w' * sqrt(2 pi)` with
+//! `w' = k * (w / width_ratio) * (width_ratio / k)^lambda_run`: the relative
+//! width times the width prior of the row's own run, aligned or not, moved
+//! the share `lambda_run` of the way (in log scale) to the row's own fitted
+//! width `w`. `lambda_run` in `[0, 1]` is learned per run from the data,
+//! without labels ([`run_width_weights`]): the normalisation reference cells
+//! of a run take the weight that makes them agree best with the same
+//! precursors in the other runs, so a run whose peaks are really narrower or
+//! wider than its width prior says keeps that change in its quantities, and a
+//! run whose width deviations are fit noise keeps the relative width alone. A
+//! row of a precursor without such a fit reports the extract's own
 //! `quantity` and `quantity_se`. The extract tables keep the per-run values.
 //!
 //! Whole isotope pattern: the fits use the first four isotopes of a
@@ -137,6 +145,7 @@ use quant::library::{Library, LibraryEntry};
 use quant::mobility::{MobilityObservation, RunMobility};
 use quant::ms1_index::{MobilityGate, Ms1RunIndex};
 use quant::ms2::{elution_window, LibrarySpectrum, Ms2RunIndex};
+use quant::normalize::NormCell;
 use rayon::prelude::*;
 
 use crate::transfer_fdr::{IDENTIFIED_FEATURES, TRANSFER_FEATURES};
@@ -1257,27 +1266,217 @@ pub(crate) fn relative_widths<'a>(
     ratios.into_iter().map(|(p, k)| (p, median(k))).collect()
 }
 
+/// The log2 deviation `log2(width_ratio / k)` of evidence `e` from the
+/// precursor's relative width `k = relative_width`, which the run width
+/// weight multiplies in [`reported_quantity`]; `None` when that quantity does
+/// not depend on the weight (a trace area with `trace`, no relative width,
+/// or no finite positive width prior `w / width_ratio`), and 0 when the
+/// deviation is not finite.
+pub(crate) fn width_deviation(
+    e: &Evidence,
+    relative_width: Option<f64>,
+    trace: bool,
+) -> Option<f64> {
+    if trace && e.trace_quantity > 0.0 && e.trace_quantity.is_finite() {
+        return None;
+    }
+    let w_prior = e.w / e.width_ratio;
+    let k = relative_width.filter(|_| w_prior.is_finite() && w_prior > 0.0)?;
+    let d = (e.width_ratio / k).log2();
+    Some(if d.is_finite() { d } else { 0.0 })
+}
+
 /// `(quantity, quantity_se)` of evidence `e`: with `trace`, its trace area
-/// when that is positive; else at the precursor's relative width
-/// `relative_width` times the width prior of the row's run, `w /
-/// width_ratio`; or the extract's own values without a relative width or
-/// without a finite positive width prior.
+/// when that is positive; else at the width
+/// `k * w_prior * 2^(own_weight * d)`: the precursor's relative width
+/// `k = relative_width` times the width prior of the row's run, `w_prior =
+/// w / width_ratio`, moved by the run width weight `own_weight` (in `[0, 1]`,
+/// [`run_width_weights`]) along the row's [`width_deviation`] `d`, so that
+/// weight 0 is `k * w_prior` and weight 1 the row's own fitted width `w`; or
+/// the extract's own values without a relative width or without a finite
+/// positive width prior.
 pub(crate) fn reported_quantity(
     e: &Evidence,
     relative_width: Option<f64>,
     trace: bool,
+    own_weight: f64,
 ) -> (f64, f64) {
     if trace && e.trace_quantity > 0.0 && e.trace_quantity.is_finite() {
         return (e.trace_quantity, e.trace_quantity_se);
     }
-    let w_prior = e.w / e.width_ratio;
-    match relative_width.filter(|_| w_prior.is_finite() && w_prior > 0.0) {
-        Some(k) => {
-            let area = k * w_prior * (2.0 * std::f64::consts::PI).sqrt();
+    match (relative_width, width_deviation(e, relative_width, false)) {
+        (Some(k), Some(d)) => {
+            let width = k * (e.w / e.width_ratio) * (own_weight * d).exp2();
+            let area = width * (2.0 * std::f64::consts::PI).sqrt();
             (e.amplitude * area, e.amplitude_se * area)
         }
-        None => (e.quantity, e.quantity_se),
+        _ => (e.quantity, e.quantity_se),
     }
+}
+
+/// A normalisation reference cell's part in [`run_width_weights`]: its
+/// precursor and run, the log2 of its [`reported_quantity`] at weight 0,
+/// and its [`width_deviation`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WidthCell {
+    pub precursor: u32,
+    pub run: u16,
+    pub log2_quantity: f64,
+    pub deviation: f64,
+}
+
+/// The candidate run width weights are `0, 1/STEPS, ..., 1`.
+const WIDTH_WEIGHT_STEPS: u32 = 10;
+/// Fewest cells of a precursor for its cells to have a leave-one-out mean.
+const WIDTH_WEIGHT_MIN_PRECURSOR_CELLS: usize = 4;
+/// Fewest such cells of a run for its weight to be learned; a run with fewer
+/// keeps weight 0.
+const WIDTH_WEIGHT_MIN_RUN_CELLS: usize = 11;
+/// Passes over the runs.
+const WIDTH_WEIGHT_PASSES: usize = 2;
+/// A larger weight replaces a smaller one only when it lowers the run's
+/// spread (log2) by more than this.
+const WIDTH_WEIGHT_TOLERANCE: f64 = 1e-6;
+
+/// Median absolute deviation from the median of `v` (reordered).
+fn median_absolute_deviation(v: &mut [f64]) -> f64 {
+    let mid = |v: &mut [f64]| {
+        v.sort_unstable_by(f64::total_cmp);
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        }
+    };
+    let m = mid(v);
+    for x in v.iter_mut() {
+        *x = (*x - m).abs();
+    }
+    mid(v)
+}
+
+/// Per run (`runs` of them, by run index), the weight of [`reported_quantity`]
+/// learned from `cells` (one per precursor and run), without labels. A
+/// cell's residual is its log2 quantity at its run's weight minus the mean of
+/// its precursor's other cells (precursors with at least
+/// [`WIDTH_WEIGHT_MIN_PRECURSOR_CELLS`] cells); a run's spread is the median
+/// absolute deviation of its cells' residuals, which ignores the run's own
+/// offset (the normalisation's part). Run by run, with the other runs at
+/// their current weights, the weight of the smallest spread among
+/// `0, 0.1, ..., 1` is taken (the smallest weight on a tie), in
+/// [`WIDTH_WEIGHT_PASSES`] passes; a run's own weight does not move the means
+/// its residuals are taken against, so each candidate costs one pass over
+/// the run's cells. A run with fewer than [`WIDTH_WEIGHT_MIN_RUN_CELLS`] such
+/// cells keeps 0, the precursor's relative width alone.
+pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
+    let mut weights = vec![0.0; runs];
+    let mut order: Vec<usize> = (0..cells.len())
+        .filter(|&i| (cells[i].run as usize) < runs)
+        .collect();
+    order.sort_by_key(|&i| (cells[i].precursor, cells[i].run));
+    // Per cell its precursor's group; the group sizes and sums of the cells'
+    // log2 quantities at the current weights.
+    let mut group = vec![usize::MAX; cells.len()];
+    let (mut size, mut sum) = (Vec::new(), Vec::new());
+    for g in order.chunk_by(|&a, &b| cells[a].precursor == cells[b].precursor) {
+        if g.len() < WIDTH_WEIGHT_MIN_PRECURSOR_CELLS {
+            continue;
+        }
+        for &i in g {
+            group[i] = size.len();
+        }
+        size.push(g.len() as f64);
+        sum.push(g.iter().map(|&i| cells[i].log2_quantity).sum::<f64>());
+    }
+    let mut by_run: Vec<Vec<usize>> = vec![Vec::new(); runs];
+    for &i in &order {
+        if group[i] != usize::MAX {
+            by_run[cells[i].run as usize].push(i);
+        }
+    }
+    let (mut base, mut res) = (Vec::new(), Vec::new());
+    for _ in 0..WIDTH_WEIGHT_PASSES {
+        for (run, members) in by_run.iter().enumerate() {
+            if members.len() < WIDTH_WEIGHT_MIN_RUN_CELLS {
+                continue;
+            }
+            let current = weights[run];
+            // Residual at weight 0: the cell minus its precursor's other cells.
+            base.clear();
+            base.extend(members.iter().map(|&i| {
+                let (c, g) = (&cells[i], group[i]);
+                let own = c.log2_quantity + current * c.deviation;
+                c.log2_quantity - (sum[g] - own) / (size[g] - 1.0)
+            }));
+            let mut best = (0.0, f64::INFINITY);
+            for step in 0..=WIDTH_WEIGHT_STEPS {
+                let w = f64::from(step) / f64::from(WIDTH_WEIGHT_STEPS);
+                res.clear();
+                res.extend(
+                    base.iter()
+                        .zip(members)
+                        .map(|(b, &i)| b + w * cells[i].deviation),
+                );
+                let spread = median_absolute_deviation(&mut res);
+                if spread < best.1 - WIDTH_WEIGHT_TOLERANCE {
+                    best = (w, spread);
+                }
+            }
+            for &i in members {
+                sum[group[i]] += (best.0 - current) * cells[i].deviation;
+            }
+            weights[run] = best.0;
+        }
+    }
+    weights
+}
+
+/// A one-line description of run width weights `weights`: how many runs took
+/// each weight.
+pub(crate) fn describe_width_weights(weights: &[f64]) -> String {
+    let mut counts = [0usize; WIDTH_WEIGHT_STEPS as usize + 1];
+    for &w in weights {
+        counts[(w * f64::from(WIDTH_WEIGHT_STEPS)).round() as usize] += 1;
+    }
+    counts
+        .iter()
+        .enumerate()
+        .filter(|(_, &n)| n > 0)
+        .map(|(s, n)| format!("{:.1}: {n}", s as f64 / f64::from(WIDTH_WEIGHT_STEPS)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The normalisation reference cells of `cells` (each with its
+/// [`width_deviation`]) at the run width weights learned from them
+/// ([`run_width_weights`], `runs` runs), and the weights.
+pub(crate) fn weigh_widths(
+    cells: Vec<(NormCell, Option<f64>)>,
+    runs: usize,
+) -> (Vec<NormCell>, Vec<f64>) {
+    let width_cells: Vec<WidthCell> = cells
+        .iter()
+        .filter_map(|(c, d)| {
+            d.map(|deviation| WidthCell {
+                precursor: c.precursor,
+                run: c.run,
+                log2_quantity: c.log2_quantity,
+                deviation,
+            })
+        })
+        .collect();
+    let weights = run_width_weights(&width_cells, runs);
+    let cells = cells
+        .into_iter()
+        .map(|(mut c, d)| {
+            if let (Some(d), Some(&w)) = (d, weights.get(c.run as usize)) {
+                c.log2_quantity += w * d;
+            }
+            c
+        })
+        .collect();
+    (cells, weights)
 }
 
 /// `(quantity, quantity_se)` of the whole isotope pattern, from the pair
@@ -2481,7 +2680,7 @@ mod finalize_tests {
     };
     use quant::align::AlignParams;
     use quant::library::{build_library, PrecursorMeta, PsmIn};
-    use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
+    use quant::normalize::{fit as fit_normalization, NormParams};
 
     use super::*;
 
@@ -3089,7 +3288,8 @@ mod finalize_tests {
         let id_fdr = i_scores.finish(&i_models.failed_folds);
 
         // Pass 3: the reference cells of the run normalisation.
-        let mut cells: TrainingSample<u64, NormCell> = TrainingSample::new(usize::MAX, seed);
+        let mut cells: TrainingSample<u64, (NormCell, Option<f64>)> =
+            TrainingSample::new(usize::MAX, seed);
         let mut cell_seq = 0u64;
         let empty_shapes = DonorShapes::default();
         shards.for_each(|rows| {
@@ -3113,25 +3313,30 @@ mod finalize_tests {
                         return;
                     }
                     let Some(e) = r.evidence.as_ref() else { return };
-                    let q = reported_quantity(e, k.get(&r.precursor).copied(), false).0;
+                    let k = k.get(&r.precursor).copied();
+                    let q = reported_quantity(e, k, false, 0.0).0;
                     if q > 0.0 && q.is_finite() {
                         cell_seq += 1;
                         cells.push(
                             cell_seq,
                             u64::from(r.precursor),
-                            NormCell {
-                                precursor: r.precursor,
-                                run: r.run,
-                                log2_quantity: q.log2(),
-                                rt: e.t0,
-                            },
+                            (
+                                NormCell {
+                                    precursor: r.precursor,
+                                    run: r.run,
+                                    log2_quantity: q.log2(),
+                                    rt: e.t0,
+                                },
+                                width_deviation(e, k, false),
+                            ),
                         );
                     }
                 },
             );
             Ok(())
         })?;
-        let norm = fit_normalization(&cells.into_items(), stems.len(), &NormParams::default());
+        let (cells, weights) = weigh_widths(cells.into_items(), stems.len());
+        let norm = fit_normalization(&cells, stems.len(), &NormParams::default());
 
         // Pass 4: the outputs.
         let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
@@ -3197,7 +3402,12 @@ mod finalize_tests {
             let reported = |r: &ExtractRow| {
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
-                        reported_quantity(e, k.get(&r.precursor).copied(), false),
+                        reported_quantity(
+                            e,
+                            k.get(&r.precursor).copied(),
+                            false,
+                            weights[r.run as usize],
+                        ),
                         lib.meta[r.precursor as usize].isotope_share,
                     )
                 })
@@ -3721,7 +3931,7 @@ mod finalize_tests {
                 .filter(|r| r.role == Role::Identified)
                 .map(|r| {
                     let e = r.evidence.as_ref().unwrap();
-                    reported_quantity(e, k.get(&3).copied(), false)
+                    reported_quantity(e, k.get(&3).copied(), false, 0.0)
                 })
                 .collect();
             // The three runs, of different peak widths, report one quantity:
@@ -3755,7 +3965,7 @@ mod finalize_tests {
         // A row without a width prior keeps the extract's own quantity.
         let e = rows[4].evidence.as_ref().unwrap();
         assert_eq!(
-            reported_quantity(e, Some(k[&4]), false),
+            reported_quantity(e, Some(k[&4]), false, 0.0),
             (e.quantity, e.quantity_se)
         );
         // So does a precursor without an identified fit.
@@ -3766,9 +3976,107 @@ mod finalize_tests {
         assert!(relative_widths(&rows).is_empty());
         let e = rows[1].evidence.as_ref().unwrap();
         assert_eq!(
-            reported_quantity(e, None, false),
+            reported_quantity(e, None, false, 0.0),
             (e.quantity, e.quantity_se)
         );
+    }
+
+    #[test]
+    fn width_weight_moves_the_quantity_to_the_own_fitted_width() {
+        let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
+        let k = relative_widths(&rows)[&3];
+        let e = rows[0].evidence.as_ref().unwrap();
+        let at = |w: f64| reported_quantity(e, Some(k), false, w);
+        // Weight 1 is the row's own fitted area, A * w * sqrt(2 pi).
+        assert!((at(1.0).0 / e.quantity - 1.0).abs() < 1e-12);
+        assert!((at(1.0).1 / e.quantity_se - 1.0).abs() < 1e-12);
+        // Weight 0.5 is the geometric mean of weight 0 and the own area.
+        let mid = (at(0.0).0 * at(1.0).0).sqrt();
+        assert!((at(0.5).0 / mid - 1.0).abs() < 1e-12);
+        let d = width_deviation(e, Some(k), false).unwrap();
+        assert!((d - (0.7f64 / 1.0).log2()).abs() < 1e-12, "{d}");
+        // No relative width, or a trace area: the weight has nothing to move.
+        assert_eq!(width_deviation(e, None, false), None);
+        let mut t = e.clone();
+        t.trace_quantity = 3.0;
+        assert_eq!(width_deviation(&t, Some(k), true), None);
+        assert_eq!(reported_quantity(&t, Some(k), true, 1.0).0, 3.0);
+    }
+
+    /// Cells of `precursors` precursors in four runs: run 0's peaks really
+    /// change width (its weight-0 quantities miss the change `d`), run 1's
+    /// width deviations are fit noise, runs 2 and 3 have none.
+    fn width_cells(precursors: u32) -> Vec<WidthCell> {
+        let mut g = Rng(11);
+        let mut cells = Vec::new();
+        for p in 0..precursors {
+            let truth = 20.0 + 3.0 * g.normal();
+            for run in 0..4u16 {
+                let d = if run < 2 { 0.4 * g.normal() } else { 0.0 };
+                let missed = if run == 0 { d } else { 0.0 };
+                cells.push(WidthCell {
+                    precursor: p,
+                    run,
+                    log2_quantity: truth - missed + 0.05 * g.normal() + f64::from(run),
+                    deviation: d,
+                });
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn run_width_weights_keep_real_width_changes_and_drop_fit_noise() {
+        let cells = width_cells(300);
+        // The run offsets (+run) are the normalisation's part, not the weights'.
+        assert_eq!(run_width_weights(&cells, 4), vec![1.0, 0.0, 0.0, 0.0]);
+        // A run without cells keeps 0.
+        assert_eq!(run_width_weights(&cells, 5), vec![1.0, 0.0, 0.0, 0.0, 0.0]);
+        // The order of the cells does not matter.
+        let mut reversed = cells.clone();
+        reversed.reverse();
+        assert_eq!(run_width_weights(&reversed, 4), vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn run_width_weights_need_enough_cells() {
+        // Fewer than WIDTH_WEIGHT_MIN_RUN_CELLS precursors: every run keeps 0.
+        let few = width_cells(WIDTH_WEIGHT_MIN_RUN_CELLS as u32 - 1);
+        assert_eq!(run_width_weights(&few, 4), vec![0.0; 4]);
+        // Precursors in fewer than WIDTH_WEIGHT_MIN_PRECURSOR_CELLS runs have
+        // no leave-one-out mean.
+        let three: Vec<WidthCell> = width_cells(300).into_iter().filter(|c| c.run < 3).collect();
+        assert_eq!(run_width_weights(&three, 4), vec![0.0; 4]);
+        assert_eq!(run_width_weights(&[], 2), vec![0.0; 2]);
+    }
+
+    #[test]
+    fn weigh_widths_moves_only_cells_with_a_deviation() {
+        let cells: Vec<(NormCell, Option<f64>)> = width_cells(300)
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let cell = NormCell {
+                    precursor: c.precursor,
+                    run: c.run,
+                    log2_quantity: c.log2_quantity,
+                    rt: 100.0,
+                };
+                // Every tenth cell reports a trace area: no deviation.
+                (cell, (i % 10 != 0).then_some(c.deviation))
+            })
+            .collect();
+        let (out, weights) = weigh_widths(cells.clone(), 4);
+        assert_eq!(weights, vec![1.0, 0.0, 0.0, 0.0]);
+        for ((before, d), after) in cells.iter().zip(&out) {
+            let want = before.log2_quantity + d.map_or(0.0, |d| weights[before.run as usize] * d);
+            assert_eq!(after.log2_quantity, want);
+            assert_eq!(
+                (after.precursor, after.run, after.rt),
+                (before.precursor, before.run, before.rt)
+            );
+        }
+        assert_eq!(describe_width_weights(&weights), "0.0: 3, 1.0: 1");
     }
 
     #[test]

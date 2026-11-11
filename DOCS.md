@@ -1824,15 +1824,23 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
 * **Reported quantity.** The extract fit gives each (precursor, run) an apex amplitude `A`
   and an elution width `w`; `A · w · √(2π)` is the area under the fitted profile. Fitting the
   width separately in each run lets one precursor's area jump between runs with the width
-  pick alone, so `<stem>.mbr.parquet` and `quantms.feature.parquet` report `A · w_p · √(2π)`
-  (standard error `amplitude_se · w_p · √(2π)`) with one width per precursor: `w_p` is the
-  median, over the runs that identify the precursor (aligned runs, fits with `A > 0`), of the
-  fitted width divided by the run map's local slope at the apex, carried back into each run
-  by that run's slope at the row's apex (the slope is about 1 when the runs share a gradient;
-  the mapping keeps the area right when one run elutes more slowly). Transfers use the same
-  `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
-  reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
-  `quantity_se` (`A · w · √(2π)`) for provenance.
+  pick alone, so `<stem>.mbr.parquet` and `quantms.feature.parquet` report `A · w' · √(2π)`
+  (standard error `amplitude_se · w' · √(2π)`) with `w' = k · w_prior · (width_ratio / k)^λ`.
+  `w_prior` is the run's width prior at the row's RT and `width_ratio = w / w_prior` (both in
+  `<stem>.extract.parquet`); the precursor's relative width `k` is the median `width_ratio` of
+  its identified fits with `A > 0`. At `λ = 0` a precursor has one width relative to each run's
+  peak widths; at `λ = 1` the row keeps its own fitted width. The run weight `λ`, one of
+  `0, 0.1, …, 1`, is learned from the data without labels: it is the weight at which the run's
+  normalisation reference cells agree best with the same precursors in the other runs (the
+  smallest median absolute deviation of each cell from its precursor's mean over the other
+  runs, for precursors in at least 4 runs; two passes over the runs, a tie goes to the
+  smaller weight, and a run with fewer than 11 such cells keeps 0). A run whose peaks really
+  narrow or widen against its width prior,
+  for example at a much lower load, keeps that change in its quantities; a run whose width
+  deviations are fit noise keeps the relative width. The finalize log lists how many runs took
+  each weight. Transfers use the same rule. A precursor without such an identified fit, and a
+  row without a width prior, reports its own per-run area. `<stem>.extract.parquet` keeps the
+  per-run `quantity` and `quantity_se` (`A · w · √(2π)`) for provenance.
 * **Trace area of the brightest precursors.** `<stem>.extract.parquet` also keeps a
   template-free area, `trace_quantity`: each isotope trace of the fit, minus its baseline,
   integrated by the trapezoid rule over `[t0 − 3w', t0 + 4w']` with `w' = max(w, w_prior)`
@@ -1927,10 +1935,11 @@ plus one run's scores, not the PSMs of every run. With one merged pair of Percol
 whole pair, and every SpecId, is held. `quant finalize` is a map-reduce over the runs: each
 run's extract table is read on its own, in record batches cut at precursor boundaries, and the
 runs are processed in parallel (`--threads`). What a row needs from other runs is either a
-per-precursor summary (the consensus width, and the sorted donor fits around their median,
+per-precursor summary (the relative width, and the sorted donor fits around their median,
 which give the shape features' median over the other runs) or a global model, so every
 reduction is exact: training rows, held-out scores (merged run by run; the K-decoy q-values are
-built from the sorted scores), normalisation cells and validation counts. Each run's output
+built from the sorted scores), normalisation cells (and the run width weights learned on
+them) and validation counts. Each run's output
 rows go to a temporary table, and the tables are merged by (precursor, run) into
 `<base>.mbr.parquet`. Temporary tables go next to the output, or to `--temp-dir` (for example
 a local disk); they are removed at the end. Two caps bound the models: each GBDT trains on at

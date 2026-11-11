@@ -556,6 +556,17 @@ pub(crate) struct SearchArgs {
     /// `glyco.glycan_gdb` in `--config`). The requirement is checked as soon as the
     /// command line and the config file are merged, so a missing database fails
     /// immediately rather than after the digest, index build and spectrum load.
+    ///
+    /// With `--lfq`, the emitted glycopeptides are quantified from MS1 as
+    /// intact glycopeptides (peptide + glycan composition + charge) and six
+    /// tables are written next to the PIN: `<base>.glyco.lfq.tsv` (per
+    /// feature), `.glyco.quant.tsv` (per glycopeptide), `.glyco.site.tsv`
+    /// (glycoform shares at each site), `.glyco.protein.tsv` (summed and Top3
+    /// areas) and the cross-run `.glyco.matrix.tsv` /
+    /// `.glyco.protein_matrix.tsv` pivots. `--lfq-tol`, `--lfq-rt-window`,
+    /// `--lfq-min-cosine` and `--lfq-feature-fdr` apply; `--glyco-mbr`
+    /// transfers the identified glycopeptides into the runs that missed them.
+    /// The isobaric stages and the peptide `--mbr` do not.
     #[arg(long = "glyco", default_value_t = false)]
     pub(crate) glyco: bool,
 
@@ -933,6 +944,11 @@ pub(crate) struct SearchArgs {
     /// `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. mzML, Thermo `.raw` and Bruker `.d` input (a
     /// `.d`'s MS1 frames are summed over ion mobility).
+    ///
+    /// Under `--glyco` it quantifies INTACT glycopeptides instead (peptide +
+    /// glycan composition + charge, with the glycan's exact elemental formula
+    /// for the isotope envelope) and writes the `.glyco.lfq/quant/site/
+    /// protein.tsv` tables beside the `.glyco.pin`; see `--glyco`.
     #[arg(long = "lfq", default_value_t = false)]
     pub(crate) lfq: bool,
 
@@ -962,6 +978,22 @@ pub(crate) struct SearchArgs {
     /// Default 0.05.
     #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) lfq_feature_fdr: f64,
+
+    /// Match-between-runs for intact glycopeptides (`--glyco --lfq`, two or
+    /// more inputs). Each run's retention time is aligned to the first
+    /// input's with a robust piecewise-linear map (one knot per 300 anchors,
+    /// mis-pairs trimmed at 3 MAD) fitted on the glycopeptides
+    /// both identified; a map is only used when fitted on at least 50 such
+    /// glycopeptides and its robust residual is at most 45 s. Every accepted
+    /// glycopeptide is then measured in each run that did not identify it, in
+    /// a window of three residual sigmas (clamped to 10-60 s) around its
+    /// predicted apex, and the transfers are scored as their own target/decoy
+    /// competition rather than mixed with the identified features.
+    /// Transferred rows say so in the `Evidence` column of the
+    /// `.glyco.lfq.tsv` table; the roll-up tables keep their per-run area and
+    /// gain the transferred runs.
+    #[arg(long = "glyco-mbr", default_value_t = false)]
+    pub(crate) glyco_mbr: bool,
 
     /// Directory for the per-run artifacts of multi-run quantification: for
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and

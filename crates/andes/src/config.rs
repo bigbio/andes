@@ -225,6 +225,8 @@ pub struct GlycoCfg {
     pub min_core_y: Option<u32>,
     pub retrieval_tol_ppm: Option<f64>,
     pub peptide_first: Option<bool>,
+    /// Match-between-runs for intact glycopeptides, as `--glyco-mbr`.
+    pub mbr: Option<bool>,
     pub index_sequon_only: Option<bool>,
     pub cz_max_charge: Option<u8>,
     pub y_max_charge: Option<u8>,
@@ -631,6 +633,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         glyco_peptide_first,
         cfg.glyco.peptide_first
     );
+    set!("glyco_mbr", glyco_mbr, cfg.glyco.mbr);
     set!(
         "glyco_index_sequon_only",
         glyco_index_sequon_only,

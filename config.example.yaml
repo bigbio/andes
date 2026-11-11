@@ -96,6 +96,7 @@ glyco:
   # index_sequon_only: false     # index only N-X-S/T peptides (~10x smaller index)
   # cz_max_charge: 1             # c/z fragment charge cap (unset: from deconvolution)
   # y_max_charge: 3              # glycan-Y fragment charge cap
+  # mbr: false                   # match-between-runs for intact glycopeptides (needs lfq, 2+ inputs)
 
 quant:
   # tmt: tmt10                  # reporter-ion quantification: tmt6|tmt10|tmt11|tmt16|tmt18|tmt32|tmt35|itraq4|itraq8

@@ -4922,6 +4922,24 @@ mod finalize_tests {
     }
 
     #[test]
+    fn a_pseudo_transfer_copied_into_its_identified_row_has_no_label() {
+        let mut g = Rng(21);
+        let e = evidence(&mut g, true, 500.0);
+        // The identified row took the pseudo-transfer's fit: nothing to
+        // compare, so no label and no wrong-peak count.
+        assert_eq!(mismatch(&e, &e), None);
+        assert_eq!(wrong_label(&e, &e), None);
+        // Also when the copied fit carries a NaN feature.
+        let mut n = e.clone();
+        n.m1_ratio = f64::NAN;
+        assert_eq!(mismatch(&n, &n.clone()), None);
+        // Any other identified fit is compared as before.
+        let mut id = e.clone();
+        id.t0 += 3.0 * id.w;
+        assert!(mismatch(&e, &id).unwrap().apex);
+    }
+
+    #[test]
     fn wrong_features_take_the_fitted_quantity_without_floors() {
         let mut g = Rng(5);
         let mut e = evidence(&mut g, true, 50.0);

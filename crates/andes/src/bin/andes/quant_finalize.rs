@@ -1657,6 +1657,20 @@ pub(crate) fn transfer_quant_q(transfer_q: Option<f64>, measurement_q: f64) -> f
     transfer_q.map_or(measurement_q, |t| t.max(measurement_q))
 }
 
+/// Whether two fits are one fit copied (bit for bit equal apex, width,
+/// amplitude, LLR and quantity; a NaN compares equal to itself here).
+fn same_fit(a: &Evidence, b: &Evidence) -> bool {
+    [
+        (a.t0, b.t0),
+        (a.w, b.w),
+        (a.amplitude, b.amplitude),
+        (a.llr, b.llr),
+        (a.quantity, b.quantity),
+    ]
+    .iter()
+    .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
 /// How a pseudo-transfer's measurement differs from the identified fit of
 /// the same cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1681,8 +1695,15 @@ impl Mismatch {
 /// the same cell, on the fitted quantities (`Evidence::quantity`: the area
 /// of each fit at its own width, so two fits of one height and different
 /// widths differ). `None` unless both apexes and the identified width are
-/// finite.
+/// finite, and `None` when the identified fit is the pseudo-transfer's own
+/// (an identified pair measured at the predicted position,
+/// [`crate::quant_mbr`]): such a pair has no measurement to be compared
+/// with, so it is neither a training example of the wrong-measurement model
+/// nor counted in the wrong-peak rates.
 pub(crate) fn mismatch(pseudo: &Evidence, id: &Evidence) -> Option<Mismatch> {
+    if same_fit(pseudo, id) {
+        return None;
+    }
     let quantity = |e: &Evidence| Some(e.quantity).filter(|q| *q > 0.0 && q.is_finite());
     (pseudo.t0.is_finite() && id.t0.is_finite() && id.w.is_finite()).then(|| Mismatch {
         apex: (pseudo.t0 - id.t0).abs() > id.w,

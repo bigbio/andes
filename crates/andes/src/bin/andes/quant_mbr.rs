@@ -24,7 +24,10 @@
 //!   amplitude of a positive identified fit, the identified row takes that
 //!   fit ([`prefer_consensus_peak`]; counted in the extract log). An
 //!   identified fit without signal, or a lower one at the predicted
-//!   position, changes nothing;
+//!   position, changes nothing. Each decoy probe of the pair gets the same
+//!   chance: the decoy moved by the same offset is fitted too, and the decoy
+//!   row takes that fit by the same rule, so the identified targets and
+//!   their decoys are measured alike;
 //! * not identified: a `Transfer` target and its decoy probes, with the
 //!   alignment prior, when the [`TransferSelection`] keeps the pair (it
 //!   decides from the library alone, before any fit, and skips the target
@@ -209,6 +212,9 @@ pub(crate) struct ExtractCounts {
     /// Identified pairs measured on the peak at the position the other runs
     /// predict instead of the one at their PSM ([`prefer_consensus_peak`]).
     pub consensus_peak: usize,
+    /// Decoy rows of identified pairs measured on their counterpart at that
+    /// position, under the same rule ([`prefer_consensus_peak`]).
+    pub consensus_peak_decoys: usize,
     /// Identified fits that set the run's width prior.
     pub width_fits: usize,
     /// Fewer than the needed identified fits: the width prior is the run's
@@ -285,6 +291,7 @@ impl ExtractCounts {
         self.other_component += o.other_component;
         self.not_selected += o.not_selected;
         self.consensus_peak += o.consensus_peak;
+        self.consensus_peak_decoys += o.consensus_peak_decoys;
     }
 }
 
@@ -753,7 +760,7 @@ fn rows_into<F>(
 ) where
     F: Fn(usize) -> usize + Sync,
 {
-    let planned: Vec<(Vec<(ExtractRow, Probe)>, ExtractCounts)> = ids
+    let planned: Vec<PlannedRows> = ids
         .par_iter()
         .map(|&i| {
             let e = &lib.entries[i];
@@ -761,9 +768,9 @@ fn rows_into<F>(
         })
         .collect();
     let mut jobs = Vec::new();
-    for (&i, (rows, _)) in ids.iter().zip(&planned) {
+    for (&i, (rows, counterparts, _)) in ids.iter().zip(&planned) {
         let meta = &lib.meta[lib.entries[i].precursor as usize];
-        for (_, probe) in rows {
+        for probe in rows.iter().map(|(_, p)| p).chain(counterparts.iter().map(|(_, p)| p)) {
             let job = FitJob {
                 probe: *probe,
                 charge: meta.charge.max(1),
@@ -775,7 +782,7 @@ fn rows_into<F>(
         }
     }
     let mut evidence = fit_on_series(series, &jobs, ep).into_iter();
-    for (&i, (rows, mut counts)) in ids.iter().zip(planned) {
+    for (&i, (rows, counterparts, mut counts)) in ids.iter().zip(planned) {
         let mut rows: Vec<ExtractRow> = rows
             .into_iter()
             .map(|(mut row, _)| {
@@ -783,7 +790,13 @@ fn rows_into<F>(
                 row
             })
             .collect();
-        counts.consensus_peak += usize::from(prefer_consensus_peak(&mut rows));
+        let counterparts: Vec<(usize, Option<Evidence>)> = counterparts
+            .into_iter()
+            .map(|(at, _)| (at, evidence.next().flatten()))
+            .collect();
+        let (target, decoys) = prefer_consensus_peak(&mut rows, &counterparts);
+        counts.consensus_peak += usize::from(target);
+        counts.consensus_peak_decoys += decoys;
         slots[i] = Some((rows, counts));
     }
 }
@@ -795,34 +808,61 @@ fn rows_into<F>(
 /// the wrong-measurement label).
 pub(crate) const CONSENSUS_PEAK_FACTOR: f64 = 2.0;
 
+/// Whether a row fitted as `own` is measured as `other` instead: `other` is
+/// another peak (the apexes lie further apart than the sum of the two
+/// fitted widths) with more than [`CONSENSUS_PEAK_FACTOR`] times the
+/// amplitude of a positive `own`.
+fn takes_other_peak(own: &Evidence, other: &Evidence) -> bool {
+    (other.t0 - own.t0).abs() > own.w + other.w
+        && own.amplitude > 0.0
+        && other.amplitude > CONSENSUS_PEAK_FACTOR * own.amplitude
+}
+
 /// Gives the identified target row of one entry's `rows` the fit of its
-/// pseudo-transfer row when that fit is another, larger peak: both fits have
-/// a positive amplitude, the apexes lie further apart than the sum of the
-/// two fitted widths, and the pseudo-transfer's amplitude is more than
-/// [`CONSENSUS_PEAK_FACTOR`] times the identified one. Returns whether it
-/// did. The PSM of such a pair was taken off the elution apex (mostly on the
-/// tail of an abundant peptide), where the identified fit, held near the
-/// PSM, reads a fraction of the peak the other runs measure. The decoy rows
-/// and the pseudo-transfer row keep their fits.
-fn prefer_consensus_peak(rows: &mut [ExtractRow]) -> bool {
+/// pseudo-transfer row when that fit is another, larger peak
+/// ([`takes_other_peak`]). The PSM of such a pair was taken off the elution
+/// apex (mostly on the tail of an abundant peptide), where the identified
+/// fit, held near the PSM, reads a fraction of the peak the other runs
+/// measure. Each decoy row of the identified pair gets the same chance:
+/// `counterparts` holds, per decoy row index, the fit of the same decoy moved
+/// to the pseudo-transfer's position, and the decoy row takes it by the same
+/// rule, so the identified targets and their decoys are measured alike.
+/// Returns whether the target moved and how many decoy rows did. The
+/// pseudo-transfer row keeps its fit.
+fn prefer_consensus_peak(
+    rows: &mut [ExtractRow],
+    counterparts: &[(usize, Option<Evidence>)],
+) -> (bool, usize) {
+    let mut decoys = 0;
+    for (i, other) in counterparts {
+        if let (Some(own), Some(other)) = (&rows[*i].evidence, other) {
+            if takes_other_peak(own, other) {
+                rows[*i].evidence = Some(other.clone());
+                decoys += 1;
+            }
+        }
+    }
     let at = |role: Role| {
         rows.iter()
             .position(|r| r.role == role && r.kind == Hypothesis::Target)
     };
     let (Some(id), Some(pseudo)) = (at(Role::Identified), at(Role::PseudoTransfer)) else {
-        return false;
+        return (false, decoys);
     };
     let (Some(a), Some(b)) = (&rows[id].evidence, &rows[pseudo].evidence) else {
-        return false;
+        return (false, decoys);
     };
-    let other_peak = (b.t0 - a.t0).abs() > a.w + b.w;
-    let larger = a.amplitude > 0.0 && b.amplitude > CONSENSUS_PEAK_FACTOR * a.amplitude;
-    if !(other_peak && larger) {
-        return false;
+    if !takes_other_peak(a, b) {
+        return (false, decoys);
     }
     rows[id].evidence = rows[pseudo].evidence.clone();
-    true
+    (true, decoys)
 }
+
+/// The planned rows of one entry (each with its probe), the counterpart
+/// probes of its identified decoy rows (row index, probe; see
+/// [`prefer_consensus_peak`]), and the counts.
+type PlannedRows = (Vec<(ExtractRow, Probe)>, Vec<(usize, Probe)>, ExtractCounts);
 
 /// The rows of one library entry in `run`, each with the probe to fit on
 /// `ms1` and no evidence yet. An unaligned run gets the identified row only;
@@ -835,9 +875,10 @@ fn entry_rows(
     gate: &PairGate,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
-) -> (Vec<(ExtractRow, Probe)>, ExtractCounts) {
+) -> PlannedRows {
     let mut counts = ExtractCounts::default();
     let mut rows = Vec::new();
+    let mut counterparts = Vec::new();
     let meta = &lib.meta[e.precursor as usize];
     let charge = meta.charge.max(1);
     let aligned = |r: u16| {
@@ -880,10 +921,30 @@ fn entry_rows(
                 rows.push(row(probe.kind, Role::Identified, &probe, donors));
             }
             if !run_aligned {
-                return (rows, counts);
+                return (rows, counterparts, counts);
             }
             match lib.alignment.predict_excluding(e.precursor, run) {
                 Some((t_hat, s)) => {
+                    // Each decoy of the identified pair, moved by the offset
+                    // that takes the PSM's RT to the predicted one.
+                    let (lo, hi) = run_rt();
+                    for (k, (r, p)) in rows.iter().enumerate() {
+                        if r.kind == Hypothesis::Target {
+                            continue;
+                        }
+                        let t = p.t_hat + (t_hat - rt);
+                        if t >= lo && t <= hi {
+                            counterparts.push((
+                                k,
+                                Probe {
+                                    t_hat: t,
+                                    s,
+                                    w_prior: wp.at(t),
+                                    ..*p
+                                },
+                            ));
+                        }
+                    }
                     let probe = target(t_hat, s, wp.at(t_hat));
                     rows.push(row(
                         Hypothesis::Target,
@@ -924,7 +985,7 @@ fn entry_rows(
             None => counts.no_prediction += 1,
         },
     }
-    (rows, counts)
+    (rows, counterparts, counts)
 }
 
 /// Most identified precursors the run's mobility scale is learned from.
@@ -2142,7 +2203,7 @@ mod tests {
         let wp = WidthPrior::from_fits(Vec::new(), &scales);
         let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
         let off = PairGate::new(&TransferSelection::OFF, &fx.lib);
-        let (rows, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp);
+        let (rows, _, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp);
         let id: Vec<&(ExtractRow, Probe)> = rows
             .iter()
             .filter(|(r, _)| r.role == Role::Identified)
@@ -2681,7 +2742,7 @@ mod tests {
             rows[0].evidence = id.cloned();
             rows[3].evidence = pseudo.cloned();
             let before = rows.clone();
-            let took = prefer_consensus_peak(&mut rows);
+            let (took, _) = prefer_consensus_peak(&mut rows, &[]);
             if took {
                 assert_eq!(rows[0].evidence, rows[3].evidence);
                 assert_eq!(rows[1..], before[1..]);
@@ -2713,7 +2774,22 @@ mod tests {
         assert!(!taken(Some(&id), None));
         // Without a pseudo-transfer row there is nothing to take.
         let mut rows = base[..3].to_vec();
-        assert!(!prefer_consensus_peak(&mut rows));
+        assert_eq!(prefer_consensus_peak(&mut rows, &[]), (false, 0));
+        // A decoy row of the identified pair takes its counterpart by the
+        // same rule, whether or not the target moves.
+        let mut rows = base.clone();
+        rows[0].evidence = Some(id.clone());
+        rows[1].evidence = Some(id.clone());
+        rows[2].evidence = Some(id.clone());
+        rows[3].evidence = Some(at(500.0, 1.5e4));
+        let far = at(440.0, 3e4);
+        let (took, decoys) = prefer_consensus_peak(
+            &mut rows,
+            &[(1, Some(far.clone())), (2, Some(at(440.0, 1.5e4)))],
+        );
+        assert_eq!((took, decoys), (false, 1));
+        assert_eq!(rows[1].evidence.as_ref(), Some(&far));
+        assert_eq!(rows[2].evidence.as_ref(), Some(&id));
     }
 
     #[test]

@@ -35,7 +35,7 @@ use model::mass::PROTON;
 use quant::formula::Formula;
 use quant::label::{
     channel_qvalues, channel_score, classify_channel, classify_identified, classify_transferred,
-    fit_group, learn_rt_shifts, log2_ratio, ChannelEnvelope, ChannelFit, ChannelStatus,
+    fit_group, learn_rt_shifts, log2_ratio, median, ChannelEnvelope, ChannelFit, ChannelStatus,
     ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
 };
 use quant::Ms1RunIndex;
@@ -233,6 +233,10 @@ struct Group {
     deltas: Vec<f64>,
     /// FAIMS voltage of its best PSM, if any.
     faims_cv: Option<f32>,
+    /// A decoy peptide's group (its decoy PSMs at the targets' cut): measured
+    /// like a target, only to count how often the transfer of a false donor
+    /// identification is accepted; never reported.
+    identity_decoy: bool,
     /// `--label-arg-pro`: per satellite, its parent channel and m/z (the
     /// parent with one heavy proline from converted heavy arginine).
     satellites: Vec<(usize, f64)>,
@@ -474,19 +478,34 @@ fn seed_of(s: &str, run: usize) -> u64 {
     h
 }
 
-/// Per-run label quantification. Returns the `label.parquet` rows and the
-/// QPX feature records (identified groups, quantified channels).
+/// Further `label.parquet` metadata keys and values.
+type Metadata = Vec<(String, String)>;
+
+/// `label.parquet` rows, QPX feature records and further table metadata.
+pub(super) type LabelOutputs = (
+    Vec<output::LabelRow>,
+    Vec<output::FeatureRecord>,
+    Vec<(String, String)>,
+);
+
+/// Per-run label quantification. Returns the `label.parquet` rows, the QPX
+/// feature records (identified and transferred groups, quantified channels)
+/// and the identity-decoy metadata of the transfers. `decoy_hits` are the
+/// decoy PSMs at the targets' cut (identity decoys, `--mbr` only).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn quantify(
     collector: &QuantCollector,
     settings: &LabelSettings,
     spectra: &[Spectrum],
-    hits: &[Hit<'_>],
+    target_hits: &[Hit<'_>],
+    decoy_hits: &[Hit<'_>],
     candidates: &[Candidate],
     index: &search::search_index::SearchIndex,
     with_records: bool,
     next_feature_id: &mut i64,
-) -> Result<(Vec<output::LabelRow>, Vec<output::FeatureRecord>), String> {
+) -> Result<LabelOutputs, String> {
+    let all_hits: Vec<&Hit<'_>> = target_hits.iter().chain(decoy_hits).collect();
+    let hits = &all_hits[..];
     let spec = &settings.spec;
     let n_ch = spec.len();
     let sites = spec.sites();
@@ -504,10 +523,7 @@ pub(super) fn quantify(
         _ => h.psm.rank_score > o.psm.rank_score,
     };
     for (hi, h) in hits.iter().enumerate() {
-        if h.cand.is_decoy {
-            continue;
-        }
-        let Some(lh) = labelled(h.cand, spec) else {
+        let Some(mut lh) = labelled(h.cand, spec) else {
             mixed += 1;
             continue;
         };
@@ -516,6 +532,9 @@ pub(super) fn quantify(
             continue;
         };
         let z = h.psm.charge_used.max(1);
+        if h.cand.is_decoy {
+            lh.key = format!("DECOY:{}", lh.key);
+        }
         let gid = *gid_of.entry((lh.key.clone(), z)).or_insert_with(|| {
             let counts: Vec<u32> = sites
                 .iter()
@@ -557,18 +576,19 @@ pub(super) fn quantify(
                 envelopes,
                 deltas,
                 faims_cv: None,
+                identity_decoy: h.cand.is_decoy,
             });
             groups.len() - 1
         });
         let slot = ids
             .entry((gid, h.run_idx))
             .or_insert_with(|| vec![None; n_ch]);
-        let replace = slot[lh.channel].is_none_or(|o| better(h, &hits[o.hi]));
+        let replace = slot[lh.channel].is_none_or(|o| better(h, hits[o.hi]));
         if replace {
             slot[lh.channel] = Some(ChannelHit { hi, rt });
         }
         let b = best_of_group.entry(gid).or_insert(hi);
-        if better(h, &hits[*b]) {
+        if better(h, hits[*b]) {
             *b = hi;
         }
     }
@@ -626,13 +646,7 @@ pub(super) fn quantify(
                 .iter()
                 .flatten()
                 .copied()
-                .reduce(|a, b| {
-                    if better(&hits[b.hi], &hits[a.hi]) {
-                        b
-                    } else {
-                        a
-                    }
-                })
+                .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
                 .expect("an identified group has a PSM");
             let spec_ = &spectra[hits[best.hi].spec_idx];
             let Some(si) = group_of(&series, run, spec_) else {
@@ -643,7 +657,7 @@ pub(super) fn quantify(
         // Identified precursors of the run (claims): (series, charge, mz, rt, gid).
         let mut claims: Vec<(usize, u8, f64, f64, usize)> = Vec::new();
         for (si, list) in by_series.iter().enumerate() {
-            for (gid, chans) in list {
+            for (gid, chans) in list.iter().filter(|(g, _)| !groups[*g].identity_decoy) {
                 for (c, ch) in chans.iter().enumerate() {
                     if let Some(ch) = ch {
                         let g = &groups[*gid];
@@ -678,21 +692,17 @@ pub(super) fn quantify(
                 continue;
             }
             let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-            // Anchors in the reference channel's time (no shifts yet).
+            // Anchors in the reference channel's time (no shifts yet),
+            // target groups only.
             let anchors: Vec<(usize, f64)> = list
                 .iter()
+                .filter(|(gid, _)| !groups[*gid].identity_decoy)
                 .map(|(gid, chans)| {
                     let best = chans
                         .iter()
                         .flatten()
                         .copied()
-                        .reduce(|a, b| {
-                            if better(&hits[b.hi], &hits[a.hi]) {
-                                b
-                            } else {
-                                a
-                            }
-                        })
+                        .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
                         .unwrap();
                     (*gid, best.rt)
                 })
@@ -733,7 +743,7 @@ pub(super) fn quantify(
                         .enumerate()
                         .filter_map(|(c, x)| x.map(|x| (c, x)))
                         .reduce(|a, b| {
-                            if better(&hits[b.1.hi], &hits[a.1.hi]) {
+                            if better(hits[b.1.hi], hits[a.1.hi]) {
                                 b
                             } else {
                                 a
@@ -791,8 +801,9 @@ pub(super) fn quantify(
     }
 
     // ── Match between runs ────────────────────────────────────────────────
+    let mut meta: Vec<(String, String)> = Vec::new();
     if let (Some(mbr_fdr), true) = (settings.mbr_fdr, n_runs >= 2) {
-        let transfers = transfer(
+        let (transfers, stats) = transfer(
             collector,
             &groups,
             &fitted,
@@ -802,6 +813,7 @@ pub(super) fn quantify(
             mbr_fdr,
         )?;
         fitted.extend(transfers);
+        meta = stats;
     }
 
     // ── Channel q-values (match between channels), pooled over runs ───────
@@ -812,7 +824,7 @@ pub(super) fn quantify(
         let mut rows: Vec<(f64, bool)> = Vec::new();
         let mut at: Vec<((usize, usize), usize)> = Vec::new();
         for (fi, f) in fitted.iter().enumerate() {
-            if f.transfer_q.is_some() {
+            if f.transfer_q.is_some() || groups[f.gid].identity_decoy {
                 continue;
             }
             for c in 0..n_ch {
@@ -867,6 +879,7 @@ pub(super) fn quantify(
                 .filter(|(f, st)| {
                     f.run == run_idx
                         && f.transfer_q.is_none()
+                        && !groups[f.gid].identity_decoy
                         && st[c] == ChannelStatus::Identified
                         && st[r] == ChannelStatus::Identified
                 })
@@ -885,9 +898,13 @@ pub(super) fn quantify(
     let mut rows: Vec<output::LabelRow> = Vec::new();
     let mut records: Vec<output::FeatureRecord> = Vec::new();
     let mut counts = vec![[0usize; 5]; n_ch];
+    let any_transfer = fitted.iter().any(|f| f.transfer_q.is_some());
     for &fi in &order {
         let f = &fitted[fi];
         let g = &groups[f.gid];
+        if g.identity_decoy {
+            continue;
+        }
         let st = &statuses[fi];
         let run = &collector.runs[f.run];
         for c in 0..n_ch {
@@ -940,22 +957,55 @@ pub(super) fn quantify(
                 converted_fraction: f.converted[c],
             });
         }
-        // QPX: one feature per identified (group, run), quantified channels.
-        if with_records && f.transfer_q.is_none() {
-            let best = f.ids.iter().flatten().copied().reduce(|a, b| {
-                if better(&hits[b.hi], &hits[a.hi]) {
-                    b
-                } else {
-                    a
-                }
-            });
-            if let Some(best) = best {
-                let hit = &hits[best.hi];
+        // QPX: one feature per (group, run), quantified channels. A transfer
+        // carries the identification of the group's best PSM in another run.
+        if with_records {
+            let best = if f.transfer_q.is_some() {
+                best_of_group.get(&f.gid).copied()
+            } else {
+                f.ids
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
+                    .map(|x| x.hi)
+            };
+            if let Some(hi) = best {
+                let hit = hits[hi];
                 let spec_ = &spectra[hit.spec_idx];
-                let id = super::quant_id(hit, run, spec_, candidates, index);
+                let donor_run = &collector.runs[hit.run_idx];
+                let id = super::quant_id(hit, donor_run, spec_, candidates, index);
                 let proteins = super::proteins_of(&hit.psm, candidates, index);
                 let mut rec = super::base_record(&id, proteins, *next_feature_id);
                 *next_feature_id += 1;
+                if f.transfer_q.is_some() {
+                    rec.run_file_name = run.stem.clone();
+                    rec.id_run_file_name = None;
+                    rec.psm_ids = Vec::new();
+                    rec.scan = Vec::new();
+                    rec.observed_mz = g.channel_mz[f
+                        .fit
+                        .channels
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.amplitude.total_cmp(&b.1.amplitude))
+                        .map_or(0, |x| x.0)] as f32;
+                }
+                if any_transfer {
+                    rec.mbr = Some(output::feature_parquet::MbrColumns {
+                        evidence_type: if f.transfer_q.is_some() {
+                            "transfer_ms1"
+                        } else {
+                            "identified"
+                        }
+                        .to_string(),
+                        transfer_q: f.transfer_q,
+                        quant_q: None,
+                        quantity_se: None,
+                        claimed_by: None,
+                        claim_co_apex: None,
+                    });
+                }
                 rec.rt = Some(f.fit.t0 as f32);
                 rec.rt_start = Some((f.fit.t0 - 3.0 * f.fit.w) as f32);
                 rec.rt_stop = Some((f.fit.t0 + 3.0 * f.fit.w) as f32);
@@ -1008,7 +1058,7 @@ pub(super) fn quantify(
             r + 1
         );
     }
-    Ok((rows, records))
+    Ok((rows, records, meta))
 }
 
 /// Match between runs: every group of the library (identified in some run)
@@ -1022,19 +1072,22 @@ fn transfer(
     run_series_cv: &[Vec<Option<f32>>],
     fit_params: &FitParams,
     fdr: f64,
-) -> Result<Vec<Fitted>, String> {
+) -> Result<(Vec<Fitted>, Metadata), String> {
     let n_runs = collector.runs.len();
     let n_ch = groups.first().map_or(0, |g| g.channel_mz.len());
     // Observations: the fitted apex (reference time) of strong identified fits.
-    let obs: Vec<quant::align::Observation> = fitted
-        .iter()
-        .filter(|f| f.fit.llr >= MIN_WIDTH_LLR)
-        .map(|f| quant::align::Observation {
-            precursor: f.gid as u32,
-            run: f.run as u16,
-            rt: f.fit.t0,
-        })
-        .collect();
+    let observe = |decoy: bool| -> Vec<quant::align::Observation> {
+        fitted
+            .iter()
+            .filter(|f| f.fit.llr >= MIN_WIDTH_LLR && groups[f.gid].identity_decoy == decoy)
+            .map(|f| quant::align::Observation {
+                precursor: f.gid as u32,
+                run: f.run as u16,
+                rt: f.fit.t0,
+            })
+            .collect()
+    };
+    let obs = observe(false);
     let spacing: Vec<f64> = run_scales
         .iter()
         .map(|s| {
@@ -1048,7 +1101,10 @@ fn transfer(
         run_min_spacing_s: spacing,
         ..Default::default()
     };
-    let alignment = quant::align::align(&obs, groups.len(), n_runs, &params);
+    let mut alignment = quant::align::align(&obs, groups.len(), n_runs, &params);
+    // Identity decoys get their consensus and predictions as a target would,
+    // without moving any run map.
+    alignment.add_observations(&observe(true))?;
     let mut present = vec![vec![false; n_runs]; groups.len()];
     for f in fitted {
         present[f.gid][f.run] = true;
@@ -1056,6 +1112,7 @@ fn transfer(
     let mut out: Vec<Fitted> = Vec::new();
     let mut scored: Vec<(f64, bool)> = Vec::new();
     let mut target_rows: Vec<usize> = Vec::new();
+    let mut identity_scores: Vec<f64> = Vec::new();
     for (run_idx, run) in collector.runs.iter().enumerate() {
         let Some(cache) = run.ms1.as_ref() else {
             continue;
@@ -1137,6 +1194,10 @@ fn transfer(
             })
             .collect();
         for (f, d) in results {
+            if groups[f.gid].identity_decoy {
+                identity_scores.push(group_score(&f.fit));
+                continue;
+            }
             target_rows.push(scored.len());
             scored.push((group_score(&f.fit), false));
             scored.extend(d.into_iter().map(|x| (x, true)));
@@ -1144,20 +1205,162 @@ fn transfer(
         }
     }
     let q = channel_qvalues(&scored, N_DECOYS);
+    // The q-value of an identity-decoy transfer: that of the weakest target
+    // transfer scoring at least as high (the targets' step function).
+    let mut steps: Vec<(f64, f64)> = target_rows.iter().map(|&r| (scored[r].0, q[r])).collect();
+    steps.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let q_at = |score: f64| -> f64 {
+        steps
+            .iter()
+            .take_while(|(s, _)| *s >= score)
+            .last()
+            .map_or(1.0, |x| x.1)
+    };
+    let accepted_targets = target_rows.iter().filter(|&&r| q[r] <= fdr).count();
+    let accepted_identity = identity_scores.iter().filter(|&&s| q_at(s) <= fdr).count();
+    // Accepted transfers of false donor identifications: identity decoys
+    // stand for the library's false target entries one for one.
+    let identity_rate = accepted_identity as f64 / accepted_targets.max(1) as f64;
     let mut kept = Vec::new();
     for (k, mut f) in out.into_iter().enumerate() {
-        let qk = q[target_rows[k]];
+        let qk = (q[target_rows[k]] + identity_rate).min(1.0);
         if qk <= fdr {
             f.transfer_q = Some(qk);
             kept.push(f);
         }
     }
     eprintln!(
-        "quant: label: match between runs: {} of {} transfers at transfer q<={fdr}",
+        "quant: label: match between runs: {} of {} transfers at transfer q<={fdr} \
+         (identity decoys: {} of {} transferred, false-donor rate {:.4} added to the q-values)",
         kept.len(),
-        target_rows.len()
+        target_rows.len(),
+        accepted_identity,
+        identity_scores.len(),
+        identity_rate
     );
-    Ok(kept)
+    let stats = vec![
+        (
+            "andes.label.identity_decoy_transfers".to_string(),
+            format!("{accepted_identity}/{}", identity_scores.len()),
+        ),
+        (
+            "andes.label.identity_decoy_rate".to_string(),
+            identity_rate.to_string(),
+        ),
+    ];
+    Ok((kept, stats))
+}
+
+/// Fewest peptide ratios a protein ratio needs (MaxQuant's "min. ratio
+/// count").
+pub(super) const MIN_RATIO_COUNT: usize = 2;
+
+/// One protein ratio of [`protein_ratios`].
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ProteinRatio {
+    pub protein: String,
+    pub lead: String,
+    pub run: String,
+    pub channel: u8,
+    pub channel_name: String,
+    pub log2_ratio: f64,
+    pub log2_ratio_normalized: Option<f64>,
+    /// Peptide ratios the median is over, and those whose evidence is only
+    /// matched between channels or transferred (no identification of the
+    /// channel in the run).
+    pub ratio_count: usize,
+    pub inferred_count: usize,
+}
+
+/// Protein ratios as MaxQuant computes them, from `label.parquet` rows: per
+/// run, channel and peptide identity (all charges), the median of its
+/// evidence log-ratios; per protein, the median of its peptides' ratios, from
+/// [`MIN_RATIO_COUNT`] peptides up; the normalised ratio likewise from the
+/// normalised evidence. A peptide's protein is its protein group at the
+/// protein q-value cut when `group_of` gives one, else its accessions joined.
+pub(super) fn protein_ratios(
+    rows: &[output::LabelRow],
+    group_of: impl Fn(&str) -> Option<(String, String)>,
+    min_count: usize,
+) -> Vec<ProteinRatio> {
+    use std::collections::BTreeMap;
+    // (run, protein, lead, channel, name) -> peptide -> (ratios, normalised, identified)
+    type Key = (String, String, String, u8, String);
+    // Per peptide: its evidence ratios, normalised ratios, and whether the
+    // channel is identified in some evidence.
+    type Evidence = (Vec<f64>, Vec<f64>, bool);
+    let mut by: BTreeMap<Key, BTreeMap<String, Evidence>> = BTreeMap::new();
+    for r in rows {
+        let Some(v) = r.log2_ratio else { continue };
+        let (protein, lead) = group_of(&r.sequence).unwrap_or_else(|| {
+            let p = r.proteins.join(";");
+            (p.clone(), r.proteins.first().cloned().unwrap_or(p))
+        });
+        let e = by
+            .entry((
+                r.run.clone(),
+                protein,
+                lead,
+                r.channel,
+                r.channel_name.clone(),
+            ))
+            .or_default()
+            .entry(r.peptide.clone())
+            .or_default();
+        e.0.push(v);
+        if let Some(n) = r.log2_ratio_normalized {
+            e.1.push(n);
+        }
+        e.2 |= r.status == "identified";
+    }
+    let mut out = Vec::new();
+    for ((run, protein, lead, channel, channel_name), peptides) in by {
+        let ratios: Vec<f64> = peptides.values().map(|p| median(p.0.clone())).collect();
+        if ratios.len() < min_count {
+            continue;
+        }
+        let norm: Vec<f64> = peptides
+            .values()
+            .filter(|p| !p.1.is_empty())
+            .map(|p| median(p.1.clone()))
+            .collect();
+        out.push(ProteinRatio {
+            protein,
+            lead,
+            run,
+            channel,
+            channel_name,
+            log2_ratio: median(ratios.clone()),
+            log2_ratio_normalized: (norm.len() >= min_count).then(|| median(norm)),
+            ratio_count: ratios.len(),
+            inferred_count: peptides.values().filter(|p| !p.2).count(),
+        });
+    }
+    out
+}
+
+/// `<stem>.label_proteins.tsv`: the [`protein_ratios`] as text.
+pub(super) fn protein_ratio_tsv(ratios: &[ProteinRatio]) -> String {
+    let mut s = String::from(
+        "protein_group\tlead\tfilename\tchannel\tchannel_name\tlog2_ratio\t\
+         log2_ratio_normalized\tratio_count\tinferred_ratio_count\n",
+    );
+    for r in ratios {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\n",
+            r.protein,
+            r.lead,
+            r.run,
+            r.channel,
+            r.channel_name,
+            r.log2_ratio,
+            r.log2_ratio_normalized
+                .map_or_else(|| "NA".to_string(), |v| format!("{v:.6}")),
+            r.ratio_count,
+            r.inferred_count
+        ));
+    }
+    s
 }
 
 #[cfg(test)]
@@ -1226,6 +1429,7 @@ mod tests {
             deltas: vec![0.0, 10.008269],
             faims_cv: None,
             satellites: vec![(1, mp)],
+            identity_decoy: false,
         };
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
@@ -1238,6 +1442,66 @@ mod tests {
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
+
+    #[test]
+    fn protein_ratio_is_the_median_of_peptide_medians() {
+        let row = |pep: &str, z: u8, v: f64, status: &str| output::LabelRow {
+            run: "r".into(),
+            peptide: pep.into(),
+            sequence: pep.into(),
+            charge: z,
+            proteins: vec!["P1".into()],
+            channel: 2,
+            channel_name: "heavy".into(),
+            label: None,
+            status: status.into(),
+            spec_id: None,
+            psm_q_value: None,
+            rt_psm: None,
+            labelled_peptidoform: None,
+            mz: 0.0,
+            rt_apex: 0.0,
+            rt_shift: 0.0,
+            width: 0.0,
+            quantity: 0.0,
+            quantity_se: 0.0,
+            quantity_upper: 0.0,
+            llr: 0.0,
+            envelope_cos: 0.0,
+            coherence: 0.0,
+            m1_ratio: 0.0,
+            mass_err_ppm: 0.0,
+            channel_q_value: None,
+            group_llr: 0.0,
+            transfer: false,
+            transfer_q_value: None,
+            log2_ratio: Some(v),
+            log2_ratio_se: None,
+            log2_ratio_normalized: Some(v - 0.5),
+            converted_fraction: None,
+        };
+        // Peptide A: charges 2 and 3 (median 1.0); B: 3.0; C: -1.0.
+        let rows = vec![
+            row("A", 2, 0.5, "identified"),
+            row("A", 3, 1.5, "identified"),
+            row("B", 2, 3.0, "match_channel"),
+            row("C", 2, -1.0, "identified"),
+        ];
+        let r = protein_ratios(&rows, |_| None, 2);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].ratio_count, 3);
+        assert_eq!(r[0].inferred_count, 1);
+        assert!((r[0].log2_ratio - 1.0).abs() < 1e-12);
+        assert!((r[0].log2_ratio_normalized.unwrap() - 0.5).abs() < 1e-12);
+        // One peptide is not enough.
+        assert!(protein_ratios(&rows[3..], |_| None, 2).is_empty());
+        let tsv = protein_ratio_tsv(&r);
+        assert!(tsv
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("P1\tP1\tr\t2\theavy\t1.000000"));
     }
 
     #[test]

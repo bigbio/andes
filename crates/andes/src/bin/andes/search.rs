@@ -3146,6 +3146,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.output_parquet.as_deref(),
             qpx_groups.as_ref(),
             tmt_mbr_input.as_ref(),
+            (cli.mbr && cli.label.is_some()).then_some(&mbr_decoys),
         )?),
         None => None,
     };

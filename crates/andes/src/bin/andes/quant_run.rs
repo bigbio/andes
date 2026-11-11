@@ -1469,6 +1469,7 @@ pub(crate) fn run_quant(
     parquet_dir: Option<&Path>,
     groups: Option<&crate::quant_cmd::ProteinGroups<'_>>,
     mbr: Option<&TmtMbrInput<'_>>,
+    label_decoys: Option<&HashMap<String, PercolatorPsm>>,
 ) -> Result<output::QuantSummary, String> {
     let s = &collector.settings;
     // Per-peptide quantities for the proteoform table.
@@ -2084,11 +2085,28 @@ pub(crate) fn run_quant(
 
     // ── Labelled pairs ────────────────────────────────────────────────────────
     if let Some(ls) = &s.label {
-        let (rows, label_records) = label_run::quantify(
+        // Identity decoys (`--mbr`): the decoy PSMs at the targets' cut.
+        let decoy_hits: Vec<Hit<'_>> = match label_decoys {
+            Some(d) => select_rank1(
+                collector,
+                spectra,
+                queues,
+                candidates,
+                Some(d),
+                cutoffs,
+                true,
+            )
+            .into_iter()
+            .filter(|h| h.cand.is_decoy)
+            .collect(),
+            None => Vec::new(),
+        };
+        let (rows, label_records, label_meta) = label_run::quantify(
             collector,
             ls,
             spectra,
             &hits,
+            &decoy_hits,
             candidates,
             index,
             parquet_dir.is_some(),
@@ -2104,6 +2122,7 @@ pub(crate) fn run_quant(
                 channels: &channels,
                 reference: ls.spec.reference,
                 runs: &runs,
+                extra: &label_meta,
             },
         )?;
         eprintln!(
@@ -2117,6 +2136,29 @@ pub(crate) fn run_quant(
                  medium / heavy, DIMETHYL0/4/6/8) are not written to quantms.feature.parquet"
             );
         }
+        // Protein ratios (median of peptide ratios), per run and channel.
+        let ratios = label_run::protein_ratios(
+            &rows,
+            |seq| {
+                let pg = groups?;
+                match pg.inf.group_at(seq, pg.max_q) {
+                    output::protein_inference::GroupAt::Group { group, .. } => {
+                        Some((group.accessions.join(";"), group.lead.clone()))
+                    }
+                    _ => None,
+                }
+            },
+            label_run::MIN_RATIO_COUNT,
+        );
+        let ppath = dir.join(format!("{stem}.label_proteins.tsv"));
+        std::fs::write(&ppath, label_run::protein_ratio_tsv(&ratios))
+            .map_err(|e| format!("write {}: {e}", ppath.display()))?;
+        eprintln!(
+            "quant: wrote {} ({} protein ratios from at least {} peptides)",
+            ppath.display(),
+            ratios.len(),
+            label_run::MIN_RATIO_COUNT
+        );
         records.extend(label_records);
     }
 

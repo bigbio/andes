@@ -207,8 +207,30 @@ fn silac_duplex_quantifies_matches_and_transfers() {
         .unwrap()
         .build()
         .unwrap();
-    let n: usize = reader.map(|b| b.unwrap().num_rows()).sum();
-    assert!(n >= 200, "{n} feature rows");
+    let mut n = 0;
+    let mut transfers = 0;
+    for b in reader {
+        let b = b.unwrap();
+        n += b.num_rows();
+        let i = b.schema().index_of("evidence_type").expect("MBR columns");
+        let ev = b.column(i).as_any().downcast_ref::<StringArray>().unwrap();
+        transfers += (0..b.num_rows())
+            .filter(|&k| ev.value(k) == "transfer_ms1")
+            .count();
+    }
+    assert!(n >= 280, "{n} feature rows");
+    assert!(transfers >= 20, "{transfers} transferred feature rows");
+
+    // Protein ratios: the one BSA protein, per run.
+    let tsv = std::fs::read_to_string(tmp.path().join("s.label_proteins.tsv")).unwrap();
+    let lines: Vec<&str> = tsv.lines().collect();
+    assert_eq!(lines.len(), 3, "{tsv}");
+    for l in &lines[1..] {
+        let f: Vec<&str> = l.split('\t').collect();
+        assert_eq!(f[3], "2");
+        let count: usize = f[7].parse().unwrap();
+        assert!(count >= 50, "{l}");
+    }
     assert!(log.contains("quant: label: match between runs:"), "{log}");
 }
 

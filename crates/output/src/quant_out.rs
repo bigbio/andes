@@ -802,6 +802,8 @@ pub struct LabelTableMeta<'a> {
     pub channels: &'a [String],
     pub reference: usize,
     pub runs: &'a [String],
+    /// Further metadata keys (the match-between-runs identity-decoy counts).
+    pub extra: &'a [(String, String)],
 }
 
 fn label_schema() -> Schema {
@@ -964,7 +966,10 @@ pub fn write_label_parquet(
             ),
             (LABEL_REFERENCE_KEY, (meta.reference + 1).to_string()),
             (LABEL_RUNS_KEY, meta.runs.join("\n")),
-        ],
+        ]
+        .into_iter()
+        .chain(meta.extra.iter().map(|(k, v)| (k.as_str(), v.clone())))
+        .collect::<Vec<_>>()[..],
     )
 }
 
@@ -1066,6 +1071,7 @@ mod tests {
                 channels: &channels,
                 reference: 0,
                 runs: &runs,
+                extra: &[],
             },
         )
         .unwrap();

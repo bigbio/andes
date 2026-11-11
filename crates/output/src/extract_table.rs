@@ -605,7 +605,7 @@ pub struct ExtractTableReader {
 }
 
 /// The evidence columns of [`ExtractTableReader::open_identified_fits`].
-const FIT_EVIDENCE: [&str; 9] = [
+const FIT_EVIDENCE: [&str; 10] = [
     "amplitude",
     "t0",
     "w",
@@ -615,6 +615,7 @@ const FIT_EVIDENCE: [&str; 9] = [
     "iso_h3",
     "tailing",
     "amplitude_se",
+    "width_ratio",
 ];
 
 impl ExtractTableReader {
@@ -625,8 +626,8 @@ impl ExtractTableReader {
 
     /// Opens `path` to read its identified target rows only, with the
     /// columns of their peak shape: the keys, and of the evidence the
-    /// amplitude and its standard error, apex, width, isotope heights and
-    /// tailing. The other
+    /// amplitude and its standard error, apex, width, width ratio, isotope
+    /// heights and tailing. The other
     /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
     pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, true)
@@ -752,7 +753,7 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
                 quantity_se: f64::NAN,
                 llr: f64::NAN,
                 rt_z: f64::NAN,
-                width_ratio: f64::NAN,
+                width_ratio: v(9),
                 envelope_cos: f64::NAN,
                 coherence: f64::NAN,
                 m1_ratio: f64::NAN,
@@ -1080,6 +1081,7 @@ mod tests {
                             a.amplitude_se,
                             a.t0,
                             a.w,
+                            a.width_ratio,
                             a.iso_heights,
                             a.tailing
                         ),
@@ -1088,6 +1090,7 @@ mod tests {
                             b.amplitude_se,
                             b.t0,
                             b.w,
+                            b.width_ratio,
                             b.iso_heights,
                             b.tailing
                         )

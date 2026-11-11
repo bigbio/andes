@@ -21,7 +21,7 @@ echo "provenance: andes $($BIN --version 2>&1 | head -1) | $(uname -srm) | $(npr
   --spectrum "$RAWDIR/MouseLiver-Z-T-4.raw" \
   --spectrum "$RAWDIR/MouseLiver-Z-T-5.raw" \
   --database "$DB" \
-  --decoy-strategy sequon-reverse \
+  --decoy-strategy sequon \
   --glyco --glyco-glycan-gdb "$GDB" \
   --fragmentation HCD --fragment-tol-ppm 20 \
   --lfq --glyco-mbr \

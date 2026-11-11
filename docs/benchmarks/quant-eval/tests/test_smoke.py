@@ -404,6 +404,22 @@ class Smoke(unittest.TestCase):
         tr2 = pd.concat([tr.assign(p=p), pd.DataFrame({"run": "r2", "quant_q": np.cumsum(p2) / np.arange(1, 4), "p": p2})])
         tr2 = tr2.sample(frac=1, random_state=3).reset_index(drop=True)
         self.assertTrue(np.allclose(readers.recover_p(tr2).values, tr2.p.values))
+        # rows with equal p share the running mean at the end of their step (as finalize writes it): every row gets its p back
+        p3 = np.array([0.1, 0.2, 0.2, 0.2, 0.5, 0.5])
+        ends = {0.1: 1, 0.2: 4, 0.5: 6}
+        q3 = np.array([np.sort(p3)[:ends[v]].mean() for v in p3])
+        tr3 = pd.DataFrame({"run": "r", "quant_q": q3, "p": p3}).sample(frac=1, random_state=5).reset_index(drop=True)
+        self.assertTrue(np.allclose(readers.recover_p(tr3).values, tr3.p.values))
+        # a table with measurement_q: p comes from that column over every accepted transfer (shared-feature rows are part of
+        # the running mean), whatever quant_q holds; other rows get none
+        m = pd.DataFrame({"run": "r", "evidence_type": ["transfer_ms1", "shared_feature", "transfer_ms2", "transfer_ms1",
+                                                        "below_threshold", "identified"],
+                          "measurement_q": [0.1, 0.175, 0.175, 0.175, np.nan, np.nan],
+                          "quant_q": [0.3, 0.175, 0.4, 0.175, 0.6, 0.001]})
+        got = readers.transfer_p(m, set(m.columns))
+        self.assertTrue(np.allclose(got.values[:4], [0.1, 0.2, 0.2, 0.2]) and got.iloc[4:].isna().all())
+        old = m.drop(columns="measurement_q").assign(quant_q=m.measurement_q.fillna(m.quant_q))
+        self.assertTrue(np.allclose(readers.transfer_p(old, set(old.columns)).values[:4], [0.1, 0.2, 0.2, 0.2]))
 
     def test_downstream(self):
         with tempfile.TemporaryDirectory() as tmp:

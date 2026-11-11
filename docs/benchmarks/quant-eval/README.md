@@ -11,7 +11,7 @@ tables.
 
 | tool | file | quantity used | notes |
 |---|---|---|---|
-| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, and `evidence_type` of the same file; `quantity_normalized` is not used |
+| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, `measurement_q` (when present) and `evidence_type` of the same file; `quantity_normalized` is not used |
 | MaxQuant | `evidence.txt` | `Intensity`, summed over the evidence rows of a precursor x run | reverse and contaminants removed; the LFQ columns are not used |
 | FragPipe | IonQuant `combined_ion.tsv` | `<run> Intensity` | IonQuant must be run with normalisation off (`--normalization 0`); rows with `Match Type` MBR are transfers |
 | FlashLFQ (PIP-ECHO) | `QuantifiedPeaks.tsv` (`--flashlfq NAME:PEAKS[:PIPQ]`) | `Peak intensity` | key = `Full Sequence` + `/` + `Precursor Charge`, so the identifications given to FlashLFQ must carry andes-form full sequences; `Peak Detection Type` MBR = transfer, its `PIP Q-Value` is kept (`PIPQ` keeps transfers up to that value); decoy-peptide and random-RT peaks are dropped. FlashLFQ sums the charge states of a peptide into one intensity unless run charge-specific |
@@ -30,7 +30,7 @@ andes row rules (`--andes NAME:RULE[@LIBQ]:PATH`), all with `library_q <= 0.01` 
 | `default` | identified rows + transfers with `transfer_q <= 0.01` |
 | `all` | identified rows + every transfer the finalize output carries |
 | `hard-cut` | identified rows + transfers with `quant_q <= --hard-cut` (default 0.01) |
-| `weights` | rows of `all`, with the per-transfer error probability recovered from `quant_q` (running mean of p over a run's transfers sorted by p); the roll-up then uses learned precision weights (the "V" view) |
+| `weights` | rows of `all`, with the per-transfer error probability recovered from `measurement_q` (running mean of p over a run's accepted transfers sorted by p, rows with equal p sharing one value; `quant_q` holds that mean in tables without the column); the roll-up then uses learned precision weights (the "V" view) |
 | `weights-bias` | rows of `weights`; where the table carries `quantity_bias` and `quantity_bias_se` (log2) for a transfer, its quantity is divided by `2**quantity_bias` and the learned class variance of the transfer is scaled by its `quantity_bias_se**2` relative to its class mean. A table without these columns gives the `weights` rows |
 
 MaxQuant and FragPipe rows are used as the tools report them (their own match-between-runs rows included).

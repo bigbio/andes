@@ -204,17 +204,34 @@ def read_sage(path, runs):
     return _finish(remap_runs(d, runs), G.run_tag("sage-lfq", path))
 
 
-def recover_p(tr):
-    """Per-quantity error probability p recovered from quant_q = running mean of p over a run's accepted transfers sorted by p.
-    tr: transfer rows with run and quant_q (unique index). p_i = i * q_i - (i - 1) * q_(i-1) within a run.
-    The result is indexed like `tr` (input order), not in the sorted order used internally."""
+ACCEPTED_TRANSFERS = ("transfer_ms2", "transfer_ms1", "shared_feature")
+
+
+def recover_p(tr, col="quant_q"):
+    """Per-quantity error probability p recovered from `col` = running mean of p over a run's accepted transfers sorted by p.
+    tr: every accepted transfer of each run (the whole pool the running mean was taken over: a missing row shifts the others)
+    with run and `col` (unique index). Rows with equal p are one step and share the mean at the end of their step, so p is
+    recovered per step: with n rows up to the end of the step, m rows before it and means q and q_prev at those two points,
+    p = (n * q - m * q_prev) / (n - m). The result is indexed like `tr` (input order)."""
     order = tr.index
-    tr = tr.sort_values(["run", "quant_q"], kind="stable")
-    i = tr.groupby("run").cumcount().values + 1
-    qq = tr.quant_q.values
-    prev = np.r_[0.0, qq[:-1]]
-    prev[i == 1] = 0.0
-    return pd.Series(np.clip(i * qq - (i - 1) * prev, 0.0, 1.0), index=tr.index).reindex(order)
+    tr = tr.sort_values(["run", col], kind="stable")
+    step = tr.groupby(["run", col], sort=False)
+    q = tr[col].values
+    n = (tr.groupby("run").cumcount().values + 1) + (step.cumcount(ascending=False).values)   # rows up to the end of the step
+    m = n - step[col].transform("size").values                                             # rows before the step
+    first = step.cumcount().values == 0
+    q_prev = pd.Series(np.where(first, np.r_[0.0, q[:-1]], np.nan)).ffill().values             # mean at the end of the previous step
+    q_prev[m == 0] = 0.0
+    return pd.Series(np.clip((n * q - m * q_prev) / (n - m), 0.0, 1.0), index=tr.index).reindex(order)
+
+
+def transfer_p(m, names):
+    """Error probability p of every accepted transfer of finalize table `m` (NaN for the other rows), recovered per run from
+    `measurement_q` when the table has that column (`names`: its columns), else from `quant_q` (tables whose quant_q of an
+    accepted transfer is that running mean). Call on the whole table, before any row is dropped."""
+    col = "measurement_q" if "measurement_q" in names else "quant_q"
+    pool = m[m.evidence_type.isin(ACCEPTED_TRANSFERS) & m[col].notna()]
+    return recover_p(pool, col).reindex(m.index)
 
 
 def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
@@ -225,7 +242,8 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
       default    identified rows + transfers with transfer_q <= 0.01
       all        identified rows + every transfer the finalize output carries
       hard-cut   identified rows + transfers with quant_q <= hard_cut
-      weights    as `all`, plus the column p (recovered error probability of each transfer) for the precision-weight view
+      weights    as `all`, plus the column p (error probability of each transfer, recovered from the running mean in
+                 `measurement_q`, or in `quant_q` for a table without that column) for the precision-weight view
       every-row  every row of the table including the below-threshold ones (a diagnostic arm: what a count-only metric gives when nothing is rejected)
       weights-bias  as `weights`; where the table carries `quantity_bias` (log2) and `quantity_bias_se` (log2) for a transfer, its
                  quantity is divided by 2**quantity_bias and the column se carries quantity_bias_se (the roll-up then scales the
@@ -236,11 +254,14 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
         raise SystemExit(f"andes rule {rule!r} not in {ANDES_RULES}")
     cols = ["precursor_key", "run", "evidence_type", "quantity", "quant_q", "transfer_q", "library_q"]
     bias_cols = ["quantity_bias", "quantity_bias_se"]
-    has_bias = rule == "weights-bias" and set(bias_cols) <= set(pq.ParquetFile(path).schema_arrow.names)
+    names = set(pq.ParquetFile(path).schema_arrow.names)
+    has_bias = rule == "weights-bias" and set(bias_cols) <= names
     if rule == "weights-bias" and not has_bias:
         print(f"andes {path}: no quantity_bias / quantity_bias_se columns; weights-bias rows = weights rows", file=sys.stderr)
-    m = pd.read_parquet(path, columns=cols + (bias_cols if has_bias else []))
+    m = pd.read_parquet(path, columns=cols + (bias_cols if has_bias else []) + [c for c in ["measurement_q"] if c in names])
     tag = G.run_tag(f"andes-finalize:{rule}", path)
+    m = m.reset_index(drop=True)
+    m["p"] = transfer_p(m, names) if rule in ("weights", "weights-bias") else np.nan
     dropped = ["shared_feature"] if rule == "every-row" else ["below_threshold", "shared_feature"]
     m = m[np.isfinite(m.quantity) & (m.quantity > 0) & ~m.evidence_type.isin(dropped)].copy()
     m["key"] = [norm_key(k) for k in m.precursor_key.values]
@@ -260,17 +281,10 @@ def read_andes(path, runs, rule="default", hard_cut=0.01, library_q=IDQ):
         m = m[(~m.is_transfer) | (m.tq <= TRANSFER_Q)]
     elif rule == "hard-cut":
         m = m[(~m.is_transfer) | (m.quant_q <= hard_cut)]
-    out = m[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr"]].copy()
+    out = m[["key", "run", "quantity", "is_transfer", "library_q", "tq", "thr", "p"]].copy()
     if rule == "weights-bias":
         out["se"] = m.se.values
-    if rule in ("weights", "weights-bias"):
-        tr = m[m.is_transfer]
-        ptab = G.tagged(pd.DataFrame({"key": tr.key.values, "run": tr.run.values, "p": recover_p(tr).values}), tag)
-        out = G.join(G.tagged(out, tag), ptab, ["key", "run"], how="left")
-    else:
-        out["p"] = np.nan
-        out = G.tagged(out, tag)
-    return out
+    return G.tagged(out, tag)
 
 
 def read_andes_rt(path, runs):

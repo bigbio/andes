@@ -27,8 +27,8 @@ pub use pin::{emitted_row_evidence, format_spec_id, spec_id_run, write_pin, writ
 
 pub mod stats;
 pub use stats::{
-    classify_mods, psm_facts, write_statistics_log, FixedModSpec, IdentificationSummary, PeptideMods,
-    PsmFacts, RunStatistics, SpectraTally, SummaryContext,
+    classify_mods, psm_facts, write_statistics_log, FixedModSpec, IdentificationSummary,
+    PeptideMods, PsmFacts, RunStatistics, SpectraTally, SummaryContext,
 };
 
 pub mod qpx;

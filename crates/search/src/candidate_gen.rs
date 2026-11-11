@@ -28,6 +28,7 @@
 use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
+use model::aa_set::label_code::LabelState;
 use model::aa_set::{form_index, AminoAcidSet, Terminus, FORM_TABLE_LEN};
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
@@ -584,10 +585,15 @@ pub(crate) fn expand_mod_combinations(
     let n = span.len();
     let mut position_variants: Vec<&[AminoAcid]> = Vec::with_capacity(n);
     let mut position_slots: Vec<&[u8]> = Vec::with_capacity(n);
+    let mut position_labels: Vec<Option<&[u8]>> = Vec::new();
+    let labelled = params.aa_set.has_label_channels();
     for (i, &r) in span.iter().enumerate() {
         let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
         position_variants.push(params.aa_set.forms(r, nt, ct));
         position_slots.push(params.aa_set.form_slots(r, nt, ct));
+        if labelled {
+            position_labels.push(params.aa_set.form_labels(r, nt, ct));
+        }
     }
 
     let mut out = Vec::new();
@@ -595,6 +601,8 @@ pub(crate) fn expand_mod_combinations(
     expand_recursive(
         &position_variants,
         &position_slots,
+        &position_labels,
+        LabelState::default(),
         0,
         &mut current,
         0,
@@ -856,6 +864,8 @@ fn walk_forms_bounded(
     fn rec<'a>(
         pv: &[&'a [AminoAcid]],
         ps: &[&[u8]],
+        pl: &[Option<&[u8]>],
+        label: LabelState,
         pos: usize,
         sum: f64,
         masses: &mut SmallVec<[f64; WALK_INLINE_LEN]>,
@@ -875,11 +885,14 @@ fn walk_forms_bounded(
             *k += 1;
             return;
         }
-        for (variant, &slots) in pv[pos].iter().zip(ps[pos]) {
+        for (j, (variant, &slots)) in pv[pos].iter().zip(ps[pos]).enumerate() {
             let new_mods = mods_used + u32::from(slots);
             if new_mods > max_mods || !sites.allows(pos, variant) {
                 continue;
             }
+            let Some(next_label) = step_label(pl, pos, j, label) else {
+                continue;
+            };
             let m = variant.mass + variant.mod_.as_ref().map_or(0.0, |md| md.mass_delta);
             let next = sum + m;
             // Bounds for everything under this choice.
@@ -891,6 +904,8 @@ fn walk_forms_bounded(
             rec(
                 pv,
                 ps,
+                pl,
+                next_label,
                 pos + 1,
                 next,
                 masses,
@@ -909,9 +924,19 @@ fn walk_forms_bounded(
             masses.pop();
         }
     }
+    let mut position_labels: smallvec::SmallVec<[Option<&[u8]>; WALK_INLINE_LEN]> =
+        smallvec::SmallVec::new();
+    if params.aa_set.has_label_channels() {
+        for (i, &r) in span.iter().enumerate() {
+            let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
+            position_labels.push(params.aa_set.form_labels(r, nt, ct));
+        }
+    }
     rec(
         &position_variants,
         &position_slots,
+        &position_labels,
+        LabelState::default(),
         0,
         0.0,
         &mut masses,
@@ -1078,6 +1103,8 @@ pub fn expand_base_record_bounded(
 fn expand_recursive(
     position_variants: &[&[AminoAcid]],
     position_slots: &[&[u8]],
+    position_labels: &[Option<&[u8]>],
+    label: LabelState,
     pos: usize,
     current: &mut Vec<AminoAcid>,
     mods_used: u32,
@@ -1089,15 +1116,24 @@ fn expand_recursive(
         out.push(current.clone());
         return;
     }
-    for (variant, &slots) in position_variants[pos].iter().zip(position_slots[pos]) {
+    for (j, (variant, &slots)) in position_variants[pos]
+        .iter()
+        .zip(position_slots[pos])
+        .enumerate()
+    {
         let new_mods = mods_used + u32::from(slots);
         if new_mods > max_mods || !sites.allows(pos, variant) {
             continue;
         }
+        let Some(next_label) = step_label(position_labels, pos, j, label) else {
+            continue;
+        };
         current.push(variant.clone());
         expand_recursive(
             position_variants,
             position_slots,
+            position_labels,
+            next_label,
             pos + 1,
             current,
             new_mods,
@@ -1106,6 +1142,23 @@ fn expand_recursive(
             out,
         );
         current.pop();
+    }
+}
+
+/// The label state after form `j` of position `pos` (see
+/// [`model::aa_set::label_code`]): unchanged when no channel labels are
+/// registered or none applies at `pos`, `None` when the form mixes channels
+/// with the positions before it.
+#[inline]
+fn step_label(
+    labels: &[Option<&[u8]>],
+    pos: usize,
+    j: usize,
+    state: LabelState,
+) -> Option<LabelState> {
+    match labels.get(pos) {
+        Some(Some(codes)) => state.step(codes[j]),
+        _ => Some(state),
     }
 }
 
@@ -1837,6 +1890,175 @@ mod tests {
             blocks_cleavage: false,
             diagnostic_ions: Vec::new(),
         }
+    }
+
+    fn label_mod(name: &str, delta: f64, residue: u8, location: ModLocation) -> Modification {
+        use model::modification::ResidueSpec;
+        Modification {
+            name: name.into(),
+            mass_delta: delta,
+            residue: if residue == b'*' {
+                ResidueSpec::Wildcard
+            } else {
+                ResidueSpec::Specific(residue)
+            },
+            location,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+        }
+    }
+
+    /// The labels of a candidate as (name of each labelled residue's mod).
+    fn label_names(c: &Candidate) -> Vec<String> {
+        c.peptide
+            .residues
+            .iter()
+            .filter_map(|aa| aa.mod_.map(|m| m.name.clone()))
+            .collect()
+    }
+
+    // SILAC heavy K and R as variable mods: a candidate is all-light or
+    // all-heavy, never one heavy and one light labelable residue.
+    #[test]
+    fn silac_labels_are_channel_consistent() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "silac".into(),
+                // PEPKTIDER (one missed cleavage) and its parts.
+                sequence: b"PEPKTIDERAAGGLK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let k8 = label_mod("Label:13C(6)15N(2)", 8.014199, b'K', ModLocation::Anywhere);
+        let r10 = label_mod("Label:13C(6)15N(4)", 10.008269, b'R', ModLocation::Anywhere);
+        let build = |labels: bool| {
+            let mut b = AminoAcidSetBuilder::new_standard()
+                .add_variable_mod(k8.clone())
+                .add_variable_mod(r10.clone())
+                .add_variable_mod(oxidation_m());
+            if labels {
+                b = b.with_label_channels(vec![
+                    ("Label:13C(6)15N(2)".into(), 1),
+                    ("Label:13C(6)15N(4)".into(), 1),
+                ]);
+            }
+            let mut params = SearchParams::default_tryptic(b.build().unwrap());
+            params.min_length = 3;
+            params.max_variable_mods_per_peptide = 3;
+            params
+        };
+        let free = build(false);
+        let labelled = build(true);
+        let all: Vec<_> = enumerate_candidates(&db, &free, "XXX").collect();
+        let kept: Vec<_> = enumerate_candidates(&db, &labelled, "XXX").collect();
+        let span = |c: &Candidate| {
+            c.peptide
+                .residues
+                .iter()
+                .map(|a| a.residue as char)
+                .collect::<String>()
+        };
+        // PEPKTIDER: free search has 4 label states, labelled keeps 2.
+        let n = |v: &[Candidate], s: &str| v.iter().filter(|c| span(c) == s).count();
+        assert_eq!(n(&all, "PEPKTIDER"), 4);
+        assert_eq!(n(&kept, "PEPKTIDER"), 2);
+        for c in kept.iter().filter(|c| span(c) == "PEPKTIDER") {
+            let names = label_names(c);
+            assert!(names.is_empty() || names.len() == 2, "{names:?}");
+        }
+        // Single-site peptides keep both states.
+        assert_eq!(n(&kept, "TIDER"), 2);
+        // The walk used by the out-of-core index agrees with the expansion.
+        let tables = crate::candidate_gen::FormWalkTables::new(&labelled);
+        let mut walked = 0;
+        crate::candidate_gen::walk_forms_bounded(
+            b"PEPKTIDER",
+            &labelled,
+            &tables,
+            true,
+            false,
+            crate::candidate_gen::SpanSites::new(&target.proteins[0], 0),
+            0.0,
+            f64::MAX,
+            |_, _, _| walked += 1,
+        );
+        assert_eq!(walked, 2);
+    }
+
+    // Dimethyl on K and the peptide N-terminus, three channels: the
+    // N-terminal K carries both sites, and a protein N-terminal acetyl in
+    // place of the N-terminal label leaves the K's label free.
+    #[test]
+    fn dimethyl_labels_cover_n_terminus_and_lysine() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "dimethyl".into(),
+                sequence: b"MAGLKPEPTIDEK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let mut b = AminoAcidSetBuilder::new_standard();
+        let mut channels = Vec::new();
+        for (c, (name, d)) in [
+            ("Dimethyl", 28.0313),
+            ("Dimethyl:2H(4)", 32.056407),
+            ("Dimethyl:2H(6)13C(2)", 36.07567),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (res, loc, suffix) in [
+                (b'K', ModLocation::Anywhere, ""),
+                (b'*', ModLocation::NTerm, "-N"),
+            ] {
+                let nm = format!("{name}{suffix}");
+                b = b.add_variable_mod(label_mod(&nm, d, res, loc));
+                channels.push((nm, c as u8 + 1));
+            }
+        }
+        let acetyl = label_mod("Acetyl", 42.010565, b'*', ModLocation::ProtNTerm);
+        let aa_set = b
+            .add_variable_mod(acetyl)
+            .with_label_channels(channels)
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 4;
+        let kept: Vec<_> = enumerate_candidates(&db, &params, "XXX").collect();
+        let of = |s: &str| -> Vec<Vec<String>> {
+            kept.iter()
+                .filter(|c| {
+                    c.peptide
+                        .residues
+                        .iter()
+                        .map(|a| a.residue as char)
+                        .collect::<String>()
+                        == s
+                })
+                .map(label_names)
+                .collect()
+        };
+        // PEPTIDEK: N-term and K both carry one channel's label: light + 3.
+        let pk = of("PEPTIDEK");
+        assert_eq!(pk.len(), 4, "{pk:?}");
+        for names in &pk {
+            assert!(names.is_empty() || names.len() == 2, "{names:?}");
+        }
+        // MAGLK at the protein N-terminus: light, 3 labelled, and 3 with the
+        // acetyl in place of the N-terminal label (the K labelled), plus the
+        // acetylated light form.
+        let mk = of("MAGLK");
+        assert_eq!(mk.len(), 8, "{mk:?}");
     }
 
     fn deamidation_n() -> Modification {

@@ -34,9 +34,9 @@ use std::collections::HashMap;
 use model::mass::PROTON;
 use quant::formula::Formula;
 use quant::label::{
-    channel_qvalues, channel_score, classify_channel, classify_transferred, fit_group,
-    learn_rt_shifts, log2_ratio, ChannelEnvelope, ChannelFit, ChannelStatus, ClassifyParams,
-    FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
+    channel_qvalues, channel_score, classify_channel, classify_identified, classify_transferred,
+    fit_group, learn_rt_shifts, log2_ratio, ChannelEnvelope, ChannelFit, ChannelStatus,
+    ClassifyParams, FitParams, GroupFit, GroupProbe, LabelSpec, Site, FREE_WIDTHS,
 };
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
@@ -55,6 +55,8 @@ pub(crate) struct LabelSettings {
     pub tol_ppm: f64,
     /// `--mbr`: transfer groups between runs at this q-value.
     pub mbr_fdr: Option<f64>,
+    /// `--label-arg-pro`: fit the heavy proline of converted heavy arginine.
+    pub arg_pro: bool,
 }
 
 impl LabelSettings {
@@ -68,7 +70,11 @@ impl LabelSettings {
                 Some(q) => format!(", match between runs at transfer q<={q}"),
                 None => String::new(),
             }
-        )
+        ) + if self.arg_pro {
+            ", arginine-to-proline conversion fitted"
+        } else {
+            ""
+        }
     }
 }
 
@@ -227,6 +233,18 @@ struct Group {
     deltas: Vec<f64>,
     /// FAIMS voltage of its best PSM, if any.
     faims_cv: Option<f32>,
+    /// `--label-arg-pro`: per satellite, its parent channel and m/z (the
+    /// parent with one heavy proline from converted heavy arginine).
+    satellites: Vec<(usize, f64)>,
+}
+
+/// Mass of the heavy proline that heavy arginine converts to: 13C5 for Arg6
+/// (13C6), 13C5 15N1 for Arg10 (13C6 15N4).
+fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
+    const C13_C12: f64 = 1.003_354_838;
+    const N15_N14: f64 = 0.997_034_886;
+    let n15 = arg.heavy_atoms.saturating_sub(arg.carbon13);
+    (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
 /// The best PSM of a group's channel in a run.
@@ -249,6 +267,8 @@ struct Fitted {
     claimed: Vec<bool>,
     transfer_q: Option<f64>,
     rt_shift: Vec<f64>,
+    /// Per channel, the converted (heavy proline) fraction (`--label-arg-pro`).
+    converted: Vec<Option<f64>>,
 }
 
 /// The run-level scales of one MS1 series.
@@ -267,17 +287,59 @@ const MIN_NORM_RATIOS: usize = 10;
 const N_DECOYS: usize = 4;
 
 fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe {
+    let mut channel_mz = g.channel_mz.clone();
+    let mut envelopes = g.envelopes.clone();
+    let mut rt_shift = shifts.to_vec();
+    for &(parent, mz) in &g.satellites {
+        channel_mz.push(mz);
+        envelopes.push(g.envelopes[parent]);
+        rt_shift.push(shifts[parent]);
+    }
     GroupProbe {
         charge: g.charge,
-        channel_mz: g.channel_mz.clone(),
-        envelopes: g.envelopes.clone(),
+        free: vec![true; channel_mz.len()],
+        channel_mz,
+        envelopes,
         t_hat,
         s,
         w_prior: w,
-        rt_shift: shifts.to_vec(),
-        free: vec![true; g.channel_mz.len()],
+        rt_shift,
         mobility: None,
     }
+}
+
+/// [`fit_group`] with the satellites folded into their parent channels: a
+/// parent's amplitude and quantity become the sums, its standard error their
+/// root sum of squares. Also returns each channel's converted fraction (the
+/// satellites' share; `None` without satellites).
+fn fit_folded(
+    ms1: &Ms1RunIndex,
+    g: &Group,
+    probe: &GroupProbe,
+    params: &FitParams,
+) -> Option<(GroupFit, Vec<Option<f64>>)> {
+    let mut fit = fit_group(ms1, probe, params)?;
+    let n = g.channel_mz.len();
+    let mut converted = vec![None; n];
+    if g.satellites.is_empty() {
+        return Some((fit, converted));
+    }
+    let sats: Vec<ChannelFit> = fit.channels.split_off(n);
+    for (&(parent, _), sat) in g.satellites.iter().zip(&sats) {
+        let c = &mut fit.channels[parent];
+        let total = c.amplitude + sat.amplitude;
+        converted[parent] = Some(if total > 0.0 {
+            sat.amplitude / total
+        } else {
+            0.0
+        });
+        c.amplitude = total;
+        c.quantity += sat.quantity;
+        c.amplitude_se = c.amplitude_se.hypot(sat.amplitude_se);
+        c.quantity_se = c.quantity_se.hypot(sat.quantity_se);
+        c.llr += sat.llr;
+    }
+    Some((fit, converted))
 }
 
 /// Learns the run's elution width from `anchors` (group, RT of its best PSM
@@ -299,7 +361,7 @@ fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], to
             .filter_map(|(gid, t)| {
                 let g = &groups[*gid];
                 let p = probe_of(g, *t, s, w, &vec![0.0; g.channel_mz.len()]);
-                fit_group(ms1, &p, &params)
+                fit_folded(ms1, g, &p, &params).map(|x| x.0)
             })
             .filter(|f| f.llr >= MIN_WIDTH_LLR)
             .map(|f| f.w)
@@ -345,8 +407,12 @@ fn learn_shifts(
             let g = &groups[*gid];
             let alone = |c: usize| {
                 let mut p = probe_of(g, *t, w.max(dt), w, &vec![0.0; n]);
-                p.free = (0..n).map(|k| k == c).collect();
-                fit_group(ms1, &p, &params).filter(|f| f.llr >= MIN_WIDTH_LLR)
+                p.free = (0..p.channel_mz.len())
+                    .map(|k| k == c || (k >= n && g.satellites[k - n].0 == c))
+                    .collect();
+                fit_folded(ms1, g, &p, &params)
+                    .map(|x| x.0)
+                    .filter(|f| f.llr >= MIN_WIDTH_LLR)
             };
             let Some(fr) = alone(r) else {
                 return Vec::new();
@@ -474,6 +540,19 @@ pub(super) fn quantify(
                     .into_iter()
                     .map(|(a, ..)| a)
                     .collect(),
+                satellites: if settings.arg_pro {
+                    let n_pro = lh.residues.iter().filter(|r| r.0 == b'P').count();
+                    (0..n_ch)
+                        .filter(|_| n_pro > 0)
+                        .filter_map(|c| {
+                            let arg = spec.channels[c].label_at(Site::Residue(b'R'))?;
+                            let d = heavy_proline_delta(arg)?;
+                            Some((c, channel_mz[c] + d / z as f64))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 channel_mz,
                 envelopes,
                 deltas,
@@ -662,13 +741,13 @@ pub(super) fn quantify(
                         })?;
                     let t_hat = best.1.rt - shifts[best.0];
                     let probe = probe_of(g, t_hat, s, w, &shifts);
-                    let fit = fit_group(ms1, &probe, &fit_params)?;
+                    let (fit, converted) = fit_folded(ms1, g, &probe, &fit_params)?;
                     let missing: Vec<usize> = (0..n_ch).filter(|&c| chans[c].is_none()).collect();
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
                         for dp in decoy_probes(g, &probe, &missing, tol, seed) {
-                            let df = fit_group(ms1, &dp, &fit_params);
+                            let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
                                 decoy_scores[c].push(
                                     df.as_ref().map_or(0.0, |d| channel_score(&d.channels[c])),
@@ -701,6 +780,7 @@ pub(super) fn quantify(
                         claimed,
                         transfer_q: None,
                         rt_shift: shifts.clone(),
+                        converted,
                     })
                 })
                 .collect();
@@ -761,7 +841,7 @@ pub(super) fn quantify(
             .map(|c| {
                 let ch: &ChannelFit = &f.fit.channels[c];
                 if f.ids[c].is_some() {
-                    ChannelStatus::Identified
+                    classify_identified(ch, &classify)
                 } else if f.transfer_q.is_some() {
                     classify_transferred(ch, strongest, &classify)
                 } else {
@@ -857,6 +937,7 @@ pub(super) fn quantify(
                 log2_ratio_se: ratio.map(|x| x.1),
                 log2_ratio_normalized: ratio
                     .and_then(|x| offsets.get(&(f.run, c)).map(|o| x.0 - o)),
+                converted_fraction: f.converted[c],
             });
         }
         // QPX: one feature per identified (group, run), quantified channels.
@@ -1027,7 +1108,7 @@ fn transfer(
                 let shifts = sc.map_or_else(|| vec![0.0; n_ch], |s| s.shifts.clone());
                 let g = &groups[gid];
                 let probe = probe_of(g, t, s_align.max(dt), w, &shifts);
-                let fit = fit_group(ms1, &probe, fit_params)?;
+                let (fit, converted) = fit_folded(ms1, g, &probe, fit_params)?;
                 let all: Vec<usize> = (0..n_ch).collect();
                 let dscores: Vec<f64> = decoy_probes(
                     g,
@@ -1037,7 +1118,7 @@ fn transfer(
                     seed_of(&g.key, run_idx),
                 )
                 .iter()
-                .map(|d| fit_group(ms1, d, fit_params).map_or(0.0, |d| group_score(&d)))
+                .map(|d| fit_folded(ms1, g, d, fit_params).map_or(0.0, |d| group_score(&d.0)))
                 .collect();
                 Some((
                     Fitted {
@@ -1049,6 +1130,7 @@ fn transfer(
                         claimed: vec![false; n_ch],
                         transfer_q: None,
                         rt_shift: shifts,
+                        converted,
                     },
                     dscores,
                 ))
@@ -1081,6 +1163,82 @@ fn transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A heavy channel 20 % converted to its heavy-proline form: fitted with
+    /// the satellite, the channel holds the whole heavy amount.
+    #[test]
+    fn arg_pro_satellite_is_folded_into_its_channel() {
+        use model::scan::Ms1Scan;
+        let spec = LabelSpec::parse("silac2").unwrap();
+        let arg10 = spec.channels[1].label_at(Site::Residue(b'R')).unwrap();
+        let d_pro = heavy_proline_delta(arg10).unwrap();
+        assert!((d_pro - 6.013809).abs() < 1e-4, "{d_pro}");
+        let light = Formula::peptide(b"PEPTIDER".iter().map(|&r| (r, 0.0)));
+        let sites = spec.sites();
+        let counts: Vec<u32> = sites
+            .iter()
+            .map(|s| u32::from(*s == Site::Residue(b'R')))
+            .collect();
+        let envs: Vec<ChannelEnvelope> = (0..2)
+            .map(|c| spec.channel_envelope(c, &sites, &counts, &light))
+            .collect();
+        let z = 2.0;
+        let ml = 478.73;
+        let mh = ml + 10.008269 / z;
+        let mp = mh + d_pro / z;
+        // (m/z, envelope, amplitude) at apex 100 s, sigma 4 s.
+        let species = [
+            (ml, envs[0], 1e6),
+            (mh, envs[1], 0.8e6),
+            (mp, envs[1], 0.2e6),
+        ];
+        let scans: Vec<Ms1Scan> = (0..200)
+            .map(|i| {
+                let rt = i as f64;
+                let g = (-(rt - 100.0f64).powi(2) / 32.0).exp();
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..40).map(|k| (300.0 + k as f64 * 23.1, 50.0)).collect();
+                for (mz, env, amp) in species {
+                    for off in -2..=5 {
+                        let v = amp * env.at(off) * g;
+                        if v > 50.0 {
+                            peaks.push((mz + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={i}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let mut g = Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: vec![ml, mh],
+            envelopes: envs.clone(),
+            deltas: vec![0.0, 10.008269],
+            faims_cv: None,
+            satellites: vec![(1, mp)],
+        };
+        let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
+        let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
+        let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
+        assert!(r.abs() < 0.02, "{r}");
+        assert!((converted[1].unwrap() - 0.2).abs() < 0.01, "{converted:?}");
+        // Without the satellite, the heavy channel misses the converted part.
+        g.satellites.clear();
+        let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
+        let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
+        let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
+        assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
 
     #[test]
     fn max_sites_follow_missed_cleavages() {

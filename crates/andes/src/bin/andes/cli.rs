@@ -967,6 +967,13 @@ pub(crate) struct SearchArgs {
     #[arg(long = "label-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     pub(crate) label_fdr: f64,
 
+    /// SILAC: fit the heavy proline that cells make from heavy arginine
+    /// (Arg6 -> 13C5 Pro, Arg10 -> 13C5 15N1 Pro) as a satellite of each
+    /// proline-containing peptide's arginine-labelled channels, and add it
+    /// back to the channel. `label.parquet` reports the converted fraction.
+    #[arg(long = "label-arg-pro", default_value_t = false)]
+    pub(crate) label_arg_pro: bool,
+
     /// Advanced: 2H enrichment of metabolic deuterium labels (Lys4, Leu3).
     #[arg(long = "label-2h-enrichment-silac", hide = true, default_value = "0.96", value_parser = parse_unit_fraction)]
     pub(crate) label_2h_enrichment_silac: f64,

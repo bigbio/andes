@@ -211,3 +211,132 @@ fn silac_duplex_quantifies_matches_and_transfers() {
     assert!(n >= 200, "{n} feature rows");
     assert!(log.contains("quant: label: match between runs:"), "{log}");
 }
+
+/// Dimethyl triplex (`make_quant_fixtures.py --dimethyl`): every amine
+/// labelled, L:M:H of 1:1:1, 1:0.5:0.25 or 0.25:1:2 (of the fully labelled
+/// monoisotopes), the deuterated channels eluting 1.5 s and 3 s early and
+/// carrying their lower isotopologues at 99 % 2H, the medium overlapping the
+/// light M+4.
+#[test]
+fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = tmp.path().join("d.pin");
+    let out = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .args([
+            "--spectrum",
+            fixture("test-fixtures/dimethyl_run1.mzML.gz")
+                .to_str()
+                .unwrap(),
+            "--database",
+            fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
+            "--threads",
+            "2",
+            "--output-pin",
+            pin.to_str().unwrap(),
+            "--label",
+            "dimethyl3",
+            "--label-heavy-enrichment",
+            "1",
+            "--rescore-native",
+        ])
+        .output()
+        .expect("run andes");
+    let log = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "andes failed:\n{log}");
+
+    // The learned RT offsets of the deuterated channels.
+    let line = log
+        .lines()
+        .find(|l| l.contains("channel RT offsets"))
+        .unwrap_or_else(|| panic!("{log}"));
+    let offsets: Vec<f64> = line
+        .split("channel RT offsets")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert_eq!(offsets.len(), 3, "{line}");
+    assert!((offsets[1] + 1.5).abs() < 0.2, "{line}");
+    assert!((offsets[2] + 3.0).abs() < 0.2, "{line}");
+
+    let rows = read_rows(&tmp.path().join("d.label.parquet"));
+    let count = |ch: u8, st: &str| {
+        rows.iter()
+            .filter(|r| r.channel == ch && r.status == st)
+            .count()
+    };
+    for ch in [1, 2, 3] {
+        assert!(count(ch, "match_channel") >= 40, "channel {ch}:\n{log}");
+        assert_eq!(count(ch, "below_detection"), 0, "channel {ch}");
+    }
+
+    // Monoisotope ratios from the molar ones: the fully labelled
+    // monoisotope's share of a channel is its natural π0 (the formula the fit
+    // uses, carbamidomethyl C as in the search) times 0.99 per 2H atom.
+    let mut spec = quant::label::LabelSpec::parse("dimethyl3").unwrap();
+    spec.enrichment_heavy = 1.0;
+    spec.enrichment_2h_chemical = 1.0;
+    let sites = spec.sites();
+    let mono_share = |seq: &str, c: usize| {
+        let f = quant::formula::Formula::peptide(
+            seq.bytes()
+                .map(|r| (r, if r == b'C' { 57.02146 } else { 0.0 })),
+        );
+        let counts: Vec<u32> = sites
+            .iter()
+            .map(|s| match s {
+                quant::label::Site::NTerm => 1,
+                quant::label::Site::Residue(r) => seq.bytes().filter(|b| b == r).count() as u32,
+            })
+            .collect();
+        let d = spec.channel_atoms(c, &sites, &counts).deuterium;
+        spec.channel_envelope(c, &sites, &counts, &f).at(0) * 0.99f64.powi(d as i32)
+    };
+    let mut groups: HashMap<(String, u8), [Option<f64>; 3]> = HashMap::new();
+    let seq_of: HashMap<(String, u8), String> = rows
+        .iter()
+        .map(|r| ((r.peptide.clone(), r.charge), r.peptide.clone()))
+        .collect();
+    for r in rows.iter().filter(|r| r.channel > 1) {
+        if let Some(v) = r.log2_ratio {
+            groups.entry((r.peptide.clone(), r.charge)).or_default()[r.channel as usize - 1] =
+                Some(v);
+        }
+    }
+    let designs: [[f64; 2]; 3] = [[0.0, 0.0], [-1.0, -2.0], [2.0, 3.0]];
+    let (mut good, mut total) = (0usize, 0usize);
+    for (key, v) in &groups {
+        let (Some(m), Some(h)) = (v[1], v[2]) else {
+            continue;
+        };
+        // The bare sequence: the peptide identity without its brackets.
+        let seq: String = seq_of[key]
+            .split('[')
+            .enumerate()
+            .map(|(i, p)| {
+                if i == 0 {
+                    p
+                } else {
+                    p.split_once(']').map_or(p, |x| x.1)
+                }
+            })
+            .collect();
+        let l0 = mono_share(&seq, 0);
+        let mono = [
+            m - (l0 / mono_share(&seq, 1)).log2(),
+            h - (l0 / mono_share(&seq, 2)).log2(),
+        ];
+        let dev = designs
+            .iter()
+            .map(|d| (mono[0] - d[0]).abs().max((mono[1] - d[1]).abs()))
+            .fold(f64::INFINITY, f64::min);
+        total += 1;
+        good += usize::from(dev < 0.03);
+    }
+    assert!(total >= 120, "{total} groups with both ratios");
+    assert!(
+        good as f64 >= 0.9 * total as f64,
+        "{good} of {total} groups at a design ratio"
+    );
+}

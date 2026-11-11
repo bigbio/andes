@@ -25,7 +25,8 @@
 //! log-likelihood ratio against "background only" is `LLR = A·b / 2` at the
 //! optimum. `(t0, w)` maximise `LLR − (t0 − t_hat)² / (2 s²)` over the scan
 //! RTs within `t_hat ± 3 s` and the widths `{0.7, 1, 1.4} · w_prior`, as in
-//! [`crate::evidence`]. The noise `σ_t` of a trace is `1.4826 · median|Δy| /
+//! [`crate::evidence`], then refined between scans (the vertex of the
+//! parabola through the best apex and its neighbours). The noise `σ_t` of a trace is `1.4826 · median|Δy| /
 //! √2` over the window's scans away from the expected peak (beyond
 //! `3 · max(s, w)` of `t_hat`), floored at half the median detection limit.
 //!
@@ -93,6 +94,13 @@ pub struct LabelSite {
     pub heavy_atoms: u32,
     /// Of those, the 13C atoms (the rest are 15N).
     pub carbon13: u32,
+    /// C and H atoms the label adds to the peptide, its own 13C and 2H
+    /// included (a chemical label adds atoms, 2 C and 4 H per dimethyl site;
+    /// a metabolic one substitutes them and adds none). The envelope's
+    /// natural part is the peptide's atoms plus these, minus the label's 13C,
+    /// 15N and 2H.
+    pub natural_c: i32,
+    pub natural_h: i32,
     /// Unimod name (the modification name the search uses).
     pub name: String,
     pub unimod: Option<u32>,
@@ -147,6 +155,9 @@ pub struct LabelAtoms {
     pub nitrogen15: u32,
     /// 13C / 15N enrichment.
     pub p_heavy: f64,
+    /// Natural C and H atoms added (see [`LabelSite::natural_c`]).
+    pub natural_c: i32,
+    pub natural_h: i32,
 }
 
 /// A label the specification syntax knows by name.
@@ -157,6 +168,8 @@ struct NamedLabel {
     deuterium: u32,
     heavy_atoms: u32,
     carbon13: u32,
+    natural_c: i32,
+    natural_h: i32,
     name: &'static str,
     unimod: u32,
     chemical: bool,
@@ -175,6 +188,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 4,
         heavy_atoms: 0,
         carbon13: 0,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:2H(4)",
         unimod: 481,
         chemical: false,
@@ -186,6 +201,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 0,
         heavy_atoms: 6,
         carbon13: 6,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:13C(6)",
         unimod: 188,
         chemical: false,
@@ -197,6 +214,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 0,
         heavy_atoms: 8,
         carbon13: 6,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:13C(6)15N(2)",
         unimod: 259,
         chemical: false,
@@ -208,6 +227,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 0,
         heavy_atoms: 6,
         carbon13: 6,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:13C(6)",
         unimod: 188,
         chemical: false,
@@ -219,6 +240,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 0,
         heavy_atoms: 10,
         carbon13: 6,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:13C(6)15N(4)",
         unimod: 267,
         chemical: false,
@@ -230,6 +253,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 3,
         heavy_atoms: 0,
         carbon13: 0,
+        natural_c: 0,
+        natural_h: 0,
         name: "Label:2H(3)",
         unimod: 262,
         chemical: false,
@@ -241,6 +266,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 0,
         heavy_atoms: 0,
         carbon13: 0,
+        natural_c: 2,
+        natural_h: 4,
         name: "Dimethyl",
         unimod: 36,
         chemical: true,
@@ -252,6 +279,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 4,
         heavy_atoms: 0,
         carbon13: 0,
+        natural_c: 2,
+        natural_h: 4,
         name: "Dimethyl:2H(4)",
         unimod: 199,
         chemical: true,
@@ -263,6 +292,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 4,
         heavy_atoms: 2,
         carbon13: 2,
+        natural_c: 2,
+        natural_h: 4,
         name: "Dimethyl:2H(4)13C(2)",
         unimod: 510,
         chemical: true,
@@ -274,6 +305,8 @@ const NAMED_LABELS: &[NamedLabel] = &[
         deuterium: 6,
         heavy_atoms: 2,
         carbon13: 2,
+        natural_c: 2,
+        natural_h: 4,
         name: "Dimethyl:2H(6)13C(2)",
         unimod: 330,
         chemical: true,
@@ -527,6 +560,8 @@ impl LabelSpec {
             carbon13: 0,
             nitrogen15: 0,
             p_heavy: self.enrichment_heavy,
+            natural_c: 0,
+            natural_h: 0,
         };
         let mut chemical = false;
         for (s, &n) in sites.iter().zip(counts) {
@@ -534,6 +569,8 @@ impl LabelSpec {
                 a.deuterium += l.deuterium * n;
                 a.carbon13 += l.carbon13 * n;
                 a.nitrogen15 += (l.heavy_atoms - l.carbon13.min(l.heavy_atoms)) * n;
+                a.natural_c += l.natural_c * n as i32;
+                a.natural_h += l.natural_h * n as i32;
                 chemical |= l.chemical && l.deuterium > 0;
             }
         }
@@ -546,7 +583,8 @@ impl LabelSpec {
     /// The isotope pattern of channel `c` of a peptide whose unlabelled
     /// formula is `light`: the natural envelope of the atoms the labels do
     /// not fix (a Lys8 fixes 6 C and 2 N as 13C/15N, which then take no part
-    /// in the natural 13C/15N distribution), shifted by the label, with the
+    /// in the natural 13C/15N distribution) plus the natural atoms a chemical
+    /// label adds (two C per dimethyl site), shifted by the label, with the
     /// lower isotopologues of incomplete enrichment.
     pub fn channel_envelope(
         &self,
@@ -557,9 +595,10 @@ impl LabelSpec {
     ) -> ChannelEnvelope {
         let a = self.channel_atoms(c, sites, counts);
         let mut f = *light;
-        f.c = f.c.saturating_sub(a.carbon13);
+        let add = |x: u32, d: i32| (x as i64 + d as i64).max(0) as u32;
+        f.c = add(f.c, a.natural_c).saturating_sub(a.carbon13);
         f.n = f.n.saturating_sub(a.nitrogen15);
-        f.h = f.h.saturating_sub(a.deuterium);
+        f.h = add(f.h, a.natural_h).saturating_sub(a.deuterium);
         let env = f.envelope((HIGHEST_OFFSET + 1) as usize);
         ChannelEnvelope::new(
             &env,
@@ -612,6 +651,8 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
                 deuterium: nl.deuterium,
                 heavy_atoms: nl.heavy_atoms,
                 carbon13: nl.carbon13,
+                natural_c: nl.natural_c,
+                natural_h: nl.natural_h,
                 name: nl.name.to_string(),
                 unimod: Some(nl.unimod),
                 chemical: nl.chemical,
@@ -659,6 +700,8 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
         deuterium: d,
         heavy_atoms: heavy,
         carbon13: heavy,
+        natural_c: 0,
+        natural_h: 0,
         name: format!("Label:{}+{delta:.6}", site.describe()),
         unimod: None,
         chemical: false,
@@ -1112,7 +1155,33 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             }
         }
     }
-    let (_, t0, w) = best?;
+    let (best_obj, t0_grid, w) = best?;
+    // Sub-scan apex: the vertex of the parabola through the objective at the
+    // best grid apex and its neighbours (same width), when it improves on it.
+    let objective = |t0: f64| -> f64 {
+        let gc = profiles(t0, w);
+        let (h, b, _, _) = normal(&gc);
+        let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
+        llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s)
+    };
+    let mut t0 = t0_grid;
+    if let Some(k) = t0s.iter().position(|&x| x == t0_grid) {
+        if k > 0 && k + 1 < t0s.len() {
+            let (x0, x1, x2) = (t0s[k - 1], t0_grid, t0s[k + 1]);
+            let (y0, y1, y2) = (objective(x0), best_obj, objective(x2));
+            let den = (x0 - x1) * (x0 - x2) * (x1 - x2);
+            if den.abs() > 0.0 {
+                let a = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / den;
+                let b = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)) / den;
+                if a < 0.0 {
+                    let v = (-b / (2.0 * a)).clamp(x0, x2);
+                    if v.is_finite() && objective(v) > best_obj {
+                        t0 = v;
+                    }
+                }
+            }
+        }
+    }
     let gc = profiles(t0, w);
     let (h, b, proj, sgg) = normal(&gc);
     let (a, llr, passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
@@ -1443,6 +1512,18 @@ pub fn classify_channel(
         return ChannelStatus::NotQuantifiable;
     }
     ChannelStatus::Matched
+}
+
+/// The status of an identified channel: identified, unless its own pattern
+/// fails the quality checks of [`classify_channel`] (envelope cosine, a
+/// strong residual M−1 of another envelope), when its quantity is not this
+/// channel's alone and it is not quantifiable. Its identification stays.
+pub fn classify_identified(fit: &ChannelFit, p: &ClassifyParams) -> ChannelStatus {
+    if fit.amplitude > 0.0 && (fit.envelope_cos < p.min_cosine || fit.m1_ratio > p.max_m1_ratio) {
+        ChannelStatus::NotQuantifiable
+    } else {
+        ChannelStatus::Identified
+    }
 }
 
 /// The status of a channel of a group transferred from another run (its

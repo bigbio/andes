@@ -861,6 +861,7 @@ fn select_rank1_all<'a>(
     select_rank1(collector, spectra, queues, candidates, None, None, None, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_rank1<'a>(
     collector: &QuantCollector,
     spectra: &[Spectrum],

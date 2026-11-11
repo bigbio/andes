@@ -595,6 +595,12 @@ pub(crate) fn load_labels_from_tsv(
                         diagnostic_ions: Vec::new(),
                     },
                 ));
+                // Rebuild, so the cached masses include the glycan: scoring
+                // takes each suffix mass as the cached total minus the prefix.
+                let charge = peptide.charge;
+                let residues = std::mem::take(&mut peptide.residues);
+                peptide = Peptide::new(residues, peptide.pre, peptide.post);
+                peptide.charge = charge;
             }
         }
         if !seen_scans.insert(scan) {

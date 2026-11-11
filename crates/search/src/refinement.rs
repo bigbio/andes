@@ -9,18 +9,15 @@
 //!      (`build_peptide_anchored_index`),
 //!   4. searches the unidentified spectra against that small index with the
 //!      refinement variable-mod tier applied (`refinement_aa_set`), and
-//!   5. RETURNS every Pass-2 winner (tagged as a refinement PSM) as a
-//!      [`RefinementOutput`] so the caller can write it as a SEPARATE PIN
-//!      (`run_refinement`).
+//!   5. returns every Pass-2 winner (tagged as a refinement PSM) as a
+//!      [`RefinementOutput`] (`run_refinement`).
 //!
-//! The cascade is OPT-IN (`--refine`) and additive: nothing here runs on the
-//! default path. Pass-2 winners are NOT merged into the Pass-1 queues — a merged
-//! Pass-2 `PsmMatch::candidate_idxs` indexes the PASS-2 candidate list, which is
-//! a different slice than the Pass-1 `candidates` the PIN writer resolves
-//! peptide/accession against (a merge would alias the indices → wrong protein or
-//! OOB). Instead the Pass-2 artifacts (index + candidates + tagged queues +
-//! global spectrum indices) are returned, and the caller emits a second PIN: the
-//! merged report is the disjoint union Pass-1 PIN ⊎ refine PIN.
+//! The cascade is opt-in (`--refine`): nothing here runs on the default path.
+//! The caller merges the Pass-2 winners into the Pass-1 queues with
+//! [`merge_into_pass1`], which offsets the Pass-2 `protein_index` and
+//! `candidate_idxs` by the Pass-1 database and candidate counts so both passes
+//! share one index space, and writes one PIN in which a scan's Pass-1 and
+//! Pass-2 PSMs compete. Pass-2 rows carry `IsRefinement = 1`.
 
 use std::collections::HashSet;
 

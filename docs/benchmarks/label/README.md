@@ -10,7 +10,15 @@ Scripts behind the real-data numbers of DOCS.md §10 *Labelled pairs*.
 | `mzml_to_mzxml.py MZML MZXML [--ms2-from CENTROIDED_MZML]` | writes the indexed mzXML MaxQuant 2.0.3 can read (see below) |
 | `make_mqpar.py TEMPLATE OUT FASTA LABELS FILE...` | fills a MaxQuant parameter file for a SILAC run |
 | `compare_maxquant.py LABEL_PARQUET EVIDENCE_TXT RUN DESIGN...` | matches andes channel ratios to MaxQuant evidence ratios on (sequence, charge); DESIGN is the log2 expected ratio per channel, or `class` to split lysine and arginine peptides |
+| `andes_to_idxml.py Q_TSV PIN RUN MZML OUT` | writes one run's andes PSMs (PEP scores, labels as named modifications) as idXML for OpenMS MS1LabeledWorkflow |
+| `compare_ms1labeled.py QPX_FEATURE_PARQUET LABEL_PARQUET RUN=DESIGN...` | matches MS1LabeledWorkflow ratios (its QPX feature table) to andes channel ratios against a known design |
 | `match_by_q.py LABEL_PARQUET` | per run, the log-ratio of channels matched between channels by quality q-value bin, against groups with both channels identified |
+
+PXD022659's HeLa ratio mixtures are Thermo `.raw` (PanoramaPublic `RawFiles/raw`, listed with
+`?method=JSON`), read directly by MaxQuant and converted with ThermoRawFileParser for andes and
+OpenMS. MS1LabeledWorkflow ran on andes's identifications after PeptideIndexer (target-decoy database
+from DecoyDatabase, `-unmatched_action remove`), in the 3.6.0 release and built from OpenMS
+`develop` (commit `fbb25191d7`) for its targeted quantification.
 
 Data: PXD003327 `Chris_Ecoli_1-2-4.mzML` (PRIDE); PXD022659 `Ecoli_LH_1_1_66_DDA1`,
 `Ecoli_LH_1_10_66_DDA1` mzML (PanoramaPublic, `RawFiles/mzml`); PXD000714

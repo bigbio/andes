@@ -2216,8 +2216,48 @@ That run took 44 min 52 s. It identifies 2,073 MS/MS (andes: 26,126 PSMs at 1 % 
 55 H/L ratios (medians −0.38 and 0.84 for the 1:1 and 1:10 runs). With its Sciex Q-TOF defaults
 (isotope tolerance in Da, intensity thresholds), it crashes in MS/MS preparation for the main search
 (`PeakListLayerData.GetIsotopeCluster`). MaxQuant is meant to read these runs from the Sciex `.wiff`
-files, which are not public. On this dataset the comparison is OpenMS only; MaxQuant is compared on
-PXD003327.
+files, which are not public. MaxQuant is compared instead on the Orbitrap runs of the same dataset.
+
+*PXD022659, HeLa ratio mixtures* (Q Exactive HF, DDA, `[][Lys8,Arg10]`; Thermo `.raw` from
+PanoramaPublic `RawFiles/raw`, converted to mzML with ThermoRawFileParser for andes and OpenMS, read
+directly by MaxQuant). One replicate each of heavy/light 70/30, 50/50 and 10/90 (`B_0-7ug_DDA_061`,
+`C_0-5ug_DDA_060`, `E_0-1ug_DDA_055`): expected log2 H/L +1.22, 0 and −3.17. andes searched the
+three runs together with `--mbr` against the reviewed human proteome (13 min 37 s, 4 threads):
+158,429 PSMs (70 % of 224,889 MS/MS), 37,869 sequences, 3,627 protein groups at 1 % FDR. MaxQuant
+2.0.3 (same database, Trypsin/P, 2 missed cleavages, its defaults; 5 h 22 min, sharing the 4 cores
+with OpenMS for part of it) identified 86,924 MS/MS, 21,492 sequences, 2,470 protein groups.
+OpenMS is FeatureFinderMultiplex alone (51 to 66 min per run), and MS1LabeledWorkflow 3.6.0 given
+andes's identifications (`andes_to_idxml.py`; 12 min for the three runs, `-match_between_runs
+true`). One value per (sequence, charge) on every side; the median absolute error is against the design:
+
+| run | tool | peptides | median | IQR | median abs. error |
+|---|---|---|---|---|---|
+| 70/30 | andes | 17,957 | 1.19 | 0.39 | 0.195 |
+| 70/30 | MaxQuant | 9,725 | 1.06 | 0.29 | 0.185 |
+| 70/30 | MS1LabeledWorkflow 3.6.0 | 5,292 | 1.13 | 0.33 | 0.160 |
+| 70/30 | FeatureFinderMultiplex | 8,964 | 1.11 | 0.36 | 0.182 |
+| 50/50 | andes | 20,938 | −0.12 | 0.34 | 0.201 |
+| 50/50 | MaxQuant | 11,201 | −0.18 | 0.23 | 0.201 |
+| 50/50 | MS1LabeledWorkflow 3.6.0 | 6,085 | −0.15 | 0.23 | 0.175 |
+| 50/50 | FeatureFinderMultiplex | 10,297 | −0.15 | 0.25 | 0.183 |
+| 10/90 | andes | 4,138 | −3.48 | 0.39 | 0.343 |
+| 10/90 | MaxQuant | 3,892 | −3.38 | 0.35 | 0.276 |
+| 10/90 | MS1LabeledWorkflow 3.6.0 | 2,532 | −3.41 | 0.51 | 0.368 |
+| 10/90 | FeatureFinderMultiplex | 4,281 | −3.30 | 1.19 | 0.431 |
+
+On the peptides both quantify (median abs. error, andes against the other):
+
+| run | MaxQuant | MS1LabeledWorkflow 3.6.0 | FeatureFinderMultiplex |
+|---|---|---|---|
+| 70/30 | 8,287: 0.152 / 0.175 | 4,884: 0.135 / 0.156 | 6,009: 0.135 / 0.156 |
+| 50/50 | 9,857: 0.163 / 0.198 | 5,649: 0.146 / 0.173 | 7,096: 0.146 / 0.171 |
+| 10/90 | 2,050: 0.323 / 0.265 | 1,756: 0.363 / 0.349 | 2,076: 0.363 / 0.354 |
+
+andes quantifies about twice as many peptides as MaxQuant and three times as many as
+MS1LabeledWorkflow 3.6.0. On shared peptides it is the most accurate at 70/30 and 50/50, while at 10/90 its
+ratios overshoot the design more than MaxQuant's (median −3.48 and −3.38 against −3.17). MaxQuant's
+spread is the lowest, or tied for lowest, in every run. The additional ratios andes reports (channels matched between channels and
+transferred between runs) are wider than those it shares with the other tools.
 
 *PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
 21.7 s in all, 0.83 s for `--label`, 944 groups; 275 / 537 / 341 channels matched between

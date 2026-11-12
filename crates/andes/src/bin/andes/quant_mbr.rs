@@ -2434,7 +2434,7 @@ mod tests {
         assert_eq!(sel(0.004).min_donors(1000), 4);
         assert_eq!(sel(1.0).min_donors(1), 0);
         assert!(TransferSelection::OFF.is_off());
-        assert!(!TransferSelection::default().is_off());
+        assert!(TransferSelection::default().is_off());
     }
 
     #[test]
@@ -2568,7 +2568,7 @@ mod tests {
         assert_eq!(e.donors, vec![0]);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, 7);
-        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_transfer_layout(&rows);
         assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
         assert_eq!(rows[0].kind, Hypothesis::Target);
         let target = rows[0].evidence.as_ref().unwrap();
@@ -3853,7 +3853,11 @@ mod finalize_tests {
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
                         measurement_q: None,
-                        transfer_pep: None,
+                        transfer_pep: if r.role == Role::Transfer {
+                            scored[i].and_then(|(fam, s)| fdr.pep(r.precursor, fam, s))
+                        } else {
+                            None
+                        },
                     },
                     (
                         e.map(|e| e.mass_err_ppm),
@@ -5142,10 +5146,11 @@ mod finalize_tests {
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
         assert_eq!(
-            &TRANSFER_FEATURES[n - 3..],
-            ["shape_log_width", "shape_tailing_diff", "shape_iso_cos"]
+            &TRANSFER_FEATURES[n - 4..],
+            ["shape_log_width", "shape_tailing_diff", "shape_iso_cos", "log10_donor_pep"]
         );
-        assert_eq!(&x[n - 3..], &g.map(|v| v as f32));
+        assert_eq!(&x[n - 4..n - 1], &g.map(|v| v as f32));
+        assert_eq!(x[n - 1], -4.0);
     }
 
     #[test]

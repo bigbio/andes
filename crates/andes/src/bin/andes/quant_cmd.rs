@@ -1351,7 +1351,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
 
 fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
     let part = |role: usize| {
-        ["target", "mass-shift decoy", "RT-shift decoy"]
+        ["target", "mass-shift decoy", "RT decoy"]
             .iter()
             .enumerate()
             .filter(|&(f, _)| c.rows[role][f] > 0)

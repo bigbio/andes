@@ -2813,7 +2813,7 @@ fn log_summary(
         }
     };
     eprintln!(
-        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT-shift decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
+        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
         quant::ms2::SUPPORT_MIN_MATCHED,
         quant::ms2::SUPPORT_MIN_ANGLE,
         v.ms2_supported[0],
@@ -2864,7 +2864,7 @@ fn log_summary(
             a.wrong_peak_only
         );
         eprintln!(
-            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
+            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
             a.pooled,
             a.mass_only,
             a.rt_only,

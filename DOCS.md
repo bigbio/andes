@@ -2207,6 +2207,14 @@ between 0.1 and 0.2, −0.21 and 1.26 (so the default `--label-fdr` is 0.05). Wi
 0.012 added), and in the 1:10 run the transferred ratios' median is 2.75 against 2.67 for the
 identified ones.
 
+MaxQuant 2.0.3 gives no usable comparison on these runs. Fed from mzML (centroided MS1 and MS2), it
+computes NaN MS1 masses and crashes in feature detection. With MS1 rewritten as synthetic profile
+peaks and its Orbitrap feature settings, it finishes (32 min 40 s) but finds 3,791 MS1 features,
+identifies 1,377 of 44,296 MS/MS (andes 26,126 PSMs at 1 % FDR) and reports one H/L ratio per run. With
+its Sciex Q-TOF defaults, it crashes in MS/MS preparation for the main search
+(`PeakListLayerData.GetIsotopeCluster`), with and without intensity-dependent calibration and
+advanced peak splitting. MaxQuant is meant to read these runs from the Sciex `.wiff` files, which are not public.
+
 *PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
 21.7 s in all, 0.83 s for `--label`, 944 groups; 275 / 537 / 341 channels matched between
 channels). In this file lysine and arginine peptides carry opposite designs (K: M/L and H/L near

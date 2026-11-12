@@ -9,7 +9,7 @@ profile/centroid state from `filterLine`, so this writes one filterLine per
 scan.
 
     mzml_to_mzxml.py IN.mzML OUT.mzXML [--vendor "Thermo Scientific"] [--analyzer FTMS]
-                     [--ms2-from CENTROIDED.mzML]
+                     [--ms2-from CENTROIDED.mzML] [--ms1-profile-resolution R]
 
 Reads uncompressed or zlib arrays, 32- or 64-bit. Writes 32-bit network-order
 m/z-int pairs (MaxQuant 2.0.3 misreads 64-bit mzXML peaks) without
@@ -60,6 +60,21 @@ def spectra(path):
             el.clear()
 
 
+def pseudo_profile(mz, it, resolution):
+    """Each centroid as a 5-point Gaussian-like peak of FWHM mz/resolution, zeros
+    on its flanks unless a neighbour is that close."""
+    pts = []
+    for k, (m, i) in enumerate(zip(mz, it)):
+        d = m / resolution / 2.0
+        if k == 0 or mz[k - 1] + 4 * d < m - 2 * d:
+            pts.append((m - 2 * d, 0.0))
+        pts += [(m - d, 0.5 * i), (m, i), (m + d, 0.5 * i)]
+        if k + 1 == len(mz) or mz[k + 1] - 4 * d > m + 2 * d:
+            pts.append((m + 2 * d, 0.0))
+    pts.sort()
+    return [p[0] for p in pts], [p[1] for p in pts]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inp")
@@ -68,6 +83,9 @@ def main():
     ap.add_argument("--analyzer", default="FTMS")
     ap.add_argument("--ms2-from", help="take the MS2 peaks from this mzML (same spectra, same order), "
                     "e.g. the input centroided by OpenMS PeakPickerHiRes")
+    ap.add_argument("--ms1-profile-resolution", type=float,
+                    help="write centroided MS1 as synthetic profile peaks of this resolving power "
+                    "(MaxQuant computes NaN masses from centroided MS1 and crashes)")
     a = ap.parse_args()
 
     out = open(a.out, "wb")
@@ -121,6 +139,10 @@ def main():
             # MS2 top-N filter).
             el.clear()
             continue
+        if level == 1 and not profile and a.ms1_profile_resolution:
+            mz, it = pseudo_profile(mz[:n], it[:n], a.ms1_profile_resolution)
+            n = len(mz)
+            profile = True
         num += 1
         if n:
             bp = max(range(n), key=lambda i: it[i])

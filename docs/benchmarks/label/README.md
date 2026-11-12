@@ -26,6 +26,8 @@ the analyzer from a Thermo-style `filterLine` and misreads 64-bit peaks, so the
 converter writes 32-bit peaks and one filter line per scan, and it drops empty
 spectra, on which MaxQuant's MS1 peak detection and MS2 top-N filter crash. For PXD003327, MS1 stays profile
 and MS2 comes centroided from OpenMS PeakPickerHiRes (`--ms2-from`), the same
-input andes is compared on. For the TripleTOF runs of PXD022659 (centroided
-already), MaxQuant's FTMS MS/MS tolerance is raised to 40 ppm, its TOF default,
+input andes is compared on. For the TripleTOF runs of PXD022659, whose MS1 is
+centroided (MaxQuant computes NaN masses from centroided MS1 and crashes in its peak
+detection), MS1 is rewritten as synthetic profile peaks (`--ms1-profile-resolution 30000`, each
+centroid a 5-point peak of that FWHM), and MaxQuant's FTMS MS/MS tolerance is raised to 40 ppm, its TOF default,
 since the reader labels every scan FTMS.

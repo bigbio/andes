@@ -13,8 +13,8 @@ scan.
 
 Reads uncompressed or zlib arrays, 32- or 64-bit. Writes 32-bit network-order
 m/z-int pairs (MaxQuant 2.0.3 misreads 64-bit mzXML peaks) without
-compression, plus the scan index. Empty MS2 spectra are left
-out (MaxQuant's top-N peak filter crashes on them) and scans are renumbered 1..n.
+compression, plus the scan index. Empty spectra are left
+out (MaxQuant's MS1 peak detection and top-N MS2 filter crash on them) and scans are renumbered 1..n.
 """
 
 import argparse
@@ -116,8 +116,9 @@ def main():
         mz = arrays.get("mz", ())
         it = arrays.get("int", ())
         n = min(len(mz), len(it))
-        if level == 2 and n == 0:
-            # MaxQuant's top-N filter indexes past the end of an empty MS2 spectrum.
+        if n == 0:
+            # MaxQuant indexes past the end of an empty spectrum (MS1 peak detection,
+            # MS2 top-N filter).
             el.clear()
             continue
         num += 1

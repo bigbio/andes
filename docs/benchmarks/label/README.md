@@ -23,8 +23,8 @@ spectrum. Under Mono it also fails to inflate zlib arrays. The vendor files of t
 (PXD003327 deposited mzML only; the PanoramaPublic `RawFiles/raw` folder needs a
 login), so MaxQuant reads mzXML written by `mzml_to_mzxml.py`. That reader takes
 the analyzer from a Thermo-style `filterLine` and misreads 64-bit peaks, so the
-converter writes 32-bit peaks and one filter line per scan, and it drops empty MS2
-spectra, on which MaxQuant's top-N filter crashes. For PXD003327, MS1 stays profile
+converter writes 32-bit peaks and one filter line per scan, and it drops empty
+spectra, on which MaxQuant's MS1 peak detection and MS2 top-N filter crash. For PXD003327, MS1 stays profile
 and MS2 comes centroided from OpenMS PeakPickerHiRes (`--ms2-from`), the same
 input andes is compared on. For the TripleTOF runs of PXD022659 (centroided
 already), MaxQuant's FTMS MS/MS tolerance is raised to 40 ppm, its TOF default,

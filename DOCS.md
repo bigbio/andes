@@ -2178,10 +2178,12 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
 **Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated, 2026-11-11).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
-m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant was not run: its only download (v2.9.0.0,
-maxquant.org) is a form that requires a name, email address and institution, acceptance of its
-license and a captcha, and no MaxQuant results are deposited with these datasets (PXD003327 holds
-Proteome Discoverer `.msf` files, PXD000714 X!Tandem output, PXD022659 MetaMorpheus results).
+m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
+same labels, Trypsin/P, 2 missed cleavages and its default tolerances (20 ppm first search, 4.5 ppm
+main search after recalibration), reading mzXML converted with
+`docs/benchmarks/label/mzml_to_mzxml.py`: its mzML reader keeps only DIA-style MS2 windows and drops
+every DDA MS/MS spectrum, and the vendor files of these runs are not public (details in that
+folder's README). Its ratios are the evidence `Ratio M/L` / `Ratio H/L`, non-normalised.
 
 *PXD022659* (E. coli SILAC `[][Lys8]` at known light:heavy mixtures, TripleTOF 6600 DDA, 20 ppm
 MS1 tolerance; runs `Ecoli_LH_1_1_66_DDA1` and `Ecoli_LH_1_10_66_DDA1` with `--mbr`; 3 min in all,
@@ -2222,6 +2224,22 @@ andes's medians are nearer the nominal ±1 / ±2 in every cell and it quantifies
 (arginine H/L 326 against 192); OpenMS's spread is lower in three of the four cells. OpenMS took
 2 min 8 s for the multiplet detection of this run (andes 0.83 s, its identifications from the same
 search).
+
+Against MaxQuant 2.0.3 (same file, profile MS1 and MS2 centroided by OpenMS PeakPickerHiRes, given to
+both tools; andes then identifies 1,303 PSMs, 735 sequences, 189 protein groups at 1 % FDR, MaxQuant
+925 MS/MS, 540 sequences, 173 protein groups), matched on (sequence, charge), one value per
+peptide (the median over its evidences):
+
+| ratio | class | MaxQuant n, median, IQR | andes n, median, IQR | same peptides: MaxQuant / andes median, IQR | median abs. difference |
+|---|---|---|---|---|---|
+| M/L | K | 146, 0.65, 0.19 | 198, 0.75, 0.29 | 108: 0.64 / 0.74, 0.17 / 0.20 | 0.129 |
+| M/L | R | 229, −0.96, 0.12 | 390, −0.96, 0.26 | 208: −0.96 / −0.94, 0.12 / 0.14 | 0.071 |
+| H/L | K | 146, 1.82, 0.18 | 216, 1.92, 0.46 | 110: 1.81 / 1.90, 0.17 / 0.20 | 0.099 |
+| H/L | R | 229, −1.78, 0.19 | 317, −1.80, 0.27 | 190: −1.79 / −1.77, 0.18 / 0.21 | 0.086 |
+
+On the same peptides the two agree to about 0.1 log2 and MaxQuant's spread is lower, by 0.02 to
+0.03; andes quantifies 35 to 70 % more peptides, the extra ones with a wider spread. For lysine peptides andes's medians sit about 0.1 nearer the nominal +1 / +2.
+MaxQuant took 30 min 46 s on 4 threads (andes 22 s for search and quantification).
 
 *PXD000714* (yeast mitochondria, dimethyl triplex, fraction `20120524_Renvoise_Triplex_rep1F3`,
 converted from mzXML, against the reviewed yeast proteome; 39 s in all, 2.7 s for `--label`):

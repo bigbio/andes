@@ -20,6 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use model::modification::ModLocation;
 use model::{EntryKind, PriorTier, Protein, SiteClaim};
 use search::SearchIndex;
 
@@ -185,8 +186,25 @@ pub fn site_claims(
     claim_fdr: f64,
     restricted: &[f64],
     posteriors: Option<&HashMap<String, f64>>,
+    fixed_terminal: &[(ModLocation, f64)],
 ) -> SiteOutcome {
     let same = |a: f64, b: f64| (a - b).abs() <= model::protein::SITE_MASS_TOLERANCE;
+    // The fixed terminal mods that can stack with a claim on a peptide's
+    // first or last residue (the peptide string carries the summed mass), for
+    // a peptide starting at `start` of a protein of length `len`.
+    let terminal = |at: usize, n: usize, start: usize, len: usize| -> Vec<f64> {
+        fixed_terminal
+            .iter()
+            .filter(|(loc, _)| match loc {
+                ModLocation::NTerm => at == 0,
+                ModLocation::ProtNTerm => at == 0 && start == 0,
+                ModLocation::CTerm => at + 1 == n,
+                ModLocation::ProtCTerm => at + 1 == n && start + n == len,
+                ModLocation::Anywhere => false,
+            })
+            .map(|&(_, d)| d)
+            .collect()
+    };
     let proteins: Vec<&Protein> = idx
         .iter_target_proteins()
         .filter(|p| p.entry_kind() == EntryKind::Reference)
@@ -257,9 +275,12 @@ pub fn site_claims(
                 occurrences(seq, &residues).flat_map(|start| mods.iter().map(move |m| (start, m)))
             {
                 let pos = (start + at) as u32;
-                let Some(c) = claims_of(i)
-                    .iter()
-                    .find(|c| c.position == pos && same(c.mass_delta, mass))
+                let term = terminal(at, residues.len(), start, seq.len());
+                let Some(c) = claims_of(i).iter().find(|c| {
+                    c.position == pos
+                        && (same(c.mass_delta, mass)
+                            || term.iter().any(|&t| same(c.mass_delta + t, mass)))
+                })
                 else {
                     continue;
                 };
@@ -717,10 +738,38 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_on_the_first_residue_matches_under_a_fixed_n_terminal_mod() {
+        // The claimed S at 4 is the peptide's first residue; with a fixed
+        // N-terminal label the peptide string carries the summed mass.
+        const LABEL: f64 = 229.162932;
+        let idx = index();
+        let rows = || -> HashMap<String, PercolatorPsm> {
+            (0..20)
+                .map(|i| {
+                    // SPGGGKC occurs once, at the real site (the knockoff
+                    // sites are followed by D and E).
+                    let pep = format!("G.S+{:.5}PGGGKC.G", PHOSPHO + LABEL);
+                    psm(&format!("n{i}"), 100.0 - i as f64, &pep)
+                })
+                .collect()
+        };
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
+        assert!(out.rows.is_empty(), "{:?}", out.rows);
+        let fixed = [(ModLocation::NTerm, LABEL)];
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None, &fixed);
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!((out.rows[0].position, out.rows[0].psms), (5, 20));
+        // A protein-N-terminal label does not apply away from the protein start.
+        let fixed = [(ModLocation::ProtNTerm, LABEL)];
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None, &fixed);
+        assert!(out.rows.is_empty());
+    }
+
+    #[test]
     fn a_site_claim_gets_its_knockoff_q_value() {
         let idx = index();
         let mut t = rows();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         // Two knockoff PSMs of a site with two knockoffs weigh 1/2 each. The
         // threshold just above the second one (50 claims, one knockoff) gives
         // (1/2 + 1/2) / 50 = 0.02, the least FDP any claim reaches.
@@ -742,7 +791,7 @@ mod tests {
         assert_eq!(t["c0"].q_value, 0.001, "a PSM's own q-value is unchanged");
         // A stricter claim cutoff accepts no site.
         let mut t = rows();
-        assert!(site_claims(&mut t, &idx, 0.01, 0.015, &[PHOSPHO], None)
+        assert!(site_claims(&mut t, &idx, 0.01, 0.015, &[PHOSPHO], None, &[])
             .rows
             .is_empty());
     }
@@ -782,7 +831,7 @@ mod tests {
         let (id, mut p2) = psm("p2", 1.0, "K.AGGGS+79.96633PGGGK.C");
         p2.proteins = "sp|P2|A".into();
         t.insert(id, p2);
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         let p1 = out.rows.iter().find(|r| r.accession == "sp|P1|A").unwrap();
         assert!((p1.site_q - 0.5 / 101.0).abs() < 1e-12, "{}", p1.site_q);
     }
@@ -802,13 +851,13 @@ mod tests {
             .filter(|k| !k.starts_with('k'))
             .map(|k| (k.clone(), 1.0))
             .collect();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], Some(&post));
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], Some(&post), &[]);
         let r = &out.rows[0];
         assert!((r.identity.unwrap() - 60.0 / 63.0).abs() < 1e-9);
         assert!((r.occupancy.unwrap() - 63.0 / 64.0).abs() < 1e-9);
         assert_eq!(r.alternatives, "+42.0106:0.05");
         assert!((r.identity_spectra - 63.0).abs() < 1e-9);
-        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut rows(), &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         assert_eq!((out.rows[0].occupancy, out.rows[0].identity), (None, None));
     }
 
@@ -816,7 +865,7 @@ mod tests {
     fn an_unrestricted_mod_keeps_its_knockoff_site_psms() {
         let idx = index();
         let mut t = rows();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[], None, &[]);
         assert!(out.knockoff_rows.is_empty());
         assert_eq!(t["k1"].q_value, 0.001);
         assert_eq!(out.rows.len(), 1, "the site claim is still controlled");
@@ -839,7 +888,7 @@ mod tests {
         for p in t.values_mut() {
             p.proteins = "sp|P1|A;sp|P2|B".into();
         }
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         assert_eq!(out.rows.len(), 2);
         for r in &out.rows {
             assert!((r.site_q - 0.02).abs() < 1e-9, "{}", r.site_q);
@@ -862,7 +911,7 @@ mod tests {
         );
         let mut t = rows();
         t.get_mut("k1").unwrap().proteins = "sp|P1|A;sp|P2|B".into();
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         assert!(!out.knockoff_rows.contains("k1"));
         assert_eq!(t["k1"].q_value, 0.001);
         assert!(out.knockoff_rows.contains("k2"));
@@ -911,7 +960,7 @@ mod tests {
             let (id, p) = psm(id, score, pep);
             t.insert(id, p);
         }
-        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None);
+        let out = site_claims(&mut t, &idx, 0.01, 0.05, &[PHOSPHO], None, &[]);
         let sites: Vec<(u32, usize)> = out.rows.iter().map(|r| (r.position, r.psms)).collect();
         assert_eq!(sites, [(5, 60), (15, 60)]);
     }
@@ -967,7 +1016,7 @@ mod tests {
         };
         let run = |idx: &SearchIndex| {
             let mut t = rows();
-            site_claims(&mut t, idx, 0.01, 0.05, &[PHOSPHO], None)
+            site_claims(&mut t, idx, 0.01, 0.05, &[PHOSPHO], None, &[])
         };
         let exact = run(&make(PHOSPHO));
         let near = run(&make(f64::from_bits(PHOSPHO.to_bits() + 3)));

@@ -497,14 +497,35 @@ pub(crate) fn load_labels_from_tsv(
     // variant (a bare `C` would otherwise parse as UNMODIFIED — wrong b/y masses).
     // Variable mods (Ox-M) are left off: the label doesn't say which are modified,
     // and the unmodified form is the correct default for the rank corpus.
-    let fixed_deltas: std::collections::HashMap<u8, f64> =
-        aa_set.fixed_mod_deltas().into_iter().collect();
+    // Fixed mods at any position decorate each of their residues; fixed
+    // peptide-terminal mods (an N-terminal label) only the first or last
+    // residue, where they add to the residue's own fixed mod (the stacked
+    // form of the set). Protein-terminal fixed mods are left off: the label
+    // file gives no protein position.
+    let anywhere: std::collections::HashMap<u8, f64> =
+        aa_set.fixed_anywhere_deltas().into_iter().collect();
+    let terminal = aa_set.fixed_terminal_deltas();
+    let at = |loc: model::modification::ModLocation| -> f64 {
+        terminal.iter().filter(|(l, _)| *l == loc).map(|(_, d)| d).sum()
+    };
+    let (n_term, c_term) = (
+        at(model::modification::ModLocation::NTerm),
+        at(model::modification::ModLocation::CTerm),
+    );
     let decorate = |seq: &str| -> String {
         let mut d = String::with_capacity(seq.len() + 4);
         d.push_str("-.");
-        for &b in seq.as_bytes() {
+        let n = seq.len();
+        for (i, &b) in seq.as_bytes().iter().enumerate() {
             d.push(b as char);
-            if let Some(delta) = fixed_deltas.get(&b) {
+            let mut delta = anywhere.get(&b).copied().unwrap_or(0.0);
+            if i == 0 {
+                delta += n_term;
+            }
+            if i + 1 == n {
+                delta += c_term;
+            }
+            if delta != 0.0 {
                 d.push_str(&format!("+{:.5}", delta));
             }
         }
@@ -592,6 +613,7 @@ pub(crate) fn load_labels_from_tsv(
                         loss_class: 1,
                         annotated_site_mass: None,
                         blocks_cleavage: false,
+                        parts: Vec::new(),
                         diagnostic_ions: Vec::new(),
                     },
                 ));
@@ -1108,6 +1130,7 @@ pub(crate) fn build_msnet_peptide(
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             };
             residues.push(aa.with_mod(m));

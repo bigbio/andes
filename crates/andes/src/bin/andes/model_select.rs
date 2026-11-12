@@ -73,6 +73,7 @@ pub(crate) fn build_aa_set(
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             };
             let ox = Modification {
@@ -86,6 +87,7 @@ pub(crate) fn build_aa_set(
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             };
             Ok(AminoAcidSetBuilder::new_standard()
@@ -116,6 +118,7 @@ pub(crate) fn default_aa_set_with_tag(
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
@@ -129,6 +132,7 @@ pub(crate) fn default_aa_set_with_tag(
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     // Protein N-terminal acetylation (+42.010565) — a near-universal default in
@@ -146,6 +150,7 @@ pub(crate) fn default_aa_set_with_tag(
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let mut b = AminoAcidSetBuilder::new_standard()
@@ -164,6 +169,7 @@ pub(crate) fn default_aa_set_with_tag(
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let tag_nterm = Modification {
@@ -177,6 +183,7 @@ pub(crate) fn default_aa_set_with_tag(
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);

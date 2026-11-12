@@ -240,6 +240,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         r[pos1 - 1] = r[pos1 - 1].clone().with_mod(m);

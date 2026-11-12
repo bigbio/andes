@@ -1835,6 +1835,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }
@@ -1851,6 +1852,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }
@@ -1895,6 +1897,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let acetyl = Modification {
@@ -1908,6 +1911,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         // First tryptic peptide AAAPEPTIDEK sits at the protein N-terminus (offset 0).
@@ -1981,6 +1985,7 @@ mod tests {
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: blocks,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             };
             let aa = AminoAcidSetBuilder::new_standard()
@@ -2064,6 +2069,7 @@ mod tests {
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             });
             if deamidation {

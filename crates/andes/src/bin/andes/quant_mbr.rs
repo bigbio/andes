@@ -2299,7 +2299,11 @@ mod tests {
             let rows = rows_of(&b.rows, ONLY_RUN0);
             // Identified in run 0 (target and decoy probes), a transfer with
             // its decoys in run 1: the target entry's rows, fitted alike.
-            assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
+            if run == 0 {
+                assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
+            } else {
+                assert_transfer_layout(&rows);
+            }
             let role = if run == 0 {
                 Role::Identified
             } else {
@@ -2404,7 +2408,7 @@ mod tests {
         // run 0 still has a prediction) but has no donor run left.
         let lib = with_entry(&fx.lib, ONLY_RUN1, |e| e.donors.clear());
         let all = extract_all(0, &fx.ms1_tables[0], &lib, &params()).unwrap();
-        assert_eq!(rows_of(&all.rows, ONLY_RUN1).len(), 3);
+        assert_transfer_layout(&rows_of(&all.rows, ONLY_RUN1));
         let sel = extract_run(0, &fx.ms1_tables[0], &lib, &params(), &SELECT).unwrap();
         assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
         assert_eq!(sel.counts.not_selected, 1);

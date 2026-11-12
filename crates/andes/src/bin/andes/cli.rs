@@ -980,6 +980,15 @@ pub(crate) struct SearchArgs {
     #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
     pub(crate) lfq_feature_fdr: f64,
 
+    /// Write the training table of the `--glyco --lfq --mbr` match scorer to
+    /// FILE: one row per scored candidate window, `label`, the ten match-model
+    /// features, and a group id (the peptide). Positives are the candidates
+    /// that cover a glycopeptide both runs identified; negatives are the other
+    /// scored windows and every window of the +11 Th decoy twin. A developer
+    /// tool for retraining the shipped model
+    /// (`resources/quant/glyco_mbr_model.txt`); it does not change the run.
+    #[arg(long = "glyco-mbr-match-train", value_name = "FILE")]
+    pub(crate) glyco_mbr_match_train: Option<PathBuf>,
     /// Directory for the per-run artifacts of multi-run quantification: for
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
     /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no

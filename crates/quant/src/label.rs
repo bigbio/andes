@@ -702,7 +702,7 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
         carbon13: heavy,
         natural_c: 0,
         natural_h: 0,
-        name: format!("Label:{}+{delta:.6}", site.describe()),
+        name: format!("Label:{}:{delta:.6}", site.describe()),
         unimod: None,
         chemical: false,
     }])
@@ -1164,95 +1164,122 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             .map(|x| x.0)?;
         t0s.push(rt[k]);
     }
-    let mut best: Option<(f64, f64, f64)> = None; // (objective, t0, w)
-    for &t0 in &t0s {
-        for &wm in params.widths {
-            let w = wm * w_prior;
-            let gc = profiles(t0, w);
-            if gc
-                .iter()
-                .all(|g| g.iter().map(|v| v * v).sum::<f64>() < 1e-9)
-            {
-                continue;
-            }
-            let (h, b, _, _) = normal(&gc, &w_inv);
-            let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
-            let obj = llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s);
-            if best.is_none_or(|(o, _, _)| obj > o) {
-                best = Some((obj, t0, w));
+    // The apex and width that maximise the likelihood ratio under the trace
+    // weights `wt` (with the RT prior), refined to a sub-scan apex by the
+    // vertex of the parabola through the best grid apex and its neighbours.
+    let search_apex = |wt: &[f64]| -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64, f64)> = None; // (objective, t0, w)
+        for &t0 in &t0s {
+            for &wm in params.widths {
+                let w = wm * w_prior;
+                let gc = profiles(t0, w);
+                if gc
+                    .iter()
+                    .all(|g| g.iter().map(|v| v * v).sum::<f64>() < 1e-9)
+                {
+                    continue;
+                }
+                let (h, b, _, _) = normal(&gc, wt);
+                let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
+                let obj = llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s);
+                if best.is_none_or(|(o, _, _)| obj > o) {
+                    best = Some((obj, t0, w));
+                }
             }
         }
-    }
-    let (best_obj, t0_grid, w) = best?;
-    // Sub-scan apex: the vertex of the parabola through the objective at the
-    // best grid apex and its neighbours (same width), when it improves on it.
-    let objective = |t0: f64| -> f64 {
-        let gc = profiles(t0, w);
-        let (h, b, _, _) = normal(&gc, &w_inv);
-        let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
-        llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s)
-    };
-    let mut t0 = t0_grid;
-    if let Some(k) = t0s.iter().position(|&x| x == t0_grid) {
-        if k > 0 && k + 1 < t0s.len() {
-            let (x0, x1, x2) = (t0s[k - 1], t0_grid, t0s[k + 1]);
-            let (y0, y1, y2) = (objective(x0), best_obj, objective(x2));
-            let den = (x0 - x1) * (x0 - x2) * (x1 - x2);
-            if den.abs() > 0.0 {
-                let a = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / den;
-                let b = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)) / den;
-                if a < 0.0 {
-                    let v = (-b / (2.0 * a)).clamp(x0, x2);
-                    if v.is_finite() && objective(v) > best_obj {
-                        t0 = v;
+        let (best_obj, t0_grid, w) = best?;
+        let objective = |t0: f64| -> f64 {
+            let gc = profiles(t0, w);
+            let (h, b, _, _) = normal(&gc, wt);
+            let (_, llr, _) = nn_quadratic(&h, &b, n_ch, &probe.free);
+            llr - (t0 - probe.t_hat).powi(2) / (2.0 * s * s)
+        };
+        let mut t0 = t0_grid;
+        if let Some(k) = t0s.iter().position(|&x| x == t0_grid) {
+            if k > 0 && k + 1 < t0s.len() {
+                let (x0, x1, x2) = (t0s[k - 1], t0_grid, t0s[k + 1]);
+                let (y0, y1, y2) = (objective(x0), best_obj, objective(x2));
+                let den = (x0 - x1) * (x0 - x2) * (x1 - x2);
+                if den.abs() > 0.0 {
+                    let a = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / den;
+                    let b = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)) / den;
+                    if a < 0.0 {
+                        let v = (-b / (2.0 * a)).clamp(x0, x2);
+                        if v.is_finite() && objective(v) > best_obj {
+                            t0 = v;
+                        }
                     }
                 }
             }
         }
-    }
-    let gc = profiles(t0, w);
+        Some((t0, w))
+    };
+    let (mut t0, mut w) = search_apex(&w_inv)?;
     // Interference: a trace whose residual at the optimum is far above its
     // noise carries another species (an interfered isotope of one channel);
     // its weight is divided by its excess (robust reweighting, twice), so
-    // the amplitudes rest on the traces that follow the model.
+    // the amplitudes rest on the traces that follow the model. An interferer
+    // strong enough to have pulled the apex to itself loses its weight here,
+    // so the apex is searched again under the robust weights (and the weights
+    // re-derived there), until the apex stays put.
     let mut w_fit = w_inv.clone();
+    let mut gc = profiles(t0, w);
     let (mut h, mut b, mut proj, mut sgg) = normal(&gc, &w_fit);
     let (mut a, mut llr, mut passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
-    for _ in 0..2 {
-        let mut changed = false;
-        for t in 0..n_t {
-            let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
-            if mt.iter().all(|&m| m == 0.0) {
-                continue;
-            }
-            let mut ss = 0.0;
-            let mut n = 0usize;
-            for (j, &tj) in rt.iter().enumerate() {
-                if (tj - t0).abs() > 2.0 * w {
+    for round in 0..3 {
+        let mut reweighted = false;
+        for _ in 0..2 {
+            let mut changed = false;
+            for t in 0..n_t {
+                let mt = &traces.mix[t * n_ch..(t + 1) * n_ch];
+                if mt.iter().all(|&m| m == 0.0) {
                     continue;
                 }
-                let model: f64 = (0..n_ch).map(|c| mt[c] * a[c] * gc[c][j]).sum();
-                let r = yc[t][j] - model;
-                ss += r * r;
-                n += 1;
+                let mut ss = 0.0;
+                let mut n = 0usize;
+                for (j, &tj) in rt.iter().enumerate() {
+                    if (tj - t0).abs() > 2.0 * w {
+                        continue;
+                    }
+                    let model: f64 = (0..n_ch).map(|c| mt[c] * a[c] * gc[c][j]).sum();
+                    let r = yc[t][j] - model;
+                    ss += r * r;
+                    n += 1;
+                }
+                if n < 3 {
+                    continue;
+                }
+                let chi = ss / n as f64 * w_inv[t];
+                let target = if chi > 9.0 {
+                    w_inv[t] * 9.0 / chi
+                } else {
+                    w_inv[t]
+                };
+                if (target - w_fit[t]).abs() > 1e-12 * w_inv[t] {
+                    w_fit[t] = target;
+                    changed = true;
+                }
             }
-            if n < 3 {
-                continue;
+            if !changed {
+                break;
             }
-            let chi = ss / n as f64 * w_inv[t];
-            let target = if chi > 9.0 {
-                w_inv[t] * 9.0 / chi
-            } else {
-                w_inv[t]
-            };
-            if (target - w_fit[t]).abs() > 1e-12 * w_inv[t] {
-                w_fit[t] = target;
-                changed = true;
-            }
+            reweighted = true;
+            (h, b, proj, sgg) = normal(&gc, &w_fit);
+            (a, llr, passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
         }
-        if !changed {
+        if !reweighted || round == 2 {
             break;
         }
+        let Some((t1, w1)) = search_apex(&w_fit) else {
+            break;
+        };
+        if t1 == t0 && w1 == w {
+            break;
+        }
+        (t0, w) = (t1, w1);
+        // Weights are re-derived at the new apex, from the noise alone.
+        w_fit.clone_from(&w_inv);
+        gc = profiles(t0, w);
         (h, b, proj, sgg) = normal(&gc, &w_fit);
         (a, llr, passive) = nn_quadratic(&h, &b, n_ch, &probe.free);
     }
@@ -1306,12 +1333,14 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                 exp.push(traces.mix[t * n_ch + c]);
             }
             let envelope_cos = cosine(&obs, &exp);
-            // Coherence of the monoisotopic trace with the profile.
+            // Coherence of the monoisotopic trace with the profile, around
+            // the channel's own (shifted) apex.
+            let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
             let mono = traces.own[c][1];
             let mut xs = Vec::new();
             let mut gs = Vec::new();
             for (j, &t) in rt.iter().enumerate() {
-                if (t - t0).abs() > 2.0 * w {
+                if (t - t_ch).abs() > 2.0 * w {
                     continue;
                 }
                 let mut v = yc[mono][j];
@@ -1409,8 +1438,9 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             let mz = probe.channel_mz[c];
             let tol = mz * params.tol_ppm * 1e-6;
             let (mut sw, mut swe) = (0.0, 0.0);
+            let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
             for (j, i) in window.clone().enumerate() {
-                if (rt[j] - t0).abs() > w {
+                if (rt[j] - t_ch).abs() > w {
                     continue;
                 }
                 if let Some((m, inten)) = ms1.apex_centroid(i, mz - tol, mz + tol) {
@@ -1815,6 +1845,12 @@ mod tests {
         assert_eq!(s.channels[1].sites.len(), 2);
         assert_eq!(s.channels[1].sites[0].heavy_atoms, 8);
         assert!(s.channels[1].qpx_label.is_some());
+        // A stacked mod's name joins its parts with '+': a custom label's
+        // own name must not contain it, or the label is lost when split.
+        for l in &s.channels[1].sites {
+            assert!(!l.name.contains('+'), "{}", l.name);
+            assert_eq!(s.channel_of_label(l.site, &l.name), Some(1));
+        }
     }
 
     #[test]
@@ -2025,6 +2061,39 @@ mod tests {
         let fit = fit_group(&run, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r + 1.0).abs() < 0.1, "{r}");
+    }
+
+    /// A single-trace interferer strong enough to win the unweighted apex
+    /// search inside the search range: the robust weights take it out and
+    /// the apex is searched again, back at the peptide.
+    #[test]
+    fn single_trace_interferer_does_not_move_the_apex() {
+        let light = [0.55, 0.3, 0.11, 0.04];
+        let el = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
+        let eh = ChannelEnvelope::new(&light, 0, 1.0, 8, 0.99);
+        let lone = ChannelEnvelope::new(&[1.0], 0, 1.0, 0, 1.0);
+        let ml = 600.3;
+        let mh = ml + 8.014199 / 2.0;
+        // On the heavy channel's M+2 only, 7 s from the peptide's apex.
+        let other = mh + 2.0 * ISOTOPE / 2.0;
+        let run = synthetic_run(
+            &[
+                (ml, el, 1e6, 100.0),
+                (mh, eh, 1e6, 100.0),
+                (other, lone, 8e6, 107.0),
+            ],
+            4.0,
+            50.0,
+        );
+        let fit = fit_group(
+            &run,
+            &probe(&[ml, mh], &[el, eh], 100.0),
+            &FitParams::default(),
+        )
+        .unwrap();
+        assert!((fit.t0 - 100.0).abs() < 1.0, "apex {}", fit.t0);
+        let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
+        assert!(r.abs() < 0.15, "{r}");
     }
 
     #[test]

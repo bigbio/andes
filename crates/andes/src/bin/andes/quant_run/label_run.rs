@@ -111,14 +111,47 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
     (mods, channels)
 }
 
-/// Most labelled sites a peptide of the search can carry: one per residue
-/// site up to the missed cleavages (each labelled residue of a tryptic
-/// peptide is a cleavage site or its C-terminus), plus the N-terminus.
-pub(crate) fn max_label_sites(spec: &LabelSpec, missed_cleavages: u32) -> u32 {
+/// Labelled residues a peptide may carry beyond what the digestion bounds
+/// (labels on residues the enzyme does not cleave after, such as Leu3, or any
+/// residue in a non-specific digest).
+const FREE_LABEL_SITES: u32 = 8;
+
+/// Most labelled sites a peptide of the search can carry. A labelled residue
+/// that every enzyme cleaves after (SILAC K/R with trypsin) is a cleavage site
+/// or the C-terminus, so those number at most the missed cleavages plus one;
+/// labels on other residues are capped at [`FREE_LABEL_SITES`]; plus the
+/// N-terminus. The labels count apart from the other variable mods
+/// (`SearchParams::max_label_sites`), so this bounds the labels only.
+pub(crate) fn max_label_sites(
+    spec: &LabelSpec,
+    enzymes: &[model::enzyme::Enzyme],
+    missed_cleavages: u32,
+) -> u32 {
+    use model::enzyme::Enzyme;
     let sites = spec.sites();
-    let residue = sites.iter().any(|s| matches!(s, Site::Residue(_)));
+    let specific = !enzymes.is_empty()
+        && enzymes
+            .iter()
+            .all(|e| !matches!(e, Enzyme::NonSpecific | Enzyme::NoCleavage));
+    let mut cleavage = false;
+    let mut free = false;
+    for s in &sites {
+        if let Site::Residue(r) = s {
+            if specific && enzymes.iter().all(|e| e.is_cleavable_after(*r)) {
+                cleavage = true;
+            } else {
+                free = true;
+            }
+        }
+    }
     let nterm = sites.contains(&Site::NTerm);
-    u32::from(residue) * (missed_cleavages + 1) + u32::from(nterm)
+    let residues = match (cleavage, free) {
+        (false, false) => 0,
+        (true, false) => missed_cleavages + 1,
+        (false, true) => FREE_LABEL_SITES,
+        (true, true) => missed_cleavages + 1 + FREE_LABEL_SITES,
+    };
+    residues + u32::from(nterm)
 }
 
 /// A PSM in label terms.
@@ -146,11 +179,19 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
     let spec_sites = spec.sites();
     for (i, aa) in res.iter().enumerate() {
         let mut non_label: Vec<&str> = Vec::new();
+        // Whether a non-label part holds the side chain / the terminus.
+        let mut side_taken = false;
+        let mut term_taken = false;
         let mut non_label_delta = 0.0;
         let mut used: Vec<Site> = Vec::new();
         if let Some(m) = aa.mod_ {
             let mut label_delta = 0.0;
-            for part in m.name.split('+') {
+            let n_parts = m.name.split('+').count();
+            for (k, part) in m.name.split('+').enumerate() {
+                // A stack lists its side-chain parts first and its terminal
+                // part last, and takes its location from that terminal part.
+                let terminal =
+                    m.location != model::modification::ModLocation::Anywhere && k + 1 == n_parts;
                 // The site of a label part: this residue's, then the N-terminus.
                 let site = [Site::Residue(aa.residue), Site::NTerm]
                     .into_iter()
@@ -168,20 +209,25 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
                         instances.push(s);
                         label_delta += spec.channels[c].label_at(s)?.delta;
                     }
-                    None => non_label.push(part),
+                    None => {
+                        non_label.push(part);
+                        if terminal {
+                            term_taken = true;
+                        } else {
+                            side_taken = true;
+                        }
+                    }
                 }
             }
             label_mass += label_delta;
             non_label_delta = m.mass_delta - label_delta;
         }
-        // Labelable sites left without a label.
-        let nterm_free = aa
-            .mod_
-            .is_none_or(|m| m.location == model::modification::ModLocation::Anywhere);
+        // Labelable sites left without a label: a non-label mod takes a
+        // residue's side chain or the N-terminus, not both.
         for s in &spec_sites {
             let here = match s {
-                Site::Residue(r) => *r == aa.residue && non_label.is_empty(),
-                Site::NTerm => i == 0 && nterm_free && non_label.is_empty(),
+                Site::Residue(r) => *r == aa.residue && !side_taken,
+                Site::NTerm => i == 0 && !term_taken,
             };
             if here && !used.contains(s) {
                 unlabelled.push(*s);
@@ -456,6 +502,13 @@ fn decoy_probes(
             let mut p = probe.clone();
             for &c in moved {
                 p.channel_mz[c] += shift / z;
+            }
+            // Satellites follow the parents in the probe; they move with them.
+            let n_ch = g.channel_mz.len();
+            for (k, &(parent, _)) in g.satellites.iter().enumerate() {
+                if moved.contains(&parent) {
+                    p.channel_mz[n_ch + k] += shift / z;
+                }
             }
             p
         })
@@ -1084,13 +1137,19 @@ pub(super) fn quantify(
                     rec.id_run_file_name = None;
                     rec.psm_ids = Vec::new();
                     rec.scan = Vec::new();
-                    rec.observed_mz = g.channel_mz[f
-                        .fit
-                        .channels
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.amplitude.total_cmp(&b.1.amplitude))
-                        .map_or(0, |x| x.0)] as f32;
+                    // The donor's peptidoform and m/z, observed in this run
+                    // at that channel's fitted mass error.
+                    let c = labelled(hit.cand, spec).map_or(0, |l| l.channel);
+                    let calc = g.channel_mz[c];
+                    let err = f.fit.channels[c].mass_err_ppm;
+                    rec.calculated_mz = calc as f32;
+                    if err.is_finite() {
+                        rec.observed_mz = (calc * (1.0 + err * 1e-6)) as f32;
+                        rec.mass_error_ppm = Some(err as f32);
+                    } else {
+                        rec.observed_mz = calc as f32;
+                        rec.mass_error_ppm = None;
+                    }
                 }
                 if any_transfer {
                     rec.mbr = Some(output::feature_parquet::MbrColumns {
@@ -1327,7 +1386,8 @@ fn transfer(
     }
     let q = weighted_qvalues(&scored);
     // The q-value of an identity-decoy transfer: that of the weakest target
-    // transfer scoring at least as high (the targets' step function).
+    // transfer scoring at least as high (the targets' step function); one
+    // above every target takes the best target's.
     let mut steps: Vec<(f64, f64)> = target_rows.iter().map(|&r| (scored[r].0, q[r])).collect();
     steps.sort_by(|a, b| b.0.total_cmp(&a.0));
     let q_at = |score: f64| -> f64 {
@@ -1335,6 +1395,7 @@ fn transfer(
             .iter()
             .take_while(|(s, _)| *s >= score)
             .last()
+            .or(steps.first())
             .map_or(1.0, |x| x.1)
     };
     let accepted_targets = target_rows.iter().filter(|&&r| q[r] <= fdr).count();
@@ -1567,6 +1628,73 @@ mod tests {
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
     }
 
+    /// A protein N-terminal acetyl holds the N-terminus, not the first
+    /// residue's side chain: light and heavy forms of an acetylated
+    /// `KPEPTIDER` name the same label sites (K and R).
+    #[test]
+    fn terminal_mod_leaves_the_residue_label_site() {
+        use model::amino_acid::AminoAcid;
+        use model::modification::{ModLocation, Modification, ResidueSpec};
+        use model::peptide::Peptide;
+        let spec = LabelSpec::parse("silac2").unwrap();
+        let m = |name: &str, delta: f64, r: u8, loc: ModLocation| -> &'static Modification {
+            Box::leak(Box::new(Modification {
+                name: name.into(),
+                mass_delta: delta,
+                residue: ResidueSpec::Specific(r),
+                location: loc,
+                fixed: false,
+                accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
+                annotated_site_mass: None,
+                blocks_cleavage: false,
+                diagnostic_ions: Vec::new(),
+            }))
+        };
+        let lys8 = spec.channels[1].label_at(Site::Residue(b'K')).unwrap();
+        let arg10 = spec.channels[1].label_at(Site::Residue(b'R')).unwrap();
+        let acetyl = m("Acetyl", 42.010565, b'K', ModLocation::ProtNTerm);
+        let heavy_k = m(
+            &format!("{}+Acetyl", lys8.name),
+            lys8.delta + 42.010565,
+            b'K',
+            ModLocation::ProtNTerm,
+        );
+        let heavy_r = m(&arg10.name, arg10.delta, b'R', ModLocation::Anywhere);
+        let cand = |first: &'static Modification, last: Option<&'static Modification>| {
+            let mut res: Vec<AminoAcid> = b"KPEPTIDER"
+                .iter()
+                .map(|&r| AminoAcid::standard(r).unwrap().clone())
+                .collect();
+            res[0] = res[0].clone().with_mod(first);
+            if let Some(l) = last {
+                res[8] = res[8].clone().with_mod(l);
+            }
+            Candidate {
+                peptide: Peptide::new(res, b'_', b'A'),
+                protein_index: 0,
+                start_offset_in_protein: 0,
+                is_decoy: false,
+                is_protein_n_term: true,
+                is_protein_c_term: false,
+            }
+        };
+        let light = labelled(&cand(acetyl, None), &spec).unwrap();
+        let heavy = labelled(&cand(heavy_k, Some(heavy_r)), &spec).unwrap();
+        assert_eq!(light.channel, 0);
+        assert_eq!(heavy.channel, 1);
+        let sorted = |v: &[Site]| {
+            let mut v = v.to_vec();
+            v.sort_by_key(|s| format!("{s:?}"));
+            v
+        };
+        assert_eq!(sorted(&light.instances), sorted(&heavy.instances));
+        assert_eq!(light.instances.len(), 2);
+        assert_eq!(light.key, heavy.key);
+        assert!((light.light_mass - heavy.light_mass).abs() < 1e-6);
+    }
+
     #[test]
     fn protein_ratio_is_the_median_of_peptide_medians() {
         let row = |pep: &str, z: u8, v: f64, status: &str| output::LabelRow {
@@ -1630,10 +1758,19 @@ mod tests {
 
     #[test]
     fn max_sites_follow_missed_cleavages() {
+        use model::enzyme::Enzyme;
         let s = LabelSpec::parse("silac2").unwrap();
-        assert_eq!(max_label_sites(&s, 2), 3);
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2), 3);
         let d = LabelSpec::parse("dimethyl3").unwrap();
-        assert_eq!(max_label_sites(&d, 1), 3);
+        assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 1), 3);
+        // Leu is no cleavage site: its labels are not bound by missed cleavages.
+        let l = LabelSpec::parse("[][Leu3]").unwrap();
+        assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2), FREE_LABEL_SITES);
+        // Arg labels with Lys-C are not bound by its cleavages either.
+        assert_eq!(
+            max_label_sites(&s, &[Enzyme::LysC], 2),
+            3 + FREE_LABEL_SITES
+        );
     }
 
     #[test]

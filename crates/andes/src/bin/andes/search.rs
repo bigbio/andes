@@ -1160,14 +1160,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     if let Some(spec) = &label_spec {
-        // The labels do not use up the other mods' allowance.
-        let extra = crate::quant_run::label_run::max_label_sites(spec, params.max_missed_cleavages);
-        params.max_variable_mods_per_peptide += extra;
+        // The labels count apart from the other mods' allowance.
+        let enzymes: Vec<_> = std::iter::once(params.enzyme)
+            .chain(params.extra_enzymes.iter().copied())
+            .collect();
+        let extra = crate::quant_run::label_run::max_label_sites(
+            spec,
+            &enzymes,
+            params.max_missed_cleavages,
+        );
+        params.max_label_sites = extra;
         eprintln!(
             "--label: channels {}; label mods added to the search (up to {extra} labelled sites \
-             per peptide on top of {} other variable mods)",
+             per peptide, apart from the {} other variable mods)",
             spec.describe(),
-            params.max_variable_mods_per_peptide - extra
+            params.max_variable_mods_per_peptide
         );
     }
     params.precursor_cal_mode = cli.precursor_cal;

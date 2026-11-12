@@ -23,16 +23,25 @@ import struct
 import sys
 import xml.etree.ElementTree as ET
 import zlib
+from xml.sax.saxutils import quoteattr
 
 NS = "{http://psi.hupo.org/ms/mzml}"
 
 
-def cv(elem):
-    return {p.get("accession"): p.get("value") for p in elem.iter(NS + "cvParam")}
+def cv(elem, groups=None):
+    """The cvParams of `elem` and its descendants, with those of every
+    referenced `referenceableParamGroup` (inline ones win)."""
+    if elem is None:
+        return {}
+    out = {}
+    for ref in elem.iter(NS + "referenceableParamGroupRef"):
+        out.update((groups or {}).get(ref.get("ref"), {}))
+    out.update({p.get("accession"): p.get("value") for p in elem.iter(NS + "cvParam")})
+    return out
 
 
-def decode(bda):
-    params = cv(bda)
+def decode(bda, groups):
+    params = cv(bda, groups)
     raw = base64.b64decode(bda.find(NS + "binary").text or "")
     if "MS:1000574" in params:
         raw = zlib.decompress(raw)
@@ -43,20 +52,28 @@ def decode(bda):
     return kind, vals
 
 
-def peaks(el):
+def peaks(el, groups):
     arrays = {}
     for bda in el.iter(NS + "binaryDataArray"):
-        k, v = decode(bda)
+        k, v = decode(bda, groups)
         if k:
             arrays[k] = v
     return arrays
 
 
+def param_group(el, groups):
+    """Record a `referenceableParamGroup` (they precede the spectra)."""
+    groups[el.get("id")] = {p.get("accession"): p.get("value") for p in el.iter(NS + "cvParam")}
+
+
 def spectra(path):
     """(profile, arrays) of every spectrum of an mzML, in file order."""
+    groups = {}
     for _, el in ET.iterparse(path, events=("end",)):
-        if el.tag == NS + "spectrum":
-            yield "MS:1000128" in cv(el), peaks(el)
+        if el.tag == NS + "referenceableParamGroup":
+            param_group(el, groups)
+        elif el.tag == NS + "spectrum":
+            yield "MS:1000128" in cv(el, groups), peaks(el, groups)
             el.clear()
 
 
@@ -101,32 +118,38 @@ def main():
     w('<mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2">\n')
     hdr = pos
     w('<msRun scanCount="%010d" startTime="PT%014.4fS" endTime="PT%014.4fS">\n' % (0, 0.0, 0.0))
-    w('<parentFile fileName="%s" fileType="RAWData" fileSha1="0000000000000000000000000000000000000000"/>\n' % a.inp)
-    w('<msInstrument><msManufacturer category="msManufacturer" value="%s"/>'
+    w('<parentFile fileName=%s fileType="RAWData" fileSha1="0000000000000000000000000000000000000000"/>\n'
+      % quoteattr(a.inp))
+    w('<msInstrument><msManufacturer category="msManufacturer" value=%s/>'
       '<msModel category="msModel" value="unknown"/><msIonisation category="msIonisation" value="ESI"/>'
-      '<msMassAnalyzer category="msMassAnalyzer" value="%s"/><msDetector category="msDetector" value="unknown"/></msInstrument>\n'
-      % (a.vendor, a.analyzer))
+      '<msMassAnalyzer category="msMassAnalyzer" value=%s/><msDetector category="msDetector" value="unknown"/></msInstrument>\n'
+      % (quoteattr(a.vendor), quoteattr(a.analyzer)))
     w('<dataProcessing centroided="0"><software type="conversion" name="mzml_to_mzxml.py" version="1"/></dataProcessing>\n')
 
     offsets = []
     num = 0
+    t0 = t1 = 0.0
+    groups = {}
     other = spectra(a.ms2_from) if a.ms2_from else None
     for ev, el in ET.iterparse(a.inp, events=("end",)):
+        if el.tag == NS + "referenceableParamGroup":
+            param_group(el, groups)
+            continue
         if el.tag != NS + "spectrum":
             continue
-        p = cv(el)
+        p = cv(el, groups)
         level = int(p.get("MS:1000511", "1"))
         profile = "MS:1000128" in p
         scan = el.find(NS + "scanList/" + NS + "scan")
-        sp = cv(scan) if scan is not None else {}
-        rt = float(sp.get("MS:1000016", "0"))
-        unit = None
-        for c in scan.iter(NS + "cvParam"):
-            if c.get("accession") == "MS:1000016":
-                unit = c.get("unitName")
-        if unit == "minute":
-            rt *= 60.0
-        arrays = peaks(el)
+        sp = cv(scan, groups)
+        rt = float(sp.get("MS:1000016") or 0.0)
+        # Minutes by the unit accession (unitName is optional).
+        if scan is not None:
+            for c in scan.iter(NS + "cvParam"):
+                if c.get("accession") == "MS:1000016" and (
+                        c.get("unitAccession") == "UO:0000031" or c.get("unitName") == "minute"):
+                    rt *= 60.0
+        arrays = peaks(el, groups)
         if other is not None:
             o_profile, o_arrays = next(other)
             if level == 2:
@@ -154,9 +177,12 @@ def main():
         ce = ""
         if level == 2:
             pre = el.find(NS + "precursorList/" + NS + "precursor")
-            iso = cv(pre.find(NS + "isolationWindow")) if pre.find(NS + "isolationWindow") is not None else {}
-            si = cv(pre.find(NS + "selectedIonList/" + NS + "selectedIon"))
-            act = cv(pre.find(NS + "activation"))
+            if pre is None:
+                pre = ET.Element(NS + "precursor")
+            # Every part is optional in mzML: a missing one has no parameters.
+            iso = cv(pre.find(NS + "isolationWindow"), groups)
+            si = cv(pre.find(NS + "selectedIonList/" + NS + "selectedIon"), groups)
+            act = cv(pre.find(NS + "activation"), groups)
             pmz = float(si.get("MS:1000744") or iso.get("MS:1000827"))
             z = si.get("MS:1000041")
             pint = si.get("MS:1000042") or "0"
@@ -190,6 +216,9 @@ def main():
         el.clear()
         if num % 2000 == 0:
             print(num, file=sys.stderr)
+    if num == 0:
+        out.close()
+        sys.exit(f"{a.inp}: no spectrum with peaks; nothing written")
     w('</msRun>\n')
     idx = pos
     w('<index name="scan">\n')

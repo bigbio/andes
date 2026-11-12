@@ -1,10 +1,16 @@
 """Run OpenMS FeatureFinderMultiplex (pyOpenMS) on one run and write its
 multiplets as TSV: rt, charge, then per channel m/z and intensity."""
-import sys, time
+import argparse, sys, time
 import pyopenms as p
-mzml, labels, mc, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-tol = float(sys.argv[5]) if len(sys.argv) > 5 else 6.0
-cutoff = float(sys.argv[6]) if len(sys.argv) > 6 else 1000.0
+ap = argparse.ArgumentParser(description=__doc__)
+ap.add_argument("mzml")
+ap.add_argument("labels", help="e.g. '[][Lys8,Arg10]'")
+ap.add_argument("max_labelled", type=int, help="algorithm:max_nr_labelled_aas")
+ap.add_argument("out")
+ap.add_argument("tol_ppm", nargs="?", type=float, default=6.0)
+ap.add_argument("intensity_cutoff", nargs="?", type=float, default=1000.0)
+a = ap.parse_args()
+mzml, labels, mc, out, tol, cutoff = a.mzml, a.labels, a.max_labelled, a.out, a.tol_ppm, a.intensity_cutoff
 exp = p.MSExperiment()
 fh = p.MzMLFile()
 o = fh.getOptions(); o.setMSLevels([1]); fh.setOptions(o)

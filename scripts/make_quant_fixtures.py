@@ -632,9 +632,10 @@ def make_dimethyl_run(precursors, path: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="test-fixtures")
-    ap.add_argument("--mbr", action="store_true", help="write the three MBR runs only")
-    ap.add_argument("--silac", action="store_true", help="write the two SILAC runs only")
-    ap.add_argument("--dimethyl", action="store_true", help="write the dimethyl triplex run only")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--mbr", action="store_true", help="write the three MBR runs only")
+    mode.add_argument("--silac", action="store_true", help="write the two SILAC runs only")
+    mode.add_argument("--dimethyl", action="store_true", help="write the dimethyl triplex run only")
     args = ap.parse_args()
     if args.dimethyl:
         precursors = mbr_precursors(os.path.join(args.out, "BSA.fasta"))

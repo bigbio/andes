@@ -11,7 +11,7 @@ for run, g in t.groupby("filename"):
     one = j[(j.status_l == "identified") ^ (j.status_h == "identified")].copy()
     one["q"] = np.where(one.status_l == "identified", one.channel_q_value_h, one.channel_q_value_l)
     one["status"] = np.where(one.status_l == "identified", one.status_h, one.status_l)
-    one["qbin"] = pd.cut(one.q, [0, 0.01, 0.02, 0.05, 0.1, 0.2, 1.0])
+    one["qbin"] = pd.cut(one.q, [0, 0.01, 0.02, 0.05, 0.1, 0.2, 1.0], include_lowest=True)
     x = one.dropna(subset=["r"]).groupby("qbin", observed=False).r
     print(pd.DataFrame({"n": x.size(), "median": x.median().round(3), "iqr": (x.quantile(.75) - x.quantile(.25)).round(3)}))
     print(one.status.value_counts().to_dict())

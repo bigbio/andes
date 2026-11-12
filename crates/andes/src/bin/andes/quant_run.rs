@@ -527,14 +527,21 @@ impl QuantCollector {
             .collect();
         let span = self.next_span_start..end;
         self.next_span_start = end;
-        if let (true, Some(idx)) = (self.settings.lfq, &ms1) {
+        let ms1_quant = if self.settings.lfq {
+            Some("Label-free areas")
+        } else if self.settings.label.is_some() {
+            Some("Labelled-pair ratios")
+        } else {
+            None
+        };
+        if let (Some(what), Some(idx)) = (ms1_quant, &ms1) {
             if let Some(frac) = idx.isotope_partner_fraction(MS1_RESOLUTION_CHECK_PPM) {
                 if frac < MS1_MIN_ISOTOPE_PARTNER_FRACTION {
                     eprintln!(
                         "WARN: quant: {stem}: the MS1 scans do not look high-resolution \
                          ({:.0}% of their most intense centroids have an isotope partner within \
                          {MS1_RESOLUTION_CHECK_PPM} ppm; Orbitrap/TOF survey scans reach 70-95%). \
-                         Label-free areas from low-resolution MS1 are not meaningful.",
+                         {what} from low-resolution MS1 are not meaningful.",
                         100.0 * frac
                     );
                 }

@@ -60,6 +60,9 @@ impl Terminus {
 struct FormList {
     variants: Vec<AminoAcid>,
     slots: Vec<u8>,
+    /// How many of each form's `slots` are channel labels (they count against
+    /// the label-site allowance, not the variable-mod one).
+    label_slots: Vec<u8>,
     /// Label state of each form (see [`label_code`]); empty when no label
     /// channels are registered or no label applies at this position.
     labels: Vec<u8>,
@@ -178,6 +181,13 @@ impl AminoAcidSet {
     #[inline]
     pub fn form_slots(&self, residue: u8, n: Terminus, c: Terminus) -> &[u8] {
         &self.forms[form_index(residue, n, c)].slots
+    }
+
+    /// How many of each form's [`Self::form_slots`] are channel labels
+    /// ([`AminoAcidSetBuilder::with_label_channels`]); all zero without labels.
+    #[inline]
+    pub fn form_label_slots(&self, residue: u8, n: Terminus, c: Terminus) -> &[u8] {
+        &self.forms[form_index(residue, n, c)].label_slots
     }
 
     /// Every non-empty form list with its slot counts.
@@ -667,6 +677,8 @@ impl AminoAcidSetBuilder {
                                     continue;
                                 }
                                 let slots = s_slots + n_slots + c_slots;
+                                let label_slots =
+                                    parts.iter().filter(|m| label_of(m).is_some()).count() as u8;
                                 let aa = match parts.as_slice() {
                                     [] => std_aa.clone(),
                                     [m] => std_aa.clone().with_mod(*m),
@@ -696,6 +708,7 @@ impl AminoAcidSetBuilder {
                                     None => {
                                         list.variants.push(aa);
                                         list.slots.push(slots);
+                                        list.label_slots.push(label_slots);
                                         if position_labelable {
                                             list.labels.push(code);
                                         }
@@ -705,6 +718,7 @@ impl AminoAcidSetBuilder {
                                     {
                                         list.variants[i] = aa;
                                         list.slots[i] = slots;
+                                        list.label_slots[i] = label_slots;
                                         if position_labelable {
                                             list.labels[i] = code;
                                         }

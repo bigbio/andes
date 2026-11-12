@@ -586,6 +586,7 @@ pub(crate) fn expand_mod_combinations(
     let mut position_variants: Vec<&[AminoAcid]> = Vec::with_capacity(n);
     let mut position_slots: Vec<&[u8]> = Vec::with_capacity(n);
     let mut position_labels: Vec<Option<&[u8]>> = Vec::new();
+    let mut position_label_slots: Vec<&[u8]> = Vec::new();
     let labelled = params.aa_set.has_label_channels();
     for (i, &r) in span.iter().enumerate() {
         let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
@@ -593,6 +594,7 @@ pub(crate) fn expand_mod_combinations(
         position_slots.push(params.aa_set.form_slots(r, nt, ct));
         if labelled {
             position_labels.push(params.aa_set.form_labels(r, nt, ct));
+            position_label_slots.push(params.aa_set.form_label_slots(r, nt, ct));
         }
     }
 
@@ -602,11 +604,12 @@ pub(crate) fn expand_mod_combinations(
         &position_variants,
         &position_slots,
         &position_labels,
+        &position_label_slots,
         LabelState::default(),
         0,
         &mut current,
-        0,
-        params.max_variable_mods_per_peptide,
+        ModBudget::default(),
+        ModBudget::max_of(params),
         sites.with_forms(
             &params.aa_set,
             n,
@@ -865,13 +868,14 @@ fn walk_forms_bounded(
         pv: &[&'a [AminoAcid]],
         ps: &[&[u8]],
         pl: &[Option<&[u8]>],
+        pls: &[&[u8]],
         label: LabelState,
         pos: usize,
         sum: f64,
         masses: &mut SmallVec<[f64; WALK_INLINE_LEN]>,
         chosen: &mut SmallVec<[&'a AminoAcid; WALK_INLINE_LEN]>,
-        mods_used: u32,
-        max_mods: u32,
+        mods_used: ModBudget,
+        max_mods: ModBudget,
         sites: SpanSites<'_>,
         min_rest: &[f64],
         max_rest: &[f64],
@@ -886,8 +890,10 @@ fn walk_forms_bounded(
             return;
         }
         for (j, (variant, &slots)) in pv[pos].iter().zip(ps[pos]).enumerate() {
-            let new_mods = mods_used + u32::from(slots);
-            if new_mods > max_mods || !sites.allows(pos, variant) {
+            let Some(new_mods) = mods_used.take(slots, pls, pos, j, max_mods) else {
+                continue;
+            };
+            if !sites.allows(pos, variant) {
                 continue;
             }
             let Some(next_label) = step_label(pl, pos, j, label) else {
@@ -905,6 +911,7 @@ fn walk_forms_bounded(
                 pv,
                 ps,
                 pl,
+                pls,
                 next_label,
                 pos + 1,
                 next,
@@ -926,23 +933,27 @@ fn walk_forms_bounded(
     }
     let mut position_labels: smallvec::SmallVec<[Option<&[u8]>; WALK_INLINE_LEN]> =
         smallvec::SmallVec::new();
+    let mut position_label_slots: smallvec::SmallVec<[&[u8]; WALK_INLINE_LEN]> =
+        smallvec::SmallVec::new();
     if params.aa_set.has_label_channels() {
         for (i, &r) in span.iter().enumerate() {
             let (nt, ct) = position_termini(i, n, is_protein_n_term, is_protein_c_term);
             position_labels.push(params.aa_set.form_labels(r, nt, ct));
+            position_label_slots.push(params.aa_set.form_label_slots(r, nt, ct));
         }
     }
     rec(
         &position_variants,
         &position_slots,
         &position_labels,
+        &position_label_slots,
         LabelState::default(),
         0,
         0.0,
         &mut masses,
         &mut chosen,
-        0,
-        params.max_variable_mods_per_peptide,
+        ModBudget::default(),
+        ModBudget::max_of(params),
         sites.with_forms(
             &params.aa_set,
             n,
@@ -1104,11 +1115,12 @@ fn expand_recursive(
     position_variants: &[&[AminoAcid]],
     position_slots: &[&[u8]],
     position_labels: &[Option<&[u8]>],
+    position_label_slots: &[&[u8]],
     label: LabelState,
     pos: usize,
     current: &mut Vec<AminoAcid>,
-    mods_used: u32,
-    max_mods: u32,
+    mods_used: ModBudget,
+    max_mods: ModBudget,
     sites: SpanSites<'_>,
     out: &mut Vec<Vec<AminoAcid>>,
 ) {
@@ -1121,8 +1133,10 @@ fn expand_recursive(
         .zip(position_slots[pos])
         .enumerate()
     {
-        let new_mods = mods_used + u32::from(slots);
-        if new_mods > max_mods || !sites.allows(pos, variant) {
+        let Some(new_mods) = mods_used.take(slots, position_label_slots, pos, j, max_mods) else {
+            continue;
+        };
+        if !sites.allows(pos, variant) {
             continue;
         }
         let Some(next_label) = step_label(position_labels, pos, j, label) else {
@@ -1133,6 +1147,7 @@ fn expand_recursive(
             position_variants,
             position_slots,
             position_labels,
+            position_label_slots,
             next_label,
             pos + 1,
             current,
@@ -1142,6 +1157,47 @@ fn expand_recursive(
             out,
         );
         current.pop();
+    }
+}
+
+/// Variable modifications a peptidoform has taken so far, counted apart: the
+/// channel labels of `--label` against [`SearchParams::max_label_sites`], every
+/// other variable mod against [`SearchParams::max_variable_mods_per_peptide`].
+#[derive(Debug, Clone, Copy, Default)]
+struct ModBudget {
+    mods: u32,
+    labels: u32,
+}
+
+impl ModBudget {
+    fn max_of(params: &SearchParams) -> Self {
+        Self {
+            mods: params.max_variable_mods_per_peptide,
+            labels: params.max_label_sites,
+        }
+    }
+
+    /// The budget after form `j` of position `pos`, carrying `slots` variable
+    /// mods of which `label_slots[pos][j]` are labels; `None` when it exceeds
+    /// `max`.
+    #[inline]
+    fn take(
+        self,
+        slots: u8,
+        label_slots: &[&[u8]],
+        pos: usize,
+        j: usize,
+        max: Self,
+    ) -> Option<Self> {
+        let labels = label_slots
+            .get(pos)
+            .and_then(|l| l.get(j))
+            .map_or(0, |&l| u32::from(l));
+        let next = Self {
+            mods: self.mods + u32::from(slots) - labels,
+            labels: self.labels + labels,
+        };
+        (next.mods <= max.mods && next.labels <= max.labels).then_some(next)
     }
 }
 
@@ -1255,7 +1311,9 @@ fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
 /// and filtering on the resulting peptidoform mass — not from `Δ` precision.
 fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
     let deltas = variable_mod_deltas(params);
-    let max_mods = params.max_variable_mods_per_peptide as usize;
+    // Labels count apart from the other mods, so a peptidoform's offset sums
+    // up to both allowances' worth of form deltas.
+    let max_mods = (params.max_variable_mods_per_peptide + params.max_label_sites) as usize;
 
     // BFS over multisets of mod deltas: level k = applying exactly k variable
     // mods. We track each combination's summed delta and de-dup by milli-Da.

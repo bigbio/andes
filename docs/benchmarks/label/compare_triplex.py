@@ -1,6 +1,16 @@
+"""Compare andes triplex label ratios with OpenMS FeatureFinderMultiplex.
+
+usage: compare_triplex.py LABEL_PARQUET FFM_TSV [RUN]
+RUN is the label.parquet `filename` the TSV belongs to (needed when the table
+holds several runs).
+"""
 import sys, numpy as np, pandas as pd, pyarrow.parquet as pq
 lab, ffm = sys.argv[1], sys.argv[2]
 t = pq.read_table(lab).to_pandas()
+if len(sys.argv) > 3:
+    t = t[t.filename == sys.argv[3]]
+elif t.filename.nunique() > 1:
+    sys.exit(f"{lab} holds {t.filename.nunique()} runs: name the run of {ffm}")
 ref = t[t.channel == 1][["peptide", "charge", "sequence", "mz", "rt_apex", "status"]]
 # OpenMS multiplets: light channel (map 0) m/z, and log2 ratios of maps 1, 2 to 0.
 rows = []
@@ -19,8 +29,11 @@ for _, g in ref.iterrows():
     b = c.iloc[(c.rt - g.rt_apex).abs().argmin()]
     out.append((g.peptide, g.charge, g.sequence, b.r1, b.r2))
 m = pd.DataFrame(out, columns=["peptide", "charge", "sequence", "o1", "o2"])
-a = t[t.channel > 1].pivot_table(index=["peptide", "charge"], columns="channel", values="log2_ratio").reset_index()
-a.columns = ["peptide", "charge", "a1", "a2"][: len(a.columns)]
+a = (t[t.channel > 1]
+     .pivot_table(index=["peptide", "charge"], columns="channel", values="log2_ratio", dropna=False)
+     .reindex(columns=[2, 3])
+     .rename(columns={2: "a1", 3: "a2"})
+     .reset_index())
 m = m.merge(a, on=["peptide", "charge"])
 nK = m.sequence.str.count("K"); nR = m.sequence.str.count("R")
 m["cls"] = np.where((nK > 0) & (nR == 0), "K", np.where((nR > 0) & (nK == 0), "R", "KR"))

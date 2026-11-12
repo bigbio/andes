@@ -29,10 +29,17 @@ ACETYL = "+42.01056"
 TOKEN = re.compile(r"([A-Z])((?:[+-][0-9]+\.[0-9]+)*)")
 
 
+def lookup(aa, delta):
+    for (a, d), name in MODS.items():
+        if a == aa and abs(float(d) - delta) < 1e-3:
+            return name
+    return None
+
+
 def to_openms(pep):
-    # strip the flanking residues: andes writes `K.PEPTIDE.A`
+    # strip the flanking residues: andes writes `K.PEPTIDE.A`, `_` at a protein terminus
     core = pep
-    m = re.match(r"^[A-Z\-]\.(.*)\.[A-Z\-]$", pep)
+    m = re.match(r"^[A-Z_\-]\.(.*)\.[A-Z_\-]$", pep)
     if m:
         core = m.group(1)
     out = []
@@ -44,10 +51,10 @@ def to_openms(pep):
                 nterm = ".(Acetyl)"
             elif (aa, d) in MODS:
                 names.append(MODS[(aa, d)])
-            elif k == 0 and (aa, "%+.5f" % (float(d) - float(ACETYL))) in MODS:
+            elif k == 0 and lookup(aa, float(d) - float(ACETYL)):
                 # protein N-terminal acetyl merged with the first residue's own modification
                 nterm = ".(Acetyl)"
-                names.append(MODS[(aa, "%+.5f" % (float(d) - float(ACETYL)))])
+                names.append(lookup(aa, float(d) - float(ACETYL)))
             else:
                 raise ValueError(f"unknown modification {aa}{d} in {pep}")
         out.append(aa + "".join(f"({n})" for n in names))

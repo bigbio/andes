@@ -94,6 +94,32 @@ const CREATOR: &str = "andes";
 /// `SpecId` exactly. Rows whose SpecId is in `excluded` (knockoff PSMs, never
 /// reported) are left out of the bundle. `competition` is the scope of the
 /// rescorer's target-decoy competition groups (used with `rescore_decoys`).
+/// The `SpecId`s of the emitted rows that `psms.parquet` leaves out. With
+/// rescoring: the target and decoy rows target-decoy competition removed (not
+/// in Percolator's FDR-controlled output; decoys only when `rescore_decoys`
+/// lists the surviving decoys) and the rows in `excluded` (knockoff PSMs,
+/// never reported). Empty when rescore is off: every emitted row is written.
+/// The feature parquet numbers its `psm_ids` over the rows not in this set, so
+/// both files agree on the row order. Fails, like [`write_qpx`], when a target
+/// row has no rescoring result and did not lose a competition.
+pub fn omitted_psm_rows(
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
+    rescore_decoys: Option<&HashSet<String>>,
+    excluded: &HashSet<String>,
+) -> std::io::Result<HashSet<String>> {
+    let Some(m) = rescore else {
+        return Ok(HashSet::new());
+    };
+    // Audit the Percolator join over the whole run before any row is written
+    // (fail loud on target rows with no result rather than emit null q-values).
+    let mut omitted = audit_rescore_join(&rescore_rows(spectra, queues, candidates), m, rescore_decoys)?;
+    omitted.extend(excluded.iter().cloned());
+    Ok(omitted)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn write_qpx(
     out_dir: &Path,
@@ -126,22 +152,7 @@ pub fn write_qpx(
     }
     std::fs::create_dir_all(out_dir)?;
 
-    // When rescoring is on, audit the Percolator join over the whole run before
-    // writing any row (fail loud on target rows with no result rather than emit
-    // null q-values), and leave out the target rows target-decoy competition
-    // removed: they are not in Percolator's FDR-controlled output. Empty when
-    // rescore is off, keeping that path identical.
-    let mut competed_away = match rescore {
-        Some(m) => audit_rescore_join(
-            &rescore_rows(spectra, queues, candidates),
-            m,
-            rescore_decoys,
-        )?,
-        None => HashSet::new(),
-    };
-    // Rows never reported (knockoff PSMs) are left out the same way, so the
-    // bundle and the feature parquet's `psm_ids` agree on the row order.
-    competed_away.extend(excluded.iter().cloned());
+    let competed_away = omitted_psm_rows(spectra, queues, candidates, rescore, rescore_decoys, excluded)?;
 
     // Bound Arrow's Utf8/List buffers before they reach their 32-bit offset
     // limit. Slicing an already-built batch is too late. Preserve the global

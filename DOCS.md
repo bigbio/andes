@@ -461,7 +461,10 @@ Each accepted site also gets two probabilities:
   `identity_spectra` is the posterior mass placing a modification there, in spectra.
 
 The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
-one spectrum compete. A row's logit combines:
+one spectrum compete. Target-decoy competition keeps one row per spectrum and precursor mass, so
+the rows are scored apart from it: with Percolator, a static pass of the trained model without
+`-Y` scores every PIN row (run only when the database has site claims); the native rescorer
+keeps the held-out score of every row. A row's logit combines:
 - its rescored score;
 - its precursor isotope offset;
 - its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
@@ -472,20 +475,21 @@ from the run: among the rows the other evidence already makes confident, how oft
 when the row carries the modification and when a competing row carries another. Declare the
 signatures in the mods file; a modification without them is told apart by its fragments only.
 
-Measured on synthetic peptide pools (PXD009449), one lysine modification per pool, six lysine
-modifications claimed at every site, on the half of the peptides the fixed weights were not fitted
-on:
+Measured on synthetic peptide pools (PXD009449): seven lysine pools (one modification per pool
+and an unmodified pool), six lysine modifications claimed at every site, on the half of the
+peptides the fixed weights were not fitted on, Percolator 3.7.1:
 
 | Accepted sites | Claims | Wrong modification |
 |---|---|---|
-| site q ≤ 0.05 | 753 | 245 (33%) |
-| and identity ≥ 0.5 | 522 | 26 (5.0%; 28.5 expected) |
-| and identity ≥ 0.95 | 412 | 11 (2.7%) |
-| and identity ≥ 0.95, occupancy ≥ 0.5 | 404 | 3 (0.7%) |
+| site q ≤ 0.05 | 666 | 133 (20%) |
+| and identity ≥ 0.5 | 540 | 34 (6.3%; 15.8 expected) |
+| and identity ≥ 0.95 | 485 | 6 (1.2%; 1.1 expected) |
 
-In the unmodified-lysine pool, every site that passed its site q-value had occupancy below 0.5
-(mean 0.01). The remaining wrong claims look like synthesis side products: one peptide is seen
-with another modification in three pools. PSMs at 1% FDR do not change.
+Between 0.5 and 0.95 the identity is overconfident (34 wrong against 15.8 expected). Scoring every
+row instead of the competition winners only (before, only rows at another precursor mass
+competed) takes 41 more
+correct sites at identity ≥ 0.95 and leaves 16 fewer wrong ones at identity ≥ 0.5; PSMs at 1% FDR
+do not change.
 
 ### PEFF databases
 

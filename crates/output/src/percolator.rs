@@ -1072,6 +1072,55 @@ fn repair_pep(
     Ok(())
 }
 
+/// The rescored score of every PIN row, keyed by `SpecId`: target rows, then
+/// decoy rows.
+pub type RowScores = (HashMap<String, f64>, HashMap<String, f64>);
+
+/// The score of every row of `pin` (target rows, decoy rows) under the model
+/// of the main run on that PIN ([`run_percolator_pooled`] must have run): a
+/// static pass with the main run's weights and no target-decoy competition,
+/// so every row of a spectrum keeps its score, not only its group's winner.
+/// The rows of one spectrum can then compete with each other, as the site
+/// posteriors need ([`crate::site_identity::row_posteriors`]). The pass files
+/// are scratch, removed whether or not the pass worked.
+pub fn score_all_rows(
+    backend: &PercolatorBackend,
+    pin: &Path,
+    extra_args: &[String],
+) -> Result<RowScores, PercolatorError> {
+    let main = result_paths(pin);
+    let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let pass = ResultPaths::new(&out_dir, &format!("{stem}.rows"));
+    pass.clear_stale()?;
+    let output = run_static_pass(backend, pin, &out_dir, &pass, &main.weights, extra_args, false)?;
+    let scores = |path: &Path| -> Result<HashMap<String, f64>, PercolatorError> {
+        let text = std::fs::read_to_string(path).map_err(PercolatorError::Io)?;
+        Ok(parse_psm_results(&text)?
+            .into_iter()
+            .filter_map(|(id, p)| p.score.map(|s| (id, s)))
+            .collect())
+    };
+    let result = if output.status.success() && pass.target.exists() && pass.decoy.exists() {
+        scores(&pass.target).and_then(|t| Ok((t, scores(&pass.decoy)?)))
+    } else {
+        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+        if log.trim().is_empty() {
+            log = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Err(PercolatorError::Run {
+            backend: backend.describe(),
+            status: output.status.to_string(),
+            log_tail: tail_lines(&log, 20),
+        })
+    };
+    pass.clear_stale()?;
+    result
+}
+
 /// The result files `run_percolator` writes for `pin`, next to it.
 fn result_paths(pin: &Path) -> ResultPaths {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new("."));

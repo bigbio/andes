@@ -116,9 +116,9 @@ fn neutral_mass(masses: &[f64]) -> f64 {
 impl ChunkFragmentIndex {
     /// Enumerate every peptidoform of `records` with neutral mass in
     /// `[mass_lo, mass_hi]` once and bin its ions. The bin width is the
-    /// fragment tolerance at the top of the fragment m/z range (2,500), so a
-    /// peak checking its own bin and both neighbours finds every ion within
-    /// tolerance whatever its m/z.
+    /// fragment tolerance at m/z 2,500. A peak checks its own bin and as many
+    /// bins on each side as its tolerance spans (one up to m/z 2,500, more
+    /// above it), so it finds every ion within tolerance whatever its m/z.
     pub fn build(
         records: Vec<IndexRecord>,
         db: &SearchIndex,
@@ -436,7 +436,10 @@ impl ChunkFragmentIndex {
                 }
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
-                for bb in b.saturating_sub(1)..=(b + 1).min(n_bins - 1) {
+                // Bins are sized for the window at m/z 2500; above it a
+                // ppm window spans more than one bin on each side.
+                let span = ((tol_da / self.bin_width).ceil() as usize).max(1);
+                for bb in b.saturating_sub(span)..=(b + span).min(n_bins - 1) {
                     let base = self.bin_start[bb] as usize;
                     let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
                     let seg =

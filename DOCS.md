@@ -2178,8 +2178,10 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
 **Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated, 2026-11-11).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
-m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant was not run: its download needs a
-registration this environment cannot complete.
+m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant was not run: its only download (v2.9.0.0,
+maxquant.org) is a form that requires a name, email address and institution, acceptance of its
+license and a captcha, and no MaxQuant results are deposited with these datasets (PXD003327 holds
+Proteome Discoverer `.msf` files, PXD000714 X!Tandem output, PXD022659 MetaMorpheus results).
 
 *PXD022659* (E. coli SILAC `[][Lys8]` at known light:heavy mixtures, TripleTOF 6600 DDA, 20 ppm
 MS1 tolerance; runs `Ecoli_LH_1_1_66_DDA1` and `Ecoli_LH_1_10_66_DDA1` with `--mbr`; 3 min in all,

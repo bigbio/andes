@@ -1828,7 +1828,6 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     let fingerprint = library_fingerprint(&stored);
     let selection = if a.mbr_preselect {
         TransferSelection {
-            donor_gate: true,
             min_donor_fraction: a.mbr_min_donor_fraction,
         }
     } else {

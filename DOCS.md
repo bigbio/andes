@@ -579,7 +579,7 @@ columns by header name). andes does no q-value arithmetic.
   the per-run scores, the PEP and the `score` column from the pooled run.
 - Quantification: the PSMs that identify a precursor in a run (`psm_q_value` in `*.tmt.parquet`
   and `*.lfq.parquet`, donors of the match-between-runs library) are those with a per-run q-value at or below the cut. The library's
-  `donor_psm_q` (the best donor PSM, which gates transfers at q 0.001) is the **pooled** q-value of that PSM, so that a minimum over a precursor's runs is
+  `donor_psm_q` (the best donor PSM's) is the **pooled** q-value of that PSM, so that a minimum over a precursor's runs is
   comparable; it equals the per-run one when the result files have no `pooled-q-value` column.
 
 ### Protein groups and protein FDR
@@ -1080,7 +1080,7 @@ major version marks an incompatible layout, a new minor version only adds column
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value; `psm_q_value` is the per-run q-value when the PIN had several runs) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
-| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex measurement_q` (the six `claim` columns: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the larger of `transfer_q` and `measurement_q`, §10; `transfer_q` for a transfer below the threshold); `measurement_q` is, for an accepted transfer (`transfer_ms2`, `transfer_ms1`, `shared_feature`), the running mean of its probability of a wrong measurement (§10), null for every other row; `transfer_q`, `quant_q`, `measurement_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex measurement_q transfer_pep` (the six `claim` columns: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the larger of `transfer_q` and `measurement_q`, §10; `transfer_q` for a transfer below the threshold); `measurement_q` is, for an accepted transfer (`transfer_ms2`, `transfer_ms1`, `shared_feature`), the running mean of its probability of a wrong measurement (§10), null for every other row; `transfer_pep` is, for a transfer row (accepted or not), its posterior error probability at its transfer score (§10), null for identified rows; `transfer_q`, `quant_q`, `measurement_q`, `transfer_pep` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate; the last columns of the table hold the pairs with a wrong measurement, a wrong peak or a fitted quantity more than a factor of 2 from the identified one, the peak alone where either fit has no positive quantity: `wrong_measurement`, `wrong_measurement_rate`, and among the accepted pairs `accepted_wrong_measurement_*`, `accepted_wrong_measurement_rate_*`) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
@@ -1688,10 +1688,14 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
 * **Extract** (`quant extract`, one run, reads `library.parquet`, `alignment.parquet` and the
   run's `<stem>.ms1.parquet`). Every library precursor
   is measured, at the `--lfq-tol` m/z tolerance (ppm; default 10 ppm), by a likelihood template fit of its isotope pattern and elution profile around
-  the predicted apex (around the PSM's RT where it was identified), with two decoy hypotheses
-  per transfer and per identified pair: a mass-defect-preserving m/z shift and an RT shift, each
-  with the target's prior (an identified pair's decoys keep its PSM-centred prior, so the decoys
-  search as broadly as the target). Identified pairs are also
+  the predicted apex (around the PSM's RT where it was identified), with decoy hypotheses,
+  each with the target's prior. A transfer has a mass-defect-preserving m/z shift and up to 4
+  random-RT decoys (after PIP-ECHO, Solivais et al., J Proteome Res 2025): the target's own m/z
+  at the predicted RT, in the same run, of another library precursor 5 to 11 Da away in neutral
+  mass whose RT lies outside the target's search window (more than 4 (s + w) from the predicted
+  apex), drawn deterministically per (precursor, run); the RTs follow where peptides elute, so the
+  decoys see the background a wrong transfer sees. An identified pair has the m/z shift and an RT
+  shift, and keeps its PSM-centred prior, so its decoys search as broadly as the target. Identified pairs are also
   measured as if they were transfers (pseudo-transfers). FAIMS runs are fitted on the series of
   the precursor's compensation voltage (its most frequent voltage among the donor PSMs). A
   precursor whose voltage the FAIMS run lacks is not measured there and is counted in the log;
@@ -1722,10 +1726,9 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   runs among them from 358 to 370 and from 312 to 320. The extract log and the table's `andes.extract.run_scales` tag
   record the scan spacing and the width scale of each run; `quant finalize` logs them.
   Transfer pre-selection (advanced, `--mbr-preselect`, default `true`): before any fit,
-  extract skips the transfers of an entry whose best donor PSM is above q 0.001, which finalize
-  never transfers (on a six-run benchmark 19 % of the transfer fits; the reported rows are
-  identical), and, with `--mbr-min-donor-fraction F` (default 0), the transfers with fewer other
-  aligned donor runs than F × (aligned runs − 1), rounded up. The rule reads the library only
+  with `--mbr-min-donor-fraction F` (default 0, which keeps every pair), extract skips the
+  transfers with fewer other aligned donor runs than F × (aligned runs − 1), rounded up. No pair
+  is skipped for the confidence of its donor PSM: that is a transfer feature in finalize. The rule reads the library only
   and skips a pair whole (target and decoys alike, identity decoys by the same rule from their
   own donors), so every kept pair keeps its full set of decoys and the transfer FDR stays a
   K-decoy estimate over the kept pairs. Skipped pairs get no rows and are counted in the extract
@@ -1733,8 +1736,8 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   F = 0.004 (two donor runs) left out 13 % of the transfer fits (12 % of the extract CPU time);
   the accepted transfers changed less than between two finalize seeds, but 1.1 % of those
   accepted at q 0.05 without it fell in skipped pairs, hence off by default. `false` measures
-  every transfer pair (identical to earlier releases).
-  Every transfer row (target and both decoys) and every pseudo-transfer with a fit then gets
+  every transfer pair.
+  Every transfer row (target and decoys) and every pseudo-transfer with a fit then gets
   MS2 evidence from the run's `<stem>.ms2.parquet`: among the MS2 scans whose isolation window
   holds the row's probe m/z (the decoy's own shifted m/z for a mass-shift decoy) and whose RT
   lies within one fitted width of the fitted apex (the width bounded to 1–20 s), so the scan belongs to the quantified peak, at the entry's
@@ -1749,10 +1752,10 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
 * **Finalize** (`quant finalize`). A cross-validated GBDT (3 folds by precursor) separates
   transfer targets from their decoys; the transfer q-value is the K-decoy estimate over held-out
   scores, `(D + 1) / (K · max(T, 1)) + D_id / max(T, 1)` at each score threshold (capped at 1,
-  then the running minimum), with `D` the mass- and RT-shift decoys, `K` their ratio to the
+  then the running minimum), with `D` the mass-shift and random-RT decoys, `K` their ratio to the
   targets and `D_id` the identity-decoy transfers at or above the threshold; the wrong-peak
   part is also reported per decoy family. The two parts estimate two kinds of error. The
-  mass- and RT-shift decoys model the right peptide quantified on the wrong peak. A false
+  mass-shift and random-RT decoys model the right peptide quantified on the wrong peak. A false
   donor identification is different: the false PSM matched a spectrum of another analyte,
   whose MS1 feature recurs in every run with the same width, tailing and isotope heights, so
   its transfers look like true ones to every feature and to those decoys. Identity decoys
@@ -1763,8 +1766,9 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   transfers of false donors at each threshold, without scaling. The parts overlap (a false
   donor's transfer can also land on a wrong peak), so their sum is conservative. Identity
   decoys are negatives of the classifier like the other decoys, held out by the same folds;
-  only their target probe takes part (their mass- and RT-shift probes do not). The pooled
-  q-value is also stratified by a prior of presence: the share of the run's 20 most similar
+  only their target probe takes part (their decoy probes do not). With 2 to 16 runs the pooled
+  q-value is stratified by the acceptor run, so each run's own decoys hold it to its own false
+  rate (a blank or a single-cell run among bulk runs). With more runs it is stratified by a prior of presence: the share of the run's 20 most similar
   runs (Jaccard index of their donor sets) that identified the precursor, in strata whose edges
   are cut from the library so that each holds about an equal share of the (precursor, run) pairs
   without an identification, hence of the decoys (at most 16; 9 on the 50-run PXD014415). A target and
@@ -1776,27 +1780,35 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   identified in no similar run is held to the local rate of such precursors, which the pooled estimate hides (PXD014415, yeast peptides
   in the 20 human-only runs, transfers at transfer q 0.01: 2,360 before, 1,118 after; UPS1
   transfers into the lowest spike levels of PXD009740 and PXD009815: 726 and 662 before, 1,062
-  and 699 after; 2026-11-01, one seed). An entry whose
-  best donor PSM has a PSM q-value above 0.001 is not transferred (by default extract does not
-  measure its transfers, so they have no rows; with `quant extract --mbr-preselect false` they
-  are `below_threshold` without a q-value; its identified rows are unchanged): a single marginal
-  donor PSM is the commonest false donor. On a public LFQ benchmark (six runs, peptide-level
-  shuffled entrapment, Percolator seeds 42, 1 and 2; 2026-11-05, defaults) the identity-decoy
-  estimate of the false-donor share of accepted transfers was 0.28–0.29 % at transfer q 0.01
-  where the entrapment gave 0.22–0.26 %, and 0.42–0.47 % against 0.37–0.40 % at 0.05 (at
-  2026-10-23: 0.33–0.34 % against 0.24–0.33 %, and 0.45–0.47 % against 0.37–0.49 %): it tracks
-  the false-donor share but is not an upper bound. With a reviewed *Arabidopsis* entrapment
-  (2026-10-21, an earlier build) the entrapment gave 0.24–0.30 % and 0.46–0.54 %. On 500 runs
-  (PXD042233, peptide-level shuffled entrapment, one seed, 2026-10-21) the entrapment gave 0.40 % at transfer q 0.05 against an estimate of
-  0.26 % (5.07 million accepted transfers); at 0.01 both are near zero (3 and 2 of 240,000
-  transfers). The identity term alone can therefore read low; the transfer q-value it is part
-  of also carries the wrong-peak term, which is more than ten times larger at 0.05. On the earlier whole-protein shuffled
-  entrapment, the identity decoys and the donor gate (#172) cut the transfers of entrapment
-  donors from 728 to 88 at 0.01 (48 before the peak-shape features), with 62.8k precursors quantified in at least 3 runs (67.6k, and
-  54.9k before the peak-shape features).
+  and 699 after; 2026-11-01, one seed). No donor PSM threshold beyond the donor PSM q-value
+  applies: the log10 Percolator PEP of the entry's best donor PSM is a transfer feature, and the
+  identity decoys, whose donor PSMs are decoys of the same confidence range, teach the classifier
+  what a weak donor costs. Against a 0.001 donor gate (2026-11-12, seeds 42, 1 and 7): on the
+  single-cell set PXD016921 the accepted transfers into the blank run went from 18, 20 and 5 to
+  9, 4 and 9, and those into the four single-cell runs together from 3,184, 3,140 and 2,991 to
+  3,644, 3,937 and 3,772 (14 to 26 % more); on PXD014415 the yeast transfers into
+  the human-only runs stayed at 0.15 % of the accepted transfers, and on UPS27 the false calls in
+  pairs without the top spike levels stayed within the seed spread. The identity-decoy estimate of
+  the false-donor share was measured with the 0.001 gate (public six-run LFQ benchmark, peptide-level
+  shuffled entrapment, 2026-11-05): 0.28–0.29 % at transfer q 0.01 where the entrapment gave
+  0.22–0.26 %, and 0.42–0.47 % against 0.37–0.40 % at 0.05; on 500 runs (PXD042233, 2026-10-21)
+  0.26 % against an entrapment 0.40 % at 0.05. It tracks the false-donor share but is not an upper
+  bound; the wrong-peak term of the transfer q-value is more than ten times larger at 0.05.
+  Each transfer row also gets `transfer_pep`, its posterior error probability: per fold, the
+  wrong-peak part `(D / K) / T` and the false-donor part `D_id / T` are each fitted as a
+  non-increasing step function of the held-out score (pool-adjacent-violators, no bins), the
+  wrong-peak part is shifted on the logit scale to the row's stratum by the maximum-likelihood fit
+  of which of the stratum's rows are decoys, and the PEP is their sum, capped at 1. On PXD014415
+  the known-false share of transfers (yeast into human-only runs, a lower bound of the false
+  share) stays below the mean PEP in every bin; on PXD016921 the blank run's share in the PEP bin
+  0.001 to 0.01 was 0.46 to 0.81 % against a mean PEP of 0.57 to 0.60 % (three seeds), at or below
+  it elsewhere. It is reported only: acceptance stays on the stratified `transfer_q` (accepting at a
+  mean PEP of 1 % pooled over the runs let the false transfers of the blank run rise from 9, 4 and
+  9 to 26, 42 and 28, and the yeast transfers into human-only runs of PXD014415 from 0.15 % to
+  0.48 %).
   The validation file and the finalize log count the decoys accepted per family (mass shift,
   RT shift, identity) and the transfers the wrong-peak decoys alone would accept. The
-  transfer features are the fit evidence, the donor-run count, the library q-value, the
+  transfer features are the fit evidence, the donor-run count, the library q-value, the best donor PSM's log10 PEP, the
   neighbour donor rate (the share of the 50 runs most like the transfer's run, by the Jaccard
   index of the target entries each run identified, that identified the precursor; computed from
   the donor runs alone, the same way for target and decoy precursors, and never counting the
@@ -2221,7 +2233,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Trace baseline | at least 3 scans a side; sides differ at 3 standard errors, then the lower side alone | `evidence.rs:125,128` | baseline of each trace | no | No recorded evidence |
 | Peak boundaries | 2 half-widths at half maximum; deep valley 0.5, rise 1.5 | `quant/src/xic.rs:78-83` | LFQ peak bounds | no | 2 half-widths = 2.35 sigma, 98% of a Gaussian area (code comment); valley rule: no recorded evidence |
 | Consensus-peak factor | 2 | `quant_mbr.rs` (`CONSENSUS_PEAK_FACTOR`) | identified pairs measured at the position the other runs predict | no | The factor of the wrong-measurement label; 12 runs of PXD014415, repeated on 12 others: beyond it the identified fit was off by more than 2x in 64-100% of the pairs, the predicted-position fit in 1-21% (see [§10](#10-quantification)) |
-| Transfer donor q | 0.001 | `quant_mbr.rs:1281` | library entries eligible for transfer | no | A marginal donor PSM is the commonest false donor (code comment) |
+| Random-RT decoys | 4 per transfer, donor masses 5-11 Da away, RT outside 4 (s + w) | `quant/src/decoys.rs` (`RANDOM_RT_DECOYS`, `RANDOM_RT_MASS`) | the wrong-peak null of transfers | no | After PIP-ECHO; 5 Da keeps clear of isotopes and common small modifications, 11 Da keeps the background similar (design choice) |
 | Transfer decoys | mass shifts -11, -7, 7, 11 nominal Da | `quant/src/decoys.rs:34` | the null for transfer q | no | Design choice; the quant_q notes record that the decoy null does not model isomer coincidences |
 | Presence prior | 20 neighbour runs, 20,000 library entries sampled, 50 neighbour runs for donor rate | `quant_finalize.rs:623-629` | prior strata and a feature | no | No recorded evidence |
 | Wrong-peak model | 11 features, 4,000,000 calibration rows | `quant_finalize.rs:1544,1547` | wrong-peak probability | no | No recorded evidence |

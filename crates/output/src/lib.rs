@@ -35,7 +35,7 @@ pub mod qpx;
 pub use qpx::{omitted_psm_rows, write_qpx};
 
 pub mod rt_wiring;
-pub use rt_wiring::populate_rt_features;
+pub use rt_wiring::{populate_rt_features, populate_rt_features_per_run};
 
 pub mod provenance;
 pub use provenance::populate_provenance_features;

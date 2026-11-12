@@ -443,7 +443,10 @@ pub fn infer_protein_groups(
         for a in p
             .proteins
             .split(';')
-            .filter(|a| !a.is_empty() && !knockoff(a))
+            // A decoy entry named on a target row (it holds the same peptide)
+            // shares its target's family on origin-annotated databases; it is
+            // no accession of the target group.
+            .filter(|a| !a.is_empty() && !knockoff(a) && !idx.is_decoy_accession(a))
         {
             if target.groups[g].families.contains(&family_of(a)) {
                 named[g].insert(a.to_string());
@@ -747,6 +750,52 @@ mod tests {
         assert_eq!((g.peptides, g.unique, g.score), (2, 2, 5.0));
         assert!(inf.group_of(&targets["3"]).is_none());
         assert!(inf.decoy_groups.is_empty());
+    }
+
+    #[test]
+    fn a_decoy_of_an_annotated_entry_is_no_accession_of_its_target_group() {
+        use model::protein::{EntryOrigin, ProteinAnnotation};
+        use std::sync::Arc;
+        // A variant entry of family A: its decoy carries the same origin, so
+        // its family is A too.
+        let variant = EntryOrigin {
+            kind: EntryKind::Variant,
+            family: Arc::from("A"),
+            feature: Arc::from("VAR_1"),
+            variant_delta_da: 0.0,
+            knockoff_of: None,
+            source: None,
+            tier: Default::default(),
+        };
+        let db = ProteinDb {
+            proteins: vec![
+                model::Protein {
+                    accession: "A".into(),
+                    description: String::new(),
+                    sequence: b"PEPTIDEK".to_vec(),
+                    annotation: None,
+                },
+                model::Protein {
+                    accession: "A-1".into(),
+                    description: String::new(),
+                    sequence: b"PEPTLDEK".to_vec(),
+                    annotation: Some(Arc::new(
+                        ProteinAnnotation::new(Vec::new(), None).with_origin(Some(variant)),
+                    )),
+                },
+            ],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        assert!(idx.is_decoy_accession("XXX_A-1"));
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 5.0, "K.AAAK.R", "A;XXX_A-1"),
+            psm("2", 4.0, "K.CCCK.R", "A"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &idx, |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        assert_eq!(inf.groups[0].accessions, vec!["A"]);
     }
 
     #[test]

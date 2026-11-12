@@ -297,9 +297,6 @@ impl ExtractCounts {
 /// runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TransferSelection {
-    /// Skip the transfers of an entry whose best donor PSM is above
-    /// [`TRANSFER_DONOR_Q`]: finalize never transfers such an entry.
-    pub donor_gate: bool,
     /// Skip a pair with fewer other aligned donor runs than this fraction of
     /// the library's aligned runs other than the acceptor, rounded up; 0
     /// keeps every pair.
@@ -313,12 +310,11 @@ pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.0;
 impl TransferSelection {
     /// Every pair with a prediction is measured.
     pub(crate) const OFF: TransferSelection = TransferSelection {
-        donor_gate: false,
         min_donor_fraction: 0.0,
     };
 
     pub(crate) fn is_off(&self) -> bool {
-        !self.donor_gate && self.min_donor_fraction <= 0.0
+        self.min_donor_fraction <= 0.0
     }
 
     /// The fewest other aligned donor runs a pair needs in a library of
@@ -333,8 +329,7 @@ impl TransferSelection {
     /// One line for the extract table metadata and the log.
     pub(crate) fn describe(&self, aligned_runs: usize) -> String {
         format!(
-            "donor_gate={} (best donor PSM q <= {TRANSFER_DONOR_Q}), min_donor_fraction={} ({} of {} other aligned runs)",
-            self.donor_gate,
+            "min_donor_fraction={} ({} of {} other aligned runs)",
             self.min_donor_fraction,
             self.min_donors(aligned_runs),
             aligned_runs.saturating_sub(1)
@@ -345,7 +340,6 @@ impl TransferSelection {
 impl Default for TransferSelection {
     fn default() -> Self {
         TransferSelection {
-            donor_gate: true,
             min_donor_fraction: DEFAULT_MIN_DONOR_FRACTION,
         }
     }
@@ -354,7 +348,6 @@ impl Default for TransferSelection {
 /// [`TransferSelection`] resolved for one library.
 #[derive(Debug, Clone, Copy)]
 struct PairGate {
-    donor_gate: bool,
     min_donors: u16,
 }
 
@@ -362,16 +355,14 @@ impl PairGate {
     fn new(sel: &TransferSelection, lib: &Library) -> Self {
         let aligned = lib.alignment.maps.iter().filter(|m| m.is_some()).count();
         PairGate {
-            donor_gate: sel.donor_gate,
             min_donors: sel.min_donors(aligned),
         }
     }
 
     /// True when the transfer of `e` with `other_donors` other aligned donor
     /// runs is measured.
-    fn keeps(&self, e: &LibraryEntry, other_donors: u16) -> bool {
-        let donor_ok = !self.donor_gate || e.donor_psm.q <= TRANSFER_DONOR_Q;
-        donor_ok && other_donors >= self.min_donors
+    fn keeps(&self, _e: &LibraryEntry, other_donors: u16) -> bool {
+        other_donors >= self.min_donors
     }
 }
 
@@ -1686,13 +1677,6 @@ impl ShapeReference for DonorShapes {
     }
 }
 
-/// The PSM q-value a library entry's best donor PSM needs for the entry to
-/// be transferred. Stricter than the donor threshold of the identified rows:
-/// a single marginal donor PSM is the commonest false donor, and its
-/// transfers sit on a real recurring feature that the transfer decoys
-/// cannot tell from a true one.
-pub(crate) const TRANSFER_DONOR_Q: f64 = 0.001;
-
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order, with
 /// `neighbour_rate` the share of the run's most similar runs that identified
 /// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`]);
@@ -2288,30 +2272,19 @@ mod tests {
     }
 
     const SELECT: TransferSelection = TransferSelection {
-        donor_gate: true,
         min_donor_fraction: 0.5,
     };
 
     #[test]
-    fn selection_skips_transfers_finalize_cannot_accept() {
+    fn a_marginal_best_donor_psm_is_still_measured() {
         let fx = fixture(false);
-        // The best donor PSM of precursor ONLY_RUN0 misses the transfer donor
-        // threshold: its transfer into run 1 (target and decoys) is not
-        // measured; everything else is measured as without a selection.
-        let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.002);
+        // The donor's identity confidence is carried as a value (identity_q
+        // in finalize), not as a gate: the transfer is measured.
+        let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.009);
         let all = extract_all(1, &fx.ms1_tables[1], &lib, &params()).unwrap();
         let sel = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &SELECT).unwrap();
         assert_eq!(rows_of(&all.rows, ONLY_RUN0).len(), 3);
-        assert!(rows_of(&sel.rows, ONLY_RUN0).is_empty());
-        assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN0, 1)]));
-        assert_eq!((all.counts.not_selected, sel.counts.not_selected), (0, 1));
-        // Without the donor gate the pair is measured.
-        let no_gate = TransferSelection {
-            donor_gate: false,
-            ..SELECT
-        };
-        let kept = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &no_gate).unwrap();
-        assert_eq!(kept.rows, all.rows);
+        assert_eq!(sel.rows, all.rows);
     }
 
     #[test]
@@ -2342,7 +2315,6 @@ mod tests {
     #[test]
     fn min_donors_scale_with_the_aligned_runs() {
         let sel = |f: f64| TransferSelection {
-            donor_gate: false,
             min_donor_fraction: f,
         };
         assert_eq!(sel(0.0).min_donors(500), 0);
@@ -2352,7 +2324,8 @@ mod tests {
         assert_eq!(sel(0.004).min_donors(1000), 4);
         assert_eq!(sel(1.0).min_donors(1), 0);
         assert!(TransferSelection::OFF.is_off());
-        assert!(!TransferSelection::default().is_off());
+        // The default selection skips nothing (there is no donor gate).
+        assert!(TransferSelection::default().is_off());
     }
 
     #[test]
@@ -2890,7 +2863,8 @@ mod finalize_tests {
     /// the fit's mass error and the row's claim.
     type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
     use crate::quant_finalize::{
-        finalize, finalize_stream, for_each_scored, mismatch, pseudo_example, running_mean_q,
+        finalize, finalize_stream, for_each_scored, identity_probabilities, mismatch, pseudo_example,
+        running_mean_q,
         table_features, transfer_quant_q, wrong_features, wrong_label, BlockContext, EntryIndex,
         ExtractRuns, FinalizeLimits, FinalizeParams, FinalizeSummary, MbrFeature, Mismatch, Table,
         WrongCalibration, SCORE_CHUNK,
@@ -3168,31 +3142,48 @@ mod finalize_tests {
     }
 
     #[test]
-    fn entries_with_a_marginal_best_donor_psm_are_not_transferred() {
+    fn a_transfer_carries_its_donor_identity_in_identity_q() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        // Precursors above 400 have a best donor PSM at q 0.005.
-        let lib = library_with(&|_| false, &|p| {
-            if p > 400 {
-                0.005
-            } else {
-                TRANSFER_DONOR_Q
-            }
-        });
+        // Precursors above 400 have a marginal best donor PSM (q 0.005, PEP
+        // 0.2); the others a confident one (q 0.001, PEP 1e-4).
+        let mut lib = library_with(&|_| false, &|p| if p > 400 { 0.005 } else { 0.001 });
+        for e in lib.entries.iter_mut().filter(|e| e.precursor > 400) {
+            e.donor_psm.pep = 0.2;
+        }
         let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
-        assert_eq!(s.validation.donor_gated, N as usize - 401);
-        let mut accepted_low = 0;
-        for f in s.features.iter().filter(|f| f.run == 1) {
-            if f.precursor > 400 {
-                assert_eq!(f.evidence_type, EvidenceType::BelowThreshold);
-                assert_eq!(f.transfer_q, None);
+        // Both groups are transferred: no donor gate.
+        let accepted = |hi: bool| {
+            s.features
+                .iter()
+                .filter(|f| f.run == 1 && (f.precursor > 400) == hi)
+                .filter(|f| f.evidence_type.is_transfer() && f.evidence_type != EvidenceType::BelowThreshold)
+                .count()
+        };
+        assert!(accepted(false) >= 150 && accepted(true) >= 50, "{} {}", accepted(false), accepted(true));
+        // identity_q is the running mean of the donor PEP in ascending order:
+        // the confident donors first, then the marginal ones; quant_q is never
+        // below it.
+        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let p_of = |k: &str| k.trim_start_matches("PEP").split('/').next().unwrap().parse::<u32>().unwrap();
+        let mut lo = f64::NEG_INFINITY;
+        let mut hi = f64::INFINITY;
+        for r in rows.iter().filter(|r| r.identity_q.is_some()) {
+            let iq = r.identity_q.unwrap();
+            assert!(r.quant_q.unwrap() >= iq, "{r:?}");
+            assert!(r.measurement_q.is_some(), "{r:?}");
+            if p_of(&r.precursor_key) > 400 {
+                hi = hi.min(iq);
             } else {
-                accepted_low += usize::from(f.evidence_type != EvidenceType::BelowThreshold);
+                lo = lo.max(iq);
             }
         }
-        assert!(accepted_low >= 150, "{accepted_low}");
-        // Their identified rows are reported as before.
-        assert_eq!(s.validation.identified, N as usize);
+        assert!(lo <= 1e-4 + 1e-12 && hi > lo, "{lo} {hi}");
+        // Rows that are no accepted transfer have none.
+        assert!(rows
+            .iter()
+            .filter(|r| r.measurement_q.is_none())
+            .all(|r| r.identity_q.is_none()));
     }
 
     #[test]
@@ -3649,12 +3640,6 @@ mod finalize_tests {
                     }
                     continue;
                 }
-                if r.role == Role::Transfer
-                    && r.kind == Hypothesis::Target
-                    && idx.gated(r.precursor)
-                {
-                    v.donor_gated += 1;
-                }
                 if r.kind != Hypothesis::Target {
                     if r.role == Role::Transfer {
                         let f = family(r.kind) as usize;
@@ -3773,6 +3758,7 @@ mod finalize_tests {
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
                         measurement_q: None,
+                        identity_q: None,
                     },
                     (
                         e.map(|e| e.mass_err_ppm),
@@ -3801,6 +3787,21 @@ mod finalize_tests {
                     let r = &mut out[k].2;
                     r.measurement_q = Some(q);
                     r.quant_q = Some(transfer_quant_q(r.transfer_q, q));
+                });
+            }
+            // identity_q: the same running mean of the donor PEP.
+            let mut by_run: HashMap<u16, Vec<(f64, usize)>> = HashMap::new();
+            for (k, (p, run, r, _)) in out.iter().enumerate() {
+                if r.measurement_q.is_some() {
+                    by_run.entry(*run).or_default().push((idx.donor_wrong(*p), k));
+                }
+            }
+            for pool in by_run.values_mut() {
+                identity_probabilities(pool, |k| idx.donor_q(out[k].0));
+                running_mean_q(pool, |k, q| {
+                    let r = &mut out[k].2;
+                    r.identity_q = Some(q);
+                    r.quant_q = Some(r.quant_q.map_or(q, |v| v.max(q)));
                 });
             }
             out.sort_by_key(|&(p, run, ..)| (p, run));

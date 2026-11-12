@@ -75,7 +75,7 @@ use crate::quant_mbr::{
     amplitude_snr, cosine, describe_width_weights, donor_fit, family, identified_features,
     iso_profile, local_slope, median, relative_fit_width, reported_quantity, row_width_weight,
     transfer_features, weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role,
-    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    ShapeReference, NO_SHAPE,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -741,10 +741,27 @@ impl<'a> EntryIndex<'a> {
         self.entry_of[p as usize].is_some_and(|e| e.identity_decoy)
     }
 
-    /// Not transferred: the entry's best donor PSM is above TRANSFER_DONOR_Q.
-    pub(crate) fn gated(&self, p: u32) -> bool {
-        self.entry_of[p as usize]
-            .is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
+    /// The probability that the identification of `p` is wrong: the PEP of
+    /// its best donor PSM (1 when there is none or it is not finite).
+    pub(crate) fn donor_wrong(&self, p: u32) -> f64 {
+        self.entry_of
+            .get(p as usize)
+            .copied()
+            .flatten()
+            .map(|e| e.donor_psm.pep)
+            .filter(|x| x.is_finite())
+            .map_or(1.0, |x| x.clamp(0.0, 1.0))
+    }
+
+    /// The q-value of the best donor PSM of `p` (1 when there is none).
+    pub(crate) fn donor_q(&self, p: u32) -> f64 {
+        self.entry_of
+            .get(p as usize)
+            .copied()
+            .flatten()
+            .map(|e| e.donor_psm.q)
+            .filter(|x| x.is_finite())
+            .map_or(1.0, |x| x.clamp(0.0, 1.0))
     }
 
     /// The classifier of `r` and its family; `None` for a row that takes no
@@ -757,7 +774,6 @@ impl<'a> EntryIndex<'a> {
             Role::Identified if identity => return None,
             Role::Identified => Table::Identified,
             Role::Transfer if identity && r.kind != Hypothesis::Target => return None,
-            Role::Transfer if self.gated(r.precursor) => return None,
             Role::Transfer => Table::Transfer,
             Role::PseudoTransfer => Table::Pseudo,
         };
@@ -1236,6 +1252,8 @@ struct OutRow {
     apex_rt_s: Option<f64>,
     /// The wrong-measurement q-value of an accepted transfer.
     measurement_q: Option<f64>,
+    /// The wrong-identity q-value of an accepted transfer.
+    identity_q: Option<f64>,
     library_q: f64,
     mass_err_ppm: Option<f64>,
     claim: Claim,
@@ -1279,7 +1297,7 @@ fn evidence_code(e: EvidenceType) -> u8 {
 
 /// The optional values of [`OutRow`], in column order after the evidence
 /// type.
-const OUT_VALUES: [&str; 7] = [
+const OUT_VALUES: [&str; 8] = [
     "quantity",
     "quantity_se",
     "quantity_normalized",
@@ -1287,6 +1305,7 @@ const OUT_VALUES: [&str; 7] = [
     "quant_q",
     "apex_rt_s",
     "measurement_q",
+    "identity_q",
 ];
 
 /// The claim values of [`OutRow`], after the mass error: claimant
@@ -1368,6 +1387,7 @@ impl OutWriter {
                     r.quant_q,
                     r.apex_rt_s,
                     r.measurement_q,
+                    r.identity_q,
                     Some(r.library_q),
                     r.mass_err_ppm,
                     r.claim.claimant.map(f64::from),
@@ -1466,16 +1486,17 @@ impl OutReader {
                     quant_q: opt(4, i),
                     apex_rt_s: opt(5, i),
                     measurement_q: opt(6, i),
-                    library_q: values[7].value(i),
-                    mass_err_ppm: opt(8, i),
+                    identity_q: opt(7, i),
+                    library_q: values[8].value(i),
+                    mass_err_ppm: opt(9, i),
                     claim: Claim {
-                        claimant: opt(9, i).map(|x| x as u32),
-                        dt_s: opt(10, i).map(|x| x as f32),
-                        identified: opt(11, i).is_some_and(|x| x != 0.0),
-                        co_apex: opt(12, i).is_some_and(|x| x != 0.0),
-                        n: opt(13, i).map_or(0, |x| x as u16),
-                        n_co_apex: opt(14, i).map_or(0, |x| x as u16),
-                        n_identified_co_apex: opt(15, i).map_or(0, |x| x as u16),
+                        claimant: opt(10, i).map(|x| x as u32),
+                        dt_s: opt(11, i).map(|x| x as f32),
+                        identified: opt(12, i).is_some_and(|x| x != 0.0),
+                        co_apex: opt(13, i).is_some_and(|x| x != 0.0),
+                        n: opt(14, i).map_or(0, |x| x as u16),
+                        n_co_apex: opt(15, i).map_or(0, |x| x as u16),
+                        n_identified_co_apex: opt(16, i).map_or(0, |x| x as u16),
                         ..Claim::default()
                     },
                 })
@@ -1660,6 +1681,19 @@ pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usiz
 /// `quant_q` of an accepted transfer: the larger of its transfer q-value and
 /// its wrong-measurement q-value, so a cut keeps it only when both are at or
 /// below the cut.
+/// Sets the wrong-identity probabilities of `pool` (`(p, row)`, each `p` the
+/// donor PSM's PEP) to the donor q-value of the row (`donor_q`) when the PEP
+/// carries no information: every PEP of the pool is 1, which is how a failed
+/// Percolator `-Y` PEP fit looks. A q-value is no probability, but it orders
+/// the rows and keeps their mean below the PEP's 1.
+pub(crate) fn identity_probabilities(pool: &mut [(f64, usize)], donor_q: impl Fn(usize) -> f64) {
+    if !pool.is_empty() && pool.iter().all(|&(p, _)| p >= 1.0) {
+        for (p, i) in pool.iter_mut() {
+            *p = donor_q(*i);
+        }
+    }
+}
+
 pub(crate) fn transfer_quant_q(transfer_q: Option<f64>, measurement_q: f64) -> f64 {
     transfer_q.map_or(measurement_q, |t| t.max(measurement_q))
 }
@@ -2404,12 +2438,6 @@ pub(crate) fn finalize_stream(
                     }
                     continue;
                 }
-                if r.role == Role::Transfer
-                    && r.kind == Hypothesis::Target
-                    && idx.gated(r.precursor)
-                {
-                    v.donor_gated += 1;
-                }
                 if r.kind != Hypothesis::Target {
                     if r.role == Role::Transfer {
                         let f = family(r.kind) as usize;
@@ -2543,6 +2571,7 @@ pub(crate) fn finalize_stream(
                     quant_q,
                     apex_rt_s: e.map(|e| e.t0),
                     measurement_q: None,
+                    identity_q: None,
                     library_q: r.library_q,
                     mass_err_ppm: e.map(|e| e.mass_err_ppm),
                     claim: if r.role == Role::Transfer {
@@ -2590,6 +2619,23 @@ pub(crate) fn finalize_stream(
                 let r = &mut out.rows[i];
                 r.measurement_q = Some(q);
                 r.quant_q = Some(transfer_quant_q(r.transfer_q, q));
+            });
+            // identity_q of an accepted transfer: the same running mean of
+            // the probability that the donors' identification is wrong (the
+            // PEP of the entry's best donor PSM); its quant_q is the largest
+            // of the three estimates.
+            let mut pool: Vec<(f64, usize)> = out
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.measurement_q.is_some())
+                .map(|(i, r)| (idx.donor_wrong(r.precursor), i))
+                .collect();
+            identity_probabilities(&mut pool, |i| idx.donor_q(out.rows[i].precursor));
+            running_mean_q(&mut pool, |i, q| {
+                let r = &mut out.rows[i];
+                r.identity_q = Some(q);
+                r.quant_q = Some(r.quant_q.map_or(q, |v| v.max(q)));
             });
             out.rows.sort_unstable_by_key(|r| (r.precursor, r.run));
             if let Some(w) = out
@@ -2703,6 +2749,7 @@ fn write_merged(
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
                         measurement_q: r.measurement_q,
+                        identity_q: r.identity_q,
                     })?;
                 }
                 n += rows.len();
@@ -2748,10 +2795,8 @@ fn log_summary(
         TRANSFER_FEATURES.join(",")
     );
     eprintln!(
-        "[mbr] library entries {} targets, {} identity decoys; {} transfer targets not transferred (best donor PSM q > {TRANSFER_DONOR_Q})",
-        v.target_entries,
-        v.identity_entries,
-        v.donor_gated
+        "[mbr] library entries {} targets, {} identity decoys",
+        v.target_entries, v.identity_entries
     );
     for f in &fdr.counts.failed_folds {
         eprintln!("[mbr] transfer FDR fold without a model: {f}");
@@ -2964,12 +3009,11 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
-    /// The transfer gate reads the library's best-donor q-value, which is the
-    /// pooled q-value of that PSM when the rescoring result has one: an entry
-    /// whose donor PSM is good in its run but not pooled is gated, and the
-    /// other way round.
+    /// A transfer's identity reads the library's best donor PSM: its PEP, and
+    /// its q-value, which is the pooled q-value of that PSM when the
+    /// rescoring result has one.
     #[test]
-    fn the_transfer_gate_reads_the_pooled_q_of_the_best_donor() {
+    fn a_transfer_identity_reads_the_best_donor_psm() {
         use quant::align::AlignParams;
         use quant::library::{build_library, PrecursorMeta, PsmIn};
         let meta: Vec<PrecursorMeta> = (0..200)
@@ -3000,17 +3044,18 @@ mod tests {
                 .collect()
         };
         let ap = AlignParams::default();
-        // Per-run q passes the gate, pooled q does not.
+        // The pooled q-value, not the per-run one.
         let lib = build_library(&psms(0.0005, 0.005), meta.clone(), 2, 1.0, 0.01, None, &ap);
         let idx = EntryIndex::new(&lib, 2);
-        assert!(idx.gated(0));
-        // Per-run q fails it, pooled q passes (the PSM is still a donor).
+        assert_eq!(idx.donor_q(0), 0.005);
+        assert_eq!(idx.donor_wrong(0), 0.001);
         let lib = build_library(&psms(0.005, 0.0005), meta.clone(), 2, 1.0, 0.01, None, &ap);
-        let idx = EntryIndex::new(&lib, 2);
-        assert!(!idx.gated(0));
-        // Without a pooled q-value the gate reads the q-value.
+        assert_eq!(EntryIndex::new(&lib, 2).donor_q(0), 0.0005);
+        // Without a pooled q-value, the q-value.
         let lib = build_library(&psms(0.005, f64::NAN), meta, 2, 1.0, 0.01, None, &ap);
-        assert!(EntryIndex::new(&lib, 2).gated(0));
+        assert_eq!(EntryIndex::new(&lib, 2).donor_q(0), 0.005);
+        // A precursor without an entry is wrong for certain.
+        assert_eq!(EntryIndex::new(&lib, 2).donor_wrong(10_000), 1.0);
     }
 
     /// An even histogram fills every one of the `MAX_STRATA` strata, and the
@@ -3090,6 +3135,7 @@ mod tests {
             quant_q: Some(-0.0),
             apex_rt_s: Some(f64::INFINITY),
             measurement_q: (run % 3 == 0).then_some(0.125),
+            identity_q: (run % 5 == 0).then_some(0.0625),
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
             claim: Claim {
@@ -3145,6 +3191,7 @@ mod tests {
                     r.quant_q,
                     r.apex_rt_s,
                     r.measurement_q,
+                    r.identity_q,
                     Some(r.library_q),
                     r.mass_err_ppm,
                 ]

@@ -12,7 +12,7 @@
 //! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error: the area of the precursor's whole isotope pattern. The fit measures the first four isotopes, and the result is divided by the share of the pattern they hold (from the elemental formula; 0.995 at 1 kDa, 0.949 at 2 kDa, 0.871 at 3 kDa) |
 //! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the measurement without the offset |
 //! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
-//! | `quant_q` | the largest internal error estimate of the row (not an identification FDR): the identified-row quality q-value for identified rows; `transfer_q` for a transfer below the threshold; the larger of `transfer_q` and `measurement_q` for an accepted transfer. A cut at `t` keeps a row only when every estimate made for it is at or below `t`; `t` is not the error rate of the kept rows |
+//! | `quant_q` | the largest internal error estimate of the row (not an identification FDR): the identified-row quality q-value for identified rows; `transfer_q` for a transfer below the threshold; the largest of `transfer_q`, `measurement_q` and `identity_q` for an accepted transfer. A cut at `t` keeps a row only when every estimate made for it is at or below `t`; `t` is not the error rate of the kept rows |
 //! | `apex_rt_s` | fitted apex, seconds |
 //! | `library_q` | internal library entry gate (not an identification FDR) |
 //! | `claimed_by` | transfer rows only: `precursor_key` of the best other target of the run on the same MS1 feature (same charge, neutral masses and apexes within the run's learned claim windows; the identified one first, then the nearest apex); null without a claimant and for identified rows. A statement about the run's probes: the row and its quantity are not changed by it (the shared-feature classifier may change the evidence type) |
@@ -20,6 +20,7 @@
 //! | `claim_identified`, `claim_co_apex` | the claimant is identified in the run; the apexes are closer than the sum of the two fitted widths (the two probes measure one feature, whose quantity is shared) |
 //! | `claim_n_co_apex`, `claim_n_identified_co_apex` | co-apex claimants of the row, and the identified ones among them; 0 for a transfer without any, null for identified rows |
 //! | `measurement_q` | accepted transfers only: the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability (a model trained on the pseudo-transfers, where a measurement is wrong at the wrong peak or with a quantity off by more than a factor of 2); null for other rows |
+//! | `identity_q` | accepted transfers only: the running mean, over the run's accepted transfers in ascending probability that the transferred identification is wrong, of that probability: the posterior error probability of the precursor's best donor PSM (its q-value when the rescoring result's PEP is 1 for every donor of the run, a failed fit); null for other rows |
 //!
 //! `claimed_by` is UTF-8 too; the two flags are boolean and the two counts
 //! uint32. The other columns are float64; missing or non-finite values are null (`library_q` is never null). A
@@ -68,14 +69,14 @@ use crate::versioned_parquet::{
 
 const MBR_TABLE: TableVersion = TableVersion {
     key: "andes.mbr.schema",
-    version: "1.3",
+    version: "1.4",
     major: 1,
     what: "MBR table",
 };
 const VALIDATION_TABLE: TableVersion = TableVersion {
     key: "andes.mbr_validation.schema",
-    version: "1.2",
-    major: 1,
+    version: "2.0",
+    major: 2,
     what: "MBR validation table",
 };
 
@@ -137,6 +138,9 @@ pub struct MbrRow<'a> {
     /// The wrong-measurement q-value of an accepted transfer; `None` for
     /// other rows.
     pub measurement_q: Option<f64>,
+    /// The wrong-identity q-value of an accepted transfer; `None` for other
+    /// rows.
+    pub identity_q: Option<f64>,
 }
 
 /// The same-run claims on one transfer row of `<base>.mbr.parquet`.
@@ -151,7 +155,7 @@ pub struct MbrClaim<'a> {
     pub n_identified_co_apex: u32,
 }
 
-pub const MBR_COLUMNS: [&str; 17] = [
+pub const MBR_COLUMNS: [&str; 18] = [
     "precursor_key",
     "run",
     "evidence_type",
@@ -169,6 +173,7 @@ pub const MBR_COLUMNS: [&str; 17] = [
     "claim_n_co_apex",
     "claim_n_identified_co_apex",
     "measurement_q",
+    "identity_q",
 ];
 
 /// The default transfer q-value threshold, at which the validation is
@@ -255,9 +260,6 @@ pub struct MbrValidation {
     /// Decoy transfer rows with a q-value: mass-shift, RT-shift, identity
     /// decoys.
     pub decoy_transfers: [usize; 3],
-    /// Transfer targets not transferred because their best donor PSM is
-    /// above the transfer donor q-value.
-    pub donor_gated: usize,
     /// Accepted transfers reported as `shared_feature`.
     pub shared_feature: usize,
 }
@@ -322,7 +324,6 @@ impl MbrValidation {
             target_entries: _,
             identity_entries: _,
             decoy_transfers,
-            donor_gated,
             shared_feature,
         } = o;
         self.pseudo_transfers += pseudo_transfers;
@@ -344,7 +345,6 @@ impl MbrValidation {
         self.ms2_pseudo_supported += ms2_pseudo_supported;
         self.transfer_ms2 += transfer_ms2;
         add_counts(&mut self.decoy_transfers, decoy_transfers);
-        self.donor_gated += donor_gated;
         self.shared_feature += shared_feature;
     }
 }
@@ -430,7 +430,6 @@ pub fn validation_columns() -> Vec<String> {
             "mass_decoy_transfers",
             "rt_decoy_transfers",
             "identity_decoy_transfers",
-            "donor_gated",
             "shared_feature",
             "wrong_measurement",
             "wrong_measurement_rate",
@@ -532,7 +531,6 @@ impl MbrValidation {
             n(self.decoy_transfers[0]),
             n(self.decoy_transfers[1]),
             n(self.decoy_transfers[2]),
-            n(self.donor_gated),
             n(self.shared_feature),
             n(self.wrong_measurement),
             Value(self.wrong_measurement_rate()),
@@ -579,6 +577,7 @@ fn mbr_schema() -> Schema {
         Field::new("claim_n_co_apex", DataType::UInt32, true),
         Field::new("claim_n_identified_co_apex", DataType::UInt32, true),
         f("measurement_q"),
+        f("identity_q"),
     ])
 }
 
@@ -596,6 +595,7 @@ struct MbrColumnsBuilder {
     claim_n_co: UInt32Builder,
     claim_n_id_co: UInt32Builder,
     measurement_q: Float64Builder,
+    identity_q: Float64Builder,
     rows: usize,
 }
 
@@ -614,6 +614,7 @@ impl MbrColumnsBuilder {
             claim_n_co: UInt32Builder::new(),
             claim_n_id_co: UInt32Builder::new(),
             measurement_q: Float64Builder::new(),
+            identity_q: Float64Builder::new(),
             rows: 0,
         }
     }
@@ -645,6 +646,8 @@ impl MbrColumnsBuilder {
             .append_option(c.map(|c| c.n_identified_co_apex));
         self.measurement_q
             .append_option(r.measurement_q.filter(|v| v.is_finite()));
+        self.identity_q
+            .append_option(r.identity_q.filter(|v| v.is_finite()));
         self.rows += 1;
     }
 
@@ -669,6 +672,7 @@ impl MbrColumnsBuilder {
         cols.push(Arc::new(self.claim_n_co.finish()));
         cols.push(Arc::new(self.claim_n_id_co.finish()));
         cols.push(Arc::new(self.measurement_q.finish()));
+        cols.push(Arc::new(self.identity_q.finish()));
         RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
 }
@@ -764,6 +768,9 @@ pub struct MbrRecord {
     /// `measurement_q` of an accepted transfer; `None` for other rows and in
     /// a table written before schema 1.3.
     pub measurement_q: Option<f64>,
+    /// `identity_q` of an accepted transfer; `None` for other rows and in a
+    /// table written before schema 1.4.
+    pub identity_q: Option<f64>,
 }
 
 /// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
@@ -804,6 +811,11 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
             .column_by_name("measurement_q")
             .map(|_| float("measurement_q"))
             .transpose()?;
+        // Tables written before schema 1.4 have no identity q-value.
+        let iq = b
+            .column_by_name("identity_q")
+            .map(|_| float("identity_q"))
+            .transpose()?;
         for i in 0..b.num_rows() {
             out.push(MbrRecord {
                 precursor_key: key.value(i).to_string(),
@@ -822,6 +834,7 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
                 claim_co_apex: co_apex.filter(|c| !c.is_null(i)).map(|c| c.value(i)),
                 claim_n_co_apex: n_co.and_then(|c| opt(c, i)),
                 measurement_q: mq.and_then(|c| opt(c, i)),
+                identity_q: iq.and_then(|c| opt(c, i)),
             });
         }
     }
@@ -943,6 +956,7 @@ mod tests {
                 library_q: 0.001,
                 claim: None,
                 measurement_q: None,
+                identity_q: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -964,6 +978,7 @@ mod tests {
                     n_identified_co_apex: 1,
                 }),
                 measurement_q: None,
+                identity_q: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -985,6 +1000,7 @@ mod tests {
                     n_identified_co_apex: 0,
                 }),
                 measurement_q: Some(0.006),
+                identity_q: Some(0.002),
             },
         ]
     }
@@ -1017,10 +1033,12 @@ mod tests {
                 claim_co_apex: r.claim.as_ref().map(|c| c.co_apex),
                 claim_n_co_apex: r.claim.as_ref().map(|c| c.n_co_apex),
                 measurement_q: r.measurement_q,
+                identity_q: r.identity_q,
             })
             .collect();
         assert_eq!(back, want);
         assert_eq!(back[2].measurement_q, Some(0.006));
+        assert_eq!(back[2].identity_q, Some(0.002));
         assert_eq!(back[1].quantity, None);
         // The column names and order are the documented ones.
         let t = read_table(&p, &MBR_TABLE).unwrap();
@@ -1031,7 +1049,7 @@ mod tests {
             .map(|f| f.name().clone())
             .collect();
         assert_eq!(names, MBR_COLUMNS);
-        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.3"));
+        assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.4"));
         // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());
@@ -1109,7 +1127,6 @@ mod tests {
             target_entries: 70,
             identity_entries: 2,
             decoy_transfers: [95, 85, 7],
-            donor_gated: 3,
             shared_feature: 6,
         };
         write_mbr_validation(&p, &v).unwrap();
@@ -1144,7 +1161,6 @@ mod tests {
         assert_eq!(get("accepted_mass_decoys_at_threshold"), Count(4));
         assert_eq!(get("identity_entries"), Count(2));
         assert_eq!(get("identity_decoy_transfers"), Count(7));
-        assert_eq!(get("donor_gated"), Count(3));
         assert_eq!(get("shared_feature"), Count(6));
         assert_eq!(get("wrong_measurement"), Count(2));
         assert_eq!(get("wrong_measurement_rate"), Value(Some(0.25)));

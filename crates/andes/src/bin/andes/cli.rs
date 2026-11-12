@@ -1244,10 +1244,9 @@ pub(crate) struct QuantExtractArgs {
     pub(crate) lfq_tol: Option<Tolerance>,
 
     /// Advanced: transfer pre-selection. `true` (the default, as `--mbr`)
-    /// measures a transfer only when finalize can accept it (the entry's best
-    /// donor PSM passes the transfer donor threshold) and when it has at
-    /// least `--mbr-min-donor-fraction` of the other aligned runs as donors;
-    /// a skipped pair gets neither its target nor its decoy rows. `false`
+    /// measures a transfer only when it has at least
+    /// `--mbr-min-donor-fraction` of the other aligned runs as donors; a
+    /// skipped pair gets neither its target nor its decoy rows. `false`
     /// measures every transfer pair.
     #[arg(long = "mbr-preselect", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub(crate) mbr_preselect: bool,

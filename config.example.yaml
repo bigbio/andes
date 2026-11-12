@@ -46,7 +46,7 @@ scoring:
   threads: 8
   # fragmentation: auto          # MGF only (no metadata): auto | CID | ETD | HCD | UVPD
   # protocol: auto               # auto | TMT | iTRAQ | phospho | ...
-  # fragment_tol_ppm: 20         # MGF only, mutually exclusive with fragment_tol_da
+  # fragment_tol_ppm: 20         # PIN feature tolerance on any input (replaces the per-run measurement); on MGF also picks the high-res model; exclusive with fragment_tol_da
   # model_store: models.parquet  # custom / trained model store
   # model: hcd_qexactive_tryp    # force a specific model id
   # gbdt_max_trees: 100          # advanced: trees per GBDT ensemble (0 = all; unset = 100, all under glyco)

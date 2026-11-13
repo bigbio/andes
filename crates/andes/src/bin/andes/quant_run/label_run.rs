@@ -451,6 +451,10 @@ fn fit_folded(
     Some((fit, converted))
 }
 
+/// The joint fit at the identified channels' profile (with its satellite
+/// conversions) and the pinned probe it was measured with.
+type ProfileFit = ((GroupFit, Vec<Option<f64>>), GroupProbe);
+
 /// The fit of a group with unidentified channels at the elution profile of
 /// its identified channels: the apex and width are searched with only the
 /// identified channels (and their satellites) free, the others held at 0,
@@ -464,7 +468,7 @@ fn fit_at_identified_profile(
     probe: &GroupProbe,
     ids: &[Option<ChannelHit>],
     params: &FitParams,
-) -> Option<((GroupFit, Vec<Option<f64>>), GroupProbe)> {
+) -> Option<ProfileFit> {
     let n = g.channel_mz.len();
     let mut shape = probe.clone();
     shape.free = (0..shape.channel_mz.len())
@@ -1848,8 +1852,13 @@ mod tests {
             channel_score(&target.channels[1]),
             channel_score(&decoy.channels[1]),
         );
-        assert!(sd > 0.0, "the decoy reads the species");
-        assert!(st <= sd * 1.02, "target {st} vs decoy {sd}");
+        // Read at the same pinned profile, the target and the decoy see the
+        // species alike (6 s off the apex their coherence, and so their score,
+        // can be 0): neither scores better than the other.
+        assert!(
+            (st - sd).abs() <= 0.02 * st.max(sd) + 1e-9,
+            "target {st} vs decoy {sd}"
+        );
         assert!(
             (target.channels[1].apex_offset - decoy.channels[1].apex_offset).abs() < 0.2,
             "{} vs {}",

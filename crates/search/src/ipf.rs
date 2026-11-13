@@ -298,11 +298,37 @@ pub fn site_ions(
 /// intensity tier is the null the ion PEPs are learned against.
 pub const DECOY_SHIFTS: [f64; 4] = [-7.37, -3.71, 3.83, 7.59];
 
+/// A set of placement indices, one bit per form (an ion's PyProphet
+/// transition bitmask). Compact because a multiply phosphorylated peptide can
+/// have up to [`MAX_PLACEMENTS`] forms and each site ion maps to many of them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FormSet(Box<[u64]>);
+
+impl FormSet {
+    pub fn from_indices(n_forms: usize, idx: &[u32]) -> Self {
+        let mut w = vec![0u64; n_forms.div_ceil(64)];
+        for &i in idx {
+            w[i as usize / 64] |= 1 << (i % 64);
+        }
+        FormSet(w.into_boxed_slice())
+    }
+    pub fn contains(&self, i: u32) -> bool {
+        self.0
+            .get(i as usize / 64)
+            .is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+    pub fn indices(&self) -> Vec<u32> {
+        (0..self.0.len() as u32 * 64)
+            .filter(|&i| self.contains(i))
+            .collect()
+    }
+}
+
 /// One site ion, judged against the spectrum.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IonMatch {
-    /// Indices into the placement list of the forms with this ion.
-    pub forms: Vec<u32>,
+    /// The forms with this ion.
+    pub forms: FormSet,
     /// Intensity tier of the matched peak (0 = most intense), `None` if no
     /// peak lies within tolerance.
     pub tier: Option<u8>,
@@ -319,8 +345,10 @@ pub struct IpfEvidence {
     /// Whether [`MAX_PLACEMENTS`] cut the enumeration.
     pub truncated: bool,
     pub ions: Vec<IonMatch>,
-    /// Tier of every decoy ion (`None` = unmatched), pooled over shifts.
-    pub decoys: Vec<Option<u8>>,
+    /// Decoy ions with a peak in tolerance, and decoy ions tried (pooled over
+    /// shifts); diagnostic only.
+    pub decoy_hits: u32,
+    pub decoy_total: u32,
 }
 
 /// Number of intensity tiers; peaks are tiered by rank within the spectrum.
@@ -368,18 +396,18 @@ pub fn psm_evidence(
     let matches = ions
         .iter()
         .map(|ion| IonMatch {
-            forms: ion.forms.clone(),
+            forms: FormSet::from_indices(forms.len(), &ion.forms),
             tier: match_tier(peaks, &tiers, ion.mz, tol_da(ion.mz)),
         })
         .collect();
-    let decoys = ions
+    let decoys: Vec<bool> = ions
         .iter()
         .flat_map(|ion| {
             DECOY_SHIFTS
                 .iter()
                 .map(move |s| (ion.mz + s / ion.charge as f64).max(0.0))
         })
-        .map(|mz| match_tier(peaks, &tiers, mz, tol_da(mz)))
+        .map(|mz| match_tier(peaks, &tiers, mz, tol_da(mz)).is_some())
         .collect();
     Some(IpfEvidence {
         forms: forms
@@ -389,7 +417,8 @@ pub fn psm_evidence(
         observed,
         truncated,
         ions: matches,
-        decoys,
+        decoy_hits: decoys.iter().filter(|&&m| m).count() as u32,
+        decoy_total: decoys.len() as u32,
     })
 }
 
@@ -427,14 +456,14 @@ impl IonPepModel {
         let (mut dm, mut dn) = (0usize, 0usize);
         for e in evidence {
             for ion in &e.ions {
-                if ion.forms.contains(&e.observed) {
+                if ion.forms.contains(e.observed) {
                     own[bin(ion.tier)] += 1.0;
                 } else {
                     other[bin(ion.tier)] += 1.0;
                 }
             }
-            dm += e.decoys.iter().filter(|t| t.is_some()).count();
-            dn += e.decoys.len();
+            dm += e.decoy_hits as usize;
+            dn += e.decoy_total as usize;
         }
         let (so, sx): (f64, f64) = (own.iter().sum(), other.iter().sum());
         let pep = |k: usize| {
@@ -466,7 +495,7 @@ impl IonPepModel {
                 pep: ion
                     .tier
                     .map_or(self.unmatched, |t| self.matched[t as usize]),
-                forms: ion.forms.clone(),
+                forms: ion.forms.indices(),
             })
             .collect()
     }

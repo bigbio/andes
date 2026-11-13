@@ -1601,13 +1601,19 @@ impl<'a> PreparedSearch<'a> {
                         psm.site_evidence = evidence.remove(&key(psm)).flatten();
                         if ipf {
                             let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                            if let Some(e) = crate::ipf::psm_evidence(
-                                &spec.peaks,
-                                &cand.peptide,
-                                psm.charge_used,
-                                move |mz| tol.as_da(mz),
-                                &declared,
-                            ) {
+                            // IPF localizes target PSMs only.
+                            let ev = (!cand.is_decoy)
+                                .then(|| {
+                                    crate::ipf::psm_evidence(
+                                        &spec.peaks,
+                                        &cand.peptide,
+                                        psm.charge_used,
+                                        move |mz| tol.as_da(mz),
+                                        &declared,
+                                    )
+                                })
+                                .flatten();
+                            if let Some(e) = ev {
                                 psm.site_evidence.get_or_insert_with(Default::default).ipf =
                                     Some(e);
                             }

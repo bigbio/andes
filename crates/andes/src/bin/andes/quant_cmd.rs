@@ -1885,6 +1885,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
+    let transfer_fdr = a.quant_transfer_fdr();
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         transfer_models: a.transfer_models,
@@ -1912,7 +1913,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     finalize_and_write(
         &stored,
         &ExtractFiles(paths),
-        a.quant_transfer_fdr(),
+        transfer_fdr,
         a.seed,
         limits,
         a.quant_trace_fraction,

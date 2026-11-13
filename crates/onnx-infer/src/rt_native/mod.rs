@@ -275,24 +275,190 @@ impl Conv {
     }
 
     /// `y[p] = b + Σ_k Σ_i w[k][i] · x[p + (k - k/2)·dil]` with zero padding.
+    ///
+    /// Output is computed in register tiles of [`TILE_P`] positions ×
+    /// [`TILE_O`] channels, so one load of a weight row serves every position
+    /// of the tile. Each output element still sums bias, then taps `k`
+    /// ascending, then inputs `i` ascending; channels beyond the last full
+    /// tile take the same order one position at a time.
     pub(crate) fn apply(&self, x: &[f32], n: usize, y: &mut [f32]) {
         let (cin, cout) = (self.cin, self.cout);
-        for p in 0..n {
-            let yp = &mut y[p * cout..(p + 1) * cout];
-            yp.copy_from_slice(&self.b);
-            for kk in 0..self.k {
-                let q = p as isize + (kk as isize - (self.k / 2) as isize) * self.dil as isize;
-                if q < 0 || q >= n as isize {
-                    continue;
+        let half = (self.k / 2) as isize;
+        let dil = self.dil as isize;
+        let tiled = cout - cout % TILE_O;
+        let mut p0 = 0;
+        while p0 < n {
+            let np = TILE_P.min(n - p0);
+            for o0 in (0..tiled).step_by(TILE_O) {
+                let mut acc = [[0.0f32; TILE_O]; TILE_P];
+                for a in acc.iter_mut().take(np) {
+                    a.copy_from_slice(&self.b[o0..o0 + TILE_O]);
                 }
-                let xq = &x[q as usize * cin..(q as usize + 1) * cin];
-                let wk = &self.w[kk * cin * cout..(kk + 1) * cin * cout];
-                for (i, &xv) in xq.iter().enumerate() {
-                    let wi = &wk[i * cout..(i + 1) * cout];
-                    for (yo, &wo) in yp.iter_mut().zip(wi) {
-                        *yo += wo * xv;
+                for kk in 0..self.k {
+                    let off = (kk as isize - half) * dil;
+                    // tile rows r with 0 <= p0 + r + off < n
+                    let lo = (-(p0 as isize) - off).clamp(0, np as isize) as usize;
+                    let hi = (n as isize - p0 as isize - off).clamp(0, np as isize) as usize;
+                    if lo >= hi {
+                        continue;
+                    }
+                    let q0 = ((p0 + lo) as isize + off) as usize;
+                    let xs = &x[q0 * cin..(q0 + hi - lo) * cin];
+                    let wk = &self.w[kk * cin * cout..(kk + 1) * cin * cout];
+                    tap_rows(&mut acc[lo..hi], xs, wk, cin, cout, o0);
+                }
+                for (r, a) in acc.iter().take(np).enumerate() {
+                    y[(p0 + r) * cout + o0..][..TILE_O].copy_from_slice(a);
+                }
+            }
+            if tiled < cout {
+                for p in p0..p0 + np {
+                    let yp = &mut y[p * cout + tiled..(p + 1) * cout];
+                    yp.copy_from_slice(&self.b[tiled..]);
+                    for kk in 0..self.k {
+                        let q = p as isize + (kk as isize - half) * dil;
+                        if q < 0 || q >= n as isize {
+                            continue;
+                        }
+                        let xq = &x[q as usize * cin..(q as usize + 1) * cin];
+                        let wk = &self.w[kk * cin * cout..(kk + 1) * cin * cout];
+                        for (i, &xv) in xq.iter().enumerate() {
+                            let wi = &wk[i * cout + tiled..(i + 1) * cout];
+                            for (yo, &wo) in yp.iter_mut().zip(wi) {
+                                *yo += wo * xv;
+                            }
+                        }
                     }
                 }
+            }
+            p0 += np;
+        }
+    }
+}
+
+/// Output positions per [`Conv::apply`] register tile.
+const TILE_P: usize = 4;
+/// Output channels per [`Conv::apply`] register tile.
+const TILE_O: usize = 16;
+
+/// One kernel tap over the rows of `acc` (consecutive positions whose inputs
+/// are the consecutive rows of `xs`).
+fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], cin: usize, cout: usize, o0: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    use avx::tap;
+    match acc.len() {
+        1 => tap::<1>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        2 => tap::<2>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        3 => tap::<3>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        4 => tap::<4>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        _ => unreachable!("tile holds at most TILE_P rows"),
+    }
+}
+
+/// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
+#[cfg_attr(
+    all(target_arch = "x86_64", target_feature = "avx", not(test)),
+    allow(dead_code)
+)]
+#[inline(always)]
+fn tap<const R: usize>(
+    acc: &mut [[f32; TILE_O]; R],
+    xs: &[f32],
+    wk: &[f32],
+    cin: usize,
+    cout: usize,
+    o0: usize,
+) {
+    let mut a = *acc;
+    let xs = &xs[..R * cin];
+    for i in 0..cin {
+        let w: &[f32; TILE_O] = wk[i * cout + o0..][..TILE_O].try_into().unwrap();
+        for (r, ar) in a.iter_mut().enumerate() {
+            let xv = xs[r * cin + i];
+            for (ao, &wo) in ar.iter_mut().zip(w) {
+                *ao += wo * xv;
+            }
+        }
+    }
+    *acc = a;
+}
+
+/// [`tap`] with the accumulators held in AVX registers: per element the same
+/// multiply, then add, in the same order, eight channels per instruction.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+mod avx {
+    use super::TILE_O;
+    use std::arch::x86_64::{
+        __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+    };
+
+    /// AVX vectors per tile row.
+    const V: usize = TILE_O / 8;
+    const _: () = assert!(TILE_O == 16, "the AVX tap holds 2 × 8 channels per row");
+
+    /// The 16 floats of `row` as two vectors.
+    ///
+    /// # Safety
+    /// The CPU must support AVX (the module is compiled only when it is enabled).
+    #[inline(always)]
+    unsafe fn load(row: &[f32; TILE_O]) -> [__m256; V] {
+        let p = row.as_ptr();
+        [_mm256_loadu_ps(p), _mm256_loadu_ps(p.add(8))]
+    }
+
+    /// Writes two vectors to the 16 floats of `row`.
+    ///
+    /// # Safety
+    /// As [`load`].
+    #[inline(always)]
+    unsafe fn store(row: &mut [f32; TILE_O], a: [__m256; V]) {
+        let p = row.as_mut_ptr();
+        _mm256_storeu_ps(p, a[0]);
+        _mm256_storeu_ps(p.add(8), a[1]);
+    }
+
+    /// `a + w · x` per lane (multiply, then add; no fused multiply-add).
+    ///
+    /// # Safety
+    /// As [`load`].
+    #[inline(always)]
+    unsafe fn step(a: [__m256; V], w: [__m256; V], x: f32) -> [__m256; V] {
+        let b = _mm256_set1_ps(x);
+        [
+            _mm256_add_ps(a[0], _mm256_mul_ps(w[0], b)),
+            _mm256_add_ps(a[1], _mm256_mul_ps(w[1], b)),
+        ]
+    }
+
+    /// The weights of input `i` for output channels `o0..o0 + TILE_O`.
+    #[inline(always)]
+    fn row_weights(wk: &[f32], i: usize, cout: usize, o0: usize) -> &[f32; TILE_O] {
+        wk[i * cout + o0..][..TILE_O].try_into().unwrap()
+    }
+
+    /// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
+    #[inline(always)]
+    pub(super) fn tap<const R: usize>(
+        acc: &mut [[f32; TILE_O]; R],
+        xs: &[f32],
+        wk: &[f32],
+        cin: usize,
+        cout: usize,
+        o0: usize,
+    ) {
+        let xs = &xs[..R * cin];
+        // SAFETY: AVX is enabled for this build (module `cfg`), and every load
+        // and store goes through a TILE_O-float array.
+        unsafe {
+            let mut a: [[__m256; V]; R] = std::array::from_fn(|r| load(&acc[r]));
+            for i in 0..cin {
+                let w = load(row_weights(wk, i, cout, o0));
+                for (r, ar) in a.iter_mut().enumerate() {
+                    *ar = step(*ar, w, xs[r * cin + i]);
+                }
+            }
+            for (row, ar) in acc.iter_mut().zip(a) {
+                store(row, ar);
             }
         }
     }
@@ -536,6 +702,93 @@ impl RtModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Conv::apply` sums in the order bias, tap, input, so it matches this
+    /// per-element reference bit for bit, across tile edges, padding and
+    /// channel remainders.
+    #[test]
+    fn conv_apply_matches_reference_bitwise() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        for &(k, cin, cout, dil) in &[
+            (1, 40, 96, 1),
+            (3, 96, 96, 8),
+            (2, 96, 96, 1),
+            (3, 64, 64, 4),
+            (1, 96, 12, 1),
+            (3, 8, 40, 2),
+            (5, 7, 33, 3),
+        ] {
+            let conv = Conv {
+                k,
+                cin,
+                cout,
+                dil,
+                w: (0..k * cin * cout).map(|_| rnd()).collect(),
+                b: (0..cout).map(|_| rnd()).collect(),
+            };
+            for n in 1..=20 {
+                let x: Vec<f32> = (0..n * cin).map(|_| rnd()).collect();
+                let mut y = vec![f32::NAN; n * cout];
+                conv.apply(&x, n, &mut y);
+                for p in 0..n {
+                    for (o, &bias) in conv.b.iter().enumerate() {
+                        let mut want = bias;
+                        for kk in 0..k {
+                            let q = p as isize + (kk as isize - (k / 2) as isize) * dil as isize;
+                            if q < 0 || q >= n as isize {
+                                continue;
+                            }
+                            for i in 0..cin {
+                                let wv = conv.w[(kk * cin + i) * cout + o];
+                                want += wv * x[q as usize * cin + i];
+                            }
+                        }
+                        assert_eq!(
+                            y[p * cout + o].to_bits(),
+                            want.to_bits(),
+                            "k{k} cin{cin} cout{cout} dil{dil} n{n} p{p} o{o}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The AVX tap and the portable tap give the same bits.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    #[test]
+    fn avx_tap_matches_portable_tap() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        let (cin, cout, o0) = (37, 96, 32);
+        let wk: Vec<f32> = (0..cin * cout).map(|_| rnd()).collect();
+        let xs: Vec<f32> = (0..TILE_P * cin).map(|_| rnd()).collect();
+        let mut init = [[0.0f32; TILE_O]; TILE_P];
+        for v in init.iter_mut().flatten() {
+            *v = rnd();
+        }
+        let bits =
+            |a: &[[f32; TILE_O]]| a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let (mut p4, mut v4) = (init, init);
+        tap::<4>(&mut p4, &xs, &wk, cin, cout, o0);
+        avx::tap::<4>(&mut v4, &xs, &wk, cin, cout, o0);
+        assert_eq!(bits(&p4), bits(&v4));
+        let (mut p1, mut v1) = ([init[0]], [init[0]]);
+        tap::<1>(&mut p1, &xs, &wk, cin, cout, o0);
+        avx::tap::<1>(&mut v1, &xs, &wk, cin, cout, o0);
+        assert_eq!(bits(&p1), bits(&v1));
+    }
 
     #[test]
     fn parses_proforma() {

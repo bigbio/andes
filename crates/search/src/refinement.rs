@@ -672,8 +672,14 @@ pub fn mod_count_and_class(
 
     for aa in &peptide.residues {
         let Some(m) = aa.mod_ else { continue };
+        // A stacked record carries its parts; the set's map covers records
+        // built before they did.
         let single = [m];
-        let parts = aa_set.stack_parts(m).unwrap_or(&single);
+        let parts: &[&Modification] = if m.parts.is_empty() {
+            aa_set.stack_parts(m).unwrap_or(&single)
+        } else {
+            &m.parts
+        };
         for part in parts {
             if part.fixed {
                 continue;
@@ -2067,6 +2073,21 @@ mod tests {
         let tail = AminoAcid::standard(b'G').unwrap();
         let pep = Peptide::new(vec![met, tail], b'_', b'-');
         let cfg = RefineConfig::default_tier();
+        assert_eq!(mod_count_and_class(&pep, &cfg, &base), (0, 0));
+        // An internal Met carries the fixed oxidation alone (no stack): not a
+        // discovery either.
+        let inner = base
+            .variants_for(b'M', ModLocation::Anywhere)
+            .iter()
+            .find(|aa| {
+                aa.mod_
+                    .is_some_and(|m| (m.mass_delta - 15.994915).abs() < 1e-4)
+            })
+            .expect("internal Met with the fixed oxidation")
+            .clone();
+        assert!(inner.mod_.unwrap().parts.is_empty());
+        let g = AminoAcid::standard(b'G').unwrap();
+        let pep = Peptide::new(vec![g.clone(), inner, g], b'_', b'-');
         assert_eq!(mod_count_and_class(&pep, &cfg, &base), (0, 0));
     }
 

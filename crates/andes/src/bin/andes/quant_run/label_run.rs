@@ -324,6 +324,22 @@ fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
+/// Whether a satellite of `g` lies within `tol_ppm` of the M..M+4 isotope of
+/// a channel other than its parent: the two fit components are then nearly
+/// collinear and their split is weakly determined.
+fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
+    let z = f64::from(g.charge.max(1));
+    g.satellites.iter().any(|&(parent, mz)| {
+        g.channel_mz.iter().enumerate().any(|(c, &mc)| {
+            c != parent
+                && (0..=4).any(|off| {
+                    let m = mc + f64::from(off) * model::mass::ISOTOPE / z;
+                    (m - mz).abs() <= m * tol_ppm * 1e-6
+                })
+        })
+    })
+}
+
 /// The best PSM of a group's channel in a run.
 #[derive(Clone, Copy)]
 struct ChannelHit {
@@ -694,6 +710,17 @@ pub(super) fn quantify(
         mixed,
         no_rt
     );
+    let shared = groups
+        .iter()
+        .filter(|g| satellite_on_another_channel(g, tol))
+        .count();
+    if shared > 0 {
+        eprintln!(
+            "quant: label: {shared} groups have an Arg->Pro satellite within the MS1 tolerance \
+             of another channel's isotope; the split between the two (converted_fraction, and \
+             the ratio through it) is weakly determined there"
+        );
+    }
 
     let fit_params = FitParams {
         tol_ppm: tol,
@@ -1661,6 +1688,8 @@ mod tests {
             satellites: vec![(1, mp)],
             identity_decoy: false,
         };
+        // SILAC duplex: the satellite is clear of the light channel.
+        assert!(!satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
@@ -1743,6 +1772,8 @@ mod tests {
             satellites: sats,
             identity_decoy: false,
         };
+        // Channel 2's satellite sits on Arg10's M+4 (3 mDa): flagged.
+        assert!(satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0; 4]);
         assert_eq!(p.channel_mz.len(), 7);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();

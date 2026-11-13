@@ -1348,9 +1348,11 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
     // Multisets of forms in non-decreasing index order. Many multisets reach
     // the same sum (labels of equal mass, or of masses summing alike), and
     // what a state can still reach depends only on (next index, sum,
-    // budgets left): each such state is expanded once. The sum is keyed to
-    // the micro-dalton, far below the milli-dalton offsets it feeds.
-    type State = (usize, i64, u32, u32);
+    // budgets left): each such state is expanded once. The sum is keyed by
+    // its exact bits: two sums a rounding apart can still round to different
+    // milli-dalton offsets once more forms are added, so only identical sums
+    // may share their expansion.
+    type State = (usize, u64, u32, u32);
     fn walk(
         items: &[FormDelta],
         start: usize,
@@ -1360,7 +1362,7 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
         seen: &mut std::collections::HashSet<u64>,
         out: &mut Vec<(u64, f64)>,
     ) {
-        let state = (start, (sum * 1e6).round() as i64, budget.0, budget.1);
+        let state = (start, sum.to_bits(), budget.0, budget.1);
         if !visited.insert(state) {
             return;
         }
@@ -2154,6 +2156,106 @@ mod tests {
         want.sort_unstable();
         want.dedup();
         assert_eq!(got, want);
+    }
+
+    /// The offsets with the memo equal those of the plain walk over every
+    /// multiset, on fractional masses: CodeRabbit's case (sums equal to the
+    /// micro-dalton that round to different milli-daltons once a third
+    /// label is added) and SILAC labels with an oxidation allowed.
+    #[test]
+    fn memoized_offsets_equal_the_plain_walk() {
+        fn plain(params: &SearchParams) -> Vec<u64> {
+            let deltas = crate::candidate_gen::variable_mod_deltas(params);
+            fn rec(
+                items: &[crate::candidate_gen::FormDelta],
+                start: usize,
+                sum: f64,
+                budget: (u32, u32),
+                out: &mut std::collections::BTreeSet<u64>,
+            ) {
+                for (i, f) in items.iter().enumerate().skip(start) {
+                    if f.mods > budget.0 || f.labels > budget.1 {
+                        continue;
+                    }
+                    let s = sum + f.delta;
+                    out.insert(crate::candidate_gen::milli_of(s));
+                    rec(items, i, s, (budget.0 - f.mods, budget.1 - f.labels), out);
+                }
+            }
+            let mut out = std::collections::BTreeSet::from([crate::candidate_gen::milli_of(0.0)]);
+            let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
+            channels.push(0);
+            channels.sort_unstable();
+            channels.dedup();
+            for c in channels {
+                let items: Vec<_> = deltas
+                    .iter()
+                    .filter(|f| f.channel == 0 || f.channel == c)
+                    .copied()
+                    .collect();
+                rec(
+                    &items,
+                    0,
+                    0.0,
+                    (params.max_variable_mods_per_peptide, params.max_label_sites),
+                    &mut out,
+                );
+            }
+            out.into_iter().collect()
+        }
+        let memo = |params: &SearchParams| -> Vec<u64> {
+            let mut v: Vec<u64> = crate::candidate_gen::distinct_mod_mass_offsets(params)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let build = |labels: &[(&str, f64, u8, u8)], ox: bool, mods: u32, sites: u32| {
+            let mut b = AminoAcidSetBuilder::new_standard();
+            for &(name, d, r, _) in labels {
+                b = b.add_variable_mod(label_mod(name, d, r, ModLocation::Anywhere));
+            }
+            if ox {
+                b = b.add_variable_mod(oxidation_m());
+            }
+            let channels = labels
+                .iter()
+                .map(|&(n, _, _, c)| (n.to_string(), c))
+                .collect();
+            let mut p =
+                SearchParams::default_tryptic(b.with_label_channels(channels).build().unwrap());
+            p.max_variable_mods_per_peptide = mods;
+            p.max_label_sites = sites;
+            p
+        };
+        let coderabbit = build(
+            // Forms are walked in residue order (K, L, R): a, b, c.
+            &[
+                ("A", 1.0, b'K', 1),
+                ("B", 1.000_000_24, b'L', 1),
+                ("C", 10.000_249_9, b'R', 1),
+            ],
+            false,
+            0,
+            4,
+        );
+        let got = memo(&coderabbit);
+        assert_eq!(got, plain(&coderabbit));
+        assert!(got.contains(&22001), "{got:?}");
+        let silac = build(
+            &[
+                ("Label:2H(4)", 4.025107, b'K', 1),
+                ("Label:13C(6)", 6.020129, b'R', 1),
+                ("Label:13C(6)15N(2)", 8.014199, b'K', 2),
+                ("Label:13C(6)15N(4)", 10.008269, b'R', 2),
+            ],
+            true,
+            1,
+            6,
+        );
+        assert_eq!(memo(&silac), plain(&silac));
     }
 
     #[test]

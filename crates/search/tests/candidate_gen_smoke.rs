@@ -255,6 +255,7 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     model::AminoAcidSetBuilder::new_standard()
@@ -372,6 +373,7 @@ fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
@@ -393,6 +395,7 @@ fn aa_set_with_nterm_acetyl() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
@@ -414,6 +417,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let prot_cterm = Modification {
@@ -427,6 +431,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()

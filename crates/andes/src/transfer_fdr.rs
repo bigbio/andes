@@ -71,8 +71,8 @@
 //! the between-stratum spread of the false rate ([`stratum_kappa`]),
 //! again as the running minimum from the lowest score up: a stratum with few
 //! rows takes the pooled estimate, one with many its own. The other
-//! estimates stay pooled over the strata. The stratum travels in the high
-//! nibble of the family byte ([`pack_family`]).
+//! estimates stay pooled over the strata. The stratum travels above the
+//! family's 4 bits ([`pack_family`]).
 //!
 //! A row gets no score when its fold's training set is single-class or fails
 //! the trainer's quality gate, and no q-value when it has no score or its fold
@@ -104,6 +104,7 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "shape_log_width",
     "shape_tailing_diff",
     "shape_iso_cos",
+    "log10_donor_pep",
 ];
 
 /// Feature names of the identified-row quality classifier: the template-fit
@@ -189,14 +190,14 @@ pub fn stratum_kappa(strata: &[(f64, f64)], k: f64) -> f64 {
     }
 }
 
-/// A family with its stratum in the high nibble.
-pub const fn pack_family(family: u8, stratum: u8) -> u8 {
-    (family & 0x0F) | (stratum << 4)
+/// A family in the low 4 bits with its stratum above them.
+pub fn pack_family(family: u8, stratum: impl Into<u32>) -> u32 {
+    u32::from(family & 0x0F) | (stratum.into() << 4)
 }
 
 /// The family and the stratum of a packed family.
-pub const fn unpack_family(packed: u8) -> (u8, usize) {
-    (packed & 0x0F, (packed >> 4) as usize)
+pub const fn unpack_family(packed: u32) -> (u8, usize) {
+    ((packed & 0x0F) as u8, (packed >> 4) as usize)
 }
 
 /// [`FdrRow::family`] of a target.
@@ -669,7 +670,7 @@ impl FoldScores {
     /// One row of `precursor` and `family` (packed with its stratum, see
     /// [`pack_family`]) with its held-out score (`None` when its fold has no
     /// model).
-    pub fn add(&mut self, precursor: u32, family: u8, score: Option<f32>) {
+    pub fn add(&mut self, precursor: u32, family: u32, score: Option<f32>) {
         let (family, stratum) = unpack_family(family);
         let group = fold_of(precursor, self.seed) * self.strata + stratum.min(self.strata - 1);
         match score {
@@ -746,6 +747,8 @@ impl FoldScores {
         let mut steps: Vec<[Option<Steps>; 4]> = Vec::with_capacity(N_FOLDS);
         let mut stratum_steps: Vec<Vec<Option<Steps>>> = Vec::new();
         let mut no_q = 0usize;
+        let mut peps: Vec<Option<PepSteps>> = Vec::with_capacity(N_FOLDS);
+        let mut stratum_beta: Vec<Vec<f64>> = Vec::new();
         for v in self.scores.iter_mut().flatten() {
             v.sort_unstable_by(f32::total_cmp);
         }
@@ -767,11 +770,14 @@ impl FoldScores {
                 SortedMerge::new(runs)
             });
             let mut builder = StepsBuilder::new(totals, thresholds);
+            let mut pep = PepBuilder::new(totals);
             walk_scores(streams, |c, at| {
                 builder.visit(c, at);
+                pep.visit(c, at);
                 true
             });
             let fold_steps = builder.finish();
+            peps.push(pep.finish());
             let with_q = if fold_steps[Estimate::Pooled as usize].is_some() {
                 totals.iter().sum()
             } else {
@@ -821,6 +827,29 @@ impl FoldScores {
                     kappa = stratum_kappa(&counts, k);
                 }
                 eprintln!("[mbr] transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
+                // Each stratum's PEP is the pooled one shifted on the logit
+                // scale; the shift is the maximum-likelihood fit of which of
+                // the stratum's rows are wrong-peak decoys.
+                let mut fold_betas = Vec::with_capacity(strata);
+                if let Some(pool) = peps.last().and_then(Option::as_ref) {
+                    for g in groups.clone() {
+                        let mut z_of = |f: u8| -> Vec<f64> {
+                            let mut runs = taken(g, f as usize);
+                            runs.push(Box::new(self.scores[g][f as usize].iter().copied()));
+                            runs.into_iter()
+                                .flatten()
+                                .filter(|s| s.is_finite())
+                                .map(|s| logit(pool.of(s).0))
+                                .collect()
+                        };
+                        let targets = z_of(TARGET);
+                        let mut decoys = z_of(MASS_SHIFT);
+                        decoys.extend(z_of(RT_SHIFT));
+                        fold_betas.push(logit_shift(&targets, &decoys, k));
+                    }
+                    eprintln!("[mbr] transfer PEP, fold {fold}: logit shifts by stratum {fold_betas:.2?}");
+                }
+                stratum_beta.push(fold_betas);
                 for g in groups {
                     let local = self.counts[g];
                     let walk = global.filter(|_| local[TARGET as usize] > 0 && kappa.is_finite());
@@ -849,6 +878,8 @@ impl FoldScores {
             strata,
             steps,
             stratum_steps,
+            peps,
+            stratum_beta,
             whole: ESTIMATES.map(|e| thresholds.is_none() || e == Estimate::Pooled),
             thresholds: thresholds.map(<[f64]>::to_vec).unwrap_or_default(),
             counts: FdrCounts {
@@ -857,6 +888,166 @@ impl FoldScores {
                 no_q,
             },
         }
+    }
+}
+
+/// `ln(p / (1 - p))`, with `p` kept inside `[1e-9, 1 - 1e-9]`.
+fn logit(p: f64) -> f64 {
+    let p = p.clamp(1e-9, 1.0 - 1e-9);
+    (p / (1.0 - p)).ln()
+}
+
+fn sigmoid(z: f64) -> f64 {
+    1.0 / (1.0 + (-z).exp())
+}
+
+/// The maximum-likelihood logit shift `b` of a stratum's PEP: with
+/// `pep = sigmoid(z + b)` at a row's pooled logit `z`, a row at that score is
+/// a decoy with probability `K pep / (K pep + 1)` (`K` decoys per target).
+/// The score equation `sum_decoys (1 - p)(1 - pep) = sum_targets p (1 - pep)`
+/// falls in `b`; solved by bisection on `[-30, 30]`. 0 without both classes.
+fn logit_shift(targets: &[f64], decoys: &[f64], k: f64) -> f64 {
+    if targets.is_empty() || decoys.is_empty() {
+        return 0.0;
+    }
+    let score = |b: f64| {
+        let term = |z: f64| {
+            let pep = sigmoid(z + b);
+            let p = k * pep / (k * pep + 1.0);
+            (p, 1.0 - pep)
+        };
+        let up: f64 = decoys.iter().map(|&z| { let (p, w) = term(z); (1.0 - p) * w }).sum();
+        let down: f64 = targets.iter().map(|&z| { let (p, w) = term(z); p * w }).sum();
+        up - down
+    };
+    let (mut lo, mut hi) = (-30.0, 30.0);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if score(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// The pooled local false rate of a fold by score, in two
+/// parts: the wrong-peak part `(D / K) / T` and the false-donor part
+/// `D_id / T`, each an antitone step function (blocks of distinct scores
+/// with ascending lower edges, made non-increasing in the score by pooling
+/// adjacent violators, capped at 1). No bins or smoothing constants: the
+/// blocks are the ones the monotone fit needs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PepSteps {
+    wrong_peak: Antitone,
+    identity: Antitone,
+}
+
+impl PepSteps {
+    /// The wrong-peak and false-donor parts of the PEP of score `s`.
+    pub(crate) fn of(&self, s: f32) -> (f64, f64) {
+        (self.wrong_peak.of(s), self.identity.of(s))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Antitone {
+    lo: Vec<f32>,
+    rate: Vec<f64>,
+}
+
+impl Antitone {
+    /// The rate of the block with the highest lower edge at or below `s`, or
+    /// of the lowest block below them all; 0 without blocks.
+    fn of(&self, s: f32) -> f64 {
+        if self.rate.is_empty() {
+            return 0.0;
+        }
+        let k = self.lo.partition_point(|&a| a <= s);
+        self.rate[k.saturating_sub(1)]
+    }
+}
+
+/// Pool-adjacent-violators state of one antitone rate `f / t` by score.
+#[derive(Default)]
+struct AntitoneFit {
+    /// (lower edge, targets, expected false targets) of the pooled blocks.
+    blocks: Vec<(f32, f64, f64)>,
+}
+
+impl AntitoneFit {
+    fn push(&mut self, c: f32, t: f64, f: f64) {
+        if t == 0.0 && f == 0.0 {
+            return;
+        }
+        self.blocks.push((c, t, f));
+        // A higher block may not have a higher rate than the one below.
+        let rate = |t: f64, f: f64| if t > 0.0 { f / t } else { f64::INFINITY };
+        while self.blocks.len() >= 2 {
+            let n = self.blocks.len();
+            let (_, ta, fa) = self.blocks[n - 2];
+            let (_, tb, fb) = self.blocks[n - 1];
+            if rate(tb, fb) <= rate(ta, fa) {
+                break;
+            }
+            self.blocks.pop();
+            let a = self.blocks.last_mut().expect("two blocks");
+            a.1 += tb;
+            a.2 += fb;
+        }
+    }
+
+    fn finish(self) -> Antitone {
+        let (lo, rate) = self
+            .blocks
+            .iter()
+            .map(|&(c, t, f)| (c, if t > 0.0 { (f / t).min(1.0) } else { 1.0 }))
+            .unzip();
+        Antitone { lo, rate }
+    }
+}
+
+/// Builds [`PepSteps`] in one ascending walk over a fold's scores.
+pub(crate) struct PepBuilder {
+    k: f64,
+    wrong_peak: AntitoneFit,
+    identity: AntitoneFit,
+}
+
+impl PepBuilder {
+    pub(crate) fn new(totals: [usize; 4]) -> Self {
+        let decoys = totals[MASS_SHIFT as usize] + totals[RT_SHIFT as usize];
+        let targets = totals[TARGET as usize];
+        Self {
+            k: if targets > 0 && decoys > 0 {
+                decoys as f64 / targets as f64
+            } else {
+                0.0
+            },
+            wrong_peak: AntitoneFit::default(),
+            identity: AntitoneFit::default(),
+        }
+    }
+
+    pub(crate) fn visit(&mut self, c: f32, at: [usize; 4]) {
+        if self.k <= 0.0 {
+            return;
+        }
+        let t = at[TARGET as usize] as f64;
+        let d = (at[MASS_SHIFT as usize] + at[RT_SHIFT as usize]) as f64 / self.k;
+        self.wrong_peak.push(c, t, d);
+        self.identity.push(c, t, at[IDENTITY as usize] as f64);
+    }
+
+    pub(crate) fn finish(self) -> Option<PepSteps> {
+        if self.wrong_peak.blocks.is_empty() {
+            return None;
+        }
+        Some(PepSteps {
+            wrong_peak: self.wrong_peak.finish(),
+            identity: self.identity.finish(),
+        })
     }
 }
 
@@ -1093,6 +1284,11 @@ pub struct QValues {
     /// Per fold and stratum, the pooled step function of the stratum; empty
     /// without strata.
     stratum_steps: Vec<Vec<Option<Steps>>>,
+    /// Per fold, the pooled local false rate (PEP) by score.
+    peps: Vec<Option<PepSteps>>,
+    /// Per fold and stratum, the logit shift of the stratum's PEP; empty
+    /// without strata.
+    stratum_beta: Vec<Vec<f64>>,
     /// Per [`Estimate`], whether its step functions are whole (else they
     /// answer [`QValues::accepts`] at `thresholds` only).
     whole: [bool; 4],
@@ -1101,6 +1297,25 @@ pub struct QValues {
 }
 
 impl QValues {
+    /// The row's posterior error probability (local false rate) at its
+    /// held-out score: its fold's pooled PEP with the wrong-peak part shifted
+    /// to its stratum; `None` without a finite score or a PEP fit in the fold.
+    pub fn pep(&self, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
+        let s = score.filter(|s| s.is_finite())?;
+        let fold = fold_of(precursor, self.seed);
+        let (wrong_peak, identity) = self.peps.get(fold)?.as_ref()?.of(s);
+        let stratum = unpack_family(family).1.min(self.strata - 1);
+        let beta = self
+            .stratum_beta
+            .get(fold)
+            .and_then(|b| b.get(stratum))
+            .copied()
+            .unwrap_or(0.0);
+        // The stratum shift applies to the wrong-peak part, which the
+        // stratum's own decoys measure; the false-donor part stays pooled.
+        Some((sigmoid(logit(wrong_peak) + beta) + identity).min(1.0))
+    }
+
     /// Steps of every step function, held in memory (12 bytes each).
     pub fn steps(&self) -> usize {
         self.steps
@@ -1126,7 +1341,7 @@ impl QValues {
     ///
     /// # Panics
     /// When the step functions of `e` were kept at thresholds only.
-    pub fn q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+    pub fn q(&self, e: Estimate, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         assert!(
             self.whole[e as usize],
             "{e:?} q-values were kept at thresholds only"
@@ -1144,7 +1359,7 @@ impl QValues {
         &self,
         e: Estimate,
         precursor: u32,
-        family: u8,
+        family: u32,
         score: Option<f32>,
         t: f64,
     ) -> bool {
@@ -1156,7 +1371,7 @@ impl QValues {
             .is_some_and(|q| q <= t)
     }
 
-    fn step_q(&self, e: Estimate, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+    fn step_q(&self, e: Estimate, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         let s = score.filter(|s| s.is_finite())?;
         let (family, stratum) = unpack_family(family);
         if !e.keeps(family) {
@@ -1185,7 +1400,7 @@ impl QValues {
     /// highest score at or below it, or of the fold's lowest row when it
     /// scores below all of them. `None` without a score or without q-values
     /// in the fold.
-    pub fn pseudo_q(&self, precursor: u32, family: u8, score: Option<f32>) -> Option<f64> {
+    pub fn pseudo_q(&self, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         let s = score?;
         let fold = fold_of(precursor, self.seed);
         if let Some(Some(steps)) = self.stratum_steps_of(fold, unpack_family(family).1) {
@@ -1220,13 +1435,13 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
     models.score(&precursors, &xs, &mut scores);
     let mut fs = FoldScores::new(seed);
     for (r, s) in rows.iter().zip(&scores) {
-        fs.add(r.precursor, r.family, *s);
+        fs.add(r.precursor, r.family.into(), *s);
     }
     let q = fs.finish(&models.failed_folds);
     let each = |e: Estimate| -> Vec<Option<f64>> {
         rows.iter()
             .zip(&scores)
-            .map(|(r, s)| q.q(e, r.precursor, r.family, *s))
+            .map(|(r, s)| q.q(e, r.precursor, r.family.into(), *s))
             .collect()
     };
     let result = FdrResult {
@@ -1741,6 +1956,7 @@ mod tests {
             };
             let shift = if fam == TARGET { 1.5 } else { 0.0 };
             let s = Some(((g.draw() + shift) * 8.0).round() / 8.0);
+            let fam = u32::from(fam);
             items.push((i % 800, fam, s));
             whole.add(i % 800, fam, s);
             cut.add(i % 800, fam, s);
@@ -1776,12 +1992,12 @@ mod tests {
         models.score(&precursors, &xs, &mut scores);
         let mut fs = FoldScores::new(seed);
         for (r, s) in rows.iter().zip(&scores) {
-            fs.add(r.precursor, r.family, *s);
+            fs.add(r.precursor, r.family.into(), *s);
         }
         let q = fs.finish(&models.failed_folds);
         rows.iter()
             .zip(&scores)
-            .map(|(r, s)| q.q(Estimate::Pooled, r.precursor, r.family, *s))
+            .map(|(r, s)| q.q(Estimate::Pooled, r.precursor, r.family.into(), *s))
             .collect()
     }
 
@@ -2024,7 +2240,7 @@ mod tests {
         assert_eq!(stratum_of(0.3, &e), 3);
         assert_eq!(stratum_of(1.0, &e), 4);
         assert_eq!(stratum_of(f64::NAN, &e), 0);
-        assert_eq!(unpack_family(pack_family(IDENTITY, 4)), (IDENTITY, 4));
+        assert_eq!(unpack_family(pack_family(IDENTITY, 4u32)), (IDENTITY, 4));
     }
 
     #[test]

@@ -75,7 +75,7 @@ use crate::quant_mbr::{
     amplitude_snr, cosine, describe_width_weights, donor_fit, family, identified_features,
     iso_profile, local_slope, median, relative_fit_width, reported_quantity, row_width_weight,
     transfer_features, weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role,
-    ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
+    ShapeReference, NO_SHAPE,
 };
 use crate::transfer_fdr::{
     member_seed, pack_family, row_unit, sample_hash, stratum_of, train_bagged_folds, train_folds,
@@ -678,7 +678,18 @@ impl<'a> EntryIndex<'a> {
 
     /// Number of prior strata.
     pub(crate) fn strata(&self) -> usize {
-        self.edges.len() + 1
+        if self.by_run() {
+            self.neighbours.len()
+        } else {
+            self.edges.len() + 1
+        }
+    }
+
+    /// With 2 to MAX_STRATA runs the stratum of a transfer row is its
+    /// acceptor run, so each run's decoys count its own false rate; with more
+    /// runs the strata are the presence-prior strata.
+    fn by_run(&self) -> bool {
+        (2..=MAX_STRATA).contains(&self.neighbours.len())
     }
 
     /// The prior that the row's precursor is present in its run: the share
@@ -706,12 +717,13 @@ impl<'a> EntryIndex<'a> {
 
     /// `family` of a row of table `t` with its prior stratum
     /// ([`pack_family`]); the stratum is 0 outside the transfer tables.
-    pub(crate) fn packed(&self, r: &ExtractRow, t: Table, family: u8) -> u8 {
+    pub(crate) fn packed(&self, r: &ExtractRow, t: Table, family: u8) -> u32 {
         match t {
+            Table::Transfer | Table::Pseudo if self.by_run() => pack_family(family, r.run),
             Table::Transfer | Table::Pseudo => {
                 pack_family(family, stratum_of(self.presence_prior(r), &self.edges))
             }
-            Table::Identified => family,
+            Table::Identified => family.into(),
         }
     }
 
@@ -741,11 +753,17 @@ impl<'a> EntryIndex<'a> {
         self.entry_of[p as usize].is_some_and(|e| e.identity_decoy)
     }
 
-    /// Not transferred: the entry's best donor PSM is above TRANSFER_DONOR_Q.
-    pub(crate) fn gated(&self, p: u32) -> bool {
-        self.entry_of[p as usize]
-            .is_some_and(|e| e.donor_psm.q.is_nan() || e.donor_psm.q > TRANSFER_DONOR_Q)
+    /// The Percolator PEP of the entry's best donor PSM, 1 without one. A
+    /// transfer feature: identity-decoy transfers teach the classifier what a
+    /// weak donor costs.
+    pub(crate) fn donor_pep(&self, p: u32) -> f64 {
+        self.entry_of
+            .get(p as usize)
+            .copied()
+            .flatten()
+            .map_or(1.0, |e| if e.donor_psm.pep.is_finite() { e.donor_psm.pep } else { 1.0 })
     }
+
 
     /// The classifier of `r` and its family; `None` for a row that takes no
     /// part in any.
@@ -757,7 +775,6 @@ impl<'a> EntryIndex<'a> {
             Role::Identified if identity => return None,
             Role::Identified => Table::Identified,
             Role::Transfer if identity && r.kind != Hypothesis::Target => return None,
-            Role::Transfer if self.gated(r.precursor) => return None,
             Role::Transfer => Table::Transfer,
             Role::PseudoTransfer => Table::Pseudo,
         };
@@ -913,7 +930,7 @@ pub(crate) fn table_features(
             let x = match t {
                 Table::Identified => identified_features(r),
                 Table::Transfer | Table::Pseudo => {
-                    transfer_features(r, shapes, maps, idx.neighbour_rate(r))
+                    transfer_features(r, shapes, maps, idx.neighbour_rate(r), idx.donor_pep(r.precursor))
                 }
             };
             Some((i, t, fam, x))
@@ -934,7 +951,7 @@ pub(crate) fn for_each_scored(
     transfer: &FoldModels,
     identified: &FoldModels,
     want: impl Fn(Table) -> bool + Sync + Copy,
-    mut f: impl FnMut(usize, Table, u8, Option<f32>),
+    mut f: impl FnMut(usize, Table, u32, Option<f32>),
 ) {
     let mut out = Vec::new();
     for (c, chunk) in rows.chunks(SCORE_CHUNK).enumerate() {
@@ -1239,6 +1256,8 @@ struct OutRow {
     library_q: f64,
     mass_err_ppm: Option<f64>,
     claim: Claim,
+    /// The transfer's posterior error probability ([`QValues::pep`]).
+    transfer_pep: Option<f64>,
 }
 
 impl OutRow {
@@ -1320,6 +1339,7 @@ fn out_schema() -> Arc<Schema> {
             .iter()
             .map(|n| Field::new(*n, DataType::Float64, true)),
     );
+    fields.push(Field::new("transfer_pep", DataType::Float64, true));
     Arc::new(Schema::new(fields))
 }
 
@@ -1353,7 +1373,7 @@ impl OutWriter {
             let mut precursor = UInt32Builder::with_capacity(c.len());
             let mut run = UInt16Builder::with_capacity(c.len());
             let mut ev = UInt8Builder::with_capacity(c.len());
-            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 2 + OUT_CLAIM.len())
+            let mut values: Vec<Float64Builder> = (0..OUT_VALUES.len() + 3 + OUT_CLAIM.len())
                 .map(|_| Float64Builder::with_capacity(c.len()))
                 .collect();
             for r in c {
@@ -1377,6 +1397,7 @@ impl OutWriter {
                     Some(f64::from(r.claim.n)),
                     Some(f64::from(r.claim.n_co_apex)),
                     Some(f64::from(r.claim.n_identified_co_apex)),
+                    r.transfer_pep,
                 ];
                 for (b, x) in values.iter_mut().zip(v) {
                     b.append_option(x);
@@ -1434,7 +1455,7 @@ impl OutReader {
 
     fn decode(&self, b: &RecordBatch) -> Result<Vec<OutRow>, String> {
         let path = self.path.as_path();
-        let expected = OUT_VALUES.len() + 5 + OUT_CLAIM.len();
+        let expected = OUT_VALUES.len() + 6 + OUT_CLAIM.len();
         if b.num_columns() != expected {
             return Err(format!(
                 "{}: {} columns where {} were expected",
@@ -1478,6 +1499,7 @@ impl OutReader {
                         n_identified_co_apex: opt(15, i).map_or(0, |x| x as u16),
                         ..Claim::default()
                     },
+                    transfer_pep: opt(16, i),
                 })
             })
             .collect()
@@ -2231,7 +2253,7 @@ pub(crate) fn finalize_stream(
                 let s = (s != NO_SCORE).then_some(s);
                 if r.kind != Hypothesis::Target
                     || !id_fdr
-                        .q(Estimate::Pooled, r.precursor, fam, s)
+                        .q(Estimate::Pooled, r.precursor, fam.into(), s)
                         .is_some_and(|q| q <= VALIDATION_Q)
                 {
                     continue;
@@ -2325,7 +2347,7 @@ pub(crate) fn finalize_stream(
             };
             let v = &mut out.validation;
             // Per row with a score: its family and held-out score.
-            let mut scored: Vec<Option<(u8, Option<f32>)>> = vec![None; rows.len()];
+            let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
             for (i, r) in rows.iter().enumerate() {
                 let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
                     continue;
@@ -2403,12 +2425,6 @@ pub(crate) fn finalize_stream(
                         count_decoy(v, q_of(&fdr, Estimate::Pooled, i), 2);
                     }
                     continue;
-                }
-                if r.role == Role::Transfer
-                    && r.kind == Hypothesis::Target
-                    && idx.gated(r.precursor)
-                {
-                    v.donor_gated += 1;
                 }
                 if r.kind != Hypothesis::Target {
                     if r.role == Role::Transfer {
@@ -2549,6 +2565,11 @@ pub(crate) fn finalize_stream(
                         r.claim
                     } else {
                         Claim::default()
+                    },
+                    transfer_pep: if r.role == Role::Transfer {
+                        scored[i].and_then(|(fam, s)| fdr.pep(r.precursor, fam, s))
+                    } else {
+                        None
                     },
                 });
             }
@@ -2703,6 +2724,7 @@ fn write_merged(
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
                         measurement_q: r.measurement_q,
+                        transfer_pep: r.transfer_pep,
                     })?;
                 }
                 n += rows.len();
@@ -2748,10 +2770,9 @@ fn log_summary(
         TRANSFER_FEATURES.join(",")
     );
     eprintln!(
-        "[mbr] library entries {} targets, {} identity decoys; {} transfer targets not transferred (best donor PSM q > {TRANSFER_DONOR_Q})",
+        "[mbr] library entries {} targets, {} identity decoys",
         v.target_entries,
-        v.identity_entries,
-        v.donor_gated
+        v.identity_entries
     );
     for f in &fdr.counts.failed_folds {
         eprintln!("[mbr] transfer FDR fold without a model: {f}");
@@ -2792,7 +2813,7 @@ fn log_summary(
         }
     };
     eprintln!(
-        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT-shift decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
+        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
         quant::ms2::SUPPORT_MIN_MATCHED,
         quant::ms2::SUPPORT_MIN_ANGLE,
         v.ms2_supported[0],
@@ -2843,7 +2864,7 @@ fn log_summary(
             a.wrong_peak_only
         );
         eprintln!(
-            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
+            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
             a.pooled,
             a.mass_only,
             a.rt_only,
@@ -2964,12 +2985,10 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
-    /// The transfer gate reads the library's best-donor q-value, which is the
-    /// pooled q-value of that PSM when the rescoring result has one: an entry
-    /// whose donor PSM is good in its run but not pooled is gated, and the
-    /// other way round.
+    /// The donor PEP feature reads the PEP of the library's best donor PSM,
+    /// whatever its run and pooled q-values.
     #[test]
-    fn the_transfer_gate_reads_the_pooled_q_of_the_best_donor() {
+    fn the_donor_pep_feature_reads_the_best_donor_psm() {
         use quant::align::AlignParams;
         use quant::library::{build_library, PrecursorMeta, PsmIn};
         let meta: Vec<PrecursorMeta> = (0..200)
@@ -3000,17 +3019,10 @@ mod tests {
                 .collect()
         };
         let ap = AlignParams::default();
-        // Per-run q passes the gate, pooled q does not.
-        let lib = build_library(&psms(0.0005, 0.005), meta.clone(), 2, 1.0, 0.01, None, &ap);
-        let idx = EntryIndex::new(&lib, 2);
-        assert!(idx.gated(0));
-        // Per-run q fails it, pooled q passes (the PSM is still a donor).
-        let lib = build_library(&psms(0.005, 0.0005), meta.clone(), 2, 1.0, 0.01, None, &ap);
-        let idx = EntryIndex::new(&lib, 2);
-        assert!(!idx.gated(0));
-        // Without a pooled q-value the gate reads the q-value.
-        let lib = build_library(&psms(0.005, f64::NAN), meta, 2, 1.0, 0.01, None, &ap);
-        assert!(EntryIndex::new(&lib, 2).gated(0));
+        for (q, q_gate) in [(0.0005, 0.005), (0.005, 0.0005), (0.005, f64::NAN)] {
+            let lib = build_library(&psms(q, q_gate), meta.clone(), 2, 1.0, 0.01, None, &ap);
+            assert_eq!(EntryIndex::new(&lib, 2).donor_pep(0), 0.001);
+        }
     }
 
     /// An even histogram fills every one of the `MAX_STRATA` strata, and the
@@ -3090,6 +3102,7 @@ mod tests {
             quant_q: Some(-0.0),
             apex_rt_s: Some(f64::INFINITY),
             measurement_q: (run % 3 == 0).then_some(0.125),
+            transfer_pep: None,
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
             claim: Claim {
@@ -3166,9 +3179,9 @@ mod tests {
     fn spilled_scores_match(strata: usize) {
         let dir = tempfile::tempdir().unwrap();
         let mut g = Lcg(17);
-        let rows: Vec<(u32, u8, Option<f32>)> = (0..5000u32)
+        let rows: Vec<(u32, u32, Option<f32>)> = (0..5000u32)
             .map(|i| {
-                let fam = g.below(4) as u8 | ((g.below(strata as u64) as u8) << 4);
+                let fam = g.below(4) as u32 | ((g.below(strata as u64) as u32) << 4);
                 let s = (g.below(41) as f32 - 20.0) / 4.0 + if fam & 0x0F == 0 { 1.0 } else { 0.0 };
                 (
                     i % 700,

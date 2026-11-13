@@ -116,6 +116,7 @@ fn peptide(
                     loss_class: 0,
                     annotated_site_mass: None,
                     blocks_cleavage: false,
+                    parts: Vec::new(),
                     diagnostic_ions: Vec::new(),
                 })
             });

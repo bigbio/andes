@@ -1351,7 +1351,7 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
 
 fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
     let part = |role: usize| {
-        ["target", "mass-shift decoy", "RT-shift decoy"]
+        ["target", "mass-shift decoy", "RT decoy"]
             .iter()
             .enumerate()
             .filter(|&(f, _)| c.rows[role][f] > 0)
@@ -1828,7 +1828,6 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     let fingerprint = library_fingerprint(&stored);
     let selection = if a.mbr_preselect {
         TransferSelection {
-            donor_gate: true,
             min_donor_fraction: a.mbr_min_donor_fraction,
         }
     } else {

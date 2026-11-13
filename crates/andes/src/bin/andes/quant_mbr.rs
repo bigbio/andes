@@ -304,9 +304,6 @@ impl ExtractCounts {
 /// runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TransferSelection {
-    /// Skip the transfers of an entry whose best donor PSM is above
-    /// [`TRANSFER_DONOR_Q`]: finalize never transfers such an entry.
-    pub donor_gate: bool,
     /// Skip a pair with fewer other aligned donor runs than this fraction of
     /// the library's aligned runs other than the acceptor, rounded up; 0
     /// keeps every pair.
@@ -320,12 +317,11 @@ pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.0;
 impl TransferSelection {
     /// Every pair with a prediction is measured.
     pub(crate) const OFF: TransferSelection = TransferSelection {
-        donor_gate: false,
         min_donor_fraction: 0.0,
     };
 
     pub(crate) fn is_off(&self) -> bool {
-        !self.donor_gate && self.min_donor_fraction <= 0.0
+        self.min_donor_fraction <= 0.0
     }
 
     /// The fewest other aligned donor runs a pair needs in a library of
@@ -340,8 +336,7 @@ impl TransferSelection {
     /// One line for the extract table metadata and the log.
     pub(crate) fn describe(&self, aligned_runs: usize) -> String {
         format!(
-            "donor_gate={} (best donor PSM q <= {TRANSFER_DONOR_Q}), min_donor_fraction={} ({} of {} other aligned runs)",
-            self.donor_gate,
+            "min_donor_fraction={} ({} of {} other aligned runs)",
             self.min_donor_fraction,
             self.min_donors(aligned_runs),
             aligned_runs.saturating_sub(1)
@@ -352,7 +347,6 @@ impl TransferSelection {
 impl Default for TransferSelection {
     fn default() -> Self {
         TransferSelection {
-            donor_gate: true,
             min_donor_fraction: DEFAULT_MIN_DONOR_FRACTION,
         }
     }
@@ -361,7 +355,6 @@ impl Default for TransferSelection {
 /// [`TransferSelection`] resolved for one library.
 #[derive(Debug, Clone, Copy)]
 struct PairGate {
-    donor_gate: bool,
     min_donors: u16,
 }
 
@@ -369,16 +362,14 @@ impl PairGate {
     fn new(sel: &TransferSelection, lib: &Library) -> Self {
         let aligned = lib.alignment.maps.iter().filter(|m| m.is_some()).count();
         PairGate {
-            donor_gate: sel.donor_gate,
             min_donors: sel.min_donors(aligned),
         }
     }
 
     /// True when the transfer of `e` with `other_donors` other aligned donor
     /// runs is measured.
-    fn keeps(&self, e: &LibraryEntry, other_donors: u16) -> bool {
-        let donor_ok = !self.donor_gate || e.donor_psm.q <= TRANSFER_DONOR_Q;
-        donor_ok && other_donors >= self.min_donors
+    fn keeps(&self, _e: &LibraryEntry, other_donors: u16) -> bool {
+        other_donors >= self.min_donors
     }
 }
 
@@ -757,6 +748,7 @@ fn rows_into<F>(
     series: &[&Ms1RunIndex],
     series_of: F,
     gates: &[Option<MobilityGate>],
+    pool: &quant::decoys::RtPool,
 ) where
     F: Fn(usize) -> usize + Sync,
 {
@@ -764,7 +756,7 @@ fn rows_into<F>(
         .par_iter()
         .map(|&i| {
             let e = &lib.entries[i];
-            entry_rows(e, run, aligned, lib, gate, series[series_of(i)], wp)
+            entry_rows(e, run, aligned, lib, gate, series[series_of(i)], wp, pool)
         })
         .collect();
     let mut jobs = Vec::new();
@@ -867,6 +859,7 @@ type PlannedRows = (Vec<(ExtractRow, Probe)>, Vec<(usize, Probe)>, ExtractCounts
 /// The rows of one library entry in `run`, each with the probe to fit on
 /// `ms1` and no evidence yet. An unaligned run gets the identified row only;
 /// a transfer that `gate` skips gets no rows.
+#[allow(clippy::too_many_arguments)]
 fn entry_rows(
     e: &LibraryEntry,
     run: u16,
@@ -875,6 +868,7 @@ fn entry_rows(
     gate: &PairGate,
     ms1: &Ms1RunIndex,
     wp: &WidthPrior,
+    pool: &quant::decoys::RtPool,
 ) -> PlannedRows {
     let mut counts = ExtractCounts::default();
     let mut rows = Vec::new();
@@ -966,15 +960,27 @@ fn entry_rows(
         None => match lib.alignment.predict(e.precursor, run) {
             Some(_) if !gate.keeps(e, other_donors) => counts.not_selected += 1,
             Some((t_hat, s)) => {
-                for probe in probes(
+                // The target and its mass-shift decoy; the RT decoys are
+                // random-RT decoys drawn from the run's predicted RTs.
+                let w = wp.at(t_hat);
+                for probe in probes(e.precursor, run, meta.mz, charge, t_hat, s, w, run_rt())
+                    .into_iter()
+                    .filter(|p| p.kind != Hypothesis::RtShiftDecoy)
+                {
+                    rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
+                }
+                let mass = (meta.mz - model::mass::PROTON) * charge as f64;
+                for probe in quant::decoys::random_rt_probes(
                     e.precursor,
                     run,
                     meta.mz,
-                    charge,
+                    mass,
                     t_hat,
                     s,
-                    wp.at(t_hat),
+                    w,
                     run_rt(),
+                    pool,
+                    quant::decoys::RANDOM_RT_DECOYS,
                 ) {
                     rows.push(row(probe.kind, Role::Transfer, &probe, other_donors));
                 }
@@ -1031,6 +1037,21 @@ fn run_mobility(
 /// An unaligned run yields its identified rows only and `counts.unaligned`.
 /// Errors: `run` outside the library's runs, an entry whose precursor has no
 /// metadata, or an unreadable MS1 table (the message names the file).
+/// The predicted RTs of `lib`'s precursors in `run`, by neutral mass: where
+/// the run's random-RT decoys are drawn from.
+fn rt_pool(lib: &Library, run: u16) -> quant::decoys::RtPool {
+    quant::decoys::RtPool::new(
+        lib.entries
+            .iter()
+            .filter_map(|e| {
+                let meta = lib.meta.get(e.precursor as usize)?;
+                let (t, _) = lib.alignment.predict(e.precursor, run)?;
+                Some(((meta.mz - model::mass::PROTON) * meta.charge.max(1) as f64, t))
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn extract_run(
     run: u16,
     ms1_table: &Path,
@@ -1058,6 +1079,7 @@ pub(crate) fn extract_run(
     }
     let aligned = map.is_some();
     let gate = PairGate::new(selection, lib);
+    let pool = rt_pool(lib, run);
     let load = || {
         #[cfg(test)]
         tracking::loaded();
@@ -1108,6 +1130,7 @@ pub(crate) fn extract_run(
             &[&ms1],
             |_| 0,
             &gates,
+            &pool,
         );
         drop(ms1);
         drop(held);
@@ -1128,7 +1151,7 @@ pub(crate) fn extract_run(
     let width_fit_count = fits.len();
     let wp = WidthPrior::from_fits(fits, &scales);
     rows_into(
-        &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of, &gates,
+        &mut slots, &cv_ids, run, aligned, lib, &gate, &wp, ep, &series, series_of, &gates, &pool,
     );
     drop(series);
     drop(split);
@@ -1149,6 +1172,7 @@ pub(crate) fn extract_run(
             &[&ms1],
             |_| 0,
             &gates,
+            &pool,
         );
     }
     Ok(finish(slots, width_fit_count, &wp, scales))
@@ -1177,7 +1201,7 @@ fn probe_mz(meta: &quant::library::PrecursorMeta, kind: Hypothesis) -> f64 {
         Hypothesis::MassShiftDecoy(n) => {
             meta.mz + n as f64 * PEPTIDE_MASS_SLOPE / meta.charge.max(1) as f64
         }
-        Hypothesis::Target | Hypothesis::RtShiftDecoy => meta.mz,
+        Hypothesis::Target | Hypothesis::RtShiftDecoy | Hypothesis::RandomRtDecoy(_) => meta.mz,
     }
 }
 
@@ -1747,13 +1771,6 @@ impl ShapeReference for DonorShapes {
     }
 }
 
-/// The PSM q-value a library entry's best donor PSM needs for the entry to
-/// be transferred. Stricter than the donor threshold of the identified rows:
-/// a single marginal donor PSM is the commonest false donor, and its
-/// transfers sit on a real recurring feature that the transfer decoys
-/// cannot tell from a true one.
-pub(crate) const TRANSFER_DONOR_Q: f64 = 0.001;
-
 /// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order, with
 /// `neighbour_rate` the share of the run's most similar runs that identified
 /// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`]);
@@ -1771,6 +1788,7 @@ pub(crate) fn transfer_features(
     shapes: &impl ShapeReference,
     maps: &[Option<RunMap>],
     neighbour_rate: f64,
+    donor_pep: f64,
 ) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
     let snr = amplitude_snr(e);
@@ -1793,6 +1811,7 @@ pub(crate) fn transfer_features(
         shape_width,
         shape_tailing,
         shape_iso,
+        donor_pep.max(1e-12).log10(),
     ];
     debug_assert_eq!(x.len(), TRANSFER_FEATURES.len());
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
@@ -1828,7 +1847,7 @@ pub(crate) fn family(kind: Hypothesis) -> u8 {
     match kind {
         Hypothesis::Target => 0,
         Hypothesis::MassShiftDecoy(_) => 1,
-        Hypothesis::RtShiftDecoy => 2,
+        Hypothesis::RtShiftDecoy | Hypothesis::RandomRtDecoy(_) => 2,
     }
 }
 
@@ -2203,7 +2222,7 @@ mod tests {
         let wp = WidthPrior::from_fits(Vec::new(), &scales);
         let entry = fx.lib.entries.iter().find(|e| e.precursor == 4).unwrap();
         let off = PairGate::new(&TransferSelection::OFF, &fx.lib);
-        let (rows, _, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp);
+        let (rows, _, _) = entry_rows(entry, 1, true, &fx.lib, &off, &ms1, &wp, &rt_pool(&fx.lib, 1));
         let id: Vec<&(ExtractRow, Probe)> = rows
             .iter()
             .filter(|(r, _)| r.role == Role::Identified)
@@ -2280,7 +2299,11 @@ mod tests {
             let rows = rows_of(&b.rows, ONLY_RUN0);
             // Identified in run 0 (target and decoy probes), a transfer with
             // its decoys in run 1: the target entry's rows, fitted alike.
-            assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
+            if run == 0 {
+                assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
+            } else {
+                assert_transfer_layout(&rows);
+            }
             let role = if run == 0 {
                 Role::Identified
             } else {
@@ -2304,13 +2327,10 @@ mod tests {
         let fx = fixture(false);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
-        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_transfer_layout(&rows);
         assert!(rows
             .iter()
             .all(|r| r.role == Role::Transfer && r.n_donor_runs == 1));
-        assert_eq!(rows[0].kind, Hypothesis::Target);
-        assert!(matches!(rows[1].kind, Hypothesis::MassShiftDecoy(_)));
-        assert_eq!(rows[2].kind, Hypothesis::RtShiftDecoy);
         let target = rows[0].evidence.as_ref().unwrap();
         assert!((target.t0 - apex(ONLY_RUN0, 1)).abs() <= 1.0, "{target:?}");
         assert!(target.llr > 100.0, "{target:?}");
@@ -2321,7 +2341,7 @@ mod tests {
         // The run-1-only precursor is a transfer into run 0.
         let out0 = extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out0.rows, ONLY_RUN1);
-        assert_eq!(rows.len(), 3);
+        assert_transfer_layout(&rows);
         assert!(rows.iter().all(|r| r.role == Role::Transfer));
         let lq = fx
             .lib
@@ -2331,6 +2351,22 @@ mod tests {
             .unwrap()
             .q;
         assert!(rows.iter().all(|r| r.library_q == lq));
+    }
+
+    /// The rows of one transfer pair: the target, its mass-shift decoy, then
+    /// up to `RANDOM_RT_DECOYS` random-RT decoys (fewer when the run's RT pool
+    /// has fewer candidates), and no RT-shift decoy.
+    fn assert_transfer_layout(rows: &[&ExtractRow]) {
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert!(rows.len() <= 2 + quant::decoys::RANDOM_RT_DECOYS, "{rows:?}");
+        assert_eq!(rows[0].kind, Hypothesis::Target);
+        assert!(matches!(rows[1].kind, Hypothesis::MassShiftDecoy(_)));
+        assert!(
+            rows[2..]
+                .iter()
+                .all(|r| matches!(r.kind, Hypothesis::RandomRtDecoy(_))),
+            "{rows:?}"
+        );
     }
 
     /// `lib` with the entry of precursor `p` changed by `f`.
@@ -2349,29 +2385,19 @@ mod tests {
     }
 
     const SELECT: TransferSelection = TransferSelection {
-        donor_gate: true,
         min_donor_fraction: 0.5,
     };
 
     #[test]
-    fn selection_skips_transfers_finalize_cannot_accept() {
+    fn a_marginal_best_donor_psm_does_not_skip_the_transfer() {
         let fx = fixture(false);
-        // The best donor PSM of precursor ONLY_RUN0 misses the transfer donor
-        // threshold: its transfer into run 1 (target and decoys) is not
-        // measured; everything else is measured as without a selection.
+        // The donor PSM's PEP is a transfer feature in finalize, not a gate:
+        // the transfer is measured as with a confident donor.
         let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.002);
         let all = extract_all(1, &fx.ms1_tables[1], &lib, &params()).unwrap();
-        let sel = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &SELECT).unwrap();
-        assert_eq!(rows_of(&all.rows, ONLY_RUN0).len(), 3);
-        assert!(rows_of(&sel.rows, ONLY_RUN0).is_empty());
-        assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN0, 1)]));
-        assert_eq!((all.counts.not_selected, sel.counts.not_selected), (0, 1));
-        // Without the donor gate the pair is measured.
-        let no_gate = TransferSelection {
-            donor_gate: false,
-            ..SELECT
-        };
-        let kept = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &no_gate).unwrap();
+        let off = TransferSelection { min_donor_fraction: 0.0 };
+        let kept = extract_run(1, &fx.ms1_tables[1], &lib, &params(), &off).unwrap();
+        assert!(!rows_of(&kept.rows, ONLY_RUN0).is_empty());
         assert_eq!(kept.rows, all.rows);
     }
 
@@ -2382,7 +2408,7 @@ mod tests {
         // run 0 still has a prediction) but has no donor run left.
         let lib = with_entry(&fx.lib, ONLY_RUN1, |e| e.donors.clear());
         let all = extract_all(0, &fx.ms1_tables[0], &lib, &params()).unwrap();
-        assert_eq!(rows_of(&all.rows, ONLY_RUN1).len(), 3);
+        assert_transfer_layout(&rows_of(&all.rows, ONLY_RUN1));
         let sel = extract_run(0, &fx.ms1_tables[0], &lib, &params(), &SELECT).unwrap();
         assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
         assert_eq!(sel.counts.not_selected, 1);
@@ -2403,7 +2429,6 @@ mod tests {
     #[test]
     fn min_donors_scale_with_the_aligned_runs() {
         let sel = |f: f64| TransferSelection {
-            donor_gate: false,
             min_donor_fraction: f,
         };
         assert_eq!(sel(0.0).min_donors(500), 0);
@@ -2413,7 +2438,7 @@ mod tests {
         assert_eq!(sel(0.004).min_donors(1000), 4);
         assert_eq!(sel(1.0).min_donors(1), 0);
         assert!(TransferSelection::OFF.is_off());
-        assert!(!TransferSelection::default().is_off());
+        assert!(TransferSelection::default().is_off());
     }
 
     #[test]
@@ -2547,7 +2572,7 @@ mod tests {
         assert_eq!(e.donors, vec![0]);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, 7);
-        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_transfer_layout(&rows);
         assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
         assert_eq!(rows[0].kind, Hypothesis::Target);
         let target = rows[0].evidence.as_ref().unwrap();
@@ -2885,7 +2910,7 @@ mod tests {
         assert_eq!(peak, 1, "at most one MS1 copy is live");
         assert_eq!(loads, 2, "the whole run is read again for its entries");
         // The whole-run entry is still measured, in library order.
-        assert_eq!(rows_of(&out.rows, ONLY_RUN0).len(), 3);
+        assert_transfer_layout(&rows_of(&out.rows, ONLY_RUN0));
         let mut seen: Vec<u32> = out.rows.iter().map(|r| r.precursor).collect();
         seen.dedup();
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
@@ -2931,7 +2956,7 @@ mod tests {
         e.faims_cv = Some(FAIMS_CVS[ONLY_RUN0 as usize % 2]);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out.rows, ONLY_RUN0);
-        assert_eq!(rows.len(), 3);
+        assert_transfer_layout(&rows);
         let target = rows[0].evidence.as_ref().unwrap();
         assert!(
             (target.amplitude / AMPLITUDE - 1.0).abs() < 0.1,
@@ -3244,30 +3269,19 @@ mod finalize_tests {
     }
 
     #[test]
-    fn entries_with_a_marginal_best_donor_psm_are_not_transferred() {
+    fn entries_with_a_marginal_best_donor_psm_are_still_scored() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        // Precursors above 400 have a best donor PSM at q 0.005.
-        let lib = library_with(&|_| false, &|p| {
-            if p > 400 {
-                0.005
-            } else {
-                TRANSFER_DONOR_Q
-            }
-        });
+        // Precursors above 400 have a best donor PSM at q 0.005: their
+        // transfers are scored (the donor PEP is a feature), not dropped.
+        let lib = library_with(&|_| false, &|p| if p > 400 { 0.005 } else { 0.001 });
         let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
-        assert_eq!(s.validation.donor_gated, N as usize - 401);
-        let mut accepted_low = 0;
-        for f in s.features.iter().filter(|f| f.run == 1) {
-            if f.precursor > 400 {
-                assert_eq!(f.evidence_type, EvidenceType::BelowThreshold);
-                assert_eq!(f.transfer_q, None);
-            } else {
-                accepted_low += usize::from(f.evidence_type != EvidenceType::BelowThreshold);
-            }
-        }
-        assert!(accepted_low >= 150, "{accepted_low}");
-        // Their identified rows are reported as before.
+        let scored_high = s
+            .features
+            .iter()
+            .filter(|f| f.run == 1 && f.precursor > 400 && f.transfer_q.is_some())
+            .count();
+        assert!(scored_high > 0);
         assert_eq!(s.validation.identified, N as usize);
     }
 
@@ -3658,7 +3672,7 @@ mod finalize_tests {
                 }
             }
             // Per row with features: its family and held-out score.
-            let mut scored: Vec<Option<(u8, Option<f32>)>> = vec![None; rows.len()];
+            let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
             for_each_scored(
                 rows,
                 &idx,
@@ -3724,12 +3738,6 @@ mod finalize_tests {
                         count_decoy(&mut v, &mut at, q_of(&fdr, Estimate::Pooled, i), 2);
                     }
                     continue;
-                }
-                if r.role == Role::Transfer
-                    && r.kind == Hypothesis::Target
-                    && idx.gated(r.precursor)
-                {
-                    v.donor_gated += 1;
                 }
                 if r.kind != Hypothesis::Target {
                     if r.role == Role::Transfer {
@@ -3849,6 +3857,11 @@ mod finalize_tests {
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
                         measurement_q: None,
+                        transfer_pep: if r.role == Role::Transfer {
+                            scored[i].and_then(|(fam, s)| fdr.pep(r.precursor, fam, s))
+                        } else {
+                            None
+                        },
                     },
                     (
                         e.map(|e| e.mass_err_ppm),
@@ -4905,7 +4918,7 @@ mod finalize_tests {
         );
         r.n_donor_runs = 3;
         let e = r.evidence.clone().unwrap();
-        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).unwrap();
         assert_eq!(x.len(), TRANSFER_FEATURES.len());
         let at = |name: &str| x[TRANSFER_FEATURES.iter().position(|n| *n == name).unwrap()];
         assert_eq!(at("abs_rt_z"), e.rt_z.abs() as f32);
@@ -4919,12 +4932,12 @@ mod finalize_tests {
         // ratio and gets no features; one without information has ratio 0.
         for se in [0.0, -1.0, f64::NAN] {
             r.evidence.as_mut().unwrap().amplitude_se = se;
-            assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+            assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).is_none());
             assert!(identified_features(&r).is_none());
             assert!(amplitude_snr(r.evidence.as_ref().unwrap()).is_nan());
         }
         r.evidence.as_mut().unwrap().amplitude_se = f64::INFINITY;
-        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).unwrap();
         let snr = TRANSFER_FEATURES
             .iter()
             .position(|n| *n == "log10_amplitude_snr")
@@ -4933,9 +4946,9 @@ mod finalize_tests {
         assert!(identified_features(&r).is_some());
         r.evidence.as_mut().unwrap().amplitude_se = 1e4;
         r.evidence.as_mut().unwrap().llr = f64::NAN;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).is_none());
         r.evidence = None;
-        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0).is_none());
+        assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).is_none());
     }
 
     #[test]
@@ -5133,14 +5146,15 @@ mod finalize_tests {
         assert!((g[1] + 0.4).abs() < 1e-12, "{g:?}");
         assert!(g[2] < f[2] - 0.1, "{g:?}");
         // The same numbers end the transfer feature vector.
-        let x = transfer_features(&other, &shapes, &maps, 0.0).unwrap();
+        let x = transfer_features(&other, &shapes, &maps, 0.0, 1e-4).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);
         assert_eq!(
-            &TRANSFER_FEATURES[n - 3..],
-            ["shape_log_width", "shape_tailing_diff", "shape_iso_cos"]
+            &TRANSFER_FEATURES[n - 4..],
+            ["shape_log_width", "shape_tailing_diff", "shape_iso_cos", "log10_donor_pep"]
         );
-        assert_eq!(&x[n - 3..], &g.map(|v| v as f32));
+        assert_eq!(&x[n - 4..n - 1], &g.map(|v| v as f32));
+        assert_eq!(x[n - 1], -4.0);
     }
 
     #[test]
@@ -5206,10 +5220,10 @@ mod finalize_tests {
             Role::Transfer,
             Some(evidence(&mut g, true, 100.0)),
         );
-        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap();
+        let x = transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).unwrap();
         r.ms2 = Some(supporting());
         assert_eq!(
-            transfer_features(&r, &DonorShapes::default(), &[], 0.0).unwrap(),
+            transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).unwrap(),
             x
         );
         assert!(TRANSFER_FEATURES.iter().all(|f| !f.starts_with("ms2")));

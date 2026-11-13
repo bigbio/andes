@@ -18,6 +18,9 @@ pub enum Hypothesis {
     /// Mass-shift decoy carrying the nominal shift `n` in Da.
     MassShiftDecoy(i8),
     RtShiftDecoy,
+    /// Random-RT decoy `i` of [`random_rt_probes`]: the target's m/z at the
+    /// predicted retention time of another library precursor.
+    RandomRtDecoy(u8),
 }
 
 /// One (m/z, predicted apex) hypothesis to be fitted.
@@ -183,5 +186,110 @@ mod tests {
                 assert!(((n as f64).abs() * PEPTIDE_MASS_SLOPE - d).abs() > 0.9);
             }
         }
+    }
+}
+
+/// Random-RT decoys per transfer target ([`random_rt_probes`]).
+pub const RANDOM_RT_DECOYS: usize = 4;
+/// Neutral-mass distance (Da) of the precursors whose predicted RTs the
+/// random-RT decoys borrow: close enough to share the target's background,
+/// far enough not to be an isotope or a common modification of it.
+pub const RANDOM_RT_MASS: (f64, f64) = (5.0, 11.0);
+
+/// The predicted retention times of a run's library precursors, by neutral
+/// mass: the RTs the random-RT decoys of the run are drawn from.
+#[derive(Debug, Clone, Default)]
+pub struct RtPool {
+    /// (neutral mass, predicted RT), ascending in mass.
+    at: Vec<(f64, f64)>,
+}
+
+impl RtPool {
+    /// `items` are (neutral mass, predicted RT) pairs in any order.
+    pub fn new(mut items: Vec<(f64, f64)>) -> Self {
+        items.retain(|(m, t)| m.is_finite() && t.is_finite());
+        items.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        Self { at: items }
+    }
+
+    pub fn len(&self) -> usize {
+        self.at.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+}
+
+/// Up to `k` random-RT decoys of a target (`mz`, neutral mass `mass`,
+/// predicted at `t_hat` with RT spread `s` and width prior `w_prior`), after
+/// PIP-ECHO (Solivais et al., J Proteome Res 2025): each is the target's
+/// own m/z at the predicted RT of another library precursor of the run whose
+/// neutral mass is [`RANDOM_RT_MASS`] away and whose RT lies outside the
+/// target's search window (more than `4 (s + w_prior)` from `t_hat`), inside
+/// `run_rt`. The RTs follow where real peptides elute, so the decoys see the
+/// background a wrong transfer sees, unlike an RT far outside the window.
+/// The draw is deterministic in (precursor, run); fewer than `k` come back
+/// when the pool has fewer candidates.
+#[allow(clippy::too_many_arguments)]
+pub fn random_rt_probes(
+    precursor: u32,
+    run: u16,
+    mz: f64,
+    mass: f64,
+    t_hat: f64,
+    s: f64,
+    w_prior: f64,
+    run_rt: (f64, f64),
+    pool: &RtPool,
+    k: usize,
+) -> Vec<Probe> {
+    let (lo, hi) = RANDOM_RT_MASS;
+    let sep = 4.0 * (s + w_prior);
+    let range = |a: f64, b: f64| {
+        let i = pool.at.partition_point(|x| x.0 < a);
+        let j = pool.at.partition_point(|x| x.0 <= b);
+        i..j
+    };
+    let mut cand: Vec<f64> = range(mass - hi, mass - lo)
+        .chain(range(mass + lo, mass + hi))
+        .map(|i| pool.at[i].1)
+        .filter(|&t| (t - t_hat).abs() > sep && t >= run_rt.0 && t <= run_rt.1)
+        .collect();
+    let mut out = Vec::with_capacity(k);
+    let mut h = splitmix64(((precursor as u64) << 16) | run as u64 | (1u64 << 63));
+    while out.len() < k && !cand.is_empty() {
+        h = splitmix64(h);
+        let t = cand.swap_remove((h % cand.len() as u64) as usize);
+        out.push(Probe {
+            kind: Hypothesis::RandomRtDecoy(out.len() as u8),
+            mz,
+            t_hat: t,
+            s,
+            w_prior,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod random_rt_tests {
+    use super::*;
+
+    #[test]
+    fn random_rt_decoys_borrow_rts_of_nearby_masses_outside_the_window() {
+        // Masses 1000 (the target's), 994, 1003 (too close), 1008, 1020 (too far).
+        let pool = RtPool::new(vec![(994.0, 300.0), (1003.0, 900.0), (1008.0, 1500.0), (1020.0, 2000.0), (1008.0, 1010.0)]);
+        let ps = random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &pool, 4);
+        // 994 -> 300 and 1008 -> 1500 qualify; 1008 -> 1010 is inside the window (sep 40 s).
+        let mut ts: Vec<f64> = ps.iter().map(|p| p.t_hat).collect();
+        ts.sort_by(f64::total_cmp);
+        assert_eq!(ts, vec![300.0, 1500.0]);
+        assert!(ps.iter().all(|p| p.mz == 501.0 && matches!(p.kind, Hypothesis::RandomRtDecoy(_))));
+        // Deterministic in (precursor, run).
+        let again = random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &pool, 4);
+        assert_eq!(again, ps);
+        // An empty pool gives none.
+        assert!(random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &RtPool::default(), 4).is_empty());
     }
 }

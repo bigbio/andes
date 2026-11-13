@@ -227,6 +227,7 @@ fn encode_kind(k: Hypothesis) -> (u8, i8) {
         Hypothesis::Target => (0, 0),
         Hypothesis::MassShiftDecoy(n) => (1, n),
         Hypothesis::RtShiftDecoy => (2, 0),
+        Hypothesis::RandomRtDecoy(i) => (3, i as i8),
     }
 }
 
@@ -238,6 +239,7 @@ fn decode_kind(code: u8, shift: i8) -> Option<Hypothesis> {
         (0, 0) => Some(Hypothesis::Target),
         (1, n) if n != 0 => Some(Hypothesis::MassShiftDecoy(n)),
         (2, 0) => Some(Hypothesis::RtShiftDecoy),
+        (3, i) if i >= 0 => Some(Hypothesis::RandomRtDecoy(i as u8)),
         _ => None,
     }
 }

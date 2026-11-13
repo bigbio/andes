@@ -46,11 +46,24 @@ pub fn localize_psms(
     map: &HashMap<String, PercolatorPsm>,
     evidence: &HashMap<String, IpfEvidence>,
 ) -> (Vec<IpfRow>, IonPepModel) {
-    let model = IonPepModel::fit(
-        map.iter()
-            .filter(|(_, p)| p.q_value <= TRAIN_Q)
-            .filter_map(|(id, _)| evidence.get(id)),
-    );
+    // Two passes: fit on the search's placements, localize, refit on the
+    // placements IPF prefers (so the model does not just learn the search's
+    // choice), as an EM step.
+    let train: Vec<&IpfEvidence> = map
+        .iter()
+        .filter(|(_, p)| p.q_value <= TRAIN_Q)
+        .filter_map(|(id, _)| evidence.get(id))
+        .collect();
+    let first = IonPepModel::fit(train.iter().copied());
+    let relabeled: Vec<IpfEvidence> = train
+        .iter()
+        .map(|e| {
+            let mut e = (*e).clone();
+            e.observed = localize(0.0, &e, &first).best;
+            e
+        })
+        .collect();
+    let model = IonPepModel::fit(relabeled.iter());
     let mut ids: Vec<&String> = map.keys().filter(|id| evidence.contains_key(*id)).collect();
     ids.sort();
     let mut rows: Vec<IpfRow> = ids

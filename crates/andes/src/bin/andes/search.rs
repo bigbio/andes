@@ -2983,12 +2983,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             match output::ipf::write_ipf_tsv(&path, &rows) {
                 Ok(()) => eprintln!(
                     "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}, \
-                     pi0 {:.3}) [{:.2}s]",
+                     null {:.3}) [{:.2}s]",
                     path.display(),
                     rows.len(),
                     model.matched.map(|p| (p * 1000.0).round() / 1000.0),
                     model.unmatched,
-                    model.pi0,
+                    model.null_rate,
                     t_ipf.elapsed().as_secs_f64()
                 ),
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),

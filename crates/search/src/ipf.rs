@@ -346,58 +346,64 @@ pub fn psm_evidence(
 
 /// PEP of a site-ion observation by intensity tier, learned from one run.
 ///
-/// Decoy ions only match by chance, so their tier distribution (with
-/// "unmatched" as a tier of its own) is the null. A target site ion's tier
-/// distribution is a mixture of the null and true matches. With pi0 the
-/// share of null target ions (estimated from the "unmatched" bin, where true
-/// ions are rare, and bounded to [0, 1]) the local FDR of each tier is
-/// `pi0 * P(tier | null) / P(tier | target)` (the two-groups model behind
-/// PyProphet's PEPs). An unmatched ion is scored like an OpenSWATH transition
-/// without signal: a high PEP on the forms that have it, so it counts against
-/// them and for h0. Its PEP is 1 - r, with r the share of unmatched target
-/// site ions that are not chance (bounded to [0.01, 0.5] so one missing ion
-/// never rules a form out).
+/// The IPF evidence of an ion is (1 - PEP) for the hypotheses that produce it
+/// and PEP for the others, so the ratio between the two kinds of hypothesis is
+/// a likelihood ratio LR = (1 - PEP) / PEP. Here
+/// `LR(tier) = P(tier | the form has the ion) / P(tier | it does not)` and
+/// `PEP = 1 / (1 + LR)`. Both distributions come from confident PSMs (PSM
+/// q-value filter applied by the caller): the site ions of each PSM's own
+/// placement give the first, the ions only other placements produce give the
+/// second. "Unmatched" is a tier of its own, so a missing ion counts against
+/// the forms that should show it only as much as the run says it should: in
+/// DDA most theoretical ions are missing even for the right peptidoform.
+/// The decoy ions ([`DECOY_SHIFTS`]) are kept as a check on the second
+/// distribution (`null_rate`: their match rate).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IonPepModel {
     /// PEP of a matched ion, per tier.
     pub matched: [f64; TIERS as usize],
     /// PEP of an unmatched site ion (applied to the forms that have it).
     pub unmatched: f64,
-    pub pi0: f64,
+    /// Share of decoy ions with a peak in tolerance (chance match rate).
+    pub null_rate: f64,
 }
 
 impl IonPepModel {
-    /// Fit on every PSM's evidence of the run (targets above a PSM-level
-    /// confidence filter are the usual input).
+    /// Fit on the evidence of confident PSMs of one run.
     pub fn fit<'a>(evidence: impl IntoIterator<Item = &'a IpfEvidence>) -> Self {
         let bins = TIERS as usize + 1; // last bin = unmatched
-        let (mut t, mut d) = (vec![1.0f64; bins], vec![1.0f64; bins]); // +1 pseudo-counts
+        let bin = |t: Option<u8>| t.map_or(bins - 1, |x| x as usize);
+        // +1 pseudo-counts so an empty bin never gives LR 0 or infinity.
+        let (mut own, mut other) = (vec![1.0f64; bins], vec![1.0f64; bins]);
+        let (mut dm, mut dn) = (0usize, 0usize);
         for e in evidence {
             for ion in &e.ions {
-                t[ion.tier.map_or(bins - 1, |x| x as usize)] += 1.0;
+                if ion.forms.contains(&e.observed) {
+                    own[bin(ion.tier)] += 1.0;
+                } else {
+                    other[bin(ion.tier)] += 1.0;
+                }
             }
-            for tier in &e.decoys {
-                d[tier.map_or(bins - 1, |x| x as usize)] += 1.0;
-            }
+            dm += e.decoys.iter().filter(|t| t.is_some()).count();
+            dn += e.decoys.len();
         }
-        let (st, sd): (f64, f64) = (t.iter().sum(), d.iter().sum());
-        let pt: Vec<f64> = t.iter().map(|x| x / st).collect();
-        let pd: Vec<f64> = d.iter().map(|x| x / sd).collect();
-        // Storey-style pi0 from the unmatched bin, where true ions are rare.
-        let pi0 = (pt[bins - 1] / pd[bins - 1]).clamp(0.0, 1.0);
+        let (so, sx): (f64, f64) = (own.iter().sum(), other.iter().sum());
+        let pep = |k: usize| {
+            let lr = (own[k] / so) / (other[k] / sx);
+            (1.0 / (1.0 + lr)).clamp(1e-6, 1.0 - 1e-6)
+        };
         let mut matched = [0.0; TIERS as usize];
         for (k, m) in matched.iter_mut().enumerate() {
-            *m = (pi0 * pd[k] / pt[k]).clamp(1e-6, 1.0);
+            *m = pep(k);
         }
         // Monotone in tier: a weaker peak is never better evidence.
         for k in 1..matched.len() {
             matched[k] = matched[k].max(matched[k - 1]);
         }
-        let r = (1.0 - pi0 * pd[bins - 1] / pt[bins - 1]).clamp(0.01, 0.5);
         IonPepModel {
             matched,
-            unmatched: 1.0 - r,
-            pi0,
+            unmatched: pep(bins - 1),
+            null_rate: if dn == 0 { 0.0 } else { dm as f64 / dn as f64 },
         }
     }
 
@@ -641,8 +647,11 @@ mod tests {
         let e = psm_evidence(&peaks, &reported, 2, tol).unwrap();
         assert_eq!(e.forms.len(), 3); // S1, S4, S6
         assert_eq!(e.forms[e.observed as usize], vec![1]);
-        // Fit on many copies (one run's worth of PSMs).
-        let model = IonPepModel::fit(std::iter::repeat_n(&e, 50));
+        // Fit as on a run: most confident PSMs report the right placement.
+        let right = psm_evidence(&peaks, &truth, 2, tol).unwrap();
+        let mut train = vec![&right; 45];
+        train.extend(std::iter::repeat_n(&e, 5));
+        let model = IonPepModel::fit(train);
         assert!(model.matched[0] < 0.2, "{model:?}");
         let loc = localize(0.01, &e, &model);
         assert_eq!(e.forms[loc.best as usize], vec![4], "{loc:?}");

@@ -337,6 +337,7 @@ fn acceptance_gate_same_model_is_accepted() {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
@@ -350,6 +351,7 @@ fn acceptance_gate_same_model_is_accepted() {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let aa = AminoAcidSetBuilder::new_standard()

@@ -59,6 +59,24 @@ pub struct Modification {
     /// `diagnostic=`), such as the immonium ion of the modified residue.
     /// Evidence for which modification a site carries; not used in scoring.
     pub diagnostic_ions: Vec<f64>,
+    /// For a record that stacks several declared modifications on one
+    /// residue (a terminal and a side-chain mod, see
+    /// [`crate::aa_set::AminoAcidSetBuilder::build`]), those modifications in
+    /// stacking order: the record itself has no accession, its parts do.
+    /// Empty for a single modification.
+    pub parts: Vec<&'static Modification>,
+}
+
+impl Modification {
+    /// The single modifications this record stands for: its `parts` when it
+    /// is stacked, else itself.
+    pub fn components(&self) -> Vec<&Modification> {
+        if self.parts.is_empty() {
+            vec![self]
+        } else {
+            self.parts.iter().map(|m| &**m).collect()
+        }
+    }
 }
 
 impl Modification {
@@ -417,6 +435,7 @@ impl Modification {
             loss_class,
             annotated_site_mass: annotated_sites.then_some(mass_delta),
             blocks_cleavage,
+            parts: Vec::new(),
             diagnostic_ions,
         })
     }
@@ -454,6 +473,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }
@@ -485,6 +505,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         // Wildcard matches any residue at the specified location only.
@@ -508,6 +529,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
@@ -527,6 +549,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));

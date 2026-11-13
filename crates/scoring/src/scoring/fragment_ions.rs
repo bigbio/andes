@@ -577,6 +577,7 @@ mod tests {
             loss_class,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let arc = model::modification::leak_mod(m);
@@ -633,6 +634,7 @@ mod tests {
             loss_class: 2,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         });
         let residues: Vec<AminoAcid> = b"SSAK"

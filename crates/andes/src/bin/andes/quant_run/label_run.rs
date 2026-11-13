@@ -103,6 +103,7 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
             annotated_site_mass: None,
             blocks_cleavage: false,
             diagnostic_ions: Vec::new(),
+            parts: Vec::new(),
         });
         if !channels.iter().any(|(n, _): &(String, u8)| *n == l.name) {
             channels.push((l.name.clone(), c as u8 + 1));
@@ -1809,6 +1810,7 @@ mod tests {
                 annotated_site_mass: None,
                 blocks_cleavage: false,
                 diagnostic_ions: Vec::new(),
+                parts: Vec::new(),
             }))
         };
         let lys8 = spec.channels[1].label_at(Site::Residue(b'K')).unwrap();

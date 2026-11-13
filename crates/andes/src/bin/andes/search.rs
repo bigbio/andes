@@ -1002,6 +1002,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(spec) = &label_spec {
         aa = with_label_mods(&aa, spec)?;
     }
+    // Fixed terminal mods stack with a site claim on a peptide's first or
+    // last residue.
+    let fixed_terminal_mods = aa.fixed_terminal_deltas();
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
     // Ranges are validated (min <= max) by the clap value parsers.
@@ -2922,6 +2925,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             proteoform_fdr,
             &restricted_site_masses,
             posteriors.as_ref(),
+            &fixed_terminal_mods,
         );
         knockoff_rows.extend(sites.knockoff_rows.iter().cloned());
         if !sites.counts.is_empty() {

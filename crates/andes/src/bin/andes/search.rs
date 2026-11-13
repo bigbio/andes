@@ -1167,6 +1167,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let extra = crate::quant_run::label_run::max_label_sites(
             spec,
             &enzymes,
+            params.num_tolerable_termini,
             params.max_missed_cleavages,
         );
         params.max_label_sites = extra;

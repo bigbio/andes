@@ -116,20 +116,24 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
 /// residue in a non-specific digest).
 const FREE_LABEL_SITES: u32 = 8;
 
-/// Most labelled sites a peptide of the search can carry. A labelled residue
+/// Most labelled sites a peptide of the search can carry. In a specific or
+/// semi-specific digest (`num_tolerable_termini` 2 or 1), a labelled residue
 /// that every enzyme cleaves after (SILAC K/R with trypsin) is a cleavage site
 /// or the C-terminus, so those number at most the missed cleavages plus one;
-/// labels on other residues are capped at [`FREE_LABEL_SITES`]; plus the
+/// labels on other residues, and every label of a non-specific digest (where
+/// missed cleavages do not apply), are capped at [`FREE_LABEL_SITES`]; plus the
 /// N-terminus. The labels count apart from the other variable mods
 /// (`SearchParams::max_label_sites`), so this bounds the labels only.
 pub(crate) fn max_label_sites(
     spec: &LabelSpec,
     enzymes: &[model::enzyme::Enzyme],
+    num_tolerable_termini: u8,
     missed_cleavages: u32,
 ) -> u32 {
     use model::enzyme::Enzyme;
     let sites = spec.sites();
-    let specific = !enzymes.is_empty()
+    let specific = num_tolerable_termini > 0
+        && !enzymes.is_empty()
         && enzymes
             .iter()
             .all(|e| !matches!(e, Enzyme::NonSpecific | Enzyme::NoCleavage));
@@ -1760,16 +1764,26 @@ mod tests {
     fn max_sites_follow_missed_cleavages() {
         use model::enzyme::Enzyme;
         let s = LabelSpec::parse("silac2").unwrap();
-        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2), 3);
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2, 2), 3);
+        // Semi-specific spans keep the internal missed-cleavage bound.
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 1, 2), 3);
         let d = LabelSpec::parse("dimethyl3").unwrap();
-        assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 1), 3);
+        assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 2, 1), 3);
         // Leu is no cleavage site: its labels are not bound by missed cleavages.
         let l = LabelSpec::parse("[][Leu3]").unwrap();
-        assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2), FREE_LABEL_SITES);
+        assert_eq!(
+            max_label_sites(&l, &[Enzyme::Trypsin], 2, 2),
+            FREE_LABEL_SITES
+        );
         // Arg labels with Lys-C are not bound by its cleavages either.
         assert_eq!(
-            max_label_sites(&s, &[Enzyme::LysC], 2),
+            max_label_sites(&s, &[Enzyme::LysC], 2, 2),
             3 + FREE_LABEL_SITES
+        );
+        // A non-specific digest has no missed cleavages: AKKKKA carries four.
+        assert_eq!(
+            max_label_sites(&s, &[Enzyme::Trypsin], 0, 2),
+            FREE_LABEL_SITES
         );
     }
 

@@ -1982,6 +1982,42 @@ mod tests {
 
     // SILAC heavy K and R as variable mods: a candidate is all-light or
     // all-heavy, never one heavy and one light labelable residue.
+    /// In a non-specific digest missed cleavages do not bound the labelled
+    /// residues: AKKKKA is searched with all four K labelled, within the
+    /// label allowance and apart from `--max-mods`.
+    #[test]
+    fn non_specific_digest_labels_every_site() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "silac".into(),
+                sequence: b"AKKKKA".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let k8 = label_mod("Label:13C(6)15N(2)", 8.014199, b'K', ModLocation::Anywhere);
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(k8)
+            .with_label_channels(vec![("Label:13C(6)15N(2)".into(), 1)])
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 6;
+        params.num_tolerable_termini = 0;
+        params.max_missed_cleavages = 0;
+        params.max_variable_mods_per_peptide = 0;
+        params.max_label_sites = 8;
+        let full: Vec<_> = enumerate_candidates(&db, &params, "XXX")
+            .filter(|c| c.peptide.residues.len() == 6)
+            .map(|c| label_names(&c).len())
+            .collect();
+        // Light and the all-heavy form; no partly labelled one.
+        assert!(full.contains(&0), "{full:?}");
+        assert!(full.contains(&4), "{full:?}");
+        assert!(full.iter().all(|&n| n == 0 || n == 4), "{full:?}");
+    }
+
     #[test]
     fn silac_labels_are_channel_consistent() {
         let target = ProteinDb {

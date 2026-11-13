@@ -19,6 +19,7 @@ out (MaxQuant's MS1 peak detection and top-N MS2 filter crash on them) and scans
 
 import argparse
 import base64
+import os
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -35,9 +36,28 @@ def cv(elem, groups=None):
         return {}
     out = {}
     for ref in elem.iter(NS + "referenceableParamGroupRef"):
-        out.update((groups or {}).get(ref.get("ref"), {}))
+        out.update({acc: v for acc, (v, _) in (groups or {}).get(ref.get("ref"), {}).items()})
     out.update({p.get("accession"): p.get("value") for p in elem.iter(NS + "cvParam")})
     return out
+
+
+def is_minutes(p):
+    return p.get("unitAccession") == "UO:0000031" or p.get("unitName") == "minute"
+
+
+def in_minutes(elem, acc, groups):
+    """Whether the cvParam `acc` of `elem` (inline, else from a referenced
+    group) is given in minutes, by its unit accession (unitName is optional)."""
+    if elem is None:
+        return False
+    for p in elem.iter(NS + "cvParam"):
+        if p.get("accession") == acc:
+            return is_minutes(p)
+    for ref in elem.iter(NS + "referenceableParamGroupRef"):
+        hit = (groups or {}).get(ref.get("ref"), {}).get(acc)
+        if hit is not None:
+            return hit[1]
+    return False
 
 
 def decode(bda, groups):
@@ -63,7 +83,9 @@ def peaks(el, groups):
 
 def param_group(el, groups):
     """Record a `referenceableParamGroup` (they precede the spectra)."""
-    groups[el.get("id")] = {p.get("accession"): p.get("value") for p in el.iter(NS + "cvParam")}
+    groups[el.get("id")] = {
+        p.get("accession"): (p.get("value"), is_minutes(p)) for p in el.iter(NS + "cvParam")
+    }
 
 
 def spectra(path):
@@ -143,12 +165,8 @@ def main():
         scan = el.find(NS + "scanList/" + NS + "scan")
         sp = cv(scan, groups)
         rt = float(sp.get("MS:1000016") or 0.0)
-        # Minutes by the unit accession (unitName is optional).
-        if scan is not None:
-            for c in scan.iter(NS + "cvParam"):
-                if c.get("accession") == "MS:1000016" and (
-                        c.get("unitAccession") == "UO:0000031" or c.get("unitName") == "minute"):
-                    rt *= 60.0
+        if in_minutes(scan, "MS:1000016", groups):
+            rt *= 60.0
         arrays = peaks(el, groups)
         if other is not None:
             o_profile, o_arrays = next(other)
@@ -218,7 +236,8 @@ def main():
             print(num, file=sys.stderr)
     if num == 0:
         out.close()
-        sys.exit(f"{a.inp}: no spectrum with peaks; nothing written")
+        os.remove(a.out)
+        sys.exit(f"{a.inp}: no spectrum with peaks; {a.out} not written")
     w('</msRun>\n')
     idx = pos
     w('<index name="scan">\n')

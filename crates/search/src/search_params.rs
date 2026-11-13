@@ -67,6 +67,10 @@ pub struct SearchParams {
     pub max_length: u32,
     pub max_missed_cleavages: u32,
     pub max_variable_mods_per_peptide: u32,
+    /// Most channel-label sites (`--label`) a peptide may carry. They count
+    /// apart from `max_variable_mods_per_peptide`, so the labels never use up
+    /// the other modifications' allowance. 0 without `--label`.
+    pub max_label_sites: u32,
     /// Precursor mass tolerance (default 20 ppm symmetric).
     pub precursor_tolerance: PrecursorTolerance,
     /// Charges to try for spectra without explicit charge (default 2..=3).
@@ -166,6 +170,7 @@ impl SearchParams {
             max_length: 50,
             max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
+            max_label_sites: 0,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
             isotope_error_range: -1..=2,

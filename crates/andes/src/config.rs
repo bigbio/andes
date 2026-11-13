@@ -169,6 +169,14 @@ pub struct QuantCfg {
     pub lfq_gaussian_width: Option<f64>,
     pub lfq_min_cosine: Option<f64>,
     pub lfq_feature_fdr: Option<f64>,
+    pub label: Option<String>,
+    pub label_reference: Option<usize>,
+    pub label_fdr: Option<f64>,
+    pub label_arg_pro: Option<bool>,
+    pub label_mbr_fdr: Option<f64>,
+    pub label_2h_enrichment_silac: Option<f64>,
+    pub label_2h_enrichment_chemical: Option<f64>,
+    pub label_heavy_enrichment: Option<f64>,
     pub quant_fdr: Option<f64>,
     pub dir: Option<PathBuf>,
     pub mbr: Option<bool>,
@@ -566,6 +574,30 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         lfq_feature_fdr,
         cfg.quant.lfq_feature_fdr
     );
+    set_opt!("label", label, cfg.quant.label);
+    set!(
+        "label_reference",
+        label_reference,
+        cfg.quant.label_reference
+    );
+    set!("label_fdr", label_fdr, cfg.quant.label_fdr);
+    set!("label_arg_pro", label_arg_pro, cfg.quant.label_arg_pro);
+    set!("label_mbr_fdr", label_mbr_fdr, cfg.quant.label_mbr_fdr);
+    set!(
+        "label_2h_enrichment_silac",
+        label_2h_enrichment_silac,
+        cfg.quant.label_2h_enrichment_silac
+    );
+    set!(
+        "label_2h_enrichment_chemical",
+        label_2h_enrichment_chemical,
+        cfg.quant.label_2h_enrichment_chemical
+    );
+    set!(
+        "label_heavy_enrichment",
+        label_heavy_enrichment,
+        cfg.quant.label_heavy_enrichment
+    );
     set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
     set_opt!("quant_dir", quant_dir, cfg.quant.dir);
     set!("mbr", mbr, cfg.quant.mbr);
@@ -676,6 +708,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
     check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
+    check_unit_fraction("label_fdr", args.label_fdr)?;
+    check_unit_fraction("label_mbr_fdr", args.label_mbr_fdr)?;
+    check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
+    check_unit_fraction(
+        "label_2h_enrichment_chemical",
+        args.label_2h_enrichment_chemical,
+    )?;
+    check_unit_fraction("label_heavy_enrichment", args.label_heavy_enrichment)?;
     if let Some(v) = args.quant_fdr {
         check_unit_fraction("quant_fdr", v)?;
     }

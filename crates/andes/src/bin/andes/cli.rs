@@ -956,6 +956,62 @@ pub(crate) struct SearchArgs {
     #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
     pub(crate) lfq_tol: Option<Tolerance>,
 
+    /// MS1 labelled-pair quantification (SILAC, reductive dimethyl): a preset
+    /// (`silac2`, `silac3`, `dimethyl2`, `dimethyl3`) or one bracket per
+    /// channel in increasing mass order, as OpenMS FeatureFinderMultiplex
+    /// writes them (`[][Lys8,Arg10]`, `[Dimethyl0][Dimethyl4][Dimethyl8]`;
+    /// labels `Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6
+    /// Dimethyl8`, or `<site>+<mass>[:[chem]<n>C<n>N<n>D]` with the label's
+    /// 13C, 15N and 2H atoms, `chem` for a chemical label that adds atoms;
+    /// unannotated, a chemical shift of natural atoms). The labels are added to the
+    /// search as variable modifications that every labelable site of a
+    /// peptide carries alike, and each identified peptide is measured in
+    /// every channel by one joint fit of their MS1 isotope traces; channels
+    /// without an identification are matched at their exact position (match
+    /// between channels), and with `--mbr` peptides are transferred between
+    /// runs. Writes `<stem>.label.parquet`. mzML / `.raw` with
+    /// high-resolution MS1. Not combined with `--lfq` or `--tmt`.
+    #[arg(long = "label", value_name = "SPEC")]
+    pub(crate) label: Option<String>,
+
+    /// Reference channel of the `--label` ratios, 1-based. Default 1.
+    #[arg(long = "label-reference", default_value_t = 1)]
+    pub(crate) label_reference: usize,
+
+    /// Quality q-value cut of a channel measured without an identification
+    /// (match between channels): from the target/decoy competition, within
+    /// its run, of its fit against the same fit at non-label mass shifts. An
+    /// internal quant-quality q-value. Default 0.05: on known-ratio SILAC
+    /// data (PXD022659 1:1) the channels matched at q <= 0.05 are as accurate
+    /// as pairs whose channels are both identified.
+    #[arg(long = "label-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) label_fdr: f64,
+
+    /// Transfer q-value cut of `--label --mbr` (the label-free and isobaric
+    /// transfers use `--mbr-fdr`). An internal quant-quality q-value, with
+    /// the identity-decoy false-donor rate added. Default 0.05.
+    #[arg(long = "label-mbr-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
+    pub(crate) label_mbr_fdr: f64,
+
+    /// SILAC: fit the heavy proline that cells make from heavy arginine
+    /// (Arg6 -> 13C5 Pro, Arg10 -> 13C5 15N1 Pro) as a satellite of each
+    /// proline-containing peptide's arginine-labelled channels, and add it
+    /// back to the channel. `label.parquet` reports the converted fraction.
+    #[arg(long = "label-arg-pro", default_value_t = false)]
+    pub(crate) label_arg_pro: bool,
+
+    /// Advanced: 2H enrichment of metabolic deuterium labels (Lys4, Leu3).
+    #[arg(long = "label-2h-enrichment-silac", hide = true, default_value = "0.96", value_parser = parse_unit_fraction)]
+    pub(crate) label_2h_enrichment_silac: f64,
+
+    /// Advanced: 2H enrichment of chemical deuterium labels (dimethyl).
+    #[arg(long = "label-2h-enrichment-chemical", hide = true, default_value = "0.99", value_parser = parse_unit_fraction)]
+    pub(crate) label_2h_enrichment_chemical: f64,
+
+    /// Advanced: 13C / 15N enrichment of heavy labels, per atom.
+    #[arg(long = "label-heavy-enrichment", hide = true, default_value = "0.99", value_parser = parse_unit_fraction)]
+    pub(crate) label_heavy_enrichment: f64,
+
     /// Retention-time half-window (seconds) around the identifying PSM in
     /// which the chromatographic peak is searched. Default 60 s for
     /// `--lfq` peptides and 120 s for intact glycopeptides (`--glyco`).

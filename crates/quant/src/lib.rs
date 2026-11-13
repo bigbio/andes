@@ -7,6 +7,9 @@
 //! builds the targets and the `output` crate writes the tables.
 //!
 //! * [`isobaric`]: plex tables, reporter extraction, impurity correction (NNLS).
+//! * [`label`]: MS1 labelled-pair quantification (SILAC, dimethyl): label
+//!   specifications, label-aware envelopes, the joint channel fit and match
+//!   between channels.
 //! * [`purity`]: precursor isolation purity from the preceding MS1 scan.
 //! * [`unmix`]: co-isolation interference of MS2 reporter ions, modelled per
 //!   run from the isolation-window MS1 contents, and its removal.
@@ -39,6 +42,7 @@ pub mod evidence;
 pub mod formula;
 pub mod gaussian;
 pub mod isobaric;
+pub mod label;
 pub mod lfq;
 pub mod library;
 pub mod mobility;

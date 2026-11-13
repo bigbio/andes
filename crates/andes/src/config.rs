@@ -11,11 +11,13 @@
 //! not type on the command line. Unknown keys are a hard error (`deny_unknown_
 //! fields`) so a typo never silently no-ops.
 //!
-//! Every search flag has a key here except four that are CLI-only on purpose:
+//! Every search flag has a key here except five that are CLI-only on purpose:
 //! `--config` itself, and the hidden diagnostics `--cal-min-spec-keys` (a test
 //! hook that forces the calibration pre-pass on tiny inputs),
-//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps). The test
-//! `every_search_flag_has_a_config_key` keeps that list honest.
+//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps), and
+//! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
+//! scorer). The test `every_search_flag_has_a_config_key` keeps that list
+//! honest.
 //!
 //! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
 //! the CLI accepts (e.g. `precursor_tol: 20ppm`, `charge: "2..5"`, `score: auto`)
@@ -1142,6 +1144,7 @@ glyco:
         "cal_min_spec_keys",
         "precursor_mono_dump",
         "glyco_scans",
+        "glyco_mbr_match_train",
     ];
 
     /// Every search flag maps to a config key unless it is listed as CLI-only, so

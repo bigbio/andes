@@ -175,27 +175,52 @@ pub struct SiteIon {
 }
 
 /// b/y ions of one form: charge 1, plus charge 2 when the precursor is 3+.
+/// A fragment that holds a residue whose modification declares neutral losses
+/// (Mods.txt `loss=`, e.g. phospho's 97.977 H3PO4) also gives one ion per loss
+/// at the same charges: the loss ion pins the mod to the fragment as well as
+/// the intact one does.
 fn by_ions(p: &Peptide, precursor_charge: u8) -> Vec<(f64, u8, u16, u8)> {
     let masses: Vec<f64> = p
         .residues
         .iter()
         .map(|a| a.mass + a.mod_.map_or(0.0, |m| m.mass_delta))
         .collect();
+    let losses_at = |i: usize| -> &[f64] {
+        p.residues[i]
+            .mod_
+            .filter(|m| !m.fixed)
+            .map_or(&[][..], |m| &m.neutral_losses[..])
+    };
     let n = masses.len();
     let total: f64 = masses.iter().sum();
     let mut out = Vec::with_capacity(4 * n);
+    let mut push = |mz: f64, kind: u8, num: u16, losses: &[f64]| {
+        for (shift, z) in std::iter::once(0.0)
+            .chain(losses.iter().map(|l| -l))
+            .flat_map(|s| {
+                std::iter::once((s, 1u8)).chain((precursor_charge >= 3).then_some((s, 2u8)))
+            })
+        {
+            let m = mz + shift;
+            out.push(((m + (z - 1) as f64 * PROTON) / z as f64, kind, num, z));
+        }
+    };
     let mut prefix = 0.0;
+    let mut b_losses: Vec<f64> = Vec::new();
     for (i, m) in masses[..n.saturating_sub(1)].iter().enumerate() {
         prefix += m;
-        let b = prefix + PROTON;
-        let y = total - prefix + H2O + PROTON;
+        b_losses.extend_from_slice(losses_at(i));
+        let y_losses: Vec<f64> = (i + 1..n).flat_map(|j| losses_at(j).to_vec()).collect();
         let (bn, yn) = ((i + 1) as u16, (n - i - 1) as u16);
-        out.push((b, b'b', bn, 1));
-        out.push((y, b'y', yn, 1));
-        if precursor_charge >= 3 {
-            out.push(((b + PROTON) / 2.0, b'b', bn, 2));
-            out.push(((y + PROTON) / 2.0, b'y', yn, 2));
-        }
+        // One loss per fragment (the first declared per distinct mass).
+        let uniq = |v: &[f64]| {
+            let mut u: Vec<f64> = v.to_vec();
+            u.sort_by(f64::total_cmp);
+            u.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            u
+        };
+        push(prefix + PROTON, b'b', bn, &uniq(&b_losses));
+        push(total - prefix + H2O + PROTON, b'y', yn, &uniq(&y_losses));
     }
     out
 }
@@ -614,6 +639,36 @@ mod tests {
         assert_eq!(forms.len(), 3);
         // Unmodified peptide: itself only.
         assert_eq!(placements(&pep("PEPTIDE", &[])).0.len(), 1);
+    }
+
+    #[test]
+    fn neutral_loss_ions_add_site_evidence() {
+        let lossy: &'static Modification = Box::leak(Box::new(Modification {
+            neutral_losses: vec![97.976896],
+            ..phospho(b'S').clone()
+        }));
+        let with = |i: usize| {
+            let res = "ASATSK"
+                .bytes()
+                .enumerate()
+                .map(|(k, r)| {
+                    let mut a = AminoAcid::standard(r).unwrap();
+                    if k == i {
+                        a.mod_ = Some(lossy);
+                    }
+                    a
+                })
+                .collect();
+            Peptide::new(res, b'K', b'A')
+        };
+        let (forms, _) = placements(&with(1));
+        let plain = site_ions(&placements(&pep("ASATSK", &[1])).0, 2, |_| 0.01).len();
+        let lossy_n = site_ions(&forms, 2, |_| 0.01).len();
+        assert!(lossy_n > plain, "{lossy_n} <= {plain}");
+        // y1 (K) has no phospho in any form and no loss: still dropped.
+        assert!(!site_ions(&forms, 2, |_| 0.01)
+            .iter()
+            .any(|i| i.kind == b'y' && i.number == 1));
     }
 
     #[test]

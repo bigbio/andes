@@ -2010,6 +2010,7 @@ mod tests {
             let mut params = SearchParams::default_tryptic(b.build().unwrap());
             params.min_length = 3;
             params.max_variable_mods_per_peptide = 3;
+            params.max_label_sites = 3;
             params
         };
         let free = build(false);
@@ -2033,6 +2034,20 @@ mod tests {
         }
         // Single-site peptides keep both states.
         assert_eq!(n(&kept, "TIDER"), 2);
+        // Labels count apart from the other mods: with no other mod allowed,
+        // both channels of PEPKTIDER remain and no oxidation appears.
+        let mut no_mods = build(true);
+        no_mods.max_variable_mods_per_peptide = 0;
+        let strict: Vec<_> = enumerate_candidates(&db, &no_mods, "XXX").collect();
+        assert_eq!(n(&strict, "PEPKTIDER"), 2);
+        assert!(strict
+            .iter()
+            .all(|c| label_names(c).iter().all(|m| !m.contains("Oxidation"))));
+        assert!(strict.iter().all(|c| c
+            .peptide
+            .residues
+            .iter()
+            .all(|a| a.mod_.is_none_or(|m| !m.name.contains("Oxidation")))));
         // The walk used by the out-of-core index agrees with the expansion.
         let tables = crate::candidate_gen::FormWalkTables::new(&labelled);
         let mut walked = 0;
@@ -2091,7 +2106,8 @@ mod tests {
             .unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
-        params.max_variable_mods_per_peptide = 4;
+        params.max_variable_mods_per_peptide = 1;
+        params.max_label_sites = 3;
         let kept: Vec<_> = enumerate_candidates(&db, &params, "XXX").collect();
         let of = |s: &str| -> Vec<Vec<String>> {
             kept.iter()

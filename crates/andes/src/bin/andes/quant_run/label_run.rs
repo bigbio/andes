@@ -456,16 +456,22 @@ fn fit_folded(
 /// fitted width of the strong fits, until it moves by less than 10 %.
 fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], tol: f64) -> f64 {
     let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-    let step = (anchors.len() / MAX_WIDTH_FITS).max(1);
-    let sample: Vec<&(usize, f64)> = anchors.iter().step_by(step).collect();
-    let params = FitParams {
+    // The sample is chosen by a hash of each group's key, so one group more
+    // or fewer changes at most one member (a stride over the list would shift
+    // all of them).
+    let mut order: Vec<&(usize, f64)> = anchors.iter().collect();
+    order.sort_by_key(|(gid, _)| seed_of(&groups[*gid].key, 0));
+    let sample: Vec<&(usize, f64)> = order.into_iter().take(MAX_WIDTH_FITS).collect();
+    // The coarse grid finds the width's scale; the fine one, once the coarse
+    // estimate has settled, resolves it to a few percent.
+    let mut params = FitParams {
         tol_ppm: tol,
         widths: FREE_WIDTHS,
     };
     let mut w = 6.0f64.max(dt);
-    for _ in 0..6 {
+    for _ in 0..16 {
         let s = w.max(dt);
-        let fitted: Vec<f64> = sample
+        let mut fitted: Vec<f64> = sample
             .par_iter()
             .filter_map(|(gid, t)| {
                 let g = &groups[*gid];
@@ -473,20 +479,35 @@ fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], to
                 fit_folded(ms1, g, &p, &params).map(|x| x.0)
             })
             .filter(|f| f.llr >= MIN_WIDTH_LLR)
-            .map(|f| f.w)
+            .map(|f| f.w.ln())
             .collect();
         if fitted.len() < MIN_WIDTH_FITS {
             return (6.0f64).max(dt);
         }
-        let next = quant::label::median(fitted).max(dt);
+        // Each fit picks its width from a grid relative to `w`: their median
+        // is a grid point, at which the iteration would stop (3.6 or 4.2 s
+        // from 6 s, by the sample). The trimmed mean of the log widths moves
+        // continuously and settles where the grid choices balance.
+        fitted.sort_by(f64::total_cmp);
+        let cut = fitted.len() / 10;
+        let core = &fitted[cut..fitted.len() - cut];
+        let next = (core.iter().sum::<f64>() / core.len() as f64).exp().max(dt);
         let moved = (next - w).abs() / w;
         w = next;
-        if moved < 0.1 {
+        if params.widths == FREE_WIDTHS {
+            if moved < 0.1 {
+                params.widths = REFINE_WIDTHS;
+            }
+        } else if moved < 0.01 {
             break;
         }
     }
     w
 }
+
+/// The width grid of [`learn_width`]'s second stage, multiples of the
+/// current estimate.
+const REFINE_WIDTHS: &[f64] = &[0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25];
 
 /// Learns the channels' RT offsets from the reference: every channel fitted
 /// alone at `anchors`, pairs where both are strong.
@@ -1722,6 +1743,68 @@ mod tests {
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
     }
 
+    /// The learned elution width finds the true width and does not jump when
+    /// one group more or fewer is fitted.
+    #[test]
+    fn learned_width_is_stable() {
+        use model::scan::Ms1Scan;
+        let env = ChannelEnvelope::new(&[0.55, 0.3, 0.11, 0.04], 0, 1.0, 0, 1.0);
+        let n_groups = 60;
+        let (sigma, z) = (4.0, 2.0);
+        let groups: Vec<Group> = (0..n_groups)
+            .map(|i| {
+                let ml = 400.0 + 7.3 * i as f64;
+                Group {
+                    key: format!("PEPTIDE{i}K"),
+                    sequence: format!("PEPTIDE{i}K"),
+                    charge: 2,
+                    proteins: Vec::new(),
+                    channel_mz: vec![ml, ml + 8.014199 / z],
+                    envelopes: vec![env, env],
+                    deltas: vec![0.0, 8.014199],
+                    faims_cv: None,
+                    satellites: Vec::new(),
+                    identity_decoy: false,
+                }
+            })
+            .collect();
+        let apex = |i: usize| 40.0 + 9.0 * i as f64;
+        let scans: Vec<Ms1Scan> = (0..1800)
+            .map(|k| {
+                let rt = k as f64 / 3.0;
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..60).map(|j| (350.0 + 11.3 * j as f64, 50.0)).collect();
+                for (i, g) in groups.iter().enumerate() {
+                    let e = (-(rt - apex(i)).powi(2) / (2.0 * sigma * sigma)).exp();
+                    for (c, amp) in [(0, 1e6), (1, 5e5)] {
+                        for off in 0..4 {
+                            let v = amp * env.at(off) * e;
+                            if v > 50.0 {
+                                let m = g.channel_mz[c] + off as f64 * model::mass::ISOTOPE / z;
+                                peaks.push((m, v as f32));
+                            }
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={k}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let anchors: Vec<(usize, f64)> = (0..n_groups).map(|i| (i, apex(i))).collect();
+        let all = learn_width(&ms1, &groups, &anchors, 10.0);
+        let fewer = learn_width(&ms1, &groups, &anchors[1..], 10.0);
+        assert!((all - sigma).abs() < 0.04 * sigma, "learned {all}");
+        assert!((all - fewer).abs() < 0.02 * all, "{all} vs {fewer}");
+    }
+
+    /// The collinearity check covers every isotope the fit models (M−2..M+5)
+    /// of the other channels, and the other satellites.
     #[test]
     fn satellite_overlap_check_covers_the_modelled_isotopes() {
         let iso = model::mass::ISOTOPE / 2.0;

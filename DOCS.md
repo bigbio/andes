@@ -523,7 +523,22 @@ ground truth). Among PSMs MaxQuant localizes confidently (every site ≥ 0.75, n
 
 This needs phospho declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same
 for T). Without `loss=` IPF does not beat the search placement (91.8% against 92.9%). The IPF step
-takes ~9 s on this run. Not yet measured against synthetic peptides of known site.
+takes ~9 s on this run.
+
+Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017, 10 HCD-OT files,
+fully tryptic, PSM q ≤ 0.01, n = 999 PSMs of 80 library peptides scored against the key of the
+file's own pool), IPF does not beat the search placement and is overconfident:
+
+| | false localization rate |
+|---|---|
+| andes search placement | 19.5% |
+| IPF best placement | 19.6% |
+| IPF `best_prob` ≥ 0.9 (67.0% of PSMs) | 9.4% |
+| IPF `best_prob` ≥ 0.99 (43.9% of PSMs) | 8.0% |
+
+Mean 1 − `best_prob` predicts 13.9% against 19.6% observed. Counting a placement correct if any pool
+holds it (isomers sit in different pools, so cross-pool carryover is possible) gives 13.5% / 12.4%.
+Treat `best_prob` as a ranking, not a calibrated probability.
 
 ### PEFF databases
 

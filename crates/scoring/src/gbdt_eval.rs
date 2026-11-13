@@ -390,8 +390,28 @@ mod simd {
     /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn add_all(packed: &PackedTrees, rows: &[&[f32]], out: &mut [f32]) {
+        // The feature table is rebuilt for every block; its buffer is kept per
+        // thread so the hot path allocates once, not on every call.
+        // SAFETY: the caller guarantees AVX2, as `add_all_with` requires.
+        TABLE.with(|t| unsafe { add_all_with(packed, rows, out, &mut t.borrow_mut()) })
+    }
+
+    thread_local! {
+        static TABLE: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// [`add_all`] with the feature-table buffer passed in.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[target_feature(enable = "avx2")]
+    unsafe fn add_all_with(
+        packed: &PackedTrees,
+        rows: &[&[f32]],
+        out: &mut [f32],
+        table: &mut Vec<f32>,
+    ) {
         let nf = packed.n_features;
-        let mut table: Vec<f32> = Vec::new();
         let mut acc = [0.0f32; BLOCK];
         for (rows, out) in rows.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
             let n = rows.len();

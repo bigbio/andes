@@ -96,20 +96,25 @@ fn id_hash(id: &str) -> u128 {
 
 /// Masses of the `sites=annotated` modifications in the search's `--mods`
 /// file; none without a file, as the built-in modifications have none.
-fn annotated_site_masses(mods: Option<&Path>) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+/// The `sites=annotated` masses and the fixed terminal mods of a mods file.
+type SiteMods = (Vec<f64>, Vec<(model::modification::ModLocation, f64)>);
+
+fn annotated_site_masses(mods: Option<&Path>) -> Result<SiteMods, Box<dyn std::error::Error>> {
     let Some(path) = mods else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let aa = model::AminoAcidSetBuilder::new_standard()
         .add_mods_from_file(path)
         .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
         .build()
         .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
-    Ok(aa
-        .distinct_mods()
-        .iter()
-        .filter_map(|m| m.annotated_site_mass)
-        .collect())
+    Ok((
+        aa.distinct_mods()
+            .iter()
+            .filter_map(|m| m.annotated_site_mass)
+            .collect(),
+        aa.fixed_terminal_deltas(),
+    ))
 }
 
 /// Protein groups over the rescored PSMs in `psms` and `decoy_psms` (as
@@ -129,7 +134,7 @@ pub(crate) fn infer_from_files(
         .into());
     }
     let (enzyme, _) = parse_enzymes(&a.enzyme)?;
-    let restricted = annotated_site_masses(a.mods.as_deref())?;
+    let (restricted, fixed_terminal) = annotated_site_masses(a.mods.as_deref())?;
     let opts = input::UniProtOptions {
         variants: a.uniprot_variants,
         isoforms: a.uniprot_isoforms,
@@ -160,7 +165,15 @@ pub(crate) fn infer_from_files(
     // only for the site q-values. Only those modifications make such rows.
     if !restricted.is_empty() {
         knockoffs.extend(
-            output::site_claims(&mut targets, &idx, a.fdr, proteoform_fdr, &restricted, None)
+            output::site_claims(
+                &mut targets,
+                &idx,
+                a.fdr,
+                proteoform_fdr,
+                &restricted,
+                None,
+                &fixed_terminal,
+            )
                 .knockoff_rows,
         );
     }

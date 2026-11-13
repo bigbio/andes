@@ -773,7 +773,9 @@ pub fn peptidoform_string(cand: &Candidate) -> String {
     let mut s = String::new();
     for aa in &cand.peptide.residues {
         s.push(aa.residue as char);
-        if let Some(m) = aa.mod_.as_ref() {
+        // One bracket per modification, each part of a stacked record (a
+        // terminal and a side-chain mod on one residue) on its own.
+        for m in aa.mod_.iter().flat_map(|m| m.components()) {
             match m.accession.as_deref() {
                 Some(acc) if !acc.is_empty() => {
                     s.push('[');
@@ -1391,6 +1393,7 @@ mod rescore_join_tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         });
         let residues = vec![
@@ -1432,6 +1435,7 @@ mod rescore_join_tests {
                 loss_class: 0,
                 annotated_site_mass: None,
                 blocks_cleavage: false,
+                parts: Vec::new(),
                 diagnostic_ions: Vec::new(),
             })
         };

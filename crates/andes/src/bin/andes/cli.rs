@@ -1050,7 +1050,7 @@ pub(crate) struct SearchArgs {
     /// scored windows and every window of the +11 Th decoy twin. A developer
     /// tool for retraining the shipped model
     /// (`resources/quant/glyco_mbr_model.txt`); it does not change the run.
-    #[arg(long = "glyco-mbr-match-train", value_name = "FILE")]
+    #[arg(long = "glyco-mbr-match-train", value_name = "FILE", hide = true)]
     pub(crate) glyco_mbr_match_train: Option<PathBuf>,
     /// Directory for the per-run artifacts of multi-run quantification: for
     /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and

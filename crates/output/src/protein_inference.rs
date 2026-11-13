@@ -349,23 +349,26 @@ pub fn infer_protein_groups(
     let target = parsimony(rows(targets, false));
     let decoy = parsimony(rows(decoys, true));
 
-    // Picked competition per family; the winners count once per group.
-    let families: BTreeSet<&String> = target
-        .family_group
-        .keys()
-        .chain(decoy.family_group.keys())
-        .collect();
+    // Picked competition per family; the winners count once per group. A
+    // family that parsimony subsumed competes through the group that took its
+    // peptides, on either side: otherwise its twin on the other side would win
+    // unopposed.
+    let member = |s: &Side| -> HashMap<String, usize> {
+        let mut m = s.family_group.clone();
+        for (i, g) in s.groups.iter().enumerate() {
+            for f in &g.subsumed {
+                m.entry(f.clone()).or_insert(i);
+            }
+        }
+        m
+    };
+    let (t_member, d_member) = (member(&target), member(&decoy));
+    let families: BTreeSet<&String> = t_member.keys().chain(d_member.keys()).collect();
     let mut t_win: BTreeSet<usize> = BTreeSet::new();
     let mut d_win: BTreeSet<usize> = BTreeSet::new();
     for f in families {
-        let t = target
-            .family_group
-            .get(f)
-            .map(|&g| (g, target.groups[g].score));
-        let d = decoy
-            .family_group
-            .get(f)
-            .map(|&g| (g, decoy.groups[g].score));
+        let t = t_member.get(f).map(|&g| (g, target.groups[g].score));
+        let d = d_member.get(f).map(|&g| (g, decoy.groups[g].score));
         match (t, d) {
             (Some((g, ts)), Some((_, ds))) if ts > ds => {
                 t_win.insert(g);
@@ -832,5 +835,29 @@ mod tests {
         let d = &inf.decoy_groups[0];
         assert_eq!((d.lead.as_str(), d.is_decoy, d.id), ("XXX_C", true, 5));
         assert!((d.q_value - 1.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_subsumed_family_competes_through_its_host_group() {
+        // D has only CCCK, which C also has: D is subsumed by C. D's decoy
+        // scores below C's group, so it loses and does not count.
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("c1", 5.0, "K.EEEK.R", "C"),
+            psm("c2", 3.0, "K.CCCK.R", "C;D"),
+        ]
+        .into_iter()
+        .collect();
+        let decoys: HashMap<String, PercolatorPsm> =
+            [psm("x", 1.5, "K.XDXK.R", "XXX_D")].into_iter().collect();
+        let inf = infer_protein_groups(&targets, &decoys, &index(), |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        assert_eq!(inf.groups[0].subsumed, vec!["D"]);
+        assert_eq!(inf.groups[0].q_value, 0.0);
+        assert!(inf.decoy_groups.is_empty(), "{:?}", inf.decoy_groups);
+        // A decoy above the host group still wins its competition.
+        let decoys: HashMap<String, PercolatorPsm> =
+            [psm("x", 9.0, "K.XDXK.R", "XXX_D")].into_iter().collect();
+        let inf = infer_protein_groups(&targets, &decoys, &index(), |_| true);
+        assert_eq!(inf.decoy_groups.len(), 1);
     }
 }

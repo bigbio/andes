@@ -268,7 +268,22 @@ pub struct Ms2Scratch {
     film: Vec<f32>,
     hc: Vec<f32>,
     site: Vec<f32>,
+    /// FiLM and head conditioning per conditioning vector (`cond` as bits),
+    /// computed by the model at address `cond_model`.
+    cond_cache: Vec<CondEntry>,
+    cond_model: usize,
 }
+
+/// The conditioning outputs of one `cond` vector.
+struct CondEntry {
+    key: Vec<u32>,
+    film: Vec<f32>,
+    hc: Vec<f32>,
+}
+
+/// Distinct conditioning vectors kept per scratch (a run has a few charges
+/// under one activation, instrument and NCE).
+const COND_CACHE: usize = 64;
 
 impl Ms2Model {
     /// Load an `AMS20001` weight file written by `ms2_model.export_weights`.
@@ -453,11 +468,34 @@ impl Ms2Model {
             .extend_from_slice(&self.act_emb[c.activation * ce..(c.activation + 1) * ce]);
         s.cond
             .extend_from_slice(&self.instr_emb[c.instrument * ce..(c.instrument + 1) * ce]);
-        self.film1.apply(&s.cond, &mut s.film_h);
-        for v in s.film_h.iter_mut() {
-            *v = silu(*v);
+        let model = self as *const Self as usize;
+        if s.cond_model != model {
+            s.cond_cache.clear();
+            s.cond_model = model;
         }
-        self.film2.apply(&s.film_h, &mut s.film);
+        let mut cached = s.cond_cache.iter().position(|e| {
+            e.key.len() == s.cond.len() && e.key.iter().zip(&s.cond).all(|(k, c)| *k == c.to_bits())
+        });
+        if cached.is_none() {
+            self.film1.apply(&s.cond, &mut s.film_h);
+            for v in s.film_h.iter_mut() {
+                *v = silu(*v);
+            }
+            self.film2.apply(&s.film_h, &mut s.film);
+            self.head_cond.apply(&s.cond, &mut s.hc);
+            if s.cond_cache.len() < COND_CACHE {
+                s.cond_cache.push(CondEntry {
+                    key: s.cond.iter().map(|c| c.to_bits()).collect(),
+                    film: s.film.clone(),
+                    hc: s.hc.clone(),
+                });
+                cached = Some(s.cond_cache.len() - 1);
+            }
+        }
+        let (film, hc): (&[f32], &[f32]) = match cached {
+            Some(i) => (&s.cond_cache[i].film, &s.cond_cache[i].hc),
+            None => (&s.film, &s.hc),
+        };
 
         // input projection
         s.input.clear();
@@ -473,8 +511,8 @@ impl Ms2Model {
         // FiLM-modulated residual dilated convolutions
         for (b, (conv, mix)) in self.blocks.iter().enumerate() {
             conv.apply(&s.x, np, &mut s.h);
-            let gamma = &s.film[(2 * b) * ch..(2 * b + 1) * ch];
-            let beta = &s.film[(2 * b + 1) * ch..(2 * b + 2) * ch];
+            let gamma = &film[(2 * b) * ch..(2 * b + 1) * ch];
+            let beta = &film[(2 * b + 1) * ch..(2 * b + 2) * ch];
             for row in s.h.chunks_exact_mut(ch) {
                 for ((v, g), be) in row.iter_mut().zip(gamma).zip(beta) {
                     *v = silu(*v * (1.0 + g) + be);
@@ -530,12 +568,10 @@ impl Ms2Model {
         // site head: head1 is a k = 2 conv, so its output at token p reads tokens
         // p − 1 and p; site j (between residues j + 1 and j + 2) is token j + 2.
         self.head1.apply(&s.x, np, &mut s.h);
-        self.head_cond.apply(&s.cond, &mut s.hc);
         s.site.clear();
         for j in 0..n - 1 {
             let row = &s.h[(j + 2) * ch..(j + 3) * ch];
-            s.site
-                .extend(row.iter().zip(&s.hc).map(|(a, b)| silu(a + b)));
+            s.site.extend(row.iter().zip(hc).map(|(a, b)| silu(a + b)));
         }
         let mut out = vec![0.0f32; (n - 1) * N_ION];
         self.head2.apply(&s.site, n - 1, &mut out);
@@ -635,6 +671,27 @@ mod tests {
         }
         assert_eq!((n_ok, n_none), (21, 5));
         assert!(max_err < 1e-4, "max relative error {max_err}");
+    }
+
+    /// A scratch reused across conditions gives the bits of a fresh scratch.
+    #[test]
+    fn reused_scratch_matches_fresh_scratch() {
+        let model = Ms2Model::load(fixture("tiny.ams2")).unwrap();
+        let peptides = ["PEPTIDEK", "AC[UNIMOD:4]DEFMK", "LLGGSR"];
+        let mut reused = Ms2Scratch::default();
+        for round in 0..2 {
+            for (i, z) in [2u8, 3, 1, 2, 4, 3].into_iter().enumerate() {
+                let nce = if i % 2 == 0 { Some(27.0) } else { None };
+                let c = Ms2Conditions::new(z, nce, "HCD", "Q Exactive");
+                let p = RtPeptide::from_proforma(peptides[(i + round) % peptides.len()]).unwrap();
+                let fresh = model
+                    .predict_raw_with(&p, &c, &mut Ms2Scratch::default())
+                    .unwrap();
+                let again = model.predict_raw_with(&p, &c, &mut reused).unwrap();
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&fresh), bits(&again), "charge {z} nce {nce:?}");
+            }
+        }
     }
 
     #[test]

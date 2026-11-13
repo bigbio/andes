@@ -877,16 +877,23 @@ fn write_pin(
         if line.is_empty() {
             continue;
         }
-        let x: Vec<&str> = line.split('\t').collect();
+        let (head, tail) = split_before_field(&line, k).ok_or_else(|| {
+            format!(
+                "{}: changed while adding predicted features (row {} has at most {k} columns)",
+                pin.display(),
+                row + 1
+            )
+        })?;
         buf.clear();
-        buf.push_str(&x[..k].join("\t"));
+        buf.push_str(head);
         for v in values {
             buf.push('\t');
             push_value(&mut buf, v[row]);
         }
         buf.push('\t');
-        buf.push_str(&x[k..].join("\t"));
-        writeln!(w, "{buf}").map_err(io)?;
+        buf.push_str(tail);
+        buf.push('\n');
+        w.write_all(buf.as_bytes()).map_err(io)?;
         row += 1;
     }
     if row != table.rows.len() {
@@ -900,6 +907,16 @@ fn write_pin(
     w.flush().map_err(io)?;
     drop(w);
     std::fs::rename(&tmp, pin).map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))
+}
+
+/// The first `k` tab-separated fields of `line` and the rest, each without
+/// the tab between them; `None` when `line` has no more than `k` fields.
+fn split_before_field(line: &str, k: usize) -> Option<(&str, &str)> {
+    if k == 0 {
+        return Some(("", line));
+    }
+    let (i, _) = line.match_indices('\t').nth(k - 1)?;
+    Some((&line[..i], &line[i + 1..]))
 }
 
 /// Integers as integers, other values with six significant digits.
@@ -1091,6 +1108,21 @@ mod tests {
         let miss = vec![0.0, 1.0, 0.0, 1.0, 0.0];
         impute_median(&mut col, &miss);
         assert_eq!(col, vec![1.0, 2.0, 3.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn split_before_field_matches_split_and_join() {
+        for line in ["a\tb\tc\td", "a\t\t\tb", "\ta\tb", "a\tb\t"] {
+            let x: Vec<&str> = line.split('\t').collect();
+            for k in 0..x.len() {
+                assert_eq!(
+                    split_before_field(line, k),
+                    Some((x[..k].join("\t").as_str(), x[k..].join("\t").as_str())),
+                    "{line:?} k {k}"
+                );
+            }
+            assert_eq!(split_before_field(line, x.len()), None);
+        }
     }
 
     #[test]

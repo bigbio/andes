@@ -14,7 +14,7 @@
 //! Every search flag has a key here except five that are CLI-only on purpose:
 //! `--config` itself, and the hidden diagnostics `--cal-min-spec-keys` (a test
 //! hook that forces the calibration pre-pass on tiny inputs),
-//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps), and
+//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
 //! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
 //! scorer). The test `every_search_flag_has_a_config_key` keeps that list
 //! honest.

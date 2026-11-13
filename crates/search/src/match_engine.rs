@@ -214,19 +214,20 @@ impl GlobalCandKey {
 #[derive(Default)]
 struct MmapAccumulator {
     candidates: Vec<Candidate>,
-    index_of: std::collections::HashMap<GlobalCandKey, u32>,
+    index_of: FxHashMap<GlobalCandKey, u32>,
 }
 
 impl MmapAccumulator {
     /// Intern a candidate, returning its stable global index. If an identical
-    /// candidate was already seen, returns the existing index without pushing.
-    fn intern(&mut self, cand: Candidate) -> u32 {
-        let key = GlobalCandKey::from_candidate(&cand);
+    /// candidate was already seen, returns the existing index without pushing;
+    /// the candidate is cloned only when it is new.
+    fn intern(&mut self, cand: &Candidate) -> u32 {
+        let key = GlobalCandKey::from_candidate(cand);
         if let Some(&idx) = self.index_of.get(&key) {
             return idx;
         }
         let idx = self.candidates.len() as u32;
-        self.candidates.push(cand);
+        self.candidates.push(cand.clone());
         self.index_of.insert(key, idx);
         idx
     }
@@ -1630,7 +1631,7 @@ impl<'a> PreparedSearch<'a> {
                 {
                     let mut accum = self.mmap_accum.lock().unwrap();
                     queue.remap_candidate_idxs(|local| {
-                        accum.intern(mmap_cands[local as usize].clone())
+                        accum.intern(&mmap_cands[local as usize])
                     });
                 }
 
@@ -1862,7 +1863,7 @@ pub fn run_pass2_coisolation(
             if !emitted.insert(key) {
                 continue;
             }
-            psm.candidate_idxs = vec![accum.intern(cand)];
+            psm.candidate_idxs = vec![accum.intern(&cand)];
             // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
             // spectrum_idx must be global to align with `all_spectra`.
             psm.spectrum_idx = offset + spec_idx;
@@ -2717,14 +2718,14 @@ mod accumulator_tests {
         assert!(cands.len() >= 2);
         {
             let mut accum = prepared.mmap_accum.lock().unwrap();
-            assert_eq!(accum.intern(cands[0].clone()), 0);
-            assert_eq!(accum.intern(cands[1].clone()), 1);
+            assert_eq!(accum.intern(&cands[0]), 0);
+            assert_eq!(accum.intern(&cands[1]), 1);
         }
         prepared.sync_materialized_candidates();
         assert_eq!(prepared.candidates.len(), 2);
         let mut accum = prepared.mmap_accum.lock().unwrap();
         assert!(accum.index_of.is_empty());
-        assert_eq!(accum.intern(cands[1].clone()), 0);
+        assert_eq!(accum.intern(&cands[1]), 0);
         assert_eq!(accum.candidates.len(), 1);
     }
 }
@@ -4022,6 +4023,7 @@ mod dedup_tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }));
         let cands = vec![

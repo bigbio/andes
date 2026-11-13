@@ -103,6 +103,7 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
             annotated_site_mass: None,
             blocks_cleavage: false,
             diagnostic_ions: Vec::new(),
+            parts: Vec::new(),
         });
         if !channels.iter().any(|(n, _): &(String, u8)| *n == l.name) {
             channels.push((l.name.clone(), c as u8 + 1));
@@ -324,6 +325,31 @@ fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
+/// Whether a satellite of `g` lies within `tol_ppm` of an isotope the fit
+/// models (M−2..M+5) of another component: a channel other than its parent,
+/// or another satellite. The two fit components are then nearly collinear
+/// and their split is weakly determined.
+fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
+    use quant::label::{HIGHEST_OFFSET, LOWEST_OFFSET};
+    let z = f64::from(g.charge.max(1));
+    let on = |mono: f64, mz: f64| {
+        (LOWEST_OFFSET..=HIGHEST_OFFSET).any(|off| {
+            let m = mono + f64::from(off) * model::mass::ISOTOPE / z;
+            (m - mz).abs() <= m * tol_ppm * 1e-6
+        })
+    };
+    g.satellites.iter().enumerate().any(|(i, &(parent, mz))| {
+        g.channel_mz
+            .iter()
+            .enumerate()
+            .any(|(c, &mc)| c != parent && on(mc, mz))
+            || g.satellites
+                .iter()
+                .enumerate()
+                .any(|(k, &(_, ms))| k != i && on(ms, mz))
+    })
+}
+
 /// The best PSM of a group's channel in a run.
 #[derive(Clone, Copy)]
 struct ChannelHit {
@@ -386,6 +412,7 @@ fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe
         w_prior: w,
         rt_shift,
         mobility: None,
+        pinned: false,
     }
 }
 
@@ -424,21 +451,60 @@ fn fit_folded(
     Some((fit, converted))
 }
 
+/// The joint fit at the identified channels' profile (with its satellite
+/// conversions) and the pinned probe it was measured with.
+type ProfileFit = ((GroupFit, Vec<Option<f64>>), GroupProbe);
+
+/// The fit of a group with unidentified channels at the elution profile of
+/// its identified channels: the apex and width are searched with only the
+/// identified channels (and their satellites) free, the others held at 0,
+/// and every channel is then measured jointly at that profile, pinned. Also
+/// returns the pinned probe, from which the decoys of the unidentified
+/// channels are made: neither an unidentified channel nor a decoy can move
+/// the profile onto a species at its own m/z. `rt_z` is the profile fit's.
+fn fit_at_identified_profile(
+    ms1: &Ms1RunIndex,
+    g: &Group,
+    probe: &GroupProbe,
+    ids: &[Option<ChannelHit>],
+    params: &FitParams,
+) -> Option<ProfileFit> {
+    let n = g.channel_mz.len();
+    let mut shape = probe.clone();
+    shape.free = (0..shape.channel_mz.len())
+        .map(|k| ids[if k < n { k } else { g.satellites[k - n].0 }].is_some())
+        .collect();
+    let (profile, _) = fit_folded(ms1, g, &shape, params)?;
+    let mut pinned = probe.clone();
+    pinned.t_hat = profile.t0;
+    pinned.w_prior = profile.w;
+    pinned.pinned = true;
+    let (mut fit, converted) = fit_folded(ms1, g, &pinned, params)?;
+    fit.rt_z = profile.rt_z;
+    Some(((fit, converted), pinned))
+}
+
 /// Learns the run's elution width from `anchors` (group, RT of its best PSM
 /// in reference time): rounds of fits with the width free, the median
 /// fitted width of the strong fits, until it moves by less than 10 %.
 fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], tol: f64) -> f64 {
     let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-    let step = (anchors.len() / MAX_WIDTH_FITS).max(1);
-    let sample: Vec<&(usize, f64)> = anchors.iter().step_by(step).collect();
-    let params = FitParams {
+    // The sample is chosen by a hash of each group's key, so one group more
+    // or fewer changes at most one member (a stride over the list would shift
+    // all of them).
+    let mut order: Vec<&(usize, f64)> = anchors.iter().collect();
+    order.sort_by_key(|(gid, _)| seed_of(&groups[*gid].key, 0));
+    let sample: Vec<&(usize, f64)> = order.into_iter().take(MAX_WIDTH_FITS).collect();
+    // The coarse grid finds the width's scale; the fine one, once the coarse
+    // estimate has settled, resolves it to a few percent.
+    let mut params = FitParams {
         tol_ppm: tol,
         widths: FREE_WIDTHS,
     };
     let mut w = 6.0f64.max(dt);
-    for _ in 0..6 {
+    for _ in 0..16 {
         let s = w.max(dt);
-        let fitted: Vec<f64> = sample
+        let mut fitted: Vec<f64> = sample
             .par_iter()
             .filter_map(|(gid, t)| {
                 let g = &groups[*gid];
@@ -446,20 +512,35 @@ fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], to
                 fit_folded(ms1, g, &p, &params).map(|x| x.0)
             })
             .filter(|f| f.llr >= MIN_WIDTH_LLR)
-            .map(|f| f.w)
+            .map(|f| f.w.ln())
             .collect();
         if fitted.len() < MIN_WIDTH_FITS {
             return (6.0f64).max(dt);
         }
-        let next = quant::label::median(fitted).max(dt);
+        // Each fit picks its width from a grid relative to `w`: their median
+        // is a grid point, at which the iteration would stop (3.6 or 4.2 s
+        // from 6 s, by the sample). The trimmed mean of the log widths moves
+        // continuously and settles where the grid choices balance.
+        fitted.sort_by(f64::total_cmp);
+        let cut = fitted.len() / 10;
+        let core = &fitted[cut..fitted.len() - cut];
+        let next = (core.iter().sum::<f64>() / core.len() as f64).exp().max(dt);
         let moved = (next - w).abs() / w;
         w = next;
-        if moved < 0.1 {
+        if params.widths == FREE_WIDTHS {
+            if moved < 0.1 {
+                params.widths = REFINE_WIDTHS;
+            }
+        } else if moved < 0.01 {
             break;
         }
     }
     w
 }
+
+/// The width grid of [`learn_width`]'s second stage, multiples of the
+/// current estimate.
+const REFINE_WIDTHS: &[f64] = &[0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25];
 
 /// Learns the channels' RT offsets from the reference: every channel fitted
 /// alone at `anchors`, pairs where both are strong.
@@ -694,6 +775,17 @@ pub(super) fn quantify(
         mixed,
         no_rt
     );
+    let shared = groups
+        .iter()
+        .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
+        .count();
+    if shared > 0 {
+        eprintln!(
+            "quant: label: {shared} groups have an Arg->Pro satellite within the MS1 tolerance \
+             of another channel's isotope; the split between the two (converted_fraction, and \
+             the ratio through it) is weakly determined there"
+        );
+    }
 
     let fit_params = FitParams {
         tol_ppm: tol,
@@ -844,11 +936,35 @@ pub(super) fn quantify(
                         })?;
                     let t_hat = best.1.rt - shifts[best.0];
                     let probe = probe_of(g, t_hat, s, w, &shifts);
-                    let (fit, converted) = fit_folded(ms1, g, &probe, &fit_params)?;
                     let missing: Vec<usize> = (0..n_ch).filter(|&c| chans[c].is_none()).collect();
+                    let ((fit, converted), probe) = if missing.is_empty() {
+                        (fit_folded(ms1, g, &probe, &fit_params)?, probe)
+                    } else {
+                        let ((mut fit, conv), pinned) =
+                            fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?;
+                        // The identified channels keep their quantities from the
+                        // free joint fit, as a group with every channel
+                        // identified does; only the unidentified channels (and
+                        // their decoys, made from `pinned`) are read at the
+                        // identified channels' profile.
+                        if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
+                            let hits = chans.iter();
+                            for ((ch, f), hit) in
+                                fit.channels.iter_mut().zip(&free.channels).zip(hits)
+                            {
+                                if hit.is_some() {
+                                    *ch = f.clone();
+                                }
+                            }
+                        }
+                        ((fit, conv), pinned)
+                    };
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
+                        // The decoys move the missing channels' masses of the
+                        // pinned probe: measured at the same profile as the
+                        // channels they stand for, which none of them shaped.
                         for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
@@ -1661,6 +1777,8 @@ mod tests {
             satellites: vec![(1, mp)],
             identity_decoy: false,
         };
+        // SILAC duplex: the satellite is clear of the light channel.
+        assert!(!satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
@@ -1672,6 +1790,284 @@ mod tests {
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
+
+    /// A light-only group whose heavy channel is absent, with a strong
+    /// species eluting 6 s later either at the heavy channel's m/z (the
+    /// target's situation) or at a decoy's (the decoy's): the target's heavy
+    /// channel scores no better than that decoy, since both are measured at
+    /// the light channel's profile, which neither moves.
+    #[test]
+    fn missing_channel_scores_like_its_decoys_next_to_an_interferer() {
+        use model::scan::Ms1Scan;
+        let env = ChannelEnvelope::new(&[0.55, 0.3, 0.11, 0.04], 0, 1.0, 0, 1.0);
+        let z = 2.0;
+        let ml = 512.27;
+        let g = Group {
+            key: "PEPTIDEK".into(),
+            sequence: "PEPTIDEK".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: vec![ml, ml + 8.014199 / z],
+            envelopes: vec![env, env],
+            deltas: vec![0.0, 8.014199],
+            faims_cv: None,
+            satellites: Vec::new(),
+            identity_decoy: false,
+        };
+        let ids = vec![Some(ChannelHit { hi: 0, rt: 100.0 }), None];
+        let probe = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
+        let params = FitParams::default();
+        // The run: the light channel at apex 100 s, and a species 5x as
+        // strong at `mz`, apex 106 s; sigma 4 s.
+        let run = |mz: f64| {
+            let scans: Vec<Ms1Scan> = (0..600)
+                .map(|k| {
+                    let rt = k as f64 / 3.0;
+                    let mut peaks: Vec<(f64, f32)> =
+                        (0..60).map(|j| (350.0 + 11.3 * j as f64, 50.0)).collect();
+                    for (m, apex, amp) in [(ml, 100.0, 1e6), (mz, 106.0, 5e6)] {
+                        let e = (-(rt - apex) * (rt - apex) / 32.0f64).exp();
+                        for off in 0..4 {
+                            let v = amp * env.at(off) * e;
+                            if v > 50.0 {
+                                peaks.push((m + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                            }
+                        }
+                    }
+                    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    Ms1Scan {
+                        rt,
+                        peaks,
+                        id: format!("scan={k}"),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            Ms1RunIndex::new(scans)
+        };
+        let decoy_mz = decoy_probes(&g, &probe, &[1], 10.0, 7, 1)[0].channel_mz[1];
+        assert!((decoy_mz - g.channel_mz[1]).abs() > 0.01);
+
+        // The target's situation: the species sits on the heavy channel. A
+        // free joint fit is pulled onto it; the measurement is not.
+        let at_heavy = run(g.channel_mz[1]);
+        let (free, _) = fit_folded(&at_heavy, &g, &probe, &params).unwrap();
+        assert!(free.t0 > 102.0, "free apex {}", free.t0);
+        let ((target, _), _) =
+            fit_at_identified_profile(&at_heavy, &g, &probe, &ids, &params).unwrap();
+        assert!((target.t0 - 100.0).abs() < 0.5, "apex {}", target.t0);
+
+        // The decoy's situation: the same species on the decoy's m/z.
+        let at_decoy = run(decoy_mz);
+        let (_, pinned) = fit_at_identified_profile(&at_decoy, &g, &probe, &ids, &params).unwrap();
+        let dp = decoy_probes(&g, &pinned, &[1], 10.0, 7, 1).remove(0);
+        assert_eq!(dp.channel_mz[1], decoy_mz);
+        let (decoy, _) = fit_folded(&at_decoy, &g, &dp, &params).unwrap();
+
+        let (st, sd) = (
+            channel_score(&target.channels[1]),
+            channel_score(&decoy.channels[1]),
+        );
+        // Read at the same pinned profile, the target and the decoy see the
+        // species alike (6 s off the apex their coherence, and so their score,
+        // can be 0): neither scores better than the other.
+        assert!(
+            (st - sd).abs() <= 0.02 * st.max(sd) + 1e-9,
+            "target {st} vs decoy {sd}"
+        );
+        assert!(
+            (target.channels[1].apex_offset - decoy.channels[1].apex_offset).abs() < 0.2,
+            "{} vs {}",
+            target.channels[1].apex_offset,
+            decoy.channels[1].apex_offset
+        );
+        // The identified channel is measured at its own profile.
+        let (r, _) = log2_ratio(&target.channels[0], &decoy.channels[0]).unwrap();
+        assert!(r.abs() < 0.02, "{r}");
+    }
+
+    /// The learned elution width finds the true width and does not jump when
+    /// one group more or fewer is fitted.
+    #[test]
+    fn learned_width_is_stable() {
+        use model::scan::Ms1Scan;
+        let env = ChannelEnvelope::new(&[0.55, 0.3, 0.11, 0.04], 0, 1.0, 0, 1.0);
+        let n_groups = 60;
+        let (sigma, z) = (4.0, 2.0);
+        let groups: Vec<Group> = (0..n_groups)
+            .map(|i| {
+                let ml = 400.0 + 7.3 * i as f64;
+                Group {
+                    key: format!("PEPTIDE{i}K"),
+                    sequence: format!("PEPTIDE{i}K"),
+                    charge: 2,
+                    proteins: Vec::new(),
+                    channel_mz: vec![ml, ml + 8.014199 / z],
+                    envelopes: vec![env, env],
+                    deltas: vec![0.0, 8.014199],
+                    faims_cv: None,
+                    satellites: Vec::new(),
+                    identity_decoy: false,
+                }
+            })
+            .collect();
+        let apex = |i: usize| 40.0 + 9.0 * i as f64;
+        let scans: Vec<Ms1Scan> = (0..1800)
+            .map(|k| {
+                let rt = k as f64 / 3.0;
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..60).map(|j| (350.0 + 11.3 * j as f64, 50.0)).collect();
+                for (i, g) in groups.iter().enumerate() {
+                    let e = (-(rt - apex(i)).powi(2) / (2.0 * sigma * sigma)).exp();
+                    for (c, amp) in [(0, 1e6), (1, 5e5)] {
+                        for off in 0..4 {
+                            let v = amp * env.at(off) * e;
+                            if v > 50.0 {
+                                let m = g.channel_mz[c] + off as f64 * model::mass::ISOTOPE / z;
+                                peaks.push((m, v as f32));
+                            }
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={k}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let anchors: Vec<(usize, f64)> = (0..n_groups).map(|i| (i, apex(i))).collect();
+        let all = learn_width(&ms1, &groups, &anchors, 10.0);
+        let fewer = learn_width(&ms1, &groups, &anchors[1..], 10.0);
+        assert!((all - sigma).abs() < 0.04 * sigma, "learned {all}");
+        assert!((all - fewer).abs() < 0.02 * all, "{all} vs {fewer}");
+    }
+
+    /// The collinearity check covers every isotope the fit models (M−2..M+5)
+    /// of the other channels, and the other satellites.
+    #[test]
+    fn satellite_overlap_check_covers_the_modelled_isotopes() {
+        let iso = model::mass::ISOTOPE / 2.0;
+        let group = |channel_mz: Vec<f64>, satellites: Vec<(usize, f64)>| Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            envelopes: vec![ChannelEnvelope::new(&[1.0], 0, 1.0, 0, 1.0); channel_mz.len()],
+            deltas: vec![0.0; channel_mz.len()],
+            channel_mz,
+            faims_cv: None,
+            satellites,
+            identity_decoy: false,
+        };
+        // On channel 1's M−1 (a lower isotopologue of a 2H label).
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 - iso)]),
+            10.0
+        ));
+        // On channel 1's M+5.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 + 5.0 * iso)]),
+            10.0
+        ));
+        // On another satellite.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 540.0 + iso)]),
+            10.0
+        ));
+        // Clear of everything.
+        assert!(!satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 560.0)]),
+            10.0
+        ));
+    }
+
+    /// Four channels with three heavy-proline satellites take seven fit
+    /// components, more than the five channels a specification may have:
+    /// the group is still fitted, every channel with its converted part.
+    #[test]
+    fn four_channels_with_arg_pro_satellites_are_fitted() {
+        use model::scan::Ms1Scan;
+        let spec = LabelSpec::parse("[][Arg6][R+8.014199:6C2N][Arg10]").unwrap();
+        let light = Formula::peptide(b"PEPTIDER".iter().map(|&r| (r, 0.0)));
+        let sites = spec.sites();
+        let counts: Vec<u32> = sites
+            .iter()
+            .map(|s| u32::from(*s == Site::Residue(b'R')))
+            .collect();
+        let envs: Vec<ChannelEnvelope> = (0..4)
+            .map(|c| spec.channel_envelope(c, &sites, &counts, &light))
+            .collect();
+        let z = 2.0;
+        let ml = 478.73;
+        let deltas = [0.0, 6.020129, 8.014199, 10.008269];
+        let mz: Vec<f64> = deltas.iter().map(|d| ml + d / z).collect();
+        let sats: Vec<(usize, f64)> = (1..4)
+            .map(|c| {
+                let arg = spec.channels[c].label_at(Site::Residue(b'R')).unwrap();
+                (c, mz[c] + heavy_proline_delta(arg).unwrap() / z)
+            })
+            .collect();
+        // Channel amplitudes 1 : 0.5 : 0.25 : 2, each heavy one 20 % converted.
+        let amps = [1e6, 0.5e6, 0.25e6, 2e6];
+        let mut species: Vec<(f64, ChannelEnvelope, f64)> = vec![(mz[0], envs[0], amps[0])];
+        for &(c, mp) in &sats {
+            species.push((mz[c], envs[c], 0.8 * amps[c]));
+            species.push((mp, envs[c], 0.2 * amps[c]));
+        }
+        let scans: Vec<Ms1Scan> = (0..200)
+            .map(|i| {
+                let rt = i as f64;
+                let g = (-(rt - 100.0f64).powi(2) / 32.0).exp();
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..40).map(|k| (300.0 + k as f64 * 23.1, 50.0)).collect();
+                for &(m, env, amp) in &species {
+                    for off in -2..=5 {
+                        let v = amp * env.at(off) * g;
+                        if v > 50.0 {
+                            peaks.push((m + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={i}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let g = Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: mz.clone(),
+            envelopes: envs.clone(),
+            deltas: deltas.to_vec(),
+            faims_cv: None,
+            satellites: sats,
+            identity_decoy: false,
+        };
+        // Channel 2's satellite sits on Arg10's M+4 (3 mDa): flagged.
+        assert!(satellite_on_another_channel(&g, 10.0));
+        let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0; 4]);
+        assert_eq!(p.channel_mz.len(), 7);
+        let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
+        for c in 1..4 {
+            let (r, _) = log2_ratio(&fit.channels[c], &fit.channels[0]).unwrap();
+            let want = (amps[c] / amps[0]).log2();
+            assert!((r - want).abs() < 0.05, "channel {c}: {r} vs {want}");
+            // Channel 2's satellite (+7.014 at z 2) sits 3 mDa from Arg10's
+            // M+4, inseparable at any MS1 tolerance: a little of it is shared.
+            assert!((converted[c].unwrap() - 0.2).abs() < 0.03, "{converted:?}");
+        }
     }
 
     /// A protein N-terminal acetyl holds the N-terminus, not the first
@@ -1696,6 +2092,7 @@ mod tests {
                 annotated_site_mass: None,
                 blocks_cleavage: false,
                 diagnostic_ions: Vec::new(),
+                parts: Vec::new(),
             }))
         };
         let lys8 = spec.channels[1].label_at(Site::Residue(b'K')).unwrap();

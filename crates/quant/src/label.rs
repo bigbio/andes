@@ -59,8 +59,13 @@ pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
 /// Isotopes read per channel: M−1 (the check for another envelope) to M+3.
 const READ_OFFSETS: [i32; 5] = [-1, 0, 1, 2, 3];
-/// Most channels a specification may have (the fit enumerates their subsets).
+/// Most channels a specification may have.
 pub const MAX_CHANNELS: usize = 5;
+/// Most components one fit takes: every channel and at most one satellite
+/// per channel (the heavy-proline form of `--label-arg-pro`). Up to
+/// [`MAX_CHANNELS`] components the fit enumerates the subsets of the free
+/// ones; beyond, it solves by active set (see `nn_quadratic`).
+pub const MAX_COMPONENTS: usize = 2 * MAX_CHANNELS;
 
 /// Where a label sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -901,6 +906,11 @@ pub struct GroupProbe {
     /// measure one channel alone).
     pub free: Vec<bool>,
     pub mobility: Option<MobilityGate>,
+    /// Measure at the given profile (apex `t_hat`, width `w_prior`) instead
+    /// of searching for it: a group's unidentified channels and their decoys,
+    /// read at the identified channels' elution so that none of them moves it
+    /// onto another species.
+    pub pinned: bool,
 }
 
 /// Fit settings.
@@ -1019,8 +1029,116 @@ fn build_traces(probe: &GroupProbe, tol_ppm: f64) -> Traces {
 }
 
 /// Solves `max_A A·b − AᵀHA/2` over `A ≥ 0` with `A_c = 0` where `!free[c]`,
-/// exactly, by enumerating the free subsets. Returns `(A, LLR, passive set)`.
+/// exactly. Returns `(A, LLR, passive set)`. Up to [`MAX_CHANNELS`]
+/// components it enumerates the free subsets; beyond (channels with Arg→Pro
+/// satellites, up to [`MAX_COMPONENTS`]) the 2^n subsets would cost too much
+/// inside the apex and width search, so the active-set method of Lawson and
+/// Hanson finds the same optimum, falling back to the enumeration when a
+/// passive block is singular.
 fn nn_quadratic(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64, Vec<bool>) {
+    if n > MAX_CHANNELS {
+        if let Some(r) = nn_active_set(h, b, n, free) {
+            return r;
+        }
+    }
+    nn_enumerate(h, b, n, free)
+}
+
+/// [`nn_quadratic`] by the Lawson–Hanson active-set method: grow the passive
+/// set by the free component of largest gradient `b − HA`, solve on it, and
+/// step back to the feasible boundary when a component would turn negative.
+/// `None` when a passive block is singular or the iterations do not settle.
+fn nn_active_set(
+    h: &[f64],
+    b: &[f64],
+    n: usize,
+    free: &[bool],
+) -> Option<(Vec<f64>, f64, Vec<bool>)> {
+    let scale = b.iter().fold(0.0f64, |m, &x| m.max(x.abs()));
+    if scale == 0.0 {
+        return Some((vec![0.0; n], 0.0, vec![false; n]));
+    }
+    let tol = 1e-12 * scale;
+    let mut a = vec![0.0; n];
+    let mut passive = vec![false; n];
+    // A component whose own solve came out non-positive the moment it entered
+    // (rounding on a nearly collinear column) would re-enter at once with the
+    // same gradient: it is held out until the passive set changes otherwise.
+    let mut held = vec![false; n];
+    let solve_on = |p: &[bool]| -> Option<Vec<f64>> {
+        let idx: Vec<usize> = (0..n).filter(|&c| p[c]).collect();
+        let k = idx.len();
+        let mut m = vec![0.0; k * k];
+        let mut v = vec![0.0; k];
+        for (i, &ci) in idx.iter().enumerate() {
+            v[i] = b[ci];
+            for (j, &cj) in idx.iter().enumerate() {
+                m[i * k + j] = h[ci * n + cj];
+            }
+        }
+        let x = solve(&mut m, &mut v, k)?;
+        let mut z = vec![0.0; n];
+        for (&c, &xc) in idx.iter().zip(&x) {
+            z[c] = xc;
+        }
+        Some(z)
+    };
+    for _ in 0..3 * n + 3 {
+        let grad = |c: usize| b[c] - (0..n).map(|j| h[c * n + j] * a[j]).sum::<f64>();
+        let Some(j) = (0..n)
+            .filter(|&c| free[c] && !passive[c] && !held[c])
+            .map(|c| (c, grad(c)))
+            .filter(|&(_, g)| g > tol)
+            .max_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(c, _)| c)
+        else {
+            let llr = (0..n).map(|c| a[c] * b[c]).sum::<f64>() / 2.0;
+            return Some((a, llr, passive));
+        };
+        passive[j] = true;
+        let mut inner = 0;
+        loop {
+            inner += 1;
+            if inner > 3 * n + 3 {
+                return None;
+            }
+            let z = solve_on(&passive)?;
+            if (0..n).filter(|&c| passive[c]).all(|c| z[c] > 0.0) {
+                a = z;
+                held.iter_mut().for_each(|h| *h = false);
+                break;
+            }
+            if inner == 1 && z[j] <= 0.0 {
+                // The entering component itself is rejected: hold it out.
+                passive[j] = false;
+                held[j] = true;
+                break;
+            }
+            // Step from A toward z until the first passive component hits 0.
+            let alpha = (0..n)
+                .filter(|&c| passive[c] && z[c] <= 0.0)
+                .map(|c| a[c] / (a[c] - z[c]))
+                .fold(f64::INFINITY, f64::min);
+            for c in 0..n {
+                if passive[c] {
+                    a[c] += alpha * (z[c] - a[c]);
+                }
+            }
+            // The components the step brought to zero (up to rounding) leave.
+            let amax = a.iter().fold(0.0f64, |m, &x| m.max(x.abs()));
+            for c in 0..n {
+                if passive[c] && a[c] <= 1e-12 * amax {
+                    a[c] = 0.0;
+                    passive[c] = false;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// [`nn_quadratic`] by enumerating the free subsets.
+fn nn_enumerate(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64, Vec<bool>) {
     let mut best = (vec![0.0; n], 0.0, vec![false; n]);
     for mask in 1u32..(1 << n) {
         if (0..n).any(|c| mask & (1 << c) != 0 && !free[c]) {
@@ -1122,13 +1240,14 @@ fn robust_sigma(y: &[f64], floor: f64) -> f64 {
 /// Fits `probe` on `ms1`. `None` when the window holds fewer than 3 scans.
 pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> Option<GroupFit> {
     let n_ch = probe.channel_mz.len();
-    if n_ch == 0 || n_ch > MAX_CHANNELS {
+    if n_ch == 0 || n_ch > MAX_COMPONENTS {
         return None;
     }
     let s = probe.s.max(1e-3);
     let w_prior = probe.w_prior.max(1e-3);
+    let widths: &[f64] = if probe.pinned { &[1.0] } else { params.widths };
     let max_shift = probe.rt_shift.iter().fold(0.0f64, |a, &d| a.max(d.abs()));
-    let w_max = w_prior * params.widths.iter().fold(1.0f64, |a, &b| a.max(b));
+    let w_max = w_prior * widths.iter().fold(1.0f64, |a, &b| a.max(b));
     // Enough baseline on both sides for the noise estimate whatever `s`.
     let half = (4.0 * s + 4.0 * w_max).max(8.0 * w_max) + max_shift;
     let window = ms1.scan_window(probe.t_hat - half, probe.t_hat + half);
@@ -1254,7 +1373,11 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
 
     let lo = probe.t_hat - 3.0 * s;
     let hi = probe.t_hat + 3.0 * s;
-    let mut t0s: Vec<f64> = rt.iter().copied().filter(|&t| t >= lo && t <= hi).collect();
+    let mut t0s: Vec<f64> = if probe.pinned {
+        vec![probe.t_hat]
+    } else {
+        rt.iter().copied().filter(|&t| t >= lo && t <= hi).collect()
+    };
     if t0s.is_empty() {
         let k = rt
             .iter()
@@ -1273,7 +1396,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     let search_apex = |wt: &[f64]| -> Option<(f64, f64)> {
         let mut best: Option<(f64, f64, f64)> = None; // (objective, t0, w)
         for &t0 in &t0s {
-            for &wm in params.widths {
+            for &wm in widths {
                 let w = wm * w_prior;
                 let gc = profiles(t0, w);
                 if gc
@@ -2100,7 +2223,131 @@ mod tests {
             rt_shift: vec![0.0; mzs.len()],
             free: vec![true; mzs.len()],
             mobility: None,
+            pinned: false,
         }
+    }
+
+    /// Lawson–Hanson and the subset enumeration find the same optimum, on
+    /// random positive definite problems up to [`MAX_COMPONENTS`] with fixed
+    /// components and on nearly collinear columns (a satellite on another
+    /// channel's isotope).
+    #[test]
+    fn active_set_matches_the_subset_enumeration() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut settled = 0;
+        for trial in 0..400 {
+            let n = 1 + trial % MAX_COMPONENTS;
+            // H = XᵀX of a random design, nearly collinear in some trials.
+            let rows = n + 3;
+            let mut x: Vec<f64> = (0..rows * n).map(|_| rnd()).collect();
+            if trial % 4 == 0 && n >= 2 {
+                for r in 0..rows {
+                    x[r * n + 1] = x[r * n] * (1.0 + 1e-4 * rnd());
+                }
+            }
+            let mut h = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    h[i * n + j] = (0..rows).map(|r| x[r * n + i] * x[r * n + j]).sum();
+                }
+            }
+            let b: Vec<f64> = (0..n).map(|_| 2.0 * rnd() - 0.5).collect();
+            let free: Vec<bool> = (0..n).map(|c| trial % 7 != 3 || c != 0).collect();
+            let (a_e, llr_e, _) = nn_enumerate(&h, &b, n, &free);
+            let Some((a_s, llr_s, passive)) = nn_active_set(&h, &b, n, &free) else {
+                continue;
+            };
+            settled += 1;
+            assert!(
+                (llr_e - llr_s).abs() <= 1e-9 * llr_e.abs().max(1.0),
+                "trial {trial} n {n}: {llr_e} vs {llr_s}"
+            );
+            // Optimality (KKT) on every trial, collinear ones included: the
+            // gradient b − HA vanishes on the passive set and is not positive
+            // on the other free components.
+            let scale = b.iter().chain(&h).fold(0.0f64, |m, &x| m.max(x.abs()));
+            for c in 0..n {
+                let g = b[c] - (0..n).map(|k| h[c * n + k] * a_s[k]).sum::<f64>();
+                if passive[c] {
+                    assert!(
+                        g.abs() <= 1e-7 * scale,
+                        "trial {trial}: passive {c} gradient {g}"
+                    );
+                } else if free[c] {
+                    assert!(g <= 1e-7 * scale, "trial {trial}: free {c} gradient {g}");
+                }
+            }
+            for c in 0..n {
+                assert!(a_s[c] >= 0.0 && (free[c] || a_s[c] == 0.0));
+                assert_eq!(passive[c], a_s[c] > 0.0);
+            }
+            if trial % 4 != 0 {
+                for c in 0..n {
+                    assert!((a_e[c] - a_s[c]).abs() <= 1e-6 * (1.0 + a_e[c].abs()));
+                }
+            }
+        }
+        // The fallback to the enumeration is for singular blocks only.
+        assert_eq!(settled, 400, "active set settled on {settled} of 400");
+    }
+
+    /// A probe of [`MAX_COMPONENTS`] components is fitted; one more is refused.
+    #[test]
+    fn fit_takes_at_most_max_components() {
+        let light = [0.55, 0.3, 0.11, 0.04];
+        let env = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
+        let mzs: Vec<f64> = (0..=MAX_COMPONENTS)
+            .map(|i| 500.0 + 7.0 * i as f64)
+            .collect();
+        let species: Vec<(f64, ChannelEnvelope, f64, f64)> =
+            mzs.iter().map(|&m| (m, env, 1e6, 120.0)).collect();
+        let run = synthetic_run(&species, 4.0, 50.0);
+        let envs = vec![env; mzs.len()];
+        let fit = fit_group(
+            &run,
+            &probe(&mzs[..MAX_COMPONENTS], &envs[..MAX_COMPONENTS], 121.0),
+            &FitParams::default(),
+        )
+        .expect("a fit of MAX_COMPONENTS components");
+        for c in 1..MAX_COMPONENTS {
+            let (r, _) = log2_ratio(&fit.channels[c], &fit.channels[0]).unwrap();
+            assert!(r.abs() < 0.05, "component {c}: {r}");
+        }
+        assert!(fit_group(&run, &probe(&mzs, &envs, 121.0), &FitParams::default()).is_none());
+    }
+
+    /// A pinned probe reads its channels at the given profile: a strong
+    /// species at one channel's mass 8 s from the group's apex pulls a free
+    /// fit's profile onto it, but not a pinned one's.
+    #[test]
+    fn pinned_probe_keeps_the_profile() {
+        let light = [0.55, 0.3, 0.11, 0.04];
+        let env = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
+        let (ml, mo) = (600.3, 612.8);
+        let run = synthetic_run(&[(ml, env, 1e6, 100.0), (mo, env, 2e7, 108.0)], 4.0, 50.0);
+        let mut p = probe(&[ml, mo], &[env, env], 100.0);
+        let free = fit_group(&run, &p, &FitParams::default()).unwrap();
+        assert!((free.t0 - 108.0).abs() < 1.5, "free fit moves: {}", free.t0);
+        p.pinned = true;
+        p.w_prior = 4.0;
+        let pinned = fit_group(&run, &p, &FitParams::default()).unwrap();
+        assert_eq!(pinned.t0, 100.0);
+        assert_eq!(pinned.w, 4.0);
+        assert!(
+            pinned.channels[1].llr < 0.2 * free.channels[1].llr,
+            "{} vs {}",
+            pinned.channels[1].llr,
+            free.channels[1].llr
+        );
+        // The light channel keeps its quantity at its own apex.
+        let (r, _) = log2_ratio(&pinned.channels[0], &free.channels[0]).unwrap();
+        assert!(r > 0.5, "{r}");
     }
 
     #[test]

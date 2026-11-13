@@ -274,6 +274,34 @@ impl AminoAcidSet {
     /// Read-only; intended for callers that must inspect which fixed chemistry
     /// is active (e.g. the refinement cascade, which only supports the standard
     /// Carbamidomethyl-C baseline).
+    /// The declared FIXED terminal modifications as `(location, mass_delta)`,
+    /// de-duplicated: the mods a peptide's first or last residue can carry on
+    /// top of its own.
+    pub fn fixed_terminal_deltas(&self) -> Vec<(ModLocation, f64)> {
+        let mut out: Vec<(ModLocation, f64)> = Vec::new();
+        for m in self.declared.iter().filter(|m| m.fixed && m.location != ModLocation::Anywhere) {
+            if !out.iter().any(|(l, d)| *l == m.location && d.to_bits() == m.mass_delta.to_bits()) {
+                out.push((m.location, m.mass_delta));
+            }
+        }
+        out
+    }
+
+    /// The declared FIXED modifications that apply at any position, as
+    /// `(residue, mass_delta)` pairs (the terminal ones are in
+    /// [`Self::fixed_terminal_deltas`]).
+    pub fn fixed_anywhere_deltas(&self) -> Vec<(u8, f64)> {
+        let mut out: Vec<(u8, f64)> = Vec::new();
+        for m in self.declared.iter().filter(|m| m.fixed && m.location == ModLocation::Anywhere) {
+            for &r in STANDARD_RESIDUES {
+                if m.applies_to(r, m.location) && !out.iter().any(|(x, d)| *x == r && d.to_bits() == m.mass_delta.to_bits()) {
+                    out.push((r, m.mass_delta));
+                }
+            }
+        }
+        out
+    }
+
     pub fn fixed_mod_deltas(&self) -> Vec<(u8, f64)> {
         let mut seen: std::collections::HashSet<(u8, u64)> = std::collections::HashSet::new();
         let mut out: Vec<(u8, f64)> = Vec::new();
@@ -491,6 +519,7 @@ impl AminoAcidSetBuilder {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         Self {
@@ -978,6 +1007,7 @@ fn stack_mods(r: u8, parts: &[&'static Modification], slots: u8) -> Modification
         blocks_cleavage: parts.iter().any(|m| m.blocks_cleavage),
         // A residue carrying several mods gives off none of their single
         // ions (an immonium ion carries every mod of its residue).
+        parts: parts.to_vec(),
         diagnostic_ions: Vec::new(),
     }
 }
@@ -1041,6 +1071,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }
@@ -1057,6 +1088,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }
@@ -1135,6 +1167,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let err = AminoAcidSetBuilder::new_standard()
@@ -1192,6 +1225,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
@@ -1254,6 +1288,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
@@ -1289,6 +1324,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let anywhere = AminoAcidSetBuilder::new_standard()
@@ -1311,6 +1347,42 @@ mod tests {
             nterm.fixed_mod_fingerprint(),
             "fingerprint must distinguish Anywhere vs NTerm fixed mod"
         );
+    }
+
+    #[test]
+    fn fixed_mods_split_into_anywhere_and_terminal() {
+        let mk = |r: ResidueSpec, loc: ModLocation, d: f64| Modification {
+            name: format!("m{d}"),
+            mass_delta: d,
+            residue: r,
+            location: loc,
+            fixed: true,
+            accession: Some(format!("UNIMOD:{}", d as u32)),
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            parts: Vec::new(),
+            diagnostic_ions: Vec::new(),
+        };
+        // A TMT-like label: on K and on the peptide N-terminus.
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(mk(ResidueSpec::Specific(b'K'), ModLocation::Anywhere, 229.0))
+            .add_fixed_mod(mk(ResidueSpec::Wildcard, ModLocation::NTerm, 229.0))
+            .build()
+            .unwrap();
+        assert_eq!(set.fixed_anywhere_deltas(), vec![(b'K', 229.0)]);
+        assert_eq!(set.fixed_terminal_deltas(), vec![(ModLocation::NTerm, 229.0)]);
+        // The stacked form of an N-terminal K carries both parts, each with its
+        // accession.
+        let stacked = set
+            .variants_for(b'K', ModLocation::NTerm)
+            .iter()
+            .filter_map(|aa| aa.mod_)
+            .find(|m| m.parts.len() == 2)
+            .expect("a stacked N-terminal K");
+        assert_eq!(stacked.accession, None);
+        assert!(stacked.components().iter().all(|m| m.accession.is_some()));
     }
 
     #[test]
@@ -1393,6 +1465,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()
@@ -1530,6 +1603,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let set = AminoAcidSetBuilder::new_standard()

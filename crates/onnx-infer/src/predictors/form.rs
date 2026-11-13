@@ -57,6 +57,21 @@ pub enum Mod {
     Label13C6N2,
     /// SILAC heavy arginine, Label:13C(6)15N(4) (Unimod 267) on R.
     Label13C6N4,
+    /// SILAC Lys6 / Arg6, Label:13C(6) (Unimod 188) on K or R.
+    Label13C6,
+    /// SILAC Lys4, Label:2H(4) (Unimod 481) on K.
+    Label2H4,
+    /// SILAC Leu3, Label:2H(3) (Unimod 262) on L.
+    Label2H3,
+    /// Dimethyl (Unimod 36) on K, R or the N-terminus (the light reductive
+    /// dimethyl label, or biological methylation).
+    Dimethyl,
+    /// Dimethyl:2H(4) (Unimod 199), the intermediate dimethyl label.
+    DimethylD4,
+    /// Dimethyl:2H(4)13C(2) (Unimod 510).
+    DimethylD4C13,
+    /// Dimethyl:2H(6)13C(2) (Unimod 330), the heavy dimethyl label.
+    DimethylD6C13,
 }
 
 /// Where a modification may sit.
@@ -85,6 +100,13 @@ const MODS: &[(Mod, u32, &str, Placement)] = &[
     (Mod::GluPyroGlu, 27, "E", Placement::NTermOf),
     (Mod::Label13C6N2, 259, "K", Placement::Residue),
     (Mod::Label13C6N4, 267, "R", Placement::Residue),
+    (Mod::Label13C6, 188, "KR", Placement::Residue),
+    (Mod::Label2H4, 481, "K", Placement::Residue),
+    (Mod::Label2H3, 262, "L", Placement::Residue),
+    (Mod::Dimethyl, 36, "KR", Placement::ResidueOrNTerm),
+    (Mod::DimethylD4, 199, "KR", Placement::ResidueOrNTerm),
+    (Mod::DimethylD4C13, 510, "KR", Placement::ResidueOrNTerm),
+    (Mod::DimethylD6C13, 330, "KR", Placement::ResidueOrNTerm),
 ];
 
 impl Mod {
@@ -102,13 +124,40 @@ impl Mod {
             Mod::GluPyroGlu => "Glu->pyro-Glu@E^Any_N-term".into(),
             Mod::Label13C6N2 => "Label:13C(6)15N(2)@K".into(),
             Mod::Label13C6N4 => "Label:13C(6)15N(4)@R".into(),
+            Mod::Label13C6 => format!("Label:13C(6)@{aa}"),
+            Mod::Label2H4 => "Label:2H(4)@K".into(),
+            Mod::Label2H3 => "Label:2H(3)@L".into(),
+            // The dimethyl labels fragment as the light dimethyl.
+            Mod::Dimethyl | Mod::DimethylD4 | Mod::DimethylD4C13 | Mod::DimethylD6C13
+                if site == 0 =>
+            {
+                "Dimethyl@Any_N-term".into()
+            }
+            Mod::Dimethyl | Mod::DimethylD4 | Mod::DimethylD4C13 | Mod::DimethylD6C13 => {
+                format!("Dimethyl@{aa}")
+            }
+        }
+    }
+
+    /// The form the RT and MS2 models score: a stable-isotope label changes
+    /// the mass only (the peptide elutes and fragments as its light form), so
+    /// a SILAC label is left out (`None`) and a heavy dimethyl label scores as
+    /// the light Dimethyl.
+    pub fn light_equivalent(self) -> Option<Self> {
+        match self {
+            m if m.is_isotope_label() => None,
+            Mod::DimethylD4 | Mod::DimethylD4C13 | Mod::DimethylD6C13 => Some(Mod::Dimethyl),
+            m => Some(m),
         }
     }
 
     /// A stable-isotope label: it changes the mass only, so the peptide elutes
     /// and fragments as its light form.
     pub fn is_isotope_label(self) -> bool {
-        matches!(self, Mod::Label13C6N2 | Mod::Label13C6N4)
+        matches!(
+            self,
+            Mod::Label13C6N2 | Mod::Label13C6N4 | Mod::Label13C6 | Mod::Label2H4 | Mod::Label2H3
+        )
     }
 
     /// Unimod accession.
@@ -146,7 +195,14 @@ impl Mod {
             Mod::Deamidated => [0, -1, -1, 1, 0, 0],
             Mod::GlnPyroGlu => [0, -3, -1, 0, 0, 0],
             Mod::GluPyroGlu => [0, -2, 0, -1, 0, 0],
-            Mod::Label13C6N2 | Mod::Label13C6N4 => [0, 0, 0, 0, 0, 0],
+            Mod::Label13C6N2
+            | Mod::Label13C6N4
+            | Mod::Label13C6
+            | Mod::Label2H4
+            | Mod::Label2H3 => [0, 0, 0, 0, 0, 0],
+            Mod::Dimethyl | Mod::DimethylD4 | Mod::DimethylD4C13 | Mod::DimethylD6C13 => {
+                [2, 4, 0, 0, 0, 0]
+            }
         }
     }
 }
@@ -167,16 +223,16 @@ impl Form {
     }
 
     /// The same peptidoform as an [`RtPeptide`] (Unimod accessions by site), as
-    /// the andes-rt and andes-ms2 models read it. Stable-isotope labels (SILAC
-    /// heavy K/R) are left out: a 13C/15N-labelled peptide co-elutes with its
-    /// light form and fragments like it, so the models score the light form;
-    /// the label's mass stays in [`Mass`].
+    /// the andes-rt and andes-ms2 models read it. Stable-isotope labels are
+    /// scored as their light form ([`Mod::light_equivalent`]): SILAC labels
+    /// are left out, heavy dimethyl labels read as Dimethyl; a labelled
+    /// peptide co-elutes with its light form (deuterium shifts it by a second
+    /// or so) and fragments like it. The label's mass stays in [`Mass`].
     pub fn rt_peptide(&self) -> RtPeptide {
         let mut mods: Vec<(usize, u32)> = self
             .mods
             .iter()
-            .filter(|(_, m)| !m.is_isotope_label())
-            .map(|(s, m)| (*s, m.unimod()))
+            .filter_map(|(s, m)| m.light_equivalent().map(|l| (*s, l.unimod())))
             .collect();
         mods.sort_unstable();
         RtPeptide {
@@ -288,6 +344,32 @@ mod tests {
         assert_eq!(f.mods[0].1.alphabase(0, 'K'), "TMT6plex@Any_N-term");
         // Acetyl on an internal K is not an N-terminal acetyl.
         assert!(parse_peptide("K.PEPK+42.01056TIDE.D").is_none());
+    }
+
+    /// Every label of `--label` parses with its mass and scores as the light
+    /// form: SILAC labels left out, dimethyl variants as Dimethyl.
+    #[test]
+    fn label_variants_score_as_their_light_form() {
+        let (f, m) = parse_peptide("K.PEPTK+4.02511.D").expect("Lys4");
+        assert_eq!(f.mods, vec![(5, Mod::Label2H4)]);
+        assert!((m.res[4] - (128.094963 + 4.025107)).abs() < 1e-6);
+        assert!(f.rt_peptide().mods.is_empty());
+        let (f, _) = parse_peptide("K.PEPTR+6.02013.D").expect("Arg6");
+        assert_eq!(f.mods, vec![(5, Mod::Label13C6)]);
+        assert!(f.rt_peptide().mods.is_empty());
+        // Heavy dimethyl on the N-terminus and K: the models read Dimethyl.
+        let (f, m) = parse_peptide("K.P+36.07567EPTK+36.07567.D").expect("Dimethyl8");
+        assert_eq!(
+            f.mods,
+            vec![(0, Mod::DimethylD6C13), (5, Mod::DimethylD6C13)]
+        );
+        assert!((m.nterm - 36.07567).abs() < 1e-9);
+        assert_eq!(f.rt_peptide().mods, vec![(0, 36), (5, 36)]);
+        let (light, _) = parse_peptide("K.P+28.03130EPTK+28.03130.D").expect("Dimethyl0");
+        assert_eq!(light.rt_peptide(), f.rt_peptide());
+        let (f, _) = parse_peptide("K.P+32.05641EPTK+32.05641.D").expect("Dimethyl4");
+        assert_eq!(f.rt_peptide(), light.rt_peptide());
+        assert_eq!(f.mods[0].1.alphabase(0, 'P'), "Dimethyl@Any_N-term");
     }
 
     /// SILAC heavy K/R parse with their mass, and the RT/MS2 models read the

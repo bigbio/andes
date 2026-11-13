@@ -667,7 +667,7 @@ See [§9](#9-glycopeptide-search-experimental--advanced-knobs).
 See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model) and
 [§10](#10-quantification) for reporter-ion quantification (`--tmt`).
 
-### Quantification (reporter ions, label-free)
+### Quantification (reporter ions, label-free, labelled pairs)
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -686,13 +686,19 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq.parquet` (with `accepted` false when they fail a cut) and the QPX parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `accepted` in `lfq.parquet`, from the target/decoy competition of each feature against its +11 Th twin. |
+| `--label` | spec | *(off)* | MS1 labelled-pair quantification (SILAC, reductive dimethyl; §10 *Labelled pairs*): a preset (`silac2` = `[][Lys8,Arg10]`, `silac3` = `[][Lys4,Arg6][Lys8,Arg10]`, `dimethyl2` = `[Dimethyl0][Dimethyl4]`, `dimethyl3` = `[Dimethyl0][Dimethyl4][Dimethyl8]`) or one bracket per channel in increasing mass order, in the syntax of OpenMS FeatureFinderMultiplex (labels `Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6 Dimethyl8`, or a custom `<site>+<mass>[:<annotation>]`). A custom label's annotation gives its heavy isotopes for the envelope model: 13C, 15N and 2H atoms as `<n>C`, `<n>N`, `<n>D`, which must make up its mass (`K+8.014199:6C2N`), with `chem` first for a chemical label that adds atoms, whose number is estimated from the mass as CH2 units (`Nterm+32.056407:chem4D`, light dimethyl plus 4 2H). Without one, the label is a chemical shift of natural atoms (`Nterm+28.0313`): give the annotation for an isotope label, or its enrichment and lower isotopologues are not modelled. The labels join the search as variable mods that every labelable site of a peptide carries alike; labels count apart from `--max-mods`, up to the most labelled sites a peptide can carry (missed cleavages + 1 for residues the enzyme cleaves after, such as K/R with trypsin; for other residues, such as Leu3, or in a non-specific digest, the most of them in any `--max-length` residues of the database, so that no peptide loses its labelled forms; + 1 for an N-terminal label; the search log reports the bound). Writes `<stem>.label.parquet` (§3f). With `--mbr`, groups are transferred between runs. mzML / `.raw` with high-resolution MS1. Not combined with `--lfq` or `--tmt`. |
+| `--label-reference` | channel | `1` | Reference channel (1-based) of the `--label` log-ratios. |
+| `--label-fdr` | 0..1 | `0.05` | Quality q-value cut of a channel measured without an identification (match between channels): target/decoy competition, within its run, of its fit against the same fit at up to four non-label mass shifts. An internal quant-quality q-value. On known-ratio SILAC data (PXD022659, 1:1) the channels matched at q ≤ 0.05 are as accurate as pairs whose channels are both identified, and accuracy falls off beyond 0.1 (§10). |
+| `--label-mbr-fdr` | 0..1 | `0.05` | Transfer q-value cut of `--label --mbr` (`--mbr-fdr` stays the label-free and isobaric one): transfers at or below it, the identity-decoy false-donor rate included, are reported. |
+| `--label-arg-pro` | flag | off | SILAC: fit the heavy proline cells make from heavy arginine (Arg6 → 13C5 Pro, +5.0168 Da; Arg10 → 13C5 15N1 Pro, +6.0138 Da) as a satellite of every proline-containing peptide's arginine-labelled channels and add it back to the channel; `converted_fraction` in `label.parquet`. Without it, conversion lowers the heavy/light ratios of proline peptides by the converted share. |
+| `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` | 0..1 | `0.96`, `0.99`, `0.99` | *(advanced)* Per-atom enrichment of metabolic 2H labels (Lys4, Leu3), chemical 2H labels (dimethyl) and 13C/15N labels: the lower isotopologues of each channel's pattern. |
 | `--quant-fdr` | 0..1 | `--fdr` | PSM q-value cut for quantification targets when `--rescore`/`--rescore-native` ran. With `--mbr`, also the PSM q-value at which a run identifies a precursor (§10). |
 | `--mbr` | flag | off | Match-between-runs across two or more inputs (§10): label-free quantification with `--lfq`, or with `--tmt` the transfer of reporter ions (high-resolution MS2 reporters only; refused for SPS-MS3 and ion-trap MS2; see *Match between runs for reporter ions*). Needs `--rescore` (or `--rescore-native`); `--lfq` and `--tmt` are not combined. The label-free form: Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--mbr-library-fdr` | 0..1 | `0.01` | Internal library entry gate (precursor-level), not a reported identification FDR: best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--mbr-fdr` | 0..1 | `0.01` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-11-05, defaults), `0.05` adds about 7k precursors quantified in at least 3 runs to 0.01 (63.8k to 71.3k) at an accuracy cost (median \|eps\| 0.161 to 0.175, E. coli 0.26 to 0.44, CV 0.117 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. |
 | `--quant-feature-fdr` | 0..1 or `off` | `off` | Identified-row quality q-value (`quant_q`): with a value, an identified row whose MS1 feature has a `quant_q` above it (or none) is `identified_below_threshold` and left out of `quantms.feature.parquet` (§10); `off` reports every identified row and keeps `quant_q` as an annotation. An internal quant-quality q-value, not an identification FDR. |
 
-With `--output-parquet`, both modules add `quantms.feature.parquet` (the QPX feature view) to the bundle.
+With `--output-parquet`, every module adds `quantms.feature.parquet` (the QPX feature view) to the bundle; `--label` writes one feature per (group, run) with an intensity per quantified channel under its SDRF label (`SILAC light`/`medium`/`heavy`, `DIMETHYL0`/`4`/`6`/`8`; channels outside that vocabulary are left out with a warning); with `--mbr`, transferred groups are features too, carrying the identification of the group's best PSM in another run, `evidence_type` `transfer_ms1` and their `transfer_q`.
 
 ---
 
@@ -1064,7 +1070,7 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 ---
 
-### 3f. Quantification tables (`--tmt`, `--lfq`)
+### 3f. Quantification tables (`--tmt`, `--lfq`, `--label`)
 
 Written next to the PIN (or next to `--output-tsv`/`--output-parquet` under `--rescore` without
 `--output-pin`), see §10 for the methods. The quantification tables are Parquet (ZSTD) with typed
@@ -1080,6 +1086,8 @@ major version marks an incompatible layout, a new minor version only adds column
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
 | `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value; `psm_q_value` is the per-run q-value when the PIN had several runs) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
+| `<stem>.label.parquet` (`--label`) | one per (label group, run, channel) for every group identified in the run (in any channel) or transferred into it (`--mbr`) | `filename peptide sequence charge proteins channel channel_name label status spec_id psm_q_value rt_psm labelled_peptidoform mz rt_apex rt_shift width quantity quantity_se quantity_upper llr envelope_cos coherence m1_ratio mass_err_ppm channel_q_value group_llr transfer transfer_q_value log2_ratio log2_ratio_se log2_ratio_normalized converted_fraction trace_quantity`; `peptide` is the peptide identity (the peptidoform without its channel labels), `labelled_peptidoform` the identified channel's peptidoform as searched; `channel` is 1-based, `label` the SDRF/QPX label (null outside that vocabulary); `status` is `identified` (a PSM of the run in this channel), `match_channel` (no PSM, measured at the channel's position at `channel_q_value` ≤ `--label-fdr`), `transfer` (the group transferred from another run at `transfer_q_value` ≤ `--label-mbr-fdr`), `below_detection` (no signal: `quantity_upper` = quantity + 2 SE bounds it) or `not_quantifiable` (something else is there: another identified peptide, a pattern or elution that is not the channel's, or a quality q-value above the cut); `quantity` is the area of the channel's fitted profile (its whole isotope pattern), `rt_apex` the channel's apex (the shared profile's plus `rt_shift`); `log2_ratio` is log2(channel / reference) when both are measured (`identified`, `match_channel` or `transfer`), `log2_ratio_normalized` the same minus the run's median log-ratio of the channel over its groups identified in both; `converted_fraction` (`--label-arg-pro`) the share of the channel's quantity in its heavy-proline form (null when not fitted); `trace_quantity` a shape-free quantity of the channel (its own isotope traces, the other channels' modelled parts and the background removed, integrated over the apex ± (−3 w, +4 w), scaled to the whole pattern), for checks against the profile fit. Metadata `andes.label.channels` (`<n>: <name>` per line), `andes.label.reference`, `andes.label.runs`, and with `--mbr` `andes.label.identity_decoy_transfers` (accepted / probed) and `andes.label.identity_decoy_rate` |
+| `<stem>.label_proteins.tsv` (`--label`) | one per (protein group, run, channel other than the reference) with at least 2 peptide ratios | `protein_group lead filename channel channel_name log2_ratio log2_ratio_normalized ratio_count inferred_ratio_count`: the median of the peptides' log-ratios, each the median of its evidence (charges, channel rows) in `label.parquet`, as MaxQuant computes protein ratios; `log2_ratio_normalized` from the normalised evidence (`NA` below 2 peptides); `inferred_ratio_count` counts the peptides whose channel is only matched or transferred in the run. The group is the protein group at `--protein-fdr` when protein inference ran, else the peptide's accessions |
 | `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex measurement_q transfer_pep` (the six `claim` columns: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the larger of `transfer_q` and `measurement_q`, §10; `transfer_q` for a transfer below the threshold); `measurement_q` is, for an accepted transfer (`transfer_ms2`, `transfer_ms1`, `shared_feature`), the running mean of its probability of a wrong measurement (§10), null for every other row; `transfer_pep` is, for a transfer row (accepted or not), its posterior error probability at its transfer score (§10), null for identified rows; `transfer_q`, `quant_q`, `measurement_q`, `transfer_pep` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
 | `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate; the last columns of the table hold the pairs with a wrong measurement, a wrong peak or a fitted quantity more than a factor of 2 from the identified one, the peak alone where either fit has no positive quantity: `wrong_measurement`, `wrong_measurement_rate`, and among the accepted pairs `accepted_wrong_measurement_*`, `accepted_wrong_measurement_rate_*`) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
@@ -2124,7 +2132,261 @@ run, 14 files; `--lfq --mbr` on two runs, 26 files).
   useful next steps for Andes; matching integrated isotope areas alone does not establish
   coelution.
 
+### Labelled pairs (`--label`)
+
+SILAC and reductive dimethyl samples are mixed before the LC-MS run, so each peptide appears as
+one MS1 feature per channel at a fixed mass shift, and the quantity is the ratio of the channels.
+andes measures every channel of a peptide in one fit and reports the channels and their
+log-ratios to the reference channel; protein-level summaries are left to quantms / MSstats.
+
+* **Search.** The labels are variable mods, but a candidate peptide must carry one channel's label
+  on every labelable site (all-light or all-heavy; a K-heavy, R-light peptide is not a real
+  species), in the in-memory and the out-of-core search alike. A labelable site taken by another
+  variable mod (a protein N-terminal acetyl in place of the N-terminal dimethyl) constrains
+  nothing. Labels are counted apart from the other variable mods: `--max-mods` bounds the
+  others, and a separate allowance (missed cleavages + 1 for residues the enzyme cleaves after,
+  8 for any other labelled residue, + 1 for the N-terminus) bounds the labels.
+* **Label groups.** A PSM's group is its peptidoform without the channel labels, at its charge; its
+  channel is the one its labels name (the unlabelled channel of SILAC for a peptide without
+  labels). Every channel's m/z follows from the sequence: the number of labelled sites of each kind
+  times the channel's label mass, so a K-less arginine peptide is never given a lysine shift.
+* **Channel patterns.** A channel's isotope pattern is the natural envelope of the atoms its labels
+  do not fix (the peptide's, plus the atoms a chemical label adds, minus the label's 13C, 15N and
+  2H), not an averagine of the labelled mass: a Lys8 peptide's envelope is narrower than its light
+  form's. Incomplete enrichment adds lower isotopologues (each label atom light with probability
+  1 − p, the molecule one isotope down): with two Lys4 at p = 0.96 the M−1 peak is about 0.3 of
+  the monoisotope, with three Dimethyl4 sites at p = 0.99 about 0.12. The reported quantity is the
+  whole pattern, so ratios are molar ratios.
+* **Joint fit.** Every isotope trace of every channel (M−1 to M+3, merged when two read the same
+  centroid) is modelled as a background plus each channel's part of the trace times one Gaussian
+  elution profile: one apex and width shared by the channels, one amplitude per channel, solved
+  exactly under non-negativity. A trace that two channels share is explained by both: the light
+  M+4 lies about 9 ppm below a Lys4 or Dimethyl4 channel's monoisotope, and is part of the model,
+  never an interferer. The apex is searched over the scans near the prior and refined between
+  scans; the noise of a trace is taken away from the expected peak, and the amplitudes are fitted
+  over the peak's neighbourhood (apex prior ± 3 s + 3 w). A trace whose residual at the optimum is
+  more than three times its noise (an isotope another species interferes with) has its weight
+  divided by its excess and the amplitudes are refitted (twice), so they rest on the traces that
+  follow the model. Per channel: amplitude and
+  standard error, the likelihood ratio it adds, the cosine of its own isotope heights to its
+  pattern, the coherence of its monoisotopic trace with the profile, and the residual at its M−1
+  after its own lower isotopologues (above 0.3 of the monoisotope: another envelope one isotope
+  lower).
+* **Run scales.** The elution width is learned per run (and FAIMS voltage) from its identified
+  groups, with the width free, as for `--mbr`. With deuterium labels, each channel's RT offset from
+  the reference is the median, over groups whose channels are all strong fitted one at a time, of
+  their apex differences (deuterated dimethyl elutes a second or more early).
+* **Match between channels.** A channel the run did not identify is measured at its exact m/z, the
+  identified channels anchoring the profile. Its decoys are the same fit with the channel moved by
+  four non-label mass shifts (nominal ±7…23 Da in the peptide mass-defect band, none within three
+  tolerances of any isotope of any channel; each decoy weighs 1/k for a channel with k admissible
+  shifts); target/decoy competition of `√(2·LLR) · cosine ·
+  coherence · exp(−½ (Δppm / σ)²) · exp(−½ (Δt / σ_t)²)`, within each run, gives `channel_q_value`. `Δppm` is the
+  channel's monoisotopic mass error against the group's identified channels', `σ` √2 times the run's
+  robust spread of identified-channel mass errors: in dense MS1 about 1 % of positions at a
+  non-label shift hold another peptide's co-eluting envelope, anywhere in the tolerance window,
+  while a real channel sits at its identified channel's mass error (on PXD003327 this factor takes
+  the 99th percentile decoy score from 75 to 2 and the matched channels from 0 to 1,073 at q 0.01).
+  `Δt` is the channel's elution centroid (its monoisotope and M+1, the other channels' parts
+  removed) against the shared apex, `σ_t` √2 times the run's spread of identified-channel offsets:
+  a real channel elutes with its partners, another species' envelope at a random offset, which
+  separates them where mass accuracy cannot (TOF). A channel is `match_channel` at
+  `--label-fdr` with an envelope cosine of at least 0.7, no strong residual M−1, and, when weaker
+  than a fifth of the identified channel, a coherence of at least 0.5 (OpenMS's co-elution check
+  for weak re-quantified channels); `below_detection` without signal; `not_quantifiable` when
+  another identified peptide of the run sits on it or it fails a check. An identified channel whose
+  own pattern fails the cosine or M−1 check is `not_quantifiable` too (its PSM stays).
+* **Match between runs** (`--mbr`, two or more runs). The runs are aligned jointly (§10 *Match
+  between runs*) on the fitted apexes of their identified groups. A group missing from a run is
+  fitted there at its predicted apex with the alignment's uncertainty, against four whole-group
+  decoys moved by the same rule (eight per transfer: a run has fewer transfers than channels);
+  target/decoy competition of the group score (its strongest channel's score, its mass-accuracy
+  factor against the receiving run's calibration, and `exp(−½ rt_z²)`, since the alignment's
+  uncertainty is calibrated and a decoy hit sits anywhere in the search window) over every run gives
+  `transfer_q_value`, and transfers at `--label-mbr-fdr` are reported, each channel `transfer`,
+  `below_detection` or `not_quantifiable`. Transfers never enter the alignment.
+  *Identity decoys* count the transfers of false donor identifications, which the mass-shifted
+  decoys cannot see (a false donor's "peptide" may still find a real peak): the decoy PSMs at the
+  targets' cut form decoy groups, measured in their runs like targets, added to the alignment after
+  it is fitted (they move no run map) and transferred like targets. The share of accepted
+  identity-decoy transfers among the accepted target transfers estimates the false-donor share of
+  the targets (one identity decoy per false target entry, by target/decoy symmetry), and is added
+  to every transfer q-value before the `--label-mbr-fdr` cut.
+* **Arginine-to-proline conversion** (`--label-arg-pro`). Cells convert part of the heavy arginine
+  to heavy proline, so a proline-containing peptide's heavy signal splits into the expected
+  channel and a form one heavy proline heavier. With the flag, that form (one converted proline)
+  is fitted as a satellite of each arginine-labelled channel, with the channel's pattern and
+  elution, and added back to it. With no conversion in the data the fitted share is a few tenths
+  of a percent (the non-negative fit absorbs noise), so the flag is off by default.
+* **Normalisation.** `log2_ratio_normalized` removes, per run and channel, the median log-ratio of
+  the groups identified in both the channel and the reference (at least 10): the mixing error of the
+  run. Matched channels and transfers never enter it.
+
+* **Protein ratios.** `<stem>.label_proteins.tsv` holds MaxQuant-style protein ratios per run and
+  channel: the median of the peptide ratios (each the median of the peptide's evidence ratios over
+  charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
+  experimental designs, fractions and statistics.
+
+**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated; PXD022659's HeLa runs with the code of 2026-11-13, the other runs with that of 2026-11-11, before the review fixes to the apex search, channel windows and label-site budget).
+OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
+with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
+m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
+same labels, Trypsin/P, 2 missed cleavages and its default tolerances (20 ppm first search, 4.5 ppm
+main search after recalibration), reading mzXML converted with
+`docs/benchmarks/label/mzml_to_mzxml.py`: its mzML reader keeps only DIA-style MS2 windows and drops
+every DDA MS/MS spectrum, and the vendor files of these runs are not public (details in that
+folder's README). Its ratios are the evidence `Ratio M/L` / `Ratio H/L`, non-normalised.
+
+*PXD022659* (E. coli SILAC `[][Lys8]` at known light:heavy mixtures, TripleTOF 6600 DDA, 20 ppm
+MS1 tolerance; runs `Ecoli_LH_1_1_66_DDA1` and `Ecoli_LH_1_10_66_DDA1` with `--mbr`; 3 min in all,
+9 s for `--label`). Expected log2 H/L 0 and 3.32:
+
+| run | values | n | median log2 H/L | IQR | median abs. error |
+|---|---|---|---|---|---|
+| 1:1 | andes, all channel ratios | 1,369 | −0.13 | 0.69 | 0.32 |
+| 1:1 | OpenMS, all complete multiplets | 1,087 | −0.03 | 0.49 | 0.24 |
+| 1:1 | same 568 peptides: andes / OpenMS | 568 | −0.04 / −0.08 | 0.48 / 0.42 | 0.23 / 0.21 |
+| 1:10 | andes, all channel ratios | 540 | 2.69 | 0.99 | 0.68 |
+| 1:10 | OpenMS, all complete multiplets | 458 | 2.43 | 1.08 | 0.91 |
+| 1:10 | same 163 peptides: andes / OpenMS | 163 | 2.66 / 2.56 | 0.74 / 0.81 | 0.67 / 0.77 |
+
+Both tools compress the 1:10 ratio (as SILAC on this instrument does); andes less, at a lower
+error, and on the 1:1 run OpenMS's peak-pair ratios are slightly tighter. In the 1:1 run, the
+channels andes matches between channels at q ≤ 0.05 have median −0.06 and IQR 0.58 against −0.10
+and 0.72 for groups whose two channels are both identified; between 0.05 and 0.1, −0.12 and 0.97;
+between 0.1 and 0.2, −0.21 and 1.26 (so the default `--label-fdr` is 0.05). With `--mbr`, 681 of
+1,948 transfers are accepted at `--label-mbr-fdr 0.05` (10 of 26 identity decoys, false-donor rate
+0.012 added), and in the 1:10 run the transferred ratios' median is 2.75 against 2.67 for the
+identified ones.
+
+MaxQuant 2.0.3 gives no usable comparison on these runs. Fed centroided MS1, it computes NaN
+masses and crashes in feature detection. With MS1 rewritten as synthetic profile peaks, it finishes.
+At its Orbitrap tolerances it finds 3,791 MS1 isotope clusters and identifies 1,377 of 44,296 MS/MS.
+At 20 ppm for centroid matching, isotopes and the main search (the TOF MS1 error measured by andes
+here has SD 7.5 ppm) it finds 33,323 clusters, but 77 % of MS/MS still get no precursor charge.
+That run took 44 min 52 s. It identifies 2,073 MS/MS (andes: 26,126 PSMs at 1 % FDR) and reports
+55 H/L ratios (medians −0.38 and 0.84 for the 1:1 and 1:10 runs). With its Sciex Q-TOF defaults
+(isotope tolerance in Da, intensity thresholds), it crashes in MS/MS preparation for the main search
+(`PeakListLayerData.GetIsotopeCluster`). MaxQuant is meant to read these runs from the Sciex `.wiff`
+files, which are not public. MaxQuant is compared instead on the Orbitrap runs of the same dataset.
+
+*PXD022659, HeLa ratio mixtures* (Q Exactive HF, DDA, `[][Lys8,Arg10]`; Thermo `.raw` from
+PanoramaPublic `RawFiles/raw`, converted to mzML with ThermoRawFileParser for andes and OpenMS, read
+directly by MaxQuant). One replicate each of heavy/light 70/30, 50/50 and 10/90 (`B_0-7ug_DDA_061`,
+`C_0-5ug_DDA_060`, `E_0-1ug_DDA_055`): expected log2 H/L +1.22, 0 and −3.17. andes searched the
+three runs together with `--mbr` against the reviewed human proteome (9 min 15 s, 4 threads):
+158,444 PSMs (70 % of 224,889 MS/MS), 37,880 sequences, 3,632 protein groups at 1 % FDR. MaxQuant
+2.0.3 (same database, Trypsin/P, 2 missed cleavages, its defaults; 5 h 22 min, sharing the 4 cores
+with OpenMS for part of it) identified 86,924 MS/MS, 21,492 sequences, 2,470 protein groups.
+OpenMS is FeatureFinderMultiplex alone (51 to 66 min per run), and MS1LabeledWorkflow given andes's
+identifications (`andes_to_idxml.py`, then PeptideIndexer against a target-decoy database;
+`-match_between_runs true`): the 3.6.0 release (12 min for the three runs), which only quantifies
+detected multiplets, and the development version (commit `fbb25191d7`, 2026-11-11; 3 min 50 s), whose
+targeted quantification, re-quantification and channel joining, on by default, also quantify
+identified peptides the multiplet detection misses. One value per (sequence, charge) on every side;
+the median absolute error is against the design:
+
+| run | tool | peptides | median | IQR | median abs. error |
+|---|---|---|---|---|---|
+| 70/30 | andes | 18,768 | 1.19 | 0.39 | 0.199 |
+| 70/30 | MaxQuant | 9,725 | 1.06 | 0.29 | 0.185 |
+| 70/30 | MS1LabeledWorkflow 3.6.0 | 5,292 | 1.13 | 0.33 | 0.160 |
+| 70/30 | FeatureFinderMultiplex | 8,964 | 1.11 | 0.36 | 0.182 |
+| 70/30 | MS1LabeledWorkflow dev | 14,538 | 1.03 | 0.39 | 0.226 |
+| 50/50 | andes | 21,473 | −0.12 | 0.34 | 0.203 |
+| 50/50 | MaxQuant | 11,201 | −0.18 | 0.23 | 0.201 |
+| 50/50 | MS1LabeledWorkflow 3.6.0 | 6,085 | −0.15 | 0.23 | 0.175 |
+| 50/50 | FeatureFinderMultiplex | 10,297 | −0.15 | 0.25 | 0.183 |
+| 50/50 | MS1LabeledWorkflow dev | 15,565 | −0.14 | 0.28 | 0.183 |
+| 10/90 | andes | 4,190 | −3.47 | 0.39 | 0.338 |
+| 10/90 | MaxQuant | 3,892 | −3.38 | 0.35 | 0.276 |
+| 10/90 | MS1LabeledWorkflow 3.6.0 | 2,532 | −3.41 | 0.51 | 0.368 |
+| 10/90 | FeatureFinderMultiplex | 4,281 | −3.30 | 1.19 | 0.431 |
+| 10/90 | MS1LabeledWorkflow dev | 7,697 | −3.08 | 0.78 | 0.360 |
+
+On the peptides both quantify (median abs. error, andes against the other):
+
+| run | MaxQuant | MS1LabeledWorkflow 3.6.0 | MS1LabeledWorkflow dev | FeatureFinderMultiplex |
+|---|---|---|---|---|
+| 70/30 | 8,385: 0.153 / 0.176 | 4,899: 0.134 / 0.156 | 11,991: 0.164 / 0.211 | 6,053: 0.134 / 0.156 |
+| 50/50 | 9,894: 0.163 / 0.198 | 5,654: 0.145 / 0.173 | 13,332: 0.170 / 0.178 | 7,111: 0.145 / 0.171 |
+| 10/90 | 2,055: 0.316 / 0.265 | 1,763: 0.358 / 0.348 | 3,202: 0.330 / 0.299 | 2,084: 0.356 / 0.354 |
+
+andes quantifies about twice as many peptides as MaxQuant and three times as many as
+MS1LabeledWorkflow 3.6.0; the development MS1LabeledWorkflow closes most of that gap at 70/30 and 50/50
+and quantifies nearly twice as many peptides as andes at 10/90, where on shared peptides it is also
+more accurate (0.30 against 0.33), though over all its values much wider (IQR 0.78 against 0.39).
+On shared peptides andes is the most accurate at 70/30 and 50/50, while at 10/90 its
+ratios overshoot the design more than MaxQuant's (median −3.47 and −3.38 against −3.17). MaxQuant's
+spread is the lowest, or tied for lowest, in every run. The additional ratios andes reports (channels matched between channels and
+transferred between runs) are wider than those it shares with the other tools.
+
+*PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
+21.7 s in all, 0.83 s for `--label`, 944 groups; 275 / 537 / 341 channels matched between
+channels). In this file lysine and arginine peptides carry opposite designs (K: M/L and H/L near
++1 and +2, R near −1 and −2), which the groups with both channels identified show too, so the
+classes are read separately; on 536 groups matched to OpenMS multiplets:
+
+| ratio | class | andes n, median, IQR | OpenMS n, median, IQR | median abs. difference |
+|---|---|---|---|---|
+| M/L | K | 118, 0.74, 0.22 | 123, 0.66, 0.27 | 0.145 |
+| M/L | R | 391, −0.96, 0.25 | 330, −0.93, 0.19 | 0.110 |
+| H/L | K | 122, 1.89, 0.23 | 111, 1.84, 0.16 | 0.112 |
+| H/L | R | 326, −1.80, 0.27 | 192, −1.70, 0.23 | 0.102 |
+
+andes's medians are nearer the nominal ±1 / ±2 in every cell and it quantifies more groups
+(arginine H/L 326 against 192); OpenMS's spread is lower in three of the four cells. OpenMS took
+2 min 8 s for the multiplet detection of this run (andes 0.83 s, its identifications from the same
+search).
+
+Against MaxQuant 2.0.3 (same file, profile MS1 and MS2 centroided by OpenMS PeakPickerHiRes, given to
+both tools; andes then identifies 1,303 PSMs, 735 sequences, 189 protein groups at 1 % FDR, MaxQuant
+925 MS/MS, 540 sequences, 173 protein groups), matched on (sequence, charge), one value per
+peptide (the median over its evidences):
+
+| ratio | class | MaxQuant n, median, IQR | andes n, median, IQR | same peptides: MaxQuant / andes median, IQR | median abs. difference |
+|---|---|---|---|---|---|
+| M/L | K | 146, 0.65, 0.19 | 198, 0.75, 0.29 | 108: 0.64 / 0.74, 0.17 / 0.20 | 0.129 |
+| M/L | R | 229, −0.96, 0.12 | 390, −0.96, 0.26 | 208: −0.96 / −0.94, 0.12 / 0.14 | 0.071 |
+| H/L | K | 146, 1.82, 0.18 | 216, 1.92, 0.46 | 110: 1.81 / 1.90, 0.17 / 0.20 | 0.099 |
+| H/L | R | 229, −1.78, 0.19 | 317, −1.80, 0.27 | 190: −1.79 / −1.77, 0.18 / 0.21 | 0.086 |
+
+On the same peptides the two agree to about 0.1 log2 and MaxQuant's spread is lower, by 0.02 to
+0.03; andes quantifies 35 to 70 % more peptides, the extra ones with a wider spread. For lysine peptides andes's medians sit about 0.1 nearer the nominal +1 / +2.
+MaxQuant took 30 min 46 s on 4 threads (andes 22 s for search and quantification).
+
+*PXD000714* (yeast mitochondria, dimethyl triplex, fraction `20120524_Renvoise_Triplex_rep1F3`,
+converted from mzXML, against the reviewed yeast proteome; 39 s in all, 2.7 s for `--label`):
+4,362 PSMs, 2,608 groups, deuterium offsets learned at −0.64 s (Dimethyl4) and −0.99 s
+(Dimethyl8), 927 / 812 / 588 channels matched between channels. The ratios are biological (no
+known answer); against OpenMS on 1,696 matched groups the median per-peptide difference is 0.075
+(M/L, correlation 0.74 over a narrow range) and 0.101 (H/L, correlation 0.985), andes quantifying
+1,393 H/L ratios where OpenMS has 1,065.
+
+What made match between channels and runs work on real data, in this order: the mass-accuracy
+factor (dense Orbitrap MS1, about 1,850 centroids per scan: 0 → 1,073 channels at q 0.01 on
+PXD003327); per-run competition (a 1:10 run's weak channels no longer drag a 1:1 run down); the
+co-elution factor (TOF data, whose mass accuracy separates little); and robust reweighting of
+interfered traces (PXD022659: matched channels 154 → 616, transfers 275 → 681).
+
+On the synthetic fixtures (`scripts/make_quant_fixtures.py --silac` / `--dimethyl`), the median
+error of the log-ratios is below 0.002 for identified, matched and transferred channels of a
+SILAC duplex, and below 0.001 for a dimethyl triplex whose deuterated channels elute 1.5 s and
+3 s early and carry 99 % 2H (the learned offsets are −1.50 s and −3.00 s); the outliers are
+peptides another species interferes with.
+
+The design follows the pitfalls OpenMS met with MS1LabeledWorkflow / FeatureFinderMultiplex
+(2026): identifications mapped by the labelled peptidoform's theoretical m/z rather than the
+precursor's; channel m/z values from the sequence; the multiplet's own isotopes modelled, not
+taken for interference; the lower isotopologues of 2H labels expected at M−1, with the enrichment
+per label family; no hard rank-correlation cutoffs; one profile for all channels instead of
+channels quantified over different spectra; re-measured and transferred values kept out of the
+alignment and the normalisation; and absent and not-quantifiable channels told apart.
+
 ### Limits in this release
+
+`--label` needs mzML or Thermo `.raw` with MS1 scans; arginine-to-proline conversion is
+fitted only with `--label-arg-pro` (one converted proline per peptide).
 
 `--lfq` and `--tmt-level 3` need mzML or Thermo `.raw` (MS1 / MS3 scans; MGF carries MS2 only
 and Bruker `.d` MS1 frames are not read yet) and cannot be combined with `--chimeric`;

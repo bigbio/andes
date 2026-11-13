@@ -11,6 +11,8 @@ flowchart TD
     PC --> L{"Label type"}
     L -->|"TMT / iTRAQ"| T["--tmt<br/>reporter ions per PSM<br/>impurity correction<br/>quantification gate<br/>--tmt-unmix"]
     L -->|"label-free"| F["--lfq<br/>MS1 features per precursor<br/>isotope-envelope matching"]
+    L -->|"SILAC / dimethyl"| LP["--label<br/>joint fit of every channel<br/>match between channels"]
+    LP --> O
     F --> M["--mbr<br/>library + RT alignment across runs<br/>transfers with their own q-values"]
     T --> O["QPX feature view<br/>(Parquet)"]
     M --> O
@@ -22,6 +24,7 @@ flowchart TD
 | Reporter ions | `--tmt` | per-PSM reporter intensities (TMT/iTRAQ), isotope-impurity corrected, with a precision gate and a purity-weighted roll-up weight |
 | Interference removal | `--tmt-unmix` | per-scan co-isolation estimate and unmixed channels; [details](features/tmt-unmix.md) |
 | Label-free | `--lfq` | MS1 feature quantities per precursor and run |
+| Labelled pairs | `--label silac2\|silac3\|dimethyl2\|dimethyl3` | every channel of a SILAC or dimethyl peptide from one joint MS1 fit (shared elution, overlapping channels unmixed, deuterium RT offsets learned), unidentified channels matched with their own q-values, log-ratios to a reference channel; with `--mbr`, transfers between runs |
 | Match between runs | `--mbr` | quantities in runs without an identification, each with an evidence type and its own q-value; [details](features/mbr.md) |
 | Cluster scale | `andes quant library / extract / finalize` | the same MBR split into per-run steps for many runs on a cluster |
 

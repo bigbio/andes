@@ -140,6 +140,7 @@ pub fn base_peptide_records(
     // Build base params: zero variable mods, keep everything else.
     let base_params = SearchParams {
         max_variable_mods_per_peptide: 0,
+        max_label_sites: 0,
         ..params.clone()
     };
 
@@ -992,6 +993,7 @@ mod tests {
         // them by running enumerate_candidates with base params and zipping.
         let base_params = SearchParams {
             max_variable_mods_per_peptide: 0,
+            max_label_sites: 0,
             ..params.clone()
         };
         let base_candidates: Vec<_> = enumerate_candidates(&idx, &base_params, "XXX").collect();

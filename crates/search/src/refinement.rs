@@ -633,6 +633,7 @@ pub fn refinement_aa_set(
     // residue, …) instead of panicking — a bad `--refine-config` must degrade to
     // "skip Pass-2 with a WARN", never crash the whole search.
     builder
+        .with_label_channels(base.label_channels().to_vec())
         .build()
         .map_err(|e| format!("refinement_aa_set: {e}"))
 }

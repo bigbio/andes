@@ -537,6 +537,10 @@ own pool):
 | IPF `best_prob` ≥ 0.99 (44.6% of PSMs) | 1.4% |
 
 `best_prob` is calibrated on this set: mean 1 − `best_prob` predicts 13.4% wrong, 13.4% observed.
+A semi-specific search of the same files (`--enzyme-specificity semi --fragment-index-slice-da 20`,
+1 h 41 min and 64 GB peak on 16 threads; the default slice width ran out of 160 GB) gives the same
+picture: 1,400 PSMs of 107 peptides, FLR 18.9% for the search placement against 12.2% for IPF, 2.7%
+at `best_prob` ≥ 0.9, 1.9% at ≥ 0.99, 12.5% predicted against 12.2% observed.
 Before mods could move across sibling records (each S, T or Y record moved only among its own
 residue), IPF gave 19.6% and was overconfident (13.9% predicted). Phospho is declared with its
 neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for T); without `loss=` IPF did not

@@ -473,13 +473,10 @@ impl Ms2Model {
             s.cond_cache.clear();
             s.cond_model = model;
         }
-        let cached = s.cond_cache.iter().find(|e| {
+        let mut cached = s.cond_cache.iter().position(|e| {
             e.key.len() == s.cond.len() && e.key.iter().zip(&s.cond).all(|(k, c)| *k == c.to_bits())
         });
-        if let Some(e) = cached {
-            s.film.clone_from(&e.film);
-            s.hc.clone_from(&e.hc);
-        } else {
+        if cached.is_none() {
             self.film1.apply(&s.cond, &mut s.film_h);
             for v in s.film_h.iter_mut() {
                 *v = silu(*v);
@@ -492,8 +489,13 @@ impl Ms2Model {
                     film: s.film.clone(),
                     hc: s.hc.clone(),
                 });
+                cached = Some(s.cond_cache.len() - 1);
             }
         }
+        let (film, hc): (&[f32], &[f32]) = match cached {
+            Some(i) => (&s.cond_cache[i].film, &s.cond_cache[i].hc),
+            None => (&s.film, &s.hc),
+        };
 
         // input projection
         s.input.clear();
@@ -509,8 +511,8 @@ impl Ms2Model {
         // FiLM-modulated residual dilated convolutions
         for (b, (conv, mix)) in self.blocks.iter().enumerate() {
             conv.apply(&s.x, np, &mut s.h);
-            let gamma = &s.film[(2 * b) * ch..(2 * b + 1) * ch];
-            let beta = &s.film[(2 * b + 1) * ch..(2 * b + 2) * ch];
+            let gamma = &film[(2 * b) * ch..(2 * b + 1) * ch];
+            let beta = &film[(2 * b + 1) * ch..(2 * b + 2) * ch];
             for row in s.h.chunks_exact_mut(ch) {
                 for ((v, g), be) in row.iter_mut().zip(gamma).zip(beta) {
                     *v = silu(*v * (1.0 + g) + be);
@@ -570,7 +572,7 @@ impl Ms2Model {
         for j in 0..n - 1 {
             let row = &s.h[(j + 2) * ch..(j + 3) * ch];
             s.site
-                .extend(row.iter().zip(&s.hc).map(|(a, b)| silu(a + b)));
+                .extend(row.iter().zip(hc).map(|(a, b)| silu(a + b)));
         }
         let mut out = vec![0.0f32; (n - 1) * N_ION];
         self.head2.apply(&s.site, n - 1, &mut out);

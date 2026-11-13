@@ -349,6 +349,10 @@ pub struct IpfEvidence {
     /// shifts); diagnostic only.
     pub decoy_hits: u32,
     pub decoy_total: u32,
+    /// The search's own score (node + edge, the rank score without cleavage
+    /// credit, which every placement shares) of each placement, in `forms`
+    /// order. Empty when not computed.
+    pub form_scores: Vec<f32>,
 }
 
 /// Number of intensity tiers; peaks are tiered by rank within the spectrum.
@@ -419,7 +423,24 @@ pub fn psm_evidence(
         ions: matches,
         decoy_hits: decoys.iter().filter(|&&m| m).count() as u32,
         decoy_total: decoys.len() as u32,
+        form_scores: Vec::new(),
     })
+}
+
+/// [`psm_evidence`], also scoring every placement with the search's scorer
+/// (`score` maps a placement to its search score).
+pub fn psm_evidence_scored(
+    peaks: &[(f64, f32)],
+    peptide: &Peptide,
+    precursor_charge: u8,
+    tol_da: impl Fn(f64) -> f64 + Copy,
+    declared: &[&'static Modification],
+    score: impl Fn(&Peptide) -> f32,
+) -> Option<IpfEvidence> {
+    let mut e = psm_evidence(peaks, peptide, precursor_charge, tol_da, declared)?;
+    let (forms, _) = placements_with(peptide, declared);
+    e.form_scores = forms.iter().map(&score).collect();
+    Some(e)
 }
 
 /// PEP of a site-ion observation by intensity tier, learned from one run.
@@ -515,9 +536,35 @@ pub struct Localization {
     pub best_prob: f64,
 }
 
-/// IPF for one PSM: prior from the PSM's PEP, evidence from the ion model.
+/// Weight of the search score in the placement prior: prior ∝ exp(w · score).
+/// Fitted by maximum likelihood of the reference placement on half the
+/// peptides of each benchmark (synthetic ground truth PXD007058, PXD007653 vs
+/// MaxQuant, PXD017476 vs Spectronaut), on a grid of factor-1.33 steps; all
+/// three picked this grid point.
+pub const SEARCH_SCORE_WEIGHT: f64 = 0.237;
+
+/// Prior over a PSM's placements from the search's own score of each
+/// (softmax of `SEARCH_SCORE_WEIGHT` · score); uniform without scores.
+pub fn placement_prior(e: &IpfEvidence) -> Vec<f64> {
+    let n = e.forms.len();
+    if e.form_scores.len() != n || e.form_scores.iter().any(|s| !s.is_finite()) {
+        return vec![1.0 / n as f64; n];
+    }
+    let z: Vec<f64> = e
+        .form_scores
+        .iter()
+        .map(|&s| SEARCH_SCORE_WEIGHT * s as f64)
+        .collect();
+    let m = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let ex: Vec<f64> = z.iter().map(|x| (x - m).exp()).collect();
+    let s: f64 = ex.iter().sum();
+    ex.into_iter().map(|x| x / s).collect()
+}
+
+/// IPF for one PSM: prior from the PSM's PEP (split over placements by
+/// [`placement_prior`]), evidence from the ion model.
 pub fn localize(psm_pep: f64, e: &IpfEvidence, model: &IonPepModel) -> Localization {
-    let post = posterior(psm_pep, e.forms.len(), &model.evidence(e), 0.0);
+    let post = posterior_with_prior(psm_pep, &placement_prior(e), &model.evidence(e), 0.0);
     let best = (0..post.forms.len())
         .max_by(|&a, &b| post.forms[a].total_cmp(&post.forms[b]).then(b.cmp(&a)))
         .unwrap_or(0);
@@ -558,6 +605,24 @@ pub struct Posterior {
 /// `[epsilon, 1 - epsilon]` (PyProphet `bm_evidence_epsilon`; 0 disables).
 pub fn posterior(psm_pep: f64, n_forms: usize, evidence: &[Evidence], epsilon: f64) -> Posterior {
     assert!(n_forms > 0, "a PSM has at least its own peptidoform");
+    posterior_with_prior(
+        psm_pep,
+        &vec![1.0 / n_forms as f64; n_forms],
+        evidence,
+        epsilon,
+    )
+}
+
+/// [`posterior`] with a prior over the forms (`prior` sums to 1; the forms
+/// share `1 - psm_pep` in those proportions). Uniform gives PyProphet's IPF.
+pub fn posterior_with_prior(
+    psm_pep: f64,
+    prior: &[f64],
+    evidence: &[Evidence],
+    epsilon: f64,
+) -> Posterior {
+    let n_forms = prior.len();
+    assert!(n_forms > 0, "a PSM has at least its own peptidoform");
     let clip = |e: f64| {
         if epsilon > 0.0 {
             e.clamp(epsilon, 1.0 - epsilon)
@@ -568,7 +633,7 @@ pub fn posterior(psm_pep: f64, n_forms: usize, evidence: &[Evidence], epsilon: f
     let ln = |x: f64| if x > 0.0 { x.ln() } else { f64::NEG_INFINITY };
     let psm_pep = psm_pep.clamp(0.0, 1.0);
     // log prior + sum of log evidence, per hypothesis (index n_forms = h0).
-    let mut l: Vec<f64> = vec![ln((1.0 - psm_pep) / n_forms as f64); n_forms];
+    let mut l: Vec<f64> = prior.iter().map(|p| ln((1.0 - psm_pep) * p)).collect();
     l.push(ln(psm_pep));
     for e in evidence {
         let (for_, against) = (ln(clip(1.0 - e.pep)), ln(clip(e.pep)));
@@ -693,6 +758,27 @@ mod tests {
         assert_eq!(forms.len(), 3);
         // Unmodified peptide: itself only.
         assert_eq!(placements(&pep("PEPTIDE", &[])).0.len(), 1);
+    }
+
+    #[test]
+    fn search_scores_set_the_placement_prior() {
+        let mut e = IpfEvidence {
+            forms: vec![vec![1], vec![4]],
+            ..Default::default()
+        };
+        // No scores: uniform, PyProphet's prior.
+        assert_eq!(placement_prior(&e), vec![0.5, 0.5]);
+        // A higher search score for form 1 tilts the prior towards it.
+        e.form_scores = vec![10.0, 14.0];
+        let p = placement_prior(&e);
+        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        let want = 1.0 / (1.0 + (-SEARCH_SCORE_WEIGHT * 4.0).exp());
+        assert!((p[1] - want).abs() < 1e-12, "{p:?}");
+        // No ion evidence: the posterior over forms is the prior.
+        let model = IonPepModel::fit([&e]);
+        let loc = localize(0.0, &e, &model);
+        assert_eq!(loc.best, 1);
+        assert!((loc.best_prob - want).abs() < 1e-9);
     }
 
     #[test]

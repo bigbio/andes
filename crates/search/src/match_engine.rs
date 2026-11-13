@@ -1605,12 +1605,18 @@ impl<'a> PreparedSearch<'a> {
                             // IPF localizes target PSMs only.
                             let ev = (!cand.is_decoy)
                                 .then(|| {
-                                    crate::ipf::psm_evidence(
+                                    let z = psm.charge_used;
+                                    let ss = scored_spec_for_charge(z);
+                                    crate::ipf::psm_evidence_scored(
                                         &spec.peaks,
                                         &cand.peptide,
-                                        psm.charge_used,
+                                        z,
                                         move |mz| tol.as_da(mz),
                                         &declared,
+                                        |p| {
+                                            score_psm(ss, p, scorer, z, fragment_tolerance_da)
+                                                + psm_edge_score(ss, p, scorer, z) as f32
+                                        },
                                     )
                                 })
                                 .flatten();

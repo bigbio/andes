@@ -38,6 +38,9 @@ pub struct IpfRow {
     pub truncated: bool,
     /// Per-residue localization probability, `pos:prob` for prob >= 0.01.
     pub site_probs: String,
+    /// Debug (env `ANDES_IPF_DEBUG`): every placement as
+    /// `sites|search_score|ipf_log_evidence`, `;`-separated. Empty otherwise.
+    pub forms_debug: String,
 }
 
 /// Run IPF on every target PSM of `map` that has evidence in `evidence`
@@ -64,6 +67,7 @@ pub fn localize_psms(
         })
         .collect();
     let model = IonPepModel::fit(relabeled.iter());
+    let debug = std::env::var_os("ANDES_IPF_DEBUG").is_some();
     let mut ids: Vec<&String> = map.keys().filter(|id| evidence.contains_key(*id)).collect();
     ids.sort();
     let mut rows: Vec<IpfRow> = ids
@@ -103,6 +107,29 @@ pub fn localize_psms(
                     .map(|(s, p)| format!("{}:{p:.3}", s + 1))
                     .collect::<Vec<_>>()
                     .join(";"),
+                forms_debug: if debug {
+                    // Evidence-only posterior (no PSM prior): its log is the
+                    // IPF log-likelihood up to a constant per PSM.
+                    let ll = search::ipf::posterior(0.0, e.forms.len(), &model.evidence(e), 0.0);
+                    e.forms
+                        .iter()
+                        .enumerate()
+                        .map(|(k, s)| {
+                            format!(
+                                "{}|{:.3}|{:.4}",
+                                s.iter()
+                                    .map(|x| (x + 1).to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(","),
+                                e.form_scores.get(k).copied().unwrap_or(f32::NAN),
+                                ll.forms[k].max(1e-300).ln()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";")
+                } else {
+                    String::new()
+                },
             }
         })
         .collect();
@@ -134,13 +161,15 @@ pub fn site_probability_map(rows: &[IpfRow]) -> HashMap<String, HashMap<i32, f64
 /// Write `<stem>.ipf.tsv`.
 pub fn write_ipf_tsv(path: &std::path::Path, rows: &[IpfRow]) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let debug = rows.iter().any(|r| !r.forms_debug.is_empty());
     writeln!(
         w,
-        "psm_id\tpeptide\tpsm_q\tpsm_pep\treported_sites\tbest_sites\tbest_prob\tipf_pep\tipf_q\tn_forms\tsite_ions\tmatched_ions\ttruncated\tsite_probs"
+        "psm_id\tpeptide\tpsm_q\tpsm_pep\treported_sites\tbest_sites\tbest_prob\tipf_pep\tipf_q\tn_forms\tsite_ions\tmatched_ions\ttruncated\tsite_probs{}",
+        if debug { "\tforms_debug" } else { "" }
     )?;
     let sites = |v: &[u16]| v.iter().map(u16::to_string).collect::<Vec<_>>().join(";");
     for r in rows {
-        writeln!(
+        write!(
             w,
             "{}\t{}\t{:.6}\t{:.6}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}\t{}",
             r.psm_id,
@@ -158,6 +187,10 @@ pub fn write_ipf_tsv(path: &std::path::Path, rows: &[IpfRow]) -> std::io::Result
             r.truncated as u8,
             r.site_probs
         )?;
+        if debug {
+            write!(w, "\t{}", r.forms_debug)?;
+        }
+        writeln!(w)?;
     }
     w.flush()
 }

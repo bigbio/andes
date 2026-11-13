@@ -1337,8 +1337,45 @@ fn variable_mod_deltas(params: &SearchParams) -> Vec<FormDelta> {
 /// window probes; it can never drop a candidate. The decisive correctness
 /// guarantee comes from re-running [`expand_mod_combinations`] per base record
 /// and filtering on the resulting peptidoform mass — not from `Δ` precision.
-fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
+fn distinct_mod_mass_offsets(params: &SearchParams) -> std::sync::Arc<Vec<(u64, f64)>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    // The offsets depend only on the form deltas and the two budgets, and the
+    // out-of-core retrieval asks for them once per spectrum window: compute
+    // them once per search and share them. The key is cheap to build (one
+    // pass over the form lists); a few searches' worth are kept.
+    type Key = (Vec<(u64, u32, u32, u8)>, u32, u32);
+    type Offsets = Arc<Vec<(u64, f64)>>;
+    static CACHE: OnceLock<Mutex<HashMap<Key, Offsets>>> = OnceLock::new();
     let deltas = variable_mod_deltas(params);
+    let key: Key = (
+        deltas
+            .iter()
+            .map(|f| (f.delta.to_bits(), f.mods, f.labels, f.channel))
+            .collect(),
+        params.max_variable_mods_per_peptide,
+        params.max_label_sites,
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return hit;
+    }
+    let offsets = Arc::new(enumerate_mod_mass_offsets(&deltas, key.1, key.2));
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= 16 {
+            c.clear();
+        }
+        c.insert(key, Arc::clone(&offsets));
+    }
+    offsets
+}
+
+/// The offsets of [`distinct_mod_mass_offsets`], enumerated.
+fn enumerate_mod_mass_offsets(
+    deltas: &[FormDelta],
+    max_mods: u32,
+    max_labels: u32,
+) -> Vec<(u64, f64)> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut out: Vec<(u64, f64)> = Vec::new();
     // Δ = 0 (no variable mods) is always present.
@@ -1387,7 +1424,7 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
         }
     }
 
-    let budget = (params.max_variable_mods_per_peptide, params.max_label_sites);
+    let budget = (max_mods, max_labels);
     let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
     channels.push(0);
     channels.sort_unstable();
@@ -1473,7 +1510,7 @@ pub fn lazy_candidates_for_precursor(
     let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
         std::collections::HashSet::new();
     let mut base_records: Vec<IndexRecord> = Vec::new();
-    for (_, delta) in &offsets {
+    for (_, delta) in offsets.iter() {
         // Base mass = precursor − Δ. Window asymmetric: −tol_left .. +tol_right.
         let center = precursor_mass - delta;
         let lo = (center * 1000.0).round() as i64 - tol_left_milli as i64;
@@ -1628,7 +1665,7 @@ pub fn base_records_for_nominal_window(
         rustc_hash::FxHashMap::default();
     let mut counts_this_window: rustc_hash::FxHashMap<BaseRecordKey, u32> =
         rustc_hash::FxHashMap::default();
-    for (_, delta) in &offsets {
+    for (_, delta) in offsets.iter() {
         let lo = ((full_lo - delta) * 1000.0).floor() as i64;
         let hi = ((full_hi - delta) * 1000.0).ceil() as i64;
         if hi < 0 {
@@ -2149,8 +2186,8 @@ mod tests {
         params.max_variable_mods_per_peptide = 0;
         params.max_label_sites = 100;
         let mut got: Vec<i64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
-            .into_iter()
-            .map(|(_, d)| d.round() as i64)
+            .iter()
+            .map(|&(_, d)| d.round() as i64)
             .collect();
         got.sort_unstable();
         // Every sum of at most 100 labels of 8..=12 Da: k labels reach 8k..=12k.
@@ -2158,6 +2195,11 @@ mod tests {
         want.sort_unstable();
         want.dedup();
         assert_eq!(got, want);
+        // Computed once per search: a second request shares the first result.
+        assert!(std::sync::Arc::ptr_eq(
+            &crate::candidate_gen::distinct_mod_mass_offsets(&params),
+            &crate::candidate_gen::distinct_mod_mass_offsets(&params),
+        ));
     }
 
     /// The offsets with the memo equal those of the plain walk over every
@@ -2207,8 +2249,8 @@ mod tests {
         }
         let memo = |params: &SearchParams| -> Vec<u64> {
             let mut v: Vec<u64> = crate::candidate_gen::distinct_mod_mass_offsets(params)
-                .into_iter()
-                .map(|(k, _)| k)
+                .iter()
+                .map(|&(k, _)| k)
                 .collect();
             v.sort_unstable();
             v.dedup();
@@ -2298,8 +2340,8 @@ mod tests {
         params.max_variable_mods_per_peptide = 1;
         params.max_label_sites = 3;
         let offsets: Vec<f64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
-            .into_iter()
-            .map(|(_, d)| d)
+            .iter()
+            .map(|&(_, d)| d)
             .collect();
         let has = |d: f64| offsets.iter().any(|o| (o - d).abs() < 1e-6);
         assert!(!has(4.025107 + 8.014199), "{offsets:?}");

@@ -62,8 +62,9 @@ const READ_OFFSETS: [i32; 5] = [-1, 0, 1, 2, 3];
 /// Most channels a specification may have.
 pub const MAX_CHANNELS: usize = 5;
 /// Most components one fit takes: every channel and at most one satellite
-/// per channel (the heavy-proline form of `--label-arg-pro`). The fit
-/// enumerates the subsets of its free components, at most 2^10.
+/// per channel (the heavy-proline form of `--label-arg-pro`). Up to
+/// [`MAX_CHANNELS`] components the fit enumerates the subsets of the free
+/// ones; beyond, it solves by active set (see `nn_quadratic`).
 pub const MAX_COMPONENTS: usize = 2 * MAX_CHANNELS;
 
 /// Where a label sits.
@@ -1055,6 +1056,10 @@ fn nn_active_set(
     let tol = 1e-12 * scale;
     let mut a = vec![0.0; n];
     let mut passive = vec![false; n];
+    // A component whose own solve came out non-positive the moment it entered
+    // (rounding on a nearly collinear column) would re-enter at once with the
+    // same gradient: it is held out until the passive set changes otherwise.
+    let mut held = vec![false; n];
     let solve_on = |p: &[bool]| -> Option<Vec<f64>> {
         let idx: Vec<usize> = (0..n).filter(|&c| p[c]).collect();
         let k = idx.len();
@@ -1076,7 +1081,7 @@ fn nn_active_set(
     for _ in 0..3 * n + 3 {
         let grad = |c: usize| b[c] - (0..n).map(|j| h[c * n + j] * a[j]).sum::<f64>();
         let Some(j) = (0..n)
-            .filter(|&c| free[c] && !passive[c])
+            .filter(|&c| free[c] && !passive[c] && !held[c])
             .map(|c| (c, grad(c)))
             .filter(|&(_, g)| g > tol)
             .max_by(|x, y| x.1.total_cmp(&y.1))
@@ -1095,6 +1100,13 @@ fn nn_active_set(
             let z = solve_on(&passive)?;
             if (0..n).filter(|&c| passive[c]).all(|c| z[c] > 0.0) {
                 a = z;
+                held.iter_mut().for_each(|h| *h = false);
+                break;
+            }
+            if inner == 1 && z[j] <= 0.0 {
+                // The entering component itself is rejected: hold it out.
+                passive[j] = false;
+                held[j] = true;
                 break;
             }
             // Step from A toward z until the first passive component hits 0.
@@ -2245,6 +2257,21 @@ mod tests {
                 (llr_e - llr_s).abs() <= 1e-9 * llr_e.abs().max(1.0),
                 "trial {trial} n {n}: {llr_e} vs {llr_s}"
             );
+            // Optimality (KKT) on every trial, collinear ones included: the
+            // gradient b − HA vanishes on the passive set and is not positive
+            // on the other free components.
+            let scale = b.iter().chain(&h).fold(0.0f64, |m, &x| m.max(x.abs()));
+            for c in 0..n {
+                let g = b[c] - (0..n).map(|k| h[c * n + k] * a_s[k]).sum::<f64>();
+                if passive[c] {
+                    assert!(
+                        g.abs() <= 1e-7 * scale,
+                        "trial {trial}: passive {c} gradient {g}"
+                    );
+                } else if free[c] {
+                    assert!(g <= 1e-7 * scale, "trial {trial}: free {c} gradient {g}");
+                }
+            }
             for c in 0..n {
                 assert!(a_s[c] >= 0.0 && (free[c] || a_s[c] == 0.0));
                 assert_eq!(passive[c], a_s[c] > 0.0);
@@ -2256,7 +2283,7 @@ mod tests {
             }
         }
         // The fallback to the enumeration is for singular blocks only.
-        assert!(settled >= 390, "active set settled on {settled} of 400");
+        assert_eq!(settled, 400, "active set settled on {settled} of 400");
     }
 
     /// A probe of [`MAX_COMPONENTS`] components is fitted; one more is refused.

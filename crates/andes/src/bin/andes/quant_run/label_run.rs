@@ -325,19 +325,28 @@ fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
-/// Whether a satellite of `g` lies within `tol_ppm` of the M..M+4 isotope of
-/// a channel other than its parent: the two fit components are then nearly
-/// collinear and their split is weakly determined.
+/// Whether a satellite of `g` lies within `tol_ppm` of an isotope the fit
+/// models (M−2..M+5) of another component: a channel other than its parent,
+/// or another satellite. The two fit components are then nearly collinear
+/// and their split is weakly determined.
 fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
+    use quant::label::{HIGHEST_OFFSET, LOWEST_OFFSET};
     let z = f64::from(g.charge.max(1));
-    g.satellites.iter().any(|&(parent, mz)| {
-        g.channel_mz.iter().enumerate().any(|(c, &mc)| {
-            c != parent
-                && (0..=4).any(|off| {
-                    let m = mc + f64::from(off) * model::mass::ISOTOPE / z;
-                    (m - mz).abs() <= m * tol_ppm * 1e-6
-                })
+    let on = |mono: f64, mz: f64| {
+        (LOWEST_OFFSET..=HIGHEST_OFFSET).any(|off| {
+            let m = mono + f64::from(off) * model::mass::ISOTOPE / z;
+            (m - mz).abs() <= m * tol_ppm * 1e-6
         })
+    };
+    g.satellites.iter().enumerate().any(|(i, &(parent, mz))| {
+        g.channel_mz
+            .iter()
+            .enumerate()
+            .any(|(c, &mc)| c != parent && on(mc, mz))
+            || g.satellites
+                .iter()
+                .enumerate()
+                .any(|(k, &(_, ms))| k != i && on(ms, mz))
     })
 }
 
@@ -713,7 +722,7 @@ pub(super) fn quantify(
     );
     let shared = groups
         .iter()
-        .filter(|g| satellite_on_another_channel(g, tol))
+        .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
         .count();
     if shared > 0 {
         eprintln!(
@@ -1702,6 +1711,45 @@ mod tests {
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
+
+    /// The collinearity check covers every isotope the fit models (M−2..M+5)
+    /// of the other channels, and the other satellites.
+    #[test]
+    fn satellite_overlap_check_covers_the_modelled_isotopes() {
+        let iso = model::mass::ISOTOPE / 2.0;
+        let group = |channel_mz: Vec<f64>, satellites: Vec<(usize, f64)>| Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            envelopes: vec![ChannelEnvelope::new(&[1.0], 0, 1.0, 0, 1.0); channel_mz.len()],
+            deltas: vec![0.0; channel_mz.len()],
+            channel_mz,
+            faims_cv: None,
+            satellites,
+            identity_decoy: false,
+        };
+        // On channel 1's M−1 (a lower isotopologue of a 2H label).
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 - iso)]),
+            10.0
+        ));
+        // On channel 1's M+5.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 + 5.0 * iso)]),
+            10.0
+        ));
+        // On another satellite.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 540.0 + iso)]),
+            10.0
+        ));
+        // Clear of everything.
+        assert!(!satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 560.0)]),
+            10.0
+        ));
     }
 
     /// Four channels with three heavy-proline satellites take seven fit

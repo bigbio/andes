@@ -940,7 +940,21 @@ pub(super) fn quantify(
                     let ((fit, converted), probe) = if missing.is_empty() {
                         (fit_folded(ms1, g, &probe, &fit_params)?, probe)
                     } else {
-                        fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?
+                        let ((mut fit, conv), pinned) =
+                            fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?;
+                        // The identified channels keep their quantities from the
+                        // free joint fit, as a group with every channel
+                        // identified does; only the unidentified channels (and
+                        // their decoys, made from `pinned`) are read at the
+                        // identified channels' profile.
+                        if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
+                            for c in 0..n_ch {
+                                if chans[c].is_some() {
+                                    fit.channels[c] = free.channels[c].clone();
+                                }
+                            }
+                        }
+                        ((fit, conv), pinned)
                     };
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {

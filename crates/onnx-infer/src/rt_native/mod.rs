@@ -337,7 +337,7 @@ impl Conv {
 }
 
 /// Output positions per [`Conv::apply`] register tile.
-const TILE_P: usize = 3;
+const TILE_P: usize = 2;
 /// Output channels per [`Conv::apply`] register tile.
 const TILE_O: usize = 32;
 
@@ -351,15 +351,25 @@ fn tap_rows(
     cout: usize,
     o0: usize,
 ) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    match acc.len() {
+        1 => avx::tap1(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        2 => avx::tap2(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        _ => unreachable!("tile holds at most TILE_P rows"),
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx")))]
     match acc.len() {
         1 => tap::<1>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
         2 => tap::<2>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        3 => tap::<3>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
         _ => unreachable!("tile holds at most TILE_P rows"),
     }
 }
 
 /// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
+#[cfg_attr(
+    all(target_arch = "x86_64", target_feature = "avx", not(test)),
+    allow(dead_code)
+)]
 #[inline(always)]
 fn tap<const R: usize>(
     acc: &mut [[f32; TILE_O]; R],
@@ -381,6 +391,110 @@ fn tap<const R: usize>(
         }
     }
     *acc = a;
+}
+
+/// [`tap`] with the accumulators held in AVX registers: per element the same
+/// multiply, then add, in the same order, eight channels per instruction.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+mod avx {
+    use super::TILE_O;
+    use std::arch::x86_64::{
+        __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+    };
+
+    const _: () = assert!(TILE_O == 32, "the AVX tap holds 4 × 8 channels per row");
+
+    /// The 32 floats of `row` as four vectors.
+    ///
+    /// # Safety
+    /// The CPU must support AVX (the module is compiled only when it is enabled).
+    #[inline(always)]
+    unsafe fn load(row: &[f32; TILE_O]) -> [__m256; 4] {
+        let p = row.as_ptr();
+        [
+            _mm256_loadu_ps(p),
+            _mm256_loadu_ps(p.add(8)),
+            _mm256_loadu_ps(p.add(16)),
+            _mm256_loadu_ps(p.add(24)),
+        ]
+    }
+
+    /// Writes four vectors to the 32 floats of `row`.
+    ///
+    /// # Safety
+    /// As [`load`].
+    #[inline(always)]
+    unsafe fn store(row: &mut [f32; TILE_O], a: [__m256; 4]) {
+        let p = row.as_mut_ptr();
+        _mm256_storeu_ps(p, a[0]);
+        _mm256_storeu_ps(p.add(8), a[1]);
+        _mm256_storeu_ps(p.add(16), a[2]);
+        _mm256_storeu_ps(p.add(24), a[3]);
+    }
+
+    /// `a + w · x` per lane (multiply, then add; no fused multiply-add).
+    ///
+    /// # Safety
+    /// As [`load`].
+    #[inline(always)]
+    unsafe fn step(a: [__m256; 4], w: [__m256; 4], x: f32) -> [__m256; 4] {
+        let b = _mm256_set1_ps(x);
+        [
+            _mm256_add_ps(a[0], _mm256_mul_ps(w[0], b)),
+            _mm256_add_ps(a[1], _mm256_mul_ps(w[1], b)),
+            _mm256_add_ps(a[2], _mm256_mul_ps(w[2], b)),
+            _mm256_add_ps(a[3], _mm256_mul_ps(w[3], b)),
+        ]
+    }
+
+    /// The weights of input `i` for output channels `o0..o0 + 32`.
+    #[inline(always)]
+    fn row_weights(wk: &[f32], i: usize, cout: usize, o0: usize) -> &[f32; TILE_O] {
+        wk[i * cout + o0..][..TILE_O].try_into().unwrap()
+    }
+
+    pub(super) fn tap1(
+        acc: &mut [[f32; TILE_O]; 1],
+        xs: &[f32],
+        wk: &[f32],
+        cin: usize,
+        cout: usize,
+        o0: usize,
+    ) {
+        // SAFETY: AVX is enabled for this build (module `cfg`), and every load
+        // and store goes through a 32-float array.
+        unsafe {
+            let mut a0 = load(&acc[0]);
+            for (i, &v0) in xs[..cin].iter().enumerate() {
+                let w = load(row_weights(wk, i, cout, o0));
+                a0 = step(a0, w, v0);
+            }
+            store(&mut acc[0], a0);
+        }
+    }
+
+    pub(super) fn tap2(
+        acc: &mut [[f32; TILE_O]; 2],
+        xs: &[f32],
+        wk: &[f32],
+        cin: usize,
+        cout: usize,
+        o0: usize,
+    ) {
+        let (x0, x1) = (&xs[..cin], &xs[cin..2 * cin]);
+        // SAFETY: as in `tap1`.
+        unsafe {
+            let mut a0 = load(&acc[0]);
+            let mut a1 = load(&acc[1]);
+            for (i, (&v0, &v1)) in x0.iter().zip(x1).enumerate() {
+                let w = load(row_weights(wk, i, cout, o0));
+                a0 = step(a0, w, v0);
+                a1 = step(a1, w, v1);
+            }
+            store(&mut acc[0], a0);
+            store(&mut acc[1], a1);
+        }
+    }
 }
 
 pub(crate) struct Tensor {
@@ -677,6 +791,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The AVX tap and the portable tap give the same bits.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    #[test]
+    fn avx_tap_matches_portable_tap() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        let (cin, cout, o0) = (37, 96, 32);
+        let wk: Vec<f32> = (0..cin * cout).map(|_| rnd()).collect();
+        let xs: Vec<f32> = (0..2 * cin).map(|_| rnd()).collect();
+        let mut init = [[0.0f32; TILE_O]; 2];
+        for v in init.iter_mut().flatten() {
+            *v = rnd();
+        }
+        let bits = |a: &[[f32; TILE_O]]| {
+            a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>()
+        };
+        let (mut p2, mut v2) = (init, init);
+        tap::<2>(&mut p2, &xs, &wk, cin, cout, o0);
+        avx::tap2(&mut v2, &xs, &wk, cin, cout, o0);
+        assert_eq!(bits(&p2), bits(&v2));
+        let (mut p1, mut v1) = ([init[0]], [init[0]]);
+        tap::<1>(&mut p1, &xs, &wk, cin, cout, o0);
+        avx::tap1(&mut v1, &xs, &wk, cin, cout, o0);
+        assert_eq!(bits(&p1), bits(&v1));
     }
 
     #[test]

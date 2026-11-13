@@ -60,6 +60,60 @@ impl Terminus {
 struct FormList {
     variants: Vec<AminoAcid>,
     slots: Vec<u8>,
+    /// How many of each form's `slots` are channel labels (they count against
+    /// the label-site allowance, not the variable-mod one).
+    label_slots: Vec<u8>,
+    /// Label state of each form (see [`label_code`]); empty when no label
+    /// channels are registered or no label applies at this position.
+    labels: Vec<u8>,
+}
+
+/// Label codes of [`AminoAcidSet::form_labels`]. A position whose sites can
+/// carry a channel label (SILAC K/R, dimethyl K and N-terminus) has one code per
+/// form: [`label_code::LIGHT`] when none of its labelable sites is labelled,
+/// the channel (1..=[`label_code::MAX_CHANNEL`]) when every labelable site
+/// carries that channel's label, [`label_code::MIXED`] when the form mixes
+/// channels or leaves a labelable site of a labelled form unlabelled, and
+/// [`label_code::NEUTRAL`] when its labelable sites are all taken by other
+/// modifications, variable or fixed (a protein N-terminal acetyl in place of
+/// the N-terminal dimethyl), so it constrains nothing.
+pub mod label_code {
+    pub const LIGHT: u8 = 0;
+    pub const MAX_CHANNEL: u8 = 250;
+    pub const NEUTRAL: u8 = 254;
+    pub const MIXED: u8 = 255;
+
+    /// One peptide's label state while its forms are chosen, left to right.
+    /// A peptide is labelled consistently when every labelable position takes
+    /// the same channel (or every one is light).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct LabelState(u8);
+
+    impl LabelState {
+        /// The state after a form with `code`, or `None` when the form makes
+        /// the peptide inconsistent.
+        #[inline]
+        pub fn step(self, code: u8) -> Option<Self> {
+            match code {
+                NEUTRAL => Some(self),
+                MIXED => None,
+                c => {
+                    let target = c + 1;
+                    if self.0 == 0 || self.0 == target {
+                        Some(LabelState(target))
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+
+        /// The channel the peptide carries: `None` before any labelable
+        /// position, `Some(0)` for light, `Some(c)` for channel `c`.
+        pub fn channel(self) -> Option<u8> {
+            self.0.checked_sub(1)
+        }
+    }
 }
 
 /// Index of `(residue, n, c)` in the form table: `residue * 9 + n.rank() * 3
@@ -98,6 +152,8 @@ pub struct AminoAcidSet {
     peptide_cleavage_penalty: i32,
     neighboring_aa_cleavage_credit: i32,
     neighboring_aa_cleavage_penalty: i32,
+    has_label_channels: bool,
+    label_channels: Vec<(String, u8)>,
 }
 
 impl AminoAcidSet {
@@ -131,12 +187,57 @@ impl AminoAcidSet {
         &self.forms[form_index(residue, n, c)].slots
     }
 
+    /// How many of each form's [`Self::form_slots`] are channel labels
+    /// ([`AminoAcidSetBuilder::with_label_channels`]); all zero without labels.
+    #[inline]
+    pub fn form_label_slots(&self, residue: u8, n: Terminus, c: Terminus) -> &[u8] {
+        &self.forms[form_index(residue, n, c)].label_slots
+    }
+
+    /// Label code of each form of [`Self::forms`] (see [`label_code`]), or
+    /// `None` when no channel label applies at this position.
+    #[inline]
+    pub fn form_labels(&self, residue: u8, n: Terminus, c: Terminus) -> Option<&[u8]> {
+        let l = &self.forms[form_index(residue, n, c)].labels;
+        (!l.is_empty()).then_some(l.as_slice())
+    }
+
+    /// The registered channel labels (mod name, channel), for a set built
+    /// from this one's [`Self::distinct_mods`].
+    pub fn label_channels(&self) -> &[(String, u8)] {
+        &self.label_channels
+    }
+
+    /// Whether channel labels were registered
+    /// ([`AminoAcidSetBuilder::with_label_channels`]).
+    pub fn has_label_channels(&self) -> bool {
+        self.has_label_channels
+    }
+
     /// Every non-empty form list with its slot counts.
     pub fn form_lists(&self) -> impl Iterator<Item = (&[AminoAcid], &[u8])> {
         self.forms
             .iter()
             .filter(|f| !f.variants.is_empty())
             .map(|f| (f.variants.as_slice(), f.slots.as_slice()))
+    }
+
+    /// [`Self::form_lists`] with each form's label slots and label code (the
+    /// codes empty where no channel label applies).
+    pub fn form_lists_with_labels(
+        &self,
+    ) -> impl Iterator<Item = (&[AminoAcid], &[u8], &[u8], &[u8])> {
+        self.forms
+            .iter()
+            .filter(|f| !f.variants.is_empty())
+            .map(|f| {
+                (
+                    f.variants.as_slice(),
+                    f.slots.as_slice(),
+                    f.label_slots.as_slice(),
+                    f.labels.as_slice(),
+                )
+            })
     }
 
     pub fn standard(&self, residue: u8) -> Option<&AminoAcid> {
@@ -392,6 +493,9 @@ impl AminoAcidSet {
 pub struct AminoAcidSetBuilder {
     fixed_mods: Vec<Modification>,
     variable_mods: Vec<Modification>,
+    /// Variable modifications that are channel labels, by name, with their
+    /// channel (1-based; the unlabelled form is channel 0).
+    label_channels: Vec<(String, u8)>,
 }
 
 impl AminoAcidSetBuilder {
@@ -399,6 +503,7 @@ impl AminoAcidSetBuilder {
         Self {
             fixed_mods: vec![],
             variable_mods: vec![],
+            label_channels: vec![],
         }
     }
 
@@ -420,7 +525,17 @@ impl AminoAcidSetBuilder {
         Self {
             fixed_mods: vec![cam],
             variable_mods: vec![],
+            label_channels: vec![],
         }
+    }
+
+    /// Registers variable modifications as channel labels: `(mod name,
+    /// channel)`, channel 1-based. The search then only builds peptides whose
+    /// labelable sites all carry one channel (or none, the light channel); see
+    /// [`label_code`].
+    pub fn with_label_channels(mut self, labels: Vec<(String, u8)>) -> Self {
+        self.label_channels = labels;
+        self
     }
 
     pub fn add_fixed_mod(mut self, m: Modification) -> Self {
@@ -556,6 +671,13 @@ impl AminoAcidSetBuilder {
         // N-term Acetyl). At a protein terminus the protein-terminal fixed mods
         // replace the peptide-terminal ones, and the variable mods of both
         // locations apply.
+        let label_channels = self.label_channels.clone();
+        let label_of = |m: &Modification| -> Option<u8> {
+            label_channels
+                .iter()
+                .find(|(name, _)| *name == m.name)
+                .map(|(_, c)| *c)
+        };
         let mut stacked: FxHashMap<(u8, Vec<usize>), &'static Modification> = FxHashMap::default();
         let mut stack_parts: FxHashMap<usize, Vec<&'static Modification>> = FxHashMap::default();
         let mut forms = vec![FormList::default(); FORM_TABLE_LEN];
@@ -581,9 +703,28 @@ impl AminoAcidSetBuilder {
                         &variable_mods,
                     );
                     let list = &mut forms[form_index(r, n, c)];
+                    let labelable = |choices: &[(Vec<&'static Modification>, u8)]| {
+                        choices
+                            .iter()
+                            .any(|(mods, _)| mods.iter().any(|m| label_of(m).is_some()))
+                    };
+                    let lab_sites = [
+                        labelable(&side),
+                        labelable(&n_choices),
+                        labelable(&c_choices),
+                    ];
+                    let position_labelable = lab_sites.iter().any(|&b| b);
                     for (n_mods, n_slots) in &n_choices {
                         for (c_mods, c_slots) in &c_choices {
                             for (s_mods, s_slots) in &side {
+                                let code = form_label_code(
+                                    [
+                                        (s_mods.as_slice(), *s_slots, lab_sites[0]),
+                                        (n_mods.as_slice(), *n_slots, lab_sites[1]),
+                                        (c_mods.as_slice(), *c_slots, lab_sites[2]),
+                                    ],
+                                    &label_of,
+                                );
                                 let parts: Vec<&'static Modification> =
                                     s_mods.iter().chain(n_mods).chain(c_mods).copied().collect();
                                 // One `annotated_site_mass` holds one site mass, so a
@@ -597,6 +738,8 @@ impl AminoAcidSetBuilder {
                                     continue;
                                 }
                                 let slots = s_slots + n_slots + c_slots;
+                                let label_slots =
+                                    parts.iter().filter(|m| label_of(m).is_some()).count() as u8;
                                 let aa = match parts.as_slice() {
                                     [] => std_aa.clone(),
                                     [m] => std_aa.clone().with_mod(*m),
@@ -629,12 +772,20 @@ impl AminoAcidSetBuilder {
                                     None => {
                                         list.variants.push(aa);
                                         list.slots.push(slots);
+                                        list.label_slots.push(label_slots);
+                                        if position_labelable {
+                                            list.labels.push(code);
+                                        }
                                     }
                                     Some(i)
                                         if restricted(&list.variants[i]) && !restricted(&aa) =>
                                     {
                                         list.variants[i] = aa;
                                         list.slots[i] = slots;
+                                        list.label_slots[i] = label_slots;
+                                        if position_labelable {
+                                            list.labels[i] = code;
+                                        }
                                     }
                                     Some(_) => {}
                                 }
@@ -720,7 +871,41 @@ impl AminoAcidSetBuilder {
             peptide_cleavage_penalty: 0,
             neighboring_aa_cleavage_credit: 0,
             neighboring_aa_cleavage_penalty: 0,
+            has_label_channels: !self.label_channels.is_empty(),
+            label_channels: self.label_channels,
         })
+    }
+}
+
+/// The [`label_code`] of one form from its three sites (side chain, N- and
+/// C-terminal group): each site's chosen mods, its variable-slot count and
+/// whether a channel label can sit there.
+fn form_label_code(
+    sites: [(&[&'static Modification], u8, bool); 3],
+    label_of: &impl Fn(&Modification) -> Option<u8>,
+) -> u8 {
+    let mut channel: Option<u8> = None;
+    let mut light = false;
+    for (mods, slots, labelable) in sites {
+        if !labelable {
+            continue;
+        }
+        match mods.iter().find_map(|m| label_of(m)) {
+            Some(c) => match channel {
+                Some(prev) if prev != c => return label_code::MIXED,
+                _ => channel = Some(c),
+            },
+            // Another mod, variable or fixed, holds the site: it carries no
+            // label.
+            None if slots > 0 || !mods.is_empty() => {}
+            None => light = true,
+        }
+    }
+    match (channel, light) {
+        (Some(_), true) => label_code::MIXED,
+        (Some(c), false) => c.min(label_code::MAX_CHANNEL),
+        (None, true) => label_code::LIGHT,
+        (None, false) => label_code::NEUTRAL,
     }
 }
 

@@ -31,9 +31,31 @@ end-to-end test instead (no pyOpenMS-specific options beyond the above):
   run and the transfer FDR needs 100 training rows per fold, which six
   peptides cannot give.
 
+With `--silac` it writes two SILAC duplex runs for the `--label` end-to-end
+test instead:
+
+* silac_run{1,2}.mzML.gz — the MBR precursors, each as a light and a heavy
+  (Lys8/Arg10) channel at the H/L ratio `SILAC_RATIOS[k % 4]` (both runs), so
+  the channels share one elution profile; every tenth peptide has no heavy
+  channel at all. Each channel is triggered for MS2 independently with
+  probability `SILAC_TRIGGER_PROBABILITY`, so many groups are identified in one
+  channel only (match between channels) and some in one run only (match
+  between runs). Run 2 is warped by `1.05 t + 20`.
+
+With `--dimethyl` it writes one dimethyl triplex run instead:
+
+* dimethyl_run1.mzML.gz — the MBR precursors with every amine (K and the
+  N-terminus) dimethylated, as light (+28.0313), medium (2H(4), +32.0564) and
+  heavy (2H(6)13C(2), +36.0757) channels at L:M:H = `DIMETHYL_RATIOS[k % 3]`
+  (of their monoisotopes). The deuterated channels elute
+  `DIMETHYL_RT_SHIFT_S` earlier and carry their lower isotopologues at 2H
+  enrichment `DIMETHYL_2H_ENRICHMENT` (molecules one or two 2H short, at
+  `-1.00628 Da` each). The medium's monoisotope shares a centroid with the
+  light M+4 at charge 2 (about 5 ppm apart).
+
 The exact numbers the tests assert are the constants below.
 
-Usage: scripts/make_quant_fixtures.py [--out test-fixtures] [--mbr]
+Usage: scripts/make_quant_fixtures.py [--out test-fixtures] [--mbr | --silac | --dimethyl]
 """
 import argparse
 import gzip
@@ -374,11 +396,256 @@ def make_mbr_run(run: int, precursors, path: str):
     print(f"wrote {path}: {len(spectra)} spectra, {len(peps)} precursors, {n_ms2} triggered")
 
 
+# The labelled-pair fixtures emit the envelope up to M+7, so that a channel's
+# measured pattern is its whole pattern.
+LABEL_ISOTOPES = 8
+SILAC_RATIOS = [1.0, 0.5, 2.0, 0.25]
+SILAC_HEAVY_ABSENT_EVERY = 10
+SILAC_TRIGGER_PROBABILITY = 0.6
+SILAC_WARPS = [lambda t: t, lambda t: 1.05 * t + 20.0]
+
+
+def silac_heavy(seq_str: str) -> str:
+    out = ""
+    for aa in seq_str:
+        if aa == "K":
+            out += "K(Label:13C(6)15N(2))"
+        elif aa == "R":
+            out += "R(Label:13C(6)15N(4))"
+        elif aa == "C":
+            out += "C(Carbamidomethyl)"
+        else:
+            out += aa
+    return out
+
+
+def make_silac_run(run: int, precursors, path: str):
+    rnd = random.Random(301 + run)
+    warp = SILAC_WARPS[run]
+    exp = p.MSExperiment()
+    instrument = exp.getInstrument()
+    analyzer = p.MassAnalyzer()
+    analyzer.setType(p.MassAnalyzer.AnalyzerType.ORBITRAP)
+    instrument.setMassAnalyzers([analyzer])
+    instrument.setName("Q Exactive")
+    exp.setInstrument(instrument)
+
+    species = []
+    seen = {}
+    for seq_str, z, apex_c, apex_int in precursors:
+        if not any(aa in "KR" for aa in seq_str):
+            continue
+        k = seen.setdefault(seq_str, len(seen))
+        ratio = 0.0 if k % SILAC_HEAVY_ABSENT_EVERY == SILAC_HEAVY_ABSENT_EVERY - 1 else SILAC_RATIOS[k % 4]
+        for heavy, scale in ((False, 1.0), (True, ratio)):
+            if scale <= 0.0:
+                continue
+            s = silac_heavy(seq_str) if heavy else seq_str.replace("C", "C(Carbamidomethyl)")
+            seq = p.AASequence.fromString(s)
+            mono = seq.getMonoWeight(p.Residue.ResidueType.Full, z) / z
+            triggered = rnd.random() < SILAC_TRIGGER_PROBABILITY
+            species.append((seq, mono, warp(apex_c), apex_int * scale, z, envelope(seq, LABEL_ISOTOPES), triggered))
+
+    end = max(warp(MBR_LAST_APEX_S), MBR_LAST_APEX_S) + MBR_TAIL_S
+    scan = 1
+    spectra = []
+    t = 0.0
+    while t <= end:
+        ms1 = p.MSSpectrum()
+        ms1.setMSLevel(1)
+        ms1.setRT(t)
+        ms1.setNativeID(f"controllerType=0 controllerNumber=1 scan={scan}")
+        ms1.setType(p.SpectrumSettings.SpectrumType.CENTROID)
+        peaks = [(rnd.uniform(350.0, 1500.0), rnd.uniform(50.0, 400.0)) for _ in range(MBR_BACKGROUND_PEAKS)]
+        for seq, mono, apex_rt, apex_int, z, env, _ in species:
+            g = math.exp(-0.5 * ((t - apex_rt) / MBR_SIGMA_S) ** 2)
+            if g < 1e-3:
+                continue
+            for i, e in enumerate(env):
+                inten = apex_int * e / env[0] * g
+                if inten > 10.0:
+                    peaks.append((mono + i * 1.0033548 / z, inten))
+        peaks.sort()
+        ms1.set_peaks(([mz for mz, _ in peaks], [it for _, it in peaks]))
+        spectra.append(ms1)
+        scan += 1
+        j = 0
+        for seq, mono, apex_rt, apex_int, z, env, triggered in species:
+            trigger = apex_rt - MS2_BEFORE_APEX_S
+            if not triggered or not (t <= trigger < t + 1.0):
+                continue
+            j += 1
+            ms2 = p.MSSpectrum()
+            ms2.setMSLevel(2)
+            ms2.setRT(t + 0.05 * j)
+            ms2.setNativeID(f"controllerType=0 controllerNumber=1 scan={scan}")
+            ms2.setType(p.SpectrumSettings.SpectrumType.CENTROID)
+            pre = p.Precursor()
+            pre.setMZ(mono)
+            pre.setCharge(z)
+            pre.setIntensity(apex_int)
+            pre.setIsolationWindowLowerOffset(0.7)
+            pre.setIsolationWindowUpperOffset(0.7)
+            pre.setActivationMethods({hcd_activation()})
+            ms2.setPrecursors([pre])
+            frag = sorted(fragments(seq, z))
+            ms2.set_peaks(([mz for mz, _ in frag], [it for _, it in frag]))
+            spectra.append(ms2)
+            scan += 1
+        t += 1.0
+
+    exp.setSpectra(spectra)
+    tmp = path[:-3]
+    opts = p.PeakFileOptions()
+    opts.setIntensity32Bit(True)
+    opts.setCompression(True)
+    f = p.MzMLFile()
+    f.setOptions(opts)
+    f.store(tmp, exp)
+    with open(tmp, "rb") as src, gzip.open(path, "wb", compresslevel=9) as dst:
+        shutil.copyfileobj(src, dst)
+    os.remove(tmp)
+    n_ms2 = sum(1 for x in species if x[6])
+    print(f"wrote {path}: {len(spectra)} spectra, {len(species)} channel species, {n_ms2} triggered")
+
+
+DIMETHYL_RATIOS = [(1.0, 1.0, 1.0), (1.0, 0.5, 0.25), (0.25, 1.0, 2.0)]
+DIMETHYL_MODS = ["Dimethyl", "Dimethyl:2H(4)", "Dimethyl:2H(6)13C(2)"]
+DIMETHYL_DEUTERIUM = [0, 4, 6]
+DIMETHYL_RT_SHIFT_S = [0.0, -1.5, -3.0]
+DIMETHYL_2H_ENRICHMENT = 0.99
+D_H = 2.014101778 - 1.007825032
+
+
+def dimethyl_sequence(seq_str: str, mod: str) -> str:
+    out = f".({mod})"
+    for aa in seq_str:
+        if aa == "K":
+            out += f"K({mod})"
+        elif aa == "C":
+            out += "C(Carbamidomethyl)"
+        else:
+            out += aa
+    return out
+
+
+def make_dimethyl_run(precursors, path: str):
+    rnd = random.Random(401)
+    exp = p.MSExperiment()
+    instrument = exp.getInstrument()
+    analyzer = p.MassAnalyzer()
+    analyzer.setType(p.MassAnalyzer.AnalyzerType.ORBITRAP)
+    instrument.setMassAnalyzers([analyzer])
+    instrument.setName("Q Exactive")
+    exp.setInstrument(instrument)
+
+    species = []
+    seen = {}
+    for seq_str, z, apex_c, apex_int in precursors:
+        k = seen.setdefault(seq_str, len(seen))
+        ratios = DIMETHYL_RATIOS[k % len(DIMETHYL_RATIOS)]
+        n_amines = 1 + seq_str.count("K")
+        for c, mod in enumerate(DIMETHYL_MODS):
+            seq = p.AASequence.fromString(dimethyl_sequence(seq_str, mod))
+            mono = seq.getMonoWeight(p.Residue.ResidueType.Full, z) / z
+            env = envelope(seq, LABEL_ISOTOPES)
+            # Lower isotopologues: j of the n 2H atoms are 1H.
+            n = DIMETHYL_DEUTERIUM[c] * n_amines
+            q = 1.0 - DIMETHYL_2H_ENRICHMENT
+            lower = [math.comb(n, j) * q**j * (1 - q) ** (n - j) for j in range(3)] if n else [1.0, 0.0, 0.0]
+            triggered = rnd.random() < SILAC_TRIGGER_PROBABILITY
+            species.append((seq, mono, apex_c + DIMETHYL_RT_SHIFT_S[c], apex_int * ratios[c], z, env, lower, triggered))
+
+    end = MBR_LAST_APEX_S + MBR_TAIL_S
+    scan = 1
+    spectra = []
+    t = 0.0
+    while t <= end:
+        ms1 = p.MSSpectrum()
+        ms1.setMSLevel(1)
+        ms1.setRT(t)
+        ms1.setNativeID(f"controllerType=0 controllerNumber=1 scan={scan}")
+        ms1.setType(p.SpectrumSettings.SpectrumType.CENTROID)
+        peaks = [(rnd.uniform(350.0, 1500.0), rnd.uniform(50.0, 400.0)) for _ in range(MBR_BACKGROUND_PEAKS)]
+        for seq, mono, apex_rt, apex_int, z, env, lower, _ in species:
+            g = math.exp(-0.5 * ((t - apex_rt) / MBR_SIGMA_S) ** 2)
+            if g < 1e-3:
+                continue
+            for j, w in enumerate(lower):
+                for i, e in enumerate(env):
+                    # apex_int is the fully labelled monoisotope's.
+                    inten = apex_int * e / env[0] * w / lower[0] * g
+                    if inten > 10.0:
+                        peaks.append((mono - j * D_H / z + i * 1.0033548 / z, inten))
+        # Peaks closer than the resolution are one centroid.
+        peaks.sort()
+        merged = []
+        for mz, it in peaks:
+            if merged and mz - merged[-1][0] < merged[-1][0] * 8e-6:
+                pm, pi = merged[-1]
+                merged[-1] = ((pm * pi + mz * it) / (pi + it), pi + it)
+            else:
+                merged.append((mz, it))
+        ms1.set_peaks(([mz for mz, _ in merged], [it for _, it in merged]))
+        spectra.append(ms1)
+        scan += 1
+        j = 0
+        for seq, mono, apex_rt, apex_int, z, env, lower, triggered in species:
+            trigger = apex_rt - MS2_BEFORE_APEX_S
+            if not triggered or not (t <= trigger < t + 1.0):
+                continue
+            j += 1
+            ms2 = p.MSSpectrum()
+            ms2.setMSLevel(2)
+            ms2.setRT(t + 0.05 * j)
+            ms2.setNativeID(f"controllerType=0 controllerNumber=1 scan={scan}")
+            ms2.setType(p.SpectrumSettings.SpectrumType.CENTROID)
+            pre = p.Precursor()
+            pre.setMZ(mono)
+            pre.setCharge(z)
+            pre.setIntensity(apex_int)
+            pre.setIsolationWindowLowerOffset(0.7)
+            pre.setIsolationWindowUpperOffset(0.7)
+            pre.setActivationMethods({hcd_activation()})
+            ms2.setPrecursors([pre])
+            frag = sorted(fragments(seq, z))
+            ms2.set_peaks(([mz for mz, _ in frag], [it for _, it in frag]))
+            spectra.append(ms2)
+            scan += 1
+        t += 1.0
+
+    exp.setSpectra(spectra)
+    tmp = path[:-3]
+    opts = p.PeakFileOptions()
+    opts.setIntensity32Bit(True)
+    opts.setCompression(True)
+    f = p.MzMLFile()
+    f.setOptions(opts)
+    f.store(tmp, exp)
+    with open(tmp, "rb") as src, gzip.open(path, "wb", compresslevel=9) as dst:
+        shutil.copyfileobj(src, dst)
+    os.remove(tmp)
+    n_ms2 = sum(1 for x in species if x[7])
+    print(f"wrote {path}: {len(spectra)} spectra, {len(species)} channel species, {n_ms2} triggered")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="test-fixtures")
-    ap.add_argument("--mbr", action="store_true", help="write the three MBR runs only")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--mbr", action="store_true", help="write the three MBR runs only")
+    mode.add_argument("--silac", action="store_true", help="write the two SILAC runs only")
+    mode.add_argument("--dimethyl", action="store_true", help="write the dimethyl triplex run only")
     args = ap.parse_args()
+    if args.dimethyl:
+        precursors = mbr_precursors(os.path.join(args.out, "BSA.fasta"))
+        make_dimethyl_run(precursors, os.path.join(args.out, "dimethyl_run1.mzML.gz"))
+        return
+    if args.silac:
+        precursors = mbr_precursors(os.path.join(args.out, "BSA.fasta"))
+        for run in range(len(SILAC_WARPS)):
+            make_silac_run(run, precursors, os.path.join(args.out, f"silac_run{run + 1}.mzML.gz"))
+        return
     if args.mbr:
         precursors = mbr_precursors(os.path.join(args.out, "BSA.fasta"))
         for run in range(len(MBR_WARPS)):

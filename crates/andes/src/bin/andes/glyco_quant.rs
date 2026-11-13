@@ -1,6 +1,5 @@
-//! Intact-glycopeptide label-free quantification from MS1, modelled on
-//! pGlycoQuant (Zeng et al., *Nat Commun* 2022 — "pGlycoQuant with a deep
-//! ResNet model ...").
+//! Intact-glycopeptide label-free quantification from MS1, modelled on the
+//! published method of Zeng et al., *Nat. Commun.* 2022.
 //!
 //! What is quantified: every TARGET row the glyco PIN emits (the top-1-per-scan
 //! collapse, or the full dump under `--debug-glyco`), identified by its INTACT
@@ -30,9 +29,9 @@
 //!   truncated envelope and systematically distort the cosine and the mono
 //!   share.
 //! * **The intensity is the monoisotopic peak, not the envelope sum.** As in
-//!   pGlycoQuant, `Area` is the monoisotopic XIC integrated over the peak and
-//!   divided by its theoretical share of the extracted envelope; the higher
-//!   isotopes feed only the cosine. For a 3–4 kDa glycopeptide the
+//!   the published method, `Area` is the monoisotopic XIC integrated over the
+//!   peak and divided by its theoretical share of the extracted envelope; the
+//!   higher isotopes feed only the cosine. For a 3–4 kDa glycopeptide the
 //!   monoisotope is 16–28 % of the envelope (a 3.5–6x multiplier), and the
 //!   M+1..M+n traces are the ones most exposed to co-eluting interferences,
 //!   which an envelope sum accumulates. The trade-off is that monoisotopic
@@ -47,15 +46,19 @@
 //! Cross-run matching (`--glyco --mbr`) is deliberately simpler than the peptide
 //! `--mbr`: a robust piecewise-linear RT map per run to the first input,
 //! fitted on the glycopeptides both runs accepted (outlier-trimmed, one knot
-//! per 300 anchors), and a narrow XIC search (three map sigmas, clamped to
-//! 10-60 s) in the runs that did not identify the glycopeptide. The transfers
-//! compete against their own decoy twins, as a separate competition from the
-//! identified features, so a transfer never borrows an identified feature's
-//! score distribution.
+//! per 300 anchors). The match itself is the published cross-run scorer
+//! (`glyco_match`): the donor's isotope reference XIC is slid across the target
+//! run over the alignment uncertainty (60–120 s) and scored by a small MLP, and
+//! the chosen window — not the predicted apex — is what gets quantified; with
+//! no fitted map, a transfer falls back to the mapped apex with a three-sigma
+//! window clamped to 10–60 s. The transfers compete against their own decoy
+//! twins, as a separate competition from the identified features, so a transfer
+//! never borrows an identified feature's score distribution.
 //!
-//! What is NOT here (yet): pGlycoQuant's FQR (a two-component GMM over a
-//! +10 Da decoy's scores). The feature q-value below is a picked target/decoy
-//! q-value against the same exchangeable twin the peptide LFQ path uses
+//! What is NOT here (yet): FQR (a two-component GMM over a +10 Da decoy's
+//! scores, as in the published method). The feature q-value below is a picked
+//! target/decoy q-value against the same exchangeable twin the peptide LFQ
+//! path uses
 //! (`mono_mz + 11 Th`, no RT shift), not FQR. It gates **transfers** only:
 //! a transfer's sole evidence is its MS1 feature, whereas an identification
 //! is confirmed by its MS2 (the identification FDR is controlled upstream by
@@ -103,11 +106,13 @@ use search::glyco_search::GlycoSpectrumResult;
 use search::search_index::SearchIndex;
 
 use crate::cli::Cli;
+use crate::glyco_match;
 use crate::quant_run::RunMs1;
 
 /// Fraction of the theoretical precursor envelope the extracted isotope
-/// window must cover. pGlycoQuant sums the whole theoretical distribution;
-/// beyond ~95 % the remaining isotopes are below the MS1 noise floor.
+/// window must cover. The published method sums the whole theoretical
+/// distribution; beyond ~95 % the remaining isotopes are below the MS1 noise
+/// floor.
 const ISOTOPE_COVERAGE: f64 = 0.95;
 
 /// Isotopes extracted per feature, bounds. The floor matches the peptide
@@ -157,9 +162,15 @@ struct Target {
     scan: i32,
     evidence: Evidence,
     /// Extraction half-window around `anchor_rt`, seconds. The identified
-    /// window is `--lfq-rt-window`; a transfer is searched only as far from
-    /// its RT prediction as the cross-run alignment uncertainty allows.
+    /// window is `--lfq-rt-window`; a transfer's is set by the match scorer
+    /// (its chosen peak window), or the alignment uncertainty when the
+    /// scorer could not run.
     window_s: f64,
+    /// Match search half-window (`--glyco --mbr` transfers), seconds: how far
+    /// the donor's extraction window may slide from the RT prediction.
+    search_s: f64,
+    /// The identified row this transfer was built from (a `rows` index).
+    donor: Option<usize>,
     /// `pre.SEQ_WITH_MODS.post` — the peptide identity across proteins and
     /// charge states.
     peptide: String,
@@ -200,6 +211,11 @@ struct FeatureRow {
     decoy: Option<FeatureQuant>,
     score: Option<f32>,
     q: Option<f64>,
+    /// The match score (transfers scored by the matcher; `score`
+    /// is this value then).
+    match_score: Option<f32>,
+    /// The decoy twin's match score, the other half of that competition.
+    decoy_match: Option<f32>,
 }
 
 /// Settings resolved from the `--lfq*` flags (the glyco path reuses them).
@@ -211,6 +227,8 @@ struct Settings {
     /// `--glyco --mbr`: transfer accepted glycopeptides into runs that did not
     /// identify them.
     mbr: bool,
+    /// `--glyco-mbr-match-train`: where to write the match-training table.
+    match_train: Option<PathBuf>,
 }
 
 impl Settings {
@@ -227,6 +245,7 @@ impl Settings {
             core: cli.glyco_core.into(),
             debug: cli.debug_glyco,
             mbr: cli.mbr,
+            match_train: cli.glyco_mbr_match_train.clone(),
         }
     }
 }
@@ -270,13 +289,28 @@ pub(crate) fn run(
     // in the runs that did not identify the glycopeptide, then scored as their
     // own target/decoy competition (a transfer has a predicted RT and a
     // narrow window, so its score distribution is not the identified one's).
+    let run_names: Vec<&str> = runs.iter().map(|r| r.stem).collect();
+    let alignment = if (settings.mbr || settings.match_train.is_some()) && runs.len() > 1 {
+        Some(Alignment::build(&rows, &run_names, &settings))
+    } else {
+        None
+    };
+    if let (Some(path), Some(alignment)) = (&settings.match_train, &alignment) {
+        dump_match_training(&rows, runs, &settings, alignment, path)?;
+    }
     let mut transfer_counts = TransferCounts::default();
     if settings.mbr && runs.len() > 1 {
-        let run_names: Vec<&str> = runs.iter().map(|r| r.stem).collect();
-        let (transfers, counts) = build_transfers(&rows, &run_names, &settings);
+        let alignment = alignment
+            .as_ref()
+            .expect("alignment is built for --glyco --mbr");
+        let (transfers, counts) = build_transfers(&rows, &run_names, &settings, alignment);
         transfer_counts = counts;
         if !transfers.is_empty() {
-            let (found, measured) = measure(&transfers, runs, &settings, "transferred")?;
+            // The match scorer needs the donor's own XIC as well as the
+            // target run's; references are read run by run, then the
+            // transfers are measured.
+            let refs = build_match_references(&rows, &transfers, runs, &settings)?;
+            let (found, measured) = measure_transfers(&transfers, &refs, runs, &settings)?;
             transfer_counts.measured = found;
             let mut transfer_rows = feature_rows(transfers, measured, &settings);
             assign_qvalues(&mut transfer_rows, &settings);
@@ -303,7 +337,6 @@ pub(crate) fn run(
     }
 
     write_feature_table(&output_path(glyco_pin_path, "lfq"), &rows, &settings)?;
-    let run_names: Vec<&str> = runs.iter().map(|r| r.stem).collect();
     let kept = write_rollup_tables(glyco_pin_path, &rows, &run_names, &settings)?;
     let count_evidence = |evidence: Evidence| {
         rows.iter()
@@ -402,8 +435,7 @@ fn build_targets(
                 comp.neuac,
                 comp.neugc,
             ));
-            let envelope =
-                extracted_envelope(&formula.envelope(ENVELOPE_ISOTOPES), offset);
+            let envelope = extracted_envelope(&formula.envelope(ENVELOPE_ISOTOPES), offset);
             // The mass error of the MONOISOTOPIC hypothesis: the observed
             // precursor is offset isotopes above it, so remove that offset
             // before taking the difference (the PIN's `dm` does the same).
@@ -417,6 +449,8 @@ fn build_targets(
                 scan,
                 evidence: Evidence::Identified,
                 window_s: settings.params.rt_window_s,
+                search_s: 0.0,
+                donor: None,
                 peptide: cand.peptide.to_string(),
                 glycan: composition_label(comp),
                 topology: comp.tree.canonical(),
@@ -499,7 +533,17 @@ fn extracted_envelope(full: &[f64], offset: usize) -> Vec<f64> {
 
 /// One target's measurement: its feature and its decoy twin, both optional
 /// (no peak in the window).
-type Measurement = (Option<FeatureQuant>, Option<FeatureQuant>);
+#[derive(Debug, Clone, Default)]
+struct Measurement {
+    feature: Option<FeatureQuant>,
+    decoy: Option<FeatureQuant>,
+    /// The match score of the transferred window. Set only when both
+    /// this row's and its decoy's match scores exist, so the transfer's
+    /// target/decoy competition stays symmetric.
+    match_score: Option<f32>,
+    /// The decoy twin's match score (set together with `match_score`).
+    decoy_match: Option<f32>,
+}
 
 /// Quantify every target in its run. One run's MS1 scans are resident at a
 /// time (as in the peptide LFQ path); the returned vector is indexed like
@@ -510,12 +554,49 @@ fn measure(
     settings: &Settings,
     phase: &str,
 ) -> Result<(usize, Vec<Measurement>), String> {
+    measure_with(targets, runs, settings, phase, measure_identified)
+}
+
+/// Quantify one identified target in its own run: the envelope over the search
+/// RT, mono-scaled to the monoisotopic intensity, plus the +11 Th decoy twin.
+fn measure_identified(
+    ms1: &quant::ms1_index::Ms1RunIndex,
+    t: &Target,
+    params: &LfqParams,
+) -> Measurement {
+    let lfq = t.lfq_target();
+    let params = LfqParams {
+        n_isotopes: t.envelope.len(),
+        rt_window_s: t.window_s,
+        ..params.clone()
+    };
+    let mut feature = quantify(ms1, &lfq, &params);
+    if let Some(f) = feature.as_mut() {
+        f.area = mono_area(f, &lfq.envelope);
+    }
+    Measurement {
+        feature,
+        decoy: quantify_decoy(ms1, &lfq, &params),
+        match_score: None,
+        decoy_match: None,
+    }
+}
+
+/// Quantify every target in its run with `f`, one run's MS1 scans resident at
+/// a time (as in the peptide LFQ path); the returned vector is indexed like
+/// `targets`.
+fn measure_with(
+    targets: &[Target],
+    runs: &[RunMs1<'_>],
+    settings: &Settings,
+    phase: &str,
+    f: impl Fn(&quant::ms1_index::Ms1RunIndex, &Target, &LfqParams) -> Measurement + Sync,
+) -> Result<(usize, Vec<Measurement>), String> {
     let mut by_run: Vec<Vec<usize>> = vec![Vec::new(); runs.len()];
     for (i, t) in targets.iter().enumerate() {
         by_run[t.run_idx].push(i);
     }
-    let mut slot: Vec<Option<(Option<FeatureQuant>, Option<FeatureQuant>)>> =
-        vec![None; targets.len()];
+    let mut slot: Vec<Option<Measurement>> = vec![None; targets.len()];
     let mut found = 0usize;
     for (ri, run) in runs.iter().enumerate() {
         if by_run[ri].is_empty() {
@@ -523,8 +604,11 @@ fn measure(
         }
         let t0 = std::time::Instant::now();
         let ms1 = run.load().map_err(|e| format!("--glyco --lfq: {e}"))?;
-        let part = measure_run(&ms1, targets, &by_run[ri], &settings.params);
-        let run_found = part.iter().filter(|(_, f, _)| f.is_some()).count();
+        let part: Vec<(usize, Measurement)> = by_run[ri]
+            .par_iter()
+            .map(|&i| (i, f(&ms1, &targets[i], &settings.params)))
+            .collect();
+        let run_found = part.iter().filter(|(_, m)| m.feature.is_some()).count();
         found += run_found;
         eprintln!(
             "[glyco-quant] {phase} {}: {} features in {} targets, {:.2}s",
@@ -533,43 +617,162 @@ fn measure(
             part.len(),
             t0.elapsed().as_secs_f64()
         );
-        for (i, f, d) in part {
-            slot[i] = Some((f, d));
+        for (i, m) in part {
+            slot[i] = Some(m);
         }
     }
     Ok((
         found,
-        slot.into_iter().map(|s| s.unwrap_or((None, None))).collect(),
+        slot.into_iter().map(Option::unwrap_or_default).collect(),
     ))
 }
 
-/// Quantify `idxs` of `targets` in one run's MS1 scans, target and decoy twin.
-/// The per-target isotope count follows its own envelope length.
-fn measure_run(
-    ms1: &quant::ms1_index::Ms1RunIndex,
-    targets: &[Target],
-    idxs: &[usize],
-    params: &LfqParams,
-) -> Vec<(usize, Option<FeatureQuant>, Option<FeatureQuant>)> {
-    idxs.par_iter()
-        .map(|&i| {
-            let t = &targets[i];
-            let lfq = t.lfq_target();
-            let params = LfqParams {
-                n_isotopes: t.envelope.len(),
-                rt_window_s: t.window_s,
-                ..params.clone()
-            };
-            let mut feature = quantify(ms1, &lfq, &params);
-            if let Some(f) = feature.as_mut() {
-                f.area = mono_area(f, &lfq.envelope);
-            }
-            (i, feature, quantify_decoy(ms1, &lfq, &params))
-        })
-        .collect()
+/// One donor feature's match references in its own run: the identified
+/// feature's isotope XIC and the same XIC at the decoy twin's m/z.
+struct MatchReferences {
+    target: glyco_match::Reference,
+    decoy: Option<glyco_match::Reference>,
 }
 
-/// pGlycoQuant's label-free intensity: the extracted isotope at the search's
+/// Build the match references of every donor a transfer names, grouped by run
+/// so one run's MS1 scans are resident at a time. References are keyed by the
+/// donor's `rows` index; one donor may serve several target runs.
+fn build_match_references(
+    rows: &[FeatureRow],
+    transfers: &[Target],
+    runs: &[RunMs1<'_>],
+    settings: &Settings,
+) -> Result<HashMap<usize, MatchReferences>, String> {
+    let mut by_run: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); runs.len()];
+    for t in transfers {
+        if let Some(d) = t.donor {
+            by_run[rows[d].target.run_idx].insert(d);
+        }
+    }
+    let mut refs: HashMap<usize, MatchReferences> = HashMap::new();
+    for (ri, ids) in by_run.iter().enumerate() {
+        if ids.is_empty() {
+            continue;
+        }
+        let ms1 = runs[ri]
+            .load()
+            .map_err(|e| format!("--glyco --mbr match reference: {e}"))?;
+        for &id in ids {
+            let row = &rows[id];
+            let Some(f) = &row.feature else {
+                continue;
+            };
+            let t = &row.target;
+            let build = |mono_mz: f64| {
+                glyco_match::Reference::build(
+                    &ms1,
+                    mono_mz,
+                    t.charge,
+                    t.envelope.len(),
+                    t.anchor_rt,
+                    t.window_s,
+                    f.rt_start,
+                    f.rt_stop,
+                    settings.params.tol,
+                )
+            };
+            let Some(target) = build(t.mono_mz) else {
+                continue;
+            };
+            let decoy = build(t.mono_mz + settings.params.decoy_mz_shift);
+            refs.insert(id, MatchReferences { target, decoy });
+        }
+    }
+    Ok(refs)
+}
+
+/// Measure the transfers with the match scorer: slide the donor's
+/// extraction window across the target run, let the model choose the window
+/// and score it, then quantify that window with the ordinary extractor. The
+/// decoy twin gets its own reference and its own scored window, so the
+/// transfer q-value stays a symmetric competition.
+fn measure_transfers(
+    targets: &[Target],
+    refs: &HashMap<usize, MatchReferences>,
+    runs: &[RunMs1<'_>],
+    settings: &Settings,
+) -> Result<(usize, Vec<Measurement>), String> {
+    measure_with(targets, runs, settings, "transferred", |ms1, t, params| {
+        let reference = t.donor.and_then(|d| refs.get(&d));
+        let mut anchor = t.anchor_rt;
+        let mut window = t.window_s;
+        let mut decoy_anchor = anchor;
+        let mut decoy_window = window;
+        let mut match_score = None;
+        let mut decoy_match = None;
+        if let Some(r) = reference {
+            let predicted = r.target.window_start(t.anchor_rt);
+            if let Some(m) =
+                glyco_match::best_match(ms1, &r.target, predicted, t.search_s, params.tol)
+            {
+                anchor = 0.5 * (m.start_rt + m.stop_rt);
+                window = m.window_s;
+                match_score = Some(m.score);
+            }
+            if let Some(d) = &r.decoy {
+                let predicted = d.window_start(t.anchor_rt);
+                if let Some(m) = glyco_match::best_match(ms1, d, predicted, t.search_s, params.tol)
+                {
+                    decoy_anchor = 0.5 * (m.start_rt + m.stop_rt);
+                    decoy_window = m.window_s;
+                    decoy_match = Some(m.score);
+                }
+            }
+        }
+        // The competition is target against decoy: use the match score only
+        // when both sides have one.
+        if match_score.is_none() || decoy_match.is_none() {
+            match_score = None;
+            decoy_match = None;
+            anchor = t.anchor_rt;
+            window = t.window_s;
+        }
+        let lfq = LfqTarget {
+            anchor_rt: anchor,
+            ..t.lfq_target()
+        };
+        let p = LfqParams {
+            n_isotopes: t.envelope.len(),
+            rt_window_s: window,
+            ..params.clone()
+        };
+        let mut feature = quantify(ms1, &lfq, &p);
+        if let Some(f) = feature.as_mut() {
+            f.area = mono_area(f, &t.envelope);
+        }
+        let decoy = if match_score.is_some() {
+            let twin = LfqTarget {
+                mono_mz: t.mono_mz + params.decoy_mz_shift,
+                anchor_rt: decoy_anchor,
+                ..t.lfq_target()
+            };
+            quantify(
+                ms1,
+                &twin,
+                &LfqParams {
+                    n_isotopes: t.envelope.len(),
+                    rt_window_s: decoy_window,
+                    ..params.clone()
+                },
+            )
+        } else {
+            quantify_decoy(ms1, &lfq, &p)
+        };
+        Measurement {
+            feature,
+            decoy,
+            match_score,
+            decoy_match,
+        }
+    })
+}
+
+/// The published label-free intensity: the extracted isotope at the search's
 /// offset divided by its theoretical share of the extracted envelope
 /// (`Σ_i theo_i / theo_offset`). `envelope` is normalised over the extracted
 /// isotopes, so its first element is that share; the higher isotopes enter
@@ -596,33 +799,42 @@ fn params_of(row: &FeatureRow, settings: &Settings) -> LfqParams {
 /// the peptide LFQ path.
 fn feature_rows(
     targets: Vec<Target>,
-    quantified: Vec<(Option<FeatureQuant>, Option<FeatureQuant>)>,
+    quantified: Vec<Measurement>,
     settings: &Settings,
 ) -> Vec<FeatureRow> {
     debug_assert_eq!(targets.len(), quantified.len());
     let max_apex = quantified
         .iter()
-        .flat_map(|(f, d)| [f.as_ref(), d.as_ref()])
+        .flat_map(|m| [m.feature.as_ref(), m.decoy.as_ref()])
         .flatten()
         .map(|f| f.apex_intensity)
         .fold(0.0f32, f32::max);
     targets
         .into_iter()
         .zip(quantified)
-        .map(|(target, (feature, decoy))| {
+        .map(|(target, m)| {
             let params = LfqParams {
                 rt_window_s: target.window_s,
                 ..settings.params.clone()
             };
-            let score = feature
-                .as_ref()
-                .and_then(|f| competition_score(f, &params, max_apex));
+            // A matched transfer is scored by the model, not by the cosine
+            // gate: eligibility is the model's (and `quantify`'s own)
+            // judgement, applied identically to the decoy twin.
+            let score = match (m.match_score, m.decoy_match) {
+                (Some(score), Some(_)) => Some(score),
+                _ => m
+                    .feature
+                    .as_ref()
+                    .and_then(|f| competition_score(f, &params, max_apex)),
+            };
             FeatureRow {
                 target,
-                feature,
-                decoy,
+                feature: m.feature,
+                decoy: m.decoy,
                 score,
                 q: None,
+                match_score: m.match_score,
+                decoy_match: m.decoy_match,
             }
         })
         .collect()
@@ -642,10 +854,11 @@ fn assign_qvalues(rows: &mut [FeatureRow], settings: &Settings) {
         .iter()
         .map(|r| Pair {
             target: r.score,
-            decoy: r
-                .decoy
-                .as_ref()
-                .and_then(|f| competition_score(f, &params_of(r, settings), max_apex)),
+            decoy: r.decoy_match.or_else(|| {
+                r.decoy
+                    .as_ref()
+                    .and_then(|f| competition_score(f, &params_of(r, settings), max_apex))
+            }),
         })
         .collect();
     for (row, q) in rows.iter_mut().zip(picked_qvalues(&pairs)) {
@@ -656,14 +869,16 @@ fn assign_qvalues(rows: &mut [FeatureRow], settings: &Settings) {
 /// Whether a row's feature enters the quant tables.
 ///
 /// A transfer has no MS2 of its own, so its only FDR control is the picked
-/// feature q against the +11 Th decoy twin. An identification does not need
-/// that gate: the peptide, composition and site are already confirmed by the
-/// MS2 evidence (Percolator controls their FDR), and the quantification
-/// quality gates that do matter are the envelope cosine (`score`, None when
-/// below `--lfq-min-cosine`) and `min_mono_share`, which reject a feature
-/// extracted on the wrong isotope. pGlycoQuant likewise never re-filters an
-/// identification on MS1 decoy evidence; the q-value is still computed and
-/// reported in `FeatureQValue` for both classes.
+/// feature q against the +11 Th decoy twin. Its competition score is the
+/// match score of the window the model chose (falling back to the
+/// isotope-envelope competition when either side has no match). An
+/// identification does not need that gate: the peptide, composition and site
+/// are already confirmed by the MS2 evidence (Percolator controls their FDR),
+/// and the quantification quality gates that do matter are the envelope cosine
+/// (`score`, None when below `--lfq-min-cosine`) and `min_mono_share`, which
+/// reject a feature extracted on the wrong isotope. The published method
+/// likewise never re-filters an identification on MS1 decoy evidence; the
+/// q-value is still computed and reported in `FeatureQValue` for both classes.
 fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
     if row.feature.is_none() {
         return false;
@@ -696,6 +911,11 @@ const MBR_MAX_KNOTS: usize = 10;
 /// identified window.
 const MBR_MIN_WINDOW_S: f64 = 10.0;
 const MBR_MAX_WINDOW_S: f64 = 60.0;
+/// Bounds of the match search half-window, s: how far the donor's whole
+/// extraction window may slide from its RT prediction. The original searches
+/// ±2 min; the RT map is a better prior, so andes searches 3σ within these.
+const MBR_MATCH_MIN_SEARCH_S: f64 = 60.0;
+const MBR_MATCH_MAX_SEARCH_S: f64 = 120.0;
 
 /// What the transfer stage did, for the log.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -802,8 +1022,8 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
         .map(|&(x, y)| y - (intercept + slope * x))
         .collect();
     let center = crate::quant_mbr::median(residuals.clone());
-    let mad = 1.4826
-        * crate::quant_mbr::median(residuals.iter().map(|r| (r - center).abs()).collect());
+    let mad =
+        1.4826 * crate::quant_mbr::median(residuals.iter().map(|r| (r - center).abs()).collect());
     let mut kept: Vec<(f64, f64)> = pairs
         .iter()
         .zip(&residuals)
@@ -832,12 +1052,19 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
     if xs.len() < 2 {
         return None;
     }
-    let map = RtMap { xs, ys, sigma_s: 0.0 };
+    let map = RtMap {
+        xs,
+        ys,
+        sigma_s: 0.0,
+    };
     let mut dev: Vec<f64> = kept.iter().map(|&(x, y)| y - map.forward(x)).collect();
     let dev_center = crate::quant_mbr::median(dev.clone());
-    let sigma = 1.4826
-        * crate::quant_mbr::median(dev.drain(..).map(|d| (d - dev_center).abs()).collect());
-    let map = RtMap { sigma_s: sigma, ..map };
+    let sigma =
+        1.4826 * crate::quant_mbr::median(dev.drain(..).map(|d| (d - dev_center).abs()).collect());
+    let map = RtMap {
+        sigma_s: sigma,
+        ..map
+    };
     map.sigma_s.is_finite().then_some(map)
 }
 
@@ -858,76 +1085,119 @@ fn glyco_key(t: &Target) -> GlycoKey {
 /// A run that identified the glycopeptide but rejected the feature (q above
 /// the threshold) is not a transfer target: resurrecting a rejected
 /// identification as a transfer would bypass the rejection.
+/// The cross-run alignment `--glyco --mbr` works from: every glycopeptide each
+/// run identified, its best accepted donor, and the run's RT map to the first
+/// input. Shared by the transfer builder and the match-model training dump.
+struct Alignment {
+    /// Every key each run identified, accepted or not.
+    identified: Vec<std::collections::HashSet<GlycoKey>>,
+    /// The best accepted donor per key and run (a `rows` index).
+    donor: Vec<HashMap<GlycoKey, usize>>,
+    maps: Vec<Option<RtMap>>,
+    counts: TransferCounts,
+}
+
+impl Alignment {
+    fn build(rows: &[FeatureRow], run_names: &[&str], settings: &Settings) -> Self {
+        let mut counts = TransferCounts {
+            maps: 1, // the reference run is its own map
+            ..TransferCounts::default()
+        };
+        let mut identified: Vec<std::collections::HashSet<GlycoKey>> =
+            vec![std::collections::HashSet::new(); run_names.len()];
+        let mut donor: Vec<HashMap<GlycoKey, usize>> = vec![HashMap::new(); run_names.len()];
+        for (i, row) in rows.iter().enumerate() {
+            if row.target.evidence != Evidence::Identified {
+                continue;
+            }
+            let key = glyco_key(&row.target);
+            identified[row.target.run_idx].insert(key.clone());
+            if !accepted(row, settings) {
+                continue;
+            }
+            let score = row.score.unwrap_or(f32::NEG_INFINITY);
+            match donor[row.target.run_idx].get(&key) {
+                Some(&j) if rows[j].score.unwrap_or(f32::NEG_INFINITY) >= score => {}
+                _ => {
+                    donor[row.target.run_idx].insert(key, i);
+                }
+            }
+        }
+
+        // RT maps to the reference run.
+        let mut maps: Vec<Option<RtMap>> = vec![None; run_names.len()];
+        maps[0] = Some(RtMap::identity());
+        for (r, map) in maps.iter_mut().enumerate().skip(1) {
+            let pairs: Vec<(f64, f64)> = donor[r]
+                .iter()
+                .filter_map(|(key, &j)| {
+                    let other = *donor[0].get(key)?;
+                    let rt = rows[j].feature.as_ref()?.apex_rt;
+                    let rt_ref = rows[other].feature.as_ref()?.apex_rt;
+                    Some((rt, rt_ref))
+                })
+                .collect();
+            if pairs.len() < MBR_MIN_ANCHORS {
+                eprintln!(
+                    "[glyco-mbr] {}: {} shared glycopeptides, fewer than {MBR_MIN_ANCHORS} \
+                     needed for an RT map; no transfers into or out of it",
+                    run_names[r],
+                    pairs.len()
+                );
+                continue;
+            }
+            let Some(fitted) = fit_rt_map(&pairs) else {
+                continue;
+            };
+            if fitted.sigma_s > MBR_MAX_RESIDUAL_S {
+                eprintln!(
+                    "[glyco-mbr] {}: RT map residual {:.1}s is above {MBR_MAX_RESIDUAL_S}s; \
+                     no transfers into or out of it",
+                    run_names[r], fitted.sigma_s
+                );
+                continue;
+            }
+            counts.maps += 1;
+            counts.anchors += pairs.len();
+            *map = Some(fitted);
+        }
+        Self {
+            identified,
+            donor,
+            maps,
+            counts,
+        }
+    }
+
+    /// The RT of `rt` in run `from_idx` expressed in run `to_idx`'s scale, and
+    /// the combined alignment σ of the prediction, seconds.
+    fn predict(&self, from_idx: usize, to_idx: usize, rt: f64) -> Option<(f64, f64)> {
+        let from = self.maps[from_idx].as_ref()?;
+        let to = self.maps[to_idx].as_ref()?;
+        let t_ref = from.forward(rt);
+        let predicted = to.inverse(t_ref)?;
+        // Both ends contribute: the donor run's map error at the donor RT and
+        // the target run's inverse map error at the prediction (the residual is
+        // on the reference scale; the local inverse slope converts it to the
+        // target run's scale).
+        let sigma = (from.sigma_s.powi(2) + (to.sigma_s * to.inverse_scale(t_ref)).powi(2)).sqrt();
+        Some((predicted, sigma))
+    }
+}
+
 fn build_transfers(
     rows: &[FeatureRow],
     run_names: &[&str],
     settings: &Settings,
+    alignment: &Alignment,
 ) -> (Vec<Target>, TransferCounts) {
-    let mut counts = TransferCounts {
-        maps: 1, // the reference run is its own map
-        ..TransferCounts::default()
-    };
-    // Every key each run identified, accepted or not, and the best accepted
-    // donor per key.
-    let mut identified: Vec<std::collections::HashSet<GlycoKey>> =
-        vec![std::collections::HashSet::new(); run_names.len()];
-    let mut donor: Vec<HashMap<GlycoKey, usize>> = vec![HashMap::new(); run_names.len()];
-    for (i, row) in rows.iter().enumerate() {
-        if row.target.evidence != Evidence::Identified {
-            continue;
-        }
-        let key = glyco_key(&row.target);
-        identified[row.target.run_idx].insert(key.clone());
-        if !accepted(row, settings) {
-            continue;
-        }
-        let score = row.score.unwrap_or(f32::NEG_INFINITY);
-        match donor[row.target.run_idx].get(&key) {
-            Some(&j) if rows[j].score.unwrap_or(f32::NEG_INFINITY) >= score => {}
-            _ => {
-                donor[row.target.run_idx].insert(key, i);
-            }
-        }
-    }
-
-    // RT maps to the reference run.
-    let mut maps: Vec<Option<RtMap>> = vec![None; run_names.len()];
-    maps[0] = Some(RtMap::identity());
-    for (r, map) in maps.iter_mut().enumerate().skip(1) {
-        let pairs: Vec<(f64, f64)> = donor[r]
-            .iter()
-            .filter_map(|(key, &j)| {
-                let other = *donor[0].get(key)?;
-                let rt = rows[j].feature.as_ref()?.apex_rt;
-                let rt_ref = rows[other].feature.as_ref()?.apex_rt;
-                Some((rt, rt_ref))
-            })
-            .collect();
-        if pairs.len() < MBR_MIN_ANCHORS {
-            eprintln!(
-                "[glyco-mbr] {}: {} shared glycopeptides, fewer than {MBR_MIN_ANCHORS} needed \
-                 for an RT map; no transfers into or out of it",
-                run_names[r],
-                pairs.len()
-            );
-            continue;
-        }
-        let Some(fitted) = fit_rt_map(&pairs) else {
-            continue;
-        };
-        if fitted.sigma_s > MBR_MAX_RESIDUAL_S {
-            eprintln!(
-                "[glyco-mbr] {}: RT map residual {:.1}s is above {MBR_MAX_RESIDUAL_S}s; \
-                 no transfers into or out of it",
-                run_names[r], fitted.sigma_s
-            );
-            continue;
-        }
-        counts.maps += 1;
-        counts.anchors += pairs.len();
-        *map = Some(fitted);
-    }
-
+    let Alignment {
+        identified,
+        donor,
+        maps,
+        counts,
+    } = alignment;
+    let mut counts = *counts;
     // One transfer per (key, target run), from the best-scoring donor. The
     // donor's score orders two runs that both identified the key.
     let mut best: HashMap<(GlycoKey, usize), (f32, Target)> = HashMap::new();
@@ -941,32 +1211,35 @@ fn build_transfers(
         let Some(feature) = &row.feature else {
             continue;
         };
-        let Some(from) = maps[row.target.run_idx].as_ref() else {
+        if maps[row.target.run_idx].is_none() {
             continue;
-        };
-        let t_ref = from.forward(feature.apex_rt);
+        }
         let key = glyco_key(&row.target);
         for (r, to) in maps.iter().enumerate() {
             if r == row.target.run_idx {
                 continue;
             }
-            let Some(to) = to else { continue };
+            if to.is_none() {
+                continue;
+            }
             if identified[r].contains(&key) {
                 continue;
             }
-            let Some(rt) = to.inverse(t_ref) else {
+            let Some((rt, sigma)) = alignment.predict(row.target.run_idx, r, feature.apex_rt)
+            else {
                 continue;
             };
-            // Both ends contribute: the donor run's map error at the donor RT
-            // and the target run's inverse map error at the prediction (the
-            // residual is on the reference scale; the local inverse slope
-            // converts it to the target run's scale).
-            let sigma =
-                (from.sigma_s.powi(2) + (to.sigma_s * to.inverse_scale(t_ref)).powi(2)).sqrt();
             let window = (3.0 * sigma).clamp(MBR_MIN_WINDOW_S, MBR_MAX_WINDOW_S);
+            // The matcher slides the donor's whole extraction window across
+            // the alignment uncertainty; 60 s is the floor (the map's residual
+            // is a robust σ, so 3σ can be small on a clean gradient).
+            let search = (3.0 * sigma).clamp(MBR_MATCH_MIN_SEARCH_S, MBR_MATCH_MAX_SEARCH_S);
             let score = row.score.unwrap_or(f32::NEG_INFINITY);
             let slot = (key.clone(), r);
-            if best.get(&slot).is_some_and(|(existing, _)| *existing >= score) {
+            if best
+                .get(&slot)
+                .is_some_and(|(existing, _)| *existing >= score)
+            {
                 continue;
             }
             let mut target = row.target.clone();
@@ -977,25 +1250,215 @@ fn build_transfers(
             target.evidence = Evidence::Transferred;
             target.anchor_rt = rt;
             target.window_s = window;
+            target.search_s = search;
+            target.donor = Some(i);
             best.insert(slot, (score, target));
         }
     }
     // HashMap order is not deterministic; sort so the tables are.
     let mut transfers: Vec<Target> = best.into_values().map(|(_, t)| t).collect();
     transfers.sort_by(|a, b| {
-        (a.run_idx, &a.peptide, &a.glycan, &a.topology, a.charge, &a.spec_id).cmp(&(
-            b.run_idx,
-            &b.peptide,
-            &b.glycan,
-            &b.topology,
-            b.charge,
-            &b.spec_id,
-        ))
+        (
+            a.run_idx,
+            &a.peptide,
+            &a.glycan,
+            &a.topology,
+            a.charge,
+            &a.spec_id,
+        )
+            .cmp(&(
+                b.run_idx,
+                &b.peptide,
+                &b.glycan,
+                &b.topology,
+                b.charge,
+                &b.spec_id,
+            ))
     });
     counts.candidates = transfers.len();
     (transfers, counts)
 }
 
+/// Write the training table of the match scorer (`--glyco-mbr-match-train`).
+///
+/// For every ordered pair of runs that both accepted a glycopeptide, score the
+/// donor's reference against the target run exactly as `--glyco --mbr` does, and
+/// label each scored window: positive when it covers the peak the target run
+/// identified on its own, negative otherwise. Every window of the decoy twin
+/// (+11 Th) is negative. Positives therefore come from runs where the answer is
+/// known, which is what lets the model learn the target-versus-decoy boundary
+/// the transfer q-value needs.
+fn dump_match_training(
+    rows: &[FeatureRow],
+    runs: &[RunMs1<'_>],
+    settings: &Settings,
+    alignment: &Alignment,
+    path: &Path,
+) -> Result<(), String> {
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?,
+    );
+    writeln!(
+        out,
+        "# glyco-mbr match training table: label, match-model features \
+         f0..f9, peptide, donor/target run"
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut pairs = 0usize;
+    let mut positives = 0usize;
+    let mut negatives = 0usize;
+    for d in 0..runs.len() {
+        if alignment.maps[d].is_none() || alignment.donor[d].is_empty() {
+            continue;
+        }
+        // The donor run's references for every glycopeptide it accepted.
+        let ms1_d = runs[d]
+            .load()
+            .map_err(|e| format!("--glyco-mbr-match-train: {e}"))?;
+        let mut refs: Vec<(
+            GlycoKey,
+            usize,
+            glyco_match::Reference,
+            Option<glyco_match::Reference>,
+        )> = Vec::with_capacity(alignment.donor[d].len());
+        for (key, &j) in &alignment.donor[d] {
+            let row = &rows[j];
+            let Some(f) = &row.feature else { continue };
+            let t = &row.target;
+            let build = |mono_mz: f64| {
+                glyco_match::Reference::build(
+                    &ms1_d,
+                    mono_mz,
+                    t.charge,
+                    t.envelope.len(),
+                    t.anchor_rt,
+                    t.window_s,
+                    f.rt_start,
+                    f.rt_stop,
+                    settings.params.tol,
+                )
+            };
+            let Some(target) = build(t.mono_mz) else {
+                continue;
+            };
+            let decoy = build(t.mono_mz + settings.params.decoy_mz_shift);
+            refs.push((key.clone(), j, target, decoy));
+        }
+        drop(ms1_d);
+        for (t_run, run) in runs.iter().enumerate() {
+            if t_run == d || alignment.maps[t_run].is_none() {
+                continue;
+            }
+            // This run's own accepted feature for a key, when it has one.
+            let mut truth: HashMap<&GlycoKey, usize> = HashMap::new();
+            for (key, &j) in &alignment.donor[t_run] {
+                truth.insert(key, j);
+            }
+            if truth.is_empty() {
+                continue;
+            }
+            let ms1 = run
+                .load()
+                .map_err(|e| format!("--glyco-mbr-match-train: {e}"))?;
+            let (mut pair_pos, mut pair_neg) = (0usize, 0usize);
+            for (key, donor_row, reference, decoy) in &refs {
+                let Some(&truth_row) = truth.get(key) else {
+                    continue;
+                };
+                let donor = &rows[*donor_row];
+                let true_row = &rows[truth_row];
+                let (Some(df), Some(tf)) = (&donor.feature, &true_row.feature) else {
+                    continue;
+                };
+                let Some((predicted_rt, sigma)) = alignment.predict(d, t_run, df.apex_rt) else {
+                    continue;
+                };
+                let search = (3.0 * sigma).clamp(MBR_MATCH_MIN_SEARCH_S, MBR_MATCH_MAX_SEARCH_S);
+                let Some(candidates) = glyco_match::score_candidates(
+                    &ms1,
+                    reference,
+                    reference.window_start(predicted_rt),
+                    search,
+                    settings.params.tol,
+                ) else {
+                    continue;
+                };
+                let scored = glyco_match::scored_top(&candidates);
+                if scored.is_empty() {
+                    continue;
+                }
+                let truth_width = (tf.rt_stop - tf.rt_start).max(0.0);
+                let min_overlap = 0.5 * truth_width;
+                let overlaps: Vec<f64> = scored
+                    .iter()
+                    .map(|m| (m.stop_rt.min(tf.rt_stop) - m.start_rt.max(tf.rt_start)).max(0.0))
+                    .collect();
+                if !overlaps.iter().any(|&o| o >= min_overlap && o > 0.0) {
+                    // The prediction put the true peak outside every scored
+                    // window; the pair carries no positive and is skipped.
+                    continue;
+                }
+                let group = &key.0;
+                for (m, &overlap) in scored.iter().zip(&overlaps) {
+                    let label = u8::from(overlap >= min_overlap && overlap > 0.0);
+                    write_training_row(&mut out, label, m, group, d, t_run)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    if label == 1 {
+                        pair_pos += 1;
+                    } else {
+                        pair_neg += 1;
+                    }
+                }
+                if let Some(decoy) = decoy {
+                    if let Some(candidates) = glyco_match::score_candidates(
+                        &ms1,
+                        decoy,
+                        decoy.window_start(predicted_rt),
+                        search,
+                        settings.params.tol,
+                    ) {
+                        for m in glyco_match::scored_top(&candidates) {
+                            write_training_row(&mut out, 0, &m, group, d, t_run)
+                                .map_err(|e| format!("{}: {e}", path.display()))?;
+                            pair_neg += 1;
+                        }
+                    }
+                }
+                pairs += 1;
+            }
+            positives += pair_pos;
+            negatives += pair_neg;
+            eprintln!(
+                "[glyco-mbr-match-train] runs {d}->{t_run}: {pair_pos} positive, \
+                 {pair_neg} negative candidate windows"
+            );
+        }
+    }
+    out.flush()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    eprintln!(
+        "[glyco-mbr-match-train] {} glycopeptide pairs, {positives} positive and \
+         {negatives} negative rows written to {}",
+        pairs,
+        path.display()
+    );
+    Ok(())
+}
+
+fn write_training_row(
+    out: &mut impl Write,
+    label: u8,
+    m: &glyco_match::Match,
+    group: &str,
+    donor_run: usize,
+    target_run: usize,
+) -> std::io::Result<()> {
+    write!(out, "{label}")?;
+    for f in m.features {
+        write!(out, "\t{f:.6}")?;
+    }
+    writeln!(out, "\t{group}\t{donor_run}>{target_run}")
+}
 
 /// The path of an output table: `<base>.glyco.<kind>.tsv` beside the PIN.
 fn output_path(pin: &Path, kind: &str) -> PathBuf {
@@ -1019,7 +1482,7 @@ fn write_feature_table(
         "Run\tSpecId\tScan\tPeptide\tGlycosite\tGlycan\tTopology\tProteins\tCharge\t\
          IsotopeOffset\tAnchorRT\tApexRT\tRTStart\tRTStop\tRTDelta_s\tMonoMz\tTheoMz\tPpm\t\
          Area\tMonoArea\tApexIntensity\tCosine\tNIsotopesFound\tNScans\tFeatureScore\t\
-         FeatureQValue\tDecoyCosine\tAccepted\tEvidence"
+         FeatureQValue\tDecoyCosine\tAccepted\tEvidence\tMatchScore"
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
     for row in rows {
@@ -1051,14 +1514,11 @@ fn write_feature_table(
                     f64::NAN,
                 ),
             };
-        let decoy_cos = row
-            .decoy
-            .as_ref()
-            .map_or(f64::NAN, |f| f.cosine as f64);
+        let decoy_cos = row.decoy.as_ref().map_or(f64::NAN, |f| f.cosine as f64);
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t\
-             {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+             {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             t.run,
             t.spec_id,
             t.scan,
@@ -1088,6 +1548,7 @@ fn write_feature_table(
             fmt(decoy_cos),
             u8::from(accepted(row, settings)),
             t.evidence.as_str(),
+            fmt(row.match_score.map_or(f64::NAN, f64::from)),
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
     }
@@ -1252,7 +1713,11 @@ fn write_rollup_tables(
             .get(&(run.clone(), peptide.clone()))
             .copied()
             .unwrap_or(0.0);
-        let share = if total > 0.0 { g.area / total } else { f64::NAN };
+        let share = if total > 0.0 {
+            g.area / total
+        } else {
+            f64::NAN
+        };
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -1341,11 +1806,8 @@ fn write_rollup_tables(
         std::fs::File::create(&protein_path)
             .map_err(|e| format!("{}: {e}", protein_path.display()))?,
     );
-    writeln!(
-        out,
-        "Run\tProtein\tGlycopeptides\tSummedArea\tTop3"
-    )
-    .map_err(|e| format!("{}: {e}", protein_path.display()))?;
+    writeln!(out, "Run\tProtein\tGlycopeptides\tSummedArea\tTop3")
+        .map_err(|e| format!("{}: {e}", protein_path.display()))?;
     // Cross-run protein matrix, the same pivot: per run, the protein's summed
     // glycopeptide area and Top3 (empty where the run quantified none).
     let mut protein_matrix: HashMap<String, HashMap<String, (f64, f64)>> = HashMap::new();
@@ -1353,18 +1815,17 @@ fn write_rollup_tables(
         let mut sorted = areas.clone();
         sorted.sort_by(|a, b| b.total_cmp(a));
         let top3: f64 = sorted.iter().take(3).sum();
-        protein_matrix.entry(acc.clone()).or_default().insert(
-            run.clone(),
-            (areas.iter().sum::<f64>(), top3),
-        );
+        protein_matrix
+            .entry(acc.clone())
+            .or_default()
+            .insert(run.clone(), (areas.iter().sum::<f64>(), top3));
     }
     let protein_matrix_path = output_path(pin, "protein_matrix");
     let mut pout = std::io::BufWriter::new(
         std::fs::File::create(&protein_matrix_path)
             .map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?,
     );
-    write!(pout, "Protein")
-        .map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?;
+    write!(pout, "Protein").map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?;
     for name in run_names {
         write!(pout, "\t{name}_SummedArea\t{name}_Top3")
             .map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?;
@@ -1373,8 +1834,7 @@ fn write_rollup_tables(
     let mut protein_matrix_rows: Vec<_> = protein_matrix.iter().collect();
     protein_matrix_rows.sort_by(|a, b| a.0.cmp(b.0));
     for (acc, per_run) in protein_matrix_rows {
-        write!(pout, "{acc}")
-            .map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?;
+        write!(pout, "{acc}").map_err(|e| format!("{}: {e}", protein_matrix_path.display()))?;
         for name in run_names {
             match per_run.get(*name) {
                 Some((sum, top3)) => write!(pout, "\t{}\t{}", fmt(*sum), fmt(*top3)),
@@ -1431,12 +1891,10 @@ fn site_label(residues: &[u8], post: u8, core: GlycanCore) -> String {
             [only] => format!("N{}", only + 1),
             _ => "N?".to_string(),
         },
-        GlycanCore::OGlycan => {
-            match andes_glyco::sequon::all_ser_thr_sites(residues).as_slice() {
-                [only] => format!("{}{}", residues[*only] as char, only + 1),
-                _ => "S/T?".to_string(),
-            }
-        }
+        GlycanCore::OGlycan => match andes_glyco::sequon::all_ser_thr_sites(residues).as_slice() {
+            [only] => format!("{}{}", residues[*only] as char, only + 1),
+            _ => "S/T?".to_string(),
+        },
     }
 }
 
@@ -1453,9 +1911,10 @@ fn proteins_of(
         .iter()
         .filter_map(|&c| candidates.get(c as usize))
         .map(|c| {
-            index
-                .protein_at(c.protein_index)
-                .map_or_else(|| format!("PROT_{}", c.protein_index), |p| p.accession.clone())
+            index.protein_at(c.protein_index).map_or_else(
+                || format!("PROT_{}", c.protein_index),
+                |p| p.accession.clone(),
+            )
         })
         .collect::<Vec<_>>()
         .join(";")
@@ -1530,6 +1989,7 @@ mod tests {
             core: GlycanCore::NGlycan,
             debug: false,
             mbr: false,
+            match_train: None,
         }
     }
 
@@ -1557,6 +2017,8 @@ mod tests {
             ppm: 0.0,
             anchor_rt,
             envelope: extracted_envelope(&f.envelope(ENVELOPE_ISOTOPES), 0),
+            search_s: 0.0,
+            donor: None,
         }
     }
 
@@ -1591,16 +2053,8 @@ mod tests {
     fn measures_a_synthetic_glycopeptide_envelope() {
         let t = target(800.0, 2, 97.0);
         let index = synthetic_run(&t);
-        let part = measure_run(
-            &index,
-            std::slice::from_ref(&t),
-            &[0],
-            &LfqParams::default(),
-        );
-        assert_eq!(part.len(), 1);
-        let (i, feature, decoy) = &part[0];
-        assert_eq!(*i, 0);
-        let f = feature.as_ref().expect("feature");
+        let m = measure_identified(&index, &t, &LfqParams::default());
+        let f = m.feature.as_ref().expect("feature");
         assert!((f.apex_rt - 100.0).abs() <= 1.0, "{f:?}");
         assert!(f.cosine > 0.99, "{f:?}");
         assert!(f.n_isotopes_found >= MIN_ISOTOPES as u32, "{f:?}");
@@ -1610,7 +2064,7 @@ mod tests {
         let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
         assert!((f.area / expected - 1.0).abs() < 0.03, "{f:?}");
         // The shifted decoy twin finds nothing in this clean run.
-        assert!(decoy.is_none(), "{decoy:?}");
+        assert!(m.decoy.is_none(), "{:?}", m.decoy);
     }
 
     #[test]
@@ -1624,13 +2078,8 @@ mod tests {
         f.add(Formula::glycan(8, 2, 0, 0, 0));
         t.envelope = extracted_envelope(&f.envelope(ENVELOPE_ISOTOPES), 1);
         let index = synthetic_run(&t);
-        let part = measure_run(
-            &index,
-            std::slice::from_ref(&t),
-            &[0],
-            &LfqParams::default(),
-        );
-        let f = part[0].1.as_ref().expect("feature");
+        let m = measure_identified(&index, &t, &LfqParams::default());
+        let f = m.feature.as_ref().expect("feature");
         assert!((f.apex_rt - 100.0).abs() <= 1.0, "{f:?}");
         assert!(f.cosine > 0.99, "{f:?}");
     }
@@ -1664,22 +2113,12 @@ mod tests {
         // changes the cosine, not the quantity. With the envelope sum it
         // would lose the fraction those channels carried.
         let t = target(800.0, 2, 97.0);
-        let full = measure_run(
-            &synthetic_run(&t),
-            std::slice::from_ref(&t),
-            &[0],
-            &LfqParams::default(),
-        );
-        let mono_only = measure_run(
-            &synthetic_run_mono_only(&t),
-            std::slice::from_ref(&t),
-            &[0],
-            &LfqParams::default(),
-        );
-        let a = full[0].1.as_ref().expect("full feature").area;
-        let b = mono_only[0].1.as_ref().expect("mono-only feature").area;
+        let full = measure_identified(&synthetic_run(&t), &t, &LfqParams::default());
+        let mono_only = measure_identified(&synthetic_run_mono_only(&t), &t, &LfqParams::default());
+        let a = full.feature.as_ref().expect("full feature").area;
+        let b = mono_only.feature.as_ref().expect("mono-only feature").area;
         assert!((a / b - 1.0).abs() < 0.03, "{a} vs {b}");
-        let f = mono_only[0].1.as_ref().unwrap();
+        let f = mono_only.feature.as_ref().unwrap();
         let expected = f.isotope_areas[0] / t.envelope[0];
         assert!((f.area / expected - 1.0).abs() < 1e-12, "{f:?}");
     }
@@ -1706,6 +2145,8 @@ mod tests {
             decoy: None,
             score: Some(score),
             q: Some(q),
+            match_score: None,
+            decoy_match: None,
         }
     }
 
@@ -1777,7 +2218,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = dir.path().join("run.glyco.pin");
         // q = 0.5 is above the feature FDR; the MS2 identification is the
-        // evidence, so the feature still enters the tables (pGlycoQuant never
+        // evidence, so the feature still enters the tables (the method never
         // re-filters an identification on MS1 decoy evidence).
         let identified = row(target(800.0, 2, 97.0), 100.0, 0.9, 0.5);
         // A transfer with the same q is rejected: its feature is its only
@@ -1786,7 +2227,8 @@ mod tests {
         transfer.target.evidence = Evidence::Transferred;
         transfer.target.scan = 0;
         transfer.target.spec_id = "donor_mbr_1".into();
-        let kept = write_rollup_tables(&pin, &[identified, transfer], &["r1"], &settings()).unwrap();
+        let kept =
+            write_rollup_tables(&pin, &[identified, transfer], &["r1"], &settings()).unwrap();
         assert_eq!(kept.glycopeptides, 1);
 
         let q = read(&dir.path().join("run.glyco.quant.tsv"));
@@ -1944,6 +2386,8 @@ mod tests {
             decoy: None,
             score: Some(score),
             q: Some(q),
+            match_score: None,
+            decoy_match: None,
         }
     }
 
@@ -1967,7 +2411,9 @@ mod tests {
         rejected.score = None;
         rows.push(rejected);
 
-        let (transfers, counts) = build_transfers(&rows, &["r1", "r2"], &settings());
+        let settings = settings();
+        let alignment = Alignment::build(&rows, &["r1", "r2"], &settings);
+        let (transfers, counts) = build_transfers(&rows, &["r1", "r2"], &settings, &alignment);
         assert_eq!(counts.maps, 2, "both runs have an RT map");
         assert_eq!(counts.anchors, n);
         assert_eq!(counts.candidates, 1);
@@ -1985,7 +2431,11 @@ mod tests {
             t.anchor_rt
         );
         // Clean anchors leave no residual, so the window is the floor.
-        assert!((t.window_s - MBR_MIN_WINDOW_S).abs() < 1e-9, "{:?}", t.window_s);
+        assert!(
+            (t.window_s - MBR_MIN_WINDOW_S).abs() < 1e-9,
+            "{:?}",
+            t.window_s
+        );
     }
 
     #[test]
@@ -1998,7 +2448,9 @@ mod tests {
             rows.push(identified_row(k, 1, "r2", rt + 10.0, 0.01, 10.0));
         }
         rows.push(identified_row(999, 0, "r1", 500.0, 0.01, 20.0));
-        let (transfers, counts) = build_transfers(&rows, &["r1", "r2"], &settings());
+        let settings = settings();
+        let alignment = Alignment::build(&rows, &["r1", "r2"], &settings);
+        let (transfers, counts) = build_transfers(&rows, &["r1", "r2"], &settings, &alignment);
         assert_eq!(counts.maps, 1, "only the reference run is mapped");
         assert_eq!(counts.candidates, 0);
         assert!(transfers.is_empty(), "{transfers:?}");

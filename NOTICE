@@ -38,7 +38,13 @@ annotated MS/MS spectra of publicly available proteomics datasets (the MsNet
 reanalysis collection of PRIDE and partner-repository projects; the benchmark
 accessions PXD070049, PXD001819, PXD007683, PXD007653, PXD005553, PXD002047,
 PXD053748, PXD064202, PXD014502 and PXD005411 were excluded) and are distributed
-under the Apache License, Version 2.0, with andes. The third-party predictor
+under the Apache License, Version 2.0, with andes. The glyco MBR match-scoring
+weights (`resources/quant/glyco_mbr_model.txt`) were trained by the andes authors
+on labels andes generates itself (`--glyco-mbr-match-train`) from its own
+benchmark runs, and are distributed under the Apache License, Version 2.0, with
+andes. Their network (a 10-64-32-8-2 MLP and the training recipe of Zeng et
+al., Nat. Commun. 2022) is reimplemented from the published method; no
+third-party match-model weights are redistributed. The third-party predictor
 models that `--predict peptdeep-ms2`, `peptdeep-rt` and `deeplc-rt` load
 (AlphaPeptDeep, DeepLC) are not distributed with andes; users export or obtain
 them under their own terms (see `crates/onnx-infer/MODELS.md`).

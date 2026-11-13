@@ -112,9 +112,14 @@ quant:
   # lfq_gaussian_width: 12       # experimental Gaussian peak width (s); unset = Savitzky-Golay
   # lfq_min_cosine: 0.7          # envelope cosine below which a feature is not accepted in lfq.parquet
   # lfq_feature_fdr: 0.05
+  # label: silac2               # labelled pairs: silac2|silac3|dimethyl2|dimethyl3 or [][Lys8,Arg10]-style channels
+  # label_reference: 1           # reference channel of the label log-ratios (1-based)
+  # label_fdr: 0.05              # quality q-value of a channel matched without an identification (internal)
+  # label_mbr_fdr: 0.05          # transfer q-value of --label --mbr (internal)
+  # label_arg_pro: false         # SILAC: fit heavy proline from converted heavy arginine
   # dir: quant_out              # per-run <stem>.ms1.parquet + <stem>.quant.parquet for multi-run quantification
   # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)
-  # mbr: false                   # match-between-runs across the inputs (needs lfq and rescoring, 2+ inputs)
+  # mbr: false                   # match-between-runs across the inputs (needs lfq, tmt or label, rescoring, 2+ inputs)
   # mbr_library_fdr: 0.01        # internal library entry gate (precursor-level), not a reported identification FDR
   # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
   # mbr_wrong_log2: 0.5          # --tmt --mbr: RMS log2 profile deviation that defines a wrong transferred value

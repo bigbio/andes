@@ -466,6 +466,7 @@ mod tests {
             max_length: 40,
             max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
+            max_label_sites: 0,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
             isotope_error_range: -1..=2,

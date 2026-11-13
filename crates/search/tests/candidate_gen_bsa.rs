@@ -29,6 +29,7 @@ fn aa_set_with_carbamidomethyl_oxidation() -> model::AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
@@ -42,6 +43,7 @@ fn aa_set_with_carbamidomethyl_oxidation() -> model::AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()

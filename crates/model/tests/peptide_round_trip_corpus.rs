@@ -21,6 +21,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let ox = Modification {
@@ -34,6 +35,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     let pyro_glu = Modification {
@@ -47,6 +49,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
@@ -177,6 +180,7 @@ fn accession_aa_set() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     // Oxidation WITHOUT accession + 6-dp delta → serializes as `+15.99492`
@@ -192,6 +196,7 @@ fn accession_aa_set() -> AminoAcidSet {
         loss_class: 0,
         annotated_site_mass: None,
         blocks_cleavage: false,
+        parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()

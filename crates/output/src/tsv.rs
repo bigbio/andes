@@ -33,8 +33,10 @@ use search::search_params::SearchParams;
 /// Build the `Modifications` column value for a peptide.
 ///
 /// Returns a `;`-joined list of `"{1-based-position}:{accession}"` entries for
-/// every residue whose `mod_.accession` is `Some`, in ascending position order.
-/// Returns an empty string when no residue carries a CV accession.
+/// every modification with an accession, in ascending position order: one
+/// entry per part of a stacked record (a terminal and a side-chain mod on one
+/// residue give two entries at that position). Returns an empty string when no
+/// residue carries a CV accession.
 ///
 /// Used in TSV output only. PIN omits this column because PIN's `Proteins`
 /// column is rest-of-line (the row writer emits one tab-separated accession
@@ -47,11 +49,13 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
         .residues
         .iter()
         .enumerate()
-        .filter_map(|(i, aa)| {
+        .flat_map(|(i, aa)| {
             aa.mod_
-                .as_ref()
-                .and_then(|m| m.accession.as_deref())
-                .map(|acc| format!("{}:{}", i + 1, acc))
+                .iter()
+                .flat_map(|m| m.components())
+                .filter_map(|m| m.accession.as_deref())
+                .map(move |acc| format!("{}:{}", i + 1, acc))
+                .collect::<Vec<_>>()
         })
         .collect();
     // residues are iterated in index order so ascending is guaranteed, but
@@ -612,6 +616,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let m_ox = AminoAcid {
@@ -790,6 +795,7 @@ mod tests {
             loss_class: 0,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         }
     }

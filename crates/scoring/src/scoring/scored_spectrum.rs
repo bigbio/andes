@@ -2652,6 +2652,7 @@ mod tests {
             loss_class: 1,
             annotated_site_mass: None,
             blocks_cleavage: false,
+            parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
         let t = AminoAcid::standard(b'T').unwrap().with_mod(m);

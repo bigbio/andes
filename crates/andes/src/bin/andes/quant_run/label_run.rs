@@ -318,7 +318,7 @@ struct Fitted {
     ids: Vec<Option<ChannelHit>>,
     /// Per channel, the decoy fits' scores and monoisotopic mass errors
     /// (missing channels).
-    decoy_scores: Vec<Vec<(f64, f64, f64)>>,
+    decoy_scores: Vec<Vec<(f64, Option<f64>, f64)>>,
     /// Per channel, another identified peptide of the run sits on it.
     claimed: Vec<bool>,
     transfer_q: Option<f64>,
@@ -825,7 +825,7 @@ pub(super) fn quantify(
                         for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
-                                decoy_scores[c].push(df.as_ref().map_or((0.0, 0.0, 0.0), |d| {
+                                decoy_scores[c].push(df.as_ref().map_or((0.0, None, 0.0), |d| {
                                     let ch = &d.channels[c];
                                     (channel_score(ch), ch.mass_err_ppm, ch.apex_offset)
                                 }));
@@ -881,7 +881,7 @@ pub(super) fn quantify(
                 .flat_map(|f| {
                     (0..n_ch)
                         .filter(|&c| f.ids[c].is_some() && f.fit.channels[c].llr >= MIN_WIDTH_LLR)
-                        .map(|c| f.fit.channels[c].mass_err_ppm)
+                        .filter_map(|c| f.fit.channels[c].mass_err_ppm)
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -965,7 +965,7 @@ pub(super) fn quantify(
                 let expected = {
                     let v: Vec<f64> = (0..n_ch)
                         .filter(|&k| f.ids[k].is_some())
-                        .map(|k| f.fit.channels[k].mass_err_ppm)
+                        .filter_map(|k| f.fit.channels[k].mass_err_ppm)
                         .collect();
                     if v.is_empty() {
                         center
@@ -1145,15 +1145,11 @@ pub(super) fn quantify(
                     // at that channel's fitted mass error.
                     let c = labelled(hit.cand, spec).map_or(0, |l| l.channel);
                     let calc = g.channel_mz[c];
+                    // No centroid there: no observed m/z and no mass error.
                     let err = f.fit.channels[c].mass_err_ppm;
                     rec.calculated_mz = calc as f32;
-                    if err.is_finite() {
-                        rec.observed_mz = (calc * (1.0 + err * 1e-6)) as f32;
-                        rec.mass_error_ppm = Some(err as f32);
-                    } else {
-                        rec.observed_mz = calc as f32;
-                        rec.mass_error_ppm = None;
-                    }
+                    rec.observed_mz = (calc * (1.0 + err.unwrap_or(0.0) * 1e-6)) as f32;
+                    rec.mass_error_ppm = err.map(|e| e as f32);
                 }
                 if any_transfer {
                     rec.mbr = Some(output::feature_parquet::MbrColumns {
@@ -1247,7 +1243,7 @@ fn transfer(
             .channels
             .iter()
             .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
-            .map_or(0.0, |c| c.mass_err_ppm);
+            .and_then(|c| c.mass_err_ppm);
         // The alignment is calibrated (a real transfer's apex is within its
         // uncertainty of the prediction, `rt_z` ~ N(0, 1)); a decoy that hits
         // another species' envelope sits anywhere in the search window.
@@ -1726,7 +1722,7 @@ mod tests {
             envelope_cos: 0.0,
             coherence: 0.0,
             m1_ratio: 0.0,
-            mass_err_ppm: 0.0,
+            mass_err_ppm: Some(0.0),
             channel_q_value: None,
             group_llr: 0.0,
             transfer: false,

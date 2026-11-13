@@ -842,9 +842,10 @@ pub struct ChannelFit {
     /// Residual at the channel's M−1 (after every modelled part, its own
     /// lower isotopologues included) over `π_0 · max(A, se)`.
     pub m1_ratio: f64,
-    /// Intensity-weighted ppm error of the monoisotopic centroids over
-    /// `t0 ± w` (0 when none).
-    pub mass_err_ppm: f64,
+    /// Intensity-weighted ppm error of the monoisotopic centroids within
+    /// `w` of the channel's apex; `None` when no centroid fell within the
+    /// tolerance there (nothing was measured at the channel's m/z).
+    pub mass_err_ppm: Option<f64>,
     /// Elution centroid of the channel's own signal (monoisotope and M+1,
     /// the other channels' modelled parts removed, positive values over
     /// `t0 ± 2w` of the channel's profile) minus the profile's apex, seconds;
@@ -1457,7 +1458,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                 envelope_cos,
                 coherence,
                 m1_ratio,
-                mass_err_ppm: if sw > 0.0 { swe / sw } else { 0.0 },
+                mass_err_ppm: (sw > 0.0).then(|| swe / sw),
                 apex_offset,
                 trace_quantity,
             }
@@ -1552,7 +1553,11 @@ pub fn decoy_min_sep(mass: f64, tol_ppm: f64) -> f64 {
 /// channels), at the run's mass-error spread `sigma_ppm`. A decoy that lands
 /// on another species' envelope sits anywhere in the tolerance window; a real
 /// channel sits where its identified channels do.
-pub fn mass_factor(err_ppm: f64, expected_ppm: f64, sigma_ppm: f64) -> f64 {
+pub fn mass_factor(err_ppm: Option<f64>, expected_ppm: f64, sigma_ppm: f64) -> f64 {
+    // No centroid at the channel's m/z near its apex: no evidence for it.
+    let Some(err_ppm) = err_ppm else {
+        return 0.0;
+    };
     let d = (err_ppm - expected_ppm) / sigma_ppm.max(1e-3);
     (-0.5 * d * d).exp()
 }
@@ -2094,6 +2099,15 @@ mod tests {
         assert!((fit.t0 - 100.0).abs() < 1.0, "apex {}", fit.t0);
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!(r.abs() < 0.15, "{r}");
+    }
+
+    /// A channel with no centroid at its m/z near its apex has no mass
+    /// evidence: it earns no mass credit, unlike a measured one at 0 ppm.
+    #[test]
+    fn unmeasured_channel_earns_no_mass_credit() {
+        assert_eq!(mass_factor(None, 0.0, 2.0), 0.0);
+        assert!((mass_factor(Some(0.0), 0.0, 2.0) - 1.0).abs() < 1e-12);
+        assert!(mass_factor(Some(4.0), 0.0, 2.0) < 0.2);
     }
 
     #[test]

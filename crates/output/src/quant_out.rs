@@ -764,7 +764,9 @@ pub struct LabelRow {
     pub envelope_cos: f64,
     pub coherence: f64,
     pub m1_ratio: f64,
-    pub mass_err_ppm: f64,
+    /// Mass error of the channel's monoisotopic centroids near its apex;
+    /// `None` when no centroid fell within the tolerance there.
+    pub mass_err_ppm: Option<f64>,
     /// Quality q-value of a matched channel (match between channels).
     pub channel_q_value: Option<f64>,
     /// Log-likelihood ratio of the whole group fit.
@@ -836,7 +838,7 @@ fn label_schema() -> Schema {
         f("envelope_cos", DataType::Float64, false),
         f("coherence", DataType::Float64, false),
         f("m1_ratio", DataType::Float64, false),
-        f("mass_err_ppm", DataType::Float64, false),
+        f("mass_err_ppm", DataType::Float64, true),
         f("channel_q_value", DataType::Float64, true),
         f("group_llr", DataType::Float64, false),
         f("transfer", DataType::Boolean, false),
@@ -888,20 +890,20 @@ fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, S
         rt_psm.append_option(r.rt_psm);
         labelled.append_option(r.labelled_peptidoform.as_deref());
         for (b, v) in f64s.iter_mut().zip([
-            r.mz,
-            r.rt_apex,
-            r.rt_shift,
-            r.width,
-            r.quantity,
-            r.quantity_se,
-            r.quantity_upper,
-            r.llr,
-            r.envelope_cos,
-            r.coherence,
-            r.m1_ratio,
+            Some(r.mz),
+            Some(r.rt_apex),
+            Some(r.rt_shift),
+            Some(r.width),
+            Some(r.quantity),
+            Some(r.quantity_se),
+            Some(r.quantity_upper),
+            Some(r.llr),
+            Some(r.envelope_cos),
+            Some(r.coherence),
+            Some(r.m1_ratio),
             r.mass_err_ppm,
         ]) {
-            b.append_value(v);
+            b.append_option(v);
         }
         channel_q.append_option(r.channel_q_value);
         group_llr.append_value(r.group_llr);
@@ -1059,7 +1061,7 @@ mod tests {
             envelope_cos: 0.99,
             coherence: 0.95,
             m1_ratio: 0.01,
-            mass_err_ppm: 0.5,
+            mass_err_ppm: Some(0.5),
             channel_q_value: Some(0.001),
             group_llr: 900.0,
             transfer: false,

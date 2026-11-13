@@ -1345,15 +1345,25 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
     seen.insert(milli_of(0.0));
     out.push((milli_of(0.0), 0.0));
 
-    // Multisets of forms in non-decreasing index order, each generated once.
+    // Multisets of forms in non-decreasing index order. Many multisets reach
+    // the same sum (labels of equal mass, or of masses summing alike), and
+    // what a state can still reach depends only on (next index, sum,
+    // budgets left): each such state is expanded once. The sum is keyed to
+    // the micro-dalton, far below the milli-dalton offsets it feeds.
+    type State = (usize, i64, u32, u32);
     fn walk(
         items: &[FormDelta],
         start: usize,
         sum: f64,
         budget: (u32, u32),
+        visited: &mut std::collections::HashSet<State>,
         seen: &mut std::collections::HashSet<u64>,
         out: &mut Vec<(u64, f64)>,
     ) {
+        let state = (start, (sum * 1e6).round() as i64, budget.0, budget.1);
+        if !visited.insert(state) {
+            return;
+        }
         for (i, f) in items.iter().enumerate().skip(start) {
             if f.mods > budget.0 || f.labels > budget.1 {
                 continue;
@@ -1368,6 +1378,7 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
                 i,
                 s,
                 (budget.0 - f.mods, budget.1 - f.labels),
+                visited,
                 seen,
                 out,
             );
@@ -1385,7 +1396,8 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
             .filter(|f| f.channel == 0 || f.channel == c)
             .copied()
             .collect();
-        walk(&items, 0, 0.0, budget, &mut seen, &mut out);
+        let mut visited = std::collections::HashSet::new();
+        walk(&items, 0, 0.0, budget, &mut visited, &mut seen, &mut out);
     }
     out
 }
@@ -2106,6 +2118,42 @@ mod tests {
                 "{ch}: {maglk:?}"
             );
         }
+    }
+
+    #[test]
+    fn mass_offsets_of_a_large_label_allowance() {
+        // Five labels of integer masses and 100 label sites (a non-specific
+        // search of a K/R/L/I/V-rich protein): about 96 million multisets,
+        // minutes to walk one by one, but only the sums 0..=1200 they reach.
+        // The walk expands each (index, sum, budget) state once and returns
+        // exactly those sums.
+        let mut b = AminoAcidSetBuilder::new_standard();
+        let mut channels = Vec::new();
+        for (r, d) in [
+            (b'K', 8.0),
+            (b'R', 9.0),
+            (b'L', 10.0),
+            (b'I', 11.0),
+            (b'V', 12.0),
+        ] {
+            let name = format!("Label:{}", r as char);
+            b = b.add_variable_mod(label_mod(&name, d, r, ModLocation::Anywhere));
+            channels.push((name, 1));
+        }
+        let mut params =
+            SearchParams::default_tryptic(b.with_label_channels(channels).build().unwrap());
+        params.max_variable_mods_per_peptide = 0;
+        params.max_label_sites = 100;
+        let mut got: Vec<i64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
+            .into_iter()
+            .map(|(_, d)| d.round() as i64)
+            .collect();
+        got.sort_unstable();
+        // Every sum of at most 100 labels of 8..=12 Da: k labels reach 8k..=12k.
+        let mut want: Vec<i64> = (0..=100i64).flat_map(|k| 8 * k..=12 * k).collect();
+        want.sort_unstable();
+        want.dedup();
+        assert_eq!(got, want);
     }
 
     #[test]

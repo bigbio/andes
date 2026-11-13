@@ -1674,6 +1674,88 @@ mod tests {
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
     }
 
+    /// Four channels with three heavy-proline satellites take seven fit
+    /// components, more than the five channels a specification may have:
+    /// the group is still fitted, every channel with its converted part.
+    #[test]
+    fn four_channels_with_arg_pro_satellites_are_fitted() {
+        use model::scan::Ms1Scan;
+        let spec = LabelSpec::parse("[][Arg6][R+8.014199:6C2N][Arg10]").unwrap();
+        let light = Formula::peptide(b"PEPTIDER".iter().map(|&r| (r, 0.0)));
+        let sites = spec.sites();
+        let counts: Vec<u32> = sites
+            .iter()
+            .map(|s| u32::from(*s == Site::Residue(b'R')))
+            .collect();
+        let envs: Vec<ChannelEnvelope> = (0..4)
+            .map(|c| spec.channel_envelope(c, &sites, &counts, &light))
+            .collect();
+        let z = 2.0;
+        let ml = 478.73;
+        let deltas = [0.0, 6.020129, 8.014199, 10.008269];
+        let mz: Vec<f64> = deltas.iter().map(|d| ml + d / z).collect();
+        let sats: Vec<(usize, f64)> = (1..4)
+            .map(|c| {
+                let arg = spec.channels[c].label_at(Site::Residue(b'R')).unwrap();
+                (c, mz[c] + heavy_proline_delta(arg).unwrap() / z)
+            })
+            .collect();
+        // Channel amplitudes 1 : 0.5 : 0.25 : 2, each heavy one 20 % converted.
+        let amps = [1e6, 0.5e6, 0.25e6, 2e6];
+        let mut species: Vec<(f64, ChannelEnvelope, f64)> = vec![(mz[0], envs[0], amps[0])];
+        for &(c, mp) in &sats {
+            species.push((mz[c], envs[c], 0.8 * amps[c]));
+            species.push((mp, envs[c], 0.2 * amps[c]));
+        }
+        let scans: Vec<Ms1Scan> = (0..200)
+            .map(|i| {
+                let rt = i as f64;
+                let g = (-(rt - 100.0f64).powi(2) / 32.0).exp();
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..40).map(|k| (300.0 + k as f64 * 23.1, 50.0)).collect();
+                for &(m, env, amp) in &species {
+                    for off in -2..=5 {
+                        let v = amp * env.at(off) * g;
+                        if v > 50.0 {
+                            peaks.push((m + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={i}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let g = Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: mz.clone(),
+            envelopes: envs.clone(),
+            deltas: deltas.to_vec(),
+            faims_cv: None,
+            satellites: sats,
+            identity_decoy: false,
+        };
+        let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0; 4]);
+        assert_eq!(p.channel_mz.len(), 7);
+        let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
+        for c in 1..4 {
+            let (r, _) = log2_ratio(&fit.channels[c], &fit.channels[0]).unwrap();
+            let want = (amps[c] / amps[0]).log2();
+            assert!((r - want).abs() < 0.05, "channel {c}: {r} vs {want}");
+            // Channel 2's satellite (+7.014 at z 2) sits 3 mDa from Arg10's
+            // M+4, inseparable at any MS1 tolerance: a little of it is shared.
+            assert!((converted[c].unwrap() - 0.2).abs() < 0.03, "{converted:?}");
+        }
+    }
+
     /// A protein N-terminal acetyl holds the N-terminus, not the first
     /// residue's side chain: light and heavy forms of an acetylated
     /// `KPEPTIDER` name the same label sites (K and R).

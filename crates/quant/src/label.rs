@@ -59,8 +59,12 @@ pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
 /// Isotopes read per channel: M−1 (the check for another envelope) to M+3.
 const READ_OFFSETS: [i32; 5] = [-1, 0, 1, 2, 3];
-/// Most channels a specification may have (the fit enumerates their subsets).
+/// Most channels a specification may have.
 pub const MAX_CHANNELS: usize = 5;
+/// Most components one fit takes: every channel and at most one satellite
+/// per channel (the heavy-proline form of `--label-arg-pro`). The fit
+/// enumerates the subsets of its free components, at most 2^10.
+pub const MAX_COMPONENTS: usize = 2 * MAX_CHANNELS;
 
 /// Where a label sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1122,7 +1126,7 @@ fn robust_sigma(y: &[f64], floor: f64) -> f64 {
 /// Fits `probe` on `ms1`. `None` when the window holds fewer than 3 scans.
 pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> Option<GroupFit> {
     let n_ch = probe.channel_mz.len();
-    if n_ch == 0 || n_ch > MAX_CHANNELS {
+    if n_ch == 0 || n_ch > MAX_COMPONENTS {
         return None;
     }
     let s = probe.s.max(1e-3);

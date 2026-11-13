@@ -94,13 +94,22 @@ pub(crate) fn title_prefix_for(file_stem: &str) -> Option<String> {
     Some(format!("{file_stem}/"))
 }
 
+/// Put `prefix` before every title; a spectrum without a title is named by
+/// its scan. The title is the `SpecId` of the tab-separated outputs (PIN,
+/// TSVs), so a tab or a line break in it becomes a space.
 pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
+    const SEPARATORS: [char; 3] = ['\t', '\n', '\r'];
     for spec in chunk.iter_mut() {
-        if spec.title.is_empty() {
-            spec.title = format!("{prefix}scan={}", spec.scan.unwrap_or(0));
+        let title = if spec.title.is_empty() {
+            format!("{prefix}scan={}", spec.scan.unwrap_or(0))
         } else {
-            spec.title = format!("{prefix}{}", spec.title);
-        }
+            format!("{prefix}{}", spec.title)
+        };
+        spec.title = if title.contains(SEPARATORS) {
+            title.replace(SEPARATORS, " ")
+        } else {
+            title
+        };
     }
 }
 
@@ -676,6 +685,164 @@ pub(crate) fn detect_instrument_type_for_path(
     detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
 }
 
+/// Dominant activation and analyzer of one input, each read from the metadata
+/// on its own: an mzML or a `.raw` whose scans name no activation still names
+/// its analyzer. MGF and unreadable inputs give `(None, None)`.
+pub(crate) fn detect_acquisition_metadata(
+    spectrum_path: &Path,
+) -> (Option<ActivationMethod>, Option<InstrumentType>) {
+    let (is_mzml, is_raw, is_d, _is_mgf) = input_format_flags(spectrum_path);
+    if is_mzml {
+        (
+            detect_dominant_activation(spectrum_path),
+            detect_instrument_type_for_path(spectrum_path),
+        )
+    } else if is_raw {
+        #[cfg(feature = "thermo")]
+        {
+            input::thermo::detect_activation_instrument(spectrum_path, 64)
+        }
+        #[cfg(not(feature = "thermo"))]
+        {
+            (None, None)
+        }
+    } else if is_d {
+        // timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
+        (Some(ActivationMethod::CID), Some(InstrumentType::TimsTOF))
+    } else {
+        (None, None)
+    }
+}
+
+/// Compare a further `--spectrum` input with the first one, whose metadata
+/// selects the model, the fragment tolerance and the score features of the
+/// whole search.
+///
+/// `Err` when the two analyzers are of different resolution classes: the
+/// run-level tolerance would be wrong for one of the files. `Ok(Some(_))` is a
+/// warning for a difference the search tolerates (another analyzer of the same
+/// class, another dominant activation, metadata missing on one side).
+pub(crate) fn compare_with_first_input(
+    first_path: &Path,
+    first: (Option<ActivationMethod>, Option<InstrumentType>),
+    other_path: &Path,
+    other: (Option<ActivationMethod>, Option<InstrumentType>),
+) -> Result<Option<String>, String> {
+    let class = |i: InstrumentType| {
+        if i.is_high_resolution() {
+            "high"
+        } else {
+            "low"
+        }
+    };
+    let analyzer_name = |i: Option<InstrumentType>| i.map_or("not recorded", |i| i.name());
+    let activation_name = |a: Option<ActivationMethod>| a.map_or("not recorded", |a| a.name());
+    if let (Some(a), Some(b)) = (first.1, other.1) {
+        if a.is_high_resolution() != b.is_high_resolution() {
+            return Err(format!(
+                "--spectrum inputs differ in fragment resolution: {} is {}-resolution MS2 ({}), \
+                 {} is {}-resolution MS2 ({}). The model, the fragment tolerance and the score \
+                 features are chosen once per search, from the first input; search these files \
+                 separately.",
+                first_path.display(),
+                class(a),
+                a.name(),
+                other_path.display(),
+                class(b),
+                b.name(),
+            ));
+        }
+    }
+    if first == other {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "WARN: {} differs from the first input {}: analyzer {} vs {}, dominant activation {} vs \
+         {}. The run-level model and tolerances come from the first input.",
+        other_path.display(),
+        first_path.display(),
+        analyzer_name(other.1),
+        analyzer_name(first.1),
+        activation_name(other.0),
+        activation_name(first.0),
+    )))
+}
+
+#[cfg(test)]
+mod acquisition_metadata_tests {
+    use super::{compare_with_first_input, detect_acquisition_metadata};
+    use model::{activation::ActivationMethod, InstrumentType};
+    use std::path::Path;
+
+    const HCD: Option<ActivationMethod> = Some(ActivationMethod::HCD);
+    const CID: Option<ActivationMethod> = Some(ActivationMethod::CID);
+
+    fn compare(
+        first: (Option<ActivationMethod>, Option<InstrumentType>),
+        other: (Option<ActivationMethod>, Option<InstrumentType>),
+    ) -> Result<Option<String>, String> {
+        compare_with_first_input(Path::new("a.mzML"), first, Path::new("b.mzML"), other)
+    }
+
+    #[test]
+    fn identical_inputs_are_silent() {
+        let q = (HCD, Some(InstrumentType::QExactive));
+        assert_eq!(compare(q, q), Ok(None));
+        assert_eq!(compare((None, None), (None, None)), Ok(None));
+    }
+
+    #[test]
+    fn different_resolution_classes_are_an_error() {
+        let err = compare(
+            (HCD, Some(InstrumentType::QExactive)),
+            (CID, Some(InstrumentType::LowRes)),
+        )
+        .unwrap_err();
+        assert!(err.contains("a.mzML is high-resolution MS2"), "{err}");
+        assert!(err.contains("b.mzML is low-resolution MS2"), "{err}");
+        // Also without an activation on either side.
+        assert!(compare(
+            (None, Some(InstrumentType::LowRes)),
+            (None, Some(InstrumentType::OrbitrapAstral)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn same_class_differences_are_a_warning() {
+        let w = compare(
+            (HCD, Some(InstrumentType::QExactive)),
+            (HCD, Some(InstrumentType::OrbitrapAstral)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            w.contains("b.mzML differs from the first input a.mzML"),
+            "{w}"
+        );
+        let w = compare(
+            (HCD, Some(InstrumentType::QExactive)),
+            (CID, Some(InstrumentType::QExactive)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(w.contains("dominant activation CID vs HCD"), "{w}");
+        // Metadata on one side only cannot show a class conflict.
+        let w = compare((HCD, Some(InstrumentType::QExactive)), (None, None))
+            .unwrap()
+            .unwrap();
+        assert!(w.contains("analyzer not recorded vs"), "{w}");
+    }
+
+    #[test]
+    fn mgf_has_no_acquisition_metadata() {
+        assert_eq!(
+            detect_acquisition_metadata(Path::new("no-such-file.mgf")),
+            (None, None)
+        );
+    }
+}
+
 #[cfg(test)]
 mod require_spectra_tests {
     use super::{require_spectra, with_first_read_error};
@@ -789,5 +956,34 @@ mod format_routing_tests {
             input_format_flags(Path::new("foo.mgf")),
             (false, false, false, true)
         );
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::prefix_spectrum_titles;
+    use model::Spectrum;
+
+    fn titled(title: &str, scan: Option<i32>) -> Spectrum {
+        Spectrum {
+            title: title.to_string(),
+            scan,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn titles_get_the_prefix_and_untitled_spectra_their_scan() {
+        let mut spectra = vec![titled("Scan 42", Some(42)), titled("", Some(7))];
+        prefix_spectrum_titles(&mut spectra, "run/");
+        assert_eq!(spectra[0].title, "run/Scan 42");
+        assert_eq!(spectra[1].title, "run/scan=7");
+    }
+
+    #[test]
+    fn column_and_row_separators_in_a_title_become_spaces() {
+        let mut spectra = vec![titled("a\tb\r\nc", Some(1))];
+        prefix_spectrum_titles(&mut spectra, "ru\tn/");
+        assert_eq!(spectra[0].title, "ru n/a b  c");
     }
 }

@@ -135,6 +135,10 @@ pub struct AminoAcidSet {
     forms: Vec<FormList>,
     /// The declared modifications, fixed then variable, in declaration order.
     declared: Vec<&'static Modification>,
+    /// The declared modifications behind each stacked record (several mods on
+    /// one residue, see [`stack_mods`]), in stacking order, keyed by the
+    /// address of the stacked record.
+    stack_parts: FxHashMap<usize, Vec<&'static Modification>>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
     /// per-call rebuild in the node-scoring DP hot path (PrimitiveAaGraph::new).
     aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
@@ -279,6 +283,15 @@ impl AminoAcidSet {
     /// so labeled/non-standard fixed mods are reported, not dropped.
     pub fn distinct_mods(&self) -> Vec<&'static Modification> {
         self.declared.clone()
+    }
+
+    /// The declared modifications stacked into `m` on one residue, in stacking
+    /// order; `None` when `m` is not a stacked record of this set (a single
+    /// declared modification, or a record of another set).
+    pub fn stack_parts(&self, m: &Modification) -> Option<&[&'static Modification]> {
+        self.stack_parts
+            .get(&(std::ptr::from_ref(m) as usize))
+            .map(Vec::as_slice)
     }
 
     /// Canonical, order-independent fingerprint of the FIXED modifications that
@@ -619,6 +632,7 @@ impl AminoAcidSetBuilder {
                 .map(|(_, c)| *c)
         };
         let mut stacked: FxHashMap<(u8, Vec<usize>), &'static Modification> = FxHashMap::default();
+        let mut stack_parts: FxHashMap<usize, Vec<&'static Modification>> = FxHashMap::default();
         let mut forms = vec![FormList::default(); FORM_TABLE_LEN];
         for &r in STANDARD_RESIDUES {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
@@ -695,6 +709,9 @@ impl AminoAcidSetBuilder {
                                                 r, &parts, slots,
                                             ))
                                         });
+                                        stack_parts
+                                            .entry(std::ptr::from_ref(m) as usize)
+                                            .or_insert_with(|| parts.clone());
                                         std_aa.clone().with_mod(m)
                                     }
                                 };
@@ -796,6 +813,7 @@ impl AminoAcidSetBuilder {
         Ok(AminoAcidSet {
             forms,
             declared: fixed_mods.into_iter().chain(variable_mods).collect(),
+            stack_parts,
             aa_lists_cache,
             has_cterm_mods,
             min_aa_mass,

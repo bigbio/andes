@@ -481,13 +481,14 @@ fn percolator_scores(targets: &Path, decoys: &Path, capacity: usize) -> Result<S
 }
 
 /// The columns of a run table that give a precursor's metadata.
-const META_COLUMNS: [&str; 6] = [
+const META_COLUMNS: [&str; 7] = [
     "precursor_key",
     "is_decoy",
     "mz",
     "charge",
     "envelope",
     "proteins",
+    "isotope_share",
 ];
 /// The columns of a run table that join its PSMs to the rescoring result.
 const JOIN_COLUMNS: [&str; 7] = [
@@ -511,6 +512,8 @@ struct KeyMeta {
     /// [`ENVELOPE_LEN`].
     envelope: Result<[f32; ENVELOPE_LEN], usize>,
     proteins: String,
+    /// Share of the whole isotope pattern held by the envelope's isotopes.
+    isotope_share: f32,
 }
 
 fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
@@ -527,6 +530,7 @@ impl KeyMeta {
             charge: row.charge,
             envelope: envelope_of(&row.envelope),
             proteins: row.proteins.clone(),
+            isotope_share: row.isotope_share,
         }
     }
 }
@@ -792,11 +796,19 @@ pub(crate) fn build_and_write_library(
                 paths[m.run].display()
             )
         })?;
+        if !(m.isotope_share > 0.0 && m.isotope_share <= 1.0) {
+            return Err(format!(
+                "{}: precursor {key:?} has an isotope share of {}, outside (0, 1]",
+                paths[m.run].display(),
+                m.isotope_share
+            ));
+        }
         meta.push(PrecursorMeta {
             key: key.clone(),
             mz: m.mz,
             charge: m.charge,
             envelope,
+            isotope_share: m.isotope_share,
         });
         proteins.push(m.proteins.clone());
         target_key.push(m.has_target);
@@ -1302,7 +1314,7 @@ impl DonorPsms {
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
     eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
+        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; {} identified pairs and {} of their decoy rows measured on the larger peak at the position the other runs predict; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -1315,6 +1327,8 @@ fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
         c.pseudo_other_component,
         c.other_component,
         c.not_selected,
+        c.consensus_peak,
+        c.consensus_peak_decoys,
         c.scales
             .spacing_s
             .map_or_else(|| "unknown".to_string(), |s| format!("{s:.3} s")),
@@ -2142,6 +2156,7 @@ mod tests {
                 mz: 500.0 + i as f64,
                 charge: 2,
                 envelope: [0.55, 0.3, 0.1, 0.05],
+                isotope_share: 1.0,
             })
             .collect();
         let library = build_library(&[], meta, 2, 0.01, 0.01, None, &AlignParams::default());
@@ -2304,6 +2319,7 @@ mod tests {
                 search_score: 10.0,
                 faims_cv: None,
                 envelope: vec![0.55, 0.3, 0.1, 0.05],
+                isotope_share: 1.0,
                 proteins: "P1".into(),
                 ion_mobility: None,
             })
@@ -2516,6 +2532,7 @@ mod tests {
             search_score: 10.0,
             faims_cv: None,
             envelope: vec![0.55, 0.3, 0.1, 0.05],
+            isotope_share: 1.0,
             proteins: "P1".into(),
             ion_mobility: None,
         };

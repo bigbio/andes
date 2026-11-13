@@ -60,14 +60,13 @@ impl Acquisition {
     /// in the metadata, then the `--fragment-tol-*` unit, then the peak
     /// inference, then low resolution.
     pub(crate) fn resolve(
-        detected: Option<(ActivationMethod, Option<InstrumentType>)>,
+        activation: Option<ActivationMethod>,
+        analyzer: Option<InstrumentType>,
         fragment_tol_ppm: Option<f64>,
         fragment_tol_da: Option<f64>,
         peak_evidence: Option<input::ResolutionEvidence>,
         meta: input::Ms2MetaSample,
     ) -> Self {
-        let activation = detected.map(|(a, _)| a);
-        let analyzer = detected.and_then(|(_, i)| i);
         let inferred = peak_evidence.as_ref().and_then(|e| e.high_res);
         let (high_res, resolution_source) = if let Some(i) = analyzer {
             (i.is_high_resolution(), ResolutionSource::Metadata)
@@ -227,7 +226,8 @@ mod tests {
     #[test]
     fn metadata_analyzer_decides_the_class_whatever_the_model() {
         let a = Acquisition::resolve(
-            Some((ActivationMethod::ETD, Some(InstrumentType::QExactive))),
+            Some(ActivationMethod::ETD),
+            Some(InstrumentType::QExactive),
             None,
             Some(0.5),
             Some(evidence(Some(false))),
@@ -236,7 +236,8 @@ mod tests {
         assert!(a.high_res);
         assert_eq!(a.resolution_source, ResolutionSource::Metadata);
         let a = Acquisition::resolve(
-            Some((ActivationMethod::CID, Some(InstrumentType::LowRes))),
+            Some(ActivationMethod::CID),
+            Some(InstrumentType::LowRes),
             Some(20.0),
             None,
             None,
@@ -245,9 +246,27 @@ mod tests {
         assert!(!a.high_res);
     }
 
+    /// The analyzer decides the class also when no scan names its activation.
+    #[test]
+    fn analyzer_without_activation_still_decides_the_class() {
+        let a = Acquisition::resolve(
+            None,
+            Some(InstrumentType::OrbitrapAstral),
+            None,
+            None,
+            Some(evidence(Some(false))),
+            meta(&[]),
+        );
+        assert!(a.high_res);
+        assert_eq!(a.resolution_source, ResolutionSource::Metadata);
+        assert_eq!(a.activation, None);
+        assert_eq!(a.analyzer, Some(InstrumentType::OrbitrapAstral));
+    }
+
     #[test]
     fn flags_then_peaks_then_default() {
         let a = Acquisition::resolve(
+            None,
             None,
             Some(10.0),
             None,
@@ -256,11 +275,18 @@ mod tests {
         );
         assert!(a.high_res);
         assert_eq!(a.resolution_source, ResolutionSource::FragmentTolFlag);
-        let a = Acquisition::resolve(None, None, None, Some(evidence(Some(true))), meta(&[]));
+        let a = Acquisition::resolve(
+            None,
+            None,
+            None,
+            None,
+            Some(evidence(Some(true))),
+            meta(&[]),
+        );
         assert!(a.high_res);
         assert_eq!(a.resolution_source, ResolutionSource::Peaks);
         assert_eq!(a.inferred_high_res(), Some(true));
-        let a = Acquisition::resolve(None, None, None, Some(evidence(None)), meta(&[]));
+        let a = Acquisition::resolve(None, None, None, None, Some(evidence(None)), meta(&[]));
         assert!(!a.high_res);
         assert_eq!(a.resolution_source, ResolutionSource::Default);
     }
@@ -268,7 +294,8 @@ mod tests {
     #[test]
     fn predictor_nce_comes_from_an_hcd_run_outside_a_tof() {
         let orbi = Acquisition::resolve(
-            Some((ActivationMethod::HCD, Some(InstrumentType::OrbitrapAstral))),
+            Some(ActivationMethod::HCD),
+            Some(InstrumentType::OrbitrapAstral),
             None,
             None,
             None,
@@ -281,7 +308,8 @@ mod tests {
         );
         // timsTOF records the collision energy in eV.
         let tims = Acquisition::resolve(
-            Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF))),
+            Some(ActivationMethod::CID),
+            Some(InstrumentType::TimsTOF),
             None,
             None,
             None,
@@ -294,7 +322,8 @@ mod tests {
         );
         // An implausible value is not an NCE.
         let odd = Acquisition::resolve(
-            Some((ActivationMethod::HCD, Some(InstrumentType::QExactive))),
+            Some(ActivationMethod::HCD),
+            Some(InstrumentType::QExactive),
             None,
             None,
             None,
@@ -303,7 +332,8 @@ mod tests {
         assert_eq!(odd.predictor_nce(), None);
         // Ion-trap CID energies are not HCD NCEs.
         let cid = Acquisition::resolve(
-            Some((ActivationMethod::CID, Some(InstrumentType::LowRes))),
+            Some(ActivationMethod::CID),
+            Some(InstrumentType::LowRes),
             None,
             None,
             None,
@@ -315,7 +345,8 @@ mod tests {
     #[test]
     fn describe_names_the_class_and_its_source() {
         let a = Acquisition::resolve(
-            Some((ActivationMethod::HCD, Some(InstrumentType::QExactive))),
+            Some(ActivationMethod::HCD),
+            Some(InstrumentType::QExactive),
             None,
             None,
             None,
@@ -336,7 +367,7 @@ mod tests {
     #[test]
     fn ms2_conditions_follow_the_acquisition() {
         let resolve = |act, analyzer, tol_da| {
-            Acquisition::resolve(Some((act, analyzer)), None, tol_da, None, meta(&[]))
+            Acquisition::resolve(Some(act), analyzer, None, tol_da, None, meta(&[]))
         };
         // Astral: orbitrap HCD, mapped to the Exploris family (no Astral training run).
         let astral = resolve(

@@ -410,7 +410,8 @@ fn raw_shares(reporters: &[f32]) -> Option<Vec<f64>> {
 /// squares) or no information.
 pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64]) -> Option<f64> {
     let n = profile.len();
-    let mut groups: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    // Ordered by protein, so the sums below add their terms in one order.
+    let mut groups: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
     for (i, s) in scans.iter().enumerate() {
         if let (Some(g), Some(_)) = (s.protein, eil[i]) {
             if s.reporters.len() == n && summed(&s.reporters) > 0.0 {

@@ -11,7 +11,7 @@ tables.
 
 | tool | file | quantity used | notes |
 |---|---|---|---|
-| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, and `evidence_type` of the same file; `quantity_normalized` is not used |
+| andes | `quant finalize` parquet | `quantity` (raw) | quality columns `quant_q`, `transfer_q`, `library_q`, `measurement_q` (when present) and `evidence_type` of the same file; `quantity_normalized` is not used |
 | MaxQuant | `evidence.txt` | `Intensity`, summed over the evidence rows of a precursor x run | reverse and contaminants removed; the LFQ columns are not used |
 | FragPipe | IonQuant `combined_ion.tsv` | `<run> Intensity` | IonQuant must be run with normalisation off (`--normalization 0`); rows with `Match Type` MBR are transfers |
 | FlashLFQ (PIP-ECHO) | `QuantifiedPeaks.tsv` (`--flashlfq NAME:PEAKS[:PIPQ]`) | `Peak intensity` | key = `Full Sequence` + `/` + `Precursor Charge`, so the identifications given to FlashLFQ must carry andes-form full sequences; `Peak Detection Type` MBR = transfer, its `PIP Q-Value` is kept (`PIPQ` keeps transfers up to that value); decoy-peptide and random-RT peaks are dropped. FlashLFQ sums the charge states of a peptide into one intensity unless run charge-specific |
@@ -30,7 +30,7 @@ andes row rules (`--andes NAME:RULE[@LIBQ]:PATH`), all with `library_q <= 0.01` 
 | `default` | identified rows + transfers with `transfer_q <= 0.01` |
 | `all` | identified rows + every transfer the finalize output carries |
 | `hard-cut` | identified rows + transfers with `quant_q <= --hard-cut` (default 0.01) |
-| `weights` | rows of `all`, with the per-transfer error probability recovered from `quant_q` (running mean of p over a run's transfers sorted by p); the roll-up then uses learned precision weights (the "V" view) |
+| `weights` | rows of `all`, with the per-transfer error probability recovered from `measurement_q` (running mean of p over a run's accepted transfers sorted by p, rows with equal p sharing one value; `quant_q` holds that mean in tables without the column); the roll-up then uses learned precision weights (the "V" view) |
 | `weights-bias` | rows of `weights`; where the table carries `quantity_bias` and `quantity_bias_se` (log2) for a transfer, its quantity is divided by `2**quantity_bias` and the learned class variance of the transfer is scaled by its `quantity_bias_se**2` relative to its class mean. A table without these columns gives the `weights` rows |
 
 MaxQuant and FragPipe rows are used as the tools report them (their own match-between-runs rows included).
@@ -131,8 +131,9 @@ One manifest drives the whole truth suite; nothing is searched or quantified by 
 runs stays with the cluster scripts of the user).
 
 ```
-python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7]
+python3 -m quant_eval.suite --manifest manifest.json --out results/ [--only u9740,qe] [--seeds 42,1,7] [--jobs 3]
 python3 -m quant_eval.board --results results/ > scoreboard.md
+python3 -m quant_eval.compare --results results/ [--build cand] [--arm V] [--tools MQ,FP] [--seed 42] [--only ups27]
 python3 -m quant_eval.gate  --results results/ --candidate cand [--baseline main]
 python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --fasta hye.fasta --rule hard-cut --out-prefix sub/QE
 ```
@@ -146,6 +147,15 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
   PXD014415 false-transfer rate are not above the reference build's at its own quant_q <= 0.01 plus the reference's own seed-to-seed spread of that rate
   (max - min over the quant-model seeds of the manifest; recorded as `matched_tolerance` in the result JSON, 0 with one seed); depth, accuracy and DE are read at that cut.
 - Arms: `X` (transfer_q <= 0.01), `X_V`, `X_H`, `X_I` (identified rows only, the run without match between runs) and `X_M`; a tool's output with match between runs off is another entry of the manifest's `tools` (e.g. `"maxquant": {"MQ": ..., "MQ_noMBR": ...}`).
+- `suite --jobs N`: every (dataset, seed) pair is one unit that writes its own result JSON; with `--jobs` above 1 the units run in N worker
+  processes. The result files do not depend on `--jobs`; the progress lines of the units are interleaved on stderr.
+- `compare.py`: one short table per dataset for one andes build against the tools (default: the last build of the results, and the MaxQuant
+  and FragPipe arms with match between runs). One row per metric: depth, cell accuracy, replicate spread, protein CV, DE calls in the
+  common family and on the arm's own rows, low spike levels. Per tool its value, the difference of andes to it (relative to the tool; a
+  factor from 2x on) and a marker: `✅` andes better, `❌` worse, `≈` equal or the ranges over the quant-model seeds overlap. It reads the
+  result JSONs as `board.py` does and computes nothing new. A manifest with one build (that build as `reference_build`) and the tool
+  outputs is enough for it. The two rows on the brightest cells depend on the reference build (its quantities, with those of the tools,
+  rank the cells), so they can differ between a run with the build as reference and a run with another reference.
 - `board.py`: the one scoreboard table. `gate.py`: pass / fail per criterion of the adoption gate (identified rows, wrong-peak, UPS1
   within 2x, DE by the pairwise TP-and-FDP rule, depth at the matched cut, cost); exit status 1 on any failure.
 - `proteobench.py`: Custom-input file (and metadata JSON) for the ProteoBench DDA precursor-ion modules.
@@ -177,7 +187,7 @@ python3 -m quant_eval.proteobench --finalize fin.parquet --design design.tsv --f
 - Board cosmetics: `within 2x %` (equal to 100 - `err>1 %`) is dropped from the default board, an empty absence rate prints `-`, FlashLFQ is labelled
   peptide-level (charge states summed) and Sage as having no transfer flag (its MBR fills count as identified). `--legacy` prints the earlier columns and labels.
 
-Tests: `python3 tests/test_board_metrics.py`.
+Tests: `python3 tests/test_board_metrics.py`, `python3 tests/test_compare.py`.
 
 Refs #299.
 

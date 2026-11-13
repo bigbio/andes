@@ -3,9 +3,12 @@
 //! Each run gets a log2 offset `o_r(t)` at apex RT `t`, fitted on reference
 //! cells (one log2 quantity `l` per precursor and run, typically the
 //! identified features of high quality). A precursor enters the fit when it
-//! has a reference cell in at least [`NormParams::min_runs`] runs (capped at
-//! the number of runs, and at least 2), counting only runs with at least
-//! [`NormParams::min_cells`] such cells.
+//! has a reference cell in at least [`NormParams::min_runs`] runs, counting
+//! only the active runs: those with at least [`NormParams::min_cells`] such
+//! cells. `min_runs` is capped at the number of active runs (and is at least
+//! 2). Runs that fall short leave one at a time, the one with the fewest
+//! cells first, and the counts are taken again, so a blank or near-empty run
+//! neither takes an offset nor keeps the other runs from being normalised.
 //!
 //! The offsets start at 0 and are refined for [`NormParams::rounds`] rounds:
 //!
@@ -130,7 +133,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
         half_window: params.half_window,
         precursors,
     };
-    let min_runs = params.min_runs.min(n_runs).max(2);
     let mut by_precursor: HashMap<u32, Vec<NormCell>> = HashMap::new();
     for c in cells {
         if (c.run as usize) < n_runs && c.log2_quantity.is_finite() && c.rt.is_finite() {
@@ -140,15 +142,40 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
             }
         }
     }
+    // Shrink the active runs until each holds `min_cells` cells of precursors
+    // seen in `min_runs` active runs, `min_runs` capped at their number: one
+    // run at a time, the failing run with the fewest cells first, since
+    // dropping it lowers `min_runs` for the others.
+    let mut total = vec![0usize; n_runs];
+    for c in by_precursor.values().flatten() {
+        total[c.run as usize] += 1;
+    }
+    let mut active = vec![true; n_runs];
+    let mut min_runs;
+    loop {
+        let n_active = active.iter().filter(|&&a| a).count();
+        if n_active < 2 {
+            return none(0);
+        }
+        min_runs = params.min_runs.min(n_active).max(2);
+        let mut per_run = vec![0usize; n_runs];
+        for v in by_precursor.values() {
+            let in_active = v.iter().filter(|c| active[c.run as usize]).count();
+            if in_active >= min_runs {
+                for c in v.iter().filter(|c| active[c.run as usize]) {
+                    per_run[c.run as usize] += 1;
+                }
+            }
+        }
+        let failing = (0..n_runs)
+            .filter(|&r| active[r] && per_run[r] < params.min_cells)
+            .min_by_key(|&r| (total[r], std::cmp::Reverse(r)));
+        match failing {
+            Some(r) => active[r] = false,
+            None => break,
+        }
+    }
     let eligible = |v: &Vec<NormCell>| v.len() >= min_runs;
-    let mut per_run = vec![0usize; n_runs];
-    for c in by_precursor.values().filter(|v| eligible(v)).flatten() {
-        per_run[c.run as usize] += 1;
-    }
-    let active: Vec<bool> = per_run.iter().map(|&n| n >= params.min_cells).collect();
-    if n_runs < 2 || active.iter().filter(|&&a| a).count() < 2 {
-        return none(0);
-    }
     // Precursor groups over the active runs, in precursor order.
     let mut groups: Vec<Vec<NormCell>> = by_precursor
         .into_values()
@@ -432,9 +459,16 @@ mod tests {
         assert!(!norm.is_normalized(2));
         assert_eq!(norm.normalize(2, 0, 10.0, 1e6), None);
         assert_eq!(norm.precursors, 100);
-        // With min_runs 3 only 10 precursors qualify: no run has 20 cells.
+        // With min_runs 3, run 2 (10 cells) leaves the active runs and
+        // min_runs falls to the two left, so runs 0 and 1 are still normalised.
         let norm = fit(&cells, 3, &NormParams::default());
-        assert!((0..3).all(|r| !norm.is_normalized(r)));
+        assert!(norm.is_normalized(0) && norm.is_normalized(1));
+        assert!(!norm.is_normalized(2));
+        assert_eq!(norm.precursors, 100);
+        // A blank third run (no cells at all) does the same.
+        let two: Vec<NormCell> = cells.iter().filter(|c| c.run != 2).copied().collect();
+        let norm = fit(&two, 3, &NormParams::default());
+        assert!(norm.is_normalized(0) && norm.is_normalized(1) && !norm.is_normalized(2));
         // A single run is never normalised.
         let one: Vec<NormCell> = cells.iter().filter(|c| c.run == 0).copied().collect();
         let norm = fit(&one, 1, &NormParams::default());

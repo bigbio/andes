@@ -581,15 +581,19 @@ fn map_analyzer(a: MassAnalyzer) -> Option<InstrumentType> {
 }
 
 /// Peek the first `peek_n` MS2 scans of a `.raw` and return the dominant
-/// `(activation, instrument)` for param auto-routing, mirroring the mzML
-/// `detect_dominant_activation` / `detect_instrument_type_for_path` helpers so a
-/// CID/ETD/ion-trap `.raw` is not silently scored with the HCD/QExactive model.
-/// Returns `None` if the file can't be opened or no MS2 activation is found.
+/// activation and the dominant analyzer for param auto-routing, mirroring the
+/// mzML `detect_dominant_activation` / `detect_instrument_type_for_path`
+/// helpers so a CID/ETD/ion-trap `.raw` is not silently scored with the
+/// HCD/QExactive model. Each is read on its own: scans that name no known
+/// activation still give the analyzer. `(None, None)` if the file can't be
+/// opened.
 pub fn detect_activation_instrument<P: AsRef<Path>>(
     path: P,
     peek_n: usize,
-) -> Option<(ActivationMethod, Option<InstrumentType>)> {
-    let reader = RawFileReader::open(path.as_ref()).ok()?;
+) -> (Option<ActivationMethod>, Option<InstrumentType>) {
+    let Ok(reader) = RawFileReader::open(path.as_ref()) else {
+        return (None, None);
+    };
     let mut act: HashMap<u8, usize> = HashMap::new();
     let mut inst: HashMap<u8, usize> = HashMap::new();
     let mut seen = 0usize;
@@ -615,23 +619,31 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
         }
     }
     warn_mixed_electron_activation(&act, seen);
-    // Deterministic tie-break (HashMap order is randomised per process).
-    let dominant_act = act
+    dominant_acquisition(act, inst)
+}
+
+/// The most frequent activation and the most frequent analyzer of two tallies
+/// keyed by enum discriminant. An empty tally gives `None` for its side only.
+fn dominant_acquisition(
+    act: HashMap<u8, usize>,
+    inst: HashMap<u8, usize>,
+) -> (Option<ActivationMethod>, Option<InstrumentType>) {
+    let activation = act
         .into_iter()
+        // Deterministic tie-break (HashMap order is randomised per process).
         .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)))
-        .map(|(k, _)| k)?;
-    let activation = match dominant_act {
-        x if x == ActivationMethod::CID as u8 => ActivationMethod::CID,
-        x if x == ActivationMethod::HCD as u8 => ActivationMethod::HCD,
-        x if x == ActivationMethod::ETD as u8 => ActivationMethod::ETD,
-        x if x == ActivationMethod::PQD as u8 => ActivationMethod::PQD,
-        x if x == ActivationMethod::UVPD as u8 => ActivationMethod::UVPD,
-        x if x == ActivationMethod::EThcD as u8 => ActivationMethod::EThcD,
-        // dominant_act always round-trips a known ActivationMethod; a future
-        // variant added to map_dissociation falls back to HCD (the common case)
-        // rather than silently mislabeling it as UVPD.
-        _ => ActivationMethod::HCD,
-    };
+        .map(|(k, _)| match k {
+            x if x == ActivationMethod::CID as u8 => ActivationMethod::CID,
+            x if x == ActivationMethod::HCD as u8 => ActivationMethod::HCD,
+            x if x == ActivationMethod::ETD as u8 => ActivationMethod::ETD,
+            x if x == ActivationMethod::PQD as u8 => ActivationMethod::PQD,
+            x if x == ActivationMethod::UVPD as u8 => ActivationMethod::UVPD,
+            x if x == ActivationMethod::EThcD as u8 => ActivationMethod::EThcD,
+            // The key always round-trips a known ActivationMethod; a future
+            // variant added to map_dissociation falls back to HCD (the common
+            // case) rather than silently mislabeling it as UVPD.
+            _ => ActivationMethod::HCD,
+        });
     let instrument = inst
         .into_iter()
         // Deterministic tie-break (HashMap order is randomised per process).
@@ -644,7 +656,7 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             x if x == InstrumentType::TimsTOF as u8 => InstrumentType::TimsTOF,
             _ => InstrumentType::QExactive,
         });
-    Some((activation, instrument))
+    (activation, instrument)
 }
 
 /// Warn when a run interleaves pure ETD scans with EThcD/ETciD scans (a decision-tree
@@ -777,6 +789,44 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tally(pairs: &[(u8, usize)]) -> HashMap<u8, usize> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn analyzer_is_kept_when_no_scan_names_an_activation() {
+        let (activation, instrument) = dominant_acquisition(
+            HashMap::new(),
+            tally(&[(InstrumentType::OrbitrapAstral as u8, 64)]),
+        );
+        assert_eq!(activation, None);
+        assert_eq!(instrument, Some(InstrumentType::OrbitrapAstral));
+    }
+
+    #[test]
+    fn activation_is_kept_when_no_scan_names_an_analyzer() {
+        let (activation, instrument) =
+            dominant_acquisition(tally(&[(ActivationMethod::ETD as u8, 3)]), HashMap::new());
+        assert_eq!(activation, Some(ActivationMethod::ETD));
+        assert_eq!(instrument, None);
+    }
+
+    #[test]
+    fn dominant_acquisition_is_the_most_frequent_of_each_tally() {
+        let (activation, instrument) = dominant_acquisition(
+            tally(&[
+                (ActivationMethod::CID as u8, 10),
+                (ActivationMethod::HCD as u8, 54),
+            ]),
+            tally(&[
+                (InstrumentType::LowRes as u8, 10),
+                (InstrumentType::QExactive as u8, 54),
+            ]),
+        );
+        assert_eq!(activation, Some(ActivationMethod::HCD));
+        assert_eq!(instrument, Some(InstrumentType::QExactive));
+    }
 
     #[test]
     fn open_failure_names_the_file_and_the_runtime_only_when_it_may_be_missing() {

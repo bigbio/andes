@@ -17,7 +17,10 @@
 //! at or above each group's score, with a running minimum.
 //!
 //! A decoy accession `<prefix>_<accession>` is the decoy of `<accession>`'s
-//! family, so pairs are named, not guessed.
+//! family, so pairs are named, not guessed. A decoy peptide with the residues
+//! of a target peptide is searched as a target, so a target row can name decoy
+//! accessions: they are dropped, and a target row naming only decoy accessions
+//! is evidence for no group.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -322,6 +325,9 @@ pub fn infer_protein_groups(
                 .proteins
                 .split(';')
                 .filter(|a| !a.is_empty())
+                // A target row can name a decoy entry that holds the same
+                // peptide: that entry is no target family.
+                .filter(|a| decoy || !idx.is_decoy_accession(a))
                 .map(|a| if decoy { target_of(a) } else { a.to_string() })
                 .filter(|a| !knockoff(a))
                 .map(|a| family_of(&a))
@@ -437,7 +443,10 @@ pub fn infer_protein_groups(
         for a in p
             .proteins
             .split(';')
-            .filter(|a| !a.is_empty() && !knockoff(a))
+            // A decoy entry named on a target row (it holds the same peptide)
+            // shares its target's family on origin-annotated databases; it is
+            // no accession of the target group.
+            .filter(|a| !a.is_empty() && !knockoff(a) && !idx.is_decoy_accession(a))
         {
             if target.groups[g].families.contains(&family_of(a)) {
                 named[g].insert(a.to_string());
@@ -721,6 +730,72 @@ mod tests {
         assert_eq!((g.peptides, g.score), (1, 2.0));
         assert_eq!(g.accessions, vec!["A"]);
         assert!(inf.group_of(&targets["2"]).is_none());
+    }
+
+    #[test]
+    fn decoy_accessions_on_target_rows_are_no_target_families() {
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 5.0, "K.AAAK.R", "A"),
+            // The peptide is in A and in the decoy of B.
+            psm("2", 4.0, "K.CCCK.R", "A;XXX_B"),
+            // The row names only a decoy entry.
+            psm("3", 9.0, "K.DDDK.R", "XXX_C"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &index(), |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        let g = &inf.groups[0];
+        assert_eq!(g.accessions, vec!["A"]);
+        assert_eq!((g.peptides, g.unique, g.score), (2, 2, 5.0));
+        assert!(inf.group_of(&targets["3"]).is_none());
+        assert!(inf.decoy_groups.is_empty());
+    }
+
+    #[test]
+    fn a_decoy_of_an_annotated_entry_is_no_accession_of_its_target_group() {
+        use model::protein::{EntryOrigin, ProteinAnnotation};
+        use std::sync::Arc;
+        // A variant entry of family A: its decoy carries the same origin, so
+        // its family is A too.
+        let variant = EntryOrigin {
+            kind: EntryKind::Variant,
+            family: Arc::from("A"),
+            feature: Arc::from("VAR_1"),
+            variant_delta_da: 0.0,
+            knockoff_of: None,
+            source: None,
+            tier: Default::default(),
+        };
+        let db = ProteinDb {
+            proteins: vec![
+                model::Protein {
+                    accession: "A".into(),
+                    description: String::new(),
+                    sequence: b"PEPTIDEK".to_vec(),
+                    annotation: None,
+                },
+                model::Protein {
+                    accession: "A-1".into(),
+                    description: String::new(),
+                    sequence: b"PEPTLDEK".to_vec(),
+                    annotation: Some(Arc::new(
+                        ProteinAnnotation::new(Vec::new(), None).with_origin(Some(variant)),
+                    )),
+                },
+            ],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        assert!(idx.is_decoy_accession("XXX_A-1"));
+        let targets: HashMap<String, PercolatorPsm> = [
+            psm("1", 5.0, "K.AAAK.R", "A;XXX_A-1"),
+            psm("2", 4.0, "K.CCCK.R", "A"),
+        ]
+        .into_iter()
+        .collect();
+        let inf = infer_protein_groups(&targets, &HashMap::new(), &idx, |_| true);
+        assert_eq!(inf.groups.len(), 1);
+        assert_eq!(inf.groups[0].accessions, vec!["A"]);
     }
 
     #[test]

@@ -1,0 +1,1459 @@
+{
+ "runs": [
+  "MouseLiver-Z-T-1",
+  "MouseLiver-Z-T-2",
+  "MouseLiver-Z-T-3",
+  "MouseLiver-Z-T-4",
+  "MouseLiver-Z-T-5"
+ ],
+ "q_id": 0.01,
+ "q_accept": 0.05,
+ "sequon_space": {
+  "sample_sequons": 50425,
+  "entrap_sequons": 44593,
+  "factor": 2.130782858296145
+ },
+ "features": [
+  {
+   "run": "MouseLiver-Z-T-1",
+   "identified": 23839,
+   "transferred": 45859,
+   "acc_identified": 21243,
+   "acc_transferred": 28427,
+   "glycopeptides": 43774
+  },
+  {
+   "run": "MouseLiver-Z-T-2",
+   "identified": 21801,
+   "transferred": 47586,
+   "acc_identified": 19387,
+   "acc_transferred": 29765,
+   "glycopeptides": 43452
+  },
+  {
+   "run": "MouseLiver-Z-T-3",
+   "identified": 23115,
+   "transferred": 46223,
+   "acc_identified": 20554,
+   "acc_transferred": 32378,
+   "glycopeptides": 47266
+  },
+  {
+   "run": "MouseLiver-Z-T-4",
+   "identified": 23293,
+   "transferred": 46314,
+   "acc_identified": 20532,
+   "acc_transferred": 31215,
+   "glycopeptides": 46006
+  },
+  {
+   "run": "MouseLiver-Z-T-5",
+   "identified": 23581,
+   "transferred": 46046,
+   "acc_identified": 20737,
+   "acc_transferred": 30002,
+   "glycopeptides": 45135
+  }
+ ],
+ "gated_counts": {
+  "identified": 32967,
+  "transferred": 7449
+ },
+ "topology": {
+  "compositions": 60790,
+  "topologies": 64070,
+  "multi_topology_compositions": 2439
+ },
+ "topology_gated": {
+  "compositions": 4661,
+  "topologies": 6392,
+  "multi_topology_compositions": 1131
+ },
+ "entrap_by_evidence": {
+  "Identified": {
+   "no ID gate": {
+    "n": 102453,
+    "entrap": 34802,
+    "raw": 0.33968746644802983
+   },
+   "q \u2264 0.01": {
+    "n": 32967,
+    "entrap": 136,
+    "raw": 0.004125337458670792
+   }
+  },
+  "Transferred": {
+   "no ID gate": {
+    "n": 151787,
+    "entrap": 73876,
+    "raw": 0.4867083478822297
+   },
+   "q \u2264 0.01": {
+    "n": 7449,
+    "entrap": 209,
+    "raw": 0.028057457376829104
+   }
+  }
+ },
+ "blocks": {
+  "all_accepted": {
+   "n_features": 254240,
+   "presence": {
+    ">=1": 60790,
+    ">=2": 55300,
+    ">=3": 47908,
+    ">=4": 37837,
+    ">=5": 23798
+   },
+   "split_pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both identified",
+     "n": 3239,
+     "pearson": 0.8523847947483617,
+     "spearman": 0.8356671085664317,
+     "median_abs": 0.871122767794251,
+     "p95_abs": 3.5875084005780016
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "one transferred",
+     "n": 15427,
+     "pearson": 0.6037945904149694,
+     "spearman": 0.6077898607494254,
+     "median_abs": 1.3318615125329423,
+     "p95_abs": 5.572709430838814
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both transferred",
+     "n": 15187,
+     "pearson": 0.6164306328452486,
+     "spearman": 0.6053686030165186,
+     "median_abs": 1.3763365366004159,
+     "p95_abs": 5.720359564016561
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 3460,
+     "pearson": 0.861412438257303,
+     "spearman": 0.8509354580381447,
+     "median_abs": 0.6762117580600879,
+     "p95_abs": 3.3013893055667167
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 16398,
+     "pearson": 0.6052978376158349,
+     "spearman": 0.6112262469764089,
+     "median_abs": 1.191284843293797,
+     "p95_abs": 5.57681296733101
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 16321,
+     "pearson": 0.6317693286436615,
+     "spearman": 0.6297243405757934,
+     "median_abs": 1.2711015284090337,
+     "p95_abs": 5.890291981517461
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3273,
+     "pearson": 0.8561378251987478,
+     "spearman": 0.8408541818963485,
+     "median_abs": 0.7088548449009977,
+     "p95_abs": 3.439412983840091
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 16045,
+     "pearson": 0.6142985472509721,
+     "spearman": 0.6143826080740099,
+     "median_abs": 1.1773761283763555,
+     "p95_abs": 5.466059049998078
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 15670,
+     "pearson": 0.6226918139614867,
+     "spearman": 0.6160171335552945,
+     "median_abs": 1.2216786424560855,
+     "p95_abs": 5.534850468934991
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3306,
+     "pearson": 0.8655950843620065,
+     "spearman": 0.8533434954512457,
+     "median_abs": 0.7158336414689437,
+     "p95_abs": 3.305925612546009
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 15157,
+     "pearson": 0.5747634862266982,
+     "spearman": 0.5829353643225346,
+     "median_abs": 1.3011147333536357,
+     "p95_abs": 5.884007926702229
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 15416,
+     "pearson": 0.581514024193934,
+     "spearman": 0.5781620278407871,
+     "median_abs": 1.3795254069917782,
+     "p95_abs": 6.0208583089211825
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 3184,
+     "pearson": 0.8310219358124225,
+     "spearman": 0.8189969665866531,
+     "median_abs": 0.8851459840611682,
+     "p95_abs": 4.252513018979991
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 16818,
+     "pearson": 0.6286011481224192,
+     "spearman": 0.6398724710361883,
+     "median_abs": 1.3356882049284753,
+     "p95_abs": 5.742364776920198
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 16848,
+     "pearson": 0.6419616695663117,
+     "spearman": 0.643528947600273,
+     "median_abs": 1.3735710117322242,
+     "p95_abs": 6.070743318908663
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3161,
+     "pearson": 0.8417313487493571,
+     "spearman": 0.8239215349088205,
+     "median_abs": 0.8204211252464582,
+     "p95_abs": 3.5536247027378742
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 15966,
+     "pearson": 0.6293164033010775,
+     "spearman": 0.6383341508739567,
+     "median_abs": 1.1891907404236672,
+     "p95_abs": 5.274434704055799
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 16321,
+     "pearson": 0.6376787697368624,
+     "spearman": 0.6276124895187972,
+     "median_abs": 1.2566545773467972,
+     "p95_abs": 5.503477682584407
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3184,
+     "pearson": 0.8336541848601166,
+     "spearman": 0.8211953212104951,
+     "median_abs": 0.8994082967989812,
+     "p95_abs": 3.970985001419007
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 15970,
+     "pearson": 0.6080388037077677,
+     "spearman": 0.6142432489058193,
+     "median_abs": 1.3899608781624604,
+     "p95_abs": 5.7136961284982055
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 15938,
+     "pearson": 0.6133795861097358,
+     "spearman": 0.6104234821833748,
+     "median_abs": 1.41408499229623,
+     "p95_abs": 5.937761582587786
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3266,
+     "pearson": 0.8496839803148379,
+     "spearman": 0.8387025938981676,
+     "median_abs": 0.7366780454589019,
+     "p95_abs": 3.5967002718010495
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 18833,
+     "pearson": 0.6832201474820291,
+     "spearman": 0.6850338757283967,
+     "median_abs": 1.0715377372679313,
+     "p95_abs": 4.842819311232786
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 17285,
+     "pearson": 0.6921651436716254,
+     "spearman": 0.6884716969078868,
+     "median_abs": 1.1187161236075482,
+     "p95_abs": 5.240974495069429
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3409,
+     "pearson": 0.8725702478716729,
+     "spearman": 0.8632777825397764,
+     "median_abs": 0.623238846745334,
+     "p95_abs": 3.041594794139689
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 17266,
+     "pearson": 0.6681389986395445,
+     "spearman": 0.6747410260714931,
+     "median_abs": 0.975059585761775,
+     "p95_abs": 5.10813375445018
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 17011,
+     "pearson": 0.671128030910767,
+     "spearman": 0.6730648300507931,
+     "median_abs": 1.002483502876533,
+     "p95_abs": 5.488469568287256
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3319,
+     "pearson": 0.8664633528290409,
+     "spearman": 0.8519765938411928,
+     "median_abs": 0.6925393301636547,
+     "p95_abs": 3.329478563723995
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 16652,
+     "pearson": 0.6727037158645316,
+     "spearman": 0.6756315563060292,
+     "median_abs": 1.1035307699605585,
+     "p95_abs": 4.9997863254517005
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 16489,
+     "pearson": 0.6433990108999614,
+     "spearman": 0.6409425905534301,
+     "median_abs": 1.1917355314007132,
+     "p95_abs": 5.446722453713304
+    }
+   ],
+   "n_glycopeptides": 60790,
+   "cells_filled": 225633,
+   "grid_pct": 74.23359105115973,
+   "pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "n": 33853,
+     "pearson": 0.6626056289886272,
+     "spearman": 0.6514113770316725,
+     "median_abs": 1.2851701481904954,
+     "p95_abs": 5.504367241767011
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "n": 36179,
+     "pearson": 0.666514542080726,
+     "spearman": 0.6610587028276959,
+     "median_abs": 1.1523374050780468,
+     "p95_abs": 5.598881213001508
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "n": 34988,
+     "pearson": 0.6684739522441815,
+     "spearman": 0.6574672344840152,
+     "median_abs": 1.1379765986614174,
+     "p95_abs": 5.361419519367042
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "n": 33879,
+     "pearson": 0.6339813214881473,
+     "spearman": 0.6264271206299998,
+     "median_abs": 1.2446739047039088,
+     "p95_abs": 5.801942621594781
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "n": 36850,
+     "pearson": 0.675991118430416,
+     "spearman": 0.6751377058193253,
+     "median_abs": 1.3020453524183875,
+     "p95_abs": 5.792803907542893
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "n": 35448,
+     "pearson": 0.6791684376390038,
+     "spearman": 0.670561988751193,
+     "median_abs": 1.1682727790778706,
+     "p95_abs": 5.272460272637452
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "n": 35092,
+     "pearson": 0.6569851805465385,
+     "spearman": 0.650536064926647,
+     "median_abs": 1.334449772723083,
+     "p95_abs": 5.697546190694723
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "n": 39384,
+     "pearson": 0.7211875791792338,
+     "spearman": 0.7132950635060576,
+     "median_abs": 1.055111229211807,
+     "p95_abs": 4.939661097861813
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "n": 37686,
+     "pearson": 0.7064797951929395,
+     "spearman": 0.7047789023569584,
+     "median_abs": 0.9377102877770334,
+     "p95_abs": 5.172781766592771
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "n": 36460,
+     "pearson": 0.6991033546347318,
+     "spearman": 0.6909785771844957,
+     "median_abs": 1.0842867002056238,
+     "p95_abs": 5.125979684710559
+    }
+   ],
+   "median_pair_r": 0.6722325353372988,
+   "share_mae": 0.09914754100786206,
+   "proteins": 13498,
+   "protein_median_pair_r": 0.7504749972341518,
+   "entrap": 108678,
+   "sample": 145562,
+   "entrap_raw": 0.42746224040276903,
+   "entrap_fdp": 0.9108292144190862
+  },
+  "gated_identified": {
+   "n_features": 32967,
+   "presence": {
+    ">=1": 4661,
+    ">=2": 3134,
+    ">=3": 2466,
+    ">=4": 1962,
+    ">=5": 1441
+   },
+   "split_pairs": [],
+   "n_glycopeptides": 4661,
+   "cells_filled": 13664,
+   "grid_pct": 58.63119502252736,
+   "pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "n": 1953,
+     "pearson": 0.8920177810273654,
+     "spearman": 0.8791791081428213,
+     "median_abs": 0.8058415099094667,
+     "p95_abs": 3.1062013564318707
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "n": 2106,
+     "pearson": 0.8812854792913576,
+     "spearman": 0.8704348301796767,
+     "median_abs": 0.6295937086696775,
+     "p95_abs": 2.900962233762156
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "n": 1975,
+     "pearson": 0.8988489696055658,
+     "spearman": 0.8839422911418884,
+     "median_abs": 0.6174954910597314,
+     "p95_abs": 2.80576143154301
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "n": 2064,
+     "pearson": 0.8992302808064394,
+     "spearman": 0.8899597063795144,
+     "median_abs": 0.6389787807068661,
+     "p95_abs": 2.6714879172476347
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "n": 1922,
+     "pearson": 0.8532912980129743,
+     "spearman": 0.8359318372743721,
+     "median_abs": 0.8127265620331716,
+     "p95_abs": 4.043813194001887
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "n": 1838,
+     "pearson": 0.8822414160875344,
+     "spearman": 0.8659209177341244,
+     "median_abs": 0.7486724347939084,
+     "p95_abs": 3.034383856016907
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "n": 1885,
+     "pearson": 0.873407726189583,
+     "spearman": 0.860551831133823,
+     "median_abs": 0.8446856360823993,
+     "p95_abs": 3.5642738777159835
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "n": 1949,
+     "pearson": 0.8859895946132994,
+     "spearman": 0.8690578314383709,
+     "median_abs": 0.678685427965636,
+     "p95_abs": 3.1028402042286687
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "n": 2072,
+     "pearson": 0.920738476179029,
+     "spearman": 0.9095576088569226,
+     "median_abs": 0.5582401732565963,
+     "p95_abs": 2.4465350254446343
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "n": 1952,
+     "pearson": 0.9099880852509183,
+     "spearman": 0.8983346890406716,
+     "median_abs": 0.6366650890007879,
+     "p95_abs": 2.7077881941908406
+    }
+   ],
+   "median_pair_r": 0.8890036878203325,
+   "share_mae": 0.07519656694860381,
+   "proteins": 657,
+   "protein_median_pair_r": 0.9397410059847919,
+   "entrap": 136,
+   "sample": 32831,
+   "entrap_raw": 0.004125337458670792,
+   "entrap_fdp": 0.008790198341622707
+  },
+  "gated_with_mbr": {
+   "n_features": 40416,
+   "presence": {
+    ">=1": 4661,
+    ">=2": 4454,
+    ">=3": 4150,
+    ">=4": 3646,
+    ">=5": 2813
+   },
+   "split_pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both identified",
+     "n": 1953,
+     "pearson": 0.8999309027571641,
+     "spearman": 0.8880320660941114,
+     "median_abs": 0.7987610810564689,
+     "p95_abs": 3.00263769751785
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "one transferred",
+     "n": 958,
+     "pearson": 0.5168982326543098,
+     "spearman": 0.5759336058469638,
+     "median_abs": 1.2459728441267721,
+     "p95_abs": 6.2641080327154155
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both transferred",
+     "n": 505,
+     "pearson": 0.6364349121101597,
+     "spearman": 0.6275046275204211,
+     "median_abs": 1.2248391128685157,
+     "p95_abs": 5.281556392712434
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 2106,
+     "pearson": 0.8912360096024591,
+     "spearman": 0.8830833394760564,
+     "median_abs": 0.6070286821124942,
+     "p95_abs": 2.736201713978364
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 1027,
+     "pearson": 0.525728800125972,
+     "spearman": 0.5786551667266505,
+     "median_abs": 1.01935569967279,
+     "p95_abs": 5.554459947886914
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 462,
+     "pearson": 0.6242037488131874,
+     "spearman": 0.6446793696738645,
+     "median_abs": 1.2324193369095493,
+     "p95_abs": 5.468626171371028
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 1975,
+     "pearson": 0.9035013208370585,
+     "spearman": 0.889628697383102,
+     "median_abs": 0.5928328129191556,
+     "p95_abs": 2.7234621999388384
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 995,
+     "pearson": 0.5781338487952467,
+     "spearman": 0.6194936971209521,
+     "median_abs": 1.0871844160464725,
+     "p95_abs": 5.336998930786072
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 488,
+     "pearson": 0.6003863283581751,
+     "spearman": 0.6182916133253179,
+     "median_abs": 0.9456379626881191,
+     "p95_abs": 5.078444706910772
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 2064,
+     "pearson": 0.9063193952959422,
+     "spearman": 0.8986967959034213,
+     "median_abs": 0.634007083774641,
+     "p95_abs": 2.533136902418337
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 984,
+     "pearson": 0.5441909867173246,
+     "spearman": 0.609487736991276,
+     "median_abs": 0.9820676097162657,
+     "p95_abs": 5.597685773802801
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 437,
+     "pearson": 0.6155307885265371,
+     "spearman": 0.6214623567349561,
+     "median_abs": 1.1590386346439985,
+     "p95_abs": 5.664282210733581
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 1922,
+     "pearson": 0.8616459643681937,
+     "spearman": 0.8461052626260361,
+     "median_abs": 0.79617031793215,
+     "p95_abs": 3.8687519866104045
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 1024,
+     "pearson": 0.49865449085722496,
+     "spearman": 0.5797799214640058,
+     "median_abs": 1.3470956482679757,
+     "p95_abs": 6.50853846163572
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 576,
+     "pearson": 0.6308708098341442,
+     "spearman": 0.6413731695677292,
+     "median_abs": 1.1202853680827616,
+     "p95_abs": 5.881411372286027
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 1838,
+     "pearson": 0.8897513540375307,
+     "spearman": 0.8747631141521185,
+     "median_abs": 0.7363336996799958,
+     "p95_abs": 2.914507385539092
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 880,
+     "pearson": 0.5504132885520534,
+     "spearman": 0.6085503253984571,
+     "median_abs": 1.0311172288783759,
+     "p95_abs": 5.572770206356251
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 636,
+     "pearson": 0.6103343382579183,
+     "spearman": 0.6403313985503004,
+     "median_abs": 0.989543065121854,
+     "p95_abs": 5.007704282796373
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 1885,
+     "pearson": 0.8804178216322425,
+     "spearman": 0.8687636852215974,
+     "median_abs": 0.8318627523910038,
+     "p95_abs": 3.432164065719749
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 1000,
+     "pearson": 0.5604021598657226,
+     "spearman": 0.6047452776306926,
+     "median_abs": 1.2314843970852216,
+     "p95_abs": 5.785127134960978
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 546,
+     "pearson": 0.5505816488023254,
+     "spearman": 0.5854045556945443,
+     "median_abs": 1.2861226342825738,
+     "p95_abs": 6.345096097682219
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 1949,
+     "pearson": 0.8911917117200485,
+     "spearman": 0.8759565800443291,
+     "median_abs": 0.6529147630611405,
+     "p95_abs": 3.0939211005940344
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 1091,
+     "pearson": 0.6004712309502581,
+     "spearman": 0.6626116040104377,
+     "median_abs": 0.9800438565528538,
+     "p95_abs": 5.149417470741396
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 563,
+     "pearson": 0.7023007024718563,
+     "spearman": 0.7036238519833325,
+     "median_abs": 0.8445483435261245,
+     "p95_abs": 4.902960017383937
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 2072,
+     "pearson": 0.9264763880071728,
+     "spearman": 0.9173019445624615,
+     "median_abs": 0.5269321210135818,
+     "p95_abs": 2.329244882791602
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 1051,
+     "pearson": 0.6595127698829182,
+     "spearman": 0.7173121882179007,
+     "median_abs": 0.7286167278866671,
+     "p95_abs": 4.994483842126818
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 497,
+     "pearson": 0.6434309581188014,
+     "spearman": 0.6569438003848979,
+     "median_abs": 0.9093338853182722,
+     "p95_abs": 5.507382885502188
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 1952,
+     "pearson": 0.9160447819441521,
+     "spearman": 0.9048737343219678,
+     "median_abs": 0.6159829697890657,
+     "p95_abs": 2.6235619838974955
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 952,
+     "pearson": 0.6380088380137413,
+     "spearman": 0.6888540009454098,
+     "median_abs": 0.9120321134873244,
+     "p95_abs": 5.100968703048198
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 556,
+     "pearson": 0.601741348428466,
+     "spearman": 0.6525658911428635,
+     "median_abs": 1.0442254285711599,
+     "p95_abs": 5.345414732338156
+    }
+   ],
+   "n_glycopeptides": 4661,
+   "cells_filled": 19724,
+   "grid_pct": 84.63419866981334,
+   "pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "n": 3416,
+     "pearson": 0.8243489305897765,
+     "spearman": 0.8388664532279164,
+     "median_abs": 0.9274636774378013,
+     "p95_abs": 4.504989756773609
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "n": 3595,
+     "pearson": 0.8192676963119175,
+     "spearman": 0.8406790357907361,
+     "median_abs": 0.7367471397008423,
+     "p95_abs": 4.415882972773232
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "n": 3458,
+     "pearson": 0.833927128074559,
+     "spearman": 0.8464762358346624,
+     "median_abs": 0.7549706938203506,
+     "p95_abs": 4.238632976856429
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "n": 3485,
+     "pearson": 0.8301044037923424,
+     "spearman": 0.845960428070348,
+     "median_abs": 0.7415029361360226,
+     "p95_abs": 4.202595665232643
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "n": 3522,
+     "pearson": 0.7968869643985019,
+     "spearman": 0.8146661580724442,
+     "median_abs": 0.9485714220857062,
+     "p95_abs": 5.247633320211764
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "n": 3354,
+     "pearson": 0.8211531727740639,
+     "spearman": 0.8351756287336898,
+     "median_abs": 0.8182377578249476,
+     "p95_abs": 4.460468320499296
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "n": 3431,
+     "pearson": 0.8100133421021527,
+     "spearman": 0.8282113243211072,
+     "median_abs": 0.9572198347107381,
+     "p95_abs": 4.829466953594286
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "n": 3603,
+     "pearson": 0.8411514745946784,
+     "spearman": 0.8495757413363739,
+     "median_abs": 0.7620106619818579,
+     "p95_abs": 4.017740924425228
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "n": 3620,
+     "pearson": 0.8610881628677451,
+     "spearman": 0.877269680486616,
+     "median_abs": 0.6084713314139538,
+     "p95_abs": 3.7463416722216865
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "n": 3460,
+     "pearson": 0.8458158441579008,
+     "spearman": 0.8609163851280869,
+     "median_abs": 0.7154429720974687,
+     "p95_abs": 4.003227991259211
+    }
+   ],
+   "median_pair_r": 0.8272266671910595,
+   "share_mae": 0.06307034675868382,
+   "proteins": 657,
+   "protein_median_pair_r": 0.9113491140980373,
+   "entrap": 345,
+   "sample": 40071,
+   "entrap_raw": 0.00853622327790974,
+   "entrap_fdp": 0.018188838235158603
+  },
+  "ungated_with_mbr": {
+   "n_features": 254240,
+   "presence": {
+    ">=1": 60790,
+    ">=2": 55300,
+    ">=3": 47908,
+    ">=4": 37837,
+    ">=5": 23798
+   },
+   "split_pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both identified",
+     "n": 3239,
+     "pearson": 0.8523847947483617,
+     "spearman": 0.8356671085664317,
+     "median_abs": 0.871122767794251,
+     "p95_abs": 3.5875084005780016
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "one transferred",
+     "n": 15427,
+     "pearson": 0.6037945904149694,
+     "spearman": 0.6077898607494254,
+     "median_abs": 1.3318615125329423,
+     "p95_abs": 5.572709430838814
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "class": "both transferred",
+     "n": 15187,
+     "pearson": 0.6164306328452486,
+     "spearman": 0.6053686030165186,
+     "median_abs": 1.3763365366004159,
+     "p95_abs": 5.720359564016561
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 3460,
+     "pearson": 0.861412438257303,
+     "spearman": 0.8509354580381447,
+     "median_abs": 0.6762117580600879,
+     "p95_abs": 3.3013893055667167
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 16398,
+     "pearson": 0.6052978376158349,
+     "spearman": 0.6112262469764089,
+     "median_abs": 1.191284843293797,
+     "p95_abs": 5.57681296733101
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 16321,
+     "pearson": 0.6317693286436615,
+     "spearman": 0.6297243405757934,
+     "median_abs": 1.2711015284090337,
+     "p95_abs": 5.890291981517461
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3273,
+     "pearson": 0.8561378251987478,
+     "spearman": 0.8408541818963485,
+     "median_abs": 0.7088548449009977,
+     "p95_abs": 3.439412983840091
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 16045,
+     "pearson": 0.6142985472509721,
+     "spearman": 0.6143826080740099,
+     "median_abs": 1.1773761283763555,
+     "p95_abs": 5.466059049998078
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 15670,
+     "pearson": 0.6226918139614867,
+     "spearman": 0.6160171335552945,
+     "median_abs": 1.2216786424560855,
+     "p95_abs": 5.534850468934991
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3306,
+     "pearson": 0.8655950843620065,
+     "spearman": 0.8533434954512457,
+     "median_abs": 0.7158336414689437,
+     "p95_abs": 3.305925612546009
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 15157,
+     "pearson": 0.5747634862266982,
+     "spearman": 0.5829353643225346,
+     "median_abs": 1.3011147333536357,
+     "p95_abs": 5.884007926702229
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 15416,
+     "pearson": 0.581514024193934,
+     "spearman": 0.5781620278407871,
+     "median_abs": 1.3795254069917782,
+     "p95_abs": 6.0208583089211825
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both identified",
+     "n": 3184,
+     "pearson": 0.8310219358124225,
+     "spearman": 0.8189969665866531,
+     "median_abs": 0.8851459840611682,
+     "p95_abs": 4.252513018979991
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "one transferred",
+     "n": 16818,
+     "pearson": 0.6286011481224192,
+     "spearman": 0.6398724710361883,
+     "median_abs": 1.3356882049284753,
+     "p95_abs": 5.742364776920198
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "class": "both transferred",
+     "n": 16848,
+     "pearson": 0.6419616695663117,
+     "spearman": 0.643528947600273,
+     "median_abs": 1.3735710117322242,
+     "p95_abs": 6.070743318908663
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3161,
+     "pearson": 0.8417313487493571,
+     "spearman": 0.8239215349088205,
+     "median_abs": 0.8204211252464582,
+     "p95_abs": 3.5536247027378742
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 15966,
+     "pearson": 0.6293164033010775,
+     "spearman": 0.6383341508739567,
+     "median_abs": 1.1891907404236672,
+     "p95_abs": 5.274434704055799
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 16321,
+     "pearson": 0.6376787697368624,
+     "spearman": 0.6276124895187972,
+     "median_abs": 1.2566545773467972,
+     "p95_abs": 5.503477682584407
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3184,
+     "pearson": 0.8336541848601166,
+     "spearman": 0.8211953212104951,
+     "median_abs": 0.8994082967989812,
+     "p95_abs": 3.970985001419007
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 15970,
+     "pearson": 0.6080388037077677,
+     "spearman": 0.6142432489058193,
+     "median_abs": 1.3899608781624604,
+     "p95_abs": 5.7136961284982055
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 15938,
+     "pearson": 0.6133795861097358,
+     "spearman": 0.6104234821833748,
+     "median_abs": 1.41408499229623,
+     "p95_abs": 5.937761582587786
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both identified",
+     "n": 3266,
+     "pearson": 0.8496839803148379,
+     "spearman": 0.8387025938981676,
+     "median_abs": 0.7366780454589019,
+     "p95_abs": 3.5967002718010495
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "one transferred",
+     "n": 18833,
+     "pearson": 0.6832201474820291,
+     "spearman": 0.6850338757283967,
+     "median_abs": 1.0715377372679313,
+     "p95_abs": 4.842819311232786
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "class": "both transferred",
+     "n": 17285,
+     "pearson": 0.6921651436716254,
+     "spearman": 0.6884716969078868,
+     "median_abs": 1.1187161236075482,
+     "p95_abs": 5.240974495069429
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3409,
+     "pearson": 0.8725702478716729,
+     "spearman": 0.8632777825397764,
+     "median_abs": 0.623238846745334,
+     "p95_abs": 3.041594794139689
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 17266,
+     "pearson": 0.6681389986395445,
+     "spearman": 0.6747410260714931,
+     "median_abs": 0.975059585761775,
+     "p95_abs": 5.10813375445018
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 17011,
+     "pearson": 0.671128030910767,
+     "spearman": 0.6730648300507931,
+     "median_abs": 1.002483502876533,
+     "p95_abs": 5.488469568287256
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both identified",
+     "n": 3319,
+     "pearson": 0.8664633528290409,
+     "spearman": 0.8519765938411928,
+     "median_abs": 0.6925393301636547,
+     "p95_abs": 3.329478563723995
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "one transferred",
+     "n": 16652,
+     "pearson": 0.6727037158645316,
+     "spearman": 0.6756315563060292,
+     "median_abs": 1.1035307699605585,
+     "p95_abs": 4.9997863254517005
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "class": "both transferred",
+     "n": 16489,
+     "pearson": 0.6433990108999614,
+     "spearman": 0.6409425905534301,
+     "median_abs": 1.1917355314007132,
+     "p95_abs": 5.446722453713304
+    }
+   ],
+   "n_glycopeptides": 60790,
+   "cells_filled": 225633,
+   "grid_pct": 74.23359105115973,
+   "pairs": [
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-2",
+     "n": 33853,
+     "pearson": 0.6626056289886272,
+     "spearman": 0.6514113770316725,
+     "median_abs": 1.2851701481904954,
+     "p95_abs": 5.504367241767011
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-3",
+     "n": 36179,
+     "pearson": 0.666514542080726,
+     "spearman": 0.6610587028276959,
+     "median_abs": 1.1523374050780468,
+     "p95_abs": 5.598881213001508
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-4",
+     "n": 34988,
+     "pearson": 0.6684739522441815,
+     "spearman": 0.6574672344840152,
+     "median_abs": 1.1379765986614174,
+     "p95_abs": 5.361419519367042
+    },
+    {
+     "a": "MouseLiver-Z-T-1",
+     "b": "MouseLiver-Z-T-5",
+     "n": 33879,
+     "pearson": 0.6339813214881473,
+     "spearman": 0.6264271206299998,
+     "median_abs": 1.2446739047039088,
+     "p95_abs": 5.801942621594781
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-3",
+     "n": 36850,
+     "pearson": 0.675991118430416,
+     "spearman": 0.6751377058193253,
+     "median_abs": 1.3020453524183875,
+     "p95_abs": 5.792803907542893
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-4",
+     "n": 35448,
+     "pearson": 0.6791684376390038,
+     "spearman": 0.670561988751193,
+     "median_abs": 1.1682727790778706,
+     "p95_abs": 5.272460272637452
+    },
+    {
+     "a": "MouseLiver-Z-T-2",
+     "b": "MouseLiver-Z-T-5",
+     "n": 35092,
+     "pearson": 0.6569851805465385,
+     "spearman": 0.650536064926647,
+     "median_abs": 1.334449772723083,
+     "p95_abs": 5.697546190694723
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-4",
+     "n": 39384,
+     "pearson": 0.7211875791792338,
+     "spearman": 0.7132950635060576,
+     "median_abs": 1.055111229211807,
+     "p95_abs": 4.939661097861813
+    },
+    {
+     "a": "MouseLiver-Z-T-3",
+     "b": "MouseLiver-Z-T-5",
+     "n": 37686,
+     "pearson": 0.7064797951929395,
+     "spearman": 0.7047789023569584,
+     "median_abs": 0.9377102877770334,
+     "p95_abs": 5.172781766592771
+    },
+    {
+     "a": "MouseLiver-Z-T-4",
+     "b": "MouseLiver-Z-T-5",
+     "n": 36460,
+     "pearson": 0.6991033546347318,
+     "spearman": 0.6909785771844957,
+     "median_abs": 1.0842867002056238,
+     "p95_abs": 5.125979684710559
+    }
+   ],
+   "median_pair_r": 0.6722325353372988,
+   "share_mae": 0.09914754100786206,
+   "proteins": 13498,
+   "protein_median_pair_r": 0.7504749972341518,
+   "entrap": 108678,
+   "sample": 145562,
+   "entrap_raw": 0.42746224040276903,
+   "entrap_fdp": 0.9108292144190862
+  }
+ }
+}

@@ -14,15 +14,15 @@ use crate::cli::{
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
 use crate::model_select::{
-    cli_fragment_tol_override, default_aa_set_with_tag, label_from_mods, load_param_from_store,
-    parse_enzymes, resolve_metadataless_selection, routing_protocol,
-    warn_if_universal_protease_combo,
+    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, default_aa_set_with_tag,
+    label_from_mods, load_param_from_store, parse_enzymes, resolve_metadataless_selection,
+    routing_protocol, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::rescore;
 use crate::spectra::{
-    add_mzml_skipped, detect_dominant_activation, detect_instrument_type_for_path,
+    add_mzml_skipped, compare_with_first_input, detect_acquisition_metadata,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
     prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_ms2_meta,
     sample_spectra, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
@@ -429,7 +429,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
-    if cli.mbr {
+    // Under `--glyco`, `--mbr` is the glyco path's own match-between-runs
+    // inside the intact-glycopeptide tables: no per-run artifacts.
+    if cli.mbr && !cli.glyco {
         check_mbr_args(&cli)?;
         // Before the scratch directory exists: a rejected run writes nothing.
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
@@ -493,8 +495,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             enzyme: search_enzyme,
         }),
     };
-    let loaded = input::load_protein_database(&database_path, &uniprot_opts)?;
-    let mut target_db = loaded.db;
+    let ClaimDatabase {
+        loaded,
+        annotations,
+        site_knockoffs,
+    } = load_claim_database(&database_path, &cli.annotations, &uniprot_opts)?;
+    let target_db = loaded.db;
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
         if peff.sites_without_mass + peff.processing_not_chain > 0 {
@@ -505,22 +511,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    if !cli.annotations.is_empty() {
-        let stats =
-            input::load_annotations(&cli.annotations, &mut target_db, uniprot_opts.knockoffs)?;
-        log_claims("Annotations", &stats);
+    if let Some(stats) = &annotations {
+        log_claims("Annotations", stats);
     }
-    // Knockoff sites for every annotated site, before decoys are built so they
-    // follow to the decoys like real sites.
-    if let Some(ko) = uniprot_opts.knockoffs {
-        let stats = input::add_site_knockoffs(&mut target_db, ko);
-        if stats.knockoffs > 0 {
-            eprintln!(
-                "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position \
-                 for one)",
-                stats.sites, stats.knockoffs, stats.untested
-            );
-        }
+    if site_knockoffs.knockoffs > 0 {
+        eprintln!(
+            "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position for \
+             one)",
+            site_knockoffs.sites, site_knockoffs.knockoffs, site_knockoffs.untested
+        );
     }
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
@@ -584,6 +583,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     their canonical entry. Use --decoy-strategy reverse."
                 .into(),
         );
+    }
+    // andes is about to generate the decoys: the database must not hold any.
+    if decoy_strategy != search::decoy::DecoyStrategy::None {
+        if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
+            eprintln!("{warning}");
+        }
     }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
@@ -666,35 +671,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
     }
 
-    // Detect (activation, instrument) from the input for auto-routing.
+    // Detect the activation and the analyzer from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
-    // bearing format; an explicit `--fragmentation` still overrides the
-    // detected activation (see the resolution below).
-    let auto_route_eligible = is_mzml || is_raw || is_d;
-    let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
-        if !auto_route_eligible {
-            None
-        } else if is_mzml {
-            detect_dominant_activation(&spectrum_path)
-                .map(|m| (m, detect_instrument_type_for_path(&spectrum_path)))
-        } else if is_raw {
-            #[cfg(feature = "thermo")]
-            {
-                input::thermo::detect_activation_instrument(&spectrum_path, 64)
-            }
-            #[cfg(not(feature = "thermo"))]
-            {
-                None
-            }
-        } else {
-            // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
-            Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
-        };
-    // Pre-compute before the routing match consumes `detected_activation_instrument`.
-    let instrument_was_detected = detected_activation_instrument
-        .map(|(_, inst)| inst.is_some())
-        .unwrap_or(false);
+    // is always CID/TimsTOF (DDA-PASEF). The two are read independently, so a
+    // file that names its analyzer but no activation still routes by the
+    // analyzer. An explicit `--fragmentation` overrides the detected
+    // activation (see the resolution below).
+    let (detected_activation, detected_instrument) = detect_acquisition_metadata(&spectrum_path);
+    let instrument_was_detected = detected_instrument.is_some();
+    // The model, the fragment tolerance and the score features are chosen once,
+    // from the first input: every further input must be of the same class.
+    for other_path in &spectrum_paths[1..] {
+        let other = detect_acquisition_metadata(other_path);
+        if let Some(warning) = compare_with_first_input(
+            &spectrum_path,
+            (detected_activation, detected_instrument),
+            other_path,
+            other,
+        )? {
+            eprintln!("{warning}");
+        }
+    }
 
     // The acquisition context, carried separately from the model chosen below.
     // Without analyzer metadata and without a `--fragment-tol-*` unit, the
@@ -721,7 +718,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let acquisition = Acquisition::resolve(
-        detected_activation_instrument,
+        detected_activation,
+        detected_instrument,
         cli.fragment_tol_ppm,
         cli.fragment_tol_da,
         peak_evidence,
@@ -773,14 +771,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // metadata-less resolver folds in `--fragmentation` (which wins over the
         // detected activation) and the `--fragment-tol-*` flags. Default when no metadata: CID / low-res
         // (cid_lowres_tryp).
+        let detected = (detected_activation, detected_instrument);
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
-            match detected_activation_instrument {
+            match detected {
                 // An EXPLICIT --fragmentation must win over detection. It previously
                 // only applied when detection returned no instrument, so on any normal
                 // mzML it was silently discarded — including the EThcD case, where the
                 // reader relabels ETD to HCD and the warning tells the user to "pass
                 // --fragmentation to override". It could not override anything.
-                Some((method, Some(inst))) => {
+                (Some(method), Some(inst)) => {
                     let chosen = match cli.fragmentation {
                         Fragmentation::Auto => method,
                         Fragmentation::Cid => ActivationMethod::CID,
@@ -802,15 +801,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     (chosen, Some(inst))
                 }
-                Some((method, None)) => resolve_metadataless_selection(
-                    Some(method),
-                    cli.fragmentation,
-                    cli.fragment_tol_ppm,
-                    cli.fragment_tol_da,
-                    acquisition.inferred_high_res(),
-                ),
-                None => resolve_metadataless_selection(
-                    None,
+                // The analyzer is recorded but no scan names its activation:
+                // keep the analyzer and take the activation from
+                // `--fragmentation`, else the default of the analyzer's class.
+                (None, Some(inst)) => {
+                    let explicit = cli_fragmentation_to_activation_opt(cli.fragmentation);
+                    let chosen = explicit.unwrap_or(if inst.is_high_resolution() {
+                        ActivationMethod::HCD
+                    } else {
+                        ActivationMethod::CID
+                    });
+                    eprintln!(
+                        "Param resolver: instrument = {} from {}, no activation recorded; \
+                         activation = {} [{}]",
+                        inst.name(),
+                        spectrum_path.display(),
+                        chosen.name(),
+                        if explicit.is_some() {
+                            "--fragmentation"
+                        } else {
+                            "default of the analyzer class"
+                        }
+                    );
+                    (chosen, Some(inst))
+                }
+                (method, None) => resolve_metadataless_selection(
+                    method,
                     cli.fragmentation,
                     cli.fragment_tol_ppm,
                     cli.fragment_tol_da,
@@ -1371,7 +1387,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  model          : {resolved_model_id} [{model_source}]");
     let activation_source = if cli.fragmentation != Fragmentation::Auto {
         "--fragmentation"
-    } else if detected_activation_instrument.is_some() {
+    } else if detected_activation.is_some() {
         "detected"
     } else {
         "default"
@@ -1665,6 +1681,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
+    // `--glyco --mbr` is the glyco path's own match-between-runs (RT
+    // alignment + XIC transfer inside the intact-glycopeptide tables), not the
+    // peptide library stages. It needs the glyco LFQ stage's features.
+    if cli.glyco && cli.mbr && !cli.lfq {
+        return Err(
+            "--glyco --mbr needs --lfq: match-between-runs transfers the identified intact \
+             glycopeptides into the other runs"
+                .into(),
+        );
+    }
     let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
         .map(|mut settings| {
             // Recorded in each run's MS2 table, where the library matches
@@ -1694,16 +1720,37 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if cli.glyco {
-            return Err("--tmt/--lfq/--quant-dir are not available in --glyco mode".into());
+            // `--lfq` is the glyco driver's intact-glycopeptide MS1
+            // quantification (`<base>.glyco.lfq.tsv` and the roll-ups), and
+            // `--mbr` its own match-between-runs; the isobaric machinery is
+            // not wired there.
+            let mut unsupported: Vec<&str> = Vec::new();
+            if s.plex.is_some() {
+                unsupported.push("--tmt");
+            }
+            if cli.quant_dir.is_some() {
+                unsupported.push("--quant-dir");
+            }
+            if !unsupported.is_empty() {
+                return Err(format!(
+                    "--glyco does not support: {} (label-free quantification of intact \
+                     glycopeptides is `--glyco --lfq`; the isobaric and match-between-runs \
+                     stages are not implemented for glyco mode)",
+                    unsupported.join(", ")
+                )
+                .into());
+            }
         }
-        if !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
+        if !cli.glyco && !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
                  or add --rescore so only PSMs at q<=--fdr are quantified."
             );
         }
-        eprintln!("Quantification: {}", s.describe());
+        if !cli.glyco {
+            eprintln!("Quantification: {}", s.describe());
+        }
     }
     // `--predict`: load the predictors now so a missing model fails before the
     // search. Glyco mode writes its own `.glyco.pin` and takes none.
@@ -2479,6 +2526,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             acquisition.high_res,
             mono_for_pin,
             glyco_isotope_override,
+            // `--glyco --lfq`: the collector holds each run's MS1 scans, the
+            // intact-glycopeptide quant driver's input. `None` without `--lfq`.
+            quant.as_ref(),
             t_total,
         )?;
         return Ok(());
@@ -2584,9 +2634,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Engine-wide retention-time features (additive): after all PSMs are scored
     // and the final PIN candidate pool is fixed, run per-run RT self-calibration
     // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
-    // onto each PSM. Neutral 0.0 (baseline-identical) when observed RT is
-    // unavailable or calibration cannot be fit.
-    output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
+    // onto each PSM, one calibration per input file. Neutral 0.0 when observed
+    // RT is unavailable or a file's calibration cannot be fit.
+    output::populate_rt_features_per_run(&spectra, &mut queues, &pin_candidates, &run_ends);
 
     // Provenance (additive): entry class, gap to the best Reference candidate,
     // isotope-mimic flag. All 0 on a FASTA search except IsotopeMimic with
@@ -2664,6 +2714,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
+    // Site claims need every row of a spectrum scored, not only the winner of
+    // each target-decoy competition group, so the rows can compete.
+    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
+        p.annotation
+            .as_deref()
+            .is_some_and(|a| !a.site_claims.is_empty())
+    });
+    let mut row_scores: Option<output::RowScores> = None;
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = output::resolve_backend(
@@ -2694,6 +2752,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             rescore_decoy_psms =
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            if has_site_claims {
+                row_scores = Some(
+                    output::score_all_rows(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("scoring every PIN row for the site posteriors: {e}"))?,
+                );
+            }
             if cli.mbr {
                 mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
@@ -2721,6 +2785,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // which target rows lost their scan/ExpMass group.
             rescore_decoys = Some(all.decoys.keys().cloned().collect());
             rescore_decoy_psms = all.decoys;
+            if has_site_claims {
+                row_scores = Some(all.row_scores);
+            }
             if cli.mbr {
                 mbr_source = "the native rescoring result".to_string();
             }
@@ -2823,12 +2890,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Site claims: annotated sites against their knockoff sites; each
         // accepted site also gets its occupancy and identity from the
         // posterior of every row among its spectrum's rows.
-        let has_site_claims = pin_index.iter_target_proteins().any(|p| {
-            p.annotation
-                .as_deref()
-                .is_some_and(|a| !a.site_claims.is_empty())
-        });
-        let posteriors = has_site_claims.then(|| {
+        let posteriors = row_scores.as_ref().map(|(target_scores, decoy_scores)| {
             let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
                 queues
                     .iter()
@@ -2849,7 +2911,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             })
                     })
                     .collect();
-            output::site_identity::row_posteriors(map, &rescore_decoy_psms, &rows)
+            output::site_identity::row_posteriors(target_scores, decoy_scores, &rows)
         });
         let sites = output::site_claims(
             map,
@@ -3119,6 +3181,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The rows `psms.parquet` leaves out, from the full rescore map (before the
+    // knockoff rows leave it): the feature parquet numbers its `psm_ids` over
+    // the other rows.
+    let omitted_psms = match (&quant, rescore_map.as_ref()) {
+        (Some(_), Some(map)) => output::omitted_psm_rows(
+            &spectra,
+            &queues,
+            &pin_candidates,
+            Some(map),
+            rescore_decoys.as_ref(),
+            &knockoff_rows,
+        )
+        .map_err(|e| format!("quant: {e}"))?,
+        _ => std::collections::HashSet::new(),
+    };
     if let Some(ref mut map) = rescore_map {
         map.retain(|id, _| !knockoff_rows.contains(id));
     }
@@ -3149,6 +3226,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &pin_candidates,
             &pin_index,
             rescore_map.as_ref(),
+            &omitted_psms,
             cutoffs.as_ref(),
             &report_base,
             cli.output_parquet.as_deref(),
@@ -3160,7 +3238,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Proteoform table: per protein family, the canonical entry and each
-    // isoform, variant and chain entry with accepted evidence, its confidence
+    // isoform, variant and chain entry with accepted evidence, its q-value
     // and quantity. Written with rescoring when the database holds such entries.
     if let (Some(map), Some(cutoffs), true) = (
         rescore_map.as_ref(),
@@ -3280,6 +3358,45 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         qpx_groups.as_ref(),
     )?;
     Ok(())
+}
+
+/// The target database of a search, with what each source added to it.
+pub(crate) struct ClaimDatabase {
+    pub(crate) loaded: input::LoadedDatabase,
+    /// Present when `--annotations` files were given.
+    pub(crate) annotations: Option<input::AnnotationLoadStats>,
+    pub(crate) site_knockoffs: input::SiteKnockoffStats,
+}
+
+/// Load the target database with every claim a search tests: the file's own,
+/// those of the `annotations` tables, then the knockoff sites of every
+/// annotated site, which are added before decoys are built so they follow to
+/// the decoys like real sites. `andes inference` and `quant finalize` load
+/// through here as well, so they hold the entries and sites of the search.
+pub(crate) fn load_claim_database(
+    path: &Path,
+    annotations: &[PathBuf],
+    opts: &input::UniProtOptions,
+) -> Result<ClaimDatabase, Box<dyn std::error::Error>> {
+    let mut loaded = input::load_protein_database(path, opts)?;
+    let annotations = if annotations.is_empty() {
+        None
+    } else {
+        Some(input::load_annotations(
+            annotations,
+            &mut loaded.db,
+            opts.knockoffs,
+        )?)
+    };
+    let site_knockoffs = opts
+        .knockoffs
+        .map(|ko| input::add_site_knockoffs(&mut loaded.db, ko))
+        .unwrap_or_default();
+    Ok(ClaimDatabase {
+        loaded,
+        annotations,
+        site_knockoffs,
+    })
 }
 
 /// Log what a UniProt XML load kept: annotated sites, variant entries, and

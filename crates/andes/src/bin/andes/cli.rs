@@ -556,6 +556,17 @@ pub(crate) struct SearchArgs {
     /// `glyco.glycan_gdb` in `--config`). The requirement is checked as soon as the
     /// command line and the config file are merged, so a missing database fails
     /// immediately rather than after the digest, index build and spectrum load.
+    ///
+    /// With `--lfq`, the emitted glycopeptides are quantified from MS1 as
+    /// intact glycopeptides (peptide + glycan composition + charge) and six
+    /// tables are written next to the PIN: `<base>.glyco.lfq.tsv` (per
+    /// feature), `.glyco.quant.tsv` (per glycopeptide), `.glyco.site.tsv`
+    /// (glycoform shares at each site), `.glyco.protein.tsv` (summed and Top3
+    /// areas) and the cross-run `.glyco.matrix.tsv` /
+    /// `.glyco.protein_matrix.tsv` pivots. `--lfq-tol`, `--lfq-rt-window`,
+    /// `--lfq-min-cosine` and `--lfq-feature-fdr` apply; `--mbr` is then the
+    /// glycopeptide match-between-runs (see `--mbr`), not the peptide library
+    /// stages. The isobaric stages do not apply.
     #[arg(long = "glyco", default_value_t = false)]
     pub(crate) glyco: bool,
 
@@ -933,6 +944,11 @@ pub(crate) struct SearchArgs {
     /// `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. mzML, Thermo `.raw` and Bruker `.d` input (a
     /// `.d`'s MS1 frames are summed over ion mobility).
+    ///
+    /// Under `--glyco` it quantifies INTACT glycopeptides instead (peptide +
+    /// glycan composition + charge, with the glycan's exact elemental formula
+    /// for the isotope envelope) and writes the `.glyco.lfq/quant/site/
+    /// protein.tsv` tables beside the `.glyco.pin`; see `--glyco`.
     #[arg(long = "lfq", default_value_t = false)]
     pub(crate) lfq: bool,
 
@@ -995,9 +1011,10 @@ pub(crate) struct SearchArgs {
     pub(crate) label_heavy_enrichment: f64,
 
     /// Retention-time half-window (seconds) around the identifying PSM in
-    /// which the chromatographic peak is searched. Default 60.
-    #[arg(long = "lfq-rt-window", default_value = "60", value_parser = parse_positive_tol)]
-    pub(crate) lfq_rt_window: f64,
+    /// which the chromatographic peak is searched. Default 60 s for
+    /// `--lfq` peptides and 120 s for intact glycopeptides (`--glyco`).
+    #[arg(long = "lfq-rt-window", value_parser = parse_positive_tol)]
+    pub(crate) lfq_rt_window: Option<f64>,
 
     /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
     /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
@@ -1045,6 +1062,20 @@ pub(crate) struct SearchArgs {
     /// `andes quant library`, `extract` and `finalize` on the same files and
     /// Percolator results; the native rescorer's scores have no file input
     /// to `quant library`.
+    ///
+    /// With `--glyco --lfq` (two or more inputs): match-between-runs for intact
+    /// glycopeptides instead: each run's retention time is aligned to the first
+    /// input's with a robust piecewise-linear map (one knot per 300 anchors,
+    /// mis-pairs trimmed at 3 MAD) fitted on the glycopeptides
+    /// both identified; a map is only used when fitted on at least 50 such
+    /// glycopeptides and its robust residual is at most 45 s. Every accepted
+    /// glycopeptide is then measured in each run that did not identify it, in
+    /// a window of three residual sigmas (clamped to 10-60 s) around its
+    /// predicted apex, and the transfers are scored as their own target/decoy
+    /// competition rather than mixed with the identified features.
+    /// Transferred rows say so in the `Evidence` column of the
+    /// `.glyco.lfq.tsv` table; the roll-up tables keep their per-run area and
+    /// gain the transferred runs.
     #[arg(long = "mbr", default_value_t = false)]
     pub(crate) mbr: bool,
 
@@ -1107,8 +1138,8 @@ pub(crate) struct InferenceArgs {
 
     /// The protein database the PSMs were searched against, with the same
     /// options as the search (`--annotations`, `--uniprot-*`, `--knockoffs`,
-    /// `--enzyme`, decoy affixes), so protein families, knockoff entries and
-    /// decoy pairs are the search's.
+    /// `--enzyme`, decoy affixes, `--mods`), so protein families, knockoff
+    /// entries, knockoff sites and decoy pairs are the search's.
     #[arg(long, value_name = "FILE")]
     pub(crate) database: PathBuf,
 
@@ -1151,6 +1182,12 @@ pub(crate) struct ProteinArgs {
     pub(crate) decoy_prefix: String,
     #[arg(long = "decoy-suffix")]
     pub(crate) decoy_suffix: Option<String>,
+
+    /// The search's `--mods` file. A PSM that places one of its
+    /// `sites=annotated` modifications on a knockoff site is counted for no
+    /// group, as in the search. Give it whenever the search had one.
+    #[arg(long = "mods", value_name = "MODFILE")]
+    pub(crate) mods: Option<PathBuf>,
 
     /// PSM q-value cutoff for the PSMs and peptides counted per group.
     #[arg(long = "fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
@@ -1384,7 +1421,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Advanced: share, in [0, 1], of the precursors with an identified fit
     /// that report the template-free trace area (`trace_quantity` of the
     /// extract: the baseline-subtracted isotope traces integrated around the
-    /// apex) instead of the Gaussian amplitude times the consensus width, in
+    /// apex) instead of the Gaussian amplitude times the template width, in
     /// every run: the brightest by the median amplitude signal-to-noise of
     /// their identified fits. 0 reports the template area everywhere; 1
     /// switches every such precursor. `quant_q` and the transfer q-values

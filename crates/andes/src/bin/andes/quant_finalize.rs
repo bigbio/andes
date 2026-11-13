@@ -8,7 +8,7 @@
 //! cut at precursor boundaries, and the runs are processed in parallel. Each
 //! pass reads every table once:
 //!
-//! 1. donor summaries: per precursor, the consensus width `w_c` and the
+//! 1. donor summaries: per precursor, the relative width `k` and the
 //!    sorted values around the middle of its identified fits (width on the
 //!    consensus scale, tailing, isotope heights), which give the median of
 //!    every fit and of every fit but one run's: the shape features leave the
@@ -72,8 +72,9 @@ use quant::shared;
 use rayon::prelude::*;
 
 use crate::quant_mbr::{
-    consensus_scale_width, cosine, donor_fit, family, identified_features, iso_profile,
-    local_slope, median, reported_quantity, transfer_features, DonorFit, ExtractRow, Role,
+    amplitude_snr, cosine, describe_width_weights, donor_fit, family, identified_features,
+    iso_profile, local_slope, median, relative_fit_width, reported_quantity, row_width_weight,
+    transfer_features, weigh_widths, whole_pattern, width_deviation, DonorFit, ExtractRow, Role,
     ShapeReference, NO_SHAPE, TRANSFER_DONOR_Q,
 };
 use crate::transfer_fdr::{
@@ -216,7 +217,7 @@ pub(crate) trait ExtractSource: Sync {
 
     /// [`ExtractSource::for_each_batch`] over the identified targets only,
     /// of which only the keys and the peak shape (see [`donor_fit`] and
-    /// [`consensus_scale_width`]) are read.
+    /// [`relative_fit_width`]) are read.
     fn for_each_fit_batch(
         &self,
         chunk: usize,
@@ -489,8 +490,9 @@ struct ShapeSummary {
 /// What finalize needs of a precursor's identified rows in every run.
 #[derive(Debug, Clone, Copy, Default)]
 struct PrecursorSummary {
-    /// The consensus width `w_c`.
-    w_c: Option<f64>,
+    /// The relative width `k` (see [`crate::quant_mbr`], "Reported
+    /// quantity").
+    relative_width: Option<f64>,
     shape: Option<ShapeSummary>,
     /// The median amplitude signal-to-noise of the identified target fits,
     /// read only with [`FinalizeParams::trace_fraction`].
@@ -503,7 +505,7 @@ struct PrecursorSummary {
 type Summaries = HashMap<u32, PrecursorSummary>;
 
 /// One identified row's part of its precursor's summary: precursor, width
-/// on the consensus scale, donor fit and amplitude signal-to-noise.
+/// ratio, donor fit and amplitude signal-to-noise.
 type SummaryItem = (u32, Option<f64>, Option<DonorFit>, Option<f64>);
 
 /// The summaries of the precursors of `items`, in any order.
@@ -511,7 +513,7 @@ fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
     items.sort_unstable_by_key(|it| it.0);
     let mut out = Summaries::new();
     for g in items.chunk_by(|a, b| a.0 == b.0) {
-        let widths: Vec<f64> = g.iter().filter_map(|it| it.1).collect();
+        let ratios: Vec<f64> = g.iter().filter_map(|it| it.1).collect();
         let snrs: Vec<f64> = g.iter().filter_map(|it| it.3).collect();
         let fits: Vec<&DonorFit> = g.iter().filter_map(|it| it.2.as_ref()).collect();
         let window = |value: &dyn Fn(&DonorFit) -> f64| {
@@ -527,7 +529,7 @@ fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
         out.insert(
             g[0].0,
             PrecursorSummary {
-                w_c: (!widths.is_empty()).then(|| median(widths)),
+                relative_width: (!ratios.is_empty()).then(|| median(ratios)),
                 shape,
                 snr: (!snrs.is_empty()).then(|| median(snrs)),
                 trace: false,
@@ -545,9 +547,14 @@ fn identified_snr(r: &ExtractRow) -> Option<f64> {
         return None;
     }
     let e = r.evidence.as_ref()?;
-    (e.amplitude > 0.0 && e.amplitude_se > 0.0 && e.amplitude_se.is_finite())
-        .then(|| e.amplitude / e.amplitude_se)
-        .filter(|v| v.is_finite())
+    Some(amplitude_snr(e)).filter(|v| *v > 0.0 && v.is_finite())
+}
+
+/// The relative width and the trace flag of `precursor`: what
+/// [`reported_quantity`] takes to report one of its fits.
+fn quantity_rule(summaries: &Summaries, precursor: u32) -> (Option<f64>, bool) {
+    let s = summaries.get(&precursor);
+    (s.and_then(|s| s.relative_width), s.is_some_and(|s| s.trace))
 }
 
 /// Mark the brightest share `fraction` (in `(0, 1]`) of the precursors with
@@ -1227,6 +1234,8 @@ struct OutRow {
     transfer_q: Option<f64>,
     quant_q: Option<f64>,
     apex_rt_s: Option<f64>,
+    /// The wrong-measurement q-value of an accepted transfer.
+    measurement_q: Option<f64>,
     library_q: f64,
     mass_err_ppm: Option<f64>,
     claim: Claim,
@@ -1270,13 +1279,14 @@ fn evidence_code(e: EvidenceType) -> u8 {
 
 /// The optional values of [`OutRow`], in column order after the evidence
 /// type.
-const OUT_VALUES: [&str; 6] = [
+const OUT_VALUES: [&str; 7] = [
     "quantity",
     "quantity_se",
     "quantity_normalized",
     "transfer_q",
     "quant_q",
     "apex_rt_s",
+    "measurement_q",
 ];
 
 /// The claim values of [`OutRow`], after the mass error: claimant
@@ -1357,6 +1367,7 @@ impl OutWriter {
                     r.transfer_q,
                     r.quant_q,
                     r.apex_rt_s,
+                    r.measurement_q,
                     Some(r.library_q),
                     r.mass_err_ppm,
                     r.claim.claimant.map(f64::from),
@@ -1454,16 +1465,17 @@ impl OutReader {
                     transfer_q: opt(3, i),
                     quant_q: opt(4, i),
                     apex_rt_s: opt(5, i),
-                    library_q: values[6].value(i),
-                    mass_err_ppm: opt(7, i),
+                    measurement_q: opt(6, i),
+                    library_q: values[7].value(i),
+                    mass_err_ppm: opt(8, i),
                     claim: Claim {
-                        claimant: opt(8, i).map(|x| x as u32),
-                        dt_s: opt(9, i).map(|x| x as f32),
-                        identified: opt(10, i).is_some_and(|x| x != 0.0),
-                        co_apex: opt(11, i).is_some_and(|x| x != 0.0),
-                        n: opt(12, i).map_or(0, |x| x as u16),
-                        n_co_apex: opt(13, i).map_or(0, |x| x as u16),
-                        n_identified_co_apex: opt(14, i).map_or(0, |x| x as u16),
+                        claimant: opt(9, i).map(|x| x as u32),
+                        dt_s: opt(10, i).map(|x| x as f32),
+                        identified: opt(11, i).is_some_and(|x| x != 0.0),
+                        co_apex: opt(12, i).is_some_and(|x| x != 0.0),
+                        n: opt(13, i).map_or(0, |x| x as u16),
+                        n_co_apex: opt(14, i).map_or(0, |x| x as u16),
+                        n_identified_co_apex: opt(15, i).map_or(0, |x| x as u16),
                         ..Claim::default()
                     },
                 })
@@ -1597,10 +1609,11 @@ const WRONG_FEATURES: usize = 11;
 const WRONG_CALIBRATION_ROWS: usize = 4_000_000;
 
 /// Features of the wrong-peak model: the fit evidence only (no donor count,
-/// library value or MS2 evidence), `None` with a non-finite feature or no
-/// positive quantity. The width ratio and the two standard errors are
-/// floored with `f64::max` first, which also turns a NaN among them into the
-/// floor rather than a rejection.
+/// library value or MS2 evidence), with the fitted quantity
+/// (`Evidence::quantity`, the area of the fit at its own width) and its
+/// standard error. `None` with a non-finite feature: a fit without a
+/// positive quantity, or a width ratio or standard error that is not
+/// positive and finite.
 pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     if e.quantity.is_nan() || e.quantity <= 0.0 {
         return None;
@@ -1608,26 +1621,26 @@ pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     let x = [
         e.llr,
         e.rt_z.abs(),
-        e.width_ratio.max(1e-3).ln().abs(),
+        e.width_ratio.ln().abs(),
         e.envelope_cos,
         e.coherence,
         e.m1_ratio,
         e.mass_err_ppm.abs(),
         e.n_points as f64,
-        (e.amplitude / e.amplitude_se.max(1e-9) + 1.0).log10(),
-        (e.quantity_se / e.quantity).max(1e-6).ln(),
-        e.quantity.max(1e-3).log2(),
+        (amplitude_snr(e) + 1.0).log10(),
+        (e.quantity_se / e.quantity).ln(),
+        e.quantity.log2(),
     ];
     debug_assert_eq!(x.len(), WRONG_FEATURES);
     let x: Vec<f32> = x.iter().map(|&v| v as f32).collect();
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// quant_q of each `(p_wrong, row)` in `pool`: the mean `p_wrong` of the rows
-/// at or below its own `p_wrong`. Rows with equal `p_wrong` are one step and
-/// share the mean at the end of their group, so the result does not depend on
-/// the order of the rows. `set(row, q)` receives every row once; `pool` is
-/// sorted in place.
+/// Wrong-measurement q-value (`measurement_q`) of each `(p_wrong, row)` in
+/// `pool`: the mean `p_wrong` of the rows at or below its own `p_wrong`. Rows
+/// with equal `p_wrong` are one step and share the mean at the end of their
+/// group, so the result does not depend on the order of the rows.
+/// `set(row, q)` receives every row once; `pool` is sorted in place.
 pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usize, f64)) {
     pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut sum = 0.0;
@@ -1644,18 +1657,74 @@ pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usiz
     }
 }
 
-/// Whether a pseudo-transfer's measurement is wrong against the same cell's
-/// identified fit: the apex is further than the identified width from the
-/// identified apex, or the quantity is off by more than a factor of 2.
-fn wrong_label(pseudo: &Evidence, id: &Evidence) -> Option<bool> {
-    let ok = pseudo.t0.is_finite()
-        && id.t0.is_finite()
-        && id.w.is_finite()
-        && pseudo.quantity > 0.0
-        && id.quantity > 0.0;
-    ok.then(|| {
-        (pseudo.t0 - id.t0).abs() > id.w || (pseudo.quantity / id.quantity).log2().abs() > 1.0
+/// `quant_q` of an accepted transfer: the larger of its transfer q-value and
+/// its wrong-measurement q-value, so a cut keeps it only when both are at or
+/// below the cut.
+pub(crate) fn transfer_quant_q(transfer_q: Option<f64>, measurement_q: f64) -> f64 {
+    transfer_q.map_or(measurement_q, |t| t.max(measurement_q))
+}
+
+/// Whether two fits are one fit copied (bit for bit equal apex, width,
+/// amplitude, LLR and quantity; a NaN compares equal to itself here).
+fn same_fit(a: &Evidence, b: &Evidence) -> bool {
+    [
+        (a.t0, b.t0),
+        (a.w, b.w),
+        (a.amplitude, b.amplitude),
+        (a.llr, b.llr),
+        (a.quantity, b.quantity),
+    ]
+    .iter()
+    .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// How a pseudo-transfer's measurement differs from the identified fit of
+/// the same cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Mismatch {
+    /// The apex is further than the identified width from the identified
+    /// apex.
+    pub(crate) apex: bool,
+    /// The fitted quantity is off by more than a factor of 2; `None` when
+    /// either fit has no positive finite quantity.
+    pub(crate) quantity: Option<bool>,
+}
+
+impl Mismatch {
+    /// A wrong measurement: either difference. A pair without quantities
+    /// is judged on the apex alone.
+    pub(crate) fn wrong(self) -> bool {
+        self.apex || self.quantity == Some(true)
+    }
+}
+
+/// The [`Mismatch`] of a pseudo-transfer's fit against the identified fit of
+/// the same cell, on the fitted quantities (`Evidence::quantity`: the area
+/// of each fit at its own width, so two fits of one height and different
+/// widths differ). `None` unless both apexes and the identified width are
+/// finite, and `None` when the identified fit is the pseudo-transfer's own
+/// (an identified pair measured at the predicted position,
+/// [`crate::quant_mbr`]): such a pair has no measurement to be compared
+/// with, so it is neither a training example of the wrong-measurement model
+/// nor counted in the wrong-peak rates.
+pub(crate) fn mismatch(pseudo: &Evidence, id: &Evidence) -> Option<Mismatch> {
+    if same_fit(pseudo, id) {
+        return None;
+    }
+    let quantity = |e: &Evidence| Some(e.quantity).filter(|q| *q > 0.0 && q.is_finite());
+    (pseudo.t0.is_finite() && id.t0.is_finite() && id.w.is_finite()).then(|| Mismatch {
+        apex: (pseudo.t0 - id.t0).abs() > id.w,
+        quantity: quantity(pseudo)
+            .zip(quantity(id))
+            .map(|(p, i)| (p / i).log2().abs() > 1.0),
     })
+}
+
+/// The training label of the wrong-measurement model ([`Mismatch::wrong`]).
+/// `None` unless both fits have a quantity.
+pub(crate) fn wrong_label(pseudo: &Evidence, id: &Evidence) -> Option<bool> {
+    let m = mismatch(pseudo, id)?;
+    m.quantity.map(|_| m.wrong())
 }
 
 /// A non-increasing step function of the classifier margin: the isotonic
@@ -1715,9 +1784,10 @@ impl WrongCalibration {
     }
 }
 
-/// A pseudo-transfer target's wrong-peak label and features; `None` for any
-/// other row, an identity decoy's row, or a row without an identified fit of
-/// the same cell.
+/// A pseudo-transfer target's wrong-measurement label ([`wrong_label`]) and
+/// features ([`wrong_features`]); `None` for any other row, an identity
+/// decoy's row, a row without an identified fit of the same cell, or a pair
+/// without a label or without features.
 pub(crate) fn pseudo_example(
     r: &ExtractRow,
     ctx: &BlockContext<'_>,
@@ -1821,11 +1891,11 @@ pub(crate) fn finalize_stream(
             |_| Vec::new(),
             |local, _, _, rows| {
                 for r in rows.iter().filter(|r| r.precursor as usize % groups == g) {
-                    let w = consensus_scale_width(r, maps);
+                    let k = relative_fit_width(r);
                     let f = donor_fit(r, maps);
                     let snr = (trace_fraction > 0.0).then(|| identified_snr(r)).flatten();
-                    if w.is_some() || f.is_some() || snr.is_some() {
-                        local.push((r.precursor, w, f, snr));
+                    if k.is_some() || f.is_some() || snr.is_some() {
+                        local.push((r.precursor, k, f, snr));
                     }
                 }
                 Ok(())
@@ -2134,7 +2204,7 @@ pub(crate) fn finalize_stream(
     // Pass 4: the reference cells of the run normalisation, from the
     // identified rows' scores of pass 3.
     let t0 = Instant::now();
-    let cells: Mutex<TrainingSample<Key, NormCell>> =
+    let cells: Mutex<TrainingSample<Key, (NormCell, Option<f64>)>> =
         Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
     for_each_block(
         source,
@@ -2171,19 +2241,21 @@ pub(crate) fn finalize_stream(
                 let Some(e) = r.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
                     continue;
                 };
-                let s = summaries.get(&r.precursor);
-                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
-                let q = reported_quantity(e, r.run, w_c, trace, maps).0;
+                let (k, trace) = quantity_rule(summaries, r.precursor);
+                let q = reported_quantity(e, k, trace, 0.0).0;
                 if q > 0.0 && q.is_finite() {
                     local.push((
                         (chunk as u32, first + i as u64),
                         u64::from(r.precursor),
-                        NormCell {
-                            precursor: r.precursor,
-                            run: r.run,
-                            log2_quantity: q.log2(),
-                            rt: e.t0,
-                        },
+                        (
+                            NormCell {
+                                precursor: r.precursor,
+                                run: r.run,
+                                log2_quantity: q.log2(),
+                                rt: e.t0,
+                            },
+                            width_deviation(e, k, trace),
+                        ),
                     ));
                 }
             }
@@ -2203,7 +2275,12 @@ pub(crate) fn finalize_stream(
         );
     }
     let t1 = Instant::now();
-    let norm = fit_normalization(&cells.into_items(), stems.len(), &NormParams::default());
+    let (cells, width_weights) = weigh_widths(cells.into_items(), stems.len());
+    eprintln!(
+        "[mbr] finalize: run width weights (0 = relative width, 1 = own fitted width), runs per weight: {}",
+        describe_width_weights(&width_weights)
+    );
+    let norm = fit_normalization(&cells, stems.len(), &NormParams::default());
     eprintln!(
         "[mbr] finalize: normalisation cells {:.1} s, fit {:.1} s",
         (t1 - t0).as_secs_f64(),
@@ -2283,12 +2360,13 @@ pub(crate) fn finalize_stream(
             // quantity is missing, not zero, in the MBR table and the
             // feature parquet.
             let reported = |r: &ExtractRow| {
-                let s = summaries.get(&r.precursor);
-                let (w_c, trace) = (s.and_then(|s| s.w_c), s.is_some_and(|s| s.trace));
-                r.evidence
-                    .as_ref()
-                    .filter(|e| e.amplitude > 0.0)
-                    .map(|e| reported_quantity(e, r.run, w_c, trace, maps))
+                let (k, trace) = quantity_rule(summaries, r.precursor);
+                r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
+                    whole_pattern(
+                        reported_quantity(e, k, trace, row_width_weight(r, &width_weights)),
+                        lib.meta[r.precursor as usize].isotope_share,
+                    )
+                })
             };
             // Probability that a transfer's measurement is wrong (1 without
             // features, a fold model or a calibration).
@@ -2426,13 +2504,13 @@ pub(crate) fn finalize_stream(
                             v.ms2_pseudo_supported += usize::from(m.supports());
                         }
                         v.pseudo_scored += usize::from(q.is_some());
-                        let wrong = match (e, ctx.identified.get(&(r.precursor, r.run))) {
-                            (Some(p), Some(id)) => Some((p.t0 - id.t0).abs() > id.w),
-                            _ => None,
-                        };
-                        if let Some(w) = wrong {
+                        let wrong = e
+                            .zip(ctx.identified.get(&(r.precursor, r.run)))
+                            .and_then(|(p, id)| mismatch(p, id));
+                        if let Some(m) = wrong {
                             v.wrong_peak_pairs += 1;
-                            v.wrong_peak += usize::from(w);
+                            v.wrong_peak += usize::from(m.apex);
+                            v.wrong_measurement += usize::from(m.wrong());
                         }
                         for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
                             .into_iter()
@@ -2442,9 +2520,10 @@ pub(crate) fn finalize_stream(
                                 continue;
                             }
                             a.pseudo += 1;
-                            if let Some(w) = wrong {
+                            if let Some(m) = wrong {
                                 a.pairs += 1;
-                                a.wrong_peak += usize::from(w);
+                                a.wrong_peak += usize::from(m.apex);
+                                a.wrong_measurement += usize::from(m.wrong());
                             }
                         }
                         continue;
@@ -2463,6 +2542,7 @@ pub(crate) fn finalize_stream(
                     transfer_q,
                     quant_q,
                     apex_rt_s: e.map(|e| e.t0),
+                    measurement_q: None,
                     library_q: r.library_q,
                     mass_err_ppm: e.map(|e| e.mass_err_ppm),
                     claim: if r.role == Role::Transfer {
@@ -2488,9 +2568,10 @@ pub(crate) fn finalize_stream(
             if out.rows.is_empty() {
                 return Ok(());
             }
-            // quant_q of an accepted transfer: the running mean, over the
-            // run's accepted transfers in ascending probability of a wrong
-            // measurement, of that probability (every row is kept; a
+            // measurement_q of an accepted transfer: the running mean, over
+            // the run's accepted transfers in ascending probability of a
+            // wrong measurement, of that probability; its quant_q is the
+            // larger of that and its transfer_q (every row is kept; a
             // transfer below the threshold keeps its transfer_q).
             let mut pool: Vec<(f64, usize)> = out
                 .wrong
@@ -2505,7 +2586,11 @@ pub(crate) fn finalize_stream(
                 })
                 .map(|&(i, p)| (p, i))
                 .collect();
-            running_mean_q(&mut pool, |i, q| out.rows[i].quant_q = Some(q));
+            running_mean_q(&mut pool, |i, q| {
+                let r = &mut out.rows[i];
+                r.measurement_q = Some(q);
+                r.quant_q = Some(transfer_quant_q(r.transfer_q, q));
+            });
             out.rows.sort_unstable_by_key(|r| (r.precursor, r.run));
             if let Some(w) = out
                 .rows
@@ -2617,6 +2702,7 @@ fn write_merged(
                             n_co_apex: u32::from(r.claim.n_co_apex),
                             n_identified_co_apex: u32::from(r.claim.n_identified_co_apex),
                         }),
+                        measurement_q: r.measurement_q,
                     })?;
                 }
                 n += rows.len();
@@ -2695,8 +2781,8 @@ fn log_summary(
         ))
     );
     eprintln!(
-        "[mbr] pseudo-transfers {}: wrong peak {} of {}",
-        v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs
+        "[mbr] pseudo-transfers {}: wrong peak {} of {}, wrong measurement (wrong peak, or quantity off by more than a factor of 2) {}",
+        v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs, v.wrong_measurement
     );
     let rate = |a: usize, b: usize| {
         if b > 0 {
@@ -2757,14 +2843,15 @@ fn log_summary(
             a.wrong_peak_only
         );
         eprintln!(
-            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak",
+            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT-shift decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
             a.pooled,
             a.mass_only,
             a.rt_only,
             a.pseudo,
             v.pseudo_acceptance(a).map_or("NA".into(), |s| format!("{s:.4}")),
             a.wrong_peak,
-            a.pairs
+            a.pairs,
+            a.wrong_measurement
         );
     }
 }
@@ -2891,6 +2978,7 @@ mod tests {
                 mz: 500.0 + i as f64,
                 charge: 2,
                 envelope: [0.5, 0.3, 0.15, 0.05],
+                isotope_share: 1.0,
             })
             .collect();
         let psms = |q: f64, q_gate: f64| -> Vec<PsmIn> {
@@ -3001,6 +3089,7 @@ mod tests {
             transfer_q: Some(0.25),
             quant_q: Some(-0.0),
             apex_rt_s: Some(f64::INFINITY),
+            measurement_q: (run % 3 == 0).then_some(0.125),
             library_q: 1e-3,
             mass_err_ppm: Some(-1.25),
             claim: Claim {
@@ -3055,6 +3144,7 @@ mod tests {
                     r.transfer_q,
                     r.quant_q,
                     r.apex_rt_s,
+                    r.measurement_q,
                     Some(r.library_q),
                     r.mass_err_ppm,
                 ]

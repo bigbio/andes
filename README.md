@@ -132,8 +132,12 @@ flowchart TD
 ```
 
 1. **Pick the model** from the file's activation, resolution and isobaric label (one of 19
-   bundled models).
-2. **Build candidates**: digest the FASTA and generate decoys. The candidate index goes
+   bundled models). With several `--spectrum` inputs the model comes from the first one; an
+   input of the other fragment resolution class stops the search, any other difference in
+   analyzer or activation is reported.
+2. **Build candidates**: digest the FASTA and generate decoys. A FASTA that already holds
+   decoys (reversed records, or records named as the decoy of another record) stops the search:
+   pass targets only, or declare them with `--decoy-prefix <tag> --decoy-strategy none`. The candidate index goes
    out-of-core (cached in `--index-cache-dir`, by default next to the output) so candidates can be retrieved by the
    fragment-ion index; on low-res data only the 150 most intense peaks of each spectrum vote.
    `--glyco` builds its own sequon-only candidate table from the same out-of-core index.
@@ -159,7 +163,7 @@ andes-<version>-aarch64-apple-darwin.tar.gz
 andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive holds the binary, the 17-model store in `resources/models/`, and LICENSE/NOTICE/README.
+Each archive holds the binary, the 19-model store in `resources/models/`, and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -339,26 +343,26 @@ model data.
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
 |---|---|---|---|
 | `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral |
-| `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
-| `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
-| `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
-| `hcd_qexactive_tryp_phosphorylation` | HCD / QExactive / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
-| `hcd_highres_tryp_tmt` | HCD / HighRes / Trypsin / TMT | PXD010429 | — |
-| `hcd_highres_nocleavage` | HCD / HighRes / NoCleavage / Automatic | ProteomeTools (PXD009449) | — |
-| `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Phosphorylation | ProteomeTools (PXD009449) | — |
+| `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | PXD009875, PXD028735, PXD061135 | global default model |
+| `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429, PXD017092 | — |
+| `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | PXD002214, PXD003702 | — |
+| `hcd_qexactive_tryp_phosphorylation` | HCD / QExactive / Trypsin / Phosphorylation | PXD007740, PXD014525, PXD019646 | — |
+| `hcd_highres_tryp_tmt` | HCD / HighRes / Trypsin / TMT | PXD016766 | — |
+| `hcd_highres_nocleavage` | HCD / HighRes / NoCleavage / Automatic | PXD004894, PXD006939 | — |
+| `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Phosphorylation | PXD004894, PXD006939 | — |
 | `cid_lowres_tryp` | CID / LowRes / Trypsin / Automatic | PXD009875 + PXD000865 | UPS1 (low-res) |
 | `hcd_lowres_tryp` | HCD / LowRes / Trypsin / Automatic | ion-trap HCD scans (ITMS, hcd) of PXD056948, PXD063913, PXD067562, PXD072063 | HCD on ion trap PXD012131, PXD033117, PXD042919, PXD023374 |
 | `cid_lowres_tryp_tmt` | CID / LowRes / Trypsin / TMT | PXD016999 + PXD014502 + PXD017092 | TMT a05058 (low-res) |
-| `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | ⚠ limited training data |
-| `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
-| `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
+| `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000900 | ⚠ limited training data |
+| `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | PXD000900 | ⚠ limited training data |
+| `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | PXD000900 | ⚠ limited training data |
 | `ethcd_qexactive_tryp` | EThcD / QExactive / Trypsin / Automatic | ProteomeTools EThcD/ETciD scans (PXD004732, PXD010595) | EThcD PXD010154, PXD023835; HLA EThcD PXD064573 (non-specific route) |
-| `etd_highres_tryp` | ETD / HighRes / Trypsin / Automatic | public PRIDE (see manifest) | — |
-| `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
-| `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
-| `uvpd_qexactive_tryp` | UVPD / QExactive / Trypsin / Automatic | public PRIDE (see manifest) | — |
+| `etd_highres_tryp` | ETD / HighRes / Trypsin / Automatic | PXD004732, PXD010595 | — |
+| `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Phosphorylation | PXD007058 | — |
+| `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | PXD019646 | — |
+| `uvpd_qexactive_tryp` | UVPD / QExactive / Trypsin / Automatic | PXD003109, PXD018176, PXD065289 | — |
 
-<sub>"see manifest": the accession is tracked in the training manifest, not yet pinned here.
+<sub>Training data: the PRIDE accessions in each model's `dataset` field in `resources/models/`.
 **⚠ limited training data:** few PSMs were available, so treat these models as best-effort.</sub>
 
 To train your own, see [`TRAIN.md`](TRAIN.md).

@@ -677,8 +677,10 @@ pub struct LfqTableMeta<'a> {
 }
 
 /// Write `lfq.parquet` (long): one row per quantified feature in one run
-/// with its PSM anchor, apex, boundaries, areas (`isotope_areas` a list,
-/// monoisotope first), the decoy-competition result and `accepted`
+/// with its PSM anchor, apex, boundaries, areas (`isotope_areas` a list of
+/// the traced isotopes, monoisotope first; `area` their sum over the share
+/// of the whole isotope pattern they hold), the decoy-competition result
+/// and `accepted`
 /// (`accepted[i]` for `rows[i]`: feature q-value and cosine within the run's
 /// cuts). The per-run wide view is the `accepted` rows pivoted on
 /// `(peptide, charge)` × `filename` over `area`, keeping the highest `score`

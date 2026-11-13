@@ -249,9 +249,11 @@ fn write_glyco_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
 
-    // Charge one-hot
+    // Charge one-hot; a charge below the columns sets the lowest one, a charge
+    // above them sets only `chargeHi`.
+    let hot_charge = psm.charge_used.max(min_charge);
     for c in min_charge..=max_charge {
-        let flag: u8 = if c == psm.charge_used { b'1' } else { b'0' };
+        let flag: u8 = if c == hot_charge { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
     // chargeHi overflow: 1 when the glycopeptide's charge exceeds the one-hot range
@@ -544,7 +546,7 @@ pub fn write_glyco_pin(
 /// The non-glyco path enforces the same one-PSM-per-scan rule
 /// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
 /// ONLY, never for FDR.
-pub(crate) fn select_emitted_hits(
+pub fn select_emitted_hits(
     hits: &[FullGlycoPsm],
     collapse: bool,
     enumerated_only: bool,

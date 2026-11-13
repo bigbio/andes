@@ -2012,8 +2012,13 @@ pub(crate) fn enzyme_cleavage_credit(
             penalty_peptide
         };
     } else if enz_is_n_term {
-        // N-term cleavage (peptide)
-        score += if enz.is_cleavable(pre) {
+        // N-term cleavage (peptide): the enzyme cuts before its target residue,
+        // so the cleaved residue is the peptide's own first residue.
+        let first = match cand.peptide.residues.first() {
+            Some(aa) => aa.residue,
+            None => 0,
+        };
+        score += if enz.is_cleavable(first) {
             credit_peptide
         } else {
             penalty_peptide
@@ -3880,6 +3885,50 @@ mod dedup_tests {
             is_protein_n_term: false,
             is_protein_c_term: false,
         }
+    }
+
+    /// Cleavage credit with distinguishable constants: neighbouring +10 / -100,
+    /// peptide +1 / -1000.
+    fn credit(cand: &Candidate, enz: Enzyme) -> i32 {
+        enzyme_cleavage_credit(
+            cand,
+            enz,
+            enz.is_c_term(),
+            enz.is_n_term(),
+            10,
+            -100,
+            1,
+            -1000,
+        )
+    }
+
+    fn flanked(seq: &[u8], pre: u8, post: u8) -> Candidate {
+        let residues: Vec<AminoAcid> = seq.iter().filter_map(|&b| AminoAcid::standard(b)).collect();
+        cand_with_peptide(Peptide::new(residues, pre, post))
+    }
+
+    #[test]
+    fn n_term_enzyme_peptide_credit_reads_the_first_residue() {
+        // AspN cuts before D. `G.DAAAG.D`: both ends are AspN cuts.
+        assert_eq!(credit(&flanked(b"DAAAG", b'G', b'D'), Enzyme::AspN), 11);
+        // `D.AAAAG.D`: the residue before the peptide is D, but the peptide
+        // starts with A, so its N-terminus is not an AspN cut.
+        assert_eq!(credit(&flanked(b"AAAAG", b'D', b'D'), Enzyme::AspN), -990);
+        // `G.DAAAG.A`: N-terminus cut, C-terminus not.
+        assert_eq!(credit(&flanked(b"DAAAG", b'G', b'A'), Enzyme::AspN), -99);
+        // LysN cuts before K.
+        assert_eq!(credit(&flanked(b"KAAAG", b'G', b'K'), Enzyme::LysN), 11);
+    }
+
+    #[test]
+    fn c_term_enzyme_credit_reads_the_last_residue() {
+        // Trypsin `K.AAAAR.G`: both ends are tryptic cuts.
+        assert_eq!(credit(&flanked(b"AAAAR", b'K', b'G'), Enzyme::Trypsin), 11);
+        // `G.AAAAG.G`: neither end.
+        assert_eq!(
+            credit(&flanked(b"AAAAG", b'G', b'G'), Enzyme::Trypsin),
+            -1100
+        );
     }
 
     fn psm(primary: u32, rank: f32, pin: f32) -> PsmMatch {

@@ -6,7 +6,8 @@
 //! the per-element abundance ladders (`model::isotope`).
 
 use model::amino_acid::standard_composition;
-use model::isotope::isotope_envelope_from_formula;
+use model::isotope::{isotope_envelope_and_share_from_formula, isotope_envelope_from_formula};
+use model::mass::{C, H, N, O, S};
 
 /// Atom counts (C, H, N, O, S).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -44,6 +45,40 @@ impl Formula {
             o: r(3),
             s: r(4),
         }
+    }
+
+    /// The atoms a glycan contributes, from its residue counts. Residues are
+    /// POLYMERISED (one water already lost per glycosidic bond): Hex
+    /// C6H10O5, HexNAc C8H13NO5, Fuc C6H10O4, NeuAc C11H17NO8, NeuGc
+    /// C11H17NO9.
+    ///
+    /// The peptide [`Formula::peptide`] already carries its terminal water;
+    /// an attached glycan adds no further H2O. This is the exact formula the
+    /// isotope envelope needs — a glycan carries roughly twice the oxygen and
+    /// ~14 % fewer carbons per dalton than an averagine peptide, which moves
+    /// the M+1/M+2 shares enough to matter for a 3–4 kDa glycopeptide.
+    pub fn glycan(hex: u8, hexnac: u8, fuc: u8, neuac: u8, neugc: u8) -> Self {
+        let h = hex as u32;
+        let n = hexnac as u32;
+        let f = fuc as u32;
+        let a = neuac as u32;
+        let g = neugc as u32;
+        Formula {
+            c: 6 * h + 8 * n + 6 * f + 11 * a + 11 * g,
+            h: 10 * h + 13 * n + 10 * f + 17 * a + 17 * g,
+            n: n + a + g,
+            o: 5 * h + 5 * n + 4 * f + 8 * a + 9 * g,
+            s: 0,
+        }
+    }
+
+    /// Monoisotopic mass of the formula (Da).
+    pub fn monoisotopic_mass(&self) -> f64 {
+        self.c as f64 * C
+            + self.h as f64 * H
+            + self.n as f64 * N
+            + self.o as f64 * O
+            + self.s as f64 * S
     }
 
     pub fn add(&mut self, other: Formula) {
@@ -90,6 +125,12 @@ impl Formula {
     pub fn envelope(&self, n_isotopes: usize) -> Vec<f64> {
         isotope_envelope_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
     }
+
+    /// [`Self::envelope`] and the share of the whole isotope pattern that
+    /// its `n_isotopes` peaks hold (0 when `n_isotopes == 0`).
+    pub fn envelope_and_share(&self, n_isotopes: usize) -> (Vec<f64>, f64) {
+        isotope_envelope_and_share_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
+    }
 }
 
 #[cfg(test)]
@@ -122,12 +163,69 @@ mod tests {
     }
 
     #[test]
+    fn glycan_formula_mass_matches_the_residue_masses() {
+        // Polymerised residue masses pinned by the glyco campaign (see
+        // andes-glyco::glycan_mass) at 6 decimals.
+        let f = Formula::glycan(1, 0, 0, 0, 0);
+        assert!((f.monoisotopic_mass() - 162.052824).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 1, 0, 0, 0);
+        assert!((f.monoisotopic_mass() - 203.079373).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 1, 0, 0);
+        assert!((f.monoisotopic_mass() - 146.057909).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 0, 1, 0);
+        assert!((f.monoisotopic_mass() - 291.095417).abs() < 5e-6, "{f:?}");
+        let f = Formula::glycan(0, 0, 0, 0, 1);
+        assert!((f.monoisotopic_mass() - 307.090331).abs() < 5e-6, "{f:?}");
+    }
+
+    #[test]
+    fn a_glycopeptide_envelope_is_flatter_than_the_peptide_alone() {
+        // The glycan's oxygen dilutes the 13C share: the same peptide with a
+        // HexNAc2Hex8 attached must put relatively MORE weight on M+2 than
+        // the bare peptide averaged over its extra mass.
+        let bare = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
+        let mut intact = bare;
+        intact.add(Formula::glycan(8, 2, 0, 0, 0));
+        let a = bare.envelope(6);
+        let b = intact.envelope(6);
+        assert!(b[1] / b[0] > a[1] / a[0]);
+        // The monoisotopic peak of a ~3 kDa glycopeptide is no longer dominant.
+        let mut big = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
+        big.add(Formula::averagine(2500.0));
+        let e = big.envelope(8);
+        assert!(e[2] > 0.1 * e[0], "{e:?}");
+    }
+
+    #[test]
     fn envelope_of_a_small_peptide_is_mono_dominated() {
         let f = Formula::peptide(b"PEPTIDEK".iter().map(|&r| (r, 0.0)));
         let env = f.envelope(4);
         assert_eq!(env.len(), 4);
         assert!((env.iter().sum::<f64>() - 1.0).abs() < 1e-9);
         assert!(env[0] > env[1] && env[1] > env[2]);
+    }
+
+    #[test]
+    fn share_of_the_first_four_isotopes_falls_with_mass() {
+        // Averagine peptides of 1 to 4 kDa: the first four isotopes hold
+        // nearly all of a small peptide's pattern and about three quarters
+        // of a 4 kDa one's.
+        let share = |mass: f64| Formula::averagine(mass).envelope_and_share(4).1;
+        for (mass, lo, hi) in [
+            (1000.0, 0.99, 1.0),
+            (2000.0, 0.94, 0.96),
+            (3000.0, 0.86, 0.88),
+            (4000.0, 0.73, 0.76),
+        ] {
+            let s = share(mass);
+            assert!(s > lo && s < hi, "{mass} Da: {s}");
+        }
+        let f = Formula::peptide(b"PEPTIDEK".iter().map(|&r| (r, 0.0)));
+        let (env, s) = f.envelope_and_share(4);
+        assert_eq!(env, f.envelope(4));
+        assert!(s > 0.99 && s < 1.0, "{s}");
+        // More isotopes hold more of the pattern.
+        assert!(f.envelope_and_share(5).1 > s);
     }
 
     #[test]

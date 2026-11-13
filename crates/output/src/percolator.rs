@@ -714,20 +714,21 @@ fn pin_spec_ids(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(ids)
 }
 
-/// Replace the `q-value` column of the Percolator result file `path` by the
-/// values of `q` (keyed by `PSMId`); rows without a value keep theirs. The
-/// replaced values stay in a `pooled-q-value` column before `proteinIds`
-/// (kept as it is when the file already has one). The file is replaced
-/// atomically: an error leaves it as it was. Returns the number of rows
-/// replaced.
-fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, PercolatorError> {
+/// The Percolator result file `path` as it is and with its `q-value` column
+/// replaced by the values of `q` (keyed by `PSMId`); rows without a value keep
+/// theirs. The replaced values stay in a `pooled-q-value` column before
+/// `proteinIds` (kept as it is when the file already has one). `None` when
+/// the file does not exist. Nothing is written.
+fn render_q_values(
+    path: &Path,
+    q: &HashMap<String, f64>,
+) -> Result<Option<(String, String)>, PercolatorError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
     let mut out = String::with_capacity(text.len() + text.len() / 16);
-    let mut replaced = 0usize;
     // PSMId, q-value and proteinIds columns, and whether the pooled column is added.
     let mut cols: Option<(usize, usize, usize, bool)> = None;
     for (n, line) in text.lines().enumerate() {
@@ -761,7 +762,6 @@ fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, Perc
         if let Some(v) = new {
             if let Some(f) = fields.get_mut(q_col) {
                 *f = v;
-                replaced += 1;
             }
         }
         if add {
@@ -770,8 +770,32 @@ fn rewrite_q_values(path: &Path, q: &HashMap<String, f64>) -> Result<usize, Perc
         out.push_str(&fields.join("\t"));
         out.push('\n');
     }
-    crate::atomic::write_atomic(path, |tmp| std::fs::write(tmp, &out))?;
-    Ok(replaced)
+    Ok(Some((text, out)))
+}
+
+/// Write the per-run q-values into the target and the decoy result file (see
+/// [`render_q_values`]). Both files are read and rendered before either is
+/// written, and each is replaced atomically; if the decoy file cannot be
+/// written the target file is put back, so an error leaves both pooled.
+fn rewrite_result_q_values(
+    main: &ResultPaths,
+    target_q: &HashMap<String, f64>,
+    decoy_q: &HashMap<String, f64>,
+) -> Result<(), PercolatorError> {
+    let target = render_q_values(&main.target, target_q)?;
+    let decoy = render_q_values(&main.decoy, decoy_q)?;
+    if let Some((_, new)) = &target {
+        crate::atomic::write_atomic(&main.target, |tmp| std::fs::write(tmp, new))?;
+    }
+    if let Some((_, new)) = &decoy {
+        if let Err(e) = crate::atomic::write_atomic(&main.decoy, |tmp| std::fs::write(tmp, new)) {
+            if let Some((old, _)) = &target {
+                let _ = crate::atomic::write_atomic(&main.target, |tmp| std::fs::write(tmp, old));
+            }
+            return Err(e.into());
+        }
+    }
+    Ok(())
 }
 
 /// What the pass of one run gave: Percolator's q-values of its target and of
@@ -949,10 +973,8 @@ pub fn apply_per_run_q(
     // stay pooled together.
     let mut replaced = 0usize;
     let mut note = "";
-    match rewrite_q_values(&main.target, &target_q)
-        .and_then(|_| rewrite_q_values(&main.decoy, &decoy_q))
-    {
-        Ok(_) => {}
+    match rewrite_result_q_values(&main, &target_q, &decoy_q) {
+        Ok(()) => {}
         Err(e) => {
             eprintln!("WARN: the per-run q-values could not be written to the result files ({e}); the q-values stay pooled");
             note = ", result files left pooled";
@@ -1048,6 +1070,55 @@ fn repair_pep(
          PSMs re-estimated by the mix-max method on the same model (q-values unchanged)"
     );
     Ok(())
+}
+
+/// The rescored score of every PIN row, keyed by `SpecId`: target rows, then
+/// decoy rows.
+pub type RowScores = (HashMap<String, f64>, HashMap<String, f64>);
+
+/// The score of every row of `pin` (target rows, decoy rows) under the model
+/// of the main run on that PIN ([`run_percolator_pooled`] must have run): a
+/// static pass with the main run's weights and no target-decoy competition,
+/// so every row of a spectrum keeps its score, not only its group's winner.
+/// The rows of one spectrum can then compete with each other, as the site
+/// posteriors need ([`crate::site_identity::row_posteriors`]). The pass files
+/// are scratch, removed whether or not the pass worked.
+pub fn score_all_rows(
+    backend: &PercolatorBackend,
+    pin: &Path,
+    extra_args: &[String],
+) -> Result<RowScores, PercolatorError> {
+    let main = result_paths(pin);
+    let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let pass = ResultPaths::new(&out_dir, &format!("{stem}.rows"));
+    pass.clear_stale()?;
+    let output = run_static_pass(backend, pin, &out_dir, &pass, &main.weights, extra_args, false)?;
+    let scores = |path: &Path| -> Result<HashMap<String, f64>, PercolatorError> {
+        let text = std::fs::read_to_string(path).map_err(PercolatorError::Io)?;
+        Ok(parse_psm_results(&text)?
+            .into_iter()
+            .filter_map(|(id, p)| p.score.map(|s| (id, s)))
+            .collect())
+    };
+    let result = if output.status.success() && pass.target.exists() && pass.decoy.exists() {
+        scores(&pass.target).and_then(|t| Ok((t, scores(&pass.decoy)?)))
+    } else {
+        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+        if log.trim().is_empty() {
+            log = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Err(PercolatorError::Run {
+            backend: backend.describe(),
+            status: output.status.to_string(),
+            log_tail: tail_lines(&log, 20),
+        })
+    };
+    pass.clear_stale()?;
+    result
 }
 
 /// The result files `run_percolator` writes for `pin`, next to it.
@@ -1667,6 +1738,42 @@ mod tests {
                     &format!("{}:/out", dir.display())
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn unreadable_decoy_file_leaves_the_target_file_pooled() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ResultPaths::new(dir.path(), "s");
+        let target = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                      a\t1.0\t0.01\t0.001\tK.AAK.R\tP\n";
+        std::fs::write(&paths.target, target).unwrap();
+        // No q-value column: the decoy file cannot be rendered.
+        std::fs::write(
+            &paths.decoy,
+            "PSMId\tscore\tpeptide\tproteinIds\nd\t0.1\tK.KAA.R\tXXX_P\n",
+        )
+        .unwrap();
+        let target_q = HashMap::from([("a".to_string(), 0.5)]);
+        let decoy_q = HashMap::from([("d".to_string(), 0.5)]);
+        assert!(rewrite_result_q_values(&paths, &target_q, &decoy_q).is_err());
+        assert_eq!(std::fs::read_to_string(&paths.target).unwrap(), target);
+
+        // With a readable decoy file both are rewritten and keep the pooled value.
+        std::fs::write(
+            &paths.decoy,
+            "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\nd\t0.1\t0.2\t0.9\tK.KAA.R\tXXX_P\n",
+        )
+        .unwrap();
+        rewrite_result_q_values(&paths, &target_q, &decoy_q).unwrap();
+        for (path, pooled) in [(&paths.target, "0.01"), (&paths.decoy, "0.2")] {
+            let text = std::fs::read_to_string(path).unwrap();
+            let mut lines = text.lines();
+            let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+            let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
+            let col = |name: &str| row[header.iter().position(|c| *c == name).unwrap()];
+            assert_eq!(col("q-value").parse::<f64>().unwrap(), 0.5);
+            assert_eq!(col(POOLED_Q_COLUMN), pooled);
         }
     }
 }

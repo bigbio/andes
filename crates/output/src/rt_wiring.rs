@@ -16,7 +16,8 @@
 //! When observed RT is unavailable (`Spectrum.rt_seconds` is `None`) or the
 //! per-run calibration cannot be fit (fewer than
 //! [`MIN_CALIBRATION_ANCHORS`](scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS)
-//! confident anchors, or degenerate indices), the three PIN features stay at
+//! anchors (the rank-1 target PSM of each spectrum, at any score), or
+//! degenerate indices), the three PIN features stay at
 //! their `Default` `0.0` — the NEUTRAL value — so the PIN is byte-identical to
 //! the pre-RT baseline on these columns.
 //!
@@ -36,7 +37,30 @@ use crate::row_context::iter_ranked_by_rank_score;
 /// minutes, keeping f64 precision until the final `f32` store).
 const SECONDS_PER_MINUTE: f64 = 60.0;
 
-/// Populate the engine-wide RT PIN features on every PSM in `queues`.
+/// [`populate_rt_features`] on each input file of a search: `run_ends[r]` is
+/// the exclusive end index in `spectra` of input `r` (spectra are concatenated
+/// in input order). Each file gets its own calibration line and gradient span,
+/// so runs with different gradients do not share one line.
+pub fn populate_rt_features_per_run(
+    spectra: &[Spectrum],
+    queues: &mut [TopNQueue],
+    candidates: &[Candidate],
+    run_ends: &[usize],
+) {
+    let mut start = 0;
+    for &end in run_ends {
+        let end = end.min(spectra.len()).max(start);
+        populate_rt_features(&spectra[start..end], &mut queues[start..end], candidates);
+        start = end;
+    }
+    if start < spectra.len() {
+        populate_rt_features(&spectra[start..], &mut queues[start..], candidates);
+    }
+}
+
+/// Populate the engine-wide RT PIN features on every PSM in `queues`, with one
+/// calibration over all of `spectra` (one run; see
+/// [`populate_rt_features_per_run`] for a search over several files).
 ///
 /// Steps (design "Commit 1"):
 /// 1. Collect calibration anchors `(predicted_index, observed_rt_min)` from all
@@ -308,6 +332,33 @@ mod tests {
             f.delta_rt_norm,
             expected_norm
         );
+    }
+
+    #[test]
+    fn each_run_gets_its_own_calibration() {
+        // Two runs whose RT follows the predicted index with different lines.
+        let (mut spectra, mut queues, mut candidates, _) = linear_fixture(8, 1.5, 20.0);
+        let (s2, q2, c2, _) = linear_fixture(8, 4.0, 2.0);
+        let shift = candidates.len() as u32;
+        spectra.extend(s2);
+        candidates.extend(c2);
+        for q in q2 {
+            let p = q.iter_psms().next().unwrap().clone();
+            queues.push(queue_with(vec![psm(p.candidate_idxs[0] + shift, p.rank_score)]));
+        }
+        let worst = |queues: &[TopNQueue]| {
+            queues
+                .iter()
+                .map(|q| q.iter_psms().next().unwrap().features.delta_rt.abs())
+                .fold(0.0f32, f32::max)
+        };
+        let mut per_run = queues.clone();
+        populate_rt_features_per_run(&spectra, &mut per_run, &candidates, &[8, 16]);
+        assert!(worst(&per_run) < 0.5, "per-run DeltaRT {}", worst(&per_run));
+        // One line over both runs cannot follow either.
+        let mut pooled = queues.clone();
+        populate_rt_features(&spectra, &mut pooled, &candidates);
+        assert!(worst(&pooled) > 1.0, "pooled DeltaRT {}", worst(&pooled));
     }
 
     #[test]

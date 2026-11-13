@@ -67,6 +67,9 @@ pub struct LfqTarget {
     pub anchor_rt: f64,
     /// Theoretical isotope envelope (first `n_isotopes`, sums to 1).
     pub envelope: Vec<f64>,
+    /// Share of the whole isotope pattern held by the isotopes of
+    /// `envelope`, in (0, 1].
+    pub isotope_share: f64,
 }
 
 /// A quantified feature.
@@ -75,7 +78,8 @@ pub struct FeatureQuant {
     pub apex_rt: f64,
     pub rt_start: f64,
     pub rt_stop: f64,
-    /// Summed isotope areas (intensity · seconds).
+    /// Area of the whole isotope pattern (intensity · seconds): the summed
+    /// `isotope_areas` over the target's `isotope_share`.
     pub area: f64,
     /// Monoisotopic trace height at the apex scan.
     pub apex_intensity: f32,
@@ -173,11 +177,11 @@ fn quantify_at(
     }
     let theo: Vec<f64> = target.envelope.iter().copied().take(n_iso).collect();
     let cos = cosine(&isotope_areas, &theo) as f32;
-    let area: f64 = isotope_areas.iter().sum();
+    let traced: f64 = isotope_areas.iter().sum();
     if let Some(&theo_mono) = theo.first() {
         let theo_total: f64 = theo.iter().sum();
-        if theo_mono > 0.0 && area > 0.0 && theo_total > 0.0 {
-            let share = (isotope_areas[0] / area) / (theo_mono / theo_total);
+        if theo_mono > 0.0 && traced > 0.0 && theo_total > 0.0 {
+            let share = (isotope_areas[0] / traced) / (theo_mono / theo_total);
             if share < params.min_mono_share {
                 return None;
             }
@@ -188,7 +192,7 @@ fn quantify_at(
         apex_rt: rt[peak.apex],
         rt_start: rt[peak.left],
         rt_stop: rt[peak.right],
-        area,
+        area: traced / target.isotope_share,
         apex_intensity,
         isotope_areas,
         cosine: cos,
@@ -259,6 +263,7 @@ mod tests {
             charge: 2,
             anchor_rt: 97.0,
             envelope: env.to_vec(),
+            isotope_share: 1.0,
         };
         (Ms1RunIndex::new(scans), target)
     }
@@ -279,6 +284,30 @@ mod tests {
         );
         assert!((fq.area - 1.0e7).abs() / 1.0e7 < 0.03, "{fq:?}");
         assert!((fq.rt_delta_s - 3.0).abs() <= 1.0);
+    }
+
+    #[test]
+    fn area_is_the_traced_sum_over_the_isotope_share() {
+        let (index, target) = synthetic_run();
+        let params = LfqParams::default();
+        let four = quantify(&index, &target, &params).expect("feature");
+        assert_eq!(four.area, four.isotope_areas.iter().sum::<f64>());
+        let share = 0.871_108_790_48;
+        let partial = LfqTarget {
+            isotope_share: share,
+            ..target
+        };
+        let whole = quantify(&index, &partial, &params).expect("feature");
+        assert_eq!(whole.area, four.area / share);
+        // Nothing else of the feature uses the share, nor does the decoy
+        // twin's eligibility.
+        assert_eq!(
+            FeatureQuant {
+                area: four.area,
+                ..whole
+            },
+            four
+        );
     }
 
     #[test]
@@ -375,6 +404,7 @@ mod tests {
             charge: 2,
             anchor_rt: 97.0,
             envelope: vec![0.5, 0.3, 0.15, 0.05],
+            isotope_share: 1.0,
         };
         let scans: Vec<Ms1Scan> = (0..real.len())
             .map(|i| {

@@ -281,9 +281,10 @@ andes writes `<stem>.proteoforms.tsv`: for each protein family (a UniProt entry)
 entry first and then each isoform, variant and chain entry with a *specific* target PSM at
 q ≤ `--fdr`.
 Within its family, a peptide is *specific* to a member when no other member explains it, and
-*shared* otherwise. A member's `confidence` is 1 − q of its best specific PSM, the class-aware
+*shared* otherwise. A member's `q_value` is that of its best specific PSM, the class-aware
 q-value above (`evidence` `specific`), or of its best shared PSM when it has no specific one
-(`evidence` `shared`). For a variant, `alternative_explanation` says whether its substitution
+(`evidence` `shared`). It is the error rate of the PSM set down to that PSM, not the probability
+that the member is absent. For a variant, `alternative_explanation` says whether its substitution
 weighs the same as deamidation, methylation or oxidation, and whether the canonical counterpart
 peptide (the substitution reverted) was identified: decoys cannot measure that error, so these
 rows are candidates rather than claims. With `--lfq` or `--tmt`, `quantity_<run or channel>` is
@@ -447,7 +448,7 @@ matching all their context rules, so no knockoff.
 
 With rescoring, `<stem>.sites.tsv` lists the accepted claims, one row per site whose best PSM
 passes `--fdr` and whose site q-value passes `--proteoform-fdr`. Its columns are `family
-accession position residue modification_mass prior_tier psms best_psm site_q confidence occupancy
+accession position residue modification_mass prior_tier psms best_psm site_q occupancy
 identity identity_alternatives identity_spectra`.
 
 #### Site identity: occupancy and which modification
@@ -460,7 +461,10 @@ Each accepted site also gets two probabilities:
   `identity_spectra` is the posterior mass placing a modification there, in spectra.
 
 The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
-one spectrum compete. A row's logit combines:
+one spectrum compete. Target-decoy competition keeps one row per spectrum and precursor mass, so
+the rows are scored apart from it: with Percolator, a static pass of the trained model without
+`-Y` scores every PIN row (run only when the database has site claims); the native rescorer
+keeps the held-out score of every row. A row's logit combines:
 - its rescored score;
 - its precursor isotope offset;
 - its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
@@ -471,20 +475,21 @@ from the run: among the rows the other evidence already makes confident, how oft
 when the row carries the modification and when a competing row carries another. Declare the
 signatures in the mods file; a modification without them is told apart by its fragments only.
 
-Measured on synthetic peptide pools (PXD009449), one lysine modification per pool, six lysine
-modifications claimed at every site, on the half of the peptides the fixed weights were not fitted
-on:
+Measured on synthetic peptide pools (PXD009449): seven lysine pools (one modification per pool
+and an unmodified pool), six lysine modifications claimed at every site, on the half of the
+peptides the fixed weights were not fitted on, Percolator 3.7.1:
 
 | Accepted sites | Claims | Wrong modification |
 |---|---|---|
-| site q ≤ 0.05 | 753 | 245 (33%) |
-| and identity ≥ 0.5 | 522 | 26 (5.0%; 28.5 expected) |
-| and identity ≥ 0.95 | 412 | 11 (2.7%) |
-| and identity ≥ 0.95, occupancy ≥ 0.5 | 404 | 3 (0.7%) |
+| site q ≤ 0.05 | 666 | 133 (20%) |
+| and identity ≥ 0.5 | 540 | 34 (6.3%; 15.8 expected) |
+| and identity ≥ 0.95 | 485 | 6 (1.2%; 1.1 expected) |
 
-In the unmodified-lysine pool, every site that passed its site q-value had occupancy below 0.5
-(mean 0.01). The remaining wrong claims look like synthesis side products: one peptide is seen
-with another modification in three pools. PSMs at 1% FDR do not change.
+Between 0.5 and 0.95 the identity is overconfident (34 wrong against 15.8 expected). Scoring every
+row instead of the competition winners only (before, only rows at another precursor mass
+competed) takes 41 more
+correct sites at identity ≥ 0.95 and leaves 16 fewer wrong ones at identity ≥ 0.5; PSMs at 1% FDR
+do not change.
 
 ### PEFF databases
 
@@ -636,8 +641,12 @@ andes inference \
 - The scores must be on one scale: give the results of one Percolator run over all the runs (one
   file, or one file per run from that run). Separate Percolator runs are not comparable.
 - Give the search's database options (`--annotations`, `--uniprot-*`, `--knockoffs`,
-  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries and decoy pairs
-  are the search's. Knockoff entries are evidence for no protein.
+  `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries, knockoff sites
+  and decoy pairs are the search's. Knockoff entries are evidence for no protein.
+- Give the search's `--mods` file when it had one. A PSM that places one of its `sites=annotated`
+  modifications on a knockoff site is then counted for no group, as in the search
+  ([site claims](#site-claims-knockoff-sites-experimental)). Without the file those PSMs are
+  counted.
 - The class and knockoff q-values are applied as in a search; `--fdr` and `--proteoform-fdr` set
   the PSM cutoffs for the counts.
 - `--protein-fdr` (default 0.01) is the protein q-value cut: `pg.parquet` keeps the target groups
@@ -673,7 +682,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.parquet`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
 | `--quant-dir` | dir | *(none)* | Per input file writes `<stem>.ms1.parquet` (the run's MS1 scans, every FAIMS voltage), `<stem>.ms2.parquet` (every MS2 scan reduced to its 100 most intense centroids, with its precursor and isolation window) and `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, no FDR filter; `spec_id` is the PIN SpecId, `search_score` the PIN `RawScore`) for the multi-run quantification stages. Implies MS1 capture; same inputs as `--lfq`. Two inputs with the same stem, or an input without MS1 scans, are an error. Other outputs are unchanged. |
 | `--lfq-tol` | tolerance | `10ppm` | MS1 tolerance of the isotope chromatograms, and of the `--mbr` template fit (ppm only there). |
-| `--lfq-rt-window` | seconds | `60` | Half-window around the identifying PSM's retention time. |
+| `--lfq-rt-window` | seconds | `60` (`120` with `--glyco`) | Half-window around the identifying PSM's retention time. Intact glycopeptides default to a wider window because HILIC anchors often sit off the apex; a value given explicitly applies to both paths. |
 | `--lfq-gaussian-width` | seconds | *(none)* | Experimental Gaussian smoothing width (eight sigma) for peak detection; areas use raw traces. Validate feature-q coverage for the acquisition. Default detection uses five-scan Savitzky–Golay. |
 | `--lfq-min-cosine` | 0..1 | `0.7` | Minimum isotope-envelope cosine for both target and decoy eligibility before feature competition. All target features remain in `lfq.parquet` (with `accepted` false when they fail a cut) and the QPX parquet. |
 | `--lfq-feature-fdr` | 0..1 | `0.05` | Feature FDR for `accepted` in `lfq.parquet`, from the target/decoy competition of each feature against its +11 Th twin. |
@@ -1075,12 +1084,12 @@ major version marks an incompatible layout, a new minor version only adds column
 |---|---|---|
 | `<stem>.tmt.parquet` | one per PSM with reporter ions (`psm_q_value`: the per-run q-value when the PIN had several runs), including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values), then, unless `--tmt-unmix off`, `interference` and one `unmix_<prefix>_<channel>` per channel (null for a scan the interference model could not cover; §10). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit), `andes.tmt.corrected`, `andes.tmt.unmix` (`off`, `on` or `auto`) and `andes.tmt.unmix_strength` (each run's λ) |
 | `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
-| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature confidence q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
+| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value; `psm_q_value` is the per-run q-value when the PIN had several runs) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--lfq-feature-fdr` and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
 | `<stem>.label.parquet` (`--label`) | one per (label group, run, channel) for every group identified in the run (in any channel) or transferred into it (`--mbr`) | `filename peptide sequence charge proteins channel channel_name label status spec_id psm_q_value rt_psm labelled_peptidoform mz rt_apex rt_shift width quantity quantity_se quantity_upper llr envelope_cos coherence m1_ratio mass_err_ppm channel_q_value group_llr transfer transfer_q_value log2_ratio log2_ratio_se log2_ratio_normalized converted_fraction trace_quantity`; `peptide` is the peptide identity (the peptidoform without its channel labels), `labelled_peptidoform` the identified channel's peptidoform as searched; `channel` is 1-based, `label` the SDRF/QPX label (null outside that vocabulary); `status` is `identified` (a PSM of the run in this channel), `match_channel` (no PSM, measured at the channel's position at `channel_q_value` ≤ `--label-fdr`), `transfer` (the group transferred from another run at `transfer_q_value` ≤ `--label-mbr-fdr`), `below_detection` (no signal: `quantity_upper` = quantity + 2 SE bounds it) or `not_quantifiable` (something else is there: another identified peptide, a pattern or elution that is not the channel's, or a quality q-value above the cut); `quantity` is the area of the channel's fitted profile (its whole isotope pattern), `rt_apex` the channel's apex (the shared profile's plus `rt_shift`); `log2_ratio` is log2(channel / reference) when both are measured (`identified`, `match_channel` or `transfer`), `log2_ratio_normalized` the same minus the run's median log-ratio of the channel over its groups identified in both; `converted_fraction` (`--label-arg-pro`) the share of the channel's quantity in its heavy-proline form (null when not fitted); `trace_quantity` a shape-free quantity of the channel (its own isotope traces, the other channels' modelled parts and the background removed, integrated over the apex ± (−3 w, +4 w), scaled to the whole pattern), for checks against the profile fit. Metadata `andes.label.channels` (`<n>: <name>` per line), `andes.label.reference`, `andes.label.runs`, and with `--mbr` `andes.label.identity_decoy_transfers` (accepted / probed) and `andes.label.identity_decoy_rate` |
 | `<stem>.label_proteins.tsv` (`--label`) | one per (protein group, run, channel other than the reference) with at least 2 peptide ratios | `protein_group lead filename channel channel_name log2_ratio log2_ratio_normalized ratio_count inferred_ratio_count`: the median of the peptides' log-ratios, each the median of its evidence (charges, channel rows) in `label.parquet`, as MaxQuant computes protein ratios; `log2_ratio_normalized` from the normalised evidence (`NA` below 2 peptides); `inferred_ratio_count` counts the peptides whose channel is only matched or transferred in the run. The group is the protein group at `--protein-fdr` when protein inference ran, else the peptide's accessions |
-| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex` (the last six: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the running mean of its probability of a wrong measurement, §10; `transfer_q` for a transfer below the threshold); `transfer_q`, `quant_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
-| `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
+| `<stem>.mbr.parquet` (`--mbr`, `andes quant finalize -o <stem>`) | one per (precursor, run) identified in or transferred into the run, every evidence type | `precursor_key run evidence_type quantity quantity_se quantity_normalized transfer_q quant_q apex_rt_s library_q claimed_by claim_dt_s claim_identified claim_co_apex claim_n_co_apex claim_n_identified_co_apex measurement_q` (the six `claim` columns: same-run claims on a transfer row, §10; null for identified rows); `quantity_normalized` is `quantity` with the run's level and RT-local offset removed (§10, null when the run is not normalised); `evidence_type` is `identified` (the run has a target PSM of the precursor at PSM q ≤ `--quant-fdr` and, with `--pep`, PEP ≤ `--pep`), `identified_below_threshold` (identified, but `quant_q` above `--quant-feature-fdr` or missing; quantity kept, in this table only), `transfer_ms2` (transfer q ≤ `--mbr-fdr`, and an MS2 scan of the run matches the precursor's library spectrum: at least 4 fragments at a spectral angle of at least 0.6), `transfer_ms1` (transfer q ≤ `--mbr-fdr`, without that MS2 support), `shared_feature` (transfer q ≤ `--mbr-fdr`, but the shipped classifier takes the row's MS1 feature for another compound's, §10; quantity kept, in this table only) or `below_threshold` (quantity kept, as censored; in this table only); `quant_q` is the quality q-value of the row's MS1 feature against its decoys (the identified-row estimate for identified rows; for an accepted transfer the larger of `transfer_q` and `measurement_q`, §10; `transfer_q` for a transfer below the threshold); `measurement_q` is, for an accepted transfer (`transfer_ms2`, `transfer_ms1`, `shared_feature`), the running mean of its probability of a wrong measurement (§10), null for every other row; `transfer_q`, `quant_q`, `measurement_q` and `library_q` are internal quant-quality values, not identification FDR; text columns are strings, the others float64, null for missing values, including the quantity of a row whose MS1 fit found no signal (its intensity list in the feature parquet is empty). Precursors that fail the library entry gate have no rows |
+| `<stem>.mbr_validation.parquet` | one | counts are uint64, thresholds and rates float64 (null when undefined): pseudo-transfer validation (identified pairs re-measured as transfers: acceptance rate `pseudo_acceptance_*`, wrong-peak rate; the last columns of the table hold the pairs with a wrong measurement, a wrong peak or a fitted quantity more than a factor of 2 from the identified one, the peak alone where either fit has no positive quantity: `wrong_measurement`, `wrong_measurement_rate`, and among the accepted pairs `accepted_wrong_measurement_*`, `accepted_wrong_measurement_rate_*`) and accepted transfer counts for the pooled and per-decoy-family estimates, at q ≤ 0.01 (`_q01`) and at `--mbr-fdr` (`_at_threshold`); then `--quant-feature-fdr` (null when off) and the identified rows: all, with a `quant_q`, at `quant_q` ≤ 0.01, and `identified_below_threshold`; then the MS2 evidence of the transfer rows: per hypothesis (`ms2_target_*`, `ms2_mass_decoy_*`, `ms2_rt_decoy_*`) and for the pseudo-transfers (`ms2_pseudo_*`) the rows with MS2 evidence (`_rows`) and those an MS2 scan supports (`_supported`), and the accepted transfers reported as `transfer_ms2`; then, at q ≤ 0.01 and at `--mbr-fdr`, the transfers the wrong-peak decoys alone would accept (`accepted_wrong_peak_only_*`) and the accepted decoy transfers per family (`accepted_mass_decoys_*`, `accepted_rt_decoys_*`, `accepted_identity_decoys_*`); then the target and identity-decoy library entries, the decoy transfers with a q-value per family, and the transfer targets not transferred because their entry's best donor PSM is above q 0.001 (`donor_gated`; counts the extracted rows only, so 0 when extract skipped those pairs, the default) |
 | `<dir>/quantms.feature.parquet` | one per feature (LFQ) or quantified PSM (isobaric) | the QPX feature view (`intensities` as `[{label, intensity}]` with `LFQ` or `TMT126`-style labels; `additional_intensities` with the raw/apex/isotope values; purity, cosine, q-values in `additional_scores`; `psm_ids` pointing at `psms.parquet` rows) |
 
 With `--mbr` (or `andes quant finalize --output-parquet <dir>`), `quantms.feature.parquet` holds
@@ -1193,8 +1202,8 @@ measurement (no correction) on any input format.
 
 ### Bundled model store (`resources/models/`)
 
-18 models in `resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`
-(10 / 3 / 4 / 1 models), listed in [`README.md`](README.md#supported-models). If detection
+19 models in `resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`
+(11 / 3 / 4 / 1 models), listed in [`README.md`](README.md#supported-models). If detection
 fails, andes falls back to `hcd_qexactive_tryp` or the closest regime and names it in the run
 summary.
 
@@ -1600,8 +1609,8 @@ andes quant finalize --quant-dir q/ -o experiment [--mbr-fdr 0.01] [--quant-feat
 ```
 
 With `--output-parquet`, finalize writes the QPX views of the experiment and needs the protein
-database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms` and
-the database options, as [`andes inference`](#several-runs-andes-inference)). It infers the
+database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms`, the
+database options and `--mods`, as [`andes inference`](#several-runs-andes-inference)). It infers the
 protein groups once over every run's PSMs, then:
 
 - `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the
@@ -1705,7 +1714,20 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   and an identified pair's apex is searched within three of the run's elution widths at its RT
   (at least three scan spacings) of its PSM. Narrow-peak instruments are thus not held to a
   wide fixed width, and a larger neighbouring peak of the same m/z a few widths away is not
-  taken for the identified one. The extract log and the table's `andes.extract.run_scales` tag
+  taken for the identified one. A run's best PSM is not always taken on the elution peak: an
+  abundant peptide is fragmented again on its tail, minutes after the apex, and that PSM can
+  score best, so the fit near the PSM measures the tail. When the fit at the position the other
+  runs predict (the pair's pseudo-transfer) is another peak (apexes further apart than the two
+  fitted widths together) with more than twice the amplitude of a positive identified fit, the
+  identified row takes that fit; its decoys and its pseudo-transfer are unchanged, and the
+  extract log counts these pairs. An identified fit without signal, or a lower peak at the
+  predicted position, changes nothing. On two disjoint sets of 12 runs of PXD014415 (2026-11-10,
+  six human and six human + yeast runs each, one rescoring per set) this applied to 0.75 % and
+  0.67 % of the identified cells; the identified cells of human precursors more than a factor of
+  2 from the precursor's median over its identified runs fell from 1.23 % to 0.89 % and from
+  1.16 % to 0.84 %, and in the brightest tenth of the precursors from 1.80 % to 0.31 % and from
+  1.78 % to 0.31 %. Accepted transfers rose by 0.4 %, the yeast transfers into the human-only
+  runs among them from 358 to 370 and from 312 to 320. The extract log and the table's `andes.extract.run_scales` tag
   record the scan spacing and the width scale of each run; `quant finalize` logs them.
   Transfer pre-selection (advanced, `--mbr-preselect`, default `true`): before any fit,
   extract skips the transfers of an entry whose best donor PSM is above q 0.001, which finalize
@@ -1810,27 +1832,43 @@ million PSMs). Two settings shorten it; neither is applied by andes, which passe
   matched coverage, flagging at 0.05 improves accuracy and CV only slightly, and it removes
   close to a tenth of the least abundant precursors. With a threshold, identified rows above it are
   `identified_below_threshold`. A
-  transfer's `quant_q` is its `transfer_q` below the `--mbr-fdr` threshold. For an accepted transfer it is the running mean, over
-  the run's accepted transfers in ascending probability of a wrong measurement, of that probability: a model on the fit evidence
-  alone (the identified features above plus the quantity), trained on the pseudo-transfers, labels a measurement wrong when its
-  apex lies beyond the identified fit's width or its quantity differs from the identified one by more than a factor of 2, and a
-  held-out calibration turns its margin into a probability. It therefore covers a wrong peak as seen on pseudo-transfers
-  (identified cells re-measured blind); it does not see an absent peptide or a wrong donor identity. Every row and its raw intensity is kept. Pseudo-transfers give an acceptance rate and the wrong-peak rate, which decoys cannot
-  see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
+  transfer's `quant_q` is its `transfer_q` below the `--mbr-fdr` threshold. An accepted transfer also has `measurement_q`: the
+  running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability. A model on
+  the fit evidence alone (the identified features above plus the fitted quantity), trained on the pseudo-transfers, labels a
+  measurement wrong when its apex lies beyond the identified fit's width or its fitted quantity differs from the identified one
+  by more than a factor of 2 (the area of each fit at its own width, which is not the reported quantity), and a
+  held-out calibration turns its margin into a probability. It covers a wrong peak as seen on pseudo-transfers
+  (identified cells re-measured blind); it does not see an absent peptide or a wrong donor identity. The `quant_q` of an accepted transfer is the larger of its
+  `transfer_q` and its `measurement_q`. `quant_q` is therefore the largest error estimate made for a row (one estimate for an identified
+  row or a transfer below the threshold, two for an accepted transfer): a cut at t keeps a row only when each of its estimates is
+  at most t. It is not the error rate of the rows the cut keeps, which mix rows judged by different estimates. Every row and its
+  raw intensity is kept. Pseudo-transfers give an acceptance rate, the wrong-peak rate and the wrong-measurement rate (the label
+  above, counted with the same rule; a pair without a positive fitted quantity on both sides is not a training example and is
+  counted on its apex alone), which decoys cannot see. The acceptance rate is optimistic as a transfer sensitivity: a pseudo-transfer's
   predicted apex leaves the run's own observation out of the consensus RT, but the run's
   alignment map was fitted with that observation as one of its anchors.
 * **Reported quantity.** The extract fit gives each (precursor, run) an apex amplitude `A`
   and an elution width `w`; `A · w · √(2π)` is the area under the fitted profile. Fitting the
   width separately in each run lets one precursor's area jump between runs with the width
-  pick alone, so `<stem>.mbr.parquet` and `quantms.feature.parquet` report `A · w_p · √(2π)`
-  (standard error `amplitude_se · w_p · √(2π)`) with one width per precursor: `w_p` is the
-  median, over the runs that identify the precursor (aligned runs, fits with `A > 0`), of the
-  fitted width divided by the run map's local slope at the apex, carried back into each run
-  by that run's slope at the row's apex (the slope is about 1 when the runs share a gradient;
-  the mapping keeps the area right when one run elutes more slowly). Transfers use the same
-  `w_p`. A precursor without such an identified fit, and every row of an unaligned run,
-  reports its own per-run area. `<stem>.extract.parquet` keeps the per-run `quantity` and
-  `quantity_se` (`A · w · √(2π)`) for provenance. `quantity_se` is `amplitude_se × area` with
+  pick alone, so `<stem>.mbr.parquet` and `quantms.feature.parquet` report `A · w' · √(2π)`
+  (standard error `amplitude_se · w' · √(2π)`) with `w' = k · w_prior · (width_ratio / k)^λ`.
+  `w_prior` is the run's width prior at the row's RT and `width_ratio = w / w_prior` (both in
+  `<stem>.extract.parquet`); the precursor's relative width `k` is the median `width_ratio` of
+  its identified fits with `A > 0`. At `λ = 0` a precursor has one width relative to each run's
+  peak widths; at `λ = 1` the row keeps its own fitted width. Only identified rows take their run's `λ`;
+  a transfer keeps `λ = 0`: its fitted width is not confirmed by an identification, and
+  transfers of low abundance fit narrower peaks than their precursor's relative width. The run weight `λ`, one of
+  `0, 0.1, …, 1`, is learned from the data without labels: it is the weight at which the run's
+  normalisation reference cells agree best with the same precursors in the other runs (the
+  smallest median absolute deviation of each cell from its precursor's mean over the other
+  runs, for precursors in at least 4 runs; two passes over the runs, a tie goes to the
+  smaller weight, and a run with fewer than 11 such cells keeps 0). A run whose peaks really
+  narrow or widen against its width prior,
+  for example at a much lower load, keeps that change in its quantities; a run whose width
+  deviations are fit noise keeps the relative width. The finalize log lists how many runs took
+  each weight. A precursor without such an identified fit, and a
+  row without a width prior, reports its own per-run area. `<stem>.extract.parquet` keeps the
+  per-run `quantity` and `quantity_se` (`A · w · √(2π)`) for provenance. `quantity_se` is `amplitude_se × area` with
   `amplitude_se = 1/√den`, the least-squares standard error of the fitted amplitude at the fixed peak shape: the fit error
   of the amplitude, not the cell's run-to-run uncertainty (measured 16-64x below the run-to-run spread of the cell).
 * **Trace area of the brightest precursors.** `<stem>.extract.parquet` also keeps a
@@ -1927,10 +1965,11 @@ plus one run's scores, not the PSMs of every run. With one merged pair of Percol
 whole pair, and every SpecId, is held. `quant finalize` is a map-reduce over the runs: each
 run's extract table is read on its own, in record batches cut at precursor boundaries, and the
 runs are processed in parallel (`--threads`). What a row needs from other runs is either a
-per-precursor summary (the consensus width, and the sorted donor fits around their median,
+per-precursor summary (the relative width, and the sorted donor fits around their median,
 which give the shape features' median over the other runs) or a global model, so every
 reduction is exact: training rows, held-out scores (merged run by run; the K-decoy q-values are
-built from the sorted scores), normalisation cells and validation counts. Each run's output
+built from the sorted scores), normalisation cells (and the run width weights learned on
+them) and validation counts. Each run's output
 rows go to a temporary table, and the tables are merged by (precursor, run) into
 `<base>.mbr.parquet`. Temporary tables go next to the output, or to `--temp-dir` (for example
 a local disk); they are removed at the end. Two caps bound the models: each GBDT trains on at
@@ -2349,7 +2388,8 @@ offsets. Neither module runs in `--glyco` mode.
 
 Values in the code that change results and that no flag or learned quantity sets. Each table
 row gives the value, where it is defined (`crates/...:line` on the commit this section was
-written against), what it controls, whether a flag overrides it, and the recorded basis. "Learned"
+written against; a default of a flag points to `cli.rs`, where the flag in the override column
+finds it), what it controls, whether a flag overrides it, and the recorded basis. "Learned"
 means the value is replaced by one estimated from the run or the library when enough data exist, and
 the constant is then the fallback or a bound. "No recorded evidence" means neither a code comment nor
 the research notes record why the value was chosen. Plumbing (buffer and batch sizes, thread
@@ -2364,15 +2404,15 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Missed cleavages | 2 | `andes/src/bin/andes/cli.rs:371` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
-| Peptide length | 6 to 50 | `cli.rs:380,385` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
-| Variable mods per peptide | 3 | `cli.rs:390` | combinatorial candidates | `--max-mods`, `NumMods` in mods file | No recorded evidence |
-| Precursor charge range | 2..5 | `cli.rs:338` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
+| Missed cleavages | 2 | `andes/src/bin/andes/cli.rs` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
+| Peptide length | 6 to 50 | `andes/src/bin/andes/cli.rs` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
+| Variable mods per peptide | 3 | `andes/src/bin/andes/cli.rs` | combinatorial candidates | `--max-mods`, `NumMods` in mods file | No recorded evidence |
+| Precursor charge range | 2..5 | `andes/src/bin/andes/cli.rs` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
 | Isotope-error range | -1..2 | `search/src/search_params.rs:171` | precursor isotope offsets tried | `--isotope-error` | Inherited from the Java engine default (`-ti -1,2`); glyco narrows it to a window learned from MS1 |
-| PSMs kept per spectrum | 10 | `cli.rs:342` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |
-| Minimum peaks | 10 | `cli.rs:376` | spectra skipped | `--min-peaks` | Inherited default |
-| Precursor tolerance | 20 ppm | `cli.rs:333` | candidate window | `--precursor-tol`, `--precursor-cal` | No recorded evidence for 20 |
-| Precursor calibration | off | `cli.rs:288` | ppm shift pre-pass | `--precursor-cal` | Pre-pass cost 9-17% of the run on the benchmark sets (see [§1](#calibration)) |
+| PSMs kept per spectrum | 10 | `andes/src/bin/andes/cli.rs` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |
+| Minimum peaks | 10 | `andes/src/bin/andes/cli.rs` | spectra skipped | `--min-peaks` | Inherited default |
+| Precursor tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | candidate window | `--precursor-tol`, `--precursor-cal` | No recorded evidence for 20 |
+| Precursor calibration | off | `andes/src/bin/andes/cli.rs` | ppm shift pre-pass | `--precursor-cal` | Pre-pass cost 9-17% of the run on the benchmark sets (see [§1](#calibration)) |
 | Pre-pass sample and floors | stride 10, at most 500 spectra, 10,000 spectrum keys, 150 confident PSMs, residual cap 200 | `search/src/precursor_cal.rs:76-89` | when the pre-pass runs and how many residuals feed the median | no | 150 chosen so ion-trap sets (about 193 confident PSMs in the sample) still calibrate (code comment); the others: no recorded evidence |
 | Tightened precursor window | floor 2 ppm, margin 0.5 ppm, 3 sigma, MAD scale 1.4826 | `precursor_cal.rs:92-95` | post-calibration tolerance | no | No recorded evidence (1.4826 is the Gaussian MAD factor) |
 | Calibration q cutoff | 0.01 | `search/src/mass_calibrator.rs:360` | PSMs trusted for the precursor residual | no | Standard 1% target-decoy cutoff |
@@ -2384,11 +2424,11 @@ here only where the value is a fixed choice rather than a documented option.
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
 | Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragment_error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
 | Isotope-mimic tolerance | 0.05 Da | `search/src/isotope_mimic.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
-| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws | `cli.rs:240,266,271`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (hidden); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
+| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (hidden); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
 | Entrapment prefix | `ENT_` | `search/src/refinement.rs:431` | which proteins count as entrapment | no | Naming convention |
 | Refine mods per peptide | 5 | `refinement.rs:883` | combinatorial ceiling of the second pass | the refine tier's `max_mods` is clamped to it | Memory guard (code comment) |
-| Refine selection FDR | 0.01 | `cli.rs:722` | PSMs that anchor the second pass | `--refine-select-psm-fdr` (hidden) | Standard 1% |
-| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `cli.rs:459,464` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (hidden) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
+| Refine selection FDR | 0.01 | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--refine-select-psm-fdr` (hidden) | Standard 1% |
+| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (hidden) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
 | Co-isolation isotope walk | 3 steps | `search/src/coisolation.rs:115` | steps below an accepted peak when finding the monoisotope | no | No recorded evidence |
 | Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomer_class.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
 | Implausible residue mass | 5000 Da | `model/src/aa_set.rs:17` | residues rejected as unusable | no | Sanity bound |
@@ -2397,7 +2437,7 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| GBDT trees | 100 | `cli.rs:66` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
+| GBDT trees | 100 | `andes/src/bin/andes/cli.rs` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
 | Isobaric peak filter | 100 Da window, 20 peaks | `andes/src/bin/andes/search.rs:273` (resolution), `--peak-filter` text in [§1](#scoring) | spectra filtered for TMT/iTRAQ data | `--peak-filter` | No recorded evidence |
 | Feature window | 50 Da | `scoring/src/peak_features.rs:43`, `scoring/src/scoring/strong_score.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
 | Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/scoring/fragment_error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
@@ -2415,9 +2455,9 @@ here only where the value is a fixed choice rather than a documented option.
 | Percolator invocation | `-Y` (target-decoy competition), `--seed 42`, `--only-psms`, threads = `--threads` | `output/src/percolator.rs:273,286,295` | q-values and PEP | `--percolator-args` can add or replace | Every benchmark and calibration figure was measured with `-Y`; threads change speed, not results (comment) |
 | Per-run pass | `--static --override --init-weights <pooled weights> -Y`, seed 42, one run at a time; `RUNS_PER_SCAN` 64 | `output/src/percolator.rs` (`static_pass_args`, `RUNS_PER_SCAN`) | per-run q-values of PINs of several runs | `--percolator-args` adds extra arguments | 64: scratch PINs written during one scan of the PIN, far below the usual limit of open files; a PIN of more runs is read once per 64 runs. Weights: first cross-validation bin (§ rescoring) |
 | Percolator image | 3.7.1 | `percolator.rs:18` | the version used with `--percolator-docker` | `--percolator-image` | Version of the benchmarks |
-| PSM and protein FDR | 0.01 each | `cli.rs:1066,1078` | reported cutoffs | `--fdr`, `--protein-fdr` | Convention |
+| PSM and protein FDR | 0.01 each | `andes/src/bin/andes/cli.rs` | reported cutoffs | `--fdr`, `--protein-fdr` | Convention |
 | Proteoform FDR | max(`--fdr`, 0.05) | `cli.rs` (`--proteoform-fdr` text) | variant-class claims | `--proteoform-fdr` | No recorded evidence |
-| Knockoffs per variant | 4 | `cli.rs:221,1056` | variant FDR resolution | `--knockoffs` | No recorded evidence |
+| Knockoffs per variant | 4 | `andes/src/bin/andes/cli.rs` | variant FDR resolution | `--knockoffs` | No recorded evidence |
 | Knockoff strata | substitution classes at 0.984016, 14.01565, 15.994915 Da within 0.02 Da; at least 50 tested PSMs per stratum | `output/src/knockoff_fdr.rs:21-32` | which error-rate class a variant belongs to | no | Classes differ several-fold in error rate (code comment); 50: no recorded evidence |
 | Site-FDR stratum | 50 tested claims | `output/src/site_fdr.rs:30` | stratum size | no | No recorded evidence |
 | Class-FDR guard | 20 decoys | `output/src/class_fdr.rs:144` | when a class uses its own competition | no | No recorded evidence |
@@ -2442,17 +2482,18 @@ here only where the value is a fixed choice rather than a documented option.
 | Trace integration range | 3 widths before the apex, 4 after | `evidence.rs:121,122` | area integration range | no | Longer after the apex because peaks tail (code comment) |
 | Trace baseline | at least 3 scans a side; sides differ at 3 standard errors, then the lower side alone | `evidence.rs:125,128` | baseline of each trace | no | No recorded evidence |
 | Peak boundaries | 2 half-widths at half maximum; deep valley 0.5, rise 1.5 | `quant/src/xic.rs:78-83` | LFQ peak bounds | no | 2 half-widths = 2.35 sigma, 98% of a Gaussian area (code comment); valley rule: no recorded evidence |
+| Consensus-peak factor | 2 | `quant_mbr.rs` (`CONSENSUS_PEAK_FACTOR`) | identified pairs measured at the position the other runs predict | no | The factor of the wrong-measurement label; 12 runs of PXD014415, repeated on 12 others: beyond it the identified fit was off by more than 2x in 64-100% of the pairs, the predicted-position fit in 1-21% (see [§10](#10-quantification)) |
 | Transfer donor q | 0.001 | `quant_mbr.rs:1281` | library entries eligible for transfer | no | A marginal donor PSM is the commonest false donor (code comment) |
 | Transfer decoys | mass shifts -11, -7, 7, 11 nominal Da | `quant/src/decoys.rs:34` | the null for transfer q | no | Design choice; the quant_q notes record that the decoy null does not model isomer coincidences |
 | Presence prior | 20 neighbour runs, 20,000 library entries sampled, 50 neighbour runs for donor rate | `quant_finalize.rs:623-629` | prior strata and a feature | no | No recorded evidence |
 | Wrong-peak model | 11 features, 4,000,000 calibration rows | `quant_finalize.rs:1544,1547` | wrong-peak probability | no | No recorded evidence |
 | MS2 evidence | 12 library fragments (at least 3), ions of at least 3 residues, support needs 4 matches and angle 0.6, isolation half-width 1.0 Th, elution window +/- 1 width bounded 1 to 20 s | `quant/src/ms2.rs:22-36` | MS2 support of a transfer | no | No recorded evidence |
 | Ion mobility window | search 0.1 V s/cm2, refit beyond 4 scales dropped, gate 3 scales, at least 50 pairs, scale floor 0.001 | `quant/src/mobility.rs:23-32` | timsTOF extraction gate | scale learned per run | Gate cut the main share bad 9.64 to 5.79% on a timsTOF set (internal benchmark) |
-| LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `cli.rs:924,936,942` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--lfq-feature-fdr` | No recorded evidence |
-| MBR FDRs | library 0.01, transfer 0.01, quant 0.01 | `cli.rs:972,978,1143` | which library entries and transfers are reported | `--mbr-library-fdr`, `--mbr-fdr`, `--quant-fdr` | Convention |
+| LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `andes/src/bin/andes/cli.rs` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--lfq-feature-fdr` | No recorded evidence |
+| MBR FDRs | library 0.01, transfer 0.01, quant 0.01 | `andes/src/bin/andes/cli.rs` | which library entries and transfers are reported | `--mbr-library-fdr`, `--mbr-fdr`, `--quant-fdr` | Convention |
 | Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant_run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |
 | Purity ladder | 10 steps in the window, 64 overall | `quant/src/purity.rs:21,23` | isotope ladder of the purity estimate | no | No recorded evidence |
-| TMT gate | purity 0.7, PEP 0.05, S/N 0 (off) | `cli.rs:881,887,895` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn` | No recorded evidence |
+| TMT gate | purity 0.7, PEP 0.05, S/N 0 (off) | `andes/src/bin/andes/cli.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn` | No recorded evidence |
 | TMT unmix | interference at most 0.8, 100 scans minimum (also the effective scans needed to learn λ), 10 ppm, isotopes -1 to 8, density half-width 5 Th, bisquare 4.685, 8 rounds, λ grid of 21 steps, reference weight (1 − interference)² | `quant/src/unmix.rs` | `--tmt-unmix` model | learned per run (coefficients and λ); constants bound the fit | Bisquare 4.685 is the standard 95% efficiency constant; others: no recorded evidence |
 | Mass-error ppm | 10 ppm default | `quant/src/evidence.rs:142` | centroid match tolerance | `--lfq-tol` and learned m/z window | See [§10](#10-quantification) |
 
@@ -2467,8 +2508,8 @@ here only where the value is a fixed choice rather than a documented option.
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `andes-glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `andes-glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |
 | Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `andes-glyco/src/glycan_first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
-| Y-ion charge | 3 | `cli.rs:564` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
-| Glyco tolerance | 20 ppm | `cli.rs:660` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
+| Y-ion charge | 3 | `andes/src/bin/andes/cli.rs` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
+| Glyco tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
 | Glycan mass share in isotope model | 0.5 | `model/src/isotope.rs:126` | share of the mass from the glycan in the envelope model | no | No recorded evidence |
 
 ### Outputs

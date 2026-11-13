@@ -562,7 +562,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             args.lfq_tol = Some(parse_tol("lfq_tol", &v)?);
         }
     }
-    set!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
+    set_opt!("lfq_rt_window", lfq_rt_window, cfg.quant.lfq_rt_window);
     set_opt!(
         "lfq_gaussian_width",
         lfq_gaussian_width,
@@ -719,7 +719,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.quant_fdr {
         check_unit_fraction("quant_fdr", v)?;
     }
-    check_positive("lfq_rt_window", args.lfq_rt_window)?;
+    if let Some(v) = args.lfq_rt_window {
+        check_positive("lfq_rt_window", v)?;
+    }
     check_positive("mbr_wrong_log2", args.mbr_wrong_log2)?;
     if let Some(v) = args.lfq_gaussian_width {
         check_positive("lfq_gaussian_width", v)?;

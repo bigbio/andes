@@ -32,10 +32,10 @@ pub use stats::{
 };
 
 pub mod qpx;
-pub use qpx::write_qpx;
+pub use qpx::{omitted_psm_rows, write_qpx};
 
 pub mod rt_wiring;
-pub use rt_wiring::populate_rt_features;
+pub use rt_wiring::{populate_rt_features, populate_rt_features_per_run};
 
 pub mod provenance;
 pub use provenance::populate_provenance_features;
@@ -68,8 +68,8 @@ pub mod percolator;
 pub use percolator::{
     apply_per_run_q, decoy_results_path, parse_psm_results, pep_is_degenerate,
     percolator_args_with_threads, resolve_backend, run_percolator, run_percolator_pooled,
-    run_percolator_with_decoys, PercolatorBackend, PercolatorError, PercolatorPsm, PsmResultReader,
-    PsmResultRow, DEFAULT_PERCOLATOR_IMAGE,
+    run_percolator_with_decoys, score_all_rows, PercolatorBackend, PercolatorError, PercolatorPsm,
+    PsmResultReader, PsmResultRow, RowScores, DEFAULT_PERCOLATOR_IMAGE,
 };
 
 pub(crate) mod percolator_enz;

@@ -32,7 +32,7 @@ flowchart LR
 fixed.
 
 The output is `<stem>.sites.tsv`, one row per accepted site, with columns including `site_q`,
-`confidence`, `occupancy`, `identity` and `identity_alternatives`.
+`occupancy`, `identity` and `identity_alternatives`.
 
 ## Where it works
 

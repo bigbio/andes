@@ -9,18 +9,15 @@
 //!      (`build_peptide_anchored_index`),
 //!   4. searches the unidentified spectra against that small index with the
 //!      refinement variable-mod tier applied (`refinement_aa_set`), and
-//!   5. RETURNS every Pass-2 winner (tagged as a refinement PSM) as a
-//!      [`RefinementOutput`] so the caller can write it as a SEPARATE PIN
-//!      (`run_refinement`).
+//!   5. returns every Pass-2 winner (tagged as a refinement PSM) as a
+//!      [`RefinementOutput`] (`run_refinement`).
 //!
-//! The cascade is OPT-IN (`--refine`) and additive: nothing here runs on the
-//! default path. Pass-2 winners are NOT merged into the Pass-1 queues — a merged
-//! Pass-2 `PsmMatch::candidate_idxs` indexes the PASS-2 candidate list, which is
-//! a different slice than the Pass-1 `candidates` the PIN writer resolves
-//! peptide/accession against (a merge would alias the indices → wrong protein or
-//! OOB). Instead the Pass-2 artifacts (index + candidates + tagged queues +
-//! global spectrum indices) are returned, and the caller emits a second PIN: the
-//! merged report is the disjoint union Pass-1 PIN ⊎ refine PIN.
+//! The cascade is opt-in (`--refine`): nothing here runs on the default path.
+//! The caller merges the Pass-2 winners into the Pass-1 queues with
+//! [`merge_into_pass1`], which offsets the Pass-2 `protein_index` and
+//! `candidate_idxs` by the Pass-1 database and candidate counts so both passes
+//! share one index space, and writes one PIN in which a scan's Pass-1 and
+//! Pass-2 PSMs compete. Pass-2 rows carry `IsRefinement = 1`.
 
 use std::collections::HashSet;
 
@@ -645,55 +642,57 @@ pub fn refinement_aa_set(
 // (e) mod_count_and_class
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Count the variable-modified residues on `peptide` and classify them.
+/// Count the refinement modifications on `peptide` and classify them.
 ///
 /// Returns `(num_mods, refine_mod_class)`:
-/// - `num_mods` is the number of residues carrying a modification.
-/// - `refine_mod_class` is the [`RefineConfig::class_id`] of the peptide's
-///   mod(s), determined by matching each modified residue's `(delta, residue)`
-///   against `cfg.mods`. The first non-`"other"` class wins; if every matched
-///   class is `"other"` (or no `cfg.mods` entry matches a present mod) the class
-///   is `99`. An unmodified peptide returns `(0, 0)`.
+/// - `num_mods` is the number of modifications of `cfg.mods` the peptide
+///   carries.
+/// - `refine_mod_class` is the [`RefineConfig::class_id`] of those mods. The
+///   first non-`"other"` class wins; if every matched class is `"other"` the
+///   class is `99`. A peptide with no refinement mod returns `(0, 0)`.
 ///
-/// A `Peptide` represents a modified residue as an `AminoAcid` carrying an
-/// `Option<Arc<Modification>>` whose `mass_delta` is the variable-mod delta
-/// (fixed mods are folded into the residue the same way, so this counts BOTH —
-/// see the note below). We match on `mass_delta ≈ rm.delta` (1e-4 Da) and the
-/// residue letter against `rm.residues` (`"*"` matches any residue).
+/// A modified residue is an `AminoAcid` whose `mod_` is either one declared
+/// modification or a stacked record of several on that residue (a terminal
+/// mod and a side-chain mod, say: its delta is their sum). `aa_set` is the set
+/// the peptide was built from; it gives the declared parts of a stacked
+/// record, and each part is matched on its own.
 ///
-/// NOTE: a `Peptide` does not record whether a given mod was fixed or variable,
-/// so this would otherwise count every modified residue. The base search's fixed
-/// mods (Carbamidomethyl-C, and — since Pass-2 now inherits the full base mod set
-/// — any labels such as TMT/iTRAQ) are NOT part of any refinement `cfg.mods`
-/// class; counting them would inflate `num_mods`. To keep `num_mods` aligned with
-/// the REFINEMENT tier, we count a residue only when its mod matches one of
-/// `cfg.mods` (i.e. a refinement chemistry), so base fixed labels are excluded.
-pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) {
+/// A part counts when it matches one of `cfg.mods` on delta (1e-4 Da),
+/// location and residue (`"*"` matches any residue). Fixed mods of the base
+/// search (Carbamidomethyl-C, TMT/iTRAQ labels) are in no refinement class and
+/// are not counted.
+pub fn mod_count_and_class(
+    peptide: &Peptide,
+    cfg: &RefineConfig,
+    aa_set: &AminoAcidSet,
+) -> (u32, u32) {
     let mut num_mods = 0u32;
     let mut class_id = 0u32; // 0 = none until a refinement mod matches
 
     for aa in &peptide.residues {
-        let Some(m) = aa.mod_.as_ref() else { continue };
-        // Find the refinement mod that this residue's modification matches.
-        // Match on delta + residue + LOCATION so two tiers with the same
-        // mass/residue but a different location/class are not conflated
-        // (e.g. an anywhere mod vs an N-term mod of the same Δ).
-        let matched = cfg.mods.iter().find(|rm| {
-            (rm.delta - m.mass_delta).abs() < 1e-4
-                && parse_location(&rm.location) == m.location
-                && rm
-                    .residues
-                    .iter()
-                    .any(|r| r == "*" || (r.len() == 1 && r.as_bytes()[0] == aa.residue))
-        });
-        let Some(rm) = matched else { continue };
-        num_mods += 1;
-        let this_class = RefineConfig::class_id(&rm.class);
-        // Prefer the first non-"other"(99) class seen; fall back to 99 only when
-        // every matched mod is "other". `class_id == 0` is the "none yet" state.
-        let pending = class_id == 0 || class_id == 99;
-        if pending && (class_id == 0 || this_class != 99) {
-            class_id = this_class;
+        let Some(m) = aa.mod_ else { continue };
+        let single = [m];
+        let parts = aa_set.stack_parts(m).unwrap_or(&single);
+        for part in parts {
+            // Delta, residue and location: two tiers with the same mass and
+            // residue but another location are different entries.
+            let matched = cfg.mods.iter().find(|rm| {
+                (rm.delta - part.mass_delta).abs() < 1e-4
+                    && parse_location(&rm.location) == part.location
+                    && rm
+                        .residues
+                        .iter()
+                        .any(|r| r == "*" || (r.len() == 1 && r.as_bytes()[0] == aa.residue))
+            });
+            let Some(rm) = matched else { continue };
+            num_mods += 1;
+            let this_class = RefineConfig::class_id(&rm.class);
+            // The first non-"other" (99) class seen; 99 only when every
+            // matched mod is "other". `class_id == 0` is the "none yet" state.
+            let pending = class_id == 0 || class_id == 99;
+            if pending && (class_id == 0 || this_class != 99) {
+                class_id = this_class;
+            }
         }
     }
 
@@ -975,6 +974,7 @@ pub fn run_refinement(
             let (num_mods, class) = mod_count_and_class(
                 &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
                 cfg,
+                &refine_params.aa_set,
             );
             // The anchored Pass-2 DB also contains the UNMODIFIED base peptide, so a
             // Pass-2 winner can carry zero refinement mods. Those are NOT discoveries
@@ -1816,6 +1816,11 @@ mod tests {
 
     // ── (e) mod_count_and_class ────────────────────────────────────────────
 
+    /// A set with no modification: no residue of it is a stacked record.
+    fn std_set() -> AminoAcidSet {
+        AminoAcidSetBuilder::new_standard().build().unwrap()
+    }
+
     /// Build a peptide with one residue carrying a mod of the given delta.
     fn modded_pep(residue: u8, delta: f64) -> Peptide {
         let m = Modification {
@@ -1945,7 +1950,7 @@ mod tests {
             b'_',
             b'-',
         );
-        assert_eq!(mod_count_and_class(&pep, &cfg), (0, 0));
+        assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (0, 0));
     }
 
     #[test]
@@ -1953,7 +1958,7 @@ mod tests {
         let cfg = RefineConfig::default_tier();
         // Oxidation on M, delta 15.994915, class "oxidation" → id 1.
         let pep = modded_pep(b'M', 15.994915);
-        assert_eq!(mod_count_and_class(&pep, &cfg), (1, 1));
+        assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (1, 1));
     }
 
     #[test]
@@ -1961,7 +1966,47 @@ mod tests {
         let cfg = RefineConfig::default_tier();
         // Deamidation on N, delta 0.984016, class "deamidation" → id 2.
         let pep = modded_pep(b'N', 0.984016);
-        assert_eq!(mod_count_and_class(&pep, &cfg), (1, 2));
+        assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (1, 2));
+    }
+
+    #[test]
+    fn mod_count_and_class_counts_a_refinement_mod_under_a_terminal_label() {
+        // Fixed TMT on the peptide N-terminus: an oxidised Met in position 1
+        // carries one stacked record (label + oxidation).
+        let tmt_nterm = Modification {
+            name: "TMT6plex".into(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+        };
+        let base = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(tmt_nterm)
+            .build()
+            .unwrap();
+        let cfg = RefineConfig::default_tier();
+        let set = refinement_aa_set(&base, &cfg, true).unwrap();
+        let forms = set.variants_for(b'M', ModLocation::NTerm);
+        let delta = |aa: &AminoAcid| aa.mod_.map_or(0.0, |m| m.mass_delta);
+        let labelled = forms
+            .iter()
+            .find(|aa| (delta(aa) - 229.162932).abs() < 1e-4)
+            .expect("Met with the label only");
+        let oxidised = forms
+            .iter()
+            .find(|aa| (delta(aa) - (229.162932 + 15.994915)).abs() < 1e-4)
+            .expect("Met with the label and the oxidation");
+        assert!(set.stack_parts(oxidised.mod_.unwrap()).is_some());
+        let tail = AminoAcid::standard(b'G').unwrap();
+        let pep = |first: &AminoAcid| Peptide::new(vec![first.clone(), tail.clone()], b'_', b'-');
+        assert_eq!(mod_count_and_class(&pep(oxidised), &cfg, &set), (1, 1));
+        assert_eq!(mod_count_and_class(&pep(labelled), &cfg, &set), (0, 0));
     }
 
     #[test]
@@ -1970,7 +2015,7 @@ mod tests {
         // so it must not be counted as a refinement mod.
         let cfg = RefineConfig::default_tier();
         let pep = modded_pep(b'C', 57.02146);
-        assert_eq!(mod_count_and_class(&pep, &cfg), (0, 0));
+        assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (0, 0));
     }
 
     #[test]
@@ -2004,7 +2049,7 @@ mod tests {
             diagnostic_ions: Vec::new(),
         });
         let pep = Peptide::new(vec![ox, deam], b'_', b'-');
-        let (n, class) = mod_count_and_class(&pep, &cfg);
+        let (n, class) = mod_count_and_class(&pep, &cfg, &std_set());
         assert_eq!(n, 2);
         // First non-other class encountered wins (oxidation = 1).
         assert_eq!(class, 1);
@@ -2049,6 +2094,7 @@ mod tests {
         let (num_mods, class) = mod_count_and_class(
             &pass2_cands[winner.primary_candidate_idx() as usize].peptide,
             &cfg,
+            &std_set(),
         );
         winner.features.num_mods = num_mods;
         winner.features.refine_mod_class = class;

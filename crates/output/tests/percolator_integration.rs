@@ -290,11 +290,8 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
 /// `static_pep`. Every call's arguments are appended to `calls.log` next to
 /// the script.
 ///
-/// The script is executable once the function returns: while another test
-/// thread forks, its child briefly holds the script's write descriptor and
-/// exec fails with `ExecutableFileBusy`, so the function runs the script with
-/// `--probe` until no such descriptor remains. No descriptor can appear after
-/// the write has closed.
+/// The script is executable once the function returns (see
+/// [`write_executable`]).
 #[cfg(unix)]
 fn write_fake_percolator(
     dir: &std::path::Path,
@@ -302,7 +299,6 @@ fn write_fake_percolator(
     static_pep: &str,
     static_exit: i32,
 ) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = dir.join("percolator");
     let body = format!(
         r#"#!/bin/sh
@@ -326,16 +322,29 @@ printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$
 "#,
         log = dir.join("calls.log").display(),
     );
-    std::fs::write(&script, body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&script, &body);
+    script
+}
+
+/// Writes `body` to `script`, marks it executable and returns once it can be
+/// run: while another test thread forks, its child briefly holds the script's
+/// write descriptor and exec fails with `ExecutableFileBusy`, so the script is
+/// run with `--probe` (which it must answer with exit 0 and no side effect)
+/// until no such descriptor remains. No descriptor can appear after the write
+/// has closed.
+#[cfg(unix)]
+fn write_executable(script: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(script, body).unwrap();
+    std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
     loop {
-        match std::process::Command::new(&script).arg("--probe").status() {
+        match std::process::Command::new(script).arg("--probe").status() {
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             status => {
                 assert!(status.unwrap().success());
-                return script;
+                return;
             }
         }
     }
@@ -450,13 +459,14 @@ const RESULT_HEADER: &str =
 /// A `--static` call gives the PSMs of run `run_a` a q-value of 0.002, `run_b`
 /// 0.5, `run_e` 0.003 and fails for `run_d`; a PSM named `lost*` goes to the
 /// decoy file (it lost the competition in the run), a PSM named `none*` is in
-/// neither file. Every call's arguments are appended to `calls.log`.
+/// neither file. Every call's arguments are appended to `calls.log`; it is
+/// executable once the function returns (see [`write_executable`]).
 #[cfg(unix)]
 fn write_stand_in(dir: &std::path::Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = dir.join("percolator");
     let body = format!(
         r#"#!/bin/sh
+[ "$1" = --probe ] && exit 0
 echo "$@" >> "{log}"
 static=0; t=""; d=""
 for a in "$@"; do pin="$a"; done
@@ -484,8 +494,7 @@ tail -n +2 "$pin" | awk -F'\t' -v q="$q" -v st="$static" -v t="$t" -v d="$d" '
         log = dir.join("calls.log").display(),
         header = RESULT_HEADER.replace('\t', "\\t"),
     );
-    std::fs::write(&script, body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&script, &body);
     script
 }
 

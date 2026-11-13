@@ -2007,6 +2007,7 @@ mod tests {
             annotated_site_mass: None,
             blocks_cleavage: false,
             diagnostic_ions: Vec::new(),
+            parts: Vec::new(),
         }
     }
 

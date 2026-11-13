@@ -547,6 +547,14 @@ neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for T); without 
 beat the search placement on the MaxQuant comparison (measured before the sibling change). The IPF
 step takes ~14 s on the phospho run.
 
+On 20 U2OS DDA phospho runs (PXD017476, 10 cycling and 10 nocodazole, searched together), against
+the depositors' Spectronaut library for peptides with one phospho placement across all runs
+(12,509 PSMs; a reference, not truth), the search placement and IPF disagree with Spectronaut
+equally often (4.4% and 4.3%). IPF's gain there is the error control: `best_prob` ≥ 0.75 keeps 91%
+of PSMs at 1.8% disagreement (`ModSiteLocalized=1` keeps 71% at 2.0%), ≥ 0.99 keeps 70% at 0.8%;
+predicted 5.5%. That joint run peaked at 181 GB (8.9M PIN rows); one file takes 13 GB with IPF
+and 8 GB without.
+
 ### PEFF databases
 
 `--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers

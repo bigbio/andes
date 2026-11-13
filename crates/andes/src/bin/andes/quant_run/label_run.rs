@@ -948,9 +948,12 @@ pub(super) fn quantify(
                         // their decoys, made from `pinned`) are read at the
                         // identified channels' profile.
                         if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
-                            for c in 0..n_ch {
-                                if chans[c].is_some() {
-                                    fit.channels[c] = free.channels[c].clone();
+                            let hits = chans.iter();
+                            for ((ch, f), hit) in
+                                fit.channels.iter_mut().zip(&free.channels).zip(hits)
+                            {
+                                if hit.is_some() {
+                                    *ch = f.clone();
                                 }
                             }
                         }

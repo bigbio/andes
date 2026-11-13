@@ -961,7 +961,9 @@ pub(crate) struct SearchArgs {
     /// channel in increasing mass order, as OpenMS FeatureFinderMultiplex
     /// writes them (`[][Lys8,Arg10]`, `[Dimethyl0][Dimethyl4][Dimethyl8]`;
     /// labels `Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6
-    /// Dimethyl8`, or `<site>+<mass>[:<n>D]`). The labels are added to the
+    /// Dimethyl8`, or `<site>+<mass>[:[chem]<n>C<n>N<n>D]` with the label's
+    /// 13C, 15N and 2H atoms, `chem` for a chemical label that adds atoms;
+    /// unannotated, a chemical shift of natural atoms). The labels are added to the
     /// search as variable modifications that every labelable site of a
     /// peptide carries alike, and each identified peptide is measured in
     /// every channel by one joint fit of their MS1 isotope traces; channels

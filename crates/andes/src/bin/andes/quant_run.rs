@@ -130,6 +130,20 @@ impl QuantSettings {
                     spec.len()
                 ));
             }
+            let unnamed: Vec<&str> = spec
+                .channels
+                .iter()
+                .filter(|c| c.qpx_label.is_none())
+                .map(|c| c.name.as_str())
+                .collect();
+            if !unnamed.is_empty() {
+                eprintln!(
+                    "[andes] warning: --label channel(s) {} have no SDRF/QPX label (SILAC light, \
+                     medium, heavy; DIMETHYL0/4/6/8): their intensities are left out of the QPX \
+                     features; label.parquet has every channel",
+                    unnamed.join(", ")
+                );
+            }
         }
         if cli.tmt.is_none() && !cli.lfq && cli.quant_dir.is_none() {
             return Ok(());

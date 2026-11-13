@@ -111,24 +111,23 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
     (mods, channels)
 }
 
-/// Labelled residues a peptide may carry beyond what the digestion bounds
-/// (labels on residues the enzyme does not cleave after, such as Leu3, or any
-/// residue in a non-specific digest).
-const FREE_LABEL_SITES: u32 = 8;
-
 /// Most labelled sites a peptide of the search can carry. In a specific or
 /// semi-specific digest (`num_tolerable_termini` 2 or 1), a labelled residue
 /// that every enzyme cleaves after (SILAC K/R with trypsin) is a cleavage site
-/// or the C-terminus, so those number at most the missed cleavages plus one;
-/// labels on other residues, and every label of a non-specific digest (where
-/// missed cleavages do not apply), are capped at [`FREE_LABEL_SITES`]; plus the
-/// N-terminus. The labels count apart from the other variable mods
-/// (`SearchParams::max_label_sites`), so this bounds the labels only.
+/// or the C-terminus, so those number at most the missed cleavages plus one.
+/// Labels on other residues (Leu3, or Arg with Lys-C), and every label of a
+/// non-specific digest (where missed cleavages do not apply), number at most
+/// the most such residues in any `max_length` residues of `db`, which bounds
+/// every peptide the search can produce; plus the N-terminus. The labels count
+/// apart from the other variable mods (`SearchParams::max_label_sites`), so
+/// this bounds the labels only.
 pub(crate) fn max_label_sites(
     spec: &LabelSpec,
     enzymes: &[model::enzyme::Enzyme],
     num_tolerable_termini: u8,
     missed_cleavages: u32,
+    db: &model::ProteinDb,
+    max_length: u32,
 ) -> u32 {
     use model::enzyme::Enzyme;
     let sites = spec.sites();
@@ -138,25 +137,48 @@ pub(crate) fn max_label_sites(
             .iter()
             .all(|e| !matches!(e, Enzyme::NonSpecific | Enzyme::NoCleavage));
     let mut cleavage = false;
-    let mut free = false;
+    let mut free: Vec<u8> = Vec::new();
     for s in &sites {
         if let Site::Residue(r) = s {
             if specific && enzymes.iter().all(|e| e.is_cleavable_after(*r)) {
                 cleavage = true;
             } else {
-                free = true;
+                free.push(*r);
             }
         }
     }
     let nterm = sites.contains(&Site::NTerm);
-    let residues = match (cleavage, free) {
-        (false, false) => 0,
-        (true, false) => missed_cleavages + 1,
-        (false, true) => FREE_LABEL_SITES,
-        (true, true) => missed_cleavages + 1 + FREE_LABEL_SITES,
+    let bound = if cleavage { missed_cleavages + 1 } else { 0 };
+    let free = if free.is_empty() {
+        0
+    } else {
+        most_in_window(db, &free, max_length as usize)
     };
-    residues + u32::from(nterm)
+    bound + free + u32::from(nterm)
 }
+
+/// The most residues of `residues` in any `len` consecutive residues of a
+/// protein of `db`.
+fn most_in_window(db: &model::ProteinDb, residues: &[u8], len: usize) -> u32 {
+    let len = len.max(1);
+    let hit = |r: &u8| residues.contains(&r.to_ascii_uppercase());
+    let mut best = 0u32;
+    for p in &db.proteins {
+        let s = &p.sequence;
+        let mut n = 0u32;
+        for (i, r) in s.iter().enumerate() {
+            n += u32::from(hit(r));
+            if i >= len {
+                n -= u32::from(hit(&s[i - len]));
+            }
+            best = best.max(n);
+        }
+    }
+    best
+}
+
+/// A run's MS1 index split by FAIMS compensation voltage ([`faims_groups`]).
+type RunSeries = Vec<(Option<f32>, Ms1RunIndex)>;
 
 /// A PSM in label terms.
 struct LabelledHit {
@@ -687,12 +709,17 @@ pub(super) fn quantify(
     let mut run_scales: Vec<Vec<Option<Scales>>> = Vec::with_capacity(n_runs);
     let mut run_series_cv: Vec<Vec<Option<f32>>> = Vec::with_capacity(n_runs);
 
+    // With match between runs, the last run fitted stays loaded so that the
+    // transfers into it need not decode it again (one run resident at a time).
+    let keep_resident = settings.mbr_fdr.is_some() && n_runs >= 2;
+    let mut resident: Option<(usize, RunSeries)> = None;
     for (run_idx, run) in collector.runs.iter().enumerate() {
         let Some(cache) = run.ms1.as_ref() else {
             run_scales.push(Vec::new());
             run_series_cv.push(Vec::new());
             continue;
         };
+        resident = None;
         let ms1 = cache
             .load()
             .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
@@ -868,6 +895,9 @@ pub(super) fn quantify(
             scales_here.push(Some(Scales { dt, w, shifts }));
         }
         run_scales.push(scales_here);
+        if keep_resident {
+            resident = Some((run_idx, series));
+        }
     }
 
     // ── Match between runs ────────────────────────────────────────────────
@@ -937,6 +967,7 @@ pub(super) fn quantify(
             &fit_params,
             &calib,
             mbr_fdr,
+            resident.take(),
         )?;
         fitted.extend(transfers);
         meta = stats;
@@ -1234,6 +1265,7 @@ fn transfer(
     fit_params: &FitParams,
     calib: &[(f64, f64)],
     fdr: f64,
+    mut resident: Option<(usize, RunSeries)>,
 ) -> Result<(Vec<Fitted>, Metadata), String> {
     // The group score with the mass accuracy of its strongest channel
     // against the receiving run's calibration.
@@ -1291,7 +1323,16 @@ fn transfer(
     let mut scored: Vec<(f64, f64)> = Vec::new();
     let mut target_rows: Vec<usize> = Vec::new();
     let mut identity_scores: Vec<f64> = Vec::new();
-    for (run_idx, run) in collector.runs.iter().enumerate() {
+    // The run still loaded from the fits first; the results are then taken
+    // in run order, as if every run had been visited in turn.
+    let mut order: Vec<usize> = (0..n_runs).collect();
+    if let Some((r, _)) = &resident {
+        order.retain(|x| x != r);
+        order.insert(0, *r);
+    }
+    let mut batches: Vec<Vec<(Fitted, Vec<f64>)>> = (0..n_runs).map(|_| Vec::new()).collect();
+    for run_idx in order {
+        let run = &collector.runs[run_idx];
         let Some(cache) = run.ms1.as_ref() else {
             continue;
         };
@@ -1303,10 +1344,14 @@ fn transfer(
             );
             continue;
         }
-        let ms1 = cache
-            .load()
-            .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
-        let series = faims_groups(ms1);
+        let series = match resident.take() {
+            Some((r, series)) if r == run_idx => series,
+            _ => faims_groups(
+                cache
+                    .load()
+                    .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?,
+            ),
+        };
         // Width scale of a series without identifications: the run's other
         // series, else the median of every run.
         let fallback = || {
@@ -1372,17 +1417,18 @@ fn transfer(
                 ))
             })
             .collect();
-        for (f, d) in results {
-            if groups[f.gid].identity_decoy {
-                identity_scores.push(score(&f.fit, f.run));
-                continue;
-            }
-            target_rows.push(scored.len());
-            scored.push((score(&f.fit, f.run), 0.0));
-            let w = 1.0 / d.len().max(1) as f64;
-            scored.extend(d.into_iter().map(|x| (x, w)));
-            out.push(f);
+        batches[run_idx] = results;
+    }
+    for (f, d) in batches.into_iter().flatten() {
+        if groups[f.gid].identity_decoy {
+            identity_scores.push(score(&f.fit, f.run));
+            continue;
         }
+        target_rows.push(scored.len());
+        scored.push((score(&f.fit, f.run), 0.0));
+        let w = 1.0 / d.len().max(1) as f64;
+        scored.extend(d.into_iter().map(|x| (x, w)));
+        out.push(f);
     }
     let q = weighted_qvalues(&scored);
     // The q-value of an identity-decoy transfer: that of the weakest target
@@ -1759,28 +1805,30 @@ mod tests {
     #[test]
     fn max_sites_follow_missed_cleavages() {
         use model::enzyme::Enzyme;
+        // Seven L and five R in all; at most four L in 6 residues.
+        let db = model::ProteinDb {
+            proteins: vec![model::Protein {
+                accession: "P1".into(),
+                description: String::new(),
+                sequence: b"GGLRLRLLRAGLRGLRLGGGGGGGGGGG".to_vec(),
+                annotation: None,
+            }],
+        };
         let s = LabelSpec::parse("silac2").unwrap();
-        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2, 2), 3);
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2, 2, &db, 50), 3);
         // Semi-specific spans keep the internal missed-cleavage bound.
-        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 1, 2), 3);
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 1, 2, &db, 50), 3);
         let d = LabelSpec::parse("dimethyl3").unwrap();
-        assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 2, 1), 3);
-        // Leu is no cleavage site: its labels are not bound by missed cleavages.
+        assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 2, 1, &db, 50), 3);
+        // Leu is no cleavage site: its labels are bound by the database, the
+        // most L in any peptide-length window.
         let l = LabelSpec::parse("[][Leu3]").unwrap();
-        assert_eq!(
-            max_label_sites(&l, &[Enzyme::Trypsin], 2, 2),
-            FREE_LABEL_SITES
-        );
+        assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2, 2, &db, 50), 7);
+        assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2, 2, &db, 6), 4);
         // Arg labels with Lys-C are not bound by its cleavages either.
-        assert_eq!(
-            max_label_sites(&s, &[Enzyme::LysC], 2, 2),
-            3 + FREE_LABEL_SITES
-        );
-        // A non-specific digest has no missed cleavages: AKKKKA carries four.
-        assert_eq!(
-            max_label_sites(&s, &[Enzyme::Trypsin], 0, 2),
-            FREE_LABEL_SITES
-        );
+        assert_eq!(max_label_sites(&s, &[Enzyme::LysC], 2, 2, &db, 50), 3 + 5);
+        // A non-specific digest has no missed cleavages: every K/R counts.
+        assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 0, 2, &db, 50), 5);
     }
 
     #[test]

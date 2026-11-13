@@ -1185,6 +1185,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &enzymes,
             params.num_tolerable_termini,
             params.max_missed_cleavages,
+            &idx.db,
+            params.max_length,
         );
         params.max_label_sites = extra;
         eprintln!(

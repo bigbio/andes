@@ -29,7 +29,7 @@ use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use model::aa_set::label_code::LabelState;
-use model::aa_set::{form_index, AminoAcidSet, Terminus, FORM_TABLE_LEN};
+use model::aa_set::{form_index, label_code, AminoAcidSet, Terminus, FORM_TABLE_LEN};
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
 use model::peptide::Peptide;
@@ -1264,18 +1264,26 @@ pub(crate) fn compute_cleavage_positions(
     positions
 }
 
-/// Distinct mass offsets a single position's form can add to the base
-/// peptide: for every form list of `params.aa_set`, each form's mass minus the
-/// mass of the list's form without variable modifications (the form the
-/// base-peptide index folds in), de-duplicated by `to_bits()`. A form that
-/// stacks two variable mods, or replaces a fixed terminal mod with a variable
-/// one, contributes its whole offset; every such form carries at least one
-/// variable mod, so a peptidoform's offset from its base is a sum of at most
-/// `max_variable_mods_per_peptide` of these.
-fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
-    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut out: Vec<f64> = Vec::new();
-    for (variants, slots) in params.aa_set.form_lists() {
+/// One variable form's mass offset from its form list's form without variable
+/// modifications (the form the base-peptide index folds in), with the
+/// non-label and label modifications it carries and its label channel (0
+/// when it carries no label, so it fits every channel).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FormDelta {
+    delta: f64,
+    mods: u32,
+    labels: u32,
+    channel: u8,
+}
+
+/// Distinct [`FormDelta`]s of `params.aa_set`, de-duplicated by
+/// (`to_bits()`, counts, channel). A form that stacks two variable mods, or
+/// replaces a fixed terminal mod with a variable one, contributes its whole
+/// offset. Forms that mix channels are left out: no candidate keeps them.
+fn variable_mod_deltas(params: &SearchParams) -> Vec<FormDelta> {
+    let mut seen: std::collections::HashSet<(u64, u32, u32, u8)> = std::collections::HashSet::new();
+    let mut out: Vec<FormDelta> = Vec::new();
+    for (variants, slots, label_slots, codes) in params.aa_set.form_lists_with_labels() {
         let Some(base) = variants
             .iter()
             .zip(slots)
@@ -1284,19 +1292,39 @@ fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
         else {
             continue;
         };
-        for (aa, _) in variants.iter().zip(slots).filter(|(_, &s)| s > 0) {
-            let d = variant_mass(aa) - base;
-            if seen.insert(d.to_bits()) {
-                out.push(d);
+        for (j, (aa, &s)) in variants.iter().zip(slots).enumerate() {
+            if s == 0 {
+                continue;
+            }
+            let labels = u32::from(label_slots.get(j).copied().unwrap_or(0));
+            let channel = if labels == 0 {
+                0
+            } else {
+                match codes.get(j).copied() {
+                    Some(c) if (1..=label_code::MAX_CHANNEL).contains(&c) => c,
+                    _ => continue,
+                }
+            };
+            let f = FormDelta {
+                delta: variant_mass(aa) - base,
+                mods: u32::from(s) - labels,
+                labels,
+                channel,
+            };
+            if seen.insert((f.delta.to_bits(), f.mods, f.labels, f.channel)) {
+                out.push(f);
             }
         }
     }
     out
 }
 
-/// Enumerate the distinct total mod-mass offsets `Δ` reachable by applying up
-/// to `max_variable_mods_per_peptide` variable mods (with repetition — the same
-/// mod can apply at multiple residues).
+/// Enumerate the distinct total mod-mass offsets `Δ` a peptidoform can have
+/// over its base peptide: sums of [`FormDelta`]s (with repetition, the same
+/// mod can apply at multiple residues) of one channel's labels and unlabelled
+/// forms, at most `max_variable_mods_per_peptide` non-label mods and
+/// `max_label_sites` labels, as the candidate walk counts them. A candidate
+/// carries one channel's labels only, so channels are enumerated apart.
 ///
 /// Returns a list of `(delta_milli, delta)` pairs, including `Δ = 0` (the
 /// unmodified backbone), de-duplicated by rounded milli-Dalton so two mods that
@@ -1311,43 +1339,53 @@ fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
 /// and filtering on the resulting peptidoform mass — not from `Δ` precision.
 fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
     let deltas = variable_mod_deltas(params);
-    // Labels count apart from the other mods, so a peptidoform's offset sums
-    // up to both allowances' worth of form deltas.
-    let max_mods = (params.max_variable_mods_per_peptide + params.max_label_sites) as usize;
-
-    // BFS over multisets of mod deltas: level k = applying exactly k variable
-    // mods. We track each combination's summed delta and de-dup by milli-Da.
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut out: Vec<(u64, f64)> = Vec::new();
-
     // Δ = 0 (no variable mods) is always present.
-    let zero_milli = (0.0_f64 * 1000.0).round() as i64 as u64;
-    seen.insert(zero_milli);
-    out.push((zero_milli, 0.0));
+    seen.insert(milli_of(0.0));
+    out.push((milli_of(0.0), 0.0));
 
-    if deltas.is_empty() || max_mods == 0 {
-        return out;
+    // Multisets of forms in non-decreasing index order, each generated once.
+    fn walk(
+        items: &[FormDelta],
+        start: usize,
+        sum: f64,
+        budget: (u32, u32),
+        seen: &mut std::collections::HashSet<u64>,
+        out: &mut Vec<(u64, f64)>,
+    ) {
+        for (i, f) in items.iter().enumerate().skip(start) {
+            if f.mods > budget.0 || f.labels > budget.1 {
+                continue;
+            }
+            let s = sum + f.delta;
+            let key = milli_of(s);
+            if seen.insert(key) {
+                out.push((key, s));
+            }
+            walk(
+                items,
+                i,
+                s,
+                (budget.0 - f.mods, budget.1 - f.labels),
+                seen,
+                out,
+            );
+        }
     }
 
-    // `frontier` holds (summed_delta, start_index) where start_index enforces a
-    // non-decreasing choice of mod indices so each multiset is generated once.
-    let mut frontier: Vec<(f64, usize)> = vec![(0.0, 0)];
-    for _ in 0..max_mods {
-        let mut next: Vec<(f64, usize)> = Vec::new();
-        for &(sum, start) in &frontier {
-            for (i, &d) in deltas.iter().enumerate().skip(start) {
-                let new_sum = sum + d;
-                next.push((new_sum, i));
-                let key = milli_of(new_sum);
-                if seen.insert(key) {
-                    out.push((key, new_sum));
-                }
-            }
-        }
-        frontier = next;
-        if frontier.is_empty() {
-            break;
-        }
+    let budget = (params.max_variable_mods_per_peptide, params.max_label_sites);
+    let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
+    channels.push(0);
+    channels.sort_unstable();
+    channels.dedup();
+    for c in channels {
+        let items: Vec<FormDelta> = deltas
+            .iter()
+            .filter(|f| f.channel == 0 || f.channel == c)
+            .copied()
+            .collect();
+        walk(&items, 0, 0.0, budget, &mut seen, &mut out);
     }
     out
 }
@@ -1980,8 +2018,6 @@ mod tests {
             .collect()
     }
 
-    // SILAC heavy K and R as variable mods: a candidate is all-light or
-    // all-heavy, never one heavy and one light labelable residue.
     /// In a non-specific digest missed cleavages do not bound the labelled
     /// residues: AKKKKA is searched with all four K labelled, within the
     /// label allowance and apart from `--max-mods`.
@@ -2018,6 +2054,119 @@ mod tests {
         assert!(full.iter().all(|&n| n == 0 || n == 4), "{full:?}");
     }
 
+    #[test]
+    fn fixed_mod_on_a_labelable_site_is_neutral() {
+        // A fixed protein N-terminal acetyl holds the N-terminal dimethyl
+        // site, as a variable one does: MAGLK at the protein N-terminus with
+        // the acetyl and a labelled K is that K's channel, not mixed.
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "fixed".into(),
+                sequence: b"MAGLKPEPTIDEK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let mut b = AminoAcidSetBuilder::new_standard();
+        let mut channels = Vec::new();
+        for (c, (name, d)) in [("Dimethyl", 28.0313), ("Dimethyl:2H(4)", 32.056407)]
+            .into_iter()
+            .enumerate()
+        {
+            for (res, loc, suffix) in [
+                (b'K', ModLocation::Anywhere, ""),
+                (b'*', ModLocation::NTerm, "-N"),
+            ] {
+                let nm = format!("{name}{suffix}");
+                b = b.add_variable_mod(label_mod(&nm, d, res, loc));
+                channels.push((nm, c as u8 + 1));
+            }
+        }
+        let mut acetyl = label_mod("Acetyl", 42.010565, b'*', ModLocation::ProtNTerm);
+        acetyl.fixed = true;
+        let aa_set = b
+            .add_fixed_mod(acetyl)
+            .with_label_channels(channels)
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_label_sites = 3;
+        let kept: Vec<_> = enumerate_candidates(&db, &params, "XXX").collect();
+        let maglk: Vec<Vec<String>> = kept
+            .iter()
+            .filter(|c| c.peptide.residues.iter().map(|a| a.residue).eq(*b"MAGLK"))
+            .map(label_names)
+            .collect();
+        // Both channels on K under the fixed acetyl.
+        for ch in ["Dimethyl", "Dimethyl:2H(4)"] {
+            assert!(
+                maglk.iter().any(|n| n == &["Acetyl", ch]),
+                "{ch}: {maglk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mass_offsets_keep_channels_apart() {
+        // [][Lys4][Lys8] with Met oxidation: an offset sums one channel's
+        // labels, never Lys4 with Lys8, and still covers every candidate.
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "offsets".into(),
+                sequence: b"PEMKTKIDERAAKGGLK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(label_mod(
+                "Label:2H(4)",
+                4.025107,
+                b'K',
+                ModLocation::Anywhere,
+            ))
+            .add_variable_mod(label_mod(
+                "Label:13C(6)15N(2)",
+                8.014199,
+                b'K',
+                ModLocation::Anywhere,
+            ))
+            .add_variable_mod(oxidation_m())
+            .with_label_channels(vec![
+                ("Label:2H(4)".into(), 1),
+                ("Label:13C(6)15N(2)".into(), 2),
+            ])
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 1;
+        params.max_label_sites = 3;
+        let offsets: Vec<f64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        let has = |d: f64| offsets.iter().any(|o| (o - d).abs() < 1e-6);
+        assert!(!has(4.025107 + 8.014199), "{offsets:?}");
+        assert!(has(3.0 * 8.014199 + 15.994915));
+        assert!(!has(2.0 * 15.994915));
+        // Every candidate's offset over its base peptide is among them.
+        for c in enumerate_candidates(&db, &params, "XXX") {
+            let d: f64 = c
+                .peptide
+                .residues
+                .iter()
+                .filter_map(|a| a.mod_.map(|m| m.mass_delta))
+                .sum();
+            assert!(has(d), "{d} missing from {offsets:?}");
+        }
+    }
+
+    // SILAC heavy K and R as variable mods: a candidate is all-light or
+    // all-heavy, never one heavy and one light labelable residue.
     #[test]
     fn silac_labels_are_channel_consistent() {
         let target = ProteinDb {
@@ -2076,9 +2225,6 @@ mod tests {
         no_mods.max_variable_mods_per_peptide = 0;
         let strict: Vec<_> = enumerate_candidates(&db, &no_mods, "XXX").collect();
         assert_eq!(n(&strict, "PEPKTIDER"), 2);
-        assert!(strict
-            .iter()
-            .all(|c| label_names(c).iter().all(|m| !m.contains("Oxidation"))));
         assert!(strict.iter().all(|c| c
             .peptide
             .residues

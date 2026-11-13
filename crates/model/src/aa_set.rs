@@ -75,8 +75,8 @@ struct FormList {
 /// carries that channel's label, [`label_code::MIXED`] when the form mixes
 /// channels or leaves a labelable site of a labelled form unlabelled, and
 /// [`label_code::NEUTRAL`] when its labelable sites are all taken by other
-/// variable modifications (a protein N-terminal acetyl in place of the
-/// N-terminal dimethyl), so it constrains nothing.
+/// modifications, variable or fixed (a protein N-terminal acetyl in place of
+/// the N-terminal dimethyl), so it constrains nothing.
 pub mod label_code {
     pub const LIGHT: u8 = 0;
     pub const MAX_CHANNEL: u8 = 250;
@@ -194,7 +194,6 @@ impl AminoAcidSet {
         &self.forms[form_index(residue, n, c)].label_slots
     }
 
-    /// Every non-empty form list with its slot counts.
     /// Label code of each form of [`Self::forms`] (see [`label_code`]), or
     /// `None` when no channel label applies at this position.
     #[inline]
@@ -215,11 +214,30 @@ impl AminoAcidSet {
         self.has_label_channels
     }
 
+    /// Every non-empty form list with its slot counts.
     pub fn form_lists(&self) -> impl Iterator<Item = (&[AminoAcid], &[u8])> {
         self.forms
             .iter()
             .filter(|f| !f.variants.is_empty())
             .map(|f| (f.variants.as_slice(), f.slots.as_slice()))
+    }
+
+    /// [`Self::form_lists`] with each form's label slots and label code (the
+    /// codes empty where no channel label applies).
+    pub fn form_lists_with_labels(
+        &self,
+    ) -> impl Iterator<Item = (&[AminoAcid], &[u8], &[u8], &[u8])> {
+        self.forms
+            .iter()
+            .filter(|f| !f.variants.is_empty())
+            .map(|f| {
+                (
+                    f.variants.as_slice(),
+                    f.slots.as_slice(),
+                    f.label_slots.as_slice(),
+                    f.labels.as_slice(),
+                )
+            })
     }
 
     pub fn standard(&self, residue: u8) -> Option<&AminoAcid> {
@@ -848,8 +866,9 @@ fn form_label_code(
                 Some(prev) if prev != c => return label_code::MIXED,
                 _ => channel = Some(c),
             },
-            // Another variable mod holds the site: it carries no label.
-            None if slots > 0 => {}
+            // Another mod, variable or fixed, holds the site: it carries no
+            // label.
+            None if slots > 0 || !mods.is_empty() => {}
             None => light = true,
         }
     }

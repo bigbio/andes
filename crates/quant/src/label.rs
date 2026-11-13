@@ -328,8 +328,10 @@ impl LabelSpec {
     /// comma-separated labels, e.g. `[][Lys8,Arg10]`. A label is a known name
     /// (`Lys4`, `Lys6`, `Lys8`, `Arg6`, `Arg10`, `Leu3`, `Dimethyl0`,
     /// `Dimethyl4`, `Dimethyl6`, `Dimethyl8`) or a custom `<site>+<mass>`
-    /// with an optional `:<n>D` for its 2H atoms (`K+8.014199`,
-    /// `Nterm+32.056407:4D`).
+    /// with an optional isotope annotation for the envelope model: its 13C,
+    /// 15N and 2H atoms (`K+8.014199:6C2N`), with `chem` first for a chemical
+    /// label that adds atoms (`Nterm+32.056407:chem4D`). A custom label
+    /// without one is a chemical shift of natural atoms (`Nterm+28.0313`).
     pub fn parse(text: &str) -> Result<Self, String> {
         let t = text.trim();
         let body = PRESETS
@@ -455,7 +457,9 @@ impl LabelSpec {
                     }
                     names.join("+")
                 };
-                let qpx_label = if all_silac {
+                // SDRF names light, medium and heavy only: beyond three
+                // channels they would repeat, and QPX keys intensities by them.
+                let qpx_label = if all_silac && n <= 3 {
                     Some(
                         match (n, i) {
                             (_, 0) => "SILAC light",
@@ -464,6 +468,8 @@ impl LabelSpec {
                         }
                         .to_string(),
                     )
+                } else if all_silac {
+                    None
                 } else if all_dimethyl {
                     let d = sites[0].delta;
                     NAMED_LABELS
@@ -659,16 +665,9 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
             })
             .collect());
     }
-    let (body, d) = match token.split_once(':') {
-        Some((b, d)) => {
-            let n = d
-                .trim()
-                .trim_end_matches(['D', 'd'])
-                .parse::<u32>()
-                .map_err(|_| format!("label {token:?}: expected ':<n>D' for its 2H atoms"))?;
-            (b, n)
-        }
-        None => (token, 0),
+    let (body, comp) = match token.split_once(':') {
+        Some((b, a)) => (b, Some(parse_composition(token, a)?)),
+        None => (token, None),
     };
     let Some((site, mass)) = body.split_once('+') else {
         return Err(format!(
@@ -692,20 +691,123 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
             ))
         }
     };
-    // Nominal-mass shift not carried by 2H is carried by 13C/15N.
-    let heavy = ((delta - d as f64 * D_H) / 1.0).round().max(0.0) as u32;
+    // Without an annotation the label is a chemical shift of natural atoms.
+    let comp = comp.unwrap_or(Composition {
+        chemical: true,
+        c13: 0,
+        n15: 0,
+        d: 0,
+    });
+    let shift = comp.c13 as f64 * C13_C12 + comp.n15 as f64 * N15_N14 + comp.d as f64 * D_H;
+    let (natural_c, natural_h) = if comp.chemical {
+        // The added atoms, estimated as CH2 units of the label's mass with
+        // its heavy isotopes made light (C2H4 for dimethyl); they include the
+        // label's own 13C and 2H, which the envelope then takes out again.
+        let light = delta - shift;
+        if light < 0.5 * CH2 {
+            return Err(format!(
+                "label {token:?}: a chemical label adds atoms, but {delta} Da less its heavy \
+                 isotopes leaves {light:.4} Da"
+            ));
+        }
+        let c = (light / CH2).round() as i32;
+        // 2H may exceed the added H: it can also replace the peptide's own
+        // (Dimethyl8, 2 × 13CD3 for 2 H, has 6 2H and adds 4 H).
+        if comp.c13 as i32 > c {
+            return Err(format!(
+                "label {token:?}: {} 13C, but the label adds about {c} C",
+                comp.c13
+            ));
+        }
+        (c, 2 * c)
+    } else {
+        // A metabolic label substitutes atoms: its mass is its heavy isotopes.
+        if (shift - delta).abs() > 0.01 {
+            return Err(format!(
+                "label {token:?}: {}C {}N {}D add {shift:.4} Da, not {delta} (for a chemical \
+                 label that adds atoms write ':chem…', e.g. Nterm+32.056407:chem4D)",
+                comp.c13, comp.n15, comp.d
+            ));
+        }
+        (0, 0)
+    };
     Ok(vec![LabelSite {
         site,
         delta,
-        deuterium: d,
-        heavy_atoms: heavy,
-        carbon13: heavy,
-        natural_c: 0,
-        natural_h: 0,
+        deuterium: comp.d,
+        heavy_atoms: comp.c13 + comp.n15,
+        carbon13: comp.c13,
+        natural_c,
+        natural_h,
         name: format!("Label:{}:{delta:.6}", site.describe()),
         unimod: None,
-        chemical: false,
+        chemical: comp.chemical,
     }])
+}
+
+/// 13C − 12C, Da.
+const C13_C12: f64 = 13.003_354_835 - 12.0;
+/// 15N − 14N, Da.
+const N15_N14: f64 = 15.000_108_899 - 14.003_074_004;
+/// CH2, Da.
+const CH2: f64 = 12.0 + 2.0 * 1.007_825_032;
+
+/// The isotope annotation of a custom label: `[chem]` then any of `<n>C`,
+/// `<n>N`, `<n>D` (13C, 15N and 2H atoms).
+#[derive(Debug, Clone, Copy)]
+struct Composition {
+    chemical: bool,
+    c13: u32,
+    n15: u32,
+    d: u32,
+}
+
+fn parse_composition(token: &str, text: &str) -> Result<Composition, String> {
+    let bad = || {
+        format!(
+            "label {token:?}: expected ':' then [chem] and the heavy atoms as <n>C <n>N <n>D, \
+             e.g. K+8.014199:6C2N or Nterm+32.056407:chem4D"
+        )
+    };
+    let t = text.trim();
+    let (chemical, mut rest) = match t.get(..4) {
+        Some(p) if p.eq_ignore_ascii_case("chem") => (true, &t[4..]),
+        _ => (false, t),
+    };
+    let mut comp = Composition {
+        chemical,
+        c13: 0,
+        n15: 0,
+        d: 0,
+    };
+    let mut seen = Vec::new();
+    while !rest.is_empty() {
+        let digits = rest.find(|ch: char| !ch.is_ascii_digit()).ok_or_else(bad)?;
+        if digits == 0 {
+            return Err(bad());
+        }
+        let n: u32 = rest[..digits].parse().map_err(|_| bad())?;
+        let element = rest[digits..]
+            .chars()
+            .next()
+            .ok_or_else(bad)?
+            .to_ascii_uppercase();
+        if seen.contains(&element) {
+            return Err(bad());
+        }
+        seen.push(element);
+        match element {
+            'C' => comp.c13 = n,
+            'N' => comp.n15 = n,
+            'D' => comp.d = n,
+            _ => return Err(bad()),
+        }
+        rest = &rest[digits + 1..];
+    }
+    if !chemical && seen.is_empty() {
+        return Err(bad());
+    }
+    Ok(comp)
 }
 
 /// The isotope pattern of one channel of a peptide, relative to the
@@ -1841,14 +1943,19 @@ mod tests {
         let s = LabelSpec::parse("silac3").unwrap();
         assert_eq!(s.channels[1].qpx_label.as_deref(), Some("SILAC medium"));
         assert!(s.has_deuterium());
+        // Beyond three SILAC channels the SDRF names would repeat.
+        let s = LabelSpec::parse("[][Lys4][Lys6][Lys8]").unwrap();
+        assert!(s.channels.iter().all(|c| c.qpx_label.is_none()));
         let s = LabelSpec::parse("dimethyl3").unwrap();
         assert_eq!(s.len(), 3);
         assert!(!s.has_unlabelled_channel());
         assert_eq!(s.channels[2].qpx_label.as_deref(), Some("DIMETHYL8"));
         assert_eq!(s.sites().len(), 2);
-        let s = LabelSpec::parse("[][K+8.014199,R+10.008269]").unwrap();
+        let s = LabelSpec::parse("[][K+8.014199:6C2N,R+10.008269:6C4N]").unwrap();
         assert_eq!(s.channels[1].sites.len(), 2);
         assert_eq!(s.channels[1].sites[0].heavy_atoms, 8);
+        assert_eq!(s.channels[1].sites[0].carbon13, 6);
+        assert!(!s.channels[1].sites[0].chemical);
         assert!(s.channels[1].qpx_label.is_some());
         // A stacked mod's name joins its parts with '+': a custom label's
         // own name must not contain it, or the label is lost when split.
@@ -1865,6 +1972,49 @@ mod tests {
         assert!(LabelSpec::parse("[][Lys8][Arg10]").is_err());
         assert!(LabelSpec::parse("[][Lys8,Arg10][Lys4,Arg6]").is_err());
         assert!(LabelSpec::parse("[][Foo]").is_err());
+        // An annotation whose isotopes do not make up the mass.
+        assert!(LabelSpec::parse("[][K+8.014199:8C]").is_err());
+        assert!(LabelSpec::parse("[Nterm+28.0313][Nterm+32.056407:4D]").is_err());
+        assert!(LabelSpec::parse("[][K+8.014199:6X]").is_err());
+        assert!(LabelSpec::parse("[][K+8.014199:6C6C]").is_err());
+    }
+
+    #[test]
+    fn custom_labels_carry_their_composition() {
+        // The custom forms of the dimethyl presets model the same atoms.
+        let custom =
+            LabelSpec::parse("[Nterm+28.0313][Nterm+32.056407:chem4D][Nterm+36.07567:chem2C6D]")
+                .unwrap();
+        let preset = LabelSpec::parse("[Dimethyl0][Dimethyl4][Dimethyl8]").unwrap();
+        for (c, p) in custom.channels.iter().zip(&preset.channels) {
+            let (a, b) = (&c.sites[0], p.label_at(Site::NTerm).unwrap());
+            assert_eq!(
+                (
+                    a.deuterium,
+                    a.heavy_atoms,
+                    a.carbon13,
+                    a.natural_c,
+                    a.natural_h,
+                    a.chemical
+                ),
+                (
+                    b.deuterium,
+                    b.heavy_atoms,
+                    b.carbon13,
+                    b.natural_c,
+                    b.natural_h,
+                    b.chemical
+                ),
+                "{}",
+                c.name
+            );
+        }
+        // An unannotated custom label is a chemical shift of natural atoms:
+        // no heavy isotopes, so no lower isotopologues in its envelope.
+        let s = LabelSpec::parse("[][K+8.014199]").unwrap();
+        let l = &s.channels[1].sites[0];
+        assert!(l.chemical);
+        assert_eq!((l.deuterium, l.heavy_atoms), (0, 0));
     }
 
     #[test]

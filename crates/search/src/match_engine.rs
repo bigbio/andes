@@ -1592,6 +1592,11 @@ impl<'a> PreparedSearch<'a> {
                     drop(psms);
                     let tol = scorer.pin_match_tolerance();
                     let ipf = params.ipf_localization;
+                    let declared = if ipf {
+                        params.aa_set.distinct_mods()
+                    } else {
+                        Vec::new()
+                    };
                     queue.update_in_place(|psm| {
                         psm.site_evidence = evidence.remove(&key(psm)).flatten();
                         if ipf {
@@ -1601,6 +1606,7 @@ impl<'a> PreparedSearch<'a> {
                                 &cand.peptide,
                                 psm.charge_used,
                                 move |mz| tol.as_da(mz),
+                                &declared,
                             ) {
                                 psm.site_evidence.get_or_insert_with(Default::default).ipf =
                                     Some(e);

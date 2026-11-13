@@ -510,35 +510,38 @@ have, refit once on IPF's own placements. `<stem>.ipf.tsv` has, per target PSM, 
 best placement (1-based residues), `best_prob` (localization probability given the PSM is right),
 `ipf_pep` and the model-based `ipf_q`, and `site_probs` per residue.
 
+A mod moves to every residue a declared record of the same name and mass accepts, so a phospho
+declared as separate S, T and Y lines competes across all three.
+
 Measured on the phospho benchmark file (PXD007653 control2, native rescoring), against the
-depositors' MaxQuant 1.5.3 localization of the same scans (9,982 PSMs; MaxQuant is a reference, not
-ground truth). Among PSMs MaxQuant localizes confidently (every site ≥ 0.75, n = 6,735):
+depositors' MaxQuant 1.5.3 localization of the same scans (11,948 PSMs; MaxQuant is a reference,
+not ground truth). Among PSMs MaxQuant localizes confidently (every site ≥ 0.75, n = 8,383):
 
 | | agrees with MaxQuant |
 |---|---|
-| andes search placement | 92.0% |
-| IPF best placement | 94.7% |
-| IPF `best_prob` ≥ 0.9 (86.6% of PSMs) | 97.8% |
-| IPF `best_prob` ≥ 0.99 (67.9% of PSMs) | 98.3% |
-
-This needs phospho declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same
-for T). Without `loss=` IPF does not beat the search placement (91.8% against 92.9%). The IPF step
-takes ~9 s on this run.
+| andes search placement | 92.8% |
+| IPF best placement | 95.5% |
+| IPF `best_prob` ≥ 0.9 (84.6% of PSMs) | 99.0% |
+| IPF `best_prob` ≥ 0.99 (63.4% of PSMs) | 99.6% |
 
 Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017, 10 HCD-OT files,
-fully tryptic, PSM q ≤ 0.01, n = 999 PSMs of 80 library peptides scored against the key of the
-file's own pool), IPF does not beat the search placement and is overconfident:
+fully tryptic, PSM q ≤ 0.01, 1,429 PSMs needing localization, scored against the key of the file's
+own pool):
 
 | | false localization rate |
 |---|---|
-| andes search placement | 19.5% |
-| IPF best placement | 19.6% |
-| IPF `best_prob` ≥ 0.9 (67.0% of PSMs) | 9.4% |
-| IPF `best_prob` ≥ 0.99 (43.9% of PSMs) | 8.0% |
+| andes search placement | 19.3% |
+| IPF best placement | 13.4% |
+| IPF `best_prob` ≥ 0.75 (77.3% of PSMs) | 3.6% |
+| IPF `best_prob` ≥ 0.9 (68.6% of PSMs) | 2.5% |
+| IPF `best_prob` ≥ 0.99 (44.6% of PSMs) | 1.4% |
 
-Mean 1 − `best_prob` predicts 13.9% against 19.6% observed. Counting a placement correct if any pool
-holds it (isomers sit in different pools, so cross-pool carryover is possible) gives 13.5% / 12.4%.
-Treat `best_prob` as a ranking, not a calibrated probability.
+`best_prob` is calibrated on this set: mean 1 − `best_prob` predicts 13.4% wrong, 13.4% observed.
+Before mods could move across sibling records (each S, T or Y record moved only among its own
+residue), IPF gave 19.6% and was overconfident (13.9% predicted). Phospho is declared with its
+neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for T); without `loss=` IPF did not
+beat the search placement on the MaxQuant comparison (measured before the sibling change). The IPF
+step takes ~14 s on the phospho run.
 
 ### PEFF databases
 

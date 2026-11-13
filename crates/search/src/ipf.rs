@@ -35,6 +35,16 @@ pub const MAX_PLACEMENTS: usize = 1024;
 /// Only residue-anywhere variable mods move: terminal mods (protein or peptide
 /// N/C-term) have a single possible site and are kept in place.
 pub fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
+    placements_with(peptide, &[])
+}
+
+/// [`placements`], also letting each mod move to residues that a declared
+/// sibling record (same name and mass, e.g. Mods.txt's separate Phospho S, T
+/// and Y lines) accepts; the residue then carries that sibling record.
+pub fn placements_with(
+    peptide: &Peptide,
+    declared: &[&'static Modification],
+) -> (Vec<Peptide>, bool) {
     let n = peptide.residues.len();
     // Movable mods, one entry per occurrence, in residue order.
     let movable: Vec<&'static Modification> = peptide
@@ -60,12 +70,26 @@ pub fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
         .collect();
     let free: Vec<usize> = (0..n).filter(|&i| base[i].mod_.is_none()).collect();
     // Candidate sites per mod occurrence.
-    let sites: Vec<Vec<usize>> = movable
+    let sites: Vec<Vec<(usize, &'static Modification)>> = movable
         .iter()
-        .map(|m| {
+        .map(|&m| {
             free.iter()
-                .copied()
-                .filter(|&i| m.applies_to(base[i].residue, ModLocation::Anywhere))
+                .filter_map(|&i| {
+                    let r = base[i].residue;
+                    if m.applies_to(r, ModLocation::Anywhere) {
+                        return Some((i, m));
+                    }
+                    declared
+                        .iter()
+                        .copied()
+                        .find(|d| {
+                            is_movable(d)
+                                && d.name == m.name
+                                && (d.mass_delta - m.mass_delta).abs() < 1e-6
+                                && d.applies_to(r, ModLocation::Anywhere)
+                        })
+                        .map(|d| (i, d))
+                })
                 .collect()
         })
         .collect();
@@ -74,7 +98,7 @@ pub fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
         sites: &sites,
         base: &base,
         peptide,
-        chosen: vec![usize::MAX; movable.len()],
+        chosen: movable.iter().map(|&m| (usize::MAX, m)).collect(),
         seen: std::collections::HashSet::new(),
         out: Vec::new(),
         truncated: false,
@@ -91,10 +115,10 @@ pub fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
 /// Depth-first enumeration state for [`placements`].
 struct Enum<'a> {
     movable: &'a [&'static Modification],
-    sites: &'a [Vec<usize>],
+    sites: &'a [Vec<(usize, &'static Modification)>],
     base: &'a [model::amino_acid::AminoAcid],
     peptide: &'a Peptide,
-    chosen: Vec<usize>,
+    chosen: Vec<(usize, &'static Modification)>,
     seen: std::collections::HashSet<Vec<(usize, u64)>>,
     out: Vec<Peptide>,
     truncated: bool,
@@ -112,13 +136,12 @@ impl Enum<'_> {
             let mut key: Vec<(usize, u64)> = self
                 .chosen
                 .iter()
-                .zip(self.movable)
-                .map(|(&s, m)| (s, m.mass_delta.to_bits()))
+                .map(|&(s, m)| (s, m.mass_delta.to_bits()))
                 .collect();
             key.sort_unstable();
             if self.seen.insert(key) {
                 let mut res = self.base.to_vec();
-                for (&s, m) in self.chosen.iter().zip(self.movable) {
+                for &(s, m) in &self.chosen {
                     res[s].mod_ = Some(m);
                 }
                 let mut p = Peptide::new(res, self.peptide.pre, self.peptide.post);
@@ -127,14 +150,14 @@ impl Enum<'_> {
             }
             return;
         }
-        for &s in &self.sites[k] {
-            if self.chosen[..k].contains(&s) {
+        for &(s, m) in &self.sites[k] {
+            if self.chosen[..k].iter().any(|c| c.0 == s) {
                 continue;
             }
-            self.chosen[k] = s;
+            self.chosen[k] = (s, m);
             self.rec(k + 1);
         }
-        self.chosen[k] = usize::MAX;
+        self.chosen[k].0 = usize::MAX;
     }
 }
 
@@ -333,8 +356,9 @@ pub fn psm_evidence(
     peptide: &Peptide,
     precursor_charge: u8,
     tol_da: impl Fn(f64) -> f64 + Copy,
+    declared: &[&'static Modification],
 ) -> Option<IpfEvidence> {
-    let (forms, truncated) = placements(peptide);
+    let (forms, truncated) = placements_with(peptide, declared);
     if forms.len() < 2 {
         return None;
     }
@@ -642,6 +666,22 @@ mod tests {
     }
 
     #[test]
+    fn declared_siblings_extend_sites_to_other_residues() {
+        // Mods.txt declares Phospho once per residue; a pS PSM must also be
+        // able to move to T and Y, carrying the T/Y record there.
+        let declared = [phospho(b'S'), phospho(b'T'), phospho(b'Y')];
+        let (forms, _) = placements_with(&pep("ASATYK", &[1]), &declared);
+        let mut sites: Vec<Vec<usize>> = forms.iter().map(modified_sites).collect();
+        sites.sort();
+        assert_eq!(sites, vec![vec![1], vec![3], vec![4]]);
+        let y = forms.iter().find(|p| modified_sites(p) == [4]).unwrap();
+        assert!(y.residues[4]
+            .mod_
+            .unwrap()
+            .applies_to(b'Y', ModLocation::Anywhere));
+    }
+
+    #[test]
     fn neutral_loss_ions_add_site_evidence() {
         let lossy: &'static Modification = Box::leak(Box::new(Modification {
             neutral_losses: vec![97.976896],
@@ -699,11 +739,11 @@ mod tests {
         }
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let tol = |mz: f64| mz * 10e-6;
-        let e = psm_evidence(&peaks, &reported, 2, tol).unwrap();
+        let e = psm_evidence(&peaks, &reported, 2, tol, &[]).unwrap();
         assert_eq!(e.forms.len(), 3); // S1, S4, S6
         assert_eq!(e.forms[e.observed as usize], vec![1]);
         // Fit as on a run: most confident PSMs report the right placement.
-        let right = psm_evidence(&peaks, &truth, 2, tol).unwrap();
+        let right = psm_evidence(&peaks, &truth, 2, tol, &[]).unwrap();
         let mut train = vec![&right; 45];
         train.extend(std::iter::repeat_n(&e, 5));
         let model = IonPepModel::fit(train);

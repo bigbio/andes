@@ -113,6 +113,24 @@ pub fn localize_psms(
     (rows, model)
 }
 
+/// Per-row residue localization probabilities (1-based residue -> prob),
+/// keyed by PIN `SpecId`, for the QPX `positions.scores` column.
+pub fn site_probability_map(rows: &[IpfRow]) -> HashMap<String, HashMap<i32, f64>> {
+    rows.iter()
+        .map(|r| {
+            let m = r
+                .site_probs
+                .split(';')
+                .filter_map(|x| {
+                    let (p, v) = x.split_once(':')?;
+                    Some((p.parse().ok()?, v.parse().ok()?))
+                })
+                .collect();
+            (r.psm_id.clone(), m)
+        })
+        .collect()
+}
+
 /// Write `<stem>.ipf.tsv`.
 pub fn write_ipf_tsv(path: &std::path::Path, rows: &[IpfRow]) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);

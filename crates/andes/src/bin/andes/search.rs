@@ -2974,6 +2974,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             let (rows, model) = output::ipf::localize_psms(map, &evidence);
+            output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             let stem = report_base
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

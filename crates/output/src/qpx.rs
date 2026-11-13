@@ -633,7 +633,10 @@ fn build_psms_batch(
 
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));
-            append_modifications(&mut modifications, cand);
+            let row_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+            IPF_SITE_PROBS.with(|p| {
+                append_modifications_scored(&mut modifications, cand, p.borrow().get(&row_id))
+            });
             precursor_charge.append_value(psm.charge_used as i32);
             match matched {
                 Some(p) => pep.append_value(p.pep),
@@ -784,13 +787,37 @@ pub fn peptidoform_string(cand: &Candidate) -> String {
     s
 }
 
+thread_local! {
+    /// IPF localization probabilities for the next [`write_qpx`] on this thread,
+    /// keyed by PIN `SpecId`: 1-based residue -> probability. Empty (the default)
+    /// leaves every `positions.scores` null, as before `--localize ipf`.
+    static IPF_SITE_PROBS: std::cell::RefCell<HashMap<String, HashMap<i32, f64>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Set (or clear, with an empty map) the IPF site probabilities that
+/// [`write_qpx`] writes as `positions.scores` (`score_name` "ipf_site_probability").
+pub fn set_ipf_site_probabilities(probs: HashMap<String, HashMap<i32, f64>>) {
+    IPF_SITE_PROBS.with(|p| *p.borrow_mut() = probs);
+}
+
 /// Append the `modifications` list cell for one candidate: one struct per
 /// modified residue with `name`, `accession`, and a single `positions` entry in
 /// the QPX layout (`position` int32: 1-based residue index, 0 for the peptide
 /// N-terminus, length + 1 for the C-terminus; `amino_acid` null on a terminus;
-/// `scores` null, andes does not localize). The position comes from
+/// `scores` holds the IPF localization probability of that residue when
+/// `--localize ipf` set one for this row, else null). The position comes from
 /// [`ModRecord::of_residue`], the feature view's helper.
+#[cfg(test)]
 fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candidate) {
+    append_modifications_scored(builder, cand, None)
+}
+
+fn append_modifications_scored(
+    builder: &mut ListBuilder<StructBuilder>,
+    cand: &Candidate,
+    site_probs: Option<&HashMap<i32, f64>>,
+) {
     let sb = builder.values();
     let len = cand.peptide.residues.len();
     for (i, aa) in cand.peptide.residues.iter().enumerate() {
@@ -811,9 +838,24 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
         psb.field_builder::<StringBuilder>(1)
             .unwrap()
             .append_option(m.amino_acid.map(|c| c.to_string()));
-        psb.field_builder::<ListBuilder<StructBuilder>>(2)
-            .unwrap()
-            .append_null();
+        let scores = psb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
+        match site_probs.and_then(|s| s.get(&m.position)) {
+            Some(&p) => {
+                let s = scores.values();
+                s.field_builder::<StringBuilder>(0)
+                    .unwrap()
+                    .append_value("ipf_site_probability");
+                s.field_builder::<Float64Builder>(1)
+                    .unwrap()
+                    .append_value(p);
+                s.field_builder::<BooleanBuilder>(2)
+                    .unwrap()
+                    .append_value(true);
+                s.append(true);
+                scores.append(true);
+            }
+            None => scores.append_null(),
+        }
         psb.append(true);
         pos_list.append(true);
         sb.append(true);
@@ -1445,5 +1487,36 @@ mod rescore_join_tests {
             ));
         }
         assert_eq!(got, vec![(0, None), (3, Some("S".to_string())), (5, None)]);
+
+        // With IPF probabilities, the phospho position (3) carries its score;
+        // positions IPF did not score stay null.
+        let mut b = list_struct_builder(modification_fields());
+        let probs: HashMap<i32, f64> = [(3, 0.97)].into_iter().collect();
+        append_modifications_scored(&mut b, &cand, Some(&probs));
+        b.append(true);
+        let list: ListArray = b.finish();
+        let structs = list.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        let positions = structs.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+        let score_of = |i: usize| {
+            let entry = positions.value(i);
+            let entry = entry.as_any().downcast_ref::<StructArray>().unwrap();
+            let scores = entry.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+            if scores.is_null(0) {
+                return None;
+            }
+            let s = scores.value(0);
+            let s = s.as_any().downcast_ref::<StructArray>().unwrap();
+            let name = s.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let v = s
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+            Some((name.value(0).to_string(), v.value(0)))
+        };
+        assert_eq!(score_of(0), None);
+        assert_eq!(score_of(1), Some(("ipf_site_probability".to_string(), 0.97)));
+        assert_eq!(score_of(2), None);
     }
 }

@@ -2343,6 +2343,18 @@ matched there between 4,862 and 698. With both fixed, the runs' widths are 3.8 t
 channels matched between channels in the three runs 9,275 (light) and 7,646 (heavy), from 2,718 and
 3,561.
 
+The false matches of match between channels were measured with a channel the sample does not hold.
+`B_0-7ug_DDA_061` (a Lys8/Arg10 duplex) searched with `silac3` adds a Lys4/Arg6 channel, real label
+chemistry with its 2H RT offset (learned at −0.58 s), every one of whose matches is false; it
+competes in the same per-run q-values. Scaling its matches by the candidates (15,179 unidentified
+real-channel, 26,980 absent-channel) estimates the false-match rate among the real channels' matches
+at 0.93 % at q ≤ 0.01 (33 absent against 1,996 real matches), 0.99 % at 0.02 (73 / 4,150) and 1.42 %
+at the default 0.05 (161 / 6,401), an upper bound under the assumption that the absent channel's
+candidates behave like the real channels' nulls. The false matches split evenly between lysine and
+arginine peptides (0.52 % and 0.71 % of their candidates), so they are not Arg6 landing on the light
+M+6. A synthetic channel at `K+22.5,R+22.5` (half an isotope from both real channels) gives the same
+picture: 59 matches of about 27,000 candidates against 7,328 in the real channels.
+
 *PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
 20.7 s in all, 1.0 s for `--label`, 946 groups; 279 / 544 / 346 channels matched between
 channels). In this file lysine and arginine peptides carry opposite designs (K: M/L and H/L near

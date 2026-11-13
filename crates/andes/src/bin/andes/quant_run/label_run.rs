@@ -412,6 +412,7 @@ fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe
         w_prior: w,
         rt_shift,
         mobility: None,
+        pinned: false,
     }
 }
 
@@ -886,7 +887,15 @@ pub(super) fn quantify(
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
-                        for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
+                        for mut dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
+                            // A decoy reads its mass at the group's fitted
+                            // elution, as the channel it stands for does: free
+                            // to search its own apex, a decoy near a strong
+                            // co-eluting species moves the group's profile
+                            // onto it and outscores every weak real channel.
+                            dp.t_hat = fit.t0;
+                            dp.w_prior = fit.w;
+                            dp.pinned = true;
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
                                 decoy_scores[c].push(df.as_ref().map_or((0.0, None, 0.0), |d| {
@@ -1713,8 +1722,6 @@ mod tests {
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
     }
 
-    /// The collinearity check covers every isotope the fit models (M−2..M+5)
-    /// of the other channels, and the other satellites.
     #[test]
     fn satellite_overlap_check_covers_the_modelled_isotopes() {
         let iso = model::mass::ISOTOPE / 2.0;

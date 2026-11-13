@@ -1205,7 +1205,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.cal_min_spec_keys = n;
     }
     params.precursor_mass_shift_ppm = 0.0;
-    params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
+    params.refine_select_psm_fdr = cli.psm_fdr();
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
@@ -1302,8 +1302,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.refine {
             unsupported.push("--refine");
         }
-        if cli.fdr.is_some() {
-            unsupported.push("--fdr");
+        if cli.psm_fdr.is_some() {
+            unsupported.push("--psm-fdr");
         }
         if cli.pep.is_some() {
             unsupported.push("--pep");
@@ -1751,7 +1751,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
-                 or add --rescore so only PSMs at q<=--fdr are quantified."
+                 or add --rescore so only PSMs at q<=--psm-fdr are quantified."
             );
         }
         if !cli.glyco {
@@ -2715,11 +2715,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // identical to a non-rescore run.
     //
     // Backend choice: rescoring runs ONLY when explicitly requested — `--rescore`
-    // forces Percolator, `--rescore-native` forces the native rescorer. `--fdr` /
+    // forces Percolator, `--rescore-native` forces the native rescorer. `--psm-fdr` /
     // `--pep` are thresholds applied by such a run; they never start one on their
     // own (that would silently launch a backend / the non-production native path).
-    let fdr_threshold = cli.fdr.unwrap_or(0.01);
-    let proteoform_fdr = cli.proteoform_fdr.unwrap_or(fdr_threshold.max(0.05));
+    let fdr_threshold = cli.psm_fdr();
+    let proteoform_fdr = cli.proteoform_fdr();
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
@@ -2727,10 +2727,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Say so. A threshold that silently does nothing is the same defect shape
         // as a flag that is parsed and never read.
-        if cli.fdr.is_some() || cli.pep.is_some() {
-            let which = match (cli.fdr.is_some(), cli.pep.is_some()) {
-                (true, true) => "--fdr and --pep",
-                (true, false) => "--fdr",
+        if cli.psm_fdr.is_some() || cli.pep.is_some() {
+            let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
+                (true, true) => "--psm-fdr and --pep",
+                (true, false) => "--psm-fdr",
                 _ => "--pep",
             };
             eprintln!(
@@ -3025,7 +3025,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
     // The cutoff each row is accepted at: --proteoform-fdr for proteoform
-    // claims (variant-class rows), --fdr for the rest.
+    // claims (variant-class rows), --psm-fdr for the rest.
     let cutoffs = rescore_map
         .as_ref()
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
@@ -3255,8 +3255,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant_run::TmtMbrInput {
         decoys: &mbr_decoys,
         source: &mbr_source,
-        library_fdr: cli.mbr_library_fdr,
-        accept_q: cli.mbr_fdr,
+        library_fdr: cli.mbr_donor_fdr(),
+        accept_q: cli.quant_transfer_fdr(),
         wrong_log2: cli.mbr_wrong_log2,
     });
     let quant_summary = match &quant {
@@ -3329,7 +3329,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
         let (donor_q, donor_pep) = quant
             .as_ref()
-            .map(|q| (q.settings.quant_fdr, q.settings.pep_cap))
+            .map(|q| (q.settings.psm_fdr, q.settings.pep_cap))
             .ok_or("--mbr needs --lfq")?;
         Some((dir, stems, scores, ep, donor_q, donor_pep))
     } else {
@@ -3389,11 +3389,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &stems,
         scores,
         &ep,
-        cli.mbr_library_fdr,
+        cli.mbr_donor_fdr(),
         donor_q,
         donor_pep,
-        cli.mbr_fdr,
-        cli.quant_feature_fdr.0,
+        cli.quant_transfer_fdr(),
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
         qpx_groups.as_ref(),

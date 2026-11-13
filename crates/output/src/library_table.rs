@@ -61,10 +61,10 @@ const ENVELOPE_LEN: usize = 4;
 #[derive(Debug, Clone)]
 pub struct StoredLibrary {
     pub runs: Vec<String>,
-    /// Library entry gate (internal precursor-level gate, not an
+    /// Library entry gate (`--mbr-donor-fdr`, precursor-level; not an
     /// identification FDR).
     pub max_q: f64,
-    /// PSM q-value threshold of the donor PSMs (`--quant-fdr`).
+    /// PSM q-value threshold of the donor PSMs (`--psm-fdr`).
     pub donor_q: f64,
     /// PSM PEP cap of the donor PSMs (`--pep`), when given.
     pub donor_pep: Option<f64>,

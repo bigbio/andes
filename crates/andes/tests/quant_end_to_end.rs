@@ -468,7 +468,7 @@ fn lfq_areas_track_the_designed_intensities() {
         "--lfq",
         // Six targets: the conservative (decoys + 1) / targets estimate cannot
         // go below 1/6, so the wide table needs a looser cut on this fixture.
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",
@@ -570,7 +570,7 @@ fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str])
         "--output-parquet",
         qpx.to_str().unwrap(),
         "--lfq",
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",

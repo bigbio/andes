@@ -98,7 +98,7 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     );
 }
 
-/// `--fdr` is a threshold, not a switch: andes does not compute FDR unless asked
+/// `--psm-fdr` is a threshold, not a switch: andes does not compute FDR unless asked
 /// with `--rescore` / `--rescore-native`. That is deliberate, but for a long time
 /// the help text claimed the opposite and nothing was printed, so a user asking
 /// for 1% FDR got an ordinary search and no filtered output with no indication
@@ -113,16 +113,16 @@ fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--fdr")
+    .arg("--psm-fdr")
     .arg("0.01")
     .output()
     .expect("run andes");
 
-    assert!(out.status.success(), "--fdr alone should still exit 0");
+    assert!(out.status.success(), "--psm-fdr alone should still exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--fdr") && stderr.contains("--rescore"),
-        "expected a warning naming --fdr and --rescore; stderr was:\n{stderr}"
+        stderr.contains("--psm-fdr") && stderr.contains("--rescore"),
+        "expected a warning naming --psm-fdr and --rescore; stderr was:\n{stderr}"
     );
     let stray: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read tempdir")

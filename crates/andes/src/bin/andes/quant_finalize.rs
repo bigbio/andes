@@ -2797,7 +2797,7 @@ fn log_summary(
         id_fdr.counts.unscored,
         id_fdr.counts.no_q,
         quant_feature_fdr.map_or(String::new(), |t| format!(
-            "; {} identified_below_threshold at --quant-feature-fdr {t}",
+            "; {} identified_below_threshold at quant_q {t}",
             v.identified_below_threshold
         ))
     );

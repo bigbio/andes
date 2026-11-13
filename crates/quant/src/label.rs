@@ -907,8 +907,9 @@ pub struct GroupProbe {
     pub free: Vec<bool>,
     pub mobility: Option<MobilityGate>,
     /// Measure at the given profile (apex `t_hat`, width `w_prior`) instead
-    /// of searching for it: the decoys of a fitted group, which must read
-    /// their mass at the group's elution and not move it onto another species.
+    /// of searching for it: a group's unidentified channels and their decoys,
+    /// read at the identified channels' elution so that none of them moves it
+    /// onto another species.
     pub pinned: bool,
 }
 

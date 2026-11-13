@@ -337,9 +337,9 @@ impl Conv {
 }
 
 /// Output positions per [`Conv::apply`] register tile.
-const TILE_P: usize = 2;
+const TILE_P: usize = 4;
 /// Output channels per [`Conv::apply`] register tile.
-const TILE_O: usize = 32;
+const TILE_O: usize = 16;
 
 /// One kernel tap over the rows of `acc` (consecutive positions whose inputs
 /// are the consecutive rows of `xs`).
@@ -352,15 +352,12 @@ fn tap_rows(
     o0: usize,
 ) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
-    match acc.len() {
-        1 => avx::tap1(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        2 => avx::tap2(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
-        _ => unreachable!("tile holds at most TILE_P rows"),
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx")))]
+    use avx::tap;
     match acc.len() {
         1 => tap::<1>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
         2 => tap::<2>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        3 => tap::<3>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
+        4 => tap::<4>(acc.try_into().unwrap(), xs, wk, cin, cout, o0),
         _ => unreachable!("tile holds at most TILE_P rows"),
     }
 }
@@ -402,34 +399,29 @@ mod avx {
         __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
     };
 
-    const _: () = assert!(TILE_O == 32, "the AVX tap holds 4 × 8 channels per row");
+    /// AVX vectors per tile row.
+    const V: usize = TILE_O / 8;
+    const _: () = assert!(TILE_O == 16, "the AVX tap holds 2 × 8 channels per row");
 
-    /// The 32 floats of `row` as four vectors.
+    /// The 16 floats of `row` as two vectors.
     ///
     /// # Safety
     /// The CPU must support AVX (the module is compiled only when it is enabled).
     #[inline(always)]
-    unsafe fn load(row: &[f32; TILE_O]) -> [__m256; 4] {
+    unsafe fn load(row: &[f32; TILE_O]) -> [__m256; V] {
         let p = row.as_ptr();
-        [
-            _mm256_loadu_ps(p),
-            _mm256_loadu_ps(p.add(8)),
-            _mm256_loadu_ps(p.add(16)),
-            _mm256_loadu_ps(p.add(24)),
-        ]
+        [_mm256_loadu_ps(p), _mm256_loadu_ps(p.add(8))]
     }
 
-    /// Writes four vectors to the 32 floats of `row`.
+    /// Writes two vectors to the 16 floats of `row`.
     ///
     /// # Safety
     /// As [`load`].
     #[inline(always)]
-    unsafe fn store(row: &mut [f32; TILE_O], a: [__m256; 4]) {
+    unsafe fn store(row: &mut [f32; TILE_O], a: [__m256; V]) {
         let p = row.as_mut_ptr();
         _mm256_storeu_ps(p, a[0]);
         _mm256_storeu_ps(p.add(8), a[1]);
-        _mm256_storeu_ps(p.add(16), a[2]);
-        _mm256_storeu_ps(p.add(24), a[3]);
     }
 
     /// `a + w · x` per lane (multiply, then add; no fused multiply-add).
@@ -437,62 +429,44 @@ mod avx {
     /// # Safety
     /// As [`load`].
     #[inline(always)]
-    unsafe fn step(a: [__m256; 4], w: [__m256; 4], x: f32) -> [__m256; 4] {
+    unsafe fn step(a: [__m256; V], w: [__m256; V], x: f32) -> [__m256; V] {
         let b = _mm256_set1_ps(x);
         [
             _mm256_add_ps(a[0], _mm256_mul_ps(w[0], b)),
             _mm256_add_ps(a[1], _mm256_mul_ps(w[1], b)),
-            _mm256_add_ps(a[2], _mm256_mul_ps(w[2], b)),
-            _mm256_add_ps(a[3], _mm256_mul_ps(w[3], b)),
         ]
     }
 
-    /// The weights of input `i` for output channels `o0..o0 + 32`.
+    /// The weights of input `i` for output channels `o0..o0 + TILE_O`.
     #[inline(always)]
     fn row_weights(wk: &[f32], i: usize, cout: usize, o0: usize) -> &[f32; TILE_O] {
         wk[i * cout + o0..][..TILE_O].try_into().unwrap()
     }
 
-    pub(super) fn tap1(
-        acc: &mut [[f32; TILE_O]; 1],
+    /// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
+    #[inline(always)]
+    pub(super) fn tap<const R: usize>(
+        acc: &mut [[f32; TILE_O]; R],
         xs: &[f32],
         wk: &[f32],
         cin: usize,
         cout: usize,
         o0: usize,
     ) {
+        let xs = &xs[..R * cin];
         // SAFETY: AVX is enabled for this build (module `cfg`), and every load
-        // and store goes through a 32-float array.
+        // and store goes through a TILE_O-float array.
         unsafe {
-            let mut a0 = load(&acc[0]);
-            for (i, &v0) in xs[..cin].iter().enumerate() {
+            let mut a: [[__m256; V]; R] = std::array::from_fn(|r| load(&acc[r]));
+            for i in 0..cin {
                 let w = load(row_weights(wk, i, cout, o0));
-                a0 = step(a0, w, v0);
+                for (r, ar) in a.iter_mut().enumerate() {
+                    *ar = step(*ar, w, xs[r * cin + i]);
+                }
             }
-            store(&mut acc[0], a0);
-        }
-    }
-
-    pub(super) fn tap2(
-        acc: &mut [[f32; TILE_O]; 2],
-        xs: &[f32],
-        wk: &[f32],
-        cin: usize,
-        cout: usize,
-        o0: usize,
-    ) {
-        let (x0, x1) = (&xs[..cin], &xs[cin..2 * cin]);
-        // SAFETY: as in `tap1`.
-        unsafe {
-            let mut a0 = load(&acc[0]);
-            let mut a1 = load(&acc[1]);
-            for (i, (&v0, &v1)) in x0.iter().zip(x1).enumerate() {
-                let w = load(row_weights(wk, i, cout, o0));
-                a0 = step(a0, w, v0);
-                a1 = step(a1, w, v1);
+            for (row, ar) in acc.iter_mut().zip(a) {
+                store(row, ar);
             }
-            store(&mut acc[0], a0);
-            store(&mut acc[1], a1);
         }
     }
 }
@@ -806,21 +780,21 @@ mod tests {
         };
         let (cin, cout, o0) = (37, 96, 32);
         let wk: Vec<f32> = (0..cin * cout).map(|_| rnd()).collect();
-        let xs: Vec<f32> = (0..2 * cin).map(|_| rnd()).collect();
-        let mut init = [[0.0f32; TILE_O]; 2];
+        let xs: Vec<f32> = (0..TILE_P * cin).map(|_| rnd()).collect();
+        let mut init = [[0.0f32; TILE_O]; TILE_P];
         for v in init.iter_mut().flatten() {
             *v = rnd();
         }
         let bits = |a: &[[f32; TILE_O]]| {
             a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>()
         };
-        let (mut p2, mut v2) = (init, init);
-        tap::<2>(&mut p2, &xs, &wk, cin, cout, o0);
-        avx::tap2(&mut v2, &xs, &wk, cin, cout, o0);
-        assert_eq!(bits(&p2), bits(&v2));
+        let (mut p4, mut v4) = (init, init);
+        tap::<4>(&mut p4, &xs, &wk, cin, cout, o0);
+        avx::tap::<4>(&mut v4, &xs, &wk, cin, cout, o0);
+        assert_eq!(bits(&p4), bits(&v4));
         let (mut p1, mut v1) = ([init[0]], [init[0]]);
         tap::<1>(&mut p1, &xs, &wk, cin, cout, o0);
-        avx::tap1(&mut v1, &xs, &wk, cin, cout, o0);
+        avx::tap::<1>(&mut v1, &xs, &wk, cin, cout, o0);
         assert_eq!(bits(&p1), bits(&v1));
     }
 

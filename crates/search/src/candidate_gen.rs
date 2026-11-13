@@ -2101,6 +2101,83 @@ mod tests {
         assert_eq!(walked, 2);
     }
 
+    /// `--max-mods` bounds only the non-label mods, in both walkers: a
+    /// methionine peptide keeps both channels, with and without oxidation at
+    /// `--max-mods 1` and without it at `--max-mods 0`.
+    #[test]
+    fn max_mods_bounds_only_non_label_mods() {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "silac".into(),
+                sequence: b"PEPMKTIDERAAGGLK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let k8 = label_mod("Label:13C(6)15N(2)", 8.014199, b'K', ModLocation::Anywhere);
+        let r10 = label_mod("Label:13C(6)15N(4)", 10.008269, b'R', ModLocation::Anywhere);
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(k8)
+            .add_variable_mod(r10)
+            .add_variable_mod(oxidation_m())
+            .with_label_channels(vec![
+                ("Label:13C(6)15N(2)".into(), 1),
+                ("Label:13C(6)15N(4)".into(), 1),
+            ])
+            .build()
+            .unwrap();
+        let oxidised = |c: &[&model::amino_acid::AminoAcid]| {
+            c.iter()
+                .any(|a| a.mod_.is_some_and(|m| m.name.contains("Oxidation")))
+        };
+        for (max_mods, expect, with_ox) in [(1u32, 4usize, 2usize), (0, 2, 0)] {
+            let mut params = SearchParams::default_tryptic(aa_set.clone());
+            params.min_length = 3;
+            params.max_variable_mods_per_peptide = max_mods;
+            params.max_label_sites = 3;
+            // The in-memory expansion.
+            let forms: Vec<Vec<model::amino_acid::AminoAcid>> =
+                enumerate_candidates(&db, &params, "XXX")
+                    .filter(|c| {
+                        c.peptide
+                            .residues
+                            .iter()
+                            .map(|a| a.residue)
+                            .collect::<Vec<_>>()
+                            == b"PEPMKTIDER"
+                    })
+                    .map(|c| c.peptide.residues)
+                    .collect();
+            assert_eq!(forms.len(), expect, "max_mods {max_mods}");
+            let refs: Vec<Vec<&model::amino_acid::AminoAcid>> =
+                forms.iter().map(|f| f.iter().collect()).collect();
+            assert_eq!(refs.iter().filter(|f| oxidised(f)).count(), with_ox);
+            // The bounded walk of the out-of-core index.
+            let tables = crate::candidate_gen::FormWalkTables::new(&params);
+            let (mut walked, mut walked_ox) = (0, 0);
+            crate::candidate_gen::walk_forms_bounded(
+                b"PEPMKTIDER",
+                &params,
+                &tables,
+                true,
+                false,
+                crate::candidate_gen::SpanSites::new(&target.proteins[0], 0),
+                0.0,
+                f64::MAX,
+                |_, chosen, _| {
+                    walked += 1;
+                    walked_ox += usize::from(oxidised(chosen));
+                },
+            );
+            assert_eq!(
+                (walked, walked_ox),
+                (expect, with_ox),
+                "max_mods {max_mods}"
+            );
+        }
+    }
+
     // Dimethyl on K and the peptide N-terminus, three channels: the
     // N-terminal K carries both sites, and a protein N-terminal acetyl in
     // place of the N-terminal label leaves the K's label free.

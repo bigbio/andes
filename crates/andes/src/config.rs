@@ -867,11 +867,14 @@ glyco:
             ])
             .expect("parse baseline args");
 
-        // out-of-range fdr from YAML → error
+        // out-of-range psm_fdr from YAML → error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let bad = RunConfig::from_yaml_str("rescoring:\n  fdr: 5.0\n").unwrap();
+        let bad = RunConfig::from_yaml_str("rescoring:\n  psm_fdr: 5.0\n").unwrap();
         let e = apply(bad, &mut a, &matches).unwrap_err();
-        assert!(e.contains("fdr"), "expected fdr range error, got: {e}");
+        assert!(
+            e.contains("psm_fdr"),
+            "expected psm_fdr range error, got: {e}"
+        );
 
         // both fragment tolerances from YAML → mutual-exclusion error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
@@ -886,9 +889,10 @@ glyco:
 
         // a valid config still applies cleanly
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let ok =
-            RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
-                .unwrap();
+        let ok = RunConfig::from_yaml_str(
+            "rescoring:\n  psm_fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n",
+        )
+        .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
     }
 

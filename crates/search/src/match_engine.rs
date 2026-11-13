@@ -1590,8 +1590,22 @@ impl<'a> PreparedSearch<'a> {
                         .collect();
                     drop(rows);
                     drop(psms);
+                    let tol = scorer.pin_match_tolerance();
+                    let ipf = params.ipf_localization;
                     queue.update_in_place(|psm| {
                         psm.site_evidence = evidence.remove(&key(psm)).flatten();
+                        if ipf {
+                            let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                            if let Some(e) = crate::ipf::psm_evidence(
+                                &spec.peaks,
+                                &cand.peptide,
+                                psm.charge_used,
+                                move |mz| tol.as_da(mz),
+                            ) {
+                                psm.site_evidence.get_or_insert_with(Default::default).ipf =
+                                    Some(e);
+                            }
+                        }
                     });
                 }
 

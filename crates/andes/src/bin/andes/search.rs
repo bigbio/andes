@@ -1095,6 +1095,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the Astral entrapment database, keeping them does not raise the true FDP
     // at Percolator's nominal 1%.
     params.top_n_psms_per_spectrum = cli.top_n;
+    params.ipf_localization = cli.localize.as_deref() == Some("ipf");
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -2951,6 +2952,44 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "Wrote site claims: {} ({} sites)",
                     path.display(),
                     sites.rows.len()
+                ),
+                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            }
+        }
+        // IPF site localization (`--localize ipf`): every target PSM whose row
+        // collected placement evidence at search time.
+        if params.ipf_localization {
+            let t_ipf = std::time::Instant::now();
+            let evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| {
+                    q.iter_psms()
+                        .any(|p| p.site_evidence.as_ref().is_some_and(|e| e.ipf.is_some()))
+                })
+                .flat_map(|(i, q)| {
+                    output::emitted_row_evidence(&spectra[i], q, &pin_candidates)
+                        .into_iter()
+                        .filter_map(|(id, _, e)| e.and_then(|e| e.ipf).map(|x| (id, x)))
+                })
+                .collect();
+            let (rows, model) = output::ipf::localize_psms(map, &evidence);
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.ipf.tsv"));
+            match output::ipf::write_ipf_tsv(&path, &rows) {
+                Ok(()) => eprintln!(
+                    "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}, \
+                     pi0 {:.3}) [{:.2}s]",
+                    path.display(),
+                    rows.len(),
+                    model.matched.map(|p| (p * 1000.0).round() / 1000.0),
+                    model.unmatched,
+                    model.pi0,
+                    t_ipf.elapsed().as_secs_f64()
                 ),
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
             }

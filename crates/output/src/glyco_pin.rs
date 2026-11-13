@@ -1047,6 +1047,7 @@ mod tests {
             charge_range: 2..=3,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
+            ipf_localization: false,
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Off,

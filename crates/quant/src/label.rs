@@ -906,6 +906,10 @@ pub struct GroupProbe {
     /// measure one channel alone).
     pub free: Vec<bool>,
     pub mobility: Option<MobilityGate>,
+    /// Measure at the given profile (apex `t_hat`, width `w_prior`) instead
+    /// of searching for it: the decoys of a fitted group, which must read
+    /// their mass at the group's elution and not move it onto another species.
+    pub pinned: bool,
 }
 
 /// Fit settings.
@@ -1240,8 +1244,9 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     }
     let s = probe.s.max(1e-3);
     let w_prior = probe.w_prior.max(1e-3);
+    let widths: &[f64] = if probe.pinned { &[1.0] } else { params.widths };
     let max_shift = probe.rt_shift.iter().fold(0.0f64, |a, &d| a.max(d.abs()));
-    let w_max = w_prior * params.widths.iter().fold(1.0f64, |a, &b| a.max(b));
+    let w_max = w_prior * widths.iter().fold(1.0f64, |a, &b| a.max(b));
     // Enough baseline on both sides for the noise estimate whatever `s`.
     let half = (4.0 * s + 4.0 * w_max).max(8.0 * w_max) + max_shift;
     let window = ms1.scan_window(probe.t_hat - half, probe.t_hat + half);
@@ -1367,7 +1372,11 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
 
     let lo = probe.t_hat - 3.0 * s;
     let hi = probe.t_hat + 3.0 * s;
-    let mut t0s: Vec<f64> = rt.iter().copied().filter(|&t| t >= lo && t <= hi).collect();
+    let mut t0s: Vec<f64> = if probe.pinned {
+        vec![probe.t_hat]
+    } else {
+        rt.iter().copied().filter(|&t| t >= lo && t <= hi).collect()
+    };
     if t0s.is_empty() {
         let k = rt
             .iter()
@@ -1386,7 +1395,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     let search_apex = |wt: &[f64]| -> Option<(f64, f64)> {
         let mut best: Option<(f64, f64, f64)> = None; // (objective, t0, w)
         for &t0 in &t0s {
-            for &wm in params.widths {
+            for &wm in widths {
                 let w = wm * w_prior;
                 let gc = profiles(t0, w);
                 if gc
@@ -2213,6 +2222,7 @@ mod tests {
             rt_shift: vec![0.0; mzs.len()],
             free: vec![true; mzs.len()],
             mobility: None,
+            pinned: false,
         }
     }
 
@@ -2309,6 +2319,34 @@ mod tests {
             assert!(r.abs() < 0.05, "component {c}: {r}");
         }
         assert!(fit_group(&run, &probe(&mzs, &envs, 121.0), &FitParams::default()).is_none());
+    }
+
+    /// A pinned probe reads its channels at the given profile: a strong
+    /// species at one channel's mass 8 s from the group's apex pulls a free
+    /// fit's profile onto it, but not a pinned one's.
+    #[test]
+    fn pinned_probe_keeps_the_profile() {
+        let light = [0.55, 0.3, 0.11, 0.04];
+        let env = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
+        let (ml, mo) = (600.3, 612.8);
+        let run = synthetic_run(&[(ml, env, 1e6, 100.0), (mo, env, 2e7, 108.0)], 4.0, 50.0);
+        let mut p = probe(&[ml, mo], &[env, env], 100.0);
+        let free = fit_group(&run, &p, &FitParams::default()).unwrap();
+        assert!((free.t0 - 108.0).abs() < 1.5, "free fit moves: {}", free.t0);
+        p.pinned = true;
+        p.w_prior = 4.0;
+        let pinned = fit_group(&run, &p, &FitParams::default()).unwrap();
+        assert_eq!(pinned.t0, 100.0);
+        assert_eq!(pinned.w, 4.0);
+        assert!(
+            pinned.channels[1].llr < 0.2 * free.channels[1].llr,
+            "{} vs {}",
+            pinned.channels[1].llr,
+            free.channels[1].llr
+        );
+        // The light channel keeps its quantity at its own apex.
+        let (r, _) = log2_ratio(&pinned.channels[0], &free.channels[0]).unwrap();
+        assert!(r > 0.5, "{r}");
     }
 
     #[test]

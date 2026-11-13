@@ -674,9 +674,6 @@ pub fn mod_count_and_class(
         let single = [m];
         let parts = aa_set.stack_parts(m).unwrap_or(&single);
         for part in parts {
-            if part.fixed {
-                continue;
-            }
             // Delta, residue and location: two tiers with the same mass and
             // residue but another location are different entries.
             let matched = cfg.mods.iter().find(|rm| {
@@ -2010,55 +2007,6 @@ mod tests {
         let pep = |first: &AminoAcid| Peptide::new(vec![first.clone(), tail.clone()], b'_', b'-');
         assert_eq!(mod_count_and_class(&pep(oxidised), &cfg, &set), (1, 1));
         assert_eq!(mod_count_and_class(&pep(labelled), &cfg, &set), (0, 0));
-    }
-
-    #[test]
-    fn mod_count_and_class_skips_fixed_parts_of_a_stack() {
-        // Fixed Oxidation-M and fixed TMT on the peptide N-terminus: an
-        // N-terminal Met carries both in one stack. Neither is a discovery,
-        // although the oxidation matches a refinement entry.
-        let fixed = |name: &str, delta: f64, residue, location| Modification {
-            name: name.into(),
-            mass_delta: delta,
-            residue,
-            location,
-            fixed: true,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-            annotated_site_mass: None,
-            blocks_cleavage: false,
-            diagnostic_ions: Vec::new(),
-        };
-        let base = AminoAcidSetBuilder::new_standard()
-            .add_fixed_mod(fixed(
-                "TMT6plex",
-                229.162932,
-                ResidueSpec::Wildcard,
-                ModLocation::NTerm,
-            ))
-            .add_fixed_mod(fixed(
-                "Oxidation",
-                15.994915,
-                ResidueSpec::Specific(b'M'),
-                ModLocation::Anywhere,
-            ))
-            .build()
-            .unwrap();
-        let met = base
-            .variants_for(b'M', ModLocation::NTerm)
-            .iter()
-            .find(|aa| {
-                aa.mod_
-                    .is_some_and(|m| (m.mass_delta - (229.162932 + 15.994915)).abs() < 1e-4)
-            })
-            .expect("N-terminal Met with both fixed mods")
-            .clone();
-        assert!(base.stack_parts(met.mod_.unwrap()).is_some());
-        let tail = AminoAcid::standard(b'G').unwrap();
-        let pep = Peptide::new(vec![met, tail], b'_', b'-');
-        let cfg = RefineConfig::default_tier();
-        assert_eq!(mod_count_and_class(&pep, &cfg, &base), (0, 0));
     }
 
     #[test]

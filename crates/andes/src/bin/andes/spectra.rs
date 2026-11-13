@@ -516,7 +516,7 @@ pub(crate) fn sample_spectra(
         #[cfg(feature = "thermo")]
         {
             let level = u8::try_from(ms_level).ok()?;
-            let reader = input::ThermoRawReader::open(path).ok()?;
+            let mut reader = input::ThermoRawReader::open(path).ok()?;
             // MS3 scans are sampled for their reporter ions only, so they are
             // kept without a precursor m/z; MS2 goes through the search path.
             if level >= 3 {

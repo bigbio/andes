@@ -167,13 +167,22 @@ impl ThermoRawReader {
     /// signal), as spectra with no precursor. For sampling reporter ions:
     /// unlike the search path, a scan is kept whether or not it records a
     /// precursor m/z (SPS-MS3 scans need not).
-    pub fn sample_level(&self, level: u8, n: usize) -> Vec<Spectrum> {
+    pub fn sample_level(&mut self, level: u8, n: usize) -> Vec<Spectrum> {
         let stride = (self.len / n.max(1) / 4).max(1);
-        (0..self.len)
+        // The levels are read without the peaks; only the kept scans load theirs.
+        self.handle.set_signal_loading(false);
+        let kept: Vec<usize> = (0..self.len)
             .step_by(stride)
-            .filter_map(|i| self.handle.get(i))
-            .filter(|raw| raw.ms_level() == level)
+            .filter(|&i| {
+                self.handle
+                    .get(i)
+                    .is_some_and(|raw| raw.ms_level() == level)
+            })
             .take(n)
+            .collect();
+        self.handle.set_signal_loading(true);
+        kept.into_iter()
+            .filter_map(|i| self.handle.get(i))
             .map(|raw| Spectrum {
                 title: raw.native_id(),
                 precursor_mz: 0.0,
@@ -591,9 +600,11 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     path: P,
     peek_n: usize,
 ) -> (Option<ActivationMethod>, Option<InstrumentType>) {
-    let Ok(reader) = RawFileReader::open(path.as_ref()) else {
+    let Ok(mut reader) = RawFileReader::open(path.as_ref()) else {
         return (None, None);
     };
+    // Activation and analyzer are scan metadata: the peaks are not read.
+    reader.set_signal_loading(false);
     let mut act: HashMap<u8, usize> = HashMap::new();
     let mut inst: HashMap<u8, usize> = HashMap::new();
     let mut seen = 0usize;
@@ -678,7 +689,9 @@ fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
 /// Read collision energy, isolation width and FAIMS CV from the first `n` MS2
 /// scans of a `.raw`. `None` when the file cannot be opened.
 pub fn sample_ms2_meta<P: AsRef<Path>>(path: P, n: usize) -> Option<crate::Ms2MetaSample> {
-    let reader = RawFileReader::open(path.as_ref()).ok()?;
+    let mut reader = RawFileReader::open(path.as_ref()).ok()?;
+    // Precursor, isolation and FAIMS values are scan metadata: the peaks are not read.
+    reader.set_signal_loading(false);
     let mut out = crate::Ms2MetaSample::default();
     for i in 0..reader.len() {
         if out.n_ms2 >= n {

@@ -2176,7 +2176,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
 
-**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated, 2026-11-11).
+**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated; PXD022659's HeLa runs with the code of 2026-11-13, the other runs with that of 2026-11-11, before the review fixes to the apex search, channel windows and label-site budget).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
 m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
@@ -2223,8 +2223,8 @@ files, which are not public. MaxQuant is compared instead on the Orbitrap runs o
 PanoramaPublic `RawFiles/raw`, converted to mzML with ThermoRawFileParser for andes and OpenMS, read
 directly by MaxQuant). One replicate each of heavy/light 70/30, 50/50 and 10/90 (`B_0-7ug_DDA_061`,
 `C_0-5ug_DDA_060`, `E_0-1ug_DDA_055`): expected log2 H/L +1.22, 0 and −3.17. andes searched the
-three runs together with `--mbr` against the reviewed human proteome (13 min 37 s, 4 threads):
-158,429 PSMs (70 % of 224,889 MS/MS), 37,869 sequences, 3,627 protein groups at 1 % FDR. MaxQuant
+three runs together with `--mbr` against the reviewed human proteome (9 min 49 s, 4 threads):
+158,444 PSMs (70 % of 224,889 MS/MS), 37,880 sequences, 3,632 protein groups at 1 % FDR. MaxQuant
 2.0.3 (same database, Trypsin/P, 2 missed cleavages, its defaults; 5 h 22 min, sharing the 4 cores
 with OpenMS for part of it) identified 86,924 MS/MS, 21,492 sequences, 2,470 protein groups.
 OpenMS is FeatureFinderMultiplex alone (51 to 66 min per run), and MS1LabeledWorkflow given andes's
@@ -2237,17 +2237,17 @@ the median absolute error is against the design:
 
 | run | tool | peptides | median | IQR | median abs. error |
 |---|---|---|---|---|---|
-| 70/30 | andes | 17,957 | 1.19 | 0.39 | 0.195 |
+| 70/30 | andes | 18,779 | 1.19 | 0.39 | 0.199 |
 | 70/30 | MaxQuant | 9,725 | 1.06 | 0.29 | 0.185 |
 | 70/30 | MS1LabeledWorkflow 3.6.0 | 5,292 | 1.13 | 0.33 | 0.160 |
 | 70/30 | FeatureFinderMultiplex | 8,964 | 1.11 | 0.36 | 0.182 |
 | 70/30 | MS1LabeledWorkflow dev | 14,538 | 1.03 | 0.39 | 0.226 |
-| 50/50 | andes | 20,938 | −0.12 | 0.34 | 0.201 |
+| 50/50 | andes | 21,486 | −0.12 | 0.34 | 0.203 |
 | 50/50 | MaxQuant | 11,201 | −0.18 | 0.23 | 0.201 |
 | 50/50 | MS1LabeledWorkflow 3.6.0 | 6,085 | −0.15 | 0.23 | 0.175 |
 | 50/50 | FeatureFinderMultiplex | 10,297 | −0.15 | 0.25 | 0.183 |
 | 50/50 | MS1LabeledWorkflow dev | 15,565 | −0.14 | 0.28 | 0.183 |
-| 10/90 | andes | 4,138 | −3.48 | 0.39 | 0.343 |
+| 10/90 | andes | 4,190 | −3.47 | 0.39 | 0.338 |
 | 10/90 | MaxQuant | 3,892 | −3.38 | 0.35 | 0.276 |
 | 10/90 | MS1LabeledWorkflow 3.6.0 | 2,532 | −3.41 | 0.51 | 0.368 |
 | 10/90 | FeatureFinderMultiplex | 4,281 | −3.30 | 1.19 | 0.431 |
@@ -2257,16 +2257,16 @@ On the peptides both quantify (median abs. error, andes against the other):
 
 | run | MaxQuant | MS1LabeledWorkflow 3.6.0 | MS1LabeledWorkflow dev | FeatureFinderMultiplex |
 |---|---|---|---|---|
-| 70/30 | 8,287: 0.152 / 0.175 | 4,884: 0.135 / 0.156 | 11,764: 0.163 / 0.209 | 6,009: 0.135 / 0.156 |
-| 50/50 | 9,857: 0.163 / 0.198 | 5,649: 0.146 / 0.173 | 13,251: 0.170 / 0.177 | 7,096: 0.146 / 0.171 |
-| 10/90 | 2,050: 0.323 / 0.265 | 1,756: 0.363 / 0.349 | 3,196: 0.340 / 0.299 | 2,076: 0.363 / 0.354 |
+| 70/30 | 8,385: 0.153 / 0.176 | 4,899: 0.134 / 0.156 | 11,992: 0.164 / 0.211 | 6,053: 0.134 / 0.156 |
+| 50/50 | 9,894: 0.163 / 0.198 | 5,654: 0.145 / 0.173 | 13,333: 0.170 / 0.178 | 7,111: 0.145 / 0.171 |
+| 10/90 | 2,055: 0.316 / 0.265 | 1,763: 0.358 / 0.348 | 3,202: 0.330 / 0.299 | 2,084: 0.356 / 0.354 |
 
 andes quantifies about twice as many peptides as MaxQuant and three times as many as
 MS1LabeledWorkflow 3.6.0; the development MS1LabeledWorkflow closes most of that gap at 70/30 and 50/50
 and quantifies nearly twice as many peptides as andes at 10/90, where on shared peptides it is also
-more accurate (0.30 against 0.34), though over all its values much wider (IQR 0.78 against 0.39).
+more accurate (0.30 against 0.33), though over all its values much wider (IQR 0.78 against 0.39).
 On shared peptides andes is the most accurate at 70/30 and 50/50, while at 10/90 its
-ratios overshoot the design more than MaxQuant's (median −3.48 and −3.38 against −3.17). MaxQuant's
+ratios overshoot the design more than MaxQuant's (median −3.47 and −3.38 against −3.17). MaxQuant's
 spread is the lowest, or tied for lowest, in every run. The additional ratios andes reports (channels matched between channels and
 transferred between runs) are wider than those it shares with the other tools.
 

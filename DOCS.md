@@ -491,6 +491,40 @@ competed) takes 41 more
 correct sites at identity ≥ 0.95 and leaves 16 fewer wrong ones at identity ≥ 0.5; PSMs at 1% FDR
 do not change.
 
+### Site localization (IPF, experimental)
+
+`--localize ipf` (with `--rescore` or `--rescore-native`) localizes the variable modifications of
+every PSM by inference of peptidoforms, the hierarchical Bayesian model of OpenSWATH/PyProphet IPF
+(Rosenberger et al. 2017). For one PSM the hypotheses are every placement of its variable mods on
+the residues each may occupy, plus "the PSM is wrong" (h0):
+- prior: h0 = the PSM's PEP, each placement (1 − PEP) / number of placements;
+- evidence: each fragment ion that not every placement has (the site-determining ions, b/y at
+  charge 1, charge 2 for 3+ precursors, and the `loss=` neutral losses of fragments holding the mod)
+  supports the placements that have it with (1 − ion PEP) and the others with the ion PEP;
+- posterior: prior × evidence, normalised over the PSM's hypotheses (PyProphet `apply_bm`; the
+  parity test reproduces PyProphet's own output to 1e-14).
+
+An ion's PEP depends on its peak's intensity quartile (or "no peak") and is learned from the run:
+the likelihood ratio between ions of a confident PSM's placement and ions only other placements
+have, refit once on IPF's own placements. `<stem>.ipf.tsv` has, per target PSM, the reported and
+best placement (1-based residues), `best_prob` (localization probability given the PSM is right),
+`ipf_pep` and the model-based `ipf_q`, and `site_probs` per residue.
+
+Measured on the phospho benchmark file (PXD007653 control2, native rescoring), against the
+depositors' MaxQuant 1.5.3 localization of the same scans (9,982 PSMs; MaxQuant is a reference, not
+ground truth). Among PSMs MaxQuant localizes confidently (every site ≥ 0.75, n = 6,735):
+
+| | agrees with MaxQuant |
+|---|---|
+| andes search placement | 92.0% |
+| IPF best placement | 94.7% |
+| IPF `best_prob` ≥ 0.9 (86.6% of PSMs) | 97.8% |
+| IPF `best_prob` ≥ 0.99 (67.9% of PSMs) | 98.3% |
+
+This needs phospho declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same
+for T). Without `loss=` IPF does not beat the search placement (91.8% against 92.9%). The IPF step
+takes ~9 s on this run. Not yet measured against synthetic peptides of known site.
+
 ### PEFF databases
 
 `--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers

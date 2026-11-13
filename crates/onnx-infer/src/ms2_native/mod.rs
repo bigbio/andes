@@ -571,8 +571,7 @@ impl Ms2Model {
         s.site.clear();
         for j in 0..n - 1 {
             let row = &s.h[(j + 2) * ch..(j + 3) * ch];
-            s.site
-                .extend(row.iter().zip(hc).map(|(a, b)| silu(a + b)));
+            s.site.extend(row.iter().zip(hc).map(|(a, b)| silu(a + b)));
         }
         let mut out = vec![0.0f32; (n - 1) * N_ION];
         self.head2.apply(&s.site, n - 1, &mut out);

@@ -343,14 +343,7 @@ const TILE_O: usize = 16;
 
 /// One kernel tap over the rows of `acc` (consecutive positions whose inputs
 /// are the consecutive rows of `xs`).
-fn tap_rows(
-    acc: &mut [[f32; TILE_O]],
-    xs: &[f32],
-    wk: &[f32],
-    cin: usize,
-    cout: usize,
-    o0: usize,
-) {
+fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], cin: usize, cout: usize, o0: usize) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
     use avx::tap;
     match acc.len() {
@@ -785,9 +778,8 @@ mod tests {
         for v in init.iter_mut().flatten() {
             *v = rnd();
         }
-        let bits = |a: &[[f32; TILE_O]]| {
-            a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>()
-        };
+        let bits =
+            |a: &[[f32; TILE_O]]| a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
         let (mut p4, mut v4) = (init, init);
         tap::<4>(&mut p4, &xs, &wk, cin, cout, o0);
         avx::tap::<4>(&mut v4, &xs, &wk, cin, cout, o0);

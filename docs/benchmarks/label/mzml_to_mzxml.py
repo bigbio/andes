@@ -207,8 +207,8 @@ def main():
         t1 = rt
         w('<scan num="%d" scanType="Full" centroided="%d" msLevel="%d" peaksCount="%d" polarity="+" '
           'retentionTime="PT%.4fS"%s lowMz="%.4f" highMz="%.4f" basePeakMz="%.4f" basePeakIntensity="%.4g" '
-          'totIonCurrent="%.4g" filterLine="%s">\n'
-          % (num, 0 if profile else 1, level, n, rt, ce, lo, hi, bpmz, bpi, tic, filt))
+          'totIonCurrent="%.4g" filterLine=%s>\n'
+          % (num, 0 if profile else 1, level, n, rt, ce, lo, hi, bpmz, bpi, tic, quoteattr(filt)))
         w(prec)
         w('<peaks compressionType="none" compressedLen="0" precision="32" byteOrder="network" '
           'contentType="m/z-int">%s</peaks>\n' % base64.b64encode(bytes(pairs)).decode())

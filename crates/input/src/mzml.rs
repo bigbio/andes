@@ -1649,15 +1649,9 @@ pub fn read_spectra_parallel(
     )
 }
 
-fn read_spectra_in_pieces(
-    path: &std::path::Path,
-    ms_level_min: u32,
-    ms_level_max: u32,
-    threads: usize,
-    piece_bytes: u64,
-) -> std::io::Result<(Vec<Spectrum>, Vec<String>)> {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+/// Byte ranges `[start, end)` of `path`, cut at `<spectrum` start tags about
+/// every `piece_bytes`, so every spectrum lies whole inside one range.
+fn spectrum_pieces(path: &std::path::Path, piece_bytes: u64) -> std::io::Result<Vec<(u64, u64)>> {
     let file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     let n_cuts = len / piece_bytes;
@@ -1671,24 +1665,78 @@ fn read_spectra_in_pieces(
         }
     }
     let n_pieces = starts.len();
-    let bounds: Vec<(u64, u64)> = (0..n_pieces)
+    Ok((0..n_pieces)
         .map(|i| (starts[i], starts.get(i + 1).copied().unwrap_or(len)))
-        .collect();
+        .collect())
+}
 
-    type PieceResult = std::io::Result<(Vec<Spectrum>, Vec<String>)>;
-    let next = AtomicUsize::new(0);
-    let parse_piece = |i: usize| -> PieceResult {
-        let (a, b) = bounds[i];
-        let mut f = std::fs::File::open(path)?;
-        f.seek(SeekFrom::Start(a))?;
-        let mut bytes = Vec::with_capacity((b - a) as usize);
-        f.take(b - a).read_to_end(&mut bytes)?;
-        if i + 1 == n_pieces {
-            const END: &[u8] = b"</spectrumList";
-            if let Some(p) = bytes.windows(END.len()).position(|w| w == END) {
-                bytes.truncate(p);
-            }
+/// The bytes of piece `i` of `pieces`; the last piece stops at
+/// `</spectrumList`.
+fn piece_bytes(
+    path: &std::path::Path,
+    pieces: &[(u64, u64)],
+    i: usize,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (a, b) = pieces[i];
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(a))?;
+    let mut bytes = Vec::with_capacity((b - a) as usize);
+    f.take(b - a).read_to_end(&mut bytes)?;
+    if i + 1 == pieces.len() {
+        const END: &[u8] = b"</spectrumList";
+        if let Some(p) = bytes.windows(END.len()).position(|w| w == END) {
+            bytes.truncate(p);
         }
+    }
+    Ok(bytes)
+}
+
+/// `parse(i)` for every piece index `0..n_pieces` on `threads` workers, in
+/// piece order.
+fn map_pieces<T: Send>(
+    n_pieces: usize,
+    threads: usize,
+    parse: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let mut results: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads.clamp(1, n_pieces.max(1)))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n_pieces {
+                            break;
+                        }
+                        out.push((i, parse(i)));
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("mzML parse worker panicked"))
+            .collect()
+    });
+    results.sort_by_key(|(i, _)| *i);
+    results.into_iter().map(|(_, r)| r).collect()
+}
+
+fn read_spectra_in_pieces(
+    path: &std::path::Path,
+    ms_level_min: u32,
+    ms_level_max: u32,
+    threads: usize,
+    piece_bytes_target: u64,
+) -> std::io::Result<(Vec<Spectrum>, Vec<String>)> {
+    let pieces = spectrum_pieces(path, piece_bytes_target)?;
+    type PieceResult = std::io::Result<(Vec<Spectrum>, Vec<String>)>;
+    let parse_piece = |i: usize| -> PieceResult {
+        let bytes = piece_bytes(path, &pieces, i)?;
         let mut reader =
             MzMLReader::new(bytes.as_slice()).with_ms_level_range(ms_level_min, ms_level_max);
         let mut spectra = Vec::new();
@@ -1709,36 +1757,109 @@ fn read_spectra_in_pieces(
         ));
         Ok((spectra, errors))
     };
-    let mut results: Vec<(usize, PieceResult)> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..threads.clamp(1, n_pieces))
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut out = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n_pieces {
-                            break;
-                        }
-                        out.push((i, parse_piece(i)));
-                    }
-                    out
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .flat_map(|w| w.join().expect("mzML parse worker panicked"))
-            .collect()
-    });
-    results.sort_by_key(|(i, _)| *i);
     let mut spectra = Vec::new();
     let mut errors = Vec::new();
-    for (_, r) in results {
+    for r in map_pieces(pieces.len(), threads, parse_piece) {
         let (s, e) = r?;
         spectra.extend(s);
         errors.extend(e);
     }
     Ok((spectra, errors))
+}
+
+/// MS2 spectra with their survey scans, from [`read_ms1_linked_parallel`].
+#[derive(Debug, Default)]
+pub struct Ms1LinkedRead {
+    /// The MS2 spectra in file order.
+    pub spectra: Vec<Spectrum>,
+    /// Per spectrum, the index into `run_ms1` of the most recent MS1 scan
+    /// before it, or `None` when no MS1 scan precedes it.
+    pub ms2_to_ms1: Vec<Option<usize>>,
+    /// Every MS1 scan of the run in file order, as
+    /// [`MzMLReader::with_run_ms1_capture`] keeps them.
+    pub run_ms1: Vec<Ms1Scan>,
+    /// The scan context of every MS2 spectrum when requested, as
+    /// [`MzMLReader::with_scan_context_capture`] keeps them.
+    pub contexts: Vec<ScanContext>,
+}
+
+/// The MS2 spectra, MS1 scans and MS2 scan contexts of an uncompressed mzML
+/// file, parsed by `threads` workers: the spectra, scans and links a
+/// sequential [`MzMLReader`] with run-MS1 capture reads through
+/// [`MzMLReader::read_with_ms1_chunked`]. The file is cut into pieces as in
+/// [`read_spectra_parallel`]; an MS2 spectrum at the start of a piece links
+/// to the last MS1 scan of the pieces before it. `None` when any spectrum
+/// fails to parse, so the caller can take the sequential reader's
+/// skip-and-resync path instead.
+pub fn read_ms1_linked_parallel(
+    path: &std::path::Path,
+    threads: usize,
+    capture_context: bool,
+    capture_noise: bool,
+) -> std::io::Result<Option<Ms1LinkedRead>> {
+    read_ms1_linked_in_pieces(
+        path,
+        threads,
+        capture_context,
+        capture_noise,
+        PARALLEL_PIECE_BYTES,
+    )
+}
+
+fn read_ms1_linked_in_pieces(
+    path: &std::path::Path,
+    threads: usize,
+    capture_context: bool,
+    capture_noise: bool,
+    piece_bytes_target: u64,
+) -> std::io::Result<Option<Ms1LinkedRead>> {
+    let pieces = spectrum_pieces(path, piece_bytes_target)?;
+    // Per piece: its read with piece-local MS1 indices, or `None` on a parse error.
+    let parse_piece = |i: usize| -> std::io::Result<Option<Ms1LinkedRead>> {
+        let bytes = piece_bytes(path, &pieces, i)?;
+        let mut reader = MzMLReader::new(bytes.as_slice())
+            .with_ms_level_range(2, 2)
+            .with_run_ms1_capture(true)
+            .with_scan_context_capture(capture_context)
+            .with_noise_capture(capture_noise);
+        let mut read = Ms1LinkedRead::default();
+        let mut latest: Option<usize> = None;
+        loop {
+            let before = reader.run_ms1.len();
+            match reader.pump() {
+                Ok(Some(spectrum)) => {
+                    if reader.run_ms1.len() > before {
+                        latest = Some(reader.run_ms1.len() - 1);
+                    }
+                    read.spectra.push(spectrum);
+                    read.ms2_to_ms1.push(latest);
+                }
+                Ok(None) => break,
+                Err(_) => return Ok(None),
+            }
+        }
+        read.run_ms1 = reader.take_run_ms1();
+        read.contexts = reader.take_scan_contexts();
+        Ok(Some(read))
+    };
+    let mut out = Ms1LinkedRead::default();
+    for r in map_pieces(pieces.len(), threads, parse_piece) {
+        let Some(piece) = r? else {
+            return Ok(None);
+        };
+        let base = out.run_ms1.len();
+        let before = base.checked_sub(1);
+        out.ms2_to_ms1.extend(
+            piece
+                .ms2_to_ms1
+                .into_iter()
+                .map(|l| l.map(|j| base + j).or(before)),
+        );
+        out.spectra.extend(piece.spectra);
+        out.run_ms1.extend(piece.run_ms1);
+        out.contexts.extend(piece.contexts);
+    }
+    Ok(Some(out))
 }
 
 // ── Instrument-type detection (separate, lightweight pass) ──────────────────
@@ -4656,6 +4777,64 @@ mod tests {
                         parallel, sequential,
                         "levels {min}-{max}, piece {piece}, {threads} threads"
                     );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ms1_linked_parallel_read_matches_the_chunked_reader() {
+        use std::io::Read;
+        let gz = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-fixtures/mbr_run1.mzML.gz");
+        let mut xml = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&gz).expect("open fixture"))
+            .read_to_end(&mut xml)
+            .expect("decompress fixture");
+        let path = std::env::temp_dir().join(format!(
+            "andes-parallel-ms1-mzml-{}.mzML",
+            std::process::id()
+        ));
+        std::fs::write(&path, &xml).expect("write fixture copy");
+        for (context, noise) in [(true, false), (false, true)] {
+            let mut reader = MzMLReader::new(xml.as_slice())
+                .with_ms_level_range(2, 2)
+                .with_ms1_capture(true)
+                .with_run_ms1_capture(true)
+                .with_scan_context_capture(context)
+                .with_noise_capture(noise);
+            let mut spectra = Vec::new();
+            let mut linked = Vec::new();
+            let (errors, _) = reader.read_with_ms1_chunked(7, usize::MAX, |chunk, link| {
+                for (s, l) in chunk.into_iter().zip(&link.ms2_to_ms1) {
+                    spectra.push(format!("{s:?}"));
+                    linked.push(l.map(|m| link.ms1_peaks[m].clone()));
+                }
+            });
+            assert_eq!(errors, 0);
+            let run_ms1 = reader.take_run_ms1();
+            let contexts = reader.take_scan_contexts();
+            assert!(
+                run_ms1.len() > 1 && !spectra.is_empty(),
+                "MS1 and MS2 scans"
+            );
+            for piece in [1_000u64, 7_919, 65_536, 1 << 30] {
+                for threads in [1, 3] {
+                    let read = read_ms1_linked_in_pieces(&path, threads, context, noise, piece)
+                        .expect("read")
+                        .expect("no parse error");
+                    let what = format!("piece {piece}, {threads} threads");
+                    let got: Vec<String> = read.spectra.iter().map(|s| format!("{s:?}")).collect();
+                    assert_eq!(got, spectra, "{what}");
+                    assert_eq!(read.run_ms1, run_ms1, "{what}");
+                    assert_eq!(read.contexts, contexts, "{what}");
+                    let got_linked: Vec<_> = read
+                        .ms2_to_ms1
+                        .iter()
+                        .map(|l| l.map(|m| read.run_ms1[m].peaks.clone()))
+                        .collect();
+                    assert_eq!(got_linked, linked, "{what}");
                 }
             }
         }

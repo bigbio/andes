@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::SyncSender;
 
-use input::{detect_instrument_type, MgfReader, MzMLReader};
+use input::{detect_instrument_type, MgfReader, Ms1Link, MzMLReader};
+use model::scan::Ms1Scan;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum, Tolerance};
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use search::{
@@ -223,6 +224,37 @@ where
         let _ = tx.send(chunk);
     }
     stats
+}
+
+/// Sends `spectra` (file order; `ms2_to_ms1` indexes `ms1`) through `tx` in
+/// chunks of `chunk_size`, each with the [`Ms1Link`]
+/// [`MzMLReader::read_with_ms1_chunked`] gives it: the peaks of every MS1 scan
+/// the chunk links to, once each, in file order. Stops when the consumer hangs
+/// up.
+pub(crate) fn send_linked_chunks(
+    mut spectra: Vec<Spectrum>,
+    ms2_to_ms1: &[Option<usize>],
+    ms1: &[Ms1Scan],
+    chunk_size: usize,
+    tx: &SyncSender<(Vec<Spectrum>, Ms1Link)>,
+) {
+    for links in ms2_to_ms1.chunks(chunk_size) {
+        let chunk: Vec<Spectrum> = spectra.drain(..links.len()).collect();
+        let mut link = Ms1Link::default();
+        let mut last: Option<usize> = None;
+        for &l in links {
+            link.ms2_to_ms1.push(l.map(|m| {
+                if last != Some(m) {
+                    link.ms1_peaks.push(ms1[m].peaks.clone());
+                    last = Some(m);
+                }
+                link.ms1_peaks.len() - 1
+            }));
+        }
+        if tx.send((chunk, link)).is_err() {
+            return;
+        }
+    }
 }
 
 /// Lightweight metadata collected in one linear file scan for precursorCal.

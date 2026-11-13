@@ -25,7 +25,8 @@ use crate::spectra::{
     add_mzml_skipped, compare_with_first_input, detect_acquisition_metadata,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
     prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_ms2_meta,
-    sample_spectra, send_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    sample_spectra, send_chunks, send_linked_chunks, title_prefix_for, tolerance_ppm_display,
+    ParseStats,
 };
 use crate::{arg_present, report_search_progress, EXPLICIT_MISSED_CLEAVAGES};
 use input::{MgfReader, Ms1Link, MzMLReader};
@@ -1888,9 +1889,48 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
+            // Fragment-index retrieval scores MASS-ORDERED chunks (see the
+            // non-MS1 branch below). Each spectrum keeps the part of its linked
+            // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
+            // MS1 link.
+            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
+            // Nothing is scored before the whole file is read, so an
+            // uncompressed mzML is parsed by every thread; the chunks sent are
+            // the ones the sequential reader sends.
+            let parallel_read = index_ordered
+                && file_is_mzml
+                && capture_ms1
+                && cap == usize::MAX
+                && !is_gzip_path(input_path);
+            let threads = cli.threads;
             type Ms1Parsed = (usize, Vec<String>, RunScans);
             let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
-                if file_is_mzml {
+                let linked = if parallel_read {
+                    input::mzml::read_ms1_linked_parallel(
+                        &spectrum_path,
+                        threads,
+                        capture_context,
+                        capture_noise,
+                    )
+                    .map_err(|e| format!("read mzML: {e}"))?
+                } else {
+                    None
+                };
+                if let Some(read) = linked {
+                    send_linked_chunks(
+                        read.spectra,
+                        &read.ms2_to_ms1,
+                        &read.run_ms1,
+                        CHUNK_SIZE,
+                        &tx,
+                    );
+                    let scans = RunScans {
+                        ms1: read.run_ms1,
+                        ms3: Vec::new(),
+                        contexts: read.contexts,
+                    };
+                    Ok((0, Vec::new(), scans))
+                } else if file_is_mzml {
                     let mut reader = MzMLReader::new(
                         input::open_buf_maybe_gz(&spectrum_path)
                             .map_err(|e| format!("open mzML: {e}"))?,
@@ -1965,11 +2005,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let mut file_offset = 0usize;
             let mut ms1_linked = 0usize;
-            // Fragment-index retrieval scores MASS-ORDERED chunks (see the
-            // non-MS1 branch below). Each spectrum keeps the part of its linked
-            // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
-            // MS1 link.
-            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
             let mut pending: Vec<(Spectrum, Option<Ms1Peaks>)> = Vec::new();
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {

@@ -513,47 +513,47 @@ best placement (1-based residues), `best_prob` (localization probability given t
 A mod moves to every residue a declared record of the same name and mass accepts, so a phospho
 declared as separate S, T and Y lines competes across all three.
 
-Measured on the phospho benchmark file (PXD007653 control2, native rescoring), against the
-depositors' MaxQuant 1.5.3 localization of the same scans (11,948 PSMs; MaxQuant is a reference,
-not ground truth). Among PSMs MaxQuant localizes confidently (every site ≥ 0.75, n = 8,383):
+The placements share the PSM's `1 − PEP` by the search's own score of each (node + edge score,
+softmax with weight 0.237), not uniformly as in PyProphet: the search score sees all fragment
+ions and their intensities, the IPF ions only the site-determining ones by intensity tier. The
+weight was fitted on half the peptides of the three benchmarks below; every one picked the same
+value, and the other half gained as much as the whole. `ANDES_IPF_DEBUG=1` adds a `forms_debug`
+column: every placement as `sites|search score|IPF log-evidence`.
 
-| | agrees with MaxQuant |
-|---|---|
-| andes search placement | 92.8% |
-| IPF best placement | 95.5% |
-| IPF `best_prob` ≥ 0.9 (84.6% of PSMs) | 99.0% |
-| IPF `best_prob` ≥ 0.99 (63.4% of PSMs) | 99.6% |
+Measured with `--rescore-native`, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than
+phospho groups). Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017,
+10 HCD-OT files, fully tryptic, 1,429 PSMs, scored against the key of the file's own pool):
 
-Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017, 10 HCD-OT files,
-fully tryptic, PSM q ≤ 0.01, 1,429 PSMs needing localization, scored against the key of the file's
-own pool):
+| | false localization rate | predicted |
+|---|---|---|
+| andes search placement | 19.3% | |
+| IPF, uniform placement prior | 13.4% | 13.4% |
+| IPF, search-score prior | **10.9%** | 10.7% |
+| … `best_prob` ≥ 0.75 (81.1% of PSMs) | 2.9% | |
+| … `best_prob` ≥ 0.9 (74.7% of PSMs) | 1.6% | |
+| … `best_prob` ≥ 0.99 (59.5% of PSMs) | 0.8% | |
 
-| | false localization rate |
-|---|---|
-| andes search placement | 19.3% |
-| IPF best placement | 13.4% |
-| IPF `best_prob` ≥ 0.75 (77.3% of PSMs) | 3.6% |
-| IPF `best_prob` ≥ 0.9 (68.6% of PSMs) | 2.5% |
-| IPF `best_prob` ≥ 0.99 (44.6% of PSMs) | 1.4% |
+Against the depositors' MaxQuant 1.5.3 localization of the same scans (PXD007653 control2; a
+reference, not ground truth), among PSMs MaxQuant localizes confidently (every site ≥ 0.75,
+n = 8,383): agreement 92.8% for the search placement, 95.5% for IPF with a uniform prior, 96.8%
+with the search-score prior; `best_prob` ≥ 0.9 keeps 89.4% of PSMs at 0.9% disagreement, ≥ 0.99
+keeps 77.0% at 0.5%.
 
-`best_prob` is calibrated on this set: mean 1 − `best_prob` predicts 13.4% wrong, 13.4% observed.
-A semi-specific search of the same files (`--enzyme-specificity semi --fragment-index-slice-da 20`,
-1 h 41 min and 64 GB peak on 16 threads; the default slice width ran out of 160 GB) gives the same
-picture: 1,400 PSMs of 107 peptides, FLR 18.9% for the search placement against 12.2% for IPF, 2.7%
-at `best_prob` ≥ 0.9, 1.9% at ≥ 0.99, 12.5% predicted against 12.2% observed.
-Before mods could move across sibling records (each S, T or Y record moved only among its own
-residue), IPF gave 19.6% and was overconfident (13.9% predicted). Phospho is declared with its
-neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for T); without `loss=` IPF did not
-beat the search placement on the MaxQuant comparison (measured before the sibling change). The IPF
-step takes ~14 s on the phospho run.
+Against the depositors' Spectronaut library on 20 U2OS DDA phospho runs (PXD017476, 10 cycling
+and 10 nocodazole, searched together), for peptides with one phospho placement across all runs
+(11,696 PSMs): disagreement 4.4% for the search placement, 4.3% for IPF with a uniform prior,
+3.6% with the search-score prior (3.5% predicted); `best_prob` ≥ 0.75 keeps 94.4% at 1.6%
+(`ModSiteLocalized=1` keeps 71% at 2.0%), ≥ 0.99 keeps 80.1% at 0.65%. (U2OS from the offline
+evaluation of the debug column of the same build.)
 
-On 20 U2OS DDA phospho runs (PXD017476, 10 cycling and 10 nocodazole, searched together), against
-the depositors' Spectronaut library for peptides with one phospho placement across all runs
-(12,509 PSMs; a reference, not truth), the search placement and IPF disagree with Spectronaut
-equally often (4.4% and 4.3%). IPF's gain there is the error control: `best_prob` ≥ 0.75 keeps 91%
-of PSMs at 1.8% disagreement (`ModSiteLocalized=1` keeps 71% at 2.0%), ≥ 0.99 keeps 70% at 0.8%;
-predicted 5.5%. That joint run peaked at 181 GB (8.9M PIN rows); one file takes 13 GB with IPF
-and 8 GB without.
+A semi-specific search of the synthetic files (`--enzyme-specificity semi
+--fragment-index-slice-da 20`, 1 h 41 min, 64 GB on 16 threads; the default slice width ran out of
+160 GB) gave, with the uniform prior, FLR 12.2% against 18.9% for the search placement. Before mods
+could move across sibling records, IPF gave 19.6% on the synthetic set and was overconfident.
+Phospho is declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for
+T); without `loss=` IPF did not beat the search placement (measured before the sibling change).
+The IPF step takes ~10 s on the phospho run. The 20-run U2OS search peaked at 182 GB (8.9M PIN
+rows); one file takes 13 GB with IPF and 8 GB without.
 
 ### PEFF databases
 

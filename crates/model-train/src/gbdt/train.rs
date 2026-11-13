@@ -7,7 +7,7 @@
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
 use super::isotonic::pava;
-use super::tree::{fit_tree, TreeParams};
+use super::tree::{fit_tree, fit_tree_with_leaves, TreeParams};
 use crate::TrainError;
 
 // ---------------------------------------------------------------------------
@@ -333,36 +333,24 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         })
         .collect();
 
-    // Build binned matrix (row-major, n_rows × nf, values in 0..n_bins as u8)
-    let mut binned_all = vec![0u8; n_rows * nf];
-    for r in 0..n_rows {
-        for f in 0..nf {
-            binned_all[r * nf + f] = bin_of(ds.x[r * nf + f], &bin_uppers[f]);
-        }
-    }
+    // Only the active training rows are binned (Step 3); validation rows are
+    // scored on their continuous features.
 
     // --- Step 2: Group-disjoint validation split (seeded) ---------------------
     // Collect distinct group ids in sorted order for determinism.
-    let mut distinct_groups: Vec<u32> = ds.groups.clone();
-    distinct_groups.sort_unstable();
-    distinct_groups.dedup();
-
     // Hash each group id with the seed using splitmix64 to decide train/val.
-    // A group is validation if hash → unit < val_fraction.
-    let val_set: std::collections::BTreeSet<u32> = distinct_groups
-        .iter()
-        .filter(|&&g| {
-            let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
-            let h = splitmix64(&mut state);
-            to_unit(h) < p.val_fraction as f64
-        })
-        .copied()
-        .collect();
+    // A group is validation if hash → unit < val_fraction: a function of the
+    // group id alone, evaluated per row.
+    let is_val = |g: u32| {
+        let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
+        let h = splitmix64(&mut state);
+        to_unit(h) < p.val_fraction as f64
+    };
 
     let mut train_rows: Vec<usize> = Vec::new();
     let mut val_rows: Vec<usize> = Vec::new();
     for r in 0..n_rows {
-        if val_set.contains(&ds.groups[r]) {
+        if is_val(ds.groups[r]) {
             val_rows.push(r);
         } else {
             train_rows.push(r);
@@ -434,7 +422,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     for (i, &r) in active_train.iter().enumerate() {
         train_y[i] = ds.y[r];
         for f in 0..nf {
-            train_binned[i * nf + f] = binned_all[r * nf + f];
+            train_binned[i * nf + f] = bin_of(ds.x[r * nf + f], &bin_uppers[f]);
         }
     }
 
@@ -499,12 +487,17 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let mut best_loss = f32::INFINITY;
     let mut best_round: usize = 0;
     let mut no_improve = 0u32;
+    // The validation scores after `best_round` trees (Step 5 reads them).
+    let mut best_raw_val = vec![0.0f32; val_n];
+    let mut grad = vec![0.0f32; n_active];
+    let mut hess = vec![0.0f32; n_active];
 
     for _round in 0..p.n_rounds {
         // Compute gradients and hessians for active training rows.
-        let mut grad = vec![0.0f32; n_active];
-        let mut hess = vec![0.0f32; n_active];
         if p.pairwise {
+            // The pair sums accumulate: start from zero every round.
+            grad.fill(0.0);
+            hess.fill(0.0);
             // RankNet pairwise loss within each group: for each (positive i, negative
             // j), `rho = σ(-(s_i − s_j))` is the mis-ranking probability; push i up and
             // j down. Sum over pairs → per-row grad/hess. Hessian floored so leaves are
@@ -533,7 +526,8 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         }
 
         // Fit one tree on the active binned training data.
-        let mut tree = fit_tree(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
+        let (mut tree, leaf_of) =
+            fit_tree_with_leaves(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
         // Apply learning rate shrinkage to all leaf values.
         // Scaling ALL values is safe: internal nodes have value 0 and are not
@@ -542,11 +536,11 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             *v *= p.learning_rate;
         }
 
-        // Update raw scores: training rows (use compact index i, continuous x).
-        for i in 0..n_active {
-            let r = active_train[i];
-            let row = &ds.x[r * nf..(r + 1) * nf];
-            raw_train[i] += tree.eval(row);
+        // Update raw scores: training rows. Each row adds the value of the
+        // leaf the builder put it in, which is the leaf `tree.eval` reaches on
+        // its continuous features (see `fit_tree_with_leaves`).
+        for (raw, &leaf) in raw_train.iter_mut().zip(&leaf_of) {
+            *raw += tree.value[leaf as usize];
         }
 
         // Update raw scores: validation rows (continuous x).
@@ -571,6 +565,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
                 if vloss < best_loss - 1e-8 {
                     best_loss = vloss;
                     best_round = trees.len(); // number of trees at best
+                    best_raw_val.copy_from_slice(&raw_val);
                     no_improve = 0;
                 } else {
                     no_improve += 1;
@@ -584,6 +579,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             // metric (eligibility is fixed across rounds, so this is all-or-none).
             None => {
                 best_round = trees.len();
+                best_raw_val.copy_from_slice(&raw_val);
             }
         }
     }
@@ -592,14 +588,9 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     trees.truncate(best_round);
 
     // --- Step 5: PAVA calibration on validation set ---------------------------
-    // Recompute raw_val from the truncated tree set for correctness.
-    let mut raw_val_final = vec![0.0f32; val_n];
-    for (j, &r) in val_rows.iter().enumerate() {
-        let row = &ds.x[r * nf..(r + 1) * nf];
-        for t in &trees {
-            raw_val_final[j] += t.eval(row);
-        }
-    }
+    // The validation scores of the truncated tree set: the running sums at
+    // `best_round`, added tree by tree in the same order as a re-evaluation.
+    let raw_val_final = best_raw_val;
 
     // OFFLINE GATE METRIC: held-out AUC of P(signal) on the group-disjoint
     // validation set. This is the review's free gate — AUC ≈ 0.5 means the

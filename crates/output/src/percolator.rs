@@ -543,8 +543,8 @@ pub fn run_percolator_with_decoys(
         eprintln!("{summary}");
     }
     let out = result_paths(pin);
-    let decoys = match std::fs::read_to_string(&out.decoy) {
-        Ok(text) => parse_psm_results(&text)?.into_keys().collect(),
+    let decoys = match std::fs::File::open(&out.decoy) {
+        Ok(f) => decoy_ids(std::io::BufReader::new(f))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
         Err(e) => return Err(e.into()),
     };
@@ -1295,6 +1295,22 @@ impl ResultColumns {
             protein_fields,
         })
     }
+}
+
+/// The PSM ids of a decoy result file, streamed: only the ids are kept, and
+/// each row is validated as [`parse_psm_results`] validates it (a duplicate id
+/// is an error there too).
+fn decoy_ids<R: std::io::BufRead>(reader: R) -> Result<HashSet<String>, PercolatorError> {
+    let mut rows = PsmResultReader::new(reader)?;
+    let mut ids = HashSet::new();
+    while let Some(row) = rows.next_row()? {
+        if !ids.insert(row.psm_id.to_string()) {
+            return Err(PercolatorError::DuplicatePsmId {
+                psm_id: row.psm_id.to_string(),
+            });
+        }
+    }
+    Ok(ids)
 }
 
 /// Reads a Percolator PSM result file one row at a time, so a file of any

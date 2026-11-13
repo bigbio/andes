@@ -1337,23 +1337,72 @@ fn variable_mod_deltas(params: &SearchParams) -> Vec<FormDelta> {
 /// window probes; it can never drop a candidate. The decisive correctness
 /// guarantee comes from re-running [`expand_mod_combinations`] per base record
 /// and filtering on the resulting peptidoform mass — not from `Δ` precision.
-fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
+fn distinct_mod_mass_offsets(params: &SearchParams) -> std::sync::Arc<Vec<(u64, f64)>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    // The offsets depend only on the form deltas and the two budgets, and the
+    // out-of-core retrieval asks for them once per spectrum window: compute
+    // them once per search and share them. The key is cheap to build (one
+    // pass over the form lists); a few searches' worth are kept.
+    type Key = (Vec<(u64, u32, u32, u8)>, u32, u32);
+    type Offsets = Arc<Vec<(u64, f64)>>;
+    static CACHE: OnceLock<Mutex<HashMap<Key, Offsets>>> = OnceLock::new();
     let deltas = variable_mod_deltas(params);
+    let key: Key = (
+        deltas
+            .iter()
+            .map(|f| (f.delta.to_bits(), f.mods, f.labels, f.channel))
+            .collect(),
+        params.max_variable_mods_per_peptide,
+        params.max_label_sites,
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return hit;
+    }
+    let offsets = Arc::new(enumerate_mod_mass_offsets(&deltas, key.1, key.2));
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= 16 {
+            c.clear();
+        }
+        c.insert(key, Arc::clone(&offsets));
+    }
+    offsets
+}
+
+/// The offsets of [`distinct_mod_mass_offsets`], enumerated.
+fn enumerate_mod_mass_offsets(
+    deltas: &[FormDelta],
+    max_mods: u32,
+    max_labels: u32,
+) -> Vec<(u64, f64)> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut out: Vec<(u64, f64)> = Vec::new();
     // Δ = 0 (no variable mods) is always present.
     seen.insert(milli_of(0.0));
     out.push((milli_of(0.0), 0.0));
 
-    // Multisets of forms in non-decreasing index order, each generated once.
+    // Multisets of forms in non-decreasing index order. Many multisets reach
+    // the same sum (labels of equal mass, or of masses summing alike), and
+    // what a state can still reach depends only on (next index, sum,
+    // budgets left): each such state is expanded once. The sum is keyed by
+    // its exact bits: two sums a rounding apart can still round to different
+    // milli-dalton offsets once more forms are added, so only identical sums
+    // may share their expansion.
+    type State = (usize, u64, u32, u32);
     fn walk(
         items: &[FormDelta],
         start: usize,
         sum: f64,
         budget: (u32, u32),
+        visited: &mut std::collections::HashSet<State>,
         seen: &mut std::collections::HashSet<u64>,
         out: &mut Vec<(u64, f64)>,
     ) {
+        let state = (start, sum.to_bits(), budget.0, budget.1);
+        if !visited.insert(state) {
+            return;
+        }
         for (i, f) in items.iter().enumerate().skip(start) {
             if f.mods > budget.0 || f.labels > budget.1 {
                 continue;
@@ -1368,13 +1417,14 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
                 i,
                 s,
                 (budget.0 - f.mods, budget.1 - f.labels),
+                visited,
                 seen,
                 out,
             );
         }
     }
 
-    let budget = (params.max_variable_mods_per_peptide, params.max_label_sites);
+    let budget = (max_mods, max_labels);
     let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
     channels.push(0);
     channels.sort_unstable();
@@ -1385,7 +1435,8 @@ fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
             .filter(|f| f.channel == 0 || f.channel == c)
             .copied()
             .collect();
-        walk(&items, 0, 0.0, budget, &mut seen, &mut out);
+        let mut visited = std::collections::HashSet::new();
+        walk(&items, 0, 0.0, budget, &mut visited, &mut seen, &mut out);
     }
     out
 }
@@ -1459,7 +1510,7 @@ pub fn lazy_candidates_for_precursor(
     let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
         std::collections::HashSet::new();
     let mut base_records: Vec<IndexRecord> = Vec::new();
-    for (_, delta) in &offsets {
+    for (_, delta) in offsets.iter() {
         // Base mass = precursor − Δ. Window asymmetric: −tol_left .. +tol_right.
         let center = precursor_mass - delta;
         let lo = (center * 1000.0).round() as i64 - tol_left_milli as i64;
@@ -1614,7 +1665,7 @@ pub fn base_records_for_nominal_window(
         rustc_hash::FxHashMap::default();
     let mut counts_this_window: rustc_hash::FxHashMap<BaseRecordKey, u32> =
         rustc_hash::FxHashMap::default();
-    for (_, delta) in &offsets {
+    for (_, delta) in offsets.iter() {
         let lo = ((full_lo - delta) * 1000.0).floor() as i64;
         let hi = ((full_hi - delta) * 1000.0).ceil() as i64;
         if hi < 0 {
@@ -2111,6 +2162,147 @@ mod tests {
     }
 
     #[test]
+    fn mass_offsets_of_a_large_label_allowance() {
+        // Five labels of integer masses and 100 label sites (a non-specific
+        // search of a K/R/L/I/V-rich protein): about 96 million multisets,
+        // minutes to walk one by one, but only the sums 0..=1200 they reach.
+        // The walk expands each (index, sum, budget) state once and returns
+        // exactly those sums.
+        let mut b = AminoAcidSetBuilder::new_standard();
+        let mut channels = Vec::new();
+        for (r, d) in [
+            (b'K', 8.0),
+            (b'R', 9.0),
+            (b'L', 10.0),
+            (b'I', 11.0),
+            (b'V', 12.0),
+        ] {
+            let name = format!("Label:{}", r as char);
+            b = b.add_variable_mod(label_mod(&name, d, r, ModLocation::Anywhere));
+            channels.push((name, 1));
+        }
+        let mut params =
+            SearchParams::default_tryptic(b.with_label_channels(channels).build().unwrap());
+        params.max_variable_mods_per_peptide = 0;
+        params.max_label_sites = 100;
+        let mut got: Vec<i64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
+            .iter()
+            .map(|&(_, d)| d.round() as i64)
+            .collect();
+        got.sort_unstable();
+        // Every sum of at most 100 labels of 8..=12 Da: k labels reach 8k..=12k.
+        let mut want: Vec<i64> = (0..=100i64).flat_map(|k| 8 * k..=12 * k).collect();
+        want.sort_unstable();
+        want.dedup();
+        assert_eq!(got, want);
+        // Computed once per search: a second request shares the first result.
+        assert!(std::sync::Arc::ptr_eq(
+            &crate::candidate_gen::distinct_mod_mass_offsets(&params),
+            &crate::candidate_gen::distinct_mod_mass_offsets(&params),
+        ));
+    }
+
+    /// The offsets with the memo equal those of the plain walk over every
+    /// multiset, on fractional masses: CodeRabbit's case (sums equal to the
+    /// micro-dalton that round to different milli-daltons once a third
+    /// label is added) and SILAC labels with an oxidation allowed.
+    #[test]
+    fn memoized_offsets_equal_the_plain_walk() {
+        fn plain(params: &SearchParams) -> Vec<u64> {
+            let deltas = crate::candidate_gen::variable_mod_deltas(params);
+            fn rec(
+                items: &[crate::candidate_gen::FormDelta],
+                start: usize,
+                sum: f64,
+                budget: (u32, u32),
+                out: &mut std::collections::BTreeSet<u64>,
+            ) {
+                for (i, f) in items.iter().enumerate().skip(start) {
+                    if f.mods > budget.0 || f.labels > budget.1 {
+                        continue;
+                    }
+                    let s = sum + f.delta;
+                    out.insert(crate::candidate_gen::milli_of(s));
+                    rec(items, i, s, (budget.0 - f.mods, budget.1 - f.labels), out);
+                }
+            }
+            let mut out = std::collections::BTreeSet::from([crate::candidate_gen::milli_of(0.0)]);
+            let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
+            channels.push(0);
+            channels.sort_unstable();
+            channels.dedup();
+            for c in channels {
+                let items: Vec<_> = deltas
+                    .iter()
+                    .filter(|f| f.channel == 0 || f.channel == c)
+                    .copied()
+                    .collect();
+                rec(
+                    &items,
+                    0,
+                    0.0,
+                    (params.max_variable_mods_per_peptide, params.max_label_sites),
+                    &mut out,
+                );
+            }
+            out.into_iter().collect()
+        }
+        let memo = |params: &SearchParams| -> Vec<u64> {
+            let mut v: Vec<u64> = crate::candidate_gen::distinct_mod_mass_offsets(params)
+                .iter()
+                .map(|&(k, _)| k)
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let build = |labels: &[(&str, f64, u8, u8)], ox: bool, mods: u32, sites: u32| {
+            let mut b = AminoAcidSetBuilder::new_standard();
+            for &(name, d, r, _) in labels {
+                b = b.add_variable_mod(label_mod(name, d, r, ModLocation::Anywhere));
+            }
+            if ox {
+                b = b.add_variable_mod(oxidation_m());
+            }
+            let channels = labels
+                .iter()
+                .map(|&(n, _, _, c)| (n.to_string(), c))
+                .collect();
+            let mut p =
+                SearchParams::default_tryptic(b.with_label_channels(channels).build().unwrap());
+            p.max_variable_mods_per_peptide = mods;
+            p.max_label_sites = sites;
+            p
+        };
+        let coderabbit = build(
+            // Forms are walked in residue order (K, L, R): a, b, c.
+            &[
+                ("A", 1.0, b'K', 1),
+                ("B", 1.000_000_24, b'L', 1),
+                ("C", 10.000_249_9, b'R', 1),
+            ],
+            false,
+            0,
+            4,
+        );
+        let got = memo(&coderabbit);
+        assert_eq!(got, plain(&coderabbit));
+        assert!(got.contains(&22001), "{got:?}");
+        let silac = build(
+            &[
+                ("Label:2H(4)", 4.025107, b'K', 1),
+                ("Label:13C(6)", 6.020129, b'R', 1),
+                ("Label:13C(6)15N(2)", 8.014199, b'K', 2),
+                ("Label:13C(6)15N(4)", 10.008269, b'R', 2),
+            ],
+            true,
+            1,
+            6,
+        );
+        assert_eq!(memo(&silac), plain(&silac));
+    }
+
+    #[test]
     fn mass_offsets_keep_channels_apart() {
         // [][Lys4][Lys8] with Met oxidation: an offset sums one channel's
         // labels, never Lys4 with Lys8, and still covers every candidate.
@@ -2148,8 +2340,8 @@ mod tests {
         params.max_variable_mods_per_peptide = 1;
         params.max_label_sites = 3;
         let offsets: Vec<f64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
-            .into_iter()
-            .map(|(_, d)| d)
+            .iter()
+            .map(|&(_, d)| d)
             .collect();
         let has = |d: f64| offsets.iter().any(|o| (o - d).abs() < 1e-6);
         assert!(!has(4.025107 + 8.014199), "{offsets:?}");

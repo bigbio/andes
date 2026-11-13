@@ -325,6 +325,31 @@ fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
+/// Whether a satellite of `g` lies within `tol_ppm` of an isotope the fit
+/// models (M−2..M+5) of another component: a channel other than its parent,
+/// or another satellite. The two fit components are then nearly collinear
+/// and their split is weakly determined.
+fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
+    use quant::label::{HIGHEST_OFFSET, LOWEST_OFFSET};
+    let z = f64::from(g.charge.max(1));
+    let on = |mono: f64, mz: f64| {
+        (LOWEST_OFFSET..=HIGHEST_OFFSET).any(|off| {
+            let m = mono + f64::from(off) * model::mass::ISOTOPE / z;
+            (m - mz).abs() <= m * tol_ppm * 1e-6
+        })
+    };
+    g.satellites.iter().enumerate().any(|(i, &(parent, mz))| {
+        g.channel_mz
+            .iter()
+            .enumerate()
+            .any(|(c, &mc)| c != parent && on(mc, mz))
+            || g.satellites
+                .iter()
+                .enumerate()
+                .any(|(k, &(_, ms))| k != i && on(ms, mz))
+    })
+}
+
 /// The best PSM of a group's channel in a run.
 #[derive(Clone, Copy)]
 struct ChannelHit {
@@ -695,6 +720,17 @@ pub(super) fn quantify(
         mixed,
         no_rt
     );
+    let shared = groups
+        .iter()
+        .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
+        .count();
+    if shared > 0 {
+        eprintln!(
+            "quant: label: {shared} groups have an Arg->Pro satellite within the MS1 tolerance \
+             of another channel's isotope; the split between the two (converted_fraction, and \
+             the ratio through it) is weakly determined there"
+        );
+    }
 
     let fit_params = FitParams {
         tol_ppm: tol,
@@ -1662,6 +1698,8 @@ mod tests {
             satellites: vec![(1, mp)],
             identity_decoy: false,
         };
+        // SILAC duplex: the satellite is clear of the light channel.
+        assert!(!satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
@@ -1673,6 +1711,129 @@ mod tests {
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
+
+    /// The collinearity check covers every isotope the fit models (M−2..M+5)
+    /// of the other channels, and the other satellites.
+    #[test]
+    fn satellite_overlap_check_covers_the_modelled_isotopes() {
+        let iso = model::mass::ISOTOPE / 2.0;
+        let group = |channel_mz: Vec<f64>, satellites: Vec<(usize, f64)>| Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            envelopes: vec![ChannelEnvelope::new(&[1.0], 0, 1.0, 0, 1.0); channel_mz.len()],
+            deltas: vec![0.0; channel_mz.len()],
+            channel_mz,
+            faims_cv: None,
+            satellites,
+            identity_decoy: false,
+        };
+        // On channel 1's M−1 (a lower isotopologue of a 2H label).
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 - iso)]),
+            10.0
+        ));
+        // On channel 1's M+5.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 510.0], vec![(0, 510.0 + 5.0 * iso)]),
+            10.0
+        ));
+        // On another satellite.
+        assert!(satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 540.0 + iso)]),
+            10.0
+        ));
+        // Clear of everything.
+        assert!(!satellite_on_another_channel(
+            &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 560.0)]),
+            10.0
+        ));
+    }
+
+    /// Four channels with three heavy-proline satellites take seven fit
+    /// components, more than the five channels a specification may have:
+    /// the group is still fitted, every channel with its converted part.
+    #[test]
+    fn four_channels_with_arg_pro_satellites_are_fitted() {
+        use model::scan::Ms1Scan;
+        let spec = LabelSpec::parse("[][Arg6][R+8.014199:6C2N][Arg10]").unwrap();
+        let light = Formula::peptide(b"PEPTIDER".iter().map(|&r| (r, 0.0)));
+        let sites = spec.sites();
+        let counts: Vec<u32> = sites
+            .iter()
+            .map(|s| u32::from(*s == Site::Residue(b'R')))
+            .collect();
+        let envs: Vec<ChannelEnvelope> = (0..4)
+            .map(|c| spec.channel_envelope(c, &sites, &counts, &light))
+            .collect();
+        let z = 2.0;
+        let ml = 478.73;
+        let deltas = [0.0, 6.020129, 8.014199, 10.008269];
+        let mz: Vec<f64> = deltas.iter().map(|d| ml + d / z).collect();
+        let sats: Vec<(usize, f64)> = (1..4)
+            .map(|c| {
+                let arg = spec.channels[c].label_at(Site::Residue(b'R')).unwrap();
+                (c, mz[c] + heavy_proline_delta(arg).unwrap() / z)
+            })
+            .collect();
+        // Channel amplitudes 1 : 0.5 : 0.25 : 2, each heavy one 20 % converted.
+        let amps = [1e6, 0.5e6, 0.25e6, 2e6];
+        let mut species: Vec<(f64, ChannelEnvelope, f64)> = vec![(mz[0], envs[0], amps[0])];
+        for &(c, mp) in &sats {
+            species.push((mz[c], envs[c], 0.8 * amps[c]));
+            species.push((mp, envs[c], 0.2 * amps[c]));
+        }
+        let scans: Vec<Ms1Scan> = (0..200)
+            .map(|i| {
+                let rt = i as f64;
+                let g = (-(rt - 100.0f64).powi(2) / 32.0).exp();
+                let mut peaks: Vec<(f64, f32)> =
+                    (0..40).map(|k| (300.0 + k as f64 * 23.1, 50.0)).collect();
+                for &(m, env, amp) in &species {
+                    for off in -2..=5 {
+                        let v = amp * env.at(off) * g;
+                        if v > 50.0 {
+                            peaks.push((m + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                        }
+                    }
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Ms1Scan {
+                    rt,
+                    peaks,
+                    id: format!("scan={i}"),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let ms1 = Ms1RunIndex::new(scans);
+        let g = Group {
+            key: "PEPTIDER".into(),
+            sequence: "PEPTIDER".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: mz.clone(),
+            envelopes: envs.clone(),
+            deltas: deltas.to_vec(),
+            faims_cv: None,
+            satellites: sats,
+            identity_decoy: false,
+        };
+        // Channel 2's satellite sits on Arg10's M+4 (3 mDa): flagged.
+        assert!(satellite_on_another_channel(&g, 10.0));
+        let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0; 4]);
+        assert_eq!(p.channel_mz.len(), 7);
+        let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
+        for c in 1..4 {
+            let (r, _) = log2_ratio(&fit.channels[c], &fit.channels[0]).unwrap();
+            let want = (amps[c] / amps[0]).log2();
+            assert!((r - want).abs() < 0.05, "channel {c}: {r} vs {want}");
+            // Channel 2's satellite (+7.014 at z 2) sits 3 mDa from Arg10's
+            // M+4, inseparable at any MS1 tolerance: a little of it is shared.
+            assert!((converted[c].unwrap() - 0.2).abs() < 0.03, "{converted:?}");
+        }
     }
 
     /// A protein N-terminal acetyl holds the N-terminus, not the first

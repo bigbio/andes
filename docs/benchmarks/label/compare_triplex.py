@@ -4,11 +4,16 @@ usage: compare_triplex.py LABEL_PARQUET FFM_TSV [RUN]
 RUN is the label.parquet `filename` the TSV belongs to (needed when the table
 holds several runs).
 """
-import sys, numpy as np, pandas as pd, pyarrow.parquet as pq
-lab, ffm = sys.argv[1], sys.argv[2]
+import argparse, sys, numpy as np, pandas as pd, pyarrow.parquet as pq
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("label_parquet")
+ap.add_argument("ffm_tsv")
+ap.add_argument("run", nargs="?", help="the label.parquet filename of the TSV's run")
+args = ap.parse_args()
+lab, ffm = args.label_parquet, args.ffm_tsv
 t = pq.read_table(lab).to_pandas()
-if len(sys.argv) > 3:
-    t = t[t.filename == sys.argv[3]]
+if args.run:
+    t = t[t.filename == args.run]
 elif t.filename.nunique() > 1:
     sys.exit(f"{lab} holds {t.filename.nunique()} runs: name the run of {ffm}")
 ref = t[t.channel == 1][["peptide", "charge", "sequence", "mz", "rt_apex", "status"]]

@@ -137,6 +137,9 @@ pub struct MbrRow<'a> {
     /// The wrong-measurement q-value of an accepted transfer; `None` for
     /// other rows.
     pub measurement_q: Option<f64>,
+    /// The posterior error probability of a transfer row (its local false
+    /// rate at its score); `None` for other rows.
+    pub transfer_pep: Option<f64>,
 }
 
 /// The same-run claims on one transfer row of `<base>.mbr.parquet`.
@@ -151,7 +154,7 @@ pub struct MbrClaim<'a> {
     pub n_identified_co_apex: u32,
 }
 
-pub const MBR_COLUMNS: [&str; 17] = [
+pub const MBR_COLUMNS: [&str; 18] = [
     "precursor_key",
     "run",
     "evidence_type",
@@ -169,6 +172,7 @@ pub const MBR_COLUMNS: [&str; 17] = [
     "claim_n_co_apex",
     "claim_n_identified_co_apex",
     "measurement_q",
+    "transfer_pep",
 ];
 
 /// The default transfer q-value threshold, at which the validation is
@@ -255,9 +259,6 @@ pub struct MbrValidation {
     /// Decoy transfer rows with a q-value: mass-shift, RT-shift, identity
     /// decoys.
     pub decoy_transfers: [usize; 3],
-    /// Transfer targets not transferred because their best donor PSM is
-    /// above the transfer donor q-value.
-    pub donor_gated: usize,
     /// Accepted transfers reported as `shared_feature`.
     pub shared_feature: usize,
 }
@@ -322,7 +323,6 @@ impl MbrValidation {
             target_entries: _,
             identity_entries: _,
             decoy_transfers,
-            donor_gated,
             shared_feature,
         } = o;
         self.pseudo_transfers += pseudo_transfers;
@@ -344,7 +344,6 @@ impl MbrValidation {
         self.ms2_pseudo_supported += ms2_pseudo_supported;
         self.transfer_ms2 += transfer_ms2;
         add_counts(&mut self.decoy_transfers, decoy_transfers);
-        self.donor_gated += donor_gated;
         self.shared_feature += shared_feature;
     }
 }
@@ -430,7 +429,6 @@ pub fn validation_columns() -> Vec<String> {
             "mass_decoy_transfers",
             "rt_decoy_transfers",
             "identity_decoy_transfers",
-            "donor_gated",
             "shared_feature",
             "wrong_measurement",
             "wrong_measurement_rate",
@@ -532,7 +530,6 @@ impl MbrValidation {
             n(self.decoy_transfers[0]),
             n(self.decoy_transfers[1]),
             n(self.decoy_transfers[2]),
-            n(self.donor_gated),
             n(self.shared_feature),
             n(self.wrong_measurement),
             Value(self.wrong_measurement_rate()),
@@ -579,6 +576,7 @@ fn mbr_schema() -> Schema {
         Field::new("claim_n_co_apex", DataType::UInt32, true),
         Field::new("claim_n_identified_co_apex", DataType::UInt32, true),
         f("measurement_q"),
+        f("transfer_pep"),
     ])
 }
 
@@ -596,6 +594,7 @@ struct MbrColumnsBuilder {
     claim_n_co: UInt32Builder,
     claim_n_id_co: UInt32Builder,
     measurement_q: Float64Builder,
+    transfer_pep: Float64Builder,
     rows: usize,
 }
 
@@ -614,6 +613,7 @@ impl MbrColumnsBuilder {
             claim_n_co: UInt32Builder::new(),
             claim_n_id_co: UInt32Builder::new(),
             measurement_q: Float64Builder::new(),
+            transfer_pep: Float64Builder::new(),
             rows: 0,
         }
     }
@@ -645,6 +645,8 @@ impl MbrColumnsBuilder {
             .append_option(c.map(|c| c.n_identified_co_apex));
         self.measurement_q
             .append_option(r.measurement_q.filter(|v| v.is_finite()));
+        self.transfer_pep
+            .append_option(r.transfer_pep.filter(|v| v.is_finite()));
         self.rows += 1;
     }
 
@@ -669,6 +671,7 @@ impl MbrColumnsBuilder {
         cols.push(Arc::new(self.claim_n_co.finish()));
         cols.push(Arc::new(self.claim_n_id_co.finish()));
         cols.push(Arc::new(self.measurement_q.finish()));
+        cols.push(Arc::new(self.transfer_pep.finish()));
         RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
     }
 }
@@ -943,6 +946,7 @@ mod tests {
                 library_q: 0.001,
                 claim: None,
                 measurement_q: None,
+                transfer_pep: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -964,6 +968,7 @@ mod tests {
                     n_identified_co_apex: 1,
                 }),
                 measurement_q: None,
+                transfer_pep: None,
             },
             MbrRow {
                 precursor_key: "PEPTIDEK/2",
@@ -985,6 +990,7 @@ mod tests {
                     n_identified_co_apex: 0,
                 }),
                 measurement_q: Some(0.006),
+                transfer_pep: None,
             },
         ]
     }
@@ -1109,7 +1115,6 @@ mod tests {
             target_entries: 70,
             identity_entries: 2,
             decoy_transfers: [95, 85, 7],
-            donor_gated: 3,
             shared_feature: 6,
         };
         write_mbr_validation(&p, &v).unwrap();
@@ -1144,7 +1149,6 @@ mod tests {
         assert_eq!(get("accepted_mass_decoys_at_threshold"), Count(4));
         assert_eq!(get("identity_entries"), Count(2));
         assert_eq!(get("identity_decoy_transfers"), Count(7));
-        assert_eq!(get("donor_gated"), Count(3));
         assert_eq!(get("shared_feature"), Count(6));
         assert_eq!(get("wrong_measurement"), Count(2));
         assert_eq!(get("wrong_measurement_rate"), Value(Some(0.25)));

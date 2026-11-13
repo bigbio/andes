@@ -541,10 +541,9 @@ keeps 77.0% at 0.5%.
 
 Against the depositors' Spectronaut library on 20 U2OS DDA phospho runs (PXD017476, 10 cycling
 and 10 nocodazole, searched together), for peptides with one phospho placement across all runs
-(11,696 PSMs): disagreement 4.4% for the search placement, 4.3% for IPF with a uniform prior,
-3.6% with the search-score prior (3.5% predicted); `best_prob` ≥ 0.75 keeps 94.4% at 1.6%
-(`ModSiteLocalized=1` keeps 71% at 2.0%), ≥ 0.99 keeps 80.1% at 0.65%. (U2OS from the offline
-evaluation of the debug column of the same build.)
+(12,509 PSMs): disagreement 4.4% for the search placement, 4.3% for IPF with a uniform prior,
+3.5% with the search-score prior (4.1% predicted); `best_prob` ≥ 0.75 keeps 93.4% at 1.6%
+(`ModSiteLocalized=1` keeps 71% at 2.0%), ≥ 0.99 keeps 79.1% at 0.64%.
 
 A semi-specific search of the synthetic files (`--enzyme-specificity semi
 --fragment-index-slice-da 20`, 1 h 41 min, 64 GB on 16 threads; the default slice width ran out of
@@ -552,7 +551,7 @@ A semi-specific search of the synthetic files (`--enzyme-specificity semi
 could move across sibling records, IPF gave 19.6% on the synthetic set and was overconfident.
 Phospho is declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for
 T); without `loss=` IPF did not beat the search placement (measured before the sibling change).
-The IPF step takes ~10 s on the phospho run. The 20-run U2OS search peaked at 182 GB (8.9M PIN
+The IPF step takes ~10 s on the phospho run. The 20-run U2OS search peaked at 183 GB (8.9M PIN
 rows); one file takes 13 GB with IPF and 8 GB without.
 
 ### PEFF databases

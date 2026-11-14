@@ -258,6 +258,8 @@
 //!
 //! REGENERATED 2026-11-14 (slices) when the built-in default modifications began
 //! using the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464).
+//! E. coli default-mods and precursor-cal cases: 75028 -> 75009 rows, new digest;
+//! the fixed-only and one-variable-mod cases list their mods and are unchanged.
 //! Chimeric: 1718 rows; the mass columns move on the rows with a default mod,
 //! the RT columns move on every row, and oxidised peptides print `+15.99492`.
 //! Refine: 1580 -> 1545 rows, Pass 1 unchanged (1444). Before, the default
@@ -449,14 +451,14 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_028, 0xaf02_0460_4bdd_86cb, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_009, 0xc189_0f50_38d5_c9ea, None);
 const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0xa181_3557_efb7_ae83, None);
 const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x428b_4490_d8f0_7cbc, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
-    75_028,
-    0xaf02_0460_4bdd_86cb,
+    75_009,
+    0xc189_0f50_38d5_c9ea,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

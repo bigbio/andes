@@ -1,14 +1,36 @@
 # andes documentation
 
 The full reference for the `andes` binary and its outputs; install and quick start are in
-[`README.md`](README.md). `andes --help` shows the flags a normal run needs. The rest are
-**advanced**: hidden from `--help` because the engine derives them and reports what it chose.
-Use them to reproduce a measurement or override a derivation.
+[`README.md`](README.md). `andes -h` shows the options a normal run needs; `andes --help`
+shows every option, grouped under the headings below. The options only `--help` lists are
+**advanced**: the engine derives them and reports what it chose, so they serve to reproduce
+a measurement or override a derivation. A few test hooks and diagnostics are in neither help
+(`--decoy-seed`, `--cal-min-spec-keys`, `--max-spectra`, `--precursor-mono-dump`,
+`--glyco-scans`, `--debug-glyco`, `--glyco-mbr-match-train`).
 
-Advanced (hidden) flags include: `--fragment-index`, `--gbdt-max-trees`,
-`--peak-filter`, `--ethcd-activation`, `--isotope-error`, and the glyco tuning group
-(`--glyco-tol-ppm`, `--glyco-retrieval-tol-ppm`, `--glyco-max-peaks`, `--glyco-y-max-charge`,
-`--glyco-cz-max-charge`, `--glyco-scans`).
+| Heading | `andes -h` | `andes --help` adds (advanced) |
+|---|---|---|
+| Input and output | `--config`, `--spectrum`, `--database`, `--output-pin`, `--output-tsv`, `--output-parquet` | |
+| Search | `--precursor-tol`, `--enzyme`, `--mods`, `--decoy-strategy`, `--threads` | `--decoy-prefix`, `--decoy-suffix`, `--charge`, `--isotope-error`, `--max-missed-cleavages`, `--enzyme-specificity`, `--min-length`, `--max-length`, `--max-mods`, `--min-peaks`, `--top-n` |
+| FDR | `--psm-fdr`, `--protein-fdr`, `--quant-fdr`, `--rescore` | |
+| Modes | `--chimeric`, `--refine`, `--glyco`, `--glyco-species` | `--chimeric-max-coisolated`, `--chimeric-max-kl`, `--refine-config` |
+| Quantification | `--tmt`, `--lfq`, `--label`, `--mbr`, `--quant-dir` | |
+| Database variants | | `--uniprot-variants`, `--uniprot-isoforms`, `--uniprot-chains`, `--uniprot-evidence`, `--annotations`, `--knockoffs` |
+| Rescoring | | `--rescore-native`, `--pep`, `--percolator-bin`, `--percolator-docker`, `--percolator-image`, `--percolator-args`, `--keep-pin` |
+| Calibration and runtime | | `--precursor-cal`, `--score`, `--fragmentation`, `--protocol`, `--fragment-tol-ppm`, `--fragment-tol-da`, `--peak-filter`, `--ethcd-activation`, `--ms-level`, `--fragment-index`, `--fragment-index-slice-da`, `--index-cache-dir`, `--temp-dir`, `--model-store`, `--model`, `--gbdt-max-trees` |
+| Prediction | | `--predict`, `--predictor-models`, `--predictor-backend`, `--predictor-nce`, `--predictor-instrument`, `--predictor-batch` |
+| Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2` |
+| Label-free | | `--lfq-tol`, `--lfq-rt-window`, `--lfq-gaussian-width`, `--lfq-min-cosine` |
+| Labelled pairs | | `--label-reference`, `--label-arg-pro`, `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` |
+| Glycopeptides | | `--glyco-glycan-gdb`, `--glyco-glycan-wurcs`, `--glyco-core`, `--precursor-mono`, `--glyco-tol-ppm`, `--glyco-min-core-y`, `--glyco-hcd-pair`, `--glyco-max-peaks`, `--glyco-cz-max-charge`, `--glyco-y-max-charge`, `--glyco-retrieval-tol-ppm`, `--glyco-peptide-first`, `--glyco-index-sequon-only` |
+| Advanced FDR | | `--proteoform-fdr`, `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-channel-fdr` |
+
+`andes inference` and `andes quant finalize` take the search's database options (`--enzyme`,
+`--mods`, `--decoy-prefix`, `--decoy-suffix` and the Database variants) with the same names and
+help. Options whose value is one of a list (`--decoy-strategy`, `--enzyme`, `--tmt`,
+`--uniprot-evidence`, `--precursor-cal` and the enum options) print their possible values;
+`--enzyme`, `--decoy-strategy` and `--tmt` also accept the aliases and any case listed in
+their `--help` text.
 
 ---
 
@@ -149,7 +171,7 @@ search uses the segments: its fully specific peptides keep their composition.
 | `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
-| `--decoy-seed` | u64 | fixed | *(advanced)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
+| `--decoy-seed` | u64 | fixed | *(internal, in neither help)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
 
 ### UniProt XML databases
 
@@ -727,9 +749,12 @@ built-in default`**; unknown keys are a hard error. The UniProt XML options are 
 Every search flag has a key; a key is the flag name without its section prefix
 (`--glyco-species` is `glyco.species`, `--glyco-glycan-gdb` is `glyco.glycan_gdb`,
 `--fragment-index` is `search.fragment_index`, `--gbdt-max-trees` is
-`scoring.gbdt_max_trees`, `--lfq-gaussian-width` is `quant.lfq_gaussian_width`). Four flags
-are CLI-only: `--config`, and the diagnostics `--cal-min-spec-keys`, `--precursor-mono-dump`
-and `--glyco-scans`. `glyco.enabled: true` needs `glyco.glycan_gdb` or `glyco.species` (or the
+`scoring.gbdt_max_trees`, `--lfq-gaussian-width` is `quant.lfq_gaussian_width`, `--quant-dir`
+is `quant.dir`). Each key's comment in the template names its flag and marks the advanced
+ones. Five flags are CLI-only: `--config`, and the diagnostics `--cal-min-spec-keys`,
+`--precursor-mono-dump`, `--glyco-scans` and `--glyco-mbr-match-train`. Setting
+`search.max_missed_cleavages` or `search.isotope_error` counts as an explicit value, which
+`--glyco` then keeps instead of its own (3 missed cleavages, isotope errors 0..2). `glyco.enabled: true` needs `glyco.glycan_gdb` or `glyco.species` (or the
 CLI flag), checked after the merge; setting either glycan source on the command line replaces
 the config's choice.
 
@@ -1334,7 +1359,7 @@ searches **N**-glycopeptides (N-X-S/T sequon backbones, trimannosyl core). With
 `--glyco-core o` it searches **O**-glycopeptides instead: any Ser/Thr is a
 glycosite (no sequon), the core is a single reducing-end GalNAc, and the glycan
 database must be an O-glycan `.gdb` (e.g. a published O-glycan database). The
-defaults are validated; most knobs are hidden.
+defaults are validated; `andes --help` lists the tuning options under *Glycopeptides*.
 
 `--glyco` raises `--max-missed-cleavages` to at least 3: sequon-bearing tryptic
 peptides often need a third missed cleavage to reach a scoreable length. An explicit
@@ -1357,10 +1382,10 @@ about +4.4 GB resident), the difference between running and being killed for mem
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. |
 | `--glyco-cz-max-charge` | derived | Maximum c/z charge on ETD. |
 | `--glyco-hcd-pair` | **on** | ETD, single-file runs: backbones from the paired HCD scan, c/z scored on the ETD scan (+153 backbone-correct @1%). Disabled with a warning for multi-file runs. |
-| `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before reporting. |
+| `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before reporting. It reads spectral evidence only, so targets and decoys are held to it alike. On a pooled human plasma set (stepped-collision HCD), `2` took verified-correct identifications at 1% FDR from 0 to 87 at a measured 0.75% false-discovery proportion (the ungated run accepted 102 PSMs, none correct); on a mouse AI-ETD benchmark it cost 161 of 707 identifications. Use it for collision-dominated data, not for electron-transfer data; exempting ETD scans automatically made both worse, because real files are mixed. Under `--glyco-core o` a value above 2 rejects every O-glycopeptide (the core ladder is Y0 and Y1). |
 | `--glyco-scans <FILE>` / `--debug-glyco` | off | Diagnostics. Never feed a `--debug-glyco` PIN to an FDR tool. |
 
-**Tuning knobs** (`hide = true`):
+**Tuning knobs** (advanced, `andes --help` only; `--precursor-mono-dump` is in neither help):
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -1394,6 +1419,21 @@ Removed 2026-10 (defaults fixed as above, or diagnostics/opt-ins that were never
 `--glyco-min-raw-score(-quantile)`, `--glyco-min-matched-ions`,
 `--glyco-sialic-oxonium-min-frac`, `--glyco-pin-curated`, `--glyco-diag-splits` and the
 `--precursor-mono-*` tuning flags.
+
+**Quantification (`--glyco --lfq`, `--mbr`).** With `--lfq` the reported glycopeptides are
+quantified from MS1 as intact glycopeptides (peptide, glycan composition and charge, with the
+glycan's elemental formula for the isotope envelope), in six tables next to the PIN:
+`<base>.glyco.lfq.tsv` (per feature), `.glyco.quant.tsv` (per glycopeptide), `.glyco.site.tsv`
+(glycoform shares per site), `.glyco.protein.tsv` (summed and Top3 areas) and the cross-run
+`.glyco.matrix.tsv` and `.glyco.protein_matrix.tsv`. With `--mbr` (two or more inputs) each run's
+retention time is aligned to the first input's by a robust piecewise-linear map (one knot per
+300 anchors, mis-pairs trimmed at 3 MAD) fitted on the glycopeptides both runs identified; a
+map is used only when fitted on at least 50 of them with a robust residual of at most 45 s.
+Every accepted glycopeptide is then measured in each run that did not identify it, in a
+window of three residual sigmas (clamped to 10-60 s) around its predicted apex, and the
+transfers are scored in their own target/decoy competition at `--quant-transfer-fdr`.
+Transferred rows say so in the `Evidence` column of `.glyco.lfq.tsv`; the roll-up tables keep
+their per-run areas and gain the transferred runs.
 
 **Run Percolator on a glyco PIN with `--trainFDR 0.05`.** A glyco run has too few positives
 at the default 1% training threshold for a stable fit. Pooled human-plasma glyco PIN, same
@@ -2490,18 +2530,18 @@ here only where the value is a fixed choice rather than a documented option.
 | Tightened precursor window | floor 2 ppm, margin 0.5 ppm, 3 sigma, MAD scale 1.4826 | `precursor_cal.rs:92-95` | post-calibration tolerance | no | No recorded evidence (1.4826 is the Gaussian MAD factor) |
 | Calibration q cutoff | 0.01 | `search/src/mass_calibrator.rs:360` | PSMs trusted for the precursor residual | no | Standard 1% target-decoy cutoff |
 | Residual rejection | 50 ppm | `mass_calibrator.rs:30` | residuals dropped as isotope contamination | no | No recorded evidence |
-| Fragment-index candidates | top 100 by votes, at least 3 matched b/y | `search_params.rs:24,28` | peptidoforms scored per spectrum | `--fragment-index` (hidden) only chooses the mode | 50-1000 within seed noise on phospho (code comment); +22.2% PSMs over window enumeration on Astral at 1.00% true FDP ([§1](#calibration)) |
+| Fragment-index candidates | top 100 by votes, at least 3 matched b/y | `search_params.rs:24,28` | peptidoforms scored per spectrum | `--fragment-index` (advanced) only chooses the mode | 50-1000 within seed noise on phospho (code comment); +22.2% PSMs over window enumeration on Astral at 1.00% true FDP ([§1](#calibration)) |
 | Low-res voting peaks | 150 most intense | `search_params.rs:34` | peaks that vote at a low-resolution fragment tolerance | no | TMT low-res: all peaks 4,368 PSMs at 1%; 50/100/150 peaks 12,285/12,276/12,347 (code comment) |
 | Index slice width | 80 Da | `search/src/match_engine.rs:1464` | precursor-mass span of an out-of-core chunk | no | Changes which candidates share a vote table; no recorded evidence beyond the pinned value |
 | Strong-score retention | 25 | `search_params.rs:20` | candidates the strong re-rank can promote (strong mode only) | no | Code comment: larger pool recovers top-1 flips; no recorded measurement |
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
 | Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragment_error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
 | Isotope-mimic tolerance | 0.05 Da | `search/src/isotope_mimic.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
-| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (hidden); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
+| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
 | Entrapment prefix | `ENT_` | `search/src/refinement.rs:431` | which proteins count as entrapment | no | Naming convention |
 | Refine mods per peptide | 5 | `refinement.rs:883` | combinatorial ceiling of the second pass | the refine tier's `max_mods` is clamped to it | Memory guard (code comment) |
 | Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |
-| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (hidden) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
+| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (advanced) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
 | Co-isolation isotope walk | 3 steps | `search/src/coisolation.rs:115` | steps below an accepted peak when finding the monoisotope | no | No recorded evidence |
 | Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomer_class.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
 | Implausible residue mass | 5000 Da | `model/src/aa_set.rs:17` | residues rejected as unusable | no | Sanity bound |
@@ -2543,7 +2583,7 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Trace-area share | 0.1 | `andes/src/bin/andes/quant_finalize.rs:156` | share of precursors that report trace areas | `--quant-trace-fraction` (hidden) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
+| Trace-area share | 0.1 | `andes/src/bin/andes/quant_finalize.rs:156` | share of precursors that report trace areas | `--quant-trace-fraction` (advanced, `quant finalize`) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
 | Fit window | scans within the RT prior t_hat +/- 3 s (s learned) | `quant/src/evidence.rs:1115` | apex candidates tried | s learned per run; 3 fixed | No recorded evidence |
 | Extraction half-window | 4 s + 4 w_prior | `evidence.rs:236` | scans extracted per probe | s and w_prior learned; multiples fixed | No recorded evidence |
 | Width grid | 0.7, 1.0, 1.4 x w_prior | `evidence.rs:103` | widths tried in the fit | w_prior learned | No recorded evidence; the run-level width scale uses 0.5-2.0 (below) |
@@ -2577,7 +2617,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Backbone candidates | top 150 per spectrum | `search/src/glyco_search.rs:48` | candidates kept after truncation | no | No recorded evidence |
 | Peptide-first pool | charges 1..2, at most 1,024 peptides | `glyco_search.rs:53,62` | peptide-first candidate pool | no | Cap sweep on one glyco set: 64 gives 218 at 1%, 256 gives 232, 1024 gives 253, no cap 268; 1024 kept best precision (code comment) |
 | Peptide-first filters | at least 6 matched b/y; minimum glycan 406 (N) and 203 (O) Da; backbone at least 500 Da | `glyco_search.rs:932,188,194`, `andes-glyco/src/backbone.rs:180,184` | candidate filters | no | 406 is two HexNAc, 203 one HexNAc (the Tn core); 6: no recorded evidence |
-| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `andes-glyco/src/glyco_psm.rs:23-76` | terms of the glycopeptide score | tuning group (hidden) | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
+| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `andes-glyco/src/glyco_psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `andes-glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `andes-glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |
 | Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `andes-glyco/src/glycan_first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |

@@ -398,11 +398,11 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
             }
         }
     }
-    match (sites, &d.name, d.mass) {
+    match (sites, d.name.clone(), d.mass) {
         (Some(s), _, _) => d.sites = s,
         // `name: "Phospho (STY)"` carries its sites.
         (None, Some(name), None) => {
-            let parsed = model::mod_spec::ModDecl::parse(name).map_err(|e| e.to_string())?;
+            let parsed = model::mod_spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
             d.name = parsed.name;
             d.sites = parsed.sites;
         }
@@ -1331,6 +1331,50 @@ glyco:
             .filter(|id| !CLI_ONLY.contains(&id.as_str()) && !mapped(id))
             .collect();
         assert!(missing.is_empty(), "flags with no config key: {missing:?}");
+    }
+
+    #[test]
+    fn modification_lists_apply_with_cli_precedence() {
+        let yaml = "search:\n  fixed_mods: [\"Carbamidomethyl (C)\", {name: MyTag, mass: 28.0313, sites: N-term}]\n  \
+                    variable_mods:\n    - Oxidation (M)\n    \
+                    - {name: \"Phospho (ST)\", neutral_loss: [97.976896], loss_class: phospho, restrict_to: annotated}\n    \
+                    - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: 215.1502}\n";
+        let a = applied(yaml, &[]).unwrap();
+        let f = &a.db.fixed_mods.as_ref().unwrap().0;
+        assert_eq!(f.len(), 2);
+        assert_eq!((f[0].name.as_str(), f[0].mass_delta), ("Carbamidomethyl", 57.021464));
+        assert_eq!((f[1].name.as_str(), f[1].mass_delta), ("MyTag", 28.0313));
+        assert!(f[1].accession.is_none() && f.iter().all(|m| m.fixed));
+        let v = &a.db.variable_mods.as_ref().unwrap().0;
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[1].neutral_losses, vec![97.976896]);
+        assert_eq!(v[1].loss_class, 2);
+        assert_eq!(v[1].annotated_site_mass, Some(79.966331));
+        assert_eq!(v[3].name, "GG");
+        assert!(v[3].blocks_cleavage);
+        assert_eq!(v[3].diagnostic_ions, vec![215.1502]);
+        // A list on the command line replaces the config's; the other list stays.
+        let a = applied(yaml, &["--variable-mods", "Phospho (Y)"]).unwrap();
+        assert_eq!(a.db.variable_mods.unwrap().0.len(), 1);
+        assert_eq!(a.db.fixed_mods.unwrap().0.len(), 2);
+        let a = applied("search:\n  variable_mods: []\n", &[]).unwrap();
+        assert!(a.db.variable_mods.unwrap().0.is_empty() && a.db.fixed_mods.is_none());
+        for (bad, msg) in [
+            (
+                "search:\n  variable_mods: [{name: Phospho, sites: S, nuetral_loss: [1.0]}]\n",
+                "unknown key `nuetral_loss`",
+            ),
+            ("search:\n  variable_mods: [Phosho (S)]\n", "did you mean Phospho"),
+            ("search:\n  variable_mods: [{mass: 1.0}]\n", "`sites` is missing"),
+            (
+                "search:\n  fixed_mods: [{name: Phospho, sites: S, restrict_to: annotated}]\n",
+                "needs a variable",
+            ),
+            ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
     }
 
     #[test]

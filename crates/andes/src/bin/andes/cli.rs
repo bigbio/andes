@@ -2602,6 +2602,31 @@ mod help_layout_tests {
         }
     }
 
+    /// The modification lists parse on the command line; an unknown name
+    /// fails with close names.
+    #[test]
+    fn modification_lists_parse_and_suggest() {
+        let a = SearchWrap::try_parse_from([
+            "andes",
+            "--fixed-mods",
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+            "--variable-mods",
+            "Oxidation (M), UNIMOD:21 (STY), Gln->pyro-Glu (N-term Q)",
+        ])
+        .unwrap()
+        .args;
+        let fixed = a.db.fixed_mods.unwrap().0;
+        assert_eq!(fixed.len(), 3);
+        assert_eq!(fixed[1].name, "TMT6plex");
+        assert_eq!(a.db.variable_mods.unwrap().0.len(), 5);
+        let none = SearchWrap::try_parse_from(["andes", "--variable-mods", ""]).unwrap();
+        assert!(none.args.db.variable_mods.unwrap().0.is_empty());
+        let e = SearchWrap::try_parse_from(["andes", "--variable-mods", "Oxidaton (M)"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("did you mean Oxidation?"), "{e}");
+    }
+
     /// `andes inference` and `quant finalize` describe the database options
     /// as the search does.
     #[test]

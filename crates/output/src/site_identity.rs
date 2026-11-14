@@ -228,6 +228,7 @@ mod tests {
                     diagnostic: Some(diagnostic),
                     loss: None,
                 }],
+                ipf: None,
             })),
         }
     }

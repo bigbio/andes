@@ -81,6 +81,9 @@ pub struct SearchParams {
     pub isotope_error_range: RangeInclusive<i8>,
     /// Top-N PSMs to keep per spectrum (default 10).
     pub top_n_psms_per_spectrum: u32,
+    /// Collect IPF site-localization evidence for rows with a variable mod
+    /// (`--localize ipf`). Default off: no extra work, output unchanged.
+    pub ipf_localization: bool,
     /// Number of Tolerable Termini.
     ///
     /// Controls how strictly enzymatic cleavage is enforced at the span boundaries:
@@ -175,6 +178,7 @@ impl SearchParams {
             charge_range: 2..=3,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
+            ipf_localization: false,
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,

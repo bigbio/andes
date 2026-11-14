@@ -43,6 +43,8 @@ pub struct SiteEvidence {
     /// One mark per carried modification that declares diagnostic ions or
     /// neutral losses, in residue order.
     pub marks: Vec<ModMark>,
+    /// IPF site-localization evidence (`--localize ipf`); `None` otherwise.
+    pub ipf: Option<crate::ipf::IpfEvidence>,
 }
 
 /// b and y ions at charge 1, and at charge 2 for a precursor of charge 3 or
@@ -170,6 +172,7 @@ pub fn spectrum_evidence(
                     hit as f32 / own.len() as f32
                 },
                 marks,
+                ipf: None,
             }))
         })
         .collect()

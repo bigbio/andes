@@ -411,6 +411,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
     }
+    // Before any index or scratch work: a rejected run does no I/O.
+    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
+        return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
     // Run-private temporary files go to `--temp-dir`, by default next to the
     // output; the quantification settings read the resolved directory.
     let scratch_dir = crate::cli::dir_or_output_dir(
@@ -1099,6 +1103,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the Astral entrapment database, keeping them does not raise the true FDP
     // at Percolator's nominal 1%.
     params.top_n_psms_per_spectrum = cli.top_n;
+    params.ipf_localization = cli.localize.as_deref() == Some("ipf");
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -2992,6 +2997,49 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     sites.rows.len()
                 ),
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            }
+        }
+        // IPF site localization (`--localize ipf`): every target PSM whose row
+        // collected placement evidence at search time.
+        if params.ipf_localization {
+            let t_ipf = std::time::Instant::now();
+            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| {
+                    q.iter_psms()
+                        .any(|p| p.site_evidence.as_ref().is_some_and(|e| e.ipf.is_some()))
+                })
+                .flat_map(|(i, q)| {
+                    output::emitted_row_evidence(&spectra[i], q, &pin_candidates)
+                        .into_iter()
+                        .filter_map(|(id, _, e)| e.and_then(|e| e.ipf).map(|x| (id, x)))
+                })
+                .collect();
+            // Knockoff PSMs are never reported.
+            evidence.retain(|id, _| !knockoff_rows.contains(id));
+            let (rows, model) = output::ipf::localize_psms(map, &evidence, cli.ipf_debug);
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.ipf.tsv"));
+            // The report was requested: a failed write fails the run.
+            output::ipf::write_ipf_tsv(&path, &rows)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            eprintln!(
+                "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}) \
+                 [{:.2}s]",
+                path.display(),
+                rows.len(),
+                model.matched.map(|p| (p * 1000.0).round() / 1000.0),
+                model.unmatched,
+                t_ipf.elapsed().as_secs_f64()
+            );
+            // Only a QPX write reads (and then clears) the map.
+            if cli.output_parquet.is_some() {
+                output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             }
         }
     }

@@ -1591,8 +1591,37 @@ impl<'a> PreparedSearch<'a> {
                         .collect();
                     drop(rows);
                     drop(psms);
+                    let tol = scorer.pin_match_tolerance();
+                    let ipf = params.ipf_localization;
+                    let (declared, tiers) = if ipf {
+                        (params.aa_set.distinct_mods(), crate::ipf::peak_tiers(&spec.peaks))
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     queue.update_in_place(|psm| {
                         psm.site_evidence = evidence.remove(&key(psm)).flatten();
+                        let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                        // IPF localizes target PSMs only.
+                        if !ipf || cand.is_decoy {
+                            return;
+                        }
+                        let z = psm.charge_used;
+                        let ss = scored_spec_for_charge(z);
+                        let score = |p: &Peptide| {
+                            score_psm(ss, p, scorer, z, fragment_tolerance_da)
+                                + psm_edge_score(ss, p, scorer, z) as f32
+                        };
+                        if let Some(e) = crate::ipf::psm_evidence(
+                            &spec.peaks,
+                            &tiers,
+                            &cand.peptide,
+                            z,
+                            move |mz| tol.as_da(mz),
+                            &declared,
+                            Some(&score),
+                        ) {
+                            psm.site_evidence.get_or_insert_with(Default::default).ipf = Some(e);
+                        }
                     });
                 }
 

@@ -77,6 +77,8 @@ pub struct SearchCfg {
     pub max_mods: Option<u32>,
     pub min_peaks: Option<u32>,
     pub top_n: Option<u32>,
+    /// `ipf`, as `--localize`.
+    pub localize: Option<String>,
     pub mods: Option<PathBuf>,
     /// `auto`, `on` or `off`, as `--fragment-index`.
     pub fragment_index: Option<String>,
@@ -365,6 +367,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("max_mods", max_mods, cfg.search.max_mods);
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
+    if let Some(v) = cfg.search.localize {
+        if v != "ipf" {
+            return Err(format!("search.localize: '{v}' is not one of: ipf"));
+        }
+        set_opt!("localize", localize, Some(v));
+    }
     set_opt!("mods", mods, cfg.search.mods);
     set_parsed!(
         "fragment_index",
@@ -1145,6 +1153,7 @@ glyco:
         "precursor_mono_dump",
         "glyco_scans",
         "glyco_mbr_match_train",
+        "ipf_debug",
     ];
 
     /// Every search flag maps to a config key unless it is listed as CLI-only, so
@@ -1176,7 +1185,8 @@ glyco:
     #[test]
     fn new_keys_apply_and_validate() {
         let a = applied(
-            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n  index_cache_dir: shared/cache\n\
+            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n  index_cache_dir: shared/cache\n  \
+             localize: ipf\n\
              scoring:\n  gbdt_max_trees: 0\n  precursor_mono: \"off\"\n  ethcd_activation: etd\n  \
              peak_filter: \"100:20\"\n\
              quant:\n  lfq_gaussian_width: 12.5\n\
@@ -1188,6 +1198,7 @@ glyco:
         .unwrap();
         assert_eq!(a.fragment_index, crate::cli::FragmentIndexFlag::Off);
         assert_eq!(a.fragment_index_slice_da, Some(40.0));
+        assert_eq!(a.localize.as_deref(), Some("ipf"));
         assert_eq!(a.index_cache_dir, Some(PathBuf::from("shared/cache")));
         assert_eq!(a.gbdt_max_trees, Some(0));
         assert_eq!(a.precursor_mono, crate::cli::PrecursorMonoFlag::Off);
@@ -1212,6 +1223,7 @@ glyco:
         for bad in [
             "search:\n  fragment_index: sometimes\n",
             "search:\n  fragment_index_slice_da: 0\n",
+            "search:\n  localize: ascore\n",
             "scoring:\n  precursor_mono: maybe\n",
             "quant:\n  lfq_gaussian_width: -1\n",
             "glyco:\n  retrieval_tol_ppm: 0\n",

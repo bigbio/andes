@@ -3012,7 +3012,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .filter_map(|(id, _, e)| e.and_then(|e| e.ipf).map(|x| (id, x)))
                 })
                 .collect();
-            let (rows, model) = output::ipf::localize_psms(map, &evidence);
+            let (rows, model) = output::ipf::localize_psms(map, &evidence, cli.ipf_debug);
             output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             let stem = report_base
                 .file_stem()
@@ -3022,13 +3022,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let path = dir.join(format!("{stem}.ipf.tsv"));
             match output::ipf::write_ipf_tsv(&path, &rows) {
                 Ok(()) => eprintln!(
-                    "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}, \
-                     null {:.3}) [{:.2}s]",
+                    "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}) \
+                     [{:.2}s]",
                     path.display(),
                     rows.len(),
                     model.matched.map(|p| (p * 1000.0).round() / 1000.0),
                     model.unmatched,
-                    model.null_rate,
                     t_ipf.elapsed().as_secs_f64()
                 ),
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),

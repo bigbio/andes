@@ -36,18 +36,21 @@ pub struct IpfRow {
     pub site_ions: usize,
     pub matched_ions: usize,
     pub truncated: bool,
-    /// Per-residue localization probability, `pos:prob` for prob >= 0.01.
-    pub site_probs: String,
-    /// Debug (env `ANDES_IPF_DEBUG`): every placement as
+    /// Per-residue localization probability (1-based residue, prob), for
+    /// residues with prob >= 0.01, in residue order.
+    pub site_probs: Vec<(u16, f64)>,
+    /// Debug (`--ipf-debug`): every placement as
     /// `sites|search_score|ipf_log_evidence`, `;`-separated. Empty otherwise.
     pub forms_debug: String,
 }
 
 /// Run IPF on every target PSM of `map` that has evidence in `evidence`
 /// (keyed by PIN `SpecId`). Returns rows sorted by PSM id and the model.
+/// `debug` fills [`IpfRow::forms_debug`].
 pub fn localize_psms(
     map: &HashMap<String, PercolatorPsm>,
     evidence: &HashMap<String, IpfEvidence>,
+    debug: bool,
 ) -> (Vec<IpfRow>, IonPepModel) {
     // Two passes: fit on the search's placements, localize, refit on the
     // placements IPF prefers (so the model does not just learn the search's
@@ -58,16 +61,8 @@ pub fn localize_psms(
         .filter_map(|(id, _)| evidence.get(id))
         .collect();
     let first = IonPepModel::fit(train.iter().copied());
-    let relabeled: Vec<IpfEvidence> = train
-        .iter()
-        .map(|e| {
-            let mut e = (*e).clone();
-            e.observed = localize(0.0, &e, &first).best;
-            e
-        })
-        .collect();
-    let model = IonPepModel::fit(relabeled.iter());
-    let debug = std::env::var_os("ANDES_IPF_DEBUG").is_some();
+    let model =
+        IonPepModel::fit_labelled(train.iter().map(|&e| (e, localize(0.0, e, &first).best)));
     let mut ids: Vec<&String> = map.keys().filter(|id| evidence.contains_key(*id)).collect();
     ids.sort();
     let mut rows: Vec<IpfRow> = ids
@@ -77,16 +72,14 @@ pub fn localize_psms(
             let e = &evidence[id];
             let loc = localize(psm.pep, e, &model);
             let total: f64 = loc.forms.iter().sum();
-            let mut site_prob: HashMap<u16, f64> = HashMap::new();
+            let mut site_prob: std::collections::BTreeMap<u16, f64> = Default::default();
             if total > 0.0 {
                 for (sites, w) in e.forms.iter().zip(&loc.forms) {
                     for &s in sites {
-                        *site_prob.entry(s).or_default() += w / total;
+                        *site_prob.entry(s + 1).or_default() += w / total;
                     }
                 }
             }
-            let mut sp: Vec<(u16, f64)> = site_prob.into_iter().filter(|x| x.1 >= 0.01).collect();
-            sp.sort_by_key(|x| x.0);
             let one_based = |v: &[u16]| v.iter().map(|s| s + 1).collect::<Vec<_>>();
             IpfRow {
                 psm_id: id.clone(),
@@ -102,15 +95,11 @@ pub fn localize_psms(
                 site_ions: e.ions.len(),
                 matched_ions: e.ions.iter().filter(|i| i.tier.is_some()).count(),
                 truncated: e.truncated,
-                site_probs: sp
-                    .iter()
-                    .map(|(s, p)| format!("{}:{p:.3}", s + 1))
-                    .collect::<Vec<_>>()
-                    .join(";"),
+                site_probs: site_prob.into_iter().filter(|x| x.1 >= 0.01).collect(),
                 forms_debug: if debug {
                     // Evidence-only posterior (no PSM prior): its log is the
                     // IPF log-likelihood up to a constant per PSM.
-                    let ll = search::ipf::posterior(0.0, e.forms.len(), &model.evidence(e), 0.0);
+                    let ll = search::ipf::evidence_posterior(e, &model);
                     e.forms
                         .iter()
                         .enumerate()
@@ -145,14 +134,7 @@ pub fn localize_psms(
 pub fn site_probability_map(rows: &[IpfRow]) -> HashMap<String, HashMap<i32, f64>> {
     rows.iter()
         .map(|r| {
-            let m = r
-                .site_probs
-                .split(';')
-                .filter_map(|x| {
-                    let (p, v) = x.split_once(':')?;
-                    Some((p.parse().ok()?, v.parse().ok()?))
-                })
-                .collect();
+            let m = r.site_probs.iter().map(|&(s, p)| (s as i32, p)).collect();
             (r.psm_id.clone(), m)
         })
         .collect()
@@ -186,6 +168,10 @@ pub fn write_ipf_tsv(path: &std::path::Path, rows: &[IpfRow]) -> std::io::Result
             r.matched_ions,
             r.truncated as u8,
             r.site_probs
+                .iter()
+                .map(|(s, p)| format!("{s}:{p:.3}"))
+                .collect::<Vec<_>>()
+                .join(";")
         )?;
         if debug {
             write!(w, "\t{}", r.forms_debug)?;

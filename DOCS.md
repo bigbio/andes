@@ -518,7 +518,7 @@ softmax with weight 0.237), not uniformly as in PyProphet: the search score sees
 ions and their intensities, the IPF ions only the site-determining ones by intensity tier. The
 weight was fitted on half the peptides of the three benchmarks below; every one picked the same
 value. Fitted on any two of them (finer grid), it is again 0.237 and gives the same error on the
-third as fitting on all. `ANDES_IPF_DEBUG=1` adds a `forms_debug`
+third as fitting on all. `--ipf-debug` adds a `forms_debug`
 column: every placement as `sites|search score|IPF log-evidence`.
 
 Measured with `--rescore-native`, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than

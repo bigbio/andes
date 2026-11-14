@@ -23,7 +23,7 @@ use model::mass::{H2O, PROTON};
 use model::modification::{ModLocation, Modification};
 use model::peptide::Peptide;
 
-/// Hard cap on enumerated placements per PSM; [`placements`] reports when it
+/// Hard cap on enumerated placements per PSM; [`placements_with`] reports when it
 /// was hit so callers can flag the PSM instead of silently truncating.
 pub const MAX_PLACEMENTS: usize = 1024;
 
@@ -33,14 +33,10 @@ pub const MAX_PLACEMENTS: usize = 1024;
 /// and whether [`MAX_PLACEMENTS`] cut the enumeration short.
 ///
 /// Only residue-anywhere variable mods move: terminal mods (protein or peptide
-/// N/C-term) have a single possible site and are kept in place.
-pub fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
-    placements_with(peptide, &[])
-}
-
-/// [`placements`], also letting each mod move to residues that a declared
-/// sibling record (same name and mass, e.g. Mods.txt's separate Phospho S, T
-/// and Y lines) accepts; the residue then carries that sibling record.
+/// N/C-term) have a single possible site and are kept in place. A mod also
+/// moves to residues that a `declared` sibling record (same name and mass,
+/// e.g. Mods.txt's separate Phospho S, T and Y lines) accepts; the residue then
+/// carries that sibling record.
 pub fn placements_with(
     peptide: &Peptide,
     declared: &[&'static Modification],
@@ -93,9 +89,22 @@ pub fn placements_with(
                 .collect()
         })
         .collect();
+    // Consecutive mods with the same candidates are interchangeable: visit
+    // their sites in increasing order only, so each combination is built once
+    // (n identical mods would otherwise be enumerated n! times).
+    let same_sites = |a: &[(usize, &'static Modification)],
+                      b: &[(usize, &'static Modification)]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| x.0 == y.0 && std::ptr::eq(x.1, y.1))
+    };
+    let same_as_prev: Vec<bool> = (0..sites.len())
+        .map(|k| k > 0 && same_sites(&sites[k], &sites[k - 1]))
+        .collect();
     let mut e = Enum {
-        movable: &movable,
         sites: &sites,
+        same_as_prev: &same_as_prev,
         base: &base,
         peptide,
         chosen: movable.iter().map(|&m| (usize::MAX, m)).collect(),
@@ -112,10 +121,10 @@ pub fn placements_with(
     (out, truncated)
 }
 
-/// Depth-first enumeration state for [`placements`].
+/// Depth-first enumeration state for [`placements_with`].
 struct Enum<'a> {
-    movable: &'a [&'static Modification],
     sites: &'a [Vec<(usize, &'static Modification)>],
+    same_as_prev: &'a [bool],
     base: &'a [model::amino_acid::AminoAcid],
     peptide: &'a Peptide,
     chosen: Vec<(usize, &'static Modification)>,
@@ -130,7 +139,7 @@ impl Enum<'_> {
             self.truncated = true;
             return;
         }
-        if k == self.movable.len() {
+        if k == self.sites.len() {
             // Canonical key: sorted (site, mod mass bits) so permutations of
             // identical mods collapse to one peptidoform.
             let mut key: Vec<(usize, u64)> = self
@@ -151,7 +160,9 @@ impl Enum<'_> {
             return;
         }
         for &(s, m) in &self.sites[k] {
-            if self.chosen[..k].iter().any(|c| c.0 == s) {
+            if self.chosen[..k].iter().any(|c| c.0 == s)
+                || (self.same_as_prev[k] && s < self.chosen[k - 1].0)
+            {
                 continue;
             }
             self.chosen[k] = (s, m);
@@ -192,60 +203,66 @@ pub struct SiteIon {
     pub kind: u8,
     /// Ion number (residues covered).
     pub number: u16,
-    pub charge: u8,
     /// Indices into the placement list of the forms with an ion at `mz`.
     pub forms: Vec<u32>,
 }
 
 /// b/y ions of one form: charge 1, plus charge 2 when the precursor is 3+.
 /// A fragment that holds a residue whose modification declares neutral losses
-/// (Mods.txt `loss=`, e.g. phospho's 97.977 H3PO4) also gives one ion per loss
-/// at the same charges: the loss ion pins the mod to the fragment as well as
-/// the intact one does.
-fn by_ions(p: &Peptide, precursor_charge: u8) -> Vec<(f64, u8, u16, u8)> {
-    let masses: Vec<f64> = p
-        .residues
-        .iter()
-        .map(|a| a.mass + a.mod_.map_or(0.0, |m| m.mass_delta))
-        .collect();
+/// (Mods.txt `loss=`, e.g. phospho's 97.977 H3PO4) also gives one ion per
+/// distinct loss at the same charges: the loss ion pins the mod to the fragment
+/// as well as the intact one does. Calls `emit(mz, kind, number)`.
+fn by_ions(p: &Peptide, precursor_charge: u8, mut emit: impl FnMut(f64, u8, u16)) {
+    let n = p.residues.len();
+    if n < 2 {
+        return;
+    }
     let losses_at = |i: usize| -> &[f64] {
         p.residues[i]
             .mod_
             .filter(|m| !m.fixed)
             .map_or(&[][..], |m| &m.neutral_losses[..])
     };
-    let n = masses.len();
-    let total: f64 = masses.iter().sum();
-    let mut out = Vec::with_capacity(4 * n);
-    let mut push = |mz: f64, kind: u8, num: u16, losses: &[f64]| {
-        for (shift, z) in std::iter::once(0.0)
-            .chain(losses.iter().map(|l| -l))
-            .flat_map(|s| {
-                std::iter::once((s, 1u8)).chain((precursor_charge >= 3).then_some((s, 2u8)))
-            })
-        {
-            let m = mz + shift;
-            out.push(((m + (z - 1) as f64 * PROTON) / z as f64, kind, num, z));
+    // Distinct loss masses carried by residues 0..=i (b) and i+1..n (y).
+    fn add(set: &mut Vec<f64>, losses: &[f64]) {
+        for &l in losses {
+            if !set.iter().any(|x| (x - l).abs() < 1e-6) {
+                set.push(l);
+            }
+        }
+    }
+    let mut y_losses: Vec<Vec<f64>> = vec![Vec::new(); n];
+    for i in (0..n - 1).rev() {
+        let mut s = y_losses[i + 1].clone();
+        add(&mut s, losses_at(i + 1));
+        y_losses[i] = s;
+    }
+    let mut emit_all = |m: f64, kind: u8, num: u16, losses: &[f64]| {
+        for shift in std::iter::once(0.0).chain(losses.iter().map(|l| -l)) {
+            emit(m + shift, kind, num);
+            if precursor_charge >= 3 {
+                emit((m + shift + PROTON) / 2.0, kind, num);
+            }
         }
     };
+    let total: f64 = p
+        .residues
+        .iter()
+        .map(|a| a.mass + a.mod_.map_or(0.0, |m| m.mass_delta))
+        .sum();
     let mut prefix = 0.0;
     let mut b_losses: Vec<f64> = Vec::new();
-    for (i, m) in masses[..n.saturating_sub(1)].iter().enumerate() {
-        prefix += m;
-        b_losses.extend_from_slice(losses_at(i));
-        let y_losses: Vec<f64> = (i + 1..n).flat_map(|j| losses_at(j).to_vec()).collect();
-        let (bn, yn) = ((i + 1) as u16, (n - i - 1) as u16);
-        // One loss per fragment (the first declared per distinct mass).
-        let uniq = |v: &[f64]| {
-            let mut u: Vec<f64> = v.to_vec();
-            u.sort_by(f64::total_cmp);
-            u.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-            u
-        };
-        push(prefix + PROTON, b'b', bn, &uniq(&b_losses));
-        push(total - prefix + H2O + PROTON, b'y', yn, &uniq(&y_losses));
+    for (i, (a, y_loss)) in p.residues.iter().zip(&y_losses).take(n - 1).enumerate() {
+        prefix += a.mass + a.mod_.map_or(0.0, |m| m.mass_delta);
+        add(&mut b_losses, losses_at(i));
+        emit_all(prefix + PROTON, b'b', (i + 1) as u16, &b_losses);
+        emit_all(
+            total - prefix + H2O + PROTON,
+            b'y',
+            (n - i - 1) as u16,
+            y_loss,
+        );
     }
-    out
 }
 
 /// The site-determining ions of a set of forms: every b/y ion (merged across
@@ -257,18 +274,15 @@ pub fn site_ions(
     precursor_charge: u8,
     tol_da: impl Fn(f64) -> f64,
 ) -> Vec<SiteIon> {
-    let mut all: Vec<(f64, u8, u16, u8, u32)> = forms
-        .iter()
-        .enumerate()
-        .flat_map(|(f, p)| {
-            by_ions(p, precursor_charge)
-                .into_iter()
-                .map(move |(mz, k, num, z)| (mz, k, num, z, f as u32))
-        })
-        .collect();
+    let mut all: Vec<(f64, u8, u16, u32)> = Vec::new();
+    for (f, p) in forms.iter().enumerate() {
+        by_ions(p, precursor_charge, |mz, k, num| {
+            all.push((mz, k, num, f as u32))
+        });
+    }
     all.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut out: Vec<SiteIon> = Vec::new();
-    for (mz, kind, number, charge, f) in all {
+    for (mz, kind, number, f) in all {
         match out.last_mut() {
             Some(last) if mz - last.mz <= tol_da(mz) => {
                 if !last.forms.contains(&f) {
@@ -279,24 +293,14 @@ pub fn site_ions(
                 mz,
                 kind,
                 number,
-                charge,
                 forms: vec![f],
             }),
         }
     }
     let n = forms.len();
     out.retain(|ion| ion.forms.len() < n);
-    for ion in &mut out {
-        ion.forms.sort_unstable();
-    }
     out
 }
-
-/// Shifts of the decoy ions, in Da. Each site ion gets one decoy per shift,
-/// at an m/z no b/y ion of the peptide sits at (off the 1.00 Da isotope grid
-/// and its halves), so a decoy match is a chance match. Their match rate per
-/// intensity tier is the null the ion PEPs are learned against.
-pub const DECOY_SHIFTS: [f64; 4] = [-7.37, -3.71, 3.83, 7.59];
 
 /// A set of placement indices, one bit per form (an ion's PyProphet
 /// transition bitmask). Compact because a multiply phosphorylated peptide can
@@ -317,11 +321,6 @@ impl FormSet {
             .get(i as usize / 64)
             .is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
-    pub fn indices(&self) -> Vec<u32> {
-        (0..self.0.len() as u32 * 64)
-            .filter(|&i| self.contains(i))
-            .collect()
-    }
 }
 
 /// One site ion, judged against the spectrum.
@@ -334,8 +333,8 @@ pub struct IonMatch {
     pub tier: Option<u8>,
 }
 
-/// IPF evidence of one PSM: its peptidoforms (as placement order),
-/// the site ions matched against the spectrum and the decoy-ion tiers.
+/// IPF evidence of one PSM: its peptidoforms (as placement order), the site
+/// ions matched against the spectrum, and the search score of each form.
 #[derive(Debug, Clone, Default)]
 pub struct IpfEvidence {
     /// 0-based modified residue indices of each placement.
@@ -345,10 +344,6 @@ pub struct IpfEvidence {
     /// Whether [`MAX_PLACEMENTS`] cut the enumeration.
     pub truncated: bool,
     pub ions: Vec<IonMatch>,
-    /// Decoy ions with a peak in tolerance, and decoy ions tried (pooled over
-    /// shifts); diagnostic only.
-    pub decoy_hits: u32,
-    pub decoy_total: u32,
     /// The search's own score (node + edge, the rank score without cleavage
     /// credit, which every placement shares) of each placement, in `forms`
     /// order. Empty when not computed.
@@ -359,7 +354,8 @@ pub struct IpfEvidence {
 pub const TIERS: u8 = 4;
 
 /// Intensity tier of each peak: rank-quartiles of the spectrum (0 = top).
-fn peak_tiers(peaks: &[(f64, f32)]) -> Vec<u8> {
+/// Computed once per spectrum and shared by its rows.
+pub fn peak_tiers(peaks: &[(f64, f32)]) -> Vec<u8> {
     let mut order: Vec<usize> = (0..peaks.len()).collect();
     order.sort_by(|&a, &b| peaks[b].1.total_cmp(&peaks[a].1));
     let mut tier = vec![0u8; peaks.len()];
@@ -381,66 +377,41 @@ fn match_tier(peaks: &[(f64, f32)], tiers: &[u8], mz: f64, tol: f64) -> Option<u
         .min()
 }
 
-/// IPF evidence of one PSM's peptide against its spectrum. `None` when the
-/// peptide has no movable modification or only one possible placement.
+/// IPF evidence of one PSM's peptide against its spectrum. `tiers` is
+/// [`peak_tiers`] of `peaks`; `score`, when given, is the search's score of a
+/// placement (fills [`IpfEvidence::form_scores`]). `None` when the peptide has
+/// no movable modification or only one possible placement.
 pub fn psm_evidence(
     peaks: &[(f64, f32)],
+    tiers: &[u8],
     peptide: &Peptide,
     precursor_charge: u8,
     tol_da: impl Fn(f64) -> f64 + Copy,
     declared: &[&'static Modification],
+    score: Option<&dyn Fn(&Peptide) -> f32>,
 ) -> Option<IpfEvidence> {
     let (forms, truncated) = placements_with(peptide, declared);
     if forms.len() < 2 {
         return None;
     }
     let observed = forms.iter().position(|p| same_form(p, peptide))? as u32;
-    let tiers = peak_tiers(peaks);
-    let ions = site_ions(&forms, precursor_charge, tol_da);
-    let matches = ions
-        .iter()
+    let ions = site_ions(&forms, precursor_charge, tol_da)
+        .into_iter()
         .map(|ion| IonMatch {
             forms: FormSet::from_indices(forms.len(), &ion.forms),
-            tier: match_tier(peaks, &tiers, ion.mz, tol_da(ion.mz)),
+            tier: match_tier(peaks, tiers, ion.mz, tol_da(ion.mz)),
         })
-        .collect();
-    let decoys: Vec<bool> = ions
-        .iter()
-        .flat_map(|ion| {
-            DECOY_SHIFTS
-                .iter()
-                .map(move |s| (ion.mz + s / ion.charge as f64).max(0.0))
-        })
-        .map(|mz| match_tier(peaks, &tiers, mz, tol_da(mz)).is_some())
         .collect();
     Some(IpfEvidence {
+        form_scores: score.map_or_else(Vec::new, |s| forms.iter().map(s).collect()),
         forms: forms
             .iter()
             .map(|p| modified_sites(p).into_iter().map(|i| i as u16).collect())
             .collect(),
         observed,
         truncated,
-        ions: matches,
-        decoy_hits: decoys.iter().filter(|&&m| m).count() as u32,
-        decoy_total: decoys.len() as u32,
-        form_scores: Vec::new(),
+        ions,
     })
-}
-
-/// [`psm_evidence`], also scoring every placement with the search's scorer
-/// (`score` maps a placement to its search score).
-pub fn psm_evidence_scored(
-    peaks: &[(f64, f32)],
-    peptide: &Peptide,
-    precursor_charge: u8,
-    tol_da: impl Fn(f64) -> f64 + Copy,
-    declared: &[&'static Modification],
-    score: impl Fn(&Peptide) -> f32,
-) -> Option<IpfEvidence> {
-    let mut e = psm_evidence(peaks, peptide, precursor_charge, tol_da, declared)?;
-    let (forms, _) = placements_with(peptide, declared);
-    e.form_scores = forms.iter().map(&score).collect();
-    Some(e)
 }
 
 /// PEP of a site-ion observation by intensity tier, learned from one run.
@@ -455,36 +426,36 @@ pub fn psm_evidence_scored(
 /// second. "Unmatched" is a tier of its own, so a missing ion counts against
 /// the forms that should show it only as much as the run says it should: in
 /// DDA most theoretical ions are missing even for the right peptidoform.
-/// The decoy ions ([`DECOY_SHIFTS`]) are kept as a check on the second
-/// distribution (`null_rate`: their match rate).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IonPepModel {
     /// PEP of a matched ion, per tier.
     pub matched: [f64; TIERS as usize],
     /// PEP of an unmatched site ion (applied to the forms that have it).
     pub unmatched: f64,
-    /// Share of decoy ions with a peak in tolerance (chance match rate).
-    pub null_rate: f64,
 }
 
 impl IonPepModel {
-    /// Fit on the evidence of confident PSMs of one run.
+    /// Fit on the evidence of confident PSMs of one run, each labelled by its
+    /// own placement ([`IpfEvidence::observed`]).
     pub fn fit<'a>(evidence: impl IntoIterator<Item = &'a IpfEvidence>) -> Self {
+        Self::fit_labelled(evidence.into_iter().map(|e| (e, e.observed)))
+    }
+
+    /// [`Self::fit`] with each PSM labelled by the given placement index (an
+    /// EM step relabels by IPF's own best placement).
+    pub fn fit_labelled<'a>(evidence: impl IntoIterator<Item = (&'a IpfEvidence, u32)>) -> Self {
         let bins = TIERS as usize + 1; // last bin = unmatched
         let bin = |t: Option<u8>| t.map_or(bins - 1, |x| x as usize);
         // +1 pseudo-counts so an empty bin never gives LR 0 or infinity.
         let (mut own, mut other) = (vec![1.0f64; bins], vec![1.0f64; bins]);
-        let (mut dm, mut dn) = (0usize, 0usize);
-        for e in evidence {
+        for (e, label) in evidence {
             for ion in &e.ions {
-                if ion.forms.contains(e.observed) {
+                if ion.forms.contains(label) {
                     own[bin(ion.tier)] += 1.0;
                 } else {
                     other[bin(ion.tier)] += 1.0;
                 }
             }
-            dm += e.decoy_hits as usize;
-            dn += e.decoy_total as usize;
         }
         let (so, sx): (f64, f64) = (own.iter().sum(), other.iter().sum());
         let pep = |k: usize| {
@@ -502,23 +473,14 @@ impl IonPepModel {
         IonPepModel {
             matched,
             unmatched: pep(bins - 1),
-            null_rate: if dn == 0 { 0.0 } else { dm as f64 / dn as f64 },
         }
     }
 
-    /// IPF evidence rows of one PSM, one per site ion: its tier PEP when
-    /// matched, [`Self::unmatched`] when not, always on the forms that have it
-    /// (PyProphet's transition bitmask).
-    pub fn evidence(&self, e: &IpfEvidence) -> Vec<Evidence> {
-        e.ions
-            .iter()
-            .map(|ion| Evidence {
-                pep: ion
-                    .tier
-                    .map_or(self.unmatched, |t| self.matched[t as usize]),
-                forms: ion.forms.indices(),
-            })
-            .collect()
+    /// PEP of one site-ion observation: its tier PEP when matched,
+    /// [`Self::unmatched`] when not (applied to the forms that have it).
+    pub fn ion_pep(&self, ion: &IonMatch) -> f64 {
+        ion.tier
+            .map_or(self.unmatched, |t| self.matched[t as usize])
     }
 }
 
@@ -529,7 +491,6 @@ pub struct Localization {
     pub best: u32,
     /// Posterior of every placement (h0 excluded), in placement order.
     pub forms: Vec<f64>,
-    pub h0: f64,
     /// PEP of the best placement: 1 - its posterior (PyProphet's peptidoform PEP).
     pub pep: f64,
     /// Localization probability of the best placement given the PSM is right.
@@ -550,23 +511,38 @@ pub fn placement_prior(e: &IpfEvidence) -> Vec<f64> {
     if e.form_scores.len() != n || e.form_scores.iter().any(|s| !s.is_finite()) {
         return vec![1.0 / n as f64; n];
     }
-    let z: Vec<f64> = e
+    let m = e
         .form_scores
         .iter()
-        .map(|&s| SEARCH_SCORE_WEIGHT * s as f64)
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max) as f64;
+    let ex: Vec<f64> = e
+        .form_scores
+        .iter()
+        .map(|&s| (SEARCH_SCORE_WEIGHT * (s as f64 - m)).exp())
         .collect();
-    let m = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let ex: Vec<f64> = z.iter().map(|x| (x - m).exp()).collect();
-    let s: f64 = ex.iter().sum();
-    ex.into_iter().map(|x| x / s).collect()
+    let sum: f64 = ex.iter().sum();
+    ex.into_iter().map(|x| x / sum).collect()
 }
 
 /// IPF for one PSM: prior from the PSM's PEP (split over placements by
 /// [`placement_prior`]), evidence from the ion model.
 pub fn localize(psm_pep: f64, e: &IpfEvidence, model: &IonPepModel) -> Localization {
-    let post = posterior_with_prior(psm_pep, &placement_prior(e), &model.evidence(e), 0.0);
+    let post = log_posterior(
+        psm_pep,
+        &placement_prior(e),
+        e.ions.iter().map(|ion| (model.ion_pep(ion), ion)),
+        |ion, h| ion.forms.contains(h),
+        0.0,
+    );
     let best = (0..post.forms.len())
-        .max_by(|&a, &b| post.forms[a].total_cmp(&post.forms[b]).then(b.cmp(&a)))
+        // Ties (identical evidence) go to the placement with the lowest
+        // residues, so the result does not depend on enumeration order.
+        .max_by(|&a, &b| {
+            post.forms[a]
+                .total_cmp(&post.forms[b])
+                .then_with(|| e.forms[b].cmp(&e.forms[a]))
+        })
         .unwrap_or(0);
     let total: f64 = post.forms.iter().sum();
     Localization {
@@ -577,9 +553,22 @@ pub fn localize(psm_pep: f64, e: &IpfEvidence, model: &IonPepModel) -> Localizat
         } else {
             0.0
         },
-        h0: post.h0,
         forms: post.forms,
     }
+}
+
+/// Posterior over the placements from the ion evidence alone (uniform prior,
+/// PSM assumed right): its log is the IPF log-likelihood of each placement up
+/// to a constant per PSM. For diagnostics (`--ipf-debug`).
+pub fn evidence_posterior(e: &IpfEvidence, model: &IonPepModel) -> Posterior {
+    let n = e.forms.len();
+    log_posterior(
+        0.0,
+        &vec![1.0 / n as f64; n],
+        e.ions.iter().map(|ion| (model.ion_pep(ion), ion)),
+        |ion, h| ion.forms.contains(h),
+        0.0,
+    )
 }
 
 /// One piece of evidence: an ion's PEP and the hypotheses it supports.
@@ -599,26 +588,30 @@ pub struct Posterior {
     pub h0: f64,
 }
 
-/// The IPF Bayesian step for one PSM (PyProphet `prepare_transition_bm` +
-/// `apply_bm`, log space). `psm_pep` is the PSM's PEP after rescoring,
-/// `n_forms` the number of peptidoforms. `epsilon` clips evidence into
-/// `[epsilon, 1 - epsilon]` (PyProphet `bm_evidence_epsilon`; 0 disables).
+/// The IPF Bayesian step for one PSM with PyProphet's uniform prior
+/// (`prepare_transition_bm` + `apply_bm`, log space). `psm_pep` is the PSM's
+/// PEP after rescoring, `n_forms` the number of peptidoforms. `epsilon` clips
+/// evidence into `[epsilon, 1 - epsilon]` (PyProphet `bm_evidence_epsilon`;
+/// 0 disables).
 pub fn posterior(psm_pep: f64, n_forms: usize, evidence: &[Evidence], epsilon: f64) -> Posterior {
     assert!(n_forms > 0, "a PSM has at least its own peptidoform");
-    posterior_with_prior(
+    log_posterior(
         psm_pep,
         &vec![1.0 / n_forms as f64; n_forms],
-        evidence,
+        evidence.iter().map(|e| (e.pep, e)),
+        |e, h| e.forms.contains(&h),
         epsilon,
     )
 }
 
-/// [`posterior`] with a prior over the forms (`prior` sums to 1; the forms
-/// share `1 - psm_pep` in those proportions). Uniform gives PyProphet's IPF.
-pub fn posterior_with_prior(
+/// The Bayesian step itself: `prior` over the forms (summing to 1; the forms
+/// share `1 - psm_pep` in those proportions, h0 gets `psm_pep`), and per
+/// evidence item its PEP and whether it maps to form `h` (`maps`).
+fn log_posterior<T>(
     psm_pep: f64,
     prior: &[f64],
-    evidence: &[Evidence],
+    evidence: impl Iterator<Item = (f64, T)>,
+    maps: impl Fn(&T, u32) -> bool,
     epsilon: f64,
 ) -> Posterior {
     let n_forms = prior.len();
@@ -635,12 +628,12 @@ pub fn posterior_with_prior(
     // log prior + sum of log evidence, per hypothesis (index n_forms = h0).
     let mut l: Vec<f64> = prior.iter().map(|p| ln((1.0 - psm_pep) * p)).collect();
     l.push(ln(psm_pep));
-    for e in evidence {
-        let (for_, against) = (ln(clip(1.0 - e.pep)), ln(clip(e.pep)));
-        for (h, lh) in l.iter_mut().enumerate() {
-            let maps = h < n_forms && e.forms.contains(&(h as u32));
-            *lh += if maps { for_ } else { against };
+    for (pep, item) in evidence {
+        let (for_, against) = (ln(clip(1.0 - pep)), ln(clip(pep)));
+        for (h, lh) in l[..n_forms].iter_mut().enumerate() {
+            *lh += if maps(&item, h as u32) { for_ } else { against };
         }
+        l[n_forms] += against;
     }
     let mx = l.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if !mx.is_finite() {
@@ -651,12 +644,15 @@ pub fn posterior_with_prior(
             h0: 0.0,
         };
     }
-    let z: f64 = l.iter().map(|x| (x - mx).exp()).sum();
-    let p: Vec<f64> = l.iter().map(|x| (x - mx).exp() / z).collect();
-    Posterior {
-        forms: p[..n_forms].to_vec(),
-        h0: p[n_forms],
+    for x in &mut l {
+        *x = (*x - mx).exp();
     }
+    let z: f64 = l.iter().sum();
+    let h0 = l.pop().unwrap() / z;
+    for x in &mut l {
+        *x /= z;
+    }
+    Posterior { forms: l, h0 }
 }
 
 /// Model-based q-values from PEPs (PyProphet `compute_model_fdr`): sort
@@ -687,30 +683,15 @@ pub fn model_fdr(peps: &[f64]) -> Vec<f64> {
     q
 }
 
-/// Localization probability of every residue of the PSM's peptide: the
-/// posterior mass of the peptidoforms that put a movable mod there,
-/// normalised by the peptidoform mass (so it is conditional on the PSM
-/// being right, as a site probability is usually reported).
-pub fn site_probabilities(forms: &[Peptide], post: &Posterior) -> Vec<f64> {
-    let n = forms.first().map_or(0, |p| p.residues.len());
-    let mut out = vec![0.0; n];
-    let total: f64 = post.forms.iter().sum();
-    if total <= 0.0 {
-        return out;
-    }
-    for (p, &w) in forms.iter().zip(&post.forms) {
-        for i in modified_sites(p) {
-            out[i] += w / total;
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use model::amino_acid::AminoAcid;
     use model::modification::ResidueSpec;
+
+    fn placements(peptide: &Peptide) -> (Vec<Peptide>, bool) {
+        placements_with(peptide, &[])
+    }
 
     fn phospho(r: u8) -> &'static Modification {
         Box::leak(Box::new(Modification {
@@ -758,6 +739,16 @@ mod tests {
         assert_eq!(forms.len(), 3);
         // Unmodified peptide: itself only.
         assert_eq!(placements(&pep("PEPTIDE", &[])).0.len(), 1);
+        // Three identical mods on six S: C(6,3) = 20 forms, each once, the
+        // input among them (the ordered walk must not lose any combination).
+        let input = pep("SSASSASS", &[0, 4, 7]);
+        let (forms, cut) = placements(&input);
+        assert!(!cut);
+        let mut sites: Vec<Vec<usize>> = forms.iter().map(modified_sites).collect();
+        sites.sort();
+        sites.dedup();
+        assert_eq!((forms.len(), sites.len()), (20, 20));
+        assert!(forms.iter().any(|p| same_form(p, &input)));
     }
 
     #[test]
@@ -844,10 +835,8 @@ mod tests {
         let truth = pep("ASATSKSAPEK", &[4]);
         let reported = pep("ASATSKSAPEK", &[1]);
         // Spectrum: b/y of the truth at charge 1 (intense) + uniform noise.
-        let mut peaks: Vec<(f64, f32)> = by_ions(&truth, 2)
-            .into_iter()
-            .map(|(mz, ..)| (mz, 100.0))
-            .collect();
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        by_ions(&truth, 2, |mz, _, _| peaks.push((mz, 100.0)));
         let mut x = 0.123_f64;
         for _ in 0..200 {
             x = (x * 9301.0 + 49297.0) % 233280.0; // LCG
@@ -855,11 +844,12 @@ mod tests {
         }
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let tol = |mz: f64| mz * 10e-6;
-        let e = psm_evidence(&peaks, &reported, 2, tol, &[]).unwrap();
+        let tiers = peak_tiers(&peaks);
+        let e = psm_evidence(&peaks, &tiers, &reported, 2, tol, &[], None).unwrap();
         assert_eq!(e.forms.len(), 3); // S1, S4, S6
         assert_eq!(e.forms[e.observed as usize], vec![1]);
         // Fit as on a run: most confident PSMs report the right placement.
-        let right = psm_evidence(&peaks, &truth, 2, tol, &[]).unwrap();
+        let right = psm_evidence(&peaks, &tiers, &truth, 2, tol, &[], None).unwrap();
         let mut train = vec![&right; 45];
         train.extend(std::iter::repeat_n(&e, 5));
         let model = IonPepModel::fit(train);
@@ -904,19 +894,5 @@ mod tests {
         for (a, b) in q.iter().zip(want) {
             assert!((a - b).abs() < 1e-12, "{q:?}");
         }
-    }
-
-    #[test]
-    fn site_probabilities_sum_over_forms() {
-        let (forms, _) = placements(&pep("ASATSK", &[1]));
-        let post = Posterior {
-            forms: vec![0.6, 0.3],
-            h0: 0.1,
-        };
-        let s = site_probabilities(&forms, &post);
-        let i1 = modified_sites(&forms[0])[0];
-        let i2 = modified_sites(&forms[1])[0];
-        assert!((s[i1] - 2.0 / 3.0).abs() < 1e-12);
-        assert!((s[i2] - 1.0 / 3.0).abs() < 1e-12);
     }
 }

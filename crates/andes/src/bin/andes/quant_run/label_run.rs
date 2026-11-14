@@ -451,6 +451,39 @@ fn fit_folded(
     Some((fit, converted))
 }
 
+/// The joint fit at the identified channels' profile (with its satellite
+/// conversions) and the pinned probe it was measured with.
+type ProfileFit = ((GroupFit, Vec<Option<f64>>), GroupProbe);
+
+/// The fit of a group with unidentified channels at the elution profile of
+/// its identified channels: the apex and width are searched with only the
+/// identified channels (and their satellites) free, the others held at 0,
+/// and every channel is then measured jointly at that profile, pinned. Also
+/// returns the pinned probe, from which the decoys of the unidentified
+/// channels are made: neither an unidentified channel nor a decoy can move
+/// the profile onto a species at its own m/z. `rt_z` is the profile fit's.
+fn fit_at_identified_profile(
+    ms1: &Ms1RunIndex,
+    g: &Group,
+    probe: &GroupProbe,
+    ids: &[Option<ChannelHit>],
+    params: &FitParams,
+) -> Option<ProfileFit> {
+    let n = g.channel_mz.len();
+    let mut shape = probe.clone();
+    shape.free = (0..shape.channel_mz.len())
+        .map(|k| ids[if k < n { k } else { g.satellites[k - n].0 }].is_some())
+        .collect();
+    let (profile, _) = fit_folded(ms1, g, &shape, params)?;
+    let mut pinned = probe.clone();
+    pinned.t_hat = profile.t0;
+    pinned.w_prior = profile.w;
+    pinned.pinned = true;
+    let (mut fit, converted) = fit_folded(ms1, g, &pinned, params)?;
+    fit.rt_z = profile.rt_z;
+    Some(((fit, converted), pinned))
+}
+
 /// Learns the run's elution width from `anchors` (group, RT of its best PSM
 /// in reference time): rounds of fits with the width free, the median
 /// fitted width of the strong fits, until it moves by less than 10 %.
@@ -903,20 +936,36 @@ pub(super) fn quantify(
                         })?;
                     let t_hat = best.1.rt - shifts[best.0];
                     let probe = probe_of(g, t_hat, s, w, &shifts);
-                    let (fit, converted) = fit_folded(ms1, g, &probe, &fit_params)?;
                     let missing: Vec<usize> = (0..n_ch).filter(|&c| chans[c].is_none()).collect();
+                    let ((fit, converted), probe) = if missing.is_empty() {
+                        (fit_folded(ms1, g, &probe, &fit_params)?, probe)
+                    } else {
+                        let ((mut fit, conv), pinned) =
+                            fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?;
+                        // The identified channels keep their quantities from the
+                        // free joint fit, as a group with every channel
+                        // identified does; only the unidentified channels (and
+                        // their decoys, made from `pinned`) are read at the
+                        // identified channels' profile.
+                        if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
+                            let hits = chans.iter();
+                            for ((ch, f), hit) in
+                                fit.channels.iter_mut().zip(&free.channels).zip(hits)
+                            {
+                                if hit.is_some() {
+                                    *ch = f.clone();
+                                }
+                            }
+                        }
+                        ((fit, conv), pinned)
+                    };
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
-                        for mut dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
-                            // A decoy reads its mass at the group's fitted
-                            // elution, as the channel it stands for does: free
-                            // to search its own apex, a decoy near a strong
-                            // co-eluting species moves the group's profile
-                            // onto it and outscores every weak real channel.
-                            dp.t_hat = fit.t0;
-                            dp.w_prior = fit.w;
-                            dp.pinned = true;
+                        // The decoys move the missing channels' masses of the
+                        // pinned probe: measured at the same profile as the
+                        // channels they stand for, which none of them shaped.
+                        for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
                                 decoy_scores[c].push(df.as_ref().map_or((0.0, None, 0.0), |d| {
@@ -1741,6 +1790,101 @@ mod tests {
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
+    }
+
+    /// A light-only group whose heavy channel is absent, with a strong
+    /// species eluting 6 s later either at the heavy channel's m/z (the
+    /// target's situation) or at a decoy's (the decoy's): the target's heavy
+    /// channel scores no better than that decoy, since both are measured at
+    /// the light channel's profile, which neither moves.
+    #[test]
+    fn missing_channel_scores_like_its_decoys_next_to_an_interferer() {
+        use model::scan::Ms1Scan;
+        let env = ChannelEnvelope::new(&[0.55, 0.3, 0.11, 0.04], 0, 1.0, 0, 1.0);
+        let z = 2.0;
+        let ml = 512.27;
+        let g = Group {
+            key: "PEPTIDEK".into(),
+            sequence: "PEPTIDEK".into(),
+            charge: 2,
+            proteins: Vec::new(),
+            channel_mz: vec![ml, ml + 8.014199 / z],
+            envelopes: vec![env, env],
+            deltas: vec![0.0, 8.014199],
+            faims_cv: None,
+            satellites: Vec::new(),
+            identity_decoy: false,
+        };
+        let ids = vec![Some(ChannelHit { hi: 0, rt: 100.0 }), None];
+        let probe = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
+        let params = FitParams::default();
+        // The run: the light channel at apex 100 s, and a species 5x as
+        // strong at `mz`, apex 106 s; sigma 4 s.
+        let run = |mz: f64| {
+            let scans: Vec<Ms1Scan> = (0..600)
+                .map(|k| {
+                    let rt = k as f64 / 3.0;
+                    let mut peaks: Vec<(f64, f32)> =
+                        (0..60).map(|j| (350.0 + 11.3 * j as f64, 50.0)).collect();
+                    for (m, apex, amp) in [(ml, 100.0, 1e6), (mz, 106.0, 5e6)] {
+                        let e = (-(rt - apex) * (rt - apex) / 32.0f64).exp();
+                        for off in 0..4 {
+                            let v = amp * env.at(off) * e;
+                            if v > 50.0 {
+                                peaks.push((m + off as f64 * model::mass::ISOTOPE / z, v as f32));
+                            }
+                        }
+                    }
+                    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    Ms1Scan {
+                        rt,
+                        peaks,
+                        id: format!("scan={k}"),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            Ms1RunIndex::new(scans)
+        };
+        let decoy_mz = decoy_probes(&g, &probe, &[1], 10.0, 7, 1)[0].channel_mz[1];
+        assert!((decoy_mz - g.channel_mz[1]).abs() > 0.01);
+
+        // The target's situation: the species sits on the heavy channel. A
+        // free joint fit is pulled onto it; the measurement is not.
+        let at_heavy = run(g.channel_mz[1]);
+        let (free, _) = fit_folded(&at_heavy, &g, &probe, &params).unwrap();
+        assert!(free.t0 > 102.0, "free apex {}", free.t0);
+        let ((target, _), _) =
+            fit_at_identified_profile(&at_heavy, &g, &probe, &ids, &params).unwrap();
+        assert!((target.t0 - 100.0).abs() < 0.5, "apex {}", target.t0);
+
+        // The decoy's situation: the same species on the decoy's m/z.
+        let at_decoy = run(decoy_mz);
+        let (_, pinned) = fit_at_identified_profile(&at_decoy, &g, &probe, &ids, &params).unwrap();
+        let dp = decoy_probes(&g, &pinned, &[1], 10.0, 7, 1).remove(0);
+        assert_eq!(dp.channel_mz[1], decoy_mz);
+        let (decoy, _) = fit_folded(&at_decoy, &g, &dp, &params).unwrap();
+
+        let (st, sd) = (
+            channel_score(&target.channels[1]),
+            channel_score(&decoy.channels[1]),
+        );
+        // Read at the same pinned profile, the target and the decoy see the
+        // species alike (6 s off the apex their coherence, and so their score,
+        // can be 0): neither scores better than the other.
+        assert!(
+            (st - sd).abs() <= 0.02 * st.max(sd) + 1e-9,
+            "target {st} vs decoy {sd}"
+        );
+        assert!(
+            (target.channels[1].apex_offset - decoy.channels[1].apex_offset).abs() < 0.2,
+            "{} vs {}",
+            target.channels[1].apex_offset,
+            decoy.channels[1].apex_offset
+        );
+        // The identified channel is measured at its own profile.
+        let (r, _) = log2_ratio(&target.channels[0], &decoy.channels[0]).unwrap();
+        assert!(r.abs() < 0.02, "{r}");
     }
 
     /// The learned elution width finds the true width and does not jump when

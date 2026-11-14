@@ -709,7 +709,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--quant-fdr` | 0..1 | `0.01` | Quantification FDR: the q-value cut of the values measured without their own identification (match-between-runs transfers, `--label` channels matched without an identification) and, with `--lfq`, of `accepted` in `lfq.parquet` (target/decoy competition of each feature against its +11 Th twin). Quant-quality q-values, not an identification FDR. Unset, the `--label` channels and transfers, `lfq.parquet` `accepted` and the `--glyco --lfq --mbr` transfers use 0.05 (coarse q-values; see *Rescoring & FDR filtering*). The PSMs quantified, and the PSM q-value at which a run identifies a precursor with `--mbr`, follow `--psm-fdr`. |
 | `--mbr-donor-fdr` | 0..1 | `--psm-fdr` | *(advanced)* Library entry gate (precursor-level): best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--quant-transfer-fdr` | 0..1 | `--quant-fdr` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-11-05, defaults), `0.05` adds about 7k precursors quantified in at least 3 runs to 0.01 (63.8k to 71.3k) at an accuracy cost (median \|eps\| 0.161 to 0.175, E. coli 0.26 to 0.44, CV 0.117 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. Also the cut of the `--tmt --mbr` reporter transfers, of the `--label --mbr` transfers (the identity-decoy false-donor rate included; 0.05 when `--quant-fdr` is unset too) and of the `--glyco --lfq --mbr` transfers (likewise 0.05). |
-| `--quant-channel-fdr` | 0..1 | `--quant-fdr` (0.05 when unset) | *(advanced)* `--label`: quality q-value cut of a channel measured without an identification (match between channels): target/decoy competition, within its run, of its fit against the same fit, at the group's fitted elution, at up to four non-label mass shifts. An internal quant-quality q-value. On known-ratio SILAC data (PXD022659, TripleTOF and Orbitrap) the channels matched at q ≤ 0.01 are about as accurate as pairs whose channels are both identified; between 0.01 and 0.05 their spread is wider but their ratios stay centred, and beyond 0.1 accuracy falls off (§10). In a run whose unidentified channels are weak (10/90), most matches lie between 0.01 and 0.05. |
+| `--quant-channel-fdr` | 0..1 | `--quant-fdr` (0.05 when unset) | *(advanced)* `--label`: quality q-value cut of a channel measured without an identification (match between channels): target/decoy competition, within its run, of its fit against the same fit, at the elution profile fitted from the group's identified channels, at up to four non-label mass shifts. An internal quant-quality q-value. On known-ratio SILAC data (PXD022659, TripleTOF and Orbitrap) the channels matched at q ≤ 0.01 are about as accurate as pairs whose channels are both identified; between 0.01 and 0.05 their spread is wider but their ratios stay centred, and beyond 0.1 accuracy falls off (§10). In a run whose unidentified channels are weak (10/90), most matches lie between 0.01 and 0.05. |
 
 With `--output-parquet`, every module adds `quantms.feature.parquet` (the QPX feature view) to the bundle; `--label` writes one feature per (group, run) with an intensity per quantified channel under its SDRF label (`SILAC light`/`medium`/`heavy`, `DIMETHYL0`/`4`/`6`/`8`; channels outside that vocabulary are left out with a warning); with `--mbr`, transferred groups are features too, carrying the identification of the group's best PSM in another run, `evidence_type` `transfer_ms1` and their `transfer_q`.
 
@@ -2204,12 +2204,14 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   `Δt` is the channel's elution centroid (its monoisotope and M+1, the other channels' parts
   removed) against the shared apex, `σ_t` √2 times the run's spread of identified-channel offsets:
   a real channel elutes with its partners, another species' envelope at a random offset, which
-  separates them where mass accuracy cannot (TOF). The decoys are measured at the group's fitted
-  apex and width, as the channel they stand for is: a decoy fit free to search its own apex moves
-  the whole group's profile onto a strong species near its mass (in such fits the identified
-  channel keeps about 30 % of its quantity) and scores like a perfect channel, co-eluting, with the
-  right pattern and mass, which a weak real channel cannot match (PXD022659 10/90: no channel
-  matched between channels until the decoys were pinned). A channel is `match_channel` at
+  separates them where mass accuracy cannot (TOF). An unidentified channel and its decoys are read at
+  one elution profile, the apex and width fitted from the group's identified channels alone (the
+  unidentified channels held at 0), so none of them can move it; the identified channels keep their
+  quantities from the free joint fit. A decoy fit free to search its own apex moves the group's
+  profile onto a strong species near its mass and scores like a perfect channel, which a weak real
+  channel cannot match (PXD022659 10/90: no channel matched between channels); decoys pinned to the
+  group's free joint fit are not enough either, because that fit can itself be pulled onto a species
+  at the unidentified channel's own mass, which its decoys cannot follow (below, *Null channels*). A channel is `match_channel` at
   `--quant-channel-fdr` (0.05 when neither it nor `--quant-fdr` is given) with an envelope cosine of at least 0.7, no strong residual M−1, and, when weaker
   than a fifth of the identified channel, a coherence of at least 0.5 (OpenMS's co-elution check
   for weak re-quantified channels); `below_detection` without signal; `not_quantifiable` when
@@ -2246,7 +2248,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
 
-**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's profile, except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
+**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's joint fit, before they were read at the identified channels' profile (*Null channels* below), except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
 m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
@@ -2355,17 +2357,29 @@ matched there between 4,862 and 698. With both fixed, the runs' widths are 3.8 t
 channels matched between channels in the three runs 9,275 (light) and 7,646 (heavy), from 2,718 and
 3,561.
 
-The false matches of match between channels were measured with a channel the sample does not hold.
-`B_0-7ug_DDA_061` (a Lys8/Arg10 duplex) searched with `silac3` adds a Lys4/Arg6 channel, real label
-chemistry with its 2H RT offset (learned at −0.58 s), every one of whose matches is false; it
-competes in the same per-run q-values. Scaling its matches by the candidates (15,179 unidentified
-real-channel, 26,980 absent-channel) estimates the false-match rate among the real channels' matches
-at 0.93 % at q ≤ 0.01 (33 absent against 1,996 real matches), 0.99 % at 0.02 (73 / 4,150) and 1.42 %
-at the default 0.05 (161 / 6,401), an upper bound under the assumption that the absent channel's
-candidates behave like the real channels' nulls. The false matches split evenly between lysine and
-arginine peptides (0.52 % and 0.71 % of their candidates), so they are not Arg6 landing on the light
-M+6. A synthetic channel at `K+22.5,R+22.5` (half an isotope from both real channels) gives the same
-picture: 59 matches of about 27,000 candidates against 7,328 in the real channels.
+*Null channels.* The false matches of match between channels are measured with a channel the sample
+does not hold, every one of whose matches is false, competing in the same per-run q-values.
+
+- **Absent label channel:** `B_0-7ug_DDA_061` (a Lys8/Arg10 duplex) searched with `silac3` adds a
+  Lys4/Arg6 channel (real label chemistry). Scaling its matches by the candidates estimates the false
+  share among the real channel's matches (an upper bound, assuming the absent channel's candidates
+  behave like the real channels' nulls).
+- **Unlabelled sample:** a ProteoBench QE run (`LFQ_Orbitrap_DDA_Condition_A_Sample_Alpha_01`, no
+  label at all) searched with `silac2` and `silac3`: every heavy match is false.
+
+| | decoys pinned to the group's joint fit | read at the identified channels' profile |
+|---|---|---|
+| absent Lys4/Arg6: candidates passing q ≤ 0.05 (of 39,252) | 755 | 140 |
+| absent Lys4/Arg6: `match_channel` (real Lys8/Arg10 matches) | 207 (995) | 39 (710) |
+| estimated false share among the real matches | 6.5 % | 1.7 % |
+| unlabelled `silac2`: heavy candidates passing q ≤ 0.05 (of 68,302) | 531 | 0 |
+| unlabelled `silac3`: absent candidates passing q ≤ 0.05 (of 138,075) | 568 | 0 |
+| unlabelled: false `match_channel` (`silac2` / `silac3`) | 118 / 131 | 0 / 0 |
+
+On the PXD022659 HeLa runs (`--rescore-native --label silac2 --mbr`, reviewed human proteome), reading
+at the identified channels' profile keeps about 94 % of the matched channels, with the same or lower
+error: in 10/90 the matched heavy channels go from 2,818 (median absolute error 0.298, 2.7 %
+gross) to 2,664 (0.276, 1.1 % gross); pairs with both channels identified are unchanged.
 
 *PXD003327* (E. coli triple SILAC `[][Lys4,Arg6][Lys8,Arg10]`, Orbitrap, run `Chris_Ecoli_1-2-4`;
 20.7 s in all, 1.0 s for `--label`, 946 groups; 279 / 544 / 346 channels matched between

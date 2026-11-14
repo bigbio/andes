@@ -367,11 +367,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("max_mods", max_mods, cfg.search.max_mods);
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
-    if let Some(v) = cfg.search.localize {
+    if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
         if v != "ipf" {
             return Err(format!("search.localize: '{v}' is not one of: ipf"));
         }
-        set_opt!("localize", localize, Some(v));
+        args.localize = Some(v);
     }
     set_opt!("mods", mods, cfg.search.mods);
     set_parsed!(
@@ -1231,6 +1231,9 @@ glyco:
         ] {
             assert!(applied(bad, &[]).is_err(), "{bad} must be rejected");
         }
+        // An explicit CLI flag overrides a config value, valid or not.
+        let o = applied("search:\n  localize: ascore\n", &["--localize", "ipf"]).unwrap();
+        assert_eq!(o.localize.as_deref(), Some("ipf"));
 
         // An explicit CLI flag still wins.
         let a = applied(

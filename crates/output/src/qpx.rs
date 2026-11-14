@@ -136,6 +136,14 @@ pub fn write_qpx(
     rescore_decoys: Option<&HashSet<String>>,
     excluded: &HashSet<String>,
 ) -> std::io::Result<()> {
+    // The IPF map applies to this call only: clear it on every return.
+    struct ClearIpf;
+    impl Drop for ClearIpf {
+        fn drop(&mut self) {
+            IPF_SITE_PROBS.with(|p| p.borrow_mut().clear());
+        }
+    }
+    let _clear_ipf = ClearIpf;
     if run_ends.len() != primary_ms_run_paths.len()
         || run_ends.windows(2).any(|w| w[0] > w[1])
         || run_ends.last().copied().unwrap_or(0) != spectra.len()

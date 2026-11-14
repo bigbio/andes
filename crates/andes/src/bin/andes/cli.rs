@@ -362,7 +362,7 @@ pub(crate) struct SearchArgs {
     /// Site localization of variable modifications. `ipf`: inference of
     /// peptidoforms (the OpenSWATH/PyProphet hierarchical Bayesian model)
     /// over every placement of each PSM's variable mods, after rescoring.
-    /// Writes `<stem>.ipf.tsv`. Experimental; needs `--rescore`.
+    /// Writes `<stem>.ipf.tsv`. Experimental; needs `--rescore` or `--rescore-native`.
     #[arg(long = "localize", value_parser = ["ipf"])]
     pub(crate) localize: Option<String>,
 

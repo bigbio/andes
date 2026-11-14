@@ -497,7 +497,8 @@ do not change.
 every PSM by inference of peptidoforms, the hierarchical Bayesian model of OpenSWATH/PyProphet IPF
 (Rosenberger et al. 2017). For one PSM the hypotheses are every placement of its variable mods on
 the residues each may occupy, plus "the PSM is wrong" (h0):
-- prior: h0 = the PSM's PEP, each placement (1 − PEP) / number of placements;
+- prior: h0 = the PSM's PEP, placement i (1 − PEP) × w_i, where w_i is the normalised
+  search-score weight of placement i (see below; PyProphet uses w_i = 1 / number of placements);
 - evidence: each fragment ion that not every placement has (the site-determining ions, b/y at
   charge 1, charge 2 for 3+ precursors, and the `loss=` neutral losses of fragments holding the mod)
   supports the placements that have it with (1 − ion PEP) and the others with the ion PEP;

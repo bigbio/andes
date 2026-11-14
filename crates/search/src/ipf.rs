@@ -172,8 +172,11 @@ impl Enum<'_> {
     }
 }
 
+/// A `sites=annotated` mod stays in place: IPF has no protein position to
+/// apply the annotation test, and a move could give a form that the search
+/// never makes.
 fn is_movable(m: &Modification) -> bool {
-    !m.fixed && m.location == ModLocation::Anywhere
+    !m.fixed && m.location == ModLocation::Anywhere && m.annotated_site_mass.is_none()
 }
 
 /// Same residues and the same modification (by mass) on each.
@@ -741,6 +744,12 @@ mod tests {
         assert_eq!(forms.len(), 3);
         // Unmodified peptide: itself only.
         assert_eq!(placements(&pep("PEPTIDE", &[])).0.len(), 1);
+        // A `sites=annotated` mod stays in place.
+        let mut annotated = pep("ASATSK", &[1]);
+        let mut m = phospho(b'S').clone();
+        m.annotated_site_mass = Some(m.mass_delta);
+        annotated.residues[1].mod_ = Some(Box::leak(Box::new(m)));
+        assert_eq!(placements(&annotated).0.len(), 1);
         // Three identical mods on six S: C(6,3) = 20 forms, each once, the
         // input among them (the ordered walk must not lose any combination).
         let input = pep("SSASSASS", &[0, 4, 7]);

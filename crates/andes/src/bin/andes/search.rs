@@ -1688,6 +1688,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
+    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
+        return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
     // `--glyco --mbr` is the glyco path's own match-between-runs (RT
     // alignment + XIC transfer inside the intact-glycopeptide tables), not the
     // peptide library stages. It needs the glyco LFQ stage's features.
@@ -2999,7 +3002,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // collected placement evidence at search time.
         if params.ipf_localization {
             let t_ipf = std::time::Instant::now();
-            let evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
+            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
                 .iter()
                 .enumerate()
                 .filter(|(_, q)| {
@@ -3012,6 +3015,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .filter_map(|(id, _, e)| e.and_then(|e| e.ipf).map(|x| (id, x)))
                 })
                 .collect();
+            // Knockoff PSMs are never reported.
+            evidence.retain(|id, _| !knockoff_rows.contains(id));
             let (rows, model) = output::ipf::localize_psms(map, &evidence, cli.ipf_debug);
             output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             let stem = report_base

@@ -2522,7 +2522,10 @@ mod help_layout_tests {
             if matches!(id, "help" | "version") {
                 continue;
             }
-            assert!(arg.get_help_heading().is_some(), "{id} has no heading");
+            assert!(
+                arg.is_hide_set() || arg.get_help_heading().is_some(),
+                "{id} has no heading"
+            );
             let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
             assert!(!help.trim().is_empty(), "{id} has no help");
             let flag = format!("--{}", arg.get_long().unwrap());

@@ -14,6 +14,7 @@ pub mod fragment_error;
 pub mod fragment_index;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
+pub mod ipf;
 pub mod isomer;
 pub mod isotope_mimic;
 pub mod mass_calibrator;

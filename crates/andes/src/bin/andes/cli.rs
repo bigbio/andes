@@ -359,6 +359,18 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true, default_value = "10")]
     pub(crate) top_n: u32,
 
+    /// Site localization of variable modifications. `ipf`: inference of
+    /// peptidoforms (the OpenSWATH/PyProphet hierarchical Bayesian model)
+    /// over every placement of each PSM's variable mods, after rescoring.
+    /// Writes `<stem>.ipf.tsv`. Experimental; needs `--rescore` or `--rescore-native`.
+    #[arg(long = "localize", value_parser = ["ipf"])]
+    pub(crate) localize: Option<String>,
+
+    /// With `--localize ipf`: add a `forms_debug` column to `<stem>.ipf.tsv`,
+    /// every placement as `sites|search score|IPF log-evidence`. Diagnostics.
+    #[arg(long = "ipf-debug", hide = true, requires = "localize")]
+    pub(crate) ipf_debug: bool,
+
     /// Number of Tolerable Termini (enzymatic-cleavage enforcement at span
     /// boundaries). `fully`: both termini must be cleavage sites (strict).
     /// `semi`: at least one terminus must be a cleavage site. `non-specific`:

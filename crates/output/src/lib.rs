@@ -46,6 +46,7 @@ pub use class_fdr::{apply_class_fdr, ClassCount, Cutoffs};
 pub mod isobaric_sharing;
 pub use isobaric_sharing::share_isobaric_references;
 
+pub mod ipf;
 pub mod knockoff_fdr;
 pub mod site_fdr;
 pub mod site_identity;

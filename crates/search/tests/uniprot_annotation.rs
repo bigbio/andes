@@ -1,6 +1,6 @@
 //! Candidate generation over a UniProt XML database: sequence-variant entries
 //! yield only the peptides that carry the variant, mods declared
-//! `sites=annotated` land only on annotated residues, decoys mirror both, and
+//! `restrict_to: annotated` land only on annotated residues, decoys mirror both, and
 //! every expansion path (in-RAM, lazy precursor window, fragment-index walk)
 //! produces the same candidate set.
 
@@ -18,6 +18,19 @@ use search::candidate_gen::{
 use search::candidate_index::MmapCandidateIndex;
 use search::decoy::{decoy_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
+
+/// The modifications of a `Name (sites), ...` list.
+fn spec(list: &str, fixed: bool) -> Vec<Modification> {
+    model::mod_spec::parse_mod_list(list, fixed).unwrap()
+}
+
+/// The one variable modification of a single-site item, restricted to the
+/// sites the database annotates.
+fn annotated(item: &str) -> Modification {
+    let mut m = spec(item, false).remove(0);
+    m.annotated_site_mass = Some(m.mass_delta);
+    m
+}
 
 /// P1 (tryptic peptides AGSPEK | TLSYR | SDSPAK | VNSTQR, 0-based S2, S8, S11,
 /// S13, S19, T6, T20) is phosphorylated at S2 (experimental), S13
@@ -71,11 +84,14 @@ fn target_db(evidence: EvidenceLevel, variants: bool) -> ProteinDb {
 
 /// Phospho on S and T: restricted to annotated sites or not.
 fn params(restricted: bool) -> SearchParams {
-    let sites = if restricted { ",sites=annotated" } else { "" };
     let mut builder = AminoAcidSetBuilder::new_standard();
     for r in ["S", "T"] {
-        let line = format!("79.966331,{r},opt,any,Phospho{sites}");
-        builder = builder.add_variable_mod(Modification::from_mods_txt_line(&line).unwrap());
+        let item = format!("Phospho ({r})");
+        builder = builder.add_variable_mod(if restricted {
+            annotated(&item)
+        } else {
+            spec(&item, false).remove(0)
+        });
     }
     let mut p = SearchParams::default_tryptic(builder.build().unwrap());
     p.min_length = 4;
@@ -360,9 +376,7 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
     let target = load_uniprot_xml(NTERM_XML.as_bytes(), &UniProtOptions::default())
         .unwrap()
         .0;
-    let acetyl =
-        Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated")
-            .unwrap();
+    let acetyl = annotated("Acetyl (Protein N-term)");
     let mut p = SearchParams::default_tryptic(
         AminoAcidSetBuilder::new_standard()
             .add_variable_mod(acetyl)
@@ -401,12 +415,9 @@ fn unrestricted_terminal_mod_is_not_hidden_by_a_restricted_twin() {
     // residue unrestricted: an unannotated protein starting with K must still
     // get its protein-N-term acetyl on that K.
     let mut builder = AminoAcidSetBuilder::new_standard();
-    for line in [
-        "42.010565,K,opt,any,Acetyl,sites=annotated",
-        "42.010565,*,opt,Prot-N-term,Acetyl",
-    ] {
-        builder = builder.add_variable_mod(Modification::from_mods_txt_line(line).unwrap());
-    }
+    builder = builder
+        .add_variable_mod(annotated("Acetyl (K)"))
+        .add_mods(spec("Acetyl (Protein N-term)", false));
     let mut p = SearchParams::default_tryptic(builder.build().unwrap());
     p.min_length = 4;
     p.max_missed_cleavages = 1;
@@ -657,9 +668,7 @@ fn chain_entries_yield_only_their_new_termini() {
     );
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let mut builder = AminoAcidSetBuilder::new_standard();
-    builder = builder.add_variable_mod(
-        Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
-    );
+    builder = builder.add_mods(spec("Acetyl (Protein N-term)", false));
     let mut p = SearchParams::default_tryptic(builder.build().unwrap());
     p.min_length = 4;
     p.max_missed_cleavages = 1;
@@ -805,9 +814,7 @@ fn residue_specific_terminal_mods_get_decoys() {
     let target = load_uniprot_xml(PYRO_XML.as_bytes(), &UniProtOptions::default())
         .unwrap()
         .0;
-    let pyro =
-        Modification::from_mods_txt_line("-17.026549,Q,opt,Prot-N-term,PyroGlu,sites=annotated")
-            .unwrap();
+    let pyro = annotated("Gln->pyro-Glu (Protein N-term Q)");
     let p = SearchParams::default_tryptic(
         AminoAcidSetBuilder::new_standard()
             .add_variable_mod(pyro)
@@ -1175,9 +1182,7 @@ const DEAMIDATION_XML: &str = r#"<uniprot xmlns="http://uniprot.org/uniprot">
 fn deamidation_params(deamidation: bool) -> SearchParams {
     let mut builder = AminoAcidSetBuilder::new_standard();
     if deamidation {
-        builder = builder.add_variable_mod(
-            Modification::from_mods_txt_line("0.984016,N,opt,any,Deamidated").unwrap(),
-        );
+        builder = builder.add_mods(spec("Deamidated (N)", false));
     }
     let mut p = SearchParams::default_tryptic(builder.build().unwrap());
     p.min_length = 4;

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use search::SearchIndex;
 
-use crate::cli::{InferenceArgs, ProteinArgs};
+use crate::cli::{DatabaseArgs, InferenceArgs, ProteinArgs};
 use crate::model_select::parse_enzymes;
 use crate::search::load_claim_database;
 
@@ -94,20 +94,15 @@ fn id_hash(id: &str) -> u128 {
     (u128::from(half(0)) << 64) | u128::from(half(1))
 }
 
-/// Masses of the `sites=annotated` modifications in the search's `--mods`
-/// file; none without a file, as the built-in modifications have none.
-/// The `sites=annotated` masses and the fixed terminal mods of a mods file.
+/// The masses of the search's `restrict_to: annotated` modifications and its
+/// fixed terminal mods.
 type SiteMods = (Vec<f64>, Vec<(model::modification::ModLocation, f64)>);
 
-fn annotated_site_masses(mods: Option<&Path>) -> Result<SiteMods, Box<dyn std::error::Error>> {
-    let Some(path) = mods else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let aa = model::AminoAcidSetBuilder::new_standard()
-        .add_mods_from_file(path)
-        .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-        .build()
-        .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
+/// [`SiteMods`] of the search's modification lists (the built-in defaults
+/// have neither).
+fn annotated_site_masses(db: &DatabaseArgs) -> Result<SiteMods, Box<dyn std::error::Error>> {
+    let aa = crate::model_select::search_aa_set(db, None)
+        .map_err(|e| format!("building the amino-acid set: {e}"))?;
     Ok((
         aa.distinct_mods()
             .iter()
@@ -134,7 +129,7 @@ pub(crate) fn infer_from_files(
         .into());
     }
     let (enzyme, _) = parse_enzymes(&a.db.enzyme)?;
-    let (restricted, fixed_terminal) = annotated_site_masses(a.db.mods.as_deref())?;
+    let (restricted, fixed_terminal) = annotated_site_masses(&a.db)?;
     let opts = input::UniProtOptions {
         variants: a.db.uniprot_variants,
         isoforms: a.db.uniprot_isoforms,
@@ -161,7 +156,7 @@ pub(crate) fn infer_from_files(
     let mut knockoffs =
         output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
-    // Placements of a `sites=annotated` modification on a knockoff site exist
+    // Placements of a `restrict_to: annotated` modification on a knockoff site exist
     // only for the site q-values. Only those modifications make such rows.
     if !restricted.is_empty() {
         knockoffs.extend(
@@ -280,9 +275,10 @@ mod tests {
     /// Peptides and PSMs counted for the group of a protein with one
     /// annotated phosphosite (S15) and three knockoff sites (S5, S25, S35),
     /// from three PSMs: phospho on the real site, phospho on a knockoff site,
-    /// and an unmodified peptide. `mods` is the content of the `--mods` file.
-    fn counted_with(mods: Option<&str>) -> (usize, usize) {
-        use clap::Parser;
+    /// and an unmodified peptide. `args` are the database flags, `config` the
+    /// content of the search's `--config` file.
+    fn counted_with(args: &[&str], config: Option<&str>) -> (usize, usize) {
+        use clap::{CommandFactory, FromArgMatches};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db.peff");
         std::fs::write(
@@ -307,13 +303,15 @@ mod tests {
             "d.txt",
             &["s_4_1\t-1.0\t0.5\t0.9\tK.GGPGSGGAGK.L\tXXX_sp:P1"],
         );
-        let mut argv = vec!["andes".to_string()];
-        if let Some(content) = mods {
-            let path = dir.path().join("mods.txt");
+        let mut argv: Vec<String> = ["andes"].iter().chain(args).map(|s| s.to_string()).collect();
+        if let Some(content) = config {
+            let path = dir.path().join("run.yaml");
             std::fs::write(&path, content).unwrap();
-            argv.extend(["--mods".to_string(), path.display().to_string()]);
+            argv.extend(["--config".to_string(), path.display().to_string()]);
         }
-        let a = ProteinWrap::try_parse_from(argv).unwrap().proteins;
+        let m = ProteinWrap::command().try_get_matches_from(argv).unwrap();
+        let mut a = ProteinWrap::from_arg_matches(&m).unwrap().proteins;
+        crate::config::apply_protein_config(&mut a, &m).unwrap();
         let inf = infer_from_files(&db, &a, &[targets], &[decoys]).unwrap();
         let group = inf
             .groups
@@ -325,9 +323,12 @@ mod tests {
 
     #[test]
     fn annotated_site_mods_on_knockoff_sites_count_for_no_group() {
+        let config = "search:\n  variable_mods:\n    - {name: Phospho, sites: S, restrict_to: annotated}\n";
+        assert_eq!(counted_with(&[], Some(config)), (2, 2));
+        // A list on the command line replaces the config's.
         assert_eq!(
-            counted_with(Some("79.966331,S,opt,any,Phospho,sites=annotated\n")),
-            (2, 2)
+            counted_with(&["--variable-mods", "Phospho (S)"], Some(config)),
+            (3, 3)
         );
     }
 
@@ -335,7 +336,7 @@ mod tests {
     fn knockoff_site_placements_count_without_an_annotated_site_mod() {
         // The same modification allowed on any S: a placement on a knockoff
         // site is an ordinary identification.
-        assert_eq!(counted_with(Some("79.966331,S,opt,any,Phospho\n")), (3, 3));
-        assert_eq!(counted_with(None), (3, 3));
+        assert_eq!(counted_with(&["--variable-mods", "Phospho (S)"], None), (3, 3));
+        assert_eq!(counted_with(&[], None), (3, 3));
     }
 }

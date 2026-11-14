@@ -211,29 +211,23 @@ fn cli_accepts_min_length_max_length_flags() {
 fn cli_accepts_mod_fragmentation_protocol_flags() {
     // Verify the TMT-CLI flags parse and the param resolver picks up a real
     // bundled model. We use the existing BSA fixture (no actual TMT spectra)
-    // and pass a tiny TMT-style mods file — the binary should exit 0 because
+    // and pass TMT-style modification lists — the binary should exit 0 because
     // all flags are valid. (--instrument was removed: analyzer resolution is
     // metadata-detected for mzML/.raw/.d and `--fragment-tol-*` for MGF.)
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
 
     let status = base_cmd(
         "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")
@@ -248,7 +242,7 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
 
     assert!(
         status.success(),
-        "andes should exit 0 with --mods + TMT flags, got: {status}"
+        "andes should exit 0 with the TMT modification lists and flags, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should still be written");
 }
@@ -431,16 +425,6 @@ fn cli_accepts_canonical_named_param_values() {
     let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let pin = tmp.path().join("named.pin");
@@ -450,8 +434,12 @@ fn cli_accepts_canonical_named_param_values() {
         bsa_fasta.to_str().unwrap(),
         &pin,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")

@@ -51,13 +51,11 @@ fn uniprot_xml_database_gives_the_fasta_pin() {
 #[test]
 fn annotated_site_mods_and_variants_run_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n\
-         79.966331,S,opt,any,Phospho,sites=annotated\n\
-         79.966331,T,opt,any,Phospho,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - Oxidation (M)\n    - {name: Phospho, sites: ST, restrict_to: annotated}\n",
     )
     .unwrap();
     let mods = mods.to_str().unwrap();
@@ -66,7 +64,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         "test-fixtures/BSA.xml.gz",
         &pin,
         &[
-            "--mods",
+            "--config",
             mods,
             "--uniprot-evidence",
             "curated",
@@ -134,7 +132,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     let out = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
-        &["--mods", mods, "--uniprot-variants", "--uniprot-chains"],
+        &["--config", mods, "--uniprot-variants", "--uniprot-chains"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -154,7 +152,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("exp.pin"),
-        &["--mods", mods],
+        &["--config", mods],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -167,11 +165,11 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
 #[test]
 fn restricted_artefact_mods_warn_only_with_variants() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         0.984016,N,opt,any,Deamidated,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - {name: Deamidated, sites: N, restrict_to: annotated}\n",
     )
     .unwrap();
     let mods = mods.to_str().unwrap();
@@ -179,7 +177,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("on.pin"),
-        &["--mods", mods, "--uniprot-variants"],
+        &["--config", mods, "--uniprot-variants"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("WARN: Deamidated"), "{stderr}");
@@ -187,7 +185,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("off.pin"),
-        &["--mods", mods],
+        &["--config", mods],
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
 }
@@ -316,19 +314,18 @@ fn knockoff_variants_are_searched_but_never_reported() {
 #[test]
 fn annotated_sites_get_knockoff_sites_and_a_site_table() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         79.966331,S,opt,any,Phospho,sites=annotated\n\
-         79.966331,T,opt,any,Phospho,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - {name: Phospho, sites: ST, restrict_to: annotated}\n",
     )
     .unwrap();
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("sites.pin"),
         &[
-            "--mods",
+            "--config",
             mods.to_str().unwrap(),
             "--uniprot-evidence",
             "curated",

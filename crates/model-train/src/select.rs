@@ -785,7 +785,7 @@ mod tests {
     /// The 17-own store has cid_lowres_tryp but NOT cid_lowres_tryp_phosphorylation
     /// (dropped seed-copy). A CID phospho query routes to cid_lowres_tryp via the
     /// EXACT ladder's pre-existing empty-class step (the plain model covers the
-    /// backbone; the phospho mod is still searched via --mods), so it is NOT a
+    /// backbone; the phospho mod is still searched via --variable-mods), so it is NOT a
     /// nearest/standard substitution — no WARN.
     #[test]
     fn dropped_cid_phospho_routes_to_cid_tryp() {

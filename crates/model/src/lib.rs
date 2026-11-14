@@ -13,6 +13,7 @@ pub mod instrument;
 pub mod isomer_class;
 pub mod isotope;
 pub mod mass;
+pub mod mod_spec;
 pub mod modification;
 pub mod peptide;
 pub mod protein;
@@ -30,7 +31,8 @@ pub use enzyme::Enzyme;
 pub use instrument::InstrumentType;
 pub use isomer_class::IsomerClass;
 pub use mass::{nominal_from, H2O, PROTON};
-pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
+pub use mod_spec::{ModDecl, ModSpecError};
+pub use modification::{ModLocation, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{
     ChainEnds, EntryKind, EntryOrigin, ModSite, PriorTier, Protein, ProteinAnnotation, ProteinDb,

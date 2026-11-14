@@ -451,7 +451,7 @@ const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 
-fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, golden: Golden) {
+fn assert_ecoli_golden(label: &str, mods: &[&str], precursor_cal: &str, golden: Golden) {
     let dir = tempfile::tempdir().expect("tempdir");
     let pin = dir.path().join("out.pin");
     let mut args = vec![
@@ -475,9 +475,7 @@ fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, gol
         "--fragment-index",
         "off",
     ];
-    if let Some(m) = mods {
-        args.extend(["--mods", m]);
-    }
+    args.extend(mods);
     let (header, rows, stderr) = run(&args, &pin);
     let cal = calibration_outcome(&stderr);
     if precursor_cal != "off" {
@@ -505,20 +503,24 @@ fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, gol
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_default_mods() {
-    assert_ecoli_golden("default mods", None, "off", ECOLI_DEFAULT_MODS);
+    assert_ecoli_golden("default mods", &[], "off", ECOLI_DEFAULT_MODS);
 }
 
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_fixed_mods_only() {
-    // NumMods=0 with a fixed Cam-C: isolates the `base_record_multiplicity`
+    // No variable mods with a fixed Cam-C: isolates the `base_record_multiplicity`
     // fixed-mod defect from any variable-mod expansion.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods = dir.path().join("mods_fixed.txt");
-    std::fs::write(&mods, "NumMods=0\n57.021464,C,fix,any,Carbamidomethyl\n").expect("write mods");
     assert_ecoli_golden(
         "fixed mods only",
-        Some(mods.to_str().unwrap()),
+        &[
+            "--fixed-mods",
+            "Carbamidomethyl (C)",
+            "--variable-mods",
+            "",
+            "--max-mods",
+            "0",
+        ],
         "off",
         ECOLI_FIXED_MODS_ONLY,
     );
@@ -527,16 +529,16 @@ fn ecoli_pin_matches_golden_with_fixed_mods_only() {
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_one_variable_mod() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods = dir.path().join("mods_var1.txt");
-    std::fs::write(
-        &mods,
-        "NumMods=1\n57.021464,C,fix,any,Carbamidomethyl\n15.994915,M,opt,any,Oxidation\n",
-    )
-    .expect("write mods");
     assert_ecoli_golden(
         "one variable mod",
-        Some(mods.to_str().unwrap()),
+        &[
+            "--fixed-mods",
+            "Carbamidomethyl (C)",
+            "--variable-mods",
+            "Oxidation (M)",
+            "--max-mods",
+            "1",
+        ],
         "off",
         ECOLI_ONE_VARIABLE_MOD,
     );
@@ -546,7 +548,7 @@ fn ecoli_pin_matches_golden_with_one_variable_mod() {
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
     // The calibration pre-pass runs on the out-of-core index.
-    assert_ecoli_golden("precursor-cal auto", None, "auto", ECOLI_PRECURSOR_CAL_AUTO);
+    assert_ecoli_golden("precursor-cal auto", &[], "auto", ECOLI_PRECURSOR_CAL_AUTO);
 }
 
 // ── --chimeric ──────────────────────────────────────────────────────────────

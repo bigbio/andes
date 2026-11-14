@@ -395,8 +395,10 @@ pub fn psm_evidence(
         return None;
     }
     let observed = forms.iter().position(|p| same_form(p, peptide))? as u32;
+    // `.iter()`, not `.into_iter()`: an in-place collect would keep the larger
+    // SiteIon buffer alive for every stored PSM.
     let ions = site_ions(&forms, precursor_charge, tol_da)
-        .into_iter()
+        .iter()
         .map(|ion| IonMatch {
             forms: FormSet::from_indices(forms.len(), &ion.forms),
             tier: match_tier(peaks, tiers, ion.mz, tol_da(ion.mz)),

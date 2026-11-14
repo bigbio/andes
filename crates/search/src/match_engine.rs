@@ -96,6 +96,56 @@ impl ScorerSet<'_> {
     }
 }
 
+/// Scores a spectrum's placements for IPF as the search scored its candidates.
+/// Built by [`PreparedSearch::ipf_scoring`].
+pub struct IpfScoring<'a> {
+    scorers: ScorerSet<'a>,
+    fragment_tolerance_da: f64,
+    recentre_ppm: f64,
+    declared: Vec<&'static model::modification::Modification>,
+}
+
+impl IpfScoring<'_> {
+    /// IPF evidence of each `(peptide, charge)` row against `spec` (its peaks
+    /// as read): every placement's search score (node + edge) and site ions,
+    /// with the fragment recentring and the scorer of the spectrum's
+    /// activation the search used. `None` for a row with fewer than two
+    /// placements. `spec` needs its peaks.
+    pub fn evidence(
+        &self,
+        spec: &Spectrum,
+        rows: &[(&Peptide, u8)],
+    ) -> Vec<Option<crate::ipf::IpfEvidence>> {
+        let shifted = recentred_spectra(std::slice::from_ref(spec), self.recentre_ppm);
+        let spec = shifted.as_ref().map_or(spec, |v| &v[0]);
+        let scorer = self.scorers.for_spec(spec);
+        let tol = scorer.pin_match_tolerance();
+        let tiers = crate::ipf::peak_tiers(&spec.peaks);
+        let mut scored: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> = SmallVec::new();
+        rows.iter()
+            .map(|&(peptide, z)| {
+                if !scored.iter().any(|(c, _)| *c == z) {
+                    scored.push((z, ScoredSpectrum::new(spec, scorer, z)));
+                }
+                let ss = &scored.iter().find(|(c, _)| *c == z).expect("built above").1;
+                let score = |p: &Peptide| {
+                    score_psm(ss, p, scorer, z, self.fragment_tolerance_da)
+                        + psm_edge_score(ss, p, scorer, z) as f32
+                };
+                crate::ipf::psm_evidence(
+                    &spec.peaks,
+                    &tiers,
+                    peptide,
+                    z,
+                    move |mz| tol.as_da(mz),
+                    &self.declared,
+                    Some(&score),
+                )
+            })
+            .collect()
+    }
+}
+
 /// `spectra` with every fragment peak moved by `-offset_ppm` (a peak observed at
 /// `mz` is scored at `mz / (1 + offset * 1e-6)`), or `None` when the offset is
 /// zero. The copy carries the run's measured fragment error out of retrieval,
@@ -565,7 +615,7 @@ impl<'a> PreparedSearch<'a> {
 
     /// The scorer of every scan of `spectra`, building the scorer of an
     /// activation the first time a scan of it is seen.
-    pub(crate) fn scorer_set(&self, spectra: &[Spectrum]) -> ScorerSet<'_> {
+    pub(crate) fn scorer_set(&self, spectra: &[Spectrum]) -> ScorerSet<'a> {
         let Some(ps) = &self.per_scan else {
             return ScorerSet {
                 primary: self.scorer,
@@ -614,6 +664,19 @@ impl<'a> PreparedSearch<'a> {
             primary: self.scorer,
             run_activation: Some(ps.run_activation),
             alts,
+        }
+    }
+
+    /// What IPF site localization needs to score placements against a spectrum
+    /// the way this search scored its candidates, kept once the index is dropped:
+    /// the scorer of every activation the run used, the fragment tolerance and
+    /// the fragment m/z recentring.
+    pub fn ipf_scoring(&self) -> IpfScoring<'a> {
+        IpfScoring {
+            scorers: self.scorer_set(&[]),
+            fragment_tolerance_da: self.fragment_tolerance_da,
+            recentre_ppm: self.scorer.fragment_recentre_ppm(),
+            declared: self.params.aa_set.distinct_mods(),
         }
     }
 
@@ -1591,37 +1654,8 @@ impl<'a> PreparedSearch<'a> {
                         .collect();
                     drop(rows);
                     drop(psms);
-                    let tol = scorer.pin_match_tolerance();
-                    let ipf = params.ipf_localization;
-                    let (declared, tiers) = if ipf {
-                        (params.aa_set.distinct_mods(), crate::ipf::peak_tiers(&spec.peaks))
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
                     queue.update_in_place(|psm| {
                         psm.site_evidence = evidence.remove(&key(psm)).flatten();
-                        let cand = &cand_slice[psm.primary_candidate_idx() as usize];
-                        // IPF localizes target PSMs only.
-                        if !ipf || cand.is_decoy {
-                            return;
-                        }
-                        let z = psm.charge_used;
-                        let ss = scored_spec_for_charge(z);
-                        let score = |p: &Peptide| {
-                            score_psm(ss, p, scorer, z, fragment_tolerance_da)
-                                + psm_edge_score(ss, p, scorer, z) as f32
-                        };
-                        if let Some(e) = crate::ipf::psm_evidence(
-                            &spec.peaks,
-                            &tiers,
-                            &cand.peptide,
-                            z,
-                            move |mz| tol.as_da(mz),
-                            &declared,
-                            Some(&score),
-                        ) {
-                            psm.site_evidence.get_or_insert_with(Default::default).ipf = Some(e);
-                        }
                     });
                 }
 

@@ -160,6 +160,35 @@ pub fn emitted_row_evidence(
         .collect()
 }
 
+/// The `SpecId`, primary candidate and charge of every row the PIN writes for
+/// one spectrum, as [`emitted_row_evidence`] lists them.
+pub fn emitted_row_candidates(
+    spec: &Spectrum,
+    queue: &TopNQueue,
+    candidates: &[Candidate],
+) -> Vec<(String, u32, u8)> {
+    let psms = queue.clone().into_rank_sorted_vec();
+    let ranked = emitted_rows(spec, &psms, candidates);
+    let multi_row = ranked.len() > 1;
+    let scan = spec.scan.unwrap_or(0);
+    let title = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(row_idx, (rank, psm))| {
+            (
+                format_spec_id(&title, scan, rank, row_idx, multi_row),
+                psm.primary_candidate_idx(),
+                psm.charge_used,
+            )
+        })
+        .collect()
+}
+
 // ── shared per-PSM feature vector ──────────────────────────────────────────────
 
 /// How a feature value is rendered (PIN bytes + QPX `value_type`).
@@ -1202,7 +1231,6 @@ mod tests {
             charge_range,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
-            ipf_localization: false,
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,

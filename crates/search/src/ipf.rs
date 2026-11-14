@@ -4,7 +4,10 @@
 //! (Rosenberger et al., Nat. Biotechnol. 2017; `pyprophet/ipf.py`) to DDA
 //! PSMs. For one PSM the hypotheses are every placement of its variable
 //! modifications (the peptidoforms) plus h0, "the PSM is wrong":
-//! - prior: h0 = PSM PEP; each peptidoform = (1 - PSM PEP) / #peptidoforms;
+//! - prior: h0 = PSM PEP; the peptidoforms share 1 - PSM PEP. [`localize`]
+//!   splits it by the search's own score of each placement
+//!   ([`placement_prior`], softmax with weight [`SEARCH_SCORE_WEIGHT`]);
+//!   [`posterior`] keeps PyProphet's uniform split (the parity test's entry);
 //! - evidence: each site-determining ion (a fragment that not every
 //!   peptidoform shares) has a PEP. It is evidence *for* the hypotheses it
 //!   maps to (1 - PEP) and *against* every other hypothesis, h0 included
@@ -23,14 +26,21 @@ use model::mass::{H2O, PROTON};
 use model::modification::{ModLocation, Modification};
 use model::peptide::Peptide;
 
-/// Hard cap on enumerated placements per PSM; [`placements_with`] reports when it
-/// was hit so callers can flag the PSM instead of silently truncating.
+/// Cap on enumerated placements per PSM. Above it, [`placements_with`] keeps
+/// the placements nearest the search's own and reports that it did.
 pub const MAX_PLACEMENTS: usize = 1024;
 
 /// Every placement of `peptide`'s variable modifications on the residues each
 /// one may occupy. Fixed modifications stay where they are. The input
 /// placement is always included. Returns the placements (each a full peptide)
 /// and whether [`MAX_PLACEMENTS`] cut the enumeration short.
+///
+/// When there are more than [`MAX_PLACEMENTS`] placements, the result is every
+/// placement whose displacement from the input (the summed residue distance of
+/// each mod from its own input site, mods in residue order) is at most the
+/// largest bound that keeps the count within the cap: a neighbourhood of the
+/// search's placement that reaches equally far in both directions, so no
+/// region of the peptide is dropped for being late in enumeration order.
 ///
 /// Only residue-anywhere variable mods move: terminal mods (protein or peptide
 /// N/C-term) have a single possible site and are kept in place. A mod also
@@ -102,19 +112,41 @@ pub fn placements_with(
     let same_as_prev: Vec<bool> = (0..sites.len())
         .map(|k| k > 0 && same_sites(&sites[k], &sites[k - 1]))
         .collect();
-    let mut e = Enum {
-        sites: &sites,
-        same_as_prev: &same_as_prev,
-        base: &base,
-        peptide,
-        chosen: movable.iter().map(|&m| (usize::MAX, m)).collect(),
-        seen: std::collections::HashSet::new(),
-        out: Vec::new(),
-        truncated: false,
+    // Input site of each movable mod, in the same (residue) order as `movable`.
+    let input_sites: Vec<usize> = (0..n)
+        .filter(|&i| peptide.residues[i].mod_.is_some_and(is_movable))
+        .collect();
+    let run = |max_displacement: usize| {
+        let mut e = Enum {
+            sites: &sites,
+            same_as_prev: &same_as_prev,
+            base: &base,
+            peptide,
+            input_sites: &input_sites,
+            max_displacement,
+            chosen: movable.iter().map(|&m| (usize::MAX, m)).collect(),
+            seen: std::collections::HashSet::new(),
+            out: Vec::new(),
+            truncated: false,
+        };
+        e.rec(0, 0);
+        (e.out, e.truncated)
     };
-    e.rec(0);
-    let (mut out, truncated) = (e.out, e.truncated);
-    // Guarantee the observed placement is present (it can be cut by the cap).
+    let (mut out, truncated) = run(usize::MAX);
+    if truncated {
+        // Widen the neighbourhood one residue of displacement at a time and
+        // keep the widest one that fits the cap. Displacement 0 is the input
+        // placement alone, which always fits.
+        let widest = n * movable.len();
+        out = Vec::new();
+        for d in 0..=widest {
+            let (o, cut) = run(d);
+            if cut {
+                break;
+            }
+            out = o;
+        }
+    }
     if !out.iter().any(|p| same_form(p, peptide)) {
         out.push(peptide.clone());
     }
@@ -127,6 +159,9 @@ struct Enum<'a> {
     same_as_prev: &'a [bool],
     base: &'a [model::amino_acid::AminoAcid],
     peptide: &'a Peptide,
+    /// Input site of each mod, and the largest summed distance from them.
+    input_sites: &'a [usize],
+    max_displacement: usize,
     chosen: Vec<(usize, &'static Modification)>,
     seen: std::collections::HashSet<Vec<(usize, u64)>>,
     out: Vec<Peptide>,
@@ -134,7 +169,7 @@ struct Enum<'a> {
 }
 
 impl Enum<'_> {
-    fn rec(&mut self, k: usize) {
+    fn rec(&mut self, k: usize, displacement: usize) {
         if self.out.len() >= MAX_PLACEMENTS {
             self.truncated = true;
             return;
@@ -165,8 +200,12 @@ impl Enum<'_> {
             {
                 continue;
             }
+            let d = displacement + s.abs_diff(self.input_sites[k]);
+            if d > self.max_displacement {
+                continue;
+            }
             self.chosen[k] = (s, m);
-            self.rec(k + 1);
+            self.rec(k + 1, d);
         }
         self.chosen[k].0 = usize::MAX;
     }
@@ -342,6 +381,9 @@ pub struct IonMatch {
 pub struct IpfEvidence {
     /// 0-based modified residue indices of each placement.
     pub forms: Vec<Vec<u16>>,
+    /// The modification on each of those residues, in the same order: two
+    /// placements on the same residues can differ in which mod sits where.
+    pub mods: Vec<Vec<&'static Modification>>,
     /// Index of the PSM's own placement in `forms`.
     pub observed: u32,
     /// Whether [`MAX_PLACEMENTS`] cut the enumeration.
@@ -412,6 +454,15 @@ pub fn psm_evidence(
         forms: forms
             .iter()
             .map(|p| modified_sites(p).into_iter().map(|i| i as u16).collect())
+            .collect(),
+        mods: forms
+            .iter()
+            .map(|p| {
+                modified_sites(p)
+                    .into_iter()
+                    .filter_map(|i| p.residues[i].mod_)
+                    .collect()
+            })
             .collect(),
         observed,
         truncated,
@@ -729,6 +780,42 @@ mod tests {
             })
             .collect();
         Peptide::new(res, b'K', b'A')
+    }
+
+    #[test]
+    fn over_the_cap_keeps_a_displacement_neighbourhood_of_the_input() {
+        // Four phospho on 24 S: C(24, 4) = 10,626 placements, over the cap.
+        let input = pep(&"S".repeat(24), &[8, 10, 12, 14]);
+        let (forms, cut) = placements(&input);
+        assert!(cut);
+        assert!(forms.len() <= MAX_PLACEMENTS && forms.len() > 1);
+        assert!(forms.iter().any(|p| same_form(p, &input)));
+        let disp = |sites: &[usize]| -> usize {
+            sites.iter().zip([8usize, 10, 12, 14]).map(|(s, o)| s.abs_diff(o)).sum()
+        };
+        let kept: std::collections::HashSet<Vec<usize>> =
+            forms.iter().map(modified_sites).collect();
+        let bound = kept.iter().map(|s| disp(s)).max().unwrap();
+        // Exactly the placements within the bound: none missing, none beyond.
+        let mut within = 0;
+        for a in 0..24 {
+            for b in a + 1..24 {
+                for c in b + 1..24 {
+                    for d in c + 1..24 {
+                        let s = [a, b, c, d];
+                        if disp(&s) <= bound {
+                            within += 1;
+                            assert!(kept.contains(&s.to_vec()), "{s:?} missing");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(within, kept.len());
+        // The neighbourhood reaches both ends equally: residues before the
+        // first input site and after the last both appear.
+        assert!(kept.iter().any(|s| s[0] < 8));
+        assert!(kept.iter().any(|s| s[3] > 14));
     }
 
     #[test]

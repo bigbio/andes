@@ -1103,7 +1103,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the Astral entrapment database, keeping them does not raise the true FDP
     // at Percolator's nominal 1%.
     params.top_n_psms_per_spectrum = cli.top_n;
-    params.ipf_localization = cli.localize.as_deref() == Some("ipf");
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -1775,7 +1774,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
     // Pass 2 and `--predict ms2` compares them with predicted spectra.
-    let keep_peaks = cli.refine || predictors.as_ref().is_some_and(|p| p.needs_peaks());
+    // `--localize ipf` scores placements against the peaks after rescoring.
+    let keep_peaks = cli.refine
+        || cli.localize.is_some()
+        || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -2658,6 +2660,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
     // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
+    // IPF scores placements as the search scored candidates; kept past the index.
+    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring());
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2856,6 +2860,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Knockoff rows: in the PIN as targets; left out of the QPX bundle, the
     // filtered TSV, quantification and every other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
     if let Some(ref mut map) = rescore_map {
         // A variant peptide a reference protein holds once I and L are taken
         // as equal identifies that reference too: share it before classes are
@@ -2999,26 +3004,43 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
             }
         }
-        // IPF site localization (`--localize ipf`): every target PSM whose row
-        // collected placement evidence at search time.
-        if params.ipf_localization {
+        // IPF site localization (`--localize ipf`): every identified target row
+        // (within its PSM cutoff, not a knockoff), whatever stage produced it,
+        // scored against its spectrum's retained peaks.
+        if let Some(scoring) = ipf_scoring.as_ref() {
+            use rayon::prelude::*;
             let t_ipf = std::time::Instant::now();
-            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
-                .iter()
+            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
+            let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
+            let evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
+                .par_iter()
                 .enumerate()
-                .filter(|(_, q)| {
-                    q.iter_psms()
-                        .any(|p| p.site_evidence.as_ref().is_some_and(|e| e.ipf.is_some()))
-                })
-                .flat_map(|(i, q)| {
-                    output::emitted_row_evidence(&spectra[i], q, &pin_candidates)
-                        .into_iter()
-                        .filter_map(|(id, _, e)| e.and_then(|e| e.ipf).map(|x| (id, x)))
+                .flat_map_iter(|(i, q)| {
+                    let rows: Vec<(String, u32, u8)> =
+                        output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
+                            .into_iter()
+                            .filter(|(id, c, _)| {
+                                !pin_candidates[*c as usize].is_decoy
+                                    && !knockoff_rows.contains(id)
+                                    && map_ref.get(id).is_some_and(|p| p.q_value <= cutoffs.of(id))
+                            })
+                            .collect();
+                    let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
+                        .iter()
+                        .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
+                        .collect();
+                    let found = if peptides.is_empty() {
+                        Vec::new()
+                    } else {
+                        scoring.evidence(&spectra[i], &peptides)
+                    };
+                    rows.into_iter()
+                        .zip(found)
+                        .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
+                        .collect::<Vec<_>>()
                 })
                 .collect();
-            // Knockoff PSMs are never reported.
-            evidence.retain(|id, _| !knockoff_rows.contains(id));
-            let (rows, model) = output::ipf::localize_psms(map, &evidence, cli.ipf_debug);
+            let (rows, model) = output::ipf::localize_psms(map_ref, &evidence, cli.ipf_debug);
             let stem = report_base
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -3028,18 +3050,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // The report was requested: a failed write fails the run.
             output::ipf::write_ipf_tsv(&path, &rows)
                 .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            if rows.is_empty() {
+                eprintln!(
+                    "WARN: --localize ipf: no identified target PSM has a variable \
+                     modification with more than one possible site; {} is empty",
+                    path.display()
+                );
+            }
+            let truncated = rows.iter().filter(|r| r.truncated).count();
             eprintln!(
-                "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}) \
-                 [{:.2}s]",
+                "Wrote IPF localization: {} ({} PSMs, {} with placements limited to the \
+                 {} nearest the search's; ion PEP by intensity quartile {:?}, unmatched \
+                 {:.3}) [{:.2}s]",
                 path.display(),
                 rows.len(),
+                truncated,
+                search::ipf::MAX_PLACEMENTS,
                 model.matched.map(|p| (p * 1000.0).round() / 1000.0),
                 model.unmatched,
                 t_ipf.elapsed().as_secs_f64()
             );
-            // Only a QPX write reads (and then clears) the map.
             if cli.output_parquet.is_some() {
-                output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
+                ipf_qpx = Some(output::ipf::qpx_map(&rows));
             }
         }
     }
@@ -3254,6 +3286,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
+            ipf_qpx.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             // Finding 3.9: failure to write an explicitly-requested output is a

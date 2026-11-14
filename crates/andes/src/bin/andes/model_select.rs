@@ -1452,9 +1452,8 @@ mod param_resolver_tests {
     }
 
     use crate::cli::{
-        parse_charge_range, parse_enzyme_specificity, parse_fragmentation,
-        parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol, parse_protocol,
-        EnzymeSpecificity,
+        parse_charge_range, parse_enum, parse_isotope_error_range, parse_precursor_cal,
+        parse_precursor_tol, EnzymeSpecificity,
     };
     use crate::spectra::title_prefix_for;
     use ::search::PrecursorCalMode;
@@ -1465,34 +1464,27 @@ mod param_resolver_tests {
     //    `bundled_store_selection_grid_is_pinned` covers the
     //    activation/instrument/protocol/enzyme → model_id selection.
 
+    /// The `--config` values of the named enums: their CLI names, in any case;
+    /// numbers are not accepted.
     #[test]
-    fn parse_fragmentation_accepts_named_rejects_numeric() {
-        assert_eq!(parse_fragmentation("HCD").unwrap(), Fragmentation::Hcd);
-        assert_eq!(parse_fragmentation("auto").unwrap(), Fragmentation::Auto);
-        // Legacy numeric forms are no longer accepted.
-        assert!(parse_fragmentation("3").is_err());
-        assert!(parse_fragmentation("99").is_err());
-    }
-
-    #[test]
-    fn parse_protocol_accepts_named_rejects_numeric() {
-        assert_eq!(parse_protocol("TMT").unwrap(), Protocol::Tmt);
-        assert_eq!(parse_protocol("auto").unwrap(), Protocol::Auto);
-        assert!(parse_protocol("4").is_err());
-        assert!(parse_protocol("99").is_err());
-    }
-
-    #[test]
-    fn parse_enzyme_specificity_named_only() {
+    fn config_enum_values_are_named() {
+        let frag = |s: &str| parse_enum::<Fragmentation>("fragmentation", s, true);
+        assert_eq!(frag("HCD").unwrap(), Fragmentation::Hcd);
+        assert_eq!(frag("hcd").unwrap(), Fragmentation::Hcd);
+        assert_eq!(frag("auto").unwrap(), Fragmentation::Auto);
+        assert!(frag("3").is_err());
+        let protocol = |s: &str| parse_enum::<Protocol>("protocol", s, true);
+        assert_eq!(protocol("TMT").unwrap(), Protocol::Tmt);
+        assert_eq!(protocol("itraq-PHOSPHO").unwrap(), Protocol::ItraqPhospho);
+        assert!(protocol("4").is_err());
+        let ntt = |s: &str| parse_enum::<EnzymeSpecificity>("enzyme_specificity", s, true);
+        assert_eq!(ntt("fully").unwrap(), EnzymeSpecificity::Fully);
+        assert_eq!(ntt("Semi").unwrap(), EnzymeSpecificity::Semi);
+        assert!(ntt("2").is_err());
         assert_eq!(
-            parse_enzyme_specificity("fully").unwrap(),
-            EnzymeSpecificity::Fully
+            frag("x").unwrap_err(),
+            "invalid fragmentation `x`: expected auto|CID|ETD|HCD|UVPD"
         );
-        assert_eq!(
-            parse_enzyme_specificity("semi").unwrap(),
-            EnzymeSpecificity::Semi
-        );
-        assert!(parse_enzyme_specificity("2").is_err());
     }
 
     #[test]

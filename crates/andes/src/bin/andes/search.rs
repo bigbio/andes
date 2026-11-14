@@ -456,7 +456,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // model selection via build_selection_key + the cleavage-credit feature),
     // the rest widen candidate enumeration (params.extra_enzymes). The common
     // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
-    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.db.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
@@ -487,12 +487,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
     let uniprot_opts = input::UniProtOptions {
-        variants: cli.uniprot_variants,
-        isoforms: cli.uniprot_isoforms,
-        chains: cli.uniprot_chains,
-        evidence: cli.uniprot_evidence,
+        variants: cli.db.uniprot_variants,
+        isoforms: cli.db.uniprot_isoforms,
+        chains: cli.db.uniprot_chains,
+        evidence: cli.db.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.knockoffs,
+            per_variant: cli.db.knockoffs,
             enzyme: search_enzyme,
         }),
     };
@@ -500,7 +500,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         loaded,
         annotations,
         site_knockoffs,
-    } = load_claim_database(&database_path, &cli.annotations, &uniprot_opts)?;
+    } = load_claim_database(&database_path, &cli.db.annotations, &uniprot_opts)?;
     let target_db = loaded.db;
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
@@ -532,9 +532,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(stats) => log_uniprot_load(stats, &uniprot_opts),
         None => {
             for (set, flag) in [
-                (cli.uniprot_variants, "--uniprot-variants"),
-                (cli.uniprot_isoforms, "--uniprot-isoforms"),
-                (cli.uniprot_chains, "--uniprot-chains"),
+                (cli.db.uniprot_variants, "--uniprot-variants"),
+                (cli.db.uniprot_isoforms, "--uniprot-isoforms"),
+                (cli.db.uniprot_chains, "--uniprot-chains"),
             ] {
                 if set {
                     eprintln!(
@@ -548,13 +548,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
-    let decoy_strategy =
-        search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy).ok_or_else(|| {
-            format!(
-                "unknown --decoy-strategy '{}' (expected shuffle/reverse/sequon/none)",
-                cli.decoy_strategy
-            )
-        })?;
+    let decoy_strategy = cli.decoy_strategy;
     let proteases = search::decoy::Proteases {
         primary: search_enzyme,
         extra: extra_enzymes.clone(),
@@ -594,8 +588,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
-        &cli.decoy_prefix,
-        cli.decoy_suffix.as_deref(),
+        &cli.db.decoy_prefix,
+        cli.db.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
         &proteases,
@@ -614,7 +608,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `num_mods_from_file` is populated only when --mods is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
-    let (mut aa, num_mods_from_file) = match &cli.mods {
+    let (mut aa, num_mods_from_file) = match &cli.db.mods {
         Some(path) => {
             let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
                 .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
@@ -936,7 +930,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // misses. The kit comes from `label` when known, else the protocol's
     // smaller kit. With explicit --mods the user owns the mod set (they may
     // already supply the tag), so those runs stay byte-identical.
-    if cli.mods.is_none() {
+    if cli.db.mods.is_none() {
         let tag = match (param.data_type.protocol, label) {
             (
                 model::protocol::Protocol::TMT,
@@ -984,7 +978,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
-    warn_restricted_artefacts(&aa, cli.uniprot_variants);
+    warn_restricted_artefacts(&aa, cli.db.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     // The `sites=annotated` mods, whose knockoff-site placements exist only for
@@ -1336,7 +1330,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
                  `--decoy-strategy sequon`, or supply an EXTERNAL target+decoy \
                  FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
-                ds = cli.decoy_strategy
+                ds = crate::cli::decoy_strategy_name(decoy_strategy)
             );
         }
         // Multi-file paired-scan guard (code review): --glyco-hcd-pair pairs each
@@ -1425,7 +1419,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!(
         "  mods           : {}",
-        if cli.mods.is_some() {
+        if cli.db.mods.is_some() {
             "from --mods file"
         } else {
             "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected"
@@ -1455,7 +1449,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!(
         "  decoy          : {:?} (prefix {})   chimeric: {}",
-        decoy_strategy, cli.decoy_prefix, params.chimeric
+        decoy_strategy, cli.db.decoy_prefix, params.chimeric
     );
     eprintln!("───────────────────────────────────────────");
 
@@ -1523,7 +1517,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &scorer,
             fragment_tol_da,
-            &cli.decoy_prefix,
+            &cli.db.decoy_prefix,
             &index_path,
         )
         .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
@@ -1573,7 +1567,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &params,
         &scorer,
         fragment_tol_da,
-        &cli.decoy_prefix,
+        &cli.db.decoy_prefix,
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
@@ -2626,7 +2620,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 0.01, // report_q = 1% FDR report threshold (spec)
                 high_res,
                 fragment_tol_da,
-                &cli.decoy_prefix,
+                &cli.db.decoy_prefix,
                 decoy_strategy,
                 1,
             );
@@ -2891,7 +2885,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
         let outcome =
-            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.knockoffs > 0);
+            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.db.knockoffs > 0);
         knockoff_rows = outcome.knockoff_rows;
         let untested: usize = outcome
             .counts

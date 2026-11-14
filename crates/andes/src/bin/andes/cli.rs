@@ -1,90 +1,118 @@
-//! Command-line argument definitions and value parsers for the search subcommand.
+//! Command-line argument definitions and value parsers.
+//!
+//! Help layout: every option has a `help_heading`. `-h` shows the main options
+//! of the first five headings (Input and output, Search, FDR, Modes,
+//! Quantification); `--help` shows every option that is not `hide = true`.
+//! An advanced option is `hide_short_help = true`; `hide = true` is kept for
+//! test hooks and diagnostics. The first paragraph of a doc comment is the
+//! `-h` text, the whole comment the `--help` text.
 
 use std::path::{Path, PathBuf};
 
+use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{Args, ValueEnum};
 use model::Tolerance;
 use model_train::geometry::GeometryConfig;
+use search::decoy::DecoyStrategy;
 use search::PrecursorCalMode;
 
-/// Fragmentation method. `Auto` detects from the mzML's activation block and
-/// falls back to the bundled `hcd_qexactive_tryp` model when nothing is detected.
+pub(crate) const H_IO: &str = "Input and output";
+pub(crate) const H_SEARCH: &str = "Search";
+pub(crate) const H_FDR: &str = "FDR";
+pub(crate) const H_MODES: &str = "Modes";
+pub(crate) const H_QUANT: &str = "Quantification";
+pub(crate) const H_DATABASE: &str = "Database variants";
+pub(crate) const H_RESCORING: &str = "Rescoring";
+pub(crate) const H_RUNTIME: &str = "Calibration and runtime";
+pub(crate) const H_PREDICTION: &str = "Prediction";
+pub(crate) const H_ISOBARIC: &str = "Isobaric (TMT, iTRAQ)";
+pub(crate) const H_LFQ: &str = "Label-free";
+pub(crate) const H_LABEL: &str = "Labelled pairs";
+pub(crate) const H_GLYCO: &str = "Glycopeptides";
+/// `--help` heading of the advanced FDR flags, each of which inherits a main
+/// FDR flag when unset.
+pub(crate) const ADVANCED_FDR: &str = "Advanced FDR";
+/// `--help` heading of the advanced options of the `quant` stages.
+pub(crate) const H_ADVANCED: &str = "Advanced";
+
+/// Fragmentation method of MGF spectra.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Fragmentation {
-    #[clap(name = "auto")]
+pub(crate) enum Fragmentation {
+    #[value(name = "auto")]
     Auto,
-    #[clap(name = "CID")]
+    #[value(name = "CID")]
     Cid,
-    #[clap(name = "ETD")]
+    #[value(name = "ETD")]
     Etd,
-    #[clap(name = "HCD")]
+    #[value(name = "HCD")]
     Hcd,
-    #[clap(name = "UVPD")]
+    #[value(name = "UVPD")]
     Uvpd,
 }
 
-/// Search protocol: sample labeling or enrichment strategy applied during the experiment.
+/// Search protocol: the labelling or enrichment of the sample, which selects
+/// the protocol model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Protocol {
-    #[clap(name = "auto")]
+pub(crate) enum Protocol {
+    #[value(name = "auto")]
     Auto,
-    #[clap(name = "phospho")]
+    #[value(name = "phospho")]
     Phospho,
-    #[clap(name = "iTRAQ")]
+    #[value(name = "iTRAQ")]
     Itraq,
-    #[clap(name = "iTRAQ-phospho")]
+    #[value(name = "iTRAQ-phospho")]
     ItraqPhospho,
-    #[clap(name = "TMT")]
+    #[value(name = "TMT")]
     Tmt,
-    #[clap(name = "standard")]
+    #[value(name = "standard")]
     Standard,
 }
 
 /// `--tmt-unmix`: whether and how strongly the co-isolation interference of
 /// high-resolution MS2 reporter ions is removed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum TmtUnmix {
-    /// Remove it at a strength learned per run (a no-op without `--tmt`, and
-    /// for low-resolution MS2 or MS3 reporters).
+pub(crate) enum TmtUnmix {
+    /// Remove it at a strength learned per run (a no-op without --tmt, and
+    /// for low-resolution MS2 or MS3 reporters)
     #[default]
-    #[clap(name = "auto")]
+    #[value(name = "auto")]
     Auto,
-    /// Write no interference estimate.
-    #[clap(name = "off")]
+    /// Write no interference estimate
+    #[value(name = "off")]
     Off,
-    /// Remove all of the estimated interference.
-    #[clap(name = "on")]
+    /// Remove all of the estimated interference
+    #[value(name = "on")]
     On,
 }
 
-/// Enzymatic-cleavage enforcement at peptide span boundaries:
-/// 2=fully, 1=semi, 0=non-specific.
+/// `--enzyme-specificity`: the peptide ends that must be cleavage sites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum EnzymeSpecificity {
-    #[clap(name = "non-specific")]
+pub(crate) enum EnzymeSpecificity {
+    /// Neither end
+    #[value(name = "non-specific")]
     NonSpecific,
-    #[clap(name = "semi")]
+    /// At least one end
+    #[value(name = "semi")]
     Semi,
-    #[clap(name = "fully")]
+    /// Both ends
+    #[value(name = "fully")]
     Fully,
 }
 
-/// Primary ranking mode: inherited RawScore (`rank`) or fused strong score (`strong`).
+/// `--score`: what ranks the candidates and fills the PIN `RawScore`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ScoreFlag {
-    /// Pick by the resolved model's instrument: `strong` for high-res, `rank` for low-res.
+    /// strong for a high-resolution model, rank for a low-resolution one
     #[default]
     Auto,
+    /// The rank score of the model
     Rank,
+    /// The fused intensity and competition score
     Strong,
 }
 
 /// Trees kept per GBDT ensemble when `--gbdt-max-trees` is unset (standard search).
 pub(crate) const DEFAULT_GBDT_MAX_TREES: usize = 100;
-
-/// `--help` heading of the advanced FDR flags, each of which inherits a main
-/// FDR flag when unset; `-h` leaves them out.
-pub(crate) const ADVANCED_FDR: &str = "Advanced FDR";
 
 /// `--psm-fdr` and `--quant-fdr` when not given.
 pub(crate) const DEFAULT_FDR: f64 = 0.01;
@@ -99,75 +127,260 @@ pub(crate) const PROTEOFORM_FDR_FLOOR: f64 = 0.05;
 /// too coarse for 0.01.
 pub(crate) const COARSE_QUANT_FDR: f64 = 0.05;
 
-/// Candidate retrieval from the out-of-core index.
+/// `--fragment-index`: candidate retrieval.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
-    /// The fragment-ion index (default; `--glyco` looks candidates up by
-    /// backbone mass instead).
+    /// The fragment-ion index (--glyco looks candidates up by backbone mass)
     #[default]
     Auto,
-    /// Same as `auto`; a warning (and enumeration) under `--glyco`.
+    /// As auto; with --glyco, a warning and per-spectrum enumeration
     On,
-    /// Per-spectrum enumeration of every candidate in the precursor window.
+    /// Score every candidate in each precursor window
     Off,
 }
 
 /// One `--predict` entry: a predicted-feature block added to the PIN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
 pub(crate) enum PredictFeature {
-    /// Retention-time deviation from the bundled andes-rt model.
-    #[clap(name = "rt")]
+    /// Retention-time deviation from the bundled andes-rt model
+    #[value(name = "rt")]
     Rt,
-    /// Spectral similarity to the bundled andes-ms2 model's predicted fragment
-    /// intensities.
-    #[clap(name = "ms2")]
+    /// Spectral similarity to the fragment intensities of the bundled andes-ms2 model
+    #[value(name = "ms2")]
     Ms2,
-    /// Spectral similarity to AlphaPeptDeep's predicted fragment intensities.
-    #[clap(name = "peptdeep-ms2")]
+    /// Spectral similarity to the fragment intensities of AlphaPeptDeep
+    #[value(name = "peptdeep-ms2")]
     PeptDeepMs2,
-    /// Retention-time deviation from AlphaPeptDeep.
-    #[clap(name = "peptdeep-rt")]
+    /// Retention-time deviation from AlphaPeptDeep
+    #[value(name = "peptdeep-rt")]
     PeptDeepRt,
-    /// Retention-time deviation from DeepLC.
-    #[clap(name = "deeplc-rt")]
+    /// Retention-time deviation from DeepLC
+    #[value(name = "deeplc-rt")]
     DeepLcRt,
-    /// No predicted features.
-    #[clap(name = "none")]
+    /// No predicted features
+    #[value(name = "none")]
     None,
 }
 
-/// ONNX engine for the third-party predictors.
+/// `--predictor-backend`: ONNX engine of the third-party predictors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PredictorBackend {
-    /// tract (pure Rust).
+    /// tract (pure Rust, built in)
     Tract,
-    /// ONNX Runtime.
+    /// ONNX Runtime (a build with --features ort, plus the runtime library)
     Ort,
 }
 
-/// Parse one `--predict` value (used by the YAML config).
-pub(crate) fn parse_predict_feature(s: &str) -> Result<PredictFeature, String> {
-    <PredictFeature as ValueEnum>::from_str(s, true).map_err(|_| {
-        format!(
-            "invalid predict entry `{s}`: expected rt|ms2|peptdeep-ms2|peptdeep-rt|deeplc-rt|none"
-        )
-    })
+/// A value parser that accepts what `parse` accepts and lists `values`
+/// (name, help) as the possible values in the help. For flags whose parser
+/// takes more than a fixed set of names (aliases, lists, any case).
+#[derive(Clone)]
+pub(crate) struct Listed<T> {
+    values: &'static [(&'static str, &'static str)],
+    parse: fn(&str) -> Result<T, String>,
 }
 
-/// Parse `--predictor-backend` (used by the YAML config).
-pub(crate) fn parse_predictor_backend(s: &str) -> Result<PredictorBackend, String> {
-    <PredictorBackend as ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("invalid predictor_backend `{s}`: expected tract|ort"))
+impl<T> Listed<T> {
+    pub(crate) const fn new(
+        values: &'static [(&'static str, &'static str)],
+        parse: fn(&str) -> Result<T, String>,
+    ) -> Self {
+        Self { values, parse }
+    }
 }
 
-/// Search arguments (shared by the default search path and exposed as a
-/// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
-/// keeps working unchanged).
-///
-/// Note: `spectrum`, `database`, and `output_pin` are declared `Option<PathBuf>`
-/// at the clap level so that they are not required when a subcommand (e.g.
-/// `train`) is given.  When no subcommand is present, `run()` validates them
-/// manually and returns an early error if they are missing.
+impl<T: Clone + Send + Sync + 'static> TypedValueParser for Listed<T> {
+    type Value = T;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<T, clap::Error> {
+        self.parse.parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(self.values.iter().map(|&(name, help)| {
+            let value = PossibleValue::new(name);
+            if help.is_empty() {
+                value
+            } else {
+                value.help(help)
+            }
+        })))
+    }
+}
+
+/// `--enzyme` names; `parse_enzymes` also takes their aliases and lists.
+pub(crate) const ENZYMES: &[(&str, &str)] = &[
+    ("trypsin", ""),
+    ("chymotrypsin", ""),
+    ("lysc", ""),
+    ("aspn", ""),
+    ("gluc", ""),
+    ("lysn", ""),
+    ("argc", ""),
+    ("alphalp", ""),
+    ("nocleavage", ""),
+    ("nonspecific", ""),
+];
+
+/// `--decoy-strategy` names; `DecoyStrategy::from_name` also takes their aliases.
+pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
+    ("shuffle", "seeded shuffle of each segment"),
+    (
+        "reverse",
+        "pseudo-reverse each segment; on ETD spectra a pseudo-reversed K-terminal decoy \
+         shares c/z ions with its target at every I/L",
+    ),
+    (
+        "sequon",
+        "shuffle, then restore the segment's N-X-S/T sequon count; use it with --glyco",
+    ),
+    (
+        "none",
+        "no decoys: the database already holds them (--decoy-prefix, --decoy-suffix), or \
+         the FDR is computed elsewhere",
+    ),
+];
+
+/// `--tmt` kits; `quant::Plex::parse` also takes their `plex`/TMTpro spellings.
+pub(crate) const PLEXES: &[(&str, &str)] = &[
+    ("tmt6", ""),
+    ("tmt10", ""),
+    ("tmt11", ""),
+    ("tmt16", ""),
+    ("tmt18", ""),
+    ("tmt32", ""),
+    ("tmt35", ""),
+    ("itraq4", ""),
+    ("itraq8", ""),
+];
+
+/// `--uniprot-evidence` levels.
+pub(crate) const EVIDENCE_LEVELS: &[(&str, &str)] = &[
+    (
+        "experimental",
+        "experimental and large-scale proteomics evidence",
+    ),
+    (
+        "curated",
+        "also manual assertions without experimental support (e.g. by similarity); \
+         Swiss-Prot chains without evidence codes count here",
+    ),
+    (
+        "any",
+        "also automatic annotation and features without evidence",
+    ),
+];
+
+/// `--precursor-cal` modes.
+pub(crate) const PRECURSOR_CAL_MODES: &[(&str, &str)] = &[
+    ("off", ""),
+    ("auto", "skip the correction when the sample is too small"),
+    ("on", ""),
+];
+
+/// The protein database options shared by the search, `andes inference` and
+/// `andes quant finalize`: how the database is digested and expanded, and how
+/// a decoy is recognised. Inference and finalize take the search's values.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct DatabaseArgs {
+    /// Protease; a list (gluc,trypsin or gluc+trypsin) cleaves at the sites of each one
+    ///
+    /// The first protease of a list is the primary one: it selects the model and the
+    /// cleavage feature. A non-specific protease in a list makes the whole digest
+    /// non-specific. Also accepted: tryp, chymo, lys-c, asp-n, glu-c, lys-n, arg-c, alp,
+    /// alpha-lp, none (nocleavage), all and elastase (nonspecific), in any case.
+    #[arg(long, value_name = "ENZYME", default_value = "trypsin", help_heading = H_SEARCH,
+          value_parser = Listed::new(ENZYMES, parse_enzyme_list))]
+    pub(crate) enzyme: String,
+
+    /// Modifications file [default: fixed Carbamidomethyl C; variable Oxidation M, Acetyl protein N-term]
+    ///
+    /// One modification per line, `<mass>,<residue>,<fix|opt>,<position>,<name>`: the
+    /// mass shift in Da (a number), a residue letter or *, and any, N-term, C-term,
+    /// Prot-N-term or Prot-C-term. A `NumMods=N` line sets --max-mods; # starts a comment.
+    /// Format and examples: DOCS.md §2. For `andes inference` and `andes quant finalize`,
+    /// give the search's file: PSMs that place a `sites=annotated` modification on a
+    /// knockoff site count for no protein group, as in the search.
+    #[arg(long, value_name = "FILE", help_heading = H_SEARCH)]
+    pub(crate) mods: Option<PathBuf>,
+
+    /// Accession prefix that marks a decoy, given to the generated decoys
+    #[arg(long, value_name = "PREFIX", default_value = "XXX_", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) decoy_prefix: String,
+
+    /// Accession suffix that also marks a decoy (e.g. rev for <accession>_rev decoys)
+    ///
+    /// A protein is a decoy when its accession starts with the --decoy-prefix or ends with
+    /// this suffix. For a database that holds its decoys, with --decoy-strategy none, so
+    /// that andes adds none of its own.
+    #[arg(long, value_name = "SUFFIX", hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) decoy_suffix: Option<String>,
+
+    /// UniProt XML: also search each natural sequence variant as its own entry
+    ///
+    /// Only the peptides carrying the variant are added, under an accession naming the
+    /// change (sp|P04637_VAR_005851_D7H|P53_HUMAN), and decoys mirror them. Grows the
+    /// search space.
+    #[arg(long, hide_short_help = true, help_heading = H_DATABASE)]
+    pub(crate) uniprot_variants: bool,
+
+    /// UniProt XML: also search each described isoform as its own entry
+    ///
+    /// An isoform (sp|P04637-2|P53_HUMAN) is rebuilt from the canonical sequence and its
+    /// splice variants; it carries its own annotated sites, the canonical ones on the
+    /// residues it shares and, with --uniprot-variants, its own natural variants. Grows the
+    /// search space.
+    #[arg(long, hide_short_help = true, help_heading = H_DATABASE)]
+    pub(crate) uniprot_isoforms: bool,
+
+    /// UniProt XML: also search each mature chain or peptide whose ends differ from the precursor's
+    ///
+    /// A chain is what remains after a signal peptide, propeptide or transit peptide is
+    /// removed. Only the peptides at the new termini are added; they are protein-terminal
+    /// there, so protein-terminal modifications apply. Grows the search space.
+    #[arg(long, hide_short_help = true, help_heading = H_DATABASE)]
+    pub(crate) uniprot_chains: bool,
+
+    /// UniProt XML: least evidence of a variant, annotated site or chain that is used
+    #[arg(long, value_name = "LEVEL", default_value = "experimental", hide_short_help = true,
+          help_heading = H_DATABASE,
+          value_parser = Listed::new(EVIDENCE_LEVELS, parse_uniprot_evidence))]
+    pub(crate) uniprot_evidence: input::EvidenceLevel,
+
+    /// Annotation file (<name>.annotations.parquet) of variants, sites and chains; repeatable
+    ///
+    /// Claims about the database's reference proteins from any source, one row per claim:
+    /// sequence edits become variant entries, chains become chain entries and sites are
+    /// added to the reference, as from a UniProt XML database. Several files are merged by
+    /// content. Columns: DOCS.md.
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_DATABASE)]
+    pub(crate) annotations: Vec<PathBuf>,
+
+    /// Knockoff entries per single-residue variant, which estimate the variant FDR (0: none)
+    ///
+    /// For --uniprot-variants and --annotations variants. A knockoff is the same
+    /// substitution at another position holding the same residue, in a matched sequence
+    /// context and at least 10 residues from every known variant: almost certainly absent
+    /// from the sample, it fits a mass coincidence or an isotope error as well as the real
+    /// variant. The knockoffs accepted per substitution class estimate how many accepted
+    /// variant PSMs are false, and with --rescore variant PSMs get a q-value from that
+    /// estimate too. A variant PSM is accepted only when its variant has a knockoff;
+    /// knockoff PSMs are never reported. With 0, variant PSMs get the class FDR only.
+    #[arg(long, value_name = "N", default_value_t = 4, hide_short_help = true,
+          help_heading = H_DATABASE)]
+    pub(crate) knockoffs: usize,
+}
+
+/// The search options: `andes` without a subcommand.
+// `spectrum`, `database` and `output_pin` are optional at the clap level so
+// that a subcommand can be given without them; `main` checks them when no
+// subcommand is given.
 #[derive(Args, Debug)]
 #[command(group(
     clap::ArgGroup::new("glycan_db")
@@ -176,1068 +389,850 @@ pub(crate) fn parse_predictor_backend(s: &str) -> Result<PredictorBackend, Strin
         .required(false),
 ))]
 pub(crate) struct SearchArgs {
-    /// YAML run-configuration file. Any parameter can be set here (grouped by
-    /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
-    /// DOCS §1b). An explicit CLI flag always overrides the config value.
-    #[arg(long = "config", value_name = "FILE")]
+    // ── Input and output ──────────────────────────────────────────────────
+    /// YAML file of options (config.example.yaml); a flag on the command line wins
+    ///
+    /// Sections and keys: DOCS.md §1b.
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) config: Option<PathBuf>,
 
-    /// Input spectrum file(s). Repeat `--spectrum` for multiple inputs (one PIN).
-    /// Format is auto-detected per file by extension.
-    #[arg(long)]
+    /// Spectrum file: mzML, MGF, Thermo .raw or Bruker .d; repeat for several runs
+    ///
+    /// The reader follows the file extension. Several files are searched into one PIN.
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) spectrum: Vec<PathBuf>,
 
-    /// Input protein database (target sequences only; decoys are generated
-    /// automatically): FASTA, or UniProt XML when the name ends in `.xml`
-    /// (`.gz` is decompressed either way). A UniProt XML database searches like
-    /// the UniProt FASTA and also carries annotated modification sites (used by
-    /// `sites=annotated` mods) and, with `--uniprot-variants`, natural variants.
-    #[arg(long)]
+    /// Protein database: FASTA, or UniProt XML (.xml); either may be gzipped
+    ///
+    /// Target sequences only: andes generates the decoys (--decoy-strategy). A UniProt XML
+    /// database searches like the UniProt FASTA and also carries annotated modification
+    /// sites (used by `sites=annotated` modifications) and the entries of the Database
+    /// variants options.
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) database: Option<PathBuf>,
 
-    /// UniProt XML database: also search every natural sequence variant
-    /// (`sequence variant` feature) as its own target entry. Only the peptides
-    /// carrying the variant are added, under an accession naming the change
-    /// (`sp|P04637_VAR_005851_D7H|P53_HUMAN`), and decoys mirror them. Grows the
-    /// search space: measure PSMs at 1% FDR and entrapment FDP before relying on it.
-    #[arg(long = "uniprot-variants")]
-    pub(crate) uniprot_variants: bool,
-
-    /// UniProt XML database: also search every described isoform as its own
-    /// target entry (`sp|P04637-2|P53_HUMAN`), rebuilt from the canonical
-    /// sequence and its splice variants. An isoform carries its own annotated
-    /// sites and the canonical ones on the residues it shares, and, with
-    /// `--uniprot-variants`, its own natural variants. Grows the search space.
-    #[arg(long = "uniprot-isoforms")]
-    pub(crate) uniprot_isoforms: bool,
-
-    /// UniProt XML database: also search every mature chain or peptide whose
-    /// ends differ from the precursor's (after a signal peptide, propeptide or
-    /// transit peptide is removed) as its own target entry. Only the peptides
-    /// at those new termini are added; they are protein-terminal there, so
-    /// protein-terminal mods apply. Grows the search space.
-    #[arg(long = "uniprot-chains")]
-    pub(crate) uniprot_chains: bool,
-
-    /// UniProt XML database: minimum UniProt evidence for a sequence variant, an
-    /// annotated modification site or a mature chain to be used. `experimental`
-    /// (default: experimental and large-scale proteomics evidence), `curated`
-    /// (adds manual assertions without experimental support, e.g. "by
-    /// similarity"; Swiss-Prot chains without evidence codes count here), or
-    /// `any` (adds automatic annotation and features without evidence).
-    #[arg(
-        long = "uniprot-evidence",
-        default_value = "experimental",
-        value_parser = parse_uniprot_evidence
-    )]
-    pub(crate) uniprot_evidence: input::EvidenceLevel,
-
-    /// Annotation file(s) (`<name>.annotations.parquet`): claims about the
-    /// database's reference proteins (sequence edits, modification sites,
-    /// mature chains) from any source, one row per claim. Edits become variant
-    /// entries, chains become chain entries and sites are added to the
-    /// reference, as from a UniProt XML database. Repeat for several files;
-    /// they are merged by content. See DOCS.md for the columns.
-    #[arg(long = "annotations", value_name = "FILE")]
-    pub(crate) annotations: Vec<PathBuf>,
-
-    /// Knockoff entries per single-residue variant (0: none), for UniProt XML
-    /// variants (`--uniprot-variants`) and `--annotations` variants. A knockoff is
-    /// the same substitution at another position holding the same residue, in a
-    /// matched sequence context and at least 10 residues from every known
-    /// variant, so it is almost certainly absent from the sample but fits a mass
-    /// coincidence or an isotope error as well as the real variant does. The
-    /// knockoffs accepted per substitution class estimate how many accepted
-    /// variant PSMs are false, and variant PSMs get a q-value from that estimate
-    /// too (with --rescore). A variant PSM is accepted only when its variant has
-    /// a knockoff; knockoff PSMs are never reported. 0 turns this off and
-    /// leaves variant PSMs to the class FDR alone.
-    #[arg(long = "knockoffs", default_value_t = 4)]
-    pub(crate) knockoffs: usize,
-
-    /// Output Percolator PIN file path.
-    #[arg(long)]
+    /// Percolator PIN output (required unless --rescore is given)
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) output_pin: Option<PathBuf>,
 
-    /// Output TSV file path (optional).
-    #[arg(long)]
+    /// Tab-separated PSM report
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) output_tsv: Option<PathBuf>,
 
-    /// Output QPX `.idparquet/` bundle directory (optional; quantms-compatible).
-    /// Writes `psms.parquet`, `proteins.parquet`, `protein_groups.parquet`
-    /// (empty) and `search_params.parquet`, and with `--tmt` or `--lfq`
-    /// `quantms.feature.parquet`.
-    #[arg(long)]
+    /// QPX .idparquet bundle directory (quantms-compatible)
+    ///
+    /// Writes psms.parquet, proteins.parquet, protein_groups.parquet (empty) and
+    /// search_params.parquet, and with --tmt, --lfq or --label quantms.feature.parquet.
+    #[arg(long, value_name = "DIR", help_heading = H_IO)]
     pub(crate) output_parquet: Option<PathBuf>,
 
-    /// Decoy prefix used when generating reversed decoy sequences.
-    #[arg(long, default_value = "XXX_")]
-    pub(crate) decoy_prefix: String,
-
-    /// Decoy-accession SUFFIX used to RECOGNIZE pre-built decoys in the input
-    /// FASTA (e.g. `rev` for quantms `<orig>_rev` decoys). When set, a
-    /// protein is a decoy iff its accession starts with `<decoy-prefix>_` OR ends
-    /// with this suffix. Typically paired with `--decoy-strategy none` so andes
-    /// consumes an externally-built target+decoy database instead of generating
-    /// its own decoys (which would double-decoy and bias FDR).
-    #[arg(long = "decoy-suffix")]
-    pub(crate) decoy_suffix: Option<String>,
-
-    /// How to generate decoys. Decoys are peptide-level: each segment between
-    /// two cleavage sites is permuted with its cleavage residues, its
-    /// cleavage-side terminal residue and an initiator Met in place, so every
-    /// enzymatic peptide has a decoy of the same composition and C-terminal
-    /// residue (a non-specific search permutes whole sequences). `shuffle`
-    /// (default; seeded shuffle of each segment), `reverse` (pseudo-reverse
-    /// each segment; on ETD spectra a pseudo-reversed K-terminal decoy shares
-    /// c/z ions with its target at every I/L), `sequon` (shuffle, then restore
-    /// the segment's N-X-S/T sequon count; RECOMMENDED with `--glyco`: a
-    /// permutation leaves fewer sequons than the target, so decoys reach the
-    /// glyco sequon gate at a lower rate than targets and the resulting
-    /// q-values are anti-conservative), or `none` (no decoys — for a FASTA that already
-    /// contains decoys, or external FDR). `none` with a target-only FASTA
-    /// leaves the search without decoys (FDR can't be estimated) and warns.
-    #[arg(long = "decoy-strategy", default_value = "shuffle")]
-    pub(crate) decoy_strategy: String,
-
-    /// Seed of the decoy shuffles (`shuffle`, `sequon`, and the redraw of a
-    /// segment whose decoy reads as a target peptide).
-    #[arg(long = "decoy-seed", hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
-    pub(crate) decoy_seed: u64,
-
-    /// Isotope-error offset range to try, as `MIN..MAX` (also accepts `MIN-MAX`).
-    /// Negative offsets allowed. Unset defaults to `-1..2`, or `0..2` under `--glyco`
-    /// (see the resolution site). Left as an `Option` so an EXPLICIT `-1..2` is
-    /// distinguishable from the default and is never silently overridden.
-    #[arg(long = "isotope-error", hide = true, value_parser = parse_isotope_error_range)]
-    pub(crate) isotope_error: Option<(i8, i8)>,
-
-    /// Precursor-mass calibration: `off` (default), `auto`, or `on`. `auto`/`on`
-    /// learn a systematic ppm shift from confident PSMs in a pre-pass and tighten
-    /// the precursor tolerance for the main search; `auto` skips the correction
-    /// when the sample is too small to be reliable. Off by default: on the
-    /// benchmark sets the pre-pass cost 9-17% of the run and fired on none of
-    /// Astral, TMT, UPS1 or phospho; where a larger sample made it fire (UPS1),
-    /// the tightened window lost 7.6% of PSMs.
-    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
-    pub(crate) precursor_cal: PrecursorCalMode,
-
-    /// Minimum number of (spectrum, charge) keys before the calibration pre-pass
-    /// runs; below it calibration is skipped as unreliable. Default 10000. Hidden:
-    /// exists so the out-of-core equivalence gate can force the pre-pass on the
-    /// small in-repo fixture; production runs should leave it alone.
-    #[arg(long = "cal-min-spec-keys", hide = true)]
-    pub(crate) cal_min_spec_keys: Option<usize>,
-
-    /// Candidate retrieval from the out-of-core index. `auto` (the default, and
-    /// what every normal run uses) selects the fragment-ion index for every
-    /// non-glyco search; at a low-resolution fragment tolerance
-    /// only the 150 most intense peaks vote. `off` forces per-spectrum
-    /// enumeration and `on` is the same as `auto` — both are escape hatches for
-    /// reproducing a measurement, not tuning knobs. Hidden on purpose: the
-    /// engine reports which strategy it chose.
-    #[arg(long = "fragment-index", hide = true, default_value = "auto")]
-    pub(crate) fragment_index: FragmentIndexFlag,
-
-    /// Fragment-index mode: precursor-mass width of one index slice in Da.
-    /// Default: derived from the memory budget (10–150 Da; ~0.13 GB per Da on
-    /// a phospho search).
-    #[arg(long = "fragment-index-slice-da", hide = true)]
-    pub(crate) fragment_index_slice_da: Option<f64>,
-
-    /// Directory of the candidate-index cache (`andes-candidx-<key>.bin`),
-    /// created if missing. Default: the directory of the output files. Pass a
-    /// shared directory to build the index once for several tasks, or a
-    /// node-local one for a cache per node. A directory that cannot be written
-    /// is an error.
-    #[arg(long = "index-cache-dir", value_name = "DIR")]
-    pub(crate) index_cache_dir: Option<PathBuf>,
-
-    /// Directory of the run's private temporary files, created if missing and
-    /// emptied at exit: the MS1 scans kept between searching and
-    /// quantification, the directory of `--mbr` without `--quant-dir`, and the
-    /// PIN of `--rescore` with `--keep-pin false`. Default: the directory of the
-    /// output files. A directory that cannot be written is an error.
-    #[arg(long = "temp-dir", value_name = "DIR")]
-    pub(crate) temp_dir: Option<PathBuf>,
-
-    /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
-    /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
-    /// Default `20ppm`.
-    #[arg(long = "precursor-tol", default_value = "20ppm", value_parser = parse_precursor_tol)]
+    // ── Search ────────────────────────────────────────────────────────────
+    /// Precursor mass tolerance in ppm or Da, e.g. 20ppm or 0.02da
+    #[arg(long, value_name = "TOL", default_value = "20ppm", value_parser = parse_precursor_tol,
+          help_heading = H_SEARCH)]
     pub(crate) precursor_tol: Tolerance,
 
-    /// Precursor charge range to try when not specified in the spectrum, as
-    /// `MIN..MAX` (also accepts `MIN-MAX`). Default `2..5`.
-    #[arg(long = "charge", hide = true, default_value = "2..5", value_parser = parse_charge_range)]
-    pub(crate) charge: (u8, u8),
+    #[command(flatten)]
+    pub(crate) db: DatabaseArgs,
 
-    /// Maximum number of PSMs to retain per spectrum.
-    #[arg(long, hide = true, default_value = "10")]
-    pub(crate) top_n: u32,
-
-    /// Number of Tolerable Termini (enzymatic-cleavage enforcement at span
-    /// boundaries). `fully`: both termini must be cleavage sites (strict).
-    /// `semi`: at least one terminus must be a cleavage site. `non-specific`:
-    /// neither terminus needs to be a cleavage site.
-    #[arg(long = "enzyme-specificity",
-          hide = true, default_value = "fully", value_parser = parse_enzyme_specificity)]
-    pub(crate) enzyme_specificity: EnzymeSpecificity,
-
-    /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
-    /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
-    /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
-    /// not silent).
+    /// How decoys are generated
     ///
-    /// Multi-protease digest: pass a `,`- or `+`-separated list (e.g.
-    /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
-    /// protease (the union of their cleavage rules). The FIRST entry is the
-    /// primary — it drives model selection and the cleavage-credit feature; if
-    /// no model matches that enzyme for the data, andes WARNs and you should
-    /// pass `--model`. Combining the universal protease (nonspecific) with
-    /// specific ones makes the whole digest non-specific (warned).
-    #[arg(long, default_value = "trypsin")]
-    pub(crate) enzyme: String,
+    /// Decoys are peptide-level: each segment between two cleavage sites is permuted with
+    /// its cleavage residues, its cleavage-side terminal residue and an initiator Met in
+    /// place, so every enzymatic peptide has a decoy of the same composition and C-terminal
+    /// residue (a non-specific search permutes whole sequences). With none and a
+    /// target-only database the search has no decoys and warns.
+    #[arg(long, value_name = "STRATEGY", default_value = "shuffle", help_heading = H_SEARCH,
+          value_parser = Listed::new(DECOY_STRATEGIES, parse_decoy_strategy))]
+    pub(crate) decoy_strategy: DecoyStrategy,
 
-    /// Maximum number of missed cleavages per peptide. Not applied to a
-    /// non-specific digest (`--enzyme nonspecific` or `--enzyme-specificity
-    /// non-specific`), where every position is a cleavage site.
-    #[arg(long, hide = true, default_value = "2")]
-    pub(crate) max_missed_cleavages: u32,
-
-    /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
-    /// with fewer peaks are skipped.
-    #[arg(long, hide = true, default_value = "10")]
-    pub(crate) min_peaks: u32,
-
-    /// Minimum peptide length, in residues.
-    #[arg(long, hide = true, default_value = "6")]
-    pub(crate) min_length: u32,
-
-    /// Maximum peptide length, in residues. (50 matches MSFragger/Comet defaults;
-    /// 40 dropped long tryptic peptides.)
-    #[arg(long, hide = true, default_value = "50")]
-    pub(crate) max_length: u32,
-
-    /// Maximum number of variable modifications per peptide. A `NumMods=N` line
-    /// in a --mods file overrides this.
-    #[arg(long = "max-mods", hide = true, default_value = "3")]
-    pub(crate) max_mods: u32,
-
-    /// Path to a mods.txt file describing fixed and variable modifications.
-    /// Format: each non-comment line is
-    /// `<mass>,<aa>,<fix|opt>,<location>,<name>`, where:
-    ///   - `<mass>` is a numeric monoisotopic mass delta (Da). Composition
-    ///     strings (e.g. `C2H3N1O1`) are **not** yet supported.
-    ///   - `<aa>` is a single uppercase letter or `*` (wildcard).
-    ///   - `<location>` is one of `any|N-term|C-term|Prot-N-term|Prot-C-term`.
-    ///
-    /// A single `NumMods=N` line sets the max variable mods per peptide.
-    /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
-    /// are ignored. When omitted, the binary uses its built-in defaults
-    /// (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl variable).
-    #[arg(long = "mods", value_name = "MODFILE")]
-    pub(crate) mods: Option<PathBuf>,
-
-    /// Fragmentation/activation method for MGF input only. mzML/.raw/.d
-    /// auto-detect this. Named values: auto, CID, ETD, HCD, UVPD.
-    #[arg(long, hide = true, default_value = "auto", value_parser = parse_fragmentation)]
-    pub(crate) fragmentation: Fragmentation,
-
-    /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
-    #[arg(long, hide = true, default_value = "auto", value_parser = parse_protocol)]
-    pub(crate) protocol: Protocol,
-
-    /// Fragment-matching tolerance in ppm (high-resolution MS/MS) of the PIN
-    /// features, on any input format; it replaces the per-run measurement. On
-    /// MGF it also selects the high-res model class. Mutually exclusive with
-    /// `--fragment-tol-da`.
-    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da", value_parser = parse_positive_tol)]
-    pub(crate) fragment_tol_ppm: Option<f64>,
-
-    /// Fragment-matching tolerance in Da (low-resolution ion-trap MS/MS) of the
-    /// PIN features, on any input format. On MGF it also selects the low-res
-    /// model class. Mutually exclusive with `--fragment-tol-ppm`.
-    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm", value_parser = parse_positive_tol)]
-    pub(crate) fragment_tol_da: Option<f64>,
-
-    /// Number of worker threads for the search loop. Defaults to logical CPU count.
-    #[arg(long, default_value_t = num_cpus::get())]
+    /// Worker threads [default: the number of logical CPUs]
+    #[arg(long, value_name = "N", default_value_t = num_cpus::get(), hide_default_value = true,
+          help_heading = H_SEARCH)]
     pub(crate) threads: usize,
 
-    /// Debug/benchmark cap: process only the first N spectra (0 = no cap).
+    /// Precursor charges tried when the spectrum records none, as MIN..MAX (or MIN-MAX)
+    #[arg(long, value_name = "MIN..MAX", default_value = "2..5", value_parser = parse_charge_range,
+          hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) charge: (u8, u8),
+
+    /// Isotope-error offsets tried, as MIN..MAX (or MIN-MAX) [default: -1..2, 0..2 with --glyco]
+    // An `Option`, so that an explicit -1..2 is told apart from the default and
+    // kept under --glyco.
+    #[arg(long, value_name = "MIN..MAX", value_parser = parse_isotope_error_range,
+          hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) isotope_error: Option<(i8, i8)>,
+
+    /// Missed cleavages per peptide (not applied to a non-specific digest)
+    ///
+    /// --glyco raises the value to 3 unless it is given on the command line or in --config.
+    #[arg(long, value_name = "N", default_value = "2", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) max_missed_cleavages: u32,
+
+    /// Peptide ends that must be cleavage sites
+    #[arg(long, value_name = "SPECIFICITY", value_enum, ignore_case = true,
+          default_value = "fully", hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) enzyme_specificity: EnzymeSpecificity,
+
+    /// Shortest peptide, in residues
+    #[arg(long, value_name = "N", default_value = "6", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) min_length: u32,
+
+    /// Longest peptide, in residues
+    #[arg(long, value_name = "N", default_value = "50", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) max_length: u32,
+
+    /// Variable modifications per peptide (a NumMods=N line in the --mods file overrides it)
+    #[arg(long, value_name = "N", default_value = "3", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) max_mods: u32,
+
+    /// Fewest peaks of a scored MS2 spectrum; spectra with fewer are skipped
+    #[arg(long, value_name = "N", default_value = "10", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) min_peaks: u32,
+
+    /// PSMs kept per spectrum
+    #[arg(long, value_name = "N", default_value = "10", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) top_n: u32,
+
+    /// Seed of the decoy shuffles (shuffle, sequon, and the redraw of a segment
+    /// whose decoy reads as a target peptide).
+    #[arg(long, hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    pub(crate) decoy_seed: u64,
+
+    // ── FDR ───────────────────────────────────────────────────────────────
+    /// PSM-level FDR: the q-value threshold of the reported PSMs [default: 0.01]
+    ///
+    /// It sets the filtered <stem>.q<fdr>.tsv output (target PSMs at q <= this), the PSMs
+    /// that quantification measures, the match-between-runs donors and the confident
+    /// anchors of --refine. andes computes q-values only with --rescore or
+    /// --rescore-native; without either, setting it warns and writes no filtered output.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
+    pub(crate) psm_fdr: Option<f64>,
+
+    /// Protein-group q-value threshold of the filtered output [default: none]
+    ///
+    /// With --rescore, protein groups and their q-values (<stem>.protein_groups.tsv, picked
+    /// target-decoy competition per protein family) are written either way; with this
+    /// threshold the filtered TSV keeps only PSMs whose peptide counts for a group at or
+    /// below it, and the proteoform table only the families of such groups. With --mbr and
+    /// --output-parquet, the QPX pg and feature views keep the groups at or below it, 0.01
+    /// when it is not given.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
+    pub(crate) protein_fdr: Option<f64>,
+
+    /// Quantification FDR: q-value threshold of values measured without an identification [default: 0.01]
+    ///
+    /// It covers the match-between-runs transfers of --lfq, --tmt, --label and --glyco
+    /// --lfq, the --label channels matched without an identification and, with --lfq, the
+    /// feature q-value of `accepted` in lfq.parquet. A quantification-quality q-value, not
+    /// an identification FDR. When neither this nor the value's advanced flag is given, the
+    /// --label channels and transfers, the lfq.parquet `accepted` flag and the --glyco --lfq
+    /// --mbr transfers use 0.05: their q-values come from one target/decoy competition per
+    /// run with few decoys.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
+    pub(crate) quant_fdr: Option<f64>,
+
+    /// Run Percolator on the PIN and write q-values, PEPs and the PSMs at --psm-fdr
+    ///
+    /// Percolator's PEP and q-value are joined into the outputs (QPX
+    /// posterior_error_probability and a q-value score) and the filtered <stem>.q<fdr>.tsv
+    /// is written. Percolator is --percolator-bin, else `percolator` on PATH, else the
+    /// Docker image.
+    #[arg(long, help_heading = H_FDR)]
+    pub(crate) rescore: bool,
+
+    // ── Modes ─────────────────────────────────────────────────────────────
+    /// Also search co-isolated peptides: a second PSM per scan from its MS1 isolation window
+    ///
+    /// Pass 1 is the normal search and keeps the same --top-n candidates per scan; pass 2
+    /// takes the best one as the primary peptide, detects co-isolated precursors in the
+    /// scan's MS1 isolation window and searches the residual spectrum for a second peptide,
+    /// written as an extra PSM. Needs MS1 scans (mzML, .raw); no effect on MGF input.
+    #[arg(long, help_heading = H_MODES)]
+    pub(crate) chimeric: bool,
+
+    /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
+    ///
+    /// The modifications are a built-in tier, or the tier of --refine-config.
+    #[arg(long, help_heading = H_MODES)]
+    pub(crate) refine: bool,
+
+    /// Intact glycopeptide search into a .glyco.pin (needs a glycan database, e.g. --glyco-species)
+    ///
+    /// Glycans come from the glycan database (--glyco-species, --glyco-glycan-gdb or
+    /// --glyco-glycan-wurcs); the backbone is solved as precursor minus glycan and filtered
+    /// by the N-X-S/T sequon (any S/T with --glyco-core o). With --lfq the glycopeptides
+    /// are quantified from MS1 as intact glycopeptides (peptide, glycan composition and
+    /// charge) into <base>.glyco.lfq.tsv (per feature), .glyco.quant.tsv (per
+    /// glycopeptide), .glyco.site.tsv (glycoform shares per site), .glyco.protein.tsv and
+    /// the cross-run .glyco.matrix.tsv and .glyco.protein_matrix.tsv; --lfq-tol,
+    /// --lfq-rt-window, --lfq-min-cosine and --quant-transfer-fdr apply, and --mbr is the
+    /// glycopeptide match between runs. The isobaric options do not apply.
+    #[arg(long, help_heading = H_MODES)]
+    pub(crate) glyco: bool,
+
+    /// Bundled N-glycan database of --glyco
+    ///
+    /// The databases and their attribution: crates/andes-glyco/glycan-db/.
+    #[arg(long, value_name = "SPECIES", value_enum, help_heading = H_MODES)]
+    pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
+
+    /// Most co-isolated peptides searched per scan with --chimeric
+    #[arg(long, value_name = "N", default_value = "4", hide_short_help = true,
+          help_heading = H_MODES)]
+    pub(crate) chimeric_max_coisolated: usize,
+
+    /// Largest averagine-envelope KL divergence of an accepted co-isolated precursor (--chimeric)
+    ///
+    /// Lower is stricter: fewer spurious second peptides.
+    #[arg(long, value_name = "KL", default_value = "0.3", value_parser = parse_non_negative_f32,
+          hide_short_help = true, help_heading = H_MODES)]
+    pub(crate) chimeric_max_kl: f32,
+
+    /// YAML file of the --refine modification tier [default: the built-in tier]
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_MODES)]
+    pub(crate) refine_config: Option<PathBuf>,
+
+    // ── Quantification ────────────────────────────────────────────────────
+    /// Isobaric reporter-ion quantification with this labelling kit
+    ///
+    /// Writes <stem>.tmt.parquet and, with --output-parquet, the QPX
+    /// quantms.feature.parquet. With --rescore only the PSMs at q <= --psm-fdr are
+    /// quantified. Also accepted: the plex spellings (tmt10plex) and tmtpro, tmtpro16,
+    /// tmtpro18, tmtpro32, tmtpro35, in any case.
+    #[arg(long, value_name = "PLEX", help_heading = H_QUANT,
+          value_parser = Listed::new(PLEXES, parse_plex))]
+    pub(crate) tmt: Option<quant::Plex>,
+
+    /// Label-free MS1 quantification of the identified precursors
+    ///
+    /// Isotope chromatograms are extracted around each identified peptidoform's retention
+    /// time and integrated. Writes <stem>.lfq.parquet and, with --output-parquet, the QPX
+    /// quantms.feature.parquet. mzML, Thermo .raw and Bruker .d input (a .d's MS1 frames
+    /// are summed over ion mobility). With --glyco it quantifies intact glycopeptides
+    /// instead (see --glyco).
+    #[arg(long, help_heading = H_QUANT)]
+    pub(crate) lfq: bool,
+
+    /// MS1 labelled-pair quantification (SILAC, dimethyl): a preset or one bracket per channel
+    ///
+    /// Presets: silac2, silac3, dimethyl2, dimethyl3. Channels are brackets in increasing
+    /// mass order, as OpenMS FeatureFinderMultiplex writes them ([][Lys8,Arg10],
+    /// [Dimethyl0][Dimethyl4][Dimethyl8]); a label is one of Lys4 Lys6 Lys8 Arg6 Arg10 Leu3
+    /// Dimethyl0 Dimethyl4 Dimethyl6 Dimethyl8, or <site>+<mass>[:[chem]<n>C<n>N<n>D] with
+    /// the label's 13C, 15N and 2H atoms (chem: a chemical label that adds atoms; without
+    /// atoms: a chemical shift of natural atoms). The labels are searched as variable
+    /// modifications that every labelable site of a peptide carries alike, and each
+    /// identified peptide is measured in every channel by one joint fit of their MS1
+    /// isotope traces; channels without an identification are matched at their exact
+    /// position (match between channels), and with --mbr peptides are transferred between
+    /// runs. Writes <stem>.label.parquet. mzML or .raw with high-resolution MS1; not with
+    /// --lfq or --tmt.
+    #[arg(long, value_name = "SPEC", help_heading = H_QUANT)]
+    pub(crate) label: Option<String>,
+
+    /// Match between runs across two or more inputs (needs --rescore, and --lfq, --tmt or --label)
+    ///
+    /// Label-free: after the per-run quantification, builds the precursor library, aligns
+    /// retention times across runs, measures every library precursor in every run and
+    /// writes <base>.mbr.parquet and <base>.mbr_validation.parquet (with --output-parquet,
+    /// quantms.feature.parquet holds these rows instead of the per-run features, without
+    /// the transfers above the threshold). Uses --quant-dir for the per-run tables, or a
+    /// temporary directory. With --rescore (Percolator) it gives the same result as `andes
+    /// quant library`, `extract` and `finalize` on the same files and Percolator results.
+    ///
+    /// With --tmt: the reporter ions of unidentified MS2 scans at an identified peptide's
+    /// m/z and aligned retention time are transferred into the runs that lack it, each with
+    /// an evidence type and a quantification-quality q-value (`quant_q`) in tmt.parquet and
+    /// the QPX feature view; high-resolution MS2 reporters only (not SPS-MS3 or ion-trap
+    /// MS2); identified rows are unchanged.
+    ///
+    /// With --glyco --lfq: every accepted glycopeptide is measured in each run that did not
+    /// identify it, around its predicted apex on a retention-time map fitted to the first
+    /// input on the glycopeptides both runs identified, and the transfers are scored in
+    /// their own target/decoy competition. Transferred rows say so in the Evidence column of
+    /// .glyco.lfq.tsv. Details: DOCS.md §9.
+    #[arg(long, help_heading = H_QUANT)]
+    pub(crate) mbr: bool,
+
+    /// Directory of the per-run tables of multi-run quantification
+    ///
+    /// For each input: <stem>.ms1.parquet (its MS1 scans, every FAIMS voltage),
+    /// <stem>.ms2.parquet (its MS2 scans, reduced) and <stem>.quant.parquet (every rank-1
+    /// PSM, targets and decoys, unfiltered; with --chimeric also the best PSM of each
+    /// co-isolated precursor). Input as for --lfq (mzML, .raw or .d); not with MGF or
+    /// --glyco.
+    #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
+    pub(crate) quant_dir: Option<PathBuf>,
+
+    // ── Rescoring ─────────────────────────────────────────────────────────
+    /// Rescore with the built-in rescorer instead of Percolator (no Percolator needed)
+    ///
+    /// Percolator's algorithm in process: a 3-fold cross-validated semi-supervised linear
+    /// model over the PIN features, with target-decoy competition per scan and precursor
+    /// mass, gives q-values and PEPs. Same outputs as --rescore, which is the production
+    /// path and wins when both are given.
+    #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) rescore_native: bool,
+
+    /// PEP threshold applied with --psm-fdr: a PSM must pass both [default: none]
+    #[arg(long, value_name = "PEP", value_parser = parse_unit_fraction, hide_short_help = true,
+          help_heading = H_RESCORING)]
+    pub(crate) pep: Option<f64>,
+
+    /// Percolator binary [default: percolator on PATH, else the Docker image]
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) percolator_bin: Option<PathBuf>,
+
+    /// Run Percolator from its Docker image (needs the docker command)
+    #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) percolator_docker: bool,
+
+    /// Docker image of Percolator
+    #[arg(long, value_name = "IMAGE", default_value = output::DEFAULT_PERCOLATOR_IMAGE,
+          hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) percolator_image: String,
+
+    /// Extra arguments for Percolator, e.g. "--testFDR 0.05"
+    #[arg(long, value_name = "ARGS", default_value = "", hide_default_value = true,
+          hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) percolator_args: String,
+
+    /// Keep the PIN after rescoring
+    ///
+    /// Without --output-pin, true writes the PIN (and Percolator's result files) as
+    /// <base>.pin, <base> being --output-tsv, else --output-parquet, else ./andes; false
+    /// uses a temporary PIN deleted at exit. An explicit --output-pin is always kept.
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set,
+          hide_short_help = true, help_heading = H_RESCORING)]
+    pub(crate) keep_pin: bool,
+
+    // ── Calibration and runtime ───────────────────────────────────────────
+    /// Precursor mass calibration pre-pass
+    ///
+    /// auto and on learn a systematic ppm shift from confident PSMs in a pre-pass and
+    /// tighten the precursor tolerance of the main search. Not available for Thermo .raw
+    /// input (warns).
+    #[arg(long, value_name = "MODE", default_value = "off", hide_short_help = true,
+          help_heading = H_RUNTIME,
+          value_parser = Listed::new(PRECURSOR_CAL_MODES, parse_precursor_cal))]
+    pub(crate) precursor_cal: PrecursorCalMode,
+
+    /// Fewest (spectrum, charge) keys for the calibration pre-pass to run; a
+    /// test hook that forces the pre-pass on small fixtures. [default: 10000]
+    #[arg(long, hide = true)]
+    pub(crate) cal_min_spec_keys: Option<usize>,
+
+    /// What ranks the candidates and fills the PIN RawScore
+    #[arg(long, value_name = "SCORE", default_value = "auto", hide_short_help = true,
+          help_heading = H_RUNTIME)]
+    pub(crate) score: ScoreFlag,
+
+    /// Fragmentation of MGF spectra (mzML, .raw and .d record it)
+    #[arg(long, value_name = "METHOD", value_enum, ignore_case = true, default_value = "auto",
+          hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) fragmentation: Fragmentation,
+
+    /// Labelling or enrichment protocol, which selects the protocol model
+    ///
+    /// auto keeps the selected model; when it finds TMT or iTRAQ reporter ions it turns on
+    /// the isobaric peak filter and, without --mods, adds the tag as a fixed modification.
+    #[arg(long, value_name = "PROTOCOL", value_enum, ignore_case = true,
+          default_value = "auto", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) protocol: Protocol,
+
+    /// Fragment tolerance in ppm of the PIN features, replacing the per-run measurement
+    ///
+    /// On MGF it also selects the high-resolution model class. Not with --fragment-tol-da.
+    #[arg(long, value_name = "PPM", conflicts_with = "fragment_tol_da",
+          value_parser = parse_positive_tol, hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) fragment_tol_ppm: Option<f64>,
+
+    /// Fragment tolerance in Da of the PIN features, replacing the per-run measurement
+    ///
+    /// On MGF it also selects the low-resolution model class. Not with --fragment-tol-ppm.
+    #[arg(long, value_name = "DA", conflicts_with = "fragment_tol_ppm",
+          value_parser = parse_positive_tol, hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) fragment_tol_da: Option<f64>,
+
+    /// Peak filter WINDOW_DA:PEAKS, e.g. 100:20 [default: 100:20 for isobaric data, else off]
+    ///
+    /// Keeps the PEAKS most intense peaks in every WINDOW_DA window; a window of 0 turns
+    /// the filter off.
+    #[arg(long, value_name = "WINDOW_DA:PEAKS", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) peak_filter: Option<String>,
+
+    /// How EThcD and ETciD spectra are labelled
+    #[arg(long, value_name = "LABEL", value_enum, default_value_t = EthcdActivationFlag::Ethcd,
+          hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) ethcd_activation: EthcdActivationFlag,
+
+    /// MS level searched in mzML (MGF, .raw, .d and --chimeric search MS2)
+    #[arg(long, value_name = "LEVEL", default_value = "2", hide_short_help = true,
+          help_heading = H_RUNTIME)]
+    pub(crate) ms_level: u8,
+
+    /// Candidate retrieval
+    ///
+    /// At a low-resolution fragment tolerance only the 150 most intense peaks vote in the
+    /// fragment-ion index. The search log reports the retrieval used.
+    #[arg(long, value_name = "MODE", default_value = "auto", hide_short_help = true,
+          help_heading = H_RUNTIME)]
+    pub(crate) fragment_index: FragmentIndexFlag,
+
+    /// Precursor-mass width of one fragment-index slice, in Da [default: from the memory budget]
+    #[arg(long, value_name = "DA", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) fragment_index_slice_da: Option<f64>,
+
+    /// Directory of the candidate-index cache [default: the directory of the outputs]
+    ///
+    /// The cache (andes-candidx-<key>.bin) is created if missing. A shared directory builds
+    /// the index once for several tasks, a node-local one gives a cache per node. A
+    /// directory that cannot be written is an error.
+    #[arg(long, value_name = "DIR", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) index_cache_dir: Option<PathBuf>,
+
+    /// Directory of the run's temporary files [default: the directory of the outputs]
+    ///
+    /// Created if missing and emptied at exit. It holds the MS1 scans kept between
+    /// searching and quantification, the directory of --mbr without --quant-dir, and the
+    /// PIN of --rescore with --keep-pin false. A directory that cannot be written is an
+    /// error.
+    #[arg(long, value_name = "DIR", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) temp_dir: Option<PathBuf>,
+
+    /// Parquet model store (a file or a partitioned directory) instead of the bundled one
+    #[arg(long, value_name = "PATH", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) model_store: Option<PathBuf>,
+
+    /// Model id to load from the model store, skipping the automatic selection
+    #[arg(long = "model", value_name = "ID", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) model_id_override: Option<String>,
+
+    /// Trees evaluated per GBDT ensemble, 0 for all [default: 100; all with --glyco]
+    ///
+    /// Applies to the fragment-intensity and rich-ion ensembles. Fewer trees change the
+    /// predicted intensities, so the PIN feature values and, with --score strong, which
+    /// candidate ranks first.
+    // The default of 100 keeps identifications at 1% FDR of all 300 trees on the
+    // high- and low-resolution benchmark sets at about a third less run time;
+    // under --glyco the ensembles are a negligible share of the run, so every
+    // tree is kept. Measurements: DOCS.md §11 and the benchmark notes.
+    #[arg(long, value_name = "N", hide_short_help = true, help_heading = H_RUNTIME)]
+    pub(crate) gbdt_max_trees: Option<usize>,
+
+    /// Process only the first N spectra (0: all); a benchmarking cap.
     #[arg(long, hide = true, default_value = "0")]
     pub(crate) max_spectra: usize,
 
-    /// MS level to search. Defaults to MS2 (identification); MS1 and any higher
-    /// levels (e.g. TMT SPS-MS3 reporter-quant scans) are filtered out at load
-    /// time so they never enter the search loop. Override only if you explicitly
-    /// want a different level. Applies to mzML and Thermo `.raw`; MGF files do
-    /// not encode MS level and are always treated as MS2. The chimeric cascade
-    /// always searches MS2 (it pairs MS2 with its preceding MS1).
-    #[arg(long, hide = true, default_value = "2")]
-    pub(crate) ms_level: u8,
-
-    /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
-    /// peptides. Pass 1 is the normal search and keeps the same `--top-n`
-    /// candidates per scan; Pass 2 takes the best one as the primary peptide,
-    /// detects co-isolated precursors in each scan's MS1 isolation window and
-    /// runs a targeted search for the second peptide on the residual spectrum,
-    /// emitting it as an extra PSM. Requires mzML (MS1 scans); has no effect on MGF input.
-    #[arg(long, default_value = "false")]
-    pub(crate) chimeric: bool,
-
-    /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
-    /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
-    /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
-    #[arg(long = "chimeric-max-coisolated", hide = true, default_value = "4")]
-    pub(crate) chimeric_max_coisolated: usize,
-
-    /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1
-    /// envelope (lower = stricter/cleaner; fewer spurious secondaries).
-    #[arg(long = "chimeric-max-kl", hide = true, default_value = "0.3", value_parser = parse_non_negative_f32)]
-    pub(crate) chimeric_max_kl: f32,
-
-    /// Path to a Parquet model store (a single file or a partitioned directory)
-    /// to use instead of the bundled `resources/models/`. When set, model selection reads from
-    /// this store; when unset, the bundled store is used.
-    #[arg(long = "model-store", hide = true)]
-    pub(crate) model_store: Option<PathBuf>,
-
-    /// Exact model ID to load from the model store (bundled or `--model-store`).
-    /// When set, skips automatic selection (metadata detection / `--fragmentation`
-    /// / `--protocol`) and loads this ID directly. Useful after `andes train`
-    /// to search with the freshly-trained model.
-    #[arg(long = "model", hide = true)]
-    pub(crate) model_id_override: Option<String>,
-
-    /// Evaluate only the first N trees of each GBDT ensemble (0 = all trees).
+    // ── Prediction ────────────────────────────────────────────────────────
+    /// Predicted features added to the PIN, comma-separated
     ///
-    /// Applies to BOTH shipped ensembles — fragment-intensity and rich-ion — which are
-    /// of comparable size and are each walked per fragment per candidate. `Tree::eval`
-    /// on them is the single hottest operation in a standard search (77% of self time
-    /// in a native profile). The GBDT is additive, so the early trees carry the signal
-    /// and later ones only refine it.
-    ///
-    /// WHAT TRUNCATION ACTUALLY AFFECTS, by score mode -- these differ, and conflating
-    /// them is a documented past error:
-    ///   `rank` (low-res default): the ensembles feed PIN feature columns only, never
-    ///     the ranking score, so the emitted PSM row SET is byte-identical at every K
-    ///     (verified: UPS1 emitted 382,703 rows at K=0, 100 and 25 alike).
-    ///   `strong` (high-res default): `reorder_by_strong_score` ranks by StrongScore,
-    ///     which consumes `intensity_signal` and therefore the frag-intensity ensemble.
-    ///     Truncation there CHANGES WHICH PEPTIDE WINS, not just feature values
-    ///     (verified: Astral emitted 1,214,417 / 1,214,757 / 1,214,892 / 1,215,148 rows
-    ///     at K=50 / 25 / 10 / 1). The identification counts below are still flat at
-    ///     K=100, but that is an empirical result about yield, NOT evidence that the
-    ///     model is inert to selection.
-    ///
-    /// DEFAULT 100 for standard search, measured, not guessed. Five Percolator seeds
-    /// per point, identical data and protocol:
-    ///   Astral high-res: 300 trees 38,437 PSMs @1% FDR; 100 trees 38,444; 50 trees
-    ///     38,357; 25 trees 38,094; 10 trees 37,769; 1 tree 37,533.
-    ///   UPS1 low-res (yeast target + E. coli entrapment): 300 trees 15,813 PSMs at
-    ///     3.39% true FDP; 100 trees 15,832 at 3.44%; 25 trees 15,779 at 3.61%.
-    ///     (FDP = entrapment_hits * (1 + T/E) / n with T/E = 2.419 measured over the
-    ///     searchable tryptic space, 734,280 yeast vs 303,537 E. coli peptides. An
-    ///     earlier revision of this comment printed ~2% here from a 1:1 assumption
-    ///     that does not hold for this FASTA; the ARM-TO-ARM comparison is unaffected
-    ///     because the scale factor is common to all three.)
-    /// So the last 200 trees buy nothing on either resolution class while costing
-    /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
-    /// real. (For scale: even ONE tree still reports ~19% more PSMs than Comet on Astral, so the
-    /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
-    ///
-    /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
-    /// truncation would trade identification fidelity for nothing. Set the flag
-    /// (or `scoring.gbdt_max_trees` in `--config`) to truncate there anyway.
-    ///
-    /// This CHANGES predicted intensities and therefore the emitted PIN feature
-    /// values; `--gbdt-max-trees 0` restores the full ensembles. Unset:
-    /// [`DEFAULT_GBDT_MAX_TREES`], or every tree under `--glyco`.
-    #[arg(long = "gbdt-max-trees", hide = true)]
-    pub(crate) gbdt_max_trees: Option<usize>,
-
-    /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
-    /// instruments, `rank` for low-res), `rank`, or `strong` (fused intensity +
-    /// competition score from S1–S3).
-    #[arg(long = "score", default_value = "auto")]
-    pub(crate) score: ScoreFlag,
-
-    /// Glycopeptide search mode: retrieve glycans from the loaded database, solve
-    /// the backbone as `precursor − glycan`, filter by N-X-S/T sequon, and write a
-    /// `.glyco.pin` file instead of the standard PIN. Default off.
-    ///
-    /// Requires a glycan database: `--glyco-species` for a bundled one, or
-    /// `--glyco-glycan-gdb` for your own file (or `glyco.species` /
-    /// `glyco.glycan_gdb` in `--config`). The requirement is checked as soon as the
-    /// command line and the config file are merged, so a missing database fails
-    /// immediately rather than after the digest, index build and spectrum load.
-    ///
-    /// With `--lfq`, the emitted glycopeptides are quantified from MS1 as
-    /// intact glycopeptides (peptide + glycan composition + charge) and six
-    /// tables are written next to the PIN: `<base>.glyco.lfq.tsv` (per
-    /// feature), `.glyco.quant.tsv` (per glycopeptide), `.glyco.site.tsv`
-    /// (glycoform shares at each site), `.glyco.protein.tsv` (summed and Top3
-    /// areas) and the cross-run `.glyco.matrix.tsv` /
-    /// `.glyco.protein_matrix.tsv` pivots. `--lfq-tol`, `--lfq-rt-window`,
-    /// `--lfq-min-cosine` and `--quant-transfer-fdr` apply; `--mbr` is then the
-    /// glycopeptide match-between-runs (see `--mbr`), not the peptide library
-    /// stages. The isobaric stages do not apply.
-    #[arg(long = "glyco", default_value_t = false)]
-    pub(crate) glyco: bool,
-
-    /// Cap the peaks the glyco GENERATION stage considers, keeping the most
-    /// intense N. The backbone solver is superlinear in peak count, so an
-    /// uncentroided profile scan or a very dense wide-window scan can take tens of
-    /// seconds while a normal scan takes milliseconds — the run looks hung.
-    /// Scoring always reads the full spectrum, so a generated candidate is never
-    /// scored on truncated evidence. Default 0 = no cap; 300-500 is a reasonable
-    /// value if you hit this. Changing it changes results.
-    #[arg(long = "glyco-max-peaks", hide = true, default_value_t = 0usize)]
-    pub(crate) glyco_max_peaks: usize,
-
-    /// Maximum c/z fragment charge to probe in `--glyco` ETD scoring. Unset derives it
-    /// from whether the spectrum was deconvoluted, which is correct in almost all cases:
-    /// after deconvolution multiply-charged fragments have already been moved to 1+.
-    /// Set this only for data known to carry unresolved high-charge c/z ions.
-    #[arg(long = "glyco-cz-max-charge", hide = true)]
-    pub(crate) glyco_cz_max_charge: Option<u8>,
-
-    /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
-    /// highly-charged precursors at the cost of more chance matches.
-    #[arg(long = "glyco-y-max-charge", hide = true, default_value_t = 3u8)]
-    pub(crate) glyco_y_max_charge: u8,
-
-    /// Windowed peak filtering as `WINDOW_DA:PEAKS` (e.g. `100:20`). Unset uses the
-    /// protocol default — on for isobaric-labelled data, off otherwise. A window of 0
-    /// forces it off.
-    #[arg(long = "peak-filter", hide = true)]
-    pub(crate) peak_filter: Option<String>,
-
-    /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
-    /// collisional term). `ethcd` (default) routes them to the EThcD model, which
-    /// scores b/y and c/z ions; `etd` labels them ETD (the `--glyco` c/z stack runs
-    /// on ETD spectra only).
-    #[arg(long = "ethcd-activation", hide = true, value_enum, default_value_t = EthcdActivationFlag::Ethcd)]
-    pub(crate) ethcd_activation: EthcdActivationFlag,
-
-    /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
-    /// line. Makes a `--debug-glyco` dump of a chosen set of scans affordable.
-    #[arg(long = "glyco-scans", hide = true)]
-    pub(crate) glyco_scans: Option<PathBuf>,
-
-    /// Memory: enumerate only N-X-S/T-bearing peptides into the `--glyco` candidate
-    /// index. Glyco scoring never reads any other candidate (the peptide-first
-    /// fragment index and the backbone→candidate loop both gate on the same sequon
-    /// test), so this shrinks the index roughly 10x. Measured on a
-    /// 1,500-protein mouse subset: identical rows, peptides and labels; 16 of 7,113
-    /// rows (0.2%) differ in `RawScore`/`CandidateRankEntropy` only (per-spectrum
-    /// candidate-distribution terms). Use on hosts where the full index does not fit
-    /// (the mouse entrapment recipe needs ~27 GB without it, 3.4 GB with it).
-    /// Hidden; requires `--glyco`.
-    #[arg(long = "glyco-index-sequon-only", hide = true, default_value_t = false)]
-    pub(crate) glyco_index_sequon_only: bool,
-
-    /// Load an external `.gdb` glycan database: the glycan-first search
-    /// space. Each canonical string is parsed with its tree structure preserved
-    /// (core- vs antenna-fucose), and the file's NeuGc content is used as-is (no
-    /// species filtering). Mutually exclusive with `--glyco-glycan-wurcs` and
-    /// `--glyco-species`.
-    #[arg(long = "glyco-glycan-gdb")]
-    pub(crate) glyco_glycan_gdb: Option<PathBuf>,
-
-    /// Load a WURCS 2.0 glycan database CSV (GlycanID, Mass, GlycanComposition,
-    /// StructureInformation) as the glycan-first search space. Each
-    /// `StructureInformation` is a WURCS 2.0 string reduced to the same
-    /// five-symbol tree as a `.gdb` line (anomericity/ring/substituents dropped);
-    /// the Mass and composition columns are ignored and re-derived from the tree.
-    /// Mutually exclusive with `--glyco-glycan-gdb` and `--glyco-species`.
-    #[arg(long = "glyco-glycan-wurcs", value_name = "FILE")]
-    pub(crate) glyco_glycan_wurcs: Option<PathBuf>,
-
-    /// Select a bundled species-specific N-glycan database instead of an external
-    /// `--glyco-glycan-gdb` file or `--glyco-glycan-wurcs` CSV. `--glyco` requires
-    /// one of the three. Databases and their attribution:
-    /// `crates/andes-glyco/glycan-db/`.
-    #[arg(long = "glyco-species", value_enum)]
-    pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
-
-    /// Glycan core type for `--glyco`: `n` searches N-glycans (N-X-S/T sequons,
-    /// trimannosyl core, default), `o` searches O-glycans (any S/T glycosite,
-    /// single reducing-end GalNAc core). O-glycans attach with no sequon, so an O
-    /// run's candidate gate is "has Ser or Thr" and its glycan database must be an
-    /// O-glycan `.gdb`.
-    #[arg(long = "glyco-core", value_enum, default_value_t = GlycoCoreFlag::N)]
-    pub(crate) glyco_core: GlycoCoreFlag,
-
-    /// Correct each precursor to its monoisotopic peak from the preceding MS1
-    /// isotope envelope BEFORE searching (`--glyco`; needs MS1, so mzML, Thermo
-    /// `.raw` or Bruker `.d`). `auto` fits the observed envelope at the reported charge against a
-    /// glycopeptide isotope model under the hypotheses "the recorded precursor is
-    /// the M+k peak", k = 0..6, and moves the precursor down when a k > 0 clearly
-    /// wins; every spectrum whose envelope was fitted is then searched with a
-    /// `0..1` isotope window instead of the glyco default `0..2` (the `+2` step
-    /// only carries the Hex+Fuc/NeuGc composition degeneracy once the monoisotope
-    /// is verified; bigbio/andes#64 arm F), while spectra with no linked MS1 or
-    /// charge keep the default window. An explicit `--isotope-error` is honoured.
-    /// `auto` is the default; `off` leaves every precursor as recorded. Motivation: on pGlyco2
-    /// mouse liver the firmware records 3-6 Da above the monoisotope on a class of
-    /// wide, high-mass glycopeptide envelopes, and widening the isotope window to
-    /// reach them is mass-degenerate with a glycan composition change
-    /// (bigbio/andes#64). Byte-identical output with `off`, or without MS1.
-    #[arg(long = "precursor-mono", value_enum, default_value_t = PrecursorMonoFlag::Auto)]
-    pub(crate) precursor_mono: PrecursorMonoFlag,
-
-    /// Diagnostic: write one TSV row per MS2 with the recorded/corrected precursor,
-    /// the applied shift, and the envelope fit under every hypothesis. Hidden.
-    #[arg(long = "precursor-mono-dump", hide = true)]
-    pub(crate) precursor_mono_dump: Option<PathBuf>,
-
-    /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
-    /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
-    /// suits Orbitrap MS2; on a low-resolution (ion-trap) acquisition the
-    /// default becomes 500 ppm (about 0.5 Da at m/z 1000), since a 0.3-0.5 Da
-    /// ion-trap peak never matches at 20 ppm. An explicit value is used on
-    /// either class. This is separate from `--fragment-tol-ppm`, which the
-    /// scoring model owns. Glycan-by-subtraction precursor matching uses
-    /// `--precursor-tol`.
-    #[arg(long = "glyco-tol-ppm", hide = true, default_value_t = 20.0f64, value_parser = parse_positive_tol)]
-    pub(crate) glyco_tol_ppm: f64,
-
-    /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
-    /// scan. andes historically reported a best guess for every scan clearing the
-    /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
-    /// engine requires this: the common standard is 2 core Y ions, some engines require 3
-    /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
-    /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
-    ///
-    /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
-    /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
-    /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
-    /// accepted 102 PSMs of which NONE were correct. On a mouse AI-ETD benchmark the
-    /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
-    /// leave it off for electron-transfer data. Exempting ETD scans automatically was
-    /// tried and made both regimes worse, because real files are mixed.
-    /// Under `--glyco-core o` the core ladder is only Y0 and Y1, so a value above 2
-    /// rejects every O-glycopeptide.
-    #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
-    pub(crate) glyco_min_core_y: u32,
-
-    /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
-    /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
-    /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
-    /// 7x faster than 0.5 Da on high-res data with identifications neutral.
-    #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol)]
-    pub(crate) glyco_retrieval_tol_ppm: Option<f64>,
-
-    /// Use the peptide-first b/y fragment-index fallback instead of the default
-    /// mass-driven full-glycan-list branch. On a mouse-liver fraction it finds ~2%
-    /// more glycoPSMs at ~13x the run time and ~1.5x the peak memory.
-    #[arg(long = "glyco-peptide-first", hide = true, default_value_t = false)]
-    pub(crate) glyco_peptide_first: bool,
-
-    /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
-    /// mass-residual hits). The resulting PIN is for inspection ONLY and must never
-    /// be fed to an FDR tool. Hidden dev flag.
-    #[arg(long = "debug-glyco", hide = true, default_value_t = false)]
-    pub(crate) debug_glyco: bool,
-
-    /// On ETD/AI-ETD spectra, generate candidate backbones from the paired HCD scan
-    /// (same precursor) while scoring c/z on the ETD scan — targets high-charge
-    /// glycopeptides (validated +153 backbone-correct @1%). DEFAULT ON; scans with no
-    /// HCD partner (and multi-file runs) fall back to unpaired automatically. Disable
-    /// with `--glyco-hcd-pair false`. `action = Set` so the bool takes an explicit value.
-    #[arg(long = "glyco-hcd-pair", default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) glyco_hcd_pair: bool,
-
-    /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
-    #[arg(long = "refine", default_value_t = false)]
-    pub(crate) refine: bool,
-
-    /// YAML refinement config; omit to use the built-in 5-mod DEFAULT tier.
-    #[arg(long = "refine-config", hide = true)]
-    pub(crate) refine_config: Option<std::path::PathBuf>,
-
-    /// Run Percolator on the PIN after the search and join its PEP/q-value back
-    /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
-    /// and a filtered `<stem>.q<fdr>.tsv`). Needs a Percolator backend (see
-    /// `--percolator-bin` / `--percolator-docker`). Default off.
-    #[arg(long = "rescore", default_value_t = false)]
-    pub(crate) rescore: bool,
-
-    /// Rescore with the built-in native rescorer instead of Percolator (no
-    /// Percolator backend needed): Percolator's algorithm in process, a 3-fold
-    /// cross-validated semi-supervised linear model over the PIN features with
-    /// target-decoy competition per scan and precursor mass (as `-Y`) →
-    /// q-value + PEP. A fallback for offline use; prefer `--rescore`
-    /// (Percolator) for production. Writes the same QPX q-value/PEP + filtered
-    /// `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
-    #[arg(long = "rescore-native", hide = true, default_value_t = false)]
-    pub(crate) rescore_native: bool,
-
-    /// Identification FDR at PSM level (q-value threshold). Default 0.01.
-    ///
-    /// It sets the filtered `<stem>.q<fdr>.tsv` output (target PSMs at q ≤
-    /// this), the PSMs that quantification measures, the match-between-runs
-    /// donors and the confident anchors of `--refine`. For the reported
-    /// outputs it is a THRESHOLD, not a switch: andes does not compute FDR
-    /// unless you ask it to, because doing so would silently launch
-    /// Percolator or the non-production native rescorer. Pair it with
-    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns
-    /// and writes no filtered output.
-    #[arg(long = "psm-fdr", value_parser = parse_unit_fraction)]
-    pub(crate) psm_fdr: Option<f64>,
-
-    /// q-value threshold for proteoform claims, with rescoring: the filtered
-    /// TSV, the proteoform table and quantification accept them at this level
-    /// instead of `--psm-fdr`. A proteoform claim is a PSM whose every protein
-    /// is a UniProt variant entry; its q-value already includes the class FDR
-    /// and, with knockoffs, the knockoff estimate. Isoform and chain PSMs keep
-    /// `--psm-fdr`. Default: inherits `--psm-fdr`, at least 0.05 (the larger
-    /// of the two).
-    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
-    pub(crate) proteoform_fdr: Option<f64>,
-
-    /// Protein-group q-value cutoff, with rescoring. Protein groups and their
-    /// q-values (`<stem>.protein_groups.tsv`, picked target-decoy competition
-    /// per protein family) are written either way; with this cutoff the
-    /// filtered TSV keeps only PSMs whose peptide counts for a group at or
-    /// below it, and the proteoform table only families of such groups.
-    /// Default: no protein filter. With `--mbr` and `--output-parquet`, the
-    /// QPX pg and feature views keep the groups at or below it, 0.01 unless
-    /// given.
-    #[arg(long = "protein-fdr", value_parser = parse_unit_fraction)]
-    pub(crate) protein_fdr: Option<f64>,
-
-    /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
-    /// applied IN ADDITION to `--psm-fdr` (a PSM must pass both q ≤ `--psm-fdr`
-    /// AND PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
-    /// `--pep` is a supplementary per-PSM gate. Like `--psm-fdr` it is a threshold
-    /// only: it does nothing without `--rescore` / `--rescore-native`.
-    /// Default: no PEP cap.
-    #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
-    pub(crate) pep: Option<f64>,
-
-    /// Explicit path to a Percolator binary (highest-priority backend). When
-    /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
-    #[arg(long = "percolator-bin", hide = true)]
-    pub(crate) percolator_bin: Option<std::path::PathBuf>,
-
-    /// Force the Percolator docker fallback (the pinned biocontainers image)
-    /// instead of looking for a native binary. Requires the `docker` CLI.
-    #[arg(long = "percolator-docker", hide = true, default_value_t = false)]
-    pub(crate) percolator_docker: bool,
-
-    /// Percolator docker image tag for the docker fallback (power-user override).
-    #[arg(long = "percolator-image", hide = true, default_value = output::DEFAULT_PERCOLATOR_IMAGE)]
-    pub(crate) percolator_image: String,
-
-    /// Extra arguments passed verbatim to Percolator (after the fixed flags,
-    /// before the PIN path). e.g. `--percolator-args "--testFDR 0.05"`.
-    #[arg(long = "percolator-args", hide = true, default_value = "")]
-    pub(crate) percolator_args: String,
-
-    /// Predicted-spectrum and retention-time features added to the PIN for
-    /// Percolator, as a comma-separated list:
-    /// `rt` = retention-time deviation from the bundled andes-rt model;
-    /// `ms2` = similarity of the observed spectrum to AlphaPeptDeep's predicted
-    /// fragment intensities; `peptdeep-rt` / `deeplc-rt` = retention-time
-    /// deviation from AlphaPeptDeep / DeepLC; `none` = no predicted features.
-    /// Predicted RT is calibrated to observed RT per input file. `ms2`,
-    /// `peptdeep-rt` and `deeplc-rt` load exported ONNX models from
-    /// `--predictor-models` and fail at start-up when a model file is missing.
-    /// Default `rt`.
-    #[arg(long = "predict", value_delimiter = ',', default_value = "rt")]
+    /// Predicted retention times are calibrated to the observed ones per input file.
+    /// peptdeep-ms2, peptdeep-rt and deeplc-rt load exported ONNX models from
+    /// --predictor-models and fail at start-up when a model file is missing.
+    #[arg(long, value_name = "FEATURES", value_delimiter = ',', default_value = "rt",
+          hide_short_help = true, help_heading = H_PREDICTION)]
     pub(crate) predict: Vec<PredictFeature>,
 
-    /// Directory with the exported third-party predictor models that
-    /// `--predict ms2 / peptdeep-rt / deeplc-rt` load: `peptdeep_mods.json`,
-    /// `peptdeep_{ms2,rt}_dynamic.{json,onnx}` and `deeplc_rt.{json,onnx}`
-    /// (written by the onnx-infer export scripts).
-    #[arg(long = "predictor-models")]
-    pub(crate) predictor_models: Option<std::path::PathBuf>,
+    /// Directory of the exported AlphaPeptDeep and DeepLC models
+    ///
+    /// peptdeep_mods.json, peptdeep_{ms2,rt}_dynamic.{json,onnx} and deeplc_rt.{json,onnx},
+    /// as the onnx-infer export scripts write them.
+    #[arg(long, value_name = "DIR", hide_short_help = true, help_heading = H_PREDICTION)]
+    pub(crate) predictor_models: Option<PathBuf>,
 
-    /// ONNX engine for the third-party predictors: `tract` (pure Rust, built
-    /// in) or `ort` (ONNX Runtime, a build with `--features ort` plus the
-    /// runtime library; several times faster).
-    #[arg(long = "predictor-backend", hide = true, default_value = "tract")]
+    /// ONNX engine of the AlphaPeptDeep and DeepLC models
+    #[arg(long, value_name = "ENGINE", default_value = "tract", hide_short_help = true,
+          help_heading = H_PREDICTION)]
     pub(crate) predictor_backend: PredictorBackend,
 
-    /// Collision energy given to the AlphaPeptDeep MS2 model. Default: 28 on
-    /// Q Exactive instruments, 30 otherwise.
-    #[arg(long = "predictor-nce", hide = true)]
+    /// Collision energy given to the MS2 model [default: 28 on Q Exactive, else 30]
+    #[arg(long, value_name = "NCE", hide_short_help = true, help_heading = H_PREDICTION)]
     pub(crate) predictor_nce: Option<f32>,
 
-    /// Instrument given to the AlphaPeptDeep MS2 model (one of the model's
-    /// instrument names, e.g. QE, Lumos, timsTOF). Default: from the resolved
-    /// instrument (Q Exactive → QE, timsTOF → timsTOF, TOF → SciexTOF,
-    /// otherwise Lumos).
-    #[arg(long = "predictor-instrument", hide = true)]
+    /// Instrument given to the MS2 model, e.g. QE, Lumos, timsTOF [default: from the instrument]
+    ///
+    /// One of the model's instrument names. Unset: QE for a Q Exactive, timsTOF for a
+    /// timsTOF, SciexTOF for another TOF, otherwise Lumos.
+    #[arg(long, value_name = "NAME", hide_short_help = true, help_heading = H_PREDICTION)]
     pub(crate) predictor_instrument: Option<String>,
 
-    /// Peptides per predictor batch.
-    #[arg(long = "predictor-batch", hide = true, default_value_t = 256)]
+    /// Peptides per predictor batch
+    #[arg(long, value_name = "N", default_value_t = 256, hide_short_help = true,
+          help_heading = H_PREDICTION)]
     pub(crate) predictor_batch: usize,
 
-    // ── Quantification ─────────────────────────────────────────────────────
-    /// Isobaric reporter-ion quantification of the confident PSMs with this
-    /// labelling kit: tmt6, tmt10, tmt11, tmt16, tmt18, tmt32, tmt35, itraq4 or
-    /// itraq8.
-    /// Writes `<stem>.tmt.parquet` and, with `--output-parquet`, the QPX
-    /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
-    /// q <= --psm-fdr are quantified.
-    #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
-    pub(crate) tmt: Option<quant::Plex>,
-
-    /// MS level the reporter ions are read from: 2 (the identified MS2) or 3
-    /// (the SPS-MS3 scan whose precursor references that MS2; mzML and Thermo
-    /// `.raw`; a Bruker `.d` has no MS3 scans). Default: 3 when the MS2 is low-resolution, cannot separate the
-    /// plex's channels and the MS3 scans carry reporters (SPS-MS3); else 2.
-    #[arg(long = "tmt-level")]
+    // ── Isobaric ──────────────────────────────────────────────────────────
+    /// MS level of the reporter ions: 2 (the identified MS2) or 3 (its SPS-MS3 scan) [default: 3 for SPS-MS3 data, else 2]
+    ///
+    /// 3 is the default when the MS2 is low-resolution, cannot separate the plex's channels
+    /// and the MS3 scans carry reporters. MS3 needs mzML or .raw (a .d has no MS3 scans).
+    #[arg(long, value_name = "LEVEL", hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_level: Option<u8>,
 
-    /// Reporter-ion m/z tolerance, e.g. `20ppm` or `0.003da`. Default: 20 ppm
-    /// (10 ppm for tmt32/tmt35) on high-resolution MS2 and at `--tmt-level 3`
-    /// (SPS-MS3 reporters are read in the Orbitrap), 0.3 Da on ion-trap MS2.
-    /// A window that reaches half the spacing of the kit's closest channels is
-    /// refused.
-    #[arg(long = "tmt-tol", value_parser = parse_precursor_tol)]
+    /// Reporter-ion m/z tolerance, e.g. 20ppm or 0.003da [default: 20ppm (10ppm for tmt32/tmt35), 0.3da on ion-trap MS2]
+    ///
+    /// 20 ppm (10 ppm for tmt32 and tmt35) applies to high-resolution MS2 and to
+    /// --tmt-level 3, whose reporters are read in the Orbitrap. A window reaching half the
+    /// spacing of the kit's closest channels is refused.
+    #[arg(long, value_name = "TOL", value_parser = parse_precursor_tol, hide_short_help = true,
+          help_heading = H_ISOBARIC)]
     pub(crate) tmt_tol: Option<Tolerance>,
 
-    /// Isotope impurity matrix of the kit lot (quantms text form: one line per
-    /// channel, `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18).
-    /// Corrected intensities are solved by non-negative least squares; the raw
-    /// values are kept alongside. Not supported for tmt32/tmt35. Default: no
-    /// correction.
-    #[arg(long = "tmt-correction", value_name = "FILE")]
+    /// Isotope impurity matrix of the kit lot, in quantms text form [default: no correction]
+    ///
+    /// One line per channel with the -2/-1/+1/+2 percentages (eight columns for TMTpro
+    /// 16/18). Corrected intensities are solved by non-negative least squares; the raw
+    /// values are kept alongside. Not for tmt32 and tmt35.
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_correction: Option<PathBuf>,
 
-    /// Quantification gate: PSMs whose precursor isolation purity (share of
-    /// the MS1 isolation window that belongs to the precursor) is below this
-    /// fail the gate: `tmt.parquet` and the QPX parquet keep them with
-    /// `quant_weight` 0 (`quant_gate_passed` false in `tmt.parquet`). 0 turns
-    /// the criterion off.
-    #[arg(long = "tmt-min-purity", default_value = "0.7", value_parser = parse_unit_fraction)]
+    /// Quantification gate: least precursor isolation purity (0: off)
+    ///
+    /// The purity is the share of the MS1 isolation window that belongs to the precursor.
+    /// PSMs that fail the gate are kept in tmt.parquet and the QPX parquet with quant_weight
+    /// 0 (quant_gate_passed false in tmt.parquet).
+    #[arg(long, value_name = "PURITY", default_value = "0.7", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_min_purity: f64,
 
-    /// Quantification gate: PSMs whose Percolator PEP is above this fail the
-    /// gate (kept in `tmt.parquet` with `quant_weight` 0). Needs `--rescore`
-    /// or `--rescore-native`. 1 turns the criterion off.
-    #[arg(long = "tmt-max-pep", default_value = "0.05", value_parser = parse_unit_fraction)]
+    /// Quantification gate: largest Percolator PEP (1: off; needs --rescore)
+    #[arg(long, value_name = "PEP", default_value = "0.05", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_max_pep: f64,
 
-    /// Quantification gate: PSMs whose summed reporter signal-to-noise is
-    /// below this fail the gate (kept in `tmt.parquet` with `quant_weight`
-    /// 0). Applies only where the reporter scan records noise (Thermo `.raw`,
-    /// or mzML converted with noise arrays); other PSMs are not held to it. 0
-    /// turns the criterion off.
-    #[arg(long = "tmt-min-sn", default_value = "0", value_parser = parse_non_negative)]
+    /// Quantification gate: least summed reporter signal-to-noise (0: off)
+    ///
+    /// Applies where the reporter scan records noise (Thermo .raw, or mzML converted with
+    /// noise arrays); other PSMs are not held to it.
+    #[arg(long, value_name = "SN", default_value = "0", value_parser = parse_non_negative,
+          hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_min_sn: f64,
 
-    /// Estimate each MS2 scan's co-isolation interference and write the
-    /// reporter intensities with it removed, as an extra `unmix_` channel
-    /// block and an `interference` column in `tmt.parquet` (the existing
-    /// columns are unchanged). A per-run regression explains each scan's
-    /// summed reporter signal by the precursor's, the co-isolated ions' and
-    /// the sub-threshold ion current in the isolation window of the bordering
-    /// MS1 scans; the interference is removed with the run's mean reporter
-    /// profile. `on` removes all of it; `auto` scales it by a strength learned
-    /// per run (the one under which a protein's interference-heavy PSMs best
-    /// agree with its clean PSMs; recorded in the `tmt.parquet` metadata);
-    /// `off` writes nothing. `auto` and `on` apply to high-resolution MS2
-    /// reporters only (`--tmt-level 2`), and `on` needs `--tmt`.
-    #[arg(long = "tmt-unmix", value_enum, default_value = "auto")]
+    /// Remove the co-isolation interference of high-resolution MS2 reporters
+    ///
+    /// Writes the reporter intensities with the interference removed as an extra unmix_
+    /// channel block and an interference column in tmt.parquet (the other columns are
+    /// unchanged). A per-run regression explains each scan's summed reporter signal by the
+    /// precursor's, the co-isolated ions' and the sub-threshold ion current in the
+    /// isolation window of the bordering MS1 scans; the interference is removed with the
+    /// run's mean reporter profile. The auto strength is the one under which a protein's
+    /// interference-heavy PSMs best agree with its clean PSMs (in the tmt.parquet
+    /// metadata). auto and on apply to --tmt-level 2 only; on needs --tmt.
+    #[arg(long, value_name = "MODE", value_enum, default_value = "auto", hide_short_help = true,
+          help_heading = H_ISOBARIC)]
     pub(crate) tmt_unmix: TmtUnmix,
 
-    /// Label-free MS1 quantification of the confident precursors: isotope
-    /// chromatograms are extracted around each identified peptidoform's
-    /// retention time and integrated. Writes `<stem>.lfq.parquet` and, with
-    /// `--output-parquet`, the QPX
-    /// `quantms.feature.parquet`. mzML, Thermo `.raw` and Bruker `.d` input (a
-    /// `.d`'s MS1 frames are summed over ion mobility).
+    /// With --tmt --mbr: RMS log2 deviation from its reference scan above which a transferred profile counts as wrong
     ///
-    /// Under `--glyco` it quantifies INTACT glycopeptides instead (peptide +
-    /// glycan composition + charge, with the glycan's exact elemental formula
-    /// for the isotope envelope) and writes the `.glyco.lfq/quant/site/
-    /// protein.tsv` tables beside the `.glyco.pin`; see `--glyco`.
-    #[arg(long = "lfq", default_value_t = false)]
-    pub(crate) lfq: bool,
-
-    /// MS1 m/z tolerance of the isotope chromatograms, e.g. `10ppm`. Default 10 ppm.
-    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
-    pub(crate) lfq_tol: Option<Tolerance>,
-
-    /// MS1 labelled-pair quantification (SILAC, reductive dimethyl): a preset
-    /// (`silac2`, `silac3`, `dimethyl2`, `dimethyl3`) or one bracket per
-    /// channel in increasing mass order, as OpenMS FeatureFinderMultiplex
-    /// writes them (`[][Lys8,Arg10]`, `[Dimethyl0][Dimethyl4][Dimethyl8]`;
-    /// labels `Lys4 Lys6 Lys8 Arg6 Arg10 Leu3 Dimethyl0 Dimethyl4 Dimethyl6
-    /// Dimethyl8`, or `<site>+<mass>[:[chem]<n>C<n>N<n>D]` with the label's
-    /// 13C, 15N and 2H atoms, `chem` for a chemical label that adds atoms;
-    /// unannotated, a chemical shift of natural atoms). The labels are added to the
-    /// search as variable modifications that every labelable site of a
-    /// peptide carries alike, and each identified peptide is measured in
-    /// every channel by one joint fit of their MS1 isotope traces; channels
-    /// without an identification are matched at their exact position (match
-    /// between channels), and with `--mbr` peptides are transferred between
-    /// runs. Writes `<stem>.label.parquet`. mzML / `.raw` with
-    /// high-resolution MS1. Not combined with `--lfq` or `--tmt`.
-    #[arg(long = "label", value_name = "SPEC")]
-    pub(crate) label: Option<String>,
-
-    /// Reference channel of the `--label` ratios, 1-based. Default 1.
-    #[arg(long = "label-reference", default_value_t = 1)]
-    pub(crate) label_reference: usize,
-
-    /// SILAC: fit the heavy proline that cells make from heavy arginine
-    /// (Arg6 -> 13C5 Pro, Arg10 -> 13C5 15N1 Pro) as a satellite of each
-    /// proline-containing peptide's arginine-labelled channels, and add it
-    /// back to the channel. `label.parquet` reports the converted fraction.
-    #[arg(long = "label-arg-pro", default_value_t = false)]
-    pub(crate) label_arg_pro: bool,
-
-    /// Advanced: 2H enrichment of metabolic deuterium labels (Lys4, Leu3).
-    #[arg(long = "label-2h-enrichment-silac", hide = true, default_value = "0.96", value_parser = parse_unit_fraction)]
-    pub(crate) label_2h_enrichment_silac: f64,
-
-    /// Advanced: 2H enrichment of chemical deuterium labels (dimethyl).
-    #[arg(long = "label-2h-enrichment-chemical", hide = true, default_value = "0.99", value_parser = parse_unit_fraction)]
-    pub(crate) label_2h_enrichment_chemical: f64,
-
-    /// Advanced: 13C / 15N enrichment of heavy labels, per atom.
-    #[arg(long = "label-heavy-enrichment", hide = true, default_value = "0.99", value_parser = parse_unit_fraction)]
-    pub(crate) label_heavy_enrichment: f64,
-
-    /// Retention-time half-window (seconds) around the identifying PSM in
-    /// which the chromatographic peak is searched. Default 60 s for
-    /// `--lfq` peptides and 120 s for intact glycopeptides (`--glyco`).
-    #[arg(long = "lfq-rt-window", value_parser = parse_positive_tol)]
-    pub(crate) lfq_rt_window: Option<f64>,
-
-    /// Experimental Gaussian width in seconds (eight sigma) for LFQ peak detection.
-    /// Areas still use raw signal. Omit for five-scan Savitzky–Golay smoothing.
-    /// Validate feature-q coverage for the acquisition before using this setting.
-    #[arg(long = "lfq-gaussian-width", value_parser = parse_positive_tol)]
-    pub(crate) lfq_gaussian_width: Option<f64>,
-
-    /// Minimum cosine similarity between the observed and theoretical isotope
-    /// envelope for a feature to be `accepted` in `lfq.parquet` (which keeps
-    /// every feature with its cosine). Default 0.7.
-    #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
-    pub(crate) lfq_min_cosine: f64,
-
-    /// Write the training table of the `--glyco --lfq --mbr` match scorer to
-    /// FILE: one row per scored candidate window, `label`, the ten match-model
-    /// features, and a group id (the peptide). Positives are the candidates
-    /// that cover a glycopeptide both runs identified; negatives are the other
-    /// scored windows and every window of the +11 Th decoy twin. A developer
-    /// tool for retraining the shipped model
-    /// (`resources/quant/glyco_mbr_model.txt`); it does not change the run.
-    #[arg(long = "glyco-mbr-match-train", value_name = "FILE", hide = true)]
-    pub(crate) glyco_mbr_match_train: Option<PathBuf>,
-    /// Directory for the per-run artifacts of multi-run quantification: for
-    /// each input file `<stem>.ms1.parquet` (its MS1 scans, all FAIMS voltages) and
-    /// `<stem>.quant.parquet` (every rank-1 PSM, targets and decoys, with no
-    /// FDR filter; under `--chimeric` also the best PSM of each co-isolated
-    /// precursor). Implies MS1 capture; same inputs as `--lfq` (mzML, Thermo
-    /// `.raw` or Bruker `.d`; not with MGF or `--glyco`).
-    #[arg(long = "quant-dir", value_name = "DIR")]
-    pub(crate) quant_dir: Option<PathBuf>,
-
-    /// Match-between-runs across the inputs (two or more; needs `--rescore`
-    /// or `--rescore-native`, and `--lfq` for label-free quantification or
-    /// `--tmt` for isobaric reporter ions). With `--tmt`, the reporter ions of
-    /// MS2 scans that carry no identification at an identified peptide's m/z
-    /// and aligned retention time are transferred into the runs that lack
-    /// it, each with an evidence type and an internal quant-quality q-value
-    /// (`quant_q`) in `tmt.parquet` and the QPX feature view; only
-    /// high-resolution MS2 reporters (not SPS-MS3 or ion-trap MS2) are
-    /// supported, and identified rows are unchanged. Label-free: after the
-    /// per-run quantification, builds the precursor library, aligns retention
-    /// times across runs, measures every library precursor in every run and
-    /// writes `<base>.mbr.parquet` and `<base>.mbr_validation.parquet` (with
-    /// `--output-parquet`, `quantms.feature.parquet` holds these rows instead
-    /// of the per-run features, without the below-threshold transfers). Uses
-    /// `--quant-dir` for the per-run artifacts, or a temporary directory that
-    /// is removed afterwards. With `--rescore` (Percolator), same result as
-    /// `andes quant library`, `extract` and `finalize` on the same files and
-    /// Percolator results; the native rescorer's scores have no file input
-    /// to `quant library`.
-    ///
-    /// With `--glyco --lfq` (two or more inputs): match-between-runs for intact
-    /// glycopeptides instead: each run's retention time is aligned to the first
-    /// input's with a robust piecewise-linear map (one knot per 300 anchors,
-    /// mis-pairs trimmed at 3 MAD) fitted on the glycopeptides
-    /// both identified; a map is only used when fitted on at least 50 such
-    /// glycopeptides and its robust residual is at most 45 s. Every accepted
-    /// glycopeptide is then measured in each run that did not identify it, in
-    /// a window of three residual sigmas (clamped to 10-60 s) around its
-    /// predicted apex, and the transfers are scored as their own target/decoy
-    /// competition rather than mixed with the identified features.
-    /// Transferred rows say so in the `Evidence` column of the
-    /// `.glyco.lfq.tsv` table; the roll-up tables keep their per-run area and
-    /// gain the transferred runs.
-    #[arg(long = "mbr", default_value_t = false)]
-    pub(crate) mbr: bool,
-
-    /// Quantification FDR: the q-value cut of the values measured without
-    /// their own identification (match-between-runs transfers, label
-    /// channels matched without an identification). Default 0.01.
-    ///
-    /// It covers the transfers of `--lfq`, `--tmt`, `--label` and `--glyco
-    /// --lfq`, the `--label` channels matched without an identification and,
-    /// with `--lfq`, the feature q-value of `accepted` in `lfq.parquet`.
-    /// Quant-quality q-values, not an identification FDR. When neither this
-    /// nor the advanced flag of the value is given, `--label` (channels and
-    /// transfers), the `lfq.parquet` `accepted` flag and the `--glyco --lfq
-    /// --mbr` transfers use 0.05: their q-values are coarse (one target/decoy
-    /// competition per run with few decoys); they inherit `--quant-fdr` once
-    /// they are finer.
-    #[arg(long = "quant-fdr", value_parser = parse_unit_fraction)]
-    pub(crate) quant_fdr: Option<f64>,
-
-    /// Precursor-level q-value at or below which a precursor enters the
-    /// match-between-runs library as a donor (best-PSM target/decoy q-value).
-    /// Default: inherits `--psm-fdr`.
-    #[arg(long = "mbr-donor-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
-    pub(crate) mbr_donor_fdr: Option<f64>,
-
-    /// Transfer quality q-value: transfers at or below it are reported as
-    /// `transfer_ms1` in `<base>.mbr.parquet`; with `--tmt`, transferred
-    /// reporter rows at or below it pass the quantification gate; with
-    /// `--label --mbr` the label transfer cut (with the identity-decoy
-    /// false-donor rate added); with `--glyco --lfq --mbr` the glycopeptide
-    /// transfer cut. Default: inherits `--quant-fdr` (0.05 for `--label` and
-    /// `--glyco` when `--quant-fdr` is not given either).
-    #[arg(long = "quant-transfer-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
-    pub(crate) quant_transfer_fdr: Option<f64>,
-
-    /// `--label`: quality q-value cut of a channel measured without an
-    /// identification (match between channels), from the target/decoy
-    /// competition, within its run, of its fit against the same fit at
-    /// non-label mass shifts. On known-ratio SILAC data (PXD022659 1:1) the
-    /// channels matched at q <= 0.05 are as accurate as pairs whose channels
-    /// are both identified. Default: inherits `--quant-fdr` (0.05 when
-    /// `--quant-fdr` is not given either).
-    #[arg(long = "quant-channel-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
-    pub(crate) quant_channel_fdr: Option<f64>,
-
-    /// With `--tmt --mbr`: the RMS log2 deviation of a transferred reporter
-    /// profile from its reference scan above which the value counts as wrong
-    /// when the transfer risk is learned. A definition of an error, not an
-    /// acceptance cut. Default 0.5.
-    #[arg(long = "mbr-wrong-log2", hide = true, default_value = "0.5", value_parser = parse_positive_tol)]
+    /// The definition of an error used to learn the transfer risk, not an acceptance
+    /// threshold.
+    #[arg(long = "mbr-wrong-log2", value_name = "LOG2", default_value = "0.5", value_parser = parse_positive_tol,
+          hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) mbr_wrong_log2: f64,
 
-    /// Keep the PIN file after rescoring. With `--rescore`/`--rescore-native`
-    /// and no `--output-pin`, true writes the PIN (and Percolator's result
-    /// files) as `<base>.pin`, where `<base>` is `--output-tsv`, else
-    /// `--output-parquet`, else `./andes`; false uses a temporary PIN that is
-    /// deleted at exit. An explicit `--output-pin` is always kept. Default true.
-    #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
-    pub(crate) keep_pin: bool,
+    // ── Label-free ────────────────────────────────────────────────────────
+    /// MS1 m/z tolerance of the isotope chromatograms, e.g. 10ppm [default: 10ppm]
+    #[arg(long, value_name = "TOL", value_parser = parse_precursor_tol, hide_short_help = true,
+          help_heading = H_LFQ)]
+    pub(crate) lfq_tol: Option<Tolerance>,
+
+    /// Retention-time half-window around the identifying PSM, in seconds [default: 60; 120 with --glyco]
+    #[arg(long, value_name = "SECONDS", value_parser = parse_positive_tol, hide_short_help = true,
+          help_heading = H_LFQ)]
+    pub(crate) lfq_rt_window: Option<f64>,
+
+    /// Experimental: Gaussian peak width for peak detection, in seconds (eight sigma) [default: Savitzky-Golay smoothing]
+    ///
+    /// Areas still use the raw signal. Without it, peaks are detected on five-scan
+    /// Savitzky-Golay smoothed traces. Check the feature q-value coverage on the
+    /// acquisition before relying on it.
+    #[arg(long, value_name = "SECONDS", value_parser = parse_positive_tol, hide_short_help = true,
+          help_heading = H_LFQ)]
+    pub(crate) lfq_gaussian_width: Option<f64>,
+
+    /// Least isotope-envelope cosine of a feature marked accepted in lfq.parquet
+    ///
+    /// lfq.parquet keeps every feature with its cosine.
+    #[arg(long, value_name = "COSINE", default_value = "0.7", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_LFQ)]
+    pub(crate) lfq_min_cosine: f64,
+
+    // ── Labelled pairs ────────────────────────────────────────────────────
+    /// Reference channel of the --label ratios, 1-based
+    #[arg(long, value_name = "N", default_value_t = 1, hide_short_help = true,
+          help_heading = H_LABEL)]
+    pub(crate) label_reference: usize,
+
+    /// SILAC: fit the heavy proline made from heavy arginine and add it back to its channel
+    ///
+    /// Arg6 gives 13C5 Pro and Arg10 13C5 15N1 Pro, fitted as a satellite of each
+    /// proline-containing peptide's arginine-labelled channels. label.parquet reports the
+    /// converted fraction.
+    #[arg(long, hide_short_help = true, help_heading = H_LABEL)]
+    pub(crate) label_arg_pro: bool,
+
+    /// 2H enrichment of metabolic deuterium labels (Lys4, Leu3)
+    #[arg(long = "label-2h-enrichment-silac", value_name = "FRACTION", default_value = "0.96", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_LABEL)]
+    pub(crate) label_2h_enrichment_silac: f64,
+
+    /// 2H enrichment of chemical deuterium labels (dimethyl)
+    #[arg(long = "label-2h-enrichment-chemical", value_name = "FRACTION", default_value = "0.99", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_LABEL)]
+    pub(crate) label_2h_enrichment_chemical: f64,
+
+    /// 13C and 15N enrichment of heavy labels, per atom
+    #[arg(long, value_name = "FRACTION", default_value = "0.99", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = H_LABEL)]
+    pub(crate) label_heavy_enrichment: f64,
+
+    // ── Glycopeptides ─────────────────────────────────────────────────────
+    /// External .gdb glycan database of --glyco (instead of --glyco-species)
+    ///
+    /// Each canonical string keeps its tree structure (core- or antenna-fucose), and the
+    /// file's NeuGc content is used as it is. Not with --glyco-glycan-wurcs or
+    /// --glyco-species.
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_glycan_gdb: Option<PathBuf>,
+
+    /// WURCS 2.0 glycan database CSV of --glyco (instead of --glyco-species)
+    ///
+    /// Columns GlycanID, Mass, GlycanComposition and StructureInformation. Each
+    /// StructureInformation is reduced to the five-symbol tree of a .gdb line (anomericity,
+    /// ring and substituents dropped); mass and composition are computed from the tree. Not
+    /// with --glyco-glycan-gdb or --glyco-species.
+    #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_glycan_wurcs: Option<PathBuf>,
+
+    /// Glycan core of --glyco
+    ///
+    /// An o run attaches glycans at any Ser or Thr (no sequon) and needs an O-glycan .gdb.
+    #[arg(long, value_name = "CORE", value_enum, default_value_t = GlycoCoreFlag::N,
+          hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_core: GlycoCoreFlag,
+
+    /// Correct each precursor to the monoisotopic peak of its MS1 envelope (--glyco)
+    ///
+    /// auto fits the MS1 envelope at the reported charge against a glycopeptide isotope
+    /// model under the hypotheses "the recorded precursor is the M+k peak", k = 0..6, and
+    /// moves the precursor down when a k > 0 clearly wins. A fitted spectrum is searched
+    /// with isotope errors 0..1 instead of the glyco default 0..2; spectra without a linked
+    /// MS1 or charge keep the default, and an explicit --isotope-error is used as given.
+    /// Needs MS1 (mzML, .raw or .d); without it the search is as with off.
+    #[arg(long, value_name = "MODE", value_enum, default_value_t = PrecursorMonoFlag::Auto,
+          hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) precursor_mono: PrecursorMonoFlag,
+
+    /// Write one TSV row per MS2 with the recorded and corrected precursor and
+    /// the envelope fit under every hypothesis; a diagnostic.
+    #[arg(long, hide = true)]
+    pub(crate) precursor_mono_dump: Option<PathBuf>,
+
+    /// Fragment tolerance in ppm of the glyco matching: oxonium ions, core Y ions, backbone, c/z
+    ///
+    /// Unset on low-resolution (ion-trap) MS2, it is 500 ppm (about 0.5 Da at m/z 1000).
+    /// It is separate from --fragment-tol-ppm; the glycan-by-subtraction precursor matching
+    /// uses --precursor-tol.
+    #[arg(long, value_name = "PPM", default_value_t = 20.0f64, value_parser = parse_positive_tol,
+          hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_tol_ppm: f64,
+
+    /// Fewest trimannosyl-core Y ions of a reported --glyco PSM (0: off)
+    ///
+    /// Reads spectral evidence only, so targets and decoys are held to it alike. 2 suits
+    /// collision-dominated (HCD) data; electron-transfer data lose identifications with it
+    /// (DOCS.md §9). With --glyco-core o the core ladder is Y0 and Y1 only, so a value above
+    /// 2 rejects every O-glycopeptide.
+    #[arg(long, value_name = "N", default_value_t = 0u32, hide_short_help = true,
+          help_heading = H_GLYCO)]
+    pub(crate) glyco_min_core_y: u32,
+
+    /// On ETD scans, take the candidate backbones from the paired HCD scan of the same precursor
+    ///
+    /// c/z ions are still scored on the ETD scan. Scans without an HCD partner, and
+    /// multi-file runs, are searched unpaired.
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set,
+          hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_hcd_pair: bool,
+
+    /// Most intense peaks considered when generating --glyco candidates (0: all)
+    ///
+    /// Scoring always reads the whole spectrum. 300 to 500 keeps profile or very dense
+    /// scans from taking seconds each. Changing it changes results.
+    #[arg(long, value_name = "N", default_value_t = 0usize, hide_short_help = true,
+          help_heading = H_GLYCO)]
+    pub(crate) glyco_max_peaks: usize,
+
+    /// Largest c/z fragment charge of --glyco ETD scoring [default: from whether the spectrum is deconvoluted]
+    ///
+    /// Set it only for data known to carry unresolved high-charge c/z ions.
+    #[arg(long, value_name = "Z", hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_cz_max_charge: Option<u8>,
+
+    /// Largest glycan Y fragment charge of --glyco
+    #[arg(long, value_name = "Z", default_value_t = 3u8, hide_short_help = true,
+          help_heading = H_GLYCO)]
+    pub(crate) glyco_y_max_charge: u8,
+
+    /// Candidate retrieval tolerance in ppm of --glyco [default: --glyco-tol-ppm on high-res MS2, 0.5 Da on low-res]
+    ///
+    /// Retrieval only; the scoring tolerance is unchanged.
+    #[arg(long, value_name = "PPM", value_parser = parse_positive_tol, hide_short_help = true,
+          help_heading = H_GLYCO)]
+    pub(crate) glyco_retrieval_tol_ppm: Option<f64>,
+
+    /// Peptide-first b/y fragment-index retrieval instead of the glycan-mass branch (slower)
+    #[arg(long, hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_peptide_first: bool,
+
+    /// Index only N-X-S/T peptides for --glyco, a much smaller index
+    ///
+    /// Glyco scoring reads only sequon-bearing candidates, so the results are those of the
+    /// full index except for per-spectrum candidate-distribution features (RawScore,
+    /// CandidateRankEntropy) on a few PSMs.
+    #[arg(long, hide_short_help = true, help_heading = H_GLYCO)]
+    pub(crate) glyco_index_sequon_only: bool,
+
+    /// Restrict --glyco scoring to the scan numbers in this file, one per line;
+    /// a diagnostic.
+    #[arg(long, hide = true)]
+    pub(crate) glyco_scans: Option<PathBuf>,
+
+    /// Write every candidate row per scan, de-novo mass-residual hits included;
+    /// a diagnostic PIN that must not be given to an FDR tool.
+    #[arg(long, hide = true)]
+    pub(crate) debug_glyco: bool,
+
+    /// Write the training table of the --glyco --lfq --mbr match scorer to
+    /// FILE (one row per scored candidate window: label, the ten match-model
+    /// features and the peptide as group id), for retraining
+    /// resources/quant/glyco_mbr_model.txt; the run is unchanged.
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub(crate) glyco_mbr_match_train: Option<PathBuf>,
+
+    // ── Advanced FDR ──────────────────────────────────────────────────────
+    /// q-value threshold of proteoform claims [default: the larger of --psm-fdr and 0.05]
+    ///
+    /// With rescoring, the filtered TSV, the proteoform table and quantification accept
+    /// proteoform claims at this level instead of --psm-fdr. A proteoform claim is a PSM
+    /// whose every protein is a UniProt variant entry; its q-value includes the class FDR
+    /// and, with knockoffs, the knockoff estimate. Isoform and chain PSMs keep --psm-fdr.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, hide_short_help = true,
+          help_heading = ADVANCED_FDR)]
+    pub(crate) proteoform_fdr: Option<f64>,
+
+    /// Precursor q-value threshold of a match-between-runs library donor [default: inherits --psm-fdr]
+    ///
+    /// The best-PSM target/decoy q-value of the precursor.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, hide_short_help = true,
+          help_heading = ADVANCED_FDR)]
+    pub(crate) mbr_donor_fdr: Option<f64>,
+
+    /// q-value threshold of a reported transfer [default: inherits --quant-fdr]
+    ///
+    /// Transfers at or below it are reported as transfer_ms1 in <base>.mbr.parquet; with
+    /// --tmt, transferred reporter rows at or below it pass the quantification gate; with
+    /// --label --mbr it is the label transfer threshold (the identity-decoy false-donor
+    /// rate added); with --glyco --lfq --mbr the glycopeptide transfer threshold. When
+    /// --quant-fdr is not given either, --label and --glyco use 0.05.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, hide_short_help = true,
+          help_heading = ADVANCED_FDR)]
+    pub(crate) quant_transfer_fdr: Option<f64>,
+
+    /// --label: q-value threshold of a channel matched without an identification [default: inherits --quant-fdr]
+    ///
+    /// From the target/decoy competition, within its run, of the channel's fit against the
+    /// same fit at non-label mass shifts. When --quant-fdr is not given either, 0.05.
+    #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, hide_short_help = true,
+          help_heading = ADVANCED_FDR)]
+    pub(crate) quant_channel_fdr: Option<f64>,
 }
 
 /// `andes inference`: protein groups over the rescored PSMs of one or more runs.
 #[derive(Args, Debug)]
 pub(crate) struct InferenceArgs {
-    /// Percolator target PSM results (`--results-psms`), one or more files.
-    /// Their scores must be on one scale: one Percolator run over all the
-    /// runs (one file, or one file per run from that run).
+    /// Percolator target PSM results (--results-psms) of every run
+    ///
+    /// Their scores must be on one scale: one Percolator run over all the runs (one file,
+    /// or one file per run from that run).
     #[arg(long = "psms", value_name = "TSV", num_args = 1.., required = true)]
     pub(crate) psms: Vec<PathBuf>,
 
-    /// Percolator decoy PSM results (`--decoy-results-psms`) of the same
-    /// Percolator run(s).
+    /// Percolator decoy PSM results (--decoy-results-psms) of the same Percolator run
     #[arg(long = "decoy-psms", value_name = "TSV", num_args = 1.., required = true)]
     pub(crate) decoy_psms: Vec<PathBuf>,
 
-    /// The protein database the PSMs were searched against, with the same
-    /// options as the search (`--annotations`, `--uniprot-*`, `--knockoffs`,
-    /// `--enzyme`, decoy affixes, `--mods`), so protein families, knockoff
-    /// entries, knockoff sites and decoy pairs are the search's.
+    /// The protein database of the search, with its options below
+    ///
+    /// With the search's --enzyme, --mods, decoy affixes, --annotations, --uniprot-* and
+    /// --knockoffs, protein families, knockoff entries, knockoff sites and decoy pairs are
+    /// the search's.
     #[arg(long, value_name = "FILE")]
     pub(crate) database: PathBuf,
 
     #[command(flatten)]
     pub(crate) proteins: ProteinArgs,
 
-    /// Run names for the groups' `grouped_runs`. Default: one per `--psms`
-    /// file, named after the file.
+    /// Run names of the groups' grouped_runs [default: one per --psms file, named after it]
     #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 
-    /// Output prefix: writes `<PREFIX>.pg.parquet` (the QPX protein-group view).
+    /// Output prefix: writes <PREFIX>.pg.parquet (the QPX protein-group view)
     #[arg(short = 'o', long = "output", value_name = "PREFIX")]
     pub(crate) output: PathBuf,
 }
 
 /// How protein inference reads the database and which PSMs count as evidence:
-/// the search's database options and the PSM cutoffs.
+/// the search's database options and the PSM thresholds.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ProteinArgs {
-    #[arg(long = "uniprot-variants")]
-    pub(crate) uniprot_variants: bool,
-    #[arg(long = "uniprot-isoforms")]
-    pub(crate) uniprot_isoforms: bool,
-    #[arg(long = "uniprot-chains")]
-    pub(crate) uniprot_chains: bool,
-    #[arg(
-        long = "uniprot-evidence",
-        default_value = "experimental",
-        value_parser = parse_uniprot_evidence
-    )]
-    pub(crate) uniprot_evidence: input::EvidenceLevel,
-    #[arg(long = "annotations", value_name = "FILE")]
-    pub(crate) annotations: Vec<PathBuf>,
-    #[arg(long = "knockoffs", default_value_t = 4)]
-    pub(crate) knockoffs: usize,
-    #[arg(long, default_value = "trypsin")]
-    pub(crate) enzyme: String,
-    #[arg(long, default_value = "XXX_")]
-    pub(crate) decoy_prefix: String,
-    #[arg(long = "decoy-suffix")]
-    pub(crate) decoy_suffix: Option<String>,
+    #[command(flatten)]
+    pub(crate) db: DatabaseArgs,
 
-    /// The search's `--mods` file. A PSM that places one of its
-    /// `sites=annotated` modifications on a knockoff site is counted for no
-    /// group, as in the search. Give it whenever the search had one.
-    #[arg(long = "mods", value_name = "MODFILE")]
-    pub(crate) mods: Option<PathBuf>,
-
-    /// PSM q-value cutoff for the PSMs and peptides counted per group.
-    #[arg(long = "psm-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    /// PSM q-value threshold of the PSMs and peptides counted per group
+    #[arg(long = "psm-fdr", value_name = "FDR", default_value = "0.01",
+          value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) psm_fdr: f64,
 
-    /// PSM q-value cutoff for proteoform claims (variant-class PSMs).
-    /// Default: inherits `--psm-fdr`, at least 0.05 (the larger of the two).
-    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    /// PSM q-value threshold of proteoform claims (variant-class PSMs) [default: the larger of --psm-fdr and 0.05]
+    #[arg(long = "proteoform-fdr", value_name = "FDR", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = ADVANCED_FDR)]
     pub(crate) proteoform_fdr: Option<f64>,
 
-    /// Protein q-value cutoff: the pg view keeps the target and decoy groups
-    /// at or below it (the decoys show the FDR at the cut), and `quant
-    /// finalize`'s feature view the features of those target groups. 1 keeps
-    /// every group. Default 0.01.
-    #[arg(long = "protein-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    /// Protein q-value threshold of the reported groups (1 keeps every group)
+    ///
+    /// The pg view keeps the target and decoy groups at or below it (the decoys show the
+    /// FDR at the threshold), and `quant finalize`'s feature view the features of those
+    /// target groups.
+    #[arg(long = "protein-fdr", value_name = "FDR", default_value = "0.01",
+          value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) protein_fdr: f64,
 }
 
 /// `andes quant`: the match-between-runs stages over a quant directory
-/// written by `andes search --quant-dir`.
+/// written by a search with `--quant-dir`.
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum QuantCommand {
     /// Build the precursor library and the joint retention-time alignment
-    /// from every run's PSM table and the Percolator results of those PSMs.
-    /// Writes `library.parquet` and `alignment.parquet` into the quant
-    /// directory.
+    ///
+    /// From every run's PSM table and the Percolator results of those PSMs. Writes
+    /// library.parquet and alignment.parquet into the quant directory.
     Library(QuantLibraryArgs),
-    /// Measure every library precursor in one run from its MS1 table. Writes
-    /// `<stem>.extract.parquet`.
+    /// Measure every library precursor in one run from its MS1 table
+    ///
+    /// Writes <stem>.extract.parquet.
     Extract(QuantExtractArgs),
-    /// Transfer q-values and the match-between-runs tables from every run's
-    /// extract table. Writes `<base>.mbr.parquet` and
-    /// `<base>.mbr_validation.parquet`.
+    /// Transfer q-values and the match-between-runs tables from every run's extract table
+    ///
+    /// Writes <base>.mbr.parquet and <base>.mbr_validation.parquet.
     Finalize(Box<QuantFinalizeArgs>),
 }
 
@@ -1253,200 +1248,222 @@ impl QuantCommand {
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantLibraryArgs {
-    /// Directory with each run's `<stem>.quant.parquet` and `<stem>.ms1.parquet`.
+    /// Directory with each run's <stem>.quant.parquet and <stem>.ms1.parquet
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Run stems to include. Default: every `<stem>.quant.parquet` in the
-    /// directory. A run whose PSM or MS1 table is missing is an error.
+    /// Run stems to include [default: every <stem>.quant.parquet in the directory]
+    ///
+    /// A run whose PSM or MS1 table is missing is an error.
     #[arg(long = "runs", value_name = "STEM", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 
-    /// Percolator target PSM results (`--results-psms`), with its `score`
-    /// column: one file over every run (SpecIds must be distinct across
-    /// runs), or `<stem>=<file>` once per run, repeated. PSMs are joined to
-    /// the run tables on (run, SpecId).
+    /// Percolator target PSM results (--results-psms) with their score column
+    ///
+    /// One file over every run (SpecIds distinct across runs), or <stem>=<file> once per
+    /// run. PSMs are joined to the run tables on (run, SpecId).
     #[arg(long = "psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
     pub(crate) psms: Vec<String>,
 
-    /// Percolator decoy PSM results (`--decoy-results-psms`), in the same
-    /// form as `--psms`.
+    /// Percolator decoy PSM results (--decoy-results-psms), in the form of --psms
     #[arg(long = "decoy-psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
     pub(crate) decoy_psms: Vec<String>,
 
-    /// PSM q-value (the Percolator `q-value` column) at or below which a
-    /// target PSM identifies its precursor in its run: those runs are the
-    /// precursor's donors and get identified rows; the other runs get
-    /// transfers. Use the search's `--psm-fdr` for the same result as
-    /// `--mbr`. Default 0.01.
-    #[arg(long = "psm-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    /// PSM q-value threshold of a donor: the search's --psm-fdr gives the result of --mbr
+    ///
+    /// A target PSM at or below it identifies its precursor in its run: those runs are the
+    /// precursor's donors and get identified rows; the other runs get transfers.
+    #[arg(long = "psm-fdr", value_name = "FDR", default_value = "0.01",
+          value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) psm_fdr: f64,
 
-    /// Precursor-level q-value at or below which a precursor enters the
-    /// library (best-PSM target/decoy q-value). Use the search's
-    /// `--mbr-donor-fdr` for the same result as `--mbr`. Default: inherits
-    /// `--psm-fdr`.
-    #[arg(long = "mbr-donor-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    /// Precursor q-value threshold of a library entry [default: inherits --psm-fdr]
+    ///
+    /// The best-PSM target/decoy q-value of the precursor. The search's --mbr-donor-fdr
+    /// gives the result of --mbr.
+    #[arg(long = "mbr-donor-fdr", value_name = "FDR", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = ADVANCED_FDR)]
     pub(crate) mbr_donor_fdr: Option<f64>,
 
-    /// PEP cap (the Percolator `posterior_error_prob` column) of the donor
-    /// PSMs, applied in addition to `--psm-fdr`: a target PSM identifies its
-    /// precursor only when it passes both. Use the search's `--pep` for the
-    /// same result as `--mbr`. Default: no PEP cap.
-    #[arg(long = "pep", value_parser = parse_unit_fraction)]
+    /// PEP threshold of a donor PSM, applied with --psm-fdr [default: none]
+    ///
+    /// The Percolator posterior_error_prob column. The search's --pep gives the result of
+    /// --mbr.
+    #[arg(long = "pep", value_name = "PEP", value_parser = parse_unit_fraction,
+          help_heading = H_FDR)]
     pub(crate) pep: Option<f64>,
 
-    /// Worker threads. Default: logical CPU count.
-    #[arg(long)]
+    /// Worker threads [default: the number of logical CPUs]
+    #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantExtractArgs {
-    /// Directory with the library and the run's `<stem>.ms1.parquet`.
+    /// Directory with the library and the run's <stem>.ms1.parquet
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Stem of the run to measure.
+    /// Stem of the run to measure
     #[arg(long = "run", value_name = "STEM")]
     pub(crate) run: String,
 
-    /// MS1 m/z tolerance of the template fit, in ppm (e.g. `10ppm`). Use the
-    /// `--lfq-tol` of the search for the same result as `--mbr`. Default 10 ppm.
-    #[arg(long = "lfq-tol", value_parser = parse_precursor_tol)]
+    /// MS1 m/z tolerance of the template fit in ppm, e.g. 10ppm [default: 10ppm]
+    ///
+    /// The search's --lfq-tol gives the result of --mbr.
+    #[arg(long = "lfq-tol", value_name = "TOL", value_parser = parse_precursor_tol)]
     pub(crate) lfq_tol: Option<Tolerance>,
 
-    /// Advanced: transfer pre-selection. `true` (the default, as `--mbr`)
-    /// measures a transfer only when finalize can accept it (the entry's best
-    /// donor PSM passes the transfer donor threshold) and when it has at
-    /// least `--mbr-min-donor-fraction` of the other aligned runs as donors;
-    /// a skipped pair gets neither its target nor its decoy rows. `false`
-    /// measures every transfer pair.
-    #[arg(long = "mbr-preselect", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    /// Measure only the transfers that finalize can accept
+    ///
+    /// true measures a transfer only when the entry's best donor PSM passes the transfer
+    /// donor threshold and it has at least --mbr-min-donor-fraction of the other aligned
+    /// runs as donors; a skipped pair gets neither its target nor its decoy rows. false
+    /// measures every transfer pair. The search's --mbr measures with true.
+    #[arg(long = "mbr-preselect", value_name = "BOOL", default_value_t = true,
+          action = clap::ArgAction::Set, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) mbr_preselect: bool,
 
-    /// Advanced: with `--mbr-preselect on`, the fewest other aligned donor
-    /// runs of a measured transfer, as a fraction of the library's aligned
-    /// runs other than the acceptor, rounded up (0 keeps every pair). On a
-    /// 500-run study 0.004 (2 donor runs) left out 13% of the transfer fits
-    /// (12% of the extract CPU time); the accepted transfers changed less
-    /// than between two finalize seeds, but 1.1% of the transfers accepted
-    /// at q 0.05 without it were not measured. Default 0.
-    #[arg(long = "mbr-min-donor-fraction", hide = true, default_value_t = crate::quant_mbr::DEFAULT_MIN_DONOR_FRACTION, value_parser = parse_unit_fraction)]
+    /// Fewest other aligned donor runs of a measured transfer, as a fraction of the aligned runs (0: no minimum)
+    ///
+    /// With --mbr-preselect true: the fraction of the library's aligned runs other than the
+    /// acceptor, rounded up. A minimum leaves out some transfer fits (and their CPU time),
+    /// including a few transfers that would have been accepted.
+    // Measured on a 500-run study: 0.004 (2 donor runs) left out 13% of the fits
+    // and 12% of the extract CPU time, and 1.1% of the transfers accepted at q
+    // 0.05 without it were not measured.
+    #[arg(long = "mbr-min-donor-fraction", value_name = "FRACTION",
+          default_value_t = crate::quant_mbr::DEFAULT_MIN_DONOR_FRACTION,
+          value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) mbr_min_donor_fraction: f64,
 
-    /// Worker threads. Default: logical CPU count.
-    #[arg(long)]
+    /// Worker threads [default: the number of logical CPUs]
+    #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantFinalizeArgs {
-    /// Directory with the library and every run's `<stem>.extract.parquet`.
+    /// Directory with the library and every run's <stem>.extract.parquet
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Output base: writes `<base>.mbr.parquet` and
-    /// `<base>.mbr_validation.parquet`.
+    /// Output base: writes <base>.mbr.parquet and <base>.mbr_validation.parquet
     #[arg(short = 'o', long = "output", value_name = "BASE")]
     pub(crate) output: PathBuf,
 
-    /// Quantification FDR: the q-value cut of the transfers (values measured
-    /// without their own identification). A quant-quality q-value, not an
-    /// identification FDR. Use the search's `--quant-fdr` for the same
-    /// result as `--mbr`. Default 0.01.
-    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    /// Quantification FDR: q-value threshold of the transfers
+    ///
+    /// A quantification-quality q-value, not an identification FDR. The search's
+    /// --quant-fdr gives the result of --mbr.
+    #[arg(long = "quant-fdr", value_name = "FDR", default_value = "0.01",
+          value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: f64,
 
-    /// Transfer quality q-value: transfers at or below it are reported as
-    /// `transfer_ms1`. Default: inherits `--quant-fdr`.
-    #[arg(long = "quant-transfer-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    /// q-value threshold of a transfer reported as transfer_ms1 [default: inherits --quant-fdr]
+    #[arg(long = "quant-transfer-fdr", value_name = "FDR", value_parser = parse_unit_fraction,
+          hide_short_help = true, help_heading = ADVANCED_FDR)]
     pub(crate) quant_transfer_fdr: Option<f64>,
 
-    /// Also write the QPX views into this directory: the protein groups of
-    /// every run's PSMs as `quantms.pg.parquet`, and the features of the
-    /// groups at `--protein-fdr` as `quantms.feature.parquet`, each with its
-    /// group. Needs `--database`, `--psms` and `--decoy-psms`.
-    #[arg(long = "output-parquet", value_name = "DIR", requires_all = ["database", "inference_psms", "inference_decoy_psms"])]
+    /// Also write the QPX views into this directory (needs --database, --psms and --decoy-psms)
+    ///
+    /// The protein groups of every run's PSMs as quantms.pg.parquet, and the features of
+    /// the groups at --protein-fdr as quantms.feature.parquet, each with its group.
+    #[arg(long = "output-parquet", value_name = "DIR",
+          requires_all = ["database", "inference_psms", "inference_decoy_psms"])]
     pub(crate) output_parquet: Option<PathBuf>,
 
-    /// The protein database the PSMs were searched against, with the
-    /// search's database options (as `andes inference`).
+    /// The protein database of the search, with its options (as for andes inference)
     #[arg(long, value_name = "FILE")]
     pub(crate) database: Option<PathBuf>,
 
-    /// Percolator target PSM results of every run (as `andes inference`):
-    /// one file from one Percolator run over all the runs, or one per run.
+    /// Percolator target PSM results of every run (as for andes inference)
+    ///
+    /// One file from one Percolator run over all the runs, or one per run.
     #[arg(id = "inference_psms", long = "psms", value_name = "TSV", num_args = 1..)]
     pub(crate) psms: Vec<PathBuf>,
 
-    /// Percolator decoy PSM results of the same Percolator run(s).
+    /// Percolator decoy PSM results of the same Percolator run
     #[arg(id = "inference_decoy_psms", long = "decoy-psms", value_name = "TSV", num_args = 1..)]
     pub(crate) decoy_psms: Vec<PathBuf>,
 
     #[command(flatten)]
     pub(crate) proteins: ProteinArgs,
 
-    /// Advanced: training rows per transfer or identified-quality
-    /// classifier. Above it the classifier is trained on the rows of a
-    /// hashed sample of (precursor, run) pairs (every row is still scored);
-    /// below it every row trains. Default 3000000.
-    #[arg(long = "max-train-rows", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_TRAIN_ROWS)]
+    /// Training rows per transfer or identified-quality classifier
+    ///
+    /// Above it the classifier is trained on the rows of a hashed sample of (precursor,
+    /// run) pairs (every row is still scored); below it every row trains.
+    #[arg(long = "max-train-rows", value_name = "N",
+          default_value_t = crate::quant_finalize::DEFAULT_MAX_TRAIN_ROWS,
+          hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_train_rows: usize,
 
-    /// Advanced: members of the bagged transfer classifier. Each fold's
-    /// transfer score is the mean of this many models, each trained on its
-    /// own sample of the training rows with its own seed, which keeps the
-    /// accepted transfers stable across seeds at hundreds of runs; training
-    /// and scoring time grow with it. 1 is a single model. Default 8.
-    #[arg(long = "transfer-models", hide = true, default_value_t = crate::quant_finalize::DEFAULT_TRANSFER_MODELS, value_parser = parse_transfer_models)]
+    /// Members of the bagged transfer classifier (1 to 64)
+    ///
+    /// Each fold's transfer score is the mean of this many models, each trained on its own
+    /// sample of the training rows with its own seed, which keeps the accepted transfers
+    /// stable across seeds at hundreds of runs; training and scoring time grow with it.
+    #[arg(long = "transfer-models", value_name = "N",
+          default_value_t = crate::quant_finalize::DEFAULT_TRANSFER_MODELS,
+          value_parser = parse_transfer_models, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) transfer_models: usize,
 
-    /// Advanced: reference cells of the run normalisation. Above it the fit
-    /// uses a hashed sample of whole precursors, which coarsens the RT-local
-    /// offsets (on a 6-run benchmark, half the cells raised the median
-    /// absolute log2 ratio error from 0.162 to 0.173), so keep it above the
-    /// cells of the study
-    /// when memory allows (about 150 bytes per cell). Default 20000000.
-    #[arg(long = "max-norm-cells", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_NORM_CELLS)]
+    /// Reference cells of the run normalisation (about 150 bytes each)
+    ///
+    /// Above it the fit uses a hashed sample of whole precursors, which coarsens the
+    /// RT-local offsets, so keep it above the cells of the study when memory allows.
+    // On a 6-run benchmark, half the cells raised the median absolute log2 ratio
+    // error from 0.162 to 0.173.
+    #[arg(long = "max-norm-cells", value_name = "N",
+          default_value_t = crate::quant_finalize::DEFAULT_MAX_NORM_CELLS,
+          hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_norm_cells: usize,
 
-    /// Advanced: donor fits (identified rows) summarised in one pass over
-    /// the extract tables; with more, the precursors are summarised in
-    /// groups, one pass each (about 90 bytes per fit). The results do not
-    /// depend on it. Default 12000000.
-    #[arg(long = "max-donor-fits", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_DONOR_FITS)]
+    /// Donor fits summarised in one pass over the extract tables (about 90 bytes each)
+    ///
+    /// With more, the precursors are summarised in groups, one pass each. The results do
+    /// not depend on it.
+    #[arg(long = "max-donor-fits", value_name = "N",
+          default_value_t = crate::quant_finalize::DEFAULT_MAX_DONOR_FITS,
+          hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_donor_fits: usize,
 
-    /// Advanced: held-out classifier scores kept in memory (4 bytes each);
-    /// above it they are sorted and written to temporary tables. The
-    /// results do not depend on it. Default 64000000.
-    #[arg(long = "max-held-scores", hide = true, default_value_t = crate::quant_finalize::DEFAULT_MAX_HELD_SCORES)]
+    /// Held-out classifier scores kept in memory (4 bytes each)
+    ///
+    /// Above it they are sorted and written to temporary tables. The results do not depend
+    /// on it.
+    #[arg(long = "max-held-scores", value_name = "N",
+          default_value_t = crate::quant_finalize::DEFAULT_MAX_HELD_SCORES,
+          hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_held_scores: usize,
 
-    /// Directory of the temporary tables (removed at the end), e.g. a local
-    /// disk. Default: the directory of the output base.
+    /// Directory of the temporary tables, e.g. a local disk [default: the directory of the output base]
+    ///
+    /// The tables are removed at the end.
     #[arg(long = "temp-dir", value_name = "DIR")]
     pub(crate) temp_dir: Option<PathBuf>,
 
-    /// Advanced: seed of the transfer FDR folds and models and of the
-    /// samples. Default 42.
-    #[arg(long = "seed", hide = true, default_value_t = crate::quant_cmd::MBR_SEED)]
+    /// Seed of the transfer FDR folds and models and of the samples
+    #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
+          hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,
 
-    /// Advanced: share, in [0, 1], of the precursors with an identified fit
-    /// that report the template-free trace area (`trace_quantity` of the
-    /// extract: the baseline-subtracted isotope traces integrated around the
-    /// apex) instead of the Gaussian amplitude times the template width, in
-    /// every run: the brightest by the median amplitude signal-to-noise of
-    /// their identified fits. 0 reports the template area everywhere; 1
-    /// switches every such precursor. `quant_q` and the transfer q-values
-    /// do not depend on it. Default 0.1.
-    #[arg(long = "quant-trace-fraction", hide = true, default_value_t = crate::quant_finalize::DEFAULT_TRACE_FRACTION, value_parser = parse_unit_fraction)]
+    /// Share of the precursors with an identified fit that report the trace area instead of the template area
+    ///
+    /// The trace area (trace_quantity of the extract) is the baseline-subtracted isotope
+    /// traces integrated around the apex; the template area the Gaussian amplitude times
+    /// the template width. The share, in [0, 1], goes to the brightest precursors by the
+    /// median amplitude signal-to-noise of their identified fits, in every run: 0 reports
+    /// the template area everywhere, 1 switches every such precursor. quant_q and the
+    /// transfer q-values do not depend on it.
+    #[arg(long = "quant-trace-fraction", value_name = "FRACTION",
+          default_value_t = crate::quant_finalize::DEFAULT_TRACE_FRACTION,
+          value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) quant_trace_fraction: f64,
 
-    /// Worker threads. Default: logical CPU count.
-    #[arg(long)]
+    /// Worker threads [default: the number of logical CPUs]
+    #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
 
@@ -1534,22 +1551,22 @@ fn proteoform_fdr(explicit: Option<f64>, psm_fdr: f64) -> f64 {
 /// subcommands expose them as flags so a run can be reproduced from its command line
 /// rather than from an environment the command line does not record.
 #[derive(Debug, Clone, Copy, clap::Args)]
-pub struct GeometryArgs {
+pub(crate) struct GeometryArgs {
     /// Number of score segments.
     #[arg(long = "geo-segments", default_value_t = 2i32)]
-    pub segments: i32,
+    pub(crate) segments: i32,
     /// Maximum peak rank considered.
     #[arg(long = "geo-max-rank", default_value_t = 150i32)]
-    pub max_rank: i32,
+    pub(crate) max_rank: i32,
     /// Target peptides per mass tier.
     #[arg(long = "geo-occupancy", default_value_t = 2500usize)]
-    pub occupancy: usize,
+    pub(crate) occupancy: usize,
     /// Maximum number of mass tiers.
     #[arg(long = "geo-max-tiers", default_value_t = 33usize)]
-    pub max_tiers: usize,
+    pub(crate) max_tiers: usize,
     /// Maximum fragment charge modelled.
     #[arg(long = "geo-max-fragment-charge", default_value_t = 3i32)]
-    pub max_fragment_charge: i32,
+    pub(crate) max_fragment_charge: i32,
 }
 
 impl Default for GeometryArgs {
@@ -1636,26 +1653,47 @@ pub(crate) enum PrecursorMonoFlag {
     Auto,
 }
 
-/// Parse `--fragmentation` value. Accepts named values (case-insensitive: auto,
-/// CID, ETD, HCD, UVPD).
-pub(crate) fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
-    <Fragmentation as ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD"))
+/// Parse a `--config` value of a CLI enum by its CLI name; `what` names it in
+/// the error.
+pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -> Result<E, String> {
+    <E as ValueEnum>::from_str(s, ignore_case).map_err(|_| {
+        let names: Vec<String> = E::value_variants()
+            .iter()
+            .filter_map(|v| v.to_possible_value())
+            .map(|p| p.get_name().to_string())
+            .collect();
+        format!("invalid {what} `{s}`: expected {}", names.join("|"))
+    })
+}
+
+/// Parse `--decoy-strategy` (any case; `rev`, `shuf` and `off` too).
+pub(crate) fn parse_decoy_strategy(s: &str) -> Result<DecoyStrategy, String> {
+    DecoyStrategy::from_name(s).ok_or_else(|| {
+        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/none)")
+    })
+}
+
+/// The `--decoy-strategy` name of `strategy`.
+pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
+    match strategy {
+        DecoyStrategy::Shuffle => "shuffle",
+        DecoyStrategy::Reverse => "reverse",
+        DecoyStrategy::Sequon => "sequon",
+        DecoyStrategy::None => "none",
+    }
+}
+
+/// Parse `--enzyme`: a protease or a `,`/`+` list of them, as
+/// `parse_enzymes` reads it; the value is kept as given.
+pub(crate) fn parse_enzyme_list(s: &str) -> Result<String, String> {
+    crate::model_select::parse_enzymes(s)
+        .map(|_| s.to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// Parse `--tmt` kit names.
 pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
     quant::Plex::parse(s)
-}
-
-/// Parse `--protocol` value. Accepts named values only.
-pub(crate) fn parse_protocol(s: &str) -> Result<Protocol, String> {
-    <Protocol as ValueEnum>::from_str(s, true).map_err(|_| {
-        format!(
-            "invalid --protocol `{s}`: expected \
-             auto|phospho|iTRAQ|iTRAQ-phospho|TMT|standard"
-        )
-    })
 }
 
 /// In a `MIN-MAX` dash range, the separator is the first `-` whose preceding
@@ -1837,14 +1875,14 @@ pub(crate) fn scratch_dir_error(dir: &Path, e: &dyn std::fmt::Display) -> String
     )
 }
 
-/// Parse `--precursor-cal` value. Accepts auto|on|off.
+/// Parse `--precursor-cal`: off, auto or on, in any case.
 pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
     match s.to_ascii_lowercase().as_str() {
         "auto" => Ok(PrecursorCalMode::Auto),
         "on" => Ok(PrecursorCalMode::On),
         "off" => Ok(PrecursorCalMode::Off),
         _ => Err(format!(
-            "invalid precursor-cal `{s}`: expected auto|on|off (Java -precursorCal)"
+            "invalid precursor-cal `{s}`: expected off|auto|on"
         )),
     }
 }
@@ -1853,11 +1891,6 @@ pub(crate) fn parse_uniprot_evidence(s: &str) -> Result<input::EvidenceLevel, St
     input::EvidenceLevel::from_name(s).ok_or_else(|| {
         format!("invalid UniProt evidence level `{s}`: expected experimental|curated|any")
     })
-}
-
-pub(crate) fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
-    <EnzymeSpecificity as ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("invalid enzyme specificity `{s}`: expected non-specific|semi|fully"))
 }
 
 /// `--transfer-models`: 1 to 64 members.
@@ -2222,5 +2255,344 @@ mod dir_or_output_dir_tests {
             dir_or_output_dir(None, Path::new("run.pin")),
             PathBuf::from(".")
         );
+    }
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct Wrap {
+        #[command(flatten)]
+        args: SearchArgs,
+    }
+
+    fn parse(flag: &str, value: &str) -> Result<SearchArgs, clap::Error> {
+        Wrap::try_parse_from(["andes", flag, value]).map(|w| w.args)
+    }
+
+    fn accepts(flag: &str, values: &[&str]) {
+        for v in values {
+            if let Err(e) = parse(flag, v) {
+                panic!("{flag} {v:?} rejected: {e}");
+            }
+        }
+    }
+
+    fn rejects(flag: &str, values: &[&str]) {
+        for v in values {
+            assert!(parse(flag, v).is_err(), "{flag} {v:?} accepted");
+        }
+    }
+
+    /// The flags whose parser takes aliases, lists or any case accept what
+    /// that parser accepts, and only that.
+    #[test]
+    fn listed_flags_accept_the_spellings_of_their_parsers() {
+        accepts(
+            "--decoy-strategy",
+            &[
+                "shuffle", "Shuffle", "shuf", "SHUF", "reverse", "rev", "REV", " reverse ",
+                "sequon", "SEQUON", "none", "off", "NONE",
+            ],
+        );
+        rejects("--decoy-strategy", &["bogus", "", "random"]);
+        assert_eq!(
+            parse("--decoy-strategy", "rev").unwrap().decoy_strategy,
+            DecoyStrategy::Reverse
+        );
+        assert_eq!(
+            parse("--decoy-strategy", "off").unwrap().decoy_strategy,
+            DecoyStrategy::None
+        );
+
+        accepts(
+            "--enzyme",
+            &[
+                "trypsin", "Trypsin", "tryp", "chymotrypsin", "chymo", "lysc", "lys-c", "aspn",
+                "Asp-N", "gluc", "glu-c", "lysn", "lys-n", "argc", "arg-c", "alp", "alpha-lp",
+                "alphalp", "nocleavage", "none", "nonspecific", "all", "elastase",
+                "gluc,trypsin", "gluc+trypsin", "  lysc , , trypsin ",
+            ],
+        );
+        rejects("--enzyme", &["bogus", "", " , ", "trypsin,bogus"]);
+        assert_eq!(
+            parse("--enzyme", "gluc+trypsin").unwrap().db.enzyme,
+            "gluc+trypsin",
+            "the value is kept as given"
+        );
+
+        accepts(
+            "--tmt",
+            &[
+                "tmt6", "TMT10", "tmt10plex", "TMT11plex", "tmt16", "tmtpro", "tmtpro16",
+                "tmt18", "tmtpro18", "tmt32", "tmtpro32", "tmt35", "tmtpro35", "itraq4",
+                "iTRAQ8plex",
+            ],
+        );
+        rejects("--tmt", &["tmt9", "", "tmt"]);
+
+        accepts("--uniprot-evidence", &["experimental", "Curated", "ANY"]);
+        rejects("--uniprot-evidence", &["strong", ""]);
+
+        accepts("--precursor-cal", &["off", "OFF", "Auto", "on"]);
+        rejects("--precursor-cal", &["bogus", "1", ""]);
+        assert_eq!(
+            parse("--precursor-cal", "On").unwrap().precursor_cal,
+            PrecursorCalMode::On
+        );
+    }
+
+    /// The enum flags that were parsed ignoring case still are; numbers and
+    /// other names are refused.
+    #[test]
+    fn case_insensitive_enum_flags() {
+        accepts(
+            "--fragmentation",
+            &["auto", "AUTO", "CID", "cid", "ETD", "etd", "HCD", "Hcd", "UVPD", "uvpd"],
+        );
+        rejects("--fragmentation", &["3", "99", "", "EThcD"]);
+        assert_eq!(
+            parse("--fragmentation", "hcd").unwrap().fragmentation,
+            Fragmentation::Hcd
+        );
+        accepts(
+            "--protocol",
+            &[
+                "auto", "phospho", "PHOSPHO", "iTRAQ", "itraq", "iTRAQ-phospho", "ITRAQ-PHOSPHO",
+                "TMT", "tmt", "standard",
+            ],
+        );
+        rejects("--protocol", &["4", "42", "", "silac"]);
+        accepts(
+            "--enzyme-specificity",
+            &["non-specific", "NON-SPECIFIC", "semi", "Semi", "fully", "Fully"],
+        );
+        rejects("--enzyme-specificity", &["2", "nonspecific", ""]);
+    }
+
+    /// The other enum flags keep their exact, case-sensitive names.
+    #[test]
+    fn exact_enum_flags_are_unchanged() {
+        accepts("--score", &["auto", "rank", "strong"]);
+        rejects("--score", &["Rank", "STRONG"]);
+        accepts("--fragment-index", &["auto", "on", "off"]);
+        rejects("--fragment-index", &["OFF"]);
+        accepts("--tmt-unmix", &["auto", "off", "on"]);
+        rejects("--tmt-unmix", &["Auto"]);
+        accepts("--predict", &["rt", "ms2", "peptdeep-ms2", "peptdeep-rt", "deeplc-rt", "none", "rt,ms2"]);
+        rejects("--predict", &["RT", "ms3"]);
+        accepts("--predictor-backend", &["tract", "ort"]);
+        rejects("--predictor-backend", &["ORT"]);
+        accepts("--glyco-core", &["n", "o"]);
+        rejects("--glyco-core", &["N"]);
+        accepts("--glyco-species", &["human", "mouse", "mouse-large", "high-mannose"]);
+        rejects("--glyco-species", &["Human", "rat"]);
+        accepts("--precursor-mono", &["auto", "off"]);
+        rejects("--precursor-mono", &["on"]);
+        accepts("--ethcd-activation", &["ethcd", "etd"]);
+        rejects("--ethcd-activation", &["hcd"]);
+    }
+
+    /// `--config` reads the same spellings through `parse_enum`.
+    #[test]
+    fn config_enum_parser_names_the_values() {
+        let e = parse_enum::<PredictFeature>("predict entry", "ms3", true).unwrap_err();
+        assert_eq!(
+            e,
+            "invalid predict entry `ms3`: expected rt|ms2|peptdeep-ms2|peptdeep-rt|deeplc-rt|none"
+        );
+        assert_eq!(
+            parse_enum::<PredictorBackend>("predictor_backend", "ORT", true).unwrap(),
+            PredictorBackend::Ort
+        );
+        assert!(parse_enum::<ScoreFlag>("score", "Rank", false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod help_layout_tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+    use std::collections::BTreeSet;
+
+    #[derive(Parser, Debug)]
+    struct SearchWrap {
+        #[command(flatten)]
+        args: SearchArgs,
+    }
+
+    #[derive(Parser, Debug)]
+    struct InferenceWrap {
+        #[command(flatten)]
+        args: InferenceArgs,
+    }
+
+    #[derive(Parser, Debug)]
+    struct FinalizeWrap {
+        #[command(flatten)]
+        args: QuantFinalizeArgs,
+    }
+
+    /// The long options listed in a rendered help, in order.
+    fn listed(help: &str) -> Vec<String> {
+        help.lines()
+            .filter(|l| l.starts_with("      --"))
+            .map(|l| {
+                l.trim_start()
+                    .split([' ', '='])
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    const MAIN: &[&str] = &[
+        "--config",
+        "--spectrum",
+        "--database",
+        "--output-pin",
+        "--output-tsv",
+        "--output-parquet",
+        "--precursor-tol",
+        "--enzyme",
+        "--mods",
+        "--decoy-strategy",
+        "--threads",
+        "--psm-fdr",
+        "--protein-fdr",
+        "--quant-fdr",
+        "--rescore",
+        "--chimeric",
+        "--refine",
+        "--glyco",
+        "--glyco-species",
+        "--tmt",
+        "--lfq",
+        "--label",
+        "--mbr",
+        "--quant-dir",
+    ];
+
+    /// The test hooks and diagnostics that no help lists.
+    const HIDDEN: &[&str] = &[
+        "decoy_seed",
+        "cal_min_spec_keys",
+        "max_spectra",
+        "precursor_mono_dump",
+        "glyco_scans",
+        "debug_glyco",
+        "glyco_mbr_match_train",
+    ];
+
+    #[test]
+    fn short_help_lists_the_main_options_under_five_headings() {
+        let mut cmd = SearchWrap::command();
+        let short = cmd.render_help().to_string();
+        assert_eq!(listed(&short), MAIN, "{short}");
+        for heading in [H_IO, H_SEARCH, H_FDR, H_MODES, H_QUANT] {
+            assert!(short.contains(&format!("{heading}:")), "-h misses {heading}");
+        }
+        for heading in [
+            H_DATABASE,
+            H_RESCORING,
+            H_RUNTIME,
+            H_PREDICTION,
+            H_ISOBARIC,
+            H_LFQ,
+            H_LABEL,
+            H_GLYCO,
+            ADVANCED_FDR,
+        ] {
+            assert!(!short.contains(&format!("{heading}:")), "-h shows {heading}");
+        }
+    }
+
+    #[test]
+    fn long_help_lists_every_option_but_the_hidden_ones() {
+        let mut cmd = SearchWrap::command();
+        let long = cmd.render_long_help().to_string();
+        let listed: BTreeSet<String> = listed(&long).into_iter().collect();
+        let mut hidden = BTreeSet::new();
+        for arg in cmd.get_arguments() {
+            let id = arg.get_id().as_str();
+            if matches!(id, "help" | "version") {
+                continue;
+            }
+            assert!(arg.get_help_heading().is_some(), "{id} has no heading");
+            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+            assert!(!help.trim().is_empty(), "{id} has no help");
+            let flag = format!("--{}", arg.get_long().unwrap());
+            if arg.is_hide_set() {
+                hidden.insert(id.to_string());
+                assert!(!listed.contains(&flag), "--help lists hidden {flag}");
+            } else {
+                assert!(listed.contains(&flag), "--help misses {flag}");
+            }
+        }
+        let expected: BTreeSet<String> = HIDDEN.iter().map(|s| s.to_string()).collect();
+        assert_eq!(hidden, expected);
+        for text in [
+            "[default: 0.01]",
+            "[default: inherits --psm-fdr]",
+            "[default: inherits --quant-fdr]",
+        ] {
+            assert!(long.contains(text), "--help misses {text}");
+        }
+    }
+
+    /// Help text is plain: no Markdown emphasis, issue numbers or research notes.
+    #[test]
+    fn help_text_is_plain() {
+        for mut cmd in [
+            SearchWrap::command(),
+            InferenceWrap::command(),
+            FinalizeWrap::command(),
+        ] {
+            let long = cmd.render_long_help().to_string();
+            for bad in ["**", "#64", "bigbio/", "@1%", "action = Set", "Every other engine"] {
+                assert!(!long.contains(bad), "help contains {bad:?}");
+            }
+        }
+    }
+
+    /// `andes inference` and `quant finalize` describe the database options
+    /// as the search does.
+    #[test]
+    fn database_options_have_the_same_help_everywhere() {
+        let help_of = |cmd: &clap::Command, id: &str| {
+            cmd.get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .and_then(|a| a.get_help().map(|h| h.to_string()))
+                .unwrap_or_default()
+        };
+        let search = SearchWrap::command();
+        for cmd in [InferenceWrap::command(), FinalizeWrap::command()] {
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id().as_str();
+                if matches!(id, "help" | "version") {
+                    continue;
+                }
+                let help = help_of(&cmd, id);
+                assert!(!help.trim().is_empty(), "{id} has no help");
+            }
+            for id in [
+                "enzyme",
+                "mods",
+                "decoy_prefix",
+                "decoy_suffix",
+                "uniprot_variants",
+                "uniprot_isoforms",
+                "uniprot_chains",
+                "uniprot_evidence",
+                "annotations",
+                "knockoffs",
+            ] {
+                assert_eq!(help_of(&cmd, id), help_of(&search, id), "{id}");
+            }
+        }
     }
 }

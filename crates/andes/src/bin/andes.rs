@@ -59,9 +59,8 @@ mod transfer_fdr;
 
 // Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{
-    parse_charge_range, parse_enzyme_specificity, parse_fragmentation, parse_isotope_error_range,
-    parse_precursor_cal, parse_precursor_tol, parse_protocol, parse_uniprot_evidence, Cli,
-    ScoreFlag, SearchArgs,
+    parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,
+    parse_uniprot_evidence, Cli, ScoreFlag, SearchArgs,
 };
 use crate::search::run;
 use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};
@@ -83,61 +82,68 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
     eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
 }
 
+// The variants are boxed to keep `Command` compact (clippy `large_enum_variant`).
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Train a scoring model directly from externally-labeled, high-confidence
-    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
-    /// search. This is the primary training path for the Phase-3 "own models".
-    ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    /// Train a scoring model from externally labelled, high-confidence PSMs
+    /// given as flat training parquets, without a bootstrap search.
     #[command(hide = true)]
     Train(Box<TrainArgs>),
 
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-from-search", hide = true)]
     TrainFromSearch(Box<TrainFromSearchArgs>),
 
     /// Train a v3 GBDT fragment-intensity regressor from flat training
     /// parquets and embed it in a Parquet model store alongside existing
     /// rank-core models.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-intensity-gbdt", hide = true)]
     TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
 
     /// Train a GBDT rich-ion LLR classifier (logistic; decoy-aware) from flat
     /// training parquets and embed it in a Parquet model store alongside
     /// existing rank-core models.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-rich-ion-llr", hide = true)]
     TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
 
-    /// Match-between-runs quantification stages over a `--quant-dir`:
-    /// `library` (global), `extract` (per run), `finalize` (global). The same
-    /// result as `andes search --lfq --mbr` on the same inputs.
+    /// Match between runs in stages over a --quant-dir: library, extract (per run), finalize
+    ///
+    /// The same result as a search with --lfq --mbr on the same inputs.
     #[command(subcommand)]
     Quant(cli::QuantCommand),
 
-    /// Protein groups with picked protein-level q-values over the rescored
-    /// PSMs of one or more runs. Writes the QPX protein-group view.
+    /// Protein groups with protein-level q-values over the rescored PSMs of one or more runs
+    ///
+    /// Writes the QPX protein-group view.
     Inference(Box<cli::InferenceArgs>),
 }
 
-/// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
-/// drive the existing search path (byte-identical to the pre-subcommand
-/// behaviour).
+const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
+       andes <COMMAND> [OPTIONS]";
+
+const AFTER_HELP: &str = "Example:
+  andes --spectrum run.mzML --database human.fasta --output-pin run.pin --rescore
+
+`andes --help` shows every option.";
+
+const AFTER_LONG_HELP: &str = "Example:
+  andes --spectrum run.mzML --database human.fasta --output-pin run.pin --rescore
+
+The full reference is DOCS.md.";
+
+// Top-level CLI. Without a subcommand, the flattened `SearchArgs` drive the
+// search.
 #[derive(Parser, Debug)]
 #[command(
     name = "andes",
-    // `--version` / `-V` from the crate version. Every CLI is expected to answer it,
-    // and a search result is only reproducible if you can record which build produced
-    // it — so this is provenance, not just convention.
+    // `--version` / `-V`: the build that produced a result.
     version = env!("CARGO_PKG_VERSION"),
-    about = "andes: database search of MGF/mzML spectra against FASTA",
+    about = "andes: peptide identification and quantification from MS/MS spectra \
+             (database search, rescoring, protein groups, TMT, label-free, SILAC)",
+    override_usage = USAGE,
+    after_help = AFTER_HELP,
+    after_long_help = AFTER_LONG_HELP,
     allow_hyphen_values = true,
 )]
 struct TopCli {
@@ -182,7 +188,7 @@ fn main() -> ExitCode {
             // Record whether the user set max missed cleavages, on the CLI or in
             // the --config file. `--glyco` raises the floor to 3, which costs real
             // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
-            // explicit lower value must be allowed to win. The default (1) is
+            // explicit lower value must be allowed to win. The default (2) is
             // itself a plausible explicit value, so comparing against it cannot
             // distinguish the cases — only the ValueSource and the config can.
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(

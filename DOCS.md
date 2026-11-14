@@ -556,6 +556,16 @@ T); without `loss=` IPF did not beat the search placement (measured before the s
 The IPF step takes ~10 s on the phospho run. The 20-run U2OS search peaked at 183 GB (8.9M PIN
 rows); one file takes 13 GB with IPF and 8 GB without.
 
+On the Locard-Paulet et al. 2020 benchmark (J Proteome Res 19:1338; scripts and published FLR curves
+of 16 search-engine/localization pipelines on Zenodo 3601193), which scores the same 10 Ferries files
+by their protocol (mono-phospho PSMs of a synthetic sequence in the file's own pool, ranked by
+localization score, threshold ≥ 0.75), andes searched against UniProt human + contaminants without
+the synthetic sequences: IPF keeps 973 correct-site PSMs at 2.9% FLR at `best_prob` ≥ 0.75 and 780
+at 1% observed FLR. The best published pipelines keep 564 at 3.6% (MaxQuant) and 546 at 1.8% (PD
+MS Amanda + ptmRS) at their threshold, and at most 458 at 1%. andes identifies more PSMs, so part of
+the gap is identification; at the same 550 PSMs IPF has 3 wrong sites, PD MS Amanda + ptmRS 10,
+MaxQuant 18. The search placement alone has 17% FLR and cannot be ranked.
+
 ### PEFF databases
 
 `--database x.peff` (or `.peff.gz`) reads a PSI Extended FASTA Format file: FASTA whose headers

@@ -46,43 +46,36 @@ pub(crate) fn load_seed_param(
     }
 }
 
+/// The default fixed modifications, as `--fixed-mods` would list them.
+pub(crate) const DEFAULT_FIXED_MODS: &str = "Carbamidomethyl (C)";
+
+/// The default variable modifications of the search, as `--variable-mods`
+/// would list them: Oxidation (M) and Acetyl (Protein N-term). Protein
+/// N-terminal acetylation is a near-universal default in the field (MSFragger,
+/// Comet, MaxQuant); restricted to the protein N-terminus (one site per
+/// protein, after Met cleavage), it is combinatorially cheap.
+pub(crate) const DEFAULT_VARIABLE_MODS: &str = "Oxidation (M), Acetyl (Protein N-term)";
+
+/// The default variable modifications of the training paths: Oxidation (M).
+const TRAINING_VARIABLE_MODS: &str = "Oxidation (M)";
+
+/// A built-in modification list, read through the same UNIMOD lookup as
+/// `--fixed-mods` / `--variable-mods`, so a default and the same list written
+/// out give the same masses and accessions.
+fn builtin_mods(list: &str, fixed: bool) -> Vec<Modification> {
+    model::mod_spec::parse_mod_list(list, fixed)
+        .unwrap_or_else(|e| panic!("built-in modification list {list:?}: {e}"))
+}
+
 /// The default fixed modifications: Carbamidomethyl (C).
 pub(crate) fn default_fixed_mods() -> Vec<Modification> {
-    vec![Modification::new(
-        "Carbamidomethyl",
-        57.02146,
-        ResidueSpec::Specific(b'C'),
-        ModLocation::Anywhere,
-        true,
-    )]
+    builtin_mods(DEFAULT_FIXED_MODS, true)
 }
 
 /// The default variable modifications of the search: Oxidation (M) and Acetyl
-/// (Protein N-term). Protein N-terminal acetylation is a near-universal default
-/// in the field (MSFragger / Comet / MaxQuant); restricted to the PROTEIN
-/// N-term (one site per protein, after Met cleavage), it is combinatorially
-/// cheap and biologically correct.
+/// (Protein N-term).
 pub(crate) fn default_variable_mods() -> Vec<Modification> {
-    vec![
-        oxidation_m(),
-        Modification::new(
-            "Acetyl",
-            42.010565,
-            ResidueSpec::Wildcard,
-            ModLocation::ProtNTerm,
-            false,
-        ),
-    ]
-}
-
-fn oxidation_m() -> Modification {
-    Modification::new(
-        "Oxidation",
-        15.99491,
-        ResidueSpec::Specific(b'M'),
-        ModLocation::Anywhere,
-        false,
-    )
+    builtin_mods(DEFAULT_VARIABLE_MODS, false)
 }
 
 /// The `AminoAcidSet` of the training paths: the given lists, defaulting to
@@ -93,7 +86,8 @@ pub(crate) fn build_aa_set(
     variable: Option<&ModList>,
 ) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
     let fixed = fixed.map_or_else(default_fixed_mods, |l| l.0.clone());
-    let variable = variable.map_or_else(|| vec![oxidation_m()], |l| l.0.clone());
+    let variable =
+        variable.map_or_else(|| builtin_mods(TRAINING_VARIABLE_MODS, false), |l| l.0.clone());
     Ok(AminoAcidSetBuilder::new_standard()
         .add_mods(fixed)
         .add_mods(variable)

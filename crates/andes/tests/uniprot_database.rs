@@ -226,7 +226,7 @@ fn rescoring_estimates_fdr_within_each_class() {
             "--rescore-native",
             // The fixture's few spectra pass no strict cutoff; keep every PSM
             // so the table has rows to check.
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );
@@ -275,7 +275,7 @@ fn knockoff_variants_are_searched_but_never_reported() {
             "--rescore-native",
             // Keep every PSM, knockoff rows included, so their absence from
             // the reports is what is checked.
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );
@@ -333,7 +333,7 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
             "--uniprot-evidence",
             "curated",
             "--rescore-native",
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );

@@ -209,15 +209,15 @@ fn main() -> ExitCode {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
-            // --fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
+            // --psm-fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
             // start one on their own. Warn (don't silently launch a backend) if set
             // without an explicit --rescore / --rescore-native.
-            if (search.fdr.is_some() || search.pep.is_some())
+            if (search.psm_fdr.is_some() || search.pep.is_some())
                 && !search.rescore
                 && !search.rescore_native
             {
                 eprintln!(
-                    "warning: --fdr/--pep set without --rescore or --rescore-native; \
+                    "warning: --psm-fdr/--pep set without --rescore or --rescore-native; \
                      they are ignored (add --rescore to run Percolator, or feed the PIN \
                      to Percolator yourself)."
                 );

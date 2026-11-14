@@ -129,7 +129,6 @@ pub struct ChimericCfg {
 pub struct RefineCfg {
     pub enabled: Option<bool>,
     pub config: Option<PathBuf>,
-    pub select_psm_fdr: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -137,7 +136,7 @@ pub struct RefineCfg {
 pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
-    pub fdr: Option<f64>,
+    pub psm_fdr: Option<f64>,
     pub proteoform_fdr: Option<f64>,
     pub protein_fdr: Option<f64>,
     pub pep: Option<f64>,
@@ -170,51 +169,24 @@ pub struct QuantCfg {
     pub lfq_rt_window: Option<f64>,
     pub lfq_gaussian_width: Option<f64>,
     pub lfq_min_cosine: Option<f64>,
-    pub lfq_feature_fdr: Option<f64>,
     pub label: Option<String>,
     pub label_reference: Option<usize>,
-    pub label_fdr: Option<f64>,
     pub label_arg_pro: Option<bool>,
-    pub label_mbr_fdr: Option<f64>,
     pub label_2h_enrichment_silac: Option<f64>,
     pub label_2h_enrichment_chemical: Option<f64>,
     pub label_heavy_enrichment: Option<f64>,
     pub quant_fdr: Option<f64>,
+    pub quant_transfer_fdr: Option<f64>,
+    pub quant_channel_fdr: Option<f64>,
     pub dir: Option<PathBuf>,
     pub mbr: Option<bool>,
-    pub mbr_library_fdr: Option<f64>,
-    pub mbr_fdr: Option<f64>,
+    pub mbr_donor_fdr: Option<f64>,
     pub mbr_wrong_log2: Option<f64>,
-    /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
-    pub quant_feature_fdr: Option<NumberOrString>,
-}
-
-/// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
-/// passed to the CLI validator as its text.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum NumberOrString {
-    Number(f64),
-    String(String),
-}
-
-/// `quant_feature_fdr` through the CLI validator, the error naming the key.
-fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String> {
-    crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
 }
 
 fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
     <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
         .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
-}
-
-impl NumberOrString {
-    fn text(&self) -> String {
-        match self {
-            NumberOrString::Number(v) => v.to_string(),
-            NumberOrString::String(s) => s.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -461,11 +433,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── refine ──
     set!("refine", refine, cfg.refine.enabled);
     set_opt!("refine_config", refine_config, cfg.refine.config);
-    set!(
-        "refine_select_psm_fdr",
-        refine_select_psm_fdr,
-        cfg.refine.select_psm_fdr
-    );
 
     // ── rescoring ──
     // The rescoring backend is one choice: `--rescore` or `--rescore-native` on the
@@ -476,7 +443,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         set!("rescore", rescore, cfg.rescoring.enabled);
         set!("rescore_native", rescore_native, cfg.rescoring.native);
     }
-    set_opt!("fdr", fdr, cfg.rescoring.fdr);
+    set_opt!("psm_fdr", psm_fdr, cfg.rescoring.psm_fdr);
     set_opt!(
         "proteoform_fdr",
         proteoform_fdr,
@@ -571,20 +538,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.lfq_gaussian_width
     );
     set!("lfq_min_cosine", lfq_min_cosine, cfg.quant.lfq_min_cosine);
-    set!(
-        "lfq_feature_fdr",
-        lfq_feature_fdr,
-        cfg.quant.lfq_feature_fdr
-    );
     set_opt!("label", label, cfg.quant.label);
     set!(
         "label_reference",
         label_reference,
         cfg.quant.label_reference
     );
-    set!("label_fdr", label_fdr, cfg.quant.label_fdr);
     set!("label_arg_pro", label_arg_pro, cfg.quant.label_arg_pro);
-    set!("label_mbr_fdr", label_mbr_fdr, cfg.quant.label_mbr_fdr);
     set!(
         "label_2h_enrichment_silac",
         label_2h_enrichment_silac,
@@ -601,21 +561,20 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.label_heavy_enrichment
     );
     set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
+    set_opt!(
+        "quant_transfer_fdr",
+        quant_transfer_fdr,
+        cfg.quant.quant_transfer_fdr
+    );
+    set_opt!(
+        "quant_channel_fdr",
+        quant_channel_fdr,
+        cfg.quant.quant_channel_fdr
+    );
     set_opt!("quant_dir", quant_dir, cfg.quant.dir);
     set!("mbr", mbr, cfg.quant.mbr);
-    set!(
-        "mbr_library_fdr",
-        mbr_library_fdr,
-        cfg.quant.mbr_library_fdr
-    );
-    set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set_opt!("mbr_donor_fdr", mbr_donor_fdr, cfg.quant.mbr_donor_fdr);
     set!("mbr_wrong_log2", mbr_wrong_log2, cfg.quant.mbr_wrong_log2);
-    set_parsed!(
-        "quant_feature_fdr",
-        quant_feature_fdr,
-        cfg.quant.quant_feature_fdr.map(|v| v.text()),
-        parse_quant_feature_fdr
-    );
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
@@ -685,8 +644,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // but the YAML path (plain assignment) would otherwise bypass. Re-checking the
     // final value is a no-op for CLI-supplied values (already validated by clap) and
     // rejects out-of-range values injected through `--config`.
-    if let Some(v) = args.fdr {
-        check_unit_fraction("fdr", v)?;
+    if let Some(v) = args.psm_fdr {
+        check_unit_fraction("psm_fdr", v)?;
     }
     if let Some(v) = args.proteoform_fdr {
         check_unit_fraction("proteoform_fdr", v)?;
@@ -697,9 +656,15 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;
     }
-    check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
-    check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
-    check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
+    for (key, value) in [
+        ("mbr_donor_fdr", args.mbr_donor_fdr),
+        ("quant_transfer_fdr", args.quant_transfer_fdr),
+        ("quant_channel_fdr", args.quant_channel_fdr),
+    ] {
+        if let Some(v) = value {
+            check_unit_fraction(key, v)?;
+        }
+    }
     check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
     check_unit_fraction("tmt_max_pep", args.tmt_max_pep)?;
     if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
@@ -709,9 +674,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         ));
     }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
-    check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
-    check_unit_fraction("label_fdr", args.label_fdr)?;
-    check_unit_fraction("label_mbr_fdr", args.label_mbr_fdr)?;
     check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
     check_unit_fraction(
         "label_2h_enrichment_chemical",
@@ -905,11 +867,14 @@ glyco:
             ])
             .expect("parse baseline args");
 
-        // out-of-range fdr from YAML → error
+        // out-of-range psm_fdr from YAML → error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let bad = RunConfig::from_yaml_str("rescoring:\n  fdr: 5.0\n").unwrap();
+        let bad = RunConfig::from_yaml_str("rescoring:\n  psm_fdr: 5.0\n").unwrap();
         let e = apply(bad, &mut a, &matches).unwrap_err();
-        assert!(e.contains("fdr"), "expected fdr range error, got: {e}");
+        assert!(
+            e.contains("psm_fdr"),
+            "expected psm_fdr range error, got: {e}"
+        );
 
         // both fragment tolerances from YAML → mutual-exclusion error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
@@ -924,9 +889,10 @@ glyco:
 
         // a valid config still applies cleanly
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let ok =
-            RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
-                .unwrap();
+        let ok = RunConfig::from_yaml_str(
+            "rescoring:\n  psm_fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n",
+        )
+        .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
     }
 
@@ -950,12 +916,11 @@ glyco:
             ("tmt_min_purity", "1.5"),
             ("tmt_min_purity", "-0.1"),
             ("lfq_min_cosine", "2.0"),
-            ("lfq_feature_fdr", "-0.5"),
             ("quant_fdr", "5.0"),
             ("quant_fdr", ".nan"),
-            ("quant_feature_fdr", "1.5"),
-            ("quant_feature_fdr", "0"),
-            ("quant_feature_fdr", "none"),
+            ("quant_transfer_fdr", "-0.5"),
+            ("quant_channel_fdr", "1.5"),
+            ("mbr_donor_fdr", "2"),
             ("lfq_rt_window", "0"),
             ("lfq_rt_window", "-30"),
             ("lfq_rt_window", ".inf"),
@@ -983,18 +948,51 @@ glyco:
         // In-range values still apply.
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let ok = RunConfig::from_yaml_str(
-            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  lfq_feature_fdr: 0.05\n  \
+            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  quant_channel_fdr: 0.05\n  \
              quant_fdr: 0.01\n  lfq_rt_window: 45\n  lfq_tol: 10ppm\n  tmt_tol: 0.003da\n",
         )
         .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
-        assert_eq!(a.quant_feature_fdr.0, None, "the default is off");
-        for (value, want) in [("off", None), ("0.01", Some(0.01)), ("0.05", Some(0.05))] {
-            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-            let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
-                .unwrap();
-            apply(cfg, &mut a, &matches).unwrap();
-            assert_eq!(a.quant_feature_fdr.0, want, "{value}");
+    }
+
+    /// The FDR keys follow the flag names, and each advanced key inherits
+    /// its main key when unset; a CLI flag still wins.
+    #[test]
+    fn fdr_keys_apply_and_inherit() {
+        let a = applied(
+            "rescoring:\n  psm_fdr: 0.02\n  proteoform_fdr: 0.06\n  protein_fdr: 0.03\n\
+             quant:\n  quant_fdr: 0.04\n  mbr_donor_fdr: 0.005\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(a.psm_fdr(), 0.02);
+        assert_eq!(a.proteoform_fdr(), 0.06);
+        assert_eq!(a.protein_fdr, Some(0.03));
+        assert_eq!(a.mbr_donor_fdr(), 0.005);
+        assert_eq!(a.quant_transfer_fdr(), 0.04);
+        assert_eq!(a.quant_channel_fdr(), 0.04);
+        let a = applied(
+            "quant:\n  quant_transfer_fdr: 0.02\n  quant_channel_fdr: 0.03\n",
+            &["--quant-transfer-fdr", "0.07"],
+        )
+        .unwrap();
+        assert_eq!(a.quant_transfer_fdr(), 0.07);
+        assert_eq!(a.quant_channel_fdr(), 0.03);
+        assert_eq!(a.mbr_donor_fdr(), 0.01);
+        for old in [
+            "rescoring:\n  fdr: 0.01\n",
+            "refine:\n  select_psm_fdr: 0.01\n",
+            "quant:\n  mbr_fdr: 0.01\n",
+            "quant:\n  mbr_library_fdr: 0.01\n",
+            "quant:\n  label_fdr: 0.05\n",
+            "quant:\n  label_mbr_fdr: 0.05\n",
+            "quant:\n  lfq_feature_fdr: 0.05\n",
+            "quant:\n  quant_feature_fdr: off\n",
+        ] {
+            assert!(
+                RunConfig::from_yaml_str(old).is_err(),
+                "{old} must be rejected"
+            );
         }
     }
 

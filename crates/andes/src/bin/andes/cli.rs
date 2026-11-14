@@ -82,6 +82,23 @@ pub(crate) enum ScoreFlag {
 /// Trees kept per GBDT ensemble when `--gbdt-max-trees` is unset (standard search).
 pub(crate) const DEFAULT_GBDT_MAX_TREES: usize = 100;
 
+/// `--help` heading of the advanced FDR flags, each of which inherits a main
+/// FDR flag when unset; `-h` leaves them out.
+pub(crate) const ADVANCED_FDR: &str = "Advanced FDR";
+
+/// `--psm-fdr` and `--quant-fdr` when not given.
+pub(crate) const DEFAULT_FDR: f64 = 0.01;
+
+/// The floor of the default `--proteoform-fdr`.
+pub(crate) const PROTEOFORM_FDR_FLOOR: f64 = 0.05;
+
+/// The quantification q-value of `--label` (channels and transfers), of the
+/// `lfq.parquet` `accepted` flag and of the `--glyco --lfq --mbr` transfers
+/// when neither `--quant-fdr` nor the value's advanced flag is given: their
+/// q-values come from one target/decoy competition per run with few decoys,
+/// too coarse for 0.01.
+pub(crate) const COARSE_QUANT_FDR: f64 = 0.05;
+
 /// Candidate retrieval from the out-of-core index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum FragmentIndexFlag {
@@ -564,7 +581,7 @@ pub(crate) struct SearchArgs {
     /// (glycoform shares at each site), `.glyco.protein.tsv` (summed and Top3
     /// areas) and the cross-run `.glyco.matrix.tsv` /
     /// `.glyco.protein_matrix.tsv` pivots. `--lfq-tol`, `--lfq-rt-window`,
-    /// `--lfq-min-cosine` and `--lfq-feature-fdr` apply; `--mbr` is then the
+    /// `--lfq-min-cosine` and `--quant-transfer-fdr` apply; `--mbr` is then the
     /// glycopeptide match-between-runs (see `--mbr`), not the peptide library
     /// stages. The isobaric stages do not apply.
     #[arg(long = "glyco", default_value_t = false)]
@@ -742,14 +759,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "refine-config", hide = true)]
     pub(crate) refine_config: Option<std::path::PathBuf>,
 
-    /// Confident-anchor SCOPING FDR (not a reported FDR). Default 0.01 — the same
-    /// internal TDC q used for calibration/training/report. A looser gate (e.g.
-    /// 0.10) admits low-confidence anchors that leak into the entrapment-FDP
-    /// (b1931: 0.10 → 4.86% vs 0.01 → 0.29% true FDP). Hidden power-user knob;
-    /// leave at the default unless you have a measured reason to widen it.
-    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true, value_parser = parse_unit_fraction)]
-    pub(crate) refine_select_psm_fdr: f64,
-
     /// Run Percolator on the PIN after the search and join its PEP/q-value back
     /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
     /// and a filtered `<stem>.q<fdr>.tsv`). Needs a Percolator backend (see
@@ -767,24 +776,27 @@ pub(crate) struct SearchArgs {
     #[arg(long = "rescore-native", hide = true, default_value_t = false)]
     pub(crate) rescore_native: bool,
 
-    /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
-    /// (target PSMs at q ≤ this).
+    /// Identification FDR at PSM level (q-value threshold). Default 0.01.
     ///
-    /// This is a THRESHOLD, not a switch: it does nothing on its own. andes does
-    /// not compute FDR unless you ask it to, because doing so would silently
-    /// launch Percolator or the non-production native rescorer. Pair it with
-    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns and
-    /// writes no filtered output. Defaults to 0.01 when rescoring does run.
-    #[arg(long = "fdr", value_parser = parse_unit_fraction)]
-    pub(crate) fdr: Option<f64>,
+    /// It sets the filtered `<stem>.q<fdr>.tsv` output (target PSMs at q ≤
+    /// this), the PSMs that quantification measures, the match-between-runs
+    /// donors and the confident anchors of `--refine`. For the reported
+    /// outputs it is a THRESHOLD, not a switch: andes does not compute FDR
+    /// unless you ask it to, because doing so would silently launch
+    /// Percolator or the non-production native rescorer. Pair it with
+    /// `--rescore` (Percolator) or `--rescore-native`. Setting it alone warns
+    /// and writes no filtered output.
+    #[arg(long = "psm-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) psm_fdr: Option<f64>,
 
     /// q-value threshold for proteoform claims, with rescoring: the filtered
     /// TSV, the proteoform table and quantification accept them at this level
-    /// instead of `--fdr`. A proteoform claim is a PSM whose every protein is
-    /// a UniProt variant entry; its q-value already includes the class FDR
+    /// instead of `--psm-fdr`. A proteoform claim is a PSM whose every protein
+    /// is a UniProt variant entry; its q-value already includes the class FDR
     /// and, with knockoffs, the knockoff estimate. Isoform and chain PSMs keep
-    /// `--fdr`. Default: the larger of `--fdr` and 0.05.
-    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
+    /// `--psm-fdr`. Default: inherits `--psm-fdr`, at least 0.05 (the larger
+    /// of the two).
+    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
     pub(crate) proteoform_fdr: Option<f64>,
 
     /// Protein-group q-value cutoff, with rescoring. Protein groups and their
@@ -799,9 +811,9 @@ pub(crate) struct SearchArgs {
     pub(crate) protein_fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
-    /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
-    /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
-    /// `--pep` is a supplementary per-PSM gate. Like `--fdr` it is a threshold
+    /// applied IN ADDITION to `--psm-fdr` (a PSM must pass both q ≤ `--psm-fdr`
+    /// AND PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
+    /// `--pep` is a supplementary per-PSM gate. Like `--psm-fdr` it is a threshold
     /// only: it does nothing without `--rescore` / `--rescore-native`.
     /// Default: no PEP cap.
     #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
@@ -874,7 +886,7 @@ pub(crate) struct SearchArgs {
     /// itraq8.
     /// Writes `<stem>.tmt.parquet` and, with `--output-parquet`, the QPX
     /// `quantms.feature.parquet`. Combine with `--rescore` so only PSMs at
-    /// q <= --fdr are quantified.
+    /// q <= --psm-fdr are quantified.
     #[arg(long = "tmt", value_name = "PLEX", value_parser = parse_plex)]
     pub(crate) tmt: Option<quant::Plex>,
 
@@ -978,21 +990,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "label-reference", default_value_t = 1)]
     pub(crate) label_reference: usize,
 
-    /// Quality q-value cut of a channel measured without an identification
-    /// (match between channels): from the target/decoy competition, within
-    /// its run, of its fit against the same fit at non-label mass shifts. An
-    /// internal quant-quality q-value. Default 0.05: on known-ratio SILAC
-    /// data (PXD022659 1:1) the channels matched at q <= 0.05 are as accurate
-    /// as pairs whose channels are both identified.
-    #[arg(long = "label-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
-    pub(crate) label_fdr: f64,
-
-    /// Transfer q-value cut of `--label --mbr` (the label-free and isobaric
-    /// transfers use `--mbr-fdr`). An internal quant-quality q-value, with
-    /// the identity-decoy false-donor rate added. Default 0.05.
-    #[arg(long = "label-mbr-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
-    pub(crate) label_mbr_fdr: f64,
-
     /// SILAC: fit the heavy proline that cells make from heavy arginine
     /// (Arg6 -> 13C5 Pro, Arg10 -> 13C5 15N1 Pro) as a satellite of each
     /// proline-containing peptide's arginine-labelled channels, and add it
@@ -1029,12 +1026,6 @@ pub(crate) struct SearchArgs {
     /// every feature with its cosine). Default 0.7.
     #[arg(long = "lfq-min-cosine", default_value = "0.7", value_parser = parse_unit_fraction)]
     pub(crate) lfq_min_cosine: f64,
-
-    /// Feature-level FDR for `accepted` in `lfq.parquet`, from a target/decoy
-    /// competition of each feature against a twin extracted 11 Th above it.
-    /// Default 0.05.
-    #[arg(long = "lfq-feature-fdr", default_value = "0.05", value_parser = parse_unit_fraction)]
-    pub(crate) lfq_feature_fdr: f64,
 
     /// Write the training table of the `--glyco --lfq --mbr` match scorer to
     /// FILE: one row per scored candidate window, `label`, the ten match-model
@@ -1090,18 +1081,47 @@ pub(crate) struct SearchArgs {
     #[arg(long = "mbr", default_value_t = false)]
     pub(crate) mbr: bool,
 
-    /// Internal library entry gate (precursor-level), not a reported
-    /// identification FDR: precursors whose best-PSM target/decoy q-value is
-    /// at most this enter the match-between-runs library. Default 0.01.
-    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) mbr_library_fdr: f64,
+    /// Quantification FDR: the q-value cut of the values measured without
+    /// their own identification (match-between-runs transfers, label
+    /// channels matched without an identification). Default 0.01.
+    ///
+    /// It covers the transfers of `--lfq`, `--tmt`, `--label` and `--glyco
+    /// --lfq`, the `--label` channels matched without an identification and,
+    /// with `--lfq`, the feature q-value of `accepted` in `lfq.parquet`.
+    /// Quant-quality q-values, not an identification FDR. When neither this
+    /// nor the advanced flag of the value is given, `--label` (channels and
+    /// transfers), the `lfq.parquet` `accepted` flag and the `--glyco --lfq
+    /// --mbr` transfers use 0.05: their q-values are coarse (one target/decoy
+    /// competition per run with few decoys); they inherit `--quant-fdr` once
+    /// they are finer.
+    #[arg(long = "quant-fdr", value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: Option<f64>,
+
+    /// Precursor-level q-value at or below which a precursor enters the
+    /// match-between-runs library as a donor (best-PSM target/decoy q-value).
+    /// Default: inherits `--psm-fdr`.
+    #[arg(long = "mbr-donor-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) mbr_donor_fdr: Option<f64>,
 
     /// Transfer quality q-value: transfers at or below it are reported as
     /// `transfer_ms1` in `<base>.mbr.parquet`; with `--tmt`, transferred
-    /// reporter rows at or below it pass the quantification gate. An internal
-    /// quant-quality q-value, not an identification FDR. Default 0.01.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) mbr_fdr: f64,
+    /// reporter rows at or below it pass the quantification gate; with
+    /// `--label --mbr` the label transfer cut (with the identity-decoy
+    /// false-donor rate added); with `--glyco --lfq --mbr` the glycopeptide
+    /// transfer cut. Default: inherits `--quant-fdr` (0.05 for `--label` and
+    /// `--glyco` when `--quant-fdr` is not given either).
+    #[arg(long = "quant-transfer-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) quant_transfer_fdr: Option<f64>,
+
+    /// `--label`: quality q-value cut of a channel measured without an
+    /// identification (match between channels), from the target/decoy
+    /// competition, within its run, of its fit against the same fit at
+    /// non-label mass shifts. On known-ratio SILAC data (PXD022659 1:1) the
+    /// channels matched at q <= 0.05 are as accurate as pairs whose channels
+    /// are both identified. Default: inherits `--quant-fdr` (0.05 when
+    /// `--quant-fdr` is not given either).
+    #[arg(long = "quant-channel-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) quant_channel_fdr: Option<f64>,
 
     /// With `--tmt --mbr`: the RMS log2 deviation of a transferred reporter
     /// profile from its reference scan above which the value counts as wrong
@@ -1109,20 +1129,6 @@ pub(crate) struct SearchArgs {
     /// acceptance cut. Default 0.5.
     #[arg(long = "mbr-wrong-log2", hide = true, default_value = "0.5", value_parser = parse_positive_tol)]
     pub(crate) mbr_wrong_log2: f64,
-
-    /// Identified-row quality q-value: an identified (precursor, run) whose
-    /// MS1 feature has a quality q-value against its decoys above this (or
-    /// none) is reported as `identified_below_threshold` and left out of
-    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
-    /// identification FDR. `off` (the default) reports every identified row
-    /// and keeps `quant_q` as an annotation.
-    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
-    pub(crate) quant_feature_fdr: FractionOrOff,
-
-    /// PSM q-value threshold for quantification targets when rescoring runs.
-    /// Default: the `--fdr` value (0.01).
-    #[arg(long = "quant-fdr", hide = true, value_parser = parse_unit_fraction)]
-    pub(crate) quant_fdr: Option<f64>,
 
     /// Keep the PIN file after rescoring. With `--rescore`/`--rescore-native`
     /// and no `--output-pin`, true writes the PIN (and Percolator's result
@@ -1201,12 +1207,12 @@ pub(crate) struct ProteinArgs {
     pub(crate) mods: Option<PathBuf>,
 
     /// PSM q-value cutoff for the PSMs and peptides counted per group.
-    #[arg(long = "fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) fdr: f64,
+    #[arg(long = "psm-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) psm_fdr: f64,
 
     /// PSM q-value cutoff for proteoform claims (variant-class PSMs).
-    /// Default: the larger of `--fdr` and 0.05.
-    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction)]
+    /// Default: inherits `--psm-fdr`, at least 0.05 (the larger of the two).
+    #[arg(long = "proteoform-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
     pub(crate) proteoform_fdr: Option<f64>,
 
     /// Protein q-value cutoff: the pg view keeps the target and decoy groups
@@ -1268,21 +1274,23 @@ pub(crate) struct QuantLibraryArgs {
     #[arg(long = "decoy-psms", value_name = "TSV|STEM=TSV", num_args = 1.., required = true)]
     pub(crate) decoy_psms: Vec<String>,
 
-    /// Internal library entry gate (precursor-level), not a reported
-    /// identification FDR. Default 0.01.
-    #[arg(long = "mbr-library-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) mbr_library_fdr: f64,
-
     /// PSM q-value (the Percolator `q-value` column) at or below which a
     /// target PSM identifies its precursor in its run: those runs are the
     /// precursor's donors and get identified rows; the other runs get
-    /// transfers. Use the search's `--quant-fdr` (default `--fdr`) for the
-    /// same result as `--mbr`. Default 0.01.
-    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) quant_fdr: f64,
+    /// transfers. Use the search's `--psm-fdr` for the same result as
+    /// `--mbr`. Default 0.01.
+    #[arg(long = "psm-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) psm_fdr: f64,
+
+    /// Precursor-level q-value at or below which a precursor enters the
+    /// library (best-PSM target/decoy q-value). Use the search's
+    /// `--mbr-donor-fdr` for the same result as `--mbr`. Default: inherits
+    /// `--psm-fdr`.
+    #[arg(long = "mbr-donor-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) mbr_donor_fdr: Option<f64>,
 
     /// PEP cap (the Percolator `posterior_error_prob` column) of the donor
-    /// PSMs, applied in addition to `--quant-fdr`: a target PSM identifies its
+    /// PSMs, applied in addition to `--psm-fdr`: a target PSM identifies its
     /// precursor only when it passes both. Use the search's `--pep` for the
     /// same result as `--mbr`. Default: no PEP cap.
     #[arg(long = "pep", value_parser = parse_unit_fraction)]
@@ -1343,20 +1351,17 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(short = 'o', long = "output", value_name = "BASE")]
     pub(crate) output: PathBuf,
 
-    /// Transfer quality q-value: transfers at or below it are reported as
-    /// `transfer_ms1`. An internal quant-quality q-value, not an
-    /// identification FDR. Default 0.01.
-    #[arg(long = "mbr-fdr", hide = true, default_value = "0.01", value_parser = parse_unit_fraction)]
-    pub(crate) mbr_fdr: f64,
+    /// Quantification FDR: the q-value cut of the transfers (values measured
+    /// without their own identification). A quant-quality q-value, not an
+    /// identification FDR. Use the search's `--quant-fdr` for the same
+    /// result as `--mbr`. Default 0.01.
+    #[arg(long = "quant-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
+    pub(crate) quant_fdr: f64,
 
-    /// Identified-row quality q-value: an identified (precursor, run) whose
-    /// MS1 feature has a quality q-value against its decoys above this (or
-    /// none) is reported as `identified_below_threshold` and left out of
-    /// `quantms.feature.parquet`. An internal quant-quality q-value, not an
-    /// identification FDR. `off` (the default) reports every identified row
-    /// and keeps `quant_q` as an annotation.
-    #[arg(long = "quant-feature-fdr", default_value = "off", value_parser = parse_fraction_or_off)]
-    pub(crate) quant_feature_fdr: FractionOrOff,
+    /// Transfer quality q-value: transfers at or below it are reported as
+    /// `transfer_ms1`. Default: inherits `--quant-fdr`.
+    #[arg(long = "quant-transfer-fdr", value_parser = parse_unit_fraction, hide_short_help = true, help_heading = ADVANCED_FDR)]
+    pub(crate) quant_transfer_fdr: Option<f64>,
 
     /// Also write the QPX views into this directory: the protein groups of
     /// every run's PSMs as `quantms.pg.parquet`, and the features of the
@@ -1447,6 +1452,81 @@ pub(crate) struct QuantFinalizeArgs {
 
 // Alias used internally for the search-args type.
 pub(crate) type Cli = SearchArgs;
+
+/// The effective FDR thresholds: each advanced flag inherits its main flag.
+impl SearchArgs {
+    /// `--psm-fdr`.
+    pub(crate) fn psm_fdr(&self) -> f64 {
+        self.psm_fdr.unwrap_or(DEFAULT_FDR)
+    }
+
+    /// `--proteoform-fdr`: the larger of `--psm-fdr` and 0.05 when unset.
+    pub(crate) fn proteoform_fdr(&self) -> f64 {
+        proteoform_fdr(self.proteoform_fdr, self.psm_fdr())
+    }
+
+    /// `--mbr-donor-fdr`: `--psm-fdr` when unset.
+    pub(crate) fn mbr_donor_fdr(&self) -> f64 {
+        self.mbr_donor_fdr.unwrap_or_else(|| self.psm_fdr())
+    }
+
+    /// `--quant-transfer-fdr` of the label-free and isobaric transfers:
+    /// `--quant-fdr` when unset.
+    pub(crate) fn quant_transfer_fdr(&self) -> f64 {
+        self.quant_transfer_fdr
+            .or(self.quant_fdr)
+            .unwrap_or(DEFAULT_FDR)
+    }
+
+    /// `--quant-transfer-fdr` of the `--label` and `--glyco` transfers:
+    /// `--quant-fdr` when unset, [`COARSE_QUANT_FDR`] when neither is given.
+    pub(crate) fn coarse_transfer_fdr(&self) -> f64 {
+        self.quant_transfer_fdr
+            .or(self.quant_fdr)
+            .unwrap_or(COARSE_QUANT_FDR)
+    }
+
+    /// `--quant-channel-fdr`: `--quant-fdr` when unset, [`COARSE_QUANT_FDR`]
+    /// when neither is given.
+    pub(crate) fn quant_channel_fdr(&self) -> f64 {
+        self.quant_channel_fdr
+            .or(self.quant_fdr)
+            .unwrap_or(COARSE_QUANT_FDR)
+    }
+
+    /// The feature q-value of `accepted` in `lfq.parquet`: `--quant-fdr`,
+    /// [`COARSE_QUANT_FDR`] when not given.
+    pub(crate) fn lfq_feature_fdr(&self) -> f64 {
+        self.quant_fdr.unwrap_or(COARSE_QUANT_FDR)
+    }
+}
+
+impl ProteinArgs {
+    /// `--proteoform-fdr`: the larger of `--psm-fdr` and 0.05 when unset.
+    pub(crate) fn proteoform_fdr(&self) -> f64 {
+        proteoform_fdr(self.proteoform_fdr, self.psm_fdr)
+    }
+}
+
+impl QuantLibraryArgs {
+    /// `--mbr-donor-fdr`: `--psm-fdr` when unset.
+    pub(crate) fn mbr_donor_fdr(&self) -> f64 {
+        self.mbr_donor_fdr.unwrap_or(self.psm_fdr)
+    }
+}
+
+impl QuantFinalizeArgs {
+    /// `--quant-transfer-fdr`: `--quant-fdr` when unset.
+    pub(crate) fn quant_transfer_fdr(&self) -> f64 {
+        self.quant_transfer_fdr.unwrap_or(self.quant_fdr)
+    }
+}
+
+/// The proteoform claim threshold: `explicit`, else the larger of the PSM
+/// threshold and [`PROTEOFORM_FDR_FLOOR`].
+fn proteoform_fdr(explicit: Option<f64>, psm_fdr: f64) -> f64 {
+    explicit.unwrap_or(psm_fdr.max(PROTEOFORM_FDR_FLOOR))
+}
 
 /// Derived-geometry parameters for model training.
 ///
@@ -1679,22 +1759,6 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
 /// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
 /// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
 /// bad value is rejected at parse time with a clear message.
-/// A threshold in `(0, 1]`, or `off` (`None`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct FractionOrOff(pub(crate) Option<f64>);
-
-/// `off`, or a number in `(0, 1]`.
-pub(crate) fn parse_fraction_or_off(s: &str) -> Result<FractionOrOff, String> {
-    if s.trim().eq_ignore_ascii_case("off") {
-        return Ok(FractionOrOff(None));
-    }
-    let v = parse_unit_fraction(s)?;
-    if v == 0.0 {
-        return Err(format!("invalid value `{s}`: must be above 0, or `off`"));
-    }
-    Ok(FractionOrOff(Some(v)))
-}
-
 pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1934,9 +1998,9 @@ mod enzyme_cli_tests {
 }
 
 #[cfg(test)]
-mod mbr_fdr_default_tests {
+mod fdr_parameter_tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[derive(Parser, Debug)]
     struct SearchWrap {
@@ -1945,23 +2009,186 @@ mod mbr_fdr_default_tests {
     }
 
     #[derive(Parser, Debug)]
+    struct LibraryWrap {
+        #[command(flatten)]
+        args: QuantLibraryArgs,
+    }
+
+    #[derive(Parser, Debug)]
     struct FinalizeWrap {
         #[command(flatten)]
         args: QuantFinalizeArgs,
     }
 
-    #[test]
-    fn mbr_fdr_defaults_to_0_01_when_absent() {
-        let s = SearchWrap::try_parse_from(["andes"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.01);
-        let f = FinalizeWrap::try_parse_from(["andes", "--quant-dir", "q", "-o", "x"]).unwrap();
-        assert_eq!(f.args.mbr_fdr, 0.01);
+    fn search(extra: &[&str]) -> SearchArgs {
+        let argv = std::iter::once("andes").chain(extra.iter().copied());
+        SearchWrap::try_parse_from(argv).unwrap().args
     }
 
     #[test]
-    fn mbr_fdr_explicit_value_overrides_default() {
-        let s = SearchWrap::try_parse_from(["andes", "--mbr-fdr", "0.05"]).unwrap();
-        assert_eq!(s.args.mbr_fdr, 0.05);
+    fn defaults_keep_the_previous_thresholds() {
+        let s = search(&[]);
+        assert_eq!(s.psm_fdr(), 0.01);
+        assert_eq!(s.proteoform_fdr(), 0.05);
+        assert_eq!(s.mbr_donor_fdr(), 0.01);
+        assert_eq!(s.quant_transfer_fdr(), 0.01);
+        assert_eq!(s.coarse_transfer_fdr(), 0.05);
+        assert_eq!(s.quant_channel_fdr(), 0.05);
+        assert_eq!(s.lfq_feature_fdr(), 0.05);
+        assert_eq!(s.protein_fdr, None);
+    }
+
+    #[test]
+    fn advanced_flags_inherit_their_main_flag() {
+        let s = search(&["--psm-fdr", "0.02", "--quant-fdr", "0.03"]);
+        assert_eq!(s.psm_fdr(), 0.02);
+        assert_eq!(s.proteoform_fdr(), 0.05, "at least 0.05");
+        assert_eq!(s.mbr_donor_fdr(), 0.02);
+        assert_eq!(s.quant_transfer_fdr(), 0.03);
+        assert_eq!(s.coarse_transfer_fdr(), 0.03);
+        assert_eq!(s.quant_channel_fdr(), 0.03);
+        assert_eq!(s.lfq_feature_fdr(), 0.03);
+        assert_eq!(search(&["--psm-fdr", "0.1"]).proteoform_fdr(), 0.1);
+    }
+
+    #[test]
+    fn advanced_flags_set_win_over_their_main_flag() {
+        let s = search(&[
+            "--psm-fdr",
+            "0.02",
+            "--quant-fdr",
+            "0.03",
+            "--proteoform-fdr",
+            "0.04",
+            "--mbr-donor-fdr",
+            "0.005",
+            "--quant-transfer-fdr",
+            "0.06",
+            "--quant-channel-fdr",
+            "0.07",
+        ]);
+        assert_eq!(s.proteoform_fdr(), 0.04);
+        assert_eq!(s.mbr_donor_fdr(), 0.005);
+        assert_eq!(s.quant_transfer_fdr(), 0.06);
+        assert_eq!(s.coarse_transfer_fdr(), 0.06);
+        assert_eq!(s.quant_channel_fdr(), 0.07);
+        assert_eq!(s.lfq_feature_fdr(), 0.03);
+    }
+
+    #[test]
+    fn quant_stages_inherit_the_same_way() {
+        let l = LibraryWrap::try_parse_from([
+            "andes",
+            "--quant-dir",
+            "q",
+            "--psms",
+            "t",
+            "--decoy-psms",
+            "d",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!((l.psm_fdr, l.mbr_donor_fdr()), (0.01, 0.01));
+        let l = LibraryWrap::try_parse_from([
+            "andes",
+            "--quant-dir",
+            "q",
+            "--psms",
+            "t",
+            "--decoy-psms",
+            "d",
+            "--psm-fdr",
+            "0.02",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(l.mbr_donor_fdr(), 0.02);
+        let f = FinalizeWrap::try_parse_from(["andes", "--quant-dir", "q", "-o", "x"])
+            .unwrap()
+            .args;
+        assert_eq!(f.quant_transfer_fdr(), 0.01);
+        assert_eq!(f.proteins.psm_fdr, 0.01);
+        assert_eq!(f.proteins.proteoform_fdr(), 0.05);
+        let f = FinalizeWrap::try_parse_from([
+            "andes",
+            "--quant-dir",
+            "q",
+            "-o",
+            "x",
+            "--quant-fdr",
+            "0.02",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(f.quant_transfer_fdr(), 0.02);
+        let f = FinalizeWrap::try_parse_from([
+            "andes",
+            "--quant-dir",
+            "q",
+            "-o",
+            "x",
+            "--quant-fdr",
+            "0.02",
+            "--quant-transfer-fdr",
+            "0.05",
+        ])
+        .unwrap()
+        .args;
+        assert_eq!(f.quant_transfer_fdr(), 0.05);
+    }
+
+    #[test]
+    fn removed_flags_are_rejected() {
+        for flag in [
+            "--fdr",
+            "--mbr-fdr",
+            "--mbr-library-fdr",
+            "--label-fdr",
+            "--label-mbr-fdr",
+            "--lfq-feature-fdr",
+            "--quant-feature-fdr",
+            "--refine-select-psm-fdr",
+        ] {
+            assert!(
+                SearchWrap::try_parse_from(["andes", flag, "0.01"]).is_err(),
+                "{flag}"
+            );
+        }
+    }
+
+    /// `-h` shows the main FDR flags only; `--help` adds the advanced ones
+    /// under their own heading.
+    #[test]
+    fn short_help_omits_the_advanced_flags() {
+        let advanced = [
+            "--proteoform-fdr",
+            "--mbr-donor-fdr",
+            "--quant-transfer-fdr",
+            "--quant-channel-fdr",
+        ];
+        let mut cmd = SearchWrap::command();
+        let short = cmd.render_help().to_string();
+        let long = cmd.render_long_help().to_string();
+        // The flag's own line, not a mention in another flag's text.
+        let line = |flag: &str| format!("{flag} <");
+        for main in ["--psm-fdr", "--protein-fdr", "--quant-fdr"] {
+            assert!(short.contains(&line(main)), "-h misses {main}");
+            assert!(long.contains(&line(main)), "--help misses {main}");
+        }
+        for flag in advanced {
+            assert!(!short.contains(&line(flag)), "-h shows {flag}");
+            assert!(long.contains(&line(flag)), "--help misses {flag}");
+        }
+        assert!(!short.contains(ADVANCED_FDR));
+        assert!(long.contains(ADVANCED_FDR));
+        let mut cmd = FinalizeWrap::command();
+        let short = cmd.render_help().to_string();
+        assert!(short.contains(&line("--quant-fdr")));
+        assert!(!short.contains(&line("--quant-transfer-fdr")));
+        assert!(!short.contains(&line("--proteoform-fdr")));
+        let long = cmd.render_long_help().to_string();
+        assert!(long.contains(&line("--quant-transfer-fdr")));
+        assert!(long.contains(&line("--proteoform-fdr")));
     }
 }
 

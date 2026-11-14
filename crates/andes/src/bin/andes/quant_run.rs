@@ -77,7 +77,7 @@ pub(crate) struct QuantSettings {
     pub lfq_params: LfqParams,
     pub feature_fdr: f64,
     /// PSM q-value cut for quantification targets (applied when rescoring ran).
-    pub quant_fdr: f64,
+    pub psm_fdr: f64,
     pub pep_cap: Option<f64>,
     /// `--quant-dir`: where each run's MS1, MS2 and PSM tables are written.
     pub quant_dir: Option<PathBuf>,
@@ -276,8 +276,8 @@ impl QuantSettings {
             max_pep: cli.tmt_max_pep,
             lfq: cli.lfq,
             lfq_params,
-            feature_fdr: cli.lfq_feature_fdr,
-            quant_fdr: cli.quant_fdr.or(cli.fdr).unwrap_or(0.01),
+            feature_fdr: cli.lfq_feature_fdr(),
+            psm_fdr: cli.psm_fdr(),
             pep_cap: cli.pep,
             quant_dir: cli.quant_dir.clone(),
             fragment_tol: None,
@@ -295,7 +295,7 @@ impl QuantSettings {
                     spec.reference = cli.label_reference - 1;
                     Some(LabelSettings {
                         spec,
-                        fdr: cli.label_fdr,
+                        fdr: cli.quant_channel_fdr(),
                         tol_ppm: match cli.lfq_tol {
                             Some(Tolerance::Ppm(v)) => v,
                             Some(Tolerance::Da(_)) => {
@@ -303,7 +303,7 @@ impl QuantSettings {
                             }
                             None => 10.0,
                         },
-                        mbr_fdr: cli.mbr.then_some(cli.label_mbr_fdr),
+                        mbr_fdr: cli.mbr.then_some(cli.coarse_transfer_fdr()),
                         arg_pro: cli.label_arg_pro,
                     })
                 }
@@ -911,7 +911,7 @@ struct Hit<'a> {
 }
 
 /// Select the quantification targets: rank-1 target PSMs (and the best PSM of
-/// each co-isolated precursor), at `q <= quant_fdr` (a variant-class row at
+/// each co-isolated precursor), at `q <= psm_fdr` (a variant-class row at
 /// its `cutoffs` level) and `pep <= --pep` when a rescoring result is
 /// available. The running `psm_index` reproduces the row order of
 /// `psms.parquet`: it counts the emitted rows not in `omitted`
@@ -1009,7 +1009,7 @@ fn select_rank1<'a>(
             }
             let (q_value, pep) = match rescored {
                 Some(Some(r)) => {
-                    let cutoff = cutoffs.map_or(s.quant_fdr, |c| c.or(&spec_id, s.quant_fdr));
+                    let cutoff = cutoffs.map_or(s.psm_fdr, |c| c.or(&spec_id, s.psm_fdr));
                     if r.q_value > cutoff || s.pep_cap.is_some_and(|c| r.pep > c) {
                         continue;
                     }
@@ -1552,7 +1552,7 @@ pub(crate) fn run_quant(
         "quant: {} rank-1 target PSMs selected{} ({})",
         hits.len(),
         match rescore {
-            Some(_) => format!(" at q<={}", s.quant_fdr),
+            Some(_) => format!(" at q<={}", s.psm_fdr),
             None => " (no rescoring: every rank-1 target PSM; filter downstream)".to_string(),
         },
         s.describe()
@@ -1744,7 +1744,7 @@ pub(crate) fn run_quant(
                 plex,
                 correction: s.correction.as_ref(),
                 library_fdr: input.library_fdr,
-                donor_q: s.quant_fdr,
+                donor_q: s.psm_fdr,
                 donor_pep: s.pep_cap,
                 accept_q: input.accept_q,
                 wrong_log2: input.wrong_log2,
@@ -2501,7 +2501,7 @@ mod tests {
             lfq,
             lfq_params: LfqParams::default(),
             feature_fdr: 0.05,
-            quant_fdr: 0.01,
+            psm_fdr: 0.01,
             pep_cap: None,
             quant_dir: quant_dir.map(PathBuf::from),
             fragment_tol: Some(Tolerance::Ppm(20.0)),

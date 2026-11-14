@@ -1680,7 +1680,6 @@ pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
     source: &dyn ExtractSource,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     seed: u64,
     limits: FinalizeLimits,
     trace_fraction: f64,
@@ -1699,7 +1698,7 @@ pub(crate) fn finalize_and_write(
     };
     let params = FinalizeParams {
         mbr_fdr,
-        quant_feature_fdr,
+        quant_feature_fdr: None,
         seed,
         limits,
         mbr_path: &table,
@@ -1746,7 +1745,6 @@ pub(crate) fn run_in_process(
     donor_q: f64,
     donor_pep: Option<f64>,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1784,7 +1782,6 @@ pub(crate) fn run_in_process(
         &stored,
         &files,
         mbr_fdr,
-        quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
         crate::quant_finalize::DEFAULT_TRACE_FRACTION,
@@ -1803,8 +1800,8 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
         &a.quant_dir,
         &stems,
         score_loader(&source),
-        a.mbr_library_fdr,
-        a.quant_fdr,
+        a.mbr_donor_fdr(),
+        a.psm_fdr,
         a.pep,
     )
     .map(|_| ())
@@ -1888,6 +1885,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
+    let transfer_fdr = a.quant_transfer_fdr();
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         transfer_models: a.transfer_models,
@@ -1915,8 +1913,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     finalize_and_write(
         &stored,
         &ExtractFiles(paths),
-        a.mbr_fdr,
-        a.quant_feature_fdr.0,
+        transfer_fdr,
         a.seed,
         limits,
         a.quant_trace_fraction,

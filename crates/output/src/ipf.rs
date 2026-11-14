@@ -4,7 +4,8 @@
 //! localized with the PSM's PEP as the prior (see [`search::ipf`]). Its
 //! [`search::ipf::IpfEvidence`] is built after rescoring, from the retained
 //! peaks, so every row kind (main, `--refine` Pass 2, `--chimeric`
-//! secondaries) gets it the same way. The ion PEP model is fit once per run on
+//! secondaries) gets it the same way, each input file with the fragment error
+//! it was searched with. The ion PEP model is fit once per run on
 //! the evidence of confident target PSMs. Peptidoform q-values are model-based
 //! over every localized PSM, as in PyProphet IPF.
 

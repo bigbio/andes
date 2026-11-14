@@ -101,22 +101,40 @@ impl ScorerSet<'_> {
 pub struct IpfScoring<'a> {
     scorers: ScorerSet<'a>,
     fragment_tolerance_da: f64,
-    recentre_ppm: f64,
     declared: Vec<&'static model::modification::Modification>,
 }
 
 impl IpfScoring<'_> {
+    /// Install the fragment error an input file was searched with (the
+    /// recentring, PIN tolerance and node-score window follow it) on every
+    /// scorer, as [`PreparedSearch::set_fragment_error`] did for that file.
+    /// Not while [`Self::evidence`] runs.
+    pub fn set_fragment_error(&self, m: Option<scoring_crate::scoring::FragmentErrorModel>) {
+        self.scorers.primary.set_fragment_error(m);
+        for (_, s) in &self.scorers.alts {
+            s.set_fragment_error(m);
+        }
+    }
+
+    /// The fragment error currently installed (the last file's, after a search).
+    pub fn fragment_error(&self) -> Option<scoring_crate::scoring::FragmentErrorModel> {
+        self.scorers.primary.fragment_error()
+    }
+
     /// IPF evidence of each `(peptide, charge)` row against `spec` (its peaks
     /// as read): every placement's search score (node + edge) and site ions,
-    /// with the fragment recentring and the scorer of the spectrum's
-    /// activation the search used. `None` for a row with fewer than two
-    /// placements. `spec` needs its peaks.
+    /// with the scorer of the spectrum's activation and the fragment error
+    /// currently installed (set the spectrum's file's first). `None` for a row
+    /// with fewer than two placements. `spec` needs its peaks.
     pub fn evidence(
         &self,
         spec: &Spectrum,
         rows: &[(&Peptide, u8)],
     ) -> Vec<Option<crate::ipf::IpfEvidence>> {
-        let shifted = recentred_spectra(std::slice::from_ref(spec), self.recentre_ppm);
+        let shifted = recentred_spectra(
+            std::slice::from_ref(spec),
+            self.scorers.primary.fragment_recentre_ppm(),
+        );
         let spec = shifted.as_ref().map_or(spec, |v| &v[0]);
         let scorer = self.scorers.for_spec(spec);
         let tol = scorer.pin_match_tolerance();
@@ -669,8 +687,9 @@ impl<'a> PreparedSearch<'a> {
 
     /// What IPF site localization needs to score placements against a spectrum
     /// the way this search scored its candidates, kept once the index is dropped:
-    /// the scorer of every activation the run used, the fragment tolerance and
-    /// the fragment m/z recentring. `scorer` is the run's scorer this search
+    /// the scorer of every activation the run used and the fragment tolerance.
+    /// The fragment error each input file was measured at lives on the scorers;
+    /// [`IpfScoring::set_fragment_error`] reinstalls one. `scorer` is the run's scorer this search
     /// was prepared with; the result borrows it, not the search.
     pub fn ipf_scoring<'s>(&self, scorer: &'s RankScorer) -> IpfScoring<'s> {
         assert!(
@@ -685,7 +704,6 @@ impl<'a> PreparedSearch<'a> {
                 alts: set.alts,
             },
             fragment_tolerance_da: self.fragment_tolerance_da,
-            recentre_ppm: self.scorer.fragment_recentre_ppm(),
             declared: self.params.aa_set.distinct_mods(),
         }
     }

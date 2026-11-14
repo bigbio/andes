@@ -194,12 +194,16 @@ fn score_mass_ordered(
 struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
+    /// The fragment error each input file was searched with, in input order
+    /// (`None`: not measured), for steps that score again after the search.
+    per_file: Vec<Option<scoring_crate::scoring::FragmentErrorModel>>,
 }
 
 impl FragmentErrorMeasurer {
     /// Forget the previous file's measurement.
     fn start_file(&mut self, prepared: &PreparedSearch) {
         self.done = false;
+        self.per_file.push(None);
         if self.enabled {
             prepared.set_fragment_error(None);
         }
@@ -241,6 +245,9 @@ impl FragmentErrorMeasurer {
         match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {
                 prepared.set_fragment_error(Some(m));
+                if let Some(last) = self.per_file.last_mut() {
+                    *last = Some(m);
+                }
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
@@ -1839,6 +1846,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut measurer = FragmentErrorMeasurer {
         enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
         done: false,
+        per_file: Vec::with_capacity(spectrum_paths.len()),
     };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
@@ -3012,9 +3020,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let t_ipf = std::time::Instant::now();
             let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
             let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
-            let evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> = queues
+            // One input file at a time, with the fragment error it was searched
+            // with; the rows of a file in parallel.
+            let searched_with = scoring.fragment_error();
+            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> =
+                std::collections::HashMap::new();
+            let mut lo = 0usize;
+            for (f, &hi) in run_ends.iter().enumerate() {
+                scoring.set_fragment_error(measurer.per_file.get(f).copied().flatten());
+                let part: Vec<(String, search::ipf::IpfEvidence)> = queues[lo..hi]
                 .par_iter()
                 .enumerate()
+                .map(|(j, q)| (lo + j, q))
                 .flat_map_iter(|(i, q)| {
                     let rows: Vec<(String, u32, u8)> =
                         output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
@@ -3040,6 +3057,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .collect::<Vec<_>>()
                 })
                 .collect();
+                evidence.extend(part);
+                lo = hi;
+            }
+            scoring.set_fragment_error(searched_with);
             let (rows, model) = output::ipf::localize_psms(map_ref, &evidence, cli.ipf_debug);
             let stem = report_base
                 .file_stem()

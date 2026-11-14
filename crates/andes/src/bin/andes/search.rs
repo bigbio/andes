@@ -411,6 +411,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
     }
+    // Before any index or scratch work: a rejected run does no I/O.
+    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
+        return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
     // Run-private temporary files go to `--temp-dir`, by default next to the
     // output; the quantification settings read the resolved directory.
     let scratch_dir = crate::cli::dir_or_output_dir(
@@ -1688,9 +1692,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
-    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
-        return Err("--localize ipf needs --rescore or --rescore-native".into());
-    }
     // `--glyco --mbr` is the glyco path's own match-between-runs (RT
     // alignment + XIC transfer inside the intact-glycopeptide tables), not the
     // peptide library stages. It needs the glyco LFQ stage's features.
@@ -3018,24 +3019,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Knockoff PSMs are never reported.
             evidence.retain(|id, _| !knockoff_rows.contains(id));
             let (rows, model) = output::ipf::localize_psms(map, &evidence, cli.ipf_debug);
-            output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             let stem = report_base
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "andes".to_string());
             let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
             let path = dir.join(format!("{stem}.ipf.tsv"));
-            match output::ipf::write_ipf_tsv(&path, &rows) {
-                Ok(()) => eprintln!(
-                    "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}) \
-                     [{:.2}s]",
-                    path.display(),
-                    rows.len(),
-                    model.matched.map(|p| (p * 1000.0).round() / 1000.0),
-                    model.unmatched,
-                    t_ipf.elapsed().as_secs_f64()
-                ),
-                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            // The report was requested: a failed write fails the run.
+            output::ipf::write_ipf_tsv(&path, &rows)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            eprintln!(
+                "Wrote IPF localization: {} ({} PSMs; ion PEP by tier {:?}, unmatched {:.3}) \
+                 [{:.2}s]",
+                path.display(),
+                rows.len(),
+                model.matched.map(|p| (p * 1000.0).round() / 1000.0),
+                model.unmatched,
+                t_ipf.elapsed().as_secs_f64()
+            );
+            // Only a QPX write reads (and then clears) the map.
+            if cli.output_parquet.is_some() {
+                output::qpx::set_ipf_site_probabilities(output::ipf::site_probability_map(&rows));
             }
         }
     }

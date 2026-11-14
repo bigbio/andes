@@ -315,8 +315,8 @@ mod tests {
     /// share every ion; at 20 ppm neither happens.
     #[test]
     fn a_ppm_tolerance_separates_near_isobaric_ions() {
-        let ac = line("42.010565,K,opt,any,Acetyl,diagnostic=126.0913");
-        let me3 = line("42.04695,K,opt,any,Trimethyl");
+        let ac = lys("Acetyl", 42.010565, &[126.0913], &[]);
+        let me3 = lys("Trimethyl", 42.04695, &[], &[]);
         let a = peptide(b"PEPKTIDER", 3, ac);
         let t = peptide(b"PEPKTIDER", 3, me3);
         let b4: f64 = a.residues[..4]

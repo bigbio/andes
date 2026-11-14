@@ -805,7 +805,7 @@ mod tests {
                         let s = [a, b, c, d];
                         if disp(&s) <= bound {
                             within += 1;
-                            assert!(kept.contains(&s.to_vec()), "{s:?} missing");
+                            assert!(kept.contains(s.as_slice()), "{s:?} missing");
                         }
                     }
                 }

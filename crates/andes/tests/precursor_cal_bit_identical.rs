@@ -1,3 +1,9 @@
+//! REGENERATED 2026-11-14: the built-in default modifications use the UNIMOD
+//! masses (Oxidation 15.994915, Carbamidomethyl 57.021464). 366 rows, same
+//! SpecIds; the mass and fragment-error columns move on the rows with a default
+//! mod, oxidised peptides print `+15.99492`, and the TSV `Modifications` column
+//! now names carbamidomethyl by its accession (`UNIMOD:4`).
+//!
 //! REGENERATED 2026-11-07: two columns, `IsotopeErrorAbs` and `IsotopeErrorNeg`,
 //! were appended to the PIN before `Peptide`. Both are functions of
 //! `isotope_error`; the golden PIN was rewritten by inserting them into every

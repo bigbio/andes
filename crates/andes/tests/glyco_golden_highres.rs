@@ -97,6 +97,12 @@
 //! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
 //! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
 //! unchanged.
+//!
+//! REGENERATED 2026-11-14 when the built-in default modifications began using
+//! the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464). 120 rows,
+//! SpecIds and proteins unchanged; on the 48 rows with a default mod `CalcMass`,
+//! `dm`, `absdm` and the fragment-error columns move by the mass difference, 6
+//! scores move with them, and 6 oxidised peptides now print `+15.99492`.
 
 use std::path::PathBuf;
 use std::process::Command;

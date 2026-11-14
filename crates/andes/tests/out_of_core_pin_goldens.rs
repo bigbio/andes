@@ -256,6 +256,15 @@
 //! every row (rows and all other fields unchanged). The E. coli row counts are
 //! unchanged and their digests moved with the two integer columns.
 //!
+//! REGENERATED 2026-11-14 (slices) when the built-in default modifications began
+//! using the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464).
+//! Chimeric: 1718 rows; the mass columns move on the rows with a default mod,
+//! the RT columns move on every row, and oxidised peptides print `+15.99492`.
+//! Refine: 1580 -> 1545 rows, Pass 1 unchanged (1444). Before, the default
+//! Oxidation (15.99491) and the refine tier's Oxidation (15.994915) were two
+//! modifications, so Pass 2 re-emitted 43 default-oxidation forms as refinement
+//! rows; they are one modification now (refinement rows 136 -> 101).
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).

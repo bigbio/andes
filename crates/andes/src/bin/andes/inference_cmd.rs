@@ -133,23 +133,23 @@ pub(crate) fn infer_from_files(
         )
         .into());
     }
-    let (enzyme, _) = parse_enzymes(&a.enzyme)?;
-    let (restricted, fixed_terminal) = annotated_site_masses(a.mods.as_deref())?;
+    let (enzyme, _) = parse_enzymes(&a.db.enzyme)?;
+    let (restricted, fixed_terminal) = annotated_site_masses(a.db.mods.as_deref())?;
     let opts = input::UniProtOptions {
-        variants: a.uniprot_variants,
-        isoforms: a.uniprot_isoforms,
-        chains: a.uniprot_chains,
-        evidence: a.uniprot_evidence,
+        variants: a.db.uniprot_variants,
+        isoforms: a.db.uniprot_isoforms,
+        chains: a.db.uniprot_chains,
+        evidence: a.db.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: a.knockoffs,
+            per_variant: a.db.knockoffs,
             enzyme,
         }),
     };
-    let db = load_claim_database(database, &a.annotations, &opts)?
+    let db = load_claim_database(database, &a.db.annotations, &opts)?
         .loaded
         .db;
-    let mut idx = SearchIndex::from_target_db(&db, &a.decoy_prefix);
-    idx.decoy_suffix = a.decoy_suffix.clone();
+    let mut idx = SearchIndex::from_target_db(&db, &a.db.decoy_prefix);
+    idx.decoy_suffix = a.db.decoy_suffix.clone();
 
     let mut targets = read_all(psms)?;
     let decoys = read_all(decoy_psms)?;
@@ -159,7 +159,7 @@ pub(crate) fn infer_from_files(
     }
     output::apply_class_fdr(&mut targets, &decoys, &idx);
     let mut knockoffs =
-        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
+        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
     // Placements of a `sites=annotated` modification on a knockoff site exist
     // only for the site q-values. Only those modifications make such rows.

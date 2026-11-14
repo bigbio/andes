@@ -185,8 +185,7 @@ pub struct QuantCfg {
 }
 
 fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
-    <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
+    crate::cli::parse_enum("glyco.core", s, true)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -243,30 +242,30 @@ fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
 pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
     // scalar field, value type == target type
     macro_rules! set {
-        ($id:literal, $field:ident, $val:expr) => {
+        ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
                 if !cli_set(m, $id) {
-                    args.$field = v;
+                    args.$($field).+ = v;
                 }
             }
         };
     }
     // scalar into an Option<> target
     macro_rules! set_opt {
-        ($id:literal, $field:ident, $val:expr) => {
+        ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
                 if !cli_set(m, $id) {
-                    args.$field = Some(v);
+                    args.$($field).+ = Some(v);
                 }
             }
         };
     }
     // string wire value parsed through a CLI validator `fn(&str) -> Result<T,String>`
     macro_rules! set_parsed {
-        ($id:literal, $field:ident, $val:expr, $parse:path) => {
+        ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
             if let Some(s) = $val {
                 if !cli_set(m, $id) {
-                    args.$field = $parse(&s)?;
+                    args.$($field).+ = ($parse)(&s)?;
                 }
             }
         };
@@ -277,20 +276,20 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("database", database, cfg.io.database);
     set!(
         "uniprot_variants",
-        uniprot_variants,
+        db.uniprot_variants,
         cfg.io.uniprot_variants
     );
     set!(
         "uniprot_isoforms",
-        uniprot_isoforms,
+        db.uniprot_isoforms,
         cfg.io.uniprot_isoforms
     );
-    set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
-    set!("annotations", annotations, cfg.io.annotations);
-    set!("knockoffs", knockoffs, cfg.io.knockoffs);
+    set!("uniprot_chains", db.uniprot_chains, cfg.io.uniprot_chains);
+    set!("annotations", db.annotations, cfg.io.annotations);
+    set!("knockoffs", db.knockoffs, cfg.io.knockoffs);
     set_parsed!(
         "uniprot_evidence",
-        uniprot_evidence,
+        db.uniprot_evidence,
         cfg.io.uniprot_evidence,
         crate::parse_uniprot_evidence
     );
@@ -320,12 +319,17 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
         }
     }
-    set!("enzyme", enzyme, cfg.search.enzyme);
+    set_parsed!(
+        "enzyme",
+        db.enzyme,
+        cfg.search.enzyme,
+        crate::cli::parse_enzyme_list
+    );
     set_parsed!(
         "enzyme_specificity",
         enzyme_specificity,
         cfg.search.enzyme_specificity,
-        crate::parse_enzyme_specificity
+        |s: &str| crate::cli::parse_enum("enzyme_specificity", s, true)
     );
     set!(
         "max_missed_cleavages",
@@ -337,7 +341,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("max_mods", max_mods, cfg.search.max_mods);
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
-    set_opt!("mods", mods, cfg.search.mods);
+    set_opt!("mods", db.mods, cfg.search.mods);
     set_parsed!(
         "fragment_index",
         fragment_index,
@@ -373,13 +377,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "fragmentation",
         fragmentation,
         cfg.scoring.fragmentation,
-        crate::parse_fragmentation
+        |s: &str| crate::cli::parse_enum("fragmentation", s, true)
     );
     set_parsed!(
         "protocol",
         protocol,
         cfg.scoring.protocol,
-        crate::parse_protocol
+        |s: &str| crate::cli::parse_enum("protocol", s, true)
     );
     // The fragment tolerance is one choice: a `--fragment-tol-ppm` or
     // `--fragment-tol-da` on the command line replaces both config keys, so a
@@ -416,9 +420,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("peak_filter", peak_filter, cfg.scoring.peak_filter);
 
     // ── decoys ──
-    set!("decoy_strategy", decoy_strategy, cfg.decoys.strategy);
-    set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
-    set_opt!("decoy_suffix", decoy_suffix, cfg.decoys.suffix);
+    set_parsed!(
+        "decoy_strategy",
+        decoy_strategy,
+        cfg.decoys.strategy,
+        crate::cli::parse_decoy_strategy
+    );
+    set!("decoy_prefix", db.decoy_prefix, cfg.decoys.prefix);
+    set_opt!("decoy_suffix", db.decoy_suffix, cfg.decoys.suffix);
     set!("decoy_seed", decoy_seed, cfg.decoys.seed);
 
     // ── chimeric ──
@@ -476,7 +485,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         if !cli_set(m, "predict") {
             args.predict = list
                 .iter()
-                .map(|s| crate::cli::parse_predict_feature(s))
+                .map(|s| crate::cli::parse_enum("predict entry", s, true))
                 .collect::<Result<_, _>>()?;
         }
     }
@@ -489,7 +498,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "predictor_backend",
         predictor_backend,
         cfg.rescoring.predictor_backend,
-        crate::cli::parse_predictor_backend
+        |s: &str| crate::cli::parse_enum("predictor_backend", s, true)
     );
     set_opt!("predictor_nce", predictor_nce, cfg.rescoring.predictor_nce);
     set_opt!(
@@ -1014,17 +1023,17 @@ glyco:
             .try_get_matches_from(base)
             .expect("parse baseline args");
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        assert!(!a.uniprot_variants);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
-        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
+        assert!(!a.db.uniprot_variants);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.db.uniprot_isoforms && !a.db.uniprot_chains);
         let cfg = RunConfig::from_yaml_str(
             "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
              uniprot_evidence: curated\n",
         )
         .unwrap();
         apply(cfg, &mut a, &matches).unwrap();
-        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
+        assert!(a.db.uniprot_variants && a.db.uniprot_isoforms && a.db.uniprot_chains);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Curated);
 
         let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
@@ -1036,7 +1045,7 @@ glyco:
         let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
         let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
         apply(cfg, &mut a, &cli).unwrap();
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Any);
     }
 
     /// The predictor keys apply through the CLI's validators; an explicit

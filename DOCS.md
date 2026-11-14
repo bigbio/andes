@@ -547,7 +547,8 @@ and 10 nocodazole, searched together), for peptides with one phospho placement a
 
 A semi-specific search of the synthetic files (`--enzyme-specificity semi
 --fragment-index-slice-da 20`, 1 h 41 min, 64 GB on 16 threads; the default slice width ran out of
-160 GB) gave, with the uniform prior, FLR 12.2% against 18.9% for the search placement. Before mods
+160 GB) gives FLR 10.6% for IPF with the search-score prior (12.2% with the uniform prior) against
+18.9% for the search placement, 10.2% predicted; `best_prob` ≥ 0.99 keeps 60.9% at 1.1%. Before mods
 could move across sibling records, IPF gave 19.6% on the synthetic set and was overconfident.
 Phospho is declared with its neutral loss (`79.96633,S,opt,any,Phospho,loss=97.976896`, same for
 T); without `loss=` IPF did not beat the search placement (measured before the sibling change).

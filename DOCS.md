@@ -517,7 +517,8 @@ The placements share the PSM's `1 − PEP` by the search's own score of each (no
 softmax with weight 0.237), not uniformly as in PyProphet: the search score sees all fragment
 ions and their intensities, the IPF ions only the site-determining ones by intensity tier. The
 weight was fitted on half the peptides of the three benchmarks below; every one picked the same
-value, and the other half gained as much as the whole. `ANDES_IPF_DEBUG=1` adds a `forms_debug`
+value. Fitted on any two of them (finer grid), it is again 0.237 and gives the same error on the
+third as fitting on all. `ANDES_IPF_DEBUG=1` adds a `forms_debug`
 column: every placement as `sites|search score|IPF log-evidence`.
 
 Measured with `--rescore-native`, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than

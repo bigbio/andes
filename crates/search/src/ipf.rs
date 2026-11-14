@@ -540,7 +540,7 @@ pub struct Localization {
 /// Fitted by maximum likelihood of the reference placement on half the
 /// peptides of each benchmark (synthetic ground truth PXD007058, PXD007653 vs
 /// MaxQuant, PXD017476 vs Spectronaut), on a grid of factor-1.33 steps; all
-/// three picked this grid point.
+/// three picked this grid point, and fitting on any two picks it for the third.
 pub const SEARCH_SCORE_WEIGHT: f64 = 0.237;
 
 /// Prior over a PSM's placements from the search's own score of each

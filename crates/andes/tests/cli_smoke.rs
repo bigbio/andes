@@ -424,8 +424,6 @@ fn cli_accepts_canonical_named_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
     let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
-    let dir = tempfile::tempdir().expect("tempdir");
-
     let tmp = tempfile::tempdir().expect("tmpdir");
     let pin = tmp.path().join("named.pin");
 

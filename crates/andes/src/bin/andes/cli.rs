@@ -283,6 +283,23 @@ pub(crate) const PRECURSOR_CAL_MODES: &[(&str, &str)] = &[
     ("on", ""),
 ];
 
+/// A modification list of `--fixed-mods` or `--variable-mods` (or their
+/// config keys), resolved against the bundled UNIMOD table.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ModList(pub(crate) Vec<model::Modification>);
+
+pub(crate) fn parse_fixed_mods(s: &str) -> Result<ModList, String> {
+    model::mod_spec::parse_mod_list(s, true)
+        .map(ModList)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
+    model::mod_spec::parse_mod_list(s, false)
+        .map(ModList)
+        .map_err(|e| e.to_string())
+}
+
 /// The protein database options shared by the search, `andes inference` and
 /// `andes quant finalize`: how the database is digested and expanded, and how
 /// a decoy is recognised. Inference and finalize take the search's values.
@@ -298,16 +315,30 @@ pub(crate) struct DatabaseArgs {
           value_parser = Listed::new(ENZYMES, parse_enzyme_list))]
     pub(crate) enzyme: String,
 
-    /// Modifications file [default: fixed Carbamidomethyl C; variable Oxidation M, Acetyl protein N-term]
+    /// Fixed modifications, a list of Name (sites) [default: Carbamidomethyl (C)]
     ///
-    /// One modification per line, `<mass>,<residue>,<fix|opt>,<position>,<name>`: the
-    /// mass shift in Da (a number), a residue letter or *, and any, N-term, C-term,
-    /// Prot-N-term or Prot-C-term. A `NumMods=N` line sets --max-mods; # starts a comment.
-    /// Format and examples: DOCS.md §2. For `andes inference` and `andes quant finalize`,
-    /// give the search's file: PSMs that place a `sites=annotated` modification on a
-    /// knockoff site count for no protein group, as in the search.
-    #[arg(long, value_name = "FILE", help_heading = H_SEARCH)]
-    pub(crate) mods: Option<PathBuf>,
+    /// Comma-separated, e.g. "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)". The name
+    /// is a UNIMOD name or accession (Phospho, UNIMOD:21; GlyGly, Deamidation, TMT10plex and
+    /// TMT16plex are also accepted), which gives the mass. The sites are residues (STY),
+    /// N-term, C-term, Protein N-term, Protein C-term, or a terminus followed by residues
+    /// (N-term Q). The list replaces the default; with the default, a run found to carry a
+    /// TMT or iTRAQ tag also gets the tag on K and the peptide N-term. Neutral losses, loss
+    /// class, cleavage blocking, diagnostic ions, annotated-only sites and custom masses are
+    /// set per modification in the config file (search.fixed_mods). Format and examples:
+    /// DOCS.md §2.
+    #[arg(long, value_name = "LIST", help_heading = H_SEARCH, value_parser = parse_fixed_mods)]
+    pub(crate) fixed_mods: Option<ModList>,
+
+    /// Variable modifications, a list of Name (sites) [default: Oxidation (M), Acetyl (Protein N-term)]
+    ///
+    /// Written as --fixed-mods, e.g. "Oxidation (M), Phospho (STY), Gln->pyro-Glu (N-term Q)";
+    /// "" searches none. The list replaces the default, and --max-mods bounds the variable
+    /// modifications per peptide. The per-modification settings are config-file keys
+    /// (search.variable_mods). For `andes inference` and `andes quant finalize`, give the
+    /// search's lists or its --config: PSMs that place a `restrict_to: annotated`
+    /// modification on a knockoff site count for no protein group, as in the search.
+    #[arg(long, value_name = "LIST", help_heading = H_SEARCH, value_parser = parse_variable_mods)]
+    pub(crate) variable_mods: Option<ModList>,
 
     /// Accession prefix that marks a decoy, given to the generated decoys
     #[arg(long, value_name = "PREFIX", default_value = "XXX_", hide_short_help = true,
@@ -406,7 +437,7 @@ pub(crate) struct SearchArgs {
     ///
     /// Target sequences only: andes generates the decoys (--decoy-strategy). A UniProt XML
     /// database searches like the UniProt FASTA and also carries annotated modification
-    /// sites (used by `sites=annotated` modifications) and the entries of the Database
+    /// sites (used by `restrict_to: annotated` modifications) and the entries of the Database
     /// variants options.
     #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) database: Option<PathBuf>,
@@ -485,7 +516,7 @@ pub(crate) struct SearchArgs {
           help_heading = H_SEARCH)]
     pub(crate) max_length: u32,
 
-    /// Variable modifications per peptide (a NumMods=N line in the --mods file overrides it)
+    /// Variable modifications per peptide
     #[arg(long, value_name = "N", default_value = "3", hide_short_help = true,
           help_heading = H_SEARCH)]
     pub(crate) max_mods: u32,
@@ -742,7 +773,7 @@ pub(crate) struct SearchArgs {
     /// Labelling or enrichment protocol, which selects the protocol model
     ///
     /// auto keeps the selected model; when it finds TMT or iTRAQ reporter ions it turns on
-    /// the isobaric peak filter and, without --mods, adds the tag as a fixed modification.
+    /// the isobaric peak filter and, without --fixed-mods, adds the tag as a fixed modification.
     #[arg(long, value_name = "PROTOCOL", value_enum, ignore_case = true,
           default_value = "auto", hide_short_help = true, help_heading = H_RUNTIME)]
     pub(crate) protocol: Protocol,
@@ -1172,8 +1203,8 @@ pub(crate) struct InferenceArgs {
 
     /// The protein database of the search, with its options below
     ///
-    /// With the search's --enzyme, --mods, decoy affixes, --annotations, --uniprot-* and
-    /// --knockoffs, protein families, knockoff entries, knockoff sites and decoy pairs are
+    /// With the search's --enzyme, --fixed-mods, --variable-mods, decoy affixes,
+    /// --annotations, --uniprot-* and --knockoffs, protein families, knockoff entries, knockoff sites and decoy pairs are
     /// the search's.
     #[arg(long, value_name = "FILE")]
     pub(crate) database: PathBuf,
@@ -1196,6 +1227,14 @@ pub(crate) struct InferenceArgs {
 pub(crate) struct ProteinArgs {
     #[command(flatten)]
     pub(crate) db: DatabaseArgs,
+
+    /// The search's --config file, for its database and modification keys
+    ///
+    /// Its enzyme, modification lists (with their config-only settings), decoy affixes,
+    /// UniProt options, annotations and knockoffs apply here, below the flags given on the
+    /// command line. Its other keys are not read.
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
+    pub(crate) config: Option<PathBuf>,
 
     /// PSM q-value threshold of the PSMs and peptides counted per group
     #[arg(long = "psm-fdr", value_name = "FDR", default_value = "0.01",
@@ -2459,7 +2498,8 @@ mod help_layout_tests {
         "--output-parquet",
         "--precursor-tol",
         "--enzyme",
-        "--mods",
+        "--fixed-mods",
+        "--variable-mods",
         "--decoy-strategy",
         "--threads",
         "--psm-fdr",
@@ -2562,6 +2602,31 @@ mod help_layout_tests {
         }
     }
 
+    /// The modification lists parse on the command line; an unknown name
+    /// fails with close names.
+    #[test]
+    fn modification_lists_parse_and_suggest() {
+        let a = SearchWrap::try_parse_from([
+            "andes",
+            "--fixed-mods",
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+            "--variable-mods",
+            "Oxidation (M), UNIMOD:21 (STY), Gln->pyro-Glu (N-term Q)",
+        ])
+        .unwrap()
+        .args;
+        let fixed = a.db.fixed_mods.unwrap().0;
+        assert_eq!(fixed.len(), 3);
+        assert_eq!(fixed[1].name, "TMT6plex");
+        assert_eq!(a.db.variable_mods.unwrap().0.len(), 5);
+        let none = SearchWrap::try_parse_from(["andes", "--variable-mods", ""]).unwrap();
+        assert!(none.args.db.variable_mods.unwrap().0.is_empty());
+        let e = SearchWrap::try_parse_from(["andes", "--variable-mods", "Oxidaton (M)"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("did you mean Oxidation?"), "{e}");
+    }
+
     /// `andes inference` and `quant finalize` describe the database options
     /// as the search does.
     #[test]
@@ -2584,7 +2649,8 @@ mod help_layout_tests {
             }
             for id in [
                 "enzyme",
-                "mods",
+                "fixed_mods",
+                "variable_mods",
                 "decoy_prefix",
                 "decoy_suffix",
                 "uniprot_variants",

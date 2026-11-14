@@ -11,7 +11,7 @@ a measurement or override a derivation. A few test hooks and diagnostics are in 
 | Heading | `andes -h` | `andes --help` adds (advanced) |
 |---|---|---|
 | Input and output | `--config`, `--spectrum`, `--database`, `--output-pin`, `--output-tsv`, `--output-parquet` | |
-| Search | `--precursor-tol`, `--enzyme`, `--mods`, `--decoy-strategy`, `--threads` | `--decoy-prefix`, `--decoy-suffix`, `--charge`, `--isotope-error`, `--max-missed-cleavages`, `--enzyme-specificity`, `--min-length`, `--max-length`, `--max-mods`, `--min-peaks`, `--top-n` |
+| Search | `--precursor-tol`, `--enzyme`, `--fixed-mods`, `--variable-mods`, `--decoy-strategy`, `--threads` | `--decoy-prefix`, `--decoy-suffix`, `--charge`, `--isotope-error`, `--max-missed-cleavages`, `--enzyme-specificity`, `--min-length`, `--max-length`, `--max-mods`, `--min-peaks`, `--top-n` |
 | FDR | `--psm-fdr`, `--protein-fdr`, `--quant-fdr`, `--rescore` | |
 | Modes | `--chimeric`, `--refine`, `--glyco`, `--glyco-species` | `--chimeric-max-coisolated`, `--chimeric-max-kl`, `--refine-config` |
 | Quantification | `--tmt`, `--lfq`, `--label`, `--mbr`, `--quant-dir` | |
@@ -26,8 +26,8 @@ a measurement or override a derivation. A few test hooks and diagnostics are in 
 | Advanced FDR | | `--proteoform-fdr`, `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-channel-fdr` |
 
 `andes inference` and `andes quant finalize` take the search's database options (`--enzyme`,
-`--mods`, `--decoy-prefix`, `--decoy-suffix` and the Database variants) with the same names and
-help. Options whose value is one of a list (`--decoy-strategy`, `--enzyme`, `--tmt`,
+`--fixed-mods`, `--variable-mods`, `--decoy-prefix`, `--decoy-suffix` and the Database variants)
+with the same names and help, and read them from the search's config with `--config`. Options whose value is one of a list (`--decoy-strategy`, `--enzyme`, `--tmt`,
 `--uniprot-evidence`, `--precursor-cal` and the enum options) print their possible values;
 `--enzyme`, `--decoy-strategy` and `--tmt` also accept the aliases and any case listed in
 their `--help` text.
@@ -78,14 +78,15 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--mods` | path | *(off)* | Java-format `mods.txt` (§2). Without it: Carbamidomethyl C (fixed), Oxidation M (variable) and Acetyl on the protein N-terminus (variable), max 3 variable mods per peptide. Numeric Da masses only. | Java `-mod <FILE>` |
+| `--fixed-mods` | list | `Carbamidomethyl (C)` | Fixed modifications, `Name (sites)` items with UNIMOD names (§2). Replaces the default; with the default, a detected TMT/iTRAQ tag is added on K and the peptide N-term. | Java `-mod <FILE>` |
+| `--variable-mods` | list | `Oxidation (M), Acetyl (Protein N-term)` | Variable modifications, as `--fixed-mods` (§2); `""` = none. Replaces the default. Neutral losses, cleavage blocking, diagnostic ions, annotated-only sites and custom masses are config-only (§2). | Java `-mod <FILE>` |
 
 ### Scoring
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--fragmentation` | enum | `auto` | `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` reads the file (§4); on MGF it falls back to CID and warns. | Java `-m` |
-| `--protocol` | enum | `auto` | `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol model. `auto` keeps the model; if it finds TMT/iTRAQ reporter ions it turns on the isobaric peak filter and (with no `--mods`) adds the tag as a fixed mod. | Java `-protocol` |
+| `--protocol` | enum | `auto` | `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol model. `auto` keeps the model; if it finds TMT/iTRAQ reporter ions it turns on the isobaric peak filter and (with no `--fixed-mods`) adds the tag as a fixed mod. | Java `-protocol` |
 | `--score` | enum | `auto` | What ranks candidates and fills `RawScore`: `rank` (low-res), `strong` (high-res), or `auto` (by the model's instrument class). | — |
 | `--gbdt-max-trees` | u32 | `100` | Trees per GBDT ensemble, `0` = all. 100 is 33–41% faster and identification-neutral (2026-09). `--glyco` uses all trees unless set. | — |
 | `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. | — |
@@ -195,7 +196,7 @@ or an XML file with no UniProt entries, is an error.
 `glycosylation site` features become sites with the monoisotopic mass of the named modification,
 taken from UniProt's PTM vocabulary (`ptmlist.txt`). Interchain ubiquitin, NEDD8 and ISG15
 cross-links on K become Gly-Gly sites (+114.0429). A site only matters to a variable mod declared
-`sites=annotated` in the mods file ([§2](#2-modstxt-format)). That mod is then placed only on
+`restrict_to: annotated` in the config file ([§2](#2-modifications)). That mod is then placed only on
 residues the protein annotates with a modification of the same mass (±0.005 Da, which keeps
 phospho and sulfo apart). Without that attribute a mod applies to every matching residue, as
 before. A restricted mod therefore searches far fewer positions than the same mod applied
@@ -318,7 +319,7 @@ share with their canonical entry.
 
 With `--uniprot-variants`, restricting an artefact mod (deamidation, oxidation, carbamylation,
 methylation) to annotated sites removes the canonical explanation that competes with a variant
-of the same mass. andes warns when a mods file does that.
+of the same mass. andes warns when a modification list does that.
 
 **Evidence** (`--uniprot-evidence`, from the features' ECO codes):
 
@@ -399,7 +400,7 @@ and a run with one tier is stratified by class alone. The proteoform table repor
 A row needs `edits`, `mods` or `processing`:
 - `edits` make a variant entry, with knockoffs for a single-residue substitution;
 - `processing` makes a chain entry;
-- `mods` alone add sites to the reference protein itself (for `sites=annotated` mods), and every
+- `mods` alone add sites to the reference protein itself (for `restrict_to: annotated` mods), and every
   entry built from that reference inherits them.
 
 Edits together with processing are not supported yet. Rows are checked on load:
@@ -435,13 +436,13 @@ names. It must have:
 
 Terminal sites get none.
 
-A `sites=annotated` mod may also be placed on knockoff sites. A PSM that puts the modification on
+A `restrict_to: annotated` mod may also be placed on knockoff sites. A PSM that puts the modification on
 an annotated site supports that site's claim. One that puts it on a knockoff site is a false
 claim. Within each modification × residue × tier, the knockoff PSMs estimate the false claims, as
 for variants, and each site gets a site q-value. A PSM's own q-value is unchanged: a peptide
 identification does not depend on which residue carries the modification.
 
-Placements on knockoff sites are never reported for a `sites=annotated` mod, because they exist
+Placements on knockoff sites are never reported for a `restrict_to: annotated` mod, because they exist
 only for the estimate. For an unrestricted mod, which may sit anywhere anyway, they stay ordinary
 PSMs.
 
@@ -461,7 +462,7 @@ Measured on a mouse-liver phospho run (PXD007653, reviewed mouse UniProt, 51,906
 42,985 knockoff sites):
 - **Phospho placed freely** (the usual search): identifications are identical with and without
   knockoff sites, and 1,403 annotated sites pass a site q-value of 0.05.
-- **Phospho restricted to annotated sites** (`sites=annotated`): the knockoff placements cost 0.7%
+- **Phospho restricted to annotated sites** (`restrict_to: annotated`): the knockoff placements cost 0.7%
   of PSMs and 0.8% of phosphopeptides, and only 119 sites pass, because many knockoff residues are
   really phosphorylated.
 
@@ -490,12 +491,12 @@ keeps the held-out score of every row. A row's logit combines:
 - its rescored score;
 - its precursor isotope offset;
 - its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
-- the `diagnostic=` ions and `loss=` neutral losses of its modifications.
+- the `diagnostic_ions` and `neutral_loss` masses of its modifications (§2).
 
 The weights of the first three are fixed. How much a diagnostic ion or a loss says is learned
 from the run: among the rows the other evidence already makes confident, how often it is present
 when the row carries the modification and when a competing row carries another. Declare the
-signatures in the mods file; a modification without them is told apart by its fragments only.
+signatures in the config file (§2); a modification without them is told apart by its fragments only.
 
 Measured on synthetic peptide pools (PXD009449): seven lysine pools (one modification per pool
 and an unmodified pool), six lysine modifications claimed at every site, on the half of the
@@ -681,7 +682,7 @@ andes inference \
 - Give the search's database options (`--annotations`, `--uniprot-*`, `--knockoffs`,
   `--enzyme`, `--decoy-prefix`/`--decoy-suffix`), so families, knockoff entries, knockoff sites
   and decoy pairs are the search's. Knockoff entries are evidence for no protein.
-- Give the search's `--mods` file when it had one. A PSM that places one of its `sites=annotated`
+- Give the search's modification lists, or its config with `--config`. A PSM that places one of its `restrict_to: annotated`
   modifications on a knockoff site is then counted for no group, as in the search
   ([site claims](#site-claims-knockoff-sites-experimental)). Without the file those PSMs are
   counted.
@@ -810,86 +811,126 @@ peptide, protein or quantification level.
 
 ---
 
-## 2. Mods.txt format
+## 2. Modifications
 
-The Java MS-GF+ format (`crates/model/src/modification.rs`). Each line has five fields:
+The modifications are two lists, `--fixed-mods` and `--variable-mods` on the command line or
+`search.fixed_mods` and `search.variable_mods` in the config file (§1b). Each item is
+`Name (sites)`; the command line takes a comma-separated list
+(`crates/model/src/mod_spec.rs`).
 
-```text
-<mass>,<aa>,<fix|opt>,<location>,<name>
+```bash
+andes ... --fixed-mods "Carbamidomethyl (C)" \
+  --variable-mods "Oxidation (M), Phospho (STY), Acetyl (Protein N-term), Gln->pyro-Glu (N-term Q)"
 ```
 
-| Field | Rule |
+| Part | Rule |
 |---|---|
-| `<mass>` | Monoisotopic mass delta in Da. Composition strings (`C2H3N1O1`) are **not** supported. |
-| `<aa>` | One uppercase letter or `*`. `STY` is **not** supported; use one line per residue. |
-| `<fix\|opt>` | `fix` = fixed, `opt` = variable. Case-insensitive. |
-| `<location>` | `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive; hyphens optional). |
-| `<name>` | Name used in logs. |
+| Name | A UNIMOD name (`Phospho`, `TMT6plex`, `Gln->pyro-Glu`, `GG`, `Label:13C(6)15N(2)`) or accession (`UNIMOD:21`), any case. The mass, the accession written in the outputs and the name written in the outputs come from the bundled UNIMOD table (`resources/unimod.obo`). A few names other tools use are also accepted (`resources/unimod_aliases.tsv`): `GlyGly` (`GG`), `Deamidation` (`Deamidated`), `TMT10plex` and `TMT11plex` (`TMT6plex`), `TMT16plex` and `TMT18plex` (`TMTpro`). An unknown name is an error that suggests close names. |
+| Sites | Residues (`STY`: one modification per residue); `N-term`, `C-term` (the peptide terminus, any residue); `Protein N-term`, `Protein C-term`; or a terminus followed by residues (`N-term Q`: Q at the peptide N-terminus; `Protein N-term M`). UNIMOD's `Any N-term` and `Any C-term` are the same as `N-term` and `C-term`. Residues are upper-case one-letter codes. |
 
-`NumMods=N` sets the maximum variable mods per peptide (default `3`). `#` starts a comment. A
-fixed and a variable mod on the same `(residue, location)` is rejected.
+- **Defaults.** Without `--fixed-mods`: Carbamidomethyl (C), and when the run is found to carry
+  a TMT or iTRAQ tag (`--protocol TMT` or `iTRAQ`, `--tmt`, or `--protocol auto` reading its
+  reporter ions) the tag on K and
+  the peptide N-terminus. Without `--variable-mods`: Oxidation (M) and Acetyl (Protein N-term).
+  A given list replaces its default (a `--variable-mods` list leaves the fixed default, and the
+  tag, in place); `--variable-mods ""` or `variable_mods: []` searches no variable modification.
+  The built-in defaults carry the masses 57.02146, 15.99491 and 42.010565 Da; the same names
+  in a list take the UNIMOD masses (57.021464, 15.994915, 42.010565 Da).
+- **Limit.** `--max-mods` (default 3) bounds the variable modifications per peptide.
+- **Conflicts.** A fixed and a variable modification on the same residue and position are
+  rejected.
+- **Command line and config.** A list on the command line replaces the same list of the config
+  file; the other list keeps the config's value.
 
-Optional `key=value` attributes may follow the name, comma-separated:
+### Config-only settings
 
-| Attribute | Meaning |
+In the config file an item is either the command-line string or a map. A map names the
+modification with `name` (as above) and `sites`, or with `mass` (a custom mass shift in Da, not
+looked up; `name` is then a free label, written in the outputs, with no accession). A map whose
+`name` is `Name (sites)` needs no `sites` key. The map also takes:
+
+| Key | Meaning |
 |---|---|
-| `loss=<m1;m2;…>` | Neutral-loss masses (Da) predicted for this mod's fragment ions. |
-| `class=<glyco\|phospho\|sulfo\|generic>` | Pool the mod's loss ions with others of the class. |
-| `accession=<CURIE>` | Ontology accession reported in the outputs, e.g. `UNIMOD:21`. |
-| `sites=<annotated\|any>` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
-| `cleavage=<blocked\|kept>` | `blocked`: the enzyme does not cut at a residue carrying this mod, so it is never placed on the residue a peptide was cleaved at (the C-terminal K/R under trypsin), except at the protein's own terminus. Use it for modifications present before digestion that block the protease: acetyl-, succinyl- and other lysine acylations, GlyGly, di- and trimethyl-K. Not for labels added after digestion (TMT, reductive dimethylation). `kept` (default): no restriction. |
-| `diagnostic=<mz1;mz2;…>` | Singly charged ions the mod gives off when fragmented, such as the immonium ion of the modified residue. Not used in scoring: evidence for which modification a site carries (see [site identity](#site-identity-occupancy-and-which-modification)). Examples (HCD): acetyl-K `143.1179;126.0913`, trimethyl-K `143.1543` (with `loss=59.0735`, trimethylamine), succinyl-K `201.1234;184.0968`, GlyGly-K `215.1502;198.1237`, phospho-Y `216.0426`. |
+| `neutral_loss: [m1, …]` | Neutral-loss masses (Da) predicted for this mod's fragment ions. Nothing is taken from UNIMOD: without the key no loss ions are predicted. |
+| `loss_class: glyco\|phospho\|sulfo\|generic` | Pool the mod's loss ions with others of the class; `generic` when `neutral_loss` is given without it. |
+| `restrict_to: annotated\|any` | `annotated` restricts a **variable** mod to the residues a UniProt XML database annotates with a modification of the same mass ([§1a](#uniprot-xml-databases)). `any` (default) applies it to every matching residue. |
+| `cleavage: blocked\|kept` | `blocked`: the enzyme does not cut at a residue carrying this mod, so it is never placed on the residue a peptide was cleaved at (the C-terminal K/R under trypsin), except at the protein's own terminus. Use it for modifications present before digestion that block the protease: acetyl-, succinyl- and other lysine acylations, GlyGly, di- and trimethyl-K. Not for labels added after digestion (TMT, reductive dimethylation). `kept` (default): no restriction. |
+| `diagnostic_ions: [mz1, …]` | Singly charged ions the mod gives off when fragmented, such as the immonium ion of the modified residue. Not used in scoring: evidence for which modification a site carries (see [site identity](#site-identity-occupancy-and-which-modification)). Examples (HCD): acetyl-K `143.1179, 126.0913`, trimethyl-K `143.1543` (with `neutral_loss: [59.0735]`, trimethylamine), succinyl-K `201.1234, 184.0968`, GlyGly-K `215.1502, 198.1237`, phospho-Y `216.0426`. |
 
-### Example (a) — Carbamidomethyl C + Oxidation M
+The settings apply to every site of the item. `andes inference` and `andes quant finalize`
+read the same keys from the search's config with `--config`.
 
-```text
-NumMods=3
-57.02146,C,fix,any,Carbamidomethyl
-15.99491,M,opt,any,Oxidation
+### Example (a) — the defaults
+
+```bash
+andes --spectrum run.mzML --database human.fasta --output-pin run.pin
 ```
 
-The built-in defaults when `--mods` is omitted are these two plus a variable Acetyl
-(+42.010565) on the protein N-terminus, i.e. the equivalent of adding
-`42.010565,*,opt,Prot-N-term,Acetyl`. Pass a `--mods` file to search without it.
+is the same search as `--fixed-mods "Carbamidomethyl (C)" --variable-mods "Oxidation (M),
+Acetyl (Protein N-term)"` up to the UNIMOD masses above. To search without the protein
+N-terminal acetyl: `--variable-mods "Oxidation (M)"`.
 
-### Example (b) — TMT 10-plex on K and peptide N-term
+### Example (b) — TMT 10-plex on K and the peptide N-terminus
 
-```text
-NumMods=2
-57.02146,C,fix,any,Carbamidomethyl
-229.162932,K,fix,any,TMT10plex
-229.162932,*,fix,N-term,TMT10plex
+```bash
+andes ... --fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" --max-mods 2
 ```
 
-Add `--protocol TMT` to select `hcd_qexactive_tryp_tmt` (§7).
+`TMT10plex` resolves to the same record (UNIMOD:737, 229.162932 Da). Add `--protocol TMT` to
+select `hcd_qexactive_tryp_tmt` (§7). With the default fixed list, `--tmt tmt10` adds the tag
+itself.
 
-### Example (c) — Phosphorylation on S, T, Y
+### Example (c) — Phosphorylation on S, T, Y with the phosphate loss
 
-```text
-NumMods=3
-57.02146,C,fix,any,Carbamidomethyl
-79.966331,S,opt,any,Phospho
-79.966331,T,opt,any,Phospho
-79.966331,Y,opt,any,Phospho
+```yaml
+search:
+  max_mods: 3
+  variable_mods:
+    - Oxidation (M)
+    - {name: Phospho, sites: ST, neutral_loss: [97.976896], loss_class: phospho}
+    - Phospho (Y)
 ```
 
-Add `--protocol phospho` to prefer a phospho model (e.g. `hcd_qexactive_tryp_phosphorylation`).
+On the command line, without the loss: `--variable-mods "Oxidation (M), Phospho (STY)"`. Add
+`--protocol phospho` to prefer a phospho model (e.g. `hcd_qexactive_tryp_phosphorylation`).
 
-### Example (d) — Phosphorylation only at UniProt-annotated sites
+### Example (d) — GlyGly (ubiquitin remnant) on K, blocking cleavage
 
-```text
-NumMods=3
-57.02146,C,fix,any,Carbamidomethyl
-15.99491,M,opt,any,Oxidation
-79.966331,S,opt,any,Phospho,sites=annotated
-79.966331,T,opt,any,Phospho,sites=annotated
-79.966331,Y,opt,any,Phospho,sites=annotated
-42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated
+```yaml
+search:
+  variable_mods:
+    - Oxidation (M)
+    - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: [215.1502, 198.1237]}
+```
+
+### Example (e) — A custom mass
+
+```yaml
+search:
+  fixed_mods:
+    - Carbamidomethyl (C)
+    - {name: MyTag, mass: 123.4567, sites: N-term}
+```
+
+### Example (f) — Phosphorylation only at UniProt-annotated sites
+
+```yaml
+search:
+  variable_mods:
+    - Oxidation (M)
+    - {name: Phospho, sites: STY, restrict_to: annotated}
+    - {name: Acetyl, sites: Protein N-term, restrict_to: annotated}
 ```
 
 Search it against a UniProt XML database: `--database uniprot_sprot_human.xml.gz`. Add
 `--uniprot-evidence curated` to also use sites UniProt annotates by similarity. Against a FASTA,
 the restricted mods are never placed and andes warns.
+
+### Glycopeptides
+
+`--glyco` takes the glycans from its glycan database (`--glyco-species`, `--glyco-glycan-gdb`),
+not from these lists; the lists set the modifications of the peptide backbone, as in any
+search (e.g. `--glyco --glyco-species human --variable-mods "Oxidation (M)"`).
 
 ---
 
@@ -1303,34 +1344,27 @@ Set `--protocol TMT` or `--protocol iTRAQ` (selects `hcd_qexactive_tryp_tmt` /
 
 ### TMT (10-plex example)
 
-TMT10plex = **229.162932 Da** on K and peptide N-terminus (Unimod); mods.txt as in §2 example (b).
+TMT10plex = **229.162932 Da** on K and peptide N-terminus (UNIMOD:737, `TMT6plex`); §2 example (b).
 
 ```bash
 andes \
   --spectrum tmt_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
-  --mods tmt_10plex_mods.txt \
+  --fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" \
   --protocol TMT
 ```
 
 ### iTRAQ (8-plex example)
 
-iTRAQ8plex = **304.20536 Da** on K and peptide N-terminus.
-
-```text
-NumMods=2
-57.02146,C,fix,any,Carbamidomethyl
-304.20536,K,fix,any,iTRAQ8plex
-304.20536,*,fix,N-term,iTRAQ8plex
-```
+iTRAQ8plex = **304.20536 Da** on K and peptide N-terminus (UNIMOD:730).
 
 ```bash
 andes \
   --spectrum itraq_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
-  --mods itraq_8plex_mods.txt \
+  --fixed-mods "Carbamidomethyl (C), iTRAQ8plex (K), iTRAQ8plex (N-term)" \
   --protocol iTRAQ
 ```
 
@@ -1575,7 +1609,8 @@ single input run's MS1 scans still need to fit in memory while it is processed.
 * **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
 
 ```bash
-andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+andes --spectrum tmt_run.mzML --database human.fasta \
+      --fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" \
       --rescore --psm-fdr 0.01 --tmt tmt10 --tmt-correction lot_XY.txt \
       --output-parquet run.idparquet
 ```
@@ -1663,7 +1698,7 @@ andes quant finalize --quant-dir q/ -o experiment [--quant-fdr 0.01] \
 
 With `--output-parquet`, finalize writes the QPX views of the experiment and needs the protein
 database and the Percolator results of every run (`--database`, `--psms`, `--decoy-psms`, the
-database options and `--mods`, as [`andes inference`](#several-runs-andes-inference)). It infers the
+database options and modification lists, as [`andes inference`](#several-runs-andes-inference)). It infers the
 protein groups once over every run's PSMs, then:
 
 - `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the
@@ -2519,7 +2554,7 @@ here only where the value is a fixed choice rather than a documented option.
 |---|---|---|---|---|---|
 | Missed cleavages | 2 | `andes/src/bin/andes/cli.rs` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
 | Peptide length | 6 to 50 | `andes/src/bin/andes/cli.rs` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
-| Variable mods per peptide | 3 | `andes/src/bin/andes/cli.rs` | combinatorial candidates | `--max-mods`, `NumMods` in mods file | No recorded evidence |
+| Variable mods per peptide | 3 | `andes/src/bin/andes/cli.rs` | combinatorial candidates | `--max-mods` | No recorded evidence |
 | Precursor charge range | 2..5 | `andes/src/bin/andes/cli.rs` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
 | Isotope-error range | -1..2 | `search/src/search_params.rs:171` | precursor isotope offsets tried | `--isotope-error` | Inherited from the Java engine default (`-ti -1,2`); glyco narrows it to a window learned from MS1 |
 | PSMs kept per spectrum | 10 | `andes/src/bin/andes/cli.rs` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |

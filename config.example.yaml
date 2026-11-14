@@ -26,7 +26,15 @@ io:
 search:
   precursor_tol: 20ppm             # --precursor-tol: in ppm or Da (0.02da)
   enzyme: trypsin                  # --enzyme: trypsin | chymotrypsin | lysc | aspn | gluc | lysn | argc | alphalp | nocleavage | nonspecific, or a list (gluc,trypsin)
-  # mods: mods.txt                 # --mods: modifications file, DOCS.md §2; unset: built-in (example)
+  # fixed_mods: ["Carbamidomethyl (C)"]                          # --fixed-mods: Name (sites) items, DOCS.md §2; unset: this list
+  # variable_mods: ["Oxidation (M)", "Acetyl (Protein N-term)"]   # --variable-mods: as fixed_mods, [] = none; unset: this list
+  # A list item is the command-line string or a map that adds the config-only settings (example):
+  # variable_mods:
+  #   - Oxidation (M)
+  #   - {name: Phospho, sites: STY, neutral_loss: [97.976896], loss_class: phospho}
+  #   - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: [215.1502, 198.1237]}
+  #   - {name: Phospho, sites: Y, restrict_to: annotated}   # only at sites a UniProt XML database annotates
+  #   - {name: MyTag, mass: 123.4567, sites: N-term}         # a custom mass, no UNIMOD lookup
   charge: "2..5"                   # --charge (advanced): charges tried when the spectrum has none
   enzyme_specificity: fully        # --enzyme-specificity (advanced): fully | semi | non-specific
   min_length: 6                    # --min-length (advanced): shortest peptide

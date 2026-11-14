@@ -167,8 +167,31 @@ fn main() -> ExitCode {
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
-        Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
-        Some(Command::Inference(args)) => inference_cmd::run_inference(*args),
+        Some(Command::Quant(mut cmd)) => {
+            // `quant finalize --config`: the search's database keys.
+            if let cli::QuantCommand::Finalize(a) = &mut cmd {
+                let sub = matches
+                    .subcommand_matches("quant")
+                    .and_then(|q| q.subcommand_matches("finalize"));
+                if let Some(Err(e)) = sub.map(|m| config::apply_protein_config(&mut a.proteins, m))
+                {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            quant_cmd::run_quant_command(cmd)
+        }
+        Some(Command::Inference(mut args)) => {
+            // `inference --config`: the search's database keys.
+            if let Some(Err(e)) = matches
+                .subcommand_matches("inference")
+                .map(|m| config::apply_protein_config(&mut args.proteins, m))
+            {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+            inference_cmd::run_inference(*args)
+        }
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;

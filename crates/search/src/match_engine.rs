@@ -670,10 +670,20 @@ impl<'a> PreparedSearch<'a> {
     /// What IPF site localization needs to score placements against a spectrum
     /// the way this search scored its candidates, kept once the index is dropped:
     /// the scorer of every activation the run used, the fragment tolerance and
-    /// the fragment m/z recentring.
-    pub fn ipf_scoring(&self) -> IpfScoring<'a> {
+    /// the fragment m/z recentring. `scorer` is the run's scorer this search
+    /// was prepared with; the result borrows it, not the search.
+    pub fn ipf_scoring<'s>(&self, scorer: &'s RankScorer) -> IpfScoring<'s> {
+        assert!(
+            std::ptr::eq(scorer, self.scorer),
+            "ipf_scoring needs the scorer the search was prepared with"
+        );
+        let set = self.scorer_set(&[]);
         IpfScoring {
-            scorers: self.scorer_set(&[]),
+            scorers: ScorerSet {
+                primary: scorer,
+                run_activation: set.run_activation,
+                alts: set.alts,
+            },
             fragment_tolerance_da: self.fragment_tolerance_da,
             recentre_ppm: self.scorer.fragment_recentre_ppm(),
             declared: self.params.aa_set.distinct_mods(),

@@ -2661,7 +2661,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
     // IPF scores placements as the search scored candidates; kept past the index.
-    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring());
+    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {

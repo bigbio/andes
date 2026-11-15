@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn glycan_formula_mass_matches_the_residue_masses() {
         // Polymerised residue masses pinned by the glyco campaign (see
-        // andes-glyco::glycan_mass) at 6 decimals.
+        // glyco::glycan_mass) at 6 decimals.
         let f = Formula::glycan(1, 0, 0, 0, 0);
         assert!((f.monoisotopic_mass() - 162.052824).abs() < 5e-6, "{f:?}");
         let f = Formula::glycan(0, 1, 0, 0, 0);

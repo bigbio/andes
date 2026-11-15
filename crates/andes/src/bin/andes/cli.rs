@@ -642,7 +642,7 @@ pub(crate) struct SearchArgs {
     /// Select a bundled species-specific N-glycan database instead of an external
     /// `--glyco-glycan-gdb` file or `--glyco-glycan-wurcs` CSV. `--glyco` requires
     /// one of the three. Databases and their attribution:
-    /// `crates/andes-glyco/glycan-db/`.
+    /// `crates/glyco/glycan-db/`.
     #[arg(long = "glyco-species", value_enum)]
     pub(crate) glyco_species: Option<GlycoSpeciesFlag>,
 
@@ -1538,11 +1538,11 @@ pub(crate) enum GlycoCoreFlag {
     O,
 }
 
-impl From<GlycoCoreFlag> for andes_glyco::glycan_first::GlycanCore {
+impl From<GlycoCoreFlag> for glyco::glycan_first::GlycanCore {
     fn from(value: GlycoCoreFlag) -> Self {
         match value {
-            GlycoCoreFlag::N => andes_glyco::glycan_first::GlycanCore::NGlycan,
-            GlycoCoreFlag::O => andes_glyco::glycan_first::GlycanCore::OGlycan,
+            GlycoCoreFlag::N => glyco::glycan_first::GlycanCore::NGlycan,
+            GlycoCoreFlag::O => glyco::glycan_first::GlycanCore::OGlycan,
         }
     }
 }

@@ -927,7 +927,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
     let table =
-        GlycoCandidates::from_out_of_core(&mmap, andes_glyco::glycan_first::GlycanCore::NGlycan);
+        GlycoCandidates::from_out_of_core(&mmap, glyco::glycan_first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {
@@ -958,7 +958,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     assert!(want.iter().any(|s| s.2.iter().any(|&(_, d)| d != 0)));
     assert!(expected.iter().any(|c| {
         let r: Vec<u8> = c.peptide.residues.iter().map(|a| a.residue).collect();
-        !andes_glyco::sequon::has_nxst_sequon(&r)
+        !glyco::sequon::has_nxst_sequon(&r)
     }));
     assert!(expected
         .iter()

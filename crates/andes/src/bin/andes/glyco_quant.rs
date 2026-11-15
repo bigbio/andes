@@ -91,8 +91,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use andes_glyco::glycan_db::GlycanComp;
-use andes_glyco::glycan_first::GlycanCore;
+use glyco::glycan_db::GlycanComp;
+use glyco::glycan_first::GlycanCore;
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::Tolerance;
@@ -1887,11 +1887,11 @@ fn composition_label(comp: &GlycanComp) -> String {
 /// as `output::glyco_pin::glycan_tag_with_site`).
 fn site_label(residues: &[u8], post: u8, core: GlycanCore) -> String {
     match core {
-        GlycanCore::NGlycan => match andes_glyco::sequon::glycosites(residues, post).as_slice() {
+        GlycanCore::NGlycan => match glyco::sequon::glycosites(residues, post).as_slice() {
             [only] => format!("N{}", only + 1),
             _ => "N?".to_string(),
         },
-        GlycanCore::OGlycan => match andes_glyco::sequon::all_ser_thr_sites(residues).as_slice() {
+        GlycanCore::OGlycan => match glyco::sequon::all_ser_thr_sites(residues).as_slice() {
             [only] => format!("{}{}", residues[*only] as char, only + 1),
             _ => "S/T?".to_string(),
         },

@@ -31,7 +31,7 @@ pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 /// Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 
-/// Default weight for the count-rewarding hyperscore term (andes-glyco 2.0 peptide
+/// Default weight for the count-rewarding hyperscore term (glyco 2.0 peptide
 /// channel `P`). Scales `ln(N_matched!)` against the rank-LLR. Offline blend
 /// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. 0.0 would disable
 /// the hyperscore term.
@@ -159,9 +159,9 @@ pub fn collapse_cmp(
 /// canonical way to populate them is:
 ///
 /// ```rust
-/// # use andes_glyco::glycan_db::GlycanComp;
-/// # use andes_glyco::hybrid::Source;
-/// # use andes_glyco::glyco_psm::GlycoPsmKey;
+/// # use glyco::glycan_db::GlycanComp;
+/// # use glyco::hybrid::Source;
+/// # use glyco::glyco_psm::GlycoPsmKey;
 /// let glycan: Option<GlycanComp> = None;
 /// let key = GlycoPsmKey {
 ///     spectrum_idx: 0,

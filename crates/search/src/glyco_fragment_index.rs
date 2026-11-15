@@ -16,7 +16,7 @@
 //! evidence (b/y), it works on weak-core-Y spectra where the core-Y selector
 //! fails.
 
-use andes_glyco::glycan_first::PPM_FLOOR_DA;
+use glyco::glycan_first::PPM_FLOOR_DA;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;

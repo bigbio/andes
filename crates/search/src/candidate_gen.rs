@@ -89,14 +89,14 @@ pub fn candidate_has_nxst_sequon(c: &Candidate) -> bool {
 /// it (`b'-'` at the protein C-terminus). Variable mods never change a residue
 /// letter, so every peptidoform of a span shares the span's answer.
 pub fn span_has_nxst_sequon(residues: &[u8], post: u8) -> bool {
-    use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
+    use glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
     has_nxst_sequon(residues) || boundary_nxst_site(residues, post).is_some()
 }
 
 /// The O-glycan path's candidate membership test: any Ser/Thr in the span. Unlike
 /// N-glycan there is no sequon and no boundary case — a bare S/T is the motif.
 pub fn candidate_has_ser_or_thr(c: &Candidate) -> bool {
-    use andes_glyco::sequon::has_ser_or_thr;
+    use glyco::sequon::has_ser_or_thr;
     let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
     has_ser_or_thr(&res)
 }
@@ -105,7 +105,7 @@ pub fn candidate_has_ser_or_thr(c: &Candidate) -> bool {
 /// unused (no boundary case for O-glycans) but the signature matches
 /// [`span_has_nxst_sequon`] so both slot into `out_of_core_candidates_where`.
 pub fn span_has_ser_or_thr(residues: &[u8], _post: u8) -> bool {
-    use andes_glyco::sequon::has_ser_or_thr;
+    use glyco::sequon::has_ser_or_thr;
     has_ser_or_thr(residues)
 }
 

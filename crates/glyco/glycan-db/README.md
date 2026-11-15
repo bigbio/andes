@@ -2,7 +2,7 @@
 
 N-glycan structure databases (see Attribution), bundled so `--glyco-species` works without an
 external glycan database. Each file is a header line of monosaccharide symbols, then one
-canonical S-expression per glycan (grammar: `andes-glyco::glycan_db::load_glycan_gdb`).
+canonical S-expression per glycan (grammar: `glyco::glycan_db::load_glycan_gdb`).
 
 | File | Species / scope | Structures | Provenance |
 |---|---|---|---|

@@ -3,7 +3,7 @@
 //!
 //! This is a general peptide/backbone capability (it benefits ordinary
 //! peptide search, not just glyco). The glycan per-monosaccharide RT offset is
-//! a *glyco extension* that lives in the `andes-glyco` crate and simply adds to
+//! a *glyco extension* that lives in the `glyco` crate and simply adds to
 //! the backbone index produced here — this module stays glyco-free.
 //!
 //! # Pipeline

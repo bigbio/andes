@@ -25,11 +25,11 @@ use search::candidate_gen::Candidate;
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-use andes_glyco::glycan_first::GlycanCore;
-use andes_glyco::glyco_psm::{
+use glyco::glycan_first::GlycanCore;
+use glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
-use andes_glyco::hybrid::Source;
+use glyco::hybrid::Source;
 
 use crate::percolator_enz::enzyme_features;
 use crate::pin::{psm_feature_values, FeatureFmt};
@@ -410,17 +410,17 @@ fn write_glyco_psm_row<W: Write>(
 /// backbone determines it. See the call site for why an ambiguous backbone
 /// emits `@N?` rather than andes's internal first-sequon convention.
 fn glycan_tag_with_site(
-    g: &andes_glyco::glycan_db::GlycanComp,
+    g: &glyco::glycan_db::GlycanComp,
     residues: &[u8],
     post: u8,
     core: GlycanCore,
 ) -> String {
     let site = match core {
-        GlycanCore::NGlycan => match andes_glyco::sequon::glycosites(residues, post).as_slice() {
+        GlycanCore::NGlycan => match glyco::sequon::glycosites(residues, post).as_slice() {
             [only] => format!("@N{}", only + 1),
             _ => "@N?".to_string(),
         },
-        GlycanCore::OGlycan => match andes_glyco::sequon::all_ser_thr_sites(residues).as_slice() {
+        GlycanCore::OGlycan => match glyco::sequon::all_ser_thr_sites(residues).as_slice() {
             [only] => {
                 let aa = residues[*only] as char;
                 format!("@{}{}", aa, only + 1)
@@ -789,9 +789,9 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use andes_glyco::glycan_db::GlycanComp;
-    use andes_glyco::glyco_psm::GlycoPsmKey;
-    use andes_glyco::hybrid::Source;
+    use glyco::glycan_db::GlycanComp;
+    use glyco::glyco_psm::GlycoPsmKey;
+    use glyco::hybrid::Source;
     use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
     use search::psm::{PsmFeatures, PsmMatch};
 
@@ -1075,7 +1075,7 @@ mod tests {
         let params = make_glyco_params();
 
         let glycan_mass =
-            2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX; // ~892.317 Da
+            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX; // ~892.317 Da
         let peptide_neutral_mass = candidates[0].peptide.mass();
 
         // Precursor m/z consistent with the INTACT glycopeptide at z=2 so
@@ -1209,7 +1209,7 @@ mod tests {
     /// asserts the exact ordering expression `select_emitted_hits` uses.
     #[test]
     fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
-        use andes_glyco::glyco_psm::{
+        use glyco::glyco_psm::{
             glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
         };
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
@@ -1307,7 +1307,7 @@ mod tests {
         let params = make_glyco_params();
 
         let glycan_mass =
-            2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX;
+            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX;
         let z = 2.0_f64;
         let intact_neutral = candidates[0].peptide.mass() + glycan_mass;
         let precursor_mz = (intact_neutral + z * PROTON) / z;

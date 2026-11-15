@@ -316,7 +316,7 @@ pub fn score_psm(
     total as f32
 }
 
-/// Count-rewarding hyperscore over matched backbone b/y ions (andes-glyco 2.0
+/// Count-rewarding hyperscore over matched backbone b/y ions (glyco 2.0
 /// peptide channel `P`).
 ///
 /// `hyperscore = ln(Nb! · Ny!) = ln(Nb!) + ln(Ny!)`, where `Nb`/`Ny` are the

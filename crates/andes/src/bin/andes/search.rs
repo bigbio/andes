@@ -194,12 +194,16 @@ fn score_mass_ordered(
 struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
+    /// The fragment error each input file was searched with, in input order
+    /// (`None`: not measured), for steps that score again after the search.
+    per_file: Vec<Option<scoring_crate::scoring::FragmentErrorModel>>,
 }
 
 impl FragmentErrorMeasurer {
     /// Forget the previous file's measurement.
     fn start_file(&mut self, prepared: &PreparedSearch) {
         self.done = false;
+        self.per_file.push(None);
         if self.enabled {
             prepared.set_fragment_error(None);
         }
@@ -241,6 +245,9 @@ impl FragmentErrorMeasurer {
         match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {
                 prepared.set_fragment_error(Some(m));
+                if let Some(last) = self.per_file.last_mut() {
+                    *last = Some(m);
+                }
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
@@ -410,6 +417,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = cli;
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
+    }
+    // Before any index or scratch work: a rejected run does no I/O.
+    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
+        return Err("--localize ipf needs --rescore or --rescore-native".into());
     }
     // Run-private temporary files go to `--temp-dir`, by default next to the
     // output; the quantification settings read the resolved directory.
@@ -1764,7 +1775,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
     // Pass 2 and `--predict ms2` compares them with predicted spectra.
-    let keep_peaks = cli.refine || predictors.as_ref().is_some_and(|p| p.needs_peaks());
+    // `--localize ipf` scores placements against the peaks after rescoring.
+    let keep_peaks = cli.refine
+        || cli.localize.is_some()
+        || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
@@ -1826,6 +1840,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut measurer = FragmentErrorMeasurer {
         enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
         done: false,
+        per_file: Vec::with_capacity(spectrum_paths.len()),
     };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
@@ -2647,6 +2662,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
     // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
+    // IPF scores placements as the search scored candidates; kept past the index.
+    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2845,6 +2862,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Knockoff rows: in the PIN as targets; left out of the QPX bundle, the
     // filtered TSV, quantification and every other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
     if let Some(ref mut map) = rescore_map {
         // A variant peptide a reference protein holds once I and L are taken
         // as equal identifies that reference too: share it before classes are
@@ -2986,6 +3004,89 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     sites.rows.len()
                 ),
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            }
+        }
+        // IPF site localization (`--localize ipf`): every identified target row
+        // (within its PSM cutoff, not a knockoff), whatever stage produced it,
+        // scored against its spectrum's retained peaks.
+        if let Some(scoring) = ipf_scoring.as_ref() {
+            use rayon::prelude::*;
+            let t_ipf = std::time::Instant::now();
+            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
+            let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
+            // One input file at a time, with the fragment error it was searched
+            // with; the rows of a file in parallel.
+            let searched_with = scoring.fragment_error();
+            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> =
+                std::collections::HashMap::new();
+            let mut lo = 0usize;
+            for (f, &hi) in run_ends.iter().enumerate() {
+                scoring.set_fragment_error(measurer.per_file.get(f).copied().flatten());
+                let part: Vec<(String, search::ipf::IpfEvidence)> = queues[lo..hi]
+                .par_iter()
+                .enumerate()
+                .map(|(j, q)| (lo + j, q))
+                .flat_map_iter(|(i, q)| {
+                    let rows: Vec<(String, u32, u8)> =
+                        output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
+                            .into_iter()
+                            .filter(|(id, c, _)| {
+                                !pin_candidates[*c as usize].is_decoy
+                                    && !knockoff_rows.contains(id)
+                                    && map_ref.get(id).is_some_and(|p| p.q_value <= cutoffs.of(id))
+                            })
+                            .collect();
+                    let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
+                        .iter()
+                        .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
+                        .collect();
+                    let found = if peptides.is_empty() {
+                        Vec::new()
+                    } else {
+                        scoring.evidence(&spectra[i], &peptides)
+                    };
+                    rows.into_iter()
+                        .zip(found)
+                        .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+                evidence.extend(part);
+                lo = hi;
+            }
+            scoring.set_fragment_error(searched_with);
+            let (rows, model) = output::ipf::localize_psms(map_ref, &evidence, cli.ipf_debug);
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.ipf.tsv"));
+            // The report was requested: a failed write fails the run.
+            output::ipf::write_ipf_tsv(&path, &rows)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            if rows.is_empty() {
+                eprintln!(
+                    "WARN: --localize ipf: no identified target PSM has a variable \
+                     modification with more than one possible site; {} is empty",
+                    path.display()
+                );
+            }
+            let truncated = rows.iter().filter(|r| r.truncated).count();
+            eprintln!(
+                "Wrote IPF localization: {} ({} PSMs, {} with placements limited to the \
+                 {} nearest the search's; ion PEP by intensity quartile {:?}, unmatched \
+                 {:.3}) [{:.2}s]",
+                path.display(),
+                rows.len(),
+                truncated,
+                search::ipf::MAX_PLACEMENTS,
+                model.matched.map(|p| (p * 1000.0).round() / 1000.0),
+                model.unmatched,
+                t_ipf.elapsed().as_secs_f64()
+            );
+            if cli.output_parquet.is_some() {
+                ipf_qpx = Some(output::ipf::qpx_map(&rows));
             }
         }
     }
@@ -3200,6 +3301,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
+            ipf_qpx.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             // Finding 3.9: failure to write an explicitly-requested output is a

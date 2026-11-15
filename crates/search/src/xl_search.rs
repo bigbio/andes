@@ -340,6 +340,10 @@ pub struct Rescores {
     /// beta without those of alpha.
     pub alpha_decoupled: f32,
     pub beta_decoupled: f32,
+    /// Label-blind match probability of each peptide's b/y matches,
+    /// `-log10 P(X >= n)` ([`andes_xl::match_prob`]).
+    pub alpha_match_prob: f32,
+    pub beta_match_prob: f32,
 }
 
 /// Exhaustive-oracle result of one spectrum.
@@ -762,11 +766,31 @@ fn rescores(
         z,
         &[&pb],
     );
+    let mut mzs: Vec<f64> = spec.peaks.iter().map(|p| p.0).collect();
+    mzs.sort_by(f64::total_cmp);
+    let range = match (mzs.first(), mzs.last()) {
+        (Some(a), Some(b)) => b - a,
+        _ => 0.0,
+    };
+    let p_chance = andes_xl::match_prob::chance_match_probability(mzs.len(), tol, range);
+    let match_prob = |p: &Peptide| -> f32 {
+        let ions = by_ions(p, frag_z);
+        let n = ions
+            .iter()
+            .filter(|&&m| {
+                let i = mzs.partition_point(|&x| x < m - tol);
+                mzs.get(i).is_some_and(|&x| x <= m + tol)
+            })
+            .count();
+        andes_xl::match_prob::binomial_tail_score(ions.len() as u32, n as u32, p_chance) as f32
+    };
     Rescores {
         alpha_no_stubs: ns[0],
         beta_no_stubs: ns[1],
         alpha_decoupled: da[0],
         beta_decoupled: db[0],
+        alpha_match_prob: match_prob(&pa),
+        beta_match_prob: match_prob(&pb),
     }
 }
 

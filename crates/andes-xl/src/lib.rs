@@ -66,6 +66,11 @@
 //! PIN); the FDR stays split by link class, so the two score scales are never
 //! compared.
 //!
+//! **Reported levels.** Intra-links are reported up to residue pairs (with
+//! a q-value also among the residue pairs with at least two CSMs); inter-links
+//! at CSM, residue-pair and protein-pair level. Intra protein pairs (a
+//! protein with itself) stay in the protein-pair table without a q-value.
+//!
 //! **Correctness check.** [`pair::pairs_by_sum`] is the exhaustive pair
 //! enumerator by precursor mass; it is tested against a brute-force all-pairs
 //! loop, and the search driver can run it as an oracle (no doublet gate) on a
@@ -75,6 +80,7 @@ pub mod crosslinker;
 pub mod decoy;
 pub mod doublet;
 pub mod fdr;
+pub mod match_prob;
 pub mod pair;
 pub mod rollup;
 pub mod sites;

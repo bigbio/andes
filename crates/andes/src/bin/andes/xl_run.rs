@@ -352,6 +352,7 @@ pub(crate) fn run_xl(
             .and_then(|p| p.file_stem())
             .map_or_else(|| "run".to_string(), |s| s.to_string_lossy().into_owned())
     };
+    let match_prob_feature = cli.xl_match_prob == "feature";
     let pin_path = sibling(output_pin_path, ".xl.pin");
     let n_pin = crate::xl_fdr::write_xl_pin(
         &pin_path,
@@ -361,6 +362,7 @@ pub(crate) fn run_xl(
         prepared,
         &run_of,
         None,
+        match_prob_feature,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
     // Inter-links keep the pair score: a Percolator model over all CSMs or
@@ -368,9 +370,17 @@ pub(crate) fn run_xl(
     // `--rescore` rescores the intra-links with a Percolator model trained on
     // the intra rows only; `--xl-rescore-inter` (a comparison) does the same
     // for the inter rows.
+    // `--xl-match-prob score` adds the lower match probability of the two
+    // peptides to the inter-link pair score (a comparison arm).
+    let mp_score = cli.xl_match_prob == "score";
     let mut score: Vec<Option<f64>> = results
         .iter()
-        .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
+        .map(|r| {
+            r.csm.as_ref().map(|c| {
+                let mp = c.rescores.alpha_match_prob.min(c.rescores.beta_match_prob);
+                c.pair_score as f64 + if mp_score && !c.intra { mp as f64 } else { 0.0 }
+            })
+        })
         .collect();
     let mut rescore_class = |intra: bool, suffix: &str| -> Result<(), Box<dyn std::error::Error>> {
         let path = sibling(output_pin_path, suffix);
@@ -382,6 +392,7 @@ pub(crate) fn run_xl(
             prepared,
             &run_of,
             Some(intra),
+            match_prob_feature,
         )?;
         eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;

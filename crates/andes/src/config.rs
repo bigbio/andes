@@ -17,7 +17,7 @@
 //! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
 //! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
 //! scorer), and the experimental crosslink search `--xl` with its developer
-//! hooks `--xl-oracle`, `--xl-rescore-inter` and `--xl-match-prob`. The test `every_search_flag_has_a_config_key` keeps that list
+//! hooks `--xl-oracle` and `--xl-rescore-inter`. The test `every_search_flag_has_a_config_key` keeps that list
 //! honest.
 //!
 //! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
@@ -1312,7 +1312,6 @@ glyco:
         "xl",
         "xl_oracle",
         "xl_rescore_inter",
-        "xl_match_prob",
     ];
 
     /// Every search flag maps to a config key unless it is listed as CLI-only, so

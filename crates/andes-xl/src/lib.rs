@@ -80,7 +80,6 @@ pub mod crosslinker;
 pub mod decoy;
 pub mod doublet;
 pub mod fdr;
-pub mod match_prob;
 pub mod pair;
 pub mod rollup;
 pub mod sites;

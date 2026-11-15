@@ -63,9 +63,6 @@ const FEATURES: [&str; 46] = [
     "min_decoupled",
 ];
 
-/// Match-probability feature columns (`--xl-match-prob feature`).
-const MATCH_PROB_FEATURES: [&str; 3] = ["alpha_match_prob", "beta_match_prob", "min_match_prob"];
-
 /// The row id of a CSM in the PIN and Percolator's results.
 fn spec_id(r: &XlSpectrumResult) -> String {
     format!("xl{}", r.spec_idx)
@@ -177,16 +174,12 @@ pub(crate) fn write_xl_pin(
     prepared: &PreparedSearch,
     run_of: &dyn Fn(usize) -> String,
     intra: Option<bool>,
-    match_prob: bool,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<&str> = vec![
         "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "FileName",
     ];
     head.extend(FEATURES);
-    if match_prob {
-        head.extend(MATCH_PROB_FEATURES);
-    }
     head.extend(["Peptide", "Proteins"]);
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
@@ -200,16 +193,8 @@ pub(crate) fn write_xl_pin(
         let pb = &table.peptides()[c.beta.pep as usize];
         let label = if c.class == PairClass::TT { 1 } else { -1 };
         let calc = pa.peptide.mass() + pb.peptide.mass();
-        let mut f = features(r, c, table);
+        let f = features(r, c, table);
         debug_assert_eq!(f.len(), FEATURES.len());
-        if match_prob {
-            let rs = &c.rescores;
-            f.extend([
-                rs.alpha_match_prob as f64,
-                rs.beta_match_prob as f64,
-                rs.alpha_match_prob.min(rs.beta_match_prob) as f64,
-            ]);
-        }
         let bare = |p: &XlPeptide| String::from_utf8_lossy(&p.bare()).into_owned();
         let mut row: Vec<String> = vec![
             spec_id(r),

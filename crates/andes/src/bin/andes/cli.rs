@@ -673,14 +673,6 @@ pub(crate) struct SearchArgs {
     #[arg(long = "xl-rescore-inter", hide = true, requires = "xl")]
     pub(crate) xl_rescore_inter: bool,
 
-    /// With --xl: use of the match-probability score (off, feature, score; comparison only)
-    ///
-    /// `feature` adds it to the PIN columns; `score` adds the lower of the two peptides' to
-    /// the inter-link pair score.
-    #[arg(long = "xl-match-prob", value_name = "MODE", default_value = "off",
-          value_parser = ["off", "feature", "score"], hide = true, requires = "xl")]
-    pub(crate) xl_match_prob: String,
-
     /// Bundled N-glycan database of --glyco
     ///
     /// The databases and their attribution: crates/andes-glyco/glycan-db/.
@@ -2596,7 +2588,6 @@ mod help_layout_tests {
         "ipf_debug",
         "xl_oracle",
         "xl_rescore_inter",
-        "xl_match_prob",
     ];
 
     #[test]

@@ -56,6 +56,8 @@ mod tmt_mbr;
 mod train;
 #[path = "andes/train_intensity.rs"]
 mod train_intensity;
+#[path = "andes/xl_run.rs"]
+mod xl_run;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
 

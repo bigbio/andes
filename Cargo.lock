@@ -62,6 +62,7 @@ name = "andes"
 version = "0.4.0"
 dependencies = [
  "andes-glyco",
+ "andes-xl",
  "arrow",
  "clap",
  "flate2",
@@ -85,6 +86,10 @@ dependencies = [
 
 [[package]]
 name = "andes-glyco"
+version = "0.4.0"
+
+[[package]]
+name = "andes-xl"
 version = "0.4.0"
 
 [[package]]
@@ -2634,6 +2639,7 @@ name = "search"
 version = "0.4.0"
 dependencies = [
  "andes-glyco",
+ "andes-xl",
  "input",
  "memmap2",
  "model",

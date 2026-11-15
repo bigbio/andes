@@ -1,0 +1,7 @@
+[package]
+name = "andes-xl"
+version = "0.4.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]

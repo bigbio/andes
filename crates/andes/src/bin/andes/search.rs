@@ -434,6 +434,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the run (removed at exit) and searched as `.d` folders.
     // QPX records the inputs as given; the unpacked run folders are removed on exit.
     let original_spectrum_paths = cli.spectrum.clone();
+    // `--glyco` and `--xl` are standalone drivers: they skip the standard
+    // peptide search, keep every spectrum's peaks and write their own output.
+    let standalone = cli.glyco || cli.xl.is_some();
     let _d_archives = unpack_d_archives(&mut cli.spectrum, &scratch_dir)?;
     // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
     // directory that lives until the end of the run.
@@ -1189,6 +1192,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // serve keep per-spectrum enumeration.
     let retrieval_excluded: Option<&'static str> = if cli.glyco {
         Some("--glyco looks candidates up by backbone mass")
+    } else if cli.xl.is_some() {
+        Some("--xl looks candidates up by peptide mass")
     } else if !search::fragment_index::covers_activation(param.data_type.activation) {
         Some(
             "it holds only b/y ions, and this activation method fragments into \
@@ -1197,7 +1202,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    if let (false, Some(reason)) = (cli.glyco, retrieval_excluded) {
+    if let (false, Some(reason)) = (standalone, retrieval_excluded) {
         eprintln!(
             "[auto] {} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
              index is not used: {reason})",
@@ -1238,6 +1243,36 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "WARN: --glyco-hcd-pair has no effect without --glyco (it only drives \
              paired-scan candidate generation in glyco mode); ignoring it."
         );
+    }
+    // --xl is a standalone driver like --glyco: it writes its own `.xl.tsv` and
+    // takes none of the standard output, rescoring or quantification stages.
+    if cli.xl.is_some() {
+        let mut unsupported: Vec<&str> = Vec::new();
+        for (on, flag) in [
+            (cli.output_tsv.is_some(), "--output-tsv"),
+            (cli.output_parquet.is_some(), "--output-parquet"),
+            (cli.rescore, "--rescore"),
+            (cli.rescore_native, "--rescore-native"),
+            (cli.refine, "--refine"),
+            (cli.psm_fdr.is_some(), "--psm-fdr"),
+            (cli.pep.is_some(), "--pep"),
+            (cli.lfq, "--lfq"),
+            (cli.mbr, "--mbr"),
+            (cli.quant_dir.is_some(), "--quant-dir"),
+            (cli.chimeric, "--chimeric"),
+            (cli.localize.is_some(), "--localize"),
+        ] {
+            if on {
+                unsupported.push(flag);
+            }
+        }
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "--xl does not support: {} (crosslink mode writes a standalone .xl.tsv)",
+                unsupported.join(", ")
+            )
+            .into());
+        }
     }
     // --glyco is a standalone driver (see the `if cli.glyco` early-return block
     // below): it writes its own `.glyco.pin` and skips the standard PIN/rescore/
@@ -1536,7 +1571,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // pairs its own scans, so those keep the single run-level model.
     if cli.model_id_override.is_none()
         && cli.fragmentation == Fragmentation::Auto
-        && !cli.glyco
+        && !standalone
         && instrument_was_detected
         && !resolved_model_id.is_empty()
     {
@@ -1712,7 +1747,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // `--predict`: load the predictors now so a missing model fails before the
     // search. Glyco mode writes its own `.glyco.pin` and takes none.
-    let predictors = if cli.glyco {
+    let predictors = if standalone {
         None
     } else {
         crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
@@ -1785,7 +1820,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // The per-run fragment mass error (high-res acquisitions without an
     // explicit `--fragment-tol-*`; the glyco driver keeps its own tolerances).
     let mut measurer = FragmentErrorMeasurer {
-        enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
+        enabled: acquisition.high_res && frag_tol_override.is_none() && !standalone,
         done: false,
         per_file: Vec::with_capacity(spectrum_paths.len()),
     };
@@ -1849,7 +1884,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // non-MS1 branch below). Each spectrum keeps the part of its linked
             // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
             // MS1 link.
-            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
+            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !standalone;
             // Nothing is scored before the whole file is read, so an
             // uncompressed mzML is parsed by every thread; the chunks sent are
             // the ones the sequential reader sends.
@@ -2014,7 +2049,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         offset,
                     );
                     all_queues.extend(queues);
-                } else if !cli.glyco {
+                } else if !standalone {
                     // Unreachable today (`mono_active` implies `--glyco`), kept so
                     // an MS1-linked stream never silently skips the peptide search.
                     let queues = prepared.run_chunk(&chunk_spectra, offset);
@@ -2032,7 +2067,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !keep_peaks && !cli.glyco {
+                    if !keep_peaks && !standalone {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2113,7 +2148,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 first_errors,
             }
         } else if params.fragment_index_top_k > 0
-            && !cli.glyco
+            && !standalone
             && file_is_mzml
             && !is_gzip_path(input_path)
             && !quant
@@ -2241,7 +2276,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // (its index is the whole database; 100 GB on phospho). Collect the
             // stream, sort by precursor mass, then chunk. Peaks for every
             // spectrum are held until scored (~1 GB for 100k high-res MS2).
-            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco;
+            let mass_ordered = params.fragment_index_top_k > 0 && !standalone;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -2258,7 +2293,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // glyco mode — glyco_search_run re-derives its own candidates from
                 // `prepared` + the retained peaks and writes its own `.glyco.pin`
                 // (the standard PIN is skipped), so these PSM queues are discarded.
-                if !cli.glyco {
+                if !standalone {
                     measurer.measure(&prepared, chunk.iter(), None);
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);
@@ -2271,7 +2306,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !keep_peaks && !cli.glyco {
+                    if !keep_peaks && !standalone {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2478,10 +2513,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let spectra = all_spectra;
     let mut queues = all_queues;
 
-    if cli.glyco {
+    if standalone {
         eprintln!(
-            "Standard peptide search skipped in --glyco mode (PSMs unused; glyco driver \
+            "Standard peptide search skipped in --{} mode (PSMs unused; the driver \
              derives its own candidates); {} spectra loaded ({:.2}s)",
+            if cli.glyco { "glyco" } else { "xl" },
             spectra.len(),
             search_elapsed.as_secs_f64()
         );
@@ -2492,6 +2528,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             spectra.len(),
             search_elapsed.as_secs_f64()
         );
+    }
+
+    // ── 7a. Crosslink mode: run the crosslink search, write .xl.tsv, return ──
+    if cli.xl.is_some() {
+        crate::xl_run::run_xl(&cli, &spectra, &prepared, &output_pin_path, t_total)?;
+        return Ok(());
     }
 
     // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──

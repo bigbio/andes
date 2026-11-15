@@ -171,7 +171,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
     for r in &rows {
-        let p = dir.join(&r.file);
+        let p = resolve_data_file(dir, &r.file);
         if !data_files.contains(&p) {
             data_files.push(p);
         }
@@ -208,6 +208,25 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         quant,
         dissociation: first.dissociation.as_deref().and_then(dissociation_of),
     })
+}
+
+/// Spectrum formats andes reads, tried in this order when the SDRF's file is
+/// not there under its own name (an SDRF names the vendor files; pipelines often
+/// convert them).
+const SPECTRUM_EXTENSIONS: &[&str] = &["mzML", "mzml", "raw", "d", "mgf"];
+
+/// `file` in `dir`, or the same stem with another spectrum extension when only
+/// that exists; the SDRF's own name when neither does (reported as missing).
+fn resolve_data_file(dir: &Path, file: &str) -> PathBuf {
+    let p = dir.join(file);
+    if p.exists() {
+        return p;
+    }
+    SPECTRUM_EXTENSIONS
+        .iter()
+        .map(|ext| p.with_extension(ext))
+        .find(|c| c.exists())
+        .unwrap_or(p)
 }
 
 struct RowSettings {
@@ -652,11 +671,12 @@ pub fn apply(
     };
 
     if cli("spectrum") || cfg.spectrum {
-        let sdrf_names: BTreeSet<_> = s.data_files.iter().filter_map(|p| p.file_name()).collect();
+        // By stem: a converted file (x.mzML for the SDRF's x.raw) is the same run.
+        let sdrf_stems: BTreeSet<_> = s.data_files.iter().filter_map(|p| p.file_stem()).collect();
         let extra: Vec<String> = args
             .spectrum
             .iter()
-            .filter(|p| p.file_name().is_some_and(|n| !sdrf_names.contains(n)))
+            .filter(|p| p.file_stem().is_some_and(|n| !sdrf_stems.contains(n)))
             .map(|p| p.display().to_string())
             .collect();
         if !extra.is_empty() {
@@ -924,6 +944,15 @@ mod tests {
             e.contains("cleavage agent details") && e.contains("a.raw") && e.contains("b.raw"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_converted_data_file_is_found_by_its_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("run1.mzML"), "").unwrap();
+        assert_eq!(resolve_data_file(dir.path(), "run1.raw"), dir.path().join("run1.mzML"));
+        // Missing under every extension: the SDRF's own name, reported later.
+        assert_eq!(resolve_data_file(dir.path(), "run2.raw"), dir.path().join("run2.raw"));
     }
 
     #[test]

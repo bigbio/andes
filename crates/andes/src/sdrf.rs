@@ -137,7 +137,11 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
             file,
             enzymes,
             mods: row_mods,
-            precursor_tol: ptol.first().and_then(|&i| cell(i)).map(|v| tolerance(&v)).transpose()?,
+            precursor_tol: ptol
+                .first()
+                .and_then(|&i| cell(i))
+                .map(|v| tolerance(&v))
+                .transpose()?,
             fragment_tol: ftol.first().and_then(|&i| cell(i)),
             label: label_col.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
             dissociation: diss.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
@@ -154,9 +158,15 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         m.sort();
         m.join(", ")
     })?;
-    agree(&rows, PRECURSOR_TOL, |r| r.precursor_tol.clone().unwrap_or_default())?;
-    agree(&rows, DISSOCIATION, |r| r.dissociation.clone().unwrap_or_default())?;
-    agree(&rows, LABEL, |r| r.label.as_deref().map(label_kind).unwrap_or("").to_string())?;
+    agree(&rows, PRECURSOR_TOL, |r| {
+        r.precursor_tol.clone().unwrap_or_default()
+    })?;
+    agree(&rows, DISSOCIATION, |r| {
+        r.dissociation.clone().unwrap_or_default()
+    })?;
+    agree(&rows, LABEL, |r| {
+        r.label.as_deref().map(label_kind).unwrap_or("").to_string()
+    })?;
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
@@ -211,10 +221,20 @@ struct RowSettings {
 }
 
 /// Every row must give the same `key` for `column`.
-fn agree(rows: &[RowSettings], column: &str, key: impl Fn(&RowSettings) -> String) -> Result<(), String> {
+fn agree(
+    rows: &[RowSettings],
+    column: &str,
+    key: impl Fn(&RowSettings) -> String,
+) -> Result<(), String> {
     let first = key(&rows[0]);
     if let Some(r) = rows.iter().find(|r| key(r) != first) {
-        let show = |s: &str| if s.is_empty() { "(none)".to_string() } else { s.to_string() };
+        let show = |s: &str| {
+            if s.is_empty() {
+                "(none)".to_string()
+            } else {
+                s.to_string()
+            }
+        };
         return Err(format!(
             "`{column}` differs between files: {} has {}, {} has {}; one andes run searches every \
              file with one setting, so split the SDRF by setting",
@@ -254,7 +274,8 @@ fn key_values(v: &str) -> BTreeMap<String, String> {
                 out.insert(k.trim().to_ascii_uppercase(), val.trim().to_string());
             }
             None if !part.trim().is_empty() => {
-                out.entry("NT".to_string()).or_insert_with(|| part.trim().to_string());
+                out.entry("NT".to_string())
+                    .or_insert_with(|| part.trim().to_string());
             }
             None => {}
         }
@@ -264,7 +285,9 @@ fn key_values(v: &str) -> BTreeMap<String, String> {
 
 /// The NT (name) of a key-value cell, or the cell itself.
 fn nt(v: &str) -> String {
-    key_values(v).remove("NT").unwrap_or_else(|| v.trim().to_string())
+    key_values(v)
+        .remove("NT")
+        .unwrap_or_else(|| v.trim().to_string())
 }
 
 /// The andes protease of an SDRF cleavage agent.
@@ -303,7 +326,9 @@ fn tolerance(v: &str) -> Result<String, String> {
             return Ok(format!("{}{out}", x * scale));
         }
     }
-    Err(format!("tolerance `{v}`: expected a value in ppm, Da or mmu"))
+    Err(format!(
+        "tolerance `{v}`: expected a value in ppm, Da or mmu"
+    ))
 }
 
 /// One `comment[modification parameters]` cell.
@@ -321,7 +346,9 @@ impl ModParam {
     fn parse(v: &str) -> Result<Self, String> {
         let kv = key_values(v);
         let name = match (kv.get("AC"), kv.get("NT")) {
-            (Some(ac), _) if ac.to_ascii_uppercase().starts_with("UNIMOD:") => ac.to_ascii_uppercase(),
+            (Some(ac), _) if ac.to_ascii_uppercase().starts_with("UNIMOD:") => {
+                ac.to_ascii_uppercase()
+            }
             (_, Some(nt)) => nt.clone(),
             _ => return Err(format!("`{MODS}` `{v}`: no NT= or UNIMOD AC=")),
         };
@@ -344,7 +371,9 @@ impl ModParam {
             .map(|ta| {
                 ta.split(',')
                     .map(str::trim)
-                    .filter(|r| r.len() == 1 && r.chars().all(|c| c.is_ascii_alphabetic()) && *r != "X")
+                    .filter(|r| {
+                        r.len() == 1 && r.chars().all(|c| c.is_ascii_alphabetic()) && *r != "X"
+                    })
                     .collect::<String>()
                     .to_ascii_uppercase()
             })
@@ -352,7 +381,12 @@ impl ModParam {
         if position == "Anywhere" && residues.is_empty() {
             return Err(format!("`{MODS}` `{v}`: PP=Anywhere needs TA= residues"));
         }
-        Ok(ModParam { name, fixed, position, residues })
+        Ok(ModParam {
+            name,
+            fixed,
+            position,
+            residues,
+        })
     }
 
     /// `Name (sites)` as `--fixed-mods` / `--variable-mods` take it.
@@ -424,24 +458,37 @@ fn label_kind(label: &str) -> &str {
 /// Channels of each isobaric plex, smallest first.
 const ISOBARIC: &[(&str, &[&str])] = &[
     ("tmt6", &["126", "127", "128", "129", "130", "131"]),
-    ("tmt10", &["126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131"]),
-    ("tmt11", &["126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C"]),
+    (
+        "tmt10",
+        &[
+            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131",
+        ],
+    ),
+    (
+        "tmt11",
+        &[
+            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C",
+        ],
+    ),
     (
         "tmt16",
         &[
-            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C", "132N",
-            "132C", "133N", "133C", "134N",
+            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C",
+            "132N", "132C", "133N", "133C", "134N",
         ],
     ),
     (
         "tmt18",
         &[
-            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C", "132N",
-            "132C", "133N", "133C", "134N", "134C", "135N",
+            "126", "127N", "127C", "128N", "128C", "129N", "129C", "130N", "130C", "131N", "131C",
+            "132N", "132C", "133N", "133C", "134N", "134C", "135N",
         ],
     ),
     ("itraq4", &["114", "115", "116", "117"]),
-    ("itraq8", &["113", "114", "115", "116", "117", "118", "119", "121"]),
+    (
+        "itraq8",
+        &["113", "114", "115", "116", "117", "118", "119", "121"],
+    ),
 ];
 
 /// The channel of an isobaric label: `TMT127N` -> `127N`, `iTRAQ4plex-114` -> `114`.
@@ -464,11 +511,14 @@ fn quant_of(labels: &BTreeSet<String>, mods: &[ModParam]) -> Result<Option<Quant
         "lfq" => Ok(Some(Quant::Lfq)),
         "tmt" | "itraq" => {
             let channels: BTreeSet<String> = labels.iter().map(|l| isobaric_channel(l)).collect();
-            for (plex, set) in ISOBARIC.iter().filter(|(p, _)| p.starts_with(kind.as_str())) {
+            for (plex, set) in ISOBARIC
+                .iter()
+                .filter(|(p, _)| p.starts_with(kind.as_str()))
+            {
                 // A channel without N/C matches its N form when the plex has no bare one.
-                let fits = channels.iter().all(|c| {
-                    set.contains(&c.as_str()) || set.contains(&format!("{c}N").as_str())
-                });
+                let fits = channels
+                    .iter()
+                    .all(|c| set.contains(&c.as_str()) || set.contains(&format!("{c}N").as_str()));
                 if fits {
                     return Ok(Some(Quant::Isobaric(plex.to_string())));
                 }
@@ -525,27 +575,35 @@ fn quant_of(labels: &BTreeSet<String>, mods: &[ModParam]) -> Result<Option<Quant
         "dimethyl" => {
             let set: BTreeSet<String> = labels.iter().map(|l| l.to_ascii_uppercase()).collect();
             let two: BTreeSet<String> = ["DIMETHYL0", "DIMETHYL4"].map(String::from).into();
-            let three: BTreeSet<String> = ["DIMETHYL0", "DIMETHYL4", "DIMETHYL8"].map(String::from).into();
+            let three: BTreeSet<String> = ["DIMETHYL0", "DIMETHYL4", "DIMETHYL8"]
+                .map(String::from)
+                .into();
             if set == two {
                 Ok(Some(Quant::Label("dimethyl2".into())))
             } else if set == three {
                 Ok(Some(Quant::Label("dimethyl3".into())))
             } else {
-                Err(format!("`{LABEL}`: dimethyl channels {set:?}; give --label"))
+                Err(format!(
+                    "`{LABEL}`: dimethyl channels {set:?}; give --label"
+                ))
             }
         }
-        other => Err(format!("`{LABEL}`: label `{other}` has no andes quantification; give --tmt, --lfq or --label")),
+        other => Err(format!(
+            "`{LABEL}`: label `{other}` has no andes quantification; give --tmt, --lfq or --label"
+        )),
     }
 }
 
 fn dissociation_of(v: &str) -> Option<ActivationMethod> {
     match v.to_ascii_lowercase().as_str() {
-        "hcd" | "beam-type collision-induced dissociation" | "higher energy beam-type collision-induced dissociation" => {
-            Some(ActivationMethod::HCD)
-        }
+        "hcd"
+        | "beam-type collision-induced dissociation"
+        | "higher energy beam-type collision-induced dissociation" => Some(ActivationMethod::HCD),
         "cid" | "collision-induced dissociation" => Some(ActivationMethod::CID),
         "etd" | "electron transfer dissociation" => Some(ActivationMethod::ETD),
-        "ethcd" | "electron transfer/higher-energy collision dissociation" => Some(ActivationMethod::EThcD),
+        "ethcd" | "electron transfer/higher-energy collision dissociation" => {
+            Some(ActivationMethod::EThcD)
+        }
         _ => None,
     }
 }
@@ -585,7 +643,13 @@ pub fn apply(
     let cli = |id: &str| crate::config::cli_set(m, id);
     let mut applied = Vec::new();
     let mut kept = Vec::new();
-    let names = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+    let names = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
 
     if cli("spectrum") || cfg.spectrum {
         let sdrf_names: BTreeSet<_> = s.data_files.iter().filter_map(|p| p.file_name()).collect();
@@ -718,21 +782,34 @@ mod tests {
             H,
             &[
                 &[
-                    "s1", "a.raw", "label free sample", "NT=Trypsin;AC=MS:1001251",
+                    "s1",
+                    "a.raw",
+                    "label free sample",
+                    "NT=Trypsin;AC=MS:1001251",
                     "NT=Carbamidomethyl;AC=UNIMOD:4;TA=C;MT=Fixed;PP=Anywhere",
-                    "NT=Phospho;TA=S,T,Y;MT=Variable;PP=Anywhere", "10 ppm", "0.02 Da",
+                    "NT=Phospho;TA=S,T,Y;MT=Variable;PP=Anywhere",
+                    "10 ppm",
+                    "0.02 Da",
                     "NT=HCD;AC=PRIDE:0000590",
                 ],
                 &[
-                    "s2", "b.raw", "label free sample", "NT=Trypsin;AC=MS:1001251",
+                    "s2",
+                    "b.raw",
+                    "label free sample",
+                    "NT=Trypsin;AC=MS:1001251",
                     "NT=Carbamidomethyl;AC=UNIMOD:4;TA=C;MT=Fixed;PP=Anywhere",
-                    "NT=Phospho;TA=S,T,Y;MT=Variable;PP=Anywhere", "10 ppm", "0.02 Da",
+                    "NT=Phospho;TA=S,T,Y;MT=Variable;PP=Anywhere",
+                    "10 ppm",
+                    "0.02 Da",
                     "NT=HCD;AC=PRIDE:0000590",
                 ],
             ],
         );
         let s = parse(&t, Path::new("/d")).unwrap();
-        assert_eq!(s.data_files, vec![PathBuf::from("/d/a.raw"), PathBuf::from("/d/b.raw")]);
+        assert_eq!(
+            s.data_files,
+            vec![PathBuf::from("/d/a.raw"), PathBuf::from("/d/b.raw")]
+        );
         assert_eq!(s.enzyme.as_deref(), Some("trypsin"));
         assert_eq!(s.precursor_tol.as_deref(), Some("10ppm"));
         assert_eq!(s.fixed_mods, Some(vec!["UNIMOD:4 (C)".to_string()]));
@@ -749,27 +826,44 @@ mod tests {
     fn tmt_plex_is_the_smallest_holding_the_labels() {
         let row = |f: &str, l: &str| -> Vec<String> {
             vec![
-                "s".into(), f.into(), l.into(), "NT=Trypsin".into(),
+                "s".into(),
+                f.into(),
+                l.into(),
+                "NT=Trypsin".into(),
                 "NT=TMT6plex;TA=K;MT=Fixed;PP=Anywhere".into(),
-                "NT=TMT6plex;PP=Any N-term;MT=Fixed".into(), "20 ppm".into(), "not available".into(),
+                "NT=TMT6plex;PP=Any N-term;MT=Fixed".into(),
+                "20 ppm".into(),
+                "not available".into(),
                 "HCD".into(),
             ]
         };
-        let labels10 = ["TMT126", "TMT127N", "TMT127C", "TMT128N", "TMT128C", "TMT129N", "TMT129C", "TMT130N", "TMT130C", "TMT131"];
+        let labels10 = [
+            "TMT126", "TMT127N", "TMT127C", "TMT128N", "TMT128C", "TMT129N", "TMT129C", "TMT130N",
+            "TMT130C", "TMT131",
+        ];
         let rows: Vec<Vec<String>> = labels10.iter().map(|l| row("a.raw", l)).collect();
-        let refs: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let refs: Vec<Vec<&str>> = rows
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect();
         let slices: Vec<&[&str]> = refs.iter().map(|r| r.as_slice()).collect();
         let s = parse(&sdrf(H, &slices), Path::new(".")).unwrap();
         assert_eq!(s.quant, Some(Quant::Isobaric("tmt10".into())));
         assert_eq!(s.data_files.len(), 1);
         assert_eq!(
             s.fixed_mods,
-            Some(vec!["TMT6plex (K)".to_string(), "TMT6plex (N-term)".to_string()])
+            Some(vec![
+                "TMT6plex (K)".to_string(),
+                "TMT6plex (N-term)".to_string()
+            ])
         );
         // 131C needs the 11-plex.
         let mut rows11 = rows.clone();
         rows11.push(row("a.raw", "TMT131C"));
-        let refs: Vec<Vec<&str>> = rows11.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let refs: Vec<Vec<&str>> = rows11
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect();
         let slices: Vec<&[&str]> = refs.iter().map(|r| r.as_slice()).collect();
         let s = parse(&sdrf(H, &slices), Path::new(".")).unwrap();
         assert_eq!(s.quant, Some(Quant::Isobaric("tmt11".into())));
@@ -779,14 +873,22 @@ mod tests {
     fn silac_channels_come_from_the_label_mods_and_leave_the_search_lists() {
         let row = |l: &str| -> Vec<String> {
             vec![
-                "s".into(), "a.raw".into(), l.into(), "NT=Trypsin".into(),
+                "s".into(),
+                "a.raw".into(),
+                l.into(),
+                "NT=Trypsin".into(),
                 "NT=Label:13C(6)15N(2);TA=K;MT=Variable;PP=Anywhere".into(),
-                "NT=Label:13C(6)15N(4);TA=R;MT=Variable;PP=Anywhere".into(), "10 ppm".into(),
-                "".into(), "".into(),
+                "NT=Label:13C(6)15N(4);TA=R;MT=Variable;PP=Anywhere".into(),
+                "10 ppm".into(),
+                "".into(),
+                "".into(),
             ]
         };
         let rows = [row("SILAC light"), row("SILAC heavy")];
-        let refs: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let refs: Vec<Vec<&str>> = rows
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect();
         let slices: Vec<&[&str]> = refs.iter().map(|r| r.as_slice()).collect();
         let s = parse(&sdrf(H, &slices), Path::new(".")).unwrap();
         assert_eq!(s.quant, Some(Quant::Label("[][Lys8,Arg10]".into())));
@@ -795,23 +897,55 @@ mod tests {
 
     #[test]
     fn rows_that_disagree_are_an_error_naming_the_column_and_files() {
-        let a: &[&str] = &["s", "a.raw", "label free sample", "Trypsin", "", "", "10 ppm", "", ""];
-        let b: &[&str] = &["s", "b.raw", "label free sample", "Lys-C", "", "", "10 ppm", "", ""];
+        let a: &[&str] = &[
+            "s",
+            "a.raw",
+            "label free sample",
+            "Trypsin",
+            "",
+            "",
+            "10 ppm",
+            "",
+            "",
+        ];
+        let b: &[&str] = &[
+            "s",
+            "b.raw",
+            "label free sample",
+            "Lys-C",
+            "",
+            "",
+            "10 ppm",
+            "",
+            "",
+        ];
         let e = parse(&sdrf(H, &[a, b]), Path::new(".")).unwrap_err();
-        assert!(e.contains("cleavage agent details") && e.contains("a.raw") && e.contains("b.raw"), "{e}");
+        assert!(
+            e.contains("cleavage agent details") && e.contains("a.raw") && e.contains("b.raw"),
+            "{e}"
+        );
     }
 
     #[test]
     fn terminal_mods_and_reserved_words() {
         assert_eq!(
-            ModParam::parse("NT=Acetyl;AC=UNIMOD:1;PP=Protein N-term;MT=Variable").unwrap().item().unwrap(),
+            ModParam::parse("NT=Acetyl;AC=UNIMOD:1;PP=Protein N-term;MT=Variable")
+                .unwrap()
+                .item()
+                .unwrap(),
             "UNIMOD:1 (Protein N-term)"
         );
         assert_eq!(
-            ModParam::parse("NT=Gln->pyro-Glu;TA=Q;PP=Any N-term;MT=Variable").unwrap().item().unwrap(),
+            ModParam::parse("NT=Gln->pyro-Glu;TA=Q;PP=Any N-term;MT=Variable")
+                .unwrap()
+                .item()
+                .unwrap(),
             "Gln->pyro-Glu (N-term Q)"
         );
-        assert!(ModParam::parse("NT=Oxidation;TA=M").is_err(), "MT is required");
+        assert!(
+            ModParam::parse("NT=Oxidation;TA=M").is_err(),
+            "MT is required"
+        );
         assert_eq!(value(" not applicable "), None);
         assert_eq!(tolerance("20 mmu").unwrap(), "0.02da");
         assert_eq!(norm_header("Comment [ Data File ]"), "comment[data file]");

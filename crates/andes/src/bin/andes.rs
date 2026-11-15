@@ -18,8 +18,6 @@ mod acquisition;
 mod cli;
 #[path = "../config.rs"]
 mod config;
-#[path = "../sdrf.rs"]
-mod sdrf;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]
@@ -46,6 +44,8 @@ mod quant_mbr;
 mod quant_run;
 #[path = "../rescore.rs"]
 mod rescore;
+#[path = "../sdrf.rs"]
+mod sdrf;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]

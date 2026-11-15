@@ -652,7 +652,13 @@ pub(crate) struct SearchArgs {
     pub(crate) xl: Option<String>,
 
     /// With --xl: also run the exhaustive pair search (no doublet gate) on the first N spectra
-    #[arg(long = "xl-oracle", value_name = "N", default_value = "0", hide = true, requires = "xl")]
+    #[arg(
+        long = "xl-oracle",
+        value_name = "N",
+        default_value = "0",
+        hide = true,
+        requires = "xl"
+    )]
     pub(crate) xl_oracle: usize,
 
     /// Bundled N-glycan database of --glyco

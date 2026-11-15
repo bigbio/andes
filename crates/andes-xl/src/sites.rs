@@ -39,7 +39,10 @@ pub fn link_sites(
         if i + 1 == n && !is_protein_c_term {
             continue;
         }
-        out.push(LinkSite { pos: i, n_term: false });
+        out.push(LinkSite {
+            pos: i,
+            n_term: false,
+        });
     }
     if linker.protein_n_term
         && is_protein_n_term
@@ -47,7 +50,13 @@ pub fn link_sites(
         && !modified.first().copied().unwrap_or(false)
         && out.first().is_none_or(|s| s.pos != 0)
     {
-        out.insert(0, LinkSite { pos: 0, n_term: true });
+        out.insert(
+            0,
+            LinkSite {
+                pos: 0,
+                n_term: true,
+            },
+        );
     }
     out
 }
@@ -83,7 +92,19 @@ mod tests {
     #[test]
     fn modified_residues_are_not_sites() {
         let x = Crosslinker::dsso();
-        let s = link_sites(b"MAKAKR", &[true, false, true, false, false, false], true, false, &x);
-        assert_eq!(s, vec![LinkSite { pos: 4, n_term: false }]);
+        let s = link_sites(
+            b"MAKAKR",
+            &[true, false, true, false, false, false],
+            true,
+            false,
+            &x,
+        );
+        assert_eq!(
+            s,
+            vec![LinkSite {
+                pos: 4,
+                n_term: false
+            }]
+        );
     }
 }

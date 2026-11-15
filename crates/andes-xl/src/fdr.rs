@@ -77,9 +77,17 @@ mod tests {
 
     #[test]
     fn fdr_subtracts_dd_and_clamps() {
-        let c = ClassCounts { tt: 100, td: 7, dd: 2 };
+        let c = ClassCounts {
+            tt: 100,
+            td: 7,
+            dd: 2,
+        };
         assert!((c.fdr() - 0.05).abs() < 1e-12);
-        let c = ClassCounts { tt: 10, td: 1, dd: 3 };
+        let c = ClassCounts {
+            tt: 10,
+            td: 1,
+            dd: 3,
+        };
         assert_eq!(c.fdr(), 0.0);
         assert_eq!(ClassCounts::default().fdr(), 0.0);
     }

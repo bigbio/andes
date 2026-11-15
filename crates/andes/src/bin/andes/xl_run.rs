@@ -26,11 +26,7 @@ fn sibling(output_pin_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn peptide_cols(
-    h: &PeptideHit,
-    table: &XlCandidates,
-    prepared: &PreparedSearch,
-) -> Vec<String> {
+fn peptide_cols(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> Vec<String> {
     let p = &table.peptides()[h.pep as usize];
     let proteins: Vec<&str> = p
         .proteins
@@ -83,7 +79,8 @@ const PEP_COLS: [&str; 15] = [
 ];
 
 fn scan_of(spec: &Spectrum) -> String {
-    spec.scan.map_or_else(|| spec.title.clone(), |s| s.to_string())
+    spec.scan
+        .map_or_else(|| spec.title.clone(), |s| s.to_string())
 }
 
 fn write_csms(
@@ -173,12 +170,28 @@ fn write_doublets(
         let masses: Vec<String> = d
             .masses
             .iter()
-            .map(|m| format!("{:.4}:{}{}", m.mass, m.min_charge, if m.isotope_confirmed { "i" } else { "" }))
+            .map(|m| {
+                format!(
+                    "{:.4}:{}{}",
+                    m.mass,
+                    m.min_charge,
+                    if m.isotope_confirmed { "i" } else { "" }
+                )
+            })
             .collect();
         let inten: Vec<String> = d
             .masses
             .iter()
-            .map(|m| format!("{:.4}", if d.tic > 0.0 { m.intensity / d.tic } else { 0.0 }))
+            .map(|m| {
+                format!(
+                    "{:.4}",
+                    if d.tic > 0.0 {
+                        m.intensity / d.tic
+                    } else {
+                        0.0
+                    }
+                )
+            })
             .collect();
         let (op, os, oc, oa, ob, osup) = match &r.oracle {
             Some(o) => {
@@ -296,7 +309,10 @@ fn report(results: &[XlSpectrumResult], q: &[Option<f64>]) {
     );
     eprintln!(
         "[xl] mass pairs: {} spectra with a full pair, {} with a half pair only",
-        results.iter().filter(|r| r.doublets.n_full_pairs > 0).count(),
+        results
+            .iter()
+            .filter(|r| r.doublets.n_full_pairs > 0)
+            .count(),
         results
             .iter()
             .filter(|r| r.doublets.n_full_pairs == 0 && r.doublets.n_half_pairs > 0)
@@ -320,8 +336,18 @@ fn report(results: &[XlSpectrumResult], q: &[Option<f64>]) {
         eprintln!(
             "[xl] {label}: all CSMs TT {} TD {} DD {}; q<=1%: TT {} TD {} DD {}; \
              q<=5%: TT {} TD {} DD {}; q<=10%: TT {} TD {} DD {}",
-            all.tt, all.td, all.dd, at[0].tt, at[0].td, at[0].dd, at[1].tt, at[1].td,
-            at[1].dd, at[2].tt, at[2].td, at[2].dd
+            all.tt,
+            all.td,
+            all.dd,
+            at[0].tt,
+            at[0].td,
+            at[0].dd,
+            at[1].tt,
+            at[1].td,
+            at[1].dd,
+            at[2].tt,
+            at[2].td,
+            at[2].dd
         );
     }
 }

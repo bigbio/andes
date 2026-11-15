@@ -254,10 +254,16 @@ mod tests {
     fn charge_is_capped_below_the_precursor_charge() {
         let c = dsso();
         let m = 2000.0;
-        let peaks = sorted(vec![(ion(m + c.alkene, 3), 50.0), (ion(m + c.thiol, 3), 50.0)]);
+        let peaks = sorted(vec![
+            (ion(m + c.alkene, 3), 50.0),
+            (ion(m + c.thiol, 3), 50.0),
+        ]);
         // A z3 doublet needs a precursor of charge >= 4.
         assert!(find_doublets(&peaks, 3, &c, &DoubletParams::default()).is_empty());
-        assert_eq!(find_doublets(&peaks, 4, &c, &DoubletParams::default()).len(), 1);
+        assert_eq!(
+            find_doublets(&peaks, 4, &c, &DoubletParams::default()).len(),
+            1
+        );
     }
 
     #[test]
@@ -321,6 +327,9 @@ mod tests {
         let c = dsso();
         let m = 900.0;
         let peaks = sorted(vec![(ion(m + c.sulfenic, 2), 5.0)]);
-        assert_eq!(stub_ions_present(&peaks, m, &c, 3, 10.0), [false, false, true]);
+        assert_eq!(
+            stub_ions_present(&peaks, m, &c, 3, 10.0),
+            [false, false, true]
+        );
     }
 }

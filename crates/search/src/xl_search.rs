@@ -117,7 +117,12 @@ fn n_term_blocked(p: &Peptide) -> bool {
 
 fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
     let residues: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-    let mut modified: Vec<bool> = c.peptide.residues.iter().map(|aa| aa.mod_.is_some()).collect();
+    let mut modified: Vec<bool> = c
+        .peptide
+        .residues
+        .iter()
+        .map(|aa| aa.mod_.is_some())
+        .collect();
     // Residue 0 is open to an N-terminal link unless an N-terminal mod sits on
     // it; a side-chain mod on residue 0 (e.g. carbamidomethyl Cys) leaves the
     // amine free. Lys side chains with any mod are taken.
@@ -489,9 +494,12 @@ fn protein_family<'p>(prepared: &'p PreparedSearch<'_>, pi: u32) -> &'p str {
 /// protein is an intra TD), or either peptide's sequence (I = L) occurs in a
 /// protein of the other.
 fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool {
-    let fam_b: Vec<&str> = b.proteins.iter().map(|&p| protein_family(prepared, p)).collect();
-    if a
+    let fam_b: Vec<&str> = b
         .proteins
+        .iter()
+        .map(|&p| protein_family(prepared, p))
+        .collect();
+    if a.proteins
         .iter()
         .any(|&p| fam_b.contains(&protein_family(prepared, p)))
     {
@@ -578,14 +586,13 @@ fn mass_pairs(
             }
             let b_tol = prec_tol + dtol(a.mass);
             // A complement that is itself a doublet mass is a full pair.
-            if out
-                .iter()
-                .any(|p| p.kind == PairKind::Full && p.iso == iso && {
+            if out.iter().any(|p| {
+                p.kind == PairKind::Full && p.iso == iso && {
                     let close = |x: f64, y: f64| (x - y).abs() <= b_tol;
                     (close(p.a_mass, a.mass) && close(p.b_mass, b_mass))
                         || (close(p.b_mass, a.mass) && close(p.a_mass, b_mass))
-                })
-            {
+                }
+            }) {
                 continue;
             }
             let stubs = stub_ions_present(
@@ -614,11 +621,7 @@ fn mass_pairs(
     out
 }
 
-fn summarize_doublets(
-    peaks: &[(f64, f32)],
-    z: u8,
-    cfg: &XlConfig,
-) -> DoubletSummary {
+fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSummary {
     let mut s = DoubletSummary {
         n_peaks: peaks.len(),
         base_peak: peaks.iter().map(|p| p.1 as f64).fold(0.0, f64::max),
@@ -746,7 +749,8 @@ fn search_spectrum(
                 // The pair must fit the precursor within the search's precursor
                 // tolerance, as a linear peptide does; the per-mass windows
                 // above are only the lookup.
-                let theo = table.index.mass(a.pep) + table.index.mass(b.pep) + linker.intact + iso_mass;
+                let theo =
+                    table.index.mass(a.pep) + table.index.mass(b.pep) + linker.intact + iso_mass;
                 if (precursor_mass - theo).abs() > prec_tol {
                     continue;
                 }
@@ -810,7 +814,15 @@ fn search_spectrum(
     }
 
     if run_oracle {
-        result.oracle = Some(oracle(&ctx, table, precursor_mass, prec_tol, &result, cfg, mods));
+        result.oracle = Some(oracle(
+            &ctx,
+            table,
+            precursor_mass,
+            prec_tol,
+            &result,
+            cfg,
+            mods,
+        ));
     }
     Some(result)
 }
@@ -942,7 +954,10 @@ mod tests {
         let s = with_link_mass(&p, 3, LinkForm::Intact, intact, &mods);
         assert!((s.mass() - p.mass() - intact).abs() < 1e-9);
         assert!(s.residues[3].mod_.is_none());
-        assert_eq!(s.nominal_residue_mass(), model::mass::nominal_from(s.mass() - model::mass::H2O));
+        assert_eq!(
+            s.nominal_residue_mass(),
+            model::mass::nominal_from(s.mass() - model::mass::H2O)
+        );
     }
 
     #[test]

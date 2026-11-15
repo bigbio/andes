@@ -367,7 +367,10 @@ impl ModParam {
     fn parse(v: &str) -> Result<Self, String> {
         let kv = key_values(v);
         let mut names: Vec<String> = kv.get("NT").cloned().into_iter().collect();
-        if let Some(ac) = kv.get("AC").filter(|a| a.to_ascii_uppercase().starts_with("UNIMOD:")) {
+        if let Some(ac) = kv
+            .get("AC")
+            .filter(|a| a.to_ascii_uppercase().starts_with("UNIMOD:"))
+        {
             names.push(ac.to_ascii_uppercase());
         }
         if names.is_empty() {
@@ -973,7 +976,10 @@ mod tests {
             item("NT=Acetyl;AC=UNIMOD:67;PP=Protein N-term;MT=Variable").unwrap(),
             "Acetyl (Protein N-term)"
         );
-        assert_eq!(item("NT=Phosphorylation;AC=UNIMOD:21;TA=S,T;MT=Variable").unwrap(), "UNIMOD:21 (ST)");
+        assert_eq!(
+            item("NT=Phosphorylation;AC=UNIMOD:21;TA=S,T;MT=Variable").unwrap(),
+            "UNIMOD:21 (ST)"
+        );
         assert!(item("NT=Nothing;TA=S;MT=Variable").is_err());
     }
 
@@ -981,9 +987,15 @@ mod tests {
     fn a_converted_data_file_is_found_by_its_stem() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("run1.mzML"), "").unwrap();
-        assert_eq!(resolve_data_file(dir.path(), "run1.raw"), dir.path().join("run1.mzML"));
+        assert_eq!(
+            resolve_data_file(dir.path(), "run1.raw"),
+            dir.path().join("run1.mzML")
+        );
         // Missing under every extension: the SDRF's own name, reported later.
-        assert_eq!(resolve_data_file(dir.path(), "run2.raw"), dir.path().join("run2.raw"));
+        assert_eq!(
+            resolve_data_file(dir.path(), "run2.raw"),
+            dir.path().join("run2.raw")
+        );
     }
 
     #[test]

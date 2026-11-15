@@ -149,14 +149,20 @@ N@FDP_c 1 %, raw01 / raw02, against Percolator 1559 / 1651:
 - **Shared-scan interference** is not where the errors are. Of the targets at precursor q ≤ 5 % on
   raw01, 1,884 rank first in their scan (2.0 % entrapment) and 36 rank second (8 %), so a filter on
   rank would remove at most three false IDs.
+- **Summed apex.** Three columns per row: of the peptide's b/y ions, how many occur in at least two
+  of its scan and the previous and next cycle of the same window, that count as a fraction, and how
+  many the neighbours add. On the 3-min slice this lifted N@FDP_c 1 % from 285 to 340 (Python, 10 ppm)
+  and 309 / 362 / 268 (in `dia.rs` at 20 / 10 / 5 ppm), but on the full raws it gives 1539 / 1564 at
+  20 ppm and 1540 / 1699 at 10 ppm (N@FDP_c 2 %: 1726 / 1807 against 1707 / 1691). The Percolator seed
+  alone moves raw01 by more: with `--seed 7` baseline 1575 and summed apex 1483. Not kept. The slice is
+  too small to rank features (it varies by ±50 IDs between near-identical runs); judge on full raws.
 
 Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
 best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's
 lowest-intensity quartile and 80 % of its highest. Against decoys of the same score, the missed ones
 differ most in `matchedIonRatio` (AUC 0.75) and the andes-ms2 agreement (0.71), features the PIN
-already has. Closing the remaining gap needs more fragment evidence per precursor than one scan
-gives: summing or deconvolving the apex scans (a pseudo-spectrum per precursor), or an empirical
-fragment library from the run.
+already has. Counting repeats over adjacent scans does not add separable evidence (above); what is
+left is deconvolving the apex scans or an empirical fragment library from the run.
 
 ## Reproduce
 

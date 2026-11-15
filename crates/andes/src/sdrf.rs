@@ -353,8 +353,10 @@ fn tolerance(v: &str) -> Result<String, String> {
 /// One `comment[modification parameters]` cell.
 #[derive(Debug, Clone, PartialEq)]
 struct ModParam {
-    /// The UNIMOD accession when given, else the name.
-    name: String,
+    /// The name (`NT=`), then the UNIMOD accession (`AC=`) when given: the
+    /// first that the UNIMOD table resolves is used, so a wrong accession next
+    /// to a right name (or the reverse) still reads.
+    names: Vec<String>,
     fixed: bool,
     /// `Anywhere`, `Protein N-term`, `Protein C-term`, `N-term`, `C-term`.
     position: String,
@@ -364,13 +366,13 @@ struct ModParam {
 impl ModParam {
     fn parse(v: &str) -> Result<Self, String> {
         let kv = key_values(v);
-        let name = match (kv.get("AC"), kv.get("NT")) {
-            (Some(ac), _) if ac.to_ascii_uppercase().starts_with("UNIMOD:") => {
-                ac.to_ascii_uppercase()
-            }
-            (_, Some(nt)) => nt.clone(),
-            _ => return Err(format!("`{MODS}` `{v}`: no NT= or UNIMOD AC=")),
-        };
+        let mut names: Vec<String> = kv.get("NT").cloned().into_iter().collect();
+        if let Some(ac) = kv.get("AC").filter(|a| a.to_ascii_uppercase().starts_with("UNIMOD:")) {
+            names.push(ac.to_ascii_uppercase());
+        }
+        if names.is_empty() {
+            return Err(format!("`{MODS}` `{v}`: no NT= or UNIMOD AC="));
+        }
         let fixed = match kv.get("MT").map(|s| s.to_ascii_lowercase()) {
             Some(t) if t == "fixed" => true,
             Some(t) if t == "variable" => false,
@@ -401,7 +403,7 @@ impl ModParam {
             return Err(format!("`{MODS}` `{v}`: PP=Anywhere needs TA= residues"));
         }
         Ok(ModParam {
-            name,
+            names,
             fixed,
             position,
             residues,
@@ -415,14 +417,25 @@ impl ModParam {
             (pos, true) => pos.to_string(),
             (pos, false) => format!("{pos} {}", self.residues),
         };
-        Ok(format!("{} ({sites})", self.name))
+        let mut last = String::new();
+        for name in &self.names {
+            let item = format!("{name} ({sites})");
+            match model::mod_spec::parse_mod_list(&item, self.fixed) {
+                Ok(_) => return Ok(item),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(format!(
+            "`{MODS}`: {} ({sites}) does not resolve: {last}",
+            self.names.join(" / ")
+        ))
     }
 
     /// Identity for the row-agreement check.
     fn key(&self) -> String {
         format!(
             "{} ({} {}) {}",
-            self.name,
+            self.names.join("/"),
             self.position,
             self.residues,
             if self.fixed { "fixed" } else { "variable" }
@@ -431,7 +444,12 @@ impl ModParam {
 
     /// A SILAC or dimethyl channel label, which `--label` searches itself.
     fn is_label_channel(&self) -> bool {
-        silac_token(&self.name, &self.residues).is_some() || dimethyl_name(&self.name)
+        self.silac_token(&self.residues).is_some() || self.names.iter().any(|n| dimethyl_name(n))
+    }
+
+    /// The SILAC `--label` token of this mod on `residues`, by any of its names.
+    fn silac_token(&self, residues: &str) -> Option<(&'static str, f64)> {
+        self.names.iter().find_map(|n| silac_token(n, residues))
     }
 }
 
@@ -557,7 +575,7 @@ fn quant_of(labels: &BTreeSet<String>, mods: &[ModParam]) -> Result<Option<Quant
             let mut per_residue: BTreeMap<String, Vec<(&str, f64)>> = BTreeMap::new();
             for m in mods {
                 for r in m.residues.chars() {
-                    if let Some(t) = silac_token(&m.name, &r.to_string()) {
+                    if let Some(t) = m.silac_token(&r.to_string()) {
                         let v = per_residue.entry(r.to_string()).or_default();
                         if !v.contains(&t) {
                             v.push(t);
@@ -832,7 +850,7 @@ mod tests {
         );
         assert_eq!(s.enzyme.as_deref(), Some("trypsin"));
         assert_eq!(s.precursor_tol.as_deref(), Some("10ppm"));
-        assert_eq!(s.fixed_mods, Some(vec!["UNIMOD:4 (C)".to_string()]));
+        assert_eq!(s.fixed_mods, Some(vec!["Carbamidomethyl (C)".to_string()]));
         assert_eq!(s.variable_mods, Some(vec!["Phospho (STY)".to_string()]));
         assert_eq!(s.quant, Some(Quant::Lfq));
         assert_eq!(s.dissociation, Some(ActivationMethod::HCD));
@@ -946,6 +964,19 @@ mod tests {
         );
     }
 
+    /// Real SDRFs carry wrong accessions next to right names (PXD014415:
+    /// Acetyl with UNIMOD:67) and the reverse; the first that resolves wins.
+    #[test]
+    fn the_name_or_the_accession_whichever_resolves() {
+        let item = |v: &str| ModParam::parse(v).unwrap().item();
+        assert_eq!(
+            item("NT=Acetyl;AC=UNIMOD:67;PP=Protein N-term;MT=Variable").unwrap(),
+            "Acetyl (Protein N-term)"
+        );
+        assert_eq!(item("NT=Phosphorylation;AC=UNIMOD:21;TA=S,T;MT=Variable").unwrap(), "UNIMOD:21 (ST)");
+        assert!(item("NT=Nothing;TA=S;MT=Variable").is_err());
+    }
+
     #[test]
     fn a_converted_data_file_is_found_by_its_stem() {
         let dir = tempfile::tempdir().unwrap();
@@ -962,7 +993,7 @@ mod tests {
                 .unwrap()
                 .item()
                 .unwrap(),
-            "UNIMOD:1 (Protein N-term)"
+            "Acetyl (Protein N-term)"
         );
         assert_eq!(
             ModParam::parse("NT=Gln->pyro-Glu;TA=Q;PP=Any N-term;MT=Variable")

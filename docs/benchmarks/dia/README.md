@@ -58,7 +58,9 @@ precursors at q ≤ 0.01. In andes's PIN:
   from 438 to 473 and ranked first somewhere from 295 to 341.
 
 Hypotheses tested on the slice that did not help: `--charge 2..3` or `2..4` instead of `1..5` (within
-slice noise); `--score strong` (already the auto choice for the Astral model).
+slice noise). The ranking score matters: `--score auto` picks the strong (fused) score for high-resolution
+data, and on the slice it beats `--score rank` by a wide margin (N@FDP_c 1 % 285 vs 206; DIA-NN precursors
+in the PIN 473 vs 309), so `--dia` keeps the auto choice.
 
 Tested and rejected on the full raws or the slice:
 

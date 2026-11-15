@@ -216,20 +216,27 @@ docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
   percolator -X /data/weights.txt /data/out.pin
 ```
 
-**TMT 10-plex search with mods.txt** (mods file format: [`DOCS.md` §2](DOCS.md#2-modstxt-format)):
+**Modifications** are UNIMOD names with their sites, as in MaxQuant (format:
+[`DOCS.md` §2](DOCS.md#2-modifications)). The defaults are fixed Carbamidomethyl (C) and
+variable Oxidation (M) and Acetyl (Protein N-term); a list replaces its default:
 
 ```bash
 andes \
   --spectrum tmt_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
-  --mods tmt_10plex_mods.txt \
+  --fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" \
+  --variable-mods "Oxidation (M), Phospho (STY)" \
   --protocol TMT
 ```
 
+Neutral losses, cleavage blocking, diagnostic ions, annotated-only sites and custom masses are
+set per modification in the config file (`--config`).
+
 **UniProt XML database.** `--database uniprot_sprot_human.xml.gz` searches like the UniProt
-FASTA. It also offers opt-in uses of UniProt's annotation. A mod declared `sites=annotated`
-in the mods file is placed only where UniProt annotates that modification.
+FASTA. It also offers opt-in uses of UniProt's annotation. A mod declared
+`restrict_to: annotated` in the config file is placed only where UniProt annotates that
+modification.
 `--uniprot-variants` searches natural sequence variants as their own entries, with the change in
 the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-chains` the
 peptides at the new termini of mature chains (after signal peptide or propeptide removal).
@@ -239,7 +246,7 @@ against knockoff variants ([below](#variant-calls-checked-against-knockoffs---kn
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
-  --mods phospho_annotated_mods.txt --uniprot-variants --output-pin out.pin
+  --config phospho_annotated.yaml --uniprot-variants --output-pin out.pin
 ```
 
 **PEFF databases.** `--database x.peff` reads a PSI Extended FASTA file. Its variant,
@@ -318,7 +325,7 @@ designs, with and without match between runs and next to MaxQuant and FragPipe, 
 comparisons are in the same report.
 
 ```bash
-andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+andes --spectrum tmt_run.mzML --database human.fasta \
       --rescore --tmt tmt10 --tmt-correction lot.txt --output-parquet run.idparquet
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq --mbr

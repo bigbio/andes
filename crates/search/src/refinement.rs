@@ -1614,10 +1614,10 @@ mod tests {
     fn refinement_aa_set_leaves_out_mods_restricted_to_annotated_sites() {
         // The Pass-2 mini-proteins carry no annotation: a restricted base mod
         // could never be placed there, and must not block the tier's own mod.
-        let ox = model::modification::Modification::from_mods_txt_line(
-            "15.994915,M,opt,any,Oxidation,sites=annotated",
-        )
-        .unwrap();
+        let mut ox = model::mod_spec::parse_mod_list("Oxidation (M)", false)
+            .unwrap()
+            .remove(0);
+        ox.annotated_site_mass = Some(ox.mass_delta);
         let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .add_variable_mod(ox)
             .build()

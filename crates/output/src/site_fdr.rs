@@ -73,7 +73,7 @@ pub struct SiteCount {
 pub struct SiteOutcome {
     pub rows: Vec<SiteRow>,
     pub counts: Vec<SiteCount>,
-    /// Rows that place a `sites=annotated` modification on a knockoff site:
+    /// Rows that place a `restrict_to: annotated` modification on a knockoff site:
     /// a placement only the knockoffs allow, never to be reported.
     pub knockoff_rows: HashSet<String>,
 }
@@ -175,7 +175,7 @@ enum Part {
 
 /// Site q-values for every claim of `targets`' PSMs, and the accepted site
 /// claims: a site whose best PSM passes `fdr` and whose site q-value passes
-/// `claim_fdr`. `restricted` lists the masses of the `sites=annotated` mods,
+/// `claim_fdr`. `restricted` lists the masses of the `restrict_to: annotated` mods,
 /// whose knockoff-site placements are not reported (their rows get q = 1).
 /// `posteriors` (each target row's posterior among its spectrum's rows, see
 /// [`crate::site_identity`]) give each site its occupancy and identity.

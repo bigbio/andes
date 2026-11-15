@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{Fragmentation, Protocol};
+use crate::cli::{DatabaseArgs, Fragmentation, ModList, Protocol};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     ResidueSpec,
@@ -46,149 +46,86 @@ pub(crate) fn load_seed_param(
     }
 }
 
-/// Build an `AminoAcidSet` from an optional mods file for the training paths,
-/// defaulting to Carbamidomethyl-C fixed + Oxidation-M variable. (The search
-/// default, `default_aa_set_with_tag`, additionally carries protein-N-term Acetyl.)
-pub(crate) fn build_aa_set(
-    mods: &Option<PathBuf>,
-) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
-    match mods {
-        Some(path) => {
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_mods_from_file(path)
-                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-                .build()
-                .map_err(|e| format!("building amino-acid set: {e}"))?;
-            Ok(set)
-        }
-        None => {
-            let cam = Modification {
-                name: "Carbamidomethyl".into(),
-                mass_delta: 57.02146,
-                residue: ResidueSpec::Specific(b'C'),
-                location: ModLocation::Anywhere,
-                fixed: true,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-                annotated_site_mass: None,
-                blocks_cleavage: false,
-                parts: Vec::new(),
-                diagnostic_ions: Vec::new(),
-            };
-            let ox = Modification {
-                name: "Oxidation".into(),
-                mass_delta: 15.99491,
-                residue: ResidueSpec::Specific(b'M'),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-                annotated_site_mass: None,
-                blocks_cleavage: false,
-                parts: Vec::new(),
-                diagnostic_ions: Vec::new(),
-            };
-            Ok(AminoAcidSetBuilder::new_standard()
-                .add_fixed_mod(cam)
-                .add_variable_mod(ox)
-                .build()?)
-        }
-    }
+/// The default fixed modifications, as `--fixed-mods` would list them.
+pub(crate) const DEFAULT_FIXED_MODS: &str = "Carbamidomethyl (C)";
+
+/// The default variable modifications of the search, as `--variable-mods`
+/// would list them: Oxidation (M) and Acetyl (Protein N-term). Protein
+/// N-terminal acetylation is a near-universal default in the field (MSFragger,
+/// Comet, MaxQuant); restricted to the protein N-terminus (one site per
+/// protein, after Met cleavage), it is combinatorially cheap.
+pub(crate) const DEFAULT_VARIABLE_MODS: &str = "Oxidation (M), Acetyl (Protein N-term)";
+
+/// The default variable modifications of the training paths: Oxidation (M).
+const TRAINING_VARIABLE_MODS: &str = "Oxidation (M)";
+
+/// A built-in modification list, read through the same UNIMOD lookup as
+/// `--fixed-mods` / `--variable-mods`, so a default and the same list written
+/// out give the same masses and accessions.
+fn builtin_mods(list: &str, fixed: bool) -> Vec<Modification> {
+    model::mod_spec::parse_mod_list(list, fixed)
+        .unwrap_or_else(|e| panic!("built-in modification list {list:?}: {e}"))
 }
 
-/// Build the default `AminoAcidSet` (CAM-C fixed, Ox-M variable, protein-N-term
-/// Acetyl variable), optionally with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
+/// The default fixed modifications: Carbamidomethyl (C).
+pub(crate) fn default_fixed_mods() -> Vec<Modification> {
+    builtin_mods(DEFAULT_FIXED_MODS, true)
+}
+
+/// The default variable modifications of the search: Oxidation (M) and Acetyl
+/// (Protein N-term).
+pub(crate) fn default_variable_mods() -> Vec<Modification> {
+    builtin_mods(DEFAULT_VARIABLE_MODS, false)
+}
+
+/// The `AminoAcidSet` of the training paths: the given lists, defaulting to
+/// Carbamidomethyl (C) fixed and Oxidation (M) variable. (The search default,
+/// [`search_aa_set`], also carries protein-N-term Acetyl.)
+pub(crate) fn build_aa_set(
+    fixed: Option<&ModList>,
+    variable: Option<&ModList>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    let fixed = fixed.map_or_else(default_fixed_mods, |l| l.0.clone());
+    let variable =
+        variable.map_or_else(|| builtin_mods(TRAINING_VARIABLE_MODS, false), |l| l.0.clone());
+    Ok(AminoAcidSetBuilder::new_standard()
+        .add_mods(fixed)
+        .add_mods(variable)
+        .build()?)
+}
+
+/// The search's `AminoAcidSet`: `--fixed-mods` and `--variable-mods`, each
+/// defaulting to [`default_fixed_mods`] / [`default_variable_mods`]. `tag`, an
+/// isobaric tag (TMT/iTRAQ), joins the DEFAULT fixed list on K + peptide
+/// N-term; a given `--fixed-mods` list stands as written.
 ///
-/// Used by the no-`--mods` (parameter-free) path: when the protocol resolves to
-/// TMT/iTRAQ the tag MUST be in the candidate set, or every labeled peptide is
-/// `+tag·(nK+1)` Da off at the precursor and silently misses (C1).
-pub(crate) fn default_aa_set_with_tag(
+/// The tag MUST be in the candidate set of a run found to carry it, or every
+/// labeled peptide is `+tag·(nK+1)` Da off at the precursor and silently
+/// misses (C1).
+pub(crate) fn search_aa_set(
+    db: &DatabaseArgs,
     tag: Option<(&str, f64)>,
 ) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
-    let cam = Modification {
-        name: "Carbamidomethyl".into(),
-        mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'),
-        location: ModLocation::Anywhere,
-        fixed: true,
-        accession: None,
-        neutral_losses: Vec::new(),
-        loss_class: 0,
-        annotated_site_mass: None,
-        blocks_cleavage: false,
-        parts: Vec::new(),
-        diagnostic_ions: Vec::new(),
-    };
-    let ox = Modification {
-        name: "Oxidation".into(),
-        mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'),
-        location: ModLocation::Anywhere,
-        fixed: false,
-        accession: None,
-        neutral_losses: Vec::new(),
-        loss_class: 0,
-        annotated_site_mass: None,
-        blocks_cleavage: false,
-        parts: Vec::new(),
-        diagnostic_ions: Vec::new(),
-    };
-    // Protein N-terminal acetylation (+42.010565) — a near-universal default in
-    // the field (MSFragger / Comet / MaxQuant). Restricted to the PROTEIN N-term
-    // (one site per protein, after Met cleavage), so it is combinatorially cheap
-    // (not every peptide N-term) and biologically correct.
-    let acetyl = Modification {
-        name: "Acetyl".into(),
-        mass_delta: 42.010565,
-        residue: ResidueSpec::Wildcard,
-        location: ModLocation::ProtNTerm,
-        fixed: false,
-        accession: None,
-        neutral_losses: Vec::new(),
-        loss_class: 0,
-        annotated_site_mass: None,
-        blocks_cleavage: false,
-        parts: Vec::new(),
-        diagnostic_ions: Vec::new(),
-    };
-    let mut b = AminoAcidSetBuilder::new_standard()
-        .add_fixed_mod(cam)
-        .add_variable_mod(ox)
-        .add_variable_mod(acetyl);
-    if let Some((name, mass)) = tag {
-        let tag_k = Modification {
-            name: name.into(),
-            mass_delta: mass,
-            residue: ResidueSpec::Specific(b'K'),
-            location: ModLocation::Anywhere,
-            fixed: true,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-            annotated_site_mass: None,
-            blocks_cleavage: false,
-            parts: Vec::new(),
-            diagnostic_ions: Vec::new(),
-        };
-        let tag_nterm = Modification {
-            name: name.into(),
-            mass_delta: mass,
-            residue: ResidueSpec::Wildcard,
-            location: ModLocation::NTerm,
-            fixed: true,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-            annotated_site_mass: None,
-            blocks_cleavage: false,
-            parts: Vec::new(),
-            diagnostic_ions: Vec::new(),
-        };
-        b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
+    let mut fixed = db
+        .fixed_mods
+        .as_ref()
+        .map_or_else(default_fixed_mods, |l| l.0.clone());
+    if let (Some((name, mass)), None) = (tag, &db.fixed_mods) {
+        for (residue, location) in [
+            (ResidueSpec::Specific(b'K'), ModLocation::Anywhere),
+            (ResidueSpec::Wildcard, ModLocation::NTerm),
+        ] {
+            fixed.push(Modification::new(name, mass, residue, location, true));
+        }
     }
-    Ok(b.build()?)
+    let variable = db
+        .variable_mods
+        .as_ref()
+        .map_or_else(default_variable_mods, |l| l.0.clone());
+    Ok(AminoAcidSetBuilder::new_standard()
+        .add_mods(fixed)
+        .add_mods(variable)
+        .build()?)
 }
 
 /// Convert the CLI `Fragmentation` enum to `Option<ActivationMethod>`.
@@ -1025,39 +962,19 @@ mod param_resolver_tests {
     #[test]
     fn label_is_read_from_the_declared_mods() {
         use input::IsobaricLabel::{Itraq, Tmt, TmtPro};
-        let set = |lines: &[&str]| {
-            let mut b = AminoAcidSetBuilder::new_standard();
-            for l in lines {
-                let m = Modification::from_mods_txt_line(l).unwrap();
-                b = if m.fixed {
-                    b.add_fixed_mod(m)
-                } else {
-                    b.add_variable_mod(m)
-                };
-            }
-            b.build().unwrap()
+        let set = |fixed: &str, variable: &str| {
+            AminoAcidSetBuilder::new_standard()
+                .add_mods(model::mod_spec::parse_mod_list(fixed, true).unwrap())
+                .add_mods(model::mod_spec::parse_mod_list(variable, false).unwrap())
+                .build()
+                .unwrap()
         };
+        assert_eq!(label_from_mods(&set("TMT6plex (K)", "")), Some(Tmt));
+        assert_eq!(label_from_mods(&set("TMT6plex (N-term)", "")), Some(Tmt));
+        assert_eq!(label_from_mods(&set("TMTpro (K)", "")), Some(TmtPro));
+        assert_eq!(label_from_mods(&set("", "iTRAQ4plex (K)")), Some(Itraq));
         assert_eq!(
-            label_from_mods(&set(&["229.162932,K,fix,any,TMT"])),
-            Some(Tmt)
-        );
-        assert_eq!(
-            label_from_mods(&set(&["229.162932,*,fix,N-term,TMT"])),
-            Some(Tmt)
-        );
-        assert_eq!(
-            label_from_mods(&set(&["304.207146,K,fix,any,TMTpro"])),
-            Some(TmtPro)
-        );
-        assert_eq!(
-            label_from_mods(&set(&["144.102063,K,opt,any,iTRAQ"])),
-            Some(Itraq)
-        );
-        assert_eq!(
-            label_from_mods(&set(&[
-                "57.021464,C,fix,any,Carbamidomethyl",
-                "15.994915,M,opt,any,Oxidation"
-            ])),
+            label_from_mods(&set("Carbamidomethyl (C)", "Oxidation (M)")),
             None
         );
     }
@@ -1452,9 +1369,8 @@ mod param_resolver_tests {
     }
 
     use crate::cli::{
-        parse_charge_range, parse_enzyme_specificity, parse_fragmentation,
-        parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol, parse_protocol,
-        EnzymeSpecificity,
+        parse_charge_range, parse_enum, parse_isotope_error_range, parse_precursor_cal,
+        parse_precursor_tol, EnzymeSpecificity,
     };
     use crate::spectra::title_prefix_for;
     use ::search::PrecursorCalMode;
@@ -1465,34 +1381,27 @@ mod param_resolver_tests {
     //    `bundled_store_selection_grid_is_pinned` covers the
     //    activation/instrument/protocol/enzyme → model_id selection.
 
+    /// The `--config` values of the named enums: their CLI names, in any case;
+    /// numbers are not accepted.
     #[test]
-    fn parse_fragmentation_accepts_named_rejects_numeric() {
-        assert_eq!(parse_fragmentation("HCD").unwrap(), Fragmentation::Hcd);
-        assert_eq!(parse_fragmentation("auto").unwrap(), Fragmentation::Auto);
-        // Legacy numeric forms are no longer accepted.
-        assert!(parse_fragmentation("3").is_err());
-        assert!(parse_fragmentation("99").is_err());
-    }
-
-    #[test]
-    fn parse_protocol_accepts_named_rejects_numeric() {
-        assert_eq!(parse_protocol("TMT").unwrap(), Protocol::Tmt);
-        assert_eq!(parse_protocol("auto").unwrap(), Protocol::Auto);
-        assert!(parse_protocol("4").is_err());
-        assert!(parse_protocol("99").is_err());
-    }
-
-    #[test]
-    fn parse_enzyme_specificity_named_only() {
+    fn config_enum_values_are_named() {
+        let frag = |s: &str| parse_enum::<Fragmentation>("fragmentation", s, true);
+        assert_eq!(frag("HCD").unwrap(), Fragmentation::Hcd);
+        assert_eq!(frag("hcd").unwrap(), Fragmentation::Hcd);
+        assert_eq!(frag("auto").unwrap(), Fragmentation::Auto);
+        assert!(frag("3").is_err());
+        let protocol = |s: &str| parse_enum::<Protocol>("protocol", s, true);
+        assert_eq!(protocol("TMT").unwrap(), Protocol::Tmt);
+        assert_eq!(protocol("itraq-PHOSPHO").unwrap(), Protocol::ItraqPhospho);
+        assert!(protocol("4").is_err());
+        let ntt = |s: &str| parse_enum::<EnzymeSpecificity>("enzyme_specificity", s, true);
+        assert_eq!(ntt("fully").unwrap(), EnzymeSpecificity::Fully);
+        assert_eq!(ntt("Semi").unwrap(), EnzymeSpecificity::Semi);
+        assert!(ntt("2").is_err());
         assert_eq!(
-            parse_enzyme_specificity("fully").unwrap(),
-            EnzymeSpecificity::Fully
+            frag("x").unwrap_err(),
+            "invalid fragmentation `x`: expected auto|CID|ETD|HCD|UVPD"
         );
-        assert_eq!(
-            parse_enzyme_specificity("semi").unwrap(),
-            EnzymeSpecificity::Semi
-        );
-        assert!(parse_enzyme_specificity("2").is_err());
     }
 
     #[test]

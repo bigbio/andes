@@ -45,7 +45,7 @@ pub const MAX_PLACEMENTS: usize = 1024;
 /// Only residue-anywhere variable mods move: terminal mods (protein or peptide
 /// N/C-term) have a single possible site and are kept in place. A mod also
 /// moves to residues that a `declared` sibling record (same name and mass,
-/// e.g. Mods.txt's separate Phospho S, T and Y lines) accepts; the residue then
+/// e.g. Phospho declared once for S and T with its loss and once for Y) accepts; the residue then
 /// carries that sibling record.
 pub fn placements_with(
     peptide: &Peptide,
@@ -251,7 +251,7 @@ pub struct SiteIon {
 
 /// b/y ions of one form: charge 1, plus charge 2 when the precursor is 3+.
 /// A fragment that holds a residue whose modification declares neutral losses
-/// (Mods.txt `loss=`, e.g. phospho's 97.977 H3PO4) also gives one ion per
+/// (`neutral_loss`, e.g. phospho's 97.977 H3PO4) also gives one ion per
 /// distinct loss at the same charges: the loss ion pins the mod to the fragment
 /// as well as the intact one does. Calls `emit(mz, kind, number)`.
 fn by_ions(p: &Peptide, precursor_charge: u8, mut emit: impl FnMut(f64, u8, u16)) {
@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn declared_siblings_extend_sites_to_other_residues() {
-        // Mods.txt declares Phospho once per residue; a pS PSM must also be
+        // Phospho declared as one record per residue: a pS PSM must also be
         // able to move to T and Y, carrying the T/Y record there.
         let declared = [phospho(b'S'), phospho(b'T'), phospho(b'Y')];
         let (forms, _) = placements_with(&pep("ASATYK", &[1]), &declared);

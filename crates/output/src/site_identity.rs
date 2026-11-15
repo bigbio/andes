@@ -208,7 +208,7 @@ pub fn row_posteriors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::modification::{leak_mod, Modification};
+    use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
     use search::site_evidence::ModMark;
 
     fn psm(id: &str, score: f64) -> (String, f64) {
@@ -234,14 +234,20 @@ mod tests {
 
     #[test]
     fn rows_of_a_spectrum_share_one_posterior_and_signatures_move_it() {
-        let ac = leak_mod(
-            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,diagnostic=143.1179")
-                .unwrap(),
-        );
-        let me3 = leak_mod(
-            Modification::from_mods_txt_line("42.04695,K,opt,any,Trimethyl,diagnostic=143.1543")
-                .unwrap(),
-        );
+        let k = |name: &str, mass: f64, ion: f64| {
+            leak_mod(Modification {
+                diagnostic_ions: vec![ion],
+                ..Modification::new(
+                    name,
+                    mass,
+                    ResidueSpec::Specific(b'K'),
+                    ModLocation::Anywhere,
+                    false,
+                )
+            })
+        };
+        let ac = k("Acetyl", 42.010565, 143.1179);
+        let me3 = k("Trimethyl", 42.04695, 143.1543);
         // 200 spectra teach the likelihoods: a clear acetyl row whose ion is
         // present, against a weak trimethyl row whose ion is absent.
         let mut targets = HashMap::new();

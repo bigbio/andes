@@ -1,14 +1,12 @@
 //! Heavyweight residue-and-modification set. Built via
 //! `AminoAcidSetBuilder`; queried by the candidate generator.
 
-use std::fs;
-use std::path::Path;
 
 use rustc_hash::FxHashMap;
 
 use crate::amino_acid::AminoAcid;
 use crate::enzyme::Enzyme;
-use crate::modification::{ModLocation, ModParseError, Modification, ResidueSpec};
+use crate::modification::{ModLocation, Modification, ResidueSpec};
 
 const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
 // Upper bound for a single mod's mass delta. Raised from 1000 to 5000 Da to
@@ -548,70 +546,17 @@ impl AminoAcidSetBuilder {
         self
     }
 
-    pub fn add_mods_from_file(mut self, path: &Path) -> Result<Self, AaSetError> {
-        let text = fs::read_to_string(path)?;
-        for (line_no, raw) in text.lines().enumerate() {
-            // Strip an inline `#` comment (mods.txt convention).
-            let no_comment = match raw.find('#') {
-                Some(i) => &raw[..i],
-                None => raw,
-            };
-            let line = no_comment.trim();
-            if line.is_empty() {
-                continue;
-            }
-            // `NumMods=N` header line — recognized for mods.txt compatibility
-            // but not stored on the builder. The CLI parses it separately via
-            // `parse_num_mods_from_file` and routes it to
-            // `SearchParams.max_variable_mods_per_peptide`.
-            if line.to_ascii_lowercase().starts_with("nummods=") {
-                continue;
-            }
-            let m = Modification::from_mods_txt_line(line).map_err(|source| {
-                AaSetError::ModsTxtParse {
-                    line_no: line_no + 1,
-                    source,
-                }
-            })?;
+    /// Adds each modification to the fixed or the variable list, by its
+    /// `fixed` flag, in order.
+    pub fn add_mods(mut self, mods: impl IntoIterator<Item = Modification>) -> Self {
+        for m in mods {
             if m.fixed {
                 self.fixed_mods.push(m);
             } else {
                 self.variable_mods.push(m);
             }
         }
-        Ok(self)
-    }
-
-    /// Read just the `NumMods=N` header from a mods.txt file.
-    ///
-    /// Returns:
-    /// - `Ok(Some(n))` when the file contains a single `NumMods=N` line with a valid integer.
-    /// - `Ok(None)` when no `NumMods=` line is present.
-    /// - `Err(...)` if the file cannot be read or the value cannot be parsed.
-    ///
-    /// The mods.txt `NumMods=N` header overrides the default variable-mod cap.
-    /// This sibling function lets the CLI binary apply that override to
-    /// `SearchParams.max_variable_mods_per_peptide`
-    /// without changing the public API of `add_mods_from_file`.
-    pub fn parse_num_mods_from_file(path: &Path) -> Result<Option<u32>, AaSetError> {
-        let text = fs::read_to_string(path)?;
-        for raw in text.lines() {
-            let no_comment = match raw.find('#') {
-                Some(i) => &raw[..i],
-                None => raw,
-            };
-            let line = no_comment.trim();
-            if !line.to_ascii_lowercase().starts_with("nummods=") {
-                continue;
-            }
-            // Take everything after the first `=`. Whitespace around the value is ignored.
-            let value = line.split_once('=').map(|x| x.1).unwrap_or("").trim();
-            let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
-                value: value.to_string(),
-            })?;
-            return Ok(Some(n));
-        }
-        Ok(None)
+        self
     }
 
     pub fn build(self) -> Result<AminoAcidSet, AaSetError> {
@@ -1037,19 +982,6 @@ pub enum AaSetError {
     },
     #[error("mod {name:?} mass delta {delta} is implausible (>5000 Da)")]
     ImplausibleMassDelta { name: String, delta: f64 },
-    #[error("malformed Mods.txt line {line_no}: {source}")]
-    ModsTxtParse {
-        line_no: usize,
-        #[source]
-        source: ModParseError,
-    },
-    #[error("invalid NumMods value {value:?} (expected non-negative integer)")]
-    BadNumMods { value: String },
-    #[error("Mods.txt I/O error: {source}")]
-    Io {
-        #[from]
-        source: std::io::Error,
-    },
 }
 
 #[cfg(test)]
@@ -1058,6 +990,18 @@ mod tests {
     use crate::amino_acid::AminoAcid;
     use crate::enzyme::Enzyme;
     use crate::modification::{ModLocation, Modification, ResidueSpec};
+
+    /// The modifications of a `Name (sites), ...` list.
+    fn spec(list: &str, fixed: bool) -> Vec<Modification> {
+        crate::mod_spec::parse_mod_list(list, fixed).unwrap()
+    }
+
+    /// The one modification of a single-site item, restricted to annotated sites.
+    fn annotated(item: &str) -> Modification {
+        let mut m = spec(item, false).remove(0);
+        m.annotated_site_mass = Some(m.mass_delta);
+        m
+    }
 
     fn carbamidomethyl_c() -> Modification {
         Modification {
@@ -1386,20 +1330,10 @@ mod tests {
     }
 
     #[test]
-    fn add_mods_from_file_parses_real_format() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "# comment line\n\
-             \n\
-             57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n",
-        )
-        .unwrap();
-
+    fn add_mods_sorts_fixed_and_variable() {
         let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap()
+            .add_mods(spec("Carbamidomethyl (C)", true))
+            .add_mods(spec("Oxidation (M)", false))
             .build()
             .unwrap();
 
@@ -1508,43 +1442,15 @@ mod tests {
     }
 
     #[test]
-    fn add_mods_from_file_reports_line_number() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "57.021464,C,fix,any,Carbamidomethyl\n\
-             garbage_line\n",
-        )
-        .unwrap();
-
-        let err = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap_err();
-        match err {
-            AaSetError::ModsTxtParse { line_no, .. } => assert_eq!(line_no, 2),
-            other => panic!("expected ModsTxtParse, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn tmt_style_mods_file_parses() {
-        // Real-world TMT 6-plex mods file: TMT6plex fixed on K + peptide
-        // N-term, CAM fixed on C, Oxidation variable on M, NumMods=3.
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "# TMT 6-plex labelling, tryptic + CAM + Met-oxidation\n\
-             NumMods=3\n\
-             229.162932,K,fix,any,TMT6plex\n\
-             229.162932,*,fix,N-term,TMT6plex\n\
-             57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n",
-        )
-        .unwrap();
-
+    fn tmt_style_mod_lists_build() {
+        // TMT 6-plex: TMT6plex fixed on K + peptide N-term, CAM fixed on C,
+        // Oxidation variable on M.
         let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap()
+            .add_mods(spec(
+                "TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)",
+                true,
+            ))
+            .add_mods(spec("Oxidation (M)", false))
             .build()
             .unwrap();
 
@@ -1579,10 +1485,6 @@ mod tests {
         assert_eq!(m_variants.len(), 2);
         assert!(m_variants.iter().any(|aa| aa.is_modified()));
         assert!(m_variants.iter().any(|aa| !aa.is_modified()));
-
-        // NumMods=3 is parsed via the sibling helper.
-        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
-        assert_eq!(n, Some(3));
     }
 
     #[test]
@@ -1686,19 +1588,12 @@ mod tests {
 
     #[test]
     fn terminal_forms_stack_side_chain_and_terminal_mods() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "229.162932,K,fix,any,TMT6plex\n\
-             229.162932,*,fix,N-term,TMT6plex\n\
-             57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n\
-             42.010565,*,opt,Prot-N-term,Acetyl\n",
-        )
-        .unwrap();
         let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap()
+            .add_mods(spec(
+                "TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)",
+                true,
+            ))
+            .add_mods(spec("Oxidation (M), Acetyl (Protein N-term)", false))
             .build()
             .unwrap();
         let (no, pep, prot) = (Terminus::No, Terminus::Peptide, Terminus::Protein);
@@ -1749,46 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_num_mods_returns_none_when_absent() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "57.021464,C,fix,any,Carbamidomethyl\n").unwrap();
-        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
-        assert_eq!(n, None);
-    }
-
-    #[test]
-    fn parse_num_mods_rejects_bad_value() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "NumMods=garbage\n").unwrap();
-        let err = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap_err();
-        match err {
-            AaSetError::BadNumMods { value } => assert_eq!(value, "garbage"),
-            other => panic!("expected BadNumMods, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn add_mods_from_file_strips_inline_comments() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "57.021464,C,fix,any,Carbamidomethyl  # alkylation\n\
-             NumMods=3 # max variable mods per peptide\n",
-        )
-        .unwrap();
-        let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap()
-            .build()
-            .unwrap();
-        assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
-        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
-        assert_eq!(n, Some(3));
-    }
-
-    #[test]
     fn stacks_carry_at_most_one_restricted_part_and_prefer_unrestricted_forms() {
-        let line = |l: &str| Modification::from_mods_txt_line(l).unwrap();
         let (prot, no) = (Terminus::Protein, Terminus::No);
         let mod_named = |set: &AminoAcidSet, r: u8, name: &str| {
             set.forms(r, prot, no)
@@ -1798,9 +1654,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let set = AminoAcidSetBuilder::new_standard()
-            .add_variable_mod(line("79.966331,S,opt,any,Phospho,sites=annotated"))
-            .add_variable_mod(line("15.994915,M,opt,any,Oxidation"))
-            .add_variable_mod(line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated"))
+            .add_variable_mod(annotated("Phospho (S)"))
+            .add_mods(spec("Oxidation (M)", false))
+            .add_variable_mod(annotated("Acetyl (Protein N-term)"))
             .build()
             .unwrap();
         // Two restricted parts would need two annotated sites: not formed.
@@ -1812,8 +1668,8 @@ mod tests {
 
         // An unrestricted mod equal to a restricted one replaces it.
         let set = AminoAcidSetBuilder::new_standard()
-            .add_variable_mod(line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated"))
-            .add_variable_mod(line("42.010565,*,opt,N-term,Acetyl"))
+            .add_variable_mod(annotated("Acetyl (Protein N-term)"))
+            .add_mods(spec("Acetyl (N-term)", false))
             .build()
             .unwrap();
         let ac = mod_named(&set, b'A', "Acetyl");
@@ -1825,9 +1681,7 @@ mod tests {
     fn stacked_terminal_mod_keeps_the_restricted_mods_own_site_mass() {
         // Fixed CAM-C stacks under a variable protein-N-term Acetyl restricted to
         // annotated sites: the combined mod still matches sites by Acetyl's mass.
-        let acetyl =
-            Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl,sites=annotated")
-                .unwrap();
+        let acetyl = annotated("Acetyl (Protein N-term)");
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
             .add_variable_mod(acetyl)

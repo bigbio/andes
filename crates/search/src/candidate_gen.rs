@@ -19,7 +19,7 @@
 //! that carry its variant; the rest of it reads like the canonical protein,
 //! which is searched already. A mature-chain entry ([`Protein::chain_ends`])
 //! only yields the spans at its new termini. A variable mod declared
-//! `sites=annotated` ([`model::Modification::annotated_site_mass`]) is only
+//! `restrict_to: annotated` ([`model::Modification::annotated_site_mass`]) is only
 //! placed on residues the span's protein annotates with a modification of
 //! that mass ([`Protein::mod_sites`]); every expansion path below applies the
 //! same test through [`SpanSites`], so the in-RAM, lazy and fragment-index
@@ -2927,19 +2927,16 @@ mod tests {
     /// in-RAM candidate set.
     #[test]
     fn stacked_terminal_forms_enumerate_and_match_lazy() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            tmp.path(),
-            "229.162932,K,fix,any,TMT6plex\n\
-             229.162932,*,fix,N-term,TMT6plex\n\
-             57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n\
-             42.010565,*,opt,Prot-N-term,Acetyl\n",
-        )
-        .unwrap();
+        use model::mod_spec::parse_mod_list;
         let aa_set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path())
-            .unwrap()
+            .add_mods(
+                parse_mod_list(
+                    "TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)",
+                    true,
+                )
+                .unwrap(),
+            )
+            .add_mods(parse_mod_list("Oxidation (M), Acetyl (Protein N-term)", false).unwrap())
             .build()
             .unwrap();
         let target = ProteinDb {

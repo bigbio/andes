@@ -10,7 +10,7 @@ use crate::train_intensity::GbdtMode;
 use clap::Args;
 use input::{MgfReader, MzMLReader};
 use model::{
-    activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
+    activation::ActivationMethod, InstrumentType, ModLocation, Modification,
     ResidueSpec, Spectrum, Tolerance,
 };
 use model_train::{
@@ -76,7 +76,7 @@ pub(crate) struct TrainFromSearchArgs {
     /// seed search (`bootstrap_labels`), and `--database` is not required. The
     /// `peptide` is the BARE backbone sequence (the glycan is stripped — the
     /// rank model scores backbone b/y ions, which in HCD come from the
-    /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
+    /// deglycosylated backbone); Cam-C and any `--fixed-mods` / `--variable-mods` are applied via the
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
     /// MSFragger/pGlyco backbone IDs.
@@ -129,11 +129,15 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "model-id")]
     pub(crate) model_id: Option<String>,
 
-    /// Path to a mods.txt file (same format as `--mods` for search). When
-    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl
-    /// variable).
-    #[arg(long)]
-    pub(crate) mods: Option<PathBuf>,
+    /// Fixed modifications, a list of Name (sites) as for the search's
+    /// `--fixed-mods` [default: Carbamidomethyl (C)].
+    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_fixed_mods)]
+    pub(crate) fixed_mods: Option<crate::cli::ModList>,
+
+    /// Variable modifications, a list of Name (sites) as for the search's
+    /// `--variable-mods` [default: Oxidation (M)].
+    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_variable_mods)]
+    pub(crate) variable_mods: Option<crate::cli::ModList>,
 
     /// Number of worker threads. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -417,21 +421,13 @@ pub(crate) fn load_spectra_for_train(
 /// each other and with the production search:
 ///   - charge span `2..=5` (the search binary's default; `default_tryptic` alone
 ///     is the narrow `2..=3`, which drops z=4/5 labels common on Astral/timsTOF),
-///   - the `NumMods=` variable-mod limit from the `--mods` file when present
-///     (the search path applies it too).
+///   - the modification lists `--fixed-mods` / `--variable-mods`.
 pub(crate) fn build_train_search_params(
-    mods: &Option<PathBuf>,
+    args: &TrainFromSearchArgs,
 ) -> Result<SearchParams, Box<dyn std::error::Error>> {
-    let aa = build_aa_set(mods)?;
+    let aa = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
     let mut params = SearchParams::default_tryptic(aa);
     params.charge_range = 2..=5;
-    if let Some(path) = mods {
-        if let Some(n) = AminoAcidSetBuilder::parse_num_mods_from_file(path)
-            .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?
-        {
-            params.max_variable_mods_per_peptide = n;
-        }
-    }
     Ok(params)
 }
 
@@ -450,7 +446,7 @@ pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
 /// Load external training labels from a `scan\tpeptide\tcharge` TSV (SP-B glyco
 /// training). Column order is discovered from the header (case-insensitive), so
 /// extra columns are ignored. The peptide is parsed with `aa_set` (Cam-C + any
-/// `--mods` applied). Rows with an unknown scan or an unparseable peptide/charge
+/// `--fixed-mods` / `--variable-mods` applied). Rows with an unknown scan or an unparseable peptide/charge
 /// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
 /// by the external engine; the value is unused by the accumulator).
 pub(crate) fn load_labels_from_tsv(
@@ -790,14 +786,14 @@ pub(crate) fn run_train_from_search(
         let labels = if let Some(labels_path) = args.labels.get(i) {
             // SP-B glyco path: labels come from an external engine's backbone IDs.
             // No seed search / database needed — the peptides are given directly.
-            let aa_set = build_aa_set(&args.mods)?;
+            let aa_set = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
             load_labels_from_tsv(labels_path, &spectra, &aa_set)?
         } else {
             let database = args
                 .database
                 .clone()
                 .ok_or("--database is required for initial training (or pass --labels)")?;
-            let search_params = build_train_search_params(&args.mods)?;
+            let search_params = build_train_search_params(&args)?;
             eprintln!(
                 "train: running seed search (train-fdr = {}) ...",
                 args.train_fdr
@@ -1656,7 +1652,7 @@ pub(crate) fn run_train_update(
             .map_err(|e| format!("loading model '{model_id}': {e}"))?;
         let current_scorer = RankScorer::new(&current_param);
 
-        let search_params = build_train_search_params(&args.mods)?;
+        let search_params = build_train_search_params(&args)?;
 
         eprintln!(
             "train update: running seed search (train-fdr={}) ...",
@@ -1752,7 +1748,7 @@ pub(crate) fn run_train_update(
         let current_scorer = RankScorer::new(&current_param);
         let candidate_scorer = RankScorer::new(&candidate);
 
-        let search_params = build_train_search_params(&args.mods)?;
+        let search_params = build_train_search_params(&args)?;
 
         let delta = evaluate_candidate(
             &val_spectra,

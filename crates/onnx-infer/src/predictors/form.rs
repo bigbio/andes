@@ -415,14 +415,11 @@ mod tests {
     /// The PIN string andes writes for a protein N-terminal Cys under fixed
     /// carbamidomethyl-C and variable protein N-terminal acetyl.
     fn andes_cam_acetyl_nterm_cys() -> String {
-        use model::{AminoAcidSetBuilder, ModLocation, Modification, Peptide};
+        use model::mod_spec::parse_mod_list;
+        use model::{AminoAcidSetBuilder, ModLocation, Peptide};
         let aa_set = AminoAcidSetBuilder::new_standard()
-            .add_fixed_mod(
-                Modification::from_mods_txt_line("57.021464,C,fix,any,Carbamidomethyl").unwrap(),
-            )
-            .add_variable_mod(
-                Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
-            )
+            .add_mods(parse_mod_list("Carbamidomethyl (C)", true).unwrap())
+            .add_mods(parse_mod_list("Acetyl (Protein N-term)", false).unwrap())
             .build()
             .unwrap();
         let first = aa_set

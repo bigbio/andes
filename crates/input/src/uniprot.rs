@@ -12,7 +12,7 @@
 //!   moiety-binding region`, `glycosylation site`, and ubiquitin-like `cross-link`s
 //!   that leave a Gly-Gly remnant) become [`ModSite`]s on the protein's
 //!   [`ProteinAnnotation`]. They only change a search when a variable mod is
-//!   declared `sites=annotated` (see `model::Modification::annotated_site_mass`),
+//!   declared `restrict_to: annotated` (see `model::Modification::annotated_site_mass`),
 //!   which then applies at the annotated positions alone.
 //! * **Natural sequence variants** (`sequence variant`), with
 //!   [`UniProtOptions::variants`], become extra target proteins, one per

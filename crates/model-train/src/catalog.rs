@@ -152,7 +152,7 @@ impl ProtocolCatalog {
     }
 
     /// Infers the experiment class from a slice of `(mass, residue)` pairs
-    /// (typically parsed from a `mods.txt`).
+    /// (typically the declared modifications of a search).
     ///
     /// Each pair is matched against catalog entries that carry a mass-inference
     /// signature.  Matching slugs are passed through [`canonical_set`](Self::canonical_set).
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn infers_classes_from_mod_masses() {
         let c = ProtocolCatalog::builtin();
-        // (mass, residue) pairs from a configured mods.txt
+        // (mass, residue) pairs of declared modifications
         let mods = [(229.1629_f64, 'K'), (79.96633_f64, 'S')];
         assert_eq!(c.infer_from_mods(&mods), "phospho+tmt");
         let none = [(15.9949_f64, 'M')]; // oxidation -> not an experiment class

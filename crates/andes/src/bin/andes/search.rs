@@ -14,9 +14,9 @@ use crate::cli::{
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
 use crate::model_select::{
-    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, default_aa_set_with_tag,
-    label_from_mods, load_param_from_store, parse_enzymes, resolve_metadataless_selection,
-    routing_protocol, warn_if_universal_protease_combo,
+    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, label_from_mods,
+    load_param_from_store, parse_enzymes, resolve_metadataless_selection, routing_protocol,
+    search_aa_set, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
@@ -467,7 +467,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // model selection via build_selection_key + the cleavage-credit feature),
     // the rest widen candidate enumeration (params.extra_enzymes). The common
     // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
-    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.db.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
@@ -498,12 +498,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
     let uniprot_opts = input::UniProtOptions {
-        variants: cli.uniprot_variants,
-        isoforms: cli.uniprot_isoforms,
-        chains: cli.uniprot_chains,
-        evidence: cli.uniprot_evidence,
+        variants: cli.db.uniprot_variants,
+        isoforms: cli.db.uniprot_isoforms,
+        chains: cli.db.uniprot_chains,
+        evidence: cli.db.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.knockoffs,
+            per_variant: cli.db.knockoffs,
             enzyme: search_enzyme,
         }),
     };
@@ -511,7 +511,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         loaded,
         annotations,
         site_knockoffs,
-    } = load_claim_database(&database_path, &cli.annotations, &uniprot_opts)?;
+    } = load_claim_database(&database_path, &cli.db.annotations, &uniprot_opts)?;
     let target_db = loaded.db;
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
@@ -543,9 +543,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(stats) => log_uniprot_load(stats, &uniprot_opts),
         None => {
             for (set, flag) in [
-                (cli.uniprot_variants, "--uniprot-variants"),
-                (cli.uniprot_isoforms, "--uniprot-isoforms"),
-                (cli.uniprot_chains, "--uniprot-chains"),
+                (cli.db.uniprot_variants, "--uniprot-variants"),
+                (cli.db.uniprot_isoforms, "--uniprot-isoforms"),
+                (cli.db.uniprot_chains, "--uniprot-chains"),
             ] {
                 if set {
                     eprintln!(
@@ -559,13 +559,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
-    let decoy_strategy =
-        search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy).ok_or_else(|| {
-            format!(
-                "unknown --decoy-strategy '{}' (expected shuffle/reverse/sequon/none)",
-                cli.decoy_strategy
-            )
-        })?;
+    let decoy_strategy = cli.decoy_strategy;
     let proteases = search::decoy::Proteases {
         primary: search_enzyme,
         extra: extra_enzymes.clone(),
@@ -605,8 +599,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
-        &cli.decoy_prefix,
-        cli.decoy_suffix.as_deref(),
+        &cli.db.decoy_prefix,
+        cli.db.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
         &proteases,
@@ -618,34 +612,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
-    // If --mods is given, parse the mods.txt file. Otherwise use the
-    // defaults: CAM fixed on C, Oxidation variable on M and Acetyl
-    // variable on the protein N-term.
-    //
-    // `num_mods_from_file` is populated only when --mods is given and the
-    // file contains a `NumMods=N` line; it overrides the default
-    // `max_variable_mods_per_peptide` (3) below.
-    let (mut aa, num_mods_from_file) = match &cli.mods {
-        Some(path) => {
-            let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
-                .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_mods_from_file(path)
-                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-                .build()
-                .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
-            eprintln!(
-                "Loaded modifications from {} (NumMods={})",
-                path.display(),
-                n.map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
-            );
-            (set, n)
-        }
-        // No --mods: andes defaults (CAM-C fixed, Ox-M variable, protein-N-term
-        // Acetyl variable). The isobaric
-        // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
-        None => (default_aa_set_with_tag(None)?, None),
-    };
+    // `--fixed-mods` / `--variable-mods`, each defaulting to the built-in
+    // list (CAM fixed on C; Oxidation on M and Acetyl on the protein N-term
+    // variable). The isobaric tag (TMT/iTRAQ) joins the default fixed list
+    // later, after protocol detection (C1).
+    let mut aa = search_aa_set(&cli.db, None)?;
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
@@ -940,14 +911,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         _ => {}
     }
-    // C1: parameter-free path only (no explicit --mods). When the protocol
+    // C1: default fixed list only (no --fixed-mods). When the protocol
     // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide
     // N-term so labeled peptides match their precursor mass — otherwise the
     // reporter filter engages but every labeled candidate is +tag Da off and
     // misses. The kit comes from `label` when known, else the protocol's
-    // smaller kit. With explicit --mods the user owns the mod set (they may
-    // already supply the tag), so those runs stay byte-identical.
-    if cli.mods.is_none() {
+    // smaller kit. A given --fixed-mods list is the user's (it may already
+    // carry the tag), so those runs stay byte-identical.
+    if cli.db.fixed_mods.is_none() {
         let tag = match (param.data_type.protocol, label) {
             (
                 model::protocol::Protocol::TMT,
@@ -966,10 +937,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             _ => None,
         };
         if let Some((name, mass)) = tag {
-            aa = default_aa_set_with_tag(Some((name, mass)))?;
+            aa = search_aa_set(&cli.db, Some((name, mass)))?;
             eprintln!(
                 "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
-                 into the candidate set (no --mods given)"
+                 into the candidate set (no --fixed-mods given)"
             );
         }
     }
@@ -995,10 +966,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
-    warn_restricted_artefacts(&aa, cli.uniprot_variants);
+    warn_restricted_artefacts(&aa, cli.db.uniprot_variants);
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
-    // The `sites=annotated` mods, whose knockoff-site placements exist only for
+    // The `restrict_to: annotated` mods, whose knockoff-site placements exist only for
     // the site claims and are not reported.
     let restricted_site_masses: Vec<f64> = aa
         .distinct_mods()
@@ -1187,9 +1158,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
     params.max_variable_mods_per_peptide = cli.max_mods;
-    if let Some(n) = num_mods_from_file {
-        params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
-    }
     if let Some(spec) = &label_spec {
         // The labels count apart from the other mods' allowance.
         let enzymes: Vec<_> = std::iter::once(params.enzyme)
@@ -1347,7 +1315,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
                  `--decoy-strategy sequon`, or supply an EXTERNAL target+decoy \
                  FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
-                ds = cli.decoy_strategy
+                ds = crate::cli::decoy_strategy_name(decoy_strategy)
             );
         }
         // Multi-file paired-scan guard (code review): --glyco-hcd-pair pairs each
@@ -1434,14 +1402,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
                   search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
     }
-    eprintln!(
-        "  mods           : {}",
-        if cli.mods.is_some() {
-            "from --mods file"
+    let mod_names = |fixed: bool| {
+        let names: Vec<String> = params
+            .aa_set
+            .distinct_mods()
+            .iter()
+            .filter(|m| m.fixed == fixed && m.parts.is_empty())
+            .map(|m| model::mod_spec::describe(m))
+            .collect();
+        if names.is_empty() {
+            "none".to_string()
         } else {
-            "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected"
+            names.join(", ")
         }
-    );
+    };
+    eprintln!("  fixed mods     : {}", mod_names(true));
+    eprintln!("  variable mods  : {}", mod_names(false));
     eprintln!(
         "  max var-mods   : {} per peptide",
         params.max_variable_mods_per_peptide
@@ -1466,7 +1442,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!(
         "  decoy          : {:?} (prefix {})   chimeric: {}",
-        decoy_strategy, cli.decoy_prefix, params.chimeric
+        decoy_strategy, cli.db.decoy_prefix, params.chimeric
     );
     eprintln!("───────────────────────────────────────────");
 
@@ -1534,7 +1510,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &scorer,
             fragment_tol_da,
-            &cli.decoy_prefix,
+            &cli.db.decoy_prefix,
             &index_path,
         )
         .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
@@ -1584,7 +1560,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &params,
         &scorer,
         fragment_tol_da,
-        &cli.decoy_prefix,
+        &cli.db.decoy_prefix,
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
@@ -2641,7 +2617,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 0.01, // report_q = 1% FDR report threshold (spec)
                 high_res,
                 fragment_tol_da,
-                &cli.decoy_prefix,
+                &cli.db.decoy_prefix,
                 decoy_strategy,
                 1,
             );
@@ -2909,7 +2885,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Knockoff variants: the knockoff PSMs accepted per substitution class
         // estimate the false real variant PSMs, and give them a q-value too.
         let outcome =
-            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.knockoffs > 0);
+            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.db.knockoffs > 0);
         knockoff_rows = outcome.knockoff_rows;
         let untested: usize = outcome
             .counts
@@ -3632,7 +3608,7 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
     }
 }
 
-/// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
+/// Say how many annotated sites each `restrict_to: annotated` mod of `aa` can use,
 /// and warn about one the database annotates no site of its mass for: it is
 /// never placed.
 /// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
@@ -3698,7 +3674,7 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
         }
         if sites == 0 {
             eprintln!(
-                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (sites=annotated), \
+                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (restrict_to: annotated), \
                  but no target protein annotates a site of that mass, so it is never placed. \
                  Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
                  --uniprot-evidence sets which are used."
@@ -4108,7 +4084,7 @@ mod d_archive_tests {
 }
 
 /// `aa` with the `--label` channel labels added as variable mods and
-/// registered as channels. A label the `--mods` file already declares (same
+/// registered as channels. A label the modification lists already declare (same
 /// name, residue and location) is not added twice.
 fn with_label_mods(
     aa: &model::AminoAcidSet,

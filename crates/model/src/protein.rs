@@ -94,7 +94,7 @@ pub const SITE_MASS_TOLERANCE: f64 = 0.005;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProteinAnnotation {
     /// Annotated modification sites, sorted by `position`. A variable
-    /// modification declared `sites=annotated` is only placed on these.
+    /// modification declared `restrict_to: annotated` is only placed on these.
     pub mod_sites: Vec<ModSite>,
     /// Set when this protein is a sequence variant of another entry: the
     /// parts of it that read differently from that entry, usually one (see

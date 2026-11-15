@@ -77,9 +77,12 @@ pub struct SearchCfg {
     pub max_mods: Option<u32>,
     pub min_peaks: Option<u32>,
     pub top_n: Option<u32>,
+    /// `--fixed-mods`: items `Name (sites)` or maps (see [`mod_list`]).
+    pub fixed_mods: Option<Vec<serde_yaml::Value>>,
+    /// `--variable-mods`, as `fixed_mods`.
+    pub variable_mods: Option<Vec<serde_yaml::Value>>,
     /// `ipf`, as `--localize`.
     pub localize: Option<String>,
-    pub mods: Option<PathBuf>,
     /// `auto`, `on` or `off`, as `--fragment-index`.
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
@@ -187,8 +190,7 @@ pub struct QuantCfg {
 }
 
 fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
-    <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
+    crate::cli::parse_enum("glyco.core", s, true)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -237,56 +239,44 @@ fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
     )
 }
 
-/// Apply the YAML config onto the parsed `SearchArgs`, respecting CLI precedence.
-///
-/// For each parameter: if the user did NOT type the flag (`!cli_set`) and the
-/// YAML provides a value, the YAML value replaces the built-in default. Values
-/// written as strings (tolerances/ranges/enums) go through the exact CLI parsers.
-pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
-    // scalar field, value type == target type
+/// Apply the database keys of the config (enzyme, modification lists, decoy
+/// affixes, UniProt options, annotations, knockoffs) onto `db`, respecting CLI
+/// precedence. The search applies them through [`apply`]; `andes inference`
+/// and `andes quant finalize` read the search's config through this alone.
+pub fn apply_db(
+    cfg: &RunConfig,
+    db: &mut crate::cli::DatabaseArgs,
+    m: &clap::ArgMatches,
+) -> Result<(), String> {
     macro_rules! set {
         ($id:literal, $field:ident, $val:expr) => {
-            if let Some(v) = $val {
+            if let Some(v) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = v;
+                    db.$field = v.clone();
                 }
             }
         };
     }
-    // scalar into an Option<> target
     macro_rules! set_opt {
         ($id:literal, $field:ident, $val:expr) => {
-            if let Some(v) = $val {
+            if let Some(v) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = Some(v);
+                    db.$field = Some(v.clone());
                 }
             }
         };
     }
-    // string wire value parsed through a CLI validator `fn(&str) -> Result<T,String>`
     macro_rules! set_parsed {
-        ($id:literal, $field:ident, $val:expr, $parse:path) => {
-            if let Some(s) = $val {
+        ($id:literal, $field:ident, $val:expr, $parse:expr) => {
+            if let Some(s) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = $parse(&s)?;
+                    db.$field = ($parse)(s)?;
                 }
             }
         };
     }
-
-    // ── io ──
-    set!("spectrum", spectrum, cfg.io.spectrum);
-    set_opt!("database", database, cfg.io.database);
-    set!(
-        "uniprot_variants",
-        uniprot_variants,
-        cfg.io.uniprot_variants
-    );
-    set!(
-        "uniprot_isoforms",
-        uniprot_isoforms,
-        cfg.io.uniprot_isoforms
-    );
+    set!("uniprot_variants", uniprot_variants, cfg.io.uniprot_variants);
+    set!("uniprot_isoforms", uniprot_isoforms, cfg.io.uniprot_isoforms);
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
     set!("annotations", annotations, cfg.io.annotations);
     set!("knockoffs", knockoffs, cfg.io.knockoffs);
@@ -296,6 +286,177 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.io.uniprot_evidence,
         crate::parse_uniprot_evidence
     );
+    set_parsed!(
+        "enzyme",
+        enzyme,
+        cfg.search.enzyme,
+        crate::cli::parse_enzyme_list
+    );
+    if let Some(items) = &cfg.search.fixed_mods {
+        if !cli_set(m, "fixed_mods") {
+            db.fixed_mods = Some(mod_list("search.fixed_mods", items, true)?);
+        }
+    }
+    if let Some(items) = &cfg.search.variable_mods {
+        if !cli_set(m, "variable_mods") {
+            db.variable_mods = Some(mod_list("search.variable_mods", items, false)?);
+        }
+    }
+    set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
+    set_opt!("decoy_suffix", decoy_suffix, cfg.decoys.suffix);
+    Ok(())
+}
+
+/// `andes inference` / `andes quant finalize`: apply the database keys of the
+/// search's `--config` file (see [`apply_db`]).
+pub fn apply_protein_config(
+    p: &mut crate::cli::ProteinArgs,
+    m: &clap::ArgMatches,
+) -> Result<(), String> {
+    if let Some(path) = p.config.clone() {
+        apply_db(&RunConfig::load(&path)?, &mut p.db, m)?;
+    }
+    Ok(())
+}
+
+/// The modifications of a `search.fixed_mods` / `search.variable_mods` list.
+/// Each item is the CLI string `Name (sites)` or a map:
+///
+/// ```yaml
+/// - name: Phospho          # UNIMOD name, accession or alias; or a label with `mass`
+///   mass: 79.966331        # custom mass in Da (no UNIMOD lookup)
+///   sites: STY             # as inside `Name (sites)`; optional when `name` is `Name (sites)`
+///   neutral_loss: [97.976896]
+///   loss_class: phospho    # glyco | phospho | sulfo | generic
+///   restrict_to: annotated # annotated | any
+///   cleavage: blocked      # blocked | kept
+///   diagnostic_ions: [216.0426]
+/// ```
+pub fn mod_list(
+    key: &str,
+    items: &[serde_yaml::Value],
+    fixed: bool,
+) -> Result<crate::cli::ModList, String> {
+    use model::mod_spec::ModDecl;
+    let mut mods = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let at = |e: String| format!("{key}[{i}]: {e}");
+        let decl = match item {
+            serde_yaml::Value::String(s) => ModDecl::parse(s).map_err(|e| at(e.to_string()))?,
+            serde_yaml::Value::Mapping(map) => mod_decl(map).map_err(at)?,
+            _ => {
+                return Err(at(
+                    "expected `Name (sites)` or a map with `name` or `mass` and `sites`".into(),
+                ))
+            }
+        };
+        mods.extend(
+            decl.resolve(fixed, model::unimod::bundled())
+                .map_err(|e| at(e.to_string()))?,
+        );
+    }
+    Ok(crate::cli::ModList(mods))
+}
+
+/// One map item of a modification list.
+fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, String> {
+    use serde_yaml::Value;
+    let text = |key: &str, v: &Value| -> Result<String, String> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(format!("`{key}` must be a string")),
+        }
+    };
+    let numbers = |key: &str, v: &Value| -> Result<Vec<f64>, String> {
+        let one = |v: &Value| v.as_f64().ok_or_else(|| format!("`{key}` takes numbers"));
+        match v {
+            Value::Sequence(seq) => seq.iter().map(one).collect(),
+            v => Ok(vec![one(v)?]),
+        }
+    };
+    let mut d = model::mod_spec::ModDecl::default();
+    let mut sites = None;
+    for (k, v) in map {
+        let key = k.as_str().ok_or("modification keys are strings")?;
+        match key {
+            "name" => d.name = Some(text(key, v)?),
+            "mass" => {
+                d.mass = Some(
+                    v.as_f64()
+                        .ok_or("`mass` is a number (the mass shift in Da)")?,
+                )
+            }
+            "sites" => sites = Some(text(key, v)?),
+            "neutral_loss" => d.neutral_loss = numbers(key, v)?,
+            "loss_class" => d.loss_class = Some(text(key, v)?),
+            "restrict_to" => d.restrict_to = Some(text(key, v)?),
+            "cleavage" => d.cleavage = Some(text(key, v)?),
+            "diagnostic_ions" => d.diagnostic_ions = numbers(key, v)?,
+            other => {
+                return Err(format!(
+                    "unknown key `{other}` (expected name, mass, sites, neutral_loss, \
+                     loss_class, restrict_to, cleavage, diagnostic_ions)"
+                ))
+            }
+        }
+    }
+    match (sites, d.name.clone(), d.mass) {
+        (Some(s), _, _) => d.sites = s,
+        // `name: "Phospho (STY)"` carries its sites.
+        (None, Some(name), None) => {
+            let parsed = model::mod_spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
+            d.name = parsed.name;
+            d.sites = parsed.sites;
+        }
+        (None, _, _) => return Err("`sites` is missing".into()),
+    }
+    Ok(d)
+}
+
+/// Apply the YAML config onto the parsed `SearchArgs`, respecting CLI precedence.
+///
+/// For each parameter: if the user did NOT type the flag (`!cli_set`) and the
+/// YAML provides a value, the YAML value replaces the built-in default. Values
+/// written as strings (tolerances/ranges/enums) go through the exact CLI parsers.
+pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
+    // scalar field, value type == target type
+    macro_rules! set {
+        ($id:literal, $($field:ident).+, $val:expr) => {
+            if let Some(v) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = v;
+                }
+            }
+        };
+    }
+    // scalar into an Option<> target
+    macro_rules! set_opt {
+        ($id:literal, $($field:ident).+, $val:expr) => {
+            if let Some(v) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = Some(v);
+                }
+            }
+        };
+    }
+    // string wire value parsed through a CLI validator `fn(&str) -> Result<T,String>`
+    macro_rules! set_parsed {
+        ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
+            if let Some(s) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = ($parse)(&s)?;
+                }
+            }
+        };
+    }
+
+    // The database and modification keys, shared with `andes inference` and
+    // `andes quant finalize`.
+    apply_db(&cfg, &mut args.db, m)?;
+
+    // ── io ──
+    set!("spectrum", spectrum, cfg.io.spectrum);
+    set_opt!("database", database, cfg.io.database);
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
@@ -322,12 +483,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
         }
     }
-    set!("enzyme", enzyme, cfg.search.enzyme);
     set_parsed!(
         "enzyme_specificity",
         enzyme_specificity,
         cfg.search.enzyme_specificity,
-        crate::parse_enzyme_specificity
+        |s: &str| crate::cli::parse_enum("enzyme_specificity", s, true)
     );
     set!(
         "max_missed_cleavages",
@@ -345,7 +505,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         }
         args.localize = Some(v);
     }
-    set_opt!("mods", mods, cfg.search.mods);
     set_parsed!(
         "fragment_index",
         fragment_index,
@@ -381,13 +540,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "fragmentation",
         fragmentation,
         cfg.scoring.fragmentation,
-        crate::parse_fragmentation
+        |s: &str| crate::cli::parse_enum("fragmentation", s, true)
     );
     set_parsed!(
         "protocol",
         protocol,
         cfg.scoring.protocol,
-        crate::parse_protocol
+        |s: &str| crate::cli::parse_enum("protocol", s, true)
     );
     // The fragment tolerance is one choice: a `--fragment-tol-ppm` or
     // `--fragment-tol-da` on the command line replaces both config keys, so a
@@ -424,9 +583,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("peak_filter", peak_filter, cfg.scoring.peak_filter);
 
     // ── decoys ──
-    set!("decoy_strategy", decoy_strategy, cfg.decoys.strategy);
-    set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
-    set_opt!("decoy_suffix", decoy_suffix, cfg.decoys.suffix);
+    set_parsed!(
+        "decoy_strategy",
+        decoy_strategy,
+        cfg.decoys.strategy,
+        crate::cli::parse_decoy_strategy
+    );
     set!("decoy_seed", decoy_seed, cfg.decoys.seed);
 
     // ── chimeric ──
@@ -484,7 +646,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         if !cli_set(m, "predict") {
             args.predict = list
                 .iter()
-                .map(|s| crate::cli::parse_predict_feature(s))
+                .map(|s| crate::cli::parse_enum("predict entry", s, true))
                 .collect::<Result<_, _>>()?;
         }
     }
@@ -497,7 +659,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "predictor_backend",
         predictor_backend,
         cfg.rescoring.predictor_backend,
-        crate::cli::parse_predictor_backend
+        |s: &str| crate::cli::parse_enum("predictor_backend", s, true)
     );
     set_opt!("predictor_nce", predictor_nce, cfg.rescoring.predictor_nce);
     set_opt!(
@@ -1022,17 +1184,17 @@ glyco:
             .try_get_matches_from(base)
             .expect("parse baseline args");
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        assert!(!a.uniprot_variants);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
-        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
+        assert!(!a.db.uniprot_variants);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.db.uniprot_isoforms && !a.db.uniprot_chains);
         let cfg = RunConfig::from_yaml_str(
             "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
              uniprot_evidence: curated\n",
         )
         .unwrap();
         apply(cfg, &mut a, &matches).unwrap();
-        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
+        assert!(a.db.uniprot_variants && a.db.uniprot_isoforms && a.db.uniprot_chains);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Curated);
 
         let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
@@ -1044,7 +1206,7 @@ glyco:
         let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
         let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
         apply(cfg, &mut a, &cli).unwrap();
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Any);
     }
 
     /// The predictor keys apply through the CLI's validators; an explicit
@@ -1178,6 +1340,50 @@ glyco:
             .filter(|id| !CLI_ONLY.contains(&id.as_str()) && !mapped(id))
             .collect();
         assert!(missing.is_empty(), "flags with no config key: {missing:?}");
+    }
+
+    #[test]
+    fn modification_lists_apply_with_cli_precedence() {
+        let yaml = "search:\n  fixed_mods: [\"Carbamidomethyl (C)\", {name: MyTag, mass: 28.0313, sites: N-term}]\n  \
+                    variable_mods:\n    - Oxidation (M)\n    \
+                    - {name: \"Phospho (ST)\", neutral_loss: [97.976896], loss_class: phospho, restrict_to: annotated}\n    \
+                    - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: 215.1502}\n";
+        let a = applied(yaml, &[]).unwrap();
+        let f = &a.db.fixed_mods.as_ref().unwrap().0;
+        assert_eq!(f.len(), 2);
+        assert_eq!((f[0].name.as_str(), f[0].mass_delta), ("Carbamidomethyl", 57.021464));
+        assert_eq!((f[1].name.as_str(), f[1].mass_delta), ("MyTag", 28.0313));
+        assert!(f[1].accession.is_none() && f.iter().all(|m| m.fixed));
+        let v = &a.db.variable_mods.as_ref().unwrap().0;
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[1].neutral_losses, vec![97.976896]);
+        assert_eq!(v[1].loss_class, 2);
+        assert_eq!(v[1].annotated_site_mass, Some(79.966331));
+        assert_eq!(v[3].name, "GG");
+        assert!(v[3].blocks_cleavage);
+        assert_eq!(v[3].diagnostic_ions, vec![215.1502]);
+        // A list on the command line replaces the config's; the other list stays.
+        let a = applied(yaml, &["--variable-mods", "Phospho (Y)"]).unwrap();
+        assert_eq!(a.db.variable_mods.unwrap().0.len(), 1);
+        assert_eq!(a.db.fixed_mods.unwrap().0.len(), 2);
+        let a = applied("search:\n  variable_mods: []\n", &[]).unwrap();
+        assert!(a.db.variable_mods.unwrap().0.is_empty() && a.db.fixed_mods.is_none());
+        for (bad, msg) in [
+            (
+                "search:\n  variable_mods: [{name: Phospho, sites: S, nuetral_loss: [1.0]}]\n",
+                "unknown key `nuetral_loss`",
+            ),
+            ("search:\n  variable_mods: [Phosho (S)]\n", "did you mean Phospho"),
+            ("search:\n  variable_mods: [{mass: 1.0}]\n", "`sites` is missing"),
+            (
+                "search:\n  fixed_mods: [{name: Phospho, sites: S, restrict_to: annotated}]\n",
+                "needs a variable",
+            ),
+            ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
     }
 
     #[test]

@@ -594,6 +594,22 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) refine: bool,
 
+    /// Site localization of variable modifications (`ipf`); needs --rescore or --rescore-native
+    ///
+    /// `ipf`: inference of peptidoforms (the OpenSWATH/PyProphet hierarchical Bayesian
+    /// model) over every placement of each identified PSM's variable mods, after
+    /// rescoring. Writes <base>.ipf.tsv, and the site probabilities into the QPX
+    /// psms.parquet with --output-parquet. Experimental.
+    #[arg(long = "localize", value_name = "METHOD", value_parser = ["ipf"],
+          hide_short_help = true, help_heading = H_MODES)]
+    pub(crate) localize: Option<String>,
+
+    /// With --localize ipf: add a forms_debug column to <base>.ipf.tsv (diagnostics)
+    ///
+    /// Every placement as `sites|search score|IPF log-evidence`.
+    #[arg(long = "ipf-debug", hide = true, requires = "localize", help_heading = H_MODES)]
+    pub(crate) ipf_debug: bool,
+
     /// Intact glycopeptide search into a .glyco.pin (needs a glycan database, e.g. --glyco-species)
     ///
     /// Glycans come from the glycan database (--glyco-species, --glyco-glycan-gdb or

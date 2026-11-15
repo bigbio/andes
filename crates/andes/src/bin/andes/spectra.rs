@@ -369,8 +369,6 @@ pub(crate) fn build_spec_keys_from_metadata(
     charge_range: std::ops::RangeInclusive<u8>,
     min_peaks: u32,
 ) -> Vec<SpecKey> {
-    // Metadata only: no placeholder peak lists, which on a large file were a
-    // transient allocation of one tuple per peak for every spectrum.
     search::mass_calibrator::build_spec_keys_from_counts(
         meta.iter().map(|m| (m.precursor_charge, m.num_peaks)),
         &charge_range,
@@ -629,7 +627,6 @@ pub(crate) fn run_precursor_calibration(
 pub(crate) fn detect_dominant_activation(
     spectrum_path: &std::path::Path,
 ) -> Option<ActivationMethod> {
-    // Only mzML carries `<activation>`. Other formats: caller falls back.
     let ext_lower = spectrum_ext_lower(spectrum_path);
     if ext_lower.as_deref() != Some("mzml") {
         return None;
@@ -639,7 +636,6 @@ pub(crate) fn detect_dominant_activation(
 
     let reader = MzMLReader::new(input::open_buf_maybe_gz(spectrum_path).ok()?);
 
-    // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
         std::collections::HashMap::new();
     for (seen, item) in reader.enumerate() {
@@ -657,8 +653,6 @@ pub(crate) fn detect_dominant_activation(
         return None;
     }
 
-    // Find the dominant method. Ties are broken by ActivationMethod's
-    // declaration order via match below, which is stable.
     let dominant = counts
         .iter()
         // Deterministic on ties: HashMap iteration order is randomised per
@@ -701,11 +695,6 @@ pub(crate) fn detect_dominant_activation(
     Some(dominant)
 }
 
-/// Helper to call `input::detect_instrument_type` on an mzML path.
-///
-/// Mirrors the structure of `detect_dominant_activation` so the two
-/// detection passes look symmetric at the call site. Returns `None` for
-/// non-mzML inputs or when the mzML has no recoverable instrument metadata.
 pub(crate) fn detect_instrument_type_for_path(
     spectrum_path: &std::path::Path,
 ) -> Option<InstrumentType> {
@@ -959,8 +948,6 @@ mod format_routing_tests {
     use super::input_format_flags;
     use std::path::Path;
 
-    // A gzipped spectrum is read transparently (input::open_maybe_gz) and must be
-    // routed by its UNDERLYING extension, not the bare `.gz` (finding 2.5).
     #[test]
     fn gz_is_routed_by_the_underlying_extension() {
         // (is_mzml, is_raw, is_d, is_mgf)

@@ -151,7 +151,6 @@ mod tests {
         let selected_mz = (selected_neutral + z * PROTON) / z;
         let tol = tol_20ppm();
 
-        // Tight precursor check (selected m/z) → rejected (1.0 Da >> 20 ppm).
         let spec = Spectrum {
             precursor_mz: selected_mz,
             ..Default::default()
@@ -161,7 +160,6 @@ mod tests {
             "tight precursor check should reject the 1 Da off-precursor peptide"
         );
 
-        // Isolation window ±1.5 Da → accepted, near-zero error.
         let lo_mz = selected_mz - 1.5;
         let hi_mz = selected_mz + 1.5;
         let m = matches_isolation_window(&pep, charge, 0, lo_mz, hi_mz, &tol, 0.0)

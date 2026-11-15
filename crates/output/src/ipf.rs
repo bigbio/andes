@@ -19,7 +19,6 @@ use crate::percolator::PercolatorPsm;
 /// PSM q-value below which a target's ion evidence trains the ion PEP model.
 pub const TRAIN_Q: f64 = 0.01;
 
-/// One localized PSM.
 #[derive(Debug, Clone)]
 pub struct IpfRow {
     pub psm_id: String,
@@ -215,7 +214,6 @@ pub fn site_probs_label(r: &IpfRow) -> String {
         .join(";")
 }
 
-/// Write `<stem>.ipf.tsv`.
 pub fn write_ipf_tsv(path: &std::path::Path, rows: &[IpfRow]) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let debug = rows.iter().any(|r| !r.forms_debug.is_empty());

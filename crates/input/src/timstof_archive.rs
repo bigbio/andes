@@ -170,7 +170,6 @@ fn unpack_tar<R: Read>(reader: R, dir: &Path, archive: &Path) -> Result<(), DArc
 /// Deepest nesting searched for the run folder below the unpack root.
 const MAX_DEPTH: usize = 8;
 
-/// Whether `dir` is a TDF run folder.
 fn is_run_folder(dir: &Path) -> bool {
     dir.join("analysis.tdf").is_file() && dir.join("analysis.tdf_bin").is_file()
 }
@@ -203,7 +202,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// The two files of a run folder, as (name, bytes).
     const RUN_FILES: [(&str, &[u8]); 2] =
         [("analysis.tdf", b"sqlite"), ("analysis.tdf_bin", b"frames")];
 
@@ -315,7 +313,6 @@ mod tests {
         let truncated = gzip(&tar_bytes("x.d/"));
         let (_t, r) = unpack("bad.d.tgz", &truncated[..truncated.len() / 2]);
         assert!(r.is_err(), "{r:?}");
-        // A well-formed archive without a run folder.
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         w.start_file("readme.txt", zip::write::SimpleFileOptions::default())
             .unwrap();

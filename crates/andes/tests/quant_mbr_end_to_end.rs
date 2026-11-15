@@ -304,7 +304,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator(tmp.path());
 
-    // Stage path: search, library, one extract per run, finalize.
     let staged = tmp.path().join("staged");
     let q = staged_search(&staged, &perc);
     let targets = staged.join("s.percolator.target.psms.txt");
@@ -321,7 +320,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     ]);
     assert!(q.join("library.parquet").is_file());
     assert!(q.join("alignment.parquet").is_file());
-    // Extract in reverse order: the run index comes from the library.
     for r in RUNS.iter().rev() {
         run_andes(&["quant", "extract", "--quant-dir", s(&q), "--run", r]);
         assert!(q.join(format!("{r}.extract.parquet")).is_file());
@@ -349,7 +347,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     assert!(qpx.join("quantms.feature.parquet").is_file());
     assert!(qpx.join("quantms.pg.parquet").is_file());
 
-    // All-in-one path, with a temporary quant directory.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let pin = aio.join("a.pin");
@@ -381,7 +378,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         same_mbr_tables(&staged.join("out"), &aio.join("a")),
         "mbr.parquet or mbr_validation.parquet differs between the stage path and the all-in-one run"
     );
-    // The feature parquets hold the same column data.
     let staged_parquet = qpx.join("quantms.feature.parquet");
     assert!(
         parquet_column_data(&staged_parquet)
@@ -553,7 +549,6 @@ fn separate_searches_join_on_run_and_spec_id() {
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator(tmp.path());
 
-    // All-in-one over the three runs; its Percolator files give the scores.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let mut args = search_args();
@@ -667,7 +662,6 @@ fn separate_searches_join_on_run_and_spec_id() {
         "{err}"
     );
 
-    // Per-run results from the separate Percolator runs build a library.
     let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -871,7 +865,6 @@ fn mbr_donors_honour_the_pep_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator_with_pep(tmp.path(), "0.5");
 
-    // All-in-one.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let mut args = search_args();
@@ -896,7 +889,6 @@ fn mbr_donors_honour_the_pep_cap() {
     eprintln!("all-in-one --pep 0.01: {n} identified rows");
     assert_eq!(n, 0, "identified rows from PSMs above the PEP cap");
 
-    // Stages: `quant library --pep`.
     let staged = tmp.path().join("staged");
     let q = staged_search(&staged, &perc);
     let library = |pep: Option<&str>| {

@@ -29,8 +29,6 @@ struct Row {
     peaks: Vec<(f32, f32)>,
 }
 
-/// Write the flat training parquet at `path` from `rows`.
-/// Schema mirrors `read_msnet_parquet` in andes.rs.
 fn write_flat_parquet(path: &Path, rows: &[Row]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("seq", DataType::Utf8, false),
@@ -183,8 +181,6 @@ fn synthetic_rows() -> Vec<Row> {
     ]
 }
 
-/// Round-trip test: build flat parquet → `train-intensity-gbdt` CLI → reload
-/// store → `frag_intensity_model.is_some()` + `predict_value` is finite.
 #[test]
 fn train_intensity_gbdt_roundtrip() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -230,7 +226,6 @@ fn train_intensity_gbdt_roundtrip() {
         "frag_intensity_model must be present after train-intensity-gbdt"
     );
 
-    // The model must produce a finite prediction.
     let fim = param.frag_intensity_model.as_ref().unwrap();
     let n_features = scoring_crate::frag_features::N_FRAG_FEATURES;
     let dummy = vec![0.0f32; n_features];
@@ -251,7 +246,6 @@ fn train_intensity_gbdt_preserves_existing_models() {
 
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // First: train a rank-core model into the store via train-from-msnet.
     let s1 = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train")
         .arg("--in")
@@ -267,7 +261,6 @@ fn train_intensity_gbdt_preserves_existing_models() {
         .expect("run train-from-msnet");
     assert!(s1.success(), "train-from-msnet should exit 0, got {s1}");
 
-    // Second: run train-intensity-gbdt; must preserve "existing_model".
     let s2 = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train-intensity-gbdt")
         .arg("--in")

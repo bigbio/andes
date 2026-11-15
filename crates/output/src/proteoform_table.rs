@@ -59,7 +59,6 @@ pub struct ProteoformRow {
     pub quantity: Vec<f64>,
 }
 
-/// The residues of a Percolator peptide string (`K.PEPT+79.97IDEK.A`).
 pub fn bare_sequence(peptide: &str) -> String {
     let core = match (peptide.find('.'), peptide.rfind('.')) {
         (Some(a), Some(b)) if b > a => &peptide[a + 1..b],
@@ -81,7 +80,6 @@ pub fn mass_coincidence(delta_da: f64) -> Option<&'static str> {
     .map(|(name, _)| name)
 }
 
-/// Build the table from the rescored targets passing their `cutoffs`.
 pub fn proteoform_table(
     targets: &HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,
@@ -251,7 +249,6 @@ fn variant_alternative(p: &Protein, seq: &str, identified: Option<&BTreeSet<Stri
     parts.join("; ")
 }
 
-/// Write the table as TSV.
 pub fn write_proteoform_tsv(
     path: &std::path::Path,
     rows: &[ProteoformRow],
@@ -339,7 +336,6 @@ mod tests {
         index_with(Vec::new())
     }
 
-    /// [`index`] with `extra` target proteins.
     fn index_with(extra: Vec<Protein>) -> SearchIndex {
         let mut target = ProteinDb {
             proteins: vec![
@@ -466,7 +462,6 @@ mod tests {
             (p9.evidence, p9.specific_peptides, p9.shared_peptides),
             ("shared", 0, 1)
         );
-        // The P1 family members keep their own specific evidence.
         let can = rows.iter().find(|r| r.member == "sp|P1|A").unwrap();
         assert_eq!(can.specific_peptides, 2);
     }

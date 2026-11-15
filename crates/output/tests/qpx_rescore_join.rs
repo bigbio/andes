@@ -34,7 +34,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Run the shared BSA fixture search and return (spectra, queues, candidates, index, params).
 fn run_bsa_search() -> (
     Vec<model::spectrum::Spectrum>,
     Vec<search::psm::TopNQueue>,
@@ -82,7 +81,6 @@ fn run_bsa_search() -> (
         .build()
         .unwrap();
 
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
@@ -112,7 +110,6 @@ fn run_bsa_search() -> (
     (spectra, queues, candidates, idx, params)
 }
 
-/// Read the PEP column from a written `psms.parquet`.
 fn read_pep_column(psms_path: &Path) -> Vec<Option<f64>> {
     let file = File::open(psms_path).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -142,7 +139,6 @@ fn read_pep_column(psms_path: &Path) -> Vec<Option<f64>> {
     out
 }
 
-/// Harvest the SpecId (col 0) of each non-header PIN row.
 fn pin_spec_ids(pin_path: &Path) -> Vec<String> {
     BufReader::new(File::open(pin_path).unwrap())
         .lines()
@@ -158,7 +154,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
     let (spectra, queues, candidates, idx, params) = run_bsa_search();
     let tmp = tempfile::tempdir().unwrap();
 
-    // 1. Write the PIN, harvest its SpecIds (the Percolator PSMId join keys).
     let pin_path = tmp.path().join("bsa.pin");
     output::write_pin(&pin_path, &spectra, &queues, &candidates, &params, &idx).unwrap();
     let spec_ids = pin_spec_ids(&pin_path);
@@ -197,8 +192,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         );
     }
 
-    // 3. Write QPX WITH the rescore map → reconstructed SpecIds must hit the map
-    //    so every row's PEP is non-null.
     let qdir = tmp.path().join("rescored.idparquet");
     output::write_qpx(
         &qdir,
@@ -234,8 +227,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         peps.len()
     );
 
-    // The keys actually consumed are exactly the PIN SpecIds (no leftovers means
-    // the QPX reconstructed every key the PIN produced).
     let pin_set: HashSet<&String> = spec_ids.iter().collect();
     assert_eq!(
         pin_set.len(),
@@ -637,10 +628,6 @@ fn add_runner_up(
 #[test]
 fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
     let (spectra, mut queues, candidates, idx, params) = run_bsa_search();
-    // Give every scan a lower-ranked second candidate at the same charge and
-    // precursor, as the top-N chimeric search does: one competition group with
-    // two rows. The alternative is a different target peptide, so the writers'
-    // positional-isomer collapse keeps both rows.
     add_runner_up(&mut queues, &candidates);
     let tmp = tempfile::tempdir().unwrap();
     let pin_path = tmp.path().join("bsa.pin");

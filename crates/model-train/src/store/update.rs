@@ -49,19 +49,11 @@ use crate::store::write::{write_model_with_sources, SourceLedger};
 use crate::TrainError;
 use scoring_crate::param_model::Param;
 
-// ---------------------------------------------------------------------------
-// Type aliases (reduce type-complexity lint noise)
-// ---------------------------------------------------------------------------
-
 /// One entry in the all-models list: `(model_id, Param, sources)`.
 type ModelEntry = (String, Param, Vec<(SourceLedger, CountStats)>);
 
 /// A slice of borrowed model entries for writing.
 type ModelSlice<'a> = &'a [(&'a str, &'a Param, &'a [(SourceLedger, CountStats)])];
-
-// ---------------------------------------------------------------------------
-// Weight validation (finding 3.5)
-// ---------------------------------------------------------------------------
 
 /// Upper bound on a source weight. A weight is a count multiplier; a value this
 /// large would either be a units mistake or risk saturating the `u64` counts in
@@ -84,10 +76,6 @@ fn validate_weight(source_id: &str, weight: f32) -> Result<(), TrainError> {
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Reject a store path the update and attach writers cannot rewrite in place.
 ///
@@ -119,9 +107,6 @@ pub fn update_add(
     stats: CountStats,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
-    // Validate the incoming weight up front (finding 3.5) so a NaN/negative/huge
-    // value fails loudly at the API rather than silently erasing or saturating
-    // counts.
     validate_weight(&ledger.source_id, ledger.weight)?;
 
     ensure_single_file_store(path)?;
@@ -143,14 +128,12 @@ pub fn update_add(
         )));
     }
 
-    // Load per-source stats for all existing sources.
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::new();
     for l in existing_ledgers {
         let s = store.load_source_stats(model_id, &l.source_id)?;
         sources.push((l, s));
     }
 
-    // Append the new source.
     sources.push((ledger, stats));
 
     let candidate = estimate_from_sources(&sources, &template, est_cfg)?;
@@ -174,14 +157,12 @@ pub fn update_remove(
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
 
-    // Check the source exists.
     if !existing_ledgers.iter().any(|l| l.source_id == source_id) {
         return Err(TrainError::NoModel(format!(
             "source '{source_id}' not found in model '{model_id}'"
         )));
     }
 
-    // Load remaining sources (excluding the one being removed).
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::new();
     for l in existing_ledgers {
         if l.source_id == source_id {
@@ -208,7 +189,6 @@ pub fn update_reweight(
     weight: f32,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
-    // Validate the new weight up front (finding 3.5).
     validate_weight(source_id, weight)?;
 
     ensure_single_file_store(path)?;
@@ -414,10 +394,6 @@ pub fn attach_to_model(
     Ok(existed)
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
 /// Re-sum all per-source stats (each scaled by its effective weight, see
 /// [`effective_weight`]) and estimate a
 /// new [`Param`] from the combined counts.
@@ -436,9 +412,6 @@ fn estimate_from_sources(
     let today = today_naive();
     let mut combined = CountStats::new();
     for (ledger, stats) in sources {
-        // Validate every weight before scaling (finding 3.5) — this is the
-        // chokepoint that also covers weights loaded from Parquet ledgers, not
-        // just the API entry points.
         validate_weight(&ledger.source_id, ledger.weight)?;
         if let Some(h) = ledger.decay_half_life_days {
             if !(h.is_finite() && h > 0.0) {
@@ -519,7 +492,6 @@ fn write_all_models_with_sources_inner(
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     for (i, &(model_id, param, sources)) in models.iter().enumerate() {
-        // Write each model to a temp buffer and read back the batches.
         let tmp_path = path.with_extension(format!("tmp_{model_id}.parquet"));
         let blob = blobs.get(i).cloned().flatten();
         write_model_with_sources(&tmp_path, model_id, param, sources, blob)?;
@@ -547,12 +519,6 @@ fn write_all_models_with_sources_inner(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Date helpers (no-std-time-free: we use std::time for "today")
-// ---------------------------------------------------------------------------
-
-/// Return today as "days since 1970-01-01" (Julian day count).
-/// Uses `std::time::SystemTime`. Falls back to 0 on error.
 fn today_naive() -> u32 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => (d.as_secs() / 86400) as u32,
@@ -574,8 +540,6 @@ fn parse_date(date: &str) -> Option<u32> {
         return None;
     }
 
-    // Convert to Julian Day Number and subtract offset for 1970-01-01.
-    // Using the Gregorian formula (valid for 1970+):
     let jdn = julian_day_number(y, m, d);
     let epoch_jdn = julian_day_number(1970, 1, 1);
     // Pre-1970 dates are out of the supported range: treat them as invalid

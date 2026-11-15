@@ -35,7 +35,6 @@ fn reads_real_d_when_env_set() {
     for (i, result) in reader.enumerate().take(2000) {
         let spec = result.unwrap_or_else(|e| panic!("read spectrum {i}: {e}"));
 
-        // Every emitted spectrum is a searchable MS2: positive precursor m/z.
         assert!(
             spec.precursor_mz > 0.0,
             "spectrum {i} emitted with non-positive precursor m/z {}",
@@ -49,7 +48,6 @@ fn reads_real_d_when_env_set() {
             "spectrum {i} peaks are not ascending by m/z"
         );
 
-        // A real scan number is carried for the PIN `ScanNum`/`SpecID` columns.
         assert!(spec.scan.is_some(), "spectrum {i} has no scan number");
 
         count += 1;

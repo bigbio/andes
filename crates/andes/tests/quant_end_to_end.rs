@@ -277,7 +277,6 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
     };
     let (plain_h, plain_rows, plain_key) = run("plain", &["--tmt-unmix", "off"]);
     assert_eq!(plain_key.as_deref(), Some("off"));
-    // `auto` is the default.
     for (stem, extra, mode) in [
         ("unmix", &["--tmt-unmix", "on"][..], "on"),
         ("auto", &[][..], "auto"),
@@ -504,7 +503,6 @@ fn lfq_areas_track_the_designed_intensities() {
     let apex = col(&header, "rt_apex");
     let q = col(&header, "feature_q_value");
     let n_iso = col(&header, "n_isotopes");
-    // Designed apex intensities (monoisotopic) and apex RTs.
     let design: HashMap<&str, (f64, f64)> = HashMap::from([
         ("LVNELTEFAK", (1.0e6, 40.0)),
         ("YLYEIAR", (5.0e5, 70.0)),
@@ -667,7 +665,6 @@ fn quant_dir_table_contains_decoys() {
         "--threads",
         "2",
     ]);
-    // --quant-dir alone quantifies nothing: no feature parquet.
     assert!(out.path().join("slice.idparquet").is_dir());
     assert!(!out
         .path()

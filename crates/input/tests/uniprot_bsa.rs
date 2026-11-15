@@ -26,8 +26,6 @@ fn uniprot_xml_reads_like_the_uniprot_fasta() {
     let (x, f) = (&xml.db.proteins[0], &fasta.db.proteins[0]);
     assert_eq!(x.accession, f.accession);
     assert_eq!(x.sequence, f.sequence);
-    // Same header layout as UniProt's FASTA (the recommended name has since
-    // changed from "Serum albumin" to "Albumin").
     assert_eq!(
         x.description,
         "Albumin OS=Bos taurus OX=9913 GN=ALB PE=1 SV=4"

@@ -17,7 +17,6 @@ pub const FEAT_PEP_LEN: usize = 6;
 pub const FEAT_NFLANK_MOD: usize = 7;
 pub const FEAT_CFLANK_MOD: usize = 8;
 pub const FEAT_NCE: usize = 9;
-// New features (appended; existing indices unchanged)
 pub const FEAT_N_BASIC: usize = 10;
 pub const FEAT_PROTON_MOBILITY: usize = 11;
 pub const FEAT_BASIC_NFLANK: usize = 12;
@@ -75,20 +74,16 @@ fn flank_indices(n: usize, kind: IonKind, position: u32) -> Option<(usize, usize
     }
 }
 
-/// Map a residue byte to its 0-based integer index (`residue − b'A'`).
 #[inline]
 fn res_idx(b: u8) -> f32 {
     b.wrapping_sub(b'A') as f32
 }
 
-/// Return the modification mass delta (as f32) for residue at `idx`, or 0.0
-/// if the residue carries no modification.
 #[inline]
 fn mod_delta(p: &Peptide, idx: usize) -> f32 {
     p.residues[idx].mod_.as_ref().map_or(0.0, |m| m.mass_delta) as f32
 }
 
-/// Returns `true` if the residue byte is a basic residue (R, K, or H).
 #[inline]
 fn is_basic(b: u8) -> bool {
     matches!(b, b'R' | b'K' | b'H')
@@ -145,7 +140,6 @@ pub fn extract_frag_features(
         None => return f,
     };
 
-    // ---- Original features (indices 0-9, semantics unchanged) ----
     f[FEAT_ION_TYPE] = match kind {
         IonKind::B | IonKind::C => 0.0,
         IonKind::Y | IonKind::Z => 1.0,
@@ -164,14 +158,10 @@ pub fn extract_frag_features(
     f[FEAT_CFLANK_MOD] = mod_delta(p, ci);
     f[FEAT_NCE] = nce;
 
-    // ---- New features (indices 10-17) ----
-
-    // Proton mobility / basic-residue context (peptide-global)
     let n_basic = p.residues.iter().filter(|aa| is_basic(aa.residue)).count();
     f[FEAT_N_BASIC] = n_basic as f32;
     f[FEAT_PROTON_MOBILITY] = n_basic as f32 - precursor_charge as f32;
 
-    // Per-flank chemistry (N-side and C-side residue of the cleavage)
     let nr = p.residues[ni].residue;
     let cr = p.residues[ci].residue;
     f[FEAT_BASIC_NFLANK] = if is_basic(nr) { 1.0 } else { 0.0 };
@@ -179,7 +169,6 @@ pub fn extract_frag_features(
     f[FEAT_HYDRO_NFLANK] = hydropathy(nr);
     f[FEAT_HYDRO_CFLANK] = hydropathy(cr);
 
-    // PTM context
     let total_mods = p.residues.iter().filter(|aa| aa.mod_.is_some()).count();
     f[FEAT_TOTAL_MODS] = total_mods as f32;
 
@@ -197,8 +186,6 @@ pub fn extract_frag_features(
     };
     f[FEAT_NEAREST_MOD_DIST] = nearest_mod_dist;
 
-    // Fragment charge state (1+ / 2+). Lets the model learn that 2+ fragments
-    // carry different relative intensity than their 1+ counterparts.
     f[FEAT_FRAG_CHARGE] = frag_charge as f32;
 
     f

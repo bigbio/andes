@@ -41,8 +41,6 @@ const STRONG_RETENTION: [u8; 6] = *b"WFLIYM";
 /// counterweight.
 const POLAR_CHARGED: [u8; 8] = *b"DEKRHNQS";
 
-// ---- Feature layout (fixed; indices are load-bearing for trained coeffs) ----
-
 /// Number of AA composition-count features (one per standard residue).
 pub const N_AA_FEATURES: usize = 20;
 
@@ -89,29 +87,24 @@ pub fn rt_features(peptide: &Peptide) -> Vec<f32> {
     let residues = &peptide.residues;
     let n = residues.len();
 
-    // AA composition counts (indices 0..20).
     for aa in residues {
         if let Some(i) = AA_ORDER.iter().position(|&r| r == aa.residue) {
             f[i] += 1.0;
         }
     }
 
-    // Length + mass.
     f[FEAT_LENGTH] = n as f32;
     f[FEAT_MASS_KDA] = (peptide.mass() / 1000.0) as f32;
 
-    // Hydropathy sum + mean (reuse the single Kyte-Doolittle source).
     let hydro_sum: f32 = residues.iter().map(|aa| hydropathy(aa.residue)).sum();
     f[FEAT_HYDRO_SUM] = hydro_sum;
     f[FEAT_HYDRO_MEAN] = if n > 0 { hydro_sum / n as f32 } else { 0.0 };
 
-    // Terminal residue hydropathy (position-weighted).
     if n > 0 {
         f[FEAT_HYDRO_NTERM] = TERMINAL_HYDRO_WEIGHT * hydropathy(residues[0].residue);
         f[FEAT_HYDRO_CTERM] = TERMINAL_HYDRO_WEIGHT * hydropathy(residues[n - 1].residue);
     }
 
-    // Strong-retention vs polar/charged counts.
     f[FEAT_STRONG_COUNT] = residues
         .iter()
         .filter(|aa| STRONG_RETENTION.contains(&aa.residue))
@@ -121,7 +114,6 @@ pub fn rt_features(peptide: &Peptide) -> Vec<f32> {
         .filter(|aa| POLAR_CHARGED.contains(&aa.residue))
         .count() as f32;
 
-    // Modifications: count + summed mass-delta.
     let mut mod_count = 0.0f32;
     let mut mod_mass_sum = 0.0f32;
     for aa in residues {
@@ -133,7 +125,6 @@ pub fn rt_features(peptide: &Peptide) -> Vec<f32> {
     f[FEAT_MOD_COUNT] = mod_count;
     f[FEAT_MOD_MASS_SUM] = mod_mass_sum;
 
-    // Bias term.
     f[FEAT_BIAS] = 1.0;
 
     f
@@ -193,7 +184,6 @@ impl RtIndexModel {
             .sum()
     }
 
-    /// Convenience: extract features from a peptide and predict.
     pub fn predict_peptide(&self, peptide: &Peptide) -> f64 {
         self.predict_index(&rt_features(peptide))
     }
@@ -257,7 +247,6 @@ pub fn calibrate(anchors: &[(f64, f64)]) -> Option<(f64, f64)> {
         return None;
     }
     let anchors = &finite[..];
-    // First pass over all anchors.
     let (slope0, intercept0) = ols_line(anchors)?;
 
     // Compute residuals, trim the worst ~20%, refit. Deterministic: sort by
@@ -338,7 +327,6 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
         a.swap(col, pivot);
         b.swap(col, pivot);
 
-        // Eliminate below.
         for row in (col + 1)..n {
             let factor = a[row][col] / a[col][col];
             if factor != 0.0 {
@@ -349,7 +337,6 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
             }
         }
     }
-    // Back-substitution.
     let mut x = vec![0.0f64; n];
     for row in (0..n).rev() {
         let mut s = b[row];
@@ -377,7 +364,6 @@ mod tests {
 
     #[test]
     fn features_are_deterministic_and_correct() {
-        // PEPTIDE = P,E,P,T,I,D,E
         let p = unmod_pep(b"PEPTIDE");
         let f = rt_features(&p);
         assert_eq!(f.len(), N_RT_FEATURES);
@@ -408,11 +394,9 @@ mod tests {
         // Polar/charged (D,E,K,R,H,N,Q,S): E,D,E → 3.
         assert_eq!(f[FEAT_POLAR_COUNT], 3.0);
 
-        // No mods.
         assert_eq!(f[FEAT_MOD_COUNT], 0.0);
         assert_eq!(f[FEAT_MOD_MASS_SUM], 0.0);
 
-        // Determinism: same input, same output.
         assert_eq!(rt_features(&p), f);
     }
 
@@ -445,7 +429,6 @@ mod tests {
     #[test]
     fn seed_index_ranks_hydrophobic_higher() {
         let model = RtIndexModel::seed();
-        // A hydrophobic peptide should out-index a hydrophilic one.
         let hydrophobic = model.predict_peptide(&unmod_pep(b"LLIIVV"));
         let hydrophilic = model.predict_peptide(&unmod_pep(b"DEKRDE"));
         assert!(
@@ -456,14 +439,12 @@ mod tests {
 
     #[test]
     fn fit_recovers_known_coefficients() {
-        // Ground-truth coefficient vector (arbitrary but fixed).
         let mut truth = vec![0.0f64; N_RT_FEATURES];
         for (i, c) in truth.iter_mut().enumerate() {
             *c = 0.1 * (i as f64 + 1.0);
         }
         let truth_model = RtIndexModel::new(truth.clone()).unwrap();
 
-        // Generate deterministic pseudo-random feature vectors and exact targets.
         let mut samples = Vec::new();
         let mut state: u64 = 0x1234_5678;
         let mut next = || {

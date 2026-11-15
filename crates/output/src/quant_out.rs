@@ -150,12 +150,10 @@ pub struct TransferInfo {
 }
 
 impl TmtRow {
-    /// Summed raw reporter intensity.
     pub fn intensity_sum(&self) -> f32 {
         self.raw.iter().map(|v| v.max(0.0)).sum()
     }
 
-    /// Summed reporter signal-to-noise, when noise is known.
     pub fn sn_sum(&self) -> Option<f32> {
         self.sn.as_ref().map(|sn| sn.iter().sum())
     }
@@ -214,7 +212,6 @@ pub const LFQ_RUNS_KEY: &str = "andes.lfq.runs";
 pub const LFQ_FEATURE_FDR_KEY: &str = "andes.lfq.feature_fdr";
 pub const LFQ_MIN_COSINE_KEY: &str = "andes.lfq.min_cosine";
 
-/// The column-name prefix of a plex's channels (`tmt` or `itraq`).
 fn channel_prefix(plex: Plex) -> &'static str {
     if matches!(plex, Plex::Itraq4 | Plex::Itraq8) {
         "itraq"
@@ -1214,13 +1211,10 @@ mod tests {
         assert_eq!((passed.value(0), passed.value(1)), (true, false));
         let scan = column::<Int32Array>(b, "scannr", &p).unwrap();
         assert_eq!(scan.value(0), 5);
-        // Without a correction matrix the channels hold the raw values and
-        // there is no raw block.
         write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], false, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert_eq!(names(&t).len(), 13 + 4 + 4 + 4);
         assert_eq!(f32_at(&t.batches[0], "itraq_114", &p), [Some(1.0)]);
-        // A row whose channel count does not match the plex is refused.
         let mut short = tmt_row();
         short.raw.pop();
         assert!(write_tmt_parquet(&p, Plex::Itraq4, &[short], false, None).is_err());
@@ -1261,7 +1255,6 @@ mod tests {
         let q = column::<Float64Array>(b, "quant_q", &p).unwrap();
         assert_eq!((opt(q, 0), opt(q, 1)), (None, Some(0.004)));
         assert_eq!(f32_at(b, "donor_batch_cos", &p), [None, Some(0.99)]);
-        // The default writer is the 1.1 layout without the block.
         write_tmt_parquet(&p, Plex::Itraq4, &[tmt_row()], true, None).unwrap();
         let t = read_tmt_parquet(&p).unwrap();
         assert!(!t.meta.contains_key(TMT_MBR_KEY));
@@ -1287,7 +1280,6 @@ mod tests {
             Some("a=0.40,b=1.00")
         );
         let header = names(&t);
-        // The columns of a run without the unmix block keep their positions.
         assert_eq!(header.len(), 13 + 8 + 4 + 4 + 1 + 4);
         assert_eq!(header[25], "sn_itraq_114");
         assert_eq!(header[29], "interference");

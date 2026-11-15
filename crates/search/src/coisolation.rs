@@ -42,7 +42,6 @@ pub(crate) fn detect_coisolated(
     max_kl: f32,
     max_n: usize,
 ) -> Vec<CoIsolated> {
-    // Candidate monoisotopic peaks = peaks inside the window, sorted by intensity desc.
     let lo_idx = ms1_peaks.partition_point(|&(mz, _)| mz < win_lo);
     let mut cands: Vec<(f64, f32)> = ms1_peaks[lo_idx..]
         .iter()
@@ -76,7 +75,6 @@ pub(crate) fn detect_coisolated(
         if is_selected_isotope(mz) {
             continue;
         }
-        // Don't re-report a peak that's an isotope of an already-accepted envelope.
         if out.iter().any(|c| {
             let d = (mz - c.mono_mz).abs();
             (0..6).any(|k| (d - k as f64 * ISOTOPE / c.charge as f64).abs() <= tol_da)
@@ -268,9 +266,6 @@ pub(crate) fn search_secondary(
     //    the residual `ScoredSpectrum` is built at the co-isolated precursor mass.
     let mut claimed = primary_matched_peak_keys(spec, primary, scorer);
     claimed.extend(prior_claimed.iter().copied());
-    // Build the residual peak list in a single pass (drop claimed peaks) instead
-    // of cloning the whole Spectrum and `retain()`-ing it — avoids copying the
-    // full peak vector per co-isolated secondary on dense Astral scans.
     let residual_peaks: Vec<(f64, f32)> = spec
         .peaks
         .iter()
@@ -323,7 +318,6 @@ pub(crate) fn search_secondary(
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
-            // Exact-mass gate (the nominal range is integer-coarse).
             if !in_secondary_mass_window(cand.peptide.mass(), co_neutral, tol_left, tol_right) {
                 continue;
             }
@@ -335,7 +329,6 @@ pub(crate) fn search_secondary(
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
             let edge = psm_edge_score(&res_ss, &cand.peptide, scorer, z);
-            // Production RawScore scale: `score_psm(...) + cleavage_credit`.
             let cleavage = crate::match_engine::cleavage_credit_for(cand, params.enzyme, aa_set);
             let raw_score = pin + cleavage as f32;
 
@@ -577,8 +570,6 @@ pub(crate) mod tests {
             "only the selected precursor -> no co-isolation"
         );
     }
-
-    // ── Targeted second-peptide residual search ─────────────────────────────
 
     use crate::PreparedSearch;
     use model::activation::ActivationMethod;
@@ -1029,7 +1020,6 @@ pub(crate) mod tests {
         };
         let rank = run(crate::search_params::ScoreMode::Rank);
         let f = &rank.features;
-        // RankScoreFloat is the unrounded RawScore, never left at 0.
         assert_ne!(f.rank_score_float, 0.0);
         assert!(
             (f.rank_score_float - rank.score).abs() < 0.5 * f.num_matched_main_ions as f32 + 1.0,
@@ -1081,7 +1071,6 @@ pub(crate) mod tests {
 
         let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
         let z = 2u8;
-        // Raw observed mass biased high by `shift_ppm` (so adjusted == true mass).
         let true_mass = planted.mass();
         let raw_neutral = true_mass / (1.0 - shift_ppm * 1e-6);
         let co_mz = (raw_neutral + z as f64 * PROTON) / z as f64;
@@ -1154,12 +1143,10 @@ pub(crate) mod tests {
         };
         let (center, left, right) = secondary_mass_window(co, &params);
         assert_eq!((left, right), (0.05, 0.5));
-        // 0.3 Da heavier is inside the right tolerance, 0.3 Da lighter is outside the left.
         assert!(in_secondary_mass_window(center + 0.3, center, left, right));
         assert!(!in_secondary_mass_window(center - 0.3, center, left, right));
         assert!(in_secondary_mass_window(center - 0.04, center, left, right));
         assert!(!in_secondary_mass_window(center + 0.6, center, left, right));
-        // The nominal bucket range covers both sides.
         let (lo, hi) = secondary_nominal_window(co, &params);
         assert!(lo <= nominal_from(center - left - H2O));
         assert!(hi >= nominal_from(center + right - H2O));

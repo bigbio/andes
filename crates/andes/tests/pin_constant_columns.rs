@@ -6,11 +6,6 @@
 //! than hygiene. What is cheap, and what this test does, is pin the set so a NEW
 //! always-zero feature cannot be added without someone noticing.
 //!
-//! Worth recording why pruning is not proposed here: the glyco prune was worth
-//! 256.8 -> 384.6 glycoPSMs, but the benchmark record attributes that to a
-//! data-starved classifier at a few hundred PSMs and states that at ~7,250 PSMs
-//! "the pruning buys nothing". The standard search is in the second regime, so this
-//! is a defect-class guard, not an expected identification win.
 //!
 //! THREE of these are structural — hardcoded 0.0 for every row in every mode,
 //! including under `--chimeric`:

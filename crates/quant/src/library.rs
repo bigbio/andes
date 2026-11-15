@@ -53,7 +53,6 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         .enumerate()
         .filter_map(|(id, b)| b.map(|(d, s)| (id as u32, d, s)))
         .collect();
-    // Score desc; on ties decoys first (conservative), then id for determinism.
     ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
 
     let mut fdr = Vec::with_capacity(ranked.len());
@@ -787,7 +786,6 @@ mod tests {
     #[test]
     fn entries_sorted_by_mz() {
         let mut m = meta(200);
-        // Reverse the m/z order relative to ids.
         for (i, x) in m.iter_mut().enumerate() {
             x.mz = 900.0 - i as f64;
         }
@@ -1038,7 +1036,6 @@ mod tests {
         assert_eq!(lib.entries[0].best_rt, vec![(0, 11.0), (1, 12.0)]);
     }
 
-    /// The pre-streaming `build_library`, kept to check [`LibraryBuilder`].
     fn reference_library(
         psms: &[PsmIn],
         meta: Vec<PrecursorMeta>,
@@ -1059,7 +1056,6 @@ mod tests {
             .collect();
         let qs = precursor_qvalues(&rows);
 
-        // Group the donor PSMs of confident precursors by precursor id.
         let mut by_prec: Vec<&PsmIn> = valid
             .iter()
             .copied()
@@ -1078,7 +1074,6 @@ mod tests {
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut obs: Vec<Observation> = Vec::new();
         let mut decoy_obs: Vec<Observation> = Vec::new();
-        // NaN scores rank worst, as in the confidence gate.
         let score_of = |p: &PsmIn| {
             if p.score.is_nan() {
                 f64::NEG_INFINITY

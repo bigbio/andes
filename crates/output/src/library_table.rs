@@ -35,9 +35,7 @@ use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
 /// Major version of both layouts. A reader rejects any other major.
 pub const LIBRARY_SCHEMA_MAJOR: u32 = 5;
-/// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
-/// File name of the alignment table inside the quant directory.
 pub const ALIGNMENT_FILE: &str = "alignment.parquet";
 
 const LIBRARY_KEY: &str = "andes.library.schema";
@@ -266,7 +264,6 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
     h.hex()
 }
 
-/// `<dir>/library.parquet` and `<dir>/alignment.parquet`.
 pub fn library_paths(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join(LIBRARY_FILE), dir.join(ALIGNMENT_FILE))
 }
@@ -583,7 +580,6 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
     )
 }
 
-/// Writes `<dir>/library.parquet` and `<dir>/alignment.parquet`.
 pub fn write_library(dir: &Path, lib: &StoredLibrary) -> Result<(), String> {
     write_versioned(dir, lib, SCHEMA_VERSION)
 }

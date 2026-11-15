@@ -35,7 +35,6 @@ pub const SUPPORT_MIN_MATCHED: u8 = 4;
 /// ... and at least this spectral angle.
 pub const SUPPORT_MIN_ANGLE: f32 = 0.6;
 
-/// b or y ion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IonKind {
     B,
@@ -51,7 +50,6 @@ pub struct Ion {
 }
 
 impl Ion {
-    /// `b4`, `y7`, `y9^2`.
     pub fn label(&self) -> String {
         let k = match self.kind {
             IonKind::B => 'b',
@@ -64,7 +62,6 @@ impl Ion {
         }
     }
 
-    /// The inverse of [`Ion::label`].
     pub fn parse(label: &str) -> Option<Ion> {
         let kind = match label.as_bytes().first()? {
             b'b' => IonKind::B,
@@ -85,7 +82,6 @@ impl Ion {
     }
 }
 
-/// A theoretical fragment: its m/z and ion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fragment {
     pub mz: f64,
@@ -280,7 +276,6 @@ pub fn score_scan(lib: &LibrarySpectrum, peaks: &[(f32, f32)], tol: Tolerance) -
 /// One reduced MS2 scan of a run.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Ms2Scan {
-    /// The scan's native id.
     pub native_id: String,
     /// The PSM SpecId of its rank-1 match without the `_<rank>[_<row>]`
     /// suffix: `"<title>_<scan number>"`.
@@ -326,7 +321,6 @@ impl Ms2Scan {
     }
 }
 
-/// The best scan of a probe.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Ms2Evidence {
     /// Scans whose isolation window holds the probe's m/z in its elution
@@ -548,7 +542,6 @@ mod tests {
             .map(|f| f.intensity)
             .fold(0.0, f32::max);
         assert_eq!(max, 1.0);
-        // Too few matches: no library spectrum.
         let ladder = fragment_ladder(&masses("LGEYGFQNALIVR"), 2);
         let two = peaks_of(&[(ladder[0].mz, 10.0), (ladder[3].mz, 5.0)]);
         assert!(library_spectrum(&ladder, &two, TOL).is_none());
@@ -639,11 +632,9 @@ mod tests {
         assert_eq!(ev.n_scans, 1);
         assert_eq!(ev.best, ScanMatch::default());
         assert!(!ev.supports());
-        // So is an excluded scan.
         let ev = index.best_match(&lib, 700.0, (90.0, 110.0), None, &[100.0], TOL);
         assert_eq!(ev.n_scans, 1);
         assert_eq!(ev.best.n_matched, 0);
-        // No scan: zeros.
         let ev = index.best_match(&lib, 900.0, (90.0, 110.0), None, &[], TOL);
         assert_eq!(ev, Ms2Evidence::default());
         let ev = index.best_match(&lib, f64::NAN, (90.0, 110.0), None, &[], TOL);

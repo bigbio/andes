@@ -6,11 +6,6 @@
 //! never calls it — it hand-mirrors the same assignments instead. That mirror has been
 //! wrong twice:
 //!
-//!   * the 2026-07-09 pass wired five fields and missed `delta_raw_score` and
-//!     `strong_score_cal`, so every glyco PIN shipped with `DeltaRankScore` hard 0.0 —
-//!     a top-tier Percolator feature, absent for two releases with no symptom other
-//!     than degraded discrimination;
-//!   * the same shape recurred for the RT features, which needed a third site.
 //!
 //! A constant-zero feature column cannot be spotted by any type check and does not fail
 //! a search: it silently costs identifications. So this test reads the sources and
@@ -33,7 +28,6 @@ fn standard_post_topn_fields(src: &str) -> Vec<String> {
         if !line.contains("fill_post_topn(|psm|") && !line.contains("let make_features = |") {
             continue;
         }
-        // Walk the closure body by brace depth from the call site.
         let mut depth: i32 = 0;
         let mut opened = false;
         for l in &lines[i..] {
@@ -67,7 +61,6 @@ fn assigned_features(line: &str) -> Vec<String> {
             .collect();
         let consumed = name.len().max(1);
         let tail = after[name.len()..].trim_start();
-        // Assignment only — not a read, and not `==`.
         if !name.is_empty() && tail.starts_with('=') && !tail.starts_with("==") {
             out.push(name);
         }

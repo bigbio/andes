@@ -3,7 +3,6 @@
 
 use model::mass::{nominal_from, C, H, H2O, INTEGER_MASS_SCALER, N, O, PROTON, S};
 
-/// Bit-equality on f64 — masses must match to the full mantissa.
 fn bit_eq(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits()
 }

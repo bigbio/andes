@@ -151,7 +151,6 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         return Err("no data rows".into());
     }
 
-    // One setting for the whole run.
     agree(&rows, CLEAVAGE, |r| r.enzymes.join("+"))?;
     agree(&rows, MODS, |r| {
         let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
@@ -266,14 +265,12 @@ fn agree(
     Ok(())
 }
 
-/// Lower-case, single-spaced header, so `Comment [Data File]` matches.
 fn norm_header(h: &str) -> String {
     let h = h.trim().to_ascii_lowercase();
     let h = h.split_whitespace().collect::<Vec<_>>().join(" ");
     h.replace(" [", "[").replace("[ ", "[").replace(" ]", "]")
 }
 
-/// A cell's value; `None` for empty cells and the SDRF reserved words.
 fn value(cell: &str) -> Option<String> {
     let v = cell.trim();
     let lower = v.to_ascii_lowercase();
@@ -302,7 +299,6 @@ fn key_values(v: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// The NT (name) of a key-value cell, or the cell itself.
 fn nt(v: &str) -> String {
     key_values(v)
         .remove("NT")
@@ -413,7 +409,6 @@ impl ModParam {
         })
     }
 
-    /// `Name (sites)` as `--fixed-mods` / `--variable-mods` take it.
     fn item(&self) -> Result<String, String> {
         let sites = match (self.position.as_str(), self.residues.is_empty()) {
             ("Anywhere", _) => self.residues.clone(),
@@ -434,7 +429,6 @@ impl ModParam {
         ))
     }
 
-    /// Identity for the row-agreement check.
     fn key(&self) -> String {
         format!(
             "{} ({} {}) {}",
@@ -648,7 +642,6 @@ fn dissociation_of(v: &str) -> Option<ActivationMethod> {
     }
 }
 
-/// Which SDRF-settable keys the `--config` file gave (the config wins over the SDRF).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ConfigKeys {
     spectrum: bool,
@@ -858,7 +851,6 @@ mod tests {
         assert_eq!(s.quant, Some(Quant::Lfq));
         assert_eq!(s.dissociation, Some(ActivationMethod::HCD));
         assert_eq!(s.fragment_tol.as_deref(), Some("0.02 Da"));
-        // The lists are valid --fixed-mods / --variable-mods values.
         model::mod_spec::parse_mod_list(&s.fixed_mods.unwrap().join(", "), true).unwrap();
         model::mod_spec::parse_mod_list(&s.variable_mods.unwrap().join(", "), false).unwrap();
     }
@@ -898,7 +890,6 @@ mod tests {
                 "TMT6plex (N-term)".to_string()
             ])
         );
-        // 131C needs the 11-plex.
         let mut rows11 = rows.clone();
         rows11.push(row("a.raw", "TMT131C"));
         let refs: Vec<Vec<&str>> = rows11

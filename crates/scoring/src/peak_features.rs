@@ -56,11 +56,8 @@ const NH3: f64 = 17.026549; // no model::mass equivalent
 pub struct PeakFeatureCtx {
     pub precursor_mz: f64,
     pub charge: u8,
-    /// (precursor_mz - PROTON) * charge — the observed neutral parent mass.
     pub parent_neutral_mass: f64,
-    /// Summed intensity of the active (kept) peaks.
     pub total_intensity: f64,
-    /// Maximum intensity among the active peaks.
     pub base_peak_intensity: f32,
     /// Half-width (Da) of the local window for local-rank/density/top-K feats.
     pub window_da: f64,
@@ -145,7 +142,6 @@ pub fn extract_peak_features(
             rank.saturating_sub(1) as f32 / kept_count as f32
         };
 
-        // Local window: peaks with m/z in [mz - window, mz + window].
         let lo = peaks.partition_point(|&(m, _)| m < mz - ctx.window_da);
         let hi = peaks.partition_point(|&(m, _)| m <= mz + ctx.window_da);
         let win = &peaks[lo..hi];
@@ -233,26 +229,18 @@ mod tests {
         };
         let f = extract_peak_features(&peaks, &ranks, &ctx);
         assert_eq!(f.len(), 3);
-        // peak 1 (mz 200.05, intensity 100, global rank 1):
         let p1 = &f[1];
-        // intensity_over_basepeak = 100/100 = 1.0
         assert!((p1[idx("intensity_over_basepeak")] - 1.0).abs() < 1e-6);
-        // intensity_over_tic = 100/160
         assert!((p1[idx("intensity_over_tic")] - (100.0 / 160.0)).abs() < 1e-6);
-        // global_rank_frac = (1-1)/3 = 0.0
         assert!((p1[idx("global_rank_frac")] - 0.0).abs() < 1e-6);
-        // mass_defect = 200.05 - 200.0 = 0.05
         assert!((p1[idx("mass_defect")] - 0.05).abs() < 1e-4);
-        // mz_frac_of_precursor = 200.05/500.0
         assert!((p1[idx("mz_frac_of_precursor")] - (200.05 / 500.0)).abs() < 1e-6);
         // is_top1_in_window: within ±50 Da of 200.05 the peaks are {200.05}
         // (100.0 is >50 away, 300.0 is >50 away) → it is the top → 1.0
         assert!((p1[idx("is_top1_in_window")] - 1.0).abs() < 1e-6);
 
-        // spacing sentinels at the ends:
         assert!((f[0][idx("spacing_left")] - SPACING_SENTINEL).abs() < 1e-6); // first peak: no left neighbor
         assert!((f[2][idx("spacing_right")] - SPACING_SENTINEL).abs() < 1e-6); // last peak: no right neighbor
-                                                                               // spacing_right of peak 0 = 200.05 - 100.0 = 100.05
         assert!((f[0][idx("spacing_right")] - 100.05).abs() < 1e-3);
         // a binary partner flag: no isotope/complement/loss partner exists in this sparse scan → 0.0
         assert!((f[1][idx("has_isotope_plus1")] - 0.0).abs() < 1e-6);
@@ -300,7 +288,6 @@ mod tests {
         assert!((ctx.match_tol_da - 0.5).abs() < 1e-9); // Da tolerance is m/z-independent
     }
 
-    // Test-only helper to look up a feature column by name.
     fn idx(name: &str) -> usize {
         FEATURE_NAMES
             .iter()

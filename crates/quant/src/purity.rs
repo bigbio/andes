@@ -71,7 +71,6 @@ pub fn precursor_purity(
     for (dir, edge) in [(-1.0f64, lo), (1.0, hi)] {
         let mut expected = anchor_mz + dir * spacing;
         let (mut inside, mut steps) = (0usize, 0usize);
-        // Walk while the next rung has not passed the window edge on this side.
         while dir * (edge - expected) >= 0.0
             && inside < MAX_WINDOW_STEPS
             && steps < MAX_LADDER_STEPS
@@ -180,7 +179,6 @@ mod tests {
         assert!((p - 1.0).abs() < 1e-6, "{p}");
     }
 
-    /// A target equal to the precursor m/z gives the precursor-centred result.
     #[test]
     fn target_at_the_precursor_matches_the_fallback() {
         let mz = 500.25;

@@ -31,7 +31,6 @@ pub struct Ms1Scan {
 /// An MS3 (or higher) product scan kept for reporter-ion quantification.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProductScan {
-    /// Native id (`<spectrum id>` in mzML, the controller id in `.raw`).
     pub id: String,
     pub scan: Option<i32>,
     pub rt_seconds: Option<f64>,
@@ -55,14 +54,12 @@ pub struct ProductScan {
 /// Acquisition context of one emitted MS2 scan, keyed by its native id.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScanContext {
-    /// Native id of the MS2 (the emitted spectrum's title).
     pub id: String,
     /// Native id of the survey scan the MS2 was triggered from (mzML
     /// `<precursor spectrumRef>`; the `Master Scan Number` trailer in `.raw`).
     pub parent_id: Option<String>,
     /// Acquired m/z range (`scan window lower/upper limit`), when recorded.
     pub scan_window: Option<(f64, f64)>,
-    /// FAIMS compensation voltage, when the run used FAIMS.
     pub faims_cv: Option<f32>,
     /// Noise level in the reporter-ion region of the MS2, when the source
     /// records it and noise capture is on (reporter signal-to-noise at MS2).

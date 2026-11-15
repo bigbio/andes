@@ -112,8 +112,6 @@ pub fn mod_site_features(
 
     let n_u = n as u32;
 
-    // Enumerate charge-1 b/y ions once; resolve each to a peak match.
-    // `matched[(kind, position)] -> intensity` for matched ions only.
     let predicted = predict_by_ions(peptide, 1..=1);
 
     let mut shifted_matched: u32 = 0;
@@ -127,7 +125,6 @@ pub fn mod_site_features(
     let mut y_matched = vec![false; n];
 
     for ion in &predicted {
-        // mz for charge-1 ions.
         let td = tol_da(ion.mz, feature_tol, feature_tol_is_ppm);
         let matched = scored_spec.nearest_peak_full(ion.mz, td);
 
@@ -228,7 +225,6 @@ mod tests {
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;
 
-    /// Build an unmodified peptide from a residue string.
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
             seq.bytes()
@@ -274,7 +270,6 @@ mod tests {
         Peptide::new(residues, b'K', b'R')
     }
 
-    /// Build a peptide from `seq` with a FIXED mod on the residue at `mod_idx`.
     fn pep_with_fixed_mod(seq: &str, mod_idx: usize, delta: f64) -> Peptide {
         let bytes: Vec<u8> = seq.bytes().collect();
         let m = Modification {
@@ -412,7 +407,6 @@ mod tests {
             .into_iter()
             .filter(|i| {
                 matches!(i.kind, IonKind::B) && !ion_is_shifted(i.kind, i.position, 4, n)
-                // mod at pos 4
             })
             .map(|i| (i.mz, 1000.0))
             .collect();

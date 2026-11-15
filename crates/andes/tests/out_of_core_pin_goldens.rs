@@ -593,12 +593,10 @@ fn run_slice(fragment_index: &str, chimeric: bool, out: &Path) -> (String, Vec<S
     run(&args, out)
 }
 
-/// Run a `--chimeric` search; returns (header, sorted rows, stderr).
 fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
     run_slice(fragment_index, true, out)
 }
 
-/// `--chimeric` with enumeration retrieval: header + sorted rows.
 const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 
 /// Chimeric secondaries: the rows a `--chimeric` run adds over the same search
@@ -688,7 +686,6 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
 // a single anchor at the default 1% gate; `--psm-fdr 1.0` anchors
 // every best-target peptide so Pass 2 contributes a few hundred rows.
 
-/// Run a `--refine` search; returns (header, sorted rows, stderr).
 fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
     run(
         &[
@@ -710,7 +707,6 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
     )
 }
 
-/// `--refine` with enumeration retrieval: header + sorted rows.
 const REFINE_SLICE_PIN: &str = "test-fixtures/goldens/refine_slice.pin.gz";
 
 /// Number of rows with `IsRefinement = 1`.

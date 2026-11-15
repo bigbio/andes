@@ -25,7 +25,6 @@ impl<R: BufRead> FastaReader<R> {
         }
     }
 
-    /// Eager-load all proteins into a `ProteinDb`.
     pub fn load_all(reader: R) -> Result<ProteinDb, FastaParseError> {
         let mut proteins = Vec::new();
         for result in FastaReader::new(reader) {
@@ -34,8 +33,6 @@ impl<R: BufRead> FastaReader<R> {
         Ok(ProteinDb { proteins })
     }
 
-    /// Read one line into `self.buf`. Returns `Ok(None)` at EOF.
-    /// Advances `line_no`.
     fn read_one_line(&mut self) -> Result<Option<()>, FastaParseError> {
         self.buf.clear();
         let n = self

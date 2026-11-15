@@ -438,7 +438,6 @@ pub(crate) static PTM_MASSES: &[(&str, u8, f64, SiteAnchor)] = &[
 pub(crate) const GLYGLY_CROSSLINK_PREFIX: &str =
     "Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in ";
 pub(crate) const GLYGLY_MODIFIERS: &[&str] = &["ubiquitin)", "NEDD8)", "ISG15)"];
-/// Gly-Gly remnant mass (Unimod 121).
 pub(crate) const GLYGLY_MASS: f64 = 114.042927;
 
 /// `(target residue, mass, anchor)` of the UniProt modification named `name`,

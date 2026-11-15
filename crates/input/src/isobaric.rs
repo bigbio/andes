@@ -291,7 +291,6 @@ mod tests {
 
     fn tmt_spectrum() -> Spectrum {
         let mut p = backbone();
-        // all 6 TMT reporters present, modest intensity
         for &c in TMT_CHANNELS {
             p.push((c, 200.0));
         }
@@ -517,7 +516,6 @@ mod tests {
 
     #[test]
     fn reporters_below_floor_not_counted() {
-        // Reporters present but at 0.1% of base peak (< 1% floor) → not counted.
         let run: Vec<Spectrum> = (0..200)
             .map(|_| {
                 let mut p = backbone(); // base peak 1000

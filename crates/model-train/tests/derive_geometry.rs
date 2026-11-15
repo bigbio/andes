@@ -66,7 +66,6 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     };
     let derived = derive_geometry(&corpus, &base, &cfg);
 
-    // Geometry is the derived one, not the seed's.
     assert_eq!(derived.num_segments, 2);
     assert_eq!(derived.max_rank, 150);
     assert_eq!(derived.min_charge, 2);
@@ -84,10 +83,8 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         );
     }
 
-    // (1) RankScorer accepts the geometry-only template (empty tables → no panic).
     let scorer = RankScorer::new(&derived);
 
-    // (2) Accumulate a spectrum for a charge-2 peptide into the DERIVED partitions.
     let seq = b"PEPTIDE";
     let peptide = make_peptide(seq);
     let charge = 2u8;
@@ -141,7 +138,6 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         "geometry-only accumulate recorded NO rank facts — trained tables would be flat (the bug)"
     );
 
-    // (3) Estimate fills the learned tables from the accumulated counts.
     let estimated = Estimator::new(EstimatorConfig::default()).estimate(&stats, &derived);
 
     // (4) The trained own-geometry model is scorable: non-empty rank tables, every
@@ -159,7 +155,6 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         }
     }
     let _trained_scorer = RankScorer::new(&estimated);
-    // The trained model kept the derived geometry.
     assert_eq!(estimated.num_segments, 2);
     assert_eq!(estimated.max_rank, 150);
 }

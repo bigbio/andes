@@ -1138,7 +1138,6 @@ mod tests {
         write_extract_table(&p, &rows()).unwrap();
         assert!(p.exists());
         assert!(!dir.path().join("c.extract.parquet.partial").exists());
-        // A failed write leaves neither file.
         let bad = dir.path().join("missing-dir").join("d.extract.parquet");
         let e = write_extract_table(&bad, &rows()).unwrap_err();
         assert!(e.contains("d.extract.parquet"), "{e}");
@@ -1185,7 +1184,6 @@ mod tests {
         assert!(rows[0].evidence.is_some());
         let schema = Arc::new(schema());
         let mut cols = batch(&schema, &rows).unwrap().columns().to_vec();
-        // Null `trace_quantity` on the first row, the other evidence present.
         let at = schema.index_of("trace_quantity").unwrap();
         let old = cols[at].as_any().downcast_ref::<Float64Array>().unwrap();
         let mut b = Float64Builder::new();

@@ -115,7 +115,6 @@ fn enumerate_protein(
     is_decoy: bool,
     params: &SearchParams,
 ) -> Vec<Candidate> {
-    // Standard enumeration: full sequence from offset 0.
     let mut out = enumerate_protein_from_offset(protein, 0, protein_index, is_decoy, params);
 
     // N-terminal Met cleavage: when the protein starts with M (and has >1
@@ -248,7 +247,6 @@ fn enumerate_protein_from_offset(
 
     let mut out = Vec::new();
 
-    // Build a fast lookup for cleavage positions.
     let cleavage_set: std::collections::HashSet<u32> = cleavage_positions.iter().copied().collect();
 
     let ctx = EmitCtx {
@@ -264,8 +262,6 @@ fn enumerate_protein_from_offset(
         met_cleaved_walk: has_met_cleaved_walk(protein),
     };
 
-    // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
-    // Also included in ntt=1, since a strict span satisfies "at least one end".
     for (i, &start) in anchors.iter().enumerate() {
         if n_term_only && start != 0 {
             break;
@@ -286,9 +282,7 @@ fn enumerate_protein_from_offset(
         }
     }
 
-    // ── Semi-specific spans (ntt=1 only) ─────────────────────────────────────
     if ntt == 1 {
-        // (b) Tryptic N-terminus, free C-terminus.
         for &start in anchors {
             if n_term_only && start != 0 {
                 break;
@@ -296,7 +290,6 @@ fn enumerate_protein_from_offset(
             let c_min = start + params.min_length;
             let c_max = (start + params.max_length).min(n);
             for end in c_min..=c_max {
-                // Skip ends that are cleavage positions — already emitted above.
                 if cleavage_set.contains(&end) {
                     continue;
                 }
@@ -322,7 +315,6 @@ fn enumerate_protein_from_offset(
             let s_min = end.saturating_sub(params.max_length);
             let s_max = end - params.min_length;
             for start in s_min..=s_max {
-                // Skip starts that are cleavage positions — already emitted above.
                 if cleavage_set.contains(&start) {
                     continue;
                 }
@@ -379,7 +371,6 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
         return;
     }
     let span = &ctx.sub_seq[start as usize..end as usize];
-    // Skip spans containing non-standard residues.
     if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
         return;
     }
@@ -901,7 +892,6 @@ fn walk_forms_bounded(
             };
             let m = variant.mass + variant.mod_.as_ref().map_or(0.0, |md| md.mass_delta);
             let next = sum + m;
-            // Bounds for everything under this choice.
             if next + min_rest[pos + 1] + H2O > hi || next + max_rest[pos + 1] + H2O < lo {
                 continue;
             }
@@ -3102,7 +3092,6 @@ mod tests {
 
                 let ram = ram_window_keys(&db, &params, &spec, z);
 
-                // NEW path: nominal-bucket gated mmap window.
                 let (min_nominal, max_nominal) =
                     crate::match_engine::candidate_nominal_bounds(&spec, z, &params, 0.0);
                 let mmap_nominal: HashSet<_> =
@@ -3119,8 +3108,6 @@ mod tests {
                     ram.difference(&mmap_nominal).collect::<Vec<_>>(),
                 );
 
-                // OLD path: f64 directional milli-Da window (what shipped before
-                // this fix). Reproduce exactly how the mmap loop called it.
                 let neutral_obs = precursor; // shift_ppm = 0, iso 0
                 let tol_left = params.precursor_tolerance.left.as_da(neutral_obs);
                 let tol_right = params.precursor_tolerance.right.as_da(neutral_obs);
@@ -3320,7 +3307,6 @@ mod tests {
         let center = base - tol * 0.999;
         let precursor = center + ox_delta;
 
-        // Verify hi-boundary mismatch holds (documents that the bug is real here).
         {
             let tol_milli = (tol * 1000.0).round() as i64;
             let center_milli = (center * 1000.0).round() as i64;
@@ -3332,7 +3318,6 @@ mod tests {
             );
         }
 
-        // Sanity: the in-RAM candidate set must be non-empty (PEPTMK+Ox is within tol).
         let inram_count: usize = enumerate_candidates(&db, &params, "XXX")
             .filter(|c| (c.peptide.mass() - precursor).abs() <= tol)
             .count();
@@ -3341,8 +3326,6 @@ mod tests {
             "fixture must yield at least one in-RAM candidate at the engineered precursor              (base={base:.6}, tol={tol:.6}, center={center:.6}, precursor={precursor:.6})"
         );
 
-        // Decisive assertion — must match in-RAM exactly.
-        // FAILS before the ±1 milli fetch-window fix; PASSES after.
         assert_lazy_matches_inram(&db, &params, &mi, precursor, tol);
     }
 }

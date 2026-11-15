@@ -16,10 +16,8 @@ use model_train::{
 };
 use scoring_crate::Param;
 
-// Type alias to reduce clippy type_complexity warnings in the train path.
 pub(crate) type ModelEntryOwned = (String, Param, Vec<(SourceLedger, CountStats)>);
 
-/// Load the seed Param from the optional seed model specifier.
 pub(crate) fn load_seed_param(
     seed_model: &Option<String>,
 ) -> Result<(String, Param), Box<dyn std::error::Error>> {
@@ -34,7 +32,6 @@ pub(crate) fn load_seed_param(
             Ok(("hcd_qexactive_tryp".to_string(), p))
         }
         Some(seed) => {
-            // Seed by slug from the canonical Parquet store.
             let store_path = bundled_store_path();
             let store =
                 ModelStore::open(&store_path).map_err(|e| format!("opening bundled store: {e}"))?;
@@ -46,7 +43,6 @@ pub(crate) fn load_seed_param(
     }
 }
 
-/// The default fixed modifications, as `--fixed-mods` would list them.
 pub(crate) const DEFAULT_FIXED_MODS: &str = "Carbamidomethyl (C)";
 
 /// The default variable modifications of the search, as `--variable-mods`
@@ -56,7 +52,6 @@ pub(crate) const DEFAULT_FIXED_MODS: &str = "Carbamidomethyl (C)";
 /// protein, after Met cleavage), it is combinatorially cheap.
 pub(crate) const DEFAULT_VARIABLE_MODS: &str = "Oxidation (M), Acetyl (Protein N-term)";
 
-/// The default variable modifications of the training paths: Oxidation (M).
 const TRAINING_VARIABLE_MODS: &str = "Oxidation (M)";
 
 /// A built-in modification list, read through the same UNIMOD lookup as
@@ -67,13 +62,10 @@ fn builtin_mods(list: &str, fixed: bool) -> Vec<Modification> {
         .unwrap_or_else(|e| panic!("built-in modification list {list:?}: {e}"))
 }
 
-/// The default fixed modifications: Carbamidomethyl (C).
 pub(crate) fn default_fixed_mods() -> Vec<Modification> {
     builtin_mods(DEFAULT_FIXED_MODS, true)
 }
 
-/// The default variable modifications of the search: Oxidation (M) and Acetyl
-/// (Protein N-term).
 pub(crate) fn default_variable_mods() -> Vec<Modification> {
     builtin_mods(DEFAULT_VARIABLE_MODS, false)
 }
@@ -312,24 +304,16 @@ pub(crate) fn build_selection_key(
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
-    // 2. Apply family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF).
     let inst_after_family: &str = match instrument {
         Some(i) => i.family_fallback().name(),
         None => "LowRes",
     };
-    // 1. PQD → CID for model routing. EThcD keys its own model on an Orbitrap
-    //    read-out; read elsewhere (ion trap, TOF, undetected) it routes like HCD,
-    //    the b/y half of its spectrum, as it did before the EThcD model existed.
     let act_str: &str = match activation {
         ActivationMethod::PQD => "CID",
         ActivationMethod::EThcD if !matches!(inst_after_family, "QExactive" | "HighRes") => "HCD",
         other => other.name(),
     };
 
-    // 3. Apply old-ladder (activation, instrument) normalization.
-    //    Because `normalize_for_store` returns `&'static str` only for the
-    //    normalizing arms (to avoid lifetime issues), we handle identity
-    //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
             // H5: HCD read out in the ion trap. A store without a model trained
@@ -362,8 +346,6 @@ pub(crate) fn build_selection_key(
             _ => (act_str, inst_after_family, false),
         };
 
-    // 4. Build experiment_class from protocol (unless the final fallback dropped it).
-    //    Protocol → experiment_class mapping matches the parquet's `protocol` column.
     let experiment_class: BTreeSet<String> = if drop_protocol {
         BTreeSet::new()
     } else {
@@ -373,7 +355,6 @@ pub(crate) fn build_selection_key(
     SelectionKey {
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
-        // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
         enzyme: routing_enzyme(enzyme).name().to_string(),
         experiment_class,
     }
@@ -391,7 +372,6 @@ pub(crate) fn routing_enzyme(enzyme: model::enzyme::Enzyme) -> model::enzyme::En
     }
 }
 
-/// The model [`load_param_from_store`] picks when no `--model` is given.
 pub(crate) struct ModelChoice {
     pub(crate) model_id: String,
     /// The key the store was searched with (after the family fallback and the
@@ -597,7 +577,6 @@ pub(crate) fn analyser_of(instrument: &str) -> &str {
     }
 }
 
-/// `activation / analyser / enzyme / labelling` for a warning.
 fn describe_cell(
     activation: &str,
     analyser: &str,
@@ -707,7 +686,6 @@ pub(crate) fn routing_protocol(
     }
 }
 
-/// The store's `protocol` name for a CLI protocol.
 fn protocol_store_name(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Auto | Protocol::Standard => "Automatic",
@@ -718,7 +696,6 @@ fn protocol_store_name(protocol: Protocol) -> &'static str {
     }
 }
 
-/// The experiment class the store's `model_id` was trained on.
 fn class_of<'a>(
     entries: &'a [SelectionEntry],
     model_id: &str,
@@ -729,8 +706,6 @@ fn class_of<'a>(
         .map(|e| &e.experiment_class)
 }
 
-/// [`choose_model`] for one protocol: [`build_selection_key`], then
-/// [`select_nearest_for`].
 fn choose_for_protocol(
     entries: &[SelectionEntry],
     activation: ActivationMethod,
@@ -1375,11 +1350,6 @@ mod param_resolver_tests {
     use crate::spectra::title_prefix_for;
     use ::search::PrecursorCalMode;
     use model::Tolerance;
-
-    // ── Model resolution is store-based: all bundled models live in
-    //    resources/models/ and are selected by `model_id`.
-    //    `bundled_store_selection_grid_is_pinned` covers the
-    //    activation/instrument/protocol/enzyme → model_id selection.
 
     /// The `--config` values of the named enums: their CLI names, in any case;
     /// numbers are not accepted.

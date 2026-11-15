@@ -28,9 +28,7 @@ pub struct Annotation {
     /// The entry's accession when the default (the reference accession with
     /// `_<id>` added to its middle field) does not fit.
     pub accession: Option<String>,
-    /// The entry's description when the default does not fit.
     pub description: Option<String>,
-    /// The database the claim comes from.
     pub source: Option<Arc<str>>,
     /// How likely claims of its kind are to be real.
     pub tier: PriorTier,
@@ -55,7 +53,6 @@ pub struct Processing {
 }
 
 impl Annotation {
-    /// An annotation of `kind` named `id`, with nothing else set.
     pub fn new(id: &str, kind: EntryKind) -> Self {
         Annotation {
             id: Arc::from(id),

@@ -143,7 +143,6 @@ struct Side {
 
 /// Parsimony over one side. `rows` is (peptide, score, families).
 fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
-    // Best score per peptide, and the families each peptide names.
     let mut best: BTreeMap<String, (f64, BTreeSet<String>)> = BTreeMap::new();
     for (pep, score, fams) in rows {
         let e = best
@@ -160,7 +159,6 @@ fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
             fam_peps.entry(f.clone()).or_default().insert(i);
         }
     }
-    // Families with identical peptide sets.
     let mut by_set: BTreeMap<BTreeSet<usize>, Vec<String>> = BTreeMap::new();
     for (f, s) in fam_peps {
         by_set.entry(s).or_default().push(f);
@@ -205,7 +203,6 @@ fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
             .map(|&p| scores[p])
             .fold(f64::NEG_INFINITY, f64::max)
     };
-    // Razor: each peptide counts for one kept group.
     let mut owner: HashMap<usize, usize> = HashMap::new();
     let mut shared: HashMap<usize, bool> = HashMap::new();
     for (p, gs) in &groups_of_pep {
@@ -412,7 +409,6 @@ pub fn infer_protein_groups(
         }
     }
 
-    // PSMs and named entries per target group.
     let mut psms = vec![0usize; target.groups.len()];
     let mut accepted_peps: BTreeSet<usize> = BTreeSet::new();
     let mut named: Vec<BTreeSet<String>> = vec![BTreeSet::new(); target.groups.len()];
@@ -529,7 +525,6 @@ pub fn infer_protein_groups(
         .into_iter()
         .map(|(p, g)| (target.peptides[p].clone(), new_index[g]))
         .collect();
-    // A decoy family `F` stands for the accession `<prefix>_F`.
     let decoy_accession = |f: &str| format!("{prefix}{f}");
     let mut decoy_groups: Vec<ProteinGroup> = decoy_q
         .into_iter()

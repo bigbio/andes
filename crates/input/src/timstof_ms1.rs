@@ -235,7 +235,6 @@ pub(crate) fn centroid_frame(
     let mut bounds = Vec::new();
     let summed = centroid_profile_with_bounds(&summed_profile, Some(&mut bounds));
     let n = tof.len().min(intensity.len());
-    // (tof, scan, intensity) of every point, by TOF index.
     let mut points: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
     for s in 0..scan_offsets.len().saturating_sub(1) {
         let (a, b) = (scan_offsets[s].min(n), scan_offsets[s + 1].min(n));
@@ -283,7 +282,6 @@ fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid
         return;
     }
     pts.sort_unstable_by_key(|p| (p.1, p.0));
-    // Per-scan intensity of the peak.
     let mut by_scan: Vec<(u32, f64, usize)> = Vec::new();
     for &(_, s, i) in pts.iter() {
         match by_scan.last_mut() {
@@ -308,7 +306,6 @@ fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid
         mobility_run(&by_scan[start..end], &kernel, half, &mut parts);
         start = end;
     }
-    // Merge across a shallow valley.
     let mut merged: Vec<Component> = Vec::with_capacity(parts.len());
     for c in parts {
         match merged.last_mut() {
@@ -609,7 +606,6 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
             .sum::<f64>()
     };
     let k = (0..hist.len()).max_by(|&a, &b| smooth(a).total_cmp(&smooth(b)))?;
-    // Refine within the peak: the mean offset of the pairs within one bin.
     let centre = (k as i64 - half) as f64 * OFFSET_BIN_PPM;
     let near: Vec<f64> = points
         .iter()

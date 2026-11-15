@@ -9,15 +9,11 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 
-// ── helpers ─────────────────────────────────────────────────────────────────
-
-/// Shorthand: nullable field.
 #[inline]
 fn nf(name: &str, dt: DataType) -> Field {
     Field::new(name, dt, true)
 }
 
-/// Shorthand: non-null field.
 #[inline]
 fn rf(name: &str, dt: DataType) -> Field {
     Field::new(name, dt, false)
@@ -40,8 +36,6 @@ fn list_of_struct(struct_fields: impl IntoIterator<Item = Field>) -> DataType {
     )))
 }
 
-// ── public schemas ───────────────────────────────────────────────────────────
-
 /// Manifest schema — one row per trained scoring model.
 ///
 /// `model_id` is the only non-null column; all others are nullable so that
@@ -54,16 +48,12 @@ pub fn models_schema() -> SchemaRef {
     ]);
 
     Arc::new(Schema::new(vec![
-        // --- discriminator (shared with tables schema) ---
         nf("record_kind", DataType::Utf8),
-        // --- identity ---
         rf("model_id", DataType::Utf8),
-        // --- model selector keys ---
         nf("activation", DataType::Utf8),
         nf("instrument", DataType::Utf8),
         nf("enzyme", DataType::Utf8),
         nf("experiment_class", DataType::Utf8), // sorted slug set, e.g. "phospho+tmt"
-        // --- scalar model parameters ---
         nf("version", DataType::Int32),
         nf("mme_val", DataType::Float32),
         nf("mme_is_ppm", DataType::Boolean),
@@ -74,9 +64,7 @@ pub fn models_schema() -> SchemaRef {
         nf("error_scaling_factor", DataType::Int32),
         nf("min_charge", DataType::Int32),
         nf("max_charge", DataType::Int32),
-        // --- charge histogram ---
         nf("charge_hist", charge_hist_dt),
-        // --- provenance ---
         nf("dataset", DataType::Utf8),
         nf("n_psms", DataType::Int64),
         nf("date", DataType::Utf8),
@@ -96,18 +84,13 @@ pub fn tables_schema() -> SchemaRef {
     ]);
 
     Arc::new(Schema::new(vec![
-        // --- discriminator ---
         nf("record_kind", DataType::Utf8),
-        // --- identity ---
         rf("model_id", DataType::Utf8),
-        // --- partition axes ---
         nf("part_charge", DataType::Int32),
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 (matches combined_schema)
         nf("part_seg", DataType::Int32),
-        // --- ion descriptor ---
         nf("ion_kind", DataType::Utf8), // "prefix" | "suffix" | "noise" | "-"
         nf("ion_charge", DataType::Int32),
-        // --- table kind ---
         nf("table_kind", DataType::Utf8), // "rank_dist"|"ion_err"|"noise_err"|
         // "ion_existence"|"frag_off"|"precursor_off"
         // --- payload (one of the two is non-null per row) ---
@@ -243,8 +226,6 @@ pub fn combined_schema() -> SchemaRef {
         nf("charge_keys", list_of(DataType::Int32)),
     ]))
 }
-
-// ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

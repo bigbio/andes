@@ -116,10 +116,6 @@ fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Shared fixtures
-// ---------------------------------------------------------------------------
-
 fn make_peptide(seq: &[u8]) -> Peptide {
     let residues: Vec<AminoAcid> = seq
         .iter()
@@ -129,7 +125,6 @@ fn make_peptide(seq: &[u8]) -> Peptide {
 }
 
 fn load_hcd_scorer() -> (Param, RankScorer) {
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
@@ -236,10 +231,6 @@ fn accumulate_n(n: usize) -> (CountStats, Param) {
     (stats, template)
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: estimated Param is scorable and produces finite node scores
-// ---------------------------------------------------------------------------
-
 #[test]
 fn estimated_param_is_scorable_and_finite() {
     // Accumulate 200 identical synthetic PSMs so every partition sees counts.
@@ -248,7 +239,6 @@ fn estimated_param_is_scorable_and_finite() {
     let estimator = Estimator::new(EstimatorConfig::default());
     let param = estimator.estimate(&counts, &template);
 
-    // RankScorer::new must not panic.
     let scorer = RankScorer::new(&param);
 
     // For every populated partition × ion, node_score at rank 1 must be finite
@@ -283,14 +273,8 @@ fn estimated_param_is_scorable_and_finite() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: empty (below min_count) partition backs off to a non-degenerate
-//         distribution (never all-zero, never -inf log)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn empty_partition_backs_off_not_zero() {
-    // Use an *empty* CountStats so every partition is below min_count.
     let (template, _scorer) = load_hcd_scorer();
     let empty_counts = CountStats::new();
 
@@ -304,7 +288,6 @@ fn empty_partition_backs_off_not_zero() {
 
     let mut checked = 0usize;
     for (&part, ion_table) in &param.rank_dist_table {
-        // Noise entry must be present.
         assert!(
             ion_table.contains_key(&IonType::Noise),
             "partition {:?} missing Noise entry in rank_dist_table",
@@ -339,10 +322,6 @@ fn empty_partition_backs_off_not_zero() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: dense counts recover empirical rank-1 fraction within tolerance
-// ---------------------------------------------------------------------------
-
 #[test]
 fn dense_counts_recover_empirical_within_tolerance() {
     // With a very small pseudo (effectively zero relative to many counts) and
@@ -373,7 +352,6 @@ fn dense_counts_recover_empirical_within_tolerance() {
     let estimator = Estimator::new(cfg);
     let param = estimator.estimate(&counts, &template);
 
-    // Find the (partition, ion) with the most counts at rank index 0.
     let mut best: Option<(Partition, IonType, u64, u64)> = None; // (part, ion, rank0, total)
     for (&(part, ion), v) in &counts.rank {
         if ion.is_noise() {
@@ -388,10 +366,8 @@ fn dense_counts_recover_empirical_within_tolerance() {
     let (best_part, best_ion, rank0_count, total_count) =
         best.expect("expected at least one (partition, ion) with rank-0 counts");
 
-    // Empirical fraction for rank-1 (index 0).
     let empirical = rank0_count as f32 / total_count as f32;
 
-    // Estimated frequency at index 0 from the rank_dist_table.
     let estimated = param
         .rank_dist_table
         .get(&best_part)

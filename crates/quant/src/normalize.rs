@@ -176,7 +176,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
         }
     }
     let eligible = |v: &Vec<NormCell>| v.len() >= min_runs;
-    // Precursor groups over the active runs, in precursor order.
     let mut groups: Vec<Vec<NormCell>> = by_precursor
         .into_values()
         .map(|v| v.into_iter().filter(|c| active[c.run as usize]).collect())
@@ -184,7 +183,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
         .collect();
     groups.sort_by_key(|v| v[0].precursor);
 
-    // Per run, the (group, cell) indices of its reference cells in RT order.
     let mut order: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_runs];
     for (gi, v) in groups.iter().enumerate() {
         for (ci, c) in v.iter().enumerate() {
@@ -349,7 +347,6 @@ mod tests {
                 "run {r}: {o}"
             );
         }
-        // Each precursor reads the same in every run after normalisation.
         for c in cells.iter().filter(|c| c.precursor < 50) {
             let first = corrected(&norm, &cells[3 * c.precursor as usize]);
             assert!((corrected(&norm, c) - first).abs() < 0.3);

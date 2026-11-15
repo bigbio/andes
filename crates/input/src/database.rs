@@ -37,14 +37,11 @@ impl DatabaseFormat {
     }
 }
 
-/// A loaded target database.
 #[derive(Debug, Clone)]
 pub struct LoadedDatabase {
     pub db: ProteinDb,
     pub format: DatabaseFormat,
-    /// Present for a UniProt XML database.
     pub uniprot: Option<UniProtLoadStats>,
-    /// Present for a PEFF database.
     pub peff: Option<PeffLoadStats>,
 }
 

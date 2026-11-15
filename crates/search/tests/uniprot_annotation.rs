@@ -19,7 +19,6 @@ use search::candidate_index::MmapCandidateIndex;
 use search::decoy::{decoy_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
 
-/// The modifications of a `Name (sites), ...` list.
 fn spec(list: &str, fixed: bool) -> Vec<Modification> {
     model::mod_spec::parse_mod_list(list, fixed).unwrap()
 }
@@ -82,7 +81,6 @@ fn target_db(evidence: EvidenceLevel, variants: bool) -> ProteinDb {
     .0
 }
 
-/// Phospho on S and T: restricted to annotated sites or not.
 fn params(restricted: bool) -> SearchParams {
     let mut builder = AminoAcidSetBuilder::new_standard();
     for r in ["S", "T"] {
@@ -101,7 +99,6 @@ fn params(restricted: bool) -> SearchParams {
     p
 }
 
-/// 0-based protein positions carrying a phospho in `c`.
 fn phospho_positions(c: &Candidate) -> Vec<usize> {
     c.peptide
         .residues
@@ -313,7 +310,6 @@ fn assert_every_path_agrees(idx: &SearchIndex, p: &SearchParams) {
     let mi = MmapCandidateIndex::build_in_memory(idx, p, "XXX").unwrap();
     let inram: Vec<Candidate> = enumerate_candidates(idx, p, "XXX").collect();
 
-    // Lazy precursor window == mass-filtered in-RAM set, at every candidate mass.
     let masses: BTreeSet<u64> = inram
         .iter()
         .map(|c| (c.peptide.mass() * 1000.0).round() as u64)
@@ -391,7 +387,6 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
         DecoyStrategy::Sequon,
     ] {
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
-        // The decoy keeps the initiator Met and the acetylated S after it.
         let decoy = &idx.db.proteins[1];
         assert_eq!(decoy.mod_sites()[0].position, 1, "{strategy:?}");
         assert_eq!(&decoy.sequence[..2], b"MS", "{strategy:?}");
@@ -401,7 +396,6 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
                 .filter(|c| c.peptide.residues[0].mod_.is_some())
                 .count()
         };
-        // SAGPEK after Met removal, and SAGPEKTLDYR with a missed cleavage.
         assert_eq!(acetylated(false), 2, "{strategy:?}");
         // Following its residue, the site would sit deep inside the decoy,
         // where a protein-N-term mod never applies.
@@ -438,7 +432,6 @@ fn unrestricted_terminal_mod_is_not_hidden_by_a_restricted_twin() {
         forms.iter().any(|f| f.contains("K+42")),
         "protein-N-term acetyl on K missing: {forms:?}"
     );
-    // The internal K11 has no annotated site, so no Acetyl there.
     assert!(enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .all(|c| c.peptide.residues[1..].iter().all(|aa| aa.mod_.is_none())));
@@ -522,7 +515,6 @@ fn index_cache_key_tells_variant_entries_apart() {
     let a = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p, dir);
     let b = index_cache_path(&SearchIndex::from_target_db(&variant, "XXX"), &p, dir);
     assert_ne!(a, b);
-    // Annotated sites alone do not change which base records exist.
     let again = index_cache_path(&SearchIndex::from_target_db(&plain, "XXX"), &p, dir);
     assert_eq!(a, again);
 }

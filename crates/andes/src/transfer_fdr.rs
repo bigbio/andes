@@ -340,12 +340,6 @@ pub fn transfer_train_params() -> TrainParams {
     }
 }
 
-/// Learning rate of the transfer classifier's 300 boosting rounds. At the
-/// trainer's default of 0.05 the rounds end before the validation loss does:
-/// at 500 runs the held-out scores separate targets from decoys less well
-/// than the same trees at 0.3 (the transfers accepted at q 0.01 rise by 60 %
-/// at the same estimated FDR, and a lone model's count by 3x), and the
-/// classifier is the less stable the less it has converged.
 pub const TRANSFER_LEARNING_RATE: f32 = 0.3;
 
 /// Trains the fold models of a bagged classifier with boosting settings
@@ -1800,7 +1794,6 @@ mod tests {
     fn pseudo_rows_take_the_q_of_the_nearest_lower_score() {
         let rows = rows(500, 3.0, &[1, 2], 12);
         let fdr = transfer_fdr(&rows, 4);
-        // A pseudo row identical to a scored target gets that target's q.
         for (i, row) in rows
             .iter()
             .enumerate()
@@ -1809,7 +1802,6 @@ mod tests {
         {
             assert_eq!(fdr.pseudo_q(row.precursor, &row.x), fdr.result.q[i]);
         }
-        // Far below every row: the fold's largest q.
         let low = vec![-50.0f32; TRANSFER_FEATURES.len()];
         assert!(fdr.pseudo_q(0, &low).is_some_and(|q| q > 0.1));
     }
@@ -1840,7 +1832,6 @@ mod tests {
             let all = accepted_targets(&rows, &r.q);
             eprintln!("identity: wrong-peak {wp}, combined {all} at q <= 0.01");
             assert!(wp >= 800, "{wp}");
-            // Only targets above every identity decoy of their fold remain.
             assert!(5 * all < wp, "{all} of {wp}");
             let at10 = rows
                 .iter()
@@ -1848,7 +1839,6 @@ mod tests {
                 .filter(|(row, q)| row.family == TARGET && q.is_some_and(|q| q <= 0.1))
                 .count();
             assert!(at10 >= 800, "{at10}");
-            // Identity decoys get q-values like the targets they mimic.
             assert!(rows
                 .iter()
                 .zip(&r.q)
@@ -1870,7 +1860,6 @@ mod tests {
         kdecoy_q(&items, &mut q);
         assert!((q[0].unwrap() - 1.0 / 50.0).abs() < 1e-12, "{:?}", q[0]);
         assert_eq!(q[151], Some(1.0));
-        // An identity decoy above the targets counts against every target.
         items[150].1 = 2000.0;
         kdecoy_q(&items, &mut q);
         assert!((q[0].unwrap() - (1.0 / 50.0 + 1.0 / 100.0)).abs() < 1e-12);
@@ -1924,8 +1913,6 @@ mod tests {
                         .map(|st| st.of_member(s));
                     assert_eq!(got, want[i], "trial {trial} {e:?} row {i} score {s}");
                 }
-                // A row outside the fit takes the q of the highest score at
-                // or below it, or the lowest row's.
                 if let (Some(st), Estimate::Pooled) = (&steps, e) {
                     let mut table: Vec<(f32, f64)> = kept
                         .iter()
@@ -2140,13 +2127,11 @@ mod tests {
             ra, rb,
             "the kept set and its order do not depend on arrival"
         );
-        // Whole precursors: three rows each.
         let mut per: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         for r in &ra {
             *per.entry(r.precursor).or_default() += 1;
         }
         assert!(per.values().all(|&c| c == 3));
-        // Under the cap every row is kept, in key order.
         let mut all: TrainingSample<usize> = TrainingSample::new(10_000, 42);
         for (i, r) in rows.iter().enumerate() {
             all.push(i, r.precursor as u64, r.clone());
@@ -2221,10 +2206,8 @@ mod tests {
                 Some(s),
             )
         };
-        // A precursor id fixes the fold: use ids of each stratum's parity.
         let (a, b) = (at(&strat, 0, 2.0).unwrap(), at(&strat, 1, 2.0).unwrap());
         assert!(b > 2.0 * a, "stratum 0 q {a}, stratum 1 q {b}");
-        // The pooled estimate gives both strata one q at a score.
         let p0 = at(&pooled, 0, 2.0).unwrap();
         let p1 = at(&pooled, 1, 2.0).unwrap();
         assert!((p0 - p1).abs() < 0.2 * p0.max(p1) + 1e-9, "{p0} {p1}");

@@ -77,7 +77,6 @@ impl EvidenceLevel {
         }
     }
 
-    /// The name [`EvidenceLevel::from_name`] parses.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Experimental => "experimental",
@@ -250,7 +249,6 @@ const PROCESSING_FEATURES: [&str; 4] = [
 ];
 
 impl UniProtEntry {
-    /// UniProt FASTA accession token: `sp|P02769|ALBU_BOVIN`.
     pub fn fasta_accession(&self) -> String {
         format!("{}|{}|{}", self.db_code(), self.accession, self.name)
     }
@@ -300,7 +298,6 @@ impl UniProtEntry {
         d
     }
 
-    /// ECO codes of `feature`'s evidence keys.
     fn evidence_codes<'a>(&'a self, feature: &'a UniProtFeature) -> impl Iterator<Item = &'a str> {
         feature.evidence_keys.iter().filter_map(|k| {
             self.evidence
@@ -310,7 +307,6 @@ impl UniProtEntry {
         })
     }
 
-    /// Ids of the isoforms whose sequence is the displayed (canonical) one.
     pub fn displayed_isoforms(&self) -> impl Iterator<Item = &str> {
         self.isoforms
             .iter()
@@ -318,7 +314,6 @@ impl UniProtEntry {
             .map(|i| i.id.as_str())
     }
 
-    /// Whether `feature`'s coordinates are the canonical sequence's.
     fn on_canonical(&self, feature: &UniProtFeature) -> bool {
         let s = feature.location_sequence.as_str();
         s.is_empty() || s == self.accession || self.displayed_isoforms().any(|d| d == s)
@@ -775,7 +770,6 @@ impl UniProtEntry {
     }
 }
 
-/// UniProt FASTA `PE=` code of a `<proteinExistence @type>`.
 fn protein_existence_code(kind: &str) -> &'static str {
     match kind {
         "evidence at protein level" => "1",
@@ -981,8 +975,6 @@ impl<R: BufRead> UniProtXmlReader<R> {
         }
     }
 
-    /// The innermost open element the reader tracks (`entry` inside an entry
-    /// whose children it does not track).
     fn open_element(&self) -> &'static str {
         self.stack
             .iter()
@@ -991,12 +983,10 @@ impl<R: BufRead> UniProtXmlReader<R> {
             .map_or("…", |t| t.name())
     }
 
-    /// `stack[len - 1 - up]`, i.e. `up = 0` is the element itself.
     fn ancestor(&self, up: usize) -> Option<Tag> {
         self.stack.len().checked_sub(1 + up).map(|i| self.stack[i])
     }
 
-    /// Handle an element start (an empty element is a start plus an end).
     fn on_start(&mut self, e: &BytesStart<'_>) -> Result<(), quick_xml::Error> {
         let tag = Tag::of(e.local_name().as_ref());
         self.stack.push(tag);
@@ -1124,7 +1114,6 @@ impl<R: BufRead> UniProtXmlReader<R> {
         Ok(())
     }
 
-    /// Handle an element end; returns the finished entry at `</entry>`.
     fn on_end(&mut self) -> Result<Option<UniProtEntry>, UniProtParseError> {
         let depth = self.stack.len();
         if let Some((target, at)) = self.capture.take() {
@@ -1244,7 +1233,6 @@ impl<R: BufRead> Iterator for UniProtXmlReader<R> {
     }
 }
 
-/// Unescaped value of attribute `name` (matched on its local name).
 fn attr(e: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, quick_xml::Error> {
     for a in e.attributes() {
         let a = a?;
@@ -1449,7 +1437,6 @@ mod tests {
         assert_eq!(db.proteins[0].sequence, CANONICAL);
         assert_eq!(stats.entries, 2);
         assert_eq!(stats.variant_proteins, 0);
-        // An entry without usable sites carries only its origin.
         let ann = db.proteins[1].annotation.as_deref().unwrap();
         assert!(ann.mod_sites.is_empty() && ann.variant.is_empty() && ann.chain.is_none());
         assert_eq!(&*ann.origin.as_ref().unwrap().family, "A0A000");
@@ -1542,7 +1529,6 @@ mod tests {
             ]
         );
         assert_eq!(stats.variant_proteins, 5);
-        // + E19K without evidence; T8 and Y16 as before.
         assert_eq!(stats.below_evidence, 3);
         // + Q3H (original mismatch), unknown range, M1 deletion at the terminus,
         // and L13I, which no mass spectrum tells from the canonical L13.
@@ -1561,7 +1547,6 @@ mod tests {
         assert_eq!(o.kind, model::EntryKind::Variant);
         assert_eq!(&*o.family, "P00001");
         assert_eq!(&*o.feature, "VAR_000001_K4E");
-        // K -> E: 129.042593 - 128.094963
         assert!(
             (o.variant_delta_da - 0.947630).abs() < 1e-5,
             "{}",
@@ -1594,7 +1579,6 @@ mod tests {
             sites(del).iter().map(|s| s.0).collect::<Vec<_>>(),
             [1, 5, 15]
         );
-        // The canonical protein is not a variant.
         assert_eq!(db.proteins[0].variant_region(), None);
     }
 

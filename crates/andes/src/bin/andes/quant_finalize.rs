@@ -160,11 +160,6 @@ pub(crate) struct FinalizeLimits {
 
 /// Default of [`FinalizeLimits::max_train_rows`].
 pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
-/// Default share of the precursors that report their trace areas (see
-/// [`crate::quant_mbr`], "Trace area"). On six LFQ benchmarks 0.1 lowered
-/// the gross errors of the brightest tenth of the identified cells by 17 to
-/// 43 % and the replicate SD on every set, with differential-expression
-/// calls unchanged; 1 made them worse on three of four sets.
 pub(crate) const DEFAULT_TRACE_FRACTION: f64 = 0.1;
 /// Default of [`FinalizeLimits::transfer_models`].
 pub(crate) const DEFAULT_TRANSFER_MODELS: usize = 8;
@@ -763,7 +758,6 @@ impl<'a> EntryIndex<'a> {
             .flatten()
             .map_or(1.0, |e| if e.donor_psm.pep.is_finite() { e.donor_psm.pep } else { 1.0 })
     }
-
 
     /// The classifier of `r` and its family; `None` for a row that takes no
     /// part in any.
@@ -1927,7 +1921,6 @@ pub(crate) fn finalize_stream(
                 Ok(())
             },
         )?;
-        // One allocation of the exact size, the run vectors freed as they go.
         let mut runs: Vec<Vec<_>> = items.into_inner().expect("summary lock");
         let mut all = Vec::with_capacity(runs.iter().map(Vec::len).sum());
         while let Some(v) = runs.pop() {
@@ -2658,7 +2651,6 @@ pub(crate) fn finalize_stream(
     );
     summary.fdr = fdr.counts.clone();
     summary.identified_fdr = id_fdr.counts.clone();
-    // Only the output tables are left to read.
     drop((all_summaries, t_models, i_models, norm, fdr, id_fdr));
 
     // The per-run tables merged into the outputs: one thread merges, one
@@ -2753,7 +2745,6 @@ fn write_merged(
     })
 }
 
-/// Logs what finalize did.
 #[allow(clippy::too_many_arguments)]
 fn log_summary(
     stems: &[String],

@@ -36,10 +36,6 @@ use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use crate::tdc::{confident_target_indices, ScoredLabel};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (a) confident_protein_indices
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Proteins with ≥1 Pass-1 target PSM at internal-TDC-q ≤ `select_q`.
 ///
 /// For each spectrum's BEST (max `rank_score`) PSM, build a [`ScoredLabel`] from
@@ -83,10 +79,6 @@ pub fn confident_protein_indices(
         .map(|li| candidates[cand_idx_of[li]].protein_index)
         .collect()
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// (a') confident_base_peptides
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// The UNMODIFIED backbone sequences of the confident Pass-1 target peptides,
 /// deduped and sorted (MaxQuant dependent-peptide-style anchoring).
@@ -162,10 +154,6 @@ pub fn confident_base_peptides_with_source(
     out
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (b) unidentified_spectrum_indices
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Spectra Pass-1 did NOT confidently identify at `report_q` (the report FDR
 /// threshold, e.g. 0.01). A spectrum is "identified" iff its best PSM (max
 /// rank_score across the queue) is a TARGET whose TDC q-value <= report_q; all
@@ -204,10 +192,6 @@ pub fn unidentified_spectrum_indices(
         .filter(|s| !identified.contains(s))
         .collect()
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// (c) build_refinement_index
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a SMALL target+decoy search index scoped to the confident proteins.
 ///
@@ -250,10 +234,6 @@ pub fn build_refinement_index(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (c') build_peptide_anchored_index
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Build the peptide-anchored Pass-2 search index: each confident base peptide
 /// becomes its OWN 1-entry "mini-protein", then a 1:1 decoy is generated per
 /// mini-protein (matching the Pass-1 `decoy_strategy`) so the scoped search has
@@ -286,21 +266,6 @@ pub fn build_peptide_anchored_index(
             .iter()
             .enumerate()
             .map(|(i, seq)| model::protein::Protein {
-                // Name the mini-protein after the REAL Pass-1 protein. Previously this
-                // was a synthetic `BASEPEP_<i>`, and `merge_into_pass1` only offsets
-                // `protein_index` into the concatenated DB -- it never maps back -- so
-                // every --refine PSM was emitted with an accession that names nothing and
-                // could only be attributed by re-matching the sequence against the FASTA
-                // externally. Those are precisely the MODIFIED PSMs the cascade exists to
-                // find.
-                //
-                // NOTE the mini-protein's SEQUENCE is still just the peptide, so QPX
-                // start/end coordinates remain peptide-local for Pass-2 rows; and a
-                // backbone shared across proteins keeps only its lowest-indexed source.
-                // An EMPTY accession is not an accession: `Some(String::new())`
-                // would otherwise satisfy `and_then` and emit a blank protein
-                // column, losing attribution for the row. Treat it as absent so
-                // the `BASEPEP_<i>` fallback applies.
                 accession: base_accessions
                     .get(i)
                     .and_then(|a| a.as_ref())
@@ -500,10 +465,6 @@ fn refinement_supported(decoy_strategy: DecoyStrategy) -> bool {
     !matches!(decoy_strategy, DecoyStrategy::None)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (d) refinement_aa_set
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Map a [`crate::refine_config::RefineMod`] `location` string to a [`ModLocation`].
 fn parse_location(loc: &str) -> ModLocation {
     match loc.trim().to_ascii_lowercase().as_str() {
@@ -639,10 +600,6 @@ pub fn refinement_aa_set(
         .map_err(|e| format!("refinement_aa_set: {e}"))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (e) mod_count_and_class
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Count the refinement modifications on `peptide` and classify them.
 ///
 /// Returns `(num_mods, refine_mod_class)`:
@@ -709,10 +666,6 @@ pub fn mod_count_and_class(
     (num_mods, class_id)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// (f) run_refinement
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Pass-2 refinement results, ready to write as a SEPARATE PIN (the merged
 /// report is the disjoint union: Pass-1 PIN ⊎ this). `queues[i]` corresponds to
 /// the spectrum at `all_spectra[global_spectrum_indices[i]]`; resolve peptide/
@@ -773,9 +726,6 @@ pub fn run_refinement(
     decoy_strategy: DecoyStrategy,
     seed: u64,
 ) -> Option<RefinementOutput> {
-    // `full_target_db` is consulted for the anchored backbones' real accessions (the refinement db is anchored on
-    // confident PEPTIDES, not a protein subset); keep the param so the andes call
-    // site is untouched.
 
     // Pass-2 builds its own scoped target+decoy index for TDC. With
     // DecoyStrategy::None that index is target-only, so every Pass-2 winner is a
@@ -1006,7 +956,6 @@ pub fn run_refinement(
             psm.features.is_refinement = 1;
             psm.features.num_mods = num_mods;
             psm.features.refine_mod_class = class;
-            // Fix the spectrum index back to the global stream position.
             psm.spectrum_idx = global_idx;
             // Remap every candidate index into the compact winners-only pool.
             for idx in &mut psm.candidate_idxs {
@@ -1050,10 +999,6 @@ pub fn run_refinement(
         global_spectrum_indices: unident,
     })
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// (g) merge_into_pass1
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// The result of merging a Pass-2 [`RefinementOutput`] into the Pass-1 candidate
 /// index space: a single combined candidate list and the concatenated
@@ -1117,10 +1062,6 @@ pub fn merge_into_pass1(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,8 +1069,6 @@ mod tests {
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use model::protein::Protein;
-
-    // ── Fixture helpers ────────────────────────────────────────────────────
 
     /// A target/decoy candidate at a given combined-db protein index.
     fn cand(protein_index: usize, is_decoy: bool) -> Candidate {
@@ -1180,8 +1119,6 @@ mod tests {
         }
     }
 
-    // ── (a) confident_protein_indices ──────────────────────────────────────
-
     #[test]
     fn confident_protein_indices_keeps_targets_above_q_threshold() {
         // 200 confident target spectra (proteins 0..200) + 1 lone decoy tail.
@@ -1199,7 +1136,6 @@ mod tests {
         let confident = confident_protein_indices(&queues, &candidates, 0.01);
         assert!(!confident.is_empty());
         assert!(!confident.contains(&999), "decoy protein must be excluded");
-        // High-scoring targets are present.
         assert!(confident.contains(&0));
     }
 
@@ -1209,7 +1145,6 @@ mod tests {
         // protein 7; the worse one is a decoy. peek_top must pick the target.
         let candidates = vec![cand(7, false), cand(8, true)];
         let q = queue_with(vec![psm(0, 0, 50.0), psm(0, 1, 5.0)]);
-        // A second high target spectrum so the lone-spectrum q-walk is non-empty.
         let candidates2 = {
             let mut c = candidates.clone();
             c.push(cand(9, false));
@@ -1235,8 +1170,6 @@ mod tests {
             .collect();
         assert!(confident_protein_indices(&queues, &candidates, 0.01).is_empty());
     }
-
-    // ── (a') confident_base_peptides ────────────────────────────────────────
 
     /// A target/decoy candidate carrying a specific (possibly modified) peptide
     /// at a given combined-db protein index.
@@ -1287,7 +1220,6 @@ mod tests {
         queues.push(queue_with(vec![psm(79, low_ci as u32, 4.0)]));
 
         let seqs = confident_base_peptides(&queues, &candidates, 0.01);
-        // Exactly the two confident backbones, deduped + sorted.
         assert_eq!(seqs, vec![b"PEPTIK".to_vec(), b"SAMPLER".to_vec()]);
     }
 
@@ -1318,7 +1250,6 @@ mod tests {
             b'_',
             b'-',
         );
-        // One confident target spectrum + a second so the q-walk is non-empty.
         let candidates = vec![
             cand_pep(pep, 0, false),
             cand_pep(unmod_peptide(b"AAAK"), 1, false),
@@ -1328,7 +1259,6 @@ mod tests {
             queue_with(vec![psm(1, 1, 49.0)]),
         ];
         let seqs = confident_base_peptides(&queues, &candidates, 0.5);
-        // The modified peptide's backbone is the bare residues (no mod folded in).
         assert!(
             seqs.contains(&b"PMK".to_vec()),
             "modified backbone stripped to PMK; got {seqs:?}"
@@ -1362,8 +1292,6 @@ mod tests {
         assert!(confident_base_peptides(&queues, &candidates, 0.01).is_empty());
     }
 
-    // ── (b) unidentified_spectrum_indices ──────────────────────────────────
-
     #[test]
     fn unidentified_spectrum_indices_returns_decoy_above_q_and_empty() {
         // 50 clearly-confident target spectra (high scores, no decoy competition
@@ -1383,14 +1311,12 @@ mod tests {
         queues.push(TopNQueue::new(10));
 
         let unident = unidentified_spectrum_indices(&queues, &candidates, 0.01);
-        // The 50 confident targets are NOT returned.
         for s in 0..50 {
             assert!(
                 !unident.contains(&s),
                 "confident target spectrum {s} must be identified"
             );
         }
-        // The decoy-best (50) and empty-queue (51) spectra ARE returned.
         assert!(
             unident.contains(&50),
             "decoy-best spectrum must be unidentified"
@@ -1429,14 +1355,12 @@ mod tests {
         queues.push(queue_with(vec![psm(79, 79, 4.0)]));
 
         let unident = unidentified_spectrum_indices(&queues, &candidates, 0.01);
-        // The 40 high-scoring confident targets are identified.
         for s in 0..40 {
             assert!(
                 !unident.contains(&s),
                 "confident target spectrum {s} must be identified"
             );
         }
-        // The poorly-scoring target (q above threshold) is returned.
         assert!(
             unident.contains(&79),
             "low-scoring target above report_q must be unidentified"
@@ -1461,8 +1385,6 @@ mod tests {
         );
     }
 
-    // ── (c) build_refinement_index ─────────────────────────────────────────
-
     #[test]
     fn build_refinement_index_subsets_targets_and_pairs_decoys() {
         let full_target = ProteinDb {
@@ -1475,11 +1397,9 @@ mod tests {
         let keep: HashSet<usize> = [0usize, 2].into_iter().collect();
         let idx = build_refinement_index(&full_target, &keep, "XXX", DecoyStrategy::Reverse, 42);
 
-        // 2 kept targets + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
         assert_eq!(idx.db.proteins[0].accession, "P0");
         assert_eq!(idx.db.proteins[1].accession, "P2");
-        // Decoys carry the "<prefix>_" needle.
         let needle = crate::decoy::decoy_accession_needle("XXX");
         assert!(idx.db.proteins[2].accession.starts_with(&needle));
         assert!(idx.db.proteins[3].accession.starts_with(&needle));
@@ -1496,12 +1416,9 @@ mod tests {
         // keep {0 (valid target), 5 (out of range / decoy half)}.
         let keep: HashSet<usize> = [0usize, 5].into_iter().collect();
         let idx = build_refinement_index(&full_target, &keep, "XXX", DecoyStrategy::Reverse, 42);
-        // Only P0 + its decoy.
         assert_eq!(idx.db.len(), 2);
         assert_eq!(idx.db.proteins[0].accession, "P0");
     }
-
-    // ── (c') build_peptide_anchored_index ──────────────────────────────────
 
     #[test]
     fn anchored_mini_proteins_keep_their_source_origin() {
@@ -1525,7 +1442,6 @@ mod tests {
         );
         assert_eq!(idx.db.proteins[0].origin(), Some(&origin));
         assert_eq!(idx.db.proteins[1].origin(), None);
-        // The paired decoys carry the same origin as their targets.
         assert_eq!(idx.db.proteins[2].origin(), Some(&origin));
         assert_eq!(idx.db.proteins[3].origin(), None);
         assert!(idx.has_alternative_entries);
@@ -1537,14 +1453,12 @@ mod tests {
         let idx =
             build_peptide_anchored_index(&base_seqs, &[], &[], "XXX", DecoyStrategy::Reverse, 42);
 
-        // 2 target mini-proteins + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
         // Each base seq is its own mini-protein, accession BASEPEP_i, sequence == seq.
         assert_eq!(idx.db.proteins[0].accession, "BASEPEP_0");
         assert_eq!(idx.db.proteins[0].sequence, b"PEPTIK".to_vec());
         assert_eq!(idx.db.proteins[1].accession, "BASEPEP_1");
         assert_eq!(idx.db.proteins[1].sequence, b"SAMPLER".to_vec());
-        // Decoys carry the "<prefix>_" needle.
         let needle = crate::decoy::decoy_accession_needle("XXX");
         assert!(idx.db.proteins[2].accession.starts_with(&needle));
         assert!(idx.db.proteins[3].accession.starts_with(&needle));
@@ -1602,8 +1516,6 @@ mod tests {
         }
     }
 
-    // ── (d) refinement_aa_set ──────────────────────────────────────────────
-
     fn base_set_with_cam_c() -> AminoAcidSet {
         AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .build()
@@ -1637,7 +1549,6 @@ mod tests {
         let base = base_set_with_cam_c();
         let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
 
-        // Count DISTINCT variable mods across all locations by name.
         let mut names: HashSet<String> = HashSet::new();
         for aa in set.iter_variants() {
             if let Some(m) = &aa.mod_ {
@@ -1654,7 +1565,6 @@ mod tests {
             5,
             "default tier has 5 variable mods at high-res; got {names:?}"
         );
-        // The fixed Carbamidomethyl baseline is preserved.
         let c_anywhere = set.variants_for(b'C', ModLocation::Anywhere);
         assert!(c_anywhere
             .iter()
@@ -1691,7 +1601,6 @@ mod tests {
     fn refinement_aa_set_oxidation_m_has_modified_variant() {
         let base = base_set_with_cam_c();
         let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
-        // M-Anywhere should now carry an Oxidation variable variant (unmod + ox).
         let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
         assert!(m_variants.iter().any(|aa| {
             aa.mod_
@@ -1747,8 +1656,6 @@ mod tests {
         );
     }
 
-    // ── (d') Pass-2 inherits the base search's full chemistry ──────────────
-
     #[test]
     fn refinement_aa_set_inherits_nonstandard_fixed_tmt() {
         // A labeled search: fixed CAM-C + fixed TMT6plex-on-K. Pass-2 MUST carry
@@ -1772,7 +1679,6 @@ mod tests {
             .build()
             .unwrap();
         let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
-        // K-Anywhere carries the fixed TMT (~229.16) in the refined set.
         let k_anywhere = set.variants_for(b'K', ModLocation::Anywhere);
         assert!(
             k_anywhere.iter().any(|aa| aa
@@ -1782,7 +1688,6 @@ mod tests {
                 .unwrap_or(false)),
             "refined set must carry the base's fixed TMT6plex-on-K"
         );
-        // …and the fixed CAM-C baseline is still present.
         let c_anywhere = set.variants_for(b'C', ModLocation::Anywhere);
         assert!(c_anywhere
             .iter()
@@ -1828,14 +1733,10 @@ mod tests {
         );
     }
 
-    // ── (e) mod_count_and_class ────────────────────────────────────────────
-
-    /// A set with no modification: no residue of it is a stacked record.
     fn std_set() -> AminoAcidSet {
         AminoAcidSetBuilder::new_standard().build().unwrap()
     }
 
-    /// Build a peptide with one residue carrying a mod of the given delta.
     fn modded_pep(residue: u8, delta: f64) -> Peptide {
         let m = Modification {
             name: "x".into(),
@@ -1951,7 +1852,6 @@ mod tests {
             b.sort_unstable();
             assert_eq!(a, b, "same composition, so same precursor mass");
         }
-        // Deterministic for a given seed.
         assert_eq!(entrapment_anchors(&base, &accs, 1).0, seqs);
     }
 
@@ -1972,7 +1872,6 @@ mod tests {
     #[test]
     fn mod_count_and_class_oxidation_m_is_one_class_oxidation() {
         let cfg = RefineConfig::default_tier();
-        // Oxidation on M, delta 15.994915, class "oxidation" → id 1.
         let pep = modded_pep(b'M', 15.994915);
         assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (1, 1));
     }
@@ -1980,7 +1879,6 @@ mod tests {
     #[test]
     fn mod_count_and_class_deamidation_n_is_class_two() {
         let cfg = RefineConfig::default_tier();
-        // Deamidation on N, delta 0.984016, class "deamidation" → id 2.
         let pep = modded_pep(b'N', 0.984016);
         assert_eq!(mod_count_and_class(&pep, &cfg, &std_set()), (1, 2));
     }
@@ -2135,7 +2033,6 @@ mod tests {
         let pep = Peptide::new(vec![ox, deam], b'_', b'-');
         let (n, class) = mod_count_and_class(&pep, &cfg, &std_set());
         assert_eq!(n, 2);
-        // First non-other class encountered wins (oxidation = 1).
         assert_eq!(class, 1);
     }
 
@@ -2185,14 +2082,12 @@ mod tests {
         winner.spectrum_idx = global_idx;
         global_queues[global_idx].force_push(winner);
 
-        // Pass-1 queue 0 is untouched.
         assert_eq!(global_queues[0].len(), 1);
         assert_eq!(
             global_queues[0].peek_top().unwrap().features.is_refinement,
             0
         );
 
-        // Queue 1 now holds the tagged Pass-2 winner.
         assert_eq!(global_queues[1].len(), 1);
         let merged = global_queues[1].peek_top().unwrap();
         assert_eq!(merged.features.is_refinement, 1);
@@ -2200,8 +2095,6 @@ mod tests {
         assert_eq!(merged.features.refine_mod_class, 1); // oxidation
         assert_eq!(merged.spectrum_idx, 1);
 
-        // Sanity: this is the same pass1_cands list a real caller would pass;
-        // reference it so the fixture mirrors the real signature shape.
         assert!(!pass1_cands[0].is_decoy);
     }
 
@@ -2358,7 +2251,6 @@ mod tests {
             DecoyStrategy::Reverse,
             42,
         );
-        // No confident base peptides ⇒ no Pass-2 output; Pass-1 queues untouched.
         assert!(out.is_none());
         assert_eq!(queues[0].len(), before_len);
     }
@@ -2392,7 +2284,6 @@ mod tests {
             DecoyStrategy::Reverse,
             42,
         );
-        // No unidentified spectra ⇒ no Pass-2 output; Pass-1 queues untouched.
         assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
@@ -2575,11 +2466,8 @@ mod tests {
         );
     }
 
-    // ── (g) merge_into_pass1 ───────────────────────────────────────────────
-
     #[test]
     fn merge_offsets_indices_and_force_pushes_into_pass1() {
-        // Pass-1: 1 candidate (protein 0), 1 spectrum with one unmod PSM (rank 40).
         let p1_cands = vec![cand(0, false)];
         let p1_index = SearchIndex {
             db: ProteinDb {
@@ -2591,7 +2479,6 @@ mod tests {
         };
         let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
 
-        // Refine: 1 modified candidate (its OWN protein 0 = BASEPEP_0), one PSM (rank 22) on spectrum 0.
         let refine = RefinementOutput {
             index: SearchIndex {
                 db: ProteinDb {
@@ -2608,16 +2495,13 @@ mod tests {
 
         let merged = merge_into_pass1(&mut p1_queues, p1_cands, &p1_index, refine);
 
-        // Combined candidates: pass1 (1) + refine (1) = 2; refine candidate's protein_index offset by 1.
         assert_eq!(merged.candidates.len(), 2);
         assert_eq!(
             merged.candidates[1].protein_index, 1,
             "refine protein_index offset by pass1 db len"
         );
-        // Combined index: 2 proteins, refine accession resolvable at offset 1.
         assert_eq!(merged.index.db.len(), 2);
         assert_eq!(merged.index.db.proteins[1].accession, "BASEPEP_0");
-        // Spectrum 0's queue now holds BOTH the unmod (cand 0) and the modified (cand 1) PSM.
         let mut idxs: Vec<u32> = p1_queues[0]
             .iter_psms()
             .map(|m| m.primary_candidate_idx())
@@ -2669,11 +2553,9 @@ mod tests {
 
         let merged = merge_into_pass1(&mut p1_queues, p1_cands, &p1_index, refine);
 
-        // Combined: 2 pass1 + 2 refine; refine protein_index offset by 2.
         assert_eq!(merged.candidates.len(), 4);
         assert_eq!(merged.candidates[2].protein_index, 2);
         assert_eq!(merged.candidates[3].protein_index, 3);
-        // The merged refine PSM's BOTH candidate_idxs offset by cand_offset=2 → [2, 3].
         let refine_psm = p1_queues[0]
             .iter_psms()
             .find(|m| m.candidate_idxs.len() == 2)

@@ -47,7 +47,6 @@ use crate::quant_cmd::{
     MS2_SUFFIX, TABLE_SUFFIX,
 };
 
-/// Index of the donor-run loading cosine within the transfer covariates.
 const BATCH_COS_AT: usize = 6;
 
 /// Settings of the transfer.
@@ -369,7 +368,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
     let profile = RunProfile::from_identified(&ident_vectors);
     drop(ident_vectors);
 
-    // Window calibration on the identified pairs.
     let ppm_errors: Vec<f64> = ids
         .iter()
         .zip(&id_pos)
@@ -736,7 +734,6 @@ pub(crate) fn run(
         outs.push(process_run(&ctx, r)?);
     }
 
-    // Cross-run covariate and training set.
     let profiles: Vec<RunProfile> = outs.iter().map(|o| o.profile.clone()).collect();
     let batch_cos = |run: u16, donors: &[u16]| -> f64 {
         donors
@@ -943,7 +940,6 @@ mod tests {
         // retention time wins.
         assert_eq!(index.scans()[found.pos].rt, 105.0);
         assert!(found.m.angle > 0.9 && found.rt_z.abs() < 1e-9);
-        // An identified scan is not a candidate.
         let taken = index.scans().iter().position(|s| s.rt == 105.0).unwrap();
         free[taken] = false;
         let next = best_candidate(

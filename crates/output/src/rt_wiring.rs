@@ -8,10 +8,6 @@
 //! single source of truth for both the PIN and the QPX `.idparquet` — can emit
 //! them without any extra plumbing.
 //!
-//! This implements the engine-wide backbone RT
-//! index + per-run linear calibration ONLY; the glyco per-monosaccharide offset
-//! and `DeltaRTRank` (Commit 2) are a separate later task.
-//!
 //! # Baseline safety (non-negotiable)
 //! When observed RT is unavailable (`Spectrum.rt_seconds` is `None`) or the
 //! per-run calibration cannot be fit (fewer than
@@ -88,8 +84,6 @@ pub fn populate_rt_features(
     // per-run relative RT ordering; a fitted/GBDT model can drop in later.
     let model = RtIndexModel::seed();
 
-    // ── Step 1: gather calibration anchors from rank-1 target PSMs ──────────
-    // Stable order: spectra in index order, PSMs in rank-sorted order. No hashing.
     let mut anchors: Vec<(f64, f64)> = Vec::new();
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -129,16 +123,12 @@ pub fn populate_rt_features(
         None => return, // too few anchors / degenerate ⇒ leave neutral 0.0
     };
 
-    // ── Step 3: gradient span = max−min observed RT (minutes) over the run ──
     let mut min_rt = f64::INFINITY;
     let mut max_rt = f64::NEG_INFINITY;
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
             continue;
         }
-        // Guard against a non-finite observed RT poisoning the span (Codex review):
-        // an inf/NaN `rt_seconds` was excluded from the calibration fit but would
-        // still make max/min — and hence every DeltaRTNorm — non-finite here.
         if let Some(s) = spectra[spec_idx].rt_seconds {
             if s.is_finite() {
                 let m = s / SECONDS_PER_MINUTE;
@@ -149,7 +139,6 @@ pub fn populate_rt_features(
     }
     let span = max_rt - min_rt; // may be ≤ 0 (single RT / none) ⇒ norm = 0.0
 
-    // ── Step 4: write features onto each PSM (neutral when no observed RT) ──
     for (spec_idx, queue) in queues.iter_mut().enumerate() {
         if queue.is_empty() {
             continue;
@@ -167,7 +156,6 @@ pub fn populate_rt_features(
             };
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let index = model.predict_peptide(&cand.peptide);
-            // Anchors were fit in minutes, so the line yields minutes directly.
             let pred = slope * index + intercept;
             let delta = obs - pred;
             // Belt-and-braces: never emit a non-finite RT feature (leave neutral).
@@ -191,7 +179,6 @@ mod tests {
     use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;
     use search::psm::{PsmFeatures, PsmMatch};
 
-    /// Build an unmodified peptide from a byte sequence.
     fn pep(seq: &[u8]) -> Peptide {
         let residues: Vec<_> = seq
             .iter()
@@ -200,7 +187,6 @@ mod tests {
         Peptide::new(residues, b'K', b'-')
     }
 
-    /// A target/decoy candidate carrying `peptide`.
     fn cand(peptide: Peptide, is_decoy: bool) -> Candidate {
         Candidate {
             peptide,
@@ -212,7 +198,6 @@ mod tests {
         }
     }
 
-    /// A spectrum with an optional RT in seconds.
     fn spec(scan: i32, rt_seconds: Option<f64>) -> Spectrum {
         Spectrum {
             title: format!("scan={scan}"),
@@ -229,7 +214,6 @@ mod tests {
         }
     }
 
-    /// A rank-1 PSM pointing at `candidate_idx` with the given ranking score.
     fn psm(candidate_idx: u32, rank_score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,

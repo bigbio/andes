@@ -21,7 +21,6 @@ pub enum PrecursorCalMode {
     Off,
 }
 
-/// Sample every `stride`-th element, capped at `cap`.
 pub fn sample_every_nth<T: Clone>(source: &[T], stride: usize, cap: usize) -> Vec<T> {
     if source.is_empty() || stride == 0 || cap == 0 {
         return Vec::new();
@@ -39,7 +38,6 @@ pub fn sample_every_nth<T: Clone>(source: &[T], stride: usize, cap: usize) -> Ve
     out
 }
 
-/// Residual in ppm: `(observed - theoretical) / theoretical * 1e6`.
 pub fn residual_ppm(observed_mass: f64, theoretical_mass: f64) -> f64 {
     (observed_mass - theoretical_mass) / theoretical_mass * 1e6
 }
@@ -95,7 +93,6 @@ pub mod constants {
     pub const MAD_TO_SIGMA_SCALE: f64 = 1.4826;
 }
 
-/// Median absolute deviation from `center`.
 pub fn median_absolute_deviation(values: &[f64], center: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -104,7 +101,6 @@ pub fn median_absolute_deviation(values: &[f64], center: f64) -> f64 {
     median(&deviations)
 }
 
-/// Robust Gaussian-equivalent sigma (MAD × 1.4826).
 pub fn robust_sigma_ppm(residuals: &[f64], center: f64) -> f64 {
     constants::MAD_TO_SIGMA_SCALE * median_absolute_deviation(residuals, center)
 }

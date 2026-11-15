@@ -49,11 +49,6 @@ use model_train::{
     ModelStore,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Path to the bundled Parquet store (`resources/models/`).
 fn bundled_store_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
 }
@@ -95,20 +90,14 @@ fn standard_aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load MS2 spectra from an mzML file.
 fn load_mzml(path: &Path) -> Vec<model::Spectrum> {
     let file = File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
     let reader = BufReader::new(file);
     MzMLReader::new(reader).filter_map(|r| r.ok()).collect()
 }
 
-// ---------------------------------------------------------------------------
-// The test
-// ---------------------------------------------------------------------------
-
 #[test]
 fn trained_model_yield_not_worse_than_fallback() {
-    // ── Skip guard ────────────────────────────────────────────────────────────
     let bench_dir = match std::env::var("ANDES_TRAIN_BENCH") {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
         _ => {
@@ -121,7 +110,6 @@ fn trained_model_yield_not_worse_than_fallback() {
         }
     };
 
-    // ── Resolve paths ─────────────────────────────────────────────────────────
     let train_mzml = bench_dir.join("train.mzML");
     let db_fasta = bench_dir.join("db.fasta");
     let val_mzml = bench_dir.join("validate.mzML");
@@ -149,7 +137,6 @@ fn trained_model_yield_not_worse_than_fallback() {
         bench_dir.display()
     );
 
-    // ── Step 1: load training spectra ─────────────────────────────────────────
     eprintln!("loading training spectra from {}", train_mzml.display());
     let train_spectra = load_mzml(&train_mzml);
     assert!(
@@ -158,7 +145,6 @@ fn trained_model_yield_not_worse_than_fallback() {
     );
     eprintln!("  loaded {} training spectra", train_spectra.len());
 
-    // ── Step 2: load bundled seed model ───────────────────────────────────────
     eprintln!("loading bundled seed model hcd_qexactive_tryp");
     let store_path = bundled_store_path();
     let store = ModelStore::open(&store_path).expect("failed to open bundled model store");
@@ -171,7 +157,6 @@ fn trained_model_yield_not_worse_than_fallback() {
         seed_param.partitions.len()
     );
 
-    // ── Step 3a: bootstrap confident labels from the training spectra ─────────
     let search_params = SearchParams::default_tryptic(standard_aa_set());
     let train_fdr = 0.01_f64;
 
@@ -188,18 +173,14 @@ fn trained_model_yield_not_worse_than_fallback() {
     .expect("bootstrap_labels must succeed");
     eprintln!("  {} confident labels at {} FDR", labels.len(), train_fdr);
 
-    // ── Step 3b: accumulate ion-match statistics from the labeled PSMs ────────
     let acc = StatsAccumulator::new(&seed_scorer);
     let mut stats = CountStats::new();
     for lm in &labels {
         let spec = &train_spectra[lm.spectrum_index];
         acc.accumulate(&mut stats, spec, &lm.peptide, lm.charge);
     }
-    // merge() is the parallel-combiner; use it even for a single part to keep
-    // the code path exercised.
     let merged_stats = merge(vec![stats]);
 
-    // ── Step 3c: estimate the trained model ───────────────────────────────────
     let estimator = Estimator::new(EstimatorConfig::default());
     let trained_param = estimator.estimate(&merged_stats, &seed_param);
     let trained_scorer = RankScorer::new(&trained_param);
@@ -208,7 +189,6 @@ fn trained_model_yield_not_worse_than_fallback() {
         trained_param.partitions.len()
     );
 
-    // ── Step 4: load validation spectra ──────────────────────────────────────
     eprintln!(
         "loading validation spectra from {}",
         val_mzml_path.display()
@@ -220,7 +200,6 @@ fn trained_model_yield_not_worse_than_fallback() {
     );
     eprintln!("  loaded {} validation spectra", val_spectra.len());
 
-    // ── Step 5: run the acceptance gate ──────────────────────────────────────
     eprintln!("running evaluate_candidate (fdr=0.01)");
     let delta = evaluate_candidate(
         &val_spectra,

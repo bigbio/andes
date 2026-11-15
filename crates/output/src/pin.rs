@@ -89,8 +89,6 @@ use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-// ── shared SpecId formatting ───────────────────────────────────────────────────
-
 /// Format the Percolator `SpecId` (== QPX row identity) for one PSM row.
 ///
 /// This is the SINGLE source of truth for the SpecId string, called from BOTH
@@ -188,8 +186,6 @@ pub fn emitted_row_candidates(
         })
         .collect()
 }
-
-// ── shared per-PSM feature vector ──────────────────────────────────────────────
 
 /// How a feature value is rendered (PIN bytes + QPX `value_type`).
 ///
@@ -378,8 +374,6 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
     ]
 }
 
-// ── public API ───────────────────────────────────────────────────────────────
-
 /// Write all PSMs to a Percolator `.pin` file at `output_path`.
 ///
 /// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
@@ -508,8 +502,6 @@ fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {
 /// Spectra whose PIN rows are formatted in parallel before being written out.
 const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
-// ── header ────────────────────────────────────────────────────────────────────
-
 fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io::Result<()> {
     // RawScore is the sole score column. The generating function has been
     // removed, so the GF-derived columns (DeNovoScore / lnSpecEValue / lnEValue
@@ -523,9 +515,6 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "CalcMass".to_string(),
         "FileName".to_string(),
         "mass".to_string(),
-        // RankScore = the rank-LLR ranking score (formerly "RawScore"; value is
-        // `psm.score`). Renamed so the headline/primary column is "RawScore"
-        // (the fused score, formerly "StrongScore").
         "RankScore".to_string(),
     ];
     cols.extend_from_slice(&[
@@ -709,8 +698,6 @@ pub fn feature_value_type(fmt: FeatureFmt) -> &'static str {
     }
 }
 
-// ── per-spectrum rows ──────────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn write_spectrum_rows<W: Write>(
     writer: &mut W,
@@ -793,10 +780,8 @@ fn write_psm_row<W: Write>(
     // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
     let calc_mass = cand.peptide.mass(); // includes H2O — neutral mass
 
-    // mass: duplicate of ExpMass (column convention).
     let mass = exp_mass;
 
-    // RawScore: integer-rounded score
     let raw_score = psm.score.round() as i32;
 
     // isotope_error: from PsmMatch::isotope_offset (threaded from
@@ -815,7 +800,6 @@ fn write_psm_row<W: Write>(
     let (dm, _) = precursor_error(precursor_mz, charge, isotope_error, calc_mass);
     let absdm = dm.abs();
 
-    // matchedIonRatio: from psm.features.
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
     // Write columns directly into the BufWriter (avoids ~30 String allocs/row).
@@ -837,8 +821,6 @@ fn write_psm_row<W: Write>(
     write_mass(writer, calc_mass)?;
     write!(writer, "\t{}\t", spec_id_run(&ctx.spec_id))?;
     write_double(writer, mass)?;
-    // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
-    // lnEValue are no longer emitted).
     write!(writer, "\t{}", raw_score)?;
     write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
     write_double(writer, dm)?;
@@ -871,10 +853,6 @@ fn write_psm_row<W: Write>(
     // entries (`RankScore`, `isotope_error`) are written inline above in their
     // historical leading-block positions, so this loop skips them and emits the
     // tail (`NumMatchedMainIons` … `RawScoreCal`) — the exact PIN column order.
-    //
-    // `matched_ion_ratio` is bound above for the doc cross-reference; the shared
-    // list re-derives the identical value, so the binding is intentionally inert
-    // here (silence the unused-variable lint without changing byte output).
     let _ = matched_ion_ratio;
     let features = psm_feature_values(psm, rank);
     debug_assert_eq!(features[0].0, "RankScore");
@@ -901,8 +879,6 @@ fn write_psm_row<W: Write>(
     }
     writeln!(writer)
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 /// The precursor error of a PSM in m/z units, and the theoretical m/z it is
 /// measured against: observed m/z corrected by the isotope error the search
@@ -961,9 +937,6 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
         return writer.write_all(b"0");
     }
 
-    // Stack buffer — 32 bytes is more than enough for any "%.5e" or
-    // "%.prec$" formatting of an f64 (sign + 7 mantissa digits + 'e' +
-    // signed 3-digit exponent ≈ 14 bytes worst case).
     let mut buf = [0u8; 32];
     let abs = v.abs();
     if !(1e-4..1e6).contains(&abs) {
@@ -1036,14 +1009,10 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     };
     writer.write_all(&mantissa[..mantissa_end])?;
 
-    // Parse exponent and re-emit with explicit sign + min width 2. We
-    // accept the same `unwrap_or(0)` semantics as the original code.
     let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
     let exp_val: i32 = exp_str.parse().unwrap_or(0);
     write!(writer, "e{:+03}", exp_val)
 }
-
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1071,8 +1040,6 @@ mod tests {
         assert_eq!(fmt(0.0), "0");
         assert_eq!(fmt(f64::NAN), "0");
     }
-
-    // ── fixture helpers ─────────────────────────────────────────────────────
 
     /// Build a minimal `SearchIndex` with one target protein.
     fn make_search_index(accession: &str) -> SearchIndex {
@@ -1262,20 +1229,8 @@ mod tests {
             .collect()
     }
 
-    // ── Test 1: header columns match the reference fixture ──────────────────
-
-    /// The expected column list is andes's own PIN schema (defined by
-    /// `write_header`), here pinned for charge2..=charge3 (the BSA test uses
-    /// charge_range 2..=3).
-    ///
-    /// The header is asserted column-by-column below.
     #[test]
     fn pin_header_columns_are_gf_free_schema() {
-        // GF-free schema: RawScore is the sole score column; the GF-derived
-        // DeNovoScore / lnSpecEValue / lnEValue / lnDeltaSpecEValue columns are
-        // NOT emitted. The additive feature columns (EdgeScore,
-        // PrecursorIsotopeKL, PrecursorSNR, DeltaRawScore) sit between
-        // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
             "SpecId",
             "Label",
@@ -1371,8 +1326,6 @@ mod tests {
         );
     }
 
-    /// Additive refinement-cascade columns are always present in the header
-    /// (they carry 0 without `--refine`). Guards Task 2 of the PTM cascade.
     #[test]
     fn pin_header_has_refinement_columns() {
         let params = make_params(2..=3);
@@ -1389,8 +1342,6 @@ mod tests {
             assert!(cols.iter().any(|c| c == col), "header missing column {col}");
         }
     }
-
-    // ── Test 2: decoy PSM gets Label = -1 ────────────────────────────────────
 
     #[test]
     fn pin_writes_label_minus_one_for_decoy() {
@@ -1409,7 +1360,6 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1, "should have 1 data row");
 
-        // Label is column index 1 (SpecId=0, Label=1)
         assert_eq!(rows[0][1], "-1", "decoy PSM should have Label = -1");
     }
 
@@ -1531,8 +1481,6 @@ mod tests {
         assert!(!crate::atomic::partial(&path).exists());
     }
 
-    // ── Test 3: charge one-hot encoding ────────────────────────────────────
-
     #[test]
     fn pin_writes_charge_one_hot_correctly() {
         let params = make_params(2..=3);
@@ -1551,7 +1499,6 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        // Find charge2 and charge3 column indices
         let charge2_idx = cols
             .iter()
             .position(|c| c == "charge2")
@@ -1703,8 +1650,6 @@ mod tests {
         assert_eq!(charge_cols, ["charge2", "charge3"]);
     }
 
-    // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────
-
     #[test]
     fn chimeric_specids_unique_for_cofragmented_peptides_same_scan() {
         let mut params = make_params(2..=3);
@@ -1733,7 +1678,6 @@ mod tests {
         );
     }
 
-    // ── Test: non-chimeric tied-PSM SpecId uniqueness ──────────────────────
     #[test]
     fn non_chimeric_tied_psms_same_scan_get_distinct_specids() {
         // With the generating function removed, ranks tie on equal `rank_score`
@@ -1962,8 +1906,6 @@ mod tests {
         assert_eq!(rows[0][pep_col + 1..], ["PROT_0", "PROT_1"]);
     }
 
-    // ── Test 4: empty queue → only header ────────────────────────────────────
-
     #[test]
     fn pin_handles_empty_queue() {
         let params = make_params(2..=3);
@@ -1979,8 +1921,6 @@ mod tests {
         assert!(rows.is_empty(), "empty queue should produce no data rows");
     }
 
-    // ── Test 6: real accession emitted for target PSM ─────────────────────────
-
     #[test]
     fn pin_writes_real_accession_when_search_index_provided() {
         let accession = "sp|P02769|ALBU_BOVIN";
@@ -1989,7 +1929,6 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // protein_index = 0 → first target protein
         let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);
@@ -2013,8 +1952,6 @@ mod tests {
             "Proteins column should contain the real accession, not a PROT_N placeholder"
         );
     }
-
-    // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
 
     #[test]
     fn pin_writes_decoy_prefix_for_decoy_protein() {
@@ -2051,9 +1988,6 @@ mod tests {
         );
     }
 
-    // ── PIN emits real feature values ────────────────────────────────────────
-
-    /// Verify that `NumMatchedMainIons` is emitted from `psm.features`.
     #[test]
     fn pin_emits_real_num_matched_main_ions_when_features_populated() {
         let params = make_params(2..=3);
@@ -2136,7 +2070,6 @@ mod tests {
         );
     }
 
-    /// Verify that `longest_y_pct` is formatted with 6 decimal places.
     #[test]
     fn pin_emits_longest_y_pct_with_six_decimals() {
         let params = make_params(2..=3);

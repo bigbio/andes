@@ -124,8 +124,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
             .filter(|r| r.channel == ch && r.status == st)
             .count()
     };
-    // Match between channels on both sides, transfers between runs, and the
-    // heavy-absent peptides below detection.
     for ch in [1, 2] {
         assert!(count(ch, "identified") >= 150, "channel {ch}:\n{log}");
         assert!(count(ch, "match_channel") >= 50, "channel {ch}:\n{log}");
@@ -133,7 +131,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
     }
     assert!(count(2, "below_detection") >= 15, "{log}");
     assert_eq!(count(1, "below_detection"), 0, "{log}");
-    // A heavy channel below detection has its light channel measured.
     let status_of: HashMap<(String, String, u8, u8), &str> = rows
         .iter()
         .map(|r| {
@@ -200,7 +197,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
         "{pairs} {with_transfer}"
     );
 
-    // The QPX features carry the SILAC channel labels.
     let feature = qpx.join("quantms.feature.parquet");
     let file = File::open(&feature).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -221,7 +217,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
     assert!(n >= 280, "{n} feature rows");
     assert!(transfers >= 20, "{transfers} transferred feature rows");
 
-    // Protein ratios: the one BSA protein, per run.
     let tsv = std::fs::read_to_string(tmp.path().join("s.label_proteins.tsv")).unwrap();
     let lines: Vec<&str> = tsv.lines().collect();
     assert_eq!(lines.len(), 3, "{tsv}");
@@ -266,7 +261,6 @@ fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
     let log = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(out.status.success(), "andes failed:\n{log}");
 
-    // The learned RT offsets of the deuterated channels.
     let line = log
         .lines()
         .find(|l| l.contains("channel RT offsets"))
@@ -332,7 +326,6 @@ fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
         let (Some(m), Some(h)) = (v[1], v[2]) else {
             continue;
         };
-        // The bare sequence: the peptide identity without its brackets.
         let seq: String = seq_of[key]
             .split('[')
             .enumerate()

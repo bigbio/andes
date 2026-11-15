@@ -38,7 +38,6 @@ fn first_line(path: &std::path::Path) -> String {
         .expect("read first line")
 }
 
-/// Columns that must NOT appear in the schema.
 const GF_COLUMNS: [&str; 4] = [
     "DeNovoScore",
     "lnSpecEValue",
@@ -70,8 +69,6 @@ fn rust_pin_header_is_gf_free_schema() {
     let header = first_line(&rust_pin_path);
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // RankScore (rank-LLR, formerly "RawScore") + RawScore (fused, formerly
-    // "StrongScore") present; GF columns absent.
     assert!(
         cols.contains(&"RankScore"),
         "RankScore column must be present:\n{header}"
@@ -87,7 +84,6 @@ fn rust_pin_header_is_gf_free_schema() {
         );
     }
 
-    // Additive feature columns present, between matchedIonRatio and Peptide.
     let matched_ratio_pos = cols
         .iter()
         .position(|c| *c == "matchedIonRatio")
@@ -169,7 +165,6 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .build()
         .unwrap();
 
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);

@@ -1861,7 +1861,6 @@ pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     (with(".mbr.parquet"), with(".mbr_validation.parquet"))
 }
 
-/// Concatenates the per-entry rows in library order and sums the counts.
 /// Sets the same-run claim of every fitted transfer target of `rows`: the
 /// other fitted identified or transferred targets of the run on the same MS1
 /// feature (see [`claims`]).
@@ -2412,13 +2411,11 @@ mod tests {
         let sel = extract_run(0, &fx.ms1_tables[0], &lib, &params(), &SELECT).unwrap();
         assert_eq!(sel.rows, without(&all.rows, &[(ONLY_RUN1, 0)]));
         assert_eq!(sel.counts.not_selected, 1);
-        // The identified rows and pseudo-transfers of every precursor stay.
         let roles =
             |rows: &[ExtractRow], role: Role| rows.iter().filter(|r| r.role == role).count();
         for role in [Role::Identified, Role::PseudoTransfer] {
             assert_eq!(roles(&sel.rows, role), roles(&all.rows, role));
         }
-        // The fixture's own transfers have one donor run each: kept.
         let sel = extract_run(0, &fx.ms1_tables[0], &fx.lib, &params(), &SELECT).unwrap();
         assert_eq!(
             sel,
@@ -2535,7 +2532,6 @@ mod tests {
         );
         assert!(extract_all(N_RUNS as u16, &fx.ms1_tables[2], &fx.lib, &params()).is_err());
 
-        // The identified row reaches the mbr.parquet.
         let runs: Vec<Vec<ExtractRow>> = (0..N_RUNS)
             .map(|r| {
                 extract_all(r as u16, &fx.ms1_tables[r], &fx.lib, &params())
@@ -2557,7 +2553,6 @@ mod tests {
             ("PEP0/2", "identified"),
             "{in_r2:?}"
         );
-        // Its quantity and standard error are reported.
         assert!(
             in_r2[0].quantity.is_some() && in_r2[0].quantity_se.is_some(),
             "{in_r2:?}"
@@ -2577,7 +2572,6 @@ mod tests {
         assert_eq!(rows[0].kind, Hypothesis::Target);
         let target = rows[0].evidence.as_ref().unwrap();
         assert!((target.t0 - apex(7, 1)).abs() <= 1.0, "{target:?}");
-        // The other precursors are still identified in run 1.
         let rows = rows_of(&out.rows, 8);
         assert_eq!(rows[0].role, Role::Identified);
     }
@@ -2596,7 +2590,6 @@ mod tests {
         assert!(rows_of(&out.rows, 3).is_empty());
         assert_eq!(out.counts.foreign_cv, 2);
         assert!(!rows_of(&out.rows, 4).is_empty());
-        // A run without FAIMS fits them on the whole run.
         let out0 = extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         assert_eq!(out0.counts.foreign_cv, 0);
         assert_eq!(rows_of(&out0.rows, ONLY_RUN0)[0].role, Role::Identified);
@@ -2609,7 +2602,6 @@ mod tests {
         let a = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let b = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         assert_eq!(a, b);
-        // Library order: each entry's rows are contiguous and in entry order.
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
         let mut seen: Vec<u32> = a.rows.iter().map(|r| r.precursor).collect();
         seen.dedup();
@@ -3630,9 +3622,7 @@ mod finalize_tests {
         let (cells, weights) = weigh_widths(cells.into_items(), stems.len());
         let norm = fit_normalization(&cells, stems.len(), &NormParams::default());
 
-        // Pass 4: the outputs.
         let accepted = |q: Option<f64>| q.is_some_and(|q| q <= mbr_fdr);
-        // The validation thresholds, VALIDATION_Q then mbr_fdr, and their counts.
         let thresholds = [VALIDATION_Q, mbr_fdr];
         let mut at = [Accepted::default(), Accepted::default()];
         let identity_entries = lib.entries.iter().filter(|e| e.identity_decoy).count();
@@ -4321,9 +4311,7 @@ mod finalize_tests {
         let cells = width_cells(300);
         // The run offsets (+run) are the normalisation's part, not the weights'.
         assert_eq!(run_width_weights(&cells, 4), vec![1.0, 0.0, 0.0, 0.0]);
-        // A run without cells keeps 0.
         assert_eq!(run_width_weights(&cells, 5), vec![1.0, 0.0, 0.0, 0.0, 0.0]);
-        // The order of the cells does not matter.
         let mut reversed = cells.clone();
         reversed.reverse();
         assert_eq!(run_width_weights(&reversed, 4), vec![1.0, 0.0, 0.0, 0.0]);
@@ -4372,7 +4360,6 @@ mod finalize_tests {
                     log2_quantity: c.log2_quantity,
                     rt: 100.0,
                 };
-                // Every tenth cell reports a trace area: no deviation.
                 (cell, (i % 10 != 0).then_some(c.deviation))
             })
             .collect();
@@ -4516,7 +4503,6 @@ mod finalize_tests {
             e.quantity = e.amplitude * w * (2.0 * std::f64::consts::PI).sqrt();
             let rows = &mut runs[run as usize];
             rows.retain(|r| !(r.precursor == 0 && r.role != Role::PseudoTransfer));
-            // A precursor's rows of a run are contiguous.
             let at = rows
                 .iter()
                 .position(|r| r.precursor != 0)
@@ -4537,7 +4523,6 @@ mod finalize_tests {
         assert!((a.quantity.unwrap() / (1e6 * 5.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
         assert!((b.quantity.unwrap() / (5e5 * 10.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
         assert!((a.quantity_se.unwrap() / (1e3 * 5.0 * sqrt_2pi) - 1.0).abs() < 1e-12);
-        // The extract rows keep their per-run quantities.
         let id0 = runs[0]
             .iter()
             .find(|r| r.precursor == 0 && r.role == Role::Identified);
@@ -4739,7 +4724,6 @@ mod finalize_tests {
             let got = f.quantity_normalized.unwrap();
             assert!((got / want - 1.0).abs() < 1e-9, "{f:?}");
         }
-        // The column is in the table, after quantity_se.
         let t = table(&mbr);
         let col = |name: &str| t[0].iter().position(|h| h == name).unwrap();
         assert_eq!(col("quantity_normalized"), col("quantity_se") + 1);
@@ -5022,7 +5006,6 @@ mod finalize_tests {
         let mut n = e.clone();
         n.m1_ratio = f64::NAN;
         assert_eq!(mismatch(&n, &n.clone()), None);
-        // Any other identified fit is compared as before.
         let mut id = e.clone();
         id.t0 += 3.0 * id.w;
         assert!(mismatch(&e, &id).unwrap().apex);
@@ -5145,7 +5128,6 @@ mod finalize_tests {
         assert!((g[0] - 2f64.ln()).abs() < 1e-12, "{g:?}");
         assert!((g[1] + 0.4).abs() < 1e-12, "{g:?}");
         assert!(g[2] < f[2] - 0.1, "{g:?}");
-        // The same numbers end the transfer feature vector.
         let x = transfer_features(&other, &shapes, &maps, 0.0, 1e-4).unwrap();
         let n = TRANSFER_FEATURES.len();
         assert_eq!(x.len(), n);

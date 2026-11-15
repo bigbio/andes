@@ -289,9 +289,6 @@ fn isobaric_peak_filter(explicit: Option<(f64, usize)>, high_res: bool) -> Optio
 /// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
 /// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
 /// `<base>.pin`, without it the PIN goes into a temp dir stored in `tmp`.
-/// The output base: `--output-pin`, else `--output-tsv`, else
-/// `--output-parquet`, else `./andes.pin`. Report files and the default scratch
-/// and cache directories sit next to it.
 fn output_base(
     output_pin: Option<&Path>,
     output_tsv: Option<&Path>,
@@ -496,7 +493,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
-    // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
     let uniprot_opts = input::UniProtOptions {
         variants: cli.db.uniprot_variants,
         isoforms: cli.db.uniprot_isoforms,
@@ -558,7 +554,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy = cli.decoy_strategy;
     let proteases = search::decoy::Proteases {
         primary: search_enzyme,
@@ -767,11 +762,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let detected = (detected_activation, detected_instrument);
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected {
-                // An EXPLICIT --fragmentation must win over detection. It previously
-                // only applied when detection returned no instrument, so on any normal
-                // mzML it was silently discarded — including the EThcD case, where the
-                // reader relabels ETD to HCD and the warning tells the user to "pass
-                // --fragmentation to override". It could not override anything.
                 (Some(method), Some(inst)) => {
                     let chosen = match cli.fragmentation {
                         Fragmentation::Auto => method,
@@ -1003,13 +993,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Ranges are validated (min <= max) by the clap value parsers.
     let (charge_min, charge_max) = cli.charge;
     params.charge_range = charge_min..=charge_max;
-    // Round-8: resolve the default by MODE, not by sniffing the value. An explicit
-    // `--isotope-error` (any range, including -1..2) is always honoured verbatim.
-    // Unset under --glyco defaults to 0..=2: an MS1 envelope audit found the firmware
-    // mis-picks the monoisotopic peak only ever too HIGH (0 of 23,907 scans needed a
-    // negative shift), while the iso=-1 arm emitted 28.5% of all candidate rows for
-    // 0.29% of the correct answers at a ~53:47 target:decoy ratio - pure FDR dilution.
-    // Dropping it measured +81 backbone-correct @1%.
     let iso_default = if cli.glyco { (0, 2) } else { (-1, 2) };
     let (iso_min, iso_max) = cli.isotope_error.unwrap_or(iso_default);
     params.isotope_error_range = iso_min..=iso_max;
@@ -1080,8 +1063,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             mono_params.backoff
         );
     }
-    // Fallback isolation half-width (Da) used only when the file omits per-scan
-    // isolation offsets; a fixed sensible default (was the --isolation-halfwidth flag).
     params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
@@ -1099,15 +1080,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // drops ~6% of true glycopeptides from the digest — concentrated at high
     // charge. Validated: raising to 2 for --glyco gave z5 22->54 (+2.5x) and
     // +116 backbone-correct @1% on the pooled AI-ETD benchmark. Floor glyco at 2.
-    // Round-8: raised again 2 -> 3. A sequon-bearing tryptic peptide often needs a
-    // third missed cleavage to reach a length the glyco path can score, and the
-    // reference identification set for this benchmark was itself produced with 3.
-    // Validated on the pooled AI-ETD benchmark: +44 backbone-correct @1%, +91
-    // glycoPSMs, +19 unique glycopeptides, +19 glycosites — and an ENTRAPMENT
-    // measurement (yeast/E.coli, where a glyco ID is false by construction) puts the
-    // true error at 0.14%, i.e. it buys IDs without spending error budget.
-    // Install engine-wide scoring settings from validated CLI values. Done once, before
-    // any spectrum is scored, so no scoring code reads the environment.
     let peak_filter = match cli.peak_filter.as_deref() {
         None => None,
         Some(spec) => {
@@ -1260,9 +1232,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
-    // it is silently inert, which would mislead a user who set it on purpose (code
-    // review). Warn rather than error so it stays a no-op knob outside glyco mode.
     // The flag defaults on, so only a value typed on the command line warns.
     if !cli.glyco && arg_present("--glyco-hcd-pair") {
         eprintln!(
@@ -1342,16 +1311,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // --refine + --chimeric run together correctly but do NOT fully stack.
-    //
-    // Mechanism: chimeric secondary PSMs do not collapse the refinement's
-    // confident-anchor set (the anchor set GROWS when both are on). What shrinks
-    // is the pool of spectra left for refinement to rescue: chimeric already
-    // explains many of them, so refinement has less work available, not worse
-    // anchors. See the docs for the measured numbers.
-    //
-    // Warn so the user isn't surprised that the combination is much closer to
-    // chimeric alone than to the sum.
     if params.chimeric && cli.refine {
         eprintln!(
             "WARN: --refine + --chimeric do not fully stack in this release — chimeric \
@@ -1364,10 +1323,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
 
-    // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
-    // One consolidated record of every resolved search parameter, so a
-    // (zero-config) run is fully reproducible/auditable from its log. Values that
-    // were auto-detected from the data/store are tagged [detected].
     eprintln!("──────── andes resolved parameters ────────");
     eprintln!("  spectra        : {}", spectrum_path.display());
     // The activation/instrument lines report what the RUN was routed on and say
@@ -2303,8 +2258,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // glyco mode — glyco_search_run re-derives its own candidates from
                 // `prepared` + the retained peaks and writes its own `.glyco.pin`
                 // (the standard PIN is skipped), so these PSM queues are discarded.
-                // Skip the scoring (parsing + peak retention below still run); ~16%
-                // faster on glyco. Non-glyco path is unchanged.
                 if !cli.glyco {
                     measurer.measure(&prepared, chunk.iter(), None);
                     let offset = all_spectra.len();
@@ -2522,7 +2475,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Downstream code uses these names.
     let spectra = all_spectra;
     let mut queues = all_queues;
 
@@ -2593,8 +2545,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        // Max variable mods and the entrapment diagnostic for refinement come from
-        // the refine config/tier (set them in the `--refine-config` YAML).
         let cfg = base_cfg;
 
         // High-res signal: the acquisition's resolution class. High-res
@@ -2603,8 +2553,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
         let high_res = acquisition.high_res;
 
-        // `high_res_only` comes from the refine config/tier (set it in the
-        // `--refine-config` YAML; the former CLI overrides were removed).
         let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
             eprintln!(
@@ -2641,18 +2589,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // ── 8. Write PIN — single unified list (Pass-1 ⊕ merged refine) ──────────
-    // Bench mode still writes PIN (so we can diff against the reference
-    // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
     // `pin_candidates`/`pin_index` own the list written to PIN/TSV: the merged
     // Pass-1 ⊕ Pass-2 candidates when --refine is active, else the Pass-1 pool
     // moved straight through. Owned (not borrowed) so they outlive the writes.
-    // Owned PIN candidate list + index. In the refine arm we MOVE
-    // `prepared.candidates` into the merge (which extends it in place); in the
-    // non-refine arm we move it straight into the tuple. Either way the Pass-1
-    // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
-    // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
     // IPF scores placements as the search scored candidates; kept past the index.
     let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
@@ -3296,10 +3236,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ipf_qpx.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
-            // Finding 3.9: failure to write an explicitly-requested output is a
-            // hard error, not a WARN-and-exit-0. The user asked for this
-            // artifact; silently exiting 0 without it hides data loss from any
-            // calling pipeline.
             Err(e) => {
                 return Err(format!(
                     "failed to write requested --output-parquet {}: {e}",
@@ -3527,8 +3463,6 @@ pub(crate) fn load_claim_database(
     })
 }
 
-/// Log what a UniProt XML load kept: annotated sites, variant entries, and
-/// the features the evidence level or the canonical sequence ruled out.
 /// Log what an annotation source (`--annotations` files or a PEFF header)
 /// added to the database.
 fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
@@ -3618,9 +3552,6 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
     }
 }
 
-/// Say how many annotated sites each `restrict_to: annotated` mod of `aa` can use,
-/// and warn about one the database annotates no site of its mass for: it is
-/// never placed.
 /// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
 /// oxidation (A→S, P→T…), carbamylation, methylation (G→A, S→T, D→E…).
 const ARTEFACT_MASSES: [f64; 4] = [0.984016, 15.994915, 43.005814, 14.015650];
@@ -3820,8 +3751,6 @@ fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
     }
 }
 
-// ── Training pipeline ─────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod deuterated_tag_warning_tests {
     use super::deuterated_tag_warning;
@@ -3855,9 +3784,6 @@ mod retrieval_choice_tests {
         assert!(c.report.unwrap().contains("high-resolution"));
     }
 
-    /// Low-res searches use the index with the vote cap: enumeration
-    /// there took TMT 5,404 s of CPU against 289 s for the capped index, at the
-    /// same PSMs.
     #[test]
     fn low_res_uses_the_capped_index() {
         let c = retrieval_choice(LO, None, FragmentIndexFlag::Auto);

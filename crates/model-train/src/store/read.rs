@@ -25,8 +25,6 @@ use crate::select::{parse_experiment_class, SelectionEntry};
 use crate::store::write::SourceLedger;
 use crate::TrainError;
 
-// ── public API ───────────────────────────────────────────────────────────────
-
 /// A handle to a Parquet model store.  Created by [`ModelStore::open`].
 pub struct ModelStore {
     /// One or more Parquet part files that make up this store.
@@ -179,8 +177,6 @@ impl ModelStore {
     }
 }
 
-// ── partition resolution ──────────────────────────────────────────────────────
-
 /// Resolve `path` to the list of Parquet part files that constitute the store.
 ///
 /// - A regular file ⇒ a single-element list (single-file store).
@@ -268,8 +264,6 @@ pub fn protocol_to_experiment_class(protocol: &str) -> std::collections::BTreeSe
     }
 }
 
-// ── manifest reader ──────────────────────────────────────────────────────────
-
 fn read_manifest(path: &Path) -> Result<Vec<RawManifestEntry>, TrainError> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -348,8 +342,6 @@ fn read_manifest(path: &Path) -> Result<Vec<RawManifestEntry>, TrainError> {
     Ok(entries)
 }
 
-// ── param reconstructor ──────────────────────────────────────────────────────
-
 struct ManifestRow {
     activation: String,
     instrument: String,
@@ -381,14 +373,8 @@ struct ManifestRow {
 }
 
 fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainError> {
-    // We do a full scan of each part file and collect relevant rows. For large
-    // stores this is acceptable as a first implementation; predicate pushdown
-    // can be added later. In a partitioned store every row for a given model
-    // lives in exactly one partition, so accumulating across parts is a no-op
-    // for parts that don't contain this model.
 
     let mut manifest_opt: Option<ManifestRow> = None;
-    // partition list (in stored order)
     let mut partitions: Vec<Partition> = Vec::new();
     let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
     let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
@@ -738,7 +724,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
 
     let manifest = manifest_opt.ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
 
-    // Reconstruct SpecDataType.
     let activation = model::activation::ActivationMethod::from_name(&manifest.activation)
         .ok_or_else(|| TrainError::Other(format!("unknown activation: {}", manifest.activation)))?;
     let instrument = model::instrument::InstrumentType::from_name(&manifest.instrument)
@@ -766,9 +751,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
         Tolerance::Da(manifest.mme_val as f64)
     };
 
-    // `partitions` was stored in the binary-reader sorted order (charge → seg_num → parent_mass).
-    // The binary reader sorts defensively; the parquet store stores in sorted order too.
-    // Sort to match the loader invariant.
     partitions.sort();
 
     let mut param = Param {
@@ -871,7 +853,6 @@ fn parse_manifest_row(
     let max_charge = i32_col(batch, "max_charge")?.value(i);
     let num_precursor_off = i32_col(batch, "num_precursor_off")?.value(i);
 
-    // Parse charge_hist.
     let ch_col = batch
         .column_by_name("charge_hist")
         .ok_or_else(|| TrainError::Other("missing charge_hist".into()))?;
@@ -1005,8 +986,6 @@ fn decode_ion_type(
     }
 }
 
-// ── column accessors ─────────────────────────────────────────────────────────
-
 fn str_col<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
@@ -1079,8 +1058,6 @@ fn i64_col<'a>(
         .ok_or_else(|| TrainError::Other(format!("column {name} not Int64Array")))
 }
 
-// ── source ledger reader ──────────────────────────────────────────────────────
-
 fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainError> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -1094,7 +1071,6 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
     for batch in reader {
         let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-        // Check if this batch has source/stat columns at all.
         if batch.column_by_name("source_id").is_none() {
             continue;
         }
@@ -1185,8 +1161,6 @@ fn opt_str_col(batch: &arrow::record_batch::RecordBatch, name: &str, i: usize) -
     }
 }
 
-// ── per-source stats reader ───────────────────────────────────────────────────
-
 fn read_source_stats(
     path: &Path,
     model_id: &str,
@@ -1205,7 +1179,6 @@ fn read_source_stats(
     for batch in reader {
         let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-        // Skip batches that don't have stat columns.
         if batch.column_by_name("counts").is_none() {
             continue;
         }
@@ -1240,7 +1213,6 @@ fn read_source_stats(
 
             match tk {
                 "rank" => {
-                    // Reconstruct (Partition, IonType) from columns.
                     let part = read_partition(&batch, i)?;
                     let ion = read_ion_type(&batch, i)?;
 
@@ -1379,14 +1351,10 @@ fn read_ion_type(
     decode_ion_type(kind, ic, iob, loss_class)
 }
 
-// ── tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Resolve the bundled partitioned store directory relative to this file's
-    /// manifest dir (same convention the binary uses via `CARGO_MANIFEST_DIR`).
     fn bundled_store_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
     }
@@ -1403,9 +1371,6 @@ mod tests {
         let path = bundled_store_path();
         let store = ModelStore::open(&path).expect("failed to open bundled model store");
         let entries = store.selection_entries();
-        // The bundle ships 19 own-trained models, one selection entry each. (Two
-        // seed-copy phospho slugs with no own training data were dropped; their
-        // queries route to the nearest own model via select_nearest.)
         assert_eq!(
             entries.len(),
             19,
@@ -1426,12 +1391,8 @@ mod tests {
 
     #[test]
     fn duplicate_model_id_across_parts_is_rejected() {
-        // Finding 3.7: two partitions that both declare the same model_id make
-        // load order-dependent, so `open` must reject it.
         let src = bundled_partition_file();
         let dir = tempfile::tempdir().expect("tempdir");
-        // Two real partitions, each a full copy of one bundled partition → every
-        // model_id in it appears twice across parts.
         std::fs::copy(&src, dir.path().join("part_a.parquet")).expect("copy a");
         std::fs::copy(&src, dir.path().join("part_b.parquet")).expect("copy b");
         let msg = match ModelStore::open(dir.path()) {
@@ -1446,8 +1407,6 @@ mod tests {
 
     #[test]
     fn temp_suffix_partition_is_ignored() {
-        // Finding 3.7: a stale temp partition (dotfile / `.tmp.parquet`) must be
-        // skipped so it neither shadows nor duplicates a real partition.
         let src = bundled_partition_file();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::copy(&src, dir.path().join("models.parquet")).expect("copy real");

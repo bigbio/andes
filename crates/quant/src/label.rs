@@ -53,13 +53,9 @@ pub const D_H: f64 = 2.014_101_778 - 1.007_825_032;
 /// Isotope offsets of [`ChannelEnvelope`]: `LOWEST_OFFSET ..= HIGHEST_OFFSET`
 /// relative to the channel's monoisotope.
 pub const LOWEST_OFFSET: i32 = -2;
-/// Isotopes up to M+5 are modelled so that a lighter channel's M+4..M+5
-/// lands on a heavier channel 4 Da up (Lys4, Dimethyl4).
 pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
-/// Isotopes read per channel: M−1 (the check for another envelope) to M+3.
 const READ_OFFSETS: [i32; 5] = [-1, 0, 1, 2, 3];
-/// Most channels a specification may have.
 pub const MAX_CHANNELS: usize = 5;
 /// Most components one fit takes: every channel and at most one satellite
 /// per channel (the heavy-proline form of `--label-arg-pro`). Up to
@@ -77,7 +73,6 @@ pub enum Site {
 }
 
 impl Site {
-    /// `K`, `R`, ... or `N-term`.
     pub fn describe(self) -> String {
         match self {
             Site::Residue(r) => (r as char).to_string(),
@@ -500,7 +495,6 @@ impl LabelSpec {
         })
     }
 
-    /// Number of channels.
     pub fn len(&self) -> usize {
         self.channels.len()
     }
@@ -620,7 +614,6 @@ impl LabelSpec {
         )
     }
 
-    /// A one-line description.
     pub fn describe(&self) -> String {
         self.channels
             .iter()
@@ -834,7 +827,6 @@ impl ChannelEnvelope {
     /// length; entries beyond M+5 are ignored). `deuterium` 2H atoms at
     /// enrichment `p_2h`, `heavy` 13C/15N atoms at `p_heavy`.
     pub fn new(light: &[f64], deuterium: u32, p_2h: f64, heavy: u32, p_heavy: f64) -> Self {
-        // Lower-isotopologue distribution: shift 0, -1, -2.
         let lower = |n: u32, p: f64| -> [f64; 3] {
             if n == 0 || p >= 1.0 {
                 return [1.0, 0.0, 0.0];
@@ -863,7 +855,6 @@ impl ChannelEnvelope {
         let mut out = [0.0; N_OFFSETS];
         for (k, &v) in light.iter().take((HIGHEST_OFFSET + 1) as usize).enumerate() {
             for (j, &s) in shift.iter().enumerate() {
-                // offset k - j, index (k - j) - LOWEST_OFFSET
                 let idx = k as i32 - j as i32 - LOWEST_OFFSET;
                 out[idx as usize] += v * s;
             }
@@ -877,7 +868,6 @@ impl ChannelEnvelope {
         ChannelEnvelope(out)
     }
 
-    /// Relative abundance at isotope `offset` (0 = monoisotope).
     pub fn at(&self, offset: i32) -> f64 {
         if (LOWEST_OFFSET..=HIGHEST_OFFSET).contains(&offset) {
             self.0[(offset - LOWEST_OFFSET) as usize]
@@ -1137,7 +1127,6 @@ fn nn_active_set(
     None
 }
 
-/// [`nn_quadratic`] by enumerating the free subsets.
 fn nn_enumerate(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64, Vec<bool>) {
     let mut best = (vec![0.0; n], 0.0, vec![false; n]);
     for mask in 1u32..(1 << n) {
@@ -1174,7 +1163,6 @@ fn nn_enumerate(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64
     best
 }
 
-/// Gaussian elimination with partial pivoting; `None` when singular.
 fn solve(m: &mut [f64], v: &mut [f64], k: usize) -> Option<Vec<f64>> {
     for col in 0..k {
         let piv =
@@ -1210,7 +1198,6 @@ fn solve(m: &mut [f64], v: &mut [f64], k: usize) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// Inverse of a small symmetric positive matrix (the free block of `H`).
 fn invert(h: &[f64], k: usize) -> Option<Vec<f64>> {
     let mut inv = vec![0.0; k * k];
     for col in 0..k {
@@ -1337,7 +1324,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     };
     let normal =
         |gc: &[Vec<f64>], w_inv: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>, Vec<f64>) {
-            // proj[t][c] = Σ_j yc_t g_c ; sgg[c][c'] = Σ_j g_c g_c'
             let mut sgg = vec![0.0; n_ch * n_ch];
             for a in 0..n_ch {
                 for b in a..n_ch {
@@ -1511,7 +1497,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     }
     let area = w * (2.0 * std::f64::consts::PI).sqrt();
 
-    // Standard errors: inverse of the passive block; 1/sqrt(H_cc) otherwise.
     let pidx: Vec<usize> = (0..n_ch).filter(|&c| passive[c]).collect();
     let mut se = vec![0.0; n_ch];
     let k = pidx.len();
@@ -1532,12 +1517,10 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     let n_points = rt.iter().filter(|&&t| (t - t0).abs() <= 2.0 * w).count() as u32;
     let channels = (0..n_ch)
         .map(|c| {
-            // LLR lost when c is held at 0.
             let mut free = probe.free.clone();
             free[c] = false;
             let (_, llr0, _) = nn_quadratic(&h, &b, n_ch, &free);
             let llr_c = (llr - llr0).max(0.0);
-            // Own isotope heights, the others' modelled parts removed.
             let s_cc = sgg[c * n_ch + c].max(1e-300);
             let height = |t: usize| -> f64 {
                 let mut p = proj[t][c];
@@ -1591,7 +1574,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             }
             let pi0 = probe.envelopes[c].at(0).max(1e-9);
             let m1_ratio = (r / s_cc).max(0.0) / (pi0 * a[c].max(se[c]).max(1e-300));
-            // Elution centroid of the channel's own monoisotope and M+1.
             let tc = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
             let (mut sy, mut syt) = (0.0, 0.0);
             for k in [1usize, 2] {
@@ -1660,7 +1642,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                     0.0
                 }
             };
-            // Mass error of the monoisotopic centroids near the apex.
             let mz = probe.channel_mz[c];
             let tol = mz * params.tol_ppm * 1e-6;
             let (mut sw, mut swe) = (0.0, 0.0);
@@ -2188,7 +2169,6 @@ mod tests {
                         }
                     }
                 }
-                // Background centroids everywhere else.
                 for k in 0..50 {
                     peaks.push((300.0 + k as f64 * 17.3, noise));
                 }
@@ -2450,7 +2430,6 @@ mod tests {
         let ml = 700.0;
         let mh = ml + (36.07567 - 28.0313) / 2.0;
         let run = synthetic_run(&[(ml, el, 1e6, 120.0), (mh, eh, 5e5, 117.0)], 4.0, 50.0);
-        // Each channel alone.
         let mut alone = probe(&[ml, mh], &[el, eh], 120.0);
         alone.free = vec![true, false];
         let a0 = fit_group(&run, &alone, &FitParams::default()).unwrap().t0;
@@ -2548,7 +2527,6 @@ mod tests {
         assert!((q[0] - 0.5).abs() < 1e-12);
         let q4 = channel_qvalues(&rows, 4);
         assert!((q4[0] - 0.125).abs() < 1e-12);
-        // The weighted form with equal weights is the same estimate.
         let w: Vec<(f64, f64)> = rows
             .iter()
             .map(|&(s, d)| (s, if d { 0.25 } else { 0.0 }))

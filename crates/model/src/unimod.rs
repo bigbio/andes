@@ -81,7 +81,6 @@ impl UnimodDb {
         let mut cur_mass: Option<f64> = None;
         let mut cur_sites: Vec<String> = Vec::new();
 
-        // Commit the in-progress term (if complete) into the db.
         let commit = |db: &mut UnimodDb,
                       id: &mut Option<String>,
                       name: &mut Option<String>,
@@ -101,7 +100,6 @@ impl UnimodDb {
                     .push(id_v.clone());
                 db.by_accession.insert(id_v, entry);
             } else {
-                // Incomplete term — drop any partial site list.
                 sites.clear();
             }
         };
@@ -109,7 +107,6 @@ impl UnimodDb {
         for raw in text.lines() {
             let line = raw.trim();
             if line == "[Term]" {
-                // Starting a new term: commit the previous one.
                 commit(
                     &mut db,
                     &mut cur_id,
@@ -156,7 +153,6 @@ impl UnimodDb {
                 }
             }
         }
-        // Commit the final term at EOF.
         commit(
             &mut db,
             &mut cur_id,
@@ -181,7 +177,6 @@ impl UnimodDb {
             .filter(|p| p.eq_ignore_ascii_case("UNIMOD:"))
             .map(|_| &t[7..])
         {
-            // Canonicalise to `UNIMOD:<num>`.
             let key = format!("UNIMOD:{}", num.trim());
             return match self.by_accession.get(&key) {
                 Some(m) => Ok(Some(m)),
@@ -235,17 +230,14 @@ impl UnimodDb {
             .chain(self.aliases.iter().map(|(a, _)| a.as_str()))
     }
 
-    /// Look up a record by exact `UNIMOD:NN` accession.
     pub fn by_accession(&self, accession: &str) -> Option<&UnimodMod> {
         self.by_accession.get(accession.trim())
     }
 
-    /// Number of parsed terms (test/diagnostic helper).
     pub fn len(&self) -> usize {
         self.by_accession.len()
     }
 
-    /// Whether the db parsed no usable terms.
     pub fn is_empty(&self) -> bool {
         self.by_accession.is_empty()
     }
@@ -296,7 +288,6 @@ fn bundled_path(file: &str) -> PathBuf {
             return p;
         }
     }
-    // Last-resort default (source tree) for error messages.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../resources")
         .join(file)
@@ -320,7 +311,6 @@ pub fn bundled() -> &'static UnimodDb {
     })
 }
 
-/// Convenience: resolve a token against the bundled OBO.
 pub fn resolve(token: &str) -> Result<Option<&'static UnimodMod>, UnimodResolveError> {
     bundled().resolve(token)
 }
@@ -449,7 +439,6 @@ xref: delta_mono_mass "2.0"
                 by_acc.mono_mass,
                 mass
             );
-            // Bare name resolves to the same record.
             let by_name = db.resolve(name).unwrap().unwrap();
             assert_eq!(by_name.accession, *acc, "name {name} resolved elsewhere");
         }

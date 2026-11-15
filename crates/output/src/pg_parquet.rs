@@ -24,7 +24,6 @@ use crate::feature_parquet::{
 };
 use crate::protein_inference::{Inference, ProteinGroup};
 
-/// Accession prefix of the contaminant entries of a search database.
 const CONTAMINANT_PREFIX: &str = "CONTAMINANT_";
 
 /// Features of one group: of its unique peptides, and all.
@@ -71,7 +70,6 @@ fn additional_intensity_type() -> DataType {
     ])))
 }
 
-/// The pg view's columns, in the QPX schema's order.
 pub fn pg_schema() -> Schema {
     Schema::new(vec![
         Field::new("pg_id", DataType::Int64, false),

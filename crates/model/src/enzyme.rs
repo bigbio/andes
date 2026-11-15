@@ -139,10 +139,6 @@ impl Enzyme {
         true
     }
 
-    // -----------------------------------------------------------------------
-    // GF helpers
-    // -----------------------------------------------------------------------
-
     /// Returns `true` for N-terminal enzymes (cleavage before the target
     /// residue: LysN, AspN). `false` for C-terminal enzymes (Trypsin, LysC,
     /// ArgC, Chymotrypsin, GluC, AlphaLP) and for NoCleavage /
@@ -152,7 +148,6 @@ impl Enzyme {
         matches!(self, Enzyme::LysN | Enzyme::AspN)
     }
 
-    /// `true` for C-terminal enzymes (the negation of `is_n_term`).
     pub fn is_c_term(self) -> bool {
         !self.is_n_term()
     }
@@ -285,7 +280,6 @@ mod tests {
         assert_eq!(Enzyme::from_name("AlphaLP"), Some(Enzyme::AlphaLP));
     }
 
-    // GF helper tests
     #[test]
     fn trypsin_is_c_term_and_cleaves_after_kr() {
         assert!(!Enzyme::Trypsin.is_n_term());
@@ -310,7 +304,6 @@ mod tests {
     #[test]
     fn nocleavage_residues_is_empty() {
         assert_eq!(Enzyme::NoCleavage.residues(), &[] as &[u8]);
-        // NoCleavage.isCleavable should return false for all residues.
         assert!(!Enzyme::NoCleavage.is_cleavable(b'K'));
         assert!(!Enzyme::NoCleavage.is_cleavable(b'R'));
         assert!(!Enzyme::NoCleavage.is_cleavable(b'A'));

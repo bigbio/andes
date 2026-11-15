@@ -29,7 +29,6 @@ pub const PROTON: f64 = 1.007276;
 pub const WATER: f64 = 18.010565;
 
 /// Core oxonium ions: HexNAc-derived fragments + HexHexNAc; singly-charged m/z.
-/// [138.05496, 168.06552, 186.07608, 204.08665, 366.13947]
 pub const CORE_OXONIUM_MZ: [f64; 5] = [
     138.05496, // HexNAc fragment C7H8NO2+ (HexNAc+H − CH6O3)
     168.06552, // HexNAc+H − 2H2O
@@ -74,7 +73,6 @@ mod tests {
     /// pin to 1e-6 Da. Do not retype masses elsewhere — reference these consts.
     #[test]
     fn residue_masses_match_standard() {
-        // (const, standard 6-decimal value)
         let table = [
             (HEXNAC, 203.079373),
             (HEX, 162.052824),
@@ -95,9 +93,7 @@ mod tests {
 
     #[test]
     fn core_y_steps_are_cumulative_core() {
-        // Y1 must equal HEXNAC (catches literal drift in the first step)
         assert_eq!(CORE_Y_STEPS[0], HEXNAC);
-        // Y2 = Y1 + HexNAc; Y3 = Y2 + Hex; Y4 = Y3 + Hex; Y5 = Y4 + Hex
         assert!((CORE_Y_STEPS[1] - (CORE_Y_STEPS[0] + HEXNAC)).abs() < 1e-4);
         assert!((CORE_Y_STEPS[2] - (CORE_Y_STEPS[1] + HEX)).abs() < 1e-4);
         assert!((CORE_Y_STEPS[3] - (CORE_Y_STEPS[2] + HEX)).abs() < 1e-4);
@@ -106,7 +102,6 @@ mod tests {
 
     #[test]
     fn o_core_y_steps_is_single_galnac() {
-        // O-glycan core ladder is the single reducing-end GalNAc rung (Y1).
         assert_eq!(O_CORE_Y_STEPS, [HEXNAC]);
     }
 }

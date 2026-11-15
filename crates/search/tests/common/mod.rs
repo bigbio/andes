@@ -1,8 +1,5 @@
 //! Shared test fixtures for the search crate's integration tests.
 //!
-//! Used via `mod common; use common::*;` in each integration test file.
-//! Cargo treats `tests/common/mod.rs` as a non-test module per
-//! https://doc.rust-lang.org/cargo/guide/tests.html#integration-tests.
 
 #![allow(dead_code)] // some helpers are used by only a subset of tests
 
@@ -10,10 +7,6 @@ use std::path::PathBuf;
 
 use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
 
-/// Resolve a path relative to the workspace root (CARGO_MANIFEST_DIR/../../..).
-///
-/// Pass the full path from the repo root, e.g.
-/// `fixture("test-fixtures/BSA.fasta")`.
 pub fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -22,7 +15,6 @@ pub fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Standard BSA-search aa_set: Carbamidomethyl-C fixed + Oxidation-M variable.
 pub fn aa_set() -> model::AminoAcidSet {
     let cam = Modification {
         name: "Carbamidomethyl".into(),
@@ -83,7 +75,6 @@ pub fn strip_flanking_and_mods(pin_pep: &str) -> String {
     let mut chars = middle.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '+' || c == '-' {
-            // Consume mod-mass tail: digits, optional dot, optional digits.
             while let Some(&nc) = chars.peek() {
                 if nc.is_ascii_digit() || nc == '.' {
                     chars.next();
@@ -114,7 +105,6 @@ mod parser_tests {
 
     #[test]
     fn strips_multiple_mod_masses() {
-        // Regression: the case that broke the prior naive parser.
         assert_eq!(
             strip_flanking_and_mods("K.GAC+57.021LLPKIETM+15.995R.E"),
             "GACLLPKIETMR"

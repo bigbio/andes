@@ -204,8 +204,6 @@ pub fn solve_backbone_min(
     // value = (best_w_for_rung, mass_accum, vote_count). We compute the final
     // intensity_score as the sum of per-rung best weights.
 
-    // Two-pass: collect best-weight per (backbone_bin, rung) then aggregate.
-    // We use a flat HashMap keyed by (backbone_bin, rung_idx) for efficiency.
     let mut rung_best: HashMap<
         (i64, u8),
         (
@@ -635,16 +633,6 @@ pub fn glycan_y_intensity(
         score += match_int(bb_neutral + r);
         n_rungs += 1;
     }
-    // Round-7 (audit F2): this is an UNNORMALISED sum over `1 + #single-cleavage
-    // retained masses` rungs — 5 for the trimannosyl core (the 2N+H rung is a
-    // two-cleavage fragment), more for branched topologies, up to ~O(n) for a large
-    // composition. So E[score | noise] grows with glycan SIZE, and the term
-    // structurally rewards assigning a bigger glycan. That is the mechanism behind
-    // the measured K·ladder inversion (76.5 on wrong winners vs 53.1 on correct) and
-    // the "oversized glycan" failure signature; round-2 suppressed the symptom by
-    // cutting K 50→10 but the estimator is still biased. Dividing by the rung count
-    // makes it a mean matched intensity per predicted rung, comparable across
-    // compositions — and across the de-novo branch, which always has exactly 6 rungs.
     ladder_norm_scale(score, n_rungs)
 }
 
@@ -656,14 +644,6 @@ const CORE_RUNGS: usize = 6;
 fn ladder_norm_enabled() -> bool {
     use std::sync::OnceLock;
     static CELL: OnceLock<bool> = OnceLock::new();
-    // DEFAULT ON since the bias was measured. The unnormalised sum's expectation grows
-    // with glycan size (see `glycan_y_intensity`), which structurally rewards assigning a
-    // bigger glycan — the documented K·ladder inversion, 76.5 on wrong winners vs 53.1 on
-    // correct. Measured A/B with the correction enabled: mouse AI-ETD benchmark 664 -> 683
-    // identifications at 1% FDR, and on a large-glycan human plasma set the decoy fraction
-    // in the score's top 150 fell 12.7% -> 12.0%. Neither regime regressed.
-    //
-    // The A/B is settled, so this is a constant rather than a switch.
     *CELL.get_or_init(|| true)
 }
 
@@ -911,9 +891,6 @@ pub fn acceptor_core_y_gate(
 
 #[cfg(test)]
 mod tests {
-    /// Brute-force reference for `complement_score`, mirroring the pre-optimisation
-    /// binary-search form. The two-pointer sweep must match it exactly (same pairs,
-    /// same order ⇒ bit-identical f64 sum).
     /// The complement-pair window follows the glyco fragment tolerance: a pair
     /// 0.1 Da off its target sum is outside 20 ppm (0.02 Da floor) and inside
     /// an ion-trap-sized window.
@@ -1119,10 +1096,6 @@ mod tests {
         assert!(solve_backbone(&peaks, 2500.0, 2, 20.0, 5).is_empty());
     }
 
-    /// Codex re-review #3: the relaxed quorum-1 rescue must NOT accept a lone
-    /// unrelated peak as a spurious single-rung backbone. Without b/y complement
-    /// support, a single core-Y hit is not enough — otherwise noise peaks become
-    /// candidates that enter peptide scoring.
     /// Composition-specific glycan Y-ladder: the intensity match must be high
     /// for the TRUE composition (whose stepwise Y-ions line up with the spectrum)
     /// and lower for a DECOY composition of the same total mass (different
@@ -1147,10 +1120,6 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
 
-        // Decoy of the SAME total mass but different composition order:
-        // HexNAc3Hex2Fuc? keep same mass by construction is hard; instead use a
-        // composition whose intermediate Y-ions differ (Hex-first is not built,
-        // but HexNAc5 has different steps). Use HexNAc1Hex4 (~same count, diff steps).
         let decoy = GlycanComp::from_tree_str("(N(H(H)(H)(H)))").unwrap();
 
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
@@ -1210,7 +1179,6 @@ mod tests {
         let proton = PROTON;
         let bb = 1500.0_f64;
         let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
-        // Spectrum built from the TRUE composition's full Y-ladder.
         let mut cum = 0.0;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
         for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
@@ -1226,9 +1194,7 @@ mod tests {
             s_decoy < s_true,
             "decoy ladder ({s_decoy}) must score below the target ({s_true})"
         );
-        // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
         assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
-        // Determinism: same seed → identical score.
         let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
         assert!(
             (s_decoy - s_decoy2).abs() < 1e-12,
@@ -1239,9 +1205,6 @@ mod tests {
     /// EXCHANGEABILITY regression: on a spectrum whose kept Y0/Y1 anchors appear
     /// ONLY at charge 2+ (common for large/high-charge glycopeptides), the decoy
     /// must still match them — it uses the SAME multi-charge matcher as the target.
-    /// The previous decoy searched a single +1 m/z, so it scored ~0 here while the
-    /// target scored positive: that charge-coverage asymmetry (not the intended
-    /// interior-rung shift) confounded the 2D-FDR null. This locks the fix.
     #[test]
     fn glycan_y_intensity_decoy_matches_multicharge_anchors() {
         use crate::glycan_db::GlycanComp;
@@ -1259,11 +1222,8 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
 
-        // Target sees the z=2 ladder.
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         assert!(s_true > 0.0, "target must match the z=2 ladder");
-        // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
-        // decoy would have scored 0.0 here (the bug this test guards against).
         let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777);
         assert!(
             s_decoy > 0.0,
@@ -1282,11 +1242,6 @@ mod tests {
         );
     }
 
-    /// Top-rung-KEPT regression: the decoy is mass-preserving, so its top rung sits
-    /// at the precursor mass the target also matches — it must be kept, not shifted.
-    /// On a spectrum with ONLY Y0, Y1 and the top (full-glycan) rung present (no
-    /// interior peaks), target and decoy must score IDENTICALLY (the shifted interior
-    /// rungs find nothing either way). Guards against re-introducing the top-rung shift.
     #[test]
     fn glycan_y_intensity_decoy_keeps_top_rung() {
         use crate::glycan_db::GlycanComp;
@@ -1311,11 +1266,6 @@ mod tests {
         );
     }
 
-    /// Convention + intensity regression: the core-Y ladder ions live at the
-    /// NEUTRAL peptide mass (Y0 = neutral + PROTON). `count_core_y_hits` and the
-    /// new `core_y_intensity` must both be given the NEUTRAL backbone; feeding
-    /// the residue mass (H2O too low) misses the ladder. `core_y_intensity` sums
-    /// matched base-peak-normalised intensity instead of counting.
     #[test]
     fn core_y_intensity_and_count_use_neutral_convention() {
         let proton = PROTON;
@@ -1329,7 +1279,6 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let stats = SpectrumStats::new(&peaks);
 
-        // NEUTRAL input → full ladder (6 rungs), positive intensity.
         assert_eq!(
             count_core_y_hits(&peaks, &stats, neutral, 20.0, 3, GlycanCore::NGlycan),
             6,
@@ -1340,13 +1289,11 @@ mod tests {
             inten > 0.0,
             "core_y_intensity must be positive for a real ladder, got {inten}"
         );
-        // Y0 (1.0 normalised) + 5×0.5 = 3.5 expected.
         assert!(
             (inten - 3.5).abs() < 1e-6,
             "expected 3.5 normalised intensity, got {inten}"
         );
 
-        // RESIDUE input (neutral − H2O) → the ladder is missed (wrong convention).
         let residue = neutral - H2O;
         assert!(
             count_core_y_hits(&peaks, &stats, residue, 20.0, 3, GlycanCore::NGlycan) < 6,
@@ -1467,7 +1414,6 @@ mod tests {
         let out = solve_backbone(&peaks, precursor, 2, 20.0, 5);
         assert!(!out.is_empty());
         // Centroid must be within 2 mDa of the true backbone (unbiased).
-        // The old lowest-edge behaviour skewed low by up to the 0.03-Da window.
         assert!(
             (out[0].backbone_mass - bb).abs() < 0.002,
             "centroid off by {:.4} (got {})",
@@ -1486,16 +1432,13 @@ mod tests {
         let proton = crate::glycan_mass::PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
-        // Build identical core-Y ladders anchored at two different backbone masses.
         // Both backbones get exactly the same number of Y-ladder peaks → tied hits & scores.
         let bb1 = 1200.0_f64;
         let bb2 = 1800.0_f64;
 
         let mut peaks: Vec<(f64, f32)> = Vec::new();
         for &bb in &[bb1, bb2] {
-            // Y0 (bare backbone)
             peaks.push((bb + proton, 50.0));
-            // Y_r for each core step
             for &s in steps.iter() {
                 peaks.push((bb + s + proton, 50.0));
             }
@@ -1504,7 +1447,6 @@ mod tests {
         // Precursor must be larger than any peak neutral mass.
         let precursor_neutral = bb2 + steps.last().copied().unwrap_or(0.0) + 500.0;
 
-        // Call solve_backbone twice with identical args.
         let run1 = solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
         let run2 = solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
 
@@ -1548,26 +1490,22 @@ mod tests {
         let intensity = 500.0_f32;
         let mut peaks: Vec<(f64, f32)> = Vec::new();
 
-        // Core-Y ladder for true_bb
         peaks.push((true_bb + proton, intensity)); // Y0
         for &s in steps.iter() {
             peaks.push((true_bb + s + proton, intensity));
         }
 
-        // Core-Y ladder for spurious_bb (identical count and intensity)
         peaks.push((spurious_bb + proton, intensity)); // Y0
         for &s in steps.iter() {
             peaks.push((spurious_bb + s + proton, intensity));
         }
 
-        // Add complement pairs only for true_bb.
         // A valid b-ion at b_mz and its complement y at y_mz = (true_bb + BY_COMPLEMENT_OFFSET) - b_mz.
         // Choose b_mz values far from the core-Y peaks to avoid confusion.
         let comp_target = true_bb + BY_COMPLEMENT_OFFSET; // 1500 + 2*PROTON
                                                           // Three b/y pairs: b at 300, 450, 600 Da → y = comp_target - b
         for &b_mz in &[300.0_f64, 450.0, 600.0] {
             let y_mz = comp_target - b_mz;
-            // Only add if y_mz > 0 and distinct from existing peaks
             if y_mz > 0.0 {
                 peaks.push((b_mz, intensity));
                 peaks.push((y_mz, intensity));
@@ -1606,7 +1544,6 @@ mod tests {
         let proton = crate::glycan_mass::PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
-        // True backbone at 1500 Da — bright peaks
         let true_bb = 1500.0_f64;
         let mut peaks: Vec<(f64, f32)> = vec![(true_bb + proton, 10000.0)]; // Y0 bright
         for &s in steps.iter() {
@@ -1624,7 +1561,6 @@ mod tests {
         let precursor_neutral = true_bb + 1444.53;
         let out = solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
         assert!(!out.is_empty());
-        // The bright true-backbone cluster must be ranked first.
         assert!(
             (out[0].backbone_mass - true_bb).abs() < 0.05,
             "expected true backbone first, got {}",

@@ -430,9 +430,6 @@ impl PsmMatch {
         score_key(self.rank_score).total_cmp(&score_key(other.rank_score))
     }
 
-    /// Returns the first (primary) candidate index. Callers that need to
-    /// resolve back to a single Candidate use this; PIN writer iterates
-    /// `candidate_idxs` directly to emit the multi-protein `Proteins` column.
     pub fn primary_candidate_idx(&self) -> u32 {
         self.candidate_idxs[0]
     }
@@ -540,10 +537,6 @@ impl TopNQueue {
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Equal => {
-                    // Kim et al. (Nat Commun 5:5277, 2014): keep tied PSMs at
-                    // capacity on the per-spectrum merge.
-                    // The queue may exceed `capacity` when ties exist —
-                    // `capacity` becomes a *minimum* top-N, not a hard cap.
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Less => {
@@ -865,12 +858,6 @@ mod tests {
 
     #[test]
     fn dedup_pepseq_score_aggregates_candidate_idxs() {
-        // Synthetic test for pepSeq+score dedup. Two PSMs
-        // with the same (peptide_residue, score) key should collapse to one
-        // PsmMatch with both candidate_idxs aggregated into the surviving Vec.
-        //
-        // We use drain_into_vec to extract PSMs, then assert the dedup helper
-        // collapses them correctly.
 
         let mut q = TopNQueue::new(10);
         // Three PSMs: two share (peptide=0, score=50), one is distinct (peptide=1, score=40)
@@ -889,9 +876,6 @@ mod tests {
         let drained = q.drain_into_vec();
         assert_eq!(drained.len(), 3);
 
-        // Caller (match_engine) provides the key function. Here we use
-        // a synthetic key based on score only (test scaffolding — real
-        // dedup uses peptide_residue + rounded_score from candidates).
         let deduped = simple_dedup_by_score_for_test(drained);
 
         // Expect: 2 groups — score=50 with idxs [10,20], score=40 with [30]
@@ -946,10 +930,6 @@ mod tests {
         assert_eq!(cloned.rank_score, 4.2);
     }
 
-    // -----------------------------------------------------------------------
-    // rank_score ordering tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn psm_match_orders_by_rank_score_descending() {
         // Higher rank_score means "better" → Ord-greater so the min-heap can
@@ -993,10 +973,6 @@ mod tests {
         assert_eq!(scores, vec![3.0, 2.0, 1.0]);
     }
 
-    // -----------------------------------------------------------------------
-    // isotope_offset field
-    // -----------------------------------------------------------------------
-
     #[test]
     fn psm_match_default_isotope_offset_is_zero() {
         let m = make_match(0, 1.0);
@@ -1006,10 +982,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // PsmFeatures struct and default initialization
-    // -----------------------------------------------------------------------
-
     #[test]
     fn psm_features_default_is_zero() {
         let f = PsmFeatures::default();
@@ -1018,7 +990,6 @@ mod tests {
         assert_eq!(f.longest_y, 0);
         assert_eq!(f.longest_y_pct, 0.0);
         assert_eq!(f.matched_ion_ratio, 0.0);
-        // Ion-current + error-stat columns (9 fields)
         assert_eq!(f.explained_ion_current_ratio, 0.0);
         assert_eq!(f.n_term_ion_current_ratio, 0.0);
         assert_eq!(f.c_term_ion_current_ratio, 0.0);
@@ -1114,7 +1085,6 @@ mod tests {
             m.features.matched_ion_ratio, 0.0,
             "features.matched_ion_ratio should default to 0.0"
         );
-        // Ion-current + error-stat columns (9 fields)
         assert_eq!(
             m.features.explained_ion_current_ratio, 0.0,
             "explained_ion_current_ratio should default to 0.0"
@@ -1153,10 +1123,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Issue 8: NaN-safe Ord impl
-    // -----------------------------------------------------------------------
-
     #[test]
     fn psm_match_with_nan_rank_score_orders_as_worst() {
         // NaN rank_score should sort as WORSE than any finite value.
@@ -1169,10 +1135,6 @@ mod tests {
             "NaN rank_score should sort as worse (Less) than a finite value"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Tailor per-spectrum calibration
-    // -----------------------------------------------------------------------
 
     use std::collections::HashMap;
 
@@ -1225,13 +1187,11 @@ mod tests {
         // RawScores). Must fall back to 1.0 to avoid div-by-zero / sign flip.
         let (h, total) = hist_from(&[(-10, 990), (-1, 10)]);
         assert_eq!(total, 1000);
-        // top tail is the 10 candidates at -1, which is <= 0 → fallback.
         assert_eq!(tailor_denominator(&h, total), 1.0);
     }
 
     #[test]
     fn tailor_denom_exactly_min_candidates_calibrates() {
-        // Exactly TAILOR_MIN_CANDIDATES → calibrates (>= threshold).
         // 100 candidates, top_k = ceil(0.01*100) = 1. Highest score = 40.
         let (h, total) = hist_from(&[(10, 99), (40, 1)]);
         assert_eq!(total, 100);
@@ -1240,7 +1200,6 @@ mod tests {
 
     #[test]
     fn psm_match_two_nan_rank_scores_compare_equal() {
-        // Two PSMs both with NaN rank_score → Equal.
         let a = make_match_with_rank(0, 5.0, f32::NAN);
         let b = make_match_with_rank(0, 5.0, f32::NAN);
         assert_eq!(
@@ -1250,7 +1209,6 @@ mod tests {
         );
     }
 
-    /// A tie on `rank_score` and `score`, told apart only by `tie_key`.
     fn tied(tie_key: u64, cand: u32) -> PsmMatch {
         let mut m = make_match(0, 10.0);
         m.tie_key = tie_key;

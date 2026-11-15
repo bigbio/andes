@@ -195,12 +195,10 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
     })
 }
 
-/// The TOF-domain centroids of one decoded frame.
 fn frame_centroids(frame: &timsrust::Frame) -> Vec<crate::timstof_ms1::TofCentroid> {
     centroid_profile(&sum_over_mobility(&frame.tof_indices, &frame.intensities))
 }
 
-/// Centroids converted to `(m/z, intensity)`, m/z ascending.
 fn to_peaks(
     centroids: &[crate::timstof_ms1::TofCentroid],
     calibration: &MzCalibration,
@@ -377,7 +375,6 @@ impl Ms1Frames {
         Some(fit)
     }
 
-    /// Decode the next batch of MS1 frames in parallel.
     fn decode_batch(&mut self) {
         let end = (self.cursor + MS1_BATCH).min(self.positions.len());
         let batch: Vec<(usize, usize)> = (self.cursor..end)
@@ -465,8 +462,6 @@ fn ms1_native_id(frame_id: usize) -> String {
 /// Precursors whose MS2 spectra are built per parallel batch.
 const MS2_BATCH: usize = 1024;
 
-/// The PASEF MS2 side of a `.d`: the precursors with their selections and the
-/// frames they were fragmented in.
 struct Ms2Source {
     frames: FrameReader,
     /// Frame id → position in `frames`.
@@ -653,13 +648,10 @@ fn to_spectrum(
         (None, None)
     };
     Some(Spectrum {
-        // The precursor id identifies the spectrum within the `.d` and becomes
-        // the PIN `SpecID` / scan number.
         title: format!("scan={scan_number}"),
         precursor_mz: p.mz,
         precursor_intensity,
         precursor_charge,
-        // Retention time of the parent MS1 frame, in seconds.
         rt_seconds,
         scan: Some(scan_number),
         peaks,
@@ -809,7 +801,6 @@ impl TimsTofReader {
         }
     }
 
-    /// Record the context of an emitted MS2 when context capture is on.
     fn record_context(&mut self, spec: &Spectrum, parent: Option<usize>, im: f64) {
         if self.capture_scan_context {
             self.scan_contexts.push(ScanContext {
@@ -938,7 +929,6 @@ impl TimsTofReader {
         (err_count, first_errors)
     }
 
-    /// Capture the MS1 frames after the last MS2.
     fn flush_ms1(&mut self) {
         let run_ms1 = &mut self.run_ms1;
         if let Some(ms1) = self.ms1.as_mut() {
@@ -1047,15 +1037,12 @@ mod tests {
         let p = precursor(42, 654.32, Some(2), 2.0);
         let peaks = vec![(100.0, 10.0_f32), (200.5, 20.0_f32)];
         let spec = to_spectrum(&p, Some(1800.0), peaks.clone()).expect("convertible");
-        // The precursor id is the scan number.
         assert_eq!(spec.scan, Some(42));
         assert_eq!(spec.title, "scan=42");
         assert_eq!(spec.precursor_mz, 654.32);
         assert_eq!(spec.precursor_charge, Some(2));
         assert_eq!(spec.precursor_intensity, Some(5000.0));
-        // RT is carried in seconds.
         assert_eq!(spec.rt_seconds, Some(1800.0));
-        // Symmetric offsets are half the total isolation width.
         assert_eq!(spec.isolation_lower_offset, Some(1.0));
         assert_eq!(spec.isolation_upper_offset, Some(1.0));
         assert_eq!(spec.peaks, peaks);
@@ -1071,7 +1058,6 @@ mod tests {
     fn to_spectrum_treats_zero_or_missing_charge_as_unknown() {
         let spec = to_spectrum(&precursor(1, 500.0, Some(0), 0.0), None, Vec::new()).unwrap();
         assert_eq!(spec.precursor_charge, None);
-        // A non-positive isolation width yields no offsets.
         assert_eq!(spec.isolation_lower_offset, None);
         assert_eq!(spec.isolation_upper_offset, None);
         let spec = to_spectrum(&precursor(1, 500.0, None, 2.0), None, Vec::new()).unwrap();

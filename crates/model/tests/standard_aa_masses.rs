@@ -65,7 +65,6 @@ fn exotic_residues_absent() {
             r as char
         );
     }
-    // U is now a recognized standard residue.
     assert!(
         AminoAcid::standard(b'U').is_some(),
         "selenocysteine (U) must be supported"

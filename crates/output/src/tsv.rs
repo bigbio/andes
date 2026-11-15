@@ -28,8 +28,6 @@ use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-// ── modifications helper ──────────────────────────────────────────────────────
-
 /// Build the `Modifications` column value for a peptide.
 ///
 /// Returns a `;`-joined list of `"{1-based-position}:{accession}"` entries for
@@ -68,8 +66,6 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
     });
     parts.join(";")
 }
-
-// ── public API ──────────────────────────────────────────────────────────────
 
 /// Write all PSMs to a tab-separated file at `output_path`.
 ///
@@ -153,8 +149,6 @@ pub fn write_tsv_to<W: Write>(
     Ok(())
 }
 
-// ── header ───────────────────────────────────────────────────────────────────
-
 fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -> io::Result<()> {
     let ppm_mode = matches!(params.precursor_tolerance.left, Tolerance::Ppm(_));
     let prec_err_col = if ppm_mode {
@@ -176,10 +170,7 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
         "Peptide",
         "Protein",
     ]);
-    // RankScore (integer-rounded rank score) is the sole score column
-    // (formerly "RawScore"; renamed for parity with the PIN schema).
     cols.push("RankScore");
-    // Modifications: additive last column — CV accession-based annotations.
     cols.push("Modifications");
     // Provenance of the named protein (UniProt XML databases): family
     // accession, entry kind, and the feature that made the entry.
@@ -187,8 +178,6 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
 
     writeln!(writer, "{}", cols.join("\t"))
 }
-
-// ── per-spectrum rows ─────────────────────────────────────────────────────────
 
 /// Row-writing context: fixed fields derived once per spectrum.
 struct RowCtx<'a> {
@@ -211,7 +200,6 @@ fn write_spectrum_rows<W: Write>(
     is_mgf: bool,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    // Order by rank_score (RawScore) descending — the sole ranking signal.
     let psms = queue.clone().into_rank_sorted_vec();
 
     let row_ctx = RowCtx {
@@ -244,12 +232,10 @@ fn write_psm_row<W: Write>(
     let ppm_mode = row_ctx.ppm_mode;
     let spec_file_name = row_ctx.spec_file_name;
 
-    // SpecID: derived from RowContext (title if non-empty, else "scan=N")
     let spec_id = &ctx.spec_id;
 
     let scan_num = ctx.scan;
 
-    // FragMethod: use ActivationMethod::name() for known variants, "UNKNOWN" for None
     let frag_method = psm
         .activation_method
         .map(|m| m.name().to_string())
@@ -272,14 +258,11 @@ fn write_psm_row<W: Write>(
         format!("{:.4}", da)
     };
 
-    // Charge
     let charge = psm.charge_used;
 
-    // Peptide: uses the existing Display impl → "pre.SEQ_WITH_MODS.post"
     let peptide = &cand.peptide;
     let protein = &ctx.accession;
 
-    // RawScore: integer-rounded rank score (sole score column).
     let raw_score = psm.score.round() as i32;
 
     let lead = if is_mgf {
@@ -312,7 +295,6 @@ fn write_psm_row<W: Write>(
             protein,
         )
     };
-    // Modifications: additive last column — ';'-joined "{1-based-pos}:{CURIE}".
     let mods = modifications_field(&cand.peptide);
     // Provenance of the named protein: its family accession, entry kind and
     // the feature that made it (empty for a reference entry).
@@ -327,8 +309,6 @@ fn write_psm_row<W: Write>(
     )
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,8 +319,6 @@ mod tests {
     use model::tolerance::PrecursorTolerance;
     use search::candidate_gen::Candidate;
     use search::search_index::SearchIndex;
-
-    // ── fixture helpers ─────────────────────────────────────────────────────
 
     /// Build a minimal `SearchIndex` with one target protein.
     fn make_search_index(accession: &str) -> SearchIndex {
@@ -456,8 +434,6 @@ mod tests {
             .collect()
     }
 
-    // ── Test 1: header columns match expected when MGF ─────────────────────
-
     #[test]
     fn tsv_header_columns_match_expected_when_mgf() {
         let params = make_params_ppm();
@@ -498,8 +474,6 @@ mod tests {
         );
     }
 
-    // ── Test 2: header omits Title when not MGF ────────────────────────────
-
     #[test]
     fn tsv_header_no_title_column_when_not_mgf() {
         let params = make_params_ppm();
@@ -530,8 +504,6 @@ mod tests {
         assert!(cols.contains(&"SpecID".to_string()));
     }
 
-    // ── Test 3: empty queues → only header, no data rows ──────────────────
-
     #[test]
     fn tsv_handles_empty_queues_gracefully() {
         let params = make_params_ppm();
@@ -549,8 +521,6 @@ mod tests {
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
     }
-
-    // ── Test 4: PSMs written in rank order (highest rank_score first) ──────
 
     #[test]
     fn tsv_writes_one_row_per_psm_in_rank_order() {
@@ -595,8 +565,6 @@ mod tests {
         assert_eq!(scores[0], "10", "first row should be the highest-score PSM");
         assert_eq!(scores[2], "6", "last row should be the lowest-score PSM");
     }
-
-    // ── Test 5: peptide column includes mods ───────────────────────────────
 
     #[test]
     fn tsv_peptide_column_includes_mods() {
@@ -677,8 +645,6 @@ mod tests {
         );
     }
 
-    // ── Test 6: real accession emitted for target PSM ─────────────────────────
-
     #[test]
     fn tsv_writes_real_accession_when_search_index_provided() {
         let accession = "sp|P02769|ALBU_BOVIN";
@@ -742,8 +708,6 @@ mod tests {
         assert_eq!(at("FeatureIds"), "");
     }
 
-    // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
-
     #[test]
     fn tsv_writes_decoy_prefix_for_decoy_protein() {
         let accession = "sp|P02769|ALBU_BOVIN";
@@ -781,8 +745,6 @@ mod tests {
         );
     }
 
-    // ── Modifications column tests (TSV) ──────────────────────────────────────
-
     fn make_mod(accession: Option<&str>) -> Modification {
         Modification {
             name: "TestMod".to_string(),
@@ -799,8 +761,6 @@ mod tests {
             diagnostic_ions: Vec::new(),
         }
     }
-
-    // ── Test: Modifications follows RankScore, before the provenance columns ─
 
     #[test]
     fn tsv_modifications_column_precedes_provenance() {
@@ -829,8 +789,6 @@ mod tests {
             "the provenance columns are appended after Modifications"
         );
     }
-
-    // ── Test: single mod with accession emits 1-based position:CURIE (TSV) ───
 
     #[test]
     fn tsv_modifications_field_single_accession_mod() {
@@ -890,8 +848,6 @@ mod tests {
         );
     }
 
-    // ── Test: no accession mod → empty Modifications field (TSV) ─────────────
-
     #[test]
     fn tsv_modifications_field_empty_when_no_accession_mod() {
         let params = make_params_ppm();
@@ -941,8 +897,6 @@ mod tests {
             rows[0][mod_col]
         );
     }
-
-    // ── Test: multiple mods join with ';' ascending order (TSV) ──────────────
 
     #[test]
     fn tsv_modifications_field_multiple_mods_ascending_order() {

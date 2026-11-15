@@ -53,7 +53,6 @@ pub struct RunMobility {
 }
 
 impl RunMobility {
-    /// The extraction window of a precursor with library mobility `k0`.
     pub fn gate(&self, k0: f32) -> MobilityGate {
         let centre = k0 as f64 + self.offset;
         let half = GATE_SIGMAS * self.sigma;
@@ -181,7 +180,6 @@ mod tests {
                     }
                     let mz = 500.0 + p as f64;
                     let k0 = 0.8 + 0.001 * p as f32 + shift;
-                    // Centroid mobility jitter of +-0.002.
                     let jitter = if (k + p) % 2 == 0 { 0.002 } else { -0.002 };
                     rows.push((mz, 1000.0 * a, k0 + jitter));
                     rows.push((mz + 1e-4, 4000.0 * a, k0 + 0.2));

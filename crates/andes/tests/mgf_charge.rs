@@ -40,7 +40,6 @@ fn mgf_with_charge(n: usize, charge: &str) -> String {
     text
 }
 
-/// Search `mgf` (written as `<dir>/spectra.mgf`) against the E. coli fixture.
 fn search(dir: &Path, mgf: &str) -> Output {
     std::fs::create_dir_all(dir).expect("mkdir");
     let spectra = dir.join("spectra.mgf");
@@ -66,7 +65,6 @@ fn pin_of(dir: &Path, mgf: &str) -> String {
     std::fs::read_to_string(dir.join("out.pin")).expect("read PIN")
 }
 
-/// PIN rows per charge one-hot column, as `(column name, rows set)`.
 fn rows_per_charge(pin: &str) -> Vec<(String, usize)> {
     let mut lines = pin.lines();
     let header: Vec<&str> = lines.next().expect("PIN header").split('\t').collect();

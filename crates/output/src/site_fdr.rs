@@ -30,7 +30,6 @@ use crate::percolator::PercolatorPsm;
 /// tier to get its own stratum (as for variants).
 const MIN_STRATUM_TESTED: usize = 50;
 
-/// One accepted site claim.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SiteRow {
     pub family: String,
@@ -55,7 +54,6 @@ pub struct SiteRow {
     pub identity_spectra: f64,
 }
 
-/// One stratum, as counted for the run log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SiteCount {
     pub stratum: String,
@@ -233,7 +231,6 @@ pub fn site_claims(
     // key below uses the class's first mass.
     let reps = mass_classes(&proteins);
     let canon = |m: f64| canonical_mass_bits(&reps, m);
-    // Knockoffs per real site, keyed by (protein, position, mass bits).
     let mut per_site: HashMap<(usize, u32, u64), usize> = HashMap::new();
     for i in 0..proteins.len() {
         for c in claims_of(i) {
@@ -359,7 +356,6 @@ pub fn site_claims(
         strata.entry(name).or_default().extend(parts);
     }
 
-    // Best site q-value per real site, with its PSM, and PSMs per site.
     let mut best: BTreeMap<SiteKey, SiteBest> = BTreeMap::new();
     let mut counts = Vec::new();
     for (name, mut parts) in strata {
@@ -604,7 +600,6 @@ fn tsv_field(field: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Write the site table: one row per accepted site claim.
 pub fn write_sites_tsv(path: &std::path::Path, rows: &[SiteRow]) -> std::io::Result<()> {
     use std::io::Write;
     crate::atomic::write_atomic(path, |path| {

@@ -11,10 +11,6 @@
 //!   isotope offset, decoy flag and, for the bit-identity golden, the resolved
 //!   proteins (the PIN/TSV resolution of `candidate_idxs`).
 //!
-//! The PSM goldens were recorded on 2026-10-11 from the in-memory candidate list
-//! (whole-database enumeration + a mass-bucket lookup), the path these searches
-//! took before the out-of-core index became the only one; at that time the
-//! out-of-core path was asserted equal to it on every one of these fixtures.
 
 use std::collections::HashSet;
 
@@ -48,7 +44,6 @@ fn with_reversed_decoys(target: &ProteinDb) -> SearchIndex {
     SearchIndex::from_target_db_with_strategy(&db, "XXX", None, DecoyStrategy::None, 0)
 }
 
-/// Realistic-enough scorer so candidates score on placed b/y peaks.
 fn make_scorer(tol_da: f64) -> RankScorer {
     let part = Partition {
         charge: 2,
@@ -120,7 +115,6 @@ fn make_scorer(tol_da: f64) -> RankScorer {
     RankScorer::new(&param)
 }
 
-/// Build a peptide directly from residue bytes (no flanks of consequence here).
 fn residues(bytes: &[u8]) -> Vec<AminoAcid> {
     bytes
         .iter()
@@ -204,17 +198,13 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     params.top_n_psms_per_spectrum = 5;
     params.min_peaks = 0;
 
-    // Spectrum targeting the Ox-M modified PEPTMIDEK.
     let ox_residues = {
         let mut r = residues(b"PEPTMIDEK");
-        // place Ox on the M (index 4)
         r[4].mod_ = Some(model::modification::leak_mod(ox_m));
         r
     };
     let ox_pep = Peptide::new(ox_residues, b'K', b'W');
-    // Unmodified WVTFISLLR.
     let clean_pep = Peptide::new(residues(b"WVTFISLLR"), b'K', b'S');
-    // Shared peptide (both proteins).
     let shared_pep = Peptide::new(residues(b"SHAREDPEPK"), b'R', b'-');
 
     let spectra = vec![
@@ -246,7 +236,6 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     };
     let idx = with_reversed_decoys(&target);
 
-    // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
     let cam = Modification {
         name: "Carbamidomethyl".to_string(),
         mass_delta: 57.02146,

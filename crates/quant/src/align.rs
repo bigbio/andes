@@ -182,12 +182,10 @@ impl RunMap {
         (self.knots_y[b] - self.knots_y[a]) / (self.knots_x[b] - self.knots_x[a])
     }
 
-    /// Knot x (consensus RT) and y (run RT).
     pub fn knots(&self) -> (&[f64], &[f64]) {
         (&self.knots_x, &self.knots_y)
     }
 
-    /// Slopes below the first and above the last knot.
     pub fn end_slopes(&self) -> (f64, f64) {
         (self.slope_lo, self.slope_hi)
     }
@@ -708,7 +706,6 @@ pub fn align(
         .max()
         .map_or(0, |&c| c as usize + 1);
 
-    // Observations in aligned runs, grouped by precursor.
     let mut obs_offsets = vec![0usize; n_precursors + 1];
     let mut obs_runs = Vec::new();
     let mut obs_rts = Vec::new();
@@ -752,7 +749,6 @@ pub fn align(
         buf.extend(anchor_obs(anchor).map(|i| obs_rts[i]));
         t[a] = median_in_place(&mut buf);
     }
-    // Per run, the anchors' (anchor id, rt) pairs.
     let mut run_pairs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_runs];
     for (a, anchor) in anchor_ids.iter().enumerate() {
         for i in anchor_obs(anchor) {
@@ -781,7 +777,6 @@ pub fn align(
             }));
             t[a] = median_in_place(&mut buf);
         }
-        // The gauge of each component is the mean map of its runs.
         let gauges: Vec<Option<RunMap>> = (0..n_components as u32)
             .map(|c| {
                 mean_map(
@@ -799,7 +794,6 @@ pub fn align(
     }
     fit_all(&mut maps, &t);
 
-    // Leave-one-out residuals of the anchors, as (consensus t_p, e) per run.
     let mut run_res: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_runs];
     let mut pairs: Vec<(u16, f64)> = Vec::new();
     for anchor in &anchor_ids {
@@ -1203,7 +1197,6 @@ mod tests {
     struct Rng(u64);
 
     impl Rng {
-        /// splitmix64.
         fn next_u64(&mut self) -> u64 {
             self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
             let mut z = self.0;
@@ -1212,12 +1205,10 @@ mod tests {
             z ^ (z >> 31)
         }
 
-        /// Uniform in (0, 1].
         fn uniform(&mut self) -> f64 {
             ((self.next_u64() >> 11) as f64 + 1.0) / (1u64 << 53) as f64
         }
 
-        /// Standard normal by Box-Muller.
         fn normal(&mut self) -> f64 {
             let u1 = self.uniform();
             let u2 = self.uniform();
@@ -1225,7 +1216,6 @@ mod tests {
         }
     }
 
-    /// True `t_p` per precursor and every `(p, r)` observation.
     fn synth_truth(
         n_p: usize,
         warps: &[fn(f64) -> f64],
@@ -1274,7 +1264,6 @@ mod tests {
             .map(|o| (a.predict(o.precursor, o.run).unwrap().0 - o.rt).abs())
             .collect();
         let m = median(&errs);
-        // Held out: the run's own observation does not enter its prediction.
         let held: Vec<f64> = obs
             .iter()
             .map(|o| (a.predict_excluding(o.precursor, o.run).unwrap().0 - o.rt).abs())

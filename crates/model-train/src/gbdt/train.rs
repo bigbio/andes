@@ -10,10 +10,6 @@ use super::isotonic::pava;
 use super::tree::{fit_tree, fit_tree_with_leaves, TreeParams};
 use crate::TrainError;
 
-// ---------------------------------------------------------------------------
-// Quality-gate thresholds (finding 3.6)
-// ---------------------------------------------------------------------------
-
 /// Minimum number of training rows for a classifier/regressor to be trusted.
 /// Below this the model overfits noise and is not deployable.
 pub const MIN_TRAIN_ROWS: usize = 100;
@@ -26,10 +22,6 @@ pub const MIN_VAL_AUC: f64 = 0.55;
 /// R² means the model predicts worse than the mean.
 pub const MIN_VAL_PEARSON: f64 = 0.10;
 pub const MIN_VAL_R2: f64 = 0.0;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /// Row-major continuous feature matrix `x` (n × n_features), binary labels `y`
 /// (0/1), and a `groups` id per row (run+peptide) for leakage-free validation
@@ -110,11 +102,6 @@ fn gate_or_fallback(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Splitmix64 — one step, returns a pseudo-random u64.
 #[inline]
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -124,19 +111,16 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Map a u64 into [0.0, 1.0).
 #[inline]
 fn to_unit(v: u64) -> f64 {
     (v >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Sigmoid of x, numerically stable.
 #[inline]
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Log-loss over a validation set with raw scores (before sigmoid).
 fn logloss(raw_val: &[f32], val_y: &[u8]) -> f32 {
     let mut sum = 0.0f64;
     for (&r, &y) in raw_val.iter().zip(val_y) {
@@ -268,10 +252,6 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Core training function
-// ---------------------------------------------------------------------------
-
 /// Fit a GBDT classifier with logistic loss and return a calibrated
 /// [`GbdtPeakModel`].
 ///
@@ -287,9 +267,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         )));
     }
 
-    // --- Hard gate: degenerate input (finding 3.6) -----------------------------
-    // Previously these returned a deployable-looking empty model. Now they fail
-    // loudly so a no-signal training set is never silently shipped.
     let empty_classifier = || GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -324,17 +301,12 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let n_bins = p.n_bins.min(256);
 
-    // --- Step 1: Quantile-bin each feature ------------------------------------
-    // bin_uppers[f] = ascending upper edges for feature f
     let bin_uppers: Vec<Vec<f32>> = (0..nf)
         .map(|f| {
             let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
             compute_bin_uppers(&col, n_bins)
         })
         .collect();
-
-    // Only the active training rows are binned (Step 3); validation rows are
-    // scored on their continuous features.
 
     // --- Step 2: Group-disjoint validation split (seeded) ---------------------
     // Collect distinct group ids in sorted order for determinism.
@@ -412,10 +384,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    // Build per-row compact maps for fast access.
-    // active_train[i] → original row index.
-    // We need: binned subset, x subset for tree eval, y subset.
-
     // Compact binned array for the active training rows.
     let mut train_binned = vec![0u8; n_active * nf];
     let mut train_y = vec![0u8; n_active];
@@ -459,9 +427,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     } else {
         Vec::new()
     };
-    // Pairwise training with no group carrying BOTH a positive and a negative
-    // produces zero pairs → zero gradients → a degenerate all-zero model. Fail
-    // loudly instead of silently "training" nothing (CodeRabbit).
     if p.pairwise && pair_groups.is_empty() {
         return Err(TrainError::QualityGate(
             "pairwise (RankNet) training requested but no training group contains \
@@ -493,7 +458,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let mut hess = vec![0.0f32; n_active];
 
     for _round in 0..p.n_rounds {
-        // Compute gradients and hessians for active training rows.
         if p.pairwise {
             // The pair sums accumulate: start from zero every round.
             grad.fill(0.0);
@@ -529,7 +493,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         let (mut tree, leaf_of) =
             fit_tree_with_leaves(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
-        // Apply learning rate shrinkage to all leaf values.
         // Scaling ALL values is safe: internal nodes have value 0 and are not
         // reached by eval; leaves carry the actual weight.
         for v in tree.value.iter_mut() {
@@ -584,7 +547,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         }
     }
 
-    // Truncate to best round.
     trees.truncate(best_round);
 
     // --- Step 5: PAVA calibration on validation set ---------------------------
@@ -648,7 +610,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let sorted_y: Vec<f32> = cal_pairs.iter().map(|&(_, y)| y).collect();
     let (iso_x, iso_y) = pava(&sorted_p, &sorted_y);
 
-    // --- Return ---------------------------------------------------------------
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -659,10 +620,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         iso_y,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Regression dataset and trainer
-// ---------------------------------------------------------------------------
 
 /// Row-major continuous feature matrix `x` (n × n_features), continuous labels
 /// `y` (e.g., log-relative intensities), and a `groups` id per row for
@@ -768,7 +725,6 @@ pub fn train_gbdt_regression(
         iso_x: vec![],
         iso_y: vec![],
     };
-    // Hard gate: degenerate input (finding 3.6).
     if nf == 0 {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -786,7 +742,6 @@ pub fn train_gbdt_regression(
 
     let n_bins = p.n_bins.min(256);
 
-    // --- Step 1: Quantile-bin each feature ------------------------------------
     let bin_uppers: Vec<Vec<f32>> = (0..nf)
         .map(|f| {
             let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
@@ -801,7 +756,6 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // --- Step 2: Group-disjoint validation split (seeded) ---------------------
     let mut distinct_groups: Vec<u32> = ds.groups.clone();
     distinct_groups.sort_unstable();
     distinct_groups.dedup();
@@ -884,19 +838,16 @@ pub fn train_gbdt_regression(
 
         let mut tree = fit_tree(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
-        // Apply learning rate shrinkage.
         for v in tree.value.iter_mut() {
             *v *= p.learning_rate;
         }
 
-        // Update train predictions (use compact index, continuous x).
         for i in 0..n_active {
             let r = train_rows[i];
             let row = &ds.x[r * nf..(r + 1) * nf];
             raw_train[i] += tree.eval(row);
         }
 
-        // Update val predictions.
         for (j, &r) in val_rows.iter().enumerate() {
             let row = &ds.x[r * nf..(r + 1) * nf];
             raw_val[j] += tree.eval(row);
@@ -918,7 +869,6 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // Truncate to best round.
     trees.truncate(best_round);
 
     // --- Step 5: Recompute val predictions and log gate metric ---------------
@@ -963,7 +913,6 @@ pub fn train_gbdt_regression(
         );
     }
 
-    // --- Return (no sigmoid, no isotonic) ------------------------------------
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -974,10 +923,6 @@ pub fn train_gbdt_regression(
         iso_y: vec![],
     })
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1074,8 +1019,6 @@ mod tests {
 
     #[test]
     fn no_positives_fails_quality_gate() {
-        // Finding 3.6: a single-class / too-small training set must now FAIL
-        // loudly instead of silently returning a deployable-looking empty model.
         let ds = Dataset {
             x: vec![0.1f32; 10 * 3],
             y: vec![0u8; 10],
@@ -1113,8 +1056,6 @@ mod tests {
 
     #[test]
     fn allow_degenerate_returns_fallback_instead_of_error() {
-        // The opt-in fallback (finding 3.6) downgrades the gate to a warning and
-        // returns the (empty) model.
         let ds = Dataset {
             x: vec![0.1f32; 10 * 3],
             y: vec![0u8; 10],

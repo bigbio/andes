@@ -26,10 +26,7 @@ fn bundled_single_file() -> PathBuf {
         .join("../../resources/models/protocol=Automatic/models.parquet")
 }
 
-/// Assert two stores are equivalent: same model_ids, same selection_entries,
-/// and per-model Param equality.
 fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
-    // 1. Same model_id set.
     let mut a = single.model_ids();
     let mut b = partitioned.model_ids();
     a.sort();
@@ -39,7 +36,6 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         "model_id sets differ between single file and partitioned dir"
     );
 
-    // 2. Same selection_entries (as a sorted set).
     let mut sa: Vec<_> = single
         .selection_entries()
         .into_iter()
@@ -73,14 +69,12 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         "selection_entries differ between single file and partitioned dir"
     );
 
-    // 3. Per-model Param equality.
     for id in &a {
         let pa: Param = single.load_param(id).expect("load_param single");
         let pb: Param = partitioned.load_param(id).expect("load_param partitioned");
         assert_params_equal(id, &pa, &pb);
     }
 
-    // 4. Per-model source ledgers + per-source stats equivalence.
     for id in &a {
         let mut la = single.load_sources(id).expect("load_sources single");
         let mut lb = partitioned
@@ -170,7 +164,6 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
         "[{id}] ion_existence_table"
     );
 
-    // Model blobs: compare presence + serialized bytes.
     assert_eq!(
         a.frag_intensity_model.as_ref().map(|m| m.to_bytes()),
         b.frag_intensity_model.as_ref().map(|m| m.to_bytes()),

@@ -96,7 +96,6 @@ pub enum EvidenceType {
 }
 
 impl EvidenceType {
-    /// A transfer row, accepted or not.
     pub fn is_transfer(self) -> bool {
         matches!(
             self,
@@ -132,7 +131,6 @@ pub struct MbrRow<'a> {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
-    /// The same-run claims on a transfer row; `None` for other rows.
     pub claim: Option<MbrClaim<'a>>,
     /// The wrong-measurement q-value of an accepted transfer; `None` for
     /// other rows.
@@ -145,7 +143,6 @@ pub struct MbrRow<'a> {
 /// The same-run claims on one transfer row of `<base>.mbr.parquet`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrClaim<'a> {
-    /// Key of the best claimant, when there is one.
     pub claimed_by: Option<&'a str>,
     pub dt_s: Option<f64>,
     pub identified: bool,
@@ -182,20 +179,16 @@ pub const VALIDATION_Q: f64 = 0.01;
 /// Accepted counts at one transfer q-value threshold.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Accepted {
-    /// Pseudo-transfers at or below the threshold.
     pub pseudo: usize,
     /// Accepted pseudo-transfers among `MbrValidation::wrong_peak_pairs`.
     pub pairs: usize,
-    /// Of those, at the wrong peak.
     pub wrong_peak: usize,
     /// Of those, at the wrong peak or with the quantity off by more than a
     /// factor of 2 (`MbrValidation::wrong_measurement`).
     pub wrong_measurement: usize,
     /// Transfer targets at or below the threshold, both decoy families.
     pub pooled: usize,
-    /// Mass-shift decoys only.
     pub mass_only: usize,
-    /// RT-shift decoys only.
     pub rt_only: usize,
     /// Transfer targets at or below the threshold by the wrong-peak decoy
     /// families alone (without the identity decoys).
@@ -208,11 +201,8 @@ pub struct Accepted {
 /// The pseudo-transfer validation and transfer counts of one finalize.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MbrValidation {
-    /// The run's transfer q-value threshold (`at_threshold`).
     pub q_threshold: f64,
-    /// Pseudo-transfer rows (identified pairs measured as transfers).
     pub pseudo_transfers: usize,
-    /// Pseudo-transfers with a q-value.
     pub pseudo_scored: usize,
     /// Pseudo-transfers whose identified fit exists, with an apex in both
     /// fits and an identified width.
@@ -223,24 +213,17 @@ pub struct MbrValidation {
     /// than a factor of 2 against the identified fit's (the peak alone where
     /// either fit has no positive quantity).
     pub wrong_measurement: usize,
-    /// Transfer targets.
     pub transfers: usize,
-    /// Transfer targets with a q-value.
     pub transfers_scored: usize,
-    /// Accepted at [`VALIDATION_Q`].
     pub at_q01: Accepted,
-    /// Accepted at `q_threshold`.
     pub at_threshold: Accepted,
     /// The identified quality q-value threshold, when one is applied.
     pub quant_feature_threshold: Option<f64>,
-    /// Identified target rows.
     pub identified: usize,
-    /// Identified target rows with a quality q-value.
     pub identified_scored: usize,
     /// Identified target rows with a quality q-value at or below
     /// [`VALIDATION_Q`].
     pub identified_q01: usize,
-    /// Identified target rows reported as `identified_below_threshold`.
     pub identified_below_threshold: usize,
     /// Transfer rows with MS2 evidence, per hypothesis: target, mass-shift
     /// decoy, RT-shift decoy.
@@ -253,7 +236,6 @@ pub struct MbrValidation {
     pub ms2_pseudo_supported: usize,
     /// Accepted transfers reported as `transfer_ms2`.
     pub transfer_ms2: usize,
-    /// Target and identity-decoy library entries.
     pub target_entries: usize,
     pub identity_entries: usize,
     /// Decoy transfer rows with a q-value: mass-shift, RT-shift, identity
@@ -270,7 +252,6 @@ fn add_counts<const N: usize>(a: &mut [usize; N], b: &[usize; N]) {
 }
 
 impl Accepted {
-    /// Adds the counts of `o` (of disjoint rows).
     pub fn add(&mut self, o: &Accepted) {
         let Accepted {
             pseudo,
@@ -450,12 +431,9 @@ fn ratio(num: usize, den: usize) -> Option<f64> {
     (den > 0).then(|| num as f64 / den as f64)
 }
 
-/// One cell of the validation table.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ValidationCell {
-    /// A count (uint64).
     Count(u64),
-    /// A threshold or rate (float64, null when undefined).
     Value(Option<f64>),
 }
 
@@ -475,7 +453,6 @@ impl MbrValidation {
         ratio(self.wrong_measurement, self.wrong_peak_pairs)
     }
 
-    /// The validation row, one cell per [`validation_columns`] entry.
     pub fn cells(&self) -> Vec<ValidationCell> {
         use ValidationCell::{Count, Value};
         let n = |v: usize| Count(v as u64);
@@ -580,7 +557,6 @@ fn mbr_schema() -> Schema {
     ])
 }
 
-/// The columns of `<base>.mbr.parquet` being filled row by row.
 struct MbrColumnsBuilder {
     key: StringBuilder,
     run: StringBuilder,
@@ -650,7 +626,6 @@ impl MbrColumnsBuilder {
         self.rows += 1;
     }
 
-    /// The batch of the rows pushed since the last call.
     fn batch(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, String> {
         self.rows = 0;
         let mut cols: Vec<ArrayRef> = vec![
@@ -731,7 +706,6 @@ impl MbrParquetWriter {
     }
 }
 
-/// Writes `<base>.mbr.parquet` rows in the given order.
 pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
     let schema = Arc::new(mbr_schema());
     let batches = rows.chunks(BATCH_ROWS).map(|c| mbr_batch(&schema, c));
@@ -745,7 +719,6 @@ pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String>
     )
 }
 
-/// One row of `<base>.mbr.parquet` read back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrRecord {
     pub precursor_key: String,
@@ -831,7 +804,6 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
     Ok(out)
 }
 
-/// Writes the one-row `<base>.mbr_validation.parquet`.
 pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String> {
     let names = validation_columns();
     let cells = v.cells();
@@ -1028,7 +1000,6 @@ mod tests {
         assert_eq!(back, want);
         assert_eq!(back[2].measurement_q, Some(0.006));
         assert_eq!(back[1].quantity, None);
-        // The column names and order are the documented ones.
         let t = read_table(&p, &MBR_TABLE).unwrap();
         let names: Vec<String> = t.batches[0]
             .schema()
@@ -1038,7 +1009,6 @@ mod tests {
             .collect();
         assert_eq!(names, MBR_COLUMNS);
         assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.3"));
-        // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());
     }

@@ -62,12 +62,8 @@ use crate::pin::{
 use crate::quant_out::ModRecord;
 use crate::row_context::{emitted_rows, resolve_accession};
 
-/// QPX format version string written into every file's schema metadata.
 const QPX_VERSION: &str = "1.0";
-/// Engine name written into `creator` / `software_provider`.
 const CREATOR: &str = "andes";
-
-// ── public API ───────────────────────────────────────────────────────────────
 
 /// Write a QPX `.idparquet/` bundle at `out_dir`.
 ///
@@ -214,10 +210,6 @@ pub fn write_qpx(
     Ok(())
 }
 
-// ── parquet file writer (metadata + bounded batches) ─────────────────────────────
-
-/// Write one RecordBatch to `path`, stamping the QPX schema metadata
-/// (`file_type` = `file_type`) onto the schema before writing.
 fn write_parquet(path: &Path, file_type: &str, batch: RecordBatch) -> std::io::Result<()> {
     write_parquet_batches(path, file_type, batch.schema(), std::iter::once(Ok(batch)))
 }
@@ -250,7 +242,6 @@ fn write_parquet_batches(
     })
 }
 
-/// Build the QPX schema-metadata map for a file of the given `file_type`.
 fn qpx_metadata(file_type: &str) -> std::collections::HashMap<String, String> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut m = std::collections::HashMap::new();
@@ -296,8 +287,6 @@ pub(crate) fn uuid_v4() -> String {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     )
 }
-
-// ── shared nested-type field definitions ──────────────────────────────────────
 
 /// `modifications` element:
 /// `struct<name: string, accession: string, positions: list<position>>`, with the
@@ -413,8 +402,6 @@ fn psms_schema() -> Arc<Schema> {
     ];
     Arc::new(Schema::new(fields))
 }
-
-// ── psms.parquet builder ──────────────────────────────────────────────────────
 
 /// One emitted PSM row as the Percolator join sees it.
 struct RescoreRow {
@@ -782,9 +769,6 @@ fn build_psms_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-// ── per-PSM field derivations ─────────────────────────────────────────────────
-
-/// Bare residue sequence (no mods, no flanks).
 pub fn bare_sequence(cand: &Candidate) -> String {
     cand.peptide
         .residues
@@ -1024,8 +1008,6 @@ fn append_metavalue(sb: &mut StructBuilder, name: &str, value: &str, value_type:
     sb.append(true);
 }
 
-/// Build a `ListBuilder<StructBuilder>` for a `list<struct<...>>` column from
-/// the struct's field definitions.
 fn list_struct_builder(fields: Fields) -> ListBuilder<StructBuilder> {
     let element_field = Arc::new(Field::new(
         "element",
@@ -1066,8 +1048,6 @@ fn make_builder_for(dt: &DataType) -> Box<dyn arrow::array::ArrayBuilder> {
         other => panic!("unsupported QPX struct field type: {other:?}"),
     }
 }
-
-// ── proteins.parquet builder ──────────────────────────────────────────────────
 
 /// Minimal `proteins.parquet`: one row per distinct accession seen in the
 /// emitted PSMs (rank-1-first ordering of first appearance). `score`/`rank`/
@@ -1138,8 +1118,6 @@ fn build_proteins_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-// ── protein_groups.parquet builder ────────────────────────────────────────────
-
 /// Empty `protein_groups.parquet` with the QPX protein-group schema.
 ///
 /// andes does not perform protein inference, so there are no groups to emit, but
@@ -1168,9 +1146,6 @@ fn build_protein_groups_batch() -> RecordBatch {
     RecordBatch::new_empty(Arc::new(Schema::new(fields)))
 }
 
-// ── search_params.parquet builder ─────────────────────────────────────────────
-
-/// Single-row `search_params.parquet` describing the resolved search.
 fn build_search_params_batch(
     params: &SearchParams,
     fragment_tol: &Tolerance,
@@ -1208,7 +1183,6 @@ fn build_search_params_batch(
         _ => "NONE",
     };
 
-    // Partition the declared mods into fixed/variable name lists.
     let mut fixed_mods: Vec<String> = Vec::new();
     let mut variable_mods: Vec<String> = Vec::new();
     for m in params.aa_set.distinct_mods() {
@@ -1253,7 +1227,6 @@ fn build_search_params_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-/// Build a single-row `List<Utf8>` array whose one cell holds `values`.
 fn string_list_singleton(values: Vec<String>) -> arrow::array::ListArray {
     let mut b = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
     for v in values {
@@ -1307,7 +1280,6 @@ mod rescore_join_tests {
     fn rescore_join_errors_on_unmatched_target() {
         let mut map = HashMap::new();
         map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
-        // A target (non-decoy) row whose SpecId is absent from Percolator output.
         let emitted = vec![row("scan=2_2_1", false, 2, "1000")];
         let err = audit_rescore_join(&emitted, &map, None).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);

@@ -134,7 +134,6 @@ fn per_source_stats_round_trip_and_sum() {
 
     let store = ModelStore::open(&path).unwrap();
 
-    // ledger round-trips
     let ledgers = store.load_sources("m").unwrap();
     assert_eq!(ledgers.len(), 2, "expected 2 source ledger entries");
     let found_s0 = ledgers.iter().any(|l| l.source_id == "s0");
@@ -142,7 +141,6 @@ fn per_source_stats_round_trip_and_sum() {
     assert!(found_s0, "ledger s0 not found");
     assert!(found_s1, "ledger s1 not found");
 
-    // Check ledger fields round-trip
     let l0 = ledgers.iter().find(|l| l.source_id == "s0").unwrap();
     assert_eq!(l0.dataset, "PXD001819");
     assert_eq!(l0.n_psms, 14839);
@@ -152,7 +150,6 @@ fn per_source_stats_round_trip_and_sum() {
     assert_eq!(l0.instrument, "QExactive");
     assert_eq!(l0.experiment_class, "standard");
 
-    // each source's stats round-trip exactly
     let loaded_s0 = store.load_source_stats("m", "s0").unwrap();
     let loaded_s1 = store.load_source_stats("m", "s1").unwrap();
     assert_eq!(
@@ -183,7 +180,6 @@ fn per_source_stats_round_trip_and_sum() {
 
 #[test]
 fn load_param_ignores_source_stat_rows() {
-    // Store with no sources must still work.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.parquet");
     let param = fixture_param();
@@ -211,7 +207,6 @@ fn write_models_still_works_without_sources() {
 
     let store = ModelStore::open(&path).unwrap();
     assert!(store.load_param("m").is_ok());
-    // No sources in a legacy store.
     let sources = store.load_sources("m").unwrap();
     assert_eq!(sources.len(), 0);
 }

@@ -34,19 +34,14 @@ pub(crate) struct MemoryBudget {
     pub(crate) source: MemorySource,
 }
 
-/// `MemAvailable` from Linux `/proc/meminfo`, in bytes.
-///
-/// `None` when it cannot be determined (non-Linux, restricted sandbox).
 fn meminfo_available_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     parse_meminfo_available(&meminfo)
 }
 
-/// Pull `MemAvailable` (kB) out of `/proc/meminfo` text and return bytes.
 fn parse_meminfo_available(meminfo: &str) -> Option<u64> {
     for line in meminfo.lines() {
         if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            // e.g. "MemAvailable:   12345678 kB"
             let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
             return Some(kb.saturating_mul(1024));
         }
@@ -113,8 +108,6 @@ pub(crate) fn cgroup_memory_limit_from(
     best
 }
 
-/// Read `files` in `<mount>/<cgroup_path>` and in every ancestor directory up to
-/// `mount`, returning the smallest limit found.
 fn min_limit_over_chain<F: Fn(&Path) -> Option<String>>(
     mount: &Path,
     cgroup_path: &str,
@@ -166,8 +159,6 @@ pub(crate) fn available_memory_budget() -> Option<MemoryBudget> {
     budget_from(meminfo_available_bytes(), cgroup_memory_limit())
 }
 
-/// Combine the node figure and the cgroup limit: the smaller wins, and the result
-/// records which one it was.
 fn budget_from(node_available: Option<u64>, cgroup_limit: Option<u64>) -> Option<MemoryBudget> {
     match (node_available, cgroup_limit) {
         (Some(node), Some(limit)) if limit < node => Some(MemoryBudget {
@@ -193,8 +184,6 @@ mod tests {
 
     const GIB: u64 = 1 << 30;
 
-    /// Build a reader over a fixed path → contents map, standing in for the
-    /// cgroup filesystem.
     fn fake_fs(files: &[(&str, &str)]) -> impl Fn(&Path) -> Option<String> {
         let map: HashMap<String, String> = files
             .iter()
@@ -311,12 +300,10 @@ mod tests {
         assert_eq!(budget.bytes, 8 * GIB);
         assert_eq!(budget.source, MemorySource::NodeAvailable);
 
-        // No cgroup limit: unchanged behaviour.
         let budget = budget_from(Some(16 * GIB), None).unwrap();
         assert_eq!(budget.bytes, 16 * GIB);
         assert_eq!(budget.source, MemorySource::NodeAvailable);
 
-        // Neither figure readable: no budget, callers keep their default.
         assert_eq!(budget_from(None, None), None);
     }
 

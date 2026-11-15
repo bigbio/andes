@@ -460,7 +460,6 @@ impl Ms2Model {
             return None;
         }
 
-        // conditioning
         let ce = self.cond_emb;
         s.cond.clear();
         s.cond.extend_from_slice(&c.numeric());
@@ -497,7 +496,6 @@ impl Ms2Model {
             None => (&s.film, &s.hc),
         };
 
-        // input projection
         s.input.clear();
         for (t, cv) in tok.iter().zip(&comp) {
             s.input.extend_from_slice(&self.emb[t * ed..(t + 1) * ed]);
@@ -524,7 +522,6 @@ impl Ms2Model {
             }
         }
 
-        // multi-head self-attention
         if let Some(a) = &self.attn {
             let dh = ch / a.heads;
             let scale = 1.0 / (dh as f32).sqrt();

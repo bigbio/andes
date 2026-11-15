@@ -92,7 +92,6 @@ pub fn oxonium_gate(peaks: &[(f64, f32)], min_frac: f32, tol_ppm: f64) -> Oxoniu
     let mut n = 0u8;
     for &mz in CORE_OXONIUM_MZ.iter() {
         let tol = (mz * tol_ppm / 1e6).max(OXONIUM_TOL_FLOOR_DA);
-        // best matching peak for this oxonium m/z
         let mut best = 0.0f32;
         for &(pmz, pi) in peaks {
             if (pmz - mz).abs() <= tol && pi > best {

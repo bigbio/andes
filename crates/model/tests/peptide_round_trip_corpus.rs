@@ -60,7 +60,6 @@ fn corpus_aa_set() -> AminoAcidSet {
         .unwrap()
 }
 
-/// Build a peptide from a sequence with optional `(index, mod_name)` annotations.
 fn build_peptide(
     seq: &[u8],
     pre: u8,

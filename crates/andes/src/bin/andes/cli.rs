@@ -2502,6 +2502,7 @@ mod help_layout_tests {
         "glyco_scans",
         "debug_glyco",
         "glyco_mbr_match_train",
+        "ipf_debug",
     ];
 
     #[test]

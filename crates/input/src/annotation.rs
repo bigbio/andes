@@ -125,7 +125,6 @@ pub fn suffixed_accession(accession: &str, id: &str) -> String {
     }
 }
 
-/// `base` with `edits` applied.
 fn apply(base: &[u8], edits: &[Edit]) -> Vec<u8> {
     let mut sequence = Vec::with_capacity(base.len());
     let mut at = 0;

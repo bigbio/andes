@@ -70,17 +70,11 @@ pub struct GlycoConfig {
     /// predicate, the site resolver, the diagnostic-ion panel, the small-glycan
     /// floor and the PIN site tag.
     pub core: GlycanCore,
-    /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
-    /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
     pub min_core_y: u32,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
     /// Search this isotope-error window instead of `SearchParams::isotope_error_range`.
-    /// Set by the driver once `--precursor-mono auto` has corrected precursors: the
-    /// `+2` step of the sweep then only carries the (k, X) ≡ (k−1, X + Hex + Fuc −
-    /// NeuGc) composition degeneracy, so corrected runs search `0..=1`
-    /// (bigbio/andes#64 arm F). `None` keeps the params' window.
     pub isotope_error_override: Option<std::ops::RangeInclusive<i8>>,
     /// Which spectra (by index into the scored slice) take
     /// `isotope_error_override`; the others keep the params' window. `None`
@@ -377,8 +371,6 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     // Sort by backbone mass; within a mass cluster, put Db before DeNovo and
     // monoisotopic (|offset| small) first for deterministic representatives.
     all_backbone.sort_by(|a, b| {
-        // DET-1 (total order on the primary key; the prior partial_cmp+unwrap_or
-        // silently mapped NaN to a tie — same fix as hybrid.rs / the axis sorts).
         a.backbone_mass
             .total_cmp(&b.backbone_mass)
             .then_with(|| {
@@ -559,8 +551,6 @@ impl GlycoCtxOwned {
         cfg: GlycoConfig,
         tol_ppm: f64,
     ) -> Self {
-        // Peptide-first fragment-index candidate generation is always on under the
-        // shipped gp selector (it is the high-charge-glycopeptide recall path).
         let peptide_first_on = true;
         let full_glycan_db = cfg.full_glycan_db;
         let hcd_pair_on = cfg.hcd_pair;
@@ -1014,8 +1004,6 @@ fn score_spectrum_glyco(
     // reads the paired HCD partner.
     let (y_peaks, y_stats): (&[(f64, f32)], &SpectrumStats) = (&spec.peaks, &stats);
 
-    // One file-level model scores every spectrum. Per-spectrum dispatch to an
-    // ETD-family model was measured and lost identifications.
     let spec_scorer: &scoring_crate::scoring::RankScorer = scorer;
     let gen_scorer: &scoring_crate::scoring::RankScorer = scorer;
     let gen_is_etd = matches!(
@@ -1053,9 +1041,6 @@ fn score_spectrum_glyco(
     // list mass-driven (backbone = precursor − glycan → peptide by mass in
     // phase-1), making the peptide-first b/y fallback redundant.
 
-    // Glycan-first: the glycan is identified by its fragment ions (ion index),
-    // then the peptide is searched as `backbone = precursor − glycan` for each
-    // retrieved candidate glycan. The Y-ion solver (backbone-first) is gone.
     let isotope_window = isotope_window_for(
         spec_idx,
         &ctx.isotope_error_default,
@@ -1296,16 +1281,6 @@ fn score_spectrum_glyco(
         edge: i32,
         cand_residue_mass: f64,
     }
-    // FxHash + preallocation on integer-tuple keys, where SipHash's collision
-    // resistance buys nothing. MEASURED NEUTRAL (mouse Frac1, two interleaved
-    // repetitions, byte-identical PIN: 179.3 s vs 178.3 s for the std-hasher
-    // parent), so this is kept for the determinism fix on the election's split
-    // map below, not for speed. The inlined-callee profile that motivated it
-    // read ~55% of driver time as hash work; `perf --children` credits an
-    // inlined frame with its caller's whole subtree, so that share is an upper
-    // bound, not a cost that removing the hasher can recover. Order-independent
-    // here - this map is consumed into `accepted_winners`, whose only
-    // order-sensitive consumer takes a maximum under a TOTAL comparator.
     let mut cheap_winners: FxHashMap<GlycanWinnerKey, CheapWinner> =
         FxHashMap::with_capacity_and_hasher(1024, Default::default());
 
@@ -1547,14 +1522,6 @@ fn score_spectrum_glyco(
         .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
         .collect();
 
-    // PER-SPECTRUM CALIBRATION features (code-review 2026-07-09): the glyco path
-    // calls compute_psm_features directly and NEVER runs the standard search's
-    // post-merge fill (fill_post_topn), so TailorScore / RankScoreFloat /
-    // strong_score / listwise_score_gap / candidate_rank_entropy were dead 0.0 in
-    // both the PIN (Percolator lost the strongest calibration signals) and the
-    // selector. Compute them ONCE per spectrum over the accepted candidate scores
-    // — the same signals Percolator cannot derive from per-PSM features. `.score`
-    // is the same RawScore the standard Tailor histogram bins.
     let (tailor_denom, spectrum_listwise_gap, spectrum_rank_entropy, spectrum_delta_raw) = {
         // `tailor_denominator` is generic over the hasher and sorts the keys.
         let mut hist: FxHashMap<i32, u32> = FxHashMap::default();
@@ -1565,19 +1532,6 @@ fn score_spectrum_glyco(
         }
         let denom = crate::psm::tailor_denominator(&hist, accepted_winners.len() as u32) as f32;
         scores.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
-                                               // Spectrum-level DeltaRawScore: the winner's lead over the best
-                                               // DISTINCT runner-up. The standard search sets this in
-                                               // `fill_post_topn` (match_engine.rs); the glyco driver never runs
-                                               // that fill, and the 2026-07-09 pass that mirrored the missing
-                                               // fields wired five of them and missed this one — so every glyco
-                                               // PIN has shipped with DeltaRankScore hard 0.0, i.e. Percolator
-                                               // has had no top-1-versus-runner-up evidence at all. That is one
-                                               // of the strongest classical discriminators, and the competitor
-                                               // scores were already materialised right here.
-                                               //
-                                               // "Distinct" mirrors the standard path: ties at the top are not a
-                                               // lead. 0.0 when every candidate scored identically or only one
-                                               // was scored (uncontested), which is also the standard fallback.
         let delta_raw = match scores.first() {
             Some(&best) => scores
                 .iter()
@@ -1862,32 +1816,11 @@ fn score_spectrum_glyco(
             None => Vec::new(),
         }
         .into_iter()
-        // MINIMUM-EVIDENCE GATE. andes previously emitted a best guess for
-        // every gated scan — 7304 of 24857 on a human plasma file, of which
-        // ~2% were correct. Every other engine in the field refuses to answer
-        // without structural evidence: >=2 non-Y sequence ions and >=4
-        // matched fragments, or >=2 trimannosyl-core Y ions, or >=3 with Y1
-        // mandatory, depending on the engine. We required nothing.
-        //
-        // This matters because the reportable count is bounded by the number
-        // of targets ranked above the FIRST decoy (Percolator's concatenated
-        // q floor is 1/T_top). Measured on that plasma file, the decoys
-        // sitting in the top 150 carry a median of 1 core-Y hit and 4 matched
-        // b/y ions, against 6 and 7 for the true positives — so they are
-        // exactly what a structural gate removes.
         //
         // Label-blind by construction: reads only spectral evidence, never
         // `is_decoy`, so it fires symmetrically on target and decoy scans and
         // cannot bias the target/decoy ratio. Default 0 (gate off).
         .filter(|(_, w)| {
-            // Applied uniformly. Exempting ETD scans was tried, on the
-            // theory that core-Y is a collisional product and electron-
-            // transfer spectra cannot produce it: it made things WORSE.
-            // Both benchmark datasets are mixed HCD/ETD, so the exemption
-            // does not separate the regimes — it simply lets the ungated
-            // scans back in. Measured: plasma correct identifications
-            // 87 -> 0 (the ETD file's 14372 rows return, 2049 -> 15755
-            // pooled), mouse 546 -> 628 but still short of 707 ungated.
             core_y_counts[w.bb_hit_idx] as u32 >= min_core_y
         })
         .collect::<Vec<_>>()
@@ -2007,9 +1940,6 @@ fn score_spectrum_glyco(
             edge_score: w.edge,
             activation_method: Some(spec_scorer.param().data_type.activation),
             features,
-            // The isotope offset that was actually subtracted when this
-            // backbone was derived (BUG 1 fix — previously hardcoded 0
-            // even when an M+1/M+2 offset produced the winning match).
             isotope_offset: w.isotope_offset,
             precursor_mz_override: None,
             site_evidence: None,
@@ -2436,17 +2366,8 @@ mod tests {
         );
     }
 
-    // Integration-level tests (full `glyco_search_run` over a `PreparedSearch`)
-    // are deferred to the search-crate integration tests (tests/ directory)
-    // where real PreparedSearch fixtures can be built. Unit-level sequon + mass
-    // filter logic is tested in andes_glyco::sequon.
-    //
-    // Smoke test: verify the public types compile and are accessible.
     use super::*;
 
-    /// B1: `build_hcd_partners` pairs each ETD spectrum to the nearest HCD
-    /// spectrum with a matching precursor m/z; non-ETD spectra and ETD spectra
-    /// with no in-window HCD partner get `None`.
     #[test]
     fn build_hcd_partners_pairs_etd_to_precursor_matched_hcd() {
         use model::activation::ActivationMethod;
@@ -2652,8 +2573,6 @@ mod tests {
 
     #[test]
     fn full_glyco_psm_is_clone() {
-        // Minimal construction check — verifies the types are well-formed.
-        // PsmMatch does not impl Default, so we do the minimal construction.
         let psm = PsmMatch {
             spectrum_idx: 0,
             candidate_idxs: vec![0],
@@ -2728,7 +2647,6 @@ mod tests {
         let true_bb = 1100.0_f64;
 
         // Noise backbone: large peptide (small glycan).
-        // The OLD buggy ranking kept this one (largest backbone = first after DESC sort).
         let noise_bb = 2800.0_f64;
 
         // Build synthetic spectrum: core-Y ions for true_bb only.
@@ -2765,7 +2683,6 @@ mod tests {
             noise_hits
         );
 
-        // Now simulate the new ranking logic: sort by core_y_hits DESC, backbone_mass DESC.
         let mut candidates = [
             (noise_bb, noise_hits), // large backbone — old ranking would put this first
             (true_bb, true_hits),   // small backbone — true hit

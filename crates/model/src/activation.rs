@@ -1,5 +1,3 @@
-//! Activation methods used by tandem MS spectrum acquisition. The variants
-//! (CID/ETD/HCD/PQD/UVPD/EThcD) are pinned by `tests/activation_method.rs`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivationMethod {
@@ -38,9 +36,7 @@ impl ActivationMethod {
     /// predicts them like the collisional methods.
     pub fn predicts_neutral_losses(self) -> bool {
         match self {
-            // Electron-based: labile mods survive → no loss ions.
             ActivationMethod::ETD => false,
-            // Collisional / photon-based: labile mods fragment → loss ions.
             ActivationMethod::CID
             | ActivationMethod::HCD
             | ActivationMethod::PQD
@@ -136,7 +132,6 @@ mod tests {
 
     #[test]
     fn etd_does_not_predict_neutral_losses() {
-        // Electron-based dissociation preserves labile mods on fragments.
         assert!(!ActivationMethod::ETD.predicts_neutral_losses());
     }
 

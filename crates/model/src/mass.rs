@@ -1,19 +1,14 @@
 //! Chemistry constants and mass utilities (monoisotopic masses, nominal-mass
 //! scaling). Constant values are physical facts; a test pins their bit patterns.
 
-/// Monoisotopic mass of hydrogen.
 pub const H: f64 = 1.007825035;
 
-/// Monoisotopic mass of oxygen.
 pub const O: f64 = 15.99491463;
 
-/// Monoisotopic mass of carbon-12.
 pub const C: f64 = 12.0;
 
-/// Monoisotopic mass of nitrogen-14.
 pub const N: f64 = 14.003074;
 
-/// Monoisotopic mass of sulfur-32.
 pub const S: f64 = 31.9720707;
 
 /// Monoisotopic mass of H2O, computed as `H * 2 + O` so the IEEE 754
@@ -24,7 +19,6 @@ pub const H2O: f64 = H * 2.0 + O;
 /// Proton mass used as the default charge carrier.
 pub const PROTON: f64 = 1.00727649;
 
-/// Monoisotopic mass of carbon-13.
 pub const C13: f64 = 13.00335483;
 
 /// Mass difference between carbon-13 and carbon-12, used as the unit
@@ -66,25 +60,21 @@ mod tests {
 
     #[test]
     fn nominal_from_glycine() {
-        // 0.999497f * 57.02146f = 57.0228... → round → 57
         assert_eq!(nominal_from(57.02146), 57);
     }
 
     #[test]
     fn nominal_from_alanine() {
-        // 0.999497f * 71.03711f = 71.001... → round → 71
         assert_eq!(nominal_from(71.03711), 71);
     }
 
     #[test]
     fn nominal_from_tryptophan() {
-        // 0.999497f * 186.07931f = 185.9857... → round → 186
         assert_eq!(nominal_from(186.07931), 186);
     }
 
     #[test]
     fn nominal_from_h2o() {
-        // 0.999497f * 18.010565f = 18.0014... → round → 18
         assert_eq!(nominal_from(18.010565), 18);
     }
 

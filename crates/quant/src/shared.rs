@@ -484,7 +484,6 @@ mod tests {
         let target = Ions::new(1, &[frag(300.0), frag(400.0), frag(500.0)]);
         let claimant = Ions::new(2, &[frag(300.0), frag(450.0), frag(550.0)]);
         let tol = Tolerance::Ppm(20.0);
-        // Distinguishing: target 400 and 500; claimant 450 and 550.
         assert_eq!(
             distinguishing(&target.mz, &claimant.mz, tol),
             [400.0, 500.0]
@@ -519,7 +518,6 @@ mod tests {
         assert_eq!((e.hit_claimant, e.n_claimant), (1, 4));
         assert!(e.scored());
         assert!((e.dfrac() - (0.75 - 0.25)).abs() < 1e-12);
-        // Matched intensity shares: scan 100: 100/105; scan 101: 100/200.
         assert!((f64::from(e.int_target) - (100.0 / 105.0 + 0.5)).abs() < 1e-5);
         assert!((f64::from(e.int_claimant) - 0.5).abs() < 1e-5);
     }

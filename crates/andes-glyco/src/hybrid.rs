@@ -81,8 +81,6 @@ pub fn db_branch(
                     source: Source::Db,
                     charge,
                     isotope_offset,
-                    // By construction bb = precursor − g.mass, so the observed
-                    // residual is exactly the glycan mass.
                     glycan_mass_residual: precursor_neutral - bb,
                     peptide_first: false,
                 })
@@ -92,13 +90,11 @@ pub fn db_branch(
         })
         .collect();
 
-    // Total-order sort: backbone_mass asc, tiebreak by glycan fields for determinism.
     out.sort_by(|a, b| {
         a.backbone_mass
             .to_bits()
             .cmp(&b.backbone_mass.to_bits())
             .then_with(|| {
-                // tiebreak by glycan composition (always Some for Db branch)
                 let ga = a.glycan.as_ref();
                 let gb = b.glycan.as_ref();
                 match (ga, gb) {
@@ -183,11 +179,6 @@ pub fn hybrid_candidates_with_isotope(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneHit> {
-    // Single-isotope convenience: solve the Y-ladder at THIS isotope's precursor
-    // then annotate. Callers sweeping multiple isotopes should instead call
-    // `solve_backbones_for_charge` ONCE per charge (at the widest precursor) and
-    // `hybrid_candidates_presolved` per isotope — the Y-ladder bin voting is
-    // isotope-independent, so solving once is ~N× cheaper (see those fns).
     let presolved =
         solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
     hybrid_candidates_presolved(
@@ -233,9 +224,6 @@ pub fn solve_backbones_for_charge(
         return None;
     }
 
-    // Y-ION-FIRST confidence cascade (replaces both the deleted DB brute force
-    // AND the Codex-flagged silent drop). The core-Y ladder is the primary
-    // evidence, but we degrade the quorum gracefully instead of giving up:
     //   1. PRIMARY (quorum 2): ≥2 distinct core-Y rungs → high-confidence,
     //      few candidates. Handles the Y-ladder-rich majority.
     //   2. RESCUE (quorum 1): if the primary yields nothing, relax to a single
@@ -355,7 +343,6 @@ pub fn hybrid_candidates_presolved(
         });
     }
 
-    // DB-UNION vs 0-core-Y FALLBACK.
     //
     // `y_first_has_evidence` = the Y-ladder solver anchored at least one backbone
     // (the spectrum has core-Y evidence). In that case we UNION the DB branch
@@ -395,17 +382,12 @@ pub fn hybrid_candidates_presolved(
             .to_bits()
             .cmp(&b.backbone_mass.to_bits())
             .then_with(|| {
-                // Db < DeNovo so Db wins in the dedup step below
                 let ord_a = if a.source == Source::Db { 0u8 } else { 1u8 };
                 let ord_b = if b.source == Source::Db { 0u8 } else { 1u8 };
                 ord_a.cmp(&ord_b)
             })
     });
 
-    // --- Dedup: merge candidates within max(bb*tol_ppm*1e-6, 0.01) Da, prefer Db source ---
-    // Window derives from the caller's `tol_ppm` (previously hardcoded to a
-    // 20 ppm assumption) so dedup always agrees with the gate/searchable
-    // window actually configured for this run.
     // Strategy: single-pass, keep a running "cluster representative".
     // Because Db is sorted before DeNovo at equal mass, when a cluster contains
     // both, the first element is always Db → the representative is Db.
@@ -431,7 +413,6 @@ pub fn hybrid_candidates_presolved(
             if rep.source == Source::DeNovo && next.source == Source::Db {
                 rep = next;
             }
-            // else keep rep as-is
         } else {
             deduped.push(rep);
             rep = next;
@@ -464,10 +445,6 @@ pub fn hybrid_candidates_presolved(
             })
             .collect();
         scored.sort_by(|a, b| {
-            // DET-1: total_cmp on the intensity primary key (was partial_cmp +
-            // unwrap_or(Equal), which silently mapped any NaN to a tie). The mass
-            // to_bits tiebreak is already a total order, so this is behaviour-
-            // preserving on finite intensities and only hardens the NaN edge.
             b.0.total_cmp(&a.0).then_with(|| {
                 a.1.backbone_mass
                     .to_bits()
@@ -699,7 +676,6 @@ mod tests {
             k
         };
 
-        // OLD path: solve+annotate per isotope.
         let mut old: Vec<BackboneHit> = Vec::new();
         for iso in iso_min..=iso_max {
             let pn = observed_neutral - (iso as f64) * ISOTOPE;
@@ -711,7 +687,6 @@ mod tests {
             ));
         }
 
-        // NEW path: solve ONCE at the widest precursor, annotate per isotope.
         let pn_max = observed_neutral - (iso_min as f64) * ISOTOPE;
         let presolved = solve_backbones_for_charge(&peaks, pn_max, z, tol, top_k);
         let mut new: Vec<BackboneHit> = Vec::new();

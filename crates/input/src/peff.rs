@@ -120,7 +120,6 @@ pub fn load_peff<R: BufRead>(
 fn parse_header(h: &str) -> (String, Vec<(String, String)>) {
     let h = h.trim();
     let (accession, rest) = h.split_once(char::is_whitespace).unwrap_or((h, ""));
-    // A header that starts with a key has no accession.
     let (accession, rest) = if accession.starts_with('\\') {
         ("", h)
     } else {
@@ -167,7 +166,6 @@ fn entry_rows(
             .filter(|&p| p >= 1)
             .ok_or_else(|| malformed(key, value))
     };
-    // The residues of a 1-based inclusive span, empty when it does not fit.
     let residues = |start: u32, end: u32| -> String {
         let (s, e) = (start as usize - 1, end as usize);
         if s <= e && e <= seq.len() {

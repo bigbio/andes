@@ -139,7 +139,6 @@ impl DiagnosticIon {
 /// carry the exact m/z of their cation formula.
 pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
     use crate::glycan_mass::WATER;
-    // (mz, hex, hexnac, fuc, neuac, neugc)
     const IONS: [(f64, u8, u8, u8, u8, u8); 28] = [
         (84.04439, 0, 1, 0, 0, 0),                                // HexNAc C4H6NO+
         (85.02841, 1, 0, 0, 0, 0),                                // Hex C4H5O2+
@@ -189,7 +188,6 @@ pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
 /// every GalNAc produces. `counts` are the monosaccharides each ion implies.
 /// Configurable via [`GlycanConfig::diagnostic_ions`].
 pub fn o_glycan_diagnostic_ions() -> Vec<DiagnosticIon> {
-    // (mz, hex, hexnac, fuc, neuac, neugc)
     const IONS: [(f64, u8, u8, u8, u8, u8); 7] = [
         (138.0550, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
         (168.0660, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
@@ -342,7 +340,6 @@ pub fn decode_glycan_record(encoded: u32) -> (u32, bool) {
     (encoded >> 1, (encoded & 1) != 0)
 }
 
-/// Mass binning: integer key for an approximate mass lookup.
 #[inline]
 pub fn mass_to_bin(mass: f64, bin_width: f64) -> i64 {
     (mass / bin_width).round() as i64
@@ -369,7 +366,6 @@ pub struct GlycanIonIndex {
 pub const PPM_FLOOR_DA: f64 = 0.005;
 
 impl GlycanIonIndex {
-    /// Build an empty index.
     ///
     /// `bin_width` is a fixed Da bin for the integer keys (kept fine enough that
     /// the neighbourhood walk covers every admissible match; exact tolerance is
@@ -387,7 +383,6 @@ impl GlycanIonIndex {
         self.bins.len()
     }
 
-    /// Total number of ion records across all bins.
     pub fn ion_count(&self) -> usize {
         self.bins.values().map(|v| v.len()).sum()
     }
@@ -540,7 +535,6 @@ pub fn search_glycans(
     precursor_charge: u8,
     peaks: &[(f64, f32)],
 ) -> GlycanSearchResult {
-    // 1. Diagnostic precheck.
     let matched_diagnostic: Vec<&DiagnosticIon> = config
         .diagnostic_ions
         .iter()
@@ -693,7 +687,6 @@ mod tests {
         let mz = |c: u32, h: u32, n: u32, o: u32| {
             c as f64 * C + h as f64 * H + n as f64 * N + o as f64 * O - E
         };
-        // Cation formula of each ion, in panel order.
         let formulas: [(u32, u32, u32, u32); 28] = [
             (4, 6, 1, 1),    // 84
             (4, 5, 0, 2),    // 85
@@ -975,8 +968,6 @@ mod tests {
                 crate::glycan_db::load_glycan_gdb(&content)
                     .unwrap_or_else(|e| panic!("parse {path}: {e}"))
             }
-            // No built-in list anymore (the enumerator was removed); this benchmark
-            // only runs against an explicit input .gdb.
             Err(_) => {
                 eprintln!("skipping: ANDES_GLYCO_GDB not set");
                 return;
@@ -995,7 +986,6 @@ mod tests {
         let idx = GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan);
         let build_time = t0.elapsed();
 
-        // 200-peak synthetic spectrum; query each peak's complementary mass.
         let peaks: Vec<(f64, f32)> = (0..200).map(|i| (200.0 + i as f64 * 5.0, 100.0)).collect();
         let t1 = std::time::Instant::now();
         let mut total_records = 0usize;

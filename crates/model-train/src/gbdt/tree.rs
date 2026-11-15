@@ -20,10 +20,6 @@ pub struct TreeParams {
     pub n_features: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Internal accumulator for one node's histogram over a single feature.
-// ---------------------------------------------------------------------------
-
 /// Per-bin sums of (gradient, hessian) for a single feature.
 #[derive(Clone)]
 struct BinHist {
@@ -46,18 +42,12 @@ impl BinHist {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Builder state — passed through the recursion so we can append nodes and
-// back-patch child indices.
-// ---------------------------------------------------------------------------
-
 struct Builder<'a> {
     params: &'a TreeParams,
     binned: &'a [u8], // row-major [row * n_features + feat]
     grad: &'a [f32],
     hess: &'a [f32],
     bin_uppers: &'a [Vec<f32>],
-    // Growing SoA vecs — will be moved into the final Tree.
     feature: Vec<i32>,
     threshold: Vec<f32>,
     left: Vec<i32>,
@@ -93,7 +83,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Append a placeholder node and return its index.
     fn reserve_node(&mut self) -> usize {
         let idx = self.feature.len();
         self.feature.push(0);
@@ -105,7 +94,6 @@ impl<'a> Builder<'a> {
         idx
     }
 
-    /// Write a leaf into the slot at `idx`.
     fn write_leaf(&mut self, idx: usize, weight: f32) {
         self.feature[idx] = -1;
         self.threshold[idx] = 0.0;
@@ -115,14 +103,12 @@ impl<'a> Builder<'a> {
         self.default_left[idx] = 1;
     }
 
-    /// Record that every row of `rows` reaches the leaf at `idx`.
     fn mark_leaf(&mut self, rows: &[usize], idx: usize) {
         for &r in rows {
             self.leaf_of[r] = idx as u32;
         }
     }
 
-    /// Write an internal split node into the slot at `idx`.
     fn write_internal(
         &mut self,
         idx: usize,
@@ -139,17 +125,12 @@ impl<'a> Builder<'a> {
         self.default_left[idx] = 1;
     }
 
-    // -----------------------------------------------------------------------
-    // Build a node recursively (pre-order: current node first, then children).
-    // Returns the index of the node appended.
-    // -----------------------------------------------------------------------
     fn build(&mut self, rows: &[usize], depth: u32) -> usize {
         let nf = self.params.n_features;
         let nb = self.params.n_bins;
         let lambda = self.params.lambda;
         let min_h = self.params.min_hessian;
 
-        // Compute totals for this node.
         let g_total: f32 = rows.iter().map(|&r| self.grad[r]).sum();
         let h_total: f32 = rows.iter().map(|&r| self.hess[r]).sum();
         let leaf_weight = -g_total / (h_total + lambda);
@@ -157,14 +138,12 @@ impl<'a> Builder<'a> {
         // Reserve the slot now so this node's index is lower than its children.
         let node_idx = self.reserve_node();
 
-        // Check stopping conditions.
         if depth >= self.params.max_depth || rows.len() < 2 {
             self.write_leaf(node_idx, leaf_weight);
             self.mark_leaf(rows, node_idx);
             return node_idx;
         }
 
-        // Build per-feature histograms.
         let mut hists: Vec<BinHist> = (0..nf).map(|_| BinHist::new(nb)).collect();
         for &r in rows {
             let g = self.grad[r];
@@ -207,12 +186,10 @@ impl<'a> Builder<'a> {
 
         match best_feat {
             None => {
-                // No positive-gain split found — emit a leaf.
                 self.write_leaf(node_idx, leaf_weight);
                 self.mark_leaf(rows, node_idx);
             }
             Some(feat) => {
-                // Partition rows: left ≤ best_bin, right > best_bin.
                 let (left_rows, right_rows): (Vec<usize>, Vec<usize>) = rows
                     .iter()
                     .partition(|&&r| (self.binned[r * nf + feat] as usize) <= best_bin);
@@ -229,10 +206,6 @@ impl<'a> Builder<'a> {
         node_idx
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Fit one regression tree to the given per-row gradients/hessians using
 /// pre-binned features.
@@ -294,10 +267,6 @@ pub fn fit_tree_with_leaves(
     };
     (tree, builder.leaf_of)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

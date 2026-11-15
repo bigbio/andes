@@ -35,7 +35,6 @@ pub struct Modification {
     pub fixed: bool,
     pub accession: Option<String>,
     /// User-declared neutral-loss masses (Da) for this mod's fragment ions.
-    /// Empty ⇒ no loss ions predicted (default; byte-identical to pre-feature).
     pub neutral_losses: Vec<f64>,
     /// Loss-class pool id for this mod's neutral-loss ions: 0 = none/intact,
     /// 1.. = a per-mod-class pool (glyco=1, phospho=2, sulfo=3, generic=255).
@@ -222,10 +221,8 @@ mod tests {
             parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
-        // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
         assert!(m.applies_to(b'M', ModLocation::ProtNTerm));
-        // ...but not at other locations.
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
         assert!(!m.applies_to(b'A', ModLocation::NTerm));
     }
@@ -304,7 +301,6 @@ mod tests {
             "a sulfo site is not a phospho site"
         );
         assert!(!phospho.allowed_at(&[], 3), "no annotation, no site");
-        // An unrestricted mod is allowed anywhere.
         assert!(free.allowed_at(&[], 4));
     }
 }

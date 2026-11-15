@@ -13,7 +13,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Run a search and return its stderr.
 fn run(spectrum: &str, database: &str, extra: &[&str]) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))

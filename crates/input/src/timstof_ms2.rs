@@ -60,7 +60,6 @@ pub(crate) struct FrameRow {
     pub t: [f64; 2],
 }
 
-/// Read the `Frames` rows keyed by frame id.
 pub(crate) fn read_frame_rows(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<usize, FrameRow>, rusqlite::Error> {
@@ -287,7 +286,6 @@ mod tests {
             &["1, 0.1, 100, 25.0, 26.0", "2, 0.2, 0, 25.0, 26.0"],
         );
         let p = read_pasef_precursors(&conn).unwrap();
-        // Precursor 3 has no selection and gets no spectrum.
         assert_eq!(p.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(p[0].mz, 500.25);
         assert_eq!(p[0].charge, Some(2));
@@ -301,7 +299,6 @@ mod tests {
         );
         assert_eq!(p[0].selections[0].scan_begin, 690);
         assert_eq!(p[0].selections[0].scan_end, 715);
-        // No monoisotopic peak: largest peak, charge unknown.
         assert_eq!(p[1].mz, 600.31);
         assert_eq!(p[1].charge, None);
         assert_eq!(p[1].collision_energy, 30.0);
@@ -324,7 +321,6 @@ mod tests {
 
     #[test]
     fn push_scans_takes_the_selected_scan_range_only() {
-        // Three scans: [10, 11], [20], [30, 31, 32].
         let offsets = [0, 2, 3, 6];
         let tof = [10, 11, 20, 30, 31, 32];
         let intensity = [1, 2, 3, 4, 5, 6];

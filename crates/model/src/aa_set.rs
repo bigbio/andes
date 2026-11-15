@@ -1,7 +1,6 @@
 //! Heavyweight residue-and-modification set. Built via
 //! `AminoAcidSetBuilder`; queried by the candidate generator.
 
-
 use rustc_hash::FxHashMap;
 
 use crate::amino_acid::AminoAcid;
@@ -9,9 +8,6 @@ use crate::enzyme::Enzyme;
 use crate::modification::{ModLocation, Modification, ResidueSpec};
 
 const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
-// Upper bound for a single mod's mass delta. Raised from 1000 to 5000 Da to
-// admit intact-glycan mods (common N-glycans run ~900–3500 Da; e.g. A2G2S2 is
-// 2204.77) while still catching gross typos / composition-string mistakes.
 const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 5000.0;
 
 /// Whether a residue sits at one terminus of the peptide, and whether that
@@ -373,10 +369,6 @@ impl AminoAcidSet {
         out
     }
 
-    // -----------------------------------------------------------------------
-    // GF helpers
-    // -----------------------------------------------------------------------
-
     /// All amino acid variants valid at `location`.
     ///
     /// - `Anywhere`: returns the 20 standard AAs (with Anywhere-fixed mods applied
@@ -386,9 +378,6 @@ impl AminoAcidSet {
     ///   for that terminal location (the `Anywhere` AAs are inserted into all
     ///   terminal lists at build time).
     pub fn aa_list_for(&self, location: ModLocation) -> Vec<&AminoAcid> {
-        // Borrow from the precomputed cache (built once in
-        // `AminoAcidSetBuilder::build`). Empty Vec when the location is
-        // missing — should not happen for the 5 standard locations.
         self.aa_lists_cache
             .get(&location)
             .map(|v| v.iter().collect())
@@ -1132,7 +1121,6 @@ mod tests {
     #[test]
     fn min_max_aa_mass() {
         let set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        // Min: G ≈ 57.02, Max: W ≈ 186.08
         let g = AminoAcid::standard(b'G').unwrap().mass;
         let w = AminoAcid::standard(b'W').unwrap().mass;
         assert_eq!(set.min_aa_mass(), g);
@@ -1279,13 +1267,11 @@ mod tests {
             .add_fixed_mod(mk(ModLocation::NTerm))
             .build()
             .unwrap();
-        // The delta-only view collides (that IS the bug being guarded against)...
         assert_eq!(
             anywhere.fixed_mod_deltas(),
             nterm.fixed_mod_deltas(),
             "fixed_mod_deltas is expected to collide on location"
         );
-        // ...but the location-aware fingerprint must differ.
         assert_ne!(
             anywhere.fixed_mod_fingerprint(),
             nterm.fixed_mod_fingerprint(),
@@ -1342,12 +1328,9 @@ mod tests {
         assert_eq!(set.variants_for(b'M', ModLocation::Anywhere).len(), 2);
     }
 
-    // GF helper tests
-
     #[test]
     fn peptide_cleavage_credit_default_is_zero() {
         let set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        // Default before register_enzyme is 0, not 1.
         assert_eq!(set.peptide_cleavage_credit(), 0);
     }
 
@@ -1368,7 +1351,6 @@ mod tests {
             20,
             "standard set should have exactly 20 standard residues"
         );
-        // Every standard residue must appear
         for &r in STANDARD_RESIDUES {
             assert!(
                 list.iter().any(|aa| aa.residue == r),
@@ -1382,7 +1364,6 @@ mod tests {
     fn aa_list_for_nterm_returns_at_least_20_residues() {
         let set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let list = set.aa_list_for(ModLocation::NTerm);
-        // No NTerm-specific mods → same 20 AAs as Anywhere.
         assert_eq!(list.len(), 20);
     }
 
@@ -1407,7 +1388,6 @@ mod tests {
             .build()
             .unwrap();
         let list = set.aa_list_for(ModLocation::NTerm);
-        // Each of the 20 standard residues gets an NTerm variant → 20 anywhere + 20 nterm = 40.
         assert_eq!(
             list.len(),
             40,
@@ -1454,8 +1434,6 @@ mod tests {
             .build()
             .unwrap();
 
-        // K must have a fixed TMT label folded into its Anywhere variant
-        // (1 variant, modified).
         let k_variants = set.variants_for(b'K', ModLocation::Anywhere);
         assert_eq!(
             k_variants.len(),
@@ -1475,12 +1453,10 @@ mod tests {
             "A at N-term should have a TMT variant"
         );
 
-        // C fixed CAM — single modified variant.
         let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
         assert_eq!(c_variants.len(), 1);
         assert!(c_variants[0].is_modified());
 
-        // M variable Oxidation — 2 variants (unmod + ox).
         let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
         assert_eq!(m_variants.len(), 2);
         assert!(m_variants.iter().any(|aa| aa.is_modified()));
@@ -1518,8 +1494,6 @@ mod tests {
         let anywhere = set.cached_aa_list(ModLocation::Anywhere);
         let prot_n = set.cached_aa_list(ModLocation::ProtNTerm);
 
-        // Anywhere: 20 standard residues (C fixed-modified, M with 2 variants
-        // unmod+ox, K+R get acetyl-only-at-ProtNTerm so NOT in Anywhere) = 21
         let n_any_modified = anywhere.iter().filter(|aa| aa.is_modified()).count();
         let n_any_acetyl = anywhere
             .iter()
@@ -1544,8 +1518,6 @@ mod tests {
             "Prot-N-term AA list must include 21 acetyl-bearing forms (one per Anywhere form)"
         );
 
-        // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
-        // NOT Acetyl-alone (+42.010565). The fixed CAM (+57.02146) is mandatory.
         let c_pn = prot_n
             .iter()
             .find(|aa| {
@@ -1559,7 +1531,6 @@ mod tests {
              (Acetyl-alone +42.01 would drop the mandatory fixed CAM)"
         );
 
-        // Total Prot-N-term list = Anywhere list + 21 acetyl-bearing forms.
         assert_eq!(
             prot_n.len(),
             anywhere.len() + 21,
@@ -1636,7 +1607,6 @@ mod tests {
             form_deltas(&set, b'K', pep, pep),
             form_deltas(&set, b'K', pep, no)
         );
-        // The first form of every list carries no variable mod.
         for (_, slots) in set.form_lists() {
             assert_eq!(slots[0], 0);
             assert!(slots[1..].iter().all(|&s| s > 0));

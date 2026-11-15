@@ -35,10 +35,6 @@ fn dense_noise_sampling() -> Option<usize> {
     DENSE_NOISE.get().copied().flatten()
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Accumulates per-ion match statistics from confident PSMs into a
 /// [`CountStats`].
 ///
@@ -49,7 +45,6 @@ pub struct StatsAccumulator<'a> {
 }
 
 impl<'a> StatsAccumulator<'a> {
-    /// Construct a new accumulator backed by `scorer`.
     pub fn new(scorer: &'a RankScorer) -> Self {
         Self { scorer }
     }
@@ -88,7 +83,6 @@ impl<'a> StatsAccumulator<'a> {
         // the segment-partition cache — identical to the search engine path.
         let scored_spec = ScoredSpectrum::new(spec, self.scorer, charge);
 
-        // max_rank is the index of the "missing ion" slot in rank arrays.
         let max_rank = self.scorer.max_rank();
 
         // Call the production matcher: ion_match_facts reuses directional_node_score_inner's
@@ -97,18 +91,14 @@ impl<'a> StatsAccumulator<'a> {
 
         for fact in &facts {
             let rank_idx = match fact.rank {
-                // Observed: rank index = (clamped_rank - 1), 0-based.
-                // `fact.rank` is already clamped to [1, max_rank] by ion_match_facts.
                 Some(r) => {
                     let clamped = r.min(max_rank).max(1);
                     clamped - 1
                 }
-                // Missing: use max_rank slot (last entry, as per RankScorer::missing_ion_score).
                 None => max_rank,
             };
             stats.bump_rank(fact.partition, fact.ion_type, rank_idx);
 
-            // Error bin: only for matched ions when error_scaling_factor > 0.
             if let (Some(_), Some(bin)) = (fact.rank, fact.error_bin) {
                 stats.bump_error(fact.partition, bin);
             }
@@ -156,7 +146,6 @@ impl<'a> StatsAccumulator<'a> {
             stats.bump_existence(partition, idx);
         }
 
-        // Charge histogram: one bump per PSM.
         stats.bump_charge(charge as i32);
     }
 }

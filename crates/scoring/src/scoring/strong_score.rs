@@ -21,11 +21,6 @@ pub const DENSITY_HW: f64 = 50.0;
 /// instead of `inf`/`NaN`.
 const LOG_INTENSITY_CLAMP: f64 = 50.0;
 
-/// Convert a GBDT regressor's predicted log-relative intensity to a finite,
-/// non-negative linear intensity. Clamps the log value to
-/// `[-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP]` (a no-op for real outputs) and
-/// substitutes `0.0` for a non-finite prediction so callers never propagate
-/// `inf`/`NaN`.
 /// Predict the linear relative intensity of every `predict_by_ions(peptide, 1..=2)`
 /// fragment ONCE, in that iteration order.
 ///
@@ -42,9 +37,6 @@ pub fn predict_frag_intensities(
     precursor_charge: u8,
 ) -> Vec<f64> {
     let ions = predict_by_ions(peptide, 1..=2);
-    // Build every feature row first, then walk the ensemble ONCE with trees on the
-    // outside (see `GbdtPeakModel::predict_value_batch`). Bit-identical to the
-    // per-ion call it replaces.
     let feats: Vec<[f32; crate::frag_features::N_FRAG_FEATURES]> = ions
         .iter()
         .map(|ion| {
@@ -199,13 +191,6 @@ pub fn intensity_signal(
     let mut obs_vec = Vec::with_capacity(predicted.len());
 
     for (ion_idx, ion) in predicted.iter().enumerate() {
-        // Predicted LINEAR relative intensity, kept finite (finding 3.4): the
-        // GBDT/intensity-model paths emit a log-relative value; an extreme
-        // prediction would otherwise `exp` to `+inf` and corrupt the cosine.
-        // Frag-intensity regressor (precursor charge, nce=0.0 matches training).
-        // Reuse the caller's predictions when supplied — same ion order, same
-        // features, same model, so this is the identical value without a second
-        // tree walk.
         let pred_intensity = match precomputed.and_then(|p| p.get(ion_idx).copied()) {
             Some(v) => v,
             None => {
@@ -284,7 +269,6 @@ pub fn frag_llr_battery(
     let mut pred_matched: Vec<(f64, bool)> = Vec::with_capacity(predicted.len());
 
     for (ion_idx, ion) in predicted.iter().enumerate() {
-        // Reuse the caller's predictions when supplied (see `predict_frag_intensities`).
         let p = match precomputed.and_then(|pp| pp.get(ion_idx).copied()) {
             Some(v) => v,
             None => {
@@ -323,7 +307,6 @@ pub fn frag_llr_battery(
         0.0
     };
 
-    // Fraction of the top-K predicted-most-intense ions that were observed.
     pred_matched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let k = pred_matched.len().min(FRAG_TOPK);
     let topk_observed = if k > 0 {
@@ -482,13 +465,6 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     // same subset.
     let n_others = (n - 1) as f64;
     let mean_others = (sum - this_d) / n_others;
-    // Two-pass variance about the mean. The previous `E[x^2] - E[x]^2` form
-    // cancels catastrophically when the retained scores are large and tightly
-    // clustered: both terms are big and nearly equal, so the difference keeps
-    // only the low-order bits and can land at or below zero. Measured on a real
-    // 55,171-row PIN: 53 rows blew past |1e6| and inflated the column's stdev
-    // 72x over the inliers, which after Percolator's standardisation leaves the
-    // feature carrying almost nothing but those spikes.
     let mut ss = 0.0f64;
     let mut skipped_self = false;
     for &v in retained_strong {
@@ -501,12 +477,6 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
         ss += dev * dev;
     }
     let var_others = (ss / n_others).max(0.0);
-    // A degenerate spectrum - every retained score effectively identical - carries
-    // NO discriminative information about this candidate, and the honest encoding
-    // of that is 0.0, not a huge z-score. The previous code floored sigma at an
-    // absolute 1e-6 and divided a non-zero numerator by it, manufacturing values
-    // in the millions out of nothing. Judge degeneracy RELATIVE to the score
-    // scale so the test is not itself scale-blind.
     let scale = mean_others.abs().max(1.0);
     let sigma = var_others.sqrt();
     if sigma <= 1e-9 * scale {
@@ -552,10 +522,6 @@ pub fn rich_ion_llr(
     if peptide.length() < 2 {
         return 0.0;
     }
-    // Collect the feature rows for MATCHED ions first, then walk the rich-ion
-    // ensemble once with trees on the outside. Bit-identical: the rows are gathered
-    // in the same ion order the per-ion loop used, and the f64 sum below adds the
-    // per-row logits in that same order.
     let mut rows_buf: Vec<[f32; crate::ion_features::N_ION_FEATURES]> = Vec::new();
     for ion in predict_by_ions(peptide, 1..=2) {
         let tol_da = if feature_tol_is_ppm {
@@ -732,7 +698,6 @@ mod tests {
             iso_x: vec![],
             iso_y: vec![],
         };
-        // Round-trip through bytes to exercise the validator.
         GbdtPeakModel::from_bytes(&m.to_bytes()).expect("const-leaf gbdt round-trip")
     }
 
@@ -781,8 +746,6 @@ mod tests {
 
     #[test]
     fn intensity_signal_uses_frag_model_when_present() {
-        // A constant-leaf frag model returning 0.0 (=> exp 1.0 for every ion).
-        // Build ARCDE with a peak at y3 so the observed vector is non-zero.
         let g = const_leaf_gbdt(0.0); // predict_value returns 0.0 => exp(0) = 1.0
 
         let peptide = pep(b"ARCDE");
@@ -797,7 +760,6 @@ mod tests {
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
 
-        // frag_model Some, table model None => should still compute cosine > 0.
         let sig = intensity_signal(Some(&g), &ss, &peptide, 2, 20.0, true, None);
         assert!(sig > 0.0, "expected signal > 0 with frag model, got {sig}");
     }
@@ -826,7 +788,6 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        // Both None => must return 0.0 exactly.
         let sig = intensity_signal(None, &ss, &pep(b"ARCDE"), 2, 20.0, true, None);
         assert_eq!(sig, 0.0, "no predictor must yield 0.0");
     }

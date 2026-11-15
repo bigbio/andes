@@ -44,10 +44,6 @@ use scoring_crate::param_model::{IonType, Param, Partition};
 
 use crate::counts::CountStats;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 /// Hyper-parameters for the [`Estimator`].
 #[derive(Debug, Clone)]
 pub struct EstimatorConfig {
@@ -87,10 +83,6 @@ impl Default for EstimatorConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Estimator
-// ---------------------------------------------------------------------------
 
 /// Turns [`CountStats`] into a scoring [`Param`] with Laplace smoothing and
 /// partition backoff.
@@ -166,7 +158,6 @@ impl Estimator {
         let charge_hist = build_charge_hist(&counts.charge);
         let (min_charge, max_charge) = charge_range(&charge_hist, template);
 
-        // Sorted partitions (same invariant as the binary loader).
         let mut partitions: Vec<Partition> = rank_dist_table.keys().copied().collect();
         partitions.sort();
 
@@ -201,10 +192,6 @@ impl Estimator {
         param
     }
 
-    // -----------------------------------------------------------------------
-    // rank_dist_table
-    // -----------------------------------------------------------------------
-
     fn build_rank_dist_table(
         &self,
         counts: &CountStats,
@@ -212,7 +199,6 @@ impl Estimator {
         max_rank: i32,
         prior: Option<&Param>,
     ) -> FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> {
-        // Array length: max_rank observed-rank slots + 1 missing-ion slot.
         let n_slots = (max_rank + 1) as usize;
         let pseudo = self.cfg.pseudo;
         let noise_pseudo = self.cfg.noise_pseudo;
@@ -238,7 +224,6 @@ impl Estimator {
             })
             .collect();
 
-        // Global pool: per-ion, sum across all partitions.
         let global_pool = build_global_pool(&counts.rank, n_slots);
 
         // Segment-collapsed pool: per-(charge, parent_mass.to_bits()), sum
@@ -383,10 +368,6 @@ impl Estimator {
         out
     }
 
-    // -----------------------------------------------------------------------
-    // error tables
-    // -----------------------------------------------------------------------
-
     fn build_error_tables(
         &self,
         counts: &CountStats,
@@ -405,7 +386,6 @@ impl Estimator {
         let min_count = self.cfg.min_count;
         let w = self.cfg.backoff_weight;
 
-        // Global pool for ion and noise error distributions.
         let mut global_ion_raw = vec![0u64; dist_len];
         let mut global_noise_raw = vec![0u64; dist_len];
         for v in counts.error.values() {
@@ -467,10 +447,6 @@ impl Estimator {
         (ion_out, noise_out)
     }
 
-    // -----------------------------------------------------------------------
-    // ion existence table
-    // -----------------------------------------------------------------------
-
     fn build_existence_table(
         &self,
         counts: &CountStats,
@@ -482,7 +458,6 @@ impl Estimator {
         let min_count = self.cfg.min_count;
         let w = self.cfg.backoff_weight;
 
-        // Global pool.
         let mut global_raw = [0u64; N_EX];
         for (&(_part, idx), &c) in &counts.existence {
             if (idx as usize) < N_EX {
@@ -513,10 +488,6 @@ impl Estimator {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
 
 /// Widening rank-window smoothing of a rank-distribution vector
 /// (Kim et al., Nat Commun 5:5277, 2014).
@@ -608,7 +579,6 @@ fn blend(emp: &[f32], prior: &[f32], n: f32, w: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Global pool: per-`IonType`, sum rank counts across all partitions.
 fn build_global_pool(
     rank: &FxHashMap<(Partition, IonType), Vec<u64>>,
     n_slots: usize,
@@ -686,7 +656,6 @@ fn build_charge_neighbor_pool(
     out
 }
 
-/// Build `Vec<(charge, num_specs)>` from the raw charge-count map.
 fn build_charge_hist(charge: &FxHashMap<i32, u64>) -> Vec<(i32, i32)> {
     let mut hist: Vec<(i32, i32)> = charge
         .iter()

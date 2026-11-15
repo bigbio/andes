@@ -19,7 +19,6 @@ use std::collections::HashMap;
 
 use search::site_evidence::SiteEvidence;
 
-/// Weights of the fixed part of a row's logit, per unit of each feature.
 const W_SCORE: f64 = 2.0;
 const W_ISOTOPE_1: f64 = -1.0;
 const W_ISOTOPE_2: f64 = -5.7;
@@ -27,10 +26,8 @@ const W_HIT_FRACTION: f64 = 25.0;
 const W_UNIQUE_HIT: f64 = 0.08;
 const W_UNIQUE_MISS: f64 = -0.02;
 const W_DECOY: f64 = -11.0;
-/// Posterior above which a target row teaches the signature likelihoods.
 const CONFIDENT: f64 = 0.9;
 
-/// What the search kept of one emitted row.
 #[derive(Debug, Clone)]
 pub struct RowEvidence {
     /// Spectrum index: rows of one spectrum compete.
@@ -42,7 +39,6 @@ pub struct RowEvidence {
 /// A modification signature: (mod name, mass bits, diagnostic or loss).
 type Signature = (String, u64, bool);
 
-/// Present and total counts, with one pseudo-count each way.
 #[derive(Debug, Clone, Copy)]
 struct Rate {
     present: f64,
@@ -267,7 +263,6 @@ mod tests {
         // Present when carried in all 200, never shown by a confident rival:
         // ln(201/202 / 0.5) each way, so P(acetyl) = 1 / (1 + e^-1.38) ≈ 0.80.
         assert!((post["a"] - 0.799).abs() < 0.01, "{}", post["a"]);
-        // Without signatures the two rows tie.
         for r in rows.values_mut() {
             r.evidence.as_mut().unwrap().marks.clear();
         }

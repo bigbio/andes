@@ -980,7 +980,6 @@ fn fit_traces_on_grid(
         (t0, w, sgg, proj)
     };
     let (mut t0, mut w, mut sgg, mut proj) = fit_at(all, work);
-    // The refits of the module docs: at most two.
     let mut mask = exclude_interfered(&proj, sgg, &pi, &sigma, all);
     if mask != all {
         (t0, w, sgg, proj) = fit_at(mask, work);
@@ -1140,15 +1139,12 @@ fn best_alignment(
         let a = (num / den).max(0.0);
         a * num - 0.5 * a * a * den
     };
-    // The profile log-likelihood ratio at (t0, w), over the profile's
-    // support.
     let finite = rt.iter().all(|t| t.is_finite());
     let llr = |t0: f64, w: f64| {
         let on = support(rt, finite, t0, w);
         let (num, sg, sgg) = gaussian::sums(&rt[on.clone()], &z[on], t0, w);
         llr_of(num, sg, sgg)
     };
-    // (objective, scan, index into widths)
     let penalty_at = |k: usize| (rt[k] - t_hat) * (rt[k] - t_hat) / (2.0 * s * s);
     let mut best = (f64::NEG_INFINITY, apexes.range.start, usize::MAX);
     if let Some(grid) = work.grids.get(rt, prior, widths, &apexes) {
@@ -1467,7 +1463,6 @@ fn trace_area(
     if hi - lo < 2 {
         return (0.0, 0.0);
     }
-    // Trapezoid weights: half the spacing to each in-range neighbour.
     let dt = |j: usize| {
         let before = if j > lo { rt[j] - rt[j - 1] } else { 0.0 };
         let after = if j + 1 < hi { rt[j + 1] - rt[j] } else { 0.0 };
@@ -2713,16 +2708,12 @@ mod tests {
         .unwrap();
         let ungated = fit_on_grid(&run, &pr, 2, &ENV, &p, &WIDTH_GRID, &mut scratch).unwrap();
         let reference = fit_on_grid(&alone, &pr, 2, &ENV, &p, &WIDTH_GRID, &mut scratch).unwrap();
-        // Within the gate the traces are the target's own: the fit agrees
-        // with the target measured alone.
         assert!(
             (gated.amplitude / reference.amplitude - 1.0).abs() < 0.03,
             "{gated:?} {reference:?}"
         );
         assert!((gated.amplitude / AMP - 1.0).abs() < 0.05, "{gated:?}");
-        // Without a gate the slice sums both ions.
         assert!(ungated.amplitude > 5.0 * AMP, "{ungated:?}");
-        // The one-sweep extraction gives the same result per job.
         let jobs = [
             FitJob {
                 probe: pr,
@@ -2930,7 +2921,6 @@ mod tests {
             &mut sort,
         );
         assert!((q - 400.0).abs() < 1e-9, "{q}");
-        // Sides that agree are pooled.
         y[15..].fill(1.0);
         y[15] = 1.5;
         let traces: [&[f32]; 1] = [&y];

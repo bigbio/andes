@@ -167,7 +167,6 @@ pub fn apply_knockoff_fdr(
         .collect();
 
     let rank = |p: &PercolatorPsm| p.score.unwrap_or(-p.q_value);
-    // Per (substitution class, tier): (rank, row id, row kind).
     let mut by_class_tier: HashMap<(&'static str, PriorTier), Vec<RankedRow>> = HashMap::new();
     for (id, psm) in targets.iter() {
         let mut real_delta: Option<f64> = None;
@@ -288,7 +287,6 @@ pub fn apply_knockoff_fdr(
             }
             fdp.push(((offset + w) / t.max(1) as f64).min(1.0));
         }
-        // q at a row: the least FDP over thresholds at or below its rank.
         for i in (0..fdp.len().saturating_sub(1)).rev() {
             fdp[i] = fdp[i].min(fdp[i + 1]);
         }

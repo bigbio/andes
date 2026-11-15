@@ -27,10 +27,6 @@ use crate::TrainError;
 /// Matches the constant in [`crate::labeled`].
 const FRAGMENT_TOL_DA: f64 = 0.5;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// Number of TARGET PSMs at the requested FDR for the current model and the
 /// candidate model.
 ///
@@ -44,16 +40,10 @@ pub struct YieldDelta {
 }
 
 impl YieldDelta {
-    /// Returns `true` iff the candidate model is at least as good as the
-    /// current model (i.e. `candidate_count >= current_count`).
     pub fn is_accepted(&self) -> bool {
         self.candidate_count >= self.current_count
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Evaluate a candidate model against a validation dataset using TDC FDR.
 ///
@@ -80,7 +70,6 @@ pub fn evaluate_candidate(
     fdr: f64,
     cache_dir: &Path,
 ) -> Result<YieldDelta, TrainError> {
-    // Build the SearchIndex once (shared between both searches).
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
@@ -102,10 +91,6 @@ pub fn evaluate_candidate(
         candidate_count,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Private helper: search + TDC FDR count
-// ---------------------------------------------------------------------------
 
 /// Run a single search and return the number of TARGET PSMs at `fdr`.
 ///
@@ -133,7 +118,6 @@ pub(crate) fn count_target_psms(
         cache_dir,
     )?;
 
-    // Step 3: collect best PSM per spectrum.
     struct BestPsm {
         score: f32,
         is_decoy: bool,
@@ -158,7 +142,6 @@ pub(crate) fn count_target_psms(
     // the label path agree.
     let mono_q = crate::labeled::tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
-    // Step 7: count accepted targets.
     let count = best_psms
         .iter()
         .zip(mono_q.iter())

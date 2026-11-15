@@ -36,8 +36,6 @@ fn is_protein_boundary(c: u8) -> bool {
 /// Returns `true` when the boundary between residues `n` and `c` is
 /// consistent with the enzyme's cleavage rule (OpenMS PercolatorInfile).
 pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
-    // Protein boundaries are always enzymatic (usual short-circuit),
-    // generalised to Rust's `_`/`-` boundary-byte convention.
     if is_protein_boundary(n) || is_protein_boundary(c) {
         return true;
     }
@@ -113,13 +111,10 @@ mod tests {
 
     #[test]
     fn trypsin_cleaves_after_k_r_unless_followed_by_p() {
-        // After K with non-P after: enzymatic
         assert!(is_enzymatic_boundary(b'K', b'A', Enzyme::Trypsin));
         assert!(is_enzymatic_boundary(b'R', b'A', Enzyme::Trypsin));
-        // After K with P after: not enzymatic
         assert!(!is_enzymatic_boundary(b'K', b'P', Enzyme::Trypsin));
         assert!(!is_enzymatic_boundary(b'R', b'P', Enzyme::Trypsin));
-        // Other letters: not enzymatic
         assert!(!is_enzymatic_boundary(b'A', b'B', Enzyme::Trypsin));
     }
 
@@ -137,7 +132,6 @@ mod tests {
             Enzyme::NoCleavage,
             Enzyme::NonSpecific,
         ] {
-            // Either side `-` or `_` always cleavable.
             assert!(is_enzymatic_boundary(b'-', b'A', e), "{e:?}");
             assert!(is_enzymatic_boundary(b'A', b'-', e), "{e:?}");
             assert!(is_enzymatic_boundary(b'_', b'A', e), "{e:?}");
@@ -175,12 +169,6 @@ mod tests {
 
     #[test]
     fn count_internal_handles_tryptic_peptide() {
-        // PEPTIDKR has internal boundaries: PE EP PT TI ID DK KR
-        // (i=1..7), only DK qualifies (after K, then R — wait, position 6 is K-R: after K with R after → enzymatic).
-        // Let's verify with a concrete easy case.
-        // Peptide: ABKAR → residues [A, B, K, A, R].
-        // Internal boundaries at i=1,2,3,4: (A,B), (B,K), (K,A), (A,R)
-        //   trypsin: only (K,A) qualifies → count = 1.
         let count = count_internal_enzymatic_any(b"ABKAR", Enzyme::Trypsin, &[]);
         assert_eq!(count, 1);
     }
@@ -193,8 +181,6 @@ mod tests {
 
     #[test]
     fn count_internal_handles_p_block() {
-        // KPKA: boundaries at i=1,2,3: (K,P), (P,K), (K,A)
-        //   trypsin: (K,P) blocked, (P,K) no K/R before, (K,A) yes → count=1.
         assert_eq!(
             count_internal_enzymatic_any(b"KPKA", Enzyme::Trypsin, &[]),
             1

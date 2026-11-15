@@ -162,8 +162,6 @@ pub(crate) fn add_claims(
         .map(|&i| (i, sequence_md5(&db.proteins[i].sequence)))
         .collect();
 
-    // Claims per reference in row order, each claim's content key by
-    // (reference, id), and the content keys seen.
     let mut claims: BTreeMap<usize, Vec<Annotation>> = BTreeMap::new();
     let mut sites: BTreeMap<usize, Vec<(ModSite, PriorTier)>> = BTreeMap::new();
     let mut listed: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -202,7 +200,6 @@ pub(crate) fn add_claims(
             "{}\t{:?}\t{:?}\t{:?}",
             r, claim.edits, claim.mods, claim.processing
         );
-        // An id names one claim of its reference.
         let id = format!("{}\t{}", row.reference, row.id);
         match ids.get(&id) {
             Some(k) if *k != key => {
@@ -271,7 +268,6 @@ pub(crate) fn add_claims(
         p.annotation = Some(Arc::new(info));
     }
 
-    // The family of each reference, as its entries carry it.
     let family_of = |p: &Protein| -> Arc<str> {
         p.origin().map_or_else(
             || Arc::from(primary_accession(&p.accession)),

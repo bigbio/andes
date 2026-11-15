@@ -2,7 +2,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Spreads in the PIN feature tolerance.
 pub const TOL_SIGMAS: f64 = 4.0;
 /// Spreads of the nominal-reference error in the node-score window. The
 /// window has to hold nearly every real fragment's nominal-mass rounding
@@ -11,16 +10,10 @@ pub const TOL_SIGMAS: f64 = 4.0;
 /// plateau where none loses PSMs, and the runs' measured spreads are about
 /// 0.035-0.05 Da; six spreads places the learned window in that plateau.
 pub const NODE_WINDOW_SIGMAS: f64 = 6.0;
-/// Narrowest derived feature tolerance (ppm).
 pub const MIN_FEATURE_TOL_PPM: f64 = 5.0;
-/// Widest derived feature tolerance (ppm).
 pub const MAX_FEATURE_TOL_PPM: f64 = 40.0;
-/// Width of the ppm-Gaussian term relative to the measured spread. A width of
-/// 1.5-1.8 times the fragment-error spread scored best on Astral.
 pub const GAUSSIAN_SIGMA_SCALE: f64 = 1.5;
-/// ppm-Gaussian width when no measurement exists.
 pub const DEFAULT_GAUSSIAN_SIGMA_PPM: f64 = 7.0;
-/// Narrowest ppm-Gaussian width (ppm).
 pub const MIN_GAUSSIAN_SIGMA_PPM: f64 = 1.0;
 
 /// Fragment mass error of a run, measured on its confident PSMs.
@@ -52,7 +45,6 @@ impl FragmentErrorModel {
         }
     }
 
-    /// The same model with the measured nominal-reference error (Da).
     pub fn with_node_error_da(mut self, centre_da: f64, sigma_da: f64) -> Self {
         self.node_error_da = Some((centre_da, sigma_da));
         self
@@ -73,7 +65,6 @@ impl FragmentErrorModel {
         (TOL_SIGMAS * self.sigma_ppm).clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
     }
 
-    /// Width of the ppm-Gaussian term.
     pub fn gaussian_sigma_ppm(&self) -> f64 {
         (GAUSSIAN_SIGMA_SCALE * self.sigma_ppm).max(MIN_GAUSSIAN_SIGMA_PPM)
     }

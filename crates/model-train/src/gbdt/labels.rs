@@ -51,7 +51,6 @@ pub fn theoretical_ion_mzs(peptide: &Peptide, z: u8) -> Vec<f64> {
                 mzs.push((base - NH3 + (zz - 1.0) * PROTON) / zz);
             }
         }
-        // a-ion = b - CO
         for zz in 1..=max_z {
             let zz = zz as f64;
             mzs.push((b - CO + (zz - 1.0) * PROTON) / zz);
@@ -164,8 +163,6 @@ mod tests {
                 .any(|m| (m - (227.1026 + 57.02146)).abs() < 0.01),
             "modified b2 not at shifted mass: {modded:?}"
         );
-        // A peak at the UNMODIFIED b2 must NOT be labeled signal for the modified
-        // peptide (the v1 mod-blind bug would have mislabeled it).
         let labels = label_peaks(
             &[(227.1026_f64, 100.0_f32)],
             &[&pep_with_mod("PEPTIDE", 2, 57.02146)],
@@ -177,7 +174,6 @@ mod tests {
             vec![0u8],
             "unmodified b2 mass must be noise for the modified peptide"
         );
-        // Sanity: the plain peptide DOES label that peak as signal.
         let plain_labels = label_peaks(
             &[(227.1026_f64, 100.0_f32)],
             &[&pep("PEPTIDE")],
@@ -190,8 +186,6 @@ mod tests {
 
     #[test]
     fn ppm_tolerance_is_tight_on_high_res() {
-        // With a 20 ppm tolerance (high-res), a peak 0.4 Da off b2 is noise —
-        // the old hardcoded 0.5 Da would have mislabeled it as signal.
         let p = pep("PEPTIDE");
         let labels = label_peaks(
             &[(227.1026_f64 + 0.4, 100.0_f32)],

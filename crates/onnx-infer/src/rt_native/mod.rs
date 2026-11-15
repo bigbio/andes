@@ -62,7 +62,6 @@ impl RtPeptide {
             let end = rest.find(']')?;
             Some((rest[..end].parse().ok()?, i + 8 + end + 1))
         };
-        // N-terminal mods: one or more [..] followed by '-'
         if b.first() == Some(&b'[') {
             let mut ids = Vec::new();
             while b.get(i) == Some(&b'[') {
@@ -296,7 +295,6 @@ impl Conv {
                 }
                 for kk in 0..self.k {
                     let off = (kk as isize - half) * dil;
-                    // tile rows r with 0 <= p0 + r + off < n
                     let lo = (-(p0 as isize) - off).clamp(0, np as isize) as usize;
                     let hi = (n as isize - p0 as isize - off).clamp(0, np as isize) as usize;
                     if lo >= hi {
@@ -668,7 +666,6 @@ impl RtModel {
                 *x += z;
             }
         }
-        // attention + mean pooling
         let mut logits = Vec::with_capacity(n);
         for p in 0..n {
             let xp = &s.x[p * ch..(p + 1) * ch];

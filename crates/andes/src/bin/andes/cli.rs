@@ -1400,9 +1400,6 @@ pub(crate) struct QuantExtractArgs {
     /// With --mbr-preselect true: the fraction of the library's aligned runs other than the
     /// acceptor, rounded up. A minimum leaves out some transfer fits (and their CPU time),
     /// including a few transfers that would have been accepted.
-    // Measured on a 500-run study: 0.004 (2 donor runs) left out 13% of the fits
-    // and 12% of the extract CPU time, and 1.1% of the transfers accepted at q
-    // 0.05 without it were not measured.
     #[arg(long = "mbr-min-donor-fraction", value_name = "FRACTION",
           default_value_t = crate::quant_mbr::DEFAULT_MIN_DONOR_FRACTION,
           value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
@@ -1484,8 +1481,6 @@ pub(crate) struct QuantFinalizeArgs {
     ///
     /// Above it the fit uses a hashed sample of whole precursors, which coarsens the
     /// RT-local offsets, so keep it above the cells of the study when memory allows.
-    // On a 6-run benchmark, half the cells raised the median absolute log2 ratio
-    // error from 0.162 to 0.173.
     #[arg(long = "max-norm-cells", value_name = "N",
           default_value_t = crate::quant_finalize::DEFAULT_MAX_NORM_CELLS,
           hide_short_help = true, help_heading = H_ADVANCED)]
@@ -1538,7 +1533,6 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) threads: Option<usize>,
 }
 
-// Alias used internally for the search-args type.
 pub(crate) type Cli = SearchArgs;
 
 /// The effective FDR thresholds: each advanced flag inherits its main flag.
@@ -1852,7 +1846,6 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
         .trim()
         .parse()
         .map_err(|_| format!("invalid --precursor-tol `{s}`: bad number `{num_str}`"))?;
-    // Domain check (finding 3.8): a tolerance must be a finite positive width.
     if !v.is_finite() || v <= 0.0 {
         return Err(format!(
             "invalid --precursor-tol `{s}`: value must be finite and > 0 (got {v})"

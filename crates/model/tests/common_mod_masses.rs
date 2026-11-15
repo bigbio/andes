@@ -9,7 +9,6 @@ fn bit_eq(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits()
 }
 
-/// (list item, expected_name, expected_mass_delta).
 fn unimod_reference_mods() -> Vec<(&'static str, &'static str, f64)> {
     vec![
         ("Carbamidomethyl (C)", "Carbamidomethyl", 57.021464),

@@ -1,14 +1,5 @@
 //! Every `ANDES_*` environment variable must appear in `docs/ENV_VARS.md`.
 //!
-//! The engine used to read 43 of them. Some were diagnostics, some experiments — and
-//! some were *corrections that had been written, validated, and then left disabled by
-//! default*. That last category is what this guards against.
-//!
-//! Two cases motivated it. The Y-ladder is an unnormalised sum whose expectation grows
-//! with glycan size; the correction for that bias existed, shipped disabled, and was
-//! later measured at +19 identifications — meaning the selector weights had been tuned
-//! around a bias whose fix was already in the tree. Separately, a deconvolution-aware
-//! c/z charge guard was written and never wired to a call site at all.
 //!
 //! An undocumented switch is invisible twice over: users cannot find it, and we forget
 //! it exists and tune around it. Requiring a registry entry makes hiding a correction
@@ -22,7 +13,6 @@
 
 use std::collections::BTreeSet;
 
-/// Scan the workspace sources for `"ANDES_*"` string literals.
 fn vars_in_sources() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -83,12 +73,6 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
 fn every_env_var_is_documented() {
     let registry = include_str!("../../../docs/ENV_VARS.md");
     let found = vars_in_sources();
-    // Guards against a scanner that silently finds nothing and lets the test pass
-    // vacuously. The number is deliberately a floor of one, not a population target:
-    // driving this list toward zero is the goal, and a threshold tuned to yesterday's
-    // count would fail the moment the cleanup succeeded — which is exactly what it did
-    // when the engine went from 43 variables to a handful of test-only ones. If the
-    // last variable is ever removed, delete this test rather than raising the floor.
     assert!(
         !found.is_empty(),
         "scan found no variables at all — the scanner is broken, not the code"

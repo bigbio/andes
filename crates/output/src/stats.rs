@@ -77,7 +77,6 @@ fn fmt_fragment_tolerance(matching: &Tolerance, pin_features: &Tolerance) -> Str
 }
 
 impl RunStatistics {
-    /// Tally the rank-1 PSM of each non-empty spectrum queue.
     ///
     /// `matching_tolerance` is the fragment tolerance of candidate retrieval and
     /// the trained match features, `pin_feature_tolerance` the (possibly
@@ -132,7 +131,6 @@ impl RunStatistics {
         }
 
         let mut ptm_counts: Vec<(String, usize)> = ptm.into_iter().collect();
-        // Most-frequent first; ties broken alphabetically for stable output.
         ptm_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         Self {
@@ -158,7 +156,6 @@ impl RunStatistics {
     /// run. The summary carries the PTM tally of the identified PSMs, so the
     /// pre-FDR PTM list is left out when one is given.
     pub fn render_with(&self, summary: Option<&IdentificationSummary>) -> String {
-        // Width for the PTM name column (incl. the "(unmodified)" sentinel).
         let label_w = self
             .ptm_counts
             .iter()
@@ -210,8 +207,6 @@ impl RunStatistics {
         s
     }
 }
-
-// ── Identification summary (after rescoring) ──────────────────────────────────
 
 /// What one identified PSM contributes to the summary.
 #[derive(Debug, Clone, PartialEq)]
@@ -1185,7 +1180,6 @@ mod tests {
         assert!(out.contains("Carbamidomethyl : 30"));
         assert!(out.contains("Oxidation       : 10"));
         assert!(out.contains("(unmodified)    : 25"));
-        // Most-frequent PTM listed before the rarer one.
         let cam = out.find("Carbamidomethyl").unwrap();
         let ox = out.find("Oxidation").unwrap();
         assert!(cam < ox, "PTMs should be sorted count-descending");

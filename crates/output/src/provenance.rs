@@ -176,10 +176,6 @@ mod tests {
 
     #[test]
     fn shared_peptide_carries_every_kind_it_maps_to() {
-        // A peptide in the canonical entry and its isoform is flagged as
-        // isoform: decoy generators do not keep a decoy peptide shared with
-        // the decoy canonical, so "shared means reference" would set the flag
-        // on decoys more often than on targets.
         let (idx, cands, mut queues) = fixture();
         queues[0].update_in_place(|p| {
             p.features.ref_competitor = 1;

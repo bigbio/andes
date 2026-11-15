@@ -287,18 +287,11 @@ mod tests {
             .map(|p| p.accession.as_str())
             .collect();
         assert_eq!(accs, vec!["P1", "P2"]);
-        // Sequences are preserved verbatim (not reversed).
         assert_eq!(recovered.proteins[0].sequence, b"MKWV");
     }
 
-    // -----------------------------------------------------------------------
-    // peptide_has_target_match (all-decoy Label rule)
-    // -----------------------------------------------------------------------
-
     #[test]
     fn peptide_has_target_match_finds_substring() {
-        // Target protein: MABCDEFGHIK (as bytes: M=77, A=65, B=66, ...)
-        // Use a realistic amino acid sequence the model will accept.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P1".into(),

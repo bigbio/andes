@@ -1541,7 +1541,6 @@ pub(crate) fn run_quant(
     label_decoys: Option<&HashMap<String, PercolatorPsm>>,
 ) -> Result<output::QuantSummary, String> {
     let s = &collector.settings;
-    // Per-peptide quantities for the proteoform table.
     let mut summary = output::QuantSummary::default();
     let t0 = std::time::Instant::now();
     if let Some(dir) = &s.quant_dir {
@@ -1575,7 +1574,6 @@ pub(crate) fn run_quant(
     let mut records: Vec<FeatureRecord> = Vec::new();
     let mut next_feature_id: i64 = 1;
 
-    // ── Isobaric ──────────────────────────────────────────────────────────────
     if let Some(plex) = s.plex {
         let mut rows: Vec<TmtRow> = Vec::new();
         let (mut no_scan, mut out_of_range) = (0usize, 0usize);
@@ -1970,7 +1968,6 @@ pub(crate) fn run_quant(
         }
     }
 
-    // ── Label-free ────────────────────────────────────────────────────────────
     if s.lfq {
         let n_iso = s.lfq_params.n_isotopes;
         // A precursor is a positional-isomer class with a charge: the site
@@ -2152,7 +2149,6 @@ pub(crate) fn run_quant(
         }
     }
 
-    // ── Labelled pairs ────────────────────────────────────────────────────────
     if let Some(ls) = &s.label {
         // Identity decoys (`--mbr`): the decoy PSMs at the targets' cut.
         let decoy_hits: Vec<Hit<'_>> = match label_decoys {
@@ -2433,7 +2429,6 @@ mod tests {
                 ("Scan 1_1_4_3".to_string(), true, true),
             ]
         );
-        // Without decoys (the per-run quantification), the decoy winner goes.
         let hits = select_hits(&c, &spectra, &queues, &cands, None, &HashSet::new(), None);
         assert_eq!(hits.len(), 2);
         // A rescoring result decides each co-isolated PSM on its own q-value.
@@ -2519,7 +2514,6 @@ mod tests {
             .finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
             .unwrap_err();
         assert!(e.contains("/in/run_a.mzML") && e.contains("MS1"), "{e}");
-        // --lfq alone skips the run's label-free quantification.
         let mut c = QuantCollector::new(settings(true, None));
         c.finish_file(Path::new("/in/run_a.mzML"), None, RunScans::default(), 0)
             .unwrap();
@@ -2552,7 +2546,6 @@ mod tests {
         s.min_sn = 100.0;
         let mut g = GateCounts::default();
         assert!(g.check(&s, Some(0.9), Some(500.0), Some(0.01)));
-        // Missing values do not fail their criterion.
         assert!(g.check(&s, None, None, None));
         assert!(!g.check(&s, Some(0.5), Some(50.0), Some(0.5)));
         assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.5)));
@@ -2562,7 +2555,6 @@ mod tests {
         assert!(text.contains("1 below purity 0.7"), "{text}");
         assert!(text.contains("1 above PEP 0.05"), "{text}");
         assert!(text.contains("1 below summed S/N 100"), "{text}");
-        // The off values let everything through.
         let off = settings(false, None);
         assert!(GateCounts::default().check(&off, Some(0.0), Some(0.0), Some(1.0)));
         assert!(GateCounts::default().describe(&off).is_empty());
@@ -2617,7 +2609,6 @@ mod tests {
             a.extend_from_slice(extra);
             QuantSettings::from_cli(&search_args(&a), high_res, level)
         };
-        // High-resolution MS2 reporters: accepted, and the settings say so.
         let s = from(&[], true, 2).unwrap().unwrap();
         assert!(s.tmt_mbr);
         // SPS-MS3 reporters, resolved or explicit.
@@ -2628,7 +2619,6 @@ mod tests {
         // Ion-trap MS2.
         let e = from(&[], false, 2).unwrap_err();
         assert!(e.contains("low-resolution"), "{e}");
-        // Without --mbr nothing changes for either.
         let plain = |high_res: bool, level: u8| {
             QuantSettings::from_cli(&search_args(&["--tmt", "tmt11"]), high_res, level)
                 .unwrap()

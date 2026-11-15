@@ -20,16 +20,12 @@ pub struct Spectrum {
     /// MGF `TITLE=` value (or `<spectrumRef>` for mzML).
     /// Used as the PSM `SpecID` column in `.pin` output.
     pub title: String,
-    /// `PEPMASS=` first value: precursor m/z.
     pub precursor_mz: f64,
-    /// `PEPMASS=` second value (optional): precursor intensity.
     pub precursor_intensity: Option<f32>,
     /// `CHARGE=` value, e.g. `2+`. None when absent or not a usable charge
     /// (see [`known_precursor_charge`]).
     pub precursor_charge: Option<i32>,
-    /// `RTINSECONDS=` value. None when absent.
     pub rt_seconds: Option<f64>,
-    /// `SCANS=` value (scan number). None when absent.
     pub scan: Option<i32>,
     /// Peak list: (m/z f64, intensity f32). Sorted ascending by m/z by
     /// the parser.

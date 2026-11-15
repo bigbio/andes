@@ -10,9 +10,6 @@ use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partit
 
 use crate::labeled::LabeledMatch;
 
-/// Knobs for [`derive_geometry`] — the structural choices that, in a seed model,
-/// were inherited verbatim. Swept by the benchmark harness; collapse to fixed
-/// defaults once the optimum is validated.
 #[derive(Debug, Clone)]
 pub struct GeometryConfig {
     pub num_segments: i32,
@@ -118,7 +115,6 @@ pub fn derive_tiers_by_charge(
     by_charge
         .into_iter()
         .map(|(charge, masses)| {
-            // Adaptive: tier count scales with this charge's data volume.
             let n_tiers = adaptive_n_tiers(masses.len(), occupancy, max_tiers);
             (charge, derive_mass_tiers(&masses, n_tiers))
         })
@@ -250,7 +246,6 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         base.data_type.activation,
     );
 
-    // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
     for &(charge, _) in charge_masses {
         *charge_counts.entry(charge).or_insert(0) += 1;
@@ -268,7 +263,6 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         .unwrap_or(base.max_charge);
 
     let mut param = Param {
-        // Non-geometry metadata cloned from the base/seed.
         version: base.version,
         data_type: base.data_type.clone(),
         mme: base.mme,
@@ -277,7 +271,6 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         num_precursor_off: base.num_precursor_off,
         precursor_off_map: base.precursor_off_map.clone(),
         error_scaling_factor: base.error_scaling_factor,
-        // Geometry derived from config + corpus.
         num_segments,
         max_rank: cfg.max_rank,
         partitions,
@@ -285,7 +278,6 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         charge_hist,
         min_charge,
         max_charge,
-        // Learned tables left empty for `Estimator::estimate` to fill.
         rank_dist_table: FxHashMap::default(),
         ion_err_dist_table: FxHashMap::default(),
         noise_err_dist_table: FxHashMap::default(),
@@ -566,7 +558,6 @@ mod tests {
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
 
-        // Geometry comes from config + data.
         assert_eq!(p.num_segments, 2);
         assert_eq!(p.max_rank, 150);
         // 2 charges × 2 tiers × 2 segments = 8 partitions.
@@ -581,10 +572,8 @@ mod tests {
                 .expect("frag entry per partition");
             assert!(frags.iter().any(|f| f.ion_type.is_noise()));
         }
-        // Non-geometry metadata cloned from base.
         assert_eq!(p.mme, base.mme);
         assert_eq!(p.version, base.version);
-        // Learned tables start empty (estimate fills them).
         assert!(p.rank_dist_table.is_empty());
     }
 
@@ -724,8 +713,6 @@ mod tests {
             seg_num: 0,
         };
 
-        // cap=1 (seed-matching, fast): every partition gets charge-1 b/y only,
-        // even the charge-3 precursor — this is what kept the seed at ~298 spec/s.
         let t1 = build_frag_off_table(&[p2, p3], 1, ActivationMethod::HCD);
         assert_eq!(ion_charges(t1.get(&p2).unwrap(), true), vec![1]);
         assert_eq!(

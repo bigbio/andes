@@ -59,7 +59,6 @@ mod train_intensity;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
 
-// Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{
     parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,
     parse_uniprot_evidence, Cli, ScoreFlag, SearchArgs,
@@ -234,7 +233,6 @@ fn main() -> ExitCode {
                 matches.value_source("max_missed_cleavages"),
                 cfg_missed_cleavages,
             ));
-            // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {
                 eprintln!("error: --spectrum is required for search (or use `andes train`)");

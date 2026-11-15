@@ -36,8 +36,6 @@ fn thermo_raw_reads_ms2_spectra() {
         ms2 += 1;
         if !checked_first {
             checked_first = true;
-            // First emitted MS2 must carry a precursor, peaks, a scan number,
-            // and a Thermo native-id title.
             assert!(spec.precursor_mz > 0.0, "MS2 must have a precursor m/z");
             assert!(!spec.peaks.is_empty(), "MS2 must have peaks");
             assert!(spec.scan.is_some(), "MS2 must carry a scan number");
@@ -46,7 +44,6 @@ fn thermo_raw_reads_ms2_spectra() {
                 "title should be the Thermo native id, got {:?}",
                 spec.title
             );
-            // Peaks must be finite and intensities non-negative.
             for &(mz, intensity) in spec.peaks.iter().take(50) {
                 assert!(
                     mz.is_finite() && mz > 0.0,
@@ -79,13 +76,11 @@ fn thermo_raw_chunked_ms1_link_is_consistent() {
     let mut chunks = 0usize;
     reader.read_with_ms1_chunked(5000, 0, |chunk, link| {
         chunks += 1;
-        // One link entry per emitted MS2.
         assert_eq!(
             chunk.len(),
             link.ms2_to_ms1.len(),
             "ms2_to_ms1 length must equal the MS2 count in the chunk"
         );
-        // Every link index is in range of the chunk's MS1 set (or None).
         for &m in &link.ms2_to_ms1 {
             if let Some(idx) = m {
                 assert!(idx < link.ms1_peaks.len(), "ms1 link index out of range");

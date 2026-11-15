@@ -174,7 +174,6 @@ fn glyco_spectrum(peptide: &Peptide, charge: u8) -> Spectrum {
         let intact_mz = bion.mz(prefix_nominal as f64);
         peaks.push((intact_mz, intensity));
         intensity *= 0.95;
-        // Prefix spans the loss residue once we've passed index 3.
         if loss_index < s {
             let loss_mz = intact_mz - HEX_LOSS;
             if loss_mz > 0.0 {
@@ -209,7 +208,6 @@ fn glyco_loss_table_is_learned_and_lifts_the_score() {
     let pep = glyco_peptide(true);
     let spec = glyco_spectrum(&pep, charge);
 
-    // ── SP3: accumulate confident glyco PSMs and estimate a model ────────────
     let acc = StatsAccumulator::new(&seed_scorer);
     let mut counts = CountStats::new();
     for _ in 0..200 {
@@ -217,7 +215,6 @@ fn glyco_loss_table_is_learned_and_lifts_the_score() {
     }
     let trained = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
 
-    // The estimator must have created a per-class loss rank table.
     let learned_loss_key = trained
         .rank_dist_table
         .values()

@@ -233,7 +233,6 @@ fn main() {
     };
     let pred = pred.as_ref();
 
-    // PIN rows.
     let t_all = Instant::now();
     let f = BufReader::new(File::open(&args.pin).unwrap());
     let mut lines = f.lines();
@@ -319,7 +318,6 @@ fn main() {
         t_all.elapsed().as_secs_f64()
     );
 
-    // Spectra.
     let t = Instant::now();
     let (spectra, errs) = input::read_spectra_parallel(&args.mzml, 2, 2, args.threads).unwrap();
     assert!(
@@ -427,7 +425,6 @@ fn main() {
         );
     }
 
-    // Features per PIN row.
     let p = pred.prefix();
     let tol = if args.frag_ppm {
         FragmentTolerance::Ppm(args.frag_tol)

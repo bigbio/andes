@@ -176,7 +176,6 @@ fn fixture() -> (SearchIndex, SearchParams) {
     (idx, params)
 }
 
-/// Averagine envelope (4 peaks) of a `charge` precursor of neutral `mass`.
 fn envelope(mass: f64, charge: u8, scale: f32) -> Vec<(f64, f32)> {
     let mono_mz = (mass + charge as f64 * PROTON) / charge as f64;
     averagine_isotope_envelope(mass, 4)
@@ -241,8 +240,6 @@ fn spectra_and_link() -> (Vec<Spectrum>, Ms1Link) {
     (vec![s0, s1], link)
 }
 
-/// One emitted row: (secondary?, peptidoform, protein, decoy, score, rank_score,
-/// charge, mass error, features).
 type Row = (bool, String, usize, bool, u32, u32, u8, u64, String);
 
 fn rows(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Row>> {

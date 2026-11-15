@@ -121,7 +121,6 @@ impl PpmWindow {
         })
     }
 
-    /// The fallback window.
     pub fn fallback() -> Self {
         Self {
             centre: 0.0,
@@ -129,12 +128,10 @@ impl PpmWindow {
         }
     }
 
-    /// Whether signed error `ppm` lies in the window.
     pub fn contains(&self, ppm: f64) -> bool {
         (ppm - self.centre).abs() <= self.half_width
     }
 
-    /// Distance from the centre in half-widths.
     pub fn z(&self, ppm: f64) -> f64 {
         (ppm - self.centre).abs() / self.half_width
     }
@@ -481,7 +478,6 @@ impl Logit {
         let z: Vec<Vec<f64>> = x.iter().map(|r| model.standardise(r)).collect();
         let p = d + 1;
         let mut theta = vec![0.0; p];
-        // Start at the weighted base rate.
         let wsum: f64 = weights.iter().sum();
         let base =
             (y.iter().zip(weights).map(|(a, w)| a * w).sum::<f64>() / wsum).clamp(1e-4, 1.0 - 1e-4);
@@ -543,7 +539,6 @@ impl Logit {
             .collect()
     }
 
-    /// Predicted probability of the positive class.
     pub fn predict(&self, x: &[f64]) -> f64 {
         let z = self.standardise(x);
         sigmoid(self.b + self.w.iter().zip(&z).map(|(w, v)| w * v).sum::<f64>())
@@ -765,7 +760,6 @@ mod tests {
     }
 
     fn loaded_scan(carrier: f32, empty: f32) -> Vec<f32> {
-        // Two empty channels, four loaded ones.
         vec![carrier, 40.0, 50.0, 60.0, empty, empty]
     }
 

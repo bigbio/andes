@@ -26,8 +26,6 @@ use crate::counts::CountStats;
 use crate::store::schema::combined_schema;
 use crate::TrainError;
 
-// ── public types ─────────────────────────────────────────────────────────────
-
 /// Metadata for a single training source stored in the Parquet ledger.
 ///
 /// One [`SourceLedger`] row is written per `(model_id, source_id)` pair and
@@ -57,18 +55,12 @@ pub struct SourceLedger {
     pub experiment_class: String,
 }
 
-// ── type aliases ─────────────────────────────────────────────────────────────
-
 /// One encoded precursor-offset entry: (reduced_charge, offset, tol_is_ppm, tol_val, frequency).
 type PrecursorEntry = (i32, f32, bool, f32, f32);
-
-// ── helpers ──────────────────────────────────────────────────────────────────
 
 fn f32_to_i32_bits(v: f32) -> i32 {
     v.to_bits() as i32
 }
-
-// ── public entry point ───────────────────────────────────────────────────────
 
 /// Write `models` to a Parquet file at `path`.
 ///
@@ -101,7 +93,6 @@ fn write_models_inner(
         models.len(),
         "blobs slice must be 1:1 with models"
     );
-    // Delegate to write_model_with_sources with no source data.
     if models.is_empty() {
         let schema = combined_schema();
         let props = WriterProperties::builder()
@@ -131,7 +122,6 @@ fn write_models_inner(
         .map(|(i, _, _)| blobs.get(*i).cloned().flatten())
         .collect();
 
-    // Build manifest rows + table rows.
     let manifest_batch = build_manifest_batch(&schema, &sorted, &sorted_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
@@ -220,8 +210,6 @@ pub fn write_model_with_sources(
     Ok(())
 }
 
-// ── manifest batch ───────────────────────────────────────────────────────────
-
 fn build_manifest_batch(
     schema: &Arc<Schema>,
     models: &[(&str, &Param)],
@@ -229,13 +217,11 @@ fn build_manifest_batch(
 ) -> Result<RecordBatch, TrainError> {
     let n = models.len();
 
-    // Shared columns (non-null).
     let record_kind: ArrayRef = Arc::new(StringArray::from(vec!["manifest"; n]));
     let model_id: ArrayRef = Arc::new(StringArray::from(
         models.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
     ));
 
-    // Nullable manifest scalars.
     let mut activation = StringBuilder::new();
     let mut instrument = StringBuilder::new();
     let mut enzyme = StringBuilder::new();
@@ -274,11 +260,8 @@ fn build_manifest_batch(
     );
     let mut charge_hist = ListBuilder::new(charge_hist_builder).with_field(charge_item_field);
 
-    // gbdt_model_bytes: manifest-only binary column; null when no blob supplied.
     let mut gbdt_b = BinaryBuilder::new();
-    // frag_intensity_model_bytes: read from Param.frag_intensity_model if set.
     let mut fim_b = BinaryBuilder::new();
-    // rich_ion_model_bytes: read from Param.rich_ion_model if set.
     let mut rim_b = BinaryBuilder::new();
 
     for (i, (_, param)) in models.iter().enumerate() {
@@ -305,7 +288,6 @@ fn build_manifest_batch(
         max_charge.append_value(param.max_charge);
         num_precursor_off.append_value(param.num_precursor_off);
 
-        // charge_hist entries
         let sb = charge_hist.values();
         for &(charge, count) in &param.charge_hist {
             sb.field_builder::<Int32Builder>(0)
@@ -318,26 +300,22 @@ fn build_manifest_batch(
         }
         charge_hist.append(true);
 
-        // gbdt_model_bytes: manifest-only Binary column; None => null cell (rank-core-only models).
         match gbdt_blobs.get(i).and_then(|b| b.as_ref()) {
             Some(bytes) => gbdt_b.append_value(bytes),
             None => gbdt_b.append_null(),
         }
 
-        // frag_intensity_model_bytes: serialise from Param.frag_intensity_model if set.
         match param.frag_intensity_model.as_ref() {
             Some(model) => fim_b.append_value(model.to_bytes()),
             None => fim_b.append_null(),
         }
 
-        // rich_ion_model_bytes: serialise from Param.rich_ion_model if set.
         match param.rich_ion_model.as_ref() {
             Some(model) => rim_b.append_value(model.to_bytes()),
             None => rim_b.append_null(),
         }
     }
 
-    // Table-only and source/stat-only columns: null for manifest rows.
     let null_i32 = null_i32_array(n);
     let null_i64 = null_i64_array(n);
     let null_utf8 = null_utf8_array(n);
@@ -407,8 +385,6 @@ fn build_manifest_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-// ── table batch ──────────────────────────────────────────────────────────────
-
 fn build_table_batch(
     schema: &Arc<Schema>,
     models: &[(&str, &Param)],
@@ -433,10 +409,6 @@ fn build_table_batch(
     let mut all_frag_off_loss_classes: Vec<Option<Vec<i32>>> = Vec::new();
 
     for &(model_id, param) in models {
-        // ── partition list (record_kind="partition") ──────────────────────────
-        // Store the sorted partition list so the reader knows the exact order
-        // used for rank_dist / frag_off assignment. We store one row per partition
-        // with table_kind="partition" and no payload.
         for part in &param.partitions {
             record_kinds.push("table");
             model_ids.push(model_id);
@@ -453,8 +425,6 @@ fn build_table_batch(
             all_frag_off_loss_classes.push(None);
         }
 
-        // ── precursor_off_map ─────────────────────────────────────────────────
-        // One row per charge key. Sort by charge for determinism.
         let mut precursor_charges: Vec<i32> = param.precursor_off_map.keys().copied().collect();
         precursor_charges.sort_unstable();
         for charge in precursor_charges {
@@ -484,8 +454,6 @@ fn build_table_batch(
             all_frag_off_loss_classes.push(None);
         }
 
-        // ── frag_off_table ────────────────────────────────────────────────────
-        // Iterate partitions in sorted order (same order the binary reader stores them).
         for part in &param.partitions {
             if let Some(frags) = param.frag_off_table.get(part) {
                 // Encode as flat f32 list: groups of 4 per entry (stride-4, unchanged for
@@ -537,9 +505,6 @@ fn build_table_batch(
             }
         }
 
-        // ── rank_dist_table ───────────────────────────────────────────────────
-        // One row per (partition, ion_type): values = Vec<f32> of length max_rank+1.
-        // Iterate partitions in sorted order to be deterministic.
         for part in &param.partitions {
             if let Some(ion_map) = param.rank_dist_table.get(part) {
                 // Iterate in a stable order: frag_off entries first (in insertion order),
@@ -642,14 +607,12 @@ fn build_table_batch(
 
     let nrows = record_kinds.len();
 
-    // ── build Arrow arrays ───────────────────────────────────────────────────
     let record_kind_arr: ArrayRef = Arc::new(StringArray::from(record_kinds));
     let model_id_arr: ArrayRef = Arc::new(StringArray::from(model_ids));
     let part_charge_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_charges));
     let part_mass_bits_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_mass_bits));
     let part_seg_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_segs));
 
-    // ion_kind: Option<&str> → StringArray
     let ion_kind_arr: ArrayRef = Arc::new(StringArray::from(
         ion_kinds
             .into_iter()
@@ -666,16 +629,12 @@ fn build_table_batch(
             .collect::<Vec<_>>(),
     ));
 
-    // values: List<Float32>
     let values_arr = build_float_list(all_values);
 
-    // precursor_offsets: List<Struct<...>>
     let precursor_arr = build_precursor_list(all_precursor_offsets);
 
-    // frag_off_loss_classes: List<Int32>
     let frag_off_loss_classes_arr = build_int32_list(all_frag_off_loss_classes);
 
-    // manifest-only and source/stat-only columns: null for table rows.
     let null_i32 = null_i32_array(nrows);
     let null_i64 = null_i64_array(nrows);
     let null_utf8 = null_utf8_array(nrows);
@@ -743,8 +702,6 @@ fn build_table_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-// ── row emission helpers ─────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn emit_dist_row<'a>(
     record_kinds: &mut Vec<&'a str>,
@@ -800,8 +757,6 @@ fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32, i32) {
         IonType::Noise => ("noise", 0, 0, 0),
     }
 }
-
-// ── array builders ───────────────────────────────────────────────────────────
 
 fn build_float_list(rows: Vec<Option<Vec<f32>>>) -> ArrayRef {
     let mut b = ListBuilder::new(Float32Builder::new());
@@ -875,8 +830,6 @@ fn build_precursor_list(rows: Vec<Option<Vec<PrecursorEntry>>>) -> ArrayRef {
     }
     Arc::new(lb.finish())
 }
-
-// ── null array helpers ───────────────────────────────────────────────────────
 
 fn null_i32_array(n: usize) -> ArrayRef {
     let mut b = Int32Builder::new();
@@ -976,8 +929,6 @@ fn null_int32_list_array(n: usize) -> ArrayRef {
     Arc::new(b.finish())
 }
 
-// ── source batch (record_kind="source") ──────────────────────────────────────
-
 /// Build the source-ledger batch: one row per (model_id, source).
 fn build_source_batch(
     schema: &Arc<Schema>,
@@ -1013,7 +964,6 @@ fn build_source_batch(
         src_experiment_class_b.append_value(&ledger.experiment_class);
     }
 
-    // Columns that belong to other row kinds are null here.
     let null_i32 = null_i32_array(n);
     let null_utf8 = null_utf8_array(n);
     let null_bool = null_bool_array(n);
@@ -1093,8 +1043,6 @@ fn build_source_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-// ── stat batch (record_kind="stat") ──────────────────────────────────────────
-
 /// Build the per-source sufficient-statistics batch.
 ///
 /// Row encoding:
@@ -1107,7 +1055,6 @@ fn build_stat_batch(
     model_id: &str,
     sources: &[(SourceLedger, CountStats)],
 ) -> Result<RecordBatch, TrainError> {
-    // Accumulate rows.
     let mut record_kinds: Vec<String> = Vec::new();
     let mut model_ids: Vec<String> = Vec::new();
     let mut source_ids: Vec<String> = Vec::new();
@@ -1151,7 +1098,6 @@ fn build_stat_batch(
             all_charge_keys.push(None);
         }
 
-        // ── error ─────────────────────────────────────────────────────────────
         let mut error_keys: Vec<_> = stats.error.keys().collect();
         error_keys.sort();
         for part in error_keys {
@@ -1178,7 +1124,6 @@ fn build_stat_batch(
             );
         }
 
-        // ── noise_error ───────────────────────────────────────────────────────
         let mut ne_keys: Vec<_> = stats.noise_error.keys().collect();
         ne_keys.sort();
         for part in ne_keys {
@@ -1205,9 +1150,6 @@ fn build_stat_batch(
             );
         }
 
-        // ── existence ─────────────────────────────────────────────────────────
-        // Group by partition; within each partition, build counts[idx] = count for idx u32.
-        // Collect all (partition, idx, count) tuples, group by partition.
         let mut existence_by_part: rustc_hash::FxHashMap<Partition, Vec<(u32, u64)>> =
             rustc_hash::FxHashMap::default();
         for (&(part, idx), &count) in &stats.existence {
@@ -1220,7 +1162,6 @@ fn build_stat_batch(
         ex_part_keys.sort();
         for part in ex_part_keys {
             let entries = &existence_by_part[&part];
-            // Build flat list: counts[idx] = count (fill gaps with 0).
             let max_idx = entries.iter().map(|(i, _)| *i).max().unwrap_or(0) as usize;
             let mut flat: Vec<i64> = vec![0i64; max_idx + 1];
             for &(idx, count) in entries {
@@ -1278,7 +1219,6 @@ fn build_stat_batch(
         return empty_stat_batch(schema);
     }
 
-    // ── build Arrow arrays ───────────────────────────────────────────────────
     let record_kind_arr: ArrayRef = Arc::new(StringArray::from_iter_values(
         record_kinds.iter().map(|s| s.as_str()),
     ));
@@ -1303,9 +1243,7 @@ fn build_stat_batch(
         table_kinds.into_iter().collect::<Vec<_>>(),
     ));
 
-    // counts: List<Int64>
     let counts_arr = build_int64_list(all_counts);
-    // charge_keys: List<Int32>
     let charge_keys_arr = build_int32_list(all_charge_keys);
 
     // All other columns are null for stat rows.
@@ -1386,7 +1324,6 @@ fn build_stat_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-/// Build an empty stat batch (zero rows) — used when all sources have empty CountStats.
 fn empty_stat_batch(schema: &Arc<Schema>) -> Result<RecordBatch, TrainError> {
     build_stat_batch_empty(schema)
 }
@@ -1457,7 +1394,6 @@ fn push_partition_stat_row(
     all_charge_keys.push(None);
 }
 
-/// Same as `encode_ion_type` — used by the stat batch builder (shared encoding).
 fn encode_ion_type_str(ion: &IonType) -> (&'static str, i32, i32, i32) {
     encode_ion_type(ion)
 }

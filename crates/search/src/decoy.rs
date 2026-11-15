@@ -80,7 +80,6 @@ impl Default for Proteases {
 }
 
 impl Proteases {
-    /// The digest of `params`.
     pub fn of(params: &SearchParams) -> Self {
         Self {
             primary: params.enzyme,
@@ -134,7 +133,6 @@ pub enum DecoyStrategy {
 }
 
 impl DecoyStrategy {
-    /// Parse the `--decoy-strategy` CLI value. Case-insensitive.
     pub fn from_name(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "reverse" | "rev" => Some(Self::Reverse),
@@ -200,8 +198,6 @@ fn decoy_protein(p: &Protein, prefix: &str, source: Vec<u32>, proteases: &Protea
     }
 }
 
-/// Runs on the calling thread: the search configures the global thread pool
-/// after it has built the database.
 fn peptide_level_decoys(
     target: &ProteinDb,
     prefix: &str,
@@ -618,7 +614,6 @@ fn map_region(v: VariantRegion, image: &[u32]) -> VariantRegion {
     }
 }
 
-/// Count N-X-S/T sequon start positions (X ≠ P) in a residue slice.
 fn count_sequon_starts(s: &[u8]) -> usize {
     (0..s.len().saturating_sub(2))
         .filter(|&i| s[i] == b'N' && s[i + 1] != b'P' && (s[i + 2] == b'S' || s[i + 2] == b'T'))

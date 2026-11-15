@@ -136,7 +136,6 @@ pub(crate) fn write_table(
     w.finish()
 }
 
-/// A table read back: its record batches and key-value metadata.
 pub struct ReadTable {
     pub batches: Vec<RecordBatch>,
     pub meta: HashMap<String, String>,
@@ -182,7 +181,6 @@ pub(crate) fn read_table(path: &Path, table: &TableVersion) -> Result<ReadTable,
     Ok(ReadTable { batches, meta })
 }
 
-/// Column `name` of `b` as array type `T`. The error names the file.
 pub(crate) fn column<'a, T: 'static>(
     b: &'a RecordBatch,
     name: &str,
@@ -200,7 +198,6 @@ pub(crate) fn column<'a, T: 'static>(
     })
 }
 
-/// Value `i` of a nullable primitive column.
 pub(crate) fn opt<T: arrow::datatypes::ArrowPrimitiveType>(
     a: &arrow::array::PrimitiveArray<T>,
     i: usize,

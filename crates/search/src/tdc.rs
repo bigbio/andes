@@ -54,7 +54,6 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
         }
         *qi = min_q;
     }
-    // Conservative ties: equal-score contiguous buckets take the worst q.
     let mut start = 0usize;
     while start < n {
         let s = items[order[start]].score;

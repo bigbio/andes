@@ -97,13 +97,11 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
     assert_eq!(candidates.len(), 4);
     let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
     assert_eq!(target_candidates.len(), 2);
-    // Standard target: full protein at offset 0, length 11.
     let full = target_candidates
         .iter()
         .find(|c| c.start_offset_in_protein == 0)
         .unwrap();
     assert_eq!(full.peptide.length(), 11);
-    // Met-cleaved target: sequence[1..] at offset 1, length 10.
     let met_cleaved = target_candidates
         .iter()
         .find(|c| c.start_offset_in_protein == 1)
@@ -484,7 +482,6 @@ fn protein_n_term_mod_only_at_protein_start() {
         candidates.len()
     );
 
-    // Only candidates starting at protein offset 0 may have the ProtNTerm mod.
     for cand in &candidates {
         let has_mod = cand.peptide.residues[0].is_modified();
         if has_mod {
@@ -496,7 +493,6 @@ fn protein_n_term_mod_only_at_protein_start() {
         }
     }
 
-    // Exactly 1 candidate has the Protein_N_Term mod.
     let mod_count = candidates
         .iter()
         .filter(|c| c.peptide.residues[0].is_modified())
@@ -544,7 +540,6 @@ fn nterm_mod_applies_to_every_peptide_n_terminus() {
         candidates.len()
     );
 
-    // The NTerm mod now appears on BOTH peptide N-termini (offsets 0 and 7).
     let modified_offsets: std::collections::BTreeSet<usize> = candidates
         .iter()
         .filter(|c| c.peptide.residues[0].is_modified())
@@ -555,7 +550,6 @@ fn nterm_mod_applies_to_every_peptide_n_terminus() {
         "NTerm acetyl should appear on both peptide N-termini (offsets 0 and 7), got {modified_offsets:?}"
     );
 
-    // The NTerm mod must NOT appear at any internal position.
     for cand in &candidates {
         let residues = &cand.peptide.residues;
         for (i, aa) in residues.iter().enumerate().skip(1) {
@@ -616,7 +610,6 @@ fn c_term_and_protein_c_term_distinguished() {
         candidates.len()
     );
 
-    // Verify the right mod appears on the right peptide.
     let protein_len = 7usize;
     for cand in &candidates {
         let span_end = cand.start_offset_in_protein + cand.peptide.length();
@@ -678,8 +671,6 @@ fn met_cleavage_generates_alternative_candidates() {
         .filter(|c| !c.is_decoy)
         .collect();
 
-    // Standard: "MAGER" at offset 0, length 5.
-    // Met-cleaved: "AGER" at offset 1, length 4.
     assert_eq!(
         candidates.len(),
         2,
@@ -726,39 +717,12 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
         .filter(|c| !c.is_decoy)
         .count();
 
-    // Only 1 candidate: full sequence "KAGER". No Met-cleaved pass since first residue != M.
     assert_eq!(
         target_count, 1,
         "expected 1 candidate for non-M protein, got {}",
         target_count
     );
 }
-
-// ─── Phase 5: num_tolerable_termini (NTT) tests ──────────────────────────────
-//
-// Test protein: "AAAKBBBBBBR" (length 11)
-//   - Trypsin cleaves after K(pos 3) and R(pos 10).
-//   - Cleavage positions: [0, 4, 11].
-//   - Strict spans (ntt=2, missed=0): (0,4)="AAAK" (too short at min=6), (4,11)="BBBBBBR" → 1 span.
-//     With min=4: (0,4) and (4,11) → 2 spans.
-//   - Semi-specific additional spans (ntt=1) with free-C from start=0:
-//       end in [4,11] not at cleavage position → ends 5,6,7,8,9,10 → "AAAAK.." lengths 5-10.
-//       With min=4: ends 4..=11, non-cleavage → 4,5,6,7,8,9,10 → 7 spans. But end=4 IS cleavage → skip. end=11 IS cleavage → skip. → ends 5,6,7,8,9,10 → 6 spans.
-//       Actually let's use a simpler protein for clarity.
-//
-// Simpler test protein: "AAAAAKAAAAR" (length 11)
-//   - Trypsin cleaves after K(4) and R(10).
-//   - Cleavage positions: [0, 5, 11].
-//   - Strict spans (ntt=2): (0,5)="AAAAK"(5), (5,11)="AAAAR"(6) → lengths 5 and 6.
-//     With min=5, max=11: both qualify → 2 spans.
-//   - Semi (ntt=1): free C from start=0: ends 5..=11 not cleavage → 6,7,8,9,10 → 5 spans.
-//                   free C from start=5: ends 10..=11 not cleavage → 10 → 1 span.
-//                   free N for end=5: starts 0..=0 not cleavage → (none, since 0 is cleavage pos) → 0.
-//                   free N for end=11: starts 0..=6 not cleavage → 1,2,3,4,6 → 5 spans.
-//   (Semi spans are additionally bounded by max_missed_cleavages — see the
-//   per-span derivation below the NTT_PROTEIN const for the missed=0 count.)
-//
-// Use "AAAAAKAAAAR" with min=5, max=11, missed=0, no mods.
 
 const NTT_PROTEIN: &[u8] = b"AAAAAKAAAAR";
 //   Trypsin cleavage positions: [0, 6, 11] (cleavage AFTER K at idx 5 → pos 6;
@@ -828,14 +792,10 @@ fn ntt_1_emits_strict_plus_semi_spans() {
 fn ntt_1_includes_free_c_term_span() {
     let idx = ntt_protein_index();
     let p = ntt_params(1);
-    // A span starting at a tryptic position (0 or 6) with a non-tryptic end.
-    // Example: start=0, end=5 (length 5) — start IS cleavage, end 5 is NOT cleavage.
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .collect();
     let has_free_c = candidates.iter().any(|c| {
-        // start at protein offset 0 (tryptic N-term), end at non-cleavage position.
-        // end = start_offset + peptide.length() = 0 + 5 = 5 (not in {0,6,11}).
         c.start_offset_in_protein == 0 && c.peptide.length() == 5
     });
     assert!(
@@ -852,7 +812,6 @@ fn ntt_1_includes_free_n_term_span() {
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .collect();
-    // span with start=1 (non-cleavage), end=6 (tryptic C-term): length=5.
     let has_free_n = candidates
         .iter()
         .any(|c| c.start_offset_in_protein == 1 && c.peptide.length() == 5);
@@ -871,7 +830,6 @@ fn ntt_1_no_dedup_for_strict_spans() {
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .collect();
-    // Count candidates with start=0, length=6 (span (0,6), both ends tryptic).
     let count_strict = candidates
         .iter()
         .filter(|c| c.start_offset_in_protein == 0 && c.peptide.length() == 6)

@@ -92,7 +92,6 @@ impl TractSession {
     }
 
     fn resolve_inputs<'a>(&self, inputs: &'a [NamedTensor]) -> Result<Vec<&'a NamedTensor>> {
-        // Single-input convenience: accept any name.
         if self.input_names.len() == 1 && inputs.len() == 1 {
             return Ok(vec![&inputs[0]]);
         }

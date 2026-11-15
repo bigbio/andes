@@ -23,7 +23,6 @@ use parquet::arrow::ArrowWriter;
 
 use model_train::ModelStore;
 
-/// One synthetic PSM row.
 struct Row {
     seq: &'static str,
     charge: i32,
@@ -36,7 +35,6 @@ struct Row {
     peaks: Vec<(f32, f32)>,
 }
 
-/// Write the flat training parquet at `path` from `rows`.
 fn write_flat_parquet(path: &Path, rows: &[Row]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("seq", DataType::Utf8, false),
@@ -82,7 +80,6 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
         rows.iter().map(|r| r.cterm_delta).collect::<Vec<_>>(),
     ));
 
-    // res_mod_pos: LIST<INT32>
     let mut pos_b = ListBuilder::new(Int32Builder::new());
     for r in rows {
         for &p in &r.res_mod_pos {
@@ -92,7 +89,6 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     }
     let res_mod_pos: ArrayRef = Arc::new(pos_b.finish());
 
-    // res_mod_delta: LIST<DOUBLE>
     let mut delta_b = ListBuilder::new(arrow::array::Float64Builder::new());
     for r in rows {
         for &d in &r.res_mod_delta {
@@ -102,7 +98,6 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     }
     let res_mod_delta: ArrayRef = Arc::new(delta_b.finish());
 
-    // mz: LIST<FLOAT>
     let mut mz_b = ListBuilder::new(Float32Builder::new());
     for r in rows {
         for &(m, _) in &r.peaks {
@@ -112,7 +107,6 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     }
     let mz: ArrayRef = Arc::new(mz_b.finish());
 
-    // intensity: LIST<FLOAT>
     let mut int_b = ListBuilder::new(Float32Builder::new());
     for r in rows {
         for &(_, it) in &r.peaks {
@@ -160,7 +154,6 @@ fn fake_peaks() -> Vec<(f32, f32)> {
 
 fn synthetic_rows() -> Vec<Row> {
     vec![
-        // Unmodified.
         Row {
             seq: "PEPTIDEK",
             charge: 2,
@@ -171,7 +164,6 @@ fn synthetic_rows() -> Vec<Row> {
             cterm_delta: 0.0,
             peaks: fake_peaks(),
         },
-        // Oxidation on M (residue 1).
         Row {
             seq: "MPEPTIDER",
             charge: 2,
@@ -182,7 +174,6 @@ fn synthetic_rows() -> Vec<Row> {
             cterm_delta: 0.0,
             peaks: fake_peaks(),
         },
-        // N-terminal Acetyl.
         Row {
             seq: "SAMPLERK",
             charge: 3,
@@ -200,7 +191,6 @@ fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
     run_train_env(in_parquet, store, extra, &[]);
 }
 
-/// Like [`run_train`] but injects environment variables into the child process.
 fn run_train_env(in_parquet: &Path, store: &Path, extra: &[&str], env: &[(&str, &str)]) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.arg("train")
@@ -280,7 +270,6 @@ fn geometry_derived_by_default_differs_from_seed() {
     let in_parquet = dir.path().join("psms.parquet");
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // DEFAULT: derive geometry from the (tiny) corpus.
     let store_derived = dir.path().join("derived.parquet");
     run_train_env(
         &in_parquet,
@@ -289,7 +278,6 @@ fn geometry_derived_by_default_differs_from_seed() {
         &[],
     );
 
-    // OPT-OUT: reuse the bundled seed's full partition geometry.
     let store_seed = dir.path().join("seed.parquet");
     // The engine reads no environment, so the opt-out travels on the command line.
     run_train_env(
@@ -335,7 +323,6 @@ fn fragment_tolerance_override_changes_model() {
     let in_parquet = dir.path().join("psms.parquet");
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // Tight tolerance.
     let store_tight = dir.path().join("tight.parquet");
     run_train(&in_parquet, &store_tight, &["--fragment-tol-ppm", "1"]);
     let tight = ModelStore::open(&store_tight)
@@ -343,7 +330,6 @@ fn fragment_tolerance_override_changes_model() {
         .load_param("default")
         .unwrap();
 
-    // Wide tolerance (Da-based, large window).
     let store_wide = dir.path().join("wide.parquet");
     run_train(&in_parquet, &store_wide, &["--fragment-tol-da", "1.0"]);
     let wide = ModelStore::open(&store_wide)
@@ -428,12 +414,10 @@ fn train_from_msnet_accepts_prior_model_flags() {
     let in_parquet = dir.path().join("psms.parquet");
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // Build a prior store (a valid model named "default") to point at.
     let prior_store = dir.path().join("prior.parquet");
     run_train(&in_parquet, &prior_store, &["--fragment-tol-ppm", "20"]);
     assert!(prior_store.exists(), "prior store should be written");
 
-    // Train again, shrinking toward the prior model loaded from `prior_store`.
     let store = dir.path().join("models.parquet");
     run_train(
         &in_parquet,
@@ -517,7 +501,6 @@ fn multiple_inputs_accumulate() {
     assert!(status.success(), "should exit 0");
 
     let ms = ModelStore::open(&store).unwrap();
-    // Default model id is "default".
     assert!(ms.model_ids().contains(&"default".to_string()));
     let _ = PathBuf::from(&store); // silence unused import if refactored
 }

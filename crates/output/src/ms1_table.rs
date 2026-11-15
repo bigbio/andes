@@ -31,16 +31,13 @@ use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
 use quant::ms1_index::{Ms1RunIndex, Ms1Scan};
 
-/// Major version of the table layout. A reader rejects any other major.
 pub const MS1_SCHEMA_MAJOR: u32 = 1;
 
 const SCHEMA_KEY: &str = "andes.ms1.schema";
 const SCHEMA_VERSION: &str = "1.0";
 /// Schema version of a table with the `mobility` column.
 const SCHEMA_VERSION_MOBILITY: &str = "1.1";
-/// Metadata key of the run stem.
 pub const RUN_KEY: &str = "andes.ms1.run";
-/// Scans per row group / record batch.
 const SCANS_PER_GROUP: usize = 256;
 
 const COLUMNS: [&str; 6] = [
@@ -182,7 +179,6 @@ fn write_with_version<W: Write + Send>(
     Ok(())
 }
 
-/// Write the MS1 table of run `run` to `out`.
 pub fn write_ms1<W: Write + Send>(out: W, run: &str, index: &Ms1RunIndex) -> Result<(), String> {
     write_with_version(out, run, index, SCHEMA_VERSION)
 }
@@ -212,7 +208,6 @@ fn write_file_with_version(
     written
 }
 
-/// Write the MS1 table of run `run` to `path`. Every error names `path`.
 pub fn write_ms1_table(path: &Path, run: &str, index: &Ms1RunIndex) -> Result<(), String> {
     write_file_with_version(path, run, index, SCHEMA_VERSION)
 }
@@ -343,7 +338,6 @@ fn read(file: File) -> Result<Ms1RunIndex, String> {
     Ok(Ms1RunIndex::new(scans))
 }
 
-/// Read the MS1 table in `file`, opened from `path`. Every error names `path`.
 pub fn read_ms1(file: File, path: &Path) -> Result<Ms1RunIndex, String> {
     read(file).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -393,7 +387,6 @@ pub fn read_ms1_scan_spacing(path: &Path) -> Result<Option<f64>, String> {
     Ok(Some(gaps[gaps.len() / 2]))
 }
 
-/// Read the MS1 table at `path`. Every error names `path`.
 pub fn read_ms1_table(path: &Path) -> Result<Ms1RunIndex, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     read_ms1(file, path)
@@ -492,7 +485,6 @@ mod tests {
         assert_same(&back, &idx);
         assert_eq!(back.scan(0).id, "");
         assert_eq!(back.scan(1).id, "scan=9");
-        // Reading again gives the same index.
         assert_same(&read_ms1_table(&p).unwrap(), &idx);
     }
 
@@ -527,7 +519,6 @@ mod tests {
                 .len()
         };
         assert_eq!(columns(&p), 6);
-        // A run without mobility keeps the five-column layout.
         let q = dir.path().join("plain.ms1.parquet");
         write_ms1_table(&q, "plain", &index()).unwrap();
         assert_eq!(columns(&q), 5);

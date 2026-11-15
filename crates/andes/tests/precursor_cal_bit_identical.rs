@@ -65,7 +65,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR points at crates/andes at test compile time.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

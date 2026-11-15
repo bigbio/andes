@@ -313,7 +313,6 @@ impl Predictors {
         let run_of = |spec: u32| run_ends.partition_point(|&e| e <= spec as usize);
         let n_runs = run_ends.len().max(1);
 
-        // Observed RT (minutes) and run per row.
         let obs: Vec<f64> = table
             .rows
             .iter()
@@ -327,7 +326,6 @@ impl Predictors {
             .collect();
         let anchors = anchor_rows(&table.rows, n_runs, &run_of);
 
-        // Per predictor: its feature columns and its missing flags.
         let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
         for src in &self.sources {
@@ -1059,7 +1057,6 @@ mod tests {
     fn row_charge_recovers_a_charge_beyond_the_columns() {
         let mz = 500.0;
         let exp = |z: f64| Some(z * (mz - model::PROTON));
-        // Interior column: exact.
         assert_eq!(row_charge(Some(3), (2, 4), exp(3.0), Some(mz)), 3);
         // A 6+ precursor written into the charge4 column.
         assert_eq!(row_charge(Some(4), (2, 4), exp(6.0), Some(mz)), 6);

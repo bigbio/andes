@@ -22,7 +22,6 @@ pub fn averagine_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
     }
     let lambda = (mass * 4.76e-4).max(0.0);
     let mut env = Vec::with_capacity(n_isotopes);
-    // p_k = e^-lambda * lambda^k / k!, computed iteratively (p_0 = e^-lambda).
     let mut p = (-lambda).exp();
     for k in 0..n_isotopes {
         env.push(p);
@@ -128,7 +127,6 @@ pub fn isotope_envelope_and_share_from_formula(
 /// N-glycopeptide in the 2.5–5 kDa range where the precursor
 /// mono-correction operates. Counts are rounded to whole atoms.
 pub fn glycopeptide_formula(mass: f64) -> (u32, u32, u32, u32, u32) {
-    // Per-Da atom densities of the two halves.
     const PEP: [f64; 5] = [
         4.9384 / 111.1254,
         7.7583 / 111.1254,

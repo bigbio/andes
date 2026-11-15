@@ -99,7 +99,6 @@ impl Param {
             return None;
         }
 
-        // Build the target partition for the floor lookup.
         let target = Partition {
             charge,
             parent_mass,
@@ -110,7 +109,6 @@ impl Param {
         // partition <= target via binary search.
         let pos = self.partitions.partition_point(|p| p <= &target);
         if pos > 0 {
-            // partitions[pos - 1] is the largest <= target.
             let candidate = self.partitions[pos - 1];
             if candidate.charge == charge {
                 return Some(candidate);
@@ -120,7 +118,6 @@ impl Param {
             // on (smallest_charge, parent_mass, seg_num).
         }
 
-        // Fall back: find smallest charge in partitions, retry.
         let min_charge = self.partitions.iter().map(|p| p.charge).min()?;
         let max_charge = self.partitions.iter().map(|p| p.charge).max()?;
         let fallback_charge = if charge < min_charge {
@@ -225,8 +222,6 @@ impl Param {
         parent_mass: f64,
         seg: usize,
     ) -> Vec<IonType> {
-        // Compat shim — callers in hot paths should use
-        // `ion_types_for_partition_slice` to avoid the allocation.
         self.ion_types_for_partition_slice(charge, parent_mass, seg)
             .to_vec()
     }
@@ -432,8 +427,6 @@ impl IonType {
             } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                // real_mass = node_nominal / INTEGER_MASS_SCALER
-                // mz        = real_mass / charge + offset
                 let real_mass = node_nominal / model::mass::INTEGER_MASS_SCALER as f64;
                 real_mass / c + offset
             }
@@ -673,7 +666,6 @@ mod tests {
                 seg_num: 0,
             },
         ];
-        // Sort matches the loader invariant.
         param.partitions.sort();
 
         // Partition Ord: charge → seg_num → parent_mass.
@@ -739,7 +731,6 @@ mod tests {
     fn segment_num_clamps_to_max() {
         let mut param = make_param();
         param.num_segments = 3;
-        // peak_mz / parent_mass × num_segments = floor calculation
         assert_eq!(param.segment_num_for(50.0, 100.0), 1);
         assert_eq!(param.segment_num_for(99.0, 100.0), 2);
         assert_eq!(param.segment_num_for(100.0, 100.0), 2); // clamped
@@ -748,8 +739,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge1_offset0() {
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
-        // For Prefix(charge=1, offset=0): mz = (node_nominal / 0.999497) / 1 + 0
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix {
             charge: 1,
@@ -763,8 +752,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge2() {
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
-        // For Prefix(charge=2, offset=0): mz = (node_nominal / 0.999497) / 2
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix {
             charge: 2,
@@ -778,8 +765,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_with_b_ion_offset() {
-        // Realistic b-ion case: offset = PROTON (≈1.00728).
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + PROTON
         use model::mass::{INTEGER_MASS_SCALER, PROTON};
         let b_ion = IonType::Prefix {
             charge: 1,
@@ -793,7 +778,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_suffix_same_formula_as_prefix() {
-        // Suffix uses the same mz formula as prefix.
         let offset = 18.01_f32;
         let prefix = IonType::Prefix {
             charge: 1,
@@ -830,7 +814,6 @@ mod tests {
         let node_nominal = 100.0_f64;
         let mz = ion.mz(node_nominal);
         let recovered_real_mass = ion.mass_from_mz(mz);
-        // Recovered mass should equal node_nominal / INTEGER_MASS_SCALER (real mass)
         let expected_real_mass = node_nominal / INTEGER_MASS_SCALER as f64;
         assert!(
             (recovered_real_mass - expected_real_mass).abs() < 1e-4,
@@ -905,7 +888,6 @@ mod tests {
             loss_class: 0,
         };
 
-        // Populate frag_off_table (the source of truth for ion_types_for_segment).
         let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
             FxHashMap::default();
         frag_off_table.insert(
@@ -955,13 +937,11 @@ mod tests {
         param.rebuild_cache();
 
         let seg0 = param.ion_types_for_segment(0);
-        // Should return prefix and suffix (not noise), no duplicates.
         assert_eq!(seg0.len(), 2);
         assert!(seg0.iter().all(|i| !i.is_noise()));
         assert!(seg0.iter().any(|i| i.is_prefix()));
         assert!(seg0.iter().any(|i| i.is_suffix()));
 
-        // Segment 1 has no partitions → empty.
         let seg1 = param.ion_types_for_segment(1);
         assert!(seg1.is_empty());
     }
@@ -1017,7 +997,6 @@ mod exact_mass_tests {
             (got - expected).abs() < 1e-9,
             "mz_exact must not quantise the mass: expected {expected}, got {got}"
         );
-        // And it must be within a few ppm of the textbook value.
         let textbook = real_mass + 1.007_276_49_f64;
         assert!(1e6 * (got - textbook).abs() / textbook < 1.0);
     }

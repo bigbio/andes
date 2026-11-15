@@ -50,7 +50,6 @@ pub struct IsomerClass {
 }
 
 impl IsomerClass {
-    /// The class of `peptide`.
     pub fn of_peptide(peptide: &Peptide) -> Self {
         let residues = peptide.residues.iter().map(|aa| aa.residue).collect();
         let mut mod_units: Vec<i64> = peptide
@@ -75,7 +74,6 @@ impl IsomerClass {
         Ok(c)
     }
 
-    /// [`Self::parse`] into `self`, reusing its buffers.
     pub fn parse_into(
         &mut self,
         text: &str,
@@ -141,12 +139,10 @@ impl IsomerClass {
         Ok(())
     }
 
-    /// The residues, in order.
     pub fn residues(&self) -> &[u8] {
         &self.residues
     }
 
-    /// The modification mass deltas in [`mod_mass_units`], sorted.
     pub fn mod_units(&self) -> &[i64] {
         &self.mod_units
     }

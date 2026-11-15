@@ -16,8 +16,6 @@ use quick_xml::{events::Event, Reader};
 use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType, Spectrum};
 
-// ── CV accessions we care about ─────────────────────────────────────────────
-
 // Mass-analyzer cvParams used by `detect_instrument_type`. Sourced from the
 // PSI-MS controlled vocabulary (HUPO-PSI MS ontology). When no `--instrument`
 // flag is given, the CLI defaults to low-resolution ion-trap routing; per-file
@@ -154,8 +152,6 @@ fn is_minute_unit(unit_accession: &str, unit_name: &str) -> bool {
     }
 }
 
-// ── Error type ───────────────────────────────────────────────────────────────
-
 #[derive(Debug, thiserror::Error)]
 pub enum MzMLParseError {
     #[error("XML parse error: {0}")]
@@ -197,8 +193,6 @@ impl From<std::io::Error> for MzMLParseError {
         MzMLParseError::Zlib(e)
     }
 }
-
-// ── State machine ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -422,8 +416,6 @@ impl SpectrumBuilder {
     }
 }
 
-// ── Extracted cv-param info (avoids borrow-checker conflicts) ────────────────
-
 /// What we extract from a `<cvParam>` element without holding a reference
 /// into the event buffer.
 /// PSI-MS accession for an activation `userParam` name, matched exactly
@@ -461,8 +453,6 @@ impl CvParamInfo {
     }
 }
 
-// ── MS1 linkage side structure ───────────────────────────────────────────────
-
 /// Side structure produced by the opt-in MS1-capture reader path
 /// ([`MzMLReader::read_with_ms1`]). It records the peak lists of the captured
 /// MS1 scans (stored ONCE) and, for each emitted MS2 spectrum, the index of
@@ -481,8 +471,6 @@ pub struct Ms1Link {
     /// `None` if no MS1 preceded it. Length equals the number of emitted MS2.
     pub ms2_to_ms1: Vec<Option<usize>>,
 }
-
-// ── Public reader ────────────────────────────────────────────────────────────
 
 /// Streaming mzML reader. Emits MS2 spectra by default.
 pub struct MzMLReader<R: BufRead> {
@@ -650,8 +638,6 @@ impl<R: BufRead> MzMLReader<R> {
         std::mem::take(&mut self.product_scans)
     }
 
-    // ── Build a Spectrum from a completed SpectrumBuilder ────────────────────
-
     fn finish_spectrum(&self, sb: SpectrumBuilder) -> Result<Option<Spectrum>, MzMLParseError> {
         let level = sb.ms_level.unwrap_or(0);
         if level < self.ms_level_min || level > self.ms_level_max {
@@ -689,9 +675,6 @@ impl<R: BufRead> MzMLReader<R> {
 
         let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
         let scan = scan_number(&sb.id, sb.index);
-
-        // H6 EThcD/ETciD resolution happens per-`<activation>`-block (on the
-        // block's closing tag), so `sb.activation_method` is already correct here.
 
         Ok(Some(Spectrum {
             title: sb.id,
@@ -749,8 +732,6 @@ impl<R: BufRead> MzMLReader<R> {
 
         Ok(peaks)
     }
-
-    // ── Apply a CvParamInfo to current parse state ───────────────────────────
 
     /// Inside the spectrum's first `<selectedIon>`, the one whose m/z, charge
     /// and intensity are the precursor's.
@@ -1001,8 +982,6 @@ impl<R: BufRead> MzMLReader<R> {
         }
     }
 
-    // ── Event pump ───────────────────────────────────────────────────────────
-
     fn pump(&mut self) -> Result<Option<Spectrum>, MzMLParseError> {
         loop {
             self.buf.clear();
@@ -1203,7 +1182,6 @@ impl<R: BufRead> MzMLReader<R> {
                                         continue;
                                     }
                                     if self.capture_ms1 {
-                                        // The chimeric link needs its own copy.
                                         let last = self.run_ms1.last().expect("just pushed");
                                         self.captured_ms1.push(last.peaks.clone());
                                         self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
@@ -1235,13 +1213,6 @@ impl<R: BufRead> MzMLReader<R> {
                                     });
                                     continue;
                                 }
-                                // Capture path: intercept MS1 scans before they
-                                // reach the level filter. MS1 peaks are stored
-                                // once in `captured_ms1` and never emitted as a
-                                // scorable Spectrum; we just remember the latest
-                                // MS1 index so the next MS2 can link to it.
-                                // This branch is inert when `capture_ms1` is
-                                // false (default), keeping that path byte-exact.
                                 if self.capture_ms1 && sb.ms_level == Some(1) {
                                     let peaks = Self::build_peaks(
                                         sb.mz_array,
@@ -1346,11 +1317,6 @@ impl<R: BufRead> MzMLReader<R> {
     ///
     /// `ms2_to_ms1.len()` always equals the number of returned MS2 spectra.
     pub fn read_with_ms1(mut self) -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
-        // To capture MS1 (level 1) the parser must let level-1 spectra reach
-        // the spectrum-End handler rather than being dropped by the level
-        // filter. We widen the internal min level to 1 ONLY when capturing;
-        // MS1 is intercepted before `finish_spectrum`, so the effective output
-        // is still MS2-only. With capture off, the filter is untouched.
         if self.capture_ms1 {
             self.ms_level_min = 1;
         }
@@ -1361,9 +1327,6 @@ impl<R: BufRead> MzMLReader<R> {
         loop {
             match self.pump() {
                 Ok(Some(s)) => {
-                    // Each spectrum returned by `pump` here is an emitted MS2
-                    // (MS1 is intercepted inside `pump` and never returned).
-                    // Link it to whatever MS1 most recently preceded it.
                     ms2_to_ms1.push(self.latest_ms1_idx);
                     spectra.push(s);
                 }
@@ -1551,17 +1514,10 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
                     return None;
                 }
                 Err(_e) if self.strict => {
-                    // Strict mode (finding 4.1): surface the malformed spectrum
-                    // as Err and stop, rather than silently skipping it.
                     self.done = true;
                     return Some(Err(_e));
                 }
                 Err(e) => {
-                    // Tolerant (default): resync past the malformed spectrum and
-                    // keep parsing (skip the bad scan, not the rest of the file).
-                    // Only an unreadable XML stream stops us — mirrors
-                    // `read_with_ms1` / chunked paths. Count the drop so a caller
-                    // can report it via `skipped_count` / `skipped_errors`.
                     self.skipped += 1;
                     if self.skipped_errors.len() < MAX_SKIPPED_ERRORS {
                         self.skipped_errors.push(e.to_string());
@@ -2324,11 +2280,6 @@ fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError>
         raw
     };
 
-    // Require the decoded buffer to be an exact multiple of the element width
-    // (finding 4.2). A trailing remainder means the array was truncated mid-
-    // value; previously the `while let Ok(..)` loop silently rounded the count
-    // down (treating `UnexpectedEof` as a clean end) and dropped the partial
-    // value, hiding the corruption.
     let elem_bytes = if ctx.precision_bits == 64 {
         8usize
     } else {
@@ -2469,8 +2420,6 @@ mod tests {
         )
     }
 
-    // ── Test 1 ────────────────────────────────────────────────────────────────
-
     #[test]
     fn parses_minimal_mzml_with_one_ms2_spectrum() {
         let mz_b64 = encode_f64_b64(&[100.0, 200.0]);
@@ -2488,8 +2437,6 @@ mod tests {
         assert_eq!(spectra.len(), 1, "expected exactly one MS2 spectrum");
         assert_eq!(spectra[0].peaks.len(), 2, "expected two peaks");
     }
-
-    // ── Test 2 ────────────────────────────────────────────────────────────────
 
     #[test]
     fn decodes_zlib_compressed_peaks() {
@@ -2527,8 +2474,6 @@ mod tests {
         assert!((peaks[2].0 - 450.0).abs() < 1e-6, "third m/z");
     }
 
-    // ── Test 3 ────────────────────────────────────────────────────────────────
-
     #[test]
     fn decodes_uncompressed_64bit_peaks() {
         let mz_b64 = encode_f64_b64(&[200.0, 400.0]);
@@ -2551,8 +2496,6 @@ mod tests {
         assert!((peaks[0].1 - 5000.0_f32).abs() < 1.0);
         assert!((peaks[1].1 - 2500.0_f32).abs() < 1.0);
     }
-
-    // ── Test 4 ────────────────────────────────────────────────────────────────
 
     #[test]
     fn filters_out_ms1_spectra() {
@@ -2599,8 +2542,6 @@ mod tests {
         assert_eq!(spectra[0].scan, Some(2));
     }
 
-    // ── Test 5 ────────────────────────────────────────────────────────────────
-
     #[test]
     fn extracts_scan_number_from_id_attr() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -2618,8 +2559,6 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].scan, Some(1234));
     }
-
-    // ── Test 6 ────────────────────────────────────────────────────────────────
 
     #[test]
     fn extracts_precursor_mz_and_charge() {
@@ -2774,11 +2713,8 @@ mod tests {
         );
     }
 
-    // ── Test 7 ────────────────────────────────────────────────────────────────
-
     #[test]
     fn peaks_sorted_ascending_by_mz() {
-        // Provide peaks deliberately out of order.
         let mz_b64 = encode_f64_b64(&[300.0, 100.0, 200.0]);
         let int_b64 = encode_f64_b64(&[3.0, 1.0, 2.0]);
 
@@ -2809,8 +2745,6 @@ mod tests {
         let mzs: Vec<f64> = spectra[0].peaks.iter().map(|p| p.0).collect();
         assert_eq!(mzs, vec![100.0, 200.0, 300.0]);
     }
-
-    // ── Test 8: integration — real tiny.pwiz.mzML fixture ────────────────────
 
     #[test]
     fn parses_real_test_fixture() {
@@ -2887,8 +2821,6 @@ mod tests {
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra[0].peaks, vec![(100.0, 1.0), (200.0, 2.0)]);
     }
-
-    // ── Unit helpers for extract_scan_from_id ────────────────────────────────
 
     #[test]
     fn extract_scan_plain() {
@@ -3267,8 +3199,6 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
-
-    // ── H1: profile-mode centroiding ─────────────────────────────────────────
 
     #[test]
     fn centroid_profile_collapses_one_peak_to_intensity_weighted_centroid() {
@@ -3704,8 +3634,6 @@ mod tests {
         assert_eq!(spectra[0].isolation_target_mz, None);
     }
 
-    // ── Instrument-type detection ────────────────────────────────────────────
-
     /// Build an mzML wrapper with one or more `<instrumentConfiguration>`
     /// blocks and `<run>`-level `defaultInstrumentConfigurationRef`.
     fn wrap_with_instrument_configs(
@@ -3894,14 +3822,11 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // ── MS1 capture + MS2→MS1 linkage (Ms1Link) ──────────────────────────────
-
     /// One MS1 followed by two MS2 spectra: the capture path stores the MS1
     /// peaks once, emits only the two MS2 spectra, and links both MS2 to the
     /// single preceding MS1 (index 0).
     #[test]
     fn ms1_capture_links_two_ms2_to_preceding_ms1() {
-        // MS1 with two peaks.
         let ms1_mz_b64 = encode_f64_b64(&[111.0, 222.0]);
         let ms1_int_b64 = encode_f64_b64(&[10.0, 20.0]);
         let ms1 = format!(
@@ -3950,12 +3875,10 @@ mod tests {
             .read_with_ms1()
             .expect("read_with_ms1 failed");
 
-        // Only the two MS2 spectra are emitted (the MS1 is NOT in the Vec).
         assert_eq!(spectra.len(), 2, "expected exactly two MS2 spectra");
         assert_eq!(spectra[0].scan, Some(2));
         assert_eq!(spectra[1].scan, Some(3));
 
-        // MS1 peaks stored once.
         assert_eq!(link.ms1_peaks.len(), 1, "expected one captured MS1");
         let ms1_peaks = &link.ms1_peaks[0];
         assert_eq!(ms1_peaks.len(), 2);
@@ -3964,7 +3887,6 @@ mod tests {
         assert!((ms1_peaks[0].1 - 10.0_f32).abs() < 1e-3);
         assert!((ms1_peaks[1].1 - 20.0_f32).abs() < 1e-3);
 
-        // Both MS2 link to MS1 index 0.
         assert_eq!(link.ms2_to_ms1, vec![Some(0), Some(0)]);
     }
 
@@ -4061,7 +3983,6 @@ mod tests {
                 ion_mobility: None,
             }]
         );
-        // Off by default.
         let mut plain = MzMLReader::new(Cursor::new(xml));
         assert_eq!(plain.by_ref().count(), 1);
         assert!(plain.take_scan_contexts().is_empty());
@@ -4188,7 +4109,6 @@ mod tests {
             assert_eq!(noise.len(), 3);
             assert!((noise.at(125.0) - 150.0).abs() < 1e-4);
         }
-        // Capture off: no noise kept.
         let mut plain = MzMLReader::new(Cursor::new(xml))
             .with_product_scan_capture(true)
             .with_scan_context_capture(true);
@@ -4243,7 +4163,6 @@ mod tests {
             m4 = mk_ms2("scan=6", 600.0),
         );
 
-        // Batch reference: resolve each MS2 to its MS1 peak list.
         let (b_spectra, b_link) = MzMLReader::new(Cursor::new(xml.clone()))
             .with_ms1_capture(true)
             .read_with_ms1()
@@ -4254,7 +4173,6 @@ mod tests {
             .map(|o| o.map(|i| &b_link.ms1_peaks[i]))
             .collect();
 
-        // Chunked read with a small chunk size → multiple chunks + carry-over.
         let mut chunked_spectra: Vec<Spectrum> = Vec::new();
         let mut chunked_resolved: Vec<Option<Vec<(f64, f32)>>> = Vec::new();
         let (errc, _errs) = MzMLReader::new(Cursor::new(xml))
@@ -4286,7 +4204,6 @@ mod tests {
                 _ => panic!("MS2 #{i} linkage presence differs from batch: {cr:?} vs {br:?}"),
             }
         }
-        // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
         assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
         assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
     }
@@ -4341,7 +4258,6 @@ mod tests {
         });
         assert_eq!(errc, 0);
         assert_eq!(n_ms2, 3, "only MS2 is emitted");
-        // The co-isolation link is unchanged by the run capture.
         assert_eq!(
             linked,
             vec![
@@ -4364,7 +4280,6 @@ mod tests {
             contexts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             vec!["scan=2", "scan=3", "scan=5"]
         );
-        // The same captures as the plain iterator.
         let mut plain = MzMLReader::new(Cursor::new(xml))
             .with_run_ms1_capture(true)
             .with_scan_context_capture(true);
@@ -4475,7 +4390,6 @@ mod tests {
     /// An MS2 that appears BEFORE any MS1 links to `None`.
     #[test]
     fn ms1_capture_ms2_before_any_ms1_links_to_none() {
-        // MS2 first, then an MS1, then a second MS2.
         let ms2a = ms2_spectrum_xml(
             "scan=1",
             &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
@@ -4523,7 +4437,6 @@ mod tests {
 
         assert_eq!(spectra.len(), 2, "expected two MS2 spectra");
         assert_eq!(link.ms1_peaks.len(), 1, "one captured MS1");
-        // First MS2 had no preceding MS1 → None; second is after the MS1 → Some(0).
         assert_eq!(link.ms2_to_ms1, vec![None, Some(0)]);
     }
 
@@ -4548,7 +4461,6 @@ mod tests {
             link.ms1_peaks.is_empty(),
             "no MS1 captured when capture off"
         );
-        // ms2_to_ms1 still has one entry per emitted MS2 (all None).
         assert_eq!(link.ms2_to_ms1, vec![None]);
     }
 
@@ -4659,8 +4571,6 @@ mod tests {
         );
     }
 
-    // ── Finding 4.2: truncated binary array ───────────────────────────────────
-
     #[test]
     fn truncated_binary_array_is_rejected() {
         // 12 raw bytes is not a multiple of the 8-byte f64 width → must error.
@@ -4682,8 +4592,6 @@ mod tests {
             "truncated f64 array must be rejected, got {first:?}"
         );
     }
-
-    // ── Finding 4.1: strict vs tolerant malformed-spectrum handling ───────────
 
     /// A spectrum with invalid base64 in its `<binary>` block (parse error).
     fn malformed_spectrum() -> String {

@@ -67,14 +67,12 @@ fn fragment_mzs(peptide: &Peptide, charge: u8) -> Vec<f64> {
     out
 }
 
-/// Whether a peak lies within `tol` of `mz`. `peaks` is sorted by m/z.
 fn present(peaks: &[(f64, f32)], mz: f64, tol: Tolerance) -> bool {
     let tol = tol.as_da(mz);
     let i = peaks.partition_point(|p| p.0 < mz - tol);
     i < peaks.len() && peaks[i].0 <= mz + tol
 }
 
-/// Whether `ions` (sorted) holds a value within `tol` Da of `mz`.
 fn near(ions: &[f64], mz: f64, tol: f64) -> bool {
     let i = ions.partition_point(|&v| v < mz - tol);
     i < ions.len() && ions[i] <= mz + tol
@@ -229,7 +227,6 @@ mod tests {
         Peptide::new(residues, b'K', b'G')
     }
 
-    /// A variable mod on K with diagnostic ions and neutral losses.
     fn lys(name: &str, mass: f64, ions: &[f64], losses: &[f64]) -> &'static Modification {
         leak_mod(Modification {
             diagnostic_ions: ions.to_vec(),

@@ -18,10 +18,6 @@ use model_train::{
 };
 use scoring_crate::{param_model::Param, scoring::rank_scorer::RankScorer};
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
 fn fixture_param() -> Param {
     // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
@@ -100,10 +96,6 @@ fn make_ledger(id: &str) -> SourceLedger {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PART B tests
-// ---------------------------------------------------------------------------
-
 /// EXACTNESS TEST: add s1 then remove s1 must restore the original param P0.
 #[test]
 fn add_then_remove_source_restores_model() {
@@ -114,14 +106,12 @@ fn add_then_remove_source_restores_model() {
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
 
-    // Estimate P0 from s0 alone and write to store.
     let cfg = EstimatorConfig::default();
     let estimator = model_train::estimate::Estimator::new(cfg.clone());
     let p0 = estimator.estimate(&s0, &param);
 
     write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
-    // Verify P0 round-trips.
     let store = ModelStore::open(&path).unwrap();
     let loaded_p0 = store.load_param("m").unwrap();
     assert_eq!(
@@ -129,20 +119,16 @@ fn add_then_remove_source_restores_model() {
         "P0 must round-trip exactly through the store"
     );
 
-    // update_add: append s1.
     let s1 = make_stats_s1();
     let ledger1 = make_ledger("s1");
     let (candidate_p1, sources_with_s1) =
         update_add(&path, "m", ledger1, s1.clone(), cfg.clone()).unwrap();
     commit_update(&path, "m", &candidate_p1, &sources_with_s1).unwrap();
 
-    // The store now has s0+s1; param should differ from P0.
     let store2 = ModelStore::open(&path).unwrap();
     let p_after_add = store2.load_param("m").unwrap();
-    // (We don't assert on p_after_add vs p0 here — only restore matters.)
     drop(p_after_add);
 
-    // update_remove: remove s1 → should restore P0 exactly.
     let (candidate_p0_restored, sources_s0_only) =
         update_remove(&path, "m", "s1", cfg.clone()).unwrap();
     commit_update(&path, "m", &candidate_p0_restored, &sources_s0_only).unwrap();
@@ -192,7 +178,6 @@ fn reweight_source_changes_param() {
     let (candidate, sources) = update_reweight(&path, "m", "s1", 0.0, cfg).unwrap();
     commit_update(&path, "m", &candidate, &sources).unwrap();
 
-    // After reweight to 0, s1 contributes nothing — check the weight was stored.
     let store = ModelStore::open(&path).unwrap();
     let ledgers = store.load_sources("m").unwrap();
     let l1 = ledgers.iter().find(|l| l.source_id == "s1").unwrap();
@@ -217,7 +202,6 @@ fn decay_with_empty_date_unchanged() {
     let cfg = EstimatorConfig::default();
     let (_, sources) = update_decay(&path, "m", 365.0, cfg).unwrap();
 
-    // Weight must be unchanged (since date is empty).
     let updated_ledger = &sources[0].0;
     assert!(
         (updated_ledger.weight - ledger0.weight).abs() < 1e-6,
@@ -235,18 +219,13 @@ fn commit_update_preserves_other_models() {
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
 
-    // Write two models: "m" and "other".
     use model_train::store::write_models;
-    // First write "other" model (no sources).
     write_models(&path, &[("other".to_string(), &param)]).unwrap();
-    // Then add "m" with sources by rebuilding the store.
-    // We need to load "other" and rewrite both.
     {
         let store = ModelStore::open(&path).unwrap();
         let other_param = store.load_param("other").unwrap();
         let _ = other_param; // just verifying it loads
     }
-    // Write "m" with sources into a fresh store (overwrite).
     let path2 = dir.path().join("m2.parquet");
     write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
@@ -265,10 +244,6 @@ fn commit_update_preserves_other_models() {
     let ledgers = store.load_sources("m").unwrap();
     assert_eq!(ledgers.len(), 2, "must have 2 sources after add+commit");
 }
-
-// ---------------------------------------------------------------------------
-// PART C tests (acceptance gate)
-// ---------------------------------------------------------------------------
 
 /// acceptance_gate_rejects_worse_candidate: the gate rule is
 /// `accepted iff candidate_count >= current_count`.
@@ -317,12 +292,10 @@ fn acceptance_gate_same_model_is_accepted() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // Load spectra.
     let f = input::open_buf_maybe_gz(&bsa_mgf).expect("open test.mgf");
     let reader = MgfReader::new(BufReader::new(f));
     let spectra: Vec<_> = reader.filter_map(|r| r.ok()).collect();
 
-    // Load scorer from the canonical Parquet store.
     let param = fixture_param();
     let scorer = RankScorer::new(&param);
 
@@ -361,7 +334,6 @@ fn acceptance_gate_same_model_is_accepted() {
         .unwrap();
     let search_params = SearchParams::default_tryptic(aa);
 
-    // Same scorer for both current and candidate → counts should be equal.
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let delta = evaluate_candidate(
         &spectra,

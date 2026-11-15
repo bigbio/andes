@@ -52,7 +52,6 @@ pub fn placements_with(
     declared: &[&'static Modification],
 ) -> (Vec<Peptide>, bool) {
     let n = peptide.residues.len();
-    // Movable mods, one entry per occurrence, in residue order.
     let movable: Vec<&'static Modification> = peptide
         .residues
         .iter()
@@ -75,7 +74,6 @@ pub fn placements_with(
         })
         .collect();
     let free: Vec<usize> = (0..n).filter(|&i| base[i].mod_.is_none()).collect();
-    // Candidate sites per mod occurrence.
     let sites: Vec<Vec<(usize, &'static Modification)>> = movable
         .iter()
         .map(|&m| {
@@ -112,7 +110,6 @@ pub fn placements_with(
     let same_as_prev: Vec<bool> = (0..sites.len())
         .map(|k| k > 0 && same_sites(&sites[k], &sites[k - 1]))
         .collect();
-    // Input site of each movable mod, in the same (residue) order as `movable`.
     let input_sites: Vec<usize> = (0..n)
         .filter(|&i| peptide.residues[i].mod_.is_some_and(is_movable))
         .collect();
@@ -265,7 +262,6 @@ fn by_ions(p: &Peptide, precursor_charge: u8, mut emit: impl FnMut(f64, u8, u16)
             .filter(|m| !m.fixed)
             .map_or(&[][..], |m| &m.neutral_losses[..])
     };
-    // Distinct loss masses carried by residues 0..=i (b) and i+1..n (y).
     fn add(set: &mut Vec<f64>, losses: &[f64]) {
         for &l in losses {
             if !set.iter().any(|x| (x - l).abs() < 1e-6) {

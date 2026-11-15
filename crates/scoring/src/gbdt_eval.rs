@@ -72,7 +72,6 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Sum of the leaf value reached for `x`.
     pub fn eval(&self, x: &[f32]) -> f32 {
         // Assumes a structurally-validated tree (see `Tree::validate`, enforced
         // by `from_bytes`): feature/child arrays are consistent and internal
@@ -759,7 +758,6 @@ impl GbdtPeakModel {
         if p >= self.iso_x[n - 1] {
             return self.iso_y[n - 1];
         }
-        // binary search for the segment containing p
         let mut lo = 0usize;
         let mut hi = n - 1;
         while hi - lo > 1 {
@@ -1071,14 +1069,12 @@ mod tests {
         // x0 = 1.0 -> leaf +2.0 -> sigmoid(2)=0.880797
         let s_hi = m.predict_proba(&[1.0]);
         assert!((s_hi - 0.8807971).abs() < 1e-5, "got {s_hi}");
-        // logit(s) recovers the raw sum for the identity isotonic map.
         let lg = m.predict_logit(&[1.0]);
         assert!((lg - 2.0).abs() < 1e-4, "logit got {lg}");
     }
 
     #[test]
     fn empty_iso_is_identity() {
-        // No isotonic breakpoints -> calibrated prob == sigmoid(raw).
         let mut m = toy_model();
         m.iso_x.clear();
         m.iso_y.clear();
@@ -1091,13 +1087,11 @@ mod tests {
         // toy_model: x0 <= 0.5 → leaf -1.0; else → leaf +2.0
         // predict_value must return the raw tree sum without sigmoid or isotonic.
         let m = toy_model();
-        // x0 = 0.0 → leaf -1.0; raw sum = -1.0 (no sigmoid/iso applied)
         let v_lo = m.predict_value(&[0.0]);
         assert!(
             (v_lo - (-1.0)).abs() < 1e-6,
             "predict_value([0.0]) expected -1.0, got {v_lo}"
         );
-        // x0 = 1.0 → leaf +2.0; raw sum = 2.0
         let v_hi = m.predict_value(&[1.0]);
         assert!(
             (v_hi - 2.0).abs() < 1e-6,

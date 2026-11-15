@@ -8,9 +8,7 @@ use model::Spectrum;
 pub struct MgfReader<R: BufRead> {
     reader: R,
     line_no: usize,
-    /// Reusable line buffer to avoid per-line allocations.
     buf: String,
-    /// Number of spectra parsed so far.
     spectrum_index: usize,
 }
 
@@ -142,9 +140,6 @@ impl<R: BufRead> Iterator for MgfReader<R> {
             }
 
             match parse_peak(&line) {
-                // Drop non-finite / non-positive peaks (finding 4.4), mirroring
-                // the mzML / timsTOF readers; a syntactically-malformed line is
-                // still a hard error.
                 Ok(Some((mz, intensity))) => peaks.push((mz, intensity)),
                 Ok(None) => { /* peak out of domain: skip */ }
                 Err(()) => {
@@ -182,9 +177,6 @@ impl<R: BufRead> Iterator for MgfReader<R> {
             rt_seconds,
             scan,
             peaks,
-            // MGF doesn't carry an activation method in the standard
-            // header set; could be extended via a custom `ACTIVATION=`
-            // field if needed. For now: leave it absent.
             activation_method: None,
             isolation_lower_offset: None,
             isolation_upper_offset: None,
@@ -509,8 +501,6 @@ mod tests {
 
     #[test]
     fn parse_peak_out_of_domain_is_dropped() {
-        // Finding 4.4: syntactically valid but out-of-domain peaks are dropped
-        // (Ok(None)), not errored, mirroring the mzML / timsTOF readers.
         assert_eq!(parse_peak("0 100").unwrap(), None, "zero m/z");
         assert_eq!(parse_peak("-5 100").unwrap(), None, "negative m/z");
         assert_eq!(parse_peak("inf 100").unwrap(), None, "inf m/z");

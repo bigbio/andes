@@ -678,7 +678,6 @@ pub(super) fn quantify(
     let sites = spec.sites();
     let tol = settings.tol_ppm;
 
-    // ── Groups from the PSMs ──────────────────────────────────────────────
     let mut groups: Vec<Group> = Vec::new();
     let mut gid_of: HashMap<(String, u8), usize> = HashMap::new();
     // (gid, run) -> best hit per channel.
@@ -1146,7 +1145,6 @@ pub(super) fn quantify(
         }
     }
 
-    // ── Statuses, ratios, normalisation ───────────────────────────────────
     let r = spec.reference;
     let status_of = |fi: usize, f: &Fitted| -> Vec<ChannelStatus> {
         let strongest = (0..n_ch)
@@ -1196,7 +1194,6 @@ pub(super) fn quantify(
         }
     }
 
-    // ── Rows ──────────────────────────────────────────────────────────────
     let mut order: Vec<usize> = (0..fitted.len()).collect();
     order.sort_by_key(|&i| (fitted[i].run, fitted[i].gid));
     let mut rows: Vec<output::LabelRow> = Vec::new();
@@ -1735,7 +1732,6 @@ mod tests {
         let ml = 478.73;
         let mh = ml + 10.008269 / z;
         let mp = mh + d_pro / z;
-        // (m/z, envelope, amplitude) at apex 100 s, sigma 4 s.
         let species = [
             (ml, envs[0], 1e6),
             (mh, envs[1], 0.8e6),
@@ -1777,14 +1773,12 @@ mod tests {
             satellites: vec![(1, mp)],
             identity_decoy: false,
         };
-        // SILAC duplex: the satellite is clear of the light channel.
         assert!(!satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, converted) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
         let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
         assert!(r.abs() < 0.02, "{r}");
         assert!((converted[1].unwrap() - 0.2).abs() < 0.01, "{converted:?}");
-        // Without the satellite, the heavy channel misses the converted part.
         g.satellites.clear();
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let (fit, _) = fit_folded(&ms1, &g, &p, &FitParams::default()).unwrap();
@@ -2189,7 +2183,6 @@ mod tests {
         assert_eq!(r[0].inferred_count, 1);
         assert!((r[0].log2_ratio - 1.0).abs() < 1e-12);
         assert!((r[0].log2_ratio_normalized.unwrap() - 0.5).abs() < 1e-12);
-        // One peptide is not enough.
         assert!(protein_ratios(&rows[3..], |_| None, 2).is_empty());
         let tsv = protein_ratio_tsv(&r);
         assert!(tsv

@@ -57,7 +57,6 @@ impl RefineConfig {
                 // artifact; P and K cover collagen/ECM hydroxyproline &
                 // hydroxylysine — heavily-modified proteins whose peptides never
                 // match unmodified, so a closed search loses the whole protein.
-                // (P+K widen the oxidation candidate space ~3-5× vs M-only.)
                 m(
                     "Oxidation",
                     15.994915,
@@ -99,8 +98,6 @@ impl RefineConfig {
     /// must be one of the accepted spellings (those `refinement::parse_location`
     /// recognizes). Fails fast with a clear message.
     pub fn validate(&self) -> Result<(), String> {
-        // Accepted location spellings (lowercased), matching parse_location +
-        // the `anywhere` default.
         const VALID_LOCATIONS: &[&str] = &[
             "anywhere",
             "n_term",
@@ -139,7 +136,6 @@ impl RefineConfig {
         Ok(())
     }
 
-    /// Map a class string to the PIN `refine_mod_class` id (Task 2 encoding).
     pub fn class_id(class: &str) -> u32 {
         match class {
             "oxidation" => 1,

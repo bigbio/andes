@@ -421,7 +421,6 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
 /// YAML provides a value, the YAML value replaces the built-in default. Values
 /// written as strings (tolerances/ranges/enums) go through the exact CLI parsers.
 pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
-    // scalar field, value type == target type
     macro_rules! set {
         ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
@@ -431,7 +430,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             }
         };
     }
-    // scalar into an Option<> target
     macro_rules! set_opt {
         ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
@@ -441,7 +439,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             }
         };
     }
-    // string wire value parsed through a CLI validator `fn(&str) -> Result<T,String>`
     macro_rules! set_parsed {
         ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
             if let Some(s) = $val {
@@ -1040,7 +1037,6 @@ glyco:
             ])
             .expect("parse baseline args");
 
-        // out-of-range psm_fdr from YAML → error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let bad = RunConfig::from_yaml_str("rescoring:\n  psm_fdr: 5.0\n").unwrap();
         let e = apply(bad, &mut a, &matches).unwrap_err();
@@ -1049,7 +1045,6 @@ glyco:
             "expected psm_fdr range error, got: {e}"
         );
 
-        // both fragment tolerances from YAML → mutual-exclusion error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let both =
             RunConfig::from_yaml_str("scoring:\n  fragment_tol_ppm: 20\n  fragment_tol_da: 0.02\n")
@@ -1060,7 +1055,6 @@ glyco:
             "expected conflict error, got: {e}"
         );
 
-        // a valid config still applies cleanly
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let ok = RunConfig::from_yaml_str(
             "rescoring:\n  psm_fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n",
@@ -1118,7 +1112,6 @@ glyco:
             );
         }
 
-        // In-range values still apply.
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let ok = RunConfig::from_yaml_str(
             "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  quant_channel_fdr: 0.05\n  \
@@ -1255,7 +1248,6 @@ glyco:
         assert_eq!(a.predict, vec![PredictFeature::None]);
     }
 
-    /// `search.index_cache_dir` applies, and an explicit `--index-cache-dir` wins.
     #[test]
     fn index_cache_dir_key_has_cli_precedence() {
         let yaml = "search:\n  index_cache_dir: from_config\n";
@@ -1309,7 +1301,6 @@ glyco:
         Ok(a)
     }
 
-    /// Flags deliberately left out of the config file (see the module docs).
     const CLI_ONLY: &[&str] = &[
         "config",
         "cal_min_spec_keys",
@@ -1442,7 +1433,6 @@ glyco:
         let o = applied("search:\n  localize: ascore\n", &["--localize", "ipf"]).unwrap();
         assert_eq!(o.localize.as_deref(), Some("ipf"));
 
-        // An explicit CLI flag still wins.
         let a = applied(
             "scoring:\n  gbdt_max_trees: 0\n",
             &["--gbdt-max-trees", "50"],
@@ -1451,7 +1441,6 @@ glyco:
         assert_eq!(a.gbdt_max_trees, Some(50));
     }
 
-    /// A rescoring backend on the command line wins over the config's choice.
     #[test]
     fn cli_rescore_backend_wins_over_yaml() {
         let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
@@ -1503,7 +1492,6 @@ glyco:
         assert!(check_resolved(&a).is_ok());
         assert!(check_resolved(&applied("{}", &[]).unwrap()).is_ok());
 
-        // The WURCS CSV source satisfies the requirement like the other two.
         let a = applied("glyco:\n  glycan_wurcs: w.csv\n", &["--glyco"]).unwrap();
         assert_eq!(
             a.glyco_glycan_wurcs.as_deref(),

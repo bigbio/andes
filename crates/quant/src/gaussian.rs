@@ -82,7 +82,6 @@ pub fn exp(x: f64) -> f64 {
     }
 }
 
-/// `exp(-(t - t0)^2 / (2 w^2))`.
 #[inline(always)]
 pub fn gaussian(t: f64, t0: f64, w: f64) -> f64 {
     let d = (t - t0) / w;
@@ -102,7 +101,6 @@ unsafe fn gaussians_avx2(ts: &[f64], t0: f64, w: f64, out: &mut [f64]) {
     gaussians_loop(ts, t0, w, out);
 }
 
-/// `out[j] = gaussian(ts[j], t0, w)`; `out` has the length of `ts`.
 pub fn gaussians(ts: &[f64], t0: f64, w: f64, out: &mut [f64]) {
     assert_eq!(ts.len(), out.len());
     #[cfg(target_arch = "x86_64")]
@@ -114,14 +112,12 @@ pub fn gaussians(ts: &[f64], t0: f64, w: f64, out: &mut [f64]) {
     gaussians_loop(ts, t0, w, out);
 }
 
-/// Appends `gaussian(t, t0, w)` for every `t` of `ts` to `out`.
 pub fn extend(out: &mut Vec<f64>, ts: &[f64], t0: f64, w: f64) {
     let start = out.len();
     out.resize(start + ts.len(), 0.0);
     gaussians(ts, t0, w, &mut out[start..]);
 }
 
-/// Scans per block of [`sums`].
 const BLOCK: usize = 64;
 
 /// `(sum z_j g_j, sum g_j, sum g_j^2)` over `g_j = gaussian(ts[j], t0, w)`,

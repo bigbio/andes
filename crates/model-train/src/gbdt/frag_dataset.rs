@@ -26,7 +26,6 @@ use crate::gbdt::train::RegressionDataset;
 ///    (the SAME tolerance the strong-score cosine uses at serve), push one
 ///    regression row: features from [`extract_frag_features`] and target
 ///    `y = ln(obs_intensity / base_peak)`.
-/// 4. Unmatched ions contribute no row.
 pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> RegressionDataset {
     let n_features = N_FRAG_FEATURES;
 
@@ -37,7 +36,6 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
     for row in rows {
         let ss = ScoredSpectrum::new(row.spectrum, scorer, row.charge);
 
-        // Base peak: max intensity across all active peaks.
         let base_peak = ss
             .dump_active_peaks()
             .iter()
@@ -143,7 +141,6 @@ mod tests {
         let scorer = make_scorer();
         let p = pep("PEPTIDEK"); // n=8
         let ions = predict_by_ions(&p, 1..=1);
-        // place observed peaks at the m/z of the first two b/y ions, plus a junk peak
         let mut peaks: Vec<(f64, f32)> = ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
         peaks.push((50.0, 10.0)); // junk + ensures >=... peaks
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));

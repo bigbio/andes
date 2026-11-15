@@ -58,11 +58,8 @@ pub fn split_store_by_protocol(
     src: &Path,
     dir: &Path,
 ) -> Result<Vec<(String, std::path::PathBuf)>, TrainError> {
-    // 1. First pass: map every model_id → its protocol (from manifest rows).
     let model_protocol = read_model_protocols(src)?;
 
-    // 2. Group batches by protocol. We accumulate, per protocol, the filtered
-    //    record batches so each partition can be written in one shot.
     let mut by_protocol: BTreeMap<String, Vec<RecordBatch>> = BTreeMap::new();
 
     let file = std::fs::File::open(src)?;
@@ -82,9 +79,6 @@ pub fn split_store_by_protocol(
             .downcast_ref::<StringArray>()
             .ok_or_else(|| TrainError::Other("model_id not StringArray".into()))?;
 
-        // For each protocol present in this batch, build a boolean mask of the
-        // rows whose model_id belongs to that protocol, then filter.
-        // Determine the set of protocols touched by this batch first.
         let mut row_protocol: Vec<Option<&str>> = Vec::with_capacity(batch.num_rows());
         for i in 0..batch.num_rows() {
             if mid_col.is_null(i) {
@@ -121,7 +115,6 @@ pub fn split_store_by_protocol(
         }
     }
 
-    // 3. Write one partition file per protocol.
     // Prune any pre-existing `protocol=*` partitions first so a rerun against a
     // smaller src can't leave stale partitions behind (mirrors the python
     // splitter's rmtree-then-recreate).
@@ -161,8 +154,6 @@ pub fn split_store_by_protocol(
             ))
             .set_dictionary_enabled(false)
             .build();
-        // Concatenate this protocol's filtered batches into one contiguous row
-        // group (matches the single-file layout).
         let merged = arrow::compute::concat_batches(&schema, batches.iter())
             .map_err(|e| TrainError::Other(format!("concat_batches: {e}")))?;
 
@@ -182,7 +173,6 @@ pub fn split_store_by_protocol(
     Ok(written)
 }
 
-/// First pass: build `model_id → protocol` from the manifest rows of `src`.
 fn read_model_protocols(
     src: &Path,
 ) -> Result<std::collections::HashMap<String, String>, TrainError> {

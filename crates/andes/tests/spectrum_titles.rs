@@ -13,7 +13,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// The first `n` spectra of the MGF fixture, every title given a tab.
 fn mgf_with_tabbed_titles(n: usize) -> String {
     let gz = std::fs::File::open(fixture("test-fixtures/test.mgf.gz")).expect("gz");
     let mut text = String::new();

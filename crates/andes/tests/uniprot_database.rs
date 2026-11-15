@@ -340,7 +340,6 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
         .find(|l| l.starts_with("Site claims:"))
         .unwrap_or_else(|| panic!("{stderr}"));
     assert!(!line.contains(" 0 knockoff sites"), "{line}");
-    // The real sites are counted without their knockoffs.
     assert!(
         stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 10 sites on 1 target proteins"),
         "{stderr}"

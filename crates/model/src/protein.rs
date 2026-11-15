@@ -27,8 +27,6 @@ impl Protein {
         self.sequence.is_empty()
     }
 
-    /// Annotated modification sites, sorted by position (empty without an
-    /// annotation).
     pub fn mod_sites(&self) -> &[ModSite] {
         self.annotation
             .as_deref()
@@ -55,30 +53,24 @@ impl Protein {
             .map_or(&[], |a| a.variant.as_slice())
     }
 
-    /// The new termini of a mature-chain entry, `None` for an ordinary
-    /// protein.
     pub fn chain_ends(&self) -> Option<ChainEnds> {
         self.annotation.as_deref().and_then(|a| a.chain)
     }
 
-    /// The origin of an entry a UniProt XML database added, `None` otherwise.
     pub fn origin(&self) -> Option<&EntryOrigin> {
         self.annotation.as_deref().and_then(|a| a.origin.as_ref())
     }
 
-    /// The single-residue substitutions of a variant entry (empty otherwise).
     pub fn substitutions(&self) -> &[Substitution] {
         self.annotation
             .as_deref()
             .map_or(&[], |a| a.substitutions.as_slice())
     }
 
-    /// The entry's kind; `Reference` for any protein without an origin.
     pub fn entry_kind(&self) -> EntryKind {
         self.origin().map_or(EntryKind::Reference, |o| o.kind)
     }
 
-    /// Whether this is a knockoff entry (see [`EntryOrigin::knockoff_of`]).
     pub fn is_knockoff(&self) -> bool {
         self.origin().is_some_and(|o| o.knockoff_of.is_some())
     }
@@ -157,7 +149,6 @@ impl ProteinAnnotation {
         }
     }
 
-    /// This annotation with `claims` as its site claims, sorted by position.
     pub fn with_site_claims(mut self, mut claims: Vec<SiteClaim>) -> Self {
         claims.sort_by(|a, b| {
             a.position
@@ -168,27 +159,22 @@ impl ProteinAnnotation {
         self
     }
 
-    /// This annotation for a sequence-variant entry whose differing parts are
-    /// `parts`.
     pub fn with_variant(mut self, parts: Vec<VariantRegion>) -> Self {
         self.variant = parts;
         self
     }
 
-    /// This annotation for a variant entry with `substitutions`, sorted here.
     pub fn with_substitutions(mut self, mut substitutions: Vec<Substitution>) -> Self {
         substitutions.sort_by_key(|s| s.position);
         self.substitutions = substitutions;
         self
     }
 
-    /// This annotation for an entry of origin `origin`.
     pub fn with_origin(mut self, origin: Option<EntryOrigin>) -> Self {
         self.origin = origin;
         self
     }
 
-    /// This annotation for a mature-chain entry with new termini `chain`.
     pub fn with_chain(mut self, chain: Option<ChainEnds>) -> Self {
         self.chain = chain;
         self
@@ -786,10 +772,8 @@ mod tests {
         let db = ProteinDb {
             proteins: vec![make_protein()],
         };
-        // Index 5 is out of range → ignored, leaving only the in-range pick.
         let keep: HashSet<usize> = [0usize, 5].into_iter().collect();
         assert_eq!(db.subset_by_index(&keep).len(), 1);
-        // Empty keep → empty db.
         assert!(db.subset_by_index(&HashSet::new()).is_empty());
     }
 

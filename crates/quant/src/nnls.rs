@@ -26,7 +26,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
     let mut s = vec![0.0f64; n];
 
     let residual_grad = |x: &[f64], w: &mut [f64]| {
-        // w = Aᵀ (b − A x)
         let mut r = vec![0.0f64; m];
         for i in 0..m {
             let mut acc = b[i];
@@ -51,7 +50,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
         if outer > max_iter {
             break;
         }
-        // Pick the most positive gradient among the active (zero) variables.
         let mut best: Option<(usize, f64)> = None;
         for j in 0..n {
             if !passive[j] && w[j] > tol && best.is_none_or(|(_, bw)| w[j] > bw) {
@@ -128,7 +126,6 @@ fn solve_passive(
     if k == 0 {
         return true;
     }
-    // Normal equations: (AᵀA) y = Aᵀb over the passive columns.
     let mut g = vec![0.0f64; k * (k + 1)]; // augmented [AᵀA | Aᵀb]
     for (ci, &cj) in cols.iter().enumerate() {
         for (ri, &rj) in cols.iter().enumerate() {
@@ -144,7 +141,6 @@ fn solve_passive(
         }
         g[ci * (k + 1) + k] = acc;
     }
-    // Gaussian elimination with partial pivoting.
     for p in 0..k {
         let mut piv = p;
         for r in (p + 1)..k {

@@ -307,12 +307,6 @@ fn extract_residuals(
             .or_insert_with(|| psm.clone());
     }
 
-    // Compute each best-per-spectrum PSM's residual, keeping its `is_decoy`
-    // flag so the TD-q gate below can run. Raw `rank_score` (RawScore) is NOT
-    // comparable across spectra / candidate-window sizes / DB complexity, so we
-    // CANNOT trust it as a confidence threshold on its own (the old SpecEValue
-    // guard is gone). Instead we accept only PSMs that survive a target-decoy
-    // q-value gate (Fix 1 / adversarial review).
     let mut cands: Vec<CalCandidate> = Vec::new();
     for (&spectrum_idx, psm) in best_by_spec.iter() {
         if psm.rank_score < min_rank_score {
@@ -394,7 +388,6 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
             .then_with(|| a.spectrum_idx.cmp(&b.spectrum_idx))
     });
 
-    // Running TDC q-value.
     let n = cands.len();
     let mut q = vec![1.0_f64; n];
     let (mut targets, mut decoys) = (0u64, 0u64);
@@ -407,7 +400,6 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
         q[i] = decoys as f64 / targets.max(1) as f64;
     }
 
-    // Monotone from the bottom.
     let mut min_q = 1.0_f64;
     for qi in q.iter_mut().rev() {
         if *qi < min_q {

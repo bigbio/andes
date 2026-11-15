@@ -1,4 +1,3 @@
-//! Trainer quality gate (replaces the former cross-language parity gate):
 //! determinism, blob round-trip at the real 18-feature width, and signal/noise
 //! separation. The GBDT is trained in Rust and emitted directly as the SoA
 //! `GbdtPeakModel` the scoring walker consumes — this locks the trainer→walker
@@ -71,7 +70,6 @@ fn trained_model_roundtrips_through_blob_and_separates() {
         "model must survive blob round-trip byte-for-byte"
     );
 
-    // Separation holds through the decoded model.
     let mut hi = vec![0.0f32; 18];
     hi[0] = 0.95;
     let mut lo = vec![0.0f32; 18];

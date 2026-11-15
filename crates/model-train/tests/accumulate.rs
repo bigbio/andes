@@ -16,10 +16,6 @@ use scoring_crate::scoring::rank_scorer::RankScorer;
 use model_train::accumulate::{merge, StatsAccumulator};
 use model_train::counts::CountStats;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn make_peptide(seq: &[u8]) -> Peptide {
     let residues: Vec<AminoAcid> = seq
         .iter()
@@ -30,7 +26,6 @@ fn make_peptide(seq: &[u8]) -> Peptide {
 
 /// Load the bundled hcd_qexactive_tryp model and build a RankScorer.
 fn load_hcd_scorer() -> (Param, RankScorer) {
-    // Load the hcd_qexactive_tryp model from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
@@ -58,7 +53,6 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
 //
 // Returns (spectrum, expected_partition, expected_ion_type, expected_rank=1)
 // for the single most-intense matched ion.
-// ---------------------------------------------------------------------------
 
 fn build_synthetic_spectrum(
     peptide: &Peptide,
@@ -70,7 +64,6 @@ fn build_synthetic_spectrum(
     let n = peptide.length();
     assert!(n >= 2, "peptide must have at least 2 residues");
 
-    // Compute nominal masses the same way score_psm does.
     let peptide_nominal = peptide.nominal_residue_mass();
     let mut prefix_acc = 0.0_f64;
     let mut prefix_nominals: Vec<i32> = vec![0];
@@ -80,7 +73,6 @@ fn build_synthetic_spectrum(
         prefix_nominals.push(nominal_from(prefix_acc));
     }
 
-    // Derive the parent_mass from the precursor.
     const PROTON: f64 = 1.007_276_49;
     let parent_mass = (precursor_mz - PROTON) * (charge as f64);
 
@@ -166,11 +158,6 @@ fn build_synthetic_spectrum(
     (spectrum, expected_partition, expected_ion)
 }
 
-// ---------------------------------------------------------------------------
-// TDD test: write this first (it will fail until StatsAccumulator is correct),
-// then implement until it passes.
-// ---------------------------------------------------------------------------
-
 /// Core known-rank synthetic test.
 ///
 /// Builds a synthetic spectrum where the first ion gets rank 1 by design.
@@ -196,7 +183,6 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     let (spectrum, expected_partition, expected_ion) =
         build_synthetic_spectrum(&peptide, &scorer, precursor_mz, charge);
 
-    // Run the accumulator.
     let accumulator = StatsAccumulator::new(&scorer);
     let mut stats = CountStats::new();
     accumulator.accumulate(&mut stats, &spectrum, &peptide, charge);
@@ -215,7 +201,6 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
         count
     );
 
-    // Charge histogram must be bumped exactly once (one PSM).
     let charge_count = stats.charge.get(&(charge as i32)).copied().unwrap_or(0);
     assert_eq!(
         charge_count, 1,
@@ -355,7 +340,6 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
         "expected missing-ion counts at rank_index={max_rank} on empty spectrum"
     );
 
-    // Charge must still be bumped.
     assert_eq!(
         stats.charge.get(&(charge as i32)).copied().unwrap_or(0),
         1,
@@ -386,7 +370,6 @@ fn merge_doubles_counts_for_same_psm() {
     let mut part2 = CountStats::new();
     accumulator.accumulate(&mut part2, &spectrum, &peptide, charge);
 
-    // Expected: same as a single accumulation scaled by 2.
     let mut expected = CountStats::new();
     accumulator.accumulate(&mut expected, &spectrum, &peptide, charge);
     accumulator.accumulate(&mut expected, &spectrum, &peptide, charge);

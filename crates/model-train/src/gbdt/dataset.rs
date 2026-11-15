@@ -20,17 +20,14 @@ use scoring_crate::RankScorer;
 
 /// One input PSM row for dataset building.
 pub struct PsmRow<'a> {
-    /// The spectrum associated with this PSM.
     pub spectrum: &'a Spectrum,
     /// The identified peptide, INCLUDING modifications. The mods are used only
     /// for mod-aware theoretical-ion labeling (signal vs. noise ground truth);
     /// feature extraction stays peptide-agnostic.
     pub peptide: &'a Peptide,
-    /// Precursor charge state.
     pub charge: u8,
 }
 
-/// FNV-1a 32-bit hash for deterministic group-id generation.
 fn fnv1a_32(data: &[u8]) -> u32 {
     let mut h: u32 = 2_166_136_261;
     for &b in data {
@@ -180,7 +177,6 @@ mod tests {
     fn build_dataset_single_row_produces_n_features_per_peak() {
         let scorer = make_scorer();
 
-        // Tiny synthetic spectrum: 5 peaks in sorted order
         let peaks = vec![
             (100.0_f64, 10.0_f32),
             (200.0, 100.0),
@@ -198,11 +194,9 @@ mod tests {
         };
 
         let ds = build_dataset(&[row], &scorer);
-        // Each active peak contributes N_FEATURES features.
         assert!(!ds.y.is_empty(), "must have at least one peak row");
         assert_eq!(ds.x.len(), ds.y.len() * N_FEATURES);
         assert_eq!(ds.groups.len(), ds.y.len());
-        // All rows share the same group id.
         let first_gid = ds.groups[0];
         assert!(ds.groups.iter().all(|&g| g == first_gid));
     }

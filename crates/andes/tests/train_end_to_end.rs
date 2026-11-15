@@ -30,7 +30,6 @@ fn train_writes_model_and_search_uses_it() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // ── Step 1: run `andes train` ────────────────────────────────────────
     let train_status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train-from-search")
         .arg("--spectra")
@@ -40,10 +39,6 @@ fn train_writes_model_and_search_uses_it() {
         .arg("--out-store")
         .arg(&store_path)
         // Use a lenient FDR so the small BSA fixture yields confident labels.
-        // Andes ranks training PSMs by RawScore (rank_score) since the
-        // generating function / SpecEValue was removed; on this tiny low-info
-        // fixture RawScore separates targets from decoys weakly, so a higher
-        // train-fdr is needed than the old SpecEValue path required.
         .arg("--train-fdr")
         .arg("0.9")
         .arg("--model-id")
@@ -56,7 +51,6 @@ fn train_writes_model_and_search_uses_it() {
         "andes train should exit 0, got: {train_status}"
     );
 
-    // ── Step 2: verify the store file exists and contains the model ──────────
     assert!(store_path.exists(), "model store should be written");
 
     let store = ModelStore::open(&store_path).expect("open trained model store");
@@ -66,7 +60,6 @@ fn train_writes_model_and_search_uses_it() {
         "store should contain model 'bsa_test'; found: {ids:?}"
     );
 
-    // Verify the param loads without error.
     let param = store.load_param("bsa_test").expect("load bsa_test param");
     assert!(
         !param.partitions.is_empty(),
@@ -79,7 +72,6 @@ fn train_writes_model_and_search_uses_it() {
         "a trained model keeps the seed's fragment-intensity and rich-ion models"
     );
 
-    // ── Step 3: run search using the trained model ────────────────────────────
     let search_status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
         .arg(&bsa_mgf)
@@ -112,7 +104,6 @@ fn train_writes_model_and_search_uses_it() {
         "statistics.log should contain the run summary; got:\n{stats}"
     );
 
-    // Verify PIN has a header + at least one data row.
     let pin_content = std::fs::read_to_string(&pin_path).expect("read PIN");
     let line_count = pin_content.lines().count();
     assert!(

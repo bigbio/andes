@@ -161,7 +161,6 @@ mod tests {
     fn standard_g_mass_matches_composition() {
         let g = AminoAcid::standard(b'G').unwrap();
         assert_eq!(g.residue, b'G');
-        // Glycine = C2H3NO = 2*12 + 3*1.007825035 + 1*14.003074 + 1*15.99491463
         let expected = 2.0 * crate::mass::C
             + 3.0 * crate::mass::H
             + 1.0 * crate::mass::N
@@ -186,13 +185,11 @@ mod tests {
             u.mass
         );
         assert!(u.mod_.is_none());
-        // Other non-standard residues still rejected.
         assert!(AminoAcid::standard(b'B').is_none());
     }
 
     #[test]
     fn nominal_mass_for_glycine() {
-        // Gly mass ≈ 57.02146 → nominal 57
         let g = AminoAcid::standard(b'G').unwrap();
         assert_eq!(g.nominal_mass(), 57);
     }
@@ -243,7 +240,6 @@ mod tests {
             diagnostic_ions: Vec::new(),
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
-        // M (131) + Ox (16) = 147 nominal
         assert_eq!(m.nominal_mass(), 147);
     }
 

@@ -85,7 +85,6 @@ fn asymmetric_tolerance_rejects_excessive_negative_drift() {
     let peptide = make_peptide(b"AR");
     let mass = peptide.mass();
     let charge = 2u8;
-    // Construct a spectrum where peptide is 15 ppm LIGHTER (negative error).
     let drift = mass * 15e-6;
     // spectrum implies a NEUTRAL mass of `mass + drift`. peptide_mass < spectrum mass.
     let spec_neutral = mass + drift;
@@ -105,7 +104,6 @@ fn positive_shift_compensates_observed_bias() {
     let peptide = make_peptide(b"AR");
     let mass = peptide.mass();
     let charge = 2u8;
-    // Spectrum reports +5 ppm heavy observed mass.
     let drift = mass * 5e-6;
     let mz_heavy = (mass + drift + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz_heavy, Some(charge as i32));

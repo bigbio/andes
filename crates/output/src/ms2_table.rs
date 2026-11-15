@@ -53,11 +53,9 @@ const SCHEMA_VERSION: &str = "1.0";
 const RUN_KEY: &str = "andes.ms2.run";
 const TOL_KEY: &str = "andes.ms2.fragment_tol";
 const TOP_KEY: &str = "andes.ms2.top_peaks";
-/// Scans per row group / record batch.
 const SCANS_PER_GROUP: usize = 4096;
 
 const SCHEMA_VERSION_REPORTERS: &str = "1.1";
-/// The columns of a table with reporter ions, after [`COLUMNS`].
 const REPORTER_COLUMNS: [&str; 3] = ["reporters", "purity", "reporter_sn"];
 
 const COLUMNS: [&str; 11] = [
@@ -113,7 +111,6 @@ fn schema(with_reporters: bool) -> Schema {
     Schema::new(fields)
 }
 
-/// `20ppm` or `0.5Da`.
 pub fn format_tolerance(t: Tolerance) -> String {
     match t {
         Tolerance::Ppm(v) => format!("{v}ppm"),
@@ -579,7 +576,6 @@ mod tests {
         let e = read_ms2_table(&dir.path().join("nope.ms2.parquet")).unwrap_err();
         assert!(e.contains("nope.ms2.parquet"), "{e}");
 
-        // A renamed column.
         let r = dir.path().join("r.ms2.parquet");
         let t = table(4);
         let good = batch(&Arc::new(schema(false)), &t.scans, false).unwrap();

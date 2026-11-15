@@ -96,6 +96,74 @@ impl ScorerSet<'_> {
     }
 }
 
+/// Scores a spectrum's placements for IPF as the search scored its candidates.
+/// Built by [`PreparedSearch::ipf_scoring`].
+pub struct IpfScoring<'a> {
+    scorers: ScorerSet<'a>,
+    fragment_tolerance_da: f64,
+    declared: Vec<&'static model::modification::Modification>,
+}
+
+impl IpfScoring<'_> {
+    /// Install the fragment error an input file was searched with (the
+    /// recentring, PIN tolerance and node-score window follow it) on every
+    /// scorer, as [`PreparedSearch::set_fragment_error`] did for that file.
+    /// Not while [`Self::evidence`] runs.
+    pub fn set_fragment_error(&self, m: Option<scoring_crate::scoring::FragmentErrorModel>) {
+        self.scorers.primary.set_fragment_error(m);
+        for (_, s) in &self.scorers.alts {
+            s.set_fragment_error(m);
+        }
+    }
+
+    /// The fragment error currently installed (the last file's, after a search).
+    pub fn fragment_error(&self) -> Option<scoring_crate::scoring::FragmentErrorModel> {
+        self.scorers.primary.fragment_error()
+    }
+
+    /// IPF evidence of each `(peptide, charge)` row against `spec` (its peaks
+    /// as read): every placement's search score (node + edge) and site ions,
+    /// with the scorer of the spectrum's activation and the fragment error
+    /// currently installed (set the spectrum's file's first). `None` for a row
+    /// with fewer than two placements. `spec` needs its peaks.
+    pub fn evidence(
+        &self,
+        spec: &Spectrum,
+        rows: &[(&Peptide, u8)],
+    ) -> Vec<Option<crate::ipf::IpfEvidence>> {
+        let shifted = recentred_spectra(
+            std::slice::from_ref(spec),
+            self.scorers.primary.fragment_recentre_ppm(),
+        );
+        let spec = shifted.as_ref().map_or(spec, |v| &v[0]);
+        let scorer = self.scorers.for_spec(spec);
+        let tol = scorer.pin_match_tolerance();
+        let tiers = crate::ipf::peak_tiers(&spec.peaks);
+        let mut scored: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> = SmallVec::new();
+        rows.iter()
+            .map(|&(peptide, z)| {
+                if !scored.iter().any(|(c, _)| *c == z) {
+                    scored.push((z, ScoredSpectrum::new(spec, scorer, z)));
+                }
+                let ss = &scored.iter().find(|(c, _)| *c == z).expect("built above").1;
+                let score = |p: &Peptide| {
+                    score_psm(ss, p, scorer, z, self.fragment_tolerance_da)
+                        + psm_edge_score(ss, p, scorer, z) as f32
+                };
+                crate::ipf::psm_evidence(
+                    &spec.peaks,
+                    &tiers,
+                    peptide,
+                    z,
+                    move |mz| tol.as_da(mz),
+                    &self.declared,
+                    Some(&score),
+                )
+            })
+            .collect()
+    }
+}
+
 /// `spectra` with every fragment peak moved by `-offset_ppm` (a peak observed at
 /// `mz` is scored at `mz / (1 + offset * 1e-6)`), or `None` when the offset is
 /// zero. The copy carries the run's measured fragment error out of retrieval,
@@ -214,19 +282,20 @@ impl GlobalCandKey {
 #[derive(Default)]
 struct MmapAccumulator {
     candidates: Vec<Candidate>,
-    index_of: std::collections::HashMap<GlobalCandKey, u32>,
+    index_of: FxHashMap<GlobalCandKey, u32>,
 }
 
 impl MmapAccumulator {
     /// Intern a candidate, returning its stable global index. If an identical
-    /// candidate was already seen, returns the existing index without pushing.
-    fn intern(&mut self, cand: Candidate) -> u32 {
-        let key = GlobalCandKey::from_candidate(&cand);
+    /// candidate was already seen, returns the existing index without pushing;
+    /// the candidate is cloned only when it is new.
+    fn intern(&mut self, cand: &Candidate) -> u32 {
+        let key = GlobalCandKey::from_candidate(cand);
         if let Some(&idx) = self.index_of.get(&key) {
             return idx;
         }
         let idx = self.candidates.len() as u32;
-        self.candidates.push(cand);
+        self.candidates.push(cand.clone());
         self.index_of.insert(key, idx);
         idx
     }
@@ -564,7 +633,7 @@ impl<'a> PreparedSearch<'a> {
 
     /// The scorer of every scan of `spectra`, building the scorer of an
     /// activation the first time a scan of it is seen.
-    pub(crate) fn scorer_set(&self, spectra: &[Spectrum]) -> ScorerSet<'_> {
+    pub(crate) fn scorer_set(&self, spectra: &[Spectrum]) -> ScorerSet<'a> {
         let Some(ps) = &self.per_scan else {
             return ScorerSet {
                 primary: self.scorer,
@@ -613,6 +682,29 @@ impl<'a> PreparedSearch<'a> {
             primary: self.scorer,
             run_activation: Some(ps.run_activation),
             alts,
+        }
+    }
+
+    /// What IPF site localization needs to score placements against a spectrum
+    /// the way this search scored its candidates, kept once the index is dropped:
+    /// the scorer of every activation the run used and the fragment tolerance.
+    /// The fragment error each input file was measured at lives on the scorers;
+    /// [`IpfScoring::set_fragment_error`] reinstalls one. `scorer` is the run's scorer this search
+    /// was prepared with; the result borrows it, not the search.
+    pub fn ipf_scoring<'s>(&self, scorer: &'s RankScorer) -> IpfScoring<'s> {
+        assert!(
+            std::ptr::eq(scorer, self.scorer),
+            "ipf_scoring needs the scorer the search was prepared with"
+        );
+        let set = self.scorer_set(&[]);
+        IpfScoring {
+            scorers: ScorerSet {
+                primary: scorer,
+                run_activation: set.run_activation,
+                alts: set.alts,
+            },
+            fragment_tolerance_da: self.fragment_tolerance_da,
+            declared: self.params.aa_set.distinct_mods(),
         }
     }
 
@@ -1113,15 +1205,8 @@ impl<'a> PreparedSearch<'a> {
                 let mut ref_tracker = RefTracker::default();
                 let track_ref = self.idx.has_alternative_entries;
 
-                // Tailor per-spectrum score calibration (additive PIN feature):
-                // accumulate a histogram of EVERY scored candidate's rounded RawScore
-                // for this spectrum. RawScore is a bounded integer so the map is
-                // small and cheap; it never influences which candidates are scored
-                // or kept (purely a side-channel for the post-loop denominator).
-                // Each spectrum's closure owns its own histogram → parallel-safe.
                 let mut tailor_hist: FxHashMap<i32, u32> = FxHashMap::default();
                 let mut tailor_total: u32 = 0;
-                // S4 null pool: every scored candidate's pin RawScore on this spectrum.
                 let mut strong_null_stats = OnlineStats::default();
 
                 // Determine which charge states to try for this spectrum.
@@ -1186,14 +1271,6 @@ impl<'a> PreparedSearch<'a> {
                 let resolve_cand =
                     |slot: usize| -> (&Candidate, u32) { (&cand_slice[slot], slot as u32) };
 
-                // Hoist the loop-invariant cleavage-credit constants out of the
-                // per-candidate hot path: resolving them once here avoids
-                // re-invoking four small `aa_set` accessor methods (each a
-                // HashMap field deref) for every candidate.
-                //
-                // The four credit/penalty values are SearchParams-constant; we
-                // resolve them ONCE here. The per-candidate logic becomes four
-                // branches over precomputed i32 constants.
                 let enz_credit_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_credit();
                 let enz_penalty_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_penalty();
                 let enz_credit_peptide = aa_set_for_scoring.peptide_cleavage_credit();
@@ -1207,8 +1284,6 @@ impl<'a> PreparedSearch<'a> {
                 // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
                 let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
-                // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
-                // candidate whose nominal mass falls in the precursor window.
                 for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
                     prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
                     let (cand, cand_idx) = resolve_cand(cand_slot);
@@ -1222,12 +1297,6 @@ impl<'a> PreparedSearch<'a> {
                         enz_credit_peptide,
                         enz_penalty_peptide,
                     ) as f32;
-                    // Conservative per-peptide bound on the cumulative
-                    // edge_score for two-stage gating. `psm_edge_score` returns
-                    // `sum of n-1 per-edge scores`, each clamped to roughly [-4, +4]
-                    // (log probability ratios). 10 per edge is a very loose upper
-                    // bound; we only need it to never UNDER-estimate the max so
-                    // we don't skip a candidate that could win.
                     let max_edge_bonus_per_edge: f32 = 10.0;
                     let n_minus_1 = cand.peptide.length().saturating_sub(1) as f32;
                     let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
@@ -1274,7 +1343,6 @@ impl<'a> PreparedSearch<'a> {
                             continue;
                         }
 
-                        // Compute pin_score ONCE (iso-independent).
                         let pin_score =
                             score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
@@ -1343,7 +1411,6 @@ impl<'a> PreparedSearch<'a> {
                             continue;
                         }
 
-                        // Stage 2: compute edge_score ONCE (also iso-independent).
                         let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
                         let rank_score = pin_score + edge_i as f32;
 
@@ -1417,12 +1484,6 @@ impl<'a> PreparedSearch<'a> {
                     queue.push(psm);
                 }
 
-                // Feature extraction (unchanged from baseline): post-merge, after
-                // the per-spectrum queue is final.
-                //
-                // Pre-computed `psm.edge_score` from the candidate loop
-                // is moved into `features.edge_score` to avoid the per-PSM
-                // recomputation that `compute_psm_features` would otherwise do.
                 // Spectrum-level DeltaRawScore: positive lead of the best RawScore
                 // over the second-best distinct peptide. 0.0 when no distinct
                 // runner-up was scored (uncontested top-1, e.g. top_n=1 with a
@@ -1467,14 +1528,6 @@ impl<'a> PreparedSearch<'a> {
                         full,
                     );
 
-                    // The PIN `precursor_isotope_kl` / `precursor_snr` columns are
-                    // left at their 0.0 defaults here. They were a per-PSM MS1
-                    // isotope-envelope feature of the old single-pass chimeric mode;
-                    // the two-pass cascade does not consume them (computing them ran
-                    // ~121k times on Astral for ~2:40 of wall). The cascade uses MS1
-                    // only in Pass 2's `run_pass2_coisolation` / `detect_coisolated`
-                    // co-isolation detection — `ms1_link` and its loading stay.
-
                     features.delta_raw_score = delta_raw_score;
                     if track_ref {
                         if let Some(r) = ref_tracker.best_excluding(peptidoform_key(&cand.peptide))
@@ -1485,10 +1538,6 @@ impl<'a> PreparedSearch<'a> {
                     }
                     features.listwise_score_gap = listwise_score_gap;
                     features.candidate_rank_entropy = candidate_rank_entropy;
-                    // Tailor calibrated score: this PSM's RawScore divided by the
-                    // spectrum's top-1% quantile RawScore. Additive — does not
-                    // affect ranking. Uses `psm.score` (the PIN RawScore =
-                    // node + cleavage), the same value emitted in the RawScore column.
                     features.tailor_score = psm.score / tailor_denom;
                     // Float-precision rank score (additive; ranking unchanged): the
                     // emitted RawScore (`psm.score` = node + cleavage) with the
@@ -1604,7 +1653,7 @@ impl<'a> PreparedSearch<'a> {
                 {
                     let mut accum = self.mmap_accum.lock().unwrap();
                     queue.remap_candidate_idxs(|local| {
-                        accum.intern(mmap_cands[local as usize].clone())
+                        accum.intern(&mmap_cands[local as usize])
                     });
                 }
 
@@ -1788,7 +1837,6 @@ pub fn run_pass2_coisolation(
             if coisolated.is_empty() {
                 return None;
             }
-            // Primary peptide = the queue's best PSM (smallest SpecEValue).
             let primary = prepared.candidate_peptide(q.peek_top()?.primary_candidate_idx());
             Some(Pass2Scan {
                 primary,
@@ -1836,7 +1884,7 @@ pub fn run_pass2_coisolation(
             if !emitted.insert(key) {
                 continue;
             }
-            psm.candidate_idxs = vec![accum.intern(cand)];
+            psm.candidate_idxs = vec![accum.intern(&cand)];
             // `spec_idx` is chunk-local (indexes `spectra` + `link`); the emitted
             // spectrum_idx must be global to align with `all_spectra`.
             psm.spectrum_idx = offset + spec_idx;
@@ -2095,18 +2143,9 @@ pub(crate) fn compute_psm_features_with_edge(
         return PsmFeatures::default();
     }
 
-    // ADDITIVE edge-score feature (new PIN column). Computed
-    // here so it shares the per-PSM ScoredSpectrum + scorer references that
-    // the existing feature-extraction code already has on hand.
     let edge_score =
         known_edge_score.unwrap_or_else(|| psm_edge_score(scored_spec, peptide, scorer, charge));
 
-    // Predict charge-1 b/y ions; one bool per fragment position.
-    //
-    // Stack-allocate b/y_matched on a 64-slot SmallVec (max
-    // peptide length is 40 → n-1 ≤ 39). The prior `vec![false; n-1]` heap
-    // allocations fired ~150k × 4 / PSM batch and were a measurable hot-path
-    // cost. SmallVec inlines for n ≤ 64.
     // Activation-gated neutral-loss prediction. ETD preserves labile mods
     // (no loss ions); collisional/photon activation predicts them. Inert
     // unless a residue's mod declares `neutral_losses`, so output is
@@ -2277,9 +2316,6 @@ pub(crate) fn compute_psm_features_with_edge(
     // Cache the per-segment ion list ONCE per spectrum (constant
     // for fixed `(charge, parent_mass)`), avoiding the `partition_for` binary
     // search + HashMap lookup that fired for every (split × segment) pair.
-    // On Astral with ~150k PSMs × ~12 splits × 2 segments = ~3.6M lookups
-    // saved per run. SmallVec<[&[IonType]; 8]> inlines (num_segments is
-    // typically 1-2; clamp at 8 to be safe).
     let segment_ions: SmallVec<[&[scoring_crate::param_model::IonType]; 8]> = (0..num_segments)
         .map(|seg| {
             scorer
@@ -2382,9 +2418,6 @@ pub(crate) fn compute_psm_features_with_edge(
     // carries no information to the rescorer.
     let isolation_window_efficiency = 0.0_f32;
 
-    // ── Top-7 mass-error statistics ───────────────────────────────────────────
-
-    // Sort matched ions descending by intensity.
     matched_ions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let top7 = &matched_ions[..matched_ions.len().min(7)];
 
@@ -2662,8 +2695,6 @@ pub(crate) fn compute_psm_features_with_edge(
     }
 }
 
-// ── Unit tests for feature columns ───────────────────────────────────────────
-
 #[cfg(test)]
 mod accumulator_tests {
     use super::*;
@@ -2691,14 +2722,14 @@ mod accumulator_tests {
         assert!(cands.len() >= 2);
         {
             let mut accum = prepared.mmap_accum.lock().unwrap();
-            assert_eq!(accum.intern(cands[0].clone()), 0);
-            assert_eq!(accum.intern(cands[1].clone()), 1);
+            assert_eq!(accum.intern(&cands[0]), 0);
+            assert_eq!(accum.intern(&cands[1]), 1);
         }
         prepared.sync_materialized_candidates();
         assert_eq!(prepared.candidates.len(), 2);
         let mut accum = prepared.mmap_accum.lock().unwrap();
         assert!(accum.index_of.is_empty());
-        assert_eq!(accum.intern(cands[1].clone()), 0);
+        assert_eq!(accum.intern(&cands[1]), 0);
         assert_eq!(accum.candidates.len(), 1);
     }
 }
@@ -3065,8 +3096,6 @@ mod feature_tests {
         assert!(c[0].peaks.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
-    // ── Test: empty spectrum → all new features are 0 ───────────────────────
-
     #[test]
     fn compute_psm_features_top7_error_stats_zero_when_no_matches() {
         let pep = ala_peptide(4);
@@ -3098,8 +3127,6 @@ mod feature_tests {
             "ms2_ion_current should be 0 with no peaks"
         );
     }
-
-    // ── Test: ion-current ratios populate and satisfy arithmetic invariant ───
 
     #[test]
     fn compute_psm_features_populates_ion_current_ratios() {
@@ -3158,11 +3185,8 @@ mod feature_tests {
             total
         );
 
-        // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
     }
-
-    // ── Test: unique-match fraction ──────────────────────────────────────────
 
     #[test]
     fn compute_psm_features_unique_match_fraction() {
@@ -3244,8 +3268,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: doubly-charged matched-ion count ───────────────────────────────
-
     #[test]
     fn compute_psm_features_doubly_charged_matched_ion_count() {
         let pep = ala_peptide(4);
@@ -3289,8 +3311,6 @@ mod feature_tests {
             predicted_z2.len()
         );
     }
-
-    // ── Test: mean matched intensity rank ────────────────────────────────────
 
     #[test]
     fn compute_psm_features_mean_matched_intensity_rank() {
@@ -3340,8 +3360,6 @@ mod feature_tests {
             f_buried.mean_matched_intensity_rank
         );
     }
-
-    // ── Test: longest complementary ladder ─────────────────────────────────
 
     #[test]
     fn compute_psm_features_longest_complementary_ladder() {
@@ -3398,8 +3416,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: complementary-ion balance (additive feature #campaign-10) ──────
-
     #[test]
     fn compute_psm_features_complementary_ion_balance() {
         let pep = ala_peptide(5);
@@ -3445,8 +3461,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: neutral-loss ion count ─────────────────────────────────────────
-
     #[test]
     fn compute_psm_features_neutral_loss_ion_count() {
         let pep = ala_peptide(3);
@@ -3471,8 +3485,6 @@ mod feature_tests {
             f.neutral_loss_ion_count
         );
     }
-
-    // ── Test: strong-score Stage-1 bolt-ons (ppm-Gaussian + complementary) ──
 
     #[test]
     fn compute_psm_features_strong_score_stage1_bolt_ons() {
@@ -3532,8 +3544,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: top-7 error stats are nonzero when ions match ─────────────────
-
     #[test]
     fn compute_psm_features_error_stats_nonzero_when_ions_match_with_offset() {
         // Build a peptide and shift every peak by a fixed offset so errors are known.
@@ -3543,9 +3553,6 @@ mod feature_tests {
         // 0.0005 Da offset = ~6 ppm at m/z 89 (Ala b1) — within the
         // hardcoded 20 ppm window that compute_psm_features uses for
         // high-resolution instruments (Kim et al., Nat Commun 5:5277, 2014).
-        // The previous 0.01 Da offset assumed Rust used param.mme (~0.05 Da
-        // in this fixture's make_scorer), but feature counting now uses
-        // 20 ppm regardless of param.mme.
         let offset_da = 0.0005_f64;
         let mut peaks: Vec<(f64, f32)> = predicted
             .iter()
@@ -3556,8 +3563,6 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        // make_scorer still accepts a tol arg for legacy compatibility, but
-        // compute_psm_features uses the instrument-based hardcoded tolerance.
         let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
         // Mean error should be nonzero when peaks are systematically offset.
@@ -3585,8 +3590,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: ms2_ion_current mirrors total_intensity exactly ───────────────
-
     #[test]
     fn ms2_ion_current_equals_total_intensity() {
         let pep = ala_peptide(3);
@@ -3603,8 +3606,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: PROTON mass sanity — b1 ion for alanine at charge 1 ───────────
-    // This verifies the predict_by_ions formula aligns with our test setup.
     #[test]
     fn b1_mz_for_alanine_is_proton_plus_residue_mass() {
         use model::amino_acid::AminoAcid;
@@ -3844,10 +3845,6 @@ impl Ord for DedupMapKey {
 }
 
 fn merge_unique_candidate_idxs(into: &mut Vec<u32>, from: &[u32]) {
-    // O(k) dedup: track membership in an FxHashSet seeded from `into`'s
-    // current contents while preserving the SAME output order as the prior
-    // `Vec::contains` (O(k^2)) implementation — existing entries first, then
-    // new unique `from` entries in `from` order.
     if from.is_empty() {
         return;
     }

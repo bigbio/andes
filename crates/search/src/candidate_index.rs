@@ -78,12 +78,10 @@ pub struct IndexRecord {
 }
 
 impl IndexRecord {
-    /// Is this a decoy peptide?
     pub fn is_decoy(&self) -> bool {
         self.flags & flags::IS_DECOY != 0
     }
 
-    /// Serialise to 20 little-endian bytes.
     pub fn to_bytes(&self) -> [u8; INDEX_RECORD_SIZE] {
         let mut buf = [0u8; INDEX_RECORD_SIZE];
         buf[0..8].copy_from_slice(&self.mass_milli.to_le_bytes());
@@ -94,7 +92,6 @@ impl IndexRecord {
         buf
     }
 
-    /// Deserialise from 20 little-endian bytes.
     pub fn from_bytes(buf: &[u8; INDEX_RECORD_SIZE]) -> Self {
         let mass_milli = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let protein_index = u32::from_le_bytes(buf[8..12].try_into().unwrap());
@@ -137,7 +134,6 @@ pub fn base_peptide_records(
     params: &SearchParams,
     decoy_prefix: &str,
 ) -> Vec<IndexRecord> {
-    // Build base params: zero variable mods, keep everything else.
     let base_params = SearchParams {
         max_variable_mods_per_peptide: 0,
         max_label_sites: 0,
@@ -811,7 +807,6 @@ mod tests {
 
     /// Read all records back from a binary blob.
     fn read_records(data: &[u8]) -> Vec<IndexRecord> {
-        // Skip + validate the magic/version header the builder now writes.
         assert!(
             data.len() >= INDEX_HEADER_SIZE && &data[..INDEX_MAGIC.len()] == INDEX_MAGIC,
             "binary blob missing the index header"
@@ -989,9 +984,6 @@ mod tests {
         // Represent each base peptide as (residue_bytes, mass_milli) so the
         // comparison is independent of protein_index / start_offset ordering.
         let base_records = base_peptide_records(&idx, &params, "XXX");
-        // Collect the (residue bytes, mass_milli) key from each record.
-        // Since IndexRecord doesn't store residue bytes directly, we re-derive
-        // them by running enumerate_candidates with base params and zipping.
         let base_params = SearchParams {
             max_variable_mods_per_peptide: 0,
             max_label_sites: 0,
@@ -1004,8 +996,6 @@ mod tests {
             "base_peptide_records and enumerate_candidates(NumMods=0) must yield same count"
         );
 
-        // Build a canonical (residue_bytes, mass_milli) multiset from base_peptide_records.
-        // Use the candidate residues (same enumeration) to reconstruct residue bytes.
         let mut lhs: Vec<(Vec<u8>, u64)> = base_candidates
             .iter()
             .map(|c| {
@@ -1054,10 +1044,6 @@ mod tests {
             "full enumeration ({full_count}) should exceed base ({base_count}) when variable mods present"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Build-once cache: `open_or_build` / `index_cache_path`
-    // -----------------------------------------------------------------------
 
     /// A cache directory that cannot be created or written is an error that
     /// names the flag; nothing falls back to another directory or to memory.
@@ -1124,17 +1110,11 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
         let cache_path = tmp.path();
 
-        // First call: cache miss — must build.
-        // We delete the content but keep the path alive by truncating, then
-        // let open_or_build create a fresh file.  Actually `NamedTempFile::new`
-        // creates a zero-byte file; `open_or_build` treats 0-byte files as a
-        // cache miss (size % 20 == 0 but len == 0 fails the `len > 0` guard).
         let (mi1, was_built1) = MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
             .expect("first open_or_build failed");
         assert!(was_built1, "first call must build the index (cache miss)");
         assert!(!mi1.is_empty(), "built index must be non-empty");
 
-        // Record the modification time after the first build.
         let mtime_after_build = std::fs::metadata(cache_path)
             .expect("metadata after build")
             .modified()

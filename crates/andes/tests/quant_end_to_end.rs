@@ -140,8 +140,12 @@ fn tmt10_ms2_reporters_purity_and_correction() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--output-parquet",
@@ -249,10 +253,12 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
             fixture("test-fixtures/BSA.fasta")
                 .to_string_lossy()
                 .into_owned(),
-            "--mods".to_string(),
-            fixture("test-fixtures/tmt10_mods.txt")
-                .to_string_lossy()
-                .into_owned(),
+            "--fixed-mods".to_string(),
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)".to_string(),
+            "--variable-mods".to_string(),
+            String::new(),
+            "--max-mods".to_string(),
+            "1".to_string(),
             "--output-pin".to_string(),
             pin.to_string_lossy().into_owned(),
             "--tmt".to_string(),
@@ -271,7 +277,6 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
     };
     let (plain_h, plain_rows, plain_key) = run("plain", &["--tmt-unmix", "off"]);
     assert_eq!(plain_key.as_deref(), Some("off"));
-    // `auto` is the default.
     for (stem, extra, mode) in [
         ("unmix", &["--tmt-unmix", "on"][..], "on"),
         ("auto", &[][..], "auto"),
@@ -301,8 +306,12 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--tmt",
@@ -351,8 +360,12 @@ fn tmt35_reads_the_deuterated_kit_in_reference_order() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--output-parquet",
@@ -415,14 +428,17 @@ fn tmt35_refuses_a_correction_sheet_and_a_20ppm_window() {
     let refused = |extra: &[&str]| {
         let spectrum = fixture("test-fixtures/tmt10_synthetic.mzML.gz");
         let database = fixture("test-fixtures/BSA.fasta");
-        let mods = fixture("test-fixtures/tmt10_mods.txt");
         let mut args = vec![
             "--spectrum",
             spectrum.to_str().unwrap(),
             "--database",
             database.to_str().unwrap(),
-            "--mods",
-            mods.to_str().unwrap(),
+            "--fixed-mods",
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+            "--variable-mods",
+            "",
+            "--max-mods",
+            "1",
             "--output-pin",
             pin.to_str().unwrap(),
             "--tmt",
@@ -468,7 +484,7 @@ fn lfq_areas_track_the_designed_intensities() {
         "--lfq",
         // Six targets: the conservative (decoys + 1) / targets estimate cannot
         // go below 1/6, so the wide table needs a looser cut on this fixture.
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",
@@ -487,7 +503,6 @@ fn lfq_areas_track_the_designed_intensities() {
     let apex = col(&header, "rt_apex");
     let q = col(&header, "feature_q_value");
     let n_iso = col(&header, "n_isotopes");
-    // Designed apex intensities (monoisotopic) and apex RTs.
     let design: HashMap<&str, (f64, f64)> = HashMap::from([
         ("LVNELTEFAK", (1.0e6, 40.0)),
         ("YLYEIAR", (5.0e5, 70.0)),
@@ -570,7 +585,7 @@ fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str])
         "--output-parquet",
         qpx.to_str().unwrap(),
         "--lfq",
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",
@@ -650,7 +665,6 @@ fn quant_dir_table_contains_decoys() {
         "--threads",
         "2",
     ]);
-    // --quant-dir alone quantifies nothing: no feature parquet.
     assert!(out.path().join("slice.idparquet").is_dir());
     assert!(!out
         .path()

@@ -63,10 +63,6 @@ pub const BOOTSTRAP_DECOY_PREFIX: &str = "XXX_";
 /// the production search and is incorrect.
 const FRAGMENT_TOL_DA: f64 = 0.5;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 /// A confident target PSM accepted from the bootstrap seed search.
 ///
 /// Carries everything the [`crate::accumulate::StatsAccumulator`] needs:
@@ -85,10 +81,6 @@ pub struct LabeledMatch {
     /// Always ≤ the `train_fdr` passed to [`bootstrap_labels`].
     pub confidence: f64,
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Run a seed search over `spectra` against the FASTA `database`, generate
 /// peptide-level decoys automatically, compute target-decoy competition FDR over
@@ -122,7 +114,6 @@ pub fn bootstrap_labels(
     train_fdr: f64,
     cache_dir: &Path,
 ) -> Result<Vec<LabeledMatch>, TrainError> {
-    // ── 1. Load FASTA + build SearchIndex (target + peptide-level decoys) ─────────
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
@@ -165,7 +156,6 @@ pub fn bootstrap_labels(
         if queue.is_empty() {
             continue;
         }
-        // peek_top returns the best (highest rank_score).
         if let Some(psm) = queue.peek_top() {
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
@@ -179,10 +169,8 @@ pub fn bootstrap_labels(
         }
     }
 
-    // ── 4-6. Target-decoy q-values, best score first ──────────────────────────
     let mono_q = tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
-    // ── 7. Collect accepted TARGET PSMs ──────────────────────────────────────
     let mut labels: Vec<LabeledMatch> = Vec::new();
     for (psm, q) in best_psms.into_iter().zip(mono_q.into_iter()) {
         if !psm.is_decoy && q <= train_fdr {
@@ -277,7 +265,6 @@ pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl
         while end < psms.len() && scores_tie(score_of(&psms[end]), s) {
             end += 1;
         }
-        // Worst (max) q within [start, end).
         let mut worst = q[start];
         for &qi in &q[start + 1..end] {
             if qi > worst {

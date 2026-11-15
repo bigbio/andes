@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::SyncSender;
 
-use input::{detect_instrument_type, MgfReader, MzMLReader};
+use input::{detect_instrument_type, MgfReader, Ms1Link, MzMLReader};
+use model::scan::Ms1Scan;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum, Tolerance};
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use search::{
@@ -225,6 +226,37 @@ where
     stats
 }
 
+/// Sends `spectra` (file order; `ms2_to_ms1` indexes `ms1`) through `tx` in
+/// chunks of `chunk_size`, each with the [`Ms1Link`]
+/// [`MzMLReader::read_with_ms1_chunked`] gives it: the peaks of every MS1 scan
+/// the chunk links to, once each, in file order. Stops when the consumer hangs
+/// up.
+pub(crate) fn send_linked_chunks(
+    mut spectra: Vec<Spectrum>,
+    ms2_to_ms1: &[Option<usize>],
+    ms1: &[Ms1Scan],
+    chunk_size: usize,
+    tx: &SyncSender<(Vec<Spectrum>, Ms1Link)>,
+) {
+    for links in ms2_to_ms1.chunks(chunk_size) {
+        let chunk: Vec<Spectrum> = spectra.drain(..links.len()).collect();
+        let mut link = Ms1Link::default();
+        let mut last: Option<usize> = None;
+        for &l in links {
+            link.ms2_to_ms1.push(l.map(|m| {
+                if last != Some(m) {
+                    link.ms1_peaks.push(ms1[m].peaks.clone());
+                    last = Some(m);
+                }
+                link.ms1_peaks.len() - 1
+            }));
+        }
+        if tx.send((chunk, link)).is_err() {
+            return;
+        }
+    }
+}
+
 /// Lightweight metadata collected in one linear file scan for precursorCal.
 #[derive(Debug, Clone)]
 pub(crate) struct SpectrumMeta {
@@ -337,8 +369,6 @@ pub(crate) fn build_spec_keys_from_metadata(
     charge_range: std::ops::RangeInclusive<u8>,
     min_peaks: u32,
 ) -> Vec<SpecKey> {
-    // Metadata only: no placeholder peak lists, which on a large file were a
-    // transient allocation of one tuple per peak for every spectrum.
     search::mass_calibrator::build_spec_keys_from_counts(
         meta.iter().map(|m| (m.precursor_charge, m.num_peaks)),
         &charge_range,
@@ -484,7 +514,7 @@ pub(crate) fn sample_spectra(
         #[cfg(feature = "thermo")]
         {
             let level = u8::try_from(ms_level).ok()?;
-            let reader = input::ThermoRawReader::open(path).ok()?;
+            let mut reader = input::ThermoRawReader::open(path).ok()?;
             // MS3 scans are sampled for their reporter ions only, so they are
             // kept without a precursor m/z; MS2 goes through the search path.
             if level >= 3 {
@@ -597,7 +627,6 @@ pub(crate) fn run_precursor_calibration(
 pub(crate) fn detect_dominant_activation(
     spectrum_path: &std::path::Path,
 ) -> Option<ActivationMethod> {
-    // Only mzML carries `<activation>`. Other formats: caller falls back.
     let ext_lower = spectrum_ext_lower(spectrum_path);
     if ext_lower.as_deref() != Some("mzml") {
         return None;
@@ -607,7 +636,6 @@ pub(crate) fn detect_dominant_activation(
 
     let reader = MzMLReader::new(input::open_buf_maybe_gz(spectrum_path).ok()?);
 
-    // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
         std::collections::HashMap::new();
     for (seen, item) in reader.enumerate() {
@@ -625,8 +653,6 @@ pub(crate) fn detect_dominant_activation(
         return None;
     }
 
-    // Find the dominant method. Ties are broken by ActivationMethod's
-    // declaration order via match below, which is stable.
     let dominant = counts
         .iter()
         // Deterministic on ties: HashMap iteration order is randomised per
@@ -669,11 +695,6 @@ pub(crate) fn detect_dominant_activation(
     Some(dominant)
 }
 
-/// Helper to call `input::detect_instrument_type` on an mzML path.
-///
-/// Mirrors the structure of `detect_dominant_activation` so the two
-/// detection passes look symmetric at the call site. Returns `None` for
-/// non-mzML inputs or when the mzML has no recoverable instrument metadata.
 pub(crate) fn detect_instrument_type_for_path(
     spectrum_path: &std::path::Path,
 ) -> Option<InstrumentType> {
@@ -927,8 +948,6 @@ mod format_routing_tests {
     use super::input_format_flags;
     use std::path::Path;
 
-    // A gzipped spectrum is read transparently (input::open_maybe_gz) and must be
-    // routed by its UNDERLYING extension, not the bare `.gz` (finding 2.5).
     #[test]
     fn gz_is_routed_by_the_underlying_extension() {
         // (is_mzml, is_raw, is_d, is_mgf)

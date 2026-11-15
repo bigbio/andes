@@ -84,7 +84,6 @@ fn tree_ensemble_regressor() {
     assert_eq!(out.shape, vec![3, 1]);
     assert_eq!(out.data, vec![1.0, 1.0, 3.0]);
 
-    // Multi-tree ensemble: one finite score per row.
     let mut g = OnnxSession::from_manifest(fixture("peak_gbdt.json"), BackendKind::Ort)
         .expect("load peak_gbdt");
     let out = g

@@ -21,7 +21,6 @@ pub struct Pair {
 /// lost to its decoy. Nonfinite scores are treated as missing. Pairwise ties
 /// conservatively go to the decoy; equal winning scores share one threshold.
 pub fn picked_qvalues(pairs: &[Pair]) -> Vec<Option<f64>> {
-    // Winner per pair: (score, is_decoy, pair index).
     let mut winners: Vec<(f32, bool, usize)> = Vec::with_capacity(pairs.len());
     for (i, p) in pairs.iter().enumerate() {
         match (
@@ -97,7 +96,6 @@ mod tests {
         assert!(q[0].unwrap() <= 0.5 && q[1].unwrap() <= 0.5);
         assert_eq!(q[2], None);
         assert_eq!(q[3], None);
-        // q is monotone non-decreasing with decreasing score.
         assert!(q[0].unwrap() <= q[1].unwrap());
     }
 
@@ -110,7 +108,6 @@ mod tests {
         let q = picked_qvalues(&pairs);
         let strong = q[0].unwrap();
         assert!(strong < 0.05, "{strong}");
-        // Everything in the tail lost to a decoy → None.
         assert!(q[50..].iter().all(|v| v.is_none()));
     }
 

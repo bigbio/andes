@@ -62,7 +62,6 @@ fn is_labeling_tag(s: &str) -> bool {
     LABELING_TAGS.contains(&s)
 }
 
-/// Returns `true` if `subset` contains a labeling tag.
 fn contains_labeling_tag(set: &BTreeSet<String>) -> bool {
     set.iter().any(|s| is_labeling_tag(s.as_str()))
 }
@@ -82,7 +81,6 @@ fn try_steps_1_to_3<'a>(
     enzyme: &str,
     key_class: &BTreeSet<String>,
 ) -> Option<&'a str> {
-    // Filter to candidates that match activation, instrument, and enzyme.
     let candidates: Vec<&SelectionEntry> = entries
         .iter()
         .filter(|e| e.activation == activation && e.instrument == instrument && e.enzyme == enzyme)
@@ -118,7 +116,6 @@ fn try_steps_1_to_3<'a>(
             .collect();
 
         if !subset_candidates.is_empty() {
-            // Find the maximum subset size.
             let max_size = subset_candidates
                 .iter()
                 .map(|e| e.experiment_class.len())
@@ -141,7 +138,6 @@ fn try_steps_1_to_3<'a>(
                     } else {
                         0u8
                     };
-                    // To get lex-smallest with max_by_key, wrap in Reverse.
                     (labeling_priority, std::cmp::Reverse(e.model_id.clone()))
                 })
                 .unwrap();
@@ -202,7 +198,6 @@ pub fn select<'a>(
     let family = instrument_family(&key.instrument);
     let has_family_fallback = family != key.instrument;
 
-    // Phase A: steps 1–3 with exact instrument.
     if let Some(id) = try_steps_1_to_3(
         entries,
         &key.activation,
@@ -213,7 +208,6 @@ pub fn select<'a>(
         return Some(id);
     }
 
-    // Phase B: steps 1–3 with instrument family.
     if has_family_fallback {
         if let Some(id) = try_steps_1_to_3(
             entries,
@@ -238,7 +232,6 @@ pub fn select<'a>(
         }
     }
 
-    // Last resort.
     generic_id
 }
 
@@ -667,8 +660,6 @@ mod tests {
         );
     }
 
-    // ---- Additional coverage ----
-
     #[test]
     fn no_generic_id_returns_none() {
         assert_eq!(
@@ -738,7 +729,6 @@ mod tests {
     /// no bundled HCD tryptic model carries) must resolve to the high-res
     /// Orbitrap model `hcd_qexactive_tryp`, not to whichever same-activation
     /// model sorts first by id (`hcd_astral_tryp`, an Astral-specific model).
-    /// Measured 2026-09-02: every glyco benchmark run took the alphabetical path.
     #[test]
     fn generic_highres_hcd_prefers_qexactive_over_alphabetical_astral() {
         let m = vec![
@@ -785,7 +775,7 @@ mod tests {
     /// The 17-own store has cid_lowres_tryp but NOT cid_lowres_tryp_phosphorylation
     /// (dropped seed-copy). A CID phospho query routes to cid_lowres_tryp via the
     /// EXACT ladder's pre-existing empty-class step (the plain model covers the
-    /// backbone; the phospho mod is still searched via --mods), so it is NOT a
+    /// backbone; the phospho mod is still searched via --variable-mods), so it is NOT a
     /// nearest/standard substitution — no WARN.
     #[test]
     fn dropped_cid_phospho_routes_to_cid_tryp() {
@@ -1030,8 +1020,6 @@ mod tests {
         assert_eq!(id, "astral");
         assert!(!sub);
     }
-
-    // ---- parse_experiment_class ----
 
     #[test]
     fn parse_empty_string() {

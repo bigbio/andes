@@ -122,7 +122,6 @@ pub fn tiny_param_with_ions() -> Param {
         FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
 
-    // frag_off_table: one prefix ion entry so ion_types_for_segment returns it.
     let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(
         part,

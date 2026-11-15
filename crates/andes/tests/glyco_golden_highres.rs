@@ -1,58 +1,5 @@
 //! HIGH-RES glyco serve-path golden.
 //!
-//! REGENERATED 2026-10-21 (single-cleavage Y-ions) when Y-ion generation was aligned
-//! with GlycoDecipher's B/Y convention: ONE Y ion per glycosidic bond (O(n)),
-//! replacing the combinatorial root-containing-subtree set that over-generated
-//! multi-cleavage fragments for branched glycans. Verified before copying: header
-//! identical, 120 -> 120 rows, 4 winner flips — all same-peptide glycan-annotation
-//! changes: three on THRB_HUMAN R.SRYPHKPEINSTTHPGADLQENFCR.N@N10 (core-fucosylated
-//! di-fucose `(N(F)(N(H(H(N(F)(H)))(H(N(H))))))` -> mono-sialylated
-//! `(N(N(H(H(N(A)(H)))(H(N(H))))))`) and one on VTNC_HUMAN
-//! K.NNATVHEQVGGPSLTSDLQAQSK.G@N2 (core-fucosylated di-sialylated -> tri-sialylated
-//! `(N(N(H(H(N(A)(H))(N(A)(H)))(H(N(A)(H))))))`). `YLadderScore` moved on 119 rows,
-//! `YHitFrac` on 116, `GlycanMass` on the 4 flipped rows, and `DeltaRT`/`AbsDeltaRT`/
-//! `DeltaRTNorm` on all 120 (winner flips shift the per-run RT-calibration anchors).
-//! No SpecId/protein changes; the peptide candidate pool is untouched.
-//!
-//! REGENERATED 2026-10-21 when the glycan tree topology was retained and Y-ions
-//! derived from it. Verified before copying: header identical, 120 -> 120 rows,
-//! 0 winner flips. The Peptide column gained the canonical tree suffix on all 120
-//! rows; `YLadderScore`/`YHitFrac` moved on 104 rows and the per-spectrum competition
-//! statistics (`CandidateRankEntropy` on 20, `RawScore` on 13, `TailorScore` and
-//! `ListwiseScoreGap` on 1 each) moved as the candidate pool changed; SpecIds and
-//! proteins unchanged.
-//!
-//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
-//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
-//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
-//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
-//! only sequon is N18-R|T): `@N?` -> `@N18`.
-//!
-//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
-//! only the peptides starting at the post-Met residue (it had enumerated every
-//! other span of an M-initial protein a second time) and side-chain mods began
-//! stacking with terminal mods. Against the previous binary: 120 rows, every
-//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
-//! candidate pool changes, so
-//! `CandidateRankEntropy` and `RawScore` moved on 117 rows,
-//! `ListwiseScoreGap` on 83 and `TailorScore` on 15.
-//!
-//! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
-//! became structure-aware (core + antenna-subset losses + core ladder, replacing
-//! the full 2^n power set that over-generated physically-impossible "trim a core
-//! mannose while keeping its antenna" fragments). Verified before copying: header
-//! identical; 116 -> 115 rows — one decoy winner dropped (scan 4357,
-//! XXX_CO4B_HUMAN) — and 4 winners flipped: three targets re-ranked onto the
-//! E. coli background (CERU_HUMAN->NMPC_ECOLI, THRB_HUMAN->YHFZ_ECOLI,
-//! CLUS_HUMAN->MDTG_ECOLI) and one target->decoy (PON1_HUMAN->XXX_APOB_HUMAN, a
-//! spectrum where both old and new winners are weak: CoreYHits 3->0). Net decoy
-//! winners 4->4. DeltaRT/AbsDeltaRT/DeltaRTNorm moved on every row because the
-//! winner changes shift the per-run RT-calibration anchors. The glycan-first
-//! top_k was then aligned to the field-standard 100 (was 50); that widened the candidate
-//! pool and moved only the per-spectrum competition statistics (RawScore,
-//! TailorScore, DeltaRankScore, CandidateRankEntropy, ListwiseScoreGap) on 4
-//! rows, with 0 winner flips.
-//!
 //! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
 //! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
 //! model for MGF requires `--fragment-tol-ppm`, which calls
@@ -87,16 +34,6 @@
 //!     --output-pin <tmp>/out.pin
 //!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
 //!
-//! REGENERATED 2026-10-22 when decoys became peptide-level: 120 rows, decoy
-//! winners 1 -> 1; the candidate-pool columns move with the new decoy
-//! candidates.
-//!
-//! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
-//! together). Against each parent golden the only differences are the other
-//! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the
-//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
-//! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
-//! unchanged.
 
 use std::path::PathBuf;
 use std::process::Command;

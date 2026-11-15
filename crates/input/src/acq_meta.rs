@@ -226,7 +226,6 @@ pub struct ResolutionEvidence {
 }
 
 impl ResolutionEvidence {
-    /// One line naming the evidence and the call.
     pub fn describe(&self) -> String {
         format!(
             "{} spectra, {} peaks: {} isotope pairs at 1.00335/z within {PAIR_TOL_PPM} ppm vs {:.1} \
@@ -408,7 +407,6 @@ mod tests {
         assert!(s.distinct_faims_cvs().is_empty());
     }
 
-    /// Deterministic uniform numbers in [0, 1).
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> f64 {

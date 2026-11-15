@@ -1,4 +1,3 @@
-// Clean-room glycan database loader: canonical-string `.gdb` and WURCS 2.0.
 //
 // Loads a canonical-string `.gdb` glycan database (or a WURCS 2.0 CSV)
 // and retains the FULL tree topology, normalised at parse time (children sorted by
@@ -54,7 +53,6 @@ impl std::hash::Hash for GlycanComp {
 }
 
 impl GlycanComp {
-    /// Derive every count/mass/identity field from a (normalised) tree.
     pub fn from_tree(tree: GlycanTree) -> GlycanComp {
         let counts = tree.counts();
         let hexnac = counts[1];
@@ -82,7 +80,6 @@ impl GlycanComp {
         }
     }
 
-    /// Parse a canonical S-expression and build the glycan in one step.
     pub fn from_tree_str(s: &str) -> Result<GlycanComp, GdbLoadError> {
         Ok(GlycanComp::from_tree(GlycanTree::parse(s)?))
     }
@@ -152,8 +149,6 @@ impl GlycanComp {
         }
     }
 
-    /// Y-ion retained masses (single-glycosidic-bond-cleavage fragments), ascending.
-    /// See [`GlycanTree::y_ion_retained_masses`].
     pub fn y_ion_retained_masses(&self) -> Vec<f64> {
         self.tree.y_ion_retained_masses()
     }
@@ -387,7 +382,6 @@ fn single_cleavage_y_masses(node: &GlycanTree, total: f64, out: &mut Vec<f64>) {
     }
 }
 
-/// Map a residue symbol to its index in the count tally `[H, N, F, A, G]`.
 #[inline]
 fn symbol_index(sym: u8) -> Option<usize> {
     match sym {
@@ -541,8 +535,6 @@ pub fn load_glycan_gdb(content: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
                 trees,
             });
         }
-        // Dedup by topology (the tree), not by composition — same-composition
-        // isomers are distinct glycans.
         if seen.insert(comp.tree.clone()) {
             out.push(comp);
         }
@@ -730,7 +722,6 @@ fn wurcs_to_tree(wurcs: &str, line: usize) -> Result<GlycanTree, GdbLoadError> {
             reason: "missing '/' before the linkage block",
         })?;
 
-    // Residue codes -> symbols.
     let residues: Vec<u8> = residue_block
         .split("][")
         .map(|code| {
@@ -1016,7 +1007,6 @@ mod tests {
                 "{err:?}"
             );
         }
-        // The count also holds across branches.
         let split = format!("(N(N{})(N{}))", "(H)".repeat(128), "(H)".repeat(128));
         assert!(GlycanTree::parse(&split).is_err());
     }
@@ -1050,7 +1040,6 @@ mod tests {
 
     #[test]
     fn core_and_antenna_fucose_coexist() {
-        // A core-Fuc AND an antenna-Fuc on the same glycan.
         let g = load_one("(N(F)(N(H(H)(H(N(F))))))");
         assert_eq!((g.hexnac, g.hex, g.fuc, g.core_fuc), (3, 3, 2, 1));
     }
@@ -1390,7 +1379,6 @@ G39631KX,999.0,HexNAc(1)Fuc(1),\"WURCS=2.0/2,2,1/[a2122h-1x_1-5_2*NCC/3=O][a1221
 ";
         let list = load_glycan_wurcs_csv(csv).unwrap();
         assert_eq!(list.len(), 2);
-        // Sorted by mass ascending: HexNAc before HexNAc+Fuc.
         assert_eq!((list[0].hexnac, list[0].fuc), (1, 0));
         assert_eq!((list[1].hexnac, list[1].fuc), (1, 1));
         assert!((list[0].mass - HEXNAC).abs() < 1e-6);

@@ -736,7 +736,6 @@ mod tests {
 
     #[test]
     fn extraction_takes_most_intense_peak_in_window() {
-        // 126 has two peaks inside 20 ppm; 127N none; 127C exactly on target.
         let peaks = vec![
             (126.1270, 50.0f32),
             (126.1278, 900.0),
@@ -865,8 +864,6 @@ mod tests {
         assert_eq!(p.affected(idx("127C"), 6), Some(idx("129N")));
         assert_eq!(p.affected(idx("127C"), 2), Some(idx("126")));
         assert_eq!(p.affected(idx("127C"), 3), None);
-        // 128N: −N15 → 127C, −N15−C13 → 126 … wait: 128N = 13C+15N; −N15 → 127C,
-        // −N15−C13 → 126.
         assert_eq!(p.affected(idx("128N"), 3), Some(idx("127C")));
         assert_eq!(p.affected(idx("128N"), 1), Some(idx("126")));
     }
@@ -882,7 +879,6 @@ mod tests {
         assert!((m.get(1, 0) - 0.05).abs() < 1e-12);
         assert!((m.get(5, 5) - 1.0).abs() < 1e-12);
         let truth = [1000.0f32, 2000.0, 500.0, 0.0, 100.0, 300.0];
-        // observed = M · truth
         let observed: Vec<f32> = (0..6)
             .map(|t| (0..6).map(|s| m.get(t, s) as f32 * truth[s]).sum())
             .collect();

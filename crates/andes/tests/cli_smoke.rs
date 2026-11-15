@@ -14,7 +14,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Build a base Command with the mandatory arguments that every test requires.
 fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.arg("--spectrum")
@@ -25,8 +24,6 @@ fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
         .arg(pin);
     cmd
 }
-
-// ── BSA / MGF end-to-end test (original smoke test) ─────────────────────────
 
 #[test]
 fn cli_runs_end_to_end_on_bsa_test_mgf() {
@@ -50,7 +47,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     assert!(pin_path.exists(), "PIN output not written");
     assert!(tsv_path.exists(), "TSV output not written");
 
-    // Validate PIN header and content.
     let pin_content = std::fs::read_to_string(&pin_path).unwrap();
     assert!(
         pin_content.lines().count() > 1,
@@ -74,7 +70,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
          in the Proteins column (got PROT_N placeholder instead?)"
     );
 
-    // Validate TSV header and content.
     let tsv_content = std::fs::read_to_string(&tsv_path).unwrap();
     assert!(
         tsv_content.lines().count() > 1,
@@ -86,7 +81,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         "unexpected TSV header: {tsv_header}"
     );
 
-    // Assert TSV also has a real BSA accession.
     let tsv_has_bsa_accession = tsv_content
         .lines()
         .skip(1)
@@ -98,7 +92,7 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     );
 }
 
-/// `--fdr` is a threshold, not a switch: andes does not compute FDR unless asked
+/// `--psm-fdr` is a threshold, not a switch: andes does not compute FDR unless asked
 /// with `--rescore` / `--rescore-native`. That is deliberate, but for a long time
 /// the help text claimed the opposite and nothing was printed, so a user asking
 /// for 1% FDR got an ordinary search and no filtered output with no indication
@@ -113,16 +107,16 @@ fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--fdr")
+    .arg("--psm-fdr")
     .arg("0.01")
     .output()
     .expect("run andes");
 
-    assert!(out.status.success(), "--fdr alone should still exit 0");
+    assert!(out.status.success(), "--psm-fdr alone should still exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--fdr") && stderr.contains("--rescore"),
-        "expected a warning naming --fdr and --rescore; stderr was:\n{stderr}"
+        stderr.contains("--psm-fdr") && stderr.contains("--rescore"),
+        "expected a warning naming --psm-fdr and --rescore; stderr was:\n{stderr}"
     );
     let stray: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read tempdir")
@@ -135,8 +129,6 @@ fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
         "no filtered q-value TSV should be written without a rescorer, found: {stray:?}"
     );
 }
-
-// ── New flag smoke tests: verify the flags parse and the binary exits 0 ──────
 
 #[test]
 fn cli_accepts_max_missed_cleavages_flag() {
@@ -203,37 +195,27 @@ fn cli_accepts_min_length_max_length_flags() {
     );
 }
 
-// ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
-
-// ── New flag smoke tests: --mod, --fragmentation, --protocol ──────────────────
-
 #[test]
 fn cli_accepts_mod_fragmentation_protocol_flags() {
     // Verify the TMT-CLI flags parse and the param resolver picks up a real
     // bundled model. We use the existing BSA fixture (no actual TMT spectra)
-    // and pass a tiny TMT-style mods file — the binary should exit 0 because
+    // and pass TMT-style modification lists — the binary should exit 0 because
     // all flags are valid. (--instrument was removed: analyzer resolution is
     // metadata-detected for mzML/.raw/.d and `--fragment-tol-*` for MGF.)
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
 
     let status = base_cmd(
         "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")
@@ -248,7 +230,7 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
 
     assert!(
         status.success(),
-        "andes should exit 0 with --mods + TMT flags, got: {status}"
+        "andes should exit 0 with the TMT modification lists and flags, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should still be written");
 }
@@ -275,14 +257,6 @@ fn cli_rejects_invalid_protocol_index() {
 
 #[test]
 fn cli_runs_end_to_end_on_tiny_mzml() {
-    // tiny.pwiz.mzML is the standard fixture used by the mzML reader unit tests.
-    // It is a real mzML file with MS2 spectra.  Because there is no matched FASTA,
-    // we expect few or zero PSMs — but the binary must exit 0 and the PIN must be
-    // written (even if it contains only the header row).
-    //
-    // We use BSA.fasta as the target database: it is the only fixture available.
-    // The point of this test is NOT PSM recall but that the mzML code path runs
-    // end-to-end without a crash or panic.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("mzml_out.pin");
 
@@ -430,18 +404,6 @@ fn cli_accepts_canonical_named_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
     let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
-
     let tmp = tempfile::tempdir().expect("tmpdir");
     let pin = tmp.path().join("named.pin");
 
@@ -450,8 +412,12 @@ fn cli_accepts_canonical_named_param_values() {
         bsa_fasta.to_str().unwrap(),
         &pin,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")
@@ -474,8 +440,6 @@ fn cli_accepts_canonical_named_param_values() {
         "PIN must have a header"
     );
 }
-
-// ── MGF metadata-less model-selection routing tests ──────────────────────────
 
 #[test]
 fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
@@ -530,8 +494,6 @@ fn mgf_fragment_tol_ppm_selects_high_res_model() {
     );
     assert!(err.to_lowercase().contains("qexactive"), "stderr: {err}");
 }
-
-// ── Fragment-tolerance CLI flag tests ─────────────────────────────────────────
 
 #[test]
 fn fragment_tol_flags_are_mutually_exclusive() {

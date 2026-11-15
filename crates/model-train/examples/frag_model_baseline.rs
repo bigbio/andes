@@ -252,7 +252,6 @@ fn main() {
             n_skip += 1;
             continue;
         };
-        // Observed b/y by max peak within tolerance; predicted from the GBDT.
         let ions = predict_by_ions(&pep, 1..=2);
         let pred = predict_frag_intensities(&frag, &pep, z);
         let (mut p, mut o) = (Vec::new(), Vec::new());

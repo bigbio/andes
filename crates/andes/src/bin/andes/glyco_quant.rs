@@ -196,9 +196,6 @@ impl Target {
             charge: self.charge,
             anchor_rt: self.anchor_rt,
             envelope: self.envelope.clone(),
-            // 1: `FeatureQuant::area` stays the summed traced isotopes, as
-            // before the whole-pattern scaling of the peptide path; the
-            // reported `Area` is computed here from the monoisotopic trace.
             isotope_share: 1.0,
         }
     }
@@ -221,7 +218,8 @@ struct FeatureRow {
 /// Settings resolved from the `--lfq*` flags (the glyco path reuses them).
 struct Settings {
     params: LfqParams,
-    feature_fdr: f64,
+    /// `--quant-transfer-fdr` of the glycopeptide transfers.
+    transfer_fdr: f64,
     core: GlycanCore,
     debug: bool,
     /// `--glyco --mbr`: transfer accepted glycopeptides into runs that did not
@@ -241,7 +239,7 @@ impl Settings {
                 min_cosine: cli.lfq_min_cosine as f32,
                 ..LfqParams::default()
             },
-            feature_fdr: cli.lfq_feature_fdr,
+            transfer_fdr: cli.coarse_transfer_fdr(),
             core: cli.glyco_core.into(),
             debug: cli.debug_glyco,
             mbr: cli.mbr,
@@ -263,14 +261,14 @@ pub(crate) fn run(
     let settings = Settings::from_cli(cli);
     eprintln!(
         "Quantification: intact glycopeptides from MS1 (tol {}, rt window ±{} s, {MIN_ISOTOPES}-\
-         {MAX_ISOTOPES} isotopes, min cosine {}, feature FDR {}, monoisotopic intensity)",
+         {MAX_ISOTOPES} isotopes, min cosine {}, transfer FDR {}, monoisotopic intensity)",
         match settings.params.tol {
             Tolerance::Ppm(v) => format!("{v} ppm"),
             Tolerance::Da(v) => format!("{v} Da"),
         },
         settings.params.rt_window_s,
         settings.params.min_cosine,
-        settings.feature_fdr
+        settings.transfer_fdr
     );
     let targets = build_targets(spectra, results, candidates, index, runs, &settings);
     if targets.is_empty() {
@@ -352,7 +350,7 @@ pub(crate) fn run(
         count_evidence(Evidence::Identified) + count_evidence(Evidence::Transferred),
         count_evidence(Evidence::Identified),
         count_evidence(Evidence::Transferred),
-        settings.feature_fdr,
+        settings.transfer_fdr,
         kept.glycopeptides,
         kept.sites,
         runs.len()
@@ -885,11 +883,9 @@ fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
     }
     match row.target.evidence {
         Evidence::Identified => row.score.is_some(),
-        Evidence::Transferred => row.q.is_some_and(|q| q <= settings.feature_fdr),
+        Evidence::Transferred => row.q.is_some_and(|q| q <= settings.transfer_fdr),
     }
 }
-
-// ── Match-between-runs ──────────────────────────────────────────────────────
 
 /// Fewest shared glycopeptides (same peptide, composition and charge,
 /// quantified in a run and in the reference run) that make a cross-run RT map.
@@ -1124,7 +1120,6 @@ impl Alignment {
             }
         }
 
-        // RT maps to the reference run.
         let mut maps: Vec<Option<RtMap>> = vec![None; run_names.len()];
         maps[0] = Some(RtMap::identity());
         for (r, map) in maps.iter_mut().enumerate().skip(1) {
@@ -1311,7 +1306,6 @@ fn dump_match_training(
         if alignment.maps[d].is_none() || alignment.donor[d].is_empty() {
             continue;
         }
-        // The donor run's references for every glycopeptide it accepted.
         let ms1_d = runs[d]
             .load()
             .map_err(|e| format!("--glyco-mbr-match-train: {e}"))?;
@@ -1349,7 +1343,6 @@ fn dump_match_training(
             if t_run == d || alignment.maps[t_run].is_none() {
                 continue;
             }
-            // This run's own accepted feature for a key, when it has one.
             let mut truth: HashMap<&GlycoKey, usize> = HashMap::new();
             for (key, &j) in &alignment.donor[t_run] {
                 truth.insert(key, j);
@@ -1604,7 +1597,6 @@ fn write_rollup_tables(
         }
     }
 
-    // Glycopeptide rows: sum over charge states.
     struct Glyco {
         area: f64,
         best_cosine: f32,
@@ -1791,7 +1783,6 @@ fn write_rollup_tables(
     out.flush()
         .map_err(|e| format!("{}: {e}", matrix_path.display()))?;
 
-    // Protein rows: the summed glycopeptide area and Top3.
     let mut per_protein: HashMap<(String, String), Vec<f64>> = HashMap::new();
     for ((run, _, _), g) in &glyco_rows {
         for acc in g.proteins.split(';').filter(|s| !s.is_empty()) {
@@ -1940,11 +1931,8 @@ mod tests {
         let full = Formula::averagine(3000.0).envelope(ENVELOPE_ISOTOPES);
         let mono = extracted_envelope(&full, 0);
         let m2 = extracted_envelope(&full, 2);
-        // The M+2 extraction starts at the theoretical M+2 share, so its
-        // first element is larger relative to the rest than the M+0 window's.
         assert!(m2[0] > mono[0], "{mono:?} {m2:?}");
         assert!((m2.iter().sum::<f64>() - 1.0).abs() < 1e-9);
-        // And the M+2 window keeps the isotope count bounded.
         assert!(m2.len() <= MAX_ISOTOPES && m2.len() >= MIN_ISOTOPES);
     }
 
@@ -1985,7 +1973,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             params: LfqParams::default(),
-            feature_fdr: 0.05,
+            transfer_fdr: 0.05,
             core: GlycanCore::NGlycan,
             debug: false,
             mbr: false,
@@ -2063,7 +2051,6 @@ mod tests {
         // whole envelope (height · sigma · √(2π), envelope normalised to 1).
         let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
         assert!((f.area / expected - 1.0).abs() < 0.03, "{f:?}");
-        // The shifted decoy twin finds nothing in this clean run.
         assert!(m.decoy.is_none(), "{:?}", m.decoy);
     }
 
@@ -2292,8 +2279,6 @@ mod tests {
         assert!((p[1][4].parse::<f64>().unwrap() - 47.0).abs() < 1e-6);
     }
 
-    // ── Match-between-runs ─────────────────────────────────────────────────
-
     #[test]
     fn the_rt_map_recovers_a_linear_shift() {
         // rt_ref = 4 + 1.1 · rt_run, exactly.
@@ -2309,7 +2294,6 @@ mod tests {
             let want = 4.0 + 1.1 * x;
             assert!((map.forward(x) - want).abs() < 1e-6, "{x}: {map:?}");
         }
-        // The inverse prediction round-trips.
         let rt_ref = map.forward(123.0);
         assert!((map.inverse(rt_ref).unwrap() - 123.0).abs() < 1e-6);
     }
@@ -2401,7 +2385,6 @@ mod tests {
             // run 2 is 0.8x the reference scale plus 50 s.
             rows.push(identified_row(k, 1, "r2", 0.8 * rt + 50.0, 0.01, 10.0));
         }
-        // Identified only in run 1: the one transfer.
         rows.push(identified_row(n, 0, "r1", 500.0, 0.01, 20.0));
         // Identified in run 2 but its feature failed the cosine gate (score
         // None): not an anchor donor and not a transfer target. The decoy q

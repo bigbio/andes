@@ -31,7 +31,6 @@ fn stderr_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// The BSA fixture followed by its reversed sequence under `decoy_accession`.
 fn bsa_with_reversed_copy(dir: &Path, decoy_accession: &str) -> PathBuf {
     let text = std::fs::read_to_string(fixture("test-fixtures/BSA.fasta")).expect("read BSA");
     let sequence: String = text.lines().skip(1).map(str::trim).collect();

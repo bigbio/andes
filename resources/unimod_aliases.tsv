@@ -1,0 +1,9 @@
+# Other tools' names for UNIMOD records, read by andes's modification lists
+# (--fixed-mods, --variable-mods): <alias><TAB><UNIMOD accession>. A record's
+# UNIMOD name (resources/unimod.obo) is what andes writes in its outputs.
+GlyGly	UNIMOD:121
+Deamidation	UNIMOD:7
+TMT10plex	UNIMOD:737
+TMT11plex	UNIMOD:737
+TMT16plex	UNIMOD:2016
+TMT18plex	UNIMOD:2016

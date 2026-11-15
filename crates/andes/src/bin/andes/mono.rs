@@ -44,14 +44,10 @@ pub(crate) fn coupled_isotope_window(
     }
 }
 
-/// Running tally of what the correction did, for the end-of-stream log line.
 #[derive(Debug, Default)]
 pub(crate) struct MonoStats {
-    /// MS2 spectra seen while the correction was active.
     pub seen: usize,
-    /// MS2 with a linked MS1 and a known charge (fit attempted).
     pub fitted: usize,
-    /// Applied shifts, indexed by shift (0 = left as recorded).
     pub by_shift: Vec<usize>,
 }
 
@@ -61,7 +57,6 @@ impl MonoStats {
     }
 }
 
-/// Diagnostic TSV writer (`--precursor-mono-dump`): one row per MS2.
 pub(crate) struct MonoDump {
     w: BufWriter<File>,
 }
@@ -116,10 +111,6 @@ impl MonoDump {
     }
 }
 
-/// Correct the precursors of one streamed chunk in place, appending one
-/// `Option<MonoCorrection>` per spectrum to `table` (so `table` stays aligned
-/// with the driver's `all_spectra`). A spectrum with no linked MS1 or no
-/// charge gets `None` and is left untouched.
 pub(crate) fn correct_chunk(
     chunk: &mut [Spectrum],
     link: &Ms1Link,
@@ -184,7 +175,6 @@ mod tests {
             coupled_isotope_window(true, Some((-1, 3)), -1..=3),
             (-1..=3, false)
         );
-        // Already 0..=1: nothing to report.
         assert_eq!(coupled_isotope_window(true, None, 0..=1), (0..=1, false));
     }
     use model::isotope::glycopeptide_isotope_envelope;

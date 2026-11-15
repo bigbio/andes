@@ -15,8 +15,6 @@ use output::{
     PercolatorBackend, DEFAULT_PERCOLATOR_IMAGE,
 };
 
-/// Resolve a backend for the test, honoring `$ANDES_TEST_PERCOLATOR_BIN` first.
-/// Returns `None` (→ skip) when nothing is available.
 fn test_backend() -> Option<PercolatorBackend> {
     if let Some(bin) = std::env::var_os("ANDES_TEST_PERCOLATOR_BIN") {
         let p = PathBuf::from(bin);
@@ -24,7 +22,6 @@ fn test_backend() -> Option<PercolatorBackend> {
             return Some(PercolatorBackend::Binary(p));
         }
     }
-    // PATH, then docker fallback (resolve_backend handles both).
     resolve_backend(None, false, DEFAULT_PERCOLATOR_IMAGE).ok()
 }
 
@@ -32,9 +29,7 @@ fn test_backend() -> Option<PercolatorBackend> {
 /// few low-scoring decoys, with the andes column layout Percolator expects.
 fn write_synthetic_pin(path: &std::path::Path) {
     let mut w = std::fs::File::create(path).unwrap();
-    // Minimal Percolator-valid PIN: SpecId, Label, ScanNr, <features...>, Peptide, Proteins.
     writeln!(w, "SpecId\tLabel\tScanNr\tRawScore\tdm\tPeptide\tProteins").unwrap();
-    // Targets — high score, small mass error.
     for i in 0..30 {
         writeln!(
             w,
@@ -43,7 +38,6 @@ fn write_synthetic_pin(path: &std::path::Path) {
         )
         .unwrap();
     }
-    // Decoys — low score, larger mass error.
     for i in 0..30 {
         writeln!(
             w,
@@ -84,7 +78,6 @@ fn percolator_end_to_end_or_skip() {
         !map.is_empty(),
         "expected at least one target PSM from Percolator"
     );
-    // PSMIds must round-trip (every key starts with our target prefix and parses).
     for (id, psm) in &map {
         assert_eq!(*id, psm.psm_id, "map key must equal the parsed PSMId");
         assert!(
@@ -93,7 +86,6 @@ fn percolator_end_to_end_or_skip() {
         );
         assert!(psm.pep.is_finite(), "PEP should parse to a finite number");
     }
-    // At least one of our injected targets should survive.
     assert!(
         map.keys().any(|k| k.starts_with("tt_")),
         "expected a target PSM (tt_*) in the results"
@@ -120,7 +112,6 @@ fn write_pooled_pin(path: &std::path::Path, with_file_name: bool) {
             String::new()
         };
         for i in 0..60 {
-            // Same scan and mass in both runs; the score differs slightly.
             writeln!(
                 w,
                 "{run}/t_{i}_1\t1\t{i}\t{mass}{file}\t{score}\t0.001\tR.PEPTIDEK.A\tsp|T{i}",
@@ -227,7 +218,6 @@ fn write_top_decoy_pin(path: &std::path::Path) {
     }
     for i in 0..3000 {
         let (f1, f2, f3) = (gauss(), gauss(), gauss());
-        // Decoy 0 is the outlier.
         let boost = if i == 0 { 12.0 } else { 0.0 };
         writeln!(
             w,
@@ -537,7 +527,6 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     write_five_run_pin(&pin);
     let backend = PercolatorBackend::Binary(write_stand_in(tmp.path()));
     let (targets, decoys) = run_percolator_with_decoys(&backend, &pin, &[]).unwrap();
-    // Percolator's per-run q-values.
     assert_eq!(targets["a1"].q_value, 0.002);
     assert_eq!(targets["a2"].q_value, 0.002);
     assert_eq!(targets["b2"].q_value, 0.5);
@@ -555,7 +544,6 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     // A run whose pass fails keeps the pooled q-value.
     assert_eq!(targets["d1"].q_value, 0.001);
     assert_eq!(targets["d1"].pooled_q_value, None);
-    // The pooled q-value and PEP stay.
     assert_eq!(targets["a1"].pooled_q_value, Some(0.001));
     assert_eq!(targets["lost1"].pooled_q_value, Some(0.001));
     assert_eq!(targets["b1"].pep, 0.01);

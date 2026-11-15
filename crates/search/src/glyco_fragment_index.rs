@@ -94,11 +94,6 @@ impl FragmentIndex {
         }
     }
 
-    /// [`Self::build`] with a RELATIVE (ppm) acceptance window per ion. This is
-    /// the retrieval-tolerance decoupling the roadmap's Stage S1A asks for: the
-    /// fixed-Da `tol` the engine passes here is the rank-scoring model's window
-    /// (0.5 Da for the low-res models), which on high-resolution data admits b/y
-    /// matches ~50x wider than the 20 ppm every glycan-side matcher uses.
     /// `tol_ppm <= 0` falls back to [`Self::build`].
     pub fn build_ppm<'a>(
         entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
@@ -153,23 +148,6 @@ impl FragmentIndex {
     /// NOR one peak sitting on a cross-charge m/z coincidence can inflate the
     /// count: the reported count never exceeds `min(#distinct ions, #peaks)`.
     pub fn query(&self, peaks: &[(f64, f32)], min_matches: u32) -> Vec<(u32, u32)> {
-        // Greedy 1:1 peak↔ion matching per candidate. Two dedup directions must
-        // both hold or the count inflates:
-        //   (a) several peaks near ONE theoretical ion  → count it once
-        //   (b) ONE peak near SEVERAL theoretical ions  → count it once
-        // Direction (b) is why multi-charge indexing needs the peak-side guard:
-        // a b_i⁺ and a y_j²⁺ of the SAME peptide can fall within tol of a single
-        // observed peak, and counting both would let a peptide pass `min_matches`
-        // on fewer real peaks than the threshold (an FDR-relevant inflation).
-        //
-        // `used_ion` enforces (a): a theoretical ion (keyed by candidate+ion_id)
-        // is consumed once. `matched_this_peak` enforces (b): within one peak's
-        // scan, a candidate accepts at most one of its ions. It is cleared (not
-        // reallocated) per peak, so the profiled per-candidate-HashSet alloc the
-        // old single-charge path removed does not return.
-        // (A `(u32, i64)` key — not a packed `u64` — keeps the ion id lossless for
-        // any accepted params: `--max-length` is uncapped and mod deltas reach
-        // ±5000 Da, so `ion_id = round(mz·1000)` is not guaranteed to fit in 32 bits.)
         let mut used_ion: FxHashSet<(u32, i64)> = FxHashSet::default();
         let mut matched_this_peak: FxHashSet<u32> = FxHashSet::default();
         let mut count: FxHashMap<u32, u32> = FxHashMap::default();
@@ -227,16 +205,12 @@ mod tests {
             idx.neighbourhood(theo) > 1,
             "must need more than one bin per side here"
         );
-        // +18 ppm: inside the window, but several bins away at this bin width.
         let peaks = vec![(theo * (1.0 + 18e-6), 100.0f32)];
         assert_eq!(idx.query(&peaks, 1), vec![(0, 1)]);
-        // and still rejects +30 ppm
         let far = vec![(theo * (1.0 + 30e-6), 100.0f32)];
         assert!(idx.query(&far, 1).is_empty());
     }
 
-    /// Stage S1A: a ppm index rejects a peak the 0.5 Da index accepts, and still
-    /// accepts a peak inside its own window, for the same peptide.
     #[test]
     fn ppm_window_is_per_ion_and_much_narrower_than_the_da_window() {
         let aa = aa();
@@ -261,7 +235,6 @@ mod tests {
             vec![(0, 1)],
             "20 ppm index must accept +10 ppm"
         );
-        // Floor: a light fragment at +4 mDa is inside the 5 mDa floor.
         let light = ions.iter().map(|i| i.mz).fold(f64::MAX, f64::min);
         let near_light = vec![(light + 0.004, 100.0f32)];
         assert_eq!(
@@ -269,7 +242,6 @@ mod tests {
             vec![(0, 1)],
             "floor must admit +4 mDa on a light ion"
         );
-        // tol_ppm <= 0 degrades to the Da index.
         let zero = FragmentIndex::build_ppm([(0u32, &pep)], 0.0, 1);
         assert_eq!(zero.query(&off_by_0_3, 1), vec![(0, 1)]);
     }
@@ -313,7 +285,6 @@ mod tests {
         assert!(a > b, "pep_a ({a}) must outscore the unrelated pep_b ({b})");
     }
 
-    /// Codex re-review #2: match counts must be tolerance-checked DISTINCT ions.
     /// A peak in the bin neighbourhood but OUTSIDE the fragment tolerance must
     /// not count, and several peaks clustered around ONE theoretical ion must
     /// count that ion only once.

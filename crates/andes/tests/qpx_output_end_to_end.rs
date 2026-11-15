@@ -30,7 +30,6 @@ fn search_writes_qpx_idparquet_bundle() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // ── Run a default search asking for the QPX bundle ───────────────────────
     let status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
         .arg(&bsa_mgf)
@@ -44,7 +43,6 @@ fn search_writes_qpx_idparquet_bundle() {
         .expect("run andes search");
     assert!(status.success(), "search should exit 0, got: {status}");
 
-    // ── The bundle directory + its three members must exist ──────────────────
     assert!(qpx_dir.is_dir(), "QPX bundle dir should be created");
     let psms_path = qpx_dir.join("psms.parquet");
     let sp_path = qpx_dir.join("search_params.parquet");
@@ -53,12 +51,10 @@ fn search_writes_qpx_idparquet_bundle() {
     assert!(sp_path.exists(), "search_params.parquet should be written");
     assert!(prot_path.exists(), "proteins.parquet should be written");
 
-    // ── Open psms.parquet and assert schema column names + Arrow types ───────
     let file = std::fs::File::open(&psms_path).expect("open psms.parquet");
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("parquet reader builder");
     let schema = builder.schema().clone();
 
-    // QPX schema metadata must be present on the file.
     let md = schema.metadata();
     assert_eq!(md.get("qpx_version").map(String::as_str), Some("1.0"));
     assert_eq!(md.get("creator").map(String::as_str), Some("andes"));
@@ -111,7 +107,6 @@ fn search_writes_qpx_idparquet_bundle() {
         assert_eq!(*actual, dt, "column `{name}` has wrong Arrow type");
     }
 
-    // List/struct columns: present + the top-level type is a List.
     for name in [
         "modifications",
         "additional_scores",
@@ -140,10 +135,8 @@ fn search_writes_qpx_idparquet_bundle() {
         );
     }
 
-    // Column count must equal the full QPX PSM schema (29 columns).
     assert_eq!(schema.fields().len(), 29, "psms.parquet column count");
 
-    // ── At least one data row + populated `psm_metavalues` ───────────────────
     use arrow::array::{Array, ListArray, StringArray, StructArray};
 
     let mut reader = builder.build().expect("build parquet reader");

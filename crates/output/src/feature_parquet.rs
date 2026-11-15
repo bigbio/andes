@@ -132,8 +132,6 @@ fn has_mbr(records: &[FeatureRecord]) -> bool {
     records.iter().any(|r| r.mbr.is_some())
 }
 
-// ── nested types (QPXPSMSchema / QPXFeatureSchema) ────────────────────────────
-
 pub(crate) fn score_fields() -> Fields {
     Fields::from(vec![
         Field::new("score_name", DataType::Utf8, false),
@@ -293,8 +291,6 @@ fn qpx_fields() -> Vec<Field> {
         Field::new("psm_ids", list_type(DataType::Int64), true),
     ]
 }
-
-// ── builders ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn struct_list(
     fields: Fields,
@@ -491,7 +487,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
                         .append_value(aa.to_string()),
                     None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
                 }
-                // scores: null (andes does not localize)
+                // scores: null here; site localization (`--localize ipf`) is per PSM,
+                // in psms.parquet
                 pb.field_builder::<ListBuilder<StructBuilder>>(2)
                     .unwrap()
                     .append_null();
@@ -1082,7 +1079,6 @@ mod tests {
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 33);
-        // An empty MBR table keeps the MBR columns.
         FeatureParquetWriter::new_mbr(&p).finish().unwrap();
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();

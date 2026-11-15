@@ -20,10 +20,6 @@ pub struct TreeParams {
     pub n_features: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Internal accumulator for one node's histogram over a single feature.
-// ---------------------------------------------------------------------------
-
 /// Per-bin sums of (gradient, hessian) for a single feature.
 #[derive(Clone)]
 struct BinHist {
@@ -46,24 +42,20 @@ impl BinHist {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Builder state — passed through the recursion so we can append nodes and
-// back-patch child indices.
-// ---------------------------------------------------------------------------
-
 struct Builder<'a> {
     params: &'a TreeParams,
     binned: &'a [u8], // row-major [row * n_features + feat]
     grad: &'a [f32],
     hess: &'a [f32],
     bin_uppers: &'a [Vec<f32>],
-    // Growing SoA vecs — will be moved into the final Tree.
     feature: Vec<i32>,
     threshold: Vec<f32>,
     left: Vec<i32>,
     right: Vec<i32>,
     value: Vec<f32>,
     default_left: Vec<u8>,
+    /// The leaf node that each training row reaches (index into the SoA vecs).
+    leaf_of: Vec<u32>,
 }
 
 impl<'a> Builder<'a> {
@@ -87,10 +79,10 @@ impl<'a> Builder<'a> {
             right: Vec::with_capacity(capacity),
             value: Vec::with_capacity(capacity),
             default_left: Vec::with_capacity(capacity),
+            leaf_of: vec![0; grad.len()],
         }
     }
 
-    /// Append a placeholder node and return its index.
     fn reserve_node(&mut self) -> usize {
         let idx = self.feature.len();
         self.feature.push(0);
@@ -102,7 +94,6 @@ impl<'a> Builder<'a> {
         idx
     }
 
-    /// Write a leaf into the slot at `idx`.
     fn write_leaf(&mut self, idx: usize, weight: f32) {
         self.feature[idx] = -1;
         self.threshold[idx] = 0.0;
@@ -112,7 +103,12 @@ impl<'a> Builder<'a> {
         self.default_left[idx] = 1;
     }
 
-    /// Write an internal split node into the slot at `idx`.
+    fn mark_leaf(&mut self, rows: &[usize], idx: usize) {
+        for &r in rows {
+            self.leaf_of[r] = idx as u32;
+        }
+    }
+
     fn write_internal(
         &mut self,
         idx: usize,
@@ -129,17 +125,12 @@ impl<'a> Builder<'a> {
         self.default_left[idx] = 1;
     }
 
-    // -----------------------------------------------------------------------
-    // Build a node recursively (pre-order: current node first, then children).
-    // Returns the index of the node appended.
-    // -----------------------------------------------------------------------
     fn build(&mut self, rows: &[usize], depth: u32) -> usize {
         let nf = self.params.n_features;
         let nb = self.params.n_bins;
         let lambda = self.params.lambda;
         let min_h = self.params.min_hessian;
 
-        // Compute totals for this node.
         let g_total: f32 = rows.iter().map(|&r| self.grad[r]).sum();
         let h_total: f32 = rows.iter().map(|&r| self.hess[r]).sum();
         let leaf_weight = -g_total / (h_total + lambda);
@@ -147,13 +138,12 @@ impl<'a> Builder<'a> {
         // Reserve the slot now so this node's index is lower than its children.
         let node_idx = self.reserve_node();
 
-        // Check stopping conditions.
         if depth >= self.params.max_depth || rows.len() < 2 {
             self.write_leaf(node_idx, leaf_weight);
+            self.mark_leaf(rows, node_idx);
             return node_idx;
         }
 
-        // Build per-feature histograms.
         let mut hists: Vec<BinHist> = (0..nf).map(|_| BinHist::new(nb)).collect();
         for &r in rows {
             let g = self.grad[r];
@@ -196,11 +186,10 @@ impl<'a> Builder<'a> {
 
         match best_feat {
             None => {
-                // No positive-gain split found — emit a leaf.
                 self.write_leaf(node_idx, leaf_weight);
+                self.mark_leaf(rows, node_idx);
             }
             Some(feat) => {
-                // Partition rows: left ≤ best_bin, right > best_bin.
                 let (left_rows, right_rows): (Vec<usize>, Vec<usize>) = rows
                     .iter()
                     .partition(|&&r| (self.binned[r * nf + feat] as usize) <= best_bin);
@@ -217,10 +206,6 @@ impl<'a> Builder<'a> {
         node_idx
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Fit one regression tree to the given per-row gradients/hessians using
 /// pre-binned features.
@@ -241,6 +226,24 @@ pub fn fit_tree(
     params: &TreeParams,
     bin_uppers: &[Vec<f32>],
 ) -> Tree {
+    fit_tree_with_leaves(binned, grad, hess, params, bin_uppers).0
+}
+
+/// [`fit_tree`], plus the leaf node index that each training row reaches.
+///
+/// A row's leaf is the one `Tree::eval` reaches on that row's continuous
+/// features: a split stores `threshold = bin_uppers[feat][bin]` and routes
+/// `x <= threshold` left, which is exactly `bin_of(x) <= bin` (a NaN feature
+/// bins to 0 and goes left, as `default_left = 1` sends it in `eval`). The
+/// trainer reads the training rows' increments from it instead of walking the
+/// tree again.
+pub fn fit_tree_with_leaves(
+    binned: &[u8],
+    grad: &[f32],
+    hess: &[f32],
+    params: &TreeParams,
+    bin_uppers: &[Vec<f32>],
+) -> (Tree, Vec<u32>) {
     debug_assert_eq!(grad.len(), hess.len(), "grad/hess length mismatch");
     debug_assert_eq!(
         binned.len(),
@@ -254,24 +257,70 @@ pub fn fit_tree(
     let mut builder = Builder::new(params, binned, grad, hess, bin_uppers);
     builder.build(&all_rows, 0);
 
-    Tree {
+    let tree = Tree {
         feature: builder.feature,
         threshold: builder.threshold,
         left: builder.left,
         right: builder.right,
         value: builder.value,
         default_left: builder.default_left,
-    }
+    };
+    (tree, builder.leaf_of)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use scoring_crate::gbdt_eval::Tree;
+
+    /// The leaf the builder assigns each training row is the leaf that
+    /// `Tree::eval` reaches on that row's continuous features, values on the
+    /// bin edges and NaN included, so the trainer can read the increments
+    /// from the partition.
+    #[test]
+    fn leaves_match_eval_on_continuous_features() {
+        let (n, nf, nb) = (500usize, 3usize, 8usize);
+        let uppers: Vec<Vec<f32>> = (0..nf)
+            .map(|f| (0..nb).map(|b| b as f32 + 0.25 * f as f32).collect())
+            .collect();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let mut x = vec![0.0f32; n * nf];
+        let mut binned = vec![0u8; n * nf];
+        let mut grad = vec![0.0f32; n];
+        for r in 0..n {
+            for f in 0..nf {
+                let v = match next() % 10 {
+                    0 => f32::NAN,
+                    1 => uppers[f][(next() as usize) % nb], // exactly on an edge
+                    _ => (next() % 1000) as f32 / 100.0 - 1.0,
+                };
+                x[r * nf + f] = v;
+                let b = uppers[f].partition_point(|&u| u < v).min(nb - 1);
+                binned[r * nf + f] = b as u8;
+            }
+            grad[r] = (next() % 200) as f32 / 100.0 - 1.0;
+        }
+        let hess = vec![1.0f32; n];
+        let params = TreeParams {
+            max_depth: 4,
+            n_bins: nb,
+            lambda: 1.0,
+            min_hessian: 1.0,
+            n_features: nf,
+        };
+        let (tree, leaf_of) = fit_tree_with_leaves(&binned, &grad, &hess, &params, &uppers);
+        assert!(tree.feature.len() > 3, "the tree splits");
+        for r in 0..n {
+            let row = &x[r * nf..(r + 1) * nf];
+            let leaf = leaf_of[r] as usize;
+            assert!(tree.feature[leaf] < 0, "row {r} is assigned an internal node");
+            assert_eq!(tree.value[leaf].to_bits(), tree.eval(row).to_bits(), "row {r}");
+        }
+    }
 
     #[test]
     fn tree_splits_on_discriminative_feature() {

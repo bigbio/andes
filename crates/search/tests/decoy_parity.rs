@@ -15,7 +15,6 @@ fn fixture_path() -> PathBuf {
         .expect("canonicalize Tryp_Pig_Bov.fasta path")
 }
 
-/// The fully cleaved tryptic segments of `seq` (cut after every K and R).
 fn tryptic_segments(seq: &[u8]) -> Vec<&[u8]> {
     seq.split_inclusive(|&r| r == b'K' || r == b'R').collect()
 }

@@ -543,8 +543,8 @@ pub fn run_percolator_with_decoys(
         eprintln!("{summary}");
     }
     let out = result_paths(pin);
-    let decoys = match std::fs::read_to_string(&out.decoy) {
-        Ok(text) => parse_psm_results(&text)?.into_keys().collect(),
+    let decoys = match std::fs::File::open(&out.decoy) {
+        Ok(f) => decoy_ids(std::io::BufReader::new(f))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
         Err(e) => return Err(e.into()),
     };
@@ -561,9 +561,6 @@ pub fn run_percolator_pooled(
 ) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let out = result_paths(pin);
-    // Remove any stale outputs from a previous run BEFORE launching, so the
-    // `out.target.exists()` success check below can only pass on a file this
-    // run actually wrote (guards against reading a previous run's results).
     out.clear_stale()?;
 
     let output = match backend {
@@ -1137,7 +1134,6 @@ pub fn decoy_results_path(pin: &Path) -> PathBuf {
     result_paths(pin).decoy
 }
 
-/// Keep the last `n` lines of `s`.
 fn tail_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(n);
@@ -1199,20 +1195,17 @@ pub struct PsmResultRow<'a> {
     pub pep: f64,
     /// `score` column; `None` when absent, unparseable or not finite.
     pub score: Option<f64>,
-    /// `peptide` column.
     pub peptide: &'a str,
     /// `proteinIds` and every field after it.
     protein_fields: Vec<&'a str>,
 }
 
 impl PsmResultRow<'_> {
-    /// The protein fields joined by `;`.
     pub fn proteins(&self) -> String {
         self.protein_fields.join(";")
     }
 }
 
-/// Column positions of a Percolator PSM result header.
 #[derive(Debug, Clone, Copy)]
 struct ResultColumns {
     id: usize,
@@ -1283,7 +1276,6 @@ impl ResultColumns {
             .and_then(|c| fields.get(c))
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite());
-        // proteinIds is the trailing column: every field from it on.
         let protein_fields = fields.get(self.proteins..).unwrap_or(&[]).to_vec();
         Ok(PsmResultRow {
             psm_id: fields[self.id],
@@ -1295,6 +1287,22 @@ impl ResultColumns {
             protein_fields,
         })
     }
+}
+
+/// The PSM ids of a decoy result file, streamed: only the ids are kept, and
+/// each row is validated as [`parse_psm_results`] validates it (a duplicate id
+/// is an error there too).
+fn decoy_ids<R: std::io::BufRead>(reader: R) -> Result<HashSet<String>, PercolatorError> {
+    let mut rows = PsmResultReader::new(reader)?;
+    let mut ids = HashSet::new();
+    while let Some(row) = rows.next_row()? {
+        if !ids.insert(row.psm_id.to_string()) {
+            return Err(PercolatorError::DuplicatePsmId {
+                psm_id: row.psm_id.to_string(),
+            });
+        }
+    }
+    Ok(ids)
 }
 
 /// Reads a Percolator PSM result file one row at a time, so a file of any
@@ -1432,7 +1440,6 @@ mod tests {
         assert_eq!(a.q_value, 0.001);
         assert_eq!(a.pep, 0.0005);
         assert_eq!(a.peptide, "R.PEPTIDEK.A");
-        // Two trailing protein columns re-joined with ';'.
         assert_eq!(a.proteins, "sp|P1;sp|P2");
         assert_eq!(m["title_101_1"].proteins, "sp|P3");
         assert_eq!(a.score, Some(2.5));
@@ -1586,7 +1593,6 @@ mod tests {
         out.clear_stale().unwrap();
         assert!(!out.target.exists(), "stale target must be removed");
         assert!(!out.weights.exists(), "stale weights must be removed");
-        // Idempotent: clearing again when files are absent is Ok.
         out.clear_stale().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1659,8 +1665,6 @@ mod tests {
 
     #[test]
     fn resolve_explicit_existing_binary() {
-        // Any existing file is accepted as the binary (executability is checked
-        // at spawn time). Use this test's own source file as a stand-in path.
         let me = std::env::current_exe().unwrap();
         let b = resolve_backend(Some(&me), false, DEFAULT_PERCOLATOR_IMAGE).unwrap();
         assert_eq!(b, PercolatorBackend::Binary(me));
@@ -1684,7 +1688,6 @@ mod tests {
             assert!(!args.iter().any(|a| a == "-Y" && user != "-Y"));
             assert_eq!(args.iter().filter(|a| *a == user).count(), 1);
         }
-        // extra args precede the PIN (which is last).
         assert_eq!(args.last().unwrap(), "/tmp/d/x.pin");
         let fdr_pos = args.iter().position(|a| a == "--testFDR").unwrap();
         assert!(fdr_pos < args.len() - 1);
@@ -1711,7 +1714,6 @@ mod tests {
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
         assert!(args.contains(&"-Y".to_string()));
-        // result paths rewritten under /out
         assert!(args
             .iter()
             .any(|a| a == "/out/run.percolator.target.psms.txt"));

@@ -256,6 +256,17 @@
 //! every row (rows and all other fields unchanged). The E. coli row counts are
 //! unchanged and their digests moved with the two integer columns.
 //!
+//! REGENERATED 2026-11-14 (slices) when the built-in default modifications began
+//! using the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464).
+//! E. coli default-mods and precursor-cal cases: 75028 -> 75009 rows, new digest;
+//! the fixed-only and one-variable-mod cases list their mods and are unchanged.
+//! Chimeric: 1718 rows; the mass columns move on the rows with a default mod,
+//! the RT columns move on every row, and oxidised peptides print `+15.99492`.
+//! Refine: 1580 -> 1545 rows, Pass 1 unchanged (1444). Before, the default
+//! Oxidation (15.99491) and the refine tier's Oxidation (15.994915) were two
+//! modifications, so Pass 2 re-emitted 43 default-oxidation forms as refinement
+//! rows; they are one modification now (refinement rows 136 -> 101).
+//!
 //! To regenerate after an intentional change, run the case's command line (see
 //! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
 //! its header and sorted rows, gzipped, over the case's golden PIN (slices).
@@ -440,18 +451,18 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 /// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_028, 0xaf02_0460_4bdd_86cb, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_009, 0xc189_0f50_38d5_c9ea, None);
 const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0xa181_3557_efb7_ae83, None);
 const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x428b_4490_d8f0_7cbc, None);
 /// The pre-pass scores but the sample is too small to calibrate, so the PIN
 /// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
-    75_028,
-    0xaf02_0460_4bdd_86cb,
+    75_009,
+    0xc189_0f50_38d5_c9ea,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 
-fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, golden: Golden) {
+fn assert_ecoli_golden(label: &str, mods: &[&str], precursor_cal: &str, golden: Golden) {
     let dir = tempfile::tempdir().expect("tempdir");
     let pin = dir.path().join("out.pin");
     let mut args = vec![
@@ -475,9 +486,7 @@ fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, gol
         "--fragment-index",
         "off",
     ];
-    if let Some(m) = mods {
-        args.extend(["--mods", m]);
-    }
+    args.extend(mods);
     let (header, rows, stderr) = run(&args, &pin);
     let cal = calibration_outcome(&stderr);
     if precursor_cal != "off" {
@@ -505,20 +514,24 @@ fn assert_ecoli_golden(label: &str, mods: Option<&str>, precursor_cal: &str, gol
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_default_mods() {
-    assert_ecoli_golden("default mods", None, "off", ECOLI_DEFAULT_MODS);
+    assert_ecoli_golden("default mods", &[], "off", ECOLI_DEFAULT_MODS);
 }
 
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_fixed_mods_only() {
-    // NumMods=0 with a fixed Cam-C: isolates the `base_record_multiplicity`
+    // No variable mods with a fixed Cam-C: isolates the `base_record_multiplicity`
     // fixed-mod defect from any variable-mod expansion.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods = dir.path().join("mods_fixed.txt");
-    std::fs::write(&mods, "NumMods=0\n57.021464,C,fix,any,Carbamidomethyl\n").expect("write mods");
     assert_ecoli_golden(
         "fixed mods only",
-        Some(mods.to_str().unwrap()),
+        &[
+            "--fixed-mods",
+            "Carbamidomethyl (C)",
+            "--variable-mods",
+            "",
+            "--max-mods",
+            "0",
+        ],
         "off",
         ECOLI_FIXED_MODS_ONLY,
     );
@@ -527,16 +540,16 @@ fn ecoli_pin_matches_golden_with_fixed_mods_only() {
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_one_variable_mod() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods = dir.path().join("mods_var1.txt");
-    std::fs::write(
-        &mods,
-        "NumMods=1\n57.021464,C,fix,any,Carbamidomethyl\n15.994915,M,opt,any,Oxidation\n",
-    )
-    .expect("write mods");
     assert_ecoli_golden(
         "one variable mod",
-        Some(mods.to_str().unwrap()),
+        &[
+            "--fixed-mods",
+            "Carbamidomethyl (C)",
+            "--variable-mods",
+            "Oxidation (M)",
+            "--max-mods",
+            "1",
+        ],
         "off",
         ECOLI_ONE_VARIABLE_MOD,
     );
@@ -546,7 +559,7 @@ fn ecoli_pin_matches_golden_with_one_variable_mod() {
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
     // The calibration pre-pass runs on the out-of-core index.
-    assert_ecoli_golden("precursor-cal auto", None, "auto", ECOLI_PRECURSOR_CAL_AUTO);
+    assert_ecoli_golden("precursor-cal auto", &[], "auto", ECOLI_PRECURSOR_CAL_AUTO);
 }
 
 // ── --chimeric ──────────────────────────────────────────────────────────────
@@ -580,12 +593,10 @@ fn run_slice(fragment_index: &str, chimeric: bool, out: &Path) -> (String, Vec<S
     run(&args, out)
 }
 
-/// Run a `--chimeric` search; returns (header, sorted rows, stderr).
 fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
     run_slice(fragment_index, true, out)
 }
 
-/// `--chimeric` with enumeration retrieval: header + sorted rows.
 const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 
 /// Chimeric secondaries: the rows a `--chimeric` run adds over the same search
@@ -672,10 +683,9 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
 // `prepared.candidates`); Pass 2 searches an in-memory out-of-core index of the
 // anchored database. Enumeration must reproduce the golden unified PIN, and
 // fragment-index retrieval must give a well-formed one. The Astral slice searched against E. coli alone has
-// a single anchor at the default 1% gate; `--refine-select-psm-fdr 1.0` anchors
+// a single anchor at the default 1% gate; `--psm-fdr 1.0` anchors
 // every best-target peptide so Pass 2 contributes a few hundred rows.
 
-/// Run a `--refine` search; returns (header, sorted rows, stderr).
 fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
     run(
         &[
@@ -690,14 +700,13 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
             "--fragment-index",
             fragment_index,
             "--refine",
-            "--refine-select-psm-fdr",
+            "--psm-fdr",
             "1.0",
         ],
         out,
     )
 }
 
-/// `--refine` with enumeration retrieval: header + sorted rows.
 const REFINE_SLICE_PIN: &str = "test-fixtures/goldens/refine_slice.pin.gz";
 
 /// Number of rows with `IsRefinement = 1`.

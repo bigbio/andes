@@ -32,7 +32,6 @@ use model::Tolerance;
 use quant::ms1_index::Ms1RunIndex;
 use quant::xic::cosine;
 
-/// Features the model consumes, in the published order.
 pub(crate) const N_FEATURES: usize = 10;
 
 /// Candidates the model scores per (donor, target) pair (the top 10).
@@ -45,35 +44,26 @@ const GRID_S: f64 = 1.0;
 /// uniform RT grid, plus the peak bounds the quantification found in it.
 #[derive(Debug, Clone)]
 pub(crate) struct Reference {
-    /// Isotope m/z of row 0 (the observed monoisotope).
     mono_mz: f64,
     charge: f64,
     n_iso: usize,
-    /// Isotope traces over the extraction window, row 0 = monoisotope.
     window: Vec<Vec<f32>>,
-    /// Peak bounds as `[start, stop)` grid indices.
     peak: (usize, usize),
-    /// Per-isotope summed intensity over the peak window.
     peak_sums: Vec<f64>,
-    /// Width of the extraction window, seconds.
     width_s: f64,
-    /// Donor anchor RT minus the window start, seconds.
     anchor_offset_s: f64,
 }
 
 /// The window chosen in the target run, with its match score.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Match {
-    /// RT of the chosen peak window's start, seconds.
     pub(crate) start_rt: f64,
-    /// RT of the chosen peak window's end, seconds.
     pub(crate) stop_rt: f64,
     /// Half-window for the re-extraction, seconds (`quantify` searches
     /// around the window centre).
     pub(crate) window_s: f64,
     /// The match score `0.85 · p + 0.15 · cosine`.
     pub(crate) score: f32,
-    /// The ten model features of the chosen candidate.
     pub(crate) features: [f64; N_FEATURES],
 }
 
@@ -160,11 +150,8 @@ pub(crate) fn best_match(
 /// Every candidate's features, in RT order. Only the top [`TOP_CANDIDATES`]
 /// reach the model, but the training dump needs them all for labelling.
 pub(crate) struct CandidateSet {
-    /// Candidate window starts, RT order.
     pub(crate) start_rt: Vec<f64>,
-    /// Candidate peak-window stop, RT order.
     pub(crate) stop_rt: Vec<f64>,
-    /// The ten features of each candidate, RT order.
     pub(crate) features: Vec<[f64; N_FEATURES]>,
     /// The peak-window half-width used for re-extraction, seconds.
     pub(crate) window_s: f64,
@@ -172,7 +159,6 @@ pub(crate) struct CandidateSet {
     peak_pts: usize,
 }
 
-/// Enumerate and score every candidate window shift.
 pub(crate) fn score_candidates(
     ms1: &Ms1RunIndex,
     reference: &Reference,
@@ -341,13 +327,10 @@ pub(crate) fn scored_top(candidates: &CandidateSet) -> Vec<Match> {
     out
 }
 
-/// The screening score: the small-window cosine plus the
-/// extraction-window cosine.
 fn screen(f: &[f64; N_FEATURES]) -> f64 {
     f[0] + f[9]
 }
 
-/// Cosine of one isotope trace against the reference's same trace.
 fn trace_cosine(sam: &[Vec<f64>], k: usize, reference: &[Vec<f32>], p0: usize, p1: usize) -> f64 {
     match (sam.get(k), reference.get(k)) {
         (Some(s), Some(r)) => {
@@ -400,7 +383,6 @@ fn resample(rt: &[f64], y: &[f32], grid: &[f64]) -> Vec<f32> {
     out
 }
 
-/// The shipped match weights (10 → 64 → 32 → 8 → 2, BatchNorm + ReLU).
 pub(crate) struct Model {
     dims: usize,
     fc1: Vec<f64>,

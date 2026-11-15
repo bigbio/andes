@@ -71,7 +71,6 @@ pub struct RankScorer {
     acquisition_high_res: Option<bool>,
 }
 
-/// Documented smoothing floor for the rank-LLR computation (finding 3.2).
 ///
 /// The trained estimator already floors every frequency to a small positive
 /// value (see `model-train`'s `estimate`), so for every bundled / well-formed
@@ -104,8 +103,6 @@ fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
         FREQ_FLOOR
     };
     let llr = (num / den).ln();
-    // For any valid model the floor is never hit, so this assert documents the
-    // invariant (finite LLRs) without affecting release behavior.
     debug_assert!(
         llr.is_finite(),
         "rank LLR must be finite (ion={ion_freq}, noise={noise_freq}, norm={norm})"
@@ -247,13 +244,10 @@ impl RankScorer {
         !self.partition_loss_ion_logs.is_empty()
     }
 
-    /// Maximum rank used for clamping. Exposed so callers can apply
-    /// rank-clamp / missing-ion semantics without going through `node_score`.
     pub fn max_rank(&self) -> u32 {
         self.max_rank
     }
 
-    /// Return the `Param` this scorer was built from.
     pub fn param(&self) -> &Param {
         &self.param
     }
@@ -443,11 +437,6 @@ impl RankScorer {
         if index >= table.len() {
             return 0.0;
         }
-        // Out-of-domain `prob_peak` (NaN, or outside [0,1]) makes the noise
-        // baseline non-positive / non-finite, which previously yielded a NaN
-        // that the caller rounded to 0. Return that neutral 0 explicitly so the
-        // edge evidence is dropped deterministically instead of via float NaN
-        // semantics. Valid probabilities take the normal path below unchanged.
         if !prob_peak.is_finite() || !(0.0..=1.0).contains(&prob_peak) {
             return 0.0;
         }
@@ -528,7 +517,6 @@ mod tests {
         // tiny_param() uses QExactive → high-resolution → 20 ppm
         let hi = RankScorer::new(&tiny_param());
         assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
-        // low_res_param() uses LowRes → 0.5 Da
         let lo = RankScorer::new(&low_res_param());
         assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
     }
@@ -896,8 +884,6 @@ mod tests {
             .insert(part, vec![0.7, 0.1, 0.1, 0.1]);
         let scorer = RankScorer::new(&param);
 
-        // prob_peak > 1 (dense spectrum): previously produced NaN→round→0.
-        // Now returns an explicit, finite, bounded 0.0 — never NaN/±inf.
         for &index in &[0usize, 1, 2, 3] {
             let s = scorer.ion_existence_score(part, index, 1.5);
             assert!(

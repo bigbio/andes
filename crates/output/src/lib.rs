@@ -23,7 +23,7 @@ pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::{emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
+pub use pin::{emitted_row_candidates, emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
 
 pub mod stats;
 pub use stats::{
@@ -46,6 +46,7 @@ pub use class_fdr::{apply_class_fdr, ClassCount, Cutoffs};
 pub mod isobaric_sharing;
 pub use isobaric_sharing::share_isobaric_references;
 
+pub mod ipf;
 pub mod knockoff_fdr;
 pub mod site_fdr;
 pub mod site_identity;

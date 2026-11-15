@@ -17,7 +17,6 @@ use search::search_index::SearchIndex;
 /// Format-specific fields (e.g. PIN's `exp_mass`/`dm`, TSV's `frag_method`)
 /// are computed in the per-writer code; only the intersection lives here.
 pub(crate) struct RowContext {
-    /// Raw scan number (`spec.scan.unwrap_or(0)`).
     pub scan: i32,
     /// Spectrum identifier string: `spec.title` if non-empty, else `"scan=N"`.
     pub spec_id: String,
@@ -26,9 +25,6 @@ pub(crate) struct RowContext {
 }
 
 impl RowContext {
-    /// Build a `RowContext` for one PSM. Caller passes the resolved
-    /// `Candidate` (looked up via `psm.primary_candidate_idx()`) so this layer doesn't
-    /// need its own `candidates` slice reference.
     pub(crate) fn new(spec: &Spectrum, cand: &Candidate, search_index: &SearchIndex) -> Self {
         let scan = spec.scan.unwrap_or(0);
         let spec_id = if spec.title.is_empty() {

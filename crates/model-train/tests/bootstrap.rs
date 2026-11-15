@@ -13,10 +13,6 @@ use search::SearchParams;
 
 use model_train::labeled::bootstrap_labels;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Resolve path relative to the workspace root (CARGO_MANIFEST_DIR/../../..).
 fn fixture(rel: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,7 +59,6 @@ fn bsa_aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load hcd_qexactive_tryp from the canonical Parquet store.
 fn load_hcd_scorer() -> RankScorer {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -76,7 +71,6 @@ fn load_hcd_scorer() -> RankScorer {
     RankScorer::new(&param)
 }
 
-/// Load spectra from BSA test.mgf fixture.
 fn load_bsa_spectra() -> Vec<model::Spectrum> {
     let path = fixture("test-fixtures/test.mgf.gz");
     let file = input::open_buf_maybe_gz(&path).expect("open test.mgf");
@@ -84,10 +78,6 @@ fn load_bsa_spectra() -> Vec<model::Spectrum> {
         .filter_map(|r| r.ok())
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// Basic smoke test: bootstrap_labels runs without error, returns a Vec,
 /// is deterministic, and every returned match has confidence <= train_fdr.
@@ -132,7 +122,6 @@ fn bootstrap_labels_bsa_smoke() {
             m.confidence,
             train_fdr
         );
-        // spectrum_index must be in range.
         assert!(
             m.spectrum_index < spectra.len(),
             "spectrum_index {} out of range (spectra.len()={})",
@@ -159,7 +148,6 @@ fn bootstrap_labels_bsa_smoke() {
         result2.len()
     );
 
-    // Log the count for informational purposes (not a hard failure if 0).
     eprintln!(
         "bootstrap_labels BSA @ train_fdr={}: {} confident target PSMs",
         train_fdr,

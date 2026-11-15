@@ -1,6 +1,3 @@
-//! Micro-benchmark of the shipped GBDT evaluator for the compiled-ensemble comparison
-//! (competitive plan, standard-search stop condition: "no hand-written SIMD/bitvector
-//! tree traversal before the exact compiled ensemble benchmark").
 //!
 //! Ignored by default. Run with
 //!   ANDES_GBDT_DIR=<dir from scripts/gbdt_bench/export_gbdt.py> \

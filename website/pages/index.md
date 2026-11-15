@@ -33,7 +33,7 @@ data in the same run.
 === "TMT"
 
     ```bash
-    andes --spectrum tmt_run.mzML --database human.fasta --mods tmt10_mods.txt \
+    andes --spectrum tmt_run.mzML --database human.fasta \
           --rescore --tmt tmt10 --output-parquet run.idparquet
     ```
 

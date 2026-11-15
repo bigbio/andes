@@ -36,7 +36,6 @@ use search::glyco_search::GlycoSpectrumResult;
 use glyco::glycan_db::GlycanComp;
 use glyco::rt_offset::{glyco_index, GlycanRtCoeffs};
 
-/// Seconds-per-minute conversion for `rt_seconds` → minutes.
 const SECONDS_PER_MINUTE: f64 = 60.0;
 
 /// Predicted glyco RT INDEX for one hit: backbone index (Kyte-Doolittle seed)
@@ -51,7 +50,6 @@ fn predict_glyco_index(
     let backbone = model.predict_peptide(peptide);
     match glycan {
         Some(comp) => glyco_index(backbone, comp, coeffs),
-        // No composition ⇒ empty offset; same code path serves both.
         None => backbone,
     }
 }
@@ -78,16 +76,8 @@ pub fn populate_glyco_rt_features(
 ) {
     let model = RtIndexModel::seed();
     let coeffs = GlycanRtCoeffs::default();
-    // Near-isobaric mass window for the isobaric-glycan RT margin (design
-    // a published glyco engine): compositions within this many Da of the assigned glycan but of
-    // DIFFERENT composition. Captures the exact isobars (e.g. Hex+NeuAc vs
-    // Fuc+NeuGc, both ±15.9949 Da canceling) and tight near-isobars.
     const ISOBARIC_TOL_DA: f64 = 0.05;
 
-    // ── Step 1: gather calibration anchors from rank-1 TARGET glyco hits ─────
-    // The scan's rank-1 hit is `hits[0]` (glyco_search emits per-scan hits in
-    // descending rank order). Stable order: results in slice order, then the
-    // scan's first hit. No hashing.
     let mut anchors: Vec<(f64, f64)> = Vec::new();
     for result in results.iter() {
         let spec_idx = result.spectrum_idx;
@@ -98,11 +88,6 @@ pub fn populate_glyco_rt_features(
             Some(s) if s.is_finite() => s / SECONDS_PER_MINUTE,
             _ => continue, // no / non-finite observed RT ⇒ can't anchor
         };
-        // Anchor on the highest-rank-score TARGET hit for this scan. `result.hits`
-        // is rank_score-sorted (glyco_search's deterministic ordering), so the
-        // first non-decoy is the best-ranked target — mirroring the regular path's
-        // "skip a decoy rank-1, take the next rank-1 target" rule (Codex review),
-        // instead of skipping the whole scan when `hits[0]` is a decoy.
         for hit in result.hits.iter() {
             let cand_idx = hit.psm.primary_candidate_idx() as usize;
             if cand_idx >= candidates.len() {
@@ -122,13 +107,11 @@ pub fn populate_glyco_rt_features(
         }
     }
 
-    // ── Step 2: per-run calibration (anchors in minutes ⇒ line in minutes) ──
     let (slope, intercept) = match calibrate(&anchors) {
         Some(si) => si,
         None => return, // too few anchors / degenerate ⇒ leave neutral 0.0
     };
 
-    // ── Step 3: gradient span = max−min observed RT (minutes) over the run ──
     let mut min_rt = f64::INFINITY;
     let mut max_rt = f64::NEG_INFINITY;
     for result in results.iter() {
@@ -148,7 +131,6 @@ pub fn populate_glyco_rt_features(
     }
     let span = max_rt - min_rt; // ≤ 0 (single RT / none) ⇒ norm = 0.0
 
-    // ── Step 4: write features onto each glyco hit (neutral when no RT) ─────
     for result in results.iter_mut() {
         let spec_idx = result.spectrum_idx;
         let obs_rt_min = spectra
@@ -360,14 +342,8 @@ mod tests {
         }
     }
 
-    // ── DeltaRTRank: known AbsDeltaRT → correct normalized ranks ──────────────
-
     #[test]
     fn glyco_anchor_skips_decoy_first_hit_to_the_target() {
-        // Each scan's rank-1 (first) hit is a DECOY with a TARGET as the next hit.
-        // The old code anchored only on hits[0] and skipped the whole scan; the fix
-        // skips the decoy and anchors the target, so calibration succeeds and the
-        // target hits get populated RT features (Codex review parity finding).
         let n = MIN_CALIBRATION_ANCHORS + 2;
         let mut candidates = Vec::new();
         let mut spectra = Vec::new();
@@ -442,8 +418,6 @@ mod tests {
         let empty: Vec<FullGlycoPsm> = vec![];
         assert_eq!(delta_rt_rank(&empty, 0), 0.0);
     }
-
-    // ── DeltaRT: known calibration + known glycan offset ─────────────────────
 
     /// With observed RT = slope·glyco_index + intercept for every scan, the
     /// calibration recovers (slope, intercept) and DeltaRT ≈ 0. The glyco index
@@ -580,8 +554,6 @@ mod tests {
         );
     }
 
-    // ── Neutral paths ────────────────────────────────────────────────────────
-
     #[test]
     fn neutral_when_rt_unavailable() {
         let mut candidates = Vec::new();
@@ -612,10 +584,6 @@ mod tests {
         let mut spectra = Vec::new();
         let mut results = Vec::new();
         for i in 0..n {
-            // DISTINCT peptides (varying trailing residue) so the predicted
-            // indices differ — the calibration is non-degenerate on every axis
-            // EXCEPT anchor count, isolating the `< MIN_CALIBRATION_ANCHORS`
-            // threshold as the sole reason the RT features stay neutral (CodeRabbit).
             let mut seq = b"PEPTIDE".to_vec();
             seq.push(b"ACDEFGHIKLMNPQRSTVWY"[i % 20]);
             candidates.push(cand(pep(&seq), false));

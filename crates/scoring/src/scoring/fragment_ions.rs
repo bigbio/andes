@@ -46,8 +46,6 @@ pub fn ions_for_node(
     parent_mass: f64,
     charge: u8,
 ) -> Vec<(IonType, f64)> {
-    // Compat shim — callers in hot paths should use `for_each_ion_for_node`
-    // to avoid the per-call Vec allocation.
     let mut out = Vec::new();
     for_each_ion_for_node(
         nominal_mass,
@@ -181,8 +179,6 @@ pub fn predict_by_ions_with_losses(
         return Vec::new();
     }
 
-    // Cumulative residue masses (including any mods). Index i = sum of
-    // residues[0..i]. cumulative[0] = 0; cumulative[n] = total residue mass.
     let mut cumulative: Vec<f64> = Vec::with_capacity(n + 1);
     cumulative.push(0.0);
     let mut acc = 0.0;
@@ -291,9 +287,6 @@ fn cz_remnant_enabled() -> bool {
     use std::sync::OnceLock;
     static F: OnceLock<bool> = OnceLock::new();
     *F.get_or_init(|| {
-        // Remnant c/z ions were MEASURED at -14 backbone-correct @1% and are not
-        // generated. Removed rather than left opt-in: a refuted experiment behind a
-        // switch is indistinguishable from an unfinished feature.
         false
     })
 }
@@ -538,7 +531,6 @@ mod tests {
 
     #[test]
     fn cz_spanning_shifts_remnant_ladder() {
-        // Flag OFF → only the intact glycan (byte-identical historical behavior).
         assert_eq!(cz_spanning_shifts(1000.0, false), vec![1000.0]);
         // Non-glyco (glycan_mass == 0) → naked regardless of the flag.
         assert_eq!(cz_spanning_shifts(0.0, true), vec![0.0]);
@@ -722,8 +714,6 @@ mod tests {
     fn b_ion_mz_for_alanine_at_charge_1() {
         let peptide = pep(b"AR");
         let ions = predict_by_ions(&peptide, 1..=1);
-        // b1 is the A residue alone. A residue mass = 71.0371...
-        // m/z = (71.0371 + 1 * PROTON) / 1 = 72.0444...
         let a_mass = AminoAcid::standard(b'A').unwrap().mass;
         let expected_b1 = (a_mass + PROTON) / 1.0;
         let b1 = ions
@@ -742,9 +732,6 @@ mod tests {
     fn y_ion_mz_for_arginine_at_charge_1() {
         let peptide = pep(b"AR");
         let ions = predict_by_ions(&peptide, 1..=1);
-        // y1 is the R residue + H2O. R residue mass = 156.1011...
-        // y1 neutral mass = R + H2O.
-        // m/z = (R + H2O + 1 * PROTON) / 1
         let r_mass = AminoAcid::standard(b'R').unwrap().mass;
         let expected_y1 = (r_mass + H2O + PROTON) / 1.0;
         let y1 = ions

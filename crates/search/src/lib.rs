@@ -14,6 +14,7 @@ pub mod fragment_error;
 pub mod fragment_index;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
+pub mod ipf;
 pub mod isomer;
 pub mod isotope_mimic;
 pub mod mass_calibrator;
@@ -29,7 +30,6 @@ pub mod search_params;
 pub mod site_evidence;
 pub mod tdc;
 
-// Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{decoy_db, normalize_decoy_prefix, DEFAULT_DECOY_PREFIX};
 pub use mass_calibrator::{

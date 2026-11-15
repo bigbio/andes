@@ -125,7 +125,6 @@ pub(crate) fn run_train_intensity_gbdt(
 
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT_FRAG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT_FRAG.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -134,7 +133,6 @@ pub(crate) fn run_train_intensity_gbdt(
             .expect("build_global");
     });
 
-    // ── 2. Read all input parquets ────────────────────────────────────────────
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
         eprintln!("train-intensity-gbdt: reading {} ...", input.display());
@@ -151,12 +149,10 @@ pub(crate) fn run_train_intensity_gbdt(
         args.inputs.len()
     );
 
-    // ── 3. Load seed Param and build the scorer ───────────────────────────────
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
     eprintln!("train-intensity-gbdt: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4. Build frag-intensity regression dataset ────────────────────────────
     eprintln!(
         "train-intensity-gbdt: building frag dataset from {} PSMs ...",
         psms.len()
@@ -237,7 +233,6 @@ pub(crate) fn run_train_rich_ion_llr(
 
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT_RICH_ION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT_RICH_ION.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -246,7 +241,6 @@ pub(crate) fn run_train_rich_ion_llr(
             .expect("build_global");
     });
 
-    // ── 2. Read all input parquets ────────────────────────────────────────────
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
         eprintln!("train-rich-ion-llr: reading {} ...", input.display());
@@ -263,12 +257,10 @@ pub(crate) fn run_train_rich_ion_llr(
         args.inputs.len()
     );
 
-    // ── 3. Load seed Param and build the scorer ───────────────────────────────
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
     eprintln!("train-rich-ion-llr: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4. Build rich-ion classification dataset ──────────────────────────────
     eprintln!(
         "train-rich-ion-llr: building ion dataset from {} PSMs ...",
         psms.len()

@@ -44,6 +44,8 @@ mod quant_mbr;
 mod quant_run;
 #[path = "../rescore.rs"]
 mod rescore;
+#[path = "../sdrf.rs"]
+mod sdrf;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -57,11 +59,9 @@ mod train_intensity;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
 
-// Re-imported so `config.rs` can keep its `crate::…` paths unchanged.
 use crate::cli::{
-    parse_charge_range, parse_enzyme_specificity, parse_fragmentation, parse_isotope_error_range,
-    parse_precursor_cal, parse_precursor_tol, parse_protocol, parse_uniprot_evidence, Cli,
-    ScoreFlag, SearchArgs,
+    parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,
+    parse_uniprot_evidence, Cli, ScoreFlag, SearchArgs,
 };
 use crate::search::run;
 use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};
@@ -83,61 +83,68 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
     eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
 }
 
+// The variants are boxed to keep `Command` compact (clippy `large_enum_variant`).
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Train a scoring model directly from externally-labeled, high-confidence
-    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
-    /// search. This is the primary training path for the Phase-3 "own models".
-    ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    /// Train a scoring model from externally labelled, high-confidence PSMs
+    /// given as flat training parquets, without a bootstrap search.
     #[command(hide = true)]
     Train(Box<TrainArgs>),
 
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-from-search", hide = true)]
     TrainFromSearch(Box<TrainFromSearchArgs>),
 
     /// Train a v3 GBDT fragment-intensity regressor from flat training
     /// parquets and embed it in a Parquet model store alongside existing
     /// rank-core models.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-intensity-gbdt", hide = true)]
     TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
 
     /// Train a GBDT rich-ion LLR classifier (logistic; decoy-aware) from flat
     /// training parquets and embed it in a Parquet model store alongside
     /// existing rank-core models.
-    ///
-    /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-rich-ion-llr", hide = true)]
     TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
 
-    /// Match-between-runs quantification stages over a `--quant-dir`:
-    /// `library` (global), `extract` (per run), `finalize` (global). The same
-    /// result as `andes search --lfq --mbr` on the same inputs.
+    /// Match between runs in stages over a --quant-dir: library, extract (per run), finalize
+    ///
+    /// The same result as a search with --lfq --mbr on the same inputs.
     #[command(subcommand)]
     Quant(cli::QuantCommand),
 
-    /// Protein groups with picked protein-level q-values over the rescored
-    /// PSMs of one or more runs. Writes the QPX protein-group view.
+    /// Protein groups with protein-level q-values over the rescored PSMs of one or more runs
+    ///
+    /// Writes the QPX protein-group view.
     Inference(Box<cli::InferenceArgs>),
 }
 
-/// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
-/// drive the existing search path (byte-identical to the pre-subcommand
-/// behaviour).
+const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
+       andes <COMMAND> [OPTIONS]";
+
+const AFTER_HELP: &str = "Example:
+  andes --spectrum run.mzML --database human.fasta --output-pin run.pin --rescore
+
+`andes --help` shows every option.";
+
+const AFTER_LONG_HELP: &str = "Example:
+  andes --spectrum run.mzML --database human.fasta --output-pin run.pin --rescore
+
+The full reference is DOCS.md.";
+
+// Top-level CLI. Without a subcommand, the flattened `SearchArgs` drive the
+// search.
 #[derive(Parser, Debug)]
 #[command(
     name = "andes",
-    // `--version` / `-V` from the crate version. Every CLI is expected to answer it,
-    // and a search result is only reproducible if you can record which build produced
-    // it — so this is provenance, not just convention.
+    // `--version` / `-V`: the build that produced a result.
     version = env!("CARGO_PKG_VERSION"),
-    about = "andes: database search of MGF/mzML spectra against FASTA",
+    about = "andes: peptide identification and quantification from MS/MS spectra \
+             (database search, rescoring, protein groups, TMT, label-free, SILAC)",
+    override_usage = USAGE,
+    after_help = AFTER_HELP,
+    after_long_help = AFTER_LONG_HELP,
     allow_hyphen_values = true,
 )]
 struct TopCli {
@@ -161,18 +168,55 @@ fn main() -> ExitCode {
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
-        Some(Command::Quant(cmd)) => quant_cmd::run_quant_command(cmd),
-        Some(Command::Inference(args)) => inference_cmd::run_inference(*args),
+        Some(Command::Quant(mut cmd)) => {
+            // `quant finalize --config`: the search's database keys.
+            if let cli::QuantCommand::Finalize(a) = &mut cmd {
+                let sub = matches
+                    .subcommand_matches("quant")
+                    .and_then(|q| q.subcommand_matches("finalize"));
+                if let Some(Err(e)) = sub.map(|m| config::apply_protein_config(&mut a.proteins, m))
+                {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            quant_cmd::run_quant_command(cmd)
+        }
+        Some(Command::Inference(mut args)) => {
+            // `inference --config`: the search's database keys.
+            if let Some(Err(e)) = matches
+                .subcommand_matches("inference")
+                .map(|m| config::apply_protein_config(&mut args.proteins, m))
+            {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+            inference_cmd::run_inference(*args)
+        }
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;
+            let mut cfg_keys = sdrf::ConfigKeys::default();
             if let Some(cfg_path) = top.search.config.clone() {
                 if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
                     cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
+                    cfg_keys = sdrf::ConfigKeys::of(&c);
                     config::apply(c, &mut top.search, &matches)
                 }) {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
+                }
+            }
+            // --sdrf: fill what neither the command line nor --config set.
+            if let Some(sdrf_path) = top.search.sdrf.clone() {
+                match sdrf::read(&sdrf_path)
+                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
+                {
+                    Ok(lines) => lines.iter().for_each(|l| eprintln!("{l}")),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(2);
+                    }
                 }
             }
             if let Err(e) = config::check_resolved(&top.search) {
@@ -182,14 +226,13 @@ fn main() -> ExitCode {
             // Record whether the user set max missed cleavages, on the CLI or in
             // the --config file. `--glyco` raises the floor to 3, which costs real
             // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
-            // explicit lower value must be allowed to win. The default (1) is
+            // explicit lower value must be allowed to win. The default (2) is
             // itself a plausible explicit value, so comparing against it cannot
             // distinguish the cases — only the ValueSource and the config can.
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
                 matches.value_source("max_missed_cleavages"),
                 cfg_missed_cleavages,
             ));
-            // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {
                 eprintln!("error: --spectrum is required for search (or use `andes train`)");
@@ -209,15 +252,15 @@ fn main() -> ExitCode {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
-            // --fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
+            // --psm-fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
             // start one on their own. Warn (don't silently launch a backend) if set
             // without an explicit --rescore / --rescore-native.
-            if (search.fdr.is_some() || search.pep.is_some())
+            if (search.psm_fdr.is_some() || search.pep.is_some())
                 && !search.rescore
                 && !search.rescore_native
             {
                 eprintln!(
-                    "warning: --fdr/--pep set without --rescore or --rescore-native; \
+                    "warning: --psm-fdr/--pep set without --rescore or --rescore-native; \
                      they are ignored (add --rescore to run Percolator, or feed the PIN \
                      to Percolator yourself)."
                 );

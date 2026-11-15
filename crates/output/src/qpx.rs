@@ -62,12 +62,8 @@ use crate::pin::{
 use crate::quant_out::ModRecord;
 use crate::row_context::{emitted_rows, resolve_accession};
 
-/// QPX format version string written into every file's schema metadata.
 const QPX_VERSION: &str = "1.0";
-/// Engine name written into `creator` / `software_provider`.
 const CREATOR: &str = "andes";
-
-// ── public API ───────────────────────────────────────────────────────────────
 
 /// Write a QPX `.idparquet/` bundle at `out_dir`.
 ///
@@ -135,6 +131,7 @@ pub fn write_qpx(
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
     excluded: &HashSet<String>,
+    ipf: Option<&HashMap<String, crate::ipf::IpfQpx>>,
 ) -> std::io::Result<()> {
     if run_ends.len() != primary_ms_run_paths.len()
         || run_ends.windows(2).any(|w| w[0] > w[1])
@@ -177,6 +174,7 @@ pub fn write_qpx(
                 rescore,
                 &competed_away,
                 row_offset,
+                ipf,
             )?;
             row_offset += batch.num_rows();
             Ok(batch)
@@ -212,10 +210,6 @@ pub fn write_qpx(
     Ok(())
 }
 
-// ── parquet file writer (metadata + bounded batches) ─────────────────────────────
-
-/// Write one RecordBatch to `path`, stamping the QPX schema metadata
-/// (`file_type` = `file_type`) onto the schema before writing.
 fn write_parquet(path: &Path, file_type: &str, batch: RecordBatch) -> std::io::Result<()> {
     write_parquet_batches(path, file_type, batch.schema(), std::iter::once(Ok(batch)))
 }
@@ -248,7 +242,6 @@ fn write_parquet_batches(
     })
 }
 
-/// Build the QPX schema-metadata map for a file of the given `file_type`.
 fn qpx_metadata(file_type: &str) -> std::collections::HashMap<String, String> {
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut m = std::collections::HashMap::new();
@@ -294,8 +287,6 @@ pub(crate) fn uuid_v4() -> String {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     )
 }
-
-// ── shared nested-type field definitions ──────────────────────────────────────
 
 /// `modifications` element:
 /// `struct<name: string, accession: string, positions: list<position>>`, with the
@@ -411,8 +402,6 @@ fn psms_schema() -> Arc<Schema> {
     ];
     Arc::new(Schema::new(fields))
 }
-
-// ── psms.parquet builder ──────────────────────────────────────────────────────
 
 /// One emitted PSM row as the Percolator join sees it.
 struct RescoreRow {
@@ -550,6 +539,7 @@ fn build_psms_batch(
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     competed_away: &HashSet<String>,
     row_offset: usize,
+    ipf: Option<&HashMap<String, crate::ipf::IpfQpx>>,
 ) -> std::io::Result<RecordBatch> {
     let schema = psms_schema();
 
@@ -633,7 +623,14 @@ fn build_psms_batch(
 
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));
-            append_modifications(&mut modifications, cand);
+            let localized = ipf.and_then(|m| {
+                m.get(&format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row))
+            });
+            append_modifications_scored(
+                &mut modifications,
+                cand,
+                localized.map(|l| &l.site_probs),
+            );
             precursor_charge.append_value(psm.charge_used as i32);
             match matched {
                 Some(p) => pep.append_value(p.pep),
@@ -642,7 +639,12 @@ fn build_psms_batch(
             is_decoy.append_value(cand.is_decoy);
             calculated_mz.append_value(calc_mz);
             observed_mz.append_value(adj_observed_mz);
-            append_additional_scores(&mut additional_scores, psm, matched.map(|p| p.q_value));
+            append_additional_scores(
+                &mut additional_scores,
+                psm,
+                matched.map(|p| p.q_value),
+                localized,
+            );
             append_protein_accessions(&mut protein_accessions, psm, candidates, search_index);
             // Calibrated predicted RT (minutes), populated post-search by
             // `crate::rt_wiring::populate_rt_features`. The neutral 0.0 sentinel
@@ -688,6 +690,21 @@ fn build_psms_batch(
                     let value_str = format_feature_value(value, fmt);
                     let prefixed = format!("andes:{name}");
                     append_metavalue(mvb, &prefixed, &value_str, feature_value_type(fmt));
+                }
+                if let Some(l) = localized {
+                    append_metavalue(mvb, "andes:ipf_best_sites", &l.best_sites, "string");
+                    append_metavalue(
+                        mvb,
+                        "andes:ipf_site_probabilities",
+                        &l.site_probs_label,
+                        "string",
+                    );
+                    append_metavalue(
+                        mvb,
+                        "andes:ipf_truncated",
+                        if l.truncated { "1" } else { "0" },
+                        "int",
+                    );
                 }
                 psm_metavalues.append(true);
             }
@@ -752,9 +769,6 @@ fn build_psms_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-// ── per-PSM field derivations ─────────────────────────────────────────────────
-
-/// Bare residue sequence (no mods, no flanks).
 pub fn bare_sequence(cand: &Candidate) -> String {
     cand.peptide
         .residues
@@ -790,9 +804,19 @@ pub fn peptidoform_string(cand: &Candidate) -> String {
 /// modified residue with `name`, `accession`, and a single `positions` entry in
 /// the QPX layout (`position` int32: 1-based residue index, 0 for the peptide
 /// N-terminus, length + 1 for the C-terminus; `amino_acid` null on a terminus;
-/// `scores` null, andes does not localize). The position comes from
+/// `scores` holds the IPF localization probability of that mod on that
+/// residue when `--localize ipf` localized the row, else null). The position comes from
 /// [`ModRecord::of_residue`], the feature view's helper.
+#[cfg(test)]
 fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candidate) {
+    append_modifications_scored(builder, cand, None)
+}
+
+fn append_modifications_scored(
+    builder: &mut ListBuilder<StructBuilder>,
+    cand: &Candidate,
+    site_probs: Option<&HashMap<(i32, String), f64>>,
+) {
     let sb = builder.values();
     let len = cand.peptide.residues.len();
     for (i, aa) in cand.peptide.residues.iter().enumerate() {
@@ -813,9 +837,24 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
         psb.field_builder::<StringBuilder>(1)
             .unwrap()
             .append_option(m.amino_acid.map(|c| c.to_string()));
-        psb.field_builder::<ListBuilder<StructBuilder>>(2)
-            .unwrap()
-            .append_null();
+        let scores = psb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
+        match site_probs.and_then(|s| s.get(&(m.position, m.name.clone()))) {
+            Some(&p) => {
+                let s = scores.values();
+                s.field_builder::<StringBuilder>(0)
+                    .unwrap()
+                    .append_value("ipf_site_probability");
+                s.field_builder::<Float64Builder>(1)
+                    .unwrap()
+                    .append_value(p);
+                s.field_builder::<BooleanBuilder>(2)
+                    .unwrap()
+                    .append_value(true);
+                s.append(true);
+                scores.append(true);
+            }
+            None => scores.append_null(),
+        }
         psb.append(true);
         pos_list.append(true);
         sb.append(true);
@@ -829,11 +868,14 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
 /// When `q_value` is `Some` (a `--rescore` Percolator result matched this row), a
 /// trailing `("q-value", q, higher_better=false)` entry is appended. When `None`
 /// (rescore off, or no match) no such entry is written, so the default bundle
-/// stays byte-identical to the pre-rescore output.
+/// stays byte-identical to the pre-rescore output. A row `--localize ipf`
+/// localized also gets `ipf_best_prob` (higher is better), `ipf_pep` and
+/// `ipf_q` (lower is better).
 fn append_additional_scores(
     builder: &mut ListBuilder<StructBuilder>,
     psm: &search::psm::PsmMatch,
     q_value: Option<f64>,
+    ipf: Option<&crate::ipf::IpfQpx>,
 ) {
     let f = &psm.features;
     let entries: [(&str, f64); 9] = [
@@ -875,6 +917,24 @@ fn append_additional_scores(
             .unwrap()
             .append_value(false);
         sb.append(true);
+    }
+    if let Some(l) = ipf {
+        for (name, value, higher) in [
+            ("ipf_best_prob", l.best_prob, true),
+            ("ipf_pep", l.pep, false),
+            ("ipf_q", l.q, false),
+        ] {
+            sb.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value(name);
+            sb.field_builder::<Float64Builder>(1)
+                .unwrap()
+                .append_value(value);
+            sb.field_builder::<BooleanBuilder>(2)
+                .unwrap()
+                .append_value(higher);
+            sb.append(true);
+        }
     }
     builder.append(true);
 }
@@ -948,8 +1008,6 @@ fn append_metavalue(sb: &mut StructBuilder, name: &str, value: &str, value_type:
     sb.append(true);
 }
 
-/// Build a `ListBuilder<StructBuilder>` for a `list<struct<...>>` column from
-/// the struct's field definitions.
 fn list_struct_builder(fields: Fields) -> ListBuilder<StructBuilder> {
     let element_field = Arc::new(Field::new(
         "element",
@@ -990,8 +1048,6 @@ fn make_builder_for(dt: &DataType) -> Box<dyn arrow::array::ArrayBuilder> {
         other => panic!("unsupported QPX struct field type: {other:?}"),
     }
 }
-
-// ── proteins.parquet builder ──────────────────────────────────────────────────
 
 /// Minimal `proteins.parquet`: one row per distinct accession seen in the
 /// emitted PSMs (rank-1-first ordering of first appearance). `score`/`rank`/
@@ -1062,8 +1118,6 @@ fn build_proteins_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-// ── protein_groups.parquet builder ────────────────────────────────────────────
-
 /// Empty `protein_groups.parquet` with the QPX protein-group schema.
 ///
 /// andes does not perform protein inference, so there are no groups to emit, but
@@ -1092,9 +1146,6 @@ fn build_protein_groups_batch() -> RecordBatch {
     RecordBatch::new_empty(Arc::new(Schema::new(fields)))
 }
 
-// ── search_params.parquet builder ─────────────────────────────────────────────
-
-/// Single-row `search_params.parquet` describing the resolved search.
 fn build_search_params_batch(
     params: &SearchParams,
     fragment_tol: &Tolerance,
@@ -1132,7 +1183,6 @@ fn build_search_params_batch(
         _ => "NONE",
     };
 
-    // Partition the declared mods into fixed/variable name lists.
     let mut fixed_mods: Vec<String> = Vec::new();
     let mut variable_mods: Vec<String> = Vec::new();
     for m in params.aa_set.distinct_mods() {
@@ -1177,7 +1227,6 @@ fn build_search_params_batch(
     RecordBatch::try_new(schema, columns).map_err(to_io)
 }
 
-/// Build a single-row `List<Utf8>` array whose one cell holds `values`.
 fn string_list_singleton(values: Vec<String>) -> arrow::array::ListArray {
     let mut b = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
     for v in values {
@@ -1231,7 +1280,6 @@ mod rescore_join_tests {
     fn rescore_join_errors_on_unmatched_target() {
         let mut map = HashMap::new();
         map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
-        // A target (non-decoy) row whose SpecId is absent from Percolator output.
         let emitted = vec![row("scan=2_2_1", false, 2, "1000")];
         let err = audit_rescore_join(&emitted, &map, None).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -1449,5 +1497,37 @@ mod rescore_join_tests {
             ));
         }
         assert_eq!(got, vec![(0, None), (3, Some("S".to_string())), (5, None)]);
+
+        // With IPF probabilities, the phospho position (3) carries its score;
+        // positions IPF did not score stay null.
+        let mut b = list_struct_builder(modification_fields());
+        let probs: HashMap<(i32, String), f64> =
+            [((3, "Phospho".to_string()), 0.97)].into_iter().collect();
+        append_modifications_scored(&mut b, &cand, Some(&probs));
+        b.append(true);
+        let list: ListArray = b.finish();
+        let structs = list.value(0);
+        let structs = structs.as_any().downcast_ref::<StructArray>().unwrap();
+        let positions = structs.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+        let score_of = |i: usize| {
+            let entry = positions.value(i);
+            let entry = entry.as_any().downcast_ref::<StructArray>().unwrap();
+            let scores = entry.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+            if scores.is_null(0) {
+                return None;
+            }
+            let s = scores.value(0);
+            let s = s.as_any().downcast_ref::<StructArray>().unwrap();
+            let name = s.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let v = s
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+            Some((name.value(0).to_string(), v.value(0)))
+        };
+        assert_eq!(score_of(0), None);
+        assert_eq!(score_of(1), Some(("ipf_site_probability".to_string(), 0.97)));
+        assert_eq!(score_of(2), None);
     }
 }

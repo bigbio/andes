@@ -27,7 +27,6 @@ pub fn isotope_gap_da(delta_da: f64) -> f64 {
     }
 }
 
-/// Total gap of the peptide's isotope-like variable mods.
 pub fn mod_shift_da(peptide: &Peptide) -> f64 {
     peptide
         .residues

@@ -125,7 +125,6 @@ pub fn suffixed_accession(accession: &str, id: &str) -> String {
     }
 }
 
-/// `base` with `edits` applied.
 fn apply(base: &[u8], edits: &[Edit]) -> Vec<u8> {
     let mut sequence = Vec::with_capacity(base.len());
     let mut at = 0;
@@ -471,7 +470,7 @@ fn modified_span(seq: &[u8], q: usize, enzyme: Enzyme) -> (usize, usize) {
 /// knockoffs, the same motif status ([`motif_status`]), another span whose
 /// length is within 3 of the real one's and 6..=50, and at least 5 residues
 /// from every real site of the same modification. Terminal sites get none.
-/// A knockoff site is also a `mod_sites` entry, so a `sites=annotated` mod may
+/// A knockoff site is also a `mod_sites` entry, so a `restrict_to: annotated` mod may
 /// be placed there, and a site claim naming the real site it copies.
 pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnockoffStats {
     let mut stats = SiteKnockoffStats::default();

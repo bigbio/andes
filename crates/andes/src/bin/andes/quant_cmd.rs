@@ -153,13 +153,11 @@ impl SpecIdKeys {
         h.finish()
     }
 
-    /// The 128-bit key of a SpecId.
     fn key(&self, spec_id: &str) -> u128 {
         (u128::from(self.hash(0, spec_id.as_bytes())) << 64)
             | u128::from(self.hash(1, spec_id.as_bytes()))
     }
 
-    /// A 64-bit hash of a residue sequence.
     fn residues(&self, residues: &[u8]) -> u64 {
         self.hash(2, residues)
     }
@@ -190,7 +188,6 @@ const RESIDUE_BITS: u32 = 40;
 const MOD_SET_BITS: u32 = 64 - RESIDUE_BITS - 1;
 
 impl Scored {
-    /// From the decoy result file.
     pub(crate) fn is_decoy(&self) -> bool {
         self.tag & 1 == 1
     }
@@ -305,7 +302,6 @@ impl ScoreSet {
         }
     }
 
-    /// The rescored PSM of a SpecId.
     pub(crate) fn get(&self, spec_id: &str) -> Option<&Scored> {
         self.psms.get(&self.keys.key(spec_id))
     }
@@ -521,7 +517,6 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
 }
 
 impl KeyMeta {
-    /// The metadata of `row`, a row of run `run`.
     fn of(row: &output::run_quant_table::RunPsmRow, run: usize) -> Self {
         Self {
             has_target: !row.is_decoy,
@@ -1078,7 +1073,6 @@ pub(crate) fn build_and_write_library(
     Ok(stored)
 }
 
-/// What [`entry_spectra`] gave, for the log.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct SpectrumCounts {
     pub with_spectrum: usize,
@@ -1219,8 +1213,6 @@ impl DonorPsms {
             mut scans,
             best: donor_best,
         } = self;
-        // Per precursor id of an entry: its donor scans, sorted, and its best
-        // donor PSM's run and SpecId.
         let mut entry_scans: Vec<Vec<(u16, f64)>> = vec![Vec::new(); n];
         let mut best: Vec<Option<(u16, Box<str>)>> = vec![None; n];
         let mut donor_best: Vec<Option<(BestDonor, Box<str>)>> =
@@ -1240,7 +1232,6 @@ impl DonorPsms {
         drop(slot);
         let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
         let mut c = SpectrumCounts::default();
-        // The precursor ids whose best donor PSM is in each run, with its SpecId.
         let mut wanted: Vec<Vec<(usize, &str)>> = vec![Vec::new(); stems.len()];
         for (id, b) in best.iter().enumerate() {
             if let Some((run, spec_id)) = b {
@@ -1680,7 +1671,6 @@ pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
     source: &dyn ExtractSource,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     seed: u64,
     limits: FinalizeLimits,
     trace_fraction: f64,
@@ -1699,7 +1689,7 @@ pub(crate) fn finalize_and_write(
     };
     let params = FinalizeParams {
         mbr_fdr,
-        quant_feature_fdr,
+        quant_feature_fdr: None,
         seed,
         limits,
         mbr_path: &table,
@@ -1746,7 +1736,6 @@ pub(crate) fn run_in_process(
     donor_q: f64,
     donor_pep: Option<f64>,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1784,7 +1773,6 @@ pub(crate) fn run_in_process(
         &stored,
         &files,
         mbr_fdr,
-        quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
         crate::quant_finalize::DEFAULT_TRACE_FRACTION,
@@ -1803,8 +1791,8 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
         &a.quant_dir,
         &stems,
         score_loader(&source),
-        a.mbr_library_fdr,
-        a.quant_fdr,
+        a.mbr_donor_fdr(),
+        a.psm_fdr,
         a.pep,
     )
     .map(|_| ())
@@ -1888,6 +1876,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
+    let transfer_fdr = a.quant_transfer_fdr();
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         transfer_models: a.transfer_models,
@@ -1915,8 +1904,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     finalize_and_write(
         &stored,
         &ExtractFiles(paths),
-        a.mbr_fdr,
-        a.quant_feature_fdr.0,
+        transfer_fdr,
         a.seed,
         limits,
         a.quant_trace_fraction,
@@ -2423,8 +2411,6 @@ mod tests {
         };
         let open = build(None);
         assert_eq!(open.library.entries.len(), 200);
-        // The even PSMs' scans carry their ladder: a spectrum each; every
-        // entry keeps its one donor scan.
         let with: Vec<usize> = (0..open.spectra.len())
             .filter(|&id| open.spectra[id].is_some())
             .collect();

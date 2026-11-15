@@ -65,7 +65,6 @@ pub fn psm_edge_score(
     let spectrum_parent_mass = scored_spec.parent_mass();
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // Build per-position prefix mass arrays (length n+1; [0]=0, [n]=total).
     let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
     let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
     prefix_mass_arr.push(0.0);
@@ -157,8 +156,6 @@ pub fn psm_edge_existence_facts(
     let spectrum_parent_mass = scored_spec.parent_mass();
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // Per-position prefix mass arrays (length n+1; [0]=0, [n]=total) — built
-    // identically to psm_edge_score.
     let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
     let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
     prefix_mass_arr.push(0.0);
@@ -273,12 +270,10 @@ pub fn score_psm(
     let mut prefix_mass_acc = 0.0_f64;
     // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
     for s in 1..n {
-        // Accumulate exact float mass for residue s-1 (0-indexed).
         let aa = &peptide.residues[s - 1];
         let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
         prefix_mass_acc += residue_mass;
 
-        // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
 
@@ -337,14 +332,6 @@ pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &
 }
 
 /// [`hyperscore_psm`], also returning the number of matched b/y ions.
-///
-/// The count is computed on the way to the hyperscore and was previously discarded.
-/// It is worth surfacing because it is a far better per-candidate discriminator than
-/// the hyperscore itself: over the reference identifications of a benchmark file it
-/// ranks the correct candidate first for 335 of 581 scans (median rank 1), against
-/// median rank 44 for the glycan-Y ladder that carries the largest weight in the glyco
-/// collapse. The hyperscore compresses the same evidence through two log-factorials,
-/// which flattens exactly the differences the selector needs.
 pub fn hyperscore_psm_with_matches(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -383,18 +370,8 @@ pub fn hyperscore_psm_with_matches(
 /// ladder is sparse (the high-charge wall). `glycan_mass = 0.0` scores a naked
 /// peptide; `max_frag_charge` bounds the fragment charge sweep (ETD c/z of a
 /// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
-/// The two cz_hyperscore correctness fixes (bug hunt 2026-07-16/17), now DEFAULT
-/// ON after validation (6-frac pooled AI-ETD: +251 backbone-correct @1%, +11%,
-/// 43%→48% of engine M, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
-/// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
-/// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
-/// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse
-/// (traced: a 45-mer decoy beat a 19-mer target).
 fn cz_fix_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    // Always enabled. Without it a long decoy out-counts a shorter true peptide in the
-    // per-scan collapse (traced: a 45-mer decoy beat a 19-mer target). Restoring that is
-    // not a configuration anyone should have.
     *CELL.get_or_init(|| true)
 }
 
@@ -479,7 +456,6 @@ pub fn cz_hyperscore_psm(
         glycan_mass,
         glycosite,
     ) {
-        // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
         let tol_da = if fix {
             (ion.mz * tol_ppm * 1e-6).max(0.01)
         } else {
@@ -499,10 +475,6 @@ pub fn cz_hyperscore_psm(
     let ln_factorial = |m: usize| -> f64 { (2..=m).map(|i| (i as f64).ln()).sum() };
     let raw = ln_factorial(n_c) + ln_factorial(n_z);
     if fix {
-        // Bug 7: normalize by the max attainable score for THIS peptide length so
-        // the term measures FRACTION of the ladder matched, not absolute count —
-        // removing the length bias that let long wrong/decoy peptides win the
-        // collapse. Rescaled to ~0..10 to stay comparable to the gp_cz weight.
         let max_sites = n.saturating_sub(1).max(1);
         let norm = 2.0 * ln_factorial(max_sites);
         if norm > 0.0 {
@@ -664,9 +636,6 @@ pub fn score_psm_float(
         let contribution = scored_spec
             .cached_split_score_f32(prefix_nominal, suffix_nominal)
             .unwrap_or_else(|| {
-                // Unrounded fallback: node_score_f32 (not node_score) so a cache
-                // miss does not silently revert RankScoreFloat to integer
-                // arithmetic (Codex review #1).
                 scored_spec.node_score_f32(
                     prefix_nominal as f64,
                     suffix_nominal as f64,
@@ -1035,8 +1004,6 @@ mod tests {
         );
     }
 
-    /// Verify that `score_psm` equals the manually summed `node_score` calls
-    /// across each split position (this is the definition of the new formula).
     #[test]
     fn score_psm_matches_sum_of_node_scores_across_splits() {
         use model::amino_acid::AminoAcid;

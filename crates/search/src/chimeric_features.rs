@@ -39,8 +39,6 @@ pub(crate) fn precursor_isotope_match(
     tol_da: f64,
     n_isotopes: usize,
 ) -> (f32, f32) {
-    // KL value returned when no observed envelope can be formed. Large so
-    // Percolator reads "no envelope at precursor m/z" as strongly negative.
     const NO_ENVELOPE_KL: f32 = 10.0;
     // Floor on the theoretical (and observed, post-normalization) probability
     // inside the log, to keep KL finite.
@@ -53,15 +51,11 @@ pub(crate) fn precursor_isotope_match(
     let charge_f = charge as f64;
     let spacing = ISOTOPE / charge_f;
 
-    // Observed intensity at each isotope position: the max-intensity peak
-    // within tol_da of the target m/z (binary search since ms1_peaks is
-    // m/z-sorted), 0.0 if none.
     let mut observed = vec![0.0f64; n_isotopes];
     for (k, obs_k) in observed.iter_mut().enumerate() {
         let target = theo_mono_mz + (k as f64) * spacing;
         let lo = target - tol_da;
         let hi = target + tol_da;
-        // First peak with m/z >= lo.
         let start = ms1_peaks.partition_point(|&(mz, _)| mz < lo);
         let mut best = 0.0f64;
         for &(mz, inten) in &ms1_peaks[start..] {
@@ -77,16 +71,13 @@ pub(crate) fn precursor_isotope_match(
 
     let obs_sum: f64 = observed.iter().sum();
     if obs_sum <= 0.0 {
-        // No peak at any isotope position — strong negative signal.
         return (NO_ENVELOPE_KL, 0.0);
     }
 
-    // Normalize observed to a probability distribution summing to 1.0.
     for o in observed.iter_mut() {
         *o /= obs_sum;
     }
 
-    // Theoretical averagine envelope (already normalized to sum 1.0).
     let theo = averagine_isotope_envelope(neutral_mass, n_isotopes);
 
     // KL(observed || theo) = Σ_k o_k * ln(o_k / max(t_k, eps)), over o_k > 0.
@@ -97,12 +88,8 @@ pub(crate) fn precursor_isotope_match(
             kl += o * (o / t).ln();
         }
     }
-    // KL is >= 0 in theory; clamp tiny negative rounding noise.
     let kl = kl.max(0.0) as f32;
 
-    // SNR = monoisotope observed intensity / median nonzero MS1 intensity.
-    // We recover the un-normalized monoisotope intensity as observed[0] *
-    // obs_sum (observed[0] is the normalized share of the monoisotope).
     let mono_intensity = observed[0] * obs_sum;
     let snr = match median_nonzero_intensity(ms1_peaks) {
         Some(med) if med > 0.0 => (mono_intensity / med) as f32,
@@ -153,14 +140,12 @@ mod tests {
         let env = averagine_isotope_envelope(neutral_mass, n);
         let spacing = ISOTOPE / charge as f64;
         let mut peaks: Vec<(f64, f32)> = Vec::new();
-        // Noise peaks well below the precursor m/z (still m/z-sorted first).
         peaks.push((mono_mz - 50.0, noise));
         peaks.push((mono_mz - 40.0, noise));
         for (k, &e) in env.iter().enumerate() {
             let mz = mono_mz + k as f64 * spacing;
             peaks.push((mz, scale * e as f32));
         }
-        // Noise peaks above the envelope.
         peaks.push((mono_mz + 50.0, noise));
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         peaks
@@ -172,7 +157,6 @@ mod tests {
         let neutral_mass = 1500.0;
         let mono_mz = (neutral_mass + charge as f64 * model::mass::PROTON) / charge as f64;
         let n = 4;
-        // Strong precursor (scale 1000) over a low noise floor (1.0).
         let ms1 = build_clean_envelope(mono_mz, charge, neutral_mass, n, 1000.0, 1.0);
 
         let (kl, snr) = precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
@@ -193,8 +177,6 @@ mod tests {
         let neutral_mass = 1500.0;
         let mono_mz = (neutral_mass + charge as f64 * model::mass::PROTON) / charge as f64;
         let n = 4;
-        // Peaks only at unrelated m/z values — nothing within tol of the
-        // precursor isotope ladder.
         let ms1: Vec<(f64, f32)> = vec![
             (mono_mz - 30.0, 500.0),
             (mono_mz - 20.0, 800.0),
@@ -229,8 +211,6 @@ mod tests {
 
     #[test]
     fn precursor_isotope_match_picks_max_within_tolerance() {
-        // Two peaks within tol of the monoisotope position; the max-intensity
-        // one should drive the SNR.
         let charge = 1u8;
         let neutral_mass = 1000.0;
         let mono_mz = neutral_mass + model::mass::PROTON;

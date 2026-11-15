@@ -83,8 +83,6 @@ pub trait Predictor: Sync {
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>>;
 }
 
-// ---------------------------------------------------------------- andes-rt
-
 /// The andes-rt retention-time model; no ONNX graphs.
 pub struct NativeRt {
     model: RtModel,
@@ -143,8 +141,6 @@ impl Predictor for NativeRt {
         Err(Error::InvalidArg("andes-rt has no MS2 model".into()))
     }
 }
-
-// ---------------------------------------------------------------- andes-ms2
 
 /// Plain b/y 1+/2+ channels of andes-ms2, in the order of its output sites.
 const MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
@@ -228,8 +224,6 @@ impl Predictor for NativeMs2 {
             .collect()
     }
 }
-
-// ---------------------------------------------------------------- PeptDeep
 
 /// `peptdeep_mods.json`: the alphabase modification vectors and the
 /// instrument table the exported graphs were built with.
@@ -471,8 +465,6 @@ impl Predictor for PeptDeep {
             .collect())
     }
 }
-
-// ---------------------------------------------------------------- DeepLC
 
 /// Graph manifest of an exported DeepLC model.
 pub const DEEPLC_FILE: &str = "deeplc_rt.json";

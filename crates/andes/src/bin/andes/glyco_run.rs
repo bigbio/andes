@@ -64,12 +64,6 @@ pub(crate) fn run_glyco(
     });
     glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-    // The glycan-first search space comes from one of three sources: an explicit
-    // `.gdb` file (`--glyco-glycan-gdb`), a WURCS 2.0 CSV
-    // (`--glyco-glycan-wurcs`), or a bundled species-specific database
-    // (`--glyco-species`). Trees are parsed with structure preserved (core- vs
-    // antenna-fucose) and NeuGc content is used as-is. The composition enumerator
-    // and its NeuGc/taxon tuning are gone.
     let (glycan_list, source_desc) = match (
         cli.glyco_glycan_gdb.as_ref(),
         cli.glyco_glycan_wurcs.as_ref(),
@@ -135,8 +129,6 @@ pub(crate) fn run_glyco(
              under-fire"
         );
     }
-    // Dev cap on glyco scoring uses the global --max-spectra (was the
-    // redundant --glyco-max-spectra).
     let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]
     } else {
@@ -177,12 +169,6 @@ pub(crate) fn run_glyco(
         isotope_error_override: isotope_error_override.map(|(window, _)| window),
         // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
         // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
-        // Measured 2026-09-02 (five seeds): on high-res data the 0.5 Da
-        // window admitted b/y matches ~50x wider than every glycan-side matcher
-        // and was the dominant glyco cost — 20 ppm was 6.9x faster on mouse
-        // PXD011533 and 7x on plasma PXD030622 with identifications neutral
-        // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
-        // --glyco-retrieval-tol-ppm overrides the auto default either way.
         retrieval_tol_ppm: retrieval_ppm,
         full_glycan_db: !cli.glyco_peptide_first,
         debug: cli.debug_glyco,
@@ -244,11 +230,6 @@ pub(crate) fn run_glyco(
     let mut glyco_results = pass1;
 
     let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
-    // Populate glyco RT PIN features (DeltaRT/AbsDeltaRT/DeltaRTNorm +
-    // predicted_rt_min) in place on each hit, using the engine-wide backbone
-    // RT index + per-monosaccharide offset + per-run self-calibration. The
-    // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
-    // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
     output::populate_glyco_rt_features(
         spectra,
         &mut glyco_results,

@@ -46,7 +46,6 @@ pub(crate) struct Acquisition {
     pub(crate) activation: Option<ActivationMethod>,
     /// Analyzer read from the file metadata, when recorded.
     pub(crate) analyzer: Option<InstrumentType>,
-    /// Whether the fragment spectra are high resolution.
     pub(crate) high_res: bool,
     pub(crate) resolution_source: ResolutionSource,
     /// The peak evidence, when the class was inferred from the peaks.
@@ -153,13 +152,10 @@ impl Acquisition {
         }
     }
 
-    /// The instrument a predictor should be told: the analyzer in the
-    /// metadata, else the model's.
     pub(crate) fn predictor_instrument(&self, model_instrument: InstrumentType) -> InstrumentType {
         self.analyzer.unwrap_or(model_instrument)
     }
 
-    /// The banner line.
     pub(crate) fn describe(&self) -> String {
         let mut parts = vec![format!(
             "{} MS2 [{}]",

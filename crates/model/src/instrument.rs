@@ -48,7 +48,6 @@ impl InstrumentType {
         )
     }
 
-    /// Case-sensitive lookup.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "LowRes" => Some(InstrumentType::LowRes),
@@ -143,7 +142,6 @@ mod tests {
             InstrumentType::TimsTOF.family_fallback(),
             InstrumentType::TOF
         );
-        // All others map to themselves.
         assert_eq!(
             InstrumentType::QExactive.family_fallback(),
             InstrumentType::QExactive

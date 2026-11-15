@@ -76,7 +76,6 @@ pub fn slice_value(
 #[derive(Debug, Default)]
 pub struct Ms1RunIndex {
     scans: Vec<Ms1Scan>,
-    /// Native id → position, for scans that carry an id.
     by_id: HashMap<String, usize>,
     /// Per scan, the 5th percentile of its centroid intensities (1.0 when it
     /// has none); see [`Ms1RunIndex::detection_limit`].
@@ -101,7 +100,6 @@ fn scan_detection_limit(peaks: &[(f64, f32)], buf: &mut Vec<f32>) -> f32 {
 }
 
 impl Ms1RunIndex {
-    /// Build from scans in any order; peaks are sorted by m/z if needed.
     pub fn new(mut scans: Vec<Ms1Scan>) -> Self {
         // A scan without a finite retention time has no place in the RT order
         // (and breaks the sort comparator and the binary searches).
@@ -153,12 +151,10 @@ impl Ms1RunIndex {
         }
     }
 
-    /// Position of the scan with native id `id`.
     pub fn position_of(&self, id: &str) -> Option<usize> {
         self.by_id.get(id).copied()
     }
 
-    /// The scan at `idx`.
     pub fn scan(&self, idx: usize) -> &Ms1Scan {
         &self.scans[idx]
     }
@@ -231,7 +227,6 @@ impl Ms1RunIndex {
         self.detection[idx]
     }
 
-    /// Retention-time span of the run, seconds.
     pub fn rt_range(&self) -> Option<(f64, f64)> {
         Some((self.scans.first()?.rt, self.scans.last()?.rt))
     }
@@ -258,14 +253,12 @@ impl Ms1RunIndex {
         Some(*gaps.select_nth_unstable_by(mid, f64::total_cmp).1)
     }
 
-    /// Indices of the scans with `rt_lo <= rt <= rt_hi`.
     pub fn scan_window(&self, rt_lo: f64, rt_hi: f64) -> std::ops::Range<usize> {
         let a = self.scans.partition_point(|s| s.rt < rt_lo);
         let b = self.scans.partition_point(|s| s.rt <= rt_hi);
         a..b.max(a)
     }
 
-    /// Index of the scan whose RT is nearest to `rt`.
     pub fn nearest_scan(&self, rt: f64) -> Option<usize> {
         if self.scans.is_empty() {
             return None;
@@ -379,8 +372,6 @@ impl Ms1RunIndex {
         (total > 0).then(|| hits as f64 / total as f64)
     }
 
-    /// Extracted-ion chromatogram of `mz ± tol_da` over `scans`: one value per
-    /// scan (the most intense centroid in the slice, 0.0 when none).
     pub fn xic(&self, mz: f64, tol_da: f64, scans: std::ops::Range<usize>) -> Vec<f32> {
         scans
             .map(|i| self.max_in(i, mz - tol_da, mz + tol_da))

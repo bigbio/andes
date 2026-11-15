@@ -29,13 +29,9 @@ use crate::tdc::{confident_target_indices, ScoredLabel};
 /// Wider than any supported analyzer's fragment error, so the measurement is
 /// not cut off by the default feature window.
 pub const MEASURE_WINDOW_PPM: f64 = 50.0;
-/// Most intense matched ions taken per PSM.
 pub const TOP_IONS_PER_PSM: usize = 7;
-/// Confident PSMs needed for a measurement.
 pub const MIN_CONFIDENT_PSMS: usize = 100;
-/// Target-decoy q-value of the PSMs measured.
 pub const MEASURE_Q: f64 = 0.01;
-/// Spectra scored for the measurement.
 pub const SAMPLE_SPECTRA: usize = 3000;
 
 /// Theoretical m/z of a charge-1 b/y ion rebuilt from its nominal fragment
@@ -212,7 +208,6 @@ mod tests {
             .enumerate()
             .map(|(i, ion)| (ion.mz * (1.0 + 3.0e-6), 100.0 + i as f32))
             .collect();
-        // One ion 80 ppm off: outside the window.
         peaks[0].0 = ions[0].mz * (1.0 + 80.0e-6);
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let spec = Spectrum {

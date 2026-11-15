@@ -62,7 +62,6 @@ mod tests {
         let x = vec![0.0_f32, 0.5, 1.0];
         let y = vec![0.1_f32, 0.5, 0.9];
         let (_bx, by) = pava(&x, &y);
-        // last value preserved, monotone
         assert!((by[by.len() - 1] - 0.9).abs() < 1e-6);
         for w in by.windows(2) {
             assert!(w[1] >= w[0] - 1e-6);

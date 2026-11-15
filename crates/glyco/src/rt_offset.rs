@@ -22,11 +22,8 @@ use crate::glycan_db::GlycanComp;
 /// signs only; magnitudes are NOT final.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlycanRtCoeffs {
-    /// HexNAc (GlcNAc/GalNAc) — neutral, negative on RP.
     pub hexnac: f64,
-    /// Hexose (Man/Gal/Glc) — neutral, negative on RP.
     pub hex: f64,
-    /// Fucose (deoxyhexose) — neutral, negative on RP.
     pub fuc: f64,
     /// NeuAc (N-acetylneuraminic / sialic acid) — POSITIVE on RP (its own sign).
     pub neuac: f64,
@@ -62,7 +59,6 @@ pub fn glycan_index_offset(comp: &GlycanComp, coeffs: &GlycanRtCoeffs) -> f64 {
         + comp.neugc as f64 * coeffs.neugc
 }
 
-/// Backbone index + glycan offset. Convenience for the wiring commit.
 pub fn glyco_index(backbone_index: f64, comp: &GlycanComp, coeffs: &GlycanRtCoeffs) -> f64 {
     backbone_index + glycan_index_offset(comp, coeffs)
 }
@@ -79,14 +75,12 @@ mod tests {
     fn empty_composition_has_zero_offset() {
         let c = comp(0, 0, 0, 0, 0);
         assert_eq!(glycan_index_offset(&c, &GlycanRtCoeffs::default()), 0.0);
-        // Regular peptides: backbone index passes through unchanged.
         assert_eq!(glyco_index(42.0, &c, &GlycanRtCoeffs::default()), 42.0);
     }
 
     #[test]
     fn neuac_has_opposite_sign_to_neutral_sugars() {
         let coeffs = GlycanRtCoeffs::default();
-        // A purely neutral glycan (HexNAc/Hex/Fuc) shifts the index DOWN (earlier).
         let neutral = comp(2, 3, 1, 0, 0);
         let neutral_offset = glycan_index_offset(&neutral, &coeffs);
         assert!(
@@ -103,7 +97,6 @@ mod tests {
             "adding NeuAc ({sialic_offset}) must raise index above neutral-only ({neutral_offset})"
         );
 
-        // The NeuAc coefficient itself is strictly positive; neutral ones negative.
         assert!(coeffs.neuac > 0.0 && coeffs.neugc > 0.0);
         assert!(coeffs.hexnac < 0.0 && coeffs.hex < 0.0 && coeffs.fuc < 0.0);
     }
@@ -118,7 +111,6 @@ mod tests {
 
     #[test]
     fn custom_coeffs_are_honored() {
-        // Coefficients are fittable/passed-in, not hardcoded magnitudes.
         let coeffs = GlycanRtCoeffs {
             hexnac: 1.0,
             hex: 0.0,

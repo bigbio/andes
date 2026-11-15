@@ -10,7 +10,7 @@ use crate::train_intensity::GbdtMode;
 use clap::Args;
 use input::{MgfReader, MzMLReader};
 use model::{
-    activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
+    activation::ActivationMethod, InstrumentType, ModLocation, Modification,
     ResidueSpec, Spectrum, Tolerance,
 };
 use model_train::{
@@ -76,7 +76,7 @@ pub(crate) struct TrainFromSearchArgs {
     /// seed search (`bootstrap_labels`), and `--database` is not required. The
     /// `peptide` is the BARE backbone sequence (the glycan is stripped — the
     /// rank model scores backbone b/y ions, which in HCD come from the
-    /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
+    /// deglycosylated backbone); Cam-C and any `--fixed-mods` / `--variable-mods` are applied via the
     /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
     /// fails to parse are skipped. Use to train a glyco-regime rank model from
     /// MSFragger/pGlyco backbone IDs.
@@ -129,11 +129,15 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "model-id")]
     pub(crate) model_id: Option<String>,
 
-    /// Path to a mods.txt file (same format as `--mods` for search). When
-    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl
-    /// variable).
-    #[arg(long)]
-    pub(crate) mods: Option<PathBuf>,
+    /// Fixed modifications, a list of Name (sites) as for the search's
+    /// `--fixed-mods` [default: Carbamidomethyl (C)].
+    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_fixed_mods)]
+    pub(crate) fixed_mods: Option<crate::cli::ModList>,
+
+    /// Variable modifications, a list of Name (sites) as for the search's
+    /// `--variable-mods` [default: Oxidation (M)].
+    #[arg(long, value_name = "LIST", value_parser = crate::cli::parse_variable_mods)]
+    pub(crate) variable_mods: Option<crate::cli::ModList>,
 
     /// Number of worker threads. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -417,21 +421,13 @@ pub(crate) fn load_spectra_for_train(
 /// each other and with the production search:
 ///   - charge span `2..=5` (the search binary's default; `default_tryptic` alone
 ///     is the narrow `2..=3`, which drops z=4/5 labels common on Astral/timsTOF),
-///   - the `NumMods=` variable-mod limit from the `--mods` file when present
-///     (the search path applies it too).
+///   - the modification lists `--fixed-mods` / `--variable-mods`.
 pub(crate) fn build_train_search_params(
-    mods: &Option<PathBuf>,
+    args: &TrainFromSearchArgs,
 ) -> Result<SearchParams, Box<dyn std::error::Error>> {
-    let aa = build_aa_set(mods)?;
+    let aa = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
     let mut params = SearchParams::default_tryptic(aa);
     params.charge_range = 2..=5;
-    if let Some(path) = mods {
-        if let Some(n) = AminoAcidSetBuilder::parse_num_mods_from_file(path)
-            .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?
-        {
-            params.max_variable_mods_per_peptide = n;
-        }
-    }
     Ok(params)
 }
 
@@ -450,7 +446,7 @@ pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
 /// Load external training labels from a `scan\tpeptide\tcharge` TSV (SP-B glyco
 /// training). Column order is discovered from the header (case-insensitive), so
 /// extra columns are ignored. The peptide is parsed with `aa_set` (Cam-C + any
-/// `--mods` applied). Rows with an unknown scan or an unparseable peptide/charge
+/// `--fixed-mods` / `--variable-mods` applied). Rows with an unknown scan or an unparseable peptide/charge
 /// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
 /// by the external engine; the value is unused by the accumulator).
 pub(crate) fn load_labels_from_tsv(
@@ -728,7 +724,6 @@ pub(crate) fn run_train_from_search(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -741,9 +736,6 @@ pub(crate) fn run_train_from_search(
         return run_train_update(args, update_model_id, t0);
     }
 
-    // ── Standard training path ────────────────────────────────────────────────
-
-    // ── 2. Check inputs ───────────────────────────────────────────────────────
     if args.spectra.is_empty() {
         return Err("--spectra is required for initial training".into());
     }
@@ -756,7 +748,6 @@ pub(crate) fn run_train_from_search(
         .into());
     }
 
-    // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
@@ -790,14 +781,14 @@ pub(crate) fn run_train_from_search(
         let labels = if let Some(labels_path) = args.labels.get(i) {
             // SP-B glyco path: labels come from an external engine's backbone IDs.
             // No seed search / database needed — the peptides are given directly.
-            let aa_set = build_aa_set(&args.mods)?;
+            let aa_set = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
             load_labels_from_tsv(labels_path, &spectra, &aa_set)?
         } else {
             let database = args
                 .database
                 .clone()
                 .ok_or("--database is required for initial training (or pass --labels)")?;
-            let search_params = build_train_search_params(&args.mods)?;
+            let search_params = build_train_search_params(&args)?;
             eprintln!(
                 "train: running seed search (train-fdr = {}) ...",
                 args.train_fdr
@@ -876,7 +867,6 @@ pub(crate) fn run_train_from_search(
     }
     let accum_scorer = RankScorer::new(&template);
 
-    // ── 6. Accumulate stats, one CountStats per run ───────────────────────────
     eprintln!("train: accumulating ion-match statistics ...");
     let accumulator = StatsAccumulator::new(&accum_scorer);
     let run_stats: Vec<CountStats> = runs
@@ -892,7 +882,6 @@ pub(crate) fn run_train_from_search(
         .collect();
     let stats = merge(run_stats.clone());
 
-    // ── 7. Estimate model ─────────────────────────────────────────────────────
     eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig::default();
     let estimator = Estimator::new(cfg);
@@ -931,22 +920,15 @@ pub(crate) fn run_train_from_search(
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {} partitions", n_partitions);
 
-    // ── 8. Determine model ID ─────────────────────────────────────────────────
     let model_id = args
         .model_id
         .clone()
         .unwrap_or_else(|| format!("trained_{}_{}", instrument, args.protocol));
     eprintln!("train: model ID = {model_id}");
 
-    // ── 9. Build source ledger (Part A) ───────────────────────────────────────
-    // Determine date: use args.date if provided, else today's date in ISO 8601.
     let date_str = args.date.clone().unwrap_or_else(|| {
-        // Format today as YYYY-MM-DD using std::time.
         format_today_iso8601()
     });
-    // One source per run. A single run keeps the historical id
-    // `bootstrap_<model_id>`; several runs are named by file stem (made unique
-    // with a numeric suffix when two stems collide).
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::with_capacity(runs.len());
     let mut seen_ids = std::collections::HashSet::new();
     for (run, run_stats) in runs.iter().zip(run_stats) {
@@ -1005,7 +987,6 @@ pub(crate) fn run_train_from_search(
         }
     }
 
-    // Combine all models: write the trained model + existing others together.
     let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
     all_entries.push((model_id.clone(), trained_param.clone(), sources));
     for (id, p, src) in existing_other {
@@ -1035,10 +1016,6 @@ pub(crate) fn run_train_from_search(
 
     Ok(())
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// train-from-msnet: supervised training from externally-labeled PSM parquets
-// ════════════════════════════════════════════════════════════════════════════
 
 /// One confident, externally-labeled PSM read from a flat training parquet.
 ///
@@ -1206,7 +1183,6 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
             .downcast_ref::<ListArray>()
             .ok_or("column 'intensity' is not a LIST column")?;
 
-        // Helper to pull a Vec<i32> out of one ListArray row.
         let list_i32 =
             |list: &ListArray, i: usize| -> Result<Vec<i32>, Box<dyn std::error::Error>> {
                 if list.is_null(i) {
@@ -1308,7 +1284,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
 
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -1317,7 +1292,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
             .expect("build_global");
     });
 
-    // ── 2. Read all input parquets ────────────────────────────────────────────
     let mut psms: Vec<MsnetPsm> = Vec::new();
     let mut rows_read = 0usize;
     for input in &args.inputs {
@@ -1335,7 +1309,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         args.inputs.len()
     );
 
-    // ── 3. Load seed Param and apply the fragment-tolerance override ──────────
     let (seed_model_id, mut seed_param): (String, Param) =
         load_seed_param(&Some(args.seed_model.clone()))?;
     eprintln!("train: seed model = {seed_model_id}");
@@ -1373,10 +1346,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         seed_param.clone()
     };
 
-    // Build the scorer AFTER the tolerance override so accumulation uses it.
     let seed_scorer = RankScorer::new(&template);
 
-    // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
     eprintln!("train: accumulating ion-match statistics ...");
     let stats = psms
         .par_iter()
@@ -1389,7 +1360,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     let stats = merge(stats);
     eprintln!("train: accumulated {} PSMs", psms.len());
 
-    // ── 5. Estimate the model (replaces all learned tables in the seed) ───────
     eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig {
         pseudo: args.train_pseudo,
@@ -1476,7 +1446,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         trained_param.data_type.protocol,
     );
 
-    // ── 6. Build the source ledger (sentinel train_fdr; pre-labeled input) ────
     let dataset = args
         .inputs
         .first()
@@ -1495,7 +1464,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
 
-    // ── 6b. Optionally train a GBDT peak model ────────────────────────────────
     let gbdt_blob: Option<Vec<u8>> = if args.gbdt != GbdtMode::Off {
         use model_train::gbdt::dataset::{build_dataset, PsmRow};
         use model_train::gbdt::train::{train_gbdt, TrainParams};
@@ -1557,7 +1525,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
                 let p = store
                     .load_param(&id)
                     .map_err(|e| format!("reading model '{id}': {e}"))?;
-                // Preserve the GBDT blob (if any) for the existing model.
                 let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
                 let src_ledgers = store.load_sources(&id).unwrap_or_default();
                 let mut src = Vec::new();
@@ -1571,15 +1538,12 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
             }
         }
 
-        // Build the combined entries list: new model first, then existing others.
         let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
         all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
         for (id, p, src) in existing_other {
             all_entries.push((id, p, src));
         }
 
-        // Parallel blobs: new model gets gbdt_blob (Some or None); existing models
-        // get their preserved blobs.
         let mut all_blobs: Vec<Option<Vec<u8>>> = vec![gbdt_blob];
         all_blobs.extend(existing_blobs);
 
@@ -1624,9 +1588,7 @@ pub(crate) fn run_train_update(
     // Fail before the seed search / acceptance gate, not at commit time.
     ensure_single_file_store(store_path)?;
 
-    // ── Dispatch to the right update operation ────────────────────────────────
     let (candidate, new_sources) = if args.add {
-        // --add mode: search spectra, accumulate stats, call update_add.
         let spectra_path = match args.spectra.as_slice() {
             [one] => one.clone(),
             [] => return Err("--spectra is required with --add".into()),
@@ -1648,7 +1610,6 @@ pub(crate) fn run_train_update(
         let spectra = load_spectra_for_train(&spectra_path)?;
         eprintln!("train update: loaded {} spectra", spectra.len());
 
-        // Load the current stored model as the seed.
         let store = ModelStore::open(store_path)
             .map_err(|e| format!("opening store {}: {e}", store_path.display()))?;
         let current_param = store
@@ -1656,7 +1617,7 @@ pub(crate) fn run_train_update(
             .map_err(|e| format!("loading model '{model_id}': {e}"))?;
         let current_scorer = RankScorer::new(&current_param);
 
-        let search_params = build_train_search_params(&args.mods)?;
+        let search_params = build_train_search_params(&args)?;
 
         eprintln!(
             "train update: running seed search (train-fdr={}) ...",
@@ -1718,7 +1679,6 @@ pub(crate) fn run_train_update(
     } else if let Some(ref sid) = args.remove_source.clone() {
         update_remove(store_path, model_id, sid, cfg).map_err(|e| format!("update_remove: {e}"))?
     } else if let Some(ref spec) = args.reweight.clone() {
-        // Parse "source-id=weight"
         let (sid, weight) = parse_reweight_spec(spec)?;
         update_reweight(store_path, model_id, &sid, weight, cfg)
             .map_err(|e| format!("update_reweight: {e}"))?
@@ -1731,7 +1691,6 @@ pub(crate) fn run_train_update(
         );
     };
 
-    // ── Acceptance gate (Part D) ──────────────────────────────────────────────
     let commit = if let Some(ref validate_path) = args.validate.clone() {
         let database = args
             .database
@@ -1752,7 +1711,7 @@ pub(crate) fn run_train_update(
         let current_scorer = RankScorer::new(&current_param);
         let candidate_scorer = RankScorer::new(&candidate);
 
-        let search_params = build_train_search_params(&args.mods)?;
+        let search_params = build_train_search_params(&args)?;
 
         let delta = evaluate_candidate(
             &val_spectra,
@@ -1824,7 +1783,6 @@ pub(crate) fn format_today_iso8601() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Simple Gregorian calendar conversion from Unix timestamp (days since epoch).
     let days = secs / 86400;
     unix_days_to_iso8601(days)
 }

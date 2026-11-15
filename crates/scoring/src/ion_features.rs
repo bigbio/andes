@@ -31,13 +31,11 @@ pub const ION_FEATURE_NAMES: [&str; N_ION_FEATURES] = {
 };
 pub const COMPLEMENT_PPM_SENTINEL: f32 = 1000.0;
 
-/// Signed ppm of an observed peak m/z `obs` relative to a theoretical m/z `theo`.
 #[inline]
 fn ppm(obs: f64, theo: f64) -> f64 {
     ((obs - theo) / theo) * 1e6
 }
 
-/// Convert a feature tolerance (ppm or Da) into an absolute Da window at `mz`.
 #[inline]
 fn tol_da(mz: f64, feature_tol: f64, feature_tol_is_ppm: bool) -> f64 {
     if feature_tol_is_ppm {
@@ -102,7 +100,6 @@ pub fn extract_ion_features(
 ) -> [f32; N_ION_FEATURES] {
     let mut f = [0.0f32; N_ION_FEATURES];
 
-    // Chemistry block (verbatim from frag_features; nce = 0.0).
     let chem = extract_frag_features(peptide, kind, position, precursor_charge, frag_charge, 0.0);
     f[..N_FRAG_FEATURES].copy_from_slice(&chem);
 
@@ -128,10 +125,8 @@ pub fn extract_ion_features(
         }
     }
 
-    // This ion's own match: rank + signed ppm.
     let self_ppm: Option<f64> = if let Some(mz) = self_mz {
         let td = tol_da(mz, feature_tol, feature_tol_is_ppm);
-        // nearest_peak_full returns (rank, intensity, peak_mz).
         if let Some((rank, _intensity, obs_mz)) = scored_spec.nearest_peak_full(mz, td) {
             let p = ppm(obs_mz, mz);
             f[FEAT_ION_RANK] = rank as f32;
@@ -144,7 +139,6 @@ pub fn extract_ion_features(
         None
     };
 
-    // Complement coherence: present + ppm-delta.
     f[FEAT_COMPLEMENT_PPM_DELTA] = COMPLEMENT_PPM_SENTINEL;
     if let (Some(sp), Some(cmz)) = (self_ppm, comp_mz) {
         let td = tol_da(cmz, feature_tol, feature_tol_is_ppm);
@@ -197,7 +191,6 @@ mod tests {
         }
     }
 
-    /// Find a predicted ion's m/z by (kind, position, charge).
     fn ion_mz(p: &Peptide, kind: IonKind, position: u32, charge: u8) -> f64 {
         predict_by_ions(p, 1..=2)
             .into_iter()
@@ -245,7 +238,6 @@ mod tests {
             "complement ppm delta {} should be small (both exact)",
             f[FEAT_COMPLEMENT_PPM_DELTA]
         );
-        // self matched → rank set, well below the sentinel.
         assert!(f[FEAT_ION_RANK] >= 1.0, "self rank should be set");
     }
 

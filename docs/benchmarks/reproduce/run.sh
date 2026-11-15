@@ -38,9 +38,9 @@ pick_spectra() {  # $1 = dataset dir
 for ds in "${SETS[@]}"; do
   case "$ds" in
     astral) spec=$(pick_spectra "$DATA_DIR/astral")   # .raw first: no conversion
-            fa="$DB/hye.fasta";          extra=(--mods "$HERE/../configs/astral_mods.txt" --precursor-tol 10ppm --enzyme trypsin) ;;
+            fa="$DB/hye.fasta";          extra=(--precursor-tol 10ppm --enzyme trypsin) ;;
     tmt)    spec=$(pick_spectra "$DATA_DIR/tmt")
-            fa="$DB/tmt_db.fasta";       extra=(--mods "$HERE/../configs/mods-tmt.txt") ;;
+            fa="$DB/tmt_db.fasta";       extra=(--fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" --max-mods 2) ;;
     ups1)   spec=$(pick_spectra "$DATA_DIR/ups1")
             fa="$DB/yeast_entrap.fasta"; extra=() ;;
     *) echo "unknown dataset '$ds'" >&2; exit 1 ;;

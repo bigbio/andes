@@ -1,5 +1,3 @@
-//! Load `astral-speed/test-fixtures/Tryp_Pig_Bov.fasta` (16
-//! proteins) and assert count + per-protein invariants.
 
 use std::fs::File;
 use std::io::BufReader;

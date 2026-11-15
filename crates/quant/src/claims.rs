@@ -91,7 +91,6 @@ pub struct Claim {
 }
 
 impl Claim {
-    /// The claimants, best first (at most three).
     pub fn claimants(&self) -> impl Iterator<Item = u32> + '_ {
         self.claimant
             .into_iter()
@@ -99,7 +98,6 @@ impl Claim {
     }
 }
 
-/// The value below which `q` of the sorted `v` lie, interpolated linearly.
 fn quantile(v: &[f64], q: f64) -> f64 {
     let pos = q * (v.len() - 1) as f64;
     let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
@@ -126,7 +124,6 @@ fn robust_sd(x: &mut [f64], clip: f64) -> f64 {
 /// has fewer than [`MIN_PAIRS`] same-compound pairs or a degenerate spread.
 pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     let fitted = |p: &Probe| p.mass.is_finite() && p.t0.is_finite() && p.w.is_finite();
-    // Same compound, two charge states: lower charge minus higher charge.
     let mut by_peptide: std::collections::HashMap<u32, Vec<&Probe>> = Default::default();
     for p in probes
         .iter()
@@ -200,7 +197,6 @@ pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     })
 }
 
-/// Indices of the fitted probes ordered by (charge, mass).
 fn sorted_by_mass(probes: &[Probe]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..probes.len())
         .filter(|&i| {
@@ -236,7 +232,6 @@ pub fn assign(probes: &[Probe], rows: &[usize], windows: Option<Windows>) -> Vec
                 (probes[j].charge, probes[j].mass) < (me.charge, me.mass - tol)
             });
             let mut claim = Claim::default();
-            // The three best claimants: (identified, apex distance, precursor).
             let mut best: Vec<(bool, f64, u32, usize)> = Vec::with_capacity(4);
             let mut min_dt = f64::INFINITY;
             for &j in &order[lo..] {

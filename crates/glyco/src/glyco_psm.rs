@@ -28,7 +28,6 @@ pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 /// matched b/y count) than the wrong winner but a LOWER intensity-weighted
 /// RankScore — i.e. andes' rank under-rewards COUNT, exactly what MSFragger's
 /// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
-/// Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 
 /// Default weight for the count-rewarding hyperscore term (glyco 2.0 peptide
@@ -224,7 +223,6 @@ pub struct GlycoPsmKey {
     /// the one glyco feature that discriminates competing peptides at a shared
     /// backbone window. Never folded into the ranking score.
     pub y0y1_anchor_score: f32,
-    /// GI-2 composition-conditioned SIALIC consistency (additive PIN feature):
     /// ±NeuAc/NeuGc oxonium signed by whether this glycan claims that sialic —
     /// the one oxonium-derived feature that discriminates glycans of different
     /// sialic content on one spectrum. 0.0 when no glycan is resolved.
@@ -357,7 +355,6 @@ mod tests {
         let (k, j, h) = (GLYCO_GP_K_DEFAULT, 0.0, 0.0); // isolate rank/ladder (K=10)
         let truth = glyco_gp_fused_score(15.0, 0.05, 0.0, 0.0, k, j, h); // 15 + 0.5 = 15.5
         let wrong = glyco_gp_fused_score(2.0, 0.06, 0.0, 0.0, k, j, h); //  2 + 0.6 =  2.6
-                                                                        // Legacy y_primary would pick `wrong` (0.06 > 0.05); gp fusion rescues truth.
         assert!(collapse_cmp(15.0, 0.05, 2.0, 0.06, true) == Ordering::Less);
         assert!(
             truth > wrong,
@@ -378,7 +375,6 @@ mod tests {
         // gp2 (leg 2b): truth loses on rank+ladder alone but has MORE core-Y hits;
         // the j·core_y_hits count term flips it (the MSFragger hyperscore axis).
         let (k, j, h) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT, 0.0); // 50, 5, no hyperscore
-                                                                       // truth: rank 8, ladder 0.1, core-Y 6 ; winner: rank 12, ladder 0.1, core-Y 2
         let truth = glyco_gp_fused_score(8.0, 0.1, 6.0, 0.0, k, j, h); // 8 + 5 + 30 = 43
         let winner = glyco_gp_fused_score(12.0, 0.1, 2.0, 0.0, k, j, h); // 12 + 5 + 10 = 27
         assert!(

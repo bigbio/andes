@@ -1001,7 +1001,6 @@ mod tests {
         );
     }
 
-    /// Deterministic pseudo-noise in [0, 1).
     /// Rows of two files with the same ScanNr and ExpMass are different
     /// spectra: each file's rows compete only among themselves.
     #[test]

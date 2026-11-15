@@ -57,8 +57,6 @@ pub fn load(models: &Path, manifest: &str) -> OnnxSession {
         .unwrap_or_else(|e| panic!("load {manifest}: {e}"))
 }
 
-// ---------------------------------------------------------------- MS²PIP
-
 pub struct Ms2pip {
     pub dir: std::path::PathBuf,
     /// ms2pip model name (`HCD2021`, `CID`, `TMT`, …).
@@ -112,8 +110,6 @@ impl Predictor for Ms2pip {
             .collect())
     }
 }
-
-// ---------------------------------------------------------------- andes-ms2
 
 /// b z1, b z2, y z1, y z2: the base ions andes-ms2 predicts per site.
 const ANDES_MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
@@ -195,8 +191,6 @@ impl Predictor for AndesMs2 {
             .collect())
     }
 }
-
-// ---------------------------------------------------------------- Prosit
 
 pub struct Prosit {
     pub dir: std::path::PathBuf,

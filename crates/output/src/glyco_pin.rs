@@ -47,8 +47,6 @@ use search::precursor_mono::MonoCorrection;
 /// unshifted); `MonoSNR`: searched monoisotope intensity over the MS1 median.
 pub const GLYCO_PIN_MONO_COLS: [&str; 4] = ["MonoShift", "MonoFit", "MonoFitGain", "MonoSNR"];
 
-// ── header ────────────────────────────────────────────────────────────────────
-
 fn write_glyco_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
@@ -179,8 +177,6 @@ fn write_glyco_header<W: Write>(
     writeln!(writer, "{}", cols.join("\t"))
 }
 
-// ── per-row writer ─────────────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn write_glyco_psm_row<W: Write>(
     writer: &mut W,
@@ -271,8 +267,6 @@ fn write_glyco_psm_row<W: Write>(
     let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
-    // Standard feature block (reuse psm_feature_values; skip RankScore + isotope_error
-    // which were already written above in the leading block).
     let features = psm_feature_values(psm, 1);
     debug_assert_eq!(features[0].0, "RankScore");
     debug_assert_eq!(features[1].0, "isotope_error");
@@ -288,7 +282,6 @@ fn write_glyco_psm_row<W: Write>(
         }
     }
 
-    // Glyco-specific columns (8, incl. Y0Y1Anchor and YHitFrac).
     let is_glycan_db: u8 = if key.glycan_source == Source::Db {
         1
     } else {
@@ -306,7 +299,6 @@ fn write_glyco_psm_row<W: Write>(
     if glyco_col_kept("YHitFrac") {
         write_double_tab(writer, key.y_hit_frac as f64)?;
     }
-    // PartialGlycanBY (idea B): sequence-specific partial-glycan b/y evidence.
     if glyco_col_kept("PartialGlycanBY") {
         write_double_tab(writer, key.partial_glycan_by as f64)?;
     }
@@ -319,23 +311,19 @@ fn write_glyco_psm_row<W: Write>(
     if glyco_col_kept("IsGlycanDb") {
         write!(writer, "\t{}", is_glycan_db)?;
     }
-    // G2 Y0/Y1 anchor (additive, peptide-mass-conditioned).
     if glyco_col_kept("Y0Y1Anchor") {
         write_double_tab(writer, key.y0y1_anchor_score as f64)?;
     }
-    // GI-2 sialic consistency (composition-conditioned). Additive PIN feature.
     if glyco_col_kept("SialicConsistency") {
         write_double_tab(writer, key.sialic_consistency as f64)?;
     }
 
-    // ETD c/z backbone hyperscore (additive; ETD/AI-ETD spectra only, else 0.0).
     if glyco_col_kept("CzHyperscore") {
         write_double_tab(writer, key.cz_hyperscore as f64)?;
     }
     if glyco_col_kept("CzIntensity") {
         write_double_tab(writer, key.cz_intensity as f64)?;
     }
-    // Discriminative c/z STRUCTURE features (additive; 0.0 on HCD/CID scans).
     if glyco_col_kept("CzExplained") {
         write_double_tab(writer, key.cz_explained as f64)?;
     }
@@ -439,8 +427,6 @@ fn glycan_tag_with_site(
         g.tree.canonical()
     )
 }
-
-// ── public API ────────────────────────────────────────────────────────────────
 
 /// Write a glyco PIN file from the output of `glyco_search_run`.
 ///
@@ -681,7 +667,6 @@ pub fn write_glyco_pin_to<W: Write>(
     }
 
     writer.flush()?;
-    // Return row count via a side-channel eprintln so callers can report it.
     eprintln!(
         "[glyco-pin] wrote {} PSM rows ({})",
         row_count,
@@ -693,8 +678,6 @@ pub fn write_glyco_pin_to<W: Write>(
     );
     Ok(())
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Write a tab then a double in %.6g style.
 fn write_double_tab<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
@@ -887,9 +870,6 @@ mod tests {
 
     #[test]
     fn glyco_pin_header_contains_glyco_columns() {
-        // Build a tiny result and write to a Vec<u8>.
-        // We can't call write_glyco_pin_to without real candidates + index,
-        // so we test the header directly.
         let mut buf = Vec::new();
         write_glyco_header(&mut buf, 2, 4, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
@@ -938,7 +918,6 @@ mod tests {
             pos("Peptide"),
             "IsobaricRTMargin must be last before Peptide"
         );
-        // Header column count == a written data row's column count (consistency).
     }
 
     #[test]
@@ -980,8 +959,6 @@ mod tests {
             0
         );
     }
-
-    // ── BUG 3 regression: CalcMass must include the glycan mass ──────────────
 
     use model::aa_set::AminoAcidSetBuilder;
     use model::peptide::Peptide;
@@ -1230,8 +1207,6 @@ mod tests {
             vec![0],
             "gp default rescues the rank-strong truth over the spurious-ladder split"
         );
-        // The gp fused ordering (exactly what select_emitted_hits computes) rescues
-        // the rank-strong truth (idx 0): 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5.
         let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT);
         let gp_score = |h: &FullGlycoPsm| {
             glyco_gp_fused_score(
@@ -1365,8 +1340,6 @@ mod tests {
             assert_eq!(at("YLadderScore"), Some("1.25"));
             assert_eq!(at("CoreYHits"), Some("3"));
             assert_eq!(at("CzHyperscore"), Some("2.5"));
-            // DeltaRTRank is dropped by the column policy (structurally 0 under the
-            // collapse); the consistency loop above is the real guard here.
             assert!(
                 !header.contains(&"DeltaRTRank"),
                 "structurally dead DeltaRTRank is back in the row schema"

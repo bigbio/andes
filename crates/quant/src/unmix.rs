@@ -278,8 +278,6 @@ impl InterferenceModel {
         if m < MIN_FIT_SCANS {
             return None;
         }
-        // Relative residuals: each scan counts by its relative error, so the
-        // most intense scans do not dominate the fit.
         let mut weight = vec![1.0f64; m];
         let mut beta = vec![0.0f64; N_COEF];
         let mut a = vec![0.0f64; m * N_COEF];

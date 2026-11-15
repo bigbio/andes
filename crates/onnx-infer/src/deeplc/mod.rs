@@ -197,7 +197,6 @@ mod tests {
     #[test]
     fn global_layout_for_unmodified_peptide() {
         let f = encode(&pep("PEPTIDEK")).unwrap();
-        // summed residue compositions of PEPTIDEK
         assert_eq!(&f.x_global[..7], &[40.0, 63.0, 9.0, 15.0, 0.0, 0.0, 8.0]);
         // row 0 = position −4 (I), row 4 = position 0 (P), row 7 = position 3 (T)
         assert_eq!(&f.x_global[7..13], &[6.0, 11.0, 1.0, 1.0, 0.0, 0.0]);

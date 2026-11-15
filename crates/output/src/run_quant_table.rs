@@ -33,13 +33,11 @@ const SCHEMA_VERSION: &str = "2.0";
 /// Schema version of a table with the `ion_mobility` column, which is
 /// written only when some PSM records a precursor 1/K0.
 const SCHEMA_VERSION_MOBILITY: &str = "2.1";
-/// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
 /// One rank-1 PSM of a run, target or decoy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunPsmRow {
-    /// PIN SpecId, joins the Percolator PSMId.
     pub spec_id: String,
     /// MS2 retention time, seconds.
     pub rt_s: f64,
@@ -366,7 +364,6 @@ pub fn open_run_quant_table(path: &Path, columns: &[&str]) -> Result<RunQuantBat
 }
 
 impl RunQuantBatches {
-    /// The run stem recorded in the table.
     pub fn run(&self) -> &str {
         &self.run
     }
@@ -557,7 +554,6 @@ mod tests {
         for (b, s) in back.iter().zip(shares) {
             assert_eq!(b.isotope_share.to_bits(), s.to_bits());
         }
-        // Read alone, and left out of a projection.
         let only: Vec<RunPsmRow> = open_run_quant_table(&p, &["isotope_share"])
             .unwrap()
             .flat_map(|b| b.unwrap())
@@ -635,7 +631,6 @@ mod tests {
     fn quant_table_rejects_unknown_major_version() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("b.quant.parquet");
-        // The layout before `isotope_share` (major 1) and a later one.
         for version in ["1.2", "3.0"] {
             write_with_schema_version(&p, "b", &[], version).unwrap();
             let e = read_run_quant_table(&p).unwrap_err();

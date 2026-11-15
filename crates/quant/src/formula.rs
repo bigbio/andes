@@ -164,8 +164,6 @@ mod tests {
 
     #[test]
     fn glycan_formula_mass_matches_the_residue_masses() {
-        // Polymerised residue masses pinned by the glyco campaign (see
-        // glyco::glycan_mass) at 6 decimals.
         let f = Formula::glycan(1, 0, 0, 0, 0);
         assert!((f.monoisotopic_mass() - 162.052824).abs() < 5e-6, "{f:?}");
         let f = Formula::glycan(0, 1, 0, 0, 0);
@@ -189,7 +187,6 @@ mod tests {
         let a = bare.envelope(6);
         let b = intact.envelope(6);
         assert!(b[1] / b[0] > a[1] / a[0]);
-        // The monoisotopic peak of a ~3 kDa glycopeptide is no longer dominant.
         let mut big = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
         big.add(Formula::averagine(2500.0));
         let e = big.envelope(8);
@@ -224,7 +221,6 @@ mod tests {
         let (env, s) = f.envelope_and_share(4);
         assert_eq!(env, f.envelope(4));
         assert!(s > 0.99 && s < 1.0, "{s}");
-        // More isotopes hold more of the pattern.
         assert!(f.envelope_and_share(5).1 > s);
     }
 

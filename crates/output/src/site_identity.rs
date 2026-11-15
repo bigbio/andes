@@ -19,7 +19,6 @@ use std::collections::HashMap;
 
 use search::site_evidence::SiteEvidence;
 
-/// Weights of the fixed part of a row's logit, per unit of each feature.
 const W_SCORE: f64 = 2.0;
 const W_ISOTOPE_1: f64 = -1.0;
 const W_ISOTOPE_2: f64 = -5.7;
@@ -27,10 +26,8 @@ const W_HIT_FRACTION: f64 = 25.0;
 const W_UNIQUE_HIT: f64 = 0.08;
 const W_UNIQUE_MISS: f64 = -0.02;
 const W_DECOY: f64 = -11.0;
-/// Posterior above which a target row teaches the signature likelihoods.
 const CONFIDENT: f64 = 0.9;
 
-/// What the search kept of one emitted row.
 #[derive(Debug, Clone)]
 pub struct RowEvidence {
     /// Spectrum index: rows of one spectrum compete.
@@ -42,7 +39,6 @@ pub struct RowEvidence {
 /// A modification signature: (mod name, mass bits, diagnostic or loss).
 type Signature = (String, u64, bool);
 
-/// Present and total counts, with one pseudo-count each way.
 #[derive(Debug, Clone, Copy)]
 struct Rate {
     present: f64,
@@ -208,7 +204,7 @@ pub fn row_posteriors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::modification::{leak_mod, Modification};
+    use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
     use search::site_evidence::ModMark;
 
     fn psm(id: &str, score: f64) -> (String, f64) {
@@ -234,14 +230,20 @@ mod tests {
 
     #[test]
     fn rows_of_a_spectrum_share_one_posterior_and_signatures_move_it() {
-        let ac = leak_mod(
-            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,diagnostic=143.1179")
-                .unwrap(),
-        );
-        let me3 = leak_mod(
-            Modification::from_mods_txt_line("42.04695,K,opt,any,Trimethyl,diagnostic=143.1543")
-                .unwrap(),
-        );
+        let k = |name: &str, mass: f64, ion: f64| {
+            leak_mod(Modification {
+                diagnostic_ions: vec![ion],
+                ..Modification::new(
+                    name,
+                    mass,
+                    ResidueSpec::Specific(b'K'),
+                    ModLocation::Anywhere,
+                    false,
+                )
+            })
+        };
+        let ac = k("Acetyl", 42.010565, 143.1179);
+        let me3 = k("Trimethyl", 42.04695, 143.1543);
         // 200 spectra teach the likelihoods: a clear acetyl row whose ion is
         // present, against a weak trimethyl row whose ion is absent.
         let mut targets = HashMap::new();
@@ -261,7 +263,6 @@ mod tests {
         // Present when carried in all 200, never shown by a confident rival:
         // ln(201/202 / 0.5) each way, so P(acetyl) = 1 / (1 + e^-1.38) ≈ 0.80.
         assert!((post["a"] - 0.799).abs() < 0.01, "{}", post["a"]);
-        // Without signatures the two rows tie.
         for r in rows.values_mut() {
             r.evidence.as_mut().unwrap().marks.clear();
         }

@@ -6,9 +6,9 @@
 //! whose scores barely differ. Three kinds of evidence separate them:
 //! - the fragment ions of a form that no other form of the same peptide among
 //!   the spectrum's candidates has (the site-determining ions);
-//! - the diagnostic ions a modification declares (Mods.txt `diagnostic=`),
+//! - the diagnostic ions a modification declares (config `diagnostic_ions`),
 //!   such as the immonium ion of the modified residue;
-//! - the neutral losses it declares (Mods.txt `loss=`), from the precursor or
+//! - the neutral losses it declares (config `neutral_loss`), from the precursor or
 //!   from the fragments that hold the modified residue.
 //!
 //! Rows are compared after rescoring (see `output::site_identity`); nothing
@@ -67,14 +67,12 @@ fn fragment_mzs(peptide: &Peptide, charge: u8) -> Vec<f64> {
     out
 }
 
-/// Whether a peak lies within `tol` of `mz`. `peaks` is sorted by m/z.
 fn present(peaks: &[(f64, f32)], mz: f64, tol: Tolerance) -> bool {
     let tol = tol.as_da(mz);
     let i = peaks.partition_point(|p| p.0 < mz - tol);
     i < peaks.len() && peaks[i].0 <= mz + tol
 }
 
-/// Whether `ions` (sorted) holds a value within `tol` Da of `mz`.
 fn near(ions: &[f64], mz: f64, tol: f64) -> bool {
     let i = ions.partition_point(|&v| v < mz - tol);
     i < ions.len() && ions[i] <= mz + tol
@@ -229,14 +227,25 @@ mod tests {
         Peptide::new(residues, b'K', b'G')
     }
 
-    fn line(s: &str) -> &'static Modification {
-        leak_mod(Modification::from_mods_txt_line(s).unwrap())
+    fn lys(name: &str, mass: f64, ions: &[f64], losses: &[f64]) -> &'static Modification {
+        leak_mod(Modification {
+            diagnostic_ions: ions.to_vec(),
+            neutral_losses: losses.to_vec(),
+            loss_class: if losses.is_empty() { 0 } else { 255 },
+            ..Modification::new(
+                name,
+                mass,
+                model::ResidueSpec::Specific(b'K'),
+                model::ModLocation::Anywhere,
+                false,
+            )
+        })
     }
 
     #[test]
     fn diagnostic_ions_and_losses_mark_their_modification() {
-        let ac = line("42.010565,K,opt,any,Acetyl,diagnostic=143.1179");
-        let me3 = line("42.04695,K,opt,any,Trimethyl,diagnostic=143.1543,loss=59.0735");
+        let ac = lys("Acetyl", 42.010565, &[143.1179], &[]);
+        let me3 = lys("Trimethyl", 42.04695, &[143.1543], &[59.0735]);
         let a = peptide(b"PEPKTIDER", 3, ac);
         let t = peptide(b"PEPKTIDER", 3, me3);
         let mass = t.mass();
@@ -303,8 +312,8 @@ mod tests {
     /// share every ion; at 20 ppm neither happens.
     #[test]
     fn a_ppm_tolerance_separates_near_isobaric_ions() {
-        let ac = line("42.010565,K,opt,any,Acetyl,diagnostic=126.0913");
-        let me3 = line("42.04695,K,opt,any,Trimethyl");
+        let ac = lys("Acetyl", 42.010565, &[126.0913], &[]);
+        let me3 = lys("Trimethyl", 42.04695, &[], &[]);
         let a = peptide(b"PEPKTIDER", 3, ac);
         let t = peptide(b"PEPKTIDER", 3, me3);
         let b4: f64 = a.residues[..4]

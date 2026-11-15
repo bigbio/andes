@@ -128,7 +128,6 @@ impl MonoCorrection {
     pub fn applied(&self) -> bool {
         self.shift != 0
     }
-    /// Fit of the hypothesis the search actually uses.
     pub fn fit_searched(&self) -> f32 {
         if self.applied() {
             self.fit_best
@@ -198,7 +197,6 @@ pub fn envelope_fit(
     let n = envelope_length(&theo_full, params.max_isotopes.max(1));
     let spacing = ISOTOPE / z;
 
-    // Slot 0 is the i = −1 position (theory 0), slots 1..=n are M+0..M+(n−1).
     let mut dot = 0.0f64;
     let mut o2 = 0.0f64;
     let mut t2 = 0.0f64;

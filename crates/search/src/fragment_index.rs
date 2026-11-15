@@ -1,4 +1,3 @@
-//! Per-chunk fragment-ion index for PTM-rich out-of-core searches (issue #76).
 //!
 //! The enumeration path materialises every peptidoform of every base record in
 //! a spectrum's precursor windows and runs the full scorer on each. On a
@@ -408,13 +407,6 @@ impl ChunkFragmentIndex {
         if id_lo >= id_hi {
             return Vec::new();
         }
-        // Vote count, plus the summed intensity of the peaks that produced it.
-        // The count stays the primary key — it is what `min_matched` means — and the
-        // intensity is only ever used to break ties among equal counts.
-        // Votes go into a dense per-thread array over the window's id range, plus
-        // the list of ids touched, instead of a hash map grown per spectrum. Each
-        // id's sums accumulate in peak order as before, and `select_top_k` fully
-        // orders the result, so the selection is identical.
         let n_bins = self.bin_start.len() - 1;
         let width = (id_hi - id_lo) as usize;
         // The blocks holding the first and the last id of the window; in every

@@ -11,7 +11,6 @@
 //!
 //! Both keep the target's `s` and `w_prior`, so the search breadth is equal.
 
-/// What a probe asserts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hypothesis {
     Target,
@@ -23,7 +22,6 @@ pub enum Hypothesis {
     RandomRtDecoy(u8),
 }
 
-/// One (m/z, predicted apex) hypothesis to be fitted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Probe {
     pub kind: Hypothesis,
@@ -33,9 +31,7 @@ pub struct Probe {
     pub w_prior: f64,
 }
 
-/// Nominal mass shifts (Da) of the mass-shift decoy family.
 pub const MASS_SHIFT_UNITS: [i8; 4] = [-11, -7, 7, 11];
-/// Average peptide mass per nominal Da.
 pub const PEPTIDE_MASS_SLOPE: f64 = 1.000495;
 
 fn splitmix64(mut x: u64) -> u64 {
@@ -286,10 +282,8 @@ mod random_rt_tests {
         ts.sort_by(f64::total_cmp);
         assert_eq!(ts, vec![300.0, 1500.0]);
         assert!(ps.iter().all(|p| p.mz == 501.0 && matches!(p.kind, Hypothesis::RandomRtDecoy(_))));
-        // Deterministic in (precursor, run).
         let again = random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &pool, 4);
         assert_eq!(again, ps);
-        // An empty pool gives none.
         assert!(random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &RtPool::default(), 4).is_empty());
     }
 }

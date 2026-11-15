@@ -15,13 +15,11 @@ use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
 
-/// Targets and decoys of one class, as counted for the run log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassCount {
     pub class: String,
     pub targets: usize,
     pub decoys: usize,
-    /// How the class q-values were estimated.
     pub method: ClassMethod,
     /// Storey's estimate of the class's null fraction (1.0 under `ClassTdc`).
     pub pi0: f64,
@@ -86,7 +84,6 @@ pub struct Cutoffs {
 }
 
 impl Cutoffs {
-    /// One cutoff for every row.
     pub fn uniform(fdr: f64) -> Self {
         Cutoffs {
             fdr,
@@ -95,7 +92,6 @@ impl Cutoffs {
         }
     }
 
-    /// Cutoffs for `targets`, whose proteoform-claim rows take `proteoform_fdr`.
     pub fn new(
         targets: &HashMap<String, PercolatorPsm>,
         idx: &SearchIndex,
@@ -135,7 +131,6 @@ impl Cutoffs {
             .count()
     }
 
-    /// The cutoff of row `id`.
     pub fn of(&self, id: &str) -> f64 {
         self.or(id, self.fdr)
     }
@@ -367,11 +362,8 @@ mod tests {
         .collect();
         decoys.get_mut("canon_low").unwrap().pep = 0.5;
         let cutoffs = Cutoffs::new(&decoys, &idx, 0.01, 0.05);
-        // canon fails 0.01; variant passes 0.05; both low ones pass.
         assert_eq!(cutoffs.count_passing(&decoys, None), 3);
-        // The cap drops the decoy whose PEP is 0.5.
         assert_eq!(cutoffs.count_passing(&decoys, Some(0.1)), 2);
-        // A uniform cutoff treats every row alike.
         assert_eq!(Cutoffs::uniform(0.01).count_passing(&decoys, None), 2);
     }
 

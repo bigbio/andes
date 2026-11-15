@@ -7,8 +7,6 @@ pub enum Tolerance {
 }
 
 impl Tolerance {
-    /// Convert this tolerance to absolute Daltons relative to a target mass.
-    /// For `Da`, returns the constant; for `Ppm`, returns `mass * ppm * 1e-6`.
     pub fn as_da(&self, mass: f64) -> f64 {
         match self {
             Tolerance::Ppm(ppm) => mass * ppm * 1e-6,
@@ -52,14 +50,12 @@ mod tests {
 
     #[test]
     fn ppm_at_1000_da() {
-        // 10 ppm of 1000 Da = 0.01 Da
         let t = Tolerance::Ppm(10.0);
         assert_eq!(t.as_da(1000.0), 0.01);
     }
 
     #[test]
     fn ppm_at_500_da() {
-        // 20 ppm of 500 Da = 0.01 Da
         let t = Tolerance::Ppm(20.0);
         assert_eq!(t.as_da(500.0), 0.01);
     }

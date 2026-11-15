@@ -58,6 +58,8 @@ mod train;
 mod train_intensity;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
+#[path = "andes/xl_fdr.rs"]
+mod xl_fdr;
 #[path = "andes/xl_run.rs"]
 mod xl_run;
 

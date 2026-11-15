@@ -645,8 +645,12 @@ pub(crate) struct SearchArgs {
     /// Each MS2 is searched for the linker's reporter doublets; the doublet peptide masses
     /// and the precursor give the candidate peptide pairs, and each peptide is scored with
     /// the standard scorer carrying the cleaved stub or its partner on the link residue.
-    /// Writes the best crosslink-spectrum match per spectrum (<base>.xl.tsv, with its
-    /// target/decoy class) and the doublet summary of every spectrum (<base>.xl.doublets.tsv).
+    /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
+    /// (<base>.xl.pin; --rescore scores it with Percolator) and the q-values, from the
+    /// target-target, target-decoy and decoy-decoy counts split by intra- and inter-protein
+    /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
+    /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
+    /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
     #[arg(long, value_name = "LINKER", value_parser = ["dsso"], hide_short_help = true,
           help_heading = H_MODES, conflicts_with = "glyco")]
     pub(crate) xl: Option<String>,

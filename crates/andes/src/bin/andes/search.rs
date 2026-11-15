@@ -1251,7 +1251,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         for (on, flag) in [
             (cli.output_tsv.is_some(), "--output-tsv"),
             (cli.output_parquet.is_some(), "--output-parquet"),
-            (cli.rescore, "--rescore"),
             (cli.rescore_native, "--rescore-native"),
             (cli.refine, "--refine"),
             (cli.psm_fdr.is_some(), "--psm-fdr"),
@@ -1268,7 +1267,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         if !unsupported.is_empty() {
             return Err(format!(
-                "--xl does not support: {} (crosslink mode writes a standalone .xl.tsv)",
+                "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
+                 tables; --rescore runs Percolator on the .xl.pin)",
                 unsupported.join(", ")
             )
             .into());
@@ -2532,7 +2532,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 7a. Crosslink mode: run the crosslink search, write .xl.tsv, return ──
     if cli.xl.is_some() {
-        crate::xl_run::run_xl(&cli, &spectra, &prepared, &output_pin_path, t_total)?;
+        crate::xl_run::run_xl(
+            &cli,
+            &spectra,
+            &prepared,
+            &output_pin_path,
+            spectrum_paths,
+            &run_ends,
+            t_total,
+        )?;
         return Ok(());
     }
 

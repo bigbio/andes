@@ -54,7 +54,9 @@
 //! CSM class is TT, TD or DD ([`decoy::PairClass`]). Pair FDR is
 //! `(TD - DD) / TT` ([`fdr`]), estimated separately for intra- and
 //! inter-protein links, with the link class assigned by the same rule to
-//! targets and decoys.
+//! targets and decoys. CSMs roll up to residue pairs and protein pairs by the
+//! best score of each group, and the same class-split estimate is made at each
+//! level ([`rollup`]).
 //!
 //! **Correctness check.** [`pair::pairs_by_sum`] is the exhaustive pair
 //! enumerator by precursor mass; it is tested against a brute-force all-pairs
@@ -66,4 +68,5 @@ pub mod decoy;
 pub mod doublet;
 pub mod fdr;
 pub mod pair;
+pub mod rollup;
 pub mod sites;

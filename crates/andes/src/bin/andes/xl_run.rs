@@ -1,5 +1,6 @@
-//! The `--xl` standalone driver: crosslink search, `.xl.tsv` and
-//! `.xl.doublets.tsv` output.
+//! The `--xl` standalone driver: crosslink search, the pair-aware
+//! `.xl.pin`, optional Percolator rescoring (`--rescore`), and the CSM,
+//! residue-pair, protein-pair and doublet tables.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,7 +8,6 @@ use std::path::{Path, PathBuf};
 use crate::cli::Cli;
 use andes_xl::crosslinker::Crosslinker;
 use andes_xl::decoy::PairClass;
-use andes_xl::fdr::{q_values, ClassCounts};
 use model::Spectrum;
 use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
 use search::PreparedSearch;
@@ -87,6 +87,7 @@ fn write_csms(
     path: &Path,
     spectra: &[Spectrum],
     results: &[XlSpectrumResult],
+    score: &[Option<f64>],
     q: &[Option<f64>],
     table: &XlCandidates,
     prepared: &PreparedSearch,
@@ -99,6 +100,7 @@ fn write_csms(
         "precursor_mass",
         "class",
         "link",
+        "score",
         "q_value",
         "pair_score",
         "second_pair_score",
@@ -118,7 +120,7 @@ fn write_csms(
     }
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
-    for (r, q) in results.iter().zip(q) {
+    for ((r, s), q) in results.iter().zip(score).zip(q) {
         let Some(c) = &r.csm else { continue };
         let spec = &spectra[r.spec_idx];
         let mut row = vec![
@@ -128,6 +130,7 @@ fn write_csms(
             format!("{:.5}", r.precursor_mass),
             c.class.name().to_string(),
             if c.intra { "intra" } else { "inter" }.to_string(),
+            s.map_or("NA".to_string(), |v| format!("{v:.4}")),
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             format!("{:.3}", c.pair_score),
             c.second_pair_score
@@ -270,33 +273,7 @@ fn write_doublets(
     w.flush()
 }
 
-/// q-values by `(TD - DD) / TT` on the pair score, separately for intra- and
-/// inter-protein links; `None` for spectra without a CSM.
-fn link_class_q_values(results: &[XlSpectrumResult]) -> Vec<Option<f64>> {
-    let mut q = vec![None; results.len()];
-    for intra in [true, false] {
-        let rows: Vec<usize> = results
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.csm.as_ref().is_some_and(|c| c.intra == intra))
-            .map(|(i, _)| i)
-            .collect();
-        let scores: Vec<f64> = rows
-            .iter()
-            .map(|&i| results[i].csm.as_ref().unwrap().pair_score as f64)
-            .collect();
-        let classes: Vec<PairClass> = rows
-            .iter()
-            .map(|&i| results[i].csm.as_ref().unwrap().class)
-            .collect();
-        for (k, v) in q_values(&scores, &classes).into_iter().enumerate() {
-            q[rows[k]] = Some(v);
-        }
-    }
-    q
-}
-
-fn report(results: &[XlSpectrumResult], q: &[Option<f64>]) {
+fn report(results: &[XlSpectrumResult]) {
     let n = results.len();
     let mut hist = [0usize; 4];
     for r in results {
@@ -318,47 +295,20 @@ fn report(results: &[XlSpectrumResult], q: &[Option<f64>]) {
             .filter(|r| r.doublets.n_full_pairs == 0 && r.doublets.n_half_pairs > 0)
             .count()
     );
-    for (label, intra) in [("intra", true), ("inter", false)] {
-        let mut all = ClassCounts::default();
-        let mut at = [ClassCounts::default(); 3];
-        for (r, q) in results.iter().zip(q) {
-            let Some(c) = &r.csm else { continue };
-            if c.intra != intra {
-                continue;
-            }
-            all.add(c.class);
-            for (k, cut) in [0.01, 0.05, 0.10].iter().enumerate() {
-                if q.is_some_and(|v| v <= *cut) {
-                    at[k].add(c.class);
-                }
-            }
-        }
-        eprintln!(
-            "[xl] {label}: all CSMs TT {} TD {} DD {}; q<=1%: TT {} TD {} DD {}; \
-             q<=5%: TT {} TD {} DD {}; q<=10%: TT {} TD {} DD {}",
-            all.tt,
-            all.td,
-            all.dd,
-            at[0].tt,
-            at[0].td,
-            at[0].dd,
-            at[1].tt,
-            at[1].td,
-            at[1].dd,
-            at[2].tt,
-            at[2].td,
-            at[2].dd
-        );
-    }
 }
 
 /// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
-/// write `<base>.xl.tsv` and `<base>.xl.doublets.tsv`.
+/// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
+/// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. With `--rescore` the
+/// CSMs are scored by Percolator on the PIN; otherwise by the pair score. The
+/// FDR is pooled over every input run.
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
     prepared: &PreparedSearch,
     output_pin_path: &Path,
+    spectrum_paths: &[PathBuf],
+    run_ends: &[usize],
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let name = cli.xl.as_deref().unwrap_or_default();
@@ -392,16 +342,62 @@ pub(crate) fn run_xl(
         results.iter().filter(|r| r.csm.is_some()).count(),
         t.elapsed().as_secs_f64()
     );
-    let q = link_class_q_values(&results);
-    report(&results, &q);
+    report(&results);
+    // The input run of a spectrum: the first run whose end lies past it.
+    let run_of = |i: usize| -> String {
+        let k = run_ends.partition_point(|&end| end <= i);
+        spectrum_paths
+            .get(k)
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "run".to_string(), |s| s.to_string_lossy().into_owned())
+    };
+    let pin_path = sibling(output_pin_path, ".xl.pin");
+    let n_pin = crate::xl_fdr::write_xl_pin(
+        &pin_path,
+        spectra_for_xl,
+        &results,
+        &table,
+        prepared,
+        &run_of,
+    )?;
+    eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
+    let score: Vec<Option<f64>> = if cli.rescore {
+        crate::xl_fdr::percolator_scores(cli, &pin_path, &results)?
+    } else {
+        results
+            .iter()
+            .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
+            .collect()
+    };
+    let levels = crate::xl_fdr::roll_up(&results, &score, &table, prepared);
+    crate::xl_fdr::report_levels(&levels);
+    let mut q = vec![None; results.len()];
+    for (&row, v) in levels.csm_rows.iter().zip(&levels.csm_q) {
+        q[row] = *v;
+    }
     let csm_path = sibling(output_pin_path, ".xl.tsv");
-    let n = write_csms(&csm_path, spectra_for_xl, &results, &q, &table, prepared)?;
+    let n = write_csms(
+        &csm_path,
+        spectra_for_xl,
+        &results,
+        &score,
+        &q,
+        &table,
+        prepared,
+    )?;
+    crate::xl_fdr::write_levels(
+        &sibling(output_pin_path, ".xl.residue_pairs.tsv"),
+        &sibling(output_pin_path, ".xl.ppi.tsv"),
+        &levels,
+        &results,
+        spectra_for_xl,
+    )?;
     let dbl_path = sibling(output_pin_path, ".xl.doublets.tsv");
     write_doublets(&dbl_path, spectra_for_xl, &results, &table)?;
     eprintln!(
-        "Wrote {} ({n} CSMs) and {} [PHASE TOTAL: {:.2}s]",
+        "Wrote {} ({n} CSMs), the residue-pair, protein-pair and doublet tables \
+         [PHASE TOTAL: {:.2}s]",
         csm_path.display(),
-        dbl_path.display(),
         t_total.elapsed().as_secs_f64()
     );
     Ok(())

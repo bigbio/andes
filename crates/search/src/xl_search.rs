@@ -75,6 +75,9 @@ pub struct XlPeptide {
     pub peptide: Peptide,
     /// Protein indices of every occurrence, ascending.
     pub proteins: Vec<u32>,
+    /// Every occurrence as (protein index, 0-based start in the protein),
+    /// ascending.
+    pub occurrences: Vec<(u32, u32)>,
     /// True when every occurrence is a decoy.
     pub is_decoy: bool,
     /// Link sites.
@@ -168,6 +171,8 @@ impl XlCandidates {
                 Some(&i) => {
                     let p = &mut peptides[i];
                     p.proteins.push(c.protein_index as u32);
+                    p.occurrences
+                        .push((c.protein_index as u32, c.start_offset_in_protein as u32));
                     p.is_decoy &= c.is_decoy;
                     for s in sites {
                         if !p.sites.contains(&s) {
@@ -180,6 +185,10 @@ impl XlCandidates {
                     peptides.push(XlPeptide {
                         peptide: c.peptide,
                         proteins: vec![c.protein_index as u32],
+                        occurrences: vec![(
+                            c.protein_index as u32,
+                            c.start_offset_in_protein as u32,
+                        )],
                         is_decoy: c.is_decoy,
                         sites,
                     });
@@ -189,6 +198,8 @@ impl XlCandidates {
         for p in &mut peptides {
             p.proteins.sort_unstable();
             p.proteins.dedup();
+            p.occurrences.sort_unstable();
+            p.occurrences.dedup();
             p.sites.sort_by_key(|s| (s.pos, s.n_term));
         }
         let index = MassIndex::new(peptides.iter().map(|p| p.peptide.mass()).collect());
@@ -308,6 +319,10 @@ pub struct Csm {
     pub precursor_err_ppm: f64,
     pub b_stub_ions: u8,
     pub n_mass_pairs: usize,
+    /// The reporter doublet at alpha's mass, if any.
+    pub alpha_doublet: Option<DoubletMass>,
+    /// The reporter doublet at beta's mass, if any.
+    pub beta_doublet: Option<DoubletMass>,
 }
 
 /// Exhaustive-oracle result of one spectrum.
@@ -621,6 +636,13 @@ fn mass_pairs(
     out
 }
 
+/// The doublet mass within the doublet tolerance of `mass`, most intense
+/// first.
+fn doublet_at(masses: &[DoubletMass], mass: f64, cfg: &XlConfig) -> Option<DoubletMass> {
+    let tol = mass * cfg.doublet_mass_tol_ppm * 1e-6;
+    masses.iter().find(|d| (d.mass - mass).abs() <= tol).cloned()
+}
+
 fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSummary {
     let mut s = DoubletSummary {
         n_peaks: peaks.len(),
@@ -810,6 +832,8 @@ fn search_spectrum(
             precursor_err_ppm: (precursor_mass - theo) / theo * 1e6,
             b_stub_ions: c.pair.b_stub_ions,
             n_mass_pairs: pairs.len(),
+            alpha_doublet: doublet_at(&result.doublets.masses, pa.peptide.mass(), cfg),
+            beta_doublet: doublet_at(&result.doublets.masses, pb.peptide.mass(), cfg),
         });
     }
 

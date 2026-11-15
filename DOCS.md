@@ -514,6 +514,25 @@ best placement (1-based residues), `best_prob` (localization probability given t
 A mod moves to every residue a declared record of the same name and mass accepts, so a phospho
 declared as separate S, T and Y lines competes across all three.
 
+Which rows are localized: every target row that passes its PSM cutoff (`--psm-fdr` and the class
+cutoffs) and is not a knockoff, whatever stage produced it (the main search, `--refine` Pass 2,
+`--chimeric` secondaries). The evidence is built after rescoring from the retained peaks, with the
+same scorer, fragment recentring and tolerance the search used, so the search itself does no
+extra work. A peptide with more than 1,024 placements keeps the placements nearest the search's:
+every placement whose summed residue distance from the search's sites is within the largest bound
+that fits 1,024, so the neighbourhood reaches both ends of the peptide equally. Those rows have
+`truncated` = 1 and their probabilities are conditional on that neighbourhood.
+
+Probabilities belong to a mod on a residue: two placements on the same residues that swap which
+mod sits where (methyl and dimethyl on K and R) are different hypotheses. Sites are written as
+1-based residues (`3;7`), with the mod name when a row mixes mods (`3[Dimethyl];7[Methyl]`).
+
+With `--output-parquet`, `psms.parquet` carries the same results: each reported mod's
+`positions.scores` holds its localization probability (`ipf_site_probability`, written for every
+reported mod of a localized row), `additional_scores` holds `ipf_best_prob`, `ipf_pep` and
+`ipf_q`, and `psm_metavalues` holds `andes:ipf_best_sites`, `andes:ipf_site_probabilities` and
+`andes:ipf_truncated`.
+
 The placements share the PSM's `1 − PEP` by the search's own score of each (node + edge score,
 softmax with weight 0.237), not uniformly as in PyProphet: the search score sees all fragment
 ions and their intensities, the IPF ions only the site-determining ones by intensity tier. The

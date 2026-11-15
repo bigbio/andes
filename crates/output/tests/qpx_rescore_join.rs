@@ -214,6 +214,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         Some(&map),
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
 
@@ -259,6 +260,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         Some(&map),
         None,
         &excluded,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -282,6 +284,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let peps_off = read_pep_column(&qdir_off.join("psms.parquet"));
@@ -350,6 +353,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         Some(&map),
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let builder =
@@ -412,6 +416,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let reader =
@@ -462,6 +467,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -487,6 +493,7 @@ fn dropped_peaks_write_null_peak_lists() {
             None,
             None,
             &std::collections::HashSet::new(),
+            None,
         )
         .unwrap();
         let reader =
@@ -660,6 +667,7 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
             Some(&targets),
             decoys,
             &std::collections::HashSet::new(),
+            None,
         )
     };
     let err = write(&tmp.path().join("strict.idparquet"), None).unwrap_err();
@@ -749,6 +757,7 @@ fn qpx_join_reads_competition_groups_per_input() {
             Some(targets),
             Some(decoys),
             &HashSet::new(),
+            None,
         )
     };
     let qdir = tmp.path().join("per_input.idparquet");

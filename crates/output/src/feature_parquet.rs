@@ -491,7 +491,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
                         .append_value(aa.to_string()),
                     None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
                 }
-                // scores: null (andes does not localize)
+                // scores: null here; site localization (`--localize ipf`) is per PSM,
+                // in psms.parquet
                 pb.field_builder::<ListBuilder<StructBuilder>>(2)
                     .unwrap()
                     .append_null();

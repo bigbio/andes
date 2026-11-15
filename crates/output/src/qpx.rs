@@ -135,15 +135,8 @@ pub fn write_qpx(
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     rescore_decoys: Option<&HashSet<String>>,
     excluded: &HashSet<String>,
+    ipf: Option<&HashMap<String, crate::ipf::IpfQpx>>,
 ) -> std::io::Result<()> {
-    // The IPF map applies to this call only: clear it on every return.
-    struct ClearIpf;
-    impl Drop for ClearIpf {
-        fn drop(&mut self) {
-            IPF_SITE_PROBS.with(|p| p.borrow_mut().clear());
-        }
-    }
-    let _clear_ipf = ClearIpf;
     if run_ends.len() != primary_ms_run_paths.len()
         || run_ends.windows(2).any(|w| w[0] > w[1])
         || run_ends.last().copied().unwrap_or(0) != spectra.len()
@@ -185,6 +178,7 @@ pub fn write_qpx(
                 rescore,
                 &competed_away,
                 row_offset,
+                ipf,
             )?;
             row_offset += batch.num_rows();
             Ok(batch)
@@ -558,6 +552,7 @@ fn build_psms_batch(
     rescore: Option<&HashMap<String, PercolatorPsm>>,
     competed_away: &HashSet<String>,
     row_offset: usize,
+    ipf: Option<&HashMap<String, crate::ipf::IpfQpx>>,
 ) -> std::io::Result<RecordBatch> {
     let schema = psms_schema();
 
@@ -641,10 +636,14 @@ fn build_psms_batch(
 
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));
-            let row_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
-            IPF_SITE_PROBS.with(|p| {
-                append_modifications_scored(&mut modifications, cand, p.borrow().get(&row_id))
+            let localized = ipf.and_then(|m| {
+                m.get(&format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row))
             });
+            append_modifications_scored(
+                &mut modifications,
+                cand,
+                localized.map(|l| &l.site_probs),
+            );
             precursor_charge.append_value(psm.charge_used as i32);
             match matched {
                 Some(p) => pep.append_value(p.pep),
@@ -653,7 +652,12 @@ fn build_psms_batch(
             is_decoy.append_value(cand.is_decoy);
             calculated_mz.append_value(calc_mz);
             observed_mz.append_value(adj_observed_mz);
-            append_additional_scores(&mut additional_scores, psm, matched.map(|p| p.q_value));
+            append_additional_scores(
+                &mut additional_scores,
+                psm,
+                matched.map(|p| p.q_value),
+                localized,
+            );
             append_protein_accessions(&mut protein_accessions, psm, candidates, search_index);
             // Calibrated predicted RT (minutes), populated post-search by
             // `crate::rt_wiring::populate_rt_features`. The neutral 0.0 sentinel
@@ -699,6 +703,21 @@ fn build_psms_batch(
                     let value_str = format_feature_value(value, fmt);
                     let prefixed = format!("andes:{name}");
                     append_metavalue(mvb, &prefixed, &value_str, feature_value_type(fmt));
+                }
+                if let Some(l) = localized {
+                    append_metavalue(mvb, "andes:ipf_best_sites", &l.best_sites, "string");
+                    append_metavalue(
+                        mvb,
+                        "andes:ipf_site_probabilities",
+                        &l.site_probs_label,
+                        "string",
+                    );
+                    append_metavalue(
+                        mvb,
+                        "andes:ipf_truncated",
+                        if l.truncated { "1" } else { "0" },
+                        "int",
+                    );
                 }
                 psm_metavalues.append(true);
             }
@@ -797,26 +816,12 @@ pub fn peptidoform_string(cand: &Candidate) -> String {
     s
 }
 
-thread_local! {
-    /// IPF localization probabilities for the next [`write_qpx`] on this thread,
-    /// keyed by PIN `SpecId`: 1-based residue -> probability. Empty (the default)
-    /// leaves every `positions.scores` null, as before `--localize ipf`.
-    static IPF_SITE_PROBS: std::cell::RefCell<HashMap<String, HashMap<i32, f64>>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// Set (or clear, with an empty map) the IPF site probabilities that
-/// [`write_qpx`] writes as `positions.scores` (`score_name` "ipf_site_probability").
-pub fn set_ipf_site_probabilities(probs: HashMap<String, HashMap<i32, f64>>) {
-    IPF_SITE_PROBS.with(|p| *p.borrow_mut() = probs);
-}
-
 /// Append the `modifications` list cell for one candidate: one struct per
 /// modified residue with `name`, `accession`, and a single `positions` entry in
 /// the QPX layout (`position` int32: 1-based residue index, 0 for the peptide
 /// N-terminus, length + 1 for the C-terminus; `amino_acid` null on a terminus;
-/// `scores` holds the IPF localization probability of that residue when
-/// `--localize ipf` set one for this row, else null). The position comes from
+/// `scores` holds the IPF localization probability of that mod on that
+/// residue when `--localize ipf` localized the row, else null). The position comes from
 /// [`ModRecord::of_residue`], the feature view's helper.
 #[cfg(test)]
 fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candidate) {
@@ -826,7 +831,7 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
 fn append_modifications_scored(
     builder: &mut ListBuilder<StructBuilder>,
     cand: &Candidate,
-    site_probs: Option<&HashMap<i32, f64>>,
+    site_probs: Option<&HashMap<(i32, String), f64>>,
 ) {
     let sb = builder.values();
     let len = cand.peptide.residues.len();
@@ -849,7 +854,7 @@ fn append_modifications_scored(
             .unwrap()
             .append_option(m.amino_acid.map(|c| c.to_string()));
         let scores = psb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
-        match site_probs.and_then(|s| s.get(&m.position)) {
+        match site_probs.and_then(|s| s.get(&(m.position, m.name.clone()))) {
             Some(&p) => {
                 let s = scores.values();
                 s.field_builder::<StringBuilder>(0)
@@ -879,11 +884,14 @@ fn append_modifications_scored(
 /// When `q_value` is `Some` (a `--rescore` Percolator result matched this row), a
 /// trailing `("q-value", q, higher_better=false)` entry is appended. When `None`
 /// (rescore off, or no match) no such entry is written, so the default bundle
-/// stays byte-identical to the pre-rescore output.
+/// stays byte-identical to the pre-rescore output. A row `--localize ipf`
+/// localized also gets `ipf_best_prob` (higher is better), `ipf_pep` and
+/// `ipf_q` (lower is better).
 fn append_additional_scores(
     builder: &mut ListBuilder<StructBuilder>,
     psm: &search::psm::PsmMatch,
     q_value: Option<f64>,
+    ipf: Option<&crate::ipf::IpfQpx>,
 ) {
     let f = &psm.features;
     let entries: [(&str, f64); 9] = [
@@ -925,6 +933,24 @@ fn append_additional_scores(
             .unwrap()
             .append_value(false);
         sb.append(true);
+    }
+    if let Some(l) = ipf {
+        for (name, value, higher) in [
+            ("ipf_best_prob", l.best_prob, true),
+            ("ipf_pep", l.pep, false),
+            ("ipf_q", l.q, false),
+        ] {
+            sb.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value(name);
+            sb.field_builder::<Float64Builder>(1)
+                .unwrap()
+                .append_value(value);
+            sb.field_builder::<BooleanBuilder>(2)
+                .unwrap()
+                .append_value(higher);
+            sb.append(true);
+        }
     }
     builder.append(true);
 }
@@ -1503,7 +1529,8 @@ mod rescore_join_tests {
         // With IPF probabilities, the phospho position (3) carries its score;
         // positions IPF did not score stay null.
         let mut b = list_struct_builder(modification_fields());
-        let probs: HashMap<i32, f64> = [(3, 0.97)].into_iter().collect();
+        let probs: HashMap<(i32, String), f64> =
+            [((3, "Phospho".to_string()), 0.97)].into_iter().collect();
         append_modifications_scored(&mut b, &cand, Some(&probs));
         b.append(true);
         let list: ListArray = b.finish();

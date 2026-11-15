@@ -164,7 +164,8 @@ fn write_doublets(
         "spectrum\tscan\tcharge\tprecursor_mass\tn_peaks\tbase_peak\ttic\tn_doublets\t\
          n_doublets_iso\tn_doublet_masses\ttop_rel_intensity\tdoublet_masses\t\
          doublet_intensity_tic\tn_full_pairs\tn_half_pairs\toracle_pairs\toracle_score\t\
-         oracle_class\toracle_alpha\toracle_beta\toracle_doublet_support\tcsm_score"
+         oracle_class\toracle_alpha\toracle_beta\toracle_doublet_support\tcsm_score\t\
+         oracle_csm_pair\tprobe"
     )?;
     for r in results {
         let spec = &spectra[r.spec_idx];
@@ -216,7 +217,7 @@ fn write_doublets(
         };
         writeln!(
             w,
-            "{}\t{}\t{}\t{:.5}\t{}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.5}\t{}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             spec.title,
             scan_of(spec),
             r.charge,
@@ -241,6 +242,16 @@ fn write_doublets(
             r.csm
                 .as_ref()
                 .map_or("NA".to_string(), |c| format!("{:.3}", c.pair_score)),
+            r.oracle
+                .as_ref()
+                .and_then(|o| o.csm_pair)
+                .map_or("NA".to_string(), |(found, s)| format!("{}:{s:.3}", u8::from(found))),
+            d.probe
+                .iter()
+                .flat_map(|f| f.iter().flat_map(|i| i.iter()))
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(","),
         )?;
     }
     w.flush()

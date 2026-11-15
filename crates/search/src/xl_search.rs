@@ -271,7 +271,19 @@ pub struct DoubletSummary {
     pub top_rel_intensity: f64,
     pub n_full_pairs: usize,
     pub n_half_pairs: usize,
+    /// Doublet-mass counts for the M1 probe, `[floor][iso][spacing]`: floors
+    /// [`PROBE_FLOORS`] of the base peak; any doublet, or isotope-confirmed
+    /// only; the linker's spacing, or the null spacings [`PROBE_NULL_SHIFTS`]
+    /// (mean count over the two).
+    pub probe: [[[f32; 2]; 2]; 3],
 }
+
+/// Intensity floors (fraction of the base peak) of the doublet probe.
+pub const PROBE_FLOORS: [f64; 3] = [0.0, 0.012, 0.05];
+/// Shifts of the doublet spacing (Da) that give the null doublet counts: whole
+/// Da keep the mass defect of real fragment pairs, and five Da avoid isotope
+/// copies of real doublets.
+pub const PROBE_NULL_SHIFTS: [f64; 2] = [-5.0, 5.0];
 
 /// The crosslink-spectrum match of one spectrum.
 #[derive(Debug, Clone)]
@@ -297,6 +309,9 @@ pub struct Csm {
 #[derive(Debug, Clone)]
 pub struct OracleResult {
     pub n_pairs: usize,
+    /// For a spectrum with a doublet-path CSM: whether the oracle enumerated
+    /// its peptide pair, and the oracle's score of that pair.
+    pub csm_pair: Option<(bool, f32)>,
     pub best: Option<(u32, u32, f32)>,
     pub class: Option<PairClass>,
     /// Whether each peptide of the best pair has a doublet mass within the
@@ -450,11 +465,36 @@ fn query(
     hits
 }
 
-/// The intact/inter class of a pair: intra when the peptides share a protein,
-/// or either peptide's sequence (I = L) occurs in a protein of the other. The
-/// same rule applies to targets and decoys.
+/// Accession of protein `pi` with the decoy affix removed: a target protein
+/// and its decoy share it.
+fn protein_family<'p>(prepared: &'p PreparedSearch<'_>, pi: u32) -> &'p str {
+    let idx = prepared.idx;
+    let Some(prot) = idx.db.proteins.get(pi as usize) else {
+        return "";
+    };
+    let acc = prot.accession.as_str();
+    let needle = crate::decoy::decoy_accession_needle(&idx.decoy_prefix);
+    if let Some(rest) = acc.strip_prefix(needle.as_str()) {
+        return rest;
+    }
+    match idx.decoy_suffix.as_deref() {
+        Some(sfx) if !sfx.is_empty() => acc.strip_suffix(sfx).unwrap_or(acc),
+        _ => acc,
+    }
+}
+
+/// The intra/inter class of a pair, by one rule for targets and decoys:
+/// intra when the peptides' proteins share a family (a protein and its decoy
+/// are one family, so a target peptide linked to a decoy peptide of its own
+/// protein is an intra TD), or either peptide's sequence (I = L) occurs in a
+/// protein of the other.
 fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool {
-    if a.proteins.iter().any(|p| b.proteins.binary_search(p).is_ok()) {
+    let fam_b: Vec<&str> = b.proteins.iter().map(|&p| protein_family(prepared, p)).collect();
+    if a
+        .proteins
+        .iter()
+        .any(|&p| fam_b.contains(&protein_family(prepared, p)))
+    {
         return true;
     }
     let il = |s: &[u8]| -> Vec<u8> {
@@ -598,6 +638,32 @@ fn summarize_doublets(
             .fold(0.0, f64::max);
     }
     s.masses = group_by_mass(&ds, cfg.doublet_mass_tol_ppm);
+    for (fi, &floor) in PROBE_FLOORS.iter().enumerate() {
+        let p = DoubletParams {
+            min_rel_intensity: floor,
+            ..cfg.doublet
+        };
+        let count = |c: &andes_xl::crosslinker::Cleavage| {
+            let ds = find_doublets(peaks, z, c, &p);
+            let iso: Vec<_> = ds.iter().copied().filter(|d| d.isotope_confirmed).collect();
+            [
+                group_by_mass(&ds, cfg.doublet_mass_tol_ppm).len() as f32,
+                group_by_mass(&iso, cfg.doublet_mass_tol_ppm).len() as f32,
+            ]
+        };
+        let real = count(&cleavage);
+        let mut null = [0.0_f32; 2];
+        for shift in PROBE_NULL_SHIFTS {
+            let c = andes_xl::crosslinker::Cleavage {
+                thiol: cleavage.thiol + shift,
+                ..cleavage
+            };
+            let n = count(&c);
+            null[0] += n[0] / PROBE_NULL_SHIFTS.len() as f32;
+            null[1] += n[1] / PROBE_NULL_SHIFTS.len() as f32;
+        }
+        s.probe[fi] = [[real[0], null[0]], [real[1], null[1]]];
+    }
     s
 }
 
@@ -758,6 +824,11 @@ fn oracle(
     let mut n_pairs = 0;
     let mut best: Option<(u32, u32, f32, u8)> = None;
     let mut scored: HashMap<(u32, u8), f32> = HashMap::new();
+    let csm_key = result.csm.as_ref().map(|c| {
+        let (i, j) = (c.alpha.pep, c.beta.pep);
+        ((i.min(j), i.max(j)), c.iso)
+    });
+    let mut csm_pair: Option<(bool, f32)> = csm_key.map(|_| (false, f32::NEG_INFINITY));
     for iso in cfg.isotope_offsets.clone() {
         let target = precursor_mass - iso as f64 * ISOTOPE_SPACING - linker.intact;
         let pairs = pairs_by_sum(&table.index, target, prec_tol);
@@ -771,6 +842,9 @@ fn oracle(
                 })
             };
             let pair = s(i).min(s(j));
+            if csm_key == Some(((i, j), iso)) {
+                csm_pair = Some((true, pair));
+            }
             if best.is_none_or(|(bi, bj, bs, _)| pair > bs || (pair == bs && (i, j) < (bi, bj))) {
                 best = Some((i, j, pair, iso));
             }
@@ -786,6 +860,7 @@ fn oracle(
     };
     OracleResult {
         n_pairs,
+        csm_pair,
         best: best.map(|(i, j, s, _)| (i, j, s)),
         class: best.map(|(i, j, _, _)| {
             PairClass::of(

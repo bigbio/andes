@@ -740,8 +740,16 @@ fn search_spectrum(
             mods,
             cfg.top_per_mass,
         );
+        let iso_mass = mp.iso as f64 * ISOTOPE_SPACING;
         for a in &a_hits {
             for b in &b_hits {
+                // The pair must fit the precursor within the search's precursor
+                // tolerance, as a linear peptide does; the per-mass windows
+                // above are only the lookup.
+                let theo = table.index.mass(a.pep) + table.index.mass(b.pep) + linker.intact + iso_mass;
+                if (precursor_mass - theo).abs() > prec_tol {
+                    continue;
+                }
                 combos.push(Cand {
                     a: *a,
                     b: *b,

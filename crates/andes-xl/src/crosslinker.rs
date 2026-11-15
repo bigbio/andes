@@ -156,8 +156,8 @@ mod tests {
     #[test]
     fn intact_form_carries_the_partner() {
         let x = Crosslinker::dsso();
-        assert!((LinkForm::Intact.delta(&x, 1000.0).unwrap() - 1158.003_765).abs() < 1e-9);
+        assert!((LinkForm::Intact.delta(&x, 1000.0).unwrap() - 1_158.003_765).abs() < 1e-9);
         assert!((LinkForm::Alkene.delta(&x, 1000.0).unwrap() - 54.010_565).abs() < 1e-9);
-        assert!((crosslink_mass(&x, 1000.0, 2000.0) - 3158.003_765).abs() < 1e-9);
+        assert!((crosslink_mass(&x, 1000.0, 2000.0) - 3_158.003_765).abs() < 1e-9);
     }
 }

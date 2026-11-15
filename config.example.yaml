@@ -9,6 +9,7 @@
 
 # ── Input and output ────────────────────────────────────────────────────────
 io:
+  # sdrf: design.sdrf.tsv          # --sdrf: SDRF-Proteomics settings, below the CLI and this file (example)
   spectrum: [sample.mzML]          # --spectrum: mzML, MGF, .raw or .d files (example)
   database: human.fasta            # --database: FASTA or UniProt XML, may be gzipped (example)
   output_pin: out.pin              # --output-pin: Percolator PIN, required without rescoring (example)

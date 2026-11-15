@@ -323,6 +323,23 @@ pub struct Csm {
     pub alpha_doublet: Option<DoubletMass>,
     /// The reporter doublet at beta's mass, if any.
     pub beta_doublet: Option<DoubletMass>,
+    /// Re-scores of the chosen (site, form) of each peptide on reduced
+    /// spectra, see [`Rescores`].
+    pub rescores: Rescores,
+}
+
+/// Alpha and beta re-scored at their chosen site and form on spectra with
+/// peaks removed, as rescoring features.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rescores {
+    /// Without the stub ions of both peptides (the doublet members and the
+    /// sulfenic form, at every charge below the precursor's).
+    pub alpha_no_stubs: f32,
+    pub beta_no_stubs: f32,
+    /// Decoupled: alpha without the peaks that beta's b/y ions explain, and
+    /// beta without those of alpha.
+    pub alpha_decoupled: f32,
+    pub beta_decoupled: f32,
 }
 
 /// Exhaustive-oracle result of one spectrum.
@@ -636,6 +653,123 @@ fn mass_pairs(
     out
 }
 
+/// The scoring peptide of a hit: its peptide with the hit's form at its site.
+fn hit_peptide(
+    table: &XlCandidates,
+    h: &PeptideHit,
+    partner_mass: f64,
+    linker: &Crosslinker,
+    mods: &StubMods,
+) -> Option<Peptide> {
+    let p = &table.peptides[h.pep as usize];
+    let delta = h.form.delta(linker, partner_mass)?;
+    Some(with_link_mass(&p.peptide, h.site.pos, h.form, delta, mods))
+}
+
+/// m/z of the b and y ions of `p` at charges `1..=max_z`.
+fn by_ions(p: &Peptide, max_z: u8) -> Vec<f64> {
+    let total: f64 = p
+        .residues
+        .iter()
+        .map(|aa| aa.mass + aa.mod_.map_or(0.0, |m| m.mass_delta))
+        .sum();
+    let mut out = Vec::new();
+    let mut prefix = 0.0;
+    for aa in &p.residues[..p.residues.len().saturating_sub(1)] {
+        prefix += aa.mass + aa.mod_.map_or(0.0, |m| m.mass_delta);
+        let b = prefix;
+        let y = total - prefix + model::mass::H2O;
+        for z in 1..=max_z.max(1) {
+            let zf = z as f64;
+            out.push(b / zf + PROTON);
+            out.push(y / zf + PROTON);
+        }
+    }
+    out
+}
+
+/// `spec` without the peaks within `tol` Da of any of `mzs`.
+fn without_peaks(spec: &Spectrum, mzs: &[f64], tol: f64) -> Spectrum {
+    let mut sorted = mzs.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mut out = spec.clone();
+    out.peaks.retain(|&(mz, _)| {
+        let i = sorted.partition_point(|&m| m < mz - tol);
+        !sorted.get(i).is_some_and(|&m| m <= mz + tol)
+    });
+    out
+}
+
+fn rescore(
+    spec: &Spectrum,
+    prepared: &PreparedSearch<'_>,
+    z: u8,
+    peptides: &[&Peptide],
+) -> Vec<f32> {
+    let ss = ScoredSpectrum::new(spec, prepared.scorer, z);
+    peptides
+        .iter()
+        .map(|p| {
+            score_psm(&ss, p, prepared.scorer, z, prepared.fragment_tolerance_da)
+                + psm_edge_score(&ss, p, prepared.scorer, z) as f32
+        })
+        .collect()
+}
+
+/// [`Rescores`] of the chosen pair.
+#[allow(clippy::too_many_arguments)]
+fn rescores(
+    spec: &Spectrum,
+    prepared: &PreparedSearch<'_>,
+    z: u8,
+    table: &XlCandidates,
+    alpha: &PeptideHit,
+    beta: &PeptideHit,
+    linker: &Crosslinker,
+    mods: &StubMods,
+) -> Rescores {
+    let ma = table.index.mass(alpha.pep);
+    let mb = table.index.mass(beta.pep);
+    let (Some(pa), Some(pb)) = (
+        hit_peptide(table, alpha, mb, linker, mods),
+        hit_peptide(table, beta, ma, linker, mods),
+    ) else {
+        return Rescores::default();
+    };
+    let max_z = z.saturating_sub(1).max(1);
+    let tol = prepared.fragment_tolerance_da;
+    let mut stubs = Vec::new();
+    if let Some(c) = linker.cleavage {
+        for m in [ma, mb] {
+            for stub in [c.alkene, c.thiol, c.sulfenic] {
+                for q in 1..=max_z {
+                    stubs.push((m + stub) / q as f64 + PROTON);
+                }
+            }
+        }
+    }
+    let ns = rescore(&without_peaks(spec, &stubs, tol), prepared, z, &[&pa, &pb]);
+    let frag_z = max_z.min(2);
+    let da = rescore(
+        &without_peaks(spec, &by_ions(&pb, frag_z), tol),
+        prepared,
+        z,
+        &[&pa],
+    );
+    let db = rescore(
+        &without_peaks(spec, &by_ions(&pa, frag_z), tol),
+        prepared,
+        z,
+        &[&pb],
+    );
+    Rescores {
+        alpha_no_stubs: ns[0],
+        beta_no_stubs: ns[1],
+        alpha_decoupled: da[0],
+        beta_decoupled: db[0],
+    }
+}
+
 /// The doublet mass within the doublet tolerance of `mass`, most intense
 /// first.
 fn doublet_at(masses: &[DoubletMass], mass: f64, cfg: &XlConfig) -> Option<DoubletMass> {
@@ -834,6 +968,7 @@ fn search_spectrum(
             n_mass_pairs: pairs.len(),
             alpha_doublet: doublet_at(&result.doublets.masses, pa.peptide.mass(), cfg),
             beta_doublet: doublet_at(&result.doublets.masses, pb.peptide.mass(), cfg),
+            rescores: rescores(spec, prepared, z, table, &alpha, &beta, linker, mods),
         });
     }
 
@@ -956,6 +1091,35 @@ mod tests {
             .map(|&r| AminoAcid::standard(r).unwrap())
             .collect();
         Peptide::new(residues, b'K', b'A')
+    }
+
+    #[test]
+    fn by_ions_and_peak_removal() {
+        let p = pep(b"GAK");
+        let ions = by_ions(&p, 1);
+        // b1 = G + proton, y1 = K + water + proton.
+        let g = AminoAcid::standard(b'G').unwrap().mass;
+        let k = AminoAcid::standard(b'K').unwrap().mass;
+        assert!(ions.iter().any(|&m| (m - (g + PROTON)).abs() < 1e-9));
+        assert!(ions
+            .iter()
+            .any(|&m| (m - (k + model::mass::H2O + PROTON)).abs() < 1e-9));
+        assert_eq!(ions.len(), 4);
+        let spec = Spectrum {
+            title: "t".into(),
+            precursor_mz: 0.0,
+            precursor_intensity: None,
+            precursor_charge: Some(3),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![(g + PROTON + 0.001, 1.0), (500.0, 2.0)],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+            isolation_target_mz: None,
+        };
+        let kept = without_peaks(&spec, &ions, 0.01);
+        assert_eq!(kept.peaks, vec![(500.0, 2.0)]);
     }
 
     #[test]

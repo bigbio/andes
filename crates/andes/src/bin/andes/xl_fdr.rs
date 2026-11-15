@@ -14,7 +14,7 @@ use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResu
 use search::PreparedSearch;
 
 /// PIN feature columns, in order.
-const FEATURES: [&str; 40] = [
+const FEATURES: [&str; 46] = [
     "pair_score",
     "alpha_score",
     "beta_score",
@@ -55,6 +55,12 @@ const FEATURES: [&str; 40] = [
     "charge4",
     "charge5",
     "charge6plus",
+    "alpha_no_stubs",
+    "beta_no_stubs",
+    "min_no_stubs",
+    "alpha_decoupled",
+    "beta_decoupled",
+    "min_decoupled",
 ];
 
 /// The row id of a CSM in the PIN and Percolator's results.
@@ -88,6 +94,7 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
     let (ad, ai, ac) = dbl(&c.alpha_doublet);
     let (bd, bi, bc) = dbl(&c.beta_doublet);
     let z = r.charge;
+    let rs = &c.rescores;
     vec![
         c.pair_score as f64,
         c.alpha.score as f64,
@@ -129,6 +136,12 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
         u8::from(z == 4) as f64,
         u8::from(z == 5) as f64,
         u8::from(z >= 6) as f64,
+        rs.alpha_no_stubs as f64,
+        rs.beta_no_stubs as f64,
+        rs.alpha_no_stubs.min(rs.beta_no_stubs) as f64,
+        rs.alpha_decoupled as f64,
+        rs.beta_decoupled as f64,
+        rs.alpha_decoupled.min(rs.beta_decoupled) as f64,
     ]
 }
 

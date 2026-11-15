@@ -51,13 +51,13 @@ use crate::cli::{Cli, PredictFeature, PredictorBackend};
 /// andes-rt v1 weights (`ARTN0001`): a 77,794-parameter retention-time CNN
 /// trained on retention times from public reanalysed datasets (see
 /// `crates/onnx-infer/scripts/student/NOTES.md`).
-static ANDES_RT_WEIGHTS: &[u8] =
+pub(crate) static ANDES_RT_WEIGHTS: &[u8] =
     include_bytes!("../../../../../resources/predictors/andes_rt.artn");
 
 /// andes-ms2 v1 weights (`AMS20001`): a fragment-intensity CNN trained on
 /// annotated spectra of public reanalysed datasets (see
 /// `crates/onnx-infer/scripts/student/ms2/README.md`).
-static ANDES_MS2_WEIGHTS: &[u8] =
+pub(crate) static ANDES_MS2_WEIGHTS: &[u8] =
     include_bytes!("../../../../../resources/predictors/andes_ms2.ams2");
 
 /// Target-decoy q-value at or below which a file's best-scoring targets anchor
@@ -780,7 +780,11 @@ pub(crate) fn read_pin(
 /// Per input file, the rows that anchor the RT calibration: the best-scoring
 /// row of each spectrum, when it is a target at q ≤ [`ANCHOR_Q`] among the
 /// file's best rows.
-fn anchor_rows(rows: &[PinRow], n_runs: usize, run_of: &dyn Fn(u32) -> usize) -> Vec<Vec<usize>> {
+pub(crate) fn anchor_rows(
+    rows: &[PinRow],
+    n_runs: usize,
+    run_of: &dyn Fn(u32) -> usize,
+) -> Vec<Vec<usize>> {
     let mut best: HashMap<u32, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if r.spec == NONE {

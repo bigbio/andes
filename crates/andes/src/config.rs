@@ -84,6 +84,8 @@ pub struct SearchCfg {
     pub index_cache_dir: Option<PathBuf>,
     /// Data-independent acquisition, as `--dia`.
     pub dia: Option<bool>,
+    /// The experimental peptide-centric DIA pass, as `--dia-pc`.
+    pub dia_pc: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -368,6 +370,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
     set!("dia", dia, cfg.search.dia);
+    set!("dia_pc", dia_pc, cfg.search.dia_pc);
     set_opt!("mods", mods, cfg.search.mods);
     set_parsed!(
         "fragment_index",

@@ -480,6 +480,13 @@ pub(crate) struct SearchArgs {
     #[arg(long, default_value = "false")]
     pub(crate) dia: bool,
 
+    /// Experimental, with `--dia`: also run the peptide-centric pass (predicted
+    /// library, fragment chromatograms, peak-group scores) and write its
+    /// precursor-level PIN `<stem>.dia.pin`. On the Astral benchmark it does not
+    /// beat the spectrum-centric search (docs/benchmarks/dia/README.md).
+    #[arg(long = "dia-pc", hide = true, default_value = "false")]
+    pub(crate) dia_pc: bool,
+
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
     /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
     /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.

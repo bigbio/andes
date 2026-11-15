@@ -80,6 +80,57 @@ Both losses come from searching one scan at a time. Closing them is Phase B: a p
 extracts each library precursor's fragment chromatograms across its elution window and scores the peak
 group (DIA-NN, AlphaDIA), instead of asking each spectrum which peptide it holds.
 
+## Peptide-centric pass (Phase B, `--dia-pc`, experimental, negative result)
+
+`--dia-pc` (hidden, with `--dia`) adds a DIA-NN / OpenSWATH-style pass
+(`crates/andes/src/bin/andes/dia_pc.rs`) and writes a precursor-level PIN `<stem>.dia.pin`:
+
+- library: every target and decoy peptidoform of the database, at every charge whose m/z is in an
+  isolation window (647,382 precursors);
+- RT from andes-rt, calibrated on the Phase A identifications; mass calibration of fragments and MS1
+  from the apexes of Phase A-identified precursors (−3.3 ppm fragments, +1.4 ppm MS1 on raw01);
+- an assay of the 12 most intense andes-ms2 b/y ions; their traces over the precursor's window within
+  the RT window; up to 8 local maxima scored, the 3 best by co-elution × spectral agreement kept as rows
+  sharing a `ScanNr` so target-decoy competition keeps one per precursor;
+- 23 peak-group scores: fragment co-elution (leave-one-out correlation), apex and integrated spectral
+  angle against the prediction, matched fragments and their mass error, MS1 co-elution, error and isotope
+  fit, RT error, intensities, and sparse-peak scores (fragments peaking at the apex, the top-3 predicted
+  present, matched fragments above the window's background, lag of best alignment).
+
+On the slice it does **not** beat the spectrum-centric search (N@FDP_c 1 %, Phase A 285):
+
+| variant | Percolator | best offline rescorer |
+|---|---|---|
+| first version | 258 | 270 (with Phase A evidence joined) |
+| + mass calibration, peak groups chosen by quality | 256 | 284 (gradient boosting) |
+| ±3-scan leave-one-out correlation | 241 | 264 (hand-built score) |
+| + sparse-peak scores | 244 | 250 (semi-supervised LDA) |
+| narrower RT window (2.5 widths) | 131 | 226 |
+
+Combining Phase A and Phase B per precursor (best z-scored score) gives 241. Phase B's IDs are mostly a
+subset of Phase A's (372 and 210, 186 shared; Phase A ∪ B holds 272 of DIA-NN's 517 slice precursors,
+Phase A alone 256).
+
+Why, from the measurements:
+
+- **Extraction is not the problem.** All 517 DIA-NN precursors of the slice are extracted. At DIA-NN's
+  RT their 6 most intense library fragments match 4.7–5.8 peaks against 0.8–1.5 at a random RT, and
+  83 target precursors (0 decoys) have peak groups correlating above 0.8.
+- **Peaks are too short for chromatographic scores.** DIA-NN's peaks have a 3.3 s FWHM on a 1.65 s
+  cycle, so a weak precursor's fragments appear in one to three scans, often not the same ones. The
+  median fragment correlation of DIA-NN's true precursors is 0.45, 0.31 in the lowest-intensity
+  quartile. That is the scan-level evidence Phase A already scores.
+- **The predicted assay is weaker than an empirical one.** 2.46 of andes-ms2's top three fragments are
+  present at the best apex, against 2.84 of the DIA-NN library's top three at DIA-NN's apex.
+- **The RT prior is too broad to help.** The calibrated andes-rt error against DIA-NN's apexes is
+  0.42 min robust σ, about 15 cycles, so `pc_rt_err` has no power (AUC 0.46) and a narrower window loses
+  true peaks.
+
+What would close the gap, from the same measurements: an empirical or fine-tuned fragment and RT
+library (AlphaDIA-style transfer learning on the run's own identifications), a DIA-NN-style nonlinear
+classifier trained per run, and interference handling between co-eluting precursors. Each is a larger
+project than this pass. The code is kept behind the hidden flag, with its tests, as the starting point.
+
 ## Reproduce
 
 ```bash

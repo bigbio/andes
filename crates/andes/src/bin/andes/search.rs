@@ -2688,6 +2688,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
     // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
+    // `--dia`: every target and decoy peptidoform of the database, for the
+    // peptide-centric pass (Phase B), enumerated before the index is dropped.
+    let dia_library: Vec<search::candidate_gen::Candidate> = if cli.dia && cli.dia_pc {
+        prepared.out_of_core_candidates_where(|_, _| true)
+    } else {
+        Vec::new()
+    };
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2736,7 +2743,46 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
     if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1.clone())?;
+    }
+    if cli.dia && cli.dia_pc {
+        let mut start = 0usize;
+        let runs: Vec<crate::dia_pc::Run> = run_ends
+            .iter()
+            .zip(spectrum_paths.iter())
+            .zip(dia_ms1)
+            .map(|((&end, path), ms1)| {
+                let r = crate::dia_pc::Run {
+                    range: start..end,
+                    ms1,
+                    stem: crate::quant_run::run_stem(path),
+                };
+                start = end;
+                r
+            })
+            .collect();
+        let dia_pin = output_pin_path.with_extension("dia.pin");
+        let accession = |c: &search::candidate_gen::Candidate| {
+            pin_index.protein_at(c.protein_index).map_or_else(
+                || format!("PROT_{}", c.protein_index),
+                |p| p.accession.clone(),
+            )
+        };
+        let nce = acquisition.predictor_nce().map(|v| v as f32);
+        crate::dia_pc::write_pin(
+            &dia_pin,
+            &output_pin_path,
+            &spectra,
+            runs,
+            &dia_library,
+            &accession,
+            params.charge_range.clone(),
+            (
+                nce,
+                acquisition.ms2_activation(),
+                acquisition.ms2_instrument(),
+            ),
+        )?;
     }
     if cli.refine {
         if refine_merged {

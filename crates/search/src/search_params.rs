@@ -118,6 +118,10 @@ pub struct SearchParams {
     pub precursor_mass_shift_ppm: f64,
     /// Full-isolation-window chimeric search (MSFragger DDA+ style). Default false.
     pub chimeric: bool,
+    /// DIA search (`--dia`): a scan accepts every peptide whose precursor m/z
+    /// lies in its isolation window (the reported precursor m/z is the window
+    /// centre, not a precursor). Default false.
+    pub dia: bool,
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
@@ -182,6 +186,7 @@ impl SearchParams {
             fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
+            dia: false,
             chimeric_isolation_halfwidth_da: 1.5,
             // N=4 is the measured sweet spot on Astral entrapment: +726 PSMs
             // (+1.4%) over N=2 at flat true-FDP (1.18→1.19%); N=6 adds only +62

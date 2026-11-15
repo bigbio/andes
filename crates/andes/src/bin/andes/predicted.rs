@@ -568,21 +568,21 @@ impl Predictors {
 }
 
 /// Row index sentinel: no spectrum / no parsed peptidoform.
-const NONE: u32 = u32::MAX;
+pub(crate) const NONE: u32 = u32::MAX;
 
 /// The fields of one PIN row the predictors need.
-struct PinRow {
-    spec: u32,
-    form: u32,
-    charge: u8,
-    decoy: bool,
-    score: f64,
+pub(crate) struct PinRow {
+    pub(crate) spec: u32,
+    pub(crate) form: u32,
+    pub(crate) charge: u8,
+    pub(crate) decoy: bool,
+    pub(crate) score: f64,
 }
 
 /// Pass 1 over the PIN.
-struct PinTable {
-    rows: Vec<PinRow>,
-    forms: Vec<(Form, Mass)>,
+pub(crate) struct PinTable {
+    pub(crate) rows: Vec<PinRow>,
+    pub(crate) forms: Vec<(Form, Mass)>,
     /// Column index of `Peptide` (new columns go before it).
     peptide_col: usize,
 }
@@ -658,7 +658,11 @@ fn row_charge(
     }
 }
 
-fn read_pin(pin: &Path, spectra: &[Spectrum], new_cols: &[String]) -> Result<PinTable, String> {
+pub(crate) fn read_pin(
+    pin: &Path,
+    spectra: &[Spectrum],
+    new_cols: &[String],
+) -> Result<PinTable, String> {
     let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = BufReader::new(f).lines();
     let header = lines
@@ -817,7 +821,7 @@ fn anchor_rows(rows: &[PinRow], n_runs: usize, run_of: &dyn Fn(u32) -> usize) ->
 }
 
 /// Replace non-finite values and rows flagged in `miss` by the median of the rest.
-fn impute_median(col: &mut [f64], miss: &[f64]) {
+pub(crate) fn impute_median(col: &mut [f64], miss: &[f64]) {
     let mut ok: Vec<f64> = col
         .iter()
         .zip(miss)
@@ -841,7 +845,7 @@ fn impute_median(col: &mut [f64], miss: &[f64]) {
 
 /// Pass 2: copy the PIN with the new columns inserted before `Peptide`, then
 /// replace the original.
-fn write_pin(
+pub(crate) fn write_pin(
     pin: &Path,
     table: &PinTable,
     cols: &[String],

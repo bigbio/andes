@@ -470,6 +470,16 @@ pub(crate) struct SearchArgs {
     #[arg(long, default_value = "false")]
     pub(crate) chimeric: bool,
 
+    /// Data-independent acquisition: search every MS2 scan against all peptides
+    /// whose precursor m/z lies in the scan's isolation window (spectrum-centric
+    /// direct DIA, as MSFragger-DIA), then add chromatographic co-elution
+    /// features (fragment and MS1 traces across neighbouring cycles of the same
+    /// window) to the PIN for the rescorer. Requires mzML or Thermo `.raw` with
+    /// isolation windows and MS1 scans. Replaces `--chimeric` and
+    /// `--precursor-cal`, which assume one selected precursor per scan.
+    #[arg(long, default_value = "false")]
+    pub(crate) dia: bool,
+
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
     /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
     /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.

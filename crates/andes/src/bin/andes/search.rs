@@ -1044,6 +1044,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
+    // `--dia`: every scan is searched across its whole isolation window. The
+    // chimeric cascade and the precursor calibration both read a selected
+    // precursor the scan does not have, so they are off.
+    if cli.dia {
+        if !(is_mzml || is_raw) {
+            return Err("--dia needs mzML or Thermo .raw input (isolation windows and MS1)".into());
+        }
+        if chimeric_active {
+            return Err("--dia and --chimeric cannot be combined: --dia searches every scan across its whole window".into());
+        }
+        params.dia = true;
+    }
     // `--glyco-index-sequon-only`: glyco-only index shrink (see the flag's doc).
     if cli.glyco_index_sequon_only && !cli.glyco {
         return Err(
@@ -1201,6 +1213,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
+        eprintln!(
+            "WARN: --precursor-cal is ignored under --dia (a DIA scan has no selected precursor)"
+        );
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+    }
     if let Some(n) = cli.cal_min_spec_keys {
         params.cal_min_spec_keys = n;
     }
@@ -1770,11 +1788,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
     // Pass 2 and `--predict ms2` compares them with predicted spectra.
-    let keep_peaks = cli.refine || predictors.as_ref().is_some_and(|p| p.needs_peaks());
+    let keep_peaks = cli.refine || cli.dia || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     // Exclusive end index in `all_spectra` of each input, in input order.
     let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
+    // `--dia`: each input's MS1 scans, for the co-elution features.
+    let mut dia_ms1: Vec<Vec<model::scan::Ms1Scan>> = Vec::new();
 
     let t_search_start = std::time::Instant::now();
 
@@ -2158,6 +2178,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if params.fragment_index_top_k > 0
             && !cli.glyco
+            && !cli.dia
             && file_is_mzml
             && !is_gzip_path(input_path)
             && !quant
@@ -2191,7 +2212,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
-            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_ms1 = cli.dia || quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
@@ -2354,6 +2375,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
         merge_parse_stats(&mut parse_stats, file_stats);
+        if cli.dia {
+            dia_ms1.push(if quant.is_some() {
+                run_scans.ms1.clone()
+            } else {
+                std::mem::take(&mut run_scans.ms1)
+            });
+        }
         if let Some(q) = quant.as_mut() {
             q.finish_file(
                 input_path,
@@ -2700,6 +2728,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
+    if cli.dia {
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+    }
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
@@ -2794,8 +2825,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if has_site_claims {
                 row_scores = Some(
-                    output::score_all_rows(&backend, &output_pin_path, &extra)
-                        .map_err(|e| format!("scoring every PIN row for the site posteriors: {e}"))?,
+                    output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {
+                        format!("scoring every PIN row for the site posteriors: {e}")
+                    })?,
                 );
             }
             if cli.mbr {

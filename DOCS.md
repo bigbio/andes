@@ -521,6 +521,32 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
 
+### DIA (`--dia`, experimental)
+
+Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans. Cannot be combined
+with `--chimeric`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. Co-elution columns are then added to the PIN. Config key `search.dia`. |
+
+The added PIN columns (`crates/andes/src/bin/andes/dia.rs`), for every row, targets and decoys
+alike:
+
+| Column | Meaning |
+|---|---|
+| `dia_frag_corr`, `dia_frag_coelute` | The scan's 6 most intense matched b/y ions (length ≥ 3) traced over the same isolation window ±5 cycles: mean Pearson correlation of each trace with the sum of the others, and how many correlate ≥ 0.6. |
+| `dia_apex_offset`, `dia_apex_frac` | Cycles from the scan to the apex of the summed fragment trace; the scan's share of the apex. |
+| `dia_ms1_corr` | Correlation of the monoisotopic MS1 trace (nearest survey scan per cycle, 10 ppm) with the summed fragment trace. |
+| `dia_ms1_found`, `dia_ms1_abs_ppm`, `dia_ms1_log_int`, `dia_ms1_iso_cos` | Monoisotopic MS1 peak in the nearest survey scan: present, \|ppm\| error, log10 intensity, cosine of the first three isotopes against averagine. |
+| `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
+| `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
+
+Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
+intensities. The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
+after target-decoy competition, as in `docs/benchmarks/dia/eval_dia.py`. Measured results and the
+gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
+
 ### Refine — secondary chemistry cascade
 
 A second pass over confident proteins, on the spectra pass 1 missed, with a **fixed tier**:

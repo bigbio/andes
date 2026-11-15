@@ -64,6 +64,44 @@ pub fn matches_precursor(
     }
 }
 
+/// The isolation window of `spec` in m/z: the recorded isolation target (else
+/// the precursor m/z) minus the lower and plus the upper offset, each
+/// `fallback_half_width` when the source does not record it.
+pub fn isolation_window_mz(spec: &Spectrum, fallback_half_width: f64) -> (f64, f64) {
+    let t = spec.isolation_target_mz.unwrap_or(spec.precursor_mz);
+    (
+        t - spec
+            .isolation_lower_offset
+            .unwrap_or(fallback_half_width)
+            .abs(),
+        t + spec
+            .isolation_upper_offset
+            .unwrap_or(fallback_half_width)
+            .abs(),
+    )
+}
+
+/// `--dia`: the neutral peptide masses scan `spec` accepts at `charge`, every
+/// mass whose m/z lies in its isolation window, widened at each edge by the
+/// precursor tolerance. The one definition of a DIA precursor match: candidate
+/// retrieval and the scoring gate both read it.
+pub fn dia_neutral_window(
+    spec: &Spectrum,
+    charge: u8,
+    tolerance: &PrecursorTolerance,
+    fallback_half_width: f64,
+    shift_ppm: f64,
+) -> (f64, f64) {
+    let z = charge as f64;
+    let (lo_mz, hi_mz) = isolation_window_mz(spec, fallback_half_width);
+    let lo = adjusted_observed_neutral_mass(lo_mz * z - z * PROTON, shift_ppm);
+    let hi = adjusted_observed_neutral_mass(hi_mz * z - z * PROTON, shift_ppm);
+    (
+        lo - tolerance.left.as_da(lo),
+        hi + tolerance.right.as_da(hi),
+    )
+}
+
 /// Chimeric variant of [`matches_precursor`]: returns `Some(error)` when the
 /// peptide's neutral mass falls within the spectrum's full **isolation window**
 /// (neutral-mass space at `charge`, after `isotope_offset` C13 corrections),
@@ -134,6 +172,31 @@ mod tests {
             left: Tolerance::Ppm(20.0),
             right: Tolerance::Ppm(20.0),
         }
+    }
+
+    #[test]
+    fn dia_window_spans_the_isolation_window_at_each_charge() {
+        let spec = Spectrum {
+            precursor_mz: 500.0,
+            isolation_target_mz: Some(500.0),
+            isolation_lower_offset: Some(1.0),
+            isolation_upper_offset: Some(1.0),
+            ..Default::default()
+        };
+        let tol = tol_20ppm();
+        for z in 1..=4u8 {
+            let zf = z as f64;
+            let (lo, hi) = dia_neutral_window(&spec, z, &tol, 1.5, 0.0);
+            // Window m/z 499..501 at charge z, widened by 20 ppm.
+            assert!((lo - ((499.0 - PROTON) * zf) * (1.0 - 20e-6)).abs() < 1e-6);
+            assert!((hi - ((501.0 - PROTON) * zf) * (1.0 + 20e-6)).abs() < 1e-6);
+        }
+        // No recorded window: the fallback half-width around the precursor m/z.
+        let bare = Spectrum {
+            precursor_mz: 500.0,
+            ..Default::default()
+        };
+        assert_eq!(isolation_window_mz(&bare, 1.5), (498.5, 501.5));
     }
 
     #[test]

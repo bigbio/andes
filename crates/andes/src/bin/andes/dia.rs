@@ -1,0 +1,428 @@
+//! `--dia`: chromatographic co-elution features for the PIN.
+//!
+//! A DIA scan is searched against every peptide whose precursor m/z lies in its
+//! isolation window (`SearchParams::dia`), so a match is a spectrum-level
+//! hypothesis. A true peptide also elutes: its fragments rise and fall
+//! together in the neighbouring cycles of the same window, and its precursor
+//! rises with them in MS1. After the PIN is written, every row (targets and
+//! decoys alike) gets the columns of [`COLUMNS`], read from those traces:
+//!
+//! - the most intense matched b/y fragments of the row's scan (at most
+//!   [`TOP_FRAGMENTS`]) are traced over the scans of the same isolation window
+//!   within [`HALF_CYCLES`] cycles either side;
+//! - `dia_frag_corr`: mean Pearson correlation of each fragment trace with the
+//!   sum of the others; `dia_frag_coelute`: fragments correlating at least
+//!   [`COELUTE_MIN_CORR`];
+//! - `dia_apex_offset`: cycles between the scan and the apex of the summed
+//!   fragment trace; `dia_apex_frac`: the scan's share of the apex intensity;
+//! - `dia_ms1_corr`: correlation of the monoisotopic MS1 trace (nearest survey
+//!   scan of each cycle) with the summed fragment trace;
+//! - `dia_ms1_found`, `dia_ms1_abs_ppm`, `dia_ms1_log_int`, `dia_ms1_iso_cos`:
+//!   the monoisotopic MS1 peak in the survey scan nearest the row's scan, its
+//!   absolute mass error, log10 intensity, and the cosine of its first three
+//!   isotopes against averagine;
+//! - `dia_frag_log_int`: log10 summed intensity of the traced fragments in the
+//!   row's scan; `dia_n_frag`: b/y fragments matched in the row's scan;
+//! - `dia_support`, `dia_support_top1`: other scans of the same window within
+//!   [`HALF_CYCLES`] cycles where the same precursor (peptidoform, charge) has
+//!   a PIN row, and where that row is the scan's best. A true precursor is
+//!   matched across its elution; a chance match rarely repeats in the
+//!   neighbouring cycles (the peptide-centric step of MSFragger-DIA).
+//!
+//! The rescorer weighs them with the search features; nothing here filters.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Instant;
+
+use model::isotope::averagine_isotope_envelope;
+use model::mass::ISOTOPE;
+use model::scan::Ms1Scan;
+use model::Spectrum;
+use onnx_infer::predictors::form::{Mass, H2O, PROTON};
+use quant::Ms1RunIndex;
+use rayon::prelude::*;
+
+use crate::predicted::{read_pin, write_pin, NONE};
+
+/// The columns added to the PIN, in order.
+pub(crate) const COLUMNS: [&str; 13] = [
+    "dia_frag_corr",
+    "dia_frag_coelute",
+    "dia_apex_offset",
+    "dia_apex_frac",
+    "dia_ms1_corr",
+    "dia_ms1_found",
+    "dia_ms1_abs_ppm",
+    "dia_ms1_log_int",
+    "dia_ms1_iso_cos",
+    "dia_frag_log_int",
+    "dia_n_frag",
+    "dia_support",
+    "dia_support_top1",
+];
+
+/// Cycles traced either side of the row's scan. ponytail: fixed; ±5 cycles is
+/// ±8 s on the 1.65 s Astral cycle, learn it from the peak width if other
+/// cycle times need it.
+const HALF_CYCLES: usize = 5;
+/// Fragments traced per row.
+const TOP_FRAGMENTS: usize = 6;
+/// Shortest b/y ion (residues) considered.
+const MIN_ION_LEN: usize = 3;
+/// A fragment co-elutes when its trace correlates at least this with the rest.
+const COELUTE_MIN_CORR: f64 = 0.6;
+/// Fragment m/z tolerance (ppm).
+const FRAG_PPM: f64 = 20.0;
+/// MS1 m/z tolerance (ppm).
+const MS1_PPM: f64 = 10.0;
+
+/// Adds the [`COLUMNS`] to every row of `pin`. `spectra` keep their peaks;
+/// `ms1[r]` holds input `r`'s survey scans; `run_ends[r]` is the exclusive end
+/// of input `r` in `spectra`.
+pub(crate) fn add_to_pin(
+    pin: &Path,
+    spectra: &[Spectrum],
+    run_ends: &[usize],
+    ms1: Vec<Vec<Ms1Scan>>,
+) -> Result<(), String> {
+    let t0 = Instant::now();
+    let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
+    let table = read_pin(pin, spectra, &cols)?;
+    let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
+
+    // Scans of one input and one isolation window, in RT order.
+    let mut by_window: HashMap<(usize, i64), Vec<u32>> = HashMap::new();
+    for (i, s) in spectra.iter().enumerate() {
+        let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
+        by_window
+            .entry((run_of(i), (t * 100.0).round() as i64))
+            .or_default()
+            .push(i as u32);
+    }
+    let rt = |i: u32| spectra[i as usize].rt_seconds.unwrap_or(0.0);
+    let mut slot = vec![(0u32, 0u32); spectra.len()];
+    let mut windows: Vec<Vec<u32>> = Vec::with_capacity(by_window.len());
+    for (_, mut v) in by_window {
+        v.sort_by(|&a, &b| rt(a).total_cmp(&rt(b)));
+        for (p, &i) in v.iter().enumerate() {
+            slot[i as usize] = (windows.len() as u32, p as u32);
+        }
+        windows.push(v);
+    }
+    let n_ms1: usize = ms1.iter().map(Vec::len).sum();
+    let ms1: Vec<Option<Ms1RunIndex>> = ms1
+        .into_iter()
+        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
+        .collect();
+
+    // Each precursor's rows by (window, cycle), with whether the row is its
+    // scan's best.
+    let mut best_of_spec: HashMap<u32, f64> = HashMap::new();
+    for r in &table.rows {
+        if r.spec != NONE {
+            let b = best_of_spec.entry(r.spec).or_insert(f64::NEG_INFINITY);
+            *b = b.max(r.score);
+        }
+    }
+    let mut by_precursor: HashMap<(u32, u8, u32), Vec<(u32, bool)>> = HashMap::new();
+    for r in &table.rows {
+        if r.spec == NONE || r.form == NONE {
+            continue;
+        }
+        let (w, p) = slot[r.spec as usize];
+        by_precursor
+            .entry((r.form, r.charge, w))
+            .or_default()
+            .push((p, r.score >= best_of_spec[&r.spec]));
+    }
+    let support = |form: u32, charge: u8, w: u32, p: u32| -> (f64, f64) {
+        let mut seen: Vec<(u32, bool)> = by_precursor
+            .get(&(form, charge, w))
+            .map(|v| {
+                v.iter()
+                    .copied()
+                    .filter(|&(q, _)| q != p && q.abs_diff(p) as usize <= HALF_CYCLES)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // One count per scan (a precursor can sit in several rows of a scan).
+        seen.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        seen.dedup_by_key(|s| s.0);
+        (
+            seen.len() as f64,
+            seen.iter().filter(|s| s.1).count() as f64,
+        )
+    };
+
+    let feats: Vec<[f64; COLUMNS.len()]> = table
+        .rows
+        .par_iter()
+        .map(|r| {
+            if r.spec == NONE || r.form == NONE || r.charge == 0 {
+                return [0.0; COLUMNS.len()];
+            }
+            let (w, p) = slot[r.spec as usize];
+            let win = &windows[w as usize];
+            let (p, lo) = (p as usize, (p as usize).saturating_sub(HALF_CYCLES));
+            let hi = (p + HALF_CYCLES + 1).min(win.len());
+            let scans: Vec<&[(f64, f32)]> = win[lo..hi]
+                .iter()
+                .map(|&i| spectra[i as usize].peaks.as_slice())
+                .collect();
+            let rts: Vec<f64> = win[lo..hi].iter().map(|&i| rt(i)).collect();
+            let run = run_of(r.spec as usize);
+            let mut f = row_features(
+                &scans,
+                p - lo,
+                &rts,
+                &table.forms[r.form as usize].1,
+                r.charge,
+                ms1.get(run).and_then(Option::as_ref),
+            );
+            let (s_any, s_top) = support(r.form, r.charge, w, p as u32);
+            f[COLUMNS.len() - 2] = s_any;
+            f[COLUMNS.len() - 1] = s_top;
+            f
+        })
+        .collect();
+    let values: Vec<Vec<f64>> = (0..COLUMNS.len())
+        .map(|c| feats.iter().map(|f| f[c]).collect())
+        .collect();
+    write_pin(pin, &table, &cols, &values)?;
+    eprintln!(
+        "DIA: added {} co-elution columns to {} PIN rows ({} isolation windows, {n_ms1} MS1 scans) [PHASE dia_features: {:.2}s]",
+        COLUMNS.len(),
+        table.rows.len(),
+        windows.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// The most intense peak within `tol_ppm` of `mz` in m/z-sorted `peaks`.
+fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {
+    let tol = mz * tol_ppm * 1e-6;
+    let lo = peaks.partition_point(|p| p.0 < mz - tol);
+    peaks[lo..]
+        .iter()
+        .take_while(|p| p.0 <= mz + tol)
+        .copied()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    if a.len() < 3 {
+        return 0.0;
+    }
+    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        sab += (x - ma) * (y - mb);
+        saa += (x - ma) * (x - ma);
+        sbb += (y - mb) * (y - mb);
+    }
+    if saa <= 0.0 || sbb <= 0.0 {
+        0.0
+    } else {
+        sab / (saa * sbb).sqrt()
+    }
+}
+
+/// The [`COLUMNS`] of one row: `scans` are the peak lists of the window's
+/// neighbouring cycles (RTs `rts`), `center` the row's own scan among them.
+fn row_features(
+    scans: &[&[(f64, f32)]],
+    center: usize,
+    rts: &[f64],
+    mass: &Mass,
+    charge: u8,
+    ms1: Option<&Ms1RunIndex>,
+) -> [f64; COLUMNS.len()] {
+    let n = mass.res.len();
+    let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+    // b and y ions of length >= MIN_ION_LEN; z = 2 too above a 2+ precursor.
+    let mut ions: Vec<f64> = Vec::new();
+    let mut prefix = mass.nterm;
+    for i in 0..n.saturating_sub(1) {
+        prefix += mass.res[i];
+        let (b_len, y_len) = (i + 1, n - i - 1);
+        for z in 1..=(if charge >= 3 { 2 } else { 1 }) {
+            let zf = z as f64;
+            if b_len >= MIN_ION_LEN {
+                ions.push((prefix + zf * PROTON) / zf);
+            }
+            if y_len >= MIN_ION_LEN {
+                ions.push((total - prefix + H2O + zf * PROTON) / zf);
+            }
+        }
+    }
+    let here = scans[center];
+    let mut matched: Vec<(f64, f32)> = ions
+        .iter()
+        .filter_map(|&mz| best_peak(here, mz, FRAG_PPM).map(|(_, i)| (mz, i)))
+        .collect();
+    let n_frag = matched.len() as f64;
+    matched.sort_by(|a, b| b.1.total_cmp(&a.1));
+    matched.truncate(TOP_FRAGMENTS);
+    let traces: Vec<Vec<f64>> = matched
+        .iter()
+        .map(|&(mz, _)| {
+            scans
+                .iter()
+                .map(|s| best_peak(s, mz, FRAG_PPM).map_or(0.0, |p| p.1 as f64))
+                .collect()
+        })
+        .collect();
+    let summed: Vec<f64> = (0..scans.len())
+        .map(|k| traces.iter().map(|t| t[k]).sum())
+        .collect();
+    let corrs: Vec<f64> = traces
+        .iter()
+        .map(|t| {
+            let rest: Vec<f64> = summed.iter().zip(t).map(|(s, x)| s - x).collect();
+            pearson(t, &rest)
+        })
+        .collect();
+    let frag_corr = if corrs.len() >= 2 {
+        corrs.iter().sum::<f64>() / corrs.len() as f64
+    } else {
+        0.0
+    };
+    let coelute = corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64;
+    let (apex, apex_v) =
+        summed
+            .iter()
+            .enumerate()
+            .fold((center, 0.0), |b, (k, &v)| if v > b.1 { (k, v) } else { b });
+    let apex_offset = apex.abs_diff(center) as f64;
+    let apex_frac = if apex_v > 0.0 {
+        summed[center] / apex_v
+    } else {
+        0.0
+    };
+
+    let z = charge as f64;
+    let mono = (total + H2O) / z + PROTON;
+    let (mut ms1_corr, mut found, mut abs_ppm, mut log_int, mut iso_cos) =
+        (0.0, 0.0, MS1_PPM, 0.0, 0.0);
+    if let Some(ms1) = ms1 {
+        let trace: Vec<f64> = rts
+            .iter()
+            .map(|&t| {
+                ms1.nearest_scan(t)
+                    .and_then(|i| best_peak(&ms1.scan(i).peaks, mono, MS1_PPM))
+                    .map_or(0.0, |p| p.1 as f64)
+            })
+            .collect();
+        ms1_corr = pearson(&trace, &summed);
+        if let Some(i) = ms1.nearest_scan(rts[center]) {
+            let peaks = &ms1.scan(i).peaks;
+            if let Some((mz, int)) = best_peak(peaks, mono, MS1_PPM) {
+                found = 1.0;
+                abs_ppm = ((mz - mono) / mono * 1e6).abs();
+                log_int = (int as f64).max(1.0).log10();
+                let obs: Vec<f64> = (0..3)
+                    .map(|k| {
+                        best_peak(peaks, mono + k as f64 * ISOTOPE / z, MS1_PPM)
+                            .map_or(0.0, |p| p.1 as f64)
+                    })
+                    .collect();
+                let theo = averagine_isotope_envelope(total + H2O, 3);
+                let dot: f64 = obs.iter().zip(&theo).map(|(a, b)| a * b).sum();
+                let (na, nb) = (
+                    obs.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                    theo.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                );
+                iso_cos = if na > 0.0 && nb > 0.0 {
+                    dot / (na * nb)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+    let frag_log_int = traces
+        .iter()
+        .map(|t| t[center])
+        .sum::<f64>()
+        .max(1.0)
+        .log10();
+    [
+        frag_corr,
+        coelute,
+        apex_offset,
+        apex_frac,
+        ms1_corr,
+        found,
+        abs_ppm,
+        log_int,
+        iso_cos,
+        frag_log_int,
+        n_frag,
+        0.0,
+        0.0,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onnx_infer::predictors::form::parse_peptide;
+
+    /// A peptide whose fragments and precursor elute together scores high
+    /// co-elution; the same scans read for a peptide with no signal score 0.
+    #[test]
+    fn coeluting_fragments_and_precursor_score_high() {
+        let (_, mass) = parse_peptide("K.PEPTIDEKLR.A").unwrap();
+        let z = 2u8;
+        let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+        let mono = (total + H2O) / z as f64 + PROTON;
+        // y ions of the peptide, z = 1.
+        let mut prefix = mass.nterm;
+        let mut ys = Vec::new();
+        for r in &mass.res[..mass.res.len() - 3] {
+            prefix += r;
+            ys.push(total - prefix + H2O + PROTON);
+        }
+        let shape = [0.0, 0.1, 0.4, 0.9, 1.0, 0.7, 0.3, 0.1, 0.0, 0.0, 0.0];
+        let rts: Vec<f64> = (0..shape.len()).map(|k| k as f64 * 1.6).collect();
+        let mut scans: Vec<Vec<(f64, f32)>> = Vec::new();
+        let mut survey: Vec<Ms1Scan> = Vec::new();
+        for (k, &h) in shape.iter().enumerate() {
+            let mut p: Vec<(f64, f32)> = ys
+                .iter()
+                .enumerate()
+                .map(|(j, &mz)| (mz, (1e5 * h * (1.0 + j as f64)) as f32 + 10.0))
+                .collect();
+            p.sort_by(|a, b| a.0.total_cmp(&b.0));
+            scans.push(p);
+            let env = averagine_isotope_envelope(total + H2O, 3);
+            survey.push(Ms1Scan {
+                rt: rts[k],
+                peaks: (0..3)
+                    .map(|i| {
+                        (
+                            mono + i as f64 * ISOTOPE / 2.0,
+                            (1e6 * h * env[i]) as f32 + 1.0,
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        let refs: Vec<&[(f64, f32)]> = scans.iter().map(Vec::as_slice).collect();
+        let ms1 = Ms1RunIndex::new(survey);
+        let f = row_features(&refs, 4, &rts, &mass, z, Some(&ms1));
+        assert!(f[0] > 0.95, "frag corr {}", f[0]);
+        assert_eq!(f[2], 0.0, "apex offset");
+        assert!(f[4] > 0.95, "ms1 corr {}", f[4]);
+        assert_eq!(f[5], 1.0);
+        assert!(f[8] > 0.99, "iso cos {}", f[8]);
+
+        let (_, other) = parse_peptide("K.GGGGWWWWK.A").unwrap();
+        let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1));
+        assert_eq!((g[0], g[5], g[10]), (0.0, 0.0, 0.0));
+    }
+}

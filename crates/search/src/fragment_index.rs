@@ -382,6 +382,22 @@ impl ChunkFragmentIndex {
         let mut hi = f64::MIN;
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
+            if params.dia {
+                let (w_lo, w_hi) = crate::precursor_matching::dia_neutral_window(
+                    spec,
+                    z,
+                    &params.precursor_tolerance,
+                    params.chimeric_isolation_halfwidth_da,
+                    shift_ppm,
+                );
+                lo = lo.min(w_lo);
+                hi = hi.max(w_hi);
+                exact.push((
+                    w_lo - PRECURSOR_GATE_MARGIN_DA,
+                    w_hi + PRECURSOR_GATE_MARGIN_DA,
+                ));
+                continue;
+            }
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);

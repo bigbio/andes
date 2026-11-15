@@ -330,6 +330,18 @@ pub(crate) fn candidate_nominal_bounds(
     params: &SearchParams,
     shift_ppm: f64,
 ) -> (i32, i32) {
+    if params.dia {
+        // A DIA scan isolates a window, not a precursor: every mass of it is
+        // retrieved (one bucket of margin each side; the scoring gate is exact).
+        let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+            spec,
+            z,
+            &params.precursor_tolerance,
+            params.chimeric_isolation_halfwidth_da,
+            shift_ppm,
+        );
+        return (nominal_from(lo - H2O) - 1, nominal_from(hi - H2O) + 1);
+    }
     let charge_f = z as f64;
     let iso_min = *params.isotope_error_range.start() as i32;
     let iso_max = *params.isotope_error_range.end() as i32;
@@ -990,6 +1002,18 @@ impl<'a> PreparedSearch<'a> {
                         .filter(|s| s.peaks.len() >= params.min_peaks as usize)
                     {
                         for z in charges_to_try(s, params) {
+                            if params.dia {
+                                let (a, b) = crate::precursor_matching::dia_neutral_window(
+                                    s,
+                                    z,
+                                    &params.precursor_tolerance,
+                                    params.chimeric_isolation_halfwidth_da,
+                                    shift_ppm,
+                                );
+                                lo = lo.min(a);
+                                hi = hi.max(b);
+                                continue;
+                            }
                             let zf = z as f64;
                             let obs = adjusted_observed_neutral_mass(
                                 s.precursor_mz * zf - zf * PROTON,
@@ -1253,12 +1277,36 @@ impl<'a> PreparedSearch<'a> {
                         // edge_score call entirely. For top-N=1 (Astral) this
                         // gates ~99% of candidates after the queue fills.
                         let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
+                        // `--dia`: the candidate's precursor m/z lies in the scan's
+                        // isolation window. Its mass error is measured on MS1 later
+                        // (the DIA PIN features), so it is 0 here.
+                        let dia_window = params.dia.then(|| {
+                            crate::precursor_matching::dia_neutral_window(
+                                spec,
+                                z,
+                                &params.precursor_tolerance,
+                                params.chimeric_isolation_halfwidth_da,
+                                shift_ppm,
+                            )
+                        });
+                        if let Some((lo, hi)) = dia_window {
+                            if (lo..=hi).contains(&cand.peptide.mass()) {
+                                iso_errs.push(MassError {
+                                    mass_error_da: 0.0,
+                                    mass_error_ppm: 0.0,
+                                    isotope_offset: 0,
+                                });
+                            }
+                        }
                         // Cascade Pass 1 is NARROW: the precursor match uses the tight
                         // `matches_precursor` path against the selected m/z, not the
                         // wide isolation window.
-                        for offset in
+                        let iso_range = if params.dia {
+                            1..=0
+                        } else {
                             *params.isotope_error_range.start()..=*params.isotope_error_range.end()
-                        {
+                        };
+                        for offset in iso_range {
                             let matched = matches_precursor(
                                 spec,
                                 &cand.peptide,
@@ -1375,7 +1423,12 @@ impl<'a> PreparedSearch<'a> {
                             activation_method: Some(scorer.param().data_type.activation),
                             features,
                             isotope_offset: err.isotope_offset,
-                            precursor_mz_override: None,
+                            // `--dia`: the PSM's precursor is the peptide's own m/z
+                            // (the scan records only the window), so the PIN groups
+                            // a target with the decoys of its own mass.
+                            precursor_mz_override: params
+                                .dia
+                                .then(|| cand.peptide.mass() / z as f64 + PROTON),
                             site_evidence: None,
                             tie_key: crate::psm::tie_key_of(cand),
                         };

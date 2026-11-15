@@ -122,14 +122,41 @@ Why, from the measurements:
   quartile. That is the scan-level evidence Phase A already scores.
 - **The predicted assay is weaker than an empirical one.** 2.46 of andes-ms2's top three fragments are
   present at the best apex, against 2.84 of the DIA-NN library's top three at DIA-NN's apex.
-- **The RT prior is too broad to help.** The calibrated andes-rt error against DIA-NN's apexes is
-  0.42 min robust σ, about 15 cycles, so `pc_rt_err` has no power (AUC 0.46) and a narrower window loses
-  true peaks.
+- **The RT prior is broad, for both tools.** The calibrated andes-rt error against DIA-NN's apexes is
+  0.42 min robust σ (about 15 cycles), and DIA-NN's own library RT against its apexes is 0.38 min, so
+  the generic predictors are about equally broad. `pc_rt_err` has no power here (AUC 0.46) and a
+  narrower window loses true peaks. A run-specific refinement narrows it (see "Run-specific RT").
 
 What would close the gap, from the same measurements: an empirical or fine-tuned fragment and RT
 library (AlphaDIA-style transfer learning on the run's own identifications), a DIA-NN-style nonlinear
 classifier trained per run, and interference handling between co-eluting precursors. Each is a larger
 project than this pass. The code is kept behind the hidden flag, with its tests, as the starting point.
+
+## Rescoring and RT tested on the full raws (Phase A PIN)
+
+N@FDP_c 1 %, raw01 / raw02, against Percolator 1559 / 1651:
+
+- **A nonlinear per-run classifier** (semi-supervised gradient boosting on the same 95 features, 3-fold
+  cross-validated by precursor, Percolator `-Y` competition): 1553 / 1583 after one round, 1578 / 1561
+  after two, 1520 / 1507 after three. It does not beat the linear SVM, so the gap is in the evidence,
+  not in the classifier.
+- **Run-specific RT.** A residual model of observed minus andes-rt RT, fitted on the run's q ≤ 1 %
+  identifications (residue composition, length, oxidation, predicted RT; cross-validated by peptide),
+  narrows the RT error from 0.43 to 0.18 min robust σ (95th percentile 1.06 to 0.54 min). As an
+  extra PIN column it gives 1510 / 1648: Percolator weights it, but it barely separates DIA-NN's
+  precursors that andes misses from decoys of the same score (AUC 0.46, against 0.49 for the
+  unrefined RT error). Those precursors are already at the right RT; their spectra are what is weak.
+- **Shared-scan interference** is not where the errors are. Of the targets at precursor q ≤ 5 % on
+  raw01, 1,884 rank first in their scan (2.0 % entrapment) and 36 rank second (8 %), so a filter on
+  rank would remove at most three false IDs.
+
+Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
+best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's
+lowest-intensity quartile and 80 % of its highest. Against decoys of the same score, the missed ones
+differ most in `matchedIonRatio` (AUC 0.75) and the andes-ms2 agreement (0.71), features the PIN
+already has. Closing the remaining gap needs more fragment evidence per precursor than one scan
+gives: summing or deconvolving the apex scans (a pseudo-spectrum per precursor), or an empirical
+fragment library from the run.
 
 ## Reproduce
 

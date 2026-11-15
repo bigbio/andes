@@ -528,7 +528,7 @@ with `--chimeric`; `--precursor-cal` is turned off (a DIA scan has no selected p
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. Co-elution columns are then added to the PIN. Config key `search.dia`. |
+| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. A candidate is scored only when its monoisotopic m/z has an MS1 peak within 5 ppm in the survey scan nearest the scan or one either side (the MS1 gate; on the Astral benchmark it keeps 93 % of DIA-NN's precursors and 13 % of random candidates). Co-elution columns are then added to the PIN. Config key `search.dia`. |
 
 The added PIN columns (`crates/andes/src/bin/andes/dia.rs`), for every row, targets and decoys
 alike:

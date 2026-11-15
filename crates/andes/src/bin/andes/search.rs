@@ -2345,6 +2345,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
             }
+            // The parser has sent every spectrum; its MS1 scans are complete.
+            let stats = match parser_handle.join() {
+                Ok(Ok((stats, scans))) => {
+                    run_scans = scans;
+                    stats
+                }
+                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+                Err(_) => return Err("parser thread panicked".into()),
+            };
+            // `--dia`: the MS1 precursor gate reads this input's survey scans.
+            // Mass-ordered scoring holds every spectrum until here, so the gate
+            // sees the whole run.
+            if cli.dia && mass_ordered {
+                prepared.set_dia_ms1(run_scans.ms1.clone());
+            }
             if mass_ordered {
                 score_mass_ordered(
                     &prepared,
@@ -2358,15 +2373,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut measurer,
                 );
             }
-
-            match parser_handle.join() {
-                Ok(Ok((stats, scans))) => {
-                    run_scans = scans;
-                    stats
-                }
-                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-                Err(_) => return Err("parser thread panicked".into()),
-            }
+            stats
         };
         require_spectra(
             input_path,

@@ -7,7 +7,7 @@ dk=set(r['Modified.Sequence']+'/'+r['Precursor.Charge'].astype(str))
 cols=open(tag+'.pin').readline().rstrip('\n').split('\t'); k=cols.index('Peptide')
 cz=[c for c in cols if re.fullmatch(r'charge\d',c)]
 p=pd.read_csv(tag+'.pin',sep='\t',usecols=['SpecId','Label','ScanNr','RawScore','Peptide']+cz)
-p['z']=p[cz].values.argmax(1)+1
+p['z']=[int(cz[i][6:]) for i in p[cz].values.argmax(1)]
 p['rank']=p.SpecId.str.extract(r'_(\d+)(?:_\d+)?$')[0].astype(int)
 p['key']=p.Peptide.str[2:-2].str.replace('+57.02146','(UniMod:4)',regex=False).str.replace('+15.99491','(UniMod:35)',regex=False)+'/'+p.z.astype(str)
 t=pd.concat([pd.read_csv(tag+'.t.psms',sep='\t',usecols=['PSMId','q-value'])])

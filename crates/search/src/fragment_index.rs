@@ -375,6 +375,32 @@ impl ChunkFragmentIndex {
         min_matched: u16,
         vote_peaks: usize,
     ) -> Vec<(u32, u16)> {
+        self.query_where(
+            spec,
+            charges,
+            params,
+            fragment_tol,
+            top_k,
+            min_matched,
+            vote_peaks,
+            &|_| true,
+        )
+    }
+
+    /// [`Self::query`] over the forms whose neutral mass `keep` accepts; the
+    /// rest are dropped before `top_k` is taken (`--dia`'s MS1 precursor gate).
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_where(
+        &self,
+        spec: &Spectrum,
+        charges: &[u8],
+        params: &SearchParams,
+        fragment_tol: Tolerance,
+        top_k: usize,
+        min_matched: u16,
+        vote_peaks: usize,
+        keep: &dyn Fn(f64) -> bool,
+    ) -> Vec<(u32, u16)> {
         // One over-inclusive precursor mass interval; the scoring loop applies
         // the exact per-offset test afterwards.
         let shift_ppm = params.precursor_mass_shift_ppm;
@@ -488,6 +514,7 @@ impl ChunkFragmentIndex {
             }
             sel
         });
+        sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
         select_top_k(&mut sel, top_k);
         sel.into_iter()
             .filter(|&(id, _, _)| {

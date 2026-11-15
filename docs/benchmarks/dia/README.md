@@ -27,19 +27,23 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 
 | tool | q ≤ 0.01 N, raw01 / raw02 | FDP_c at q ≤ 0.01 | FDP_c at q ≤ 0.05 | N@FDP_c 1 % | N@FDP_c 2 % |
 |---|---|---|---|---|---|
-| andes `--dia` | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
+| andes `--dia` | 1404 / 1499 | 0.004 / 0.005 | 0.042 / 0.046 | 1559 / 1651 | 1707 / 1691 |
+| andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
 
-- **Error control holds**: andes's q ≤ 0.01 measures 0.4–0.8 % true FDP, and q ≤ 0.05 measures 3.2–4.0 %.
-- **Ranking**: at a matched true FDP of 1 %, andes reaches 72 % (raw01) and 68 % (raw02) of DIA-NN, and
-  88 % / 96 % of OpenDIA arm E.
-- **Cost per run**: andes search 9.5–10 min (wall, 14 threads, 5.8 GB peak RSS) plus 13–15 min of Percolator
-  on about 2.0 M PIN rows; DIA-NN 8.8–21 min (`diann-decoys-20261114/RESULT.md`).
+- **Error control holds**: andes's q ≤ 0.01 measures 0.4–0.5 % true FDP, and q ≤ 0.05 measures 4.2–4.6 %.
+- **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN, and
+  92 % / 101 % of OpenDIA arm E.
+- **MS1 gate** (a candidate is scored only when its monoisotopic m/z has a survey peak within 5 ppm in the
+  nearest survey scan or one either side): +70 / +82 at N@FDP_c 1 % and 25–42 % less search time. On the
+  slice it keeps the MS1 peak of 93 % of DIA-NN's precursors and of 13 % of random library candidates.
+- **Cost per run**: andes search 6–7 min (wall, 14 threads) plus 12–15 min of Percolator; DIA-NN 8.8–21 min
+  (`diann-decoys-20261114/RESULT.md`).
 
 ## Where the gap is
 
-On a 3-minute slice (RT 10–13 min, [`slice.py`](slice.py), [`gap.py`](gap.py)), DIA-NN reports 604 library
+Measured before the MS1 gate. On a 3-minute slice (RT 10–13 min, [`slice.py`](slice.py), [`gap.py`](gap.py)), DIA-NN reports 604 library
 precursors at q ≤ 0.01. In andes's PIN:
 
 - **166 (27 %) are never retrieved.** They have no row in any scan. Most are 2+ near the low end of the
@@ -48,6 +52,13 @@ precursors at q ≤ 0.01. In andes's PIN:
   limit. The likely cause is spectrum-level matching: in a scan of a 2 Th window holding ~2,700 candidate
   forms, a weak precursor's few fragments do not lift it into the scan's top 10 rows.
 - **About 140 more are retrieved but never ranked first in any scan**; Percolator rescues some of them.
+- At the scan nearest DIA-NN's apex, the missed precursors still match a median of 5 b/y ions (13 of 166
+  match fewer than 3), so they reach the fragment vote and lose the per-scan ranking to other forms of the
+  window. The MS1 gate removes most of those competitors: on the slice, DIA-NN precursors in the PIN go
+  from 438 to 473 and ranked first somewhere from 295 to 341.
+
+Hypotheses tested on the slice that did not help: `--charge 2..3` or `2..4` instead of `1..5` (within
+slice noise); `--score strong` (already the auto choice for the Astral model).
 
 Slice probes (N@FDP_c 1 %): baseline 264; predicted MS2 features (`--predict rt,ms2`) 275; `--top-n 20` 232;
 the neighbouring-cycle support columns had no measurable effect.

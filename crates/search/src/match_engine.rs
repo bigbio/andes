@@ -50,6 +50,11 @@ use scoring_crate::scoring::{
 /// [`PreparedSearch::with_candidate_filter`].
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
+/// `--dia` MS1 gate tolerance (ppm) for a candidate's monoisotopic m/z.
+const DIA_MS1_GATE_PPM: f64 = 5.0;
+/// `--dia` MS1 gate: survey scans read either side of the nearest one.
+const DIA_MS1_GATE_SCANS: usize = 1;
+
 /// Builds the scorer for scans of one activation that differs from the run's
 /// routed activation; `None` keeps those scans on the run's scorer (no model of
 /// their own, or the same model). See [`PreparedSearch::with_per_scan_scorers`].
@@ -152,6 +157,11 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
+    /// `--dia`: the run's MS1 survey scans (RT seconds, m/z-sorted peaks),
+    /// sorted by RT. A DIA candidate is scored only when its monoisotopic m/z
+    /// has a peak within [`DIA_MS1_GATE_PPM`] in one of the [`DIA_MS1_GATE_SCANS`]
+    /// survey scans either side of the scan. Empty: no gate.
+    pub dia_ms1: Vec<model::scan::Ms1Scan>,
     /// The GLOBAL set of target bare-peptide sequences (every non-decoy base
     /// record in the index), built once at prepare time. The per-spectrum
     /// collision-decoy relabel uses THIS set so a decoy is relabeled iff its bare
@@ -519,6 +529,7 @@ impl<'a> PreparedSearch<'a> {
             chunk_prep_nanos: AtomicU64::new(0),
             aa_set_for_scoring,
             ms1_link: None,
+            dia_ms1: Vec::new(),
             target_bare_seqs,
             candidate_filter: None,
             per_scan: None,
@@ -675,6 +686,50 @@ impl<'a> PreparedSearch<'a> {
     pub fn with_ms1_link(mut self, ms1_link: Option<Ms1Link>) -> Self {
         self.ms1_link = ms1_link;
         self
+    }
+
+    /// `--dia`: the run's survey scans for the MS1 precursor gate (see
+    /// [`Self::dia_ms1`]); sorted here by RT.
+    pub fn set_dia_ms1(&mut self, mut scans: Vec<model::scan::Ms1Scan>) {
+        scans.retain(|s| s.rt.is_finite());
+        scans.sort_by(|a, b| a.rt.total_cmp(&b.rt));
+        self.dia_ms1 = scans;
+    }
+
+    /// `--dia` MS1 gate: whether `mz` has a survey peak within
+    /// [`DIA_MS1_GATE_PPM`] in the survey scans `scans` (an index range).
+    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
+        let tol = mz * DIA_MS1_GATE_PPM * 1e-6;
+        self.dia_ms1[scans].iter().any(|s| {
+            let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+            s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
+        })
+    }
+
+    /// The survey scans the MS1 gate reads for a scan at `rt` seconds: the
+    /// nearest one and [`DIA_MS1_GATE_SCANS`] either side.
+    fn dia_ms1_scans(&self, rt: Option<f64>) -> Option<std::ops::Range<usize>> {
+        let rt = rt?;
+        if self.dia_ms1.is_empty() {
+            return None;
+        }
+        let i = self.dia_ms1.partition_point(|s| s.rt < rt);
+        let near = match (i.checked_sub(1), (i < self.dia_ms1.len()).then_some(i)) {
+            (Some(a), Some(b)) => {
+                if rt - self.dia_ms1[a].rt <= self.dia_ms1[b].rt - rt {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        Some(
+            near.saturating_sub(DIA_MS1_GATE_SCANS)
+                ..(near + DIA_MS1_GATE_SCANS + 1).min(self.dia_ms1.len()),
+        )
     }
 
     /// Score one chunk of spectra in parallel using the prepared candidate
@@ -1184,8 +1239,31 @@ impl<'a> PreparedSearch<'a> {
                 // indices into this list and are remapped to global indices once, at
                 // the end of the closure.
                 let shift_ppm = params.precursor_mass_shift_ppm;
+                // `--dia`: the survey scans the MS1 precursor gate reads.
+                let ms1_gate = if params.dia {
+                    self.dia_ms1_scans(spec.rt_seconds)
+                } else {
+                    None
+                };
                 let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
-                    let sel = fi.query(
+                    // `--dia`: a form passes the MS1 gate when its monoisotopic
+                    // m/z has a survey peak at some charge whose window holds it.
+                    let gate = |mass: f64| {
+                        ms1_gate.clone().is_none_or(|r| {
+                            charges_to_try.iter().any(|&z| {
+                                let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+                                    spec,
+                                    z,
+                                    &params.precursor_tolerance,
+                                    params.chimeric_isolation_halfwidth_da,
+                                    shift_ppm,
+                                );
+                                (lo..=hi).contains(&mass)
+                                    && self.dia_ms1_has(r.clone(), mass / z as f64 + PROTON)
+                            })
+                        })
+                    };
+                    let sel = fi.query_where(
                         spec,
                         &charges_to_try,
                         params,
@@ -1193,6 +1271,7 @@ impl<'a> PreparedSearch<'a> {
                         params.fragment_index_top_k as usize,
                         crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                         crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
+                        &gate,
                     );
                     let relabel = |v: &mut [Candidate]| {
                         relabel_collision_decoys_with(v, &self.target_bare_seqs)
@@ -1290,7 +1369,13 @@ impl<'a> PreparedSearch<'a> {
                             )
                         });
                         if let Some((lo, hi)) = dia_window {
-                            if (lo..=hi).contains(&cand.peptide.mass()) {
+                            let mass = cand.peptide.mass();
+                            let mono_mz = mass / z as f64 + PROTON;
+                            if (lo..=hi).contains(&mass)
+                                && ms1_gate
+                                    .clone()
+                                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz))
+                            {
                                 iso_errs.push(MassError {
                                     mass_error_da: 0.0,
                                     mass_error_ppm: 0.0,
@@ -2754,6 +2839,44 @@ mod accumulator_tests {
         assert!(accum.index_of.is_empty());
         assert_eq!(accum.intern(&cands[1]), 0);
         assert_eq!(accum.candidates.len(), 1);
+    }
+
+    /// `--dia` MS1 gate: the survey scans nearest a scan's RT, ±1, and a peak
+    /// within 5 ppm of the m/z.
+    #[test]
+    fn dia_ms1_gate_reads_neighbouring_survey_scans() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let mut prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let scan = |rt: f64, mz: f64| model::scan::Ms1Scan {
+            rt,
+            peaks: vec![(mz, 1.0)],
+            ..Default::default()
+        };
+        // Unsorted on purpose; set_dia_ms1 sorts by RT.
+        prepared.set_dia_ms1(vec![
+            scan(30.0, 700.0),
+            scan(10.0, 500.0),
+            scan(20.0, 600.0),
+        ]);
+        assert_eq!(prepared.dia_ms1_scans(None), None);
+        let r = prepared.dia_ms1_scans(Some(9.0)).unwrap();
+        assert_eq!(r, 0..2);
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6)));
+        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6)));
+        assert!(!prepared.dia_ms1_has(r, 700.0));
+        assert_eq!(prepared.dia_ms1_scans(Some(26.0)).unwrap(), 1..3);
     }
 }
 

@@ -611,7 +611,7 @@ fn search_spectrum(
     mods: &StubMods,
     run_oracle: bool,
 ) -> Option<XlSpectrumResult> {
-    let z = spec.precursor_charge?;
+    let z = u8::try_from(spec.precursor_charge?).ok()?;
     if z < cfg.min_precursor_charge {
         return None;
     }
@@ -810,7 +810,10 @@ pub fn xl_search_run(
     let eligible: Vec<usize> = spectra
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.precursor_charge.is_some_and(|z| z >= cfg.min_precursor_charge))
+        .filter(|(_, s)| {
+            s.precursor_charge
+                .is_some_and(|z| z >= i32::from(cfg.min_precursor_charge))
+        })
         .map(|(i, _)| i)
         .take(cfg.oracle_spectra)
         .collect();

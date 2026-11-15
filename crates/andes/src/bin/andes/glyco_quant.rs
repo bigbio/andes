@@ -221,7 +221,8 @@ struct FeatureRow {
 /// Settings resolved from the `--lfq*` flags (the glyco path reuses them).
 struct Settings {
     params: LfqParams,
-    feature_fdr: f64,
+    /// `--quant-transfer-fdr` of the glycopeptide transfers.
+    transfer_fdr: f64,
     core: GlycanCore,
     debug: bool,
     /// `--glyco --mbr`: transfer accepted glycopeptides into runs that did not
@@ -241,7 +242,7 @@ impl Settings {
                 min_cosine: cli.lfq_min_cosine as f32,
                 ..LfqParams::default()
             },
-            feature_fdr: cli.lfq_feature_fdr,
+            transfer_fdr: cli.coarse_transfer_fdr(),
             core: cli.glyco_core.into(),
             debug: cli.debug_glyco,
             mbr: cli.mbr,
@@ -263,14 +264,14 @@ pub(crate) fn run(
     let settings = Settings::from_cli(cli);
     eprintln!(
         "Quantification: intact glycopeptides from MS1 (tol {}, rt window ±{} s, {MIN_ISOTOPES}-\
-         {MAX_ISOTOPES} isotopes, min cosine {}, feature FDR {}, monoisotopic intensity)",
+         {MAX_ISOTOPES} isotopes, min cosine {}, transfer FDR {}, monoisotopic intensity)",
         match settings.params.tol {
             Tolerance::Ppm(v) => format!("{v} ppm"),
             Tolerance::Da(v) => format!("{v} Da"),
         },
         settings.params.rt_window_s,
         settings.params.min_cosine,
-        settings.feature_fdr
+        settings.transfer_fdr
     );
     let targets = build_targets(spectra, results, candidates, index, runs, &settings);
     if targets.is_empty() {
@@ -352,7 +353,7 @@ pub(crate) fn run(
         count_evidence(Evidence::Identified) + count_evidence(Evidence::Transferred),
         count_evidence(Evidence::Identified),
         count_evidence(Evidence::Transferred),
-        settings.feature_fdr,
+        settings.transfer_fdr,
         kept.glycopeptides,
         kept.sites,
         runs.len()
@@ -885,7 +886,7 @@ fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
     }
     match row.target.evidence {
         Evidence::Identified => row.score.is_some(),
-        Evidence::Transferred => row.q.is_some_and(|q| q <= settings.feature_fdr),
+        Evidence::Transferred => row.q.is_some_and(|q| q <= settings.transfer_fdr),
     }
 }
 
@@ -1985,7 +1986,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             params: LfqParams::default(),
-            feature_fdr: 0.05,
+            transfer_fdr: 0.05,
             core: GlycanCore::NGlycan,
             debug: false,
             mbr: false,

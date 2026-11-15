@@ -281,7 +281,7 @@ andes --spectrum spectra.mzML --database db.fasta \
 `$PATH`, else the pinned Docker image). `--rescore-native` is a built-in
 cross-validated semi-supervised linear rescorer with target-decoy competition (Percolator's
 algorithm, as `-Y`), a fallback when Percolator is not available. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
-q ≤ `--fdr`, default 0.01, e.g. `--rescore --fdr 0.01`). `--fdr` and `--pep` do nothing
+q ≤ `--psm-fdr`, default 0.01, e.g. `--rescore --psm-fdr 0.01`). `--psm-fdr` and `--pep` do nothing
 without one of them.
 
 **Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
@@ -441,7 +441,7 @@ same mistakes.
    its PSMs are not accepted. Measured against genotypes, those variants are false several times
    more often than the tested ones, so the tested variants' estimate cannot be lent to them.
 4. **Reporting.** Variant-class PSMs (every protein a variant entry) are accepted at
-   `--proteoform-fdr`, every other PSM at `--fdr`. Knockoff PSMs stay in the PIN as targets; they
+   `--proteoform-fdr`, every other PSM at `--psm-fdr`. Knockoff PSMs stay in the PIN as targets; they
    are left out of the QPX bundle. They are never in the filtered TSV, quantification, MBR or the
    proteoform table, and knockoff accessions are dropped from other rows' protein lists.
 
@@ -451,7 +451,7 @@ annotation files (`--annotations`), and `--rescore`.
 | Flag | Default | Effect |
 |---|---|---|
 | `--knockoffs` | `4` | Knockoffs per single-residue variant. `0` turns them off and leaves variant PSMs to the class FDR alone. |
-| `--proteoform-fdr` | the larger of `--fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
+| `--proteoform-fdr` | the larger of `--psm-fdr` and 0.05 | q-value cutoff for variant-class PSMs in the filtered TSV, the proteoform table and quantification. |
 | `--uniprot-evidence` | `experimental` | Minimum evidence for a variant to be searched (`curated` was used below). |
 
 The run log gives, per substitution class, the knockoff entries made, the variant PSMs accepted

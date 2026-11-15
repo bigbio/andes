@@ -153,9 +153,9 @@ pub(crate) fn infer_from_files(
 
     let mut targets = read_all(psms)?;
     let decoys = read_all(decoy_psms)?;
-    let proteoform_fdr = a.proteoform_fdr.unwrap_or(a.fdr.max(0.05));
+    let proteoform_fdr = a.proteoform_fdr();
     if idx.has_alternative_entries {
-        output::share_isobaric_references(&mut targets, &idx, a.fdr.max(proteoform_fdr));
+        output::share_isobaric_references(&mut targets, &idx, a.psm_fdr.max(proteoform_fdr));
     }
     output::apply_class_fdr(&mut targets, &decoys, &idx);
     let mut knockoffs =
@@ -168,7 +168,7 @@ pub(crate) fn infer_from_files(
             output::site_claims(
                 &mut targets,
                 &idx,
-                a.fdr,
+                a.psm_fdr,
                 proteoform_fdr,
                 &restricted,
                 None,
@@ -177,7 +177,7 @@ pub(crate) fn infer_from_files(
                 .knockoff_rows,
         );
     }
-    let cutoffs = output::Cutoffs::new(&targets, &idx, a.fdr, proteoform_fdr);
+    let cutoffs = output::Cutoffs::new(&targets, &idx, a.psm_fdr, proteoform_fdr);
     Ok(output::infer_protein_groups(
         &targets,
         &decoys,

@@ -294,7 +294,7 @@ fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
 }
 
-/// `--mbr-fdr` of the transfer test. The fixture's transfer folds hold about
+/// `--quant-fdr` of the transfer test. The fixture's transfer folds hold about
 /// 30 targets each, so with the K-decoy estimate's `+1` correction no transfer
 /// q-value can fall below about `1 / (2 * 30)`.
 const FIXTURE_MBR_FDR: &str = "0.05";
@@ -343,10 +343,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&targets),
         "--decoy-psms",
         s(&decoys),
-        "--mbr-fdr",
+        "--quant-fdr",
         FIXTURE_MBR_FDR,
-        "--quant-feature-fdr",
-        "0.05",
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
     assert!(qpx.join("quantms.pg.parquet").is_file());
@@ -368,10 +366,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             "--rescore",
             "--percolator-bin",
             s(&perc),
-            "--mbr-fdr",
+            "--quant-fdr",
             FIXTURE_MBR_FDR,
-            "--quant-feature-fdr",
-            "0.05",
         ]
         .map(String::from),
     );
@@ -438,10 +434,11 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         assert_eq!(row("HLVDEPQNLIK/2", run).unwrap()[ev], "identified");
     }
     // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only:
-    // its identified rows fail the identified quality q-value.
+    // its identified rows stay identified (their `quant_q` says the MS1
+    // feature failed its decoys) and are transferred nowhere.
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = row(key, "mbr_run1").unwrap_or_else(|| panic!("{key} in run 1"));
-        assert_eq!(r1[ev], "identified_below_threshold", "{key}: {r1:?}");
+        assert_eq!(r1[ev], "identified", "{key}: {r1:?}");
         for run in ["mbr_run2", "mbr_run3"] {
             let r = row(key, run).unwrap_or_else(|| panic!("{key} in {run}"));
             assert!(!r[ev].starts_with("transfer_ms"), "{key} in {run}: {r:?}");
@@ -453,13 +450,13 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         .filter(|r| r[ev].starts_with("transfer_ms"))
         .count();
     eprintln!(
-        "transfers at --mbr-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
+        "transfers at --quant-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
         rows.len()
     );
     assert!(transfers >= 50, "only {transfers} transfers");
 
     // The feature parquet holds every mbr.parquet row except the below-threshold
-    // transfers and identified rows.
+    // transfers.
     let below: Vec<&Vec<String>> = rows
         .values()
         .filter(|r| r[ev] == "below_threshold" || r[ev] == "identified_below_threshold")
@@ -714,8 +711,8 @@ fn separate_searches_join_on_run_and_spec_id() {
         read_mbr(&sep.join("out.mbr.parquet")).1 == read_mbr(&aio.join("a.mbr.parquet")).1,
         "mbr.parquet of the separate searches differs from the all-in-one run"
     );
-    // The default `--quant-feature-fdr off` keeps identified rows whose MS1
-    // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
+    // Identified rows whose MS1 feature fails its decoys (peptide 6 has no MS1
+    // signal) stay `identified`.
     // With no signal its quantity is missing (NA), not 0.
     let (header, rows) = read_mbr(&sep.join("out.mbr.parquet"));
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
@@ -819,7 +816,7 @@ fn library_stage_errors_name_what_is_missing() {
             s(&targets),
             "--decoy-psms",
             s(&decoys),
-            "--mbr-library-fdr",
+            "--mbr-donor-fdr",
             fdr,
         ])
     };

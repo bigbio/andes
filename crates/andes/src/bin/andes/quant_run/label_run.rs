@@ -21,7 +21,7 @@
 //! identified groups' fitted apexes ([`quant::align`]), every group missing
 //! from a run is fitted there at its predicted apex, and its whole-group
 //! likelihood ratio competes with a mass-shifted decoy of the group
-//! ([`quant::decoys::MASS_SHIFT_UNITS`]); transfers at the `--mbr-fdr`
+//! ([`quant::decoys::MASS_SHIFT_UNITS`]); transfers at the `--quant-transfer-fdr`
 //! q-value are reported.
 //!
 //! Log-ratios are reported per channel against the reference channel, and

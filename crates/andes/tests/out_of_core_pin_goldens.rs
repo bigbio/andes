@@ -672,7 +672,7 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
 // `prepared.candidates`); Pass 2 searches an in-memory out-of-core index of the
 // anchored database. Enumeration must reproduce the golden unified PIN, and
 // fragment-index retrieval must give a well-formed one. The Astral slice searched against E. coli alone has
-// a single anchor at the default 1% gate; `--refine-select-psm-fdr 1.0` anchors
+// a single anchor at the default 1% gate; `--psm-fdr 1.0` anchors
 // every best-target peptide so Pass 2 contributes a few hundred rows.
 
 /// Run a `--refine` search; returns (header, sorted rows, stderr).
@@ -690,7 +690,7 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
             "--fragment-index",
             fragment_index,
             "--refine",
-            "--refine-select-psm-fdr",
+            "--psm-fdr",
             "1.0",
         ],
         out,

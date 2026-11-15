@@ -262,8 +262,8 @@ leaderboard are in [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#proteoben
 Setup: eight sets with a known answer, quantified by andes, MaxQuant and FragPipe and read through
 one evaluation ([`quant-eval`](quant-eval/README.md); rules in section 4). andes `09e1c00d`
 defaults, run 2026-11-05 over the 2026-10-31 searches (`--predict rt,ms2 --chimeric --refine
---max-missed-cleavages 2`); `quant library` (`--mbr-library-fdr 0.01`), `quant extract`, `quant
-finalize` (`--mbr-fdr 0.01`), quant-model seeds 42, 1 and 7 (PXD030780: 42); tables show seed 42.
+--max-missed-cleavages 2`); `quant library` (`--mbr-donor-fdr 0.01`), `quant extract`, `quant
+finalize` (`--quant-fdr 0.01`), quant-model seeds 42, 1 and 7 (PXD030780: 42); tables show seed 42.
 Raw `quantity` column. MBR on = identified rows plus transfers with `transfer_q ≤ 0.01`; MBR off =
 identified rows. MaxQuant 2.7.0.0 (Standard DDA, LFQ on, 1% PSM and protein FDR, 2 missed
 cleavages, `Intensity` of the evidence table per precursor and run; MBR-off run re-run 2026-11-05,
@@ -653,9 +653,9 @@ andes quant library --quant-dir q/ --psms $R=$R.percolator.target.psms.txt \
       --decoy-psms $R=$R.percolator.decoy.psms.txt ...
 # 3. per run
 andes quant extract --quant-dir q/ --run $R
-# 4. once per transfer threshold (the default --mbr-fdr is 0.01)
+# 4. once per transfer threshold (the default --quant-fdr is 0.01)
 andes quant finalize --quant-dir q/ -o pb
-andes quant finalize --quant-dir q/ -o pb05 --mbr-fdr 0.05
+andes quant finalize --quant-dir q/ -o pb05 --quant-fdr 0.05
 # 5. ProteoBench "Custom" table (python3 + pyarrow); --module qe or astral
 python3 proteobench/andes_to_proteobench.py --mbr pb.mbr.parquet --quant-dir q/ \
       --module qe --column quantity_normalized -o custom_input.tsv
@@ -680,7 +680,7 @@ andes --spectrum $R.mzML --database db.fasta --output-pin $R.pin --quant-dir q/ 
       --predict rt,ms2 --chimeric --refine --max-missed-cleavages 2
 andes quant library  --quant-dir q/ --psms target.psms.tsv --decoy-psms decoy.psms.tsv
 andes quant extract  --quant-dir q/ --run $R
-andes quant finalize --quant-dir q/ -o set --mbr-fdr 0.01 --seed 42      # also --seed 1 and 7
+andes quant finalize --quant-dir q/ -o set --quant-fdr 0.01 --seed 42      # also --seed 1 and 7
 # masked copy of the library for the wrong-peak measurement: the same three stages on a
 # quant directory whose library lacks 5% of the identified pairs (mask_pairs.parquet)
 # MaxQuant 2.7.0.0: one parameter file per set; the MBR-off run changes only
@@ -701,7 +701,7 @@ differ by one flag, and the truth evaluation reads `run.tmt.parquet` as describe
 
 ```bash
 andes --spectrum f1.mzML ... --spectrum f6.mzML --database hy_entrap.fasta --mods mods_tmt11.txt \
-      --protocol TMT --rescore --fdr 0.01 --tmt tmt11 --tmt-level 2 --tmt-correction lot.txt \
+      --protocol TMT --rescore --psm-fdr 0.01 --tmt tmt11 --tmt-level 2 --tmt-correction lot.txt \
       --threads 16 --output-tsv run.tsv [--mbr]
 ```
 
@@ -714,10 +714,10 @@ threads).
 
 ```bash
 andes --spectrum Fig2_m23142_hrMS2.raw  --database yeast.fasta --mods mods_tmtpro.txt \
-      --precursor-tol 20ppm --protocol TMT --rescore --fdr 0.01 \
+      --precursor-tol 20ppm --protocol TMT --rescore --psm-fdr 0.01 \
       --tmt tmt16 --tmt-level 2 --tmt-correction <kit impurity sheet> --output-tsv hr.tsv
 andes --spectrum Fig2_m23145_SPSms3.raw --database yeast.fasta --mods mods_tmtpro.txt \
-      --precursor-tol 20ppm --protocol TMT --rescore --fdr 0.01 \
+      --precursor-tol 20ppm --protocol TMT --rescore --psm-fdr 0.01 \
       --tmt tmt16 --tmt-level 3 --tmt-correction <kit impurity sheet> --output-tsv sps.tsv
 ```
 

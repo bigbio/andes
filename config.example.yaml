@@ -69,12 +69,13 @@ chimeric:
 refine:
   enabled: false                 # PTM-discovery second pass
   # config: refine_tiers.yaml
-  # select_psm_fdr: 0.01
 
 rescoring:
   enabled: false                 # run Percolator in-process (else feed out.pin to Percolator)
-  # fdr: 0.01                    # q-value threshold for filtered output
+  # psm_fdr: 0.01                # identification FDR at PSM level: filtered output, quant targets, MBR donors, --refine anchors
   # protein_fdr: 0.01            # protein-group q cutoff on the filtered output (default: none)
+  # --- advanced FDR (unset: inherits psm_fdr) ---
+  # proteoform_fdr: 0.05         # proteoform claims (default: the larger of psm_fdr and 0.05)
   # native: false                # non-production built-in GBDT rescorer
   # predict: [rt]                # PIN features from predictors: rt (bundled andes-rt), ms2 (AlphaPeptDeep),
   #                              #   peptdeep-rt, deeplc-rt; e.g. [rt, ms2]
@@ -111,16 +112,16 @@ quant:
   # lfq_rt_window: 60            # seconds around the identifying PSM
   # lfq_gaussian_width: 12       # experimental Gaussian peak width (s); unset = Savitzky-Golay
   # lfq_min_cosine: 0.7          # envelope cosine below which a feature is not accepted in lfq.parquet
-  # lfq_feature_fdr: 0.05
   # label: silac2               # labelled pairs: silac2|silac3|dimethyl2|dimethyl3 or [][Lys8,Arg10]-style channels
   # label_reference: 1           # reference channel of the label log-ratios (1-based)
-  # label_fdr: 0.05              # quality q-value of a channel matched without an identification (internal)
-  # label_mbr_fdr: 0.05          # transfer q-value of --label --mbr (internal)
   # label_arg_pro: false         # SILAC: fit heavy proline from converted heavy arginine
   # dir: quant_out              # per-run <stem>.ms1.parquet + <stem>.quant.parquet for multi-run quantification
-  # quant_fdr: 0.01              # PSM q-value cut for quant targets (default: rescoring fdr)
   # mbr: false                   # match-between-runs across the inputs (needs lfq, tmt or label, rescoring, 2+ inputs)
-  # mbr_library_fdr: 0.01        # internal library entry gate (precursor-level), not a reported identification FDR
-  # mbr_fdr: 0.01                # transfer quality q-value for transfer_ms1 (internal, not an identification FDR)
   # mbr_wrong_log2: 0.5          # --tmt --mbr: RMS log2 profile deviation that defines a wrong transferred value
-  # quant_feature_fdr: off       # identified-row quality q-value; above it: identified_below_threshold (internal); off (default) reports all
+  # quant_fdr: 0.01              # quantification FDR: values measured without their own identification (transfers,
+  #                              #   label channel matches) and lfq.parquet `accepted`; unset: 0.05 for label,
+  #                              #   lfq.parquet `accepted` and glyco transfers (coarse q-values), 0.01 otherwise
+  # --- advanced FDR (unset: inherits the main key) ---
+  # mbr_donor_fdr: 0.01          # precursor-level library donor gate (inherits rescoring.psm_fdr)
+  # quant_transfer_fdr: 0.01     # transfer q-value: transfer_ms1, TMT/label/glyco transfers (inherits quant_fdr)
+  # quant_channel_fdr: 0.05      # --label: channel matched without an identification (inherits quant_fdr)

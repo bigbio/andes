@@ -299,9 +299,10 @@ fn report(results: &[XlSpectrumResult]) {
 
 /// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
 /// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
-/// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. With `--rescore` the
-/// CSMs are scored by Percolator on the PIN; otherwise by the pair score. The
-/// FDR is pooled over every input run.
+/// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. CSMs are scored by the
+/// pair score; with `--rescore` the intra-links are scored by Percolator on
+/// their own PIN (`<base>.xl.intra.pin`). The FDR is pooled over every input
+/// run.
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
@@ -359,16 +360,44 @@ pub(crate) fn run_xl(
         &table,
         prepared,
         &run_of,
+        None,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
-    let score: Vec<Option<f64>> = if cli.rescore {
-        crate::xl_fdr::percolator_scores(cli, &pin_path, &results)?
-    } else {
-        results
-            .iter()
-            .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
-            .collect()
+    // Inter-links keep the pair score: a Percolator model over all CSMs or
+    // over the inter rows does not hold the inter FDR on the PXD042173 truth.
+    // `--rescore` rescores the intra-links with a Percolator model trained on
+    // the intra rows only; `--xl-rescore-inter` (a comparison) does the same
+    // for the inter rows.
+    let mut score: Vec<Option<f64>> = results
+        .iter()
+        .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
+        .collect();
+    let mut rescore_class = |intra: bool, suffix: &str| -> Result<(), Box<dyn std::error::Error>> {
+        let path = sibling(output_pin_path, suffix);
+        let n = crate::xl_fdr::write_xl_pin(
+            &path,
+            spectra_for_xl,
+            &results,
+            &table,
+            prepared,
+            &run_of,
+            Some(intra),
+        )?;
+        eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
+        let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;
+        for (dst, src) in score.iter_mut().zip(s) {
+            if src.is_some() {
+                *dst = src;
+            }
+        }
+        Ok(())
     };
+    if cli.rescore {
+        rescore_class(true, ".xl.intra.pin")?;
+    }
+    if cli.xl_rescore_inter {
+        rescore_class(false, ".xl.inter.pin")?;
+    }
     let levels = crate::xl_fdr::roll_up(&results, &score, &table, prepared);
     crate::xl_fdr::report_levels(&levels);
     let mut q = vec![None; results.len()];

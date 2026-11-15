@@ -58,6 +58,14 @@
 //! best score of each group, and the same class-split estimate is made at each
 //! level ([`rollup`]).
 //!
+//! **Rescoring.** Every CSM goes into a pair-aware PIN. Inter-links are
+//! scored by the pair score: on the PXD042173 truth, Percolator models over
+//! all CSMs or over the inter rows gave inter-link q-values below the actual
+//! false share, while the pair score held it. With `--rescore` the intra-links
+//! are scored by a Percolator model trained on the intra rows only (their own
+//! PIN); the FDR stays split by link class, so the two score scales are never
+//! compared.
+//!
 //! **Correctness check.** [`pair::pairs_by_sum`] is the exhaustive pair
 //! enumerator by precursor mass; it is tested against a brute-force all-pairs
 //! loop, and the search driver can run it as an oracle (no doublet gate) on a

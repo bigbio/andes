@@ -163,8 +163,9 @@ fn accessions<'a>(p: &XlPeptide, prepared: &'a PreparedSearch) -> Vec<(u32, &'a 
         .collect()
 }
 
-/// Write the pair-aware PIN of the CSMs: one row per spectrum with a CSM,
-/// label +1 for TT and -1 for TD and DD.
+/// Write the pair-aware PIN of the CSMs: one row per spectrum with a CSM of
+/// link class `intra` (both classes when `None`), label +1 for TT and -1 for
+/// TD and DD.
 pub(crate) fn write_xl_pin(
     path: &Path,
     spectra: &[Spectrum],
@@ -172,6 +173,7 @@ pub(crate) fn write_xl_pin(
     table: &XlCandidates,
     prepared: &PreparedSearch,
     run_of: &dyn Fn(usize) -> String,
+    intra: Option<bool>,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<&str> = vec![
@@ -183,6 +185,9 @@ pub(crate) fn write_xl_pin(
     let mut n = 0;
     for r in results {
         let Some(c) = &r.csm else { continue };
+        if intra.is_some_and(|i| i != c.intra) {
+            continue;
+        }
         let spec = &spectra[r.spec_idx];
         let pa = &table.peptides()[c.alpha.pep as usize];
         let pb = &table.peptides()[c.beta.pep as usize];
@@ -221,7 +226,8 @@ pub(crate) fn write_xl_pin(
 }
 
 /// Percolator's score of every CSM row of the PIN at `pin` (target and decoy
-/// result files), aligned with `results`.
+/// result files), aligned with `results`; `None` for spectra whose CSM is not
+/// in the PIN.
 pub(crate) fn percolator_scores(
     cli: &Cli,
     pin: &Path,
@@ -250,14 +256,11 @@ pub(crate) fn percolator_scores(
         .map(|r| {
             r.csm.as_ref()?;
             let id = spec_id(r);
-            let s = targets
-                .get(&id)
-                .or_else(|| decoys.get(&id))
-                .and_then(|p| p.score);
-            if s.is_none() {
+            let row = targets.get(&id).or_else(|| decoys.get(&id))?;
+            if row.score.is_none() {
                 missing += 1;
             }
-            s
+            row.score
         })
         .collect();
     eprintln!(
@@ -477,19 +480,21 @@ pub(crate) fn write_levels(
     let mut w = std::io::BufWriter::new(std::fs::File::create(ppi_path)?);
     writeln!(
         w,
-        "protein_pair\tclass\tlink\tscore\tq_value\tn_residue_pairs\tn_csms"
+        "protein_pair\tclass\tlink\tscore\tq_value\tn_residue_pairs\tn_csms\tbest_spectrum"
     )?;
     for (g, q) in l.ppi.iter().zip(&l.ppi_q) {
+        let r = &results[l.csm_rows[l.rp[g.best].best]];
         writeln!(
             w,
-            "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
             g.key,
             g.class.name(),
             if g.intra { "intra" } else { "inter" },
             g.score,
             fmt_q(*q),
             g.n_members,
-            g.n_csms
+            g.n_csms,
+            spectra[r.spec_idx].title
         )?;
     }
     w.flush()

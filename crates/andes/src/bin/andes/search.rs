@@ -708,6 +708,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         peak_evidence,
         sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
     );
+    if let (Some(said), Some(read)) = (cli.sdrf_dissociation, acquisition.activation) {
+        if said != read {
+            eprintln!(
+                "WARN: the SDRF dissociation method is {} but {} records {}; andes follows the file",
+                said.name(),
+                spectrum_path.display(),
+                read.name()
+            );
+        }
+    }
 
     // The label the run carries: `--tmt <plex>` names it; otherwise it is read
     // from the reporter ions (also under an explicit `--protocol`, so the

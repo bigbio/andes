@@ -868,6 +868,30 @@ glyco:
   enabled: true
 ```
 
+### SDRF input (`--sdrf`)
+
+`andes --sdrf design.sdrf.tsv --database human.fasta --output-pin out.pin` reads the search
+settings an [SDRF-Proteomics](https://github.com/bigbio/proteomics-sample-metadata) file
+records. Precedence: **`CLI flag > --config > --sdrf > built-in default`** (`io.sdrf` in the
+config file).
+
+| SDRF column | andes setting |
+|---|---|
+| `comment[data file]` | `--spectrum`: the files, looked up in the SDRF's directory; `--spectrum` on the command line or in the config replaces them |
+| `comment[cleavage agent details]` (each such column) | `--enzyme`, as a protease list (`Trypsin` + `Lys-C` -> `trypsin+lysc`) |
+| `comment[modification parameters]` (each such column) | `--fixed-mods` / `--variable-mods` by `MT=`; the UNIMOD accession (`AC=`) or name (`NT=`), `TA=` residues and `PP=` position give `Name (sites)` (§2). With modification columns the SDRF lists are complete: no column leaves the defaults |
+| `comment[precursor mass tolerance]` | `--precursor-tol` (`10 ppm`, `0.02 Da`, `20 mmu`) |
+| `comment[label]` | every row `label free sample`: `--lfq`; TMT / iTRAQ: `--tmt` with the smallest plex holding the labels; SILAC light / medium / heavy: `--label` with the channels from the `Label:` modifications (which then leave the modification lists); DIMETHYL0/4(/8): `--label dimethyl2` (`dimethyl3`). A quantification flag on the command line or in the config replaces it |
+| `comment[dissociation method]` | checked against the activation the files record; a mismatch warns and andes follows the file |
+
+Not applied: `comment[fragment mass tolerance]` (andes measures the fragment error of each run;
+`--fragment-tol-ppm` / `--fragment-tol-da` fix one) and the sample, characteristics and factor
+columns. One run searches every file with one setting, so the rows must agree on the protease,
+modifications, precursor tolerance, dissociation method and label kind; rows that disagree are
+an error naming the column and two files (split the SDRF by setting). Empty cells,
+`not available` and `not applicable` count as absent. The run prints what it took from the SDRF
+and what the command line or config kept.
+
 ---
 
 ## 1c. Splitting a search across cluster tasks

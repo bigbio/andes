@@ -49,6 +49,8 @@ pub struct RunConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IoCfg {
+    /// SDRF-Proteomics file, as `--sdrf`.
+    pub sdrf: Option<PathBuf>,
     pub spectrum: Option<Vec<PathBuf>>,
     pub database: Option<PathBuf>,
     pub uniprot_variants: Option<bool>,
@@ -232,7 +234,7 @@ impl RunConfig {
 
 /// True when the flag `id` was set EXPLICITLY on the command line (not a default
 /// and not an env fallback), so the YAML must not override it.
-fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
+pub(crate) fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
     matches!(
         m.value_source(id),
         Some(clap::parser::ValueSource::CommandLine)
@@ -455,6 +457,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     apply_db(&cfg, &mut args.db, m)?;
 
     // ── io ──
+    set_opt!("sdrf", sdrf, cfg.io.sdrf);
     set!("spectrum", spectrum, cfg.io.spectrum);
     set_opt!("database", database, cfg.io.database);
     set_opt!("output_pin", output_pin, cfg.io.output_pin);

@@ -427,6 +427,22 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FILE", help_heading = H_IO)]
     pub(crate) config: Option<PathBuf>,
 
+    /// SDRF-Proteomics file: data files, protease, modifications, tolerance and labels
+    ///
+    /// Reads `comment[data file]` (looked up next to the SDRF), the cleavage agents, the
+    /// modification parameters, the precursor mass tolerance and `comment[label]`
+    /// (label free -> --lfq, TMT / iTRAQ -> --tmt with the smallest plex holding the
+    /// labels, SILAC and dimethyl -> --label). A value on the command line or in --config
+    /// wins. Rows must agree on these settings. The fragment tolerance is not applied
+    /// (andes measures each run's), and the dissociation method is checked against the
+    /// files. DOCS.md §1b, SDRF input.
+    #[arg(long, value_name = "FILE", help_heading = H_IO)]
+    pub(crate) sdrf: Option<PathBuf>,
+
+    /// The SDRF dissociation method, checked against the files (set from --sdrf).
+    #[arg(skip)]
+    pub(crate) sdrf_dissociation: Option<model::activation::ActivationMethod>,
+
     /// Spectrum file: mzML, MGF, Thermo .raw or Bruker .d; repeat for several runs
     ///
     /// The reader follows the file extension. Several files are searched into one PIN.
@@ -2507,6 +2523,7 @@ mod help_layout_tests {
 
     const MAIN: &[&str] = &[
         "--config",
+        "--sdrf",
         "--spectrum",
         "--database",
         "--output-pin",

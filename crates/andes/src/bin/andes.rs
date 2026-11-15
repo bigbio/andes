@@ -44,6 +44,8 @@ mod quant_mbr;
 mod quant_run;
 #[path = "../rescore.rs"]
 mod rescore;
+#[path = "../sdrf.rs"]
+mod sdrf;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -195,13 +197,27 @@ fn main() -> ExitCode {
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;
+            let mut cfg_keys = sdrf::ConfigKeys::default();
             if let Some(cfg_path) = top.search.config.clone() {
                 if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
                     cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
+                    cfg_keys = sdrf::ConfigKeys::of(&c);
                     config::apply(c, &mut top.search, &matches)
                 }) {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
+                }
+            }
+            // --sdrf: fill what neither the command line nor --config set.
+            if let Some(sdrf_path) = top.search.sdrf.clone() {
+                match sdrf::read(&sdrf_path)
+                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
+                {
+                    Ok(lines) => lines.iter().for_each(|l| eprintln!("{l}")),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(2);
+                    }
                 }
             }
             if let Err(e) = config::check_resolved(&top.search) {

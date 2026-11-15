@@ -60,6 +60,17 @@ precursors at q ≤ 0.01. In andes's PIN:
 Hypotheses tested on the slice that did not help: `--charge 2..3` or `2..4` instead of `1..5` (within
 slice noise); `--score strong` (already the auto choice for the Astral model).
 
+Tested and rejected on the full raws or the slice:
+
+- **MS1 gate width** (N@FDP_c 1 %, raw01 / raw02): 5 ppm ±1 survey scan (kept) 1559 / 1651; nearest
+  survey scan only, 5 ppm, 1490 on raw01; 3 ppm ±1 scan 1618 / 1520, with q ≤ 0.01 at 1.0 / 1.35 % true
+  FDP. The raw01 gain of 3 ppm does not hold on raw02 and its q-values are no longer calibrated.
+- **Precursor-level rescoring** (slice): one row per (peptidoform, charge) with its best PSM's features plus
+  its number of rows, scans where it ranks first, second-best and top-3 RawScore, and scan span, rescored
+  by Percolator: N@FDP_c 1 % 285 → 192. Those aggregates barely separate targets from decoys, because a
+  decoy has its target's m/z and passes the MS1 gate in the same scans. Counting spectrum matches is not
+  peak-group evidence.
+
 Slice probes (N@FDP_c 1 %): baseline 264; predicted MS2 features (`--predict rt,ms2`) 275; `--top-n 20` 232;
 the neighbouring-cycle support columns had no measurable effect.
 

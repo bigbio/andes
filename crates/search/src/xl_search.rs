@@ -774,7 +774,10 @@ fn rescores(
 /// first.
 fn doublet_at(masses: &[DoubletMass], mass: f64, cfg: &XlConfig) -> Option<DoubletMass> {
     let tol = mass * cfg.doublet_mass_tol_ppm * 1e-6;
-    masses.iter().find(|d| (d.mass - mass).abs() <= tol).cloned()
+    masses
+        .iter()
+        .find(|d| (d.mass - mass).abs() <= tol)
+        .cloned()
 }
 
 fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSummary {

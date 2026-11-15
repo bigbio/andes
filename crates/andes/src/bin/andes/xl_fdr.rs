@@ -88,7 +88,11 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
     let (bg, bgm) = gap(c.beta.gap_next);
     let tic = r.doublets.tic.max(1.0);
     let dbl = |d: &Option<andes_xl::doublet::DoubletMass>| match d {
-        Some(d) => (d.intensity / tic, d.isotope_confirmed as u8 as f64, d.n_charges as f64),
+        Some(d) => (
+            d.intensity / tic,
+            d.isotope_confirmed as u8 as f64,
+            d.n_charges as f64,
+        ),
         None => (0.0, 0.0, 0.0),
     };
     let (ad, ai, ac) = dbl(&c.alpha_doublet);
@@ -170,7 +174,9 @@ pub(crate) fn write_xl_pin(
     run_of: &dyn Fn(usize) -> String,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-    let mut head: Vec<&str> = vec!["SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "FileName"];
+    let mut head: Vec<&str> = vec![
+        "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "FileName",
+    ];
     head.extend(FEATURES);
     head.extend(["Peptide", "Proteins"]);
     writeln!(w, "{}", head.join("\t"))?;
@@ -409,7 +415,11 @@ pub(crate) fn report_levels(l: &Levels) {
     );
     eprintln!(
         "[xl] residue pair: {}",
-        counts_line(l.rp.iter().zip(&l.rp_q).map(|(g, q)| (g.class, g.intra, *q)))
+        counts_line(
+            l.rp.iter()
+                .zip(&l.rp_q)
+                .map(|(g, q)| (g.class, g.intra, *q))
+        )
     );
     eprintln!(
         "[xl] residue pair (>=2 CSMs): {}",

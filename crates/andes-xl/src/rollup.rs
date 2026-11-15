@@ -124,7 +124,10 @@ mod tests {
         ];
         let g = group_by(&items, |_, it| it.key.clone());
         assert_eq!(g.len(), 2);
-        assert_eq!((g[0].key.as_str(), g[0].score, g[0].n_members, g[0].best), ("a", 3.0, 2, 2));
+        assert_eq!(
+            (g[0].key.as_str(), g[0].score, g[0].n_members, g[0].best),
+            ("a", 3.0, 2, 2)
+        );
         assert_eq!((g[1].class, g[1].n_csms), (TD, 1));
         let up = as_items(&g, |_| "p".to_string());
         assert_eq!(up[0].n_csms, 2);

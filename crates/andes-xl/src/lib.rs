@@ -56,19 +56,17 @@
 //! **Decoys.** Target and decoy peptides come from the same andes index (the
 //! search's decoy strategy), are looked up and scored identically, and the
 //! CSM class is TT, TD or DD ([`decoy::PairClass`]). Pair FDR is
-//! `(TD - DD) / TT` ([`fdr`]), estimated separately for intra- and
+//! `max(TD - DD, 2) / TT` ([`fdr`]), estimated separately for intra- and
 //! inter-protein links, with the link class assigned by the same rule to
 //! targets and decoys. CSMs roll up to residue pairs and protein pairs by the
 //! best score of each group, and the same class-split estimate is made at each
 //! level ([`rollup`]).
 //!
-//! **Rescoring.** Every CSM goes into a pair-aware PIN. Inter-links are
-//! scored by the pair score: on the PXD042173 truth, Percolator models over
-//! all CSMs or over the inter rows gave inter-link q-values below the actual
-//! false share, while the pair score held it. With `--rescore` the intra-links
-//! are scored by a Percolator model trained on the intra rows only (their own
-//! PIN); the FDR stays split by link class, so the two score scales are never
-//! compared.
+//! **Rescoring.** Every CSM goes into a pair-aware PIN, and both link classes
+//! are scored by the pair score. Percolator models trained on one class's rows
+//! (`--xl-rescore-intra`, `--xl-rescore-inter`) are comparison arms: on truth
+//! sets they reported q-values below the actual false share. The FDR stays
+//! split by link class, so two score scales are never compared.
 //!
 //! **Reported levels.** Intra-links are reported up to residue pairs (with
 //! a q-value also among the residue pairs with at least two CSMs); inter-links

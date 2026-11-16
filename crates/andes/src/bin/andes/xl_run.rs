@@ -1,5 +1,5 @@
 //! The `--xl` standalone driver: crosslink search, the pair-aware
-//! `.xl.pin`, optional Percolator rescoring (`--rescore`), and the CSM,
+//! `.xl.pin`, optional per-class Percolator comparison arms, and the CSM,
 //! residue-pair, protein-pair and doublet tables.
 
 use std::io::Write;
@@ -376,9 +376,9 @@ fn report_linker(linker: &Crosslinker) {
 /// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
 /// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
 /// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. CSMs are scored by the
-/// pair score; with `--rescore` the intra-links are scored by Percolator on
-/// their own PIN (`<base>.xl.intra.pin`). The FDR is pooled over every input
-/// run.
+/// pair score (`--rescore` does not change it); `--xl-rescore-intra` and
+/// `--xl-rescore-inter` score one link class by a Percolator model trained on
+/// its own PIN instead. The FDR is pooled over every input run.
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
@@ -436,11 +436,8 @@ pub(crate) fn run_xl(
         cfg.linker.intact,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
-    // Inter-links keep the pair score: a Percolator model over all CSMs or
-    // over the inter rows does not hold the inter FDR on the PXD042173 truth.
-    // `--rescore` rescores the intra-links with a Percolator model trained on
-    // the intra rows only; `--xl-rescore-inter` (a comparison) does the same
-    // for the inter rows.
+    // Both link classes keep the pair score. The comparison flags rescore one
+    // class with a Percolator model trained on that class's rows only.
     let mut score: Vec<Option<f64>> = results
         .iter()
         .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
@@ -466,7 +463,7 @@ pub(crate) fn run_xl(
         }
         Ok(())
     };
-    if cli.rescore {
+    if cli.xl_rescore_intra {
         rescore_class(true, ".xl.intra.pin")?;
     }
     if cli.xl_rescore_inter {

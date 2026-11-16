@@ -668,8 +668,8 @@ pub(crate) struct SearchArgs {
     /// and the precursor give the candidate peptide pairs, and each peptide is scored with
     /// the standard scorer carrying the cleaved stub or its partner on the link residue.
     /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
-    /// (<base>.xl.pin; --rescore scores the intra-links with Percolator, the inter-links
-    /// keep the pair score) and the q-values, from the
+    /// (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does
+    /// not change them) and the q-values, from the
     /// target-target, target-decoy and decoy-decoy counts split by intra- and inter-protein
     /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
     /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
@@ -687,6 +687,13 @@ pub(crate) struct SearchArgs {
         requires = "xl"
     )]
     pub(crate) xl_oracle: usize,
+
+    /// With --xl: rescore the intra-link CSMs with Percolator (comparison only)
+    ///
+    /// Trains a Percolator model on the intra-link rows alone (<base>.xl.intra.pin) and
+    /// scores them with it; without it the intra-links keep the pair score.
+    #[arg(long = "xl-rescore-intra", hide = true, requires = "xl")]
+    pub(crate) xl_rescore_intra: bool,
 
     /// With --xl: also rescore the inter-link CSMs with Percolator (comparison only)
     ///
@@ -2609,6 +2616,7 @@ mod help_layout_tests {
         "glyco_mbr_match_train",
         "ipf_debug",
         "xl_oracle",
+        "xl_rescore_intra",
         "xl_rescore_inter",
     ];
 

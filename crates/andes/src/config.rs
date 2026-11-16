@@ -16,9 +16,9 @@
 //! hook that forces the calibration pre-pass on tiny inputs),
 //! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
 //! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
-//! scorer), and the crosslink search's developer hooks `--xl-oracle` and
-//! `--xl-rescore-inter`. The test `every_search_flag_has_a_config_key` keeps that list
-//! honest.
+//! scorer), and the crosslink search's developer hooks `--xl-oracle`,
+//! `--xl-rescore-intra` and `--xl-rescore-inter`. The test
+//! `every_search_flag_has_a_config_key` keeps that list honest.
 //!
 //! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
 //! the CLI accepts (e.g. `precursor_tol: 20ppm`, `charge: "2..5"`, `score: auto`)
@@ -1416,6 +1416,7 @@ glyco:
         "glyco_mbr_match_train",
         "ipf_debug",
         "xl_oracle",
+        "xl_rescore_intra",
         "xl_rescore_inter",
     ];
 

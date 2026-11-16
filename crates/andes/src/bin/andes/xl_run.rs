@@ -346,6 +346,60 @@ fn report_linker(linker: &Crosslinker) {
     );
 }
 
+pub(crate) fn water_monolink_mods(linker: &Crosslinker) -> Vec<model::Modification> {
+    use model::modification::{ModLocation, ResidueSpec};
+    let Some(water) = linker
+        .monolinks
+        .iter()
+        .find(|m| m.name.ends_with("water") || water_record(&m.name))
+    else {
+        return Vec::new();
+    };
+    let end = &linker.ends[0];
+    let mut sites: Vec<(ResidueSpec, ModLocation)> = end
+        .residues
+        .iter()
+        .map(|&r| (ResidueSpec::Specific(r), ModLocation::Anywhere))
+        .collect();
+    if end.protein_n_term {
+        sites.push((ResidueSpec::Wildcard, ModLocation::ProtNTerm));
+    }
+    if end.peptide_n_term {
+        sites.push((ResidueSpec::Wildcard, ModLocation::NTerm));
+    }
+    sites
+        .into_iter()
+        .map(|(residue, location)| model::Modification {
+            accession: water.accession.clone(),
+            ..model::Modification::new(water.name.clone(), water.mass, residue, location, false)
+        })
+        .collect()
+}
+
+fn water_record(name: &str) -> bool {
+    model::xl_reagents::bundled().reagents.iter().any(|r| {
+        r.monolinks
+            .iter()
+            .any(|m| m.name == "water" && m.unimod.as_deref() == Some(name))
+    })
+}
+
+pub(crate) fn xl_default_variable_mods(
+    explicit: Option<&crate::cli::ModList>,
+    linker: &Crosslinker,
+) -> Option<crate::cli::ModList> {
+    if explicit.is_some() {
+        return None;
+    }
+    let mono = water_monolink_mods(linker);
+    if mono.is_empty() {
+        return None;
+    }
+    let mut mods = crate::model_select::default_variable_mods();
+    mods.extend(mono);
+    Some(crate::cli::ModList(mods))
+}
+
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
@@ -473,4 +527,45 @@ pub(crate) fn run_xl(
         t_total.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linker(spec: &str) -> Crosslinker {
+        crate::cli::parse_xl(spec).unwrap()
+    }
+
+    #[test]
+    fn the_water_monolink_sits_on_the_link_sites_of_the_first_end() {
+        let m = water_monolink_mods(&linker("DSSO"));
+        assert_eq!(m.len(), 2);
+        assert!(m.iter().all(|m| m.name == "Xlink:DSSO[176]" && !m.fixed));
+        assert_eq!(m[0].accession.as_deref(), Some("UNIMOD:1878"));
+        assert!((m[0].mass_delta - 176.01433).abs() < 1e-9);
+        assert_eq!(water_monolink_mods(&linker("DSS (K)")).len(), 1);
+        assert_eq!(water_monolink_mods(&linker("DSBU (K, N-term)")).len(), 2);
+        let b = water_monolink_mods(&linker("DSBSO"));
+        assert_eq!(b[0].name, "DSBSO:water");
+        assert!(water_monolink_mods(&linker("CDI")).is_empty());
+        assert!(water_monolink_mods(&linker("DTBP")).is_empty());
+    }
+
+    #[test]
+    fn an_explicit_variable_mod_list_replaces_the_monolink_default() {
+        let x = linker("DSS");
+        let d = xl_default_variable_mods(None, &x).unwrap().0;
+        assert_eq!(
+            d.len(),
+            crate::model_select::default_variable_mods().len() + 2
+        );
+        assert!(d.iter().any(|m| m.name == "Xlink:DSS[156]"));
+        let explicit = crate::cli::parse_variable_mods("Oxidation (M)").unwrap();
+        assert!(xl_default_variable_mods(Some(&explicit), &x).is_none());
+        let off = crate::cli::parse_variable_mods("").unwrap();
+        assert!(off.0.is_empty());
+        assert!(xl_default_variable_mods(Some(&off), &x).is_none());
+        assert!(xl_default_variable_mods(None, &linker("CDI")).is_none());
+    }
 }

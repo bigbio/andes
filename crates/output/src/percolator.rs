@@ -1778,4 +1778,53 @@ mod tests {
             assert_eq!(col(POOLED_Q_COLUMN), pooled);
         }
     }
+
+    fn native_fixture_pin(dir: &Path) -> PathBuf {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../percolator-native/tests/data/svm_ref.pin");
+        let text = std::fs::read_to_string(src).unwrap();
+        let mut out = String::new();
+        for (i, line) in text.lines().enumerate() {
+            let (id, rest) = line.split_once('\t').unwrap();
+            let run = if i == 0 {
+                RUN_COLUMN.to_string()
+            } else {
+                let scan: u64 = rest.split('\t').nth(1).unwrap().parse().unwrap();
+                format!("run{}.mzML", scan % 2)
+            };
+            out.push_str(&format!("{id}\t{run}\t{rest}\n"));
+        }
+        let pin = dir.join("fixture.pin");
+        std::fs::write(&pin, out).unwrap();
+        pin
+    }
+
+    #[test]
+    fn native_backend_runs_main_and_static_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = native_fixture_pin(dir.path());
+        let backend = PercolatorBackend::Native {
+            memory: percolator_native::MemLimit {
+                bytes: 1 << 30,
+                spill_dir: dir.path().to_path_buf(),
+            },
+        };
+        assert!(backend.describe().contains("native"));
+        let extra = percolator_args_with_threads(&[], 2);
+        let mut targets = run_percolator_pooled(&backend, &pin, &extra).unwrap();
+        assert!(targets.values().any(|p| p.q_value < 0.01));
+        let summary = apply_per_run_q(&backend, &pin, &extra, &mut targets)
+            .unwrap()
+            .unwrap();
+        assert!(summary.contains("of 2 runs"), "{summary}");
+        assert!(!summary.contains("kept the pooled"), "{summary}");
+        assert!(targets.values().any(|p| p.pooled_q_value.is_some()));
+        let out = result_paths(&pin);
+        parse_psm_results(&std::fs::read_to_string(&out.target).unwrap()).unwrap();
+        parse_psm_results(&std::fs::read_to_string(&out.decoy).unwrap()).unwrap();
+        let (t, d) = score_all_rows(&backend, &pin, &extra).unwrap();
+        assert_eq!(t.len() + d.len(), 201);
+        let (map, decoys) = run_percolator_with_decoys(&backend, &pin, &extra).unwrap();
+        assert!(!map.is_empty() && !decoys.is_empty());
+    }
 }

@@ -11,6 +11,7 @@ model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }
 quant = { path = "../quant" }
+percolator-native = { path = "../percolator-native" }
 rayon = "1.10"
 memchr = "2"
 # QPX `.idparquet` writer (quantms-compatible). Versions pinned to the ones

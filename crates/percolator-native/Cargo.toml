@@ -9,5 +9,4 @@ license.workspace = true
 rayon = "1.10"
 
 [dev-dependencies]
-output = { path = "../output" }
 tempfile = "3.10"

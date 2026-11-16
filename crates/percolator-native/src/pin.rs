@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLimit {
     pub bytes: u64,
     pub spill_dir: PathBuf,

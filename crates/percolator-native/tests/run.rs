@@ -1,4 +1,3 @@
-use output::percolator::parse_psm_results;
 use percolator_native::{fmt_g, mix_max_q, run, tdc_q, MemLimit};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -87,10 +86,15 @@ fn dot(features: &[f32], w: &[f64]) -> f64 {
 }
 
 fn scores(path: &Path) -> HashMap<String, f64> {
-    parse_psm_results(&std::fs::read_to_string(path).unwrap())
-        .unwrap()
-        .into_iter()
-        .map(|(id, psm)| (id, psm.score.unwrap()))
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = header.iter().position(|c| *c == "score").unwrap();
+    lines
+        .map(|l| {
+            let c: Vec<&str> = l.split('\t').collect();
+            (c[0].to_string(), c[col].parse().unwrap())
+        })
         .collect()
 }
 
@@ -313,30 +317,6 @@ fn mixmax_q_monotone() {
         assert!(q.iter().zip(&plain).all(|(a, b)| a <= b));
     }
     assert_eq!(mix_max_q(&s, &d, 1.0), tdc_q(&s, &d, false));
-}
-
-#[test]
-fn andes_argument_vectors_run() {
-    let dir = tempfile::tempdir().unwrap();
-    let pin = data("svm_ref.pin");
-    let main = outs(dir.path(), "main");
-    run(&training_args(&main, "2", &pin), limit(dir.path())).unwrap();
-    for f in [&main.target, &main.decoy, &main.weights] {
-        assert!(f.exists(), "{}", f.display());
-    }
-    let t = parse_psm_results(&std::fs::read_to_string(&main.target).unwrap()).unwrap();
-    assert!(t.values().any(|psm| psm.q_value < 0.01));
-    for tdc in [true, false] {
-        let o = outs(dir.path(), if tdc { "run0" } else { "pep" });
-        run(
-            &static_args(&o, &main.weights, tdc, &pin),
-            limit(dir.path()),
-        )
-        .unwrap();
-        parse_psm_results(&std::fs::read_to_string(&o.target).unwrap()).unwrap();
-        parse_psm_results(&std::fs::read_to_string(&o.decoy).unwrap()).unwrap();
-        assert!(!o.weights.exists());
-    }
 }
 
 #[test]

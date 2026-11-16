@@ -1442,6 +1442,20 @@ glyco:
     }
 
     #[test]
+    fn config_memory_gb_inherits() {
+        assert_eq!(applied("", &[]).unwrap().rescore_memory_gb, 16);
+        let a = applied("rescoring:\n  memory_gb: 4\n", &[]).unwrap();
+        assert_eq!(a.rescore_memory_gb, 4);
+        let a = applied(
+            "rescoring:\n  memory_gb: 4\n",
+            &["--rescore-memory-gb", "8"],
+        )
+        .unwrap();
+        assert_eq!(a.rescore_memory_gb, 8);
+        assert!(applied("rescoring:\n  memory_gb: 0\n", &[]).is_err());
+    }
+
+    #[test]
     fn cli_rescore_backend_wins_over_yaml() {
         let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
         assert!(

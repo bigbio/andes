@@ -695,3 +695,25 @@ fn predict_rt_keeps_the_pin_well_formed() {
         assert!(l.split('\t').count() >= pep + 2, "short row: {l}");
     }
 }
+
+#[test]
+fn native_rejects_percolator_args() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("out.pin"),
+    )
+    .args(["--rescore-native", "--percolator-args", "--testFDR 0.05"])
+    .output()
+    .expect("run andes");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(!dir.path().join("out.pin").exists());
+}

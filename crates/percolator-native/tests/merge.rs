@@ -1,4 +1,3 @@
-use output::percolator::{parse_psm_results, PsmResultReader};
 use percolator_native::{
     fmt_fixed, fmt_g, merge_folds, normalize_fold_scores, read_pin, write_results, write_weights,
     CvResult, MemLimit, Results, RowMeta,
@@ -168,101 +167,6 @@ fn results_byte_identical_to_percolator() {
             "{theirs}"
         );
     }
-}
-
-fn row(id: &str, label: i8, file: u32, scan: u64, proteins: &str) -> RowMeta {
-    RowMeta {
-        psm_id: id.to_string(),
-        label,
-        file,
-        scan,
-        exp_mass: 1000.0 + scan as f64,
-        peptide: format!("K.PEP{scan}K.R"),
-        proteins: proteins.to_string(),
-    }
-}
-
-#[test]
-fn results_parse_with_output_crate() {
-    let meta = [
-        row("a_1", 1, 0, 1, "P1\tP2"),
-        row("b_2", 1, 1, 2, "P3\t\tP4"),
-        row("a_3", -1, 0, 3, "decoy_P5"),
-        row("b_4", 1, 1, 4, ""),
-        row("a_5", -1, 0, 5, "decoy_P6\tdecoy_P7"),
-    ];
-    let files = ["run_a.mzML".to_string(), "run_b.mzML".to_string()];
-    let scores = [1.2345678, -0.000123456789, -2.5, 0.0, -1.0];
-    let q = [0.0098039215686, 1.234567e-7, 0.5, 0.25, 1.0];
-    let pep = [6.305116760146989e-16, 1.0, 0.75, 0.031, 1.0];
-    let rows: Vec<usize> = (0..meta.len()).collect();
-    let dir = tempfile::tempdir().unwrap();
-    let (t, d) = (dir.path().join("t.psms"), dir.path().join("d.psms"));
-    let res = Results {
-        rows: &rows,
-        scores: &scores,
-        q: &q,
-        pep: &pep,
-    };
-    write_results(&t, &d, &meta, &files, &res).unwrap();
-    let text = std::fs::read_to_string(&t).unwrap();
-    assert_eq!(
-        text.lines().next().unwrap(),
-        "PSMId\tfilename\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds"
-    );
-    assert_eq!(
-        text.lines().nth(1).unwrap(),
-        "a_1\trun_a.mzML\t1.23457\t0.00980392\t6.30512e-16\tK.PEP1K.R\tP1\tP2"
-    );
-    let ids: Vec<&str> = text
-        .lines()
-        .skip(1)
-        .map(|l| l.split('\t').next().unwrap())
-        .collect();
-    assert_eq!(ids, ["a_1", "b_4", "b_2"]);
-    let parsed = parse_psm_results(&text).unwrap();
-    assert_eq!(parsed.len(), 3);
-    for (i, m) in meta.iter().enumerate().filter(|(_, m)| m.label == 1) {
-        let p = &parsed[&m.psm_id];
-        let close = |a: f64, b: f64| (a - b).abs() <= 1e-5 * b.abs().max(1e-300);
-        assert!(
-            close(p.q_value, q[i]),
-            "{} q {} vs {}",
-            m.psm_id,
-            p.q_value,
-            q[i]
-        );
-        assert!(
-            close(p.pep, pep[i]),
-            "{} pep {} vs {}",
-            m.psm_id,
-            p.pep,
-            pep[i]
-        );
-        let sc = p.score.unwrap();
-        assert!(
-            close(sc, scores[i]) || sc == scores[i],
-            "{} score {sc}",
-            m.psm_id
-        );
-        assert_eq!(p.peptide, m.peptide);
-    }
-    assert_eq!(parsed["a_1"].proteins, "P1;P2");
-    assert_eq!(parsed["b_2"].proteins, "P3;P4");
-    assert_eq!(parsed["b_4"].proteins, "");
-    let decoys = std::fs::read_to_string(&d).unwrap();
-    let mut reader = PsmResultReader::new(decoys.as_bytes()).unwrap();
-    let mut seen = Vec::new();
-    while let Some(r) = reader.next_row().unwrap() {
-        seen.push((r.psm_id.to_string(), r.proteins(), r.pep));
-    }
-    assert_eq!(
-        seen,
-        [
-            ("a_5".to_string(), "decoy_P6;decoy_P7".to_string(), 1.0),
-            ("a_3".to_string(), "decoy_P5".to_string(), 0.75)
-        ]
-    );
 }
 
 #[test]

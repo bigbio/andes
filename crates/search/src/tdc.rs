@@ -81,8 +81,7 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
 /// [`confident_target_indices`] (sort by score desc, q = decoys/max(targets,1),
 /// monotone-from-bottom, conservative equal-score ties). Empty input -> empty.
 ///
-/// Used by the native rescorer to report a q-value per PSM (not just the
-/// confident set). Decoys get a q-value too (callers filter by `is_decoy`).
+/// Decoys get a q-value too (callers filter by `is_decoy`).
 pub fn qvalues(items: &[ScoredLabel]) -> Vec<f64> {
     let n = items.len();
     if n == 0 {

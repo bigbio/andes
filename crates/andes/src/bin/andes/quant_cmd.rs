@@ -17,9 +17,8 @@
 //! precursor; its key is the `<peptidoform>/<charge>` of the site form of its
 //! best PSM. Precursor id: the position of its class in the sorted union of
 //! every run's classes. The rescorer's PSM score, PSM q-value and PEP
-//! (Percolator's `score`, `q-value` and `posterior_error_prob` columns, or the
-//! native rescorer's) are joined to the run tables on (run, SpecId). Library
-//! confidence ranks precursors by the score; the q-value, and the PEP when
+//! (Percolator's `score`, `q-value` and `posterior_error_prob` columns) are
+//! joined to the run tables on (run, SpecId). Library confidence ranks precursors by the score; the q-value, and the PEP when
 //! `--pep` is given, pick the donor PSMs, as they pick the PSMs of the per-run
 //! quantification.
 

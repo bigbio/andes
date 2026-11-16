@@ -735,14 +735,20 @@ pub(crate) struct SearchArgs {
     pub(crate) quant_dir: Option<PathBuf>,
 
     // ── Rescoring ─────────────────────────────────────────────────────────
-    /// Rescore with the built-in rescorer instead of Percolator (no Percolator needed)
+    /// Rescore as --rescore, with the native Percolator engine instead of the binary
     ///
-    /// Percolator's algorithm in process: a 3-fold cross-validated semi-supervised linear
-    /// model over the PIN features, with target-decoy competition per scan and precursor
-    /// mass, gives q-values and PEPs. Same outputs as --rescore, which is the production
-    /// path and wins when both are given.
+    /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
+    /// repair and the scores of every PIN row) runs in process with Percolator 3.7.1's
+    /// algorithm and output files; no Percolator binary or Docker is needed. Takes no
+    /// --percolator-args.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) rescore_native: bool,
+
+    /// Memory of the native Percolator engine in GB; PIN features beyond it spill to --temp-dir
+    #[arg(long, value_name = "GB", default_value_t = 16,
+          value_parser = clap::value_parser!(u64).range(1..), hide = true,
+          help_heading = H_RESCORING)]
+    pub(crate) rescore_memory_gb: u64,
 
     /// PEP threshold applied with --psm-fdr: a PSM must pass both [default: none]
     #[arg(long, value_name = "PEP", value_parser = parse_unit_fraction, hide_short_help = true,
@@ -2553,6 +2559,7 @@ mod help_layout_tests {
         "debug_glyco",
         "glyco_mbr_match_train",
         "ipf_debug",
+        "rescore_memory_gb",
     ];
 
     #[test]

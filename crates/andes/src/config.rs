@@ -152,6 +152,7 @@ pub struct RescoringCfg {
     pub percolator_image: Option<String>,
     pub percolator_args: Option<String>,
     pub keep_pin: Option<bool>,
+    pub memory_gb: Option<u64>,
     pub predict: Option<Vec<String>>,
     pub predictor_models: Option<PathBuf>,
     pub predictor_backend: Option<String>,
@@ -607,8 +608,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── rescoring ──
     // The rescoring backend is one choice: `--rescore` or `--rescore-native` on the
     // command line replaces the config's `rescoring.enabled` / `rescoring.native`
-    // entirely, so a CLI `--rescore-native` is not overridden by a config that
-    // enables Percolator (which wins when both are set).
+    // entirely, so a CLI `--rescore` is not overridden by a config that selects the
+    // native engine (which wins when both are set).
     if !cli_set(m, "rescore") && !cli_set(m, "rescore_native") {
         set!("rescore", rescore, cfg.rescoring.enabled);
         set!("rescore_native", rescore_native, cfg.rescoring.native);
@@ -642,6 +643,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.percolator_args
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
+    set!(
+        "rescore_memory_gb",
+        rescore_memory_gb,
+        cfg.rescoring.memory_gb
+    );
     if let Some(list) = cfg.rescoring.predict {
         if !cli_set(m, "predict") {
             args.predict = list
@@ -816,6 +822,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // rejects out-of-range values injected through `--config`.
     if let Some(v) = args.psm_fdr {
         check_unit_fraction("psm_fdr", v)?;
+    }
+    if args.rescore_memory_gb == 0 {
+        return Err("config: `memory_gb` must be at least 1 (GB)".to_string());
     }
     if let Some(v) = args.proteoform_fdr {
         check_unit_fraction("proteoform_fdr", v)?;
@@ -1443,7 +1452,8 @@ glyco:
 
     #[test]
     fn config_memory_gb_inherits() {
-        assert_eq!(applied("", &[]).unwrap().rescore_memory_gb, 16);
+        let a = applied("rescoring:\n  keep_pin: true\n", &[]).unwrap();
+        assert_eq!(a.rescore_memory_gb, 16);
         let a = applied("rescoring:\n  memory_gb: 4\n", &[]).unwrap();
         assert_eq!(a.rescore_memory_gb, 4);
         let a = applied(

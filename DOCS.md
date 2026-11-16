@@ -486,8 +486,8 @@ Each accepted site also gets two probabilities:
 The posterior is taken over every row of a spectrum, targets and decoys, so the explanations of
 one spectrum compete. Target-decoy competition keeps one row per spectrum and precursor mass, so
 the rows are scored apart from it: with Percolator, a static pass of the trained model without
-`-Y` scores every PIN row (run only when the database has site claims); the native rescorer
-keeps the held-out score of every row. A row's logit combines:
+`-Y` scores every PIN row (run only when the database has site claims), with the binary or the
+native engine alike. A row's logit combines:
 - its rescored score;
 - its precursor isotope offset;
 - its fragment ions, and those no other form of the same peptide among the spectrum's rows has;
@@ -564,7 +564,7 @@ value. Fitted on any two of them (finer grid), it is again 0.237 and gives the s
 third as fitting on all. `--ipf-debug` adds a `forms_debug`
 column: every placement as `sites|search score|IPF log-evidence`.
 
-Measured with `--rescore-native`, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than
+Measured with the built-in rescorer that `--rescore-native` ran before 2026-11-16, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than
 phospho groups). Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017,
 10 HCD-OT files, fully tryptic, 1,429 PSMs, scored against the key of the file's own pool):
 
@@ -680,7 +680,7 @@ inherit `--quant-fdr` once they are finer.
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
-| `--rescore-native` | flag | *(off)* | *(advanced)* Built-in rescorer: Percolator's semi-supervised linear algorithm in process (3-fold CV folded by spectrum, target-decoy competition per scan and precursor mass as `-Y`); fallback when Percolator is not available. Its q-values are pooled over all PSMs; it has no per-run pass (below). |
+| `--rescore-native` | flag | *(off)* | *(advanced)* `--rescore` with the native Percolator engine (crate `percolator-native`) instead of the binary or Docker: every Percolator pass (the main run, the per-run q-values, the PEP repair and the scores of every PIN row) runs in process with Percolator 3.7.1's algorithm and writes the same result files. Needs no Percolator; takes no `--percolator-args` (an error). PIN features beyond 16 GB of memory spill to `--temp-dir` (config `rescoring.memory_gb`). |
 | `--psm-fdr` | fraction | `0.01` | Identification FDR at PSM level: q-value threshold applied by a rescoring run (filtered TSV, quantification targets, `--mbr` donors), and the confident anchors of `--refine`. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--proteoform-fdr` | fraction | max(`--psm-fdr`, 0.05) | *(advanced)* q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--psm-fdr`. |
 | `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). With `--mbr --output-parquet`, the QPX pg and feature views keep the groups at or below it, 0.01 unless given. |
@@ -1257,8 +1257,7 @@ until rescoring. Each modification lists its sites in the QPX layout: `position`
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its input file, scan and `ExpMass` group: those target rows are left out of the bundle, as
 they are out of Percolator's output; so are the decoys that lost that competition, and knockoff
-PSMs, which are never reported. `--rescore-native` competes in the same groups, with the same
-result for the bundle. Scan numbers repeat across inputs, so the groups are per input: Percolator reads
+PSMs, which are never reported. `--rescore-native` runs the same passes with the native engine. Scan numbers repeat across inputs, so the groups are per input: Percolator reads
 the input from the PIN `FileName` column. In the match-between-runs feature parquet (`andes quant finalize`),
 `posterior_error_probability` is null on every row: a row is a precursor in a run, not a PSM.
 
@@ -2242,9 +2241,8 @@ The stage path and the in-process run use the same code on the same files. With 
 (Percolator) they give identical `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet` rows
 for the same Percolator results,
 `--psm-fdr`, `--mbr-donor-fdr`, `--pep` and `--lfq-tol`: pass the search's `<pin>.percolator.target.psms.txt` and
-`<pin>.percolator.decoy.psms.txt` to `quant library`. With `--rescore-native` the scores
-(held-out scores and q-values of the native rescorer) are only available in process;
-`quant library` has no input for them.
+`<pin>.percolator.decoy.psms.txt` to `quant library`. `--rescore-native` writes the same
+files.
 
 **Known limits (memory).** The library stage holds every run's rank-1 PSMs (targets and
 decoys) with their joined scores at once, so its memory grows with the total PSM count across
@@ -2443,7 +2441,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
 
-**Real data** (release build, 4 threads, `--rescore-native`, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's joint fit, before they were read at the identified channels' profile (*Null channels* below), except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
+**Real data** (release build, 4 threads, `--rescore-native` with the built-in rescorer it ran before 2026-11-16, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's joint fit, before they were read at the identified channels' profile (*Null channels* below), except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
 m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
@@ -2571,7 +2569,7 @@ does not hold, every one of whose matches is false, competing in the same per-ru
 | unlabelled `silac3`: absent candidates passing q ≤ 0.05 (of 138,075) | 568 | 0 |
 | unlabelled: false `match_channel` (`silac2` / `silac3`) | 118 / 131 | 0 / 0 |
 
-On the PXD022659 HeLa runs (`--rescore-native --label silac2 --mbr`, reviewed human proteome), reading
+On the PXD022659 HeLa runs (`--rescore-native --label silac2 --mbr`, with the built-in rescorer of before 2026-11-16, reviewed human proteome), reading
 at the identified channels' profile keeps about 94 % of the matched channels, with the same or lower
 error: in 10/90 the matched heavy channels go from 2,818 (median absolute error 0.298, 2.7 %
 gross) to 2,664 (0.276, 1.1 % gross); pairs with both channels identified are unchanged.
@@ -2730,7 +2728,6 @@ here only where the value is a fixed choice rather than a documented option.
 | Site-FDR stratum | 50 tested claims | `output/src/site_fdr.rs:30` | stratum size | no | No recorded evidence |
 | Class-FDR guard | 20 decoys | `output/src/class_fdr.rs:144` | when a class uses its own competition | no | No recorded evidence |
 | Site identity weights | score 2.0, isotope -1.0 and -5.7, hit fraction 25, unique hit 0.08, miss -0.02, decoy -11, confident 0.9 | `output/src/site_identity.rs:25-33` | posterior of the modification identity | no | No recorded evidence in code comments |
-| Native rescoring | 3 folds, 10 rounds, positives at q 0.01, L2 C 0.1, 10 per class | `andes/src/rescore.rs:44-54` | `--rescore-native` model | no | No recorded evidence |
 | Transfer classifier | 3 folds, learning rate 0.3, at most 16 strata, EB level 0.01 | `andes/src/transfer_fdr.rs:86,130,134,348` | transfer q-values | no | Learning rate 0.3: held-out scores separate targets from decoys better than 0.05 (code comment) |
 | Join mismatch limit | 1% | `andes/src/bin/andes/quant_cmd.rs:337` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
 

@@ -20,7 +20,6 @@ use crate::model_select::{
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
-use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, compare_with_first_input, detect_acquisition_metadata,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
@@ -418,6 +417,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Before any index or scratch work: a rejected run does no I/O.
     if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
         return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
+    if cli.rescore_native && !cli.percolator_args.trim().is_empty() {
+        return Err(
+            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
+                .into(),
+        );
     }
     // Run-private temporary files go to `--temp-dir`, by default next to the
     // output; the quantification settings read the resolved directory.
@@ -2651,23 +2656,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── Rescore: run Percolator (or the native rescorer) on the PIN, join ─────
+    // ── Rescore: run Percolator (binary, Docker or native engine) on the PIN ──
     // PEP/q-value downstream. Sits BETWEEN the PIN write and the QPX/TSV writes
     // so the parsed `SpecId → PercolatorPsm` map can be threaded into
     // `write_qpx` and the filtered TSV. `None` keeps every downstream output
     // identical to a non-rescore run.
     //
     // Backend choice: rescoring runs ONLY when explicitly requested — `--rescore`
-    // forces Percolator, `--rescore-native` forces the native rescorer. `--psm-fdr` /
-    // `--pep` are thresholds applied by such a run; they never start one on their
-    // own (that would silently launch a backend / the non-production native path).
+    // runs the Percolator binary (or Docker), `--rescore-native` the same passes with
+    // the native Percolator engine. `--psm-fdr` / `--pep` are thresholds applied by
+    // such a run; they never start one on their own.
     let fdr_threshold = cli.psm_fdr();
     let proteoform_fdr = cli.proteoform_fdr();
-    let (use_percolator, use_native) = if cli.rescore {
-        (true, false)
-    } else if cli.rescore_native {
-        (false, true)
-    } else {
+    let use_native = cli.rescore_native;
+    let use_percolator = cli.rescore || cli.rescore_native;
+    if !use_percolator {
         // Say so. A threshold that silently does nothing is the same defect shape
         // as a flag that is parsed and never read.
         if cli.psm_fdr.is_some() || cli.pep.is_some() {
@@ -2683,16 +2686,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  in-process."
             );
         }
-        (false, false)
-    };
+    }
     // `--mbr`: the decoy PSMs with their scores, which the target map leaves
     // out, and where the rescoring result came from.
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
     let mut mbr_source = String::new();
     // The rescorer's decoy-result ids: with target-decoy competition (Percolator
-    // `-Y`, and the native rescorer) they let the QPX join tell a target that
-    // lost its scan/ExpMass group from one whose join drifted.
+    // `-Y`) they let the QPX join tell a target that lost its scan/ExpMass
+    // group from one whose join drifted.
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
     // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
@@ -2707,12 +2709,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut row_scores: Option<output::RowScores> = None;
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
-            let backend = output::resolve_backend(
-                cli.percolator_bin.as_deref(),
-                cli.percolator_docker,
-                &cli.percolator_image,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let backend = if use_native {
+                crate::cli::ensure_scratch_dir(&scratch_dir)?;
+                output::PercolatorBackend::Native {
+                    memory: output::MemLimit {
+                        bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
+                        spill_dir: scratch_dir.clone(),
+                    },
+                }
+            } else {
+                output::resolve_backend(
+                    cli.percolator_bin.as_deref(),
+                    cli.percolator_docker,
+                    &cli.percolator_image,
+                )
+                .map_err(|e| format!("{e}"))?
+            };
             eprintln!("Rescore: Percolator backend = {}", backend.describe());
             let user_args: Vec<String> = cli
                 .percolator_args
@@ -2744,44 +2756,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if cli.mbr {
                 mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
-            Some(map)
-        } else if use_native {
-            eprintln!(
-                "Rescore: native rescorer (no Percolator; 3-fold cross-validated semi-supervised \
-                 linear model, target-decoy competition per scan and precursor mass). \
-                 Use --rescore (Percolator) for production FDR."
-            );
-            let t_resc = std::time::Instant::now();
-            let pin_text = std::fs::read_to_string(&output_pin_path)
-                .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
-            let all = rescore::native_rescore_pin_all(&pin_text, 42)
-                .map_err(|e| format!("native rescore: {e}"))?;
-            if all.untrained_folds > 0 {
-                eprintln!(
-                    "WARN: native rescore: {} of 3 cross-validation folds had too few confident \
-                     targets or decoys to train on and ranked by the best single PIN feature. \
-                     The q-values stay valid but identify fewer PSMs.",
-                    all.untrained_folds
-                );
-            }
-            // Like Percolator with -Y: the winning decoys tell the QPX join
-            // which target rows lost their scan/ExpMass group.
-            rescore_decoys = Some(all.decoys.keys().cloned().collect());
-            rescore_decoy_psms = all.decoys;
-            if has_site_claims {
-                row_scores = Some(all.row_scores);
-            }
-            if cli.mbr {
-                mbr_source = "the native rescoring result".to_string();
-            }
-            let map = all.targets;
-            eprintln!(
-                "Rescore: native produced {} target PSMs (q-value+PEP; {} rows lost \
-                 target-decoy competition) [{:.2}s]",
-                map.len(),
-                all.competed_away,
-                t_resc.elapsed().as_secs_f64()
-            );
             Some(map)
         } else {
             None
@@ -3168,7 +3142,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             accepted.len() - linked.len(),
             &output::SummaryContext {
                 rescorer: if use_native {
-                    "native rescorer"
+                    "Percolator (native engine)"
                 } else {
                     "Percolator"
                 },

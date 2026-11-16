@@ -3,8 +3,8 @@
 //! `SpecId → PercolatorPsm` map so the QPX writer can join PEP/q-value onto the
 //! per-PSM rows.
 //!
-//! andes does not reimplement Percolator; it orchestrates the real binary (or
-//! the pinned biocontainers docker image) with
+//! andes runs the real binary, the pinned biocontainers docker image, or the
+//! in-process `percolator-native` engine, all with the same arguments
 //! `--seed 42 --results-psms … --decoy-results-psms … --weights … --only-psms <PIN>`.
 //! The result TSV is parsed by HEADER NAME (not column index) so it survives the
 //! column-offset differences between engines (e.g. a Sage-style extra `FileName`
@@ -58,6 +58,8 @@ pub enum PercolatorBackend {
     Binary(PathBuf),
     /// The docker fallback with the given image tag.
     Docker { image: String },
+    /// The in-process engine of `percolator-native`.
+    Native { memory: percolator_native::MemLimit },
 }
 
 impl PercolatorBackend {
@@ -66,6 +68,54 @@ impl PercolatorBackend {
         match self {
             PercolatorBackend::Binary(p) => format!("binary {}", p.display()),
             PercolatorBackend::Docker { image } => format!("docker {image}"),
+            PercolatorBackend::Native { memory } => format!(
+                "native ({:.1} GB in memory, spill to {})",
+                memory.bytes as f64 / (1u64 << 30) as f64,
+                memory.spill_dir.display()
+            ),
+        }
+    }
+}
+
+struct Invocation {
+    success: bool,
+    status: String,
+    log: String,
+}
+
+impl Invocation {
+    fn of_process(output: std::process::Output) -> Self {
+        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+        if log.trim().is_empty() {
+            log = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Invocation {
+            success: output.status.success(),
+            status: output.status.to_string(),
+            log,
+        }
+    }
+
+    fn of_native(args: &[String], memory: &percolator_native::MemLimit) -> Self {
+        match percolator_native::run(args, memory.clone()) {
+            Ok(()) => Invocation {
+                success: true,
+                status: "finished".to_string(),
+                log: String::new(),
+            },
+            Err(e) => Invocation {
+                success: false,
+                status: "error".to_string(),
+                log: e,
+            },
+        }
+    }
+
+    fn failure(&self, backend: &PercolatorBackend, tail: usize) -> PercolatorError {
+        PercolatorError::Run {
+            backend: backend.describe(),
+            status: self.status.clone(),
+            log_tail: tail_lines(&self.log, tail),
         }
     }
 }
@@ -447,19 +497,24 @@ fn run_static_pass(
     weights: &Path,
     extra_args: &[String],
     tdc: bool,
-) -> Result<std::process::Output, PercolatorError> {
+) -> Result<Invocation, PercolatorError> {
+    let local_args = || {
+        static_pass_args(
+            pin.to_string_lossy().into_owned(),
+            pass.target.to_string_lossy().into_owned(),
+            pass.decoy.to_string_lossy().into_owned(),
+            weights.to_string_lossy().into_owned(),
+            extra_args,
+            tdc,
+        )
+    };
     match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
-            .args(static_pass_args(
-                pin.to_string_lossy().into_owned(),
-                pass.target.to_string_lossy().into_owned(),
-                pass.decoy.to_string_lossy().into_owned(),
-                weights.to_string_lossy().into_owned(),
-                extra_args,
-                tdc,
-            ))
+            .args(local_args())
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn),
+        PercolatorBackend::Native { memory } => Ok(Invocation::of_native(&local_args(), memory)),
         PercolatorBackend::Docker { image } => {
             let pin_dir = host_dir(pin.parent().unwrap_or_else(|| Path::new(".")))?;
             let in_out = |p: &Path| {
@@ -496,6 +551,7 @@ fn run_static_pass(
             Command::new("docker")
                 .args(args)
                 .output()
+                .map(Invocation::of_process)
                 .map_err(PercolatorError::Spawn)
         }
     }
@@ -563,28 +619,24 @@ pub fn run_percolator_pooled(
     let out = result_paths(pin);
     out.clear_stale()?;
 
-    let output = match backend {
+    let ran = match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
             .args(native_args(pin, &out, extra_args))
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn)?,
         PercolatorBackend::Docker { image } => Command::new("docker")
             .args(docker_args(image, pin, &out_dir, &out, extra_args)?)
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn)?,
+        PercolatorBackend::Native { memory } => {
+            Invocation::of_native(&native_args(pin, &out, extra_args), memory)
+        }
     };
 
-    if !output.status.success() || !out.target.exists() {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        let log_tail = tail_lines(&log, 20);
-        return Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail,
-        });
+    if !ran.success || !out.target.exists() {
+        return Err(ran.failure(backend, 20));
     }
 
     let text = std::fs::read_to_string(&out.target)?;
@@ -815,19 +867,11 @@ fn score_run(
     let ids = pin_spec_ids(run_pin)?;
     pass.clear_stale()?;
     let result = run_static_pass(backend, run_pin, out_dir, pass, weights, extra_args, true)
-        .and_then(|output| {
-            if output.status.success() && pass.target.exists() {
+        .and_then(|ran| {
+            if ran.success && pass.target.exists() {
                 Ok(())
             } else {
-                let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-                if log.trim().is_empty() {
-                    log = String::from_utf8_lossy(&output.stdout).into_owned();
-                }
-                Err(PercolatorError::Run {
-                    backend: backend.describe(),
-                    status: output.status.to_string(),
-                    log_tail: tail_lines(&log, 5),
-                })
+                Err(ran.failure(backend, 5))
             }
         })
         .and_then(|()| {
@@ -1021,7 +1065,7 @@ fn repair_pep(
         .unwrap_or_else(|| "andes".to_string());
     let pass = ResultPaths::new(out_dir, &format!("{stem}.pep"));
     pass.clear_stale()?;
-    let output = run_static_pass(
+    let ran = run_static_pass(
         backend,
         pin,
         out_dir,
@@ -1030,20 +1074,12 @@ fn repair_pep(
         extra_args,
         false,
     )?;
-    let result = if output.status.success() && pass.target.exists() {
+    let result = if ran.success && pass.target.exists() {
         std::fs::read_to_string(&pass.target)
             .map_err(PercolatorError::Io)
             .and_then(|t| parse_psm_results(&t))
     } else {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail: tail_lines(&log, 20),
-        })
+        Err(ran.failure(backend, 20))
     };
     // The repair files are scratch: gone whether or not the pass worked.
     pass.clear_stale()?;
@@ -1093,7 +1129,15 @@ pub fn score_all_rows(
         .unwrap_or_else(|| "andes".to_string());
     let pass = ResultPaths::new(&out_dir, &format!("{stem}.rows"));
     pass.clear_stale()?;
-    let output = run_static_pass(backend, pin, &out_dir, &pass, &main.weights, extra_args, false)?;
+    let ran = run_static_pass(
+        backend,
+        pin,
+        &out_dir,
+        &pass,
+        &main.weights,
+        extra_args,
+        false,
+    )?;
     let scores = |path: &Path| -> Result<HashMap<String, f64>, PercolatorError> {
         let text = std::fs::read_to_string(path).map_err(PercolatorError::Io)?;
         Ok(parse_psm_results(&text)?
@@ -1101,18 +1145,10 @@ pub fn score_all_rows(
             .filter_map(|(id, p)| p.score.map(|s| (id, s)))
             .collect())
     };
-    let result = if output.status.success() && pass.target.exists() && pass.decoy.exists() {
+    let result = if ran.success && pass.target.exists() && pass.decoy.exists() {
         scores(&pass.target).and_then(|t| Ok((t, scores(&pass.decoy)?)))
     } else {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail: tail_lines(&log, 20),
-        })
+        Err(ran.failure(backend, 20))
     };
     pass.clear_stale()?;
     result
@@ -1783,16 +1819,22 @@ mod tests {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../percolator-native/tests/data/svm_ref.pin");
         let text = std::fs::read_to_string(src).unwrap();
-        let mut out = String::new();
-        for (i, line) in text.lines().enumerate() {
-            let (id, rest) = line.split_once('\t').unwrap();
-            let run = if i == 0 {
-                RUN_COLUMN.to_string()
-            } else {
-                let scan: u64 = rest.split('\t').nth(1).unwrap().parse().unwrap();
-                format!("run{}.mzML", scan % 2)
-            };
-            out.push_str(&format!("{id}\t{run}\t{rest}\n"));
+        let mut lines = text.lines();
+        let (id, rest) = lines.next().unwrap().split_once('\t').unwrap();
+        let mut out = format!("{id}\t{RUN_COLUMN}\t{rest}\n");
+        let rows: Vec<&str> = lines.collect();
+        for run in 0..2u64 {
+            for line in &rows {
+                let c: Vec<&str> = line.split('\t').collect();
+                let scan: u64 = c[2].parse().unwrap();
+                out.push_str(&format!(
+                    "r{run}_{}\trun{run}.mzML\t{}\t{}\t{}\n",
+                    c[0],
+                    c[1],
+                    scan + 1000 * run,
+                    c[3..].join("\t")
+                ));
+            }
         }
         let pin = dir.join("fixture.pin");
         std::fs::write(&pin, out).unwrap();
@@ -1823,7 +1865,7 @@ mod tests {
         parse_psm_results(&std::fs::read_to_string(&out.target).unwrap()).unwrap();
         parse_psm_results(&std::fs::read_to_string(&out.decoy).unwrap()).unwrap();
         let (t, d) = score_all_rows(&backend, &pin, &extra).unwrap();
-        assert_eq!(t.len() + d.len(), 201);
+        assert_eq!(t.len() + d.len(), 402);
         let (map, decoys) = run_percolator_with_decoys(&backend, &pin, &extra).unwrap();
         assert!(!map.is_empty() && !decoys.is_empty());
     }

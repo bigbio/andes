@@ -42,8 +42,6 @@ mod quant_finalize;
 mod quant_mbr;
 #[path = "andes/quant_run.rs"]
 mod quant_run;
-#[path = "../rescore.rs"]
-mod rescore;
 #[path = "../sdrf.rs"]
 mod sdrf;
 #[path = "andes/search.rs"]

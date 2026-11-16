@@ -37,8 +37,10 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
 
-- **Error control holds**: andes's q ≤ 0.01 measures 0.4–0.5 % true FDP (0.7–0.9 % averaged over seeds),
-  and q ≤ 0.05 measures 4.2–4.6 %.
+- **Error control**: at 20 ppm andes's q ≤ 0.01 measured 0.4–0.5 % true FDP (0.7–0.9 % averaged over
+  seeds) and q ≤ 0.05 4.2–4.6 %. At 7 ppm (current) q ≤ 0.01 averages 0.4 % on raw01 (0.3–0.6 % per seed)
+  and 0.9 % on raw02 (0.6–1.3 %, above 1 % for seed 42), and q ≤ 0.05 4.3 / 5.0 %: still controlled on
+  average, with less margin on raw02.
 - **Percolator seed noise.** The andes PIN is deterministic (byte-identical across runs), but the
   Percolator seed alone moves N@FDP_c 1 % over a range of about 150 (seeds 42, 1, 2, 3, 7). Seed 42,
   used for the first row and the single-seed comparisons below, is at the top of that range on both

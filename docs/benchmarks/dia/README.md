@@ -63,7 +63,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   1821 / 1785 with q ≤ 0.01 at 1.0–1.1 % true FDP on raw02; not kept. At 7 ppm, `--trainFDR` 0.02 /
   0.05 / 0.10 give 1726 / 1801 / 1822 on raw01 and 1703 / 1819 / 1824 on raw02 (0.05 kept: 0.10 is
   inside seed noise), and andes-ms2 at NCE 16 gives 1767 / 1811 (not kept). `--charge 2..4` (DIA-NN's
-  IDs are 75 % 2+ and 22 % 3+) gives 1751 / 1826 and `--top-n 5` 1722 / 1689 (neither kept).
+  IDs are 75 % 2+ and 22 % 3+) gives 1751 / 1826, `--top-n 5` 1722 / 1689 and `--top-n 15` 1711 / 1683
+  (q ≤ 0.01 at 1.4 % true FDP on raw02); none kept, the default 10 rows per scan is best.
 - **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
   1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
   1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633

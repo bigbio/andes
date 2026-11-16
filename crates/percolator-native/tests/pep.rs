@@ -91,6 +91,7 @@ fn pep_matches_qvality_tdc() {
     let pep = pep_tdc_fit(&s, &d).expect("fit");
     let reference = qvality("pep_ref/q_d.txt");
     let (worst, at) = max_rel_diff(&by_score_desc(&s, &pep), &reference);
+    eprintln!("qvality -Y: max relative PEP difference {worst:e} at row {at}");
     assert!(
         worst < 1e-4,
         "max relative PEP difference {worst:e} at row {at}"
@@ -102,6 +103,7 @@ fn pep_matches_qvality_tdc() {
 fn estimate_pi0_matches_qvality() {
     let (s, d) = fixture(None);
     let pi0 = estimate_pi0(&s, &d);
+    eprintln!("pi0 {pi0}");
     assert!((pi0 - 0.409259).abs() < 5e-7, "pi0 {pi0}");
 }
 
@@ -111,6 +113,7 @@ fn pep_matches_qvality_mix_max() {
     let pep = pep_mix_max(&s, &d, estimate_pi0(&s, &d));
     let reference = qvality("pep_ref/qm_d.txt");
     let (worst, at) = max_rel_diff(&by_score_desc(&s, &pep), &reference);
+    eprintln!("qvality mix-max: max relative PEP difference {worst:e} at row {at}");
     assert!(
         worst < 1e-4,
         "max relative PEP difference {worst:e} at row {at}"
@@ -135,6 +138,12 @@ fn pep_matches_percolator_svm_ref() {
         }
     }
     let pep = pep_tdc(&scores, &decoy);
+    let worst = rows
+        .iter()
+        .zip(&pep)
+        .map(|((_, want), got)| (got.ln() - want.ln()).abs())
+        .fold(0.0f64, f64::max);
+    eprintln!("svm_ref: max |ln PEP - ln Percolator PEP| {worst:e}");
     for (i, ((s, want), got)) in rows.iter().zip(&pep).enumerate() {
         let close = (got - want).abs() <= 1e-6 || ((got.ln() - want.ln()).abs() < 0.05);
         assert!(close, "row {i} score {s}: PEP {got:e}, Percolator {want:e}");
@@ -191,8 +200,8 @@ fn healthy_fit_is_returned_unchanged() {
 
 #[test]
 fn too_few_bins_falls_back_to_bounded_pep() {
-    let s = vec![3.0, 2.0, 1.0];
-    let d = vec![false, false, true];
+    let s = [3.0, 2.0, 1.0];
+    let d = [false, false, true];
     assert!(pep_tdc_fit(&s, &d).is_none());
     assert_monotone_bounded(&s, &pep_tdc(&s, &d));
 }

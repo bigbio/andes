@@ -184,14 +184,14 @@ fn row(id: &str, label: i8, file: u32, scan: u64, proteins: &str) -> RowMeta {
 
 #[test]
 fn results_parse_with_output_crate() {
-    let meta = vec![
+    let meta = [
         row("a_1", 1, 0, 1, "P1\tP2"),
         row("b_2", 1, 1, 2, "P3\t\tP4"),
         row("a_3", -1, 0, 3, "decoy_P5"),
         row("b_4", 1, 1, 4, ""),
         row("a_5", -1, 0, 5, "decoy_P6\tdecoy_P7"),
     ];
-    let files = vec!["run_a.mzML".to_string(), "run_b.mzML".to_string()];
+    let files = ["run_a.mzML".to_string(), "run_b.mzML".to_string()];
     let scores = [1.2345678, -0.000123456789, -2.5, 0.0, -1.0];
     let q = [0.0098039215686, 1.234567e-7, 0.5, 0.25, 1.0];
     let pep = [6.305116760146989e-16, 1.0, 0.75, 0.031, 1.0];
@@ -325,12 +325,12 @@ fn weights_file_readable_by_init_weights_reader() {
     let ours = std::fs::read_to_string(&path).unwrap();
     assert_eq!(ours, golden);
 
-    let w_norm = vec![
+    let w_norm = [
         vec![2.1452191, -0.0648600, 0.2210942, 0.0150415],
         vec![-1.8136169, 0.0416757, -0.2749317, -0.0546565],
         vec![1.9548566, 0.0134639, 0.2468673, 0.0449189],
     ];
-    let w_raw = vec![
+    let w_raw = [
         vec![1.5115123, -0.0555, 0.21184, -2.61768],
         vec![-1.2778, -0.03571, 0.26339, -2.41301],
         vec![1.37731, 0.011535, 0.23651, -2.38479],

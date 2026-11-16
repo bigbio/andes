@@ -21,6 +21,7 @@ pub struct RowMeta {
 
 pub struct Pin {
     pub feature_names: Vec<String>,
+    pub file_names: Vec<String>,
     pub default_direction: Option<Vec<f64>>,
     pub rows: Store,
     pub meta: Vec<RowMeta>,
@@ -82,6 +83,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let mut builder = StoreBuilder::new(nfeat, limit.bytes, &limit.spill_dir);
     let mut meta: Vec<RowMeta> = Vec::new();
     let mut file_ids: HashMap<String, u32> = HashMap::new();
+    let mut file_names: Vec<String> = Vec::new();
     let mut row = vec![0f32; nfeat];
     for (n, line) in lines.enumerate() {
         let lineno = n + 2;
@@ -144,6 +146,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
                     None => {
                         let id = file_ids.len() as u32;
                         file_ids.insert(name.to_string(), id);
+                        file_names.push(name.to_string());
                         id
                     }
                 }
@@ -187,6 +190,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     }
     Ok(Pin {
         feature_names,
+        file_names,
         default_direction,
         rows: builder.finish()?,
         meta,

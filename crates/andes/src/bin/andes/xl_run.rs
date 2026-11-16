@@ -1,7 +1,3 @@
-//! The `--xl` standalone driver: crosslink search, the pair-aware
-//! `.xl.pin`, optional per-class Percolator comparison arms, and the CSM,
-//! residue-pair, protein-pair and doublet tables.
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +8,6 @@ use model::Spectrum;
 use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
 use search::PreparedSearch;
 
-/// `<base>.<suffix>` next to the PIN path (a trailing `.pin` is replaced).
 fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
     let mut s = if report_base
         .extension()
@@ -75,8 +70,6 @@ fn peptide_cols(
     cols
 }
 
-/// Per-peptide columns: `score_<form>` for each form of the linker (its stubs,
-/// then `intact`) sit between `form` and `n_sites`.
 fn pep_cols(linker: &Crosslinker) -> Vec<String> {
     let mut v: Vec<String> = [
         "peptide",
@@ -353,12 +346,6 @@ fn report_linker(linker: &Crosslinker) {
     );
 }
 
-/// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
-/// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
-/// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. CSMs are scored by the
-/// pair score (`--rescore` does not change it); `--xl-rescore-intra` and
-/// `--xl-rescore-inter` score one link class by a Percolator model trained on
-/// its own PIN instead. The FDR is pooled over every input run.
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
@@ -391,9 +378,6 @@ pub(crate) fn run_xl(
     };
     let mut cfg = XlConfig::new(linker.clone());
     cfg.oracle_spectra = cli.xl_oracle;
-    // `--isotope-error` (or its config key) replaces the crosslink default
-    // 0..=1 only when set: the linear-search default -1..=2 would double the
-    // mass pairs searched per spectrum.
     if let Some((lo, hi)) = cli.isotope_error {
         cfg.isotope_offsets = lo..=hi;
     }
@@ -406,7 +390,6 @@ pub(crate) fn run_xl(
         t.elapsed().as_secs_f64()
     );
     report(&results);
-    // The input run of a spectrum: the first run whose end lies past it.
     let run_of = |i: usize| -> String {
         let k = run_ends.partition_point(|&end| end <= i);
         spectrum_paths
@@ -426,8 +409,6 @@ pub(crate) fn run_xl(
         cfg.linker.intact,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
-    // Both link classes keep the pair score. The comparison flags rescore one
-    // class with a Percolator model trained on that class's rows only.
     let mut score: Vec<Option<f64>> = results
         .iter()
         .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))

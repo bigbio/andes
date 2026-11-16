@@ -1,31 +1,3 @@
-# Crosslinking reagents andes knows by name (`--xl`, `search.xl`, SDRF
-# comment[cross-linker]). Loaded by crates/model/src/xl_reagents.rs; a custom
-# reagent in the config file (search.xl) uses the same entry schema.
-#
-# One entry per reagent:
-#   name        canonical name (written in the outputs)
-#   aliases     other names accepted for it
-#   xlmod       XLMOD accessions (HUPO-PSI XL-MS ontology) of the reagent and its
-#               aliases; an SDRF `AC=` resolves through them
-#   sites       default sites, as in a spec: `K, Protein N-term`; `end / end` for
-#               a heterobifunctional reagent
-#   intact      the mass the cross-link adds to the two peptides
-#   stubs       MS-cleavable reagents: the masses a released peptide carries
-#   doublets    reporter doublets as [light stub, heavy stub] names
-#   monolinks   quenched dead ends, named by quencher (water, ammonia, tris);
-#               `--variable-mods` takes them as `<reagent>:<quencher>`
-#   source      where the chemistry and the masses come from
-#
-# A mass (intact, stub or monolink) is a UNIMOD record (`unimod:`, masses then
-# come from unimod.obo) with its elemental `composition` (UNIMOD notation,
-# negative counts allowed; a test checks it against the UNIMOD mass), or a
-# `composition` alone for a mass UNIMOD lacks. A custom reagent may give a
-# `mass` in Da instead.
-#
-# NHS esters default to Lys and the protein N-terminus; Ser, Thr and Tyr, which
-# they also acylate at a lower rate, are opt-in (`DSSO (K, S, T, Y, Protein N-term)`).
-
-# MS-cleavable.
 - name: DSSO
   xlmod: [XLMOD:02126]
   sites: K, Protein N-term
@@ -41,7 +13,6 @@
     - {name: tris, unimod: "Xlink:DSSO[279]", composition: H(17) C(10) N O(6) S}
   source: Kao et al. 2011, Mol Cell Proteomics 10:M110.002212; UNIMOD
 
-# Stub masses as UNIMOD and MeroX give them (Bu and BuUr).
 - name: DSBU
   aliases: [BuUrBu]
   xlmod: [XLMOD:02120]
@@ -55,12 +26,8 @@
     - {name: water, unimod: "Xlink:BuUrBu[214]", composition: H(14) C(9) N(2) O(4)}
     - {name: ammonia, unimod: "Xlink:BuUrBu[213]", composition: H(15) C(9) N(3) O(3)}
     - {name: tris, unimod: "Xlink:BuUrBu[317]", composition: H(23) C(13) N(3) O(6)}
-  source: Mueller et al. 2010, Anal Chem 82:6958; UNIMOD
+  source: "Mueller et al. 2010, Anal Chem 82:6958; UNIMOD (stub masses Bu and BuUr as UNIMOD and MeroX give them)"
 
-# The acid-cleaved form: enrichment cuts the azide tag off before MS
-# (Matzinger et al. 2020: 2% TFA "sufficient to cleave the azide tag off from
-# DSBSO"; searched as C11H16O6S2 with alkene C3H2O, thiol C8H12O4S2 and
-# sulfenic acid C8H14O5S2).
 - name: DSBSO
   aliases: [Azide-A-DSBSO]
   xlmod: [XLMOD:02222]
@@ -74,10 +41,8 @@
   monolinks:
     - {name: water, composition: H(18) C(11) O(7) S(2)}
     - {name: ammonia, composition: H(19) C(11) N O(6) S(2)}
-  source: Kaake et al. 2014, Mol Cell Proteomics 13:3533; Matzinger et al. 2020, J Proteome Res 19:2071
+  source: "Kaake et al. 2014, Mol Cell Proteomics 13:3533; Matzinger et al. 2020, J Proteome Res 19:2071 (the acid-cleaved form: enrichment cuts the azide tag off before MS; searched as C11H16O6S2 with alkene C3H2O, thiol C8H12O4S2, sulfenic acid C8H14O5S2)"
 
-# Zero-length urea: cleavage leaves an isocyanate on one peptide and the free
-# amine on the other.
 - name: CDI
   aliases: [carbonyldiimidazole]
   xlmod: [XLMOD:02036]
@@ -87,9 +52,8 @@
     - {name: amine, composition: ""}
     - {name: isocyanate, composition: H(-2) C O}
   doublets: [[amine, isocyanate]]
-  source: Hage et al. 2017, Angew Chem Int Ed 56:14551; XLMOD
+  source: "Hage et al. 2017, Angew Chem Int Ed 56:14551; XLMOD (zero-length urea: cleavage leaves an isocyanate on one peptide and the free amine on the other)"
 
-# Non-cleavable, amine-reactive.
 - name: DSS
   aliases: [BS3]
   xlmod: [XLMOD:02001, XLMOD:02000]
@@ -171,7 +135,6 @@
   intact: {unimod: "Xlink:DFDNB", composition: C(6) N(2) O(4)}
   source: UNIMOD
 
-# Non-cleavable, other chemistries.
 - name: BMOE
   xlmod: [XLMOD:02176]
   sites: C
@@ -187,7 +150,6 @@
     - {name: water, unimod: "Xlink:SMCC[237]", composition: H(15) C(12) N O(4)}
   source: UNIMOD
 
-# Photo-linker: the diazirine carbene inserts at any residue.
 - name: SDA
   aliases: [sulfo-SDA]
   xlmod: [XLMOD:02134, XLMOD:02136]
@@ -195,12 +157,11 @@
   intact: {composition: H(6) C(5) O}
   monolinks:
     - {name: water, composition: H(8) C(5) O(2)}
-  source: Belsom et al. 2016, Mol Cell Proteomics 15:1105; XLMOD
+  source: "Belsom et al. 2016, Mol Cell Proteomics 15:1105; XLMOD (photo-linker: the diazirine carbene inserts at any residue)"
 
-# Zero-length amide between an amine and a carboxyl.
 - name: EDC
   aliases: [DMTMM]
   xlmod: [XLMOD:02010, XLMOD:02208]
   sites: K, Protein N-term / D, E, Protein C-term
   intact: {composition: H(-2) O(-1)}
-  source: Leitner et al. 2014, Proc Natl Acad Sci USA 111:9455; XLMOD
+  source: "Leitner et al. 2014, Proc Natl Acad Sci USA 111:9455; XLMOD (zero-length amide between an amine and a carboxyl)"

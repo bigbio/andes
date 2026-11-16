@@ -1,37 +1,9 @@
-//! Reporter-doublet detection for MS-cleavable linkers.
-//!
-//! When an MS-cleavable linker such as DSSO breaks in MS2, each peptide is
-//! released twice: once with the light stub of a reporter doublet and once
-//! with its heavy stub (DSSO: alkene and thiol). The two ions sit `delta / z`
-//! apart in m/z at fragment charge `z` (`delta` = heavy − light stub,
-//! 31.9721 Da for DSSO, 25.9793 Da for DSBU). A doublet therefore measures
-//! one peptide's neutral mass:
-//!
-//! ```text
-//! M(peptide) = z · (mz_light − proton) − light stub
-//! ```
-//!
-//! A linker with several reporter doublets is searched for each of them.
-//!
-//! The detector works on the raw centroided peaks (no deconvolution): every
-//! peak above an intensity floor is tried as the light member at each charge
-//! `1..=max_charge` (capped at precursor charge − 1, since the other peptide
-//! carries at least one charge), and the heavy member is looked up within a
-//! ppm window. A doublet whose two members both have a peak one isotope
-//! spacing below them is an isotope copy of a lower doublet and is dropped.
-//! Doublets of the same peptide at several charges collapse into one
-//! [`DoubletMass`].
-
 use crate::crosslinker::{Cleavage, ISOTOPE_SPACING, PROTON};
 
-/// Settings of [`find_doublets`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DoubletParams {
-    /// m/z tolerance of the heavy member and of the isotope checks, in ppm.
     pub tol_ppm: f64,
-    /// Highest fragment charge tried for a doublet.
     pub max_charge: u8,
-    /// Intensity floor of both members, as a fraction of the base peak.
     pub min_rel_intensity: f64,
 }
 
@@ -45,37 +17,23 @@ impl Default for DoubletParams {
     }
 }
 
-/// One light/heavy peak pair at one charge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Doublet {
-    /// Index of the light member in the peak list.
     pub light_idx: usize,
-    /// Index of the heavy member in the peak list.
     pub heavy_idx: usize,
-    /// Fragment charge.
     pub charge: u8,
-    /// Neutral mass of the peptide, from the light member.
     pub peptide_mass: f64,
-    /// Heavy-member m/z error against its expected position, in ppm.
     pub error_ppm: f64,
-    /// Summed intensity of the two members.
     pub intensity: f64,
-    /// Whether either member has its +1 isotope peak at this charge.
     pub isotope_confirmed: bool,
 }
 
-/// The doublets of one peptide mass, merged over charges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DoubletMass {
-    /// Neutral peptide mass, from the most intense doublet of the group.
     pub mass: f64,
-    /// Summed intensity of the group's doublets.
     pub intensity: f64,
-    /// Number of charges at which the doublet was seen.
     pub n_charges: u8,
-    /// Whether any member doublet is isotope-confirmed.
     pub isotope_confirmed: bool,
-    /// Lowest charge in the group.
     pub min_charge: u8,
 }
 
@@ -84,7 +42,6 @@ fn ppm_window(mz: f64, ppm: f64) -> f64 {
     mz * ppm * 1e-6
 }
 
-/// Index of the most intense peak within `tol` of `mz` in m/z-sorted `peaks`.
 pub fn find_peak(peaks: &[(f64, f32)], mz: f64, tol: f64) -> Option<usize> {
     let lo = peaks.partition_point(|p| p.0 < mz - tol);
     let mut best: Option<usize> = None;
@@ -99,8 +56,6 @@ pub fn find_peak(peaks: &[(f64, f32)], mz: f64, tol: f64) -> Option<usize> {
     best
 }
 
-/// Every doublet in `peaks` (sorted by m/z) for a precursor of charge
-/// `precursor_charge`.
 pub fn find_doublets(
     peaks: &[(f64, f32)],
     precursor_charge: u8,
@@ -133,8 +88,6 @@ pub fn find_doublets(
                 continue;
             }
             let iso = ISOTOPE_SPACING / zf;
-            // Isotope copy of a lower doublet: both members have a peak one
-            // isotope spacing below.
             let below_light = find_peak(peaks, mz - iso, ppm_window(mz, params.tol_ppm));
             let below_heavy = find_peak(peaks, peaks[j].0 - iso, tol);
             if below_light.is_some() && below_heavy.is_some() {
@@ -156,8 +109,6 @@ pub fn find_doublets(
     out
 }
 
-/// Collapse doublets of the same peptide mass (within `tol_ppm`) seen at
-/// several charges into one entry each, most intense first.
 pub fn group_by_mass(doublets: &[Doublet], tol_ppm: f64) -> Vec<DoubletMass> {
     let mut sorted: Vec<&Doublet> = doublets.iter().collect();
     sorted.sort_by(|a, b| a.peptide_mass.total_cmp(&b.peptide_mass));
@@ -196,8 +147,6 @@ pub fn group_by_mass(doublets: &[Doublet], tol_ppm: f64) -> Vec<DoubletMass> {
     out
 }
 
-/// Which stub ions of a peptide of neutral mass `mass` are present at any
-/// charge `1..=max_charge`, one flag per stub of `cleavage`.
 pub fn stub_ions_present(
     peaks: &[(f64, f32)],
     mass: f64,
@@ -231,7 +180,6 @@ mod tests {
         Crosslinker::dsso().cleavage.unwrap()
     }
 
-    /// DSSO stub masses by name.
     struct Dsso {
         alkene: f64,
         thiol: f64,
@@ -266,7 +214,6 @@ mod tests {
         assert_eq!(z2.len(), 1);
         assert!((z2[0].peptide_mass - m).abs() < 1e-6);
         assert!(!z2[0].isotope_confirmed);
-        // No charge-1 doublet: the spacing at z1 is 31.97, not 15.99.
         assert!(d.iter().all(|d| d.charge != 1));
     }
 
@@ -279,7 +226,6 @@ mod tests {
             (ion(m + c.alkene, 3), 50.0),
             (ion(m + c.thiol, 3), 50.0),
         ]);
-        // A z3 doublet needs a precursor of charge >= 4.
         assert!(find_doublets(&peaks, 3, &cl, &DoubletParams::default()).is_empty());
         assert_eq!(
             find_doublets(&peaks, 4, &cl, &DoubletParams::default()).len(),
@@ -377,7 +323,6 @@ mod tests {
             let d = find_doublets(&peaks, 4, &cl, &DoubletParams::default());
             assert_eq!(d.len(), 1, "{name}");
             assert!((d[0].peptide_mass - m).abs() < 1e-6, "{name}");
-            // The DSSO spacing finds nothing in these peaks.
             assert!(find_doublets(&peaks, 4, &dsso(), &DoubletParams::default()).is_empty());
         }
     }
@@ -385,7 +330,6 @@ mod tests {
     #[test]
     fn every_doublet_of_a_linker_is_searched() {
         let mut cl = dsso();
-        // A second doublet: alkene and sulfenic acid.
         cl.doublets.push((0, 2));
         let c = masses(&cl);
         let (m1, m2) = (1100.0, 1700.0);

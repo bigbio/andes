@@ -1,30 +1,3 @@
-//! YAML run-configuration file (`--config run.yaml`).
-//!
-//! A single YAML file can set every search parameter, grouped by experimental
-//! design to mirror the DOCS §1a taxonomy (`io`, `search`, `scoring`, `decoys`,
-//! `chimeric`, `refine`, `rescoring`, `glyco`). Every key is optional; omitted
-//! keys keep their built-in default.
-//!
-//! PRECEDENCE: an explicit CLI flag ALWAYS wins over the YAML value, which wins
-//! over the built-in default. We detect "explicit CLI flag" with clap's
-//! `ValueSource::CommandLine`, so the YAML only fills parameters the user did
-//! not type on the command line. Unknown keys are a hard error (`deny_unknown_
-//! fields`) so a typo never silently no-ops.
-//!
-//! Every search flag has a key here except a few that are CLI-only on purpose:
-//! `--config` itself, and the hidden diagnostics `--cal-min-spec-keys` (a test
-//! hook that forces the calibration pre-pass on tiny inputs),
-//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
-//! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
-//! scorer), and the crosslink search's developer hooks `--xl-oracle`,
-//! `--xl-rescore-intra` and `--xl-rescore-inter`. The test
-//! `every_search_flag_has_a_config_key` keeps that list honest.
-//!
-//! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
-//! the CLI accepts (e.g. `precursor_tol: 20ppm`, `charge: "2..5"`, `score: auto`)
-//! and are parsed through the identical validators, so the config and the CLI can
-//! never diverge in what they accept.
-
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -84,7 +57,6 @@ pub struct SearchCfg {
     pub fixed_mods: Option<Vec<serde_yaml::Value>>,
     /// `--variable-mods`, as `fixed_mods`.
     pub variable_mods: Option<Vec<serde_yaml::Value>>,
-    /// `--xl`: the crosslinker, `Name (sites)` or a map (see [`xl_linker`]).
     pub xl: Option<serde_yaml::Value>,
     /// `ipf`, as `--localize`.
     pub localize: Option<String>,
@@ -418,21 +390,6 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
     Ok(d)
 }
 
-/// The crosslinker of `search.xl`: the CLI string `Name (sites)`, a map with
-/// `name` and optional `sites`, or a custom reagent entry with the schema of
-/// `resources/crosslinkers.yaml` (recognised by its `intact` key):
-///
-/// ```yaml
-/// xl: DSSO (K, S, T, Y, Protein N-term)
-/// # or a reagent the table lacks:
-/// xl:
-///   name: MyLinker
-///   sites: K, Protein N-term          # one end, or `end / end`
-///   intact: {mass: 158.003765}        # or {composition: ...} or {unimod: ...}
-///   stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]
-///   doublets: [[alkene, thiol]]       # reporter doublets, [light, heavy] stub names
-///   monolinks: [{name: water, mass: 176.01433}]
-/// ```
 pub fn xl_linker(
     key: &str,
     v: &serde_yaml::Value,
@@ -473,7 +430,6 @@ pub fn xl_linker(
                 }
             }
             let name = name.ok_or_else(|| at("`name` is missing".into()))?;
-            // `name: "DSSO (K)"` carries its sites.
             let mut d = XlDecl::parse(&name).map_err(|e| at(e.to_string()))?;
             if sites.is_some() {
                 d.sites = sites;

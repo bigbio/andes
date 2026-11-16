@@ -300,9 +300,6 @@ pub fn describe(m: &Modification) -> String {
     format!("{} ({terminus}{sep}{residue})", m.name)
 }
 
-/// The sites of `spec`: `(residue, location)` per site, in written order.
-/// `item` names the list item in the error. The crosslinker spec of `--xl`
-/// parses each of its comma-separated sites with this grammar.
 pub fn parse_sites(
     item: &str,
     spec: &str,
@@ -350,9 +347,6 @@ pub fn parse_sites(
     Ok(sites)
 }
 
-/// The record `token` names: a UNIMOD accession, name or alias, then a
-/// crosslinker monolink `<reagent>:<quencher>` ([`crate::xl_reagents::monolink`],
-/// which has an empty accession when UNIMOD lacks the reagent).
 fn lookup(db: &UnimodDb, token: &str, item: &str) -> Result<UnimodMod, ModSpecError> {
     match db.resolve(token) {
         Ok(Some(m)) => Ok(m.clone()),
@@ -832,7 +826,6 @@ xref: delta_mono_mass "6.020129"
         assert_eq!(m[0].name, "DSBSO:water");
         assert!(m[0].accession.is_none());
         assert!((m[0].mass_delta - 326.049_396).abs() < 1e-5);
-        // A monolink UNIMOD has is written out under its UNIMOD record.
         assert_eq!(m[1].name, "Xlink:DSSO[176]");
         assert_eq!(m[1].accession.as_deref(), Some("UNIMOD:1878"));
         assert_eq!(m[2].location, ModLocation::ProtNTerm);

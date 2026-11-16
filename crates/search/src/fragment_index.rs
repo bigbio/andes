@@ -412,13 +412,6 @@ impl ChunkFragmentIndex {
             .collect()
     }
 
-    /// Forms with neutral mass in `[lo, hi]` and at least `min_matched`
-    /// singly-charged b/y ions within `fragment_tol` of a peak, at most
-    /// `top_k`, best votes first; only the `vote_peaks` most intense peaks vote
-    /// (0 = every peak). The open-mass counterpart of [`Self::query`]: the
-    /// interval is the caller's, not the spectrum's precursor windows. The
-    /// crosslink search uses it to retrieve a peptide whose partner is unknown,
-    /// by the fragments that do not carry the link.
     #[allow(clippy::too_many_arguments)]
     pub fn query_mass_range(
         &self,
@@ -438,13 +431,10 @@ impl ChunkFragmentIndex {
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
 
-    /// Neutral mass of form `id`.
     pub fn form_mass(&self, id: u32) -> f64 {
         self.form_mass[id as usize]
     }
 
-    /// `(form id, votes, matched intensity)` of every form with neutral mass in
-    /// `[lo, hi]` and at least `min_matched` votes, unordered.
     fn vote(
         &self,
         spec: &Spectrum,

@@ -987,10 +987,6 @@ impl<'a> PreparedSearch<'a> {
         cands
     }
 
-    /// The distinct base records of the out-of-core index whose bare span
-    /// passes `keep` (see [`Self::out_of_core_candidates_where`]), sorted by
-    /// base-record key, each with its enumeration multiplicity (identical
-    /// copies of a span, from the N-terminal-Met re-enumeration).
     pub fn out_of_core_records_where(
         &self,
         keep: impl Fn(&[u8], u8) -> bool + Sync,
@@ -1009,8 +1005,6 @@ impl<'a> PreparedSearch<'a> {
                 keep(span, post).then_some(rec)
             })
             .collect();
-        // Identical copies of a span (the N-terminal-Met re-enumeration) share a
-        // key; their count is the enumeration multiplicity.
         kept.par_sort_unstable_by_key(base_record_key);
         let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
         for rec in kept {

@@ -956,9 +956,6 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     assert_eq!(got, want);
 }
 
-/// The open-mass query votes over a caller-given mass interval: with the
-/// precursor moved far off (as a crosslinked peptide's precursor is, by its
-/// partner), it still retrieves the peptide by its fragments.
 #[test]
 fn fragment_index_open_mass_query_ignores_the_precursor() {
     use model::tolerance::Tolerance;
@@ -998,7 +995,6 @@ fn fragment_index_open_mass_query_ignores_the_precursor() {
             "{}: truth not retrieved by the open-mass query",
             spec.title
         );
-        // The precursor-window query no longer reaches it.
         let windowed = fi.query(&moved, &[z], &params, Tolerance::Da(0.05), 5, 3, 0);
         let mats = fi.materialise(&windowed, &idx, &params, None, &|_| {});
         assert!(mats.iter().all(|c| c
@@ -1008,7 +1004,6 @@ fn fragment_index_open_mass_query_ignores_the_precursor() {
             .map(|a| a.residue)
             .collect::<Vec<_>>()
             != truth_seq));
-        // An interval that excludes the peptide's mass retrieves no form of it.
         let m = truth.mass();
         let sel = fi.query_mass_range(&moved, m + 2.0, 5000.0, Tolerance::Da(0.05), 50, 1, 0);
         for &(id, _) in &sel {

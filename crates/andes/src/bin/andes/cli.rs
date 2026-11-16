@@ -300,8 +300,6 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
         .map_err(|e| e.to_string())
 }
 
-/// A `--xl` crosslinker spec `Name (sites)`, resolved against the reagent
-/// table and the bundled UNIMOD table.
 pub(crate) fn parse_xl(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
     andes_xl::spec::XlDecl::parse(s)
         .and_then(|d| d.resolve(model::unimod::bundled()))

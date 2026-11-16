@@ -1,34 +1,3 @@
-//! SDRF input (`--sdrf design.sdrf.tsv`): the search settings an SDRF-Proteomics
-//! file records, applied below the command line and the `--config` file.
-//!
-//! Read from the SDRF:
-//! - `comment[data file]`: the spectrum files, looked up next to the SDRF (the
-//!   CLI or config `spectrum` replaces them).
-//! - `comment[cleavage agent details]` (every such column): the protease list.
-//! - `comment[modification parameters]` (every such column): fixed and
-//!   variable modifications, written as the `Name (sites)` lists of
-//!   `--fixed-mods` / `--variable-mods` (the UNIMOD accession when given).
-//! - `comment[precursor mass tolerance]`.
-//! - `comment[label]`: the quantification. Every row `label free sample` is
-//!   `--lfq`; TMT / iTRAQ labels give the smallest plex holding them
-//!   (`--tmt`); SILAC light / medium / heavy give the `--label` channels from
-//!   the `Label:` modifications; DIMETHYL0/4/8 give `dimethyl2` / `dimethyl3`.
-//! - `comment[dissociation method]`: checked against what the files record.
-//! - `comment[cross-linker]`: the crosslinker of `--xl` (crosslink search),
-//!   read by `andes_xl::spec::from_sdrf`.
-//!
-//! Not applied: `comment[fragment mass tolerance]` (andes measures each run's
-//! fragment error; `--fragment-tol-*` fixes one), and the sample and factor
-//! columns, which describe the samples, not the search.
-//!
-//! One andes run searches every input with one setting, so the rows must
-//! agree on the protease, modifications, tolerance, label kind and crosslinker;
-//! rows that
-//! disagree are an error that names the column and two files.
-//!
-//! Precedence: a value given on the command line or in the `--config` file
-//! wins over the SDRF, which wins over the built-in default.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -61,7 +30,6 @@ pub struct SdrfSettings {
     pub variable_mods: Option<Vec<String>>,
     pub quant: Option<Quant>,
     pub dissociation: Option<ActivationMethod>,
-    /// The `comment[cross-linker]` cell, as written (checked by `parse`).
     pub xl: Option<String>,
 }
 
@@ -174,7 +142,6 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     agree(&rows, LABEL, |r| {
         r.label.as_deref().map(label_kind).unwrap_or("").to_string()
     })?;
-    // One crosslinker per search: rows naming different ones are an error.
     agree(&rows, XL, |r| r.xl.clone().unwrap_or_default())?;
     if let Some(v) = &rows[0].xl {
         andes_xl::spec::from_sdrf(v, model::unimod::bundled())
@@ -1063,18 +1030,15 @@ mod tests {
         let t = sdrf(HX, &[&row("a.raw", dsso), &row("b.raw", dsso)]);
         let s = parse(&t, Path::new(".")).unwrap();
         assert_eq!(s.xl.as_deref(), Some(dsso));
-        // Two crosslinkers in one search.
         let t = sdrf(
             HX,
             &[&row("a.raw", dsso), &row("b.raw", "NT=DSS;AC=XLMOD:02001")],
         );
         let e = parse(&t, Path::new(".")).unwrap_err();
         assert!(e.contains("cross-linker") && e.contains("differs"), "{e}");
-        // A cell that does not resolve is an error at parse time.
         let t = sdrf(HX, &[&row("a.raw", "NT=DSS;CL=yes")]);
         let e = parse(&t, Path::new(".")).unwrap_err();
         assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
-        // No column, or not applicable: no crosslinker.
         let t = sdrf(HX, &[&row("a.raw", "not applicable")]);
         assert_eq!(parse(&t, Path::new(".")).unwrap().xl, None);
     }

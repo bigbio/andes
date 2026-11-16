@@ -1,44 +1,15 @@
-//! The crosslinker of a search, from three sources like the modification
-//! lists: `--xl` on the command line, `search.xl` in the config file, and the
-//! SDRF column `comment[cross-linker]`.
-//!
-//! The command-line spec is written like a modification list item,
-//! `Name (sites)`:
-//!
-//! - **Name**: a reagent of the reagent table (`resources/crosslinkers.yaml`,
-//!   [`model::xl_reagents`]) by name or alias (`DSSO`, `BS3`, `DSBU`, `PhoX`,
-//!   any case), its XLMOD accession (`XLMOD:02126`), or the UNIMOD name or
-//!   accession of its intact cross-link record (`Xlink:DSS[138]`,
-//!   `UNIMOD:1898`).
-//! - **Sites** (optional; the reagent's usual reactivity when omitted):
-//!   comma-separated residues and termini, each in the modification site
-//!   grammar (`K, S, T, Y, Protein N-term`; `KSTY` also works). A
-//!   heterobifunctional reagent gives its two ends apart with `/`:
-//!   `EDC (K, Protein N-term / D, E, Protein C-term)`. `N-term` is the
-//!   N-terminus of every peptide, for synthetic peptide libraries or samples
-//!   linked after digestion (a protein linked before digestion has only its
-//!   protein N-terminus free).
-//!
-//! The config `search.xl` is the same string, or a reagent entry of the
-//! table's schema ([`model::xl_reagents::Reagent`]) for a reagent the table
-//! lacks. The SDRF cell is read by [`from_sdrf`].
-
 use model::modification::{ModLocation, ResidueSpec};
 use model::unimod::UnimodDb;
 use model::xl_reagents::{Reagent, ReagentTable};
 
 use crate::crosslinker::{Cleavage, Crosslinker, LinkEnd, Monolink, Stub, MAX_STUBS};
 
-/// A command-line crosslinker spec before it is resolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct XlDecl {
-    /// Reagent name, alias, XLMOD accession or UNIMOD record.
     pub name: String,
-    /// Site spec; the reagent's default when `None`.
     pub sites: Option<String>,
 }
 
-/// Why a crosslinker spec was rejected. Each message names the spec.
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum XlSpecError {
     #[error("`{spec}`: unknown crosslinker `{name}`{hint}")]
@@ -84,8 +55,6 @@ fn monolink_hint(role: &str) -> &'static str {
 }
 
 impl XlDecl {
-    /// Parse `Name` or `Name (sites)`. The sites are the last parenthesised
-    /// group.
     pub fn parse(spec: &str) -> Result<Self, XlSpecError> {
         let s = spec.trim();
         let err = || s.to_string();
@@ -124,7 +93,6 @@ impl XlDecl {
         })
     }
 
-    /// How the spec reads in messages.
     pub fn label(&self) -> String {
         match &self.sites {
             Some(s) => format!("{} ({s})", self.name),
@@ -132,12 +100,10 @@ impl XlDecl {
         }
     }
 
-    /// The crosslinker of the bundled reagent table this spec names.
     pub fn resolve(&self, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
         self.resolve_in(model::xl_reagents::bundled(), db)
     }
 
-    /// [`Self::resolve`] against a given reagent table.
     pub fn resolve_in(
         &self,
         table: &ReagentTable,
@@ -149,8 +115,6 @@ impl XlDecl {
     }
 }
 
-/// The crosslinker of a custom reagent entry (the config file's `search.xl`
-/// map): the table's schema, with `sites` required.
 pub fn custom(r: &Reagent, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
     if r.sites.trim().is_empty() {
         return Err(XlSpecError::CustomWithoutSites {
@@ -160,9 +124,6 @@ pub fn custom(r: &Reagent, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
     from_reagent(r, db, &r.name, None)
 }
 
-/// The reagent `name` stands for: the table by name, alias or intact UNIMOD
-/// record; then by XLMOD accession; then a UNIMOD accession or name whose
-/// record is a reagent's intact cross-link.
 fn lookup<'t>(
     table: &'t ReagentTable,
     db: &UnimodDb,
@@ -204,8 +165,6 @@ fn unknown_hint(table: &ReagentTable, name: &str) -> String {
     }
 }
 
-/// Up to three reagent names within a small edit distance of `token`,
-/// closest first; on a tie, the name of the token's length first.
 fn suggest(table: &ReagentTable, token: &str) -> Vec<String> {
     let t = token.trim().to_ascii_lowercase();
     let mut scored: Vec<(usize, usize, &str)> = table
@@ -249,8 +208,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-/// The crosslinker of reagent entry `r`, with `sites` in place of its default
-/// sites when given.
 pub fn from_reagent(
     r: &Reagent,
     db: &UnimodDb,
@@ -320,7 +277,6 @@ pub fn from_reagent(
     })
 }
 
-/// Doublets with the lighter stub first.
 fn order_doublets(mut c: Cleavage) -> Cleavage {
     for d in &mut c.doublets {
         if c.stubs[d.0].mass > c.stubs[d.1].mass {
@@ -350,34 +306,12 @@ fn check_cleavage(c: &Cleavage) -> Result<(), String> {
     Ok(())
 }
 
-/// Tolerance of the SDRF stub masses `MH` / `ML` against the reagent's stubs,
-/// in Da: the template writes them to two decimals.
 pub const SDRF_STUB_TOL_DA: f64 = 0.02;
 
-/// The crosslinker of an SDRF `comment[cross-linker]` cell, e.g.
-/// `NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98`.
-///
-/// - The reagent is found by `AC` (XLMOD, or a UNIMOD intact record) first,
-///   then by `NT`; when both resolve to different reagents it is an error.
-/// - `TA` replaces the sites. `nterm` is the protein N-terminus: the SDRF
-///   describes the reagent on the sample, and a protein linked before
-///   digestion has only its protein N-terminal amine free (the peptide
-///   N-termini appear at digestion, after the linking). `cterm` is the
-///   protein C-terminus likewise. On a heterobifunctional reagent each end
-///   keeps the `TA` targets it reacts with.
-/// - `CL`, `MH` and `ML` are checked against the reagent: `CL` against
-///   whether it has stubs, `MH` / `ML` each against a stub mass within
-///   [`SDRF_STUB_TOL_DA`] (the template's names do not say which is the light
-///   stub, so either order is accepted).
-/// - A reagent the table lacks is a custom MS-cleavable reagent when `TA`,
-///   `MH` and `ML` are all given: the two stubs are one reporter doublet and
-///   their sum is the intact cross-link (the split of a urea such as DSBU or
-///   CDI); any other unknown reagent is an error that names the fix.
 pub fn from_sdrf(value: &str, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
     from_sdrf_in(model::xl_reagents::bundled(), value, db)
 }
 
-/// [`from_sdrf`] against a given reagent table.
 pub fn from_sdrf_in(
     table: &ReagentTable,
     value: &str,
@@ -550,8 +484,6 @@ pub fn from_sdrf_in(
     Ok(x)
 }
 
-/// An SDRF `TA` list (`K,S,T,Y,nterm`) as a site spec (`K, S, T, Y, Protein
-/// N-term`): `nterm` / `cterm` are the protein termini (see [`from_sdrf`]).
 fn ta_sites(ta: &str) -> Result<String, String> {
     let mut out = Vec::new();
     for t in ta.split(',').map(str::trim).filter(|t| !t.is_empty()) {
@@ -574,7 +506,6 @@ fn ta_sites(ta: &str) -> Result<String, String> {
     Ok(out.join(", "))
 }
 
-/// The two ends of a site spec: one end for both, or `end / end`.
 pub fn parse_ends(spec: &str, sites: &str) -> Result<[LinkEnd; 2], XlSpecError> {
     let parts: Vec<&str> = sites.split('/').collect();
     match parts.as_slice() {
@@ -734,7 +665,6 @@ mod tests {
         );
         let x = custom(&r, db()).unwrap();
         let c = x.cleavage.as_ref().unwrap();
-        // The doublet is ordered light (alkene) then heavy (thiol).
         assert_eq!(c.doublets, vec![(1, 0)]);
         assert!((c.doublet_delta(0) - 31.972_07).abs() < 1e-4);
         assert_eq!(x.monolinks[0].name, "MyDSSO:water");
@@ -780,11 +710,9 @@ mod tests {
         let x = sdrf("NT=DSS;AC=XLMOD:02001").unwrap();
         assert_eq!(x.name, "DSS");
         assert_eq!(sdrf("NT=BS3;AC=XLMOD:02000").unwrap().name, "DSS");
-        // An accession the table lacks falls back to the name.
         assert_eq!(sdrf("NT=DSSO;AC=XLMOD:99999").unwrap().name, "DSSO");
         assert_eq!(sdrf("AC=XLMOD:02126").unwrap().name, "DSSO");
         assert_eq!(sdrf("DSBU").unwrap().name, "DSBU");
-        // Name and accession of two different reagents.
         let e = sdrf("NT=DSSO;AC=XLMOD:02010").unwrap_err().to_string();
         assert!(
             e.contains("AC=XLMOD:02010 is EDC but NT=DSSO is DSSO"),
@@ -796,9 +724,7 @@ mod tests {
     fn sdrf_targets_replace_the_sites() {
         let x = sdrf("NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98").unwrap();
         assert_eq!(x.ends[0].residues, b"KSTY");
-        // `nterm` is the protein N-terminus, not every peptide's.
         assert!(x.ends[0].protein_n_term && !x.ends[0].peptide_n_term);
-        // Heterobifunctional: each end keeps the targets it reacts with.
         let e = sdrf("NT=EDC;AC=XLMOD:02010;CL=no;TA=K,D,E").unwrap();
         assert_eq!(e.ends[0].residues, b"K");
         assert!(!e.ends[0].protein_n_term);
@@ -818,7 +744,6 @@ mod tests {
         assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
         let e = sdrf("NT=DSSO;CL=no").unwrap_err().to_string();
         assert!(e.contains("CL=no but DSSO is MS-cleavable"), "{e}");
-        // Either order of the two stub masses.
         assert!(sdrf("NT=DSSO;MH=85.98;ML=54.01").is_ok());
         let e = sdrf("NT=DSSO;MH=54.01;ML=86.10").unwrap_err().to_string();
         assert!(

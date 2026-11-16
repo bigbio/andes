@@ -1,36 +1,12 @@
-//! Link-site rules: where on a peptide the linker can sit.
-
 use crate::crosslinker::LinkEnd;
 
-/// A residue position the linker can occupy on a peptide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LinkSite {
-    /// 0-based residue index in the peptide.
     pub pos: usize,
-    /// Whether the site is the N-terminal amine (on residue 0).
     pub n_term: bool,
-    /// Whether the site is the protein C-terminal carboxyl (on the last
-    /// residue).
     pub c_term: bool,
 }
 
-/// Every site of a peptide with residues `residues` that linker end `end` can
-/// occupy.
-///
-/// - A reactive residue that carries no other modification (`modified[i]` is
-///   false). A linked Lys blocks tryptic cleavage, so a reactive residue at the
-///   peptide's C-terminus is a site only when it is also the protein's
-///   C-terminus.
-/// - The protein N-terminus (residue 0 of a protein N-terminal peptide), when
-///   the end reacts with it and residue 0 is unmodified; with
-///   [`LinkEnd::peptide_n_term`], the N-terminus of every peptide.
-/// - The protein C-terminus (the last residue of a protein C-terminal
-///   peptide), when the end reacts with it.
-///
-/// A position that qualifies both ways (a reactive residue 0 of a protein
-/// N-terminal peptide, a reactive last residue of a protein C-terminal one) is
-/// listed once, as the residue site, because both placements put the same mass
-/// on the same residue.
 pub fn link_sites(
     residues: &[u8],
     modified: &[bool],
@@ -98,7 +74,6 @@ mod tests {
     fn internal_lysines_are_sites_c_terminal_ones_are_not() {
         assert_eq!(sites(b"AKLLKR", false, false), vec![(1, false), (4, false)]);
         assert_eq!(sites(b"AKLLK", false, false), vec![(1, false)]);
-        // At the protein C-terminus the last Lys can be linked.
         assert_eq!(sites(b"AKLLK", false, true), vec![(1, false), (4, false)]);
     }
 
@@ -106,7 +81,6 @@ mod tests {
     fn protein_n_terminus_is_a_site() {
         assert_eq!(sites(b"MAKR", true, false), vec![(0, true), (2, false)]);
         assert_eq!(sites(b"MAKR", false, false), vec![(2, false)]);
-        // Lys at residue 0 of a protein N-terminal peptide: one site.
         assert_eq!(sites(b"KAR", true, false), vec![(0, false)]);
     }
 
@@ -157,7 +131,6 @@ mod tests {
         };
         assert_eq!(s(false), vec![(1, false)]);
         assert_eq!(s(true), vec![(1, false), (3, true)]);
-        // A reactive last residue is listed once, as the residue site.
         let e = link_sites(b"AKAD", &[false; 4], false, true, &end);
         assert_eq!(e.len(), 1);
         assert!(!e[0].c_term && e[0].pos == 3);

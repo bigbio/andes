@@ -29,6 +29,7 @@ pub mod search_index;
 pub mod search_params;
 pub mod site_evidence;
 pub mod tdc;
+pub mod xl_search;
 
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{decoy_db, normalize_decoy_prefix, DEFAULT_DECOY_PREFIX};

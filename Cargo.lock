@@ -61,6 +61,7 @@ dependencies = [
 name = "andes"
 version = "0.4.0"
 dependencies = [
+ "andes-xl",
  "arrow",
  "clap",
  "flate2",
@@ -82,6 +83,10 @@ dependencies = [
  "serde_yaml",
  "tempfile",
 ]
+
+[[package]]
+name = "andes-xl"
+version = "0.4.0"
 
 [[package]]
 name = "android-tzdata"
@@ -2633,6 +2638,7 @@ dependencies = [
 name = "search"
 version = "0.4.0"
 dependencies = [
+ "andes-xl",
  "glyco",
  "input",
  "memmap2",

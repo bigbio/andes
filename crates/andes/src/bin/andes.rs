@@ -58,6 +58,10 @@ mod train;
 mod train_intensity;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
+#[path = "andes/xl_fdr.rs"]
+mod xl_fdr;
+#[path = "andes/xl_run.rs"]
+mod xl_run;
 
 use crate::cli::{
     parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,

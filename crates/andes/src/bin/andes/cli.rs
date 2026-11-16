@@ -640,6 +640,39 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) glyco: bool,
 
+    /// Crosslink search with an MS-cleavable linker into <base>.xl.tsv (experimental)
+    ///
+    /// Each MS2 is searched for the linker's reporter doublets; the doublet peptide masses
+    /// and the precursor give the candidate peptide pairs, and each peptide is scored with
+    /// the standard scorer carrying the cleaved stub or its partner on the link residue.
+    /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
+    /// (<base>.xl.pin; --rescore scores the intra-links with Percolator, the inter-links
+    /// keep the pair score) and the q-values, from the
+    /// target-target, target-decoy and decoy-decoy counts split by intra- and inter-protein
+    /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
+    /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
+    /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
+    #[arg(long, value_name = "LINKER", value_parser = ["dsso"], hide_short_help = true,
+          help_heading = H_MODES, conflicts_with = "glyco")]
+    pub(crate) xl: Option<String>,
+
+    /// With --xl: also run the exhaustive pair search (no doublet gate) on the first N spectra
+    #[arg(
+        long = "xl-oracle",
+        value_name = "N",
+        default_value = "0",
+        hide = true,
+        requires = "xl"
+    )]
+    pub(crate) xl_oracle: usize,
+
+    /// With --xl: also rescore the inter-link CSMs with Percolator (comparison only)
+    ///
+    /// Trains a Percolator model on the inter-link rows alone (<base>.xl.inter.pin) and
+    /// scores them with it; without it the inter-links keep the pair score.
+    #[arg(long = "xl-rescore-inter", hide = true, requires = "xl")]
+    pub(crate) xl_rescore_inter: bool,
+
     /// Bundled N-glycan database of --glyco
     ///
     /// The databases and their attribution: crates/glyco/glycan-db/.
@@ -2553,6 +2586,8 @@ mod help_layout_tests {
         "debug_glyco",
         "glyco_mbr_match_train",
         "ipf_debug",
+        "xl_oracle",
+        "xl_rescore_inter",
     ];
 
     #[test]

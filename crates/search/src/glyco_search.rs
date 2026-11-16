@@ -32,13 +32,13 @@ use model::mass::{H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
-use andes_glyco::backbone::{
+use glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
-use andes_glyco::glycan_db::{GlycanComp, DENOVO_TOPOLOGY_ID};
-use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use andes_glyco::glyco_psm::{
+use glyco::glycan_db::{GlycanComp, DENOVO_TOPOLOGY_ID};
+use glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
+use glyco::glyco_psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
@@ -115,8 +115,8 @@ pub struct GlycoConfig {
     pub hcd_pair: bool,
 }
 
-use andes_glyco::hybrid::{db_branch, BackboneHit, Source};
-use andes_glyco::oxonium::{
+use glyco::hybrid::{db_branch, BackboneHit, Source};
+use glyco::oxonium::{
     hex_diagnostic_evidence, oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC,
 };
 
@@ -327,7 +327,7 @@ fn glyco_aware_peptide(
     model::peptide::Peptide::new(residues, pep.pre, pep.post)
 }
 
-/// First glycosite of `pep` ([`andes_glyco::sequon::glycosites`]: internal
+/// First glycosite of `pep` ([`glyco::sequon::glycosites`]: internal
 /// sequons first, then the boundary sequon completed by `pep.post`), defaulting
 /// to 0 when there is none. For O-glycan it is the first Ser/Thr (no motif, no
 /// boundary case); the site is not localized, so on a peptide with several S/T
@@ -336,9 +336,9 @@ fn glyco_aware_peptide(
 fn glyco_site_for(pep: &model::peptide::Peptide, core: GlycanCore) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
     if core == GlycanCore::OGlycan {
-        return andes_glyco::sequon::first_ser_thr_site(&res).unwrap_or(0);
+        return glyco::sequon::first_ser_thr_site(&res).unwrap_or(0);
     }
-    andes_glyco::sequon::glycosites(&res, pep.post)
+    glyco::sequon::glycosites(&res, pep.post)
         .first()
         .copied()
         .unwrap_or(0)
@@ -681,8 +681,8 @@ impl GlycoCtxOwned {
             min_core_ions: 1, // permissive: this is a pre-filter, not a gate (single GalNAc for O)
             top_k: 100,       // field standard: top 100 glycan compositions per peptide search
             diagnostic_ions: match cfg.core {
-                GlycanCore::NGlycan => andes_glyco::glycan_first::default_diagnostic_ions(),
-                GlycanCore::OGlycan => andes_glyco::glycan_first::o_glycan_diagnostic_ions(),
+                GlycanCore::NGlycan => glyco::glycan_first::default_diagnostic_ions(),
+                GlycanCore::OGlycan => glyco::glycan_first::o_glycan_diagnostic_ions(),
             },
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),
@@ -2271,7 +2271,7 @@ mod tests {
     #[test]
     fn o_glycan_floor_admits_a_light_tn_precursor() {
         use super::{min_glycan_floor, GlycanCore};
-        use andes_glyco::glycan_mass::HEXNAC;
+        use glyco::glycan_mass::HEXNAC;
         // A Tn glycan measured 0.01 Da light must still reach the glycan match.
         assert!(HEXNAC - 0.01 >= min_glycan_floor(GlycanCore::OGlycan));
         // The N floor is unchanged and still excludes a single HexNAc.
@@ -2462,9 +2462,9 @@ mod tests {
     /// `for iso in iso_min..=iso_max` sweep buys in the Y-first world.
     #[test]
     fn isotope_sweep_annotates_glycan_only_at_correct_offset() {
-        use andes_glyco::glycan_db::GlycanComp;
-        use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON as GLY_PROTON};
-        use andes_glyco::hybrid::hybrid_candidates_with_isotope;
+        use glyco::glycan_db::GlycanComp;
+        use glyco::glycan_mass::{CORE_Y_STEPS, PROTON as GLY_PROTON};
+        use glyco::hybrid::hybrid_candidates_with_isotope;
 
         let true_backbone_residue = 1500.0_f64;
         let glycan = GlycanComp::from_counts(2, 3, 0, 0, 0, 0);
@@ -2545,7 +2545,7 @@ mod tests {
     /// intact mass. Same-hypothesis duplicates (same offset) must still merge.
     #[test]
     fn dedup_preserves_distinct_isotope_residuals_for_novel_glycans() {
-        use andes_glyco::hybrid::BackboneHit;
+        use glyco::hybrid::BackboneHit;
         let mk = |iso: i8, residual: f64| BackboneHit {
             backbone_mass: 1500.0,
             glycan: None, // novel / unannotated
@@ -2639,8 +2639,8 @@ mod tests {
     /// so the sort produces: `true_bb` first, `noise_bb` second.
     #[test]
     fn core_y_ranking_promotes_supported_backbone_over_unsupported() {
-        use andes_glyco::backbone::{count_core_y_hits, SpectrumStats};
-        use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
+        use glyco::backbone::{count_core_y_hits, SpectrumStats};
+        use glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
 
         // True backbone: small peptide (large glycan).
         // Typical serum N-glycopeptide scenario: backbone ~1100 Da, glycan ~2200 Da.

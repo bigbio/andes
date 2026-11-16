@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-andes-glyco = { path = "../andes-glyco" }
 andes-xl = { path = "../andes-xl" }
+glyco = { path = "../glyco" }
 input = { path = "../input" }
 memmap2 = "0.9"
 model = { path = "../model" }

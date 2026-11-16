@@ -61,11 +61,11 @@ dependencies = [
 name = "andes"
 version = "0.4.0"
 dependencies = [
- "andes-glyco",
  "andes-xl",
  "arrow",
  "clap",
  "flate2",
+ "glyco",
  "input",
  "libc",
  "model",
@@ -83,10 +83,6 @@ dependencies = [
  "serde_yaml",
  "tempfile",
 ]
-
-[[package]]
-name = "andes-glyco"
-version = "0.4.0"
 
 [[package]]
 name = "andes-xl"
@@ -1177,6 +1173,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "glyco"
+version = "0.4.0"
+
+[[package]]
 name = "half"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2083,9 +2083,9 @@ dependencies = [
 name = "output"
 version = "0.4.0"
 dependencies = [
- "andes-glyco",
  "arrow",
  "chrono",
+ "glyco",
  "input",
  "memchr",
  "model",
@@ -2638,8 +2638,8 @@ dependencies = [
 name = "search"
 version = "0.4.0"
 dependencies = [
- "andes-glyco",
  "andes-xl",
+ "glyco",
  "input",
  "memmap2",
  "model",

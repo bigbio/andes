@@ -2855,11 +2855,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .map_err(|e| format!("{e}"))?;
             eprintln!("Rescore: Percolator backend = {}", backend.describe());
-            let user_args: Vec<String> = cli
+            let mut user_args: Vec<String> = cli
                 .percolator_args
                 .split_whitespace()
                 .map(|s| s.to_string())
                 .collect();
+            if cli.dia {
+                crate::dia::default_train_fdr(&mut user_args);
+            }
             let extra = output::percolator_args_with_threads(&user_args, cli.threads);
             let t_resc = std::time::Instant::now();
             let (map, decoys) =

@@ -366,6 +366,21 @@ fn row_features(
     ]
 }
 
+/// Percolator's positive-set FDR for training on a DIA PIN, unless the user
+/// set `--trainFDR`. A DIA PIN has about ten candidate rows per scan and few
+/// PSMs at 1 %, so the default (`--trainFDR 0.01`) trains on too few
+/// positives: 0.05 gave +139 / +17 at N@FDP_c 1 % (mean of 5 seeds) on the
+/// ProteoBench Astral raws, with the same measured error control
+/// (docs/benchmarks/dia/README.md).
+pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
+    if !args
+        .iter()
+        .any(|a| a == "-F" || a == "--trainFDR" || a.starts_with("--trainFDR="))
+    {
+        args.extend(["--trainFDR".to_string(), "0.05".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +439,17 @@ mod tests {
         let (_, other) = parse_peptide("K.GGGGWWWWK.A").unwrap();
         let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1));
         assert_eq!((g[0], g[5], g[10]), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn train_fdr_defaults_unless_set() {
+        let mut a = vec!["--testFDR".to_string(), "0.05".to_string()];
+        default_train_fdr(&mut a);
+        assert_eq!(a, ["--testFDR", "0.05", "--trainFDR", "0.05"]);
+        for set in [vec!["-F", "0.02"], vec!["--trainFDR=0.1"]] {
+            let mut b: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+            default_train_fdr(&mut b);
+            assert_eq!(b, set);
+        }
     }
 }

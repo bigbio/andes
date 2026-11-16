@@ -29,6 +29,7 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 |---|---|---|---|---|---|
 | andes `--dia` | 1404 / 1499 | 0.004 / 0.005 | 0.042 / 0.046 | 1559 / 1651 | 1707 / 1691 |
 | andes `--dia`, mean of 5 Percolator seeds | 1394 / 1565 | 0.007 / 0.009 | | 1496 / 1594 (1421–1575 / 1524–1651) | 1685 / 1727 |
+| andes `--dia`, `--trainFDR 0.05` (default with `--dia --rescore`), mean of 5 seeds | 1493 / 1602 | 0.005 / 0.011 | 0.049 / 0.044 | **1635 / 1611** (1568–1672 / 1557–1647) | 1793 / 1744 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -42,7 +43,15 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
-  with seed 42, 72 % / 69 % on the seed mean, and 88–92 % / 98–101 % of OpenDIA arm E.
+  with seed 42, 72 % / 69 % on the seed mean (79 % / 70 % with `--trainFDR 0.05`), and 88–92 % /
+  98–101 % of OpenDIA arm E (97 % / 99 % with `--trainFDR 0.05`).
+- **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
+  1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
+  1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633
+  on raw01 and 1568 / 1579 / 1609 / 1596 on raw02. Over all 5 seeds 0.05 is higher than the baseline on
+  raw01 for 5 of 5 seeds and on raw02 for 3 of 5. Error control is unchanged (q ≤ 0.01 at 0.3–1.3 %
+  true FDP). `--dia --rescore` now passes `--trainFDR 0.05` unless `--percolator-args` sets it.
+  `--train-best-positive` is worse (3 seeds: 1403 / 1512).
 - **MS1 gate** (a candidate is scored only when its monoisotopic m/z has a survey peak within 5 ppm in the
   nearest survey scan or one either side): +70 / +82 at N@FDP_c 1 % and 25–42 % less search time. On the
   slice it keeps the MS1 peak of 93 % of DIA-NN's precursors and of 13 % of random library candidates.

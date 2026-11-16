@@ -18,3 +18,41 @@
 .andes-hero h1 { margin: 0 0 0.3em; font-size: 2.2rem; }
 .andes-hero p { margin: 0.3em 0; }
 .md-typeset .md-button { margin: 0.2em 0.3em 0.2em 0; }
+
+/* CI / benchmarks page (javascripts/ci.js) */
+#andes-ci { --ci-line: var(--md-default-fg-color--lightest); }
+.ci-dim, .md-typeset .ci-dim { color: var(--md-default-fg-color--light); font-size: 0.75rem; }
+.ci-tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--md-code-bg-color); margin: 0.4em 0 1em; }
+.ci-tabs button { border: 0; background: none; padding: 0.25em 0.7em; border-radius: 6px; cursor: pointer; color: var(--md-default-fg-color--light); font: inherit; font-size: 0.75rem; }
+.ci-tabs button.on { background: var(--md-default-bg-color); color: var(--md-default-fg-color); box-shadow: 0 0 0 1px var(--ci-line); }
+.ci-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 0.8rem; }
+.ci-card { border: 1px solid var(--ci-line); border-radius: 10px; padding: 0.8rem 1rem; }
+.md-typeset .ci-card h4 { margin: 0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ci-card h4 span, .ci-msg { color: var(--md-default-fg-color--light); font-weight: normal; }
+.md-typeset .ci-msg { margin: 0.2em 0 0.4em; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.md-typeset .ci-sha { font-family: var(--md-code-font-family); font-size: 0.65rem; background: var(--md-code-bg-color); padding: 0.1em 0.5em; border-radius: 6px; }
+.ci-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; margin-top: 0.7rem; }
+.ci-grid small { display: block; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.6rem; color: var(--md-default-fg-color--light); }
+.ci-grid b { font-weight: 500; font-size: 0.8rem; }
+.ci-ok, .ci-bad { font-size: 0.6rem; padding: 0.1em 0.6em; border-radius: 8px; font-weight: 600; }
+.ci-ok { color: #1a7f37; background: rgba(26, 127, 55, 0.15); }
+.ci-bad { color: #cf222e; background: rgba(207, 34, 46, 0.15); cursor: help; }
+.ci-charts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; }
+@media (max-width: 45em) { .ci-charts { grid-template-columns: 1fr; } }
+.ci-chart { border: 1px solid var(--ci-line); border-radius: 10px; padding: 0.4rem; }
+#andes-ci svg { width: 100%; height: auto; font-size: 11px; fill: var(--md-default-fg-color--light); }
+#andes-ci svg .ci-label { font-size: 13px; fill: var(--md-default-fg-color); }
+#andes-ci svg polyline { fill: none; stroke: var(--md-default-fg-color); stroke-width: 1.5; }
+#andes-ci svg circle { fill: var(--md-default-fg-color); }
+#andes-ci svg .ci-grid-line { stroke: var(--ci-line); }
+#andes-ci svg .ci-zero { stroke-dasharray: 3 3; stroke: var(--md-default-fg-color--light); }
+#andes-ci svg .ci-expected, .ci-expected-key { fill: var(--md-default-fg-color); stroke: var(--md-default-bg-color); }
+#andes-ci svg.ci-boxes { max-width: 50rem; font-size: 11px; }
+.md-typeset .ci-table { display: table; width: 100%; font-size: 0.7rem; border-collapse: collapse; }
+.md-typeset .ci-table td, .md-typeset .ci-table th { border-bottom: 1px solid var(--ci-line); padding: 0.3em 0.5em; text-align: left; }
+.ci-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.6em 0; }
+.ci-controls label { display: flex; flex-direction: column; font-size: 0.72rem; }
+#andes-ci select { font: inherit; padding: 0.2em 0.4em; border-radius: 6px; border: 1px solid var(--ci-line); background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
+.ci-legend span { margin-right: 1rem; font-size: 0.72rem; }
+.ci-legend i { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.3rem; }
+.ci-legend i.ci-expected-key { border-radius: 0; transform: rotate(45deg) scale(0.8); background: var(--md-default-fg-color); }

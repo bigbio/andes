@@ -169,3 +169,17 @@ fn tdc_winner_per_file_scan_mass() {
     let s = [1.0, 3.0, 0.5, 0.1, 2.0, 2.0];
     assert_eq!(tdc_winners(&m, &s), vec![1, 2, 3, 4]);
 }
+
+#[test]
+fn tdc_winner_tie_prefers_target() {
+    let mut m = vec![
+        meta(0, 1, 100.0),
+        meta(0, 1, 100.0),
+        meta(0, 2, 100.0),
+        meta(0, 2, 100.0),
+    ];
+    m[0].label = -1;
+    m[3].label = -1;
+    let s = [2.0, 2.0, 1.0, 1.0];
+    assert_eq!(tdc_winners(&m, &s), vec![1, 2]);
+}

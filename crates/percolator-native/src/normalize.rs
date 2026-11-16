@@ -81,7 +81,7 @@ pub fn score(rows: &Store, idx: &[usize], w: &[f64], norm: Option<&Norm>) -> Vec
                     }
                 }
                 None => {
-                    for (&x, &wj) in row.iter().zip(w) {
+                    for (&x, &wj) in row.iter().zip(&w[..nf]).rev() {
                         s += wj * f64::from(x);
                     }
                 }

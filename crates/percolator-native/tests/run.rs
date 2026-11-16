@@ -154,11 +154,9 @@ fn static_pass_equals_dot_product() {
     let dir = tempfile::tempdir().unwrap();
     let pin = data("svm_ref.pin");
     let o = outs(dir.path(), "all");
-    run(
-        &static_args(&o, &data("svm_ref_perc.weights"), false, &pin),
-        limit(dir.path()),
-    )
-    .unwrap();
+    let mut a = static_args(&o, &data("svm_ref_perc.weights"), false, &pin);
+    a.insert(0, "--override".into());
+    run(&a, limit(dir.path())).unwrap();
     let mut got = scores(&o.target);
     got.extend(scores(&o.decoy));
     let rows = pin_rows(&pin);
@@ -227,7 +225,10 @@ fn static_run_without_targets_aborts_as_percolator() {
             limit(dir.path()),
         )
         .unwrap_err();
-        assert!(err.contains("Error: no target PSMs were provided."), "{err}");
+        assert!(
+            err.contains("Error: no target PSMs were provided."),
+            "{err}"
+        );
         assert!(!o.target.exists());
     }
 }
@@ -237,7 +238,13 @@ fn unknown_argument_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let o = outs(dir.path(), "u");
     let pin = p(&data("svm_ref.pin"));
-    for bad in ["--trainFDR", "-y", "--subset-max-train", "-v", "--post-processing-mix-max"] {
+    for bad in [
+        "--trainFDR",
+        "-y",
+        "--subset-max-train",
+        "-v",
+        "--post-processing-mix-max",
+    ] {
         let mut a = training_args(&o, "1", &data("svm_ref.pin"));
         a.insert(0, bad.to_string());
         let err = run(&a, limit(dir.path())).unwrap_err();
@@ -248,7 +255,15 @@ fn unknown_argument_is_an_error() {
     let err = run(&a, limit(dir.path())).unwrap_err();
     assert!(err.contains("extra.pin"), "{err}");
     for (flag, value) in [("--seed", "0"), ("--num-threads", "0"), ("--seed", "x")] {
-        let a = strs(&[flag, value, "--results-psms", "t", "--decoy-results-psms", "d", &pin]);
+        let a = strs(&[
+            flag,
+            value,
+            "--results-psms",
+            "t",
+            "--decoy-results-psms",
+            "d",
+            &pin,
+        ]);
         let err = run(&a, limit(dir.path())).unwrap_err();
         assert!(err.contains(flag), "{flag}: {err}");
     }
@@ -274,7 +289,9 @@ fn mixmax_q_monotone() {
     let mut d = Vec::new();
     let mut x: u64 = 7;
     for i in 0..600 {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let u = (x >> 11) as f64 / (1u64 << 53) as f64;
         let decoy = i % 2 == 1;
         let shift = if decoy || i % 4 == 0 { 0.0 } else { 2.0 };
@@ -311,7 +328,11 @@ fn andes_argument_vectors_run() {
     assert!(t.values().any(|psm| psm.q_value < 0.01));
     for tdc in [true, false] {
         let o = outs(dir.path(), if tdc { "run0" } else { "pep" });
-        run(&static_args(&o, &main.weights, tdc, &pin), limit(dir.path())).unwrap();
+        run(
+            &static_args(&o, &main.weights, tdc, &pin),
+            limit(dir.path()),
+        )
+        .unwrap();
         parse_psm_results(&std::fs::read_to_string(&o.target).unwrap()).unwrap();
         parse_psm_results(&std::fs::read_to_string(&o.decoy).unwrap()).unwrap();
         assert!(!o.weights.exists());
@@ -326,7 +347,11 @@ fn training_output_independent_of_threads() {
     let b = outs(dir.path(), "b");
     run(&training_args(&a, "1", &pin), limit(dir.path())).unwrap();
     run(&training_args(&b, "4", &pin), limit(dir.path())).unwrap();
-    for (x, y) in [(&a.target, &b.target), (&a.decoy, &b.decoy), (&a.weights, &b.weights)] {
+    for (x, y) in [
+        (&a.target, &b.target),
+        (&a.decoy, &b.decoy),
+        (&a.weights, &b.weights),
+    ] {
         assert_eq!(
             std::fs::read_to_string(x).unwrap(),
             std::fs::read_to_string(y).unwrap()
@@ -361,10 +386,13 @@ fn static_override_keeps_weights_that_separate_nothing() {
     let single = (0..5).any(|j| {
         [1.0f64, -1.0].iter().any(|&sign| {
             got.iter()
-                .all(|(id, &s)| s == shown(sign * f64::from(by_id[id.as_str()].features[j])))
+                .all(|(id, &s)| s == shown(sign * f64::from(by_id[id.as_str()].features[j]) + 0.5))
         })
     });
-    assert!(single, "reset scores are not one raw feature");
+    assert!(
+        single,
+        "reset scores are not one raw feature plus the kept bias"
+    );
 }
 
 #[test]
@@ -380,4 +408,41 @@ fn missing_weights_values_read_as_zero() {
     let mut got = scores(&o.target);
     got.extend(scores(&o.decoy));
     assert!(got.values().all(|&s| s == 0.0));
+}
+
+#[test]
+fn training_without_tdc_is_an_error_on_concatenated_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = outs(dir.path(), "plain");
+    let mut a = training_args(&o, "1", &data("svm_ref.pin"));
+    a.retain(|x| x != "-Y");
+    let err = run(&a, limit(dir.path())).unwrap_err();
+    assert!(err.contains("-Y"), "{err}");
+    assert!(!o.target.exists());
+}
+
+#[test]
+fn unreadable_init_weights_without_direction_aborts_even_with_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("flat.pin");
+    let mut text = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tf2\tPeptide\tProteins\n");
+    for i in 0..60 {
+        let label = if i % 2 == 0 { 1 } else { -1 };
+        text.push_str(&format!(
+            "r{i}\t{label}\t{i}\t{}\t1\t2\tK.A.R\tP\n",
+            1000 + i
+        ));
+    }
+    std::fs::write(&pin, text).unwrap();
+    let missing = dir.path().join("missing.weights");
+    let o = outs(dir.path(), "miss");
+    for tdc in [true, false] {
+        let mut a = static_args(&o, &missing, tdc, &pin);
+        if !tdc {
+            a.insert(0, "--override".into());
+        }
+        let err = run(&a, limit(dir.path())).unwrap_err();
+        assert!(err.contains("cannot find an initial direction"), "{err}");
+        assert!(!o.target.exists());
+    }
 }

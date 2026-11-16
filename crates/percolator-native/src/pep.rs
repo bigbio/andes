@@ -122,7 +122,7 @@ pub fn estimate_pi0(scores: &[f64], is_decoy: &[bool]) -> f64 {
     pi0s[min_ix].clamp(0.0, 1.0)
 }
 
-fn mix_max_counts(combined: &[(f64, bool)]) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn mix_max_counts(combined: &[(f64, bool)]) -> (Vec<f64>, Vec<f64>) {
     let mut h_w = Vec::new();
     let mut h_z = Vec::new();
     let (mut cnt_w, mut cnt_z, mut queue) = (0usize, 0usize, 0usize);

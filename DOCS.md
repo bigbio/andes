@@ -1093,7 +1093,7 @@ MS-cleavable linkers take their candidate pairs from the reporter doublets of th
 stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
 link classes are scored by the pair score `min(alpha, beta)`; q-values are
-`(TD - DD + 1) / TT` per link class (intra- and inter-protein).
+`max(TD - DD, 2) / TT` per link class (intra- and inter-protein).
 
 ---
 

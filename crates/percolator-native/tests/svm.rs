@@ -196,3 +196,19 @@ fn mfn_matches_reference_weights() {
         used[f] = true;
     }
 }
+
+#[test]
+#[should_panic(expected = "Rows::gather")]
+fn rows_gather_panics_on_unreached_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = read_pin(
+        &data_path("svm_ref.pin"),
+        MemLimit {
+            bytes: u64::MAX,
+            spill_dir: dir.path().to_path_buf(),
+        },
+    )
+    .unwrap();
+    let norm = stdv(&pin);
+    Rows::gather(&pin.rows, &norm, &[0, pin.meta.len()]);
+}

@@ -1,3 +1,4 @@
+mod cv;
 mod folds;
 mod normalize;
 mod pin;
@@ -5,6 +6,7 @@ mod scores;
 mod store;
 mod svm;
 
+pub use cv::{init_direction, train, CvConfig, CvResult};
 pub use folds::folds_by_spectrum;
 pub use normalize::{raw_weights, score, stdv, Norm};
 pub use pin::{read_pin, MemLimit, Pin, RowMeta};

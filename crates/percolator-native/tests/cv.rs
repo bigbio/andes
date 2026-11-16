@@ -1,0 +1,236 @@
+use percolator_native::{
+    count_at, init_direction, l2_svm_mfn, read_pin, score, stdv, tdc_q, train, CvConfig, CvResult,
+    MemLimit, MfnOpts, Pin, Rows,
+};
+
+fn lcg(state: &mut u64) -> f64 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    ((*state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+}
+
+fn noise(state: &mut u64) -> f64 {
+    lcg(state) + lcg(state) + lcg(state) - 1.5
+}
+
+fn pin_text(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> String {
+    let nf = rows[0].2.len();
+    let names: Vec<String> = (1..=nf).map(|j| format!("f{j}")).collect();
+    let mut text = format!(
+        "SpecId\tLabel\tScanNr\tExpMass\tFileName\t{}\tPeptide\tProteins\n",
+        names.join("\t")
+    );
+    if let Some(d) = default {
+        let cells: Vec<String> = d.iter().map(|v| v.to_string()).collect();
+        text.push_str(&format!(
+            "DefaultDirection\t-\t-\t-\t-\t{}\t-\t-\n",
+            cells.join("\t")
+        ));
+    }
+    for (i, (label, scan, f)) in rows.iter().enumerate() {
+        let cells: Vec<String> = f.iter().map(|v| format!("{v:.6}")).collect();
+        text.push_str(&format!(
+            "r{i}\t{label}\t{scan}\t1000.0\tfile0\t{}\tK.PEPTIDE{i}.R\tP{i}\n",
+            cells.join("\t")
+        ));
+    }
+    text
+}
+
+fn load(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> (tempfile::TempDir, Pin) {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("x.pin");
+    std::fs::write(&p, pin_text(rows, default)).unwrap();
+    let pin = read_pin(
+        &p,
+        MemLimit {
+            bytes: u64::MAX,
+            spill_dir: d.path().to_path_buf(),
+        },
+    )
+    .unwrap();
+    (d, pin)
+}
+
+fn synthetic(n: usize, shifts: &[f64], seed: u64) -> Vec<(i8, u64, Vec<f64>)> {
+    let mut s = seed;
+    (0..n)
+        .map(|i| {
+            let target = lcg(&mut s) < 0.5;
+            let f = shifts
+                .iter()
+                .map(|&sh| noise(&mut s) + if target { sh } else { 0.0 })
+                .collect();
+            (if target { 1 } else { -1 }, i as u64 + 1, f)
+        })
+        .collect()
+}
+
+fn pool(threads: usize) -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+}
+
+fn rows_of(res: &CvResult, f: usize, train_rows: bool) -> Vec<usize> {
+    (0..res.fold.len())
+        .filter(|&i| (res.fold[i] as usize == f) != train_rows)
+        .collect()
+}
+
+fn decoys(pin: &Pin, rows: &[usize]) -> Vec<bool> {
+    rows.iter().map(|&i| pin.meta[i].label < 0).collect()
+}
+
+fn bits(v: &[f64]) -> Vec<u64> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+#[test]
+fn cv_deterministic_across_threads() {
+    let (_d, pin) = load(&synthetic(900, &[0.9, 0.6, 0.0, 0.3], 11), None);
+    let norm = stdv(&pin);
+    let cfg = CvConfig::default();
+    let a = train(&pin, &norm, &cfg, &pool(1));
+    let b = train(&pin, &norm, &cfg, &pool(8));
+    assert_eq!(a.fold, b.fold);
+    for f in 0..3 {
+        assert_eq!(bits(&a.w_norm[f]), bits(&b.w_norm[f]));
+        assert_eq!(bits(&a.w_raw[f]), bits(&b.w_raw[f]));
+    }
+    assert_eq!(bits(&a.test_scores), bits(&b.test_scores));
+    assert!(a.test_scores.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn cv_grid_tie_picks_later_pair() {
+    let (_d, pin) = load(&synthetic(600, &[12.0, 0.0, 0.0], 5), None);
+    let norm = stdv(&pin);
+    let p = pool(4);
+    let cfg = |cpos: Vec<f64>| CvConfig {
+        iterations: 1,
+        cpos,
+        cfrac: vec![1.0],
+        ..CvConfig::default()
+    };
+    let both = train(&pin, &norm, &cfg(vec![10.0, 0.1]), &p);
+    let early = train(&pin, &norm, &cfg(vec![10.0]), &p);
+    let late = train(&pin, &norm, &cfg(vec![0.1]), &p);
+    for f in 0..3 {
+        let tr = rows_of(&both, f, true);
+        let dec = decoys(&pin, &tr);
+        let targets = dec.iter().filter(|&&d| !d).count();
+        for r in [&early, &late] {
+            let s = score(&pin.rows, &tr, &r.w_norm[f], Some(&norm));
+            assert_eq!(count_at(&tdc_q(&s, &dec, true), &dec, 0.01), targets);
+        }
+        assert_ne!(bits(&early.w_norm[f]), bits(&late.w_norm[f]));
+        assert_eq!(bits(&both.w_norm[f]), bits(&late.w_norm[f]));
+    }
+}
+
+fn twins(n: usize) -> Vec<(i8, u64, Vec<f64>)> {
+    let mut s = 3u64;
+    let mut rows = Vec::new();
+    for i in 0..n {
+        let f: Vec<f64> = (0..3).map(|_| noise(&mut s)).collect();
+        rows.push((1, 2 * i as u64 + 1, f.clone()));
+        rows.push((-1, 2 * i as u64 + 2, f));
+    }
+    rows
+}
+
+#[test]
+fn init_direction_falls_back_to_default() {
+    let p = pool(2);
+    let all = |pin: &Pin| (0..pin.meta.len()).collect::<Vec<usize>>();
+
+    let (_d, pin) = load(&twins(200), Some(&[0.0, 1.5, -2.0]));
+    let norm = stdv(&pin);
+    assert_eq!(
+        init_direction(&pin, &norm, &all(&pin), 0.01),
+        vec![0.0, 1.5, -2.0, 0.0]
+    );
+    let res = train(&pin, &norm, &CvConfig::default(), &p);
+    for f in 0..3 {
+        assert_eq!(res.w_norm[f], vec![0.0, 1.5, -2.0, 0.0]);
+        assert!(res.w_raw[f].iter().all(|v| v.is_finite()));
+    }
+    assert!(res.test_scores.iter().all(|s| s.is_finite()));
+
+    let (_d2, pin) = load(&twins(200), None);
+    let norm = stdv(&pin);
+    assert_eq!(
+        init_direction(&pin, &norm, &all(&pin), 0.01),
+        vec![-1.0, 0.0, 0.0, 0.0]
+    );
+    let res = train(&pin, &norm, &CvConfig::default(), &p);
+    for f in 0..3 {
+        assert_eq!(res.w_norm[f][..3], [-1.0, 0.0, 0.0]);
+        assert!(res.w_norm[f][3].is_finite());
+    }
+    for i in 0..pin.meta.len() {
+        let s = score(&pin.rows, &[i], &res.w_norm[0], Some(&norm))[0];
+        assert_eq!(res.test_scores[i].to_bits(), s.to_bits());
+    }
+}
+
+#[test]
+fn init_direction_picks_best_feature_with_sign() {
+    let (_d, pin) = load(&synthetic(600, &[0.0, -3.0, 1.0], 9), None);
+    let norm = stdv(&pin);
+    let all: Vec<usize> = (0..pin.meta.len()).collect();
+    assert_eq!(
+        init_direction(&pin, &norm, &all, 0.01),
+        vec![0.0, -1.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn cv_improves_over_init() {
+    let (_d, pin) = load(&synthetic(1200, &[2.5, 0.0, 0.0], 21), None);
+    let norm = stdv(&pin);
+    let cfg = CvConfig::default();
+    let res = train(&pin, &norm, &cfg, &pool(4));
+    let mut init_pos = 0;
+    let mut trained_pos = 0;
+    let mut moved = false;
+    for f in 0..3 {
+        let tr = rows_of(&res, f, true);
+        let te = rows_of(&res, f, false);
+        let dec = decoys(&pin, &te);
+        let w0 = init_direction(&pin, &norm, &tr, cfg.initial_selection_fdr);
+        let s0 = score(&pin.rows, &te, &w0, Some(&norm));
+        init_pos += count_at(&tdc_q(&s0, &dec, false), &dec, cfg.test_fdr);
+        let s1: Vec<f64> = te.iter().map(|&i| res.test_scores[i]).collect();
+        trained_pos += count_at(&tdc_q(&s1, &dec, false), &dec, cfg.test_fdr);
+        moved |= res.w_norm[f][..3] != w0[..3];
+    }
+    assert!(init_pos > 0);
+    assert!(trained_pos >= init_pos, "{trained_pos} < {init_pos}");
+    assert!(moved);
+}
+
+#[test]
+fn mfn_finite_with_one_class() {
+    let mut s = 17u64;
+    let mut data = Vec::new();
+    for _ in 0..40 {
+        data.push(noise(&mut s));
+        data.push(noise(&mut s));
+        data.push(1.0);
+    }
+    let x = Rows {
+        data,
+        nrows: 40,
+        ncols: 3,
+    };
+    let all: Vec<usize> = (0..40).collect();
+    let neg_only = l2_svm_mfn(&x, &[], &all, 1.0, 1.0, &MfnOpts::default());
+    let pos_only = l2_svm_mfn(&x, &all, &[], 1.0, 1.0, &MfnOpts::default());
+    assert!(neg_only.iter().all(|v| v.is_finite()), "{neg_only:?}");
+    assert!(pos_only.iter().all(|v| v.is_finite()), "{pos_only:?}");
+    assert!(neg_only[2] < 0.0 && pos_only[2] > 0.0);
+}

@@ -1,7 +1,8 @@
 # CI benchmarks
 
 Behind the [CI / benchmarks page](https://andes.quantms.org/ci/). `.github/workflows/benchmark.yml`
-runs this on every push to `main` and appends one JSON line per dataset to `results.jsonl` on the
+runs this after each merge to `main` (never on a pull request) and once a week, and appends one
+JSON line per dataset to `results.jsonl` on the
 `benchmarks` branch; the page reads that file in the browser, so new results need no site rebuild.
 
 | file | what |
@@ -32,7 +33,7 @@ is the reference. Run it with the workflow's `datasets` input, then add it to th
 
 **Runner:** set the repo variable `BENCH_RUNNER` (e.g. `["self-hosted","benchmark"]`) and
 `BENCH_DATA` (a persistent data directory) to use a dedicated machine; runtime and memory are
-only comparable on one machine. The default hosted runner (4 vCPU, 16 GB) runs the single-run
-sets on each push (`BENCH_DATASETS`), and `proteobench-astral` (6 runs, 15.5 GB) once a week
-(`BENCH_WEEKLY_DATASETS`), downloaded each time. On a self-hosted runner, add
-`proteobench-astral` to `BENCH_DATASETS` to run it on every push.
+only comparable on one machine. The default hosted runner (4 vCPU, 16 GB) runs TMT and UPS1
+after each merge (`BENCH_DATASETS`, 5 min of benchmark after the build on an 8-thread laptop, more on 4 vCPU), and Astral plus
+`proteobench-astral` (6 runs, 15.5 GB) once a week (`BENCH_WEEKLY_DATASETS`). On a self-hosted
+runner, move sets to `BENCH_DATASETS` to run them after each merge.

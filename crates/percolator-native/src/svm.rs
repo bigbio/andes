@@ -15,7 +15,7 @@ impl Rows {
         for r in 0..idx.len() {
             data[r * ncols + nf] = 1.0;
         }
-        if !idx.is_empty() && !store.is_empty() {
+        if !idx.is_empty() && nf > 0 {
             let mut order: Vec<usize> = (0..idx.len()).collect();
             order.sort_by_key(|&p| idx[p]);
             let mut next = 0usize;
@@ -35,6 +35,13 @@ impl Rows {
                     next += 1;
                 }
             });
+            assert_eq!(
+                next,
+                order.len(),
+                "Rows::gather: row {} not in a store of {} rows",
+                idx[order[next.min(order.len() - 1)]],
+                store.len()
+            );
         }
         Rows {
             data,

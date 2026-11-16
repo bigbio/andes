@@ -111,3 +111,16 @@ fn spilled_store_equals_ram_store() {
     drop(b);
     assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn rejects_non_finite_feature_values() {
+    let d = tempfile::tempdir().unwrap();
+    for bad in ["nan", "inf", "-inf", "1e300"] {
+        let text = PIN.replace("\t0.25\t3\t4\t", &format!("\t0.25\t{bad}\t4\t"));
+        let p = write(d.path(), "bad.pin", &text);
+        let err = read_pin(&p, ram(d.path())).err().unwrap();
+        assert!(err.contains("line 4"), "{err}");
+        assert!(err.contains("column 8"), "{err}");
+        assert!(err.contains("f2"), "{err}");
+    }
+}

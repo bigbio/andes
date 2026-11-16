@@ -124,9 +124,17 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         };
         for (slot, &i) in row.iter_mut().zip(&cols.features) {
             let cell = cells.get(i).map(|s| s.trim()).unwrap_or("");
-            *slot = cell
-                .parse::<f32>()
+            let v = cell
+                .parse::<f64>()
                 .map_err(|_| format!("line {lineno}: bad value '{cell}' in column {}", i + 1))?;
+            if !v.is_finite() || !(v as f32).is_finite() {
+                return Err(format!(
+                    "line {lineno}: non-finite feature value '{cell}' in column {} ({})",
+                    i + 1,
+                    hcells[i].trim()
+                ));
+            }
+            *slot = v as f32;
         }
         let file_idx = match cols.file {
             Some(i) => {

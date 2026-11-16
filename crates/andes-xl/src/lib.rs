@@ -83,7 +83,9 @@ pub mod decoy;
 pub mod doublet;
 pub mod fdr;
 pub mod pair;
-pub mod reagents;
+/// The reagent table, kept in `model` so that `--variable-mods` resolves
+/// monolinks by name.
+pub use model::xl_reagents as reagents;
 pub mod rollup;
 pub mod sites;
 pub mod spec;

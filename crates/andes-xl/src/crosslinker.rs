@@ -9,7 +9,7 @@ pub const ISOTOPE_SPACING: f64 = 1.003_354_835;
 pub const PROTON: f64 = 1.007_276_49;
 
 /// Most stub forms a cleavable linker can have.
-pub const MAX_STUBS: usize = 4;
+pub const MAX_STUBS: usize = model::xl_reagents::MAX_STUBS;
 /// Number of [`LinkForm`] slots: the stubs, then the intact form.
 pub const N_FORMS: usize = MAX_STUBS + 1;
 

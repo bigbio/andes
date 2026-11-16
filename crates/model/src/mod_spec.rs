@@ -168,7 +168,8 @@ impl ModDecl {
             }
             (None, Some(name)) => {
                 let u = lookup(db, name, &item)?;
-                (u.name.clone(), u.mono_mass, Some(u.accession.clone()))
+                let accession = (!u.accession.is_empty()).then(|| u.accession.clone());
+                (u.name.clone(), u.mono_mass, accession)
             }
             (None, None) => return Err(ModSpecError::NoNameOrMass { item }),
         };
@@ -349,12 +350,16 @@ pub fn parse_sites(
     Ok(sites)
 }
 
-/// The UNIMOD record `token` names: an accession, a name, then an alias.
-fn lookup<'a>(db: &'a UnimodDb, token: &str, item: &str) -> Result<&'a UnimodMod, ModSpecError> {
+/// The record `token` names: a UNIMOD accession, name or alias, then a
+/// crosslinker monolink `<reagent>:<quencher>` ([`crate::xl_reagents::monolink`],
+/// which has an empty accession when UNIMOD lacks the reagent).
+fn lookup(db: &UnimodDb, token: &str, item: &str) -> Result<UnimodMod, ModSpecError> {
     match db.resolve(token) {
-        Ok(Some(m)) => Ok(m),
+        Ok(Some(m)) => Ok(m.clone()),
         Ok(None) => db
             .resolve_alias(token)
+            .cloned()
+            .or_else(|| crate::xl_reagents::monolink(db, token))
             .ok_or_else(|| ModSpecError::UnknownName {
                 item: item.to_string(),
                 name: token.trim().to_string(),
@@ -814,5 +819,26 @@ xref: delta_mono_mass "6.020129"
             assert_eq!(m.name, name, "{list}");
             assert!((m.mass_delta - mass).abs() < 1e-6, "{list}: {}", m.mass_delta);
         }
+    }
+
+    #[test]
+    fn crosslinker_monolinks_resolve_by_name() {
+        let m = parse_mod_list(
+            "DSBSO:water (K), DSSO:water (K), PhoX:ammonia (Protein N-term)",
+            false,
+        )
+        .unwrap();
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].name, "DSBSO:water");
+        assert!(m[0].accession.is_none());
+        assert!((m[0].mass_delta - 326.049_396).abs() < 1e-5);
+        // A monolink UNIMOD has is written out under its UNIMOD record.
+        assert_eq!(m[1].name, "Xlink:DSSO[176]");
+        assert_eq!(m[1].accession.as_deref(), Some("UNIMOD:1878"));
+        assert_eq!(m[2].location, ModLocation::ProtNTerm);
+        let e = parse_mod_list("DSBSO:acid (K)", false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown modification"), "{e}");
     }
 }

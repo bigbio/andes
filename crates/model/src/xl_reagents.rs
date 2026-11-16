@@ -1,4 +1,6 @@
-//! The crosslinking reagents andes knows by name.
+//! The crosslinking reagents andes knows by name: the crosslinker table of
+//! `--xl` (resolved in the `andes-xl` crate) and the monolinks that
+//! `--variable-mods` accepts by name ([`monolink`]).
 //!
 //! Every mass of a reagent (intact cross-link, MS-cleavage stubs, quenched
 //! monolinks) is an elemental composition. When UNIMOD has the record
@@ -12,6 +14,9 @@
 //! default to Lys and the protein N-terminus; Ser, Thr and Tyr, which they
 //! also acylate at a lower rate, are opt-in (`DSSO (K, S, T, Y, Protein
 //! N-term)`).
+
+/// Most MS-cleavage stubs a reagent can have.
+pub const MAX_STUBS: usize = 4;
 
 /// One mass of a reagent.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,6 +99,7 @@ pub const REAGENTS: &[Reagent] = &[
         sites: NHS,
         source: "Mueller et al. 2010, Anal Chem 82:6958; UNIMOD",
     },
+    // The acid-cleaved form: enrichment cuts the azide tag off before MS.
     Reagent {
         name: "DSBSO",
         aliases: &["Azide-A-DSBSO"],
@@ -300,6 +306,30 @@ pub fn owner_of_record(unimod_name: &str) -> Option<(&'static Reagent, &'static 
     })
 }
 
+/// The monolink `token` names, written `<reagent>:<quencher>` (`DSBSO:water`,
+/// `PhoX:tris`, `DSSO:ammonia`; any case, reagent aliases accepted), as a
+/// modification record: the UNIMOD record when UNIMOD has it, otherwise the
+/// name `<Reagent>:<quencher>` with the mass of its composition and no
+/// accession. `None` when `token` is not of that form or names no monolink of
+/// the table.
+pub fn monolink(db: &crate::unimod::UnimodDb, token: &str) -> Option<crate::unimod::UnimodMod> {
+    let (reagent, quencher) = token.trim().split_once(':')?;
+    let r = find(reagent)?;
+    let p = r
+        .monolinks
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(quencher.trim()))?;
+    match p.unimod {
+        Some(name) => db.resolve(name).ok().flatten().cloned(),
+        None => Some(crate::unimod::UnimodMod {
+            accession: String::new(),
+            name: format!("{}:{}", r.name, p.name),
+            mono_mass: composition_mass(p.composition)?,
+            sites: Vec::new(),
+        }),
+    }
+}
+
 /// Every name [`find`] accepts other than UNIMOD records, for suggestions.
 pub fn names() -> impl Iterator<Item = &'static str> {
     REAGENTS
@@ -340,8 +370,8 @@ pub fn composition_mass(composition: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
-    fn db() -> &'static model::unimod::UnimodDb {
-        let db = model::unimod::bundled();
+    fn db() -> &'static crate::unimod::UnimodDb {
+        let db = crate::unimod::bundled();
         assert!(!db.is_empty(), "bundled UNIMOD table not found");
         db
     }
@@ -461,7 +491,7 @@ mod tests {
                     r.name
                 );
             }
-            assert!(r.stubs.len() <= crate::crosslinker::MAX_STUBS);
+            assert!(r.stubs.len() <= MAX_STUBS);
         }
     }
 
@@ -527,5 +557,25 @@ mod tests {
         assert!((composition_mass("H(-2) O(-1)").unwrap() + 18.010_565).abs() < 1e-6);
         assert_eq!(composition_mass("Xx(2)"), None);
         assert_eq!(composition_mass("H(2"), None);
+    }
+
+    #[test]
+    fn monolinks_resolve_by_reagent_and_quencher() {
+        let db = db();
+        let m = monolink(db, "dsbso:WATER").unwrap();
+        assert_eq!(m.name, "DSBSO:water");
+        assert!(m.accession.is_empty());
+        assert!((m.mono_mass - (308.038_831 + 18.010_565)).abs() < 1e-5);
+        let m = monolink(db, "PhoX:tris").unwrap();
+        assert_eq!(m.name, "PhoX:tris");
+        // A UNIMOD-backed monolink is its UNIMOD record.
+        let m = monolink(db, "BS3:water").unwrap();
+        assert_eq!(
+            (m.name.as_str(), m.accession.as_str()),
+            ("Xlink:DSS[156]", "UNIMOD:1020")
+        );
+        assert!(monolink(db, "DSSO:acid").is_none());
+        assert!(monolink(db, "Oxidation").is_none());
+        assert!(monolink(db, "NoSuch:water").is_none());
     }
 }

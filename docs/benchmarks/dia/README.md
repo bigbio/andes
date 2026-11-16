@@ -197,6 +197,14 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   1798 / 1819 against 1793 / 1744, with the raw01 seed spread narrowing from 104 to 27. Kept
   (`dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain`, 10 ppm). The slice is too small to rank features
   (±50 IDs between near-identical runs); judge on full raws and several Percolator seeds.
+- **andes-ms2 collision energy** (run-specific fragment intensity by conditioning). The run's
+  metadata gives NCE 25 (Exploris family). `andes --dia --rescore` output (seed 42) at NCE
+  19 / 22 / 25 / 28 / 31: 1652 / 1803, 1633 / 1759, 1622 / 1792, 1543 / 1774, 1580 / 1711; the
+  Astral instrument class gave 1628 / 1415. Over 5 seeds paired with NCE 25 (1666 / 1747):
+  NCE 16 1694 / 1757 (raw01 higher on 5 of 5, raw02 on 2 of 5), NCE 19 1679 / 1760 (3 / 1 of 5),
+  NCE 22 1665 / 1784 (3 / 3 of 5). Agreement with anchor spectra rises as NCE falls (median spectral
+  angle 0.721 / 0.750 / 0.770 at NCE 28 / 25 / 22), but the ID gain is at most +28 and inside seed
+  noise on raw02. Not shipped; a per-run NCE search on anchor agreement is not worth its cost.
 
 Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
 best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's

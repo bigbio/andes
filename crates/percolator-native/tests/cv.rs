@@ -93,8 +93,8 @@ fn cv_deterministic_across_threads() {
     let (_d, pin) = load(&synthetic(900, &[0.9, 0.6, 0.0, 0.3], 11), None);
     let norm = stdv(&pin);
     let cfg = CvConfig::default();
-    let a = train(&pin, &norm, &cfg, &pool(1));
-    let b = train(&pin, &norm, &cfg, &pool(8));
+    let a = train(&pin, &norm, &cfg, &pool(1)).unwrap();
+    let b = train(&pin, &norm, &cfg, &pool(8)).unwrap();
     assert_eq!(a.fold, b.fold);
     for (x, y) in a
         .w_norm
@@ -119,9 +119,9 @@ fn cv_grid_tie_picks_later_pair() {
         cfrac: vec![1.0],
         ..CvConfig::default()
     };
-    let both = train(&pin, &norm, &cfg(vec![10.0, 0.1]), &p);
-    let early = train(&pin, &norm, &cfg(vec![10.0]), &p);
-    let late = train(&pin, &norm, &cfg(vec![0.1]), &p);
+    let both = train(&pin, &norm, &cfg(vec![10.0, 0.1]), &p).unwrap();
+    let early = train(&pin, &norm, &cfg(vec![10.0]), &p).unwrap();
+    let late = train(&pin, &norm, &cfg(vec![0.1]), &p).unwrap();
     for f in 0..3 {
         let tr = rows_of(&both, f, true);
         let dec = decoys(&pin, &tr);
@@ -146,18 +146,20 @@ fn twins(n: usize) -> Vec<(i8, u64, Vec<f64>)> {
     rows
 }
 
-#[test]
-fn init_direction_falls_back_to_default() {
-    let p = pool(2);
-    let all = |pin: &Pin| (0..pin.meta.len()).collect::<Vec<usize>>();
+fn all_rows(pin: &Pin) -> Vec<usize> {
+    (0..pin.meta.len()).collect()
+}
 
+#[test]
+fn pin_direction_has_priority_and_overrule_keeps_training() {
+    let p = pool(2);
     let (_d, pin) = load(&twins(200), Some(&[0.0, 1.5, -2.0]));
     let norm = stdv(&pin);
     assert_eq!(
-        init_direction(&pin, &norm, &all(&pin), 0.01),
+        init_direction(&pin, &norm, &all_rows(&pin), 0.01, false).unwrap(),
         vec![0.0, 1.5, -2.0, 0.0]
     );
-    let res = train(&pin, &norm, &CvConfig::default(), &p);
+    let res = train(&pin, &norm, &CvConfig::default(), &p).unwrap();
     for (wn, wr) in res.w_norm.iter().zip(&res.w_raw) {
         assert_eq!(*wn, vec![0.0, 1.5, -2.0, 0.0]);
         assert!(wr.iter().all(|v| v.is_finite()));
@@ -167,17 +169,49 @@ fn init_direction_falls_back_to_default() {
     let (_d2, pin) = load(&twins(200), None);
     let norm = stdv(&pin);
     assert_eq!(
-        init_direction(&pin, &norm, &all(&pin), 0.01),
+        init_direction(&pin, &norm, &all_rows(&pin), 0.01, true).unwrap(),
         vec![-1.0, 0.0, 0.0, 0.0]
     );
-    let res = train(&pin, &norm, &CvConfig::default(), &p);
+    let cfg = CvConfig {
+        overrule: true,
+        ..CvConfig::default()
+    };
+    let res = train(&pin, &norm, &cfg, &p).unwrap();
     for wn in &res.w_norm {
-        assert_eq!(wn[..3], [-1.0, 0.0, 0.0]);
-        assert!(wn[3].is_finite());
+        assert!(wn.iter().all(|v| v.is_finite()));
     }
     for i in 0..pin.meta.len() {
         let s = score(&pin.rows, &[i], &res.w_norm[0], Some(&norm))[0];
         assert_eq!(res.test_scores[i].to_bits(), s.to_bits());
+    }
+}
+
+#[test]
+fn no_separating_feature_is_an_error() {
+    let (_d, pin) = load(&twins(200), None);
+    let norm = stdv(&pin);
+    let e = init_direction(&pin, &norm, &all_rows(&pin), 0.01, false).unwrap_err();
+    assert!(e.contains("cannot find an initial direction"), "{e}");
+    let Err(e) = train(&pin, &norm, &CvConfig::default(), &pool(2)) else {
+        panic!("expected an error");
+    };
+    assert!(e.contains("cannot find an initial direction"), "{e}");
+}
+
+#[test]
+fn zero_decoys_or_targets_is_an_error() {
+    let rows = synthetic(300, &[2.0, 0.0, 0.0], 4);
+    for (label, word) in [(1i8, "decoy"), (-1i8, "target")] {
+        let one: Vec<(i8, u64, Vec<f64>)> = rows
+            .iter()
+            .map(|(_, scan, f)| (label, *scan, f.clone()))
+            .collect();
+        let (_d, pin) = load(&one, None);
+        let norm = stdv(&pin);
+        let Err(e) = train(&pin, &norm, &CvConfig::default(), &pool(2)) else {
+            panic!("expected an error");
+        };
+        assert_eq!(e, format!("Error: no {word} PSMs were provided."));
     }
 }
 
@@ -187,7 +221,7 @@ fn init_direction_picks_best_feature_with_sign() {
     let norm = stdv(&pin);
     let all: Vec<usize> = (0..pin.meta.len()).collect();
     assert_eq!(
-        init_direction(&pin, &norm, &all, 0.01),
+        init_direction(&pin, &norm, &all, 0.01, false).unwrap(),
         vec![0.0, -1.0, 0.0, 0.0]
     );
 }
@@ -197,7 +231,7 @@ fn cv_improves_over_init() {
     let (_d, pin) = load(&synthetic(1200, &[2.5, 0.0, 0.0], 21), None);
     let norm = stdv(&pin);
     let cfg = CvConfig::default();
-    let res = train(&pin, &norm, &cfg, &pool(4));
+    let res = train(&pin, &norm, &cfg, &pool(4)).unwrap();
     let (init_pos, trained_pos, _) = init_and_trained(&pin, &res, &cfg);
     assert!(init_pos > 0);
     assert!(trained_pos >= init_pos, "{trained_pos} < {init_pos}");
@@ -208,7 +242,7 @@ fn cv_training_combines_features() {
     let (_d, pin) = load(&synthetic(3000, &[1.2, 1.2, 0.0], 23), None);
     let norm = stdv(&pin);
     let cfg = CvConfig::default();
-    let res = train(&pin, &norm, &cfg, &pool(4));
+    let res = train(&pin, &norm, &cfg, &pool(4)).unwrap();
     let (init_pos, trained_pos, moved) = init_and_trained(&pin, &res, &cfg);
     assert!(trained_pos > init_pos, "{trained_pos} <= {init_pos}");
     assert!(moved);
@@ -223,7 +257,7 @@ fn init_and_trained(pin: &Pin, res: &CvResult, cfg: &CvConfig) -> (usize, usize,
         let tr = rows_of(res, f, true);
         let te = rows_of(res, f, false);
         let dec = decoys(pin, &te);
-        let w0 = init_direction(pin, &norm, &tr, cfg.initial_selection_fdr);
+        let w0 = init_direction(pin, &norm, &tr, cfg.initial_selection_fdr, false).unwrap();
         let s0 = score(&pin.rows, &te, &w0, Some(&norm));
         init_pos += count_at(&tdc_q(&s0, &dec, false), &dec, cfg.test_fdr);
         let s1: Vec<f64> = te.iter().map(|&i| res.test_scores[i]).collect();

@@ -62,17 +62,25 @@ fn pin_direction(pin: &Pin) -> Option<&[f64]> {
         .filter(|d| d.iter().any(|&v| v != 0.0))
 }
 
-pub fn init_direction(pin: &Pin, norm: &Norm, rows: &[usize], fdr: f64) -> Vec<f64> {
+const NO_DIRECTION: &str = "Error in the input data: cannot find an initial direction with positive training examples. Consider setting/raising the initial training FDR threshold (--train-fdr-initial). Terminating.";
+
+pub fn init_direction(
+    pin: &Pin,
+    norm: &Norm,
+    rows: &[usize],
+    fdr: f64,
+    overrule: bool,
+) -> Result<Vec<f64>, String> {
     let nf = pin.rows.nfeat();
     let mut w = vec![0.0f64; nf + 1];
     if let Some(d) = pin_direction(pin) {
         for (wi, &di) in w.iter_mut().zip(d) {
             *wi = di;
         }
-        return w;
+        return Ok(w);
     }
     if nf == 0 {
-        return w;
+        return Ok(w);
     }
     let x = Rows::gather(&pin.rows, norm, rows);
     let decoy: Vec<bool> = rows.iter().map(|&i| pin.meta[i].label < 0).collect();
@@ -99,10 +107,13 @@ pub fn init_direction(pin: &Pin, norm: &Norm, rows: &[usize], fdr: f64) -> Vec<f
             }
         }
     }
-    if let Some((_, j, low)) = best {
+    if let Some((p, j, low)) = best {
+        if p == 0 && !overrule {
+            return Err(NO_DIRECTION.to_string());
+        }
         w[j] = if low { -1.0 } else { 1.0 };
     }
-    w
+    Ok(w)
 }
 
 fn dot(row: &[f64], w: &[f64]) -> f64 {
@@ -150,11 +161,16 @@ fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) ->
     count_at(&tdc_q(s, decoy, skip_decoys_plus_one), decoy, fdr)
 }
 
-pub fn train(pin: &Pin, norm: &Norm, cfg: &CvConfig, pool: &rayon::ThreadPool) -> CvResult {
+pub fn train(
+    pin: &Pin,
+    norm: &Norm,
+    cfg: &CvConfig,
+    pool: &rayon::ThreadPool,
+) -> Result<CvResult, String> {
     pool.install(|| train_in_pool(pin, norm, cfg))
 }
 
-fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> CvResult {
+fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, String> {
     let n = pin.meta.len();
     let nf = pin.rows.nfeat();
     let fold = folds_by_spectrum(&pin.meta, FOLDS, cfg.seed);
@@ -171,8 +187,14 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> CvResult {
             }
         })
         .collect();
-    let targets = is_decoy.iter().filter(|&&d| !d).count() as f64;
-    let ratio = targets / (n as f64 - targets);
+    let targets = is_decoy.iter().filter(|&&d| !d).count();
+    if targets == 0 {
+        return Err("Error: no target PSMs were provided.".to_string());
+    }
+    if targets == n {
+        return Err("Error: no decoy PSMs were provided.".to_string());
+    }
+    let ratio = targets as f64 / (n - targets) as f64;
     let pairs: Vec<(usize, f64, f64)> = (0..FOLDS)
         .flat_map(|f| {
             cfg.cpos
@@ -185,8 +207,16 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> CvResult {
 
     let init: Vec<Vec<f64>> = folds
         .iter()
-        .map(|fd| init_direction(pin, norm, &fd.train, cfg.initial_selection_fdr))
-        .collect();
+        .map(|fd| {
+            init_direction(
+                pin,
+                norm,
+                &fd.train,
+                cfg.initial_selection_fdr,
+                cfg.overrule,
+            )
+        })
+        .collect::<Result<_, _>>()?;
     let init_positives: usize = folds
         .iter()
         .zip(&init)
@@ -273,10 +303,10 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> CvResult {
             test_scores[i] = v;
         }
     }
-    CvResult {
+    Ok(CvResult {
         w_raw: std::array::from_fn(|f| raw_weights(norm, &w[f])),
         w_norm: std::array::from_fn(|f| w[f].clone()),
         test_scores,
         fold,
-    }
+    })
 }

@@ -1,8 +1,8 @@
 //! Crosslinking (XL-MS) search building blocks for andes.
 //!
 //! This crate holds the scorer-free parts of the crosslink search: the
-//! crosslinker spec and reagent table ([`spec`], [`reagents`]; masses from
-//! UNIMOD or cited compositions), linker chemistry, the reporter-doublet
+//! crosslinker spec from `--xl`, the config file and the SDRF ([`spec`]; the
+//! reagents come from `resources/crosslinkers.yaml`, [`reagents`]), linker chemistry, the reporter-doublet
 //! detector, link-site rules, pair mass lookup, decoy classes and pair FDR.
 //! Peptide scoring lives in `search::xl_search`, which scores every peptide
 //! with the andes core scorer. The examples below use DSSO; another
@@ -95,8 +95,8 @@ pub mod decoy;
 pub mod doublet;
 pub mod fdr;
 pub mod pair;
-/// The reagent table, kept in `model` so that `--variable-mods` resolves
-/// monolinks by name.
+/// The reagent table (`resources/crosslinkers.yaml`), loaded in `model` so
+/// that `--variable-mods` resolves monolinks by name.
 pub use model::xl_reagents as reagents;
 pub mod rollup;
 pub mod sites;

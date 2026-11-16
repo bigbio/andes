@@ -418,18 +418,20 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
     Ok(d)
 }
 
-/// The crosslinker of `search.xl`: the CLI string `Name (sites)` or a map.
+/// The crosslinker of `search.xl`: the CLI string `Name (sites)`, a map with
+/// `name` and optional `sites`, or a custom reagent entry with the schema of
+/// `resources/crosslinkers.yaml` (recognised by its `intact` key):
 ///
 /// ```yaml
 /// xl: DSSO (K, S, T, Y, Protein N-term)
-/// # or a linker the reagent table lacks:
+/// # or a reagent the table lacks:
 /// xl:
-///   name: MyLinker          # a label with `mass`; a reagent name without it
-///   mass: 158.003765        # intact cross-link mass in Da
-///   sites: K, Protein N-term   # one end, or `end / end`; optional for a named reagent
-///   stubs: {alkene: 54.010565, thiol: 85.982635, sulfenic: 103.9932}   # MS-cleavable only
-///   doublets: [[alkene, thiol]]   # reporter doublets; optional with exactly two stubs
-///   monolinks: {water: 176.01433}
+///   name: MyLinker
+///   sites: K, Protein N-term          # one end, or `end / end`
+///   intact: {mass: 158.003765}        # or {composition: ...} or {unimod: ...}
+///   stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]
+///   doublets: [[alkene, thiol]]       # reporter doublets, [light, heavy] stub names
+///   monolinks: [{name: water, mass: 176.01433}]
 /// ```
 pub fn xl_linker(
     key: &str,
@@ -438,83 +440,48 @@ pub fn xl_linker(
     use andes_xl::spec::XlDecl;
     use serde_yaml::Value;
     let at = |e: String| format!("{key}: {e}");
-    let decl = match v {
-        Value::String(s) => XlDecl::parse(s).map_err(|e| at(e.to_string()))?,
-        Value::Mapping(map) => xl_decl(map).map_err(at)?,
-        _ => {
-            return Err(at(
-                "expected `Name (sites)` or a map with `name` or `mass`".into()
-            ))
+    let db = model::unimod::bundled();
+    match v {
+        Value::String(s) => XlDecl::parse(s)
+            .and_then(|d| d.resolve(db))
+            .map_err(|e| at(e.to_string())),
+        Value::Mapping(map) if map.contains_key("intact") => {
+            let r: model::xl_reagents::Reagent =
+                serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
+            andes_xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
         }
-    };
-    decl.resolve(model::unimod::bundled())
-        .map_err(|e| at(e.to_string()))
-}
-
-fn xl_decl(map: &serde_yaml::Mapping) -> Result<andes_xl::spec::XlDecl, String> {
-    use serde_yaml::Value;
-    let text = |key: &str, v: &Value| -> Result<String, String> {
-        match v {
-            Value::String(s) => Ok(s.clone()),
-            _ => Err(format!("`{key}` must be a string")),
-        }
-    };
-    // `{name: mass, ...}` in written order.
-    let masses = |key: &str, v: &Value| -> Result<Vec<(String, f64)>, String> {
-        let Value::Mapping(m) = v else {
-            return Err(format!("`{key}` is a map of name: mass"));
-        };
-        m.iter()
-            .map(|(k, v)| {
-                let name = k.as_str().ok_or(format!("`{key}`: names are strings"))?;
-                let mass = v
-                    .as_f64()
-                    .ok_or(format!("`{key}`: `{name}` takes a mass in Da"))?;
-                Ok((name.to_string(), mass))
-            })
-            .collect()
-    };
-    let mut d = andes_xl::spec::XlDecl::default();
-    for (k, v) in map {
-        let key = k.as_str().ok_or("crosslinker keys are strings")?;
-        match key {
-            "name" => d.name = Some(text(key, v)?),
-            "mass" => {
-                d.mass = Some(
-                    v.as_f64()
-                        .ok_or("`mass` is a number (the intact cross-link mass in Da)")?,
-                )
-            }
-            "sites" => d.sites = Some(text(key, v)?),
-            "stubs" => d.stubs = masses(key, v)?,
-            "monolinks" => d.monolinks = masses(key, v)?,
-            "doublets" => {
-                let pairs = v
-                    .as_sequence()
-                    .ok_or("`doublets` is a list of [light, heavy]")?;
-                for p in pairs {
-                    match p.as_sequence().map(Vec::as_slice) {
-                        Some([a, b]) => d.doublets.push((text(key, a)?, text(key, b)?)),
-                        _ => return Err("`doublets`: each is a pair of stub names".into()),
+        Value::Mapping(map) => {
+            let mut name = None;
+            let mut sites = None;
+            for (k, val) in map {
+                let text = || {
+                    val.as_str().map(str::to_string).ok_or_else(|| {
+                        at(format!("`{}` must be a string", k.as_str().unwrap_or("?")))
+                    })
+                };
+                match k.as_str() {
+                    Some("name") => name = Some(text()?),
+                    Some("sites") => sites = Some(text()?),
+                    other => {
+                        return Err(at(format!(
+                            "unknown key `{}` (a named reagent takes name and sites; a custom \
+                             reagent also takes intact, stubs, doublets, monolinks, aliases, \
+                             xlmod, source)",
+                            other.unwrap_or("?")
+                        )))
                     }
                 }
             }
-            other => {
-                return Err(format!(
-                    "unknown key `{other}` (expected name, mass, sites, stubs, doublets, monolinks)"
-                ))
+            let name = name.ok_or_else(|| at("`name` is missing".into()))?;
+            // `name: "DSSO (K)"` carries its sites.
+            let mut d = XlDecl::parse(&name).map_err(|e| at(e.to_string()))?;
+            if sites.is_some() {
+                d.sites = sites;
             }
+            d.resolve(db).map_err(|e| at(e.to_string()))
         }
+        _ => Err(at("expected `Name (sites)` or a map with `name`".into())),
     }
-    // `name: "DSSO (K)"` carries its sites.
-    if d.mass.is_none() && d.sites.is_none() {
-        if let Some(name) = d.name.clone() {
-            let parsed = andes_xl::spec::XlDecl::parse(&name).map_err(|e| e.to_string())?;
-            d.name = parsed.name;
-            d.sites = parsed.sites;
-        }
-    }
-    Ok(d)
 }
 
 /// Apply the YAML config onto the parsed `SearchArgs`, respecting CLI precedence.
@@ -1498,13 +1465,14 @@ glyco:
         assert_eq!(x.ends[0].residues, b"KSTY");
         let a = applied("search:\n  xl: DSSO (K)\n", &["--xl", "DSBU"]).unwrap();
         assert_eq!(a.xl.unwrap().name, "DSBU");
-        let yaml = "search:\n  xl:\n    name: MyLinker\n    mass: 158.003765\n    sites: K, Protein N-term\n    \
-                    stubs: {alkene: 54.010565, thiol: 85.982635, sulfenic: 103.9932}\n    \
-                    doublets: [[alkene, thiol]]\n    monolinks: {water: 176.01433}\n";
+        let yaml = "search:\n  xl:\n    name: MyLinker\n    sites: K, Protein N-term\n    \
+                    intact: {mass: 158.003765}\n    \
+                    stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]\n    \
+                    doublets: [[alkene, thiol]]\n    monolinks: [{name: water, mass: 176.01433}]\n";
         let x = applied(yaml, &[]).unwrap().xl.unwrap();
         assert_eq!(x.name, "MyLinker");
         let c = x.cleavage.unwrap();
-        assert_eq!(c.stubs.len(), 3);
+        assert_eq!(c.stubs.len(), 2);
         assert_eq!(c.doublets, vec![(0, 1)]);
         assert_eq!(x.monolinks.len(), 1);
         let x = applied("search:\n  xl: {name: \"BS3 (K)\"}\n", &[])
@@ -1513,13 +1481,22 @@ glyco:
             .unwrap();
         assert_eq!(x.name, "DSS");
         assert!(!x.ends[0].protein_n_term);
+        let x = applied("search:\n  xl: {name: EDC, sites: K / D}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.ends[1].residues, b"D");
         for (bad, msg) in [
             ("search:\n  xl: DSOS\n", "did you mean DSSO"),
-            ("search:\n  xl: {mass: 100.0}\n", "needs `sites`"),
-            ("search:\n  xl: {name: DSSO, stubs: {a: 1.0}}\n", "need"),
+            ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
+            ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
             (
                 "search:\n  xl: {name: DSSO, sitess: K}\n",
                 "unknown key `sitess`",
+            ),
+            (
+                "search:\n  xl: {name: X, sites: K, intact: {mass: 1.0}, stubz: []}\n",
+                "unknown field `stubz`",
             ),
             ("search:\n  xl: 42\n", "expected `Name (sites)`"),
         ] {

@@ -273,7 +273,7 @@ fn parse_spec_site(s: &str) -> Option<String> {
 /// same way the model store does: prefer `<exe_dir>/resources/<file>`
 /// (packaged release next to the binary), fall back to the compile-time
 /// source tree.
-fn bundled_path(file: &str) -> PathBuf {
+pub(crate) fn bundled_path(file: &str) -> PathBuf {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

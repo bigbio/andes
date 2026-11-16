@@ -1,340 +1,229 @@
-//! The crosslinking reagents andes knows by name: the crosslinker table of
-//! `--xl` (resolved in the `andes-xl` crate) and the monolinks that
-//! `--variable-mods` accepts by name ([`monolink`]).
+//! The crosslinking reagents andes knows by name, loaded from the bundled
+//! `resources/crosslinkers.yaml`: the crosslinker table of `--xl` (resolved
+//! in the `andes-xl` crate) and the monolinks that `--variable-mods` accepts
+//! by name ([`monolink`]).
 //!
-//! Every mass of a reagent (intact cross-link, MS-cleavage stubs, quenched
-//! monolinks) is an elemental composition. When UNIMOD has the record
-//! (`Xlink:<NAME>[<nominal>]`), the record names it and its UNIMOD mass is
-//! the one used; a test checks that each composition gives the UNIMOD mass.
-//! Reagents UNIMOD lacks carry the composition from the cited paper, and their
-//! mass is computed from it.
-//!
-//! Sites are the reagent's usual reactivity, written as in a spec (`K,
-//! Protein N-term`; `end / end` for a heterobifunctional reagent). NHS esters
-//! default to Lys and the protein N-terminus; Ser, Thr and Tyr, which they
-//! also acylate at a lower rate, are opt-in (`DSSO (K, S, T, Y, Protein
-//! N-term)`).
+//! The file holds no code, only chemistry: per reagent its name, aliases,
+//! XLMOD accessions, default sites, and its intact, stub and monolink masses.
+//! Each mass is a UNIMOD record (then the UNIMOD mass is the one used) with its
+//! elemental composition, or a composition alone for a reagent UNIMOD lacks;
+//! a custom reagent of the config file may give a plain `mass`. The schema is
+//! [`Reagent`], shared by the bundled file and the config file.
+
+use std::sync::OnceLock;
+
+use serde::Deserialize;
+
+use crate::unimod::{UnimodDb, UnimodMod};
 
 /// Most MS-cleavage stubs a reagent can have.
 pub const MAX_STUBS: usize = 4;
 
-/// One mass of a reagent.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One mass of a reagent: the intact cross-link, a stub or a monolink.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Part {
     /// Column or display name (a stub's short name, a monolink's quencher).
-    pub name: &'static str,
+    #[serde(default)]
+    pub name: String,
+    /// The UNIMOD record of this mass, if UNIMOD has it.
+    #[serde(default)]
+    pub unimod: Option<String>,
     /// Elemental composition in UNIMOD notation (`H(6) C(6) O(3) S`;
     /// negative counts allowed).
-    pub composition: &'static str,
-    /// The UNIMOD record of this mass, if UNIMOD has it.
-    pub unimod: Option<&'static str>,
+    #[serde(default)]
+    pub composition: Option<String>,
+    /// A mass in Da, for a custom reagent without a composition.
+    #[serde(default)]
+    pub mass: Option<f64>,
 }
 
-/// A crosslinking reagent of the built-in table.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Reagent {
-    /// Canonical name.
-    pub name: &'static str,
-    /// Other names accepted for it.
-    pub aliases: &'static [&'static str],
-    /// The intact cross-link.
-    pub intact: Part,
-    /// MS-cleavage stubs; empty for a non-cleavable reagent.
-    pub stubs: &'static [Part],
-    /// Reporter doublets as `(light, heavy)` stub indices.
-    pub doublets: &'static [(usize, usize)],
-    /// Quenched monolinks.
-    pub monolinks: &'static [Part],
-    /// Default sites, as in a spec.
-    pub sites: &'static str,
-    /// Where the chemistry and masses come from.
-    pub source: &'static str,
-}
-
-const fn p(name: &'static str, composition: &'static str, unimod: Option<&'static str>) -> Part {
-    Part {
-        name,
-        composition,
-        unimod,
+impl Part {
+    /// The mass and UNIMOD accession of this part: the UNIMOD record's mass
+    /// when it names one, else the composition's, else `mass`.
+    pub fn resolve(&self, db: &UnimodDb) -> Result<(f64, Option<String>), String> {
+        if let Some(name) = &self.unimod {
+            return match db.resolve(name) {
+                Ok(Some(rec)) => Ok((rec.mono_mass, Some(rec.accession.clone()))),
+                _ => Err(format!(
+                    "UNIMOD record {name} not found (the bundled UNIMOD table \
+                     resources/unimod.obo could not be read, or lacks it)"
+                )),
+            };
+        }
+        if let Some(c) = &self.composition {
+            return composition_mass(c)
+                .map(|m| (m, None))
+                .ok_or_else(|| format!("bad composition `{c}`"));
+        }
+        match self.mass {
+            Some(m) if m.is_finite() => Ok((m, None)),
+            Some(m) => Err(format!("mass {m} is not a finite number")),
+            None => Err(format!(
+                "`{}` needs a `unimod` record, a `composition` or a `mass`",
+                if self.name.is_empty() {
+                    "intact"
+                } else {
+                    &self.name
+                }
+            )),
+        }
     }
 }
 
-const NHS: &str = "K, Protein N-term";
+/// A crosslinking reagent: one entry of `resources/crosslinkers.yaml`, or a
+/// custom reagent of the config file.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reagent {
+    /// Canonical name.
+    pub name: String,
+    /// Other names accepted for it.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// XLMOD accessions of the reagent and its aliases.
+    #[serde(default)]
+    pub xlmod: Vec<String>,
+    /// Default sites, as in a spec (`K, Protein N-term`; `end / end` for a
+    /// heterobifunctional reagent).
+    #[serde(default)]
+    pub sites: String,
+    /// The intact cross-link.
+    pub intact: Part,
+    /// MS-cleavage stubs; empty for a non-cleavable reagent.
+    #[serde(default)]
+    pub stubs: Vec<Part>,
+    /// Reporter doublets as `[light, heavy]` stub names.
+    #[serde(default)]
+    pub doublets: Vec<[String; 2]>,
+    /// Quenched monolinks, named by quencher.
+    #[serde(default)]
+    pub monolinks: Vec<Part>,
+    /// Where the chemistry and masses come from.
+    #[serde(default)]
+    pub source: Option<String>,
+}
 
-/// The built-in reagents.
-pub const REAGENTS: &[Reagent] = &[
-    // MS-cleavable.
-    Reagent {
-        name: "DSSO",
-        aliases: &[],
-        intact: p("intact", "H(6) C(6) O(3) S", Some("Xlink:DSSO[158]")),
-        stubs: &[
-            p("alkene", "H(2) C(3) O", Some("Xlink:DSSO[54]")),
-            p("thiol", "H(2) C(3) O S", Some("Xlink:DSSO[86]")),
-            p("sulfenic", "H(4) C(3) O(2) S", Some("Xlink:DSSO[104]")),
-        ],
-        doublets: &[(0, 1)],
-        monolinks: &[
-            p("water", "H(8) C(6) O(4) S", Some("Xlink:DSSO[176]")),
-            p("ammonia", "H(9) C(6) N O(3) S", Some("Xlink:DSSO[175]")),
-            p("tris", "H(17) C(10) N O(6) S", Some("Xlink:DSSO[279]")),
-        ],
-        sites: NHS,
-        source: "Kao et al. 2011, Mol Cell Proteomics 10:M110.002212; UNIMOD",
-    },
-    Reagent {
-        name: "DSBU",
-        aliases: &["BuUrBu"],
-        intact: p("intact", "H(12) C(9) N(2) O(3)", Some("Xlink:BuUrBu[196]")),
-        stubs: &[
-            p("Bu", "H(7) C(4) N O", Some("Xlink:BuUrBu[85]")),
-            p("BuUr", "H(5) C(5) N O(2)", Some("Xlink:BuUrBu[111]")),
-        ],
-        doublets: &[(0, 1)],
-        monolinks: &[
-            p("water", "H(14) C(9) N(2) O(4)", Some("Xlink:BuUrBu[214]")),
-            p("ammonia", "H(15) C(9) N(3) O(3)", Some("Xlink:BuUrBu[213]")),
-            p("tris", "H(23) C(13) N(3) O(6)", Some("Xlink:BuUrBu[317]")),
-        ],
-        sites: NHS,
-        source: "Mueller et al. 2010, Anal Chem 82:6958; UNIMOD",
-    },
-    // The acid-cleaved form: enrichment cuts the azide tag off before MS.
-    Reagent {
-        name: "DSBSO",
-        aliases: &["Azide-A-DSBSO"],
-        intact: p("intact", "H(16) C(11) O(6) S(2)", None),
-        stubs: &[
-            p("alkene", "H(2) C(3) O", Some("Xlink:DSSO[54]")),
-            p("thiol", "H(12) C(8) O(4) S(2)", None),
-            p("sulfenic", "H(14) C(8) O(5) S(2)", None),
-        ],
-        doublets: &[(0, 1)],
-        monolinks: &[
-            p("water", "H(18) C(11) O(7) S(2)", None),
-            p("ammonia", "H(19) C(11) N O(6) S(2)", None),
-        ],
-        sites: NHS,
-        source: "Kaake et al. 2014, Mol Cell Proteomics 13:3533; compositions as in \
-                 Matzinger et al. 2020, J Proteome Res 19:2071",
-    },
-    Reagent {
-        name: "CDI",
-        aliases: &["carbonyldiimidazole"],
-        intact: p("intact", "H(-2) C O", None),
-        stubs: &[p("amine", "", None), p("isocyanate", "H(-2) C O", None)],
-        doublets: &[(0, 1)],
-        monolinks: &[],
-        sites: "K, S, T, Y, Protein N-term",
-        source: "Hage et al. 2017, Angew Chem Int Ed 56:14551",
-    },
-    // Non-cleavable, amine-reactive.
-    Reagent {
-        name: "DSS",
-        aliases: &["BS3"],
-        intact: p("intact", "H(10) C(8) O(2)", Some("Xlink:DSS[138]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[
-            p("water", "H(12) C(8) O(3)", Some("Xlink:DSS[156]")),
-            p("ammonia", "H(13) C(8) N O(2)", Some("Xlink:DSS[155]")),
-            p("tris", "H(21) C(12) N O(5)", Some("Xlink:DSS[259]")),
-        ],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "BS2G",
-        aliases: &["DSG"],
-        intact: p("intact", "H(4) C(5) O(2)", Some("Xlink:BS2G[96]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[
-            p("water", "H(6) C(5) O(3)", Some("Xlink:BS2G[114]")),
-            p("ammonia", "H(7) C(5) N O(2)", Some("Xlink:BS2G[113]")),
-            p("tris", "H(15) C(9) N O(5)", Some("Xlink:BS2G[217]")),
-        ],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "EGS",
-        aliases: &["sulfo-EGS"],
-        intact: p("intact", "H(10) C(10) O(6)", Some("Xlink:EGS[226]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[p("water", "H(12) C(10) O(7)", Some("Xlink:EGS[244]"))],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "DST",
-        aliases: &["sulfo-DST"],
-        intact: p("intact", "H(2) C(4) O(4)", Some("Xlink:DST[114]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[p("water", "H(4) C(4) O(5)", Some("Xlink:DST[132]"))],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "DSP",
-        aliases: &["DTSSP"],
-        intact: p("intact", "H(6) C(6) O(2) S(2)", Some("Xlink:DTSSP[174]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[p("water", "H(8) C(6) O(3) S(2)", Some("Xlink:DTSSP[192]"))],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "PhoX",
-        aliases: &["DSPP"],
-        intact: p("intact", "H(3) C(8) O(5) P", None),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[
-            p("water", "H(5) C(8) O(6) P", None),
-            p("ammonia", "H(6) C(8) N O(5) P", None),
-            p("tris", "H(14) C(12) N O(8) P", None),
-        ],
-        sites: NHS,
-        source: "Steigenberger et al. 2019, ACS Cent Sci 5:1514",
-    },
-    Reagent {
-        name: "DMP",
-        aliases: &[],
-        intact: p("intact", "H(10) C(7) N(2)", Some("Xlink:DMP[122]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[
-            p("water", "H(12) C(7) N(2) O", Some("Xlink:DMP[140]")),
-            p("ammonia", "H(13) C(7) N(3)", Some("Xlink:DMP[139]")),
-        ],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "DTBP",
-        aliases: &[],
-        intact: p("intact", "H(8) C(6) N(2) S(2)", Some("Xlink:DTBP[172]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "DFDNB",
-        aliases: &[],
-        intact: p("intact", "C(6) N(2) O(4)", Some("Xlink:DFDNB")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[],
-        sites: NHS,
-        source: "UNIMOD",
-    },
-    // Non-cleavable, other chemistries.
-    Reagent {
-        name: "BMOE",
-        aliases: &[],
-        intact: p("intact", "H(8) C(10) N(2) O(4)", Some("Xlink:BMOE")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[],
-        sites: "C",
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "SMCC",
-        aliases: &["sulfo-SMCC"],
-        intact: p("intact", "H(13) C(12) N O(3)", Some("Xlink:SMCC[219]")),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[p("water", "H(15) C(12) N O(4)", Some("Xlink:SMCC[237]"))],
-        sites: "K, Protein N-term / C",
-        source: "UNIMOD",
-    },
-    Reagent {
-        name: "SDA",
-        aliases: &["sulfo-SDA"],
-        intact: p("intact", "H(6) C(5) O", None),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[p("water", "H(8) C(5) O(2)", None)],
-        sites: "K, S, T, Y, Protein N-term / ACDEFGHIKLMNPQRSTVWY",
-        source: "Belsom et al. 2016, Mol Cell Proteomics 15:1105",
-    },
-    Reagent {
-        name: "EDC",
-        aliases: &["DMTMM"],
-        intact: p("intact", "H(-2) O(-1)", None),
-        stubs: &[],
-        doublets: &[],
-        monolinks: &[],
-        sites: "K, Protein N-term / D, E, Protein C-term",
-        source: "Leitner et al. 2014, Proc Natl Acad Sci USA 111:9455",
-    },
-];
+impl Reagent {
+    /// Whether `name` is this reagent's name or an alias (any case).
+    pub fn is_named(&self, name: &str) -> bool {
+        let n = name.trim();
+        self.name.eq_ignore_ascii_case(n) || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(n))
+    }
+}
 
-/// The reagent named `name`: a canonical name or alias (any case), or the
-/// UNIMOD name or accession of its intact record.
-pub fn find(name: &str) -> Option<&'static Reagent> {
-    let n = name.trim();
-    REAGENTS.iter().find(|r| {
-        r.name.eq_ignore_ascii_case(n)
-            || r.aliases.iter().any(|a| a.eq_ignore_ascii_case(n))
-            || r.intact.unimod.is_some_and(|u| u.eq_ignore_ascii_case(n))
+/// The reagent table.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReagentTable {
+    pub reagents: Vec<Reagent>,
+}
+
+impl ReagentTable {
+    /// Parse a YAML list of [`Reagent`] entries.
+    pub fn parse_yaml(text: &str) -> Result<Self, String> {
+        let reagents: Vec<Reagent> = serde_yaml::from_str(text).map_err(|e| e.to_string())?;
+        Ok(ReagentTable { reagents })
+    }
+
+    /// The reagent named `name`: a name or alias (any case), or the UNIMOD
+    /// name of its intact record.
+    pub fn find(&self, name: &str) -> Option<&Reagent> {
+        let n = name.trim();
+        self.reagents.iter().find(|r| {
+            r.is_named(n)
+                || r.intact
+                    .unimod
+                    .as_deref()
+                    .is_some_and(|u| u.eq_ignore_ascii_case(n))
+        })
+    }
+
+    /// The reagent with XLMOD accession `accession` (`XLMOD:02001`, any case).
+    pub fn find_xlmod(&self, accession: &str) -> Option<&Reagent> {
+        let a = accession.trim();
+        self.reagents
+            .iter()
+            .find(|r| r.xlmod.iter().any(|x| x.eq_ignore_ascii_case(a)))
+    }
+
+    /// The reagent with a monolink or stub record named `unimod_name`, and
+    /// the role of that record (`monolink` or `cleavage stub`).
+    pub fn owner_of_record(&self, unimod_name: &str) -> Option<(&Reagent, &'static str)> {
+        let is = |p: &Part| {
+            p.unimod
+                .as_deref()
+                .is_some_and(|u| u.eq_ignore_ascii_case(unimod_name))
+        };
+        self.reagents.iter().find_map(|r| {
+            if r.monolinks.iter().any(is) {
+                Some((r, "monolink"))
+            } else if r.stubs.iter().any(is) {
+                Some((r, "cleavage stub"))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Every name [`Self::find`] accepts other than UNIMOD records.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.reagents.iter().flat_map(|r| {
+            std::iter::once(r.name.as_str()).chain(r.aliases.iter().map(String::as_str))
+        })
+    }
+}
+
+/// The bundled reagent table (`resources/crosslinkers.yaml`), parsed once.
+/// An unreadable file gives an empty table, so every lookup fails with the
+/// caller's "unknown crosslinker" error; [`bundled_error`] says why.
+pub fn bundled() -> &'static ReagentTable {
+    load().as_ref().unwrap_or_else(|_| {
+        static EMPTY: OnceLock<ReagentTable> = OnceLock::new();
+        EMPTY.get_or_init(ReagentTable::default)
     })
 }
 
-/// The reagent with a monolink or stub record named `unimod_name`, and the
-/// role of that record (`monolink` or `stub`).
-pub fn owner_of_record(unimod_name: &str) -> Option<(&'static Reagent, &'static str)> {
-    let is = |p: &Part| {
-        p.unimod
-            .is_some_and(|u| u.eq_ignore_ascii_case(unimod_name))
-    };
-    REAGENTS.iter().find_map(|r| {
-        if r.monolinks.iter().any(is) {
-            Some((r, "monolink"))
-        } else if r.stubs.iter().any(is) {
-            Some((r, "cleavage stub"))
-        } else {
-            None
-        }
+/// Why the bundled reagent table could not be loaded, if it could not.
+pub fn bundled_error() -> Option<&'static str> {
+    load().as_ref().err().map(String::as_str)
+}
+
+fn load() -> &'static Result<ReagentTable, String> {
+    static TABLE: OnceLock<Result<ReagentTable, String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let path = crate::unimod::bundled_path("crosslinkers.yaml");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        ReagentTable::parse_yaml(&text).map_err(|e| format!("{}: {e}", path.display()))
     })
 }
 
 /// The monolink `token` names, written `<reagent>:<quencher>` (`DSBSO:water`,
 /// `PhoX:tris`, `DSSO:ammonia`; any case, reagent aliases accepted), as a
 /// modification record: the UNIMOD record when UNIMOD has it, otherwise the
-/// name `<Reagent>:<quencher>` with the mass of its composition and no
+/// name `<Reagent>:<quencher>` with the mass of its composition and an empty
 /// accession. `None` when `token` is not of that form or names no monolink of
-/// the table.
-pub fn monolink(db: &crate::unimod::UnimodDb, token: &str) -> Option<crate::unimod::UnimodMod> {
+/// the bundled table.
+pub fn monolink(db: &UnimodDb, token: &str) -> Option<UnimodMod> {
+    monolink_in(bundled(), db, token)
+}
+
+fn monolink_in(table: &ReagentTable, db: &UnimodDb, token: &str) -> Option<UnimodMod> {
     let (reagent, quencher) = token.trim().split_once(':')?;
-    let r = find(reagent)?;
+    let r = table.find(reagent)?;
     let p = r
         .monolinks
         .iter()
         .find(|p| p.name.eq_ignore_ascii_case(quencher.trim()))?;
-    match p.unimod {
+    match &p.unimod {
         Some(name) => db.resolve(name).ok().flatten().cloned(),
-        None => Some(crate::unimod::UnimodMod {
+        None => Some(UnimodMod {
             accession: String::new(),
             name: format!("{}:{}", r.name, p.name),
-            mono_mass: composition_mass(p.composition)?,
+            mono_mass: p.resolve(db).ok()?.0,
             sites: Vec::new(),
         }),
     }
-}
-
-/// Every name [`find`] accepts other than UNIMOD records, for suggestions.
-pub fn names() -> impl Iterator<Item = &'static str> {
-    REAGENTS
-        .iter()
-        .flat_map(|r| std::iter::once(r.name).chain(r.aliases.iter().copied()))
 }
 
 /// Monoisotopic masses of the elements reagent compositions use (AME2020).
@@ -370,10 +259,17 @@ pub fn composition_mass(composition: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
-    fn db() -> &'static crate::unimod::UnimodDb {
+    fn db() -> &'static UnimodDb {
         let db = crate::unimod::bundled();
         assert!(!db.is_empty(), "bundled UNIMOD table not found");
         db
+    }
+
+    fn table() -> &'static ReagentTable {
+        assert_eq!(bundled_error(), None);
+        let t = bundled();
+        assert!(!t.reagents.is_empty());
+        t
     }
 
     fn parts(r: &Reagent) -> impl Iterator<Item = &Part> {
@@ -382,18 +278,51 @@ mod tests {
             .chain(r.monolinks.iter())
     }
 
+    fn mass_of(p: &Part) -> f64 {
+        composition_mass(p.composition.as_deref().expect("composition")).unwrap()
+    }
+
     #[test]
-    fn every_composition_parses() {
-        for r in REAGENTS {
+    fn the_bundled_file_parses_and_every_mass_has_a_composition() {
+        for r in &table().reagents {
+            assert!(!r.sites.is_empty(), "{}: no sites", r.name);
+            assert!(r.source.is_some(), "{}: no source", r.name);
             for p in parts(r) {
+                let c = p.composition.as_deref();
                 assert!(
-                    composition_mass(p.composition).is_some(),
-                    "{} {}: {}",
+                    c.is_some_and(|c| composition_mass(c).is_some()),
+                    "{} {}: composition {c:?}",
                     r.name,
-                    p.name,
-                    p.composition
+                    p.name
+                );
+                assert!(
+                    p.mass.is_none(),
+                    "{} {}: bundled masses are compositions",
+                    r.name,
+                    p.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_reagent_has_unique_xlmod_accessions_and_names() {
+        let mut acc = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        for r in &table().reagents {
+            assert!(!r.xlmod.is_empty(), "{}: no XLMOD accession", r.name);
+            for a in &r.xlmod {
+                assert!(
+                    a.strip_prefix("XLMOD:")
+                        .is_some_and(|n| n.len() == 5 && n.bytes().all(|b| b.is_ascii_digit())),
+                    "{}: bad accession {a}",
+                    r.name
+                );
+                assert!(acc.insert(a.clone()), "duplicate XLMOD accession {a}");
+            }
+        }
+        for n in table().names() {
+            assert!(names.insert(n.to_ascii_lowercase()), "duplicate name {n}");
         }
     }
 
@@ -401,14 +330,14 @@ mod tests {
     fn every_unimod_backed_mass_matches_its_composition() {
         let db = db();
         let mut checked = 0;
-        for r in REAGENTS {
+        for r in &table().reagents {
             for p in parts(r) {
-                let Some(name) = p.unimod else { continue };
+                let Some(name) = &p.unimod else { continue };
                 let rec =
                     db.resolve(name).ok().flatten().unwrap_or_else(|| {
                         panic!("{} {}: no UNIMOD record {name}", r.name, p.name)
                     });
-                let m = composition_mass(p.composition).unwrap();
+                let m = mass_of(p);
                 assert!(
                     (rec.mono_mass - m).abs() < 2e-5,
                     "{} {} {name}: UNIMOD {} vs composition {m}",
@@ -424,10 +353,25 @@ mod tests {
 
     #[test]
     fn every_intact_unimod_xlink_record_is_in_the_table_or_named_here() {
-        // UNIMOD intact cross-link records andes does not list, and why.
-        const LEFT_OUT: &[&str] = &[
-            // Iodoacetyl reagent whose UNIMOD composition keeps the iodine.
-            "Xlink:B10621",
+        // UNIMOD Xlink records that are not a reagent's intact cross-link,
+        // stub or monolink, and why.
+        const LEFT_OUT: &[(&str, &str)] = &[
+            (
+                "Xlink:B10621",
+                "iodoacetyl reagent whose composition keeps the iodine",
+            ),
+            ("Xlink:DTSSP[88]", "chemical cleavage product (reduction)"),
+            ("Xlink:DTBP[87]", "chemical cleavage product (reduction)"),
+            (
+                "Xlink:EGS[115]",
+                "chemical cleavage product (hydroxylamine)",
+            ),
+            ("Xlink:DST[56]", "chemical cleavage product (periodate)"),
+            (
+                "Xlink:DMP[154]",
+                "free monolink other than the quenched forms",
+            ),
+            ("Xlink:SMCC[321]", "monolink quenched by an amine reagent"),
         ];
         let db = db();
         for acc in 1..=3000 {
@@ -437,23 +381,14 @@ mod tests {
             if !rec.name.starts_with("Xlink:") {
                 continue;
             }
-            let listed = REAGENTS
+            let listed = table()
+                .reagents
                 .iter()
                 .flat_map(parts)
-                .any(|p| p.unimod == Some(rec.name.as_str()));
-            // Chemical cleavage products and other non-cross-link forms.
-            let other_product = [
-                "Xlink:DTSSP[88]",
-                "Xlink:DTBP[87]",
-                "Xlink:EGS[115]",
-                "Xlink:DST[56]",
-                "Xlink:DMP[154]",
-                "Xlink:SMCC[321]",
-            ]
-            .contains(&rec.name.as_str());
+                .any(|p| p.unimod.as_deref() == Some(rec.name.as_str()));
             assert!(
-                listed || other_product || LEFT_OUT.contains(&rec.name.as_str()),
-                "UNIMOD {} ({}) is neither in the reagent table nor left out on purpose",
+                listed || LEFT_OUT.iter().any(|(n, _)| *n == rec.name),
+                "UNIMOD {} ({}) is neither in the reagent table nor left out with a reason",
                 rec.name,
                 rec.accession
             );
@@ -463,12 +398,11 @@ mod tests {
     #[test]
     fn cleavable_stubs_split_the_intact_linker() {
         let h2o = composition_mass("H(2) O").unwrap();
-        for r in REAGENTS.iter().filter(|r| !r.stubs.is_empty()) {
-            let m = |p: &Part| composition_mass(p.composition).unwrap();
-            let intact = m(&r.intact);
-            let stubs: Vec<f64> = r.stubs.iter().map(m).collect();
-            // Some pair of stubs (the light doublet stub and a heavy form,
-            // or the heavy form plus water) adds up to the intact linker.
+        for r in table().reagents.iter().filter(|r| !r.stubs.is_empty()) {
+            let intact = mass_of(&r.intact);
+            let stubs: Vec<f64> = r.stubs.iter().map(mass_of).collect();
+            // Some pair of stubs (the light doublet stub and a heavy form, or
+            // the heavy form plus water) adds up to the intact linker.
             let splits = stubs.iter().enumerate().any(|(i, a)| {
                 stubs[i..]
                     .iter()
@@ -484,10 +418,11 @@ mod tests {
                 "{}: cleavable without doublets",
                 r.name
             );
-            for &(l, h) in r.doublets {
+            let idx = |n: &str| r.stubs.iter().position(|s| s.name == n).unwrap();
+            for [l, h] in &r.doublets {
                 assert!(
-                    stubs[l] < stubs[h],
-                    "{}: doublet ({l}, {h}) not light-heavy",
+                    stubs[idx(l)] < stubs[idx(h)],
+                    "{}: doublet not light-heavy",
                     r.name
                 );
             }
@@ -496,19 +431,19 @@ mod tests {
     }
 
     #[test]
-    fn nhs_monolinks_are_the_intact_linker_plus_the_quencher() {
+    fn monolinks_are_the_intact_linker_plus_the_quencher() {
         let q = |name: &str| match name {
             "water" => composition_mass("H(2) O"),
             "ammonia" => composition_mass("H(3) N"),
             "tris" => composition_mass("H(11) C(4) N O(3)"),
             _ => None,
         };
-        for r in REAGENTS {
-            let intact = composition_mass(r.intact.composition).unwrap();
-            for p in r.monolinks {
+        for r in &table().reagents {
+            let intact = mass_of(&r.intact);
+            for p in &r.monolinks {
                 let quencher =
-                    q(p.name).unwrap_or_else(|| panic!("{}: quencher {}", r.name, p.name));
-                let m = composition_mass(p.composition).unwrap();
+                    q(&p.name).unwrap_or_else(|| panic!("{}: quencher {}", r.name, p.name));
+                let m = mass_of(p);
                 assert!(
                     (m - intact - quencher).abs() < 1e-6,
                     "{} {}: {m} != {intact} + {quencher}",
@@ -522,14 +457,15 @@ mod tests {
     #[test]
     fn published_masses_of_reagents_unimod_lacks() {
         // Masses as the cited papers give them (rounded there).
-        let m = |name: &str| composition_mass(find(name).unwrap().intact.composition).unwrap();
-        assert!((m("DSBSO") - 308.0385).abs() < 1e-3);
+        let t = table();
+        let m = |name: &str| mass_of(&t.find(name).unwrap().intact);
+        assert!((m("DSBSO") - 308.0388).abs() < 1e-3);
         assert!((m("PhoX") - 209.9718).abs() < 1e-3);
         assert!((m("CDI") - 25.9793).abs() < 1e-3);
         assert!((m("SDA") - 82.0419).abs() < 1e-3);
         assert!((m("EDC") + 18.0106).abs() < 1e-3);
-        let dsbso = find("dsbso").unwrap();
-        let stub = |k: usize| composition_mass(dsbso.stubs[k].composition).unwrap();
+        let dsbso = t.find("dsbso").unwrap();
+        let stub = |k: usize| mass_of(&dsbso.stubs[k]);
         // Kaake et al.: alkene +54, unsaturated thiol +236, sulfenic acid +254.
         assert!((stub(0) - 54.0106).abs() < 1e-3);
         assert!((stub(1) - 236.0177).abs() < 1e-3);
@@ -537,26 +473,18 @@ mod tests {
     }
 
     #[test]
-    fn lookup_by_name_alias_and_unimod_record() {
-        assert_eq!(find("dsso").unwrap().name, "DSSO");
-        assert_eq!(find("BS3").unwrap().name, "DSS");
-        assert_eq!(find("buurbu").unwrap().name, "DSBU");
-        assert_eq!(find("Xlink:DSS[138]").unwrap().name, "DSS");
-        assert!(find("Xlink:DSS[156]").is_none());
-        assert_eq!(owner_of_record("Xlink:DSS[156]").unwrap().0.name, "DSS");
-        let mut seen = std::collections::HashSet::new();
-        for n in names() {
-            assert!(seen.insert(n.to_ascii_lowercase()), "duplicate name {n}");
-        }
-    }
-
-    #[test]
-    fn composition_parser() {
-        assert_eq!(composition_mass(""), Some(0.0));
-        assert!((composition_mass("H(2) O").unwrap() - 18.010_565).abs() < 1e-6);
-        assert!((composition_mass("H(-2) O(-1)").unwrap() + 18.010_565).abs() < 1e-6);
-        assert_eq!(composition_mass("Xx(2)"), None);
-        assert_eq!(composition_mass("H(2"), None);
+    fn lookup_by_name_alias_unimod_record_and_xlmod() {
+        let t = table();
+        assert_eq!(t.find("dsso").unwrap().name, "DSSO");
+        assert_eq!(t.find("BS3").unwrap().name, "DSS");
+        assert_eq!(t.find("buurbu").unwrap().name, "DSBU");
+        assert_eq!(t.find("Xlink:DSS[138]").unwrap().name, "DSS");
+        assert!(t.find("Xlink:DSS[156]").is_none());
+        assert_eq!(t.owner_of_record("Xlink:DSS[156]").unwrap().0.name, "DSS");
+        assert_eq!(t.find_xlmod("XLMOD:02126").unwrap().name, "DSSO");
+        assert_eq!(t.find_xlmod("xlmod:02000").unwrap().name, "DSS");
+        assert_eq!(t.find_xlmod("XLMOD:02010").unwrap().name, "EDC");
+        assert!(t.find_xlmod("XLMOD:99999").is_none());
     }
 
     #[test]
@@ -577,5 +505,29 @@ mod tests {
         assert!(monolink(db, "DSSO:acid").is_none());
         assert!(monolink(db, "Oxidation").is_none());
         assert!(monolink(db, "NoSuch:water").is_none());
+    }
+
+    #[test]
+    fn a_custom_entry_parses_with_plain_masses() {
+        let t = ReagentTable::parse_yaml(
+            "- name: MyLinker\n  sites: K\n  intact: {mass: 100.5}\n  \
+             stubs: [{name: a, mass: 10.0}, {name: b, mass: 20.0}]\n  doublets: [[a, b]]\n",
+        )
+        .unwrap();
+        let r = &t.reagents[0];
+        assert_eq!(r.intact.resolve(db()).unwrap(), (100.5, None));
+        assert_eq!(r.doublets, vec![["a".to_string(), "b".to_string()]]);
+        assert!(ReagentTable::parse_yaml("- name: X\n  intact: {}\n  stubz: []\n").is_err());
+        let p = Part::default();
+        assert!(p.resolve(db()).unwrap_err().contains("needs a `unimod`"));
+    }
+
+    #[test]
+    fn composition_parser() {
+        assert_eq!(composition_mass(""), Some(0.0));
+        assert!((composition_mass("H(2) O").unwrap() - 18.010_565).abs() < 1e-6);
+        assert!((composition_mass("H(-2) O(-1)").unwrap() + 18.010_565).abs() < 1e-6);
+        assert_eq!(composition_mass("Xx(2)"), None);
+        assert_eq!(composition_mass("H(2"), None);
     }
 }

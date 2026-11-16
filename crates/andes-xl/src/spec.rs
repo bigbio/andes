@@ -1,57 +1,51 @@
-//! The crosslinker of a search: `--xl` on the command line and `search.xl`
-//! in the config file.
+//! The crosslinker of a search, from three sources like the modification
+//! lists: `--xl` on the command line, `search.xl` in the config file, and the
+//! SDRF column `comment[cross-linker]`.
 //!
-//! The spec is written like a modification list item, `Name (sites)`:
+//! The command-line spec is written like a modification list item,
+//! `Name (sites)`:
 //!
-//! - **Name**: a reagent of the built-in table ([`crate::reagents`]) by name
-//!   or alias (`DSSO`, `BS3`, `DSBU`, `PhoX`, any case), or the UNIMOD name or
+//! - **Name**: a reagent of the reagent table (`resources/crosslinkers.yaml`,
+//!   [`model::xl_reagents`]) by name or alias (`DSSO`, `BS3`, `DSBU`, `PhoX`,
+//!   any case), its XLMOD accession (`XLMOD:02126`), or the UNIMOD name or
 //!   accession of its intact cross-link record (`Xlink:DSS[138]`,
-//!   `UNIMOD:1898`). Masses come from UNIMOD when it has the record and from
-//!   the cited composition otherwise.
+//!   `UNIMOD:1898`).
 //! - **Sites** (optional; the reagent's usual reactivity when omitted):
-//!   comma-separated residues and protein termini, each in the modification
-//!   site grammar (`K, S, T, Y, Protein N-term`; `KSTY` also works). A
+//!   comma-separated residues and termini, each in the modification site
+//!   grammar (`K, S, T, Y, Protein N-term`; `KSTY` also works). A
 //!   heterobifunctional reagent gives its two ends apart with `/`:
 //!   `EDC (K, Protein N-term / D, E, Protein C-term)`. `N-term` is the
 //!   N-terminus of every peptide, for synthetic peptide libraries or samples
 //!   linked after digestion (a protein linked before digestion has only its
 //!   protein N-terminus free).
 //!
-//! A config `search.xl` can also be a map ([`XlDecl`]) that defines a linker
-//! the table lacks: intact `mass`, `sites`, and for an MS-cleavable linker its
-//! `stubs` and reporter `doublets`.
+//! The config `search.xl` is the same string, or a reagent entry of the
+//! table's schema ([`model::xl_reagents::Reagent`]) for a reagent the table
+//! lacks. The SDRF cell is read by [`from_sdrf`].
 
 use model::modification::{ModLocation, ResidueSpec};
 use model::unimod::UnimodDb;
+use model::xl_reagents::{Reagent, ReagentTable};
 
 use crate::crosslinker::{Cleavage, Crosslinker, LinkEnd, Monolink, Stub, MAX_STUBS};
-use crate::reagents::{self, Part, Reagent};
 
-/// One declared crosslinker before it is resolved.
+/// A command-line crosslinker spec before it is resolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct XlDecl {
-    /// Reagent name, alias or UNIMOD record; with `mass`, a free label.
-    pub name: Option<String>,
-    /// Custom intact mass in Da; the name is then not looked up.
-    pub mass: Option<f64>,
+    /// Reagent name, alias, XLMOD accession or UNIMOD record.
+    pub name: String,
     /// Site spec; the reagent's default when `None`.
     pub sites: Option<String>,
-    /// Custom MS-cleavage stubs, `(name, mass)`.
-    pub stubs: Vec<(String, f64)>,
-    /// Custom reporter doublets as `(light, heavy)` stub names.
-    pub doublets: Vec<(String, String)>,
-    /// Custom monolinks, `(name, mass)`.
-    pub monolinks: Vec<(String, f64)>,
 }
 
 /// Why a crosslinker spec was rejected. Each message names the spec.
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum XlSpecError {
-    #[error("`{spec}`: unknown crosslinker `{name}`{}", hint(.suggestions))]
+    #[error("`{spec}`: unknown crosslinker `{name}`{hint}")]
     Unknown {
         spec: String,
         name: String,
-        suggestions: Vec<String>,
+        hint: String,
     },
     #[error("`{spec}`: `{name}` is a {role} of {reagent}; give `{reagent}` as the crosslinker{}",
             monolink_hint(.role))]
@@ -59,10 +53,10 @@ pub enum XlSpecError {
         spec: String,
         name: String,
         role: &'static str,
-        reagent: &'static str,
+        reagent: String,
     },
-    #[error("`{spec}`: the UNIMOD record {name} is not available (the bundled UNIMOD table resources/unimod.obo could not be read)")]
-    MissingUnimod { spec: String, name: String },
+    #[error("`{spec}`: {why}")]
+    BadMass { spec: String, why: String },
     #[error("`{spec}`: no crosslinker name")]
     MissingName { spec: String },
     #[error("`{spec}`: unbalanced parentheses")]
@@ -73,12 +67,12 @@ pub enum XlSpecError {
         sites: String,
         why: String,
     },
-    #[error("`{spec}`: a custom linker (with `mass`) needs `sites`")]
+    #[error("`{spec}`: a custom reagent needs `sites`")]
     CustomWithoutSites { spec: String },
-    #[error("`{spec}`: mass {mass} is not a finite number")]
-    BadMass { spec: String, mass: f64 },
     #[error("`{spec}`: {why}")]
     BadCleavage { spec: String, why: String },
+    #[error("`{spec}`: {why}")]
+    Sdrf { spec: String, why: String },
 }
 
 fn monolink_hint(role: &str) -> &'static str {
@@ -86,17 +80,6 @@ fn monolink_hint(role: &str) -> &'static str {
         " (and the monolink to --variable-mods)"
     } else {
         ""
-    }
-}
-
-fn hint(suggestions: &[String]) -> String {
-    if suggestions.is_empty() {
-        format!(
-            " (known: {})",
-            reagents::names().collect::<Vec<_>>().join(", ")
-        )
-    } else {
-        format!("; did you mean {}?", suggestions.join(", "))
     }
 }
 
@@ -136,195 +119,97 @@ impl XlDecl {
             parse_ends(s, sites)?;
         }
         Ok(XlDecl {
-            name: Some(name.to_string()),
+            name: name.to_string(),
             sites: sites.map(str::to_string),
-            ..XlDecl::default()
         })
     }
 
     /// How the spec reads in messages.
     pub fn label(&self) -> String {
-        let name = match (&self.name, self.mass) {
-            (Some(n), _) => n.clone(),
-            (None, Some(m)) => format!("{m:+}"),
-            (None, None) => String::new(),
-        };
         match &self.sites {
-            Some(s) => format!("{name} ({s})"),
-            None => name,
+            Some(s) => format!("{} ({s})", self.name),
+            None => self.name.clone(),
         }
     }
 
-    /// The crosslinker this declaration stands for.
+    /// The crosslinker of the bundled reagent table this spec names.
     pub fn resolve(&self, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
+        self.resolve_in(model::xl_reagents::bundled(), db)
+    }
+
+    /// [`Self::resolve`] against a given reagent table.
+    pub fn resolve_in(
+        &self,
+        table: &ReagentTable,
+        db: &UnimodDb,
+    ) -> Result<Crosslinker, XlSpecError> {
         let spec = self.label();
-        match self.mass {
-            Some(mass) => self.resolve_custom(&spec, mass),
-            None => {
-                if !(self.stubs.is_empty() && self.doublets.is_empty() && self.monolinks.is_empty())
-                {
-                    return Err(XlSpecError::BadCleavage {
-                        spec,
-                        why: "`stubs`, `doublets` and `monolinks` define a custom linker and need \
-                              its intact `mass`"
-                            .into(),
-                    });
-                }
-                let name = self
-                    .name
-                    .as_deref()
-                    .ok_or(XlSpecError::MissingName { spec: spec.clone() })?;
-                let reagent = lookup(db, name, &spec)?;
-                let mut x = from_reagent(reagent, db, &spec)?;
-                if let Some(sites) = &self.sites {
-                    x.ends = parse_ends(&spec, sites)?;
-                }
-                Ok(x)
-            }
-        }
-    }
-
-    fn resolve_custom(&self, spec: &str, mass: f64) -> Result<Crosslinker, XlSpecError> {
-        let finite = |m: f64| {
-            if m.is_finite() {
-                Ok(m)
-            } else {
-                Err(XlSpecError::BadMass {
-                    spec: spec.to_string(),
-                    mass: m,
-                })
-            }
-        };
-        finite(mass)?;
-        let sites = self
-            .sites
-            .as_deref()
-            .ok_or(XlSpecError::CustomWithoutSites {
-                spec: spec.to_string(),
-            })?;
-        let bad = |why: String| XlSpecError::BadCleavage {
-            spec: spec.to_string(),
-            why,
-        };
-        let cleavage = if self.stubs.is_empty() {
-            if !self.doublets.is_empty() {
-                return Err(bad("`doublets` without `stubs`".into()));
-            }
-            None
-        } else {
-            let mut stubs = Vec::new();
-            for (name, m) in &self.stubs {
-                finite(*m)?;
-                if stubs.iter().any(|s: &Stub| s.name == *name) {
-                    return Err(bad(format!("stub `{name}` given twice")));
-                }
-                stubs.push(Stub {
-                    name: name.clone(),
-                    mass: *m,
-                });
-            }
-            let index = |n: &str| {
-                stubs
-                    .iter()
-                    .position(|s| s.name == n)
-                    .ok_or_else(|| bad(format!("doublet stub `{n}` is not one of the stubs")))
-            };
-            let mut doublets = Vec::new();
-            if self.doublets.is_empty() {
-                if stubs.len() != 2 {
-                    return Err(bad(
-                        "give `doublets` (pairs of stub names) when there are not exactly two stubs"
-                            .into(),
-                    ));
-                }
-                doublets.push((0, 1));
-            } else {
-                for (a, b) in &self.doublets {
-                    doublets.push((index(a)?, index(b)?));
-                }
-            }
-            let c = Cleavage { stubs, doublets };
-            check_cleavage(&c).map_err(bad)?;
-            Some(order_doublets(c))
-        };
-        let mut monolinks = Vec::new();
-        for (name, m) in &self.monolinks {
-            monolinks.push(Monolink {
-                name: name.clone(),
-                accession: None,
-                mass: finite(*m)?,
-            });
-        }
-        Ok(Crosslinker {
-            name: self.name.clone().unwrap_or_else(|| format!("{mass:+}")),
-            accession: None,
-            intact: mass,
-            cleavage,
-            ends: parse_ends(spec, sites)?,
-            monolinks,
-        })
+        let reagent = lookup(table, db, &self.name, &spec)?;
+        from_reagent(reagent, db, &spec, self.sites.as_deref())
     }
 }
 
-/// Doublets with the lighter stub first.
-fn order_doublets(mut c: Cleavage) -> Cleavage {
-    for d in &mut c.doublets {
-        if c.stubs[d.0].mass > c.stubs[d.1].mass {
-            *d = (d.1, d.0);
-        }
+/// The crosslinker of a custom reagent entry (the config file's `search.xl`
+/// map): the table's schema, with `sites` required.
+pub fn custom(r: &Reagent, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
+    if r.sites.trim().is_empty() {
+        return Err(XlSpecError::CustomWithoutSites {
+            spec: r.name.clone(),
+        });
     }
-    c
+    from_reagent(r, db, &r.name, None)
 }
 
-fn check_cleavage(c: &Cleavage) -> Result<(), String> {
-    if c.stubs.len() > MAX_STUBS {
-        return Err(format!("at most {MAX_STUBS} stubs"));
-    }
-    if c.doublets.is_empty() {
-        return Err("an MS-cleavable linker needs at least one reporter doublet".into());
-    }
-    for &(a, b) in &c.doublets {
-        if (c.stubs[a].mass - c.stubs[b].mass).abs() < 1e-3 {
-            return Err(format!(
-                "doublet `{}`/`{}` has no mass spacing",
-                c.stubs[a].name, c.stubs[b].name
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The reagent `name` stands for: the table by name or alias, then UNIMOD.
-fn lookup(db: &UnimodDb, name: &str, spec: &str) -> Result<&'static Reagent, XlSpecError> {
-    if let Some(r) = reagents::find(name) {
+/// The reagent `name` stands for: the table by name, alias or intact UNIMOD
+/// record; then by XLMOD accession; then a UNIMOD accession or name whose
+/// record is a reagent's intact cross-link.
+fn lookup<'t>(
+    table: &'t ReagentTable,
+    db: &UnimodDb,
+    name: &str,
+    spec: &str,
+) -> Result<&'t Reagent, XlSpecError> {
+    if let Some(r) = table.find(name).or_else(|| table.find_xlmod(name)) {
         return Ok(r);
     }
-    // A UNIMOD accession or name: its record must be a reagent's intact link.
     if let Ok(Some(rec)) = db.resolve(name) {
-        if let Some(r) = reagents::find(&rec.name) {
+        if let Some(r) = table.find(&rec.name) {
             return Ok(r);
         }
-        if let Some((r, role)) = reagents::owner_of_record(&rec.name) {
+        if let Some((r, role)) = table.owner_of_record(&rec.name) {
             return Err(XlSpecError::NotALinker {
                 spec: spec.to_string(),
                 name: rec.name.clone(),
                 role,
-                reagent: r.name,
+                reagent: r.name.clone(),
             });
         }
     }
     Err(XlSpecError::Unknown {
         spec: spec.to_string(),
         name: name.trim().to_string(),
-        suggestions: suggest(name),
+        hint: unknown_hint(table, name),
     })
+}
+
+fn unknown_hint(table: &ReagentTable, name: &str) -> String {
+    if let Some(e) = model::xl_reagents::bundled_error() {
+        return format!(" (the reagent table could not be loaded: {e})");
+    }
+    let s = suggest(table, name);
+    if s.is_empty() {
+        format!(" (known: {})", table.names().collect::<Vec<_>>().join(", "))
+    } else {
+        format!("; did you mean {}?", s.join(", "))
+    }
 }
 
 /// Up to three reagent names within a small edit distance of `token`,
 /// closest first; on a tie, the name of the token's length first.
-fn suggest(token: &str) -> Vec<String> {
+fn suggest(table: &ReagentTable, token: &str) -> Vec<String> {
     let t = token.trim().to_ascii_lowercase();
-    let mut scored: Vec<(usize, usize, &str)> = reagents::names()
+    let mut scored: Vec<(usize, usize, &str)> = table
+        .names()
         .map(|n| {
             let d = edit_distance(&t, &n.to_ascii_lowercase());
             (d, n.len().abs_diff(t.len()), n)
@@ -339,7 +224,6 @@ fn suggest(token: &str) -> Vec<String> {
         .collect()
 }
 
-/// Edit distance with adjacent transpositions (optimal string alignment).
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -365,60 +249,329 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-/// The mass of one reagent part: its UNIMOD record, or its composition.
-fn part_mass(part: &Part, db: &UnimodDb, spec: &str) -> Result<(f64, Option<String>), XlSpecError> {
-    match part.unimod {
-        Some(name) => match db.resolve(name) {
-            Ok(Some(rec)) => Ok((rec.mono_mass, Some(rec.accession.clone()))),
-            _ => Err(XlSpecError::MissingUnimod {
-                spec: spec.to_string(),
-                name: name.to_string(),
-            }),
-        },
-        None => Ok((
-            reagents::composition_mass(part.composition)
-                .expect("reagent table compositions parse (tested)"),
-            None,
-        )),
-    }
-}
-
-fn from_reagent(r: &Reagent, db: &UnimodDb, spec: &str) -> Result<Crosslinker, XlSpecError> {
-    let (intact, accession) = part_mass(&r.intact, db, spec)?;
-    let cleavage = if r.stubs.is_empty() {
-        None
-    } else {
-        let mut stubs = Vec::new();
-        for s in r.stubs {
-            stubs.push(Stub {
-                name: s.name.to_string(),
-                mass: part_mass(s, db, spec)?.0,
-            });
-        }
-        Some(Cleavage {
-            stubs,
-            doublets: r.doublets.to_vec(),
+/// The crosslinker of reagent entry `r`, with `sites` in place of its default
+/// sites when given.
+pub fn from_reagent(
+    r: &Reagent,
+    db: &UnimodDb,
+    spec: &str,
+    sites: Option<&str>,
+) -> Result<Crosslinker, XlSpecError> {
+    let mass = |p: &model::xl_reagents::Part| {
+        p.resolve(db).map_err(|why| XlSpecError::BadMass {
+            spec: spec.to_string(),
+            why: format!("{}: {why}", r.name),
         })
     };
+    let bad = |why: String| XlSpecError::BadCleavage {
+        spec: spec.to_string(),
+        why,
+    };
+    let (intact, accession) = mass(&r.intact)?;
+    let cleavage = if r.stubs.is_empty() {
+        if !r.doublets.is_empty() {
+            return Err(bad("`doublets` without `stubs`".into()));
+        }
+        None
+    } else {
+        let mut stubs: Vec<Stub> = Vec::new();
+        for s in &r.stubs {
+            if stubs.iter().any(|t| t.name == s.name) {
+                return Err(bad(format!("stub `{}` given twice", s.name)));
+            }
+            stubs.push(Stub {
+                name: s.name.clone(),
+                mass: mass(s)?.0,
+            });
+        }
+        let index = |n: &str| {
+            stubs
+                .iter()
+                .position(|s| s.name == n)
+                .ok_or_else(|| bad(format!("doublet stub `{n}` is not one of the stubs")))
+        };
+        let mut doublets = Vec::new();
+        for [a, b] in &r.doublets {
+            doublets.push((index(a)?, index(b)?));
+        }
+        let c = Cleavage { stubs, doublets };
+        check_cleavage(&c).map_err(bad)?;
+        Some(order_doublets(c))
+    };
     let mut monolinks = Vec::new();
-    for m in r.monolinks {
-        let (mass, accession) = part_mass(m, db, spec)?;
+    for m in &r.monolinks {
+        let (mass, accession) = mass(m)?;
         monolinks.push(Monolink {
             name: m
                 .unimod
-                .map_or_else(|| format!("{}-{}", r.name, m.name), str::to_string),
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", r.name, m.name)),
             accession,
             mass,
         });
     }
     Ok(Crosslinker {
-        name: r.name.to_string(),
+        name: r.name.clone(),
         accession,
         intact,
         cleavage,
-        ends: parse_ends(spec, r.sites).expect("reagent table sites parse (tested)"),
+        ends: parse_ends(spec, sites.unwrap_or(&r.sites))?,
         monolinks,
     })
+}
+
+/// Doublets with the lighter stub first.
+fn order_doublets(mut c: Cleavage) -> Cleavage {
+    for d in &mut c.doublets {
+        if c.stubs[d.0].mass > c.stubs[d.1].mass {
+            *d = (d.1, d.0);
+        }
+    }
+    c
+}
+
+fn check_cleavage(c: &Cleavage) -> Result<(), String> {
+    if c.stubs.len() > MAX_STUBS {
+        return Err(format!("at most {MAX_STUBS} stubs"));
+    }
+    if c.doublets.is_empty() {
+        return Err(
+            "an MS-cleavable linker needs at least one reporter doublet (`doublets`)".into(),
+        );
+    }
+    for &(a, b) in &c.doublets {
+        if (c.stubs[a].mass - c.stubs[b].mass).abs() < 1e-3 {
+            return Err(format!(
+                "doublet `{}`/`{}` has no mass spacing",
+                c.stubs[a].name, c.stubs[b].name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tolerance of the SDRF stub masses `MH` / `ML` against the reagent's stubs,
+/// in Da: the template writes them to two decimals.
+pub const SDRF_STUB_TOL_DA: f64 = 0.02;
+
+/// The crosslinker of an SDRF `comment[cross-linker]` cell, e.g.
+/// `NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98`.
+///
+/// - The reagent is found by `AC` (XLMOD, or a UNIMOD intact record) first,
+///   then by `NT`; when both resolve to different reagents it is an error.
+/// - `TA` replaces the sites. `nterm` is the protein N-terminus: the SDRF
+///   describes the reagent on the sample, and a protein linked before
+///   digestion has only its protein N-terminal amine free (the peptide
+///   N-termini appear at digestion, after the linking). `cterm` is the
+///   protein C-terminus likewise. On a heterobifunctional reagent each end
+///   keeps the `TA` targets it reacts with.
+/// - `CL`, `MH` and `ML` are checked against the reagent: `CL` against
+///   whether it has stubs, `MH` / `ML` each against a stub mass within
+///   [`SDRF_STUB_TOL_DA`] (the template's names do not say which is the light
+///   stub, so either order is accepted).
+/// - A reagent the table lacks is a custom MS-cleavable reagent when `TA`,
+///   `MH` and `ML` are all given: the two stubs are one reporter doublet and
+///   their sum is the intact cross-link (the split of a urea such as DSBU or
+///   CDI); any other unknown reagent is an error that names the fix.
+pub fn from_sdrf(value: &str, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
+    from_sdrf_in(model::xl_reagents::bundled(), value, db)
+}
+
+/// [`from_sdrf`] against a given reagent table.
+pub fn from_sdrf_in(
+    table: &ReagentTable,
+    value: &str,
+    db: &UnimodDb,
+) -> Result<Crosslinker, XlSpecError> {
+    let spec = value.trim().to_string();
+    let err = |why: String| XlSpecError::Sdrf {
+        spec: spec.clone(),
+        why,
+    };
+    let mut kv: std::collections::BTreeMap<String, String> = Default::default();
+    for part in value.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('=') {
+            Some((k, v)) => {
+                kv.insert(k.trim().to_ascii_uppercase(), v.trim().to_string());
+            }
+            None => {
+                kv.entry("NT".into()).or_insert_with(|| part.to_string());
+            }
+        }
+    }
+    let num = |key: &str| -> Result<Option<f64>, XlSpecError> {
+        kv.get(key)
+            .map(|v| {
+                v.parse::<f64>()
+                    .map_err(|_| err(format!("{key}={v} is not a number")))
+            })
+            .transpose()
+    };
+    let (mh, ml) = (num("MH")?, num("ML")?);
+    let by_ac = kv
+        .get("AC")
+        .and_then(|ac| lookup(table, db, ac, &spec).ok());
+    let by_nt = kv
+        .get("NT")
+        .and_then(|nt| lookup(table, db, nt, &spec).ok());
+    let sites = kv
+        .get("TA")
+        .map(|ta| ta_sites(ta))
+        .transpose()
+        .map_err(err)?;
+    let mut x = match (by_ac, by_nt) {
+        (Some(a), Some(n)) if a.name != n.name => {
+            return Err(err(format!(
+                "AC={} is {} but NT={} is {}; fix one of them",
+                kv["AC"], a.name, kv["NT"], n.name
+            )))
+        }
+        (Some(r), _) | (None, Some(r)) => from_reagent(r, db, &spec, None)?,
+        (None, None) => {
+            let (Some(ta), Some(mh), Some(ml)) = (kv.get("TA"), mh, ml) else {
+                return Err(err(format!(
+                    "unknown crosslinker (NT={}, AC={}); give a known name or XLMOD accession, \
+                     or define it with TA, MH and ML (an MS-cleavable reagent whose two stubs \
+                     add up to the cross-link), or define it in the config file (search.xl)",
+                    kv.get("NT").map_or("-", String::as_str),
+                    kv.get("AC").map_or("-", String::as_str)
+                )));
+            };
+            let (light, heavy) = if mh <= ml { (mh, ml) } else { (ml, mh) };
+            let r = Reagent {
+                name: kv
+                    .get("NT")
+                    .cloned()
+                    .unwrap_or_else(|| "custom".to_string()),
+                xlmod: kv.get("AC").cloned().into_iter().collect(),
+                sites: ta_sites(ta).map_err(err)?,
+                intact: model::xl_reagents::Part {
+                    mass: Some(light + heavy),
+                    ..Default::default()
+                },
+                stubs: vec![
+                    model::xl_reagents::Part {
+                        name: "light".into(),
+                        mass: Some(light),
+                        ..Default::default()
+                    },
+                    model::xl_reagents::Part {
+                        name: "heavy".into(),
+                        mass: Some(heavy),
+                        ..Default::default()
+                    },
+                ],
+                doublets: vec![["light".into(), "heavy".into()]],
+                ..Default::default()
+            };
+            return from_reagent(&r, db, &spec, None);
+        }
+    };
+    if let Some(cl) = kv.get("CL") {
+        let says = match cl.to_ascii_lowercase().as_str() {
+            "yes" | "true" | "1" => true,
+            "no" | "false" | "0" => false,
+            other => return Err(err(format!("CL={other}: expected yes or no"))),
+        };
+        if says != x.cleavage.is_some() {
+            return Err(err(format!(
+                "CL={cl} but {} is {}MS-cleavable",
+                x.name,
+                if x.cleavage.is_some() { "" } else { "not " }
+            )));
+        }
+    }
+    for (key, v) in [("MH", mh), ("ML", ml)] {
+        let Some(v) = v else { continue };
+        let stubs: Vec<f64> = x
+            .cleavage
+            .as_ref()
+            .map(|c| c.stub_masses().collect())
+            .unwrap_or_default();
+        if !stubs.iter().any(|s| (s - v).abs() <= SDRF_STUB_TOL_DA) {
+            return Err(err(format!(
+                "{key}={v} matches no cleavage stub of {} ({}) within {SDRF_STUB_TOL_DA} Da",
+                x.name,
+                if stubs.is_empty() {
+                    "it has none".to_string()
+                } else {
+                    stubs
+                        .iter()
+                        .map(|s| format!("{s:.4}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )));
+        }
+    }
+    if let Some(sites) = sites {
+        let ta = parse_ends(&spec, &sites)?[0].clone();
+        if x.is_homobifunctional() {
+            x.ends = [ta.clone(), ta];
+        } else {
+            let keep = |e: &LinkEnd| LinkEnd {
+                residues: e
+                    .residues
+                    .iter()
+                    .copied()
+                    .filter(|r| ta.residues.contains(r))
+                    .collect(),
+                protein_n_term: e.protein_n_term && ta.protein_n_term,
+                protein_c_term: e.protein_c_term && ta.protein_c_term,
+                peptide_n_term: false,
+            };
+            let ends = [keep(&x.ends[0]), keep(&x.ends[1])];
+            let covered = |r: u8| ends.iter().any(|e| e.residues.contains(&r));
+            if let Some(&r) = ta.residues.iter().find(|&&r| !covered(r)) {
+                return Err(err(format!(
+                    "TA target {} is not a target of either end of {} ({})",
+                    r as char,
+                    x.name,
+                    x.describe_sites()
+                )));
+            }
+            if ends
+                .iter()
+                .any(|e| e.residues.is_empty() && !e.protein_n_term && !e.protein_c_term)
+            {
+                return Err(err(format!(
+                    "TA leaves an end of {} ({}) without targets",
+                    x.name,
+                    x.describe_sites()
+                )));
+            }
+            x.ends = ends;
+        }
+    }
+    Ok(x)
+}
+
+/// An SDRF `TA` list (`K,S,T,Y,nterm`) as a site spec (`K, S, T, Y, Protein
+/// N-term`): `nterm` / `cterm` are the protein termini (see [`from_sdrf`]).
+fn ta_sites(ta: &str) -> Result<String, String> {
+    let mut out = Vec::new();
+    for t in ta.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        match t.to_ascii_lowercase().as_str() {
+            "nterm" | "n-term" | "protein n-term" => out.push("Protein N-term".to_string()),
+            "cterm" | "c-term" | "protein c-term" => out.push("Protein C-term".to_string()),
+            _ if t.len() == 1 && t.as_bytes()[0].is_ascii_alphabetic() => {
+                out.push(t.to_ascii_uppercase())
+            }
+            _ => {
+                return Err(format!(
+                    "TA target `{t}`: expected one-letter residues, nterm or cterm"
+                ))
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("TA lists no targets".into());
+    }
+    Ok(out.join(", "))
 }
 
 /// The two ends of a site spec: one end for both, or `end / end`.
@@ -493,17 +646,18 @@ mod tests {
 
     #[test]
     fn every_table_reagent_resolves_with_its_default_sites() {
-        for r in reagents::REAGENTS {
-            let x = resolve(r.name).unwrap_or_else(|e| panic!("{}: {e}", r.name));
+        for r in &model::xl_reagents::bundled().reagents {
+            let x = resolve(&r.name).unwrap_or_else(|e| panic!("{}: {e}", r.name));
             assert_eq!(x.name, r.name);
             assert_eq!(x.cleavage.is_some(), !r.stubs.is_empty());
             assert_eq!(x.monolinks.len(), r.monolinks.len());
-            assert!(!x.ends[0].residues.is_empty() || x.ends[0].protein_n_term);
-            // Every alias resolves to the same linker.
-            for a in r.aliases {
+            for a in &r.aliases {
                 assert_eq!(resolve(a).unwrap(), x, "{a}");
             }
-            if let Some(u) = r.intact.unimod {
+            for a in &r.xlmod {
+                assert_eq!(resolve(a).unwrap(), x, "{a}");
+            }
+            if let Some(u) = &r.intact.unimod {
                 assert_eq!(resolve(u).unwrap(), x, "{u}");
                 let acc = x.accession.clone().unwrap();
                 assert_eq!(resolve(&acc).unwrap(), x, "{acc}");
@@ -559,10 +713,6 @@ mod tests {
         let e = resolve("DSSO (K / D / E)").unwrap_err().to_string();
         assert!(e.contains("at most two ends"), "{e}");
         assert!(matches!(
-            resolve("DSSO (K"),
-            Err(XlSpecError::Unbalanced { .. }) | Err(XlSpecError::Unknown { .. })
-        ));
-        assert!(matches!(
             resolve(" (K)"),
             Err(XlSpecError::MissingName { .. })
         ));
@@ -570,59 +720,48 @@ mod tests {
         assert!(e.contains("bad sites"), "{e}");
     }
 
+    fn entry(yaml: &str) -> Reagent {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
     #[test]
-    fn custom_cleavable_linker() {
-        let d = XlDecl {
-            name: Some("MyDSSO".into()),
-            mass: Some(158.003_765),
-            sites: Some("K, Protein N-term".into()),
-            stubs: vec![
-                ("thiol".into(), 85.982_635),
-                ("alkene".into(), 54.010_565),
-                ("sulfenic".into(), 103.993_2),
-            ],
-            doublets: vec![("thiol".into(), "alkene".into())],
-            monolinks: vec![("water".into(), 176.014_33)],
-        };
-        let x = d.resolve(db()).unwrap();
+    fn a_custom_entry_has_the_table_schema() {
+        let r = entry(
+            "name: MyDSSO\nsites: K, Protein N-term\nintact: {mass: 158.003765}\n\
+             stubs: [{name: thiol, mass: 85.982635}, {name: alkene, composition: H(2) C(3) O}, \
+             {name: sulfenic, mass: 103.9932}]\ndoublets: [[thiol, alkene]]\n\
+             monolinks: [{name: water, mass: 176.01433}]\n",
+        );
+        let x = custom(&r, db()).unwrap();
         let c = x.cleavage.as_ref().unwrap();
         // The doublet is ordered light (alkene) then heavy (thiol).
         assert_eq!(c.doublets, vec![(1, 0)]);
         assert!((c.doublet_delta(0) - 31.972_07).abs() < 1e-4);
-        assert_eq!(x.monolinks[0].mass, 176.014_33);
-        // Two stubs need no `doublets`.
-        let two = XlDecl {
-            stubs: vec![("a".into(), 10.0), ("b".into(), 20.0)],
+        assert_eq!(x.monolinks[0].name, "MyDSSO:water");
+        let no_doublets = Reagent {
             doublets: vec![],
-            ..d.clone()
+            ..r.clone()
         };
-        assert_eq!(
-            two.resolve(db()).unwrap().cleavage.unwrap().doublets,
-            vec![(0, 1)]
-        );
-        // Three stubs do.
-        let three = XlDecl {
-            doublets: vec![],
-            ..d.clone()
-        };
-        assert!(three
-            .resolve(db())
+        assert!(custom(&no_doublets, db())
             .unwrap_err()
             .to_string()
-            .contains("give `doublets`"));
-        let no_sites = XlDecl {
-            sites: None,
-            ..d.clone()
+            .contains("reporter doublet"));
+        let no_sites = Reagent {
+            sites: String::new(),
+            ..r.clone()
         };
         assert!(matches!(
-            no_sites.resolve(db()),
+            custom(&no_sites, db()),
             Err(XlSpecError::CustomWithoutSites { .. })
         ));
-        let unknown_stub = XlDecl {
-            doublets: vec![("alkene".into(), "thiolx".into())],
-            ..d
+        let bad_stub = Reagent {
+            doublets: vec![["alkene".into(), "thiolx".into()]],
+            ..r.clone()
         };
-        assert!(unknown_stub.resolve(db()).is_err());
+        assert!(custom(&bad_stub, db()).is_err());
+        let zl = entry("name: ZL\nsites: K / D, E\nintact: {composition: H(-2) O(-1)}\n");
+        let x = custom(&zl, db()).unwrap();
+        assert!(x.cleavage.is_none() && !x.is_homobifunctional());
     }
 
     #[test]
@@ -632,15 +771,76 @@ mod tests {
         assert_eq!(edit_distance("", "abc"), 3);
     }
 
+    fn sdrf(v: &str) -> Result<Crosslinker, XlSpecError> {
+        from_sdrf(v, db())
+    }
+
     #[test]
-    fn custom_non_cleavable_linker() {
-        let d = XlDecl {
-            name: Some("ZL".into()),
-            mass: Some(-18.010_565),
-            sites: Some("K / D, E".into()),
-            ..XlDecl::default()
-        };
-        let x = d.resolve(db()).unwrap();
-        assert!(x.cleavage.is_none() && !x.is_homobifunctional());
+    fn sdrf_resolves_by_accession_then_name() {
+        let x = sdrf("NT=DSS;AC=XLMOD:02001").unwrap();
+        assert_eq!(x.name, "DSS");
+        assert_eq!(sdrf("NT=BS3;AC=XLMOD:02000").unwrap().name, "DSS");
+        // An accession the table lacks falls back to the name.
+        assert_eq!(sdrf("NT=DSSO;AC=XLMOD:99999").unwrap().name, "DSSO");
+        assert_eq!(sdrf("AC=XLMOD:02126").unwrap().name, "DSSO");
+        assert_eq!(sdrf("DSBU").unwrap().name, "DSBU");
+        // Name and accession of two different reagents.
+        let e = sdrf("NT=DSSO;AC=XLMOD:02010").unwrap_err().to_string();
+        assert!(
+            e.contains("AC=XLMOD:02010 is EDC but NT=DSSO is DSSO"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn sdrf_targets_replace_the_sites() {
+        let x = sdrf("NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98").unwrap();
+        assert_eq!(x.ends[0].residues, b"KSTY");
+        // `nterm` is the protein N-terminus, not every peptide's.
+        assert!(x.ends[0].protein_n_term && !x.ends[0].peptide_n_term);
+        // Heterobifunctional: each end keeps the targets it reacts with.
+        let e = sdrf("NT=EDC;AC=XLMOD:02010;CL=no;TA=K,D,E").unwrap();
+        assert_eq!(e.ends[0].residues, b"K");
+        assert!(!e.ends[0].protein_n_term);
+        assert_eq!(e.ends[1].residues, b"DE");
+        assert!(!e.ends[1].protein_c_term);
+        let err = sdrf("NT=EDC;TA=K,D,E,Y").unwrap_err().to_string();
+        assert!(err.contains("TA target Y"), "{err}");
+        let err = sdrf("NT=EDC;TA=K").unwrap_err().to_string();
+        assert!(err.contains("without targets"), "{err}");
+        let err = sdrf("NT=DSS;TA=K,xyz").unwrap_err().to_string();
+        assert!(err.contains("TA target `xyz`"), "{err}");
+    }
+
+    #[test]
+    fn sdrf_cleavability_and_stub_masses_are_checked() {
+        let e = sdrf("NT=DSS;CL=yes").unwrap_err().to_string();
+        assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
+        let e = sdrf("NT=DSSO;CL=no").unwrap_err().to_string();
+        assert!(e.contains("CL=no but DSSO is MS-cleavable"), "{e}");
+        // Either order of the two stub masses.
+        assert!(sdrf("NT=DSSO;MH=85.98;ML=54.01").is_ok());
+        let e = sdrf("NT=DSSO;MH=54.01;ML=86.10").unwrap_err().to_string();
+        assert!(
+            e.contains("ML=86.1 matches no cleavage stub of DSSO"),
+            "{e}"
+        );
+        let e = sdrf("NT=DSS;MH=54.01").unwrap_err().to_string();
+        assert!(e.contains("it has none"), "{e}");
+    }
+
+    #[test]
+    fn sdrf_defines_an_unknown_cleavable_reagent_only_with_targets_and_stubs() {
+        let x = sdrf("NT=NewUrea;CL=yes;TA=K,nterm;MH=111.03;ML=85.05").unwrap();
+        assert_eq!(x.name, "NewUrea");
+        assert!((x.intact - 196.08).abs() < 1e-9);
+        let c = x.cleavage.unwrap();
+        assert!((c.doublet_delta(0) - 25.98).abs() < 1e-9);
+        assert_eq!(x.ends[0].residues, b"K");
+        let e = sdrf("NT=NewUrea;MH=111.03;ML=85.05")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("define it with TA, MH and ML"), "{e}");
+        assert!(sdrf("NT=NewUrea;TA=K").is_err());
     }
 }

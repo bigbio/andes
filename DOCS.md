@@ -1058,10 +1058,16 @@ The crosslinker is written like a modification, `Name (sites)`: a reagent name o
 the UNIMOD name or accession of its intact cross-link, then optional sites
 (`--xl "DSSO (K, S, T, Y, Protein N-term)"`). Without sites the reagent's usual ones apply.
 `N-term` is every peptide N-terminus (synthetic peptide libraries); a heterobifunctional
-reagent separates its ends with `/`. The config key is `search.xl` (the same string, or a map
-that defines a linker the table lacks: `mass`, `sites`, `stubs`, `doublets`, `monolinks`; see
-`config.example.yaml`). Monolinks are variable modifications, e.g.
-`--variable-mods "Xlink:DSSO[176] (K)"`.
+reagent separates its ends with `/`. The reagents are the entries of
+`resources/crosslinkers.yaml` (name, aliases, XLMOD accessions, default sites, and masses as
+UNIMOD records or compositions with their source); a reagent can also be named by its XLMOD
+accession (`--xl XLMOD:02126`). The config key is `search.xl`: the same string, or an entry of
+that file's schema for a reagent the table lacks (see `config.example.yaml`). An SDRF
+`comment[cross-linker]` cell (`NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98`)
+sets the crosslinker below the command line and the config file: the reagent by `AC`, then
+`NT`; `TA` replaces the sites (`nterm` is the protein N-terminus); `CL`, `MH` and `ML` are
+checked against the reagent. Monolinks are variable modifications, by UNIMOD record or as
+`reagent:quencher`, e.g. `--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"`.
 
 | Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
 |---|---|---|---|---|

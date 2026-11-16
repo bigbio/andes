@@ -13,14 +13,14 @@ use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpe
 use search::PreparedSearch;
 
 /// `<base>.<suffix>` next to the PIN path (a trailing `.pin` is replaced).
-fn sibling(output_pin_path: &Path, suffix: &str) -> PathBuf {
-    let mut s = if output_pin_path
+fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
+    let mut s = if report_base
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pin"))
     {
-        output_pin_path.with_extension("").into_os_string()
+        report_base.with_extension("").into_os_string()
     } else {
-        output_pin_path.to_path_buf().into_os_string()
+        report_base.to_path_buf().into_os_string()
     };
     s.push(suffix);
     PathBuf::from(s)
@@ -307,7 +307,7 @@ pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
     prepared: &PreparedSearch,
-    output_pin_path: &Path,
+    report_base: &Path,
     spectrum_paths: &[PathBuf],
     run_ends: &[usize],
     t_total: std::time::Instant,
@@ -352,7 +352,7 @@ pub(crate) fn run_xl(
             .and_then(|p| p.file_stem())
             .map_or_else(|| "run".to_string(), |s| s.to_string_lossy().into_owned())
     };
-    let pin_path = sibling(output_pin_path, ".xl.pin");
+    let pin_path = sibling(report_base, ".xl.pin");
     let n_pin = crate::xl_fdr::write_xl_pin(
         &pin_path,
         spectra_for_xl,
@@ -361,6 +361,7 @@ pub(crate) fn run_xl(
         prepared,
         &run_of,
         None,
+        cfg.linker.intact,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
     // Inter-links keep the pair score: a Percolator model over all CSMs or
@@ -373,7 +374,7 @@ pub(crate) fn run_xl(
         .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
         .collect();
     let mut rescore_class = |intra: bool, suffix: &str| -> Result<(), Box<dyn std::error::Error>> {
-        let path = sibling(output_pin_path, suffix);
+        let path = sibling(report_base, suffix);
         let n = crate::xl_fdr::write_xl_pin(
             &path,
             spectra_for_xl,
@@ -382,11 +383,15 @@ pub(crate) fn run_xl(
             prepared,
             &run_of,
             Some(intra),
+            cfg.linker.intact,
         )?;
         eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;
-        for (dst, src) in score.iter_mut().zip(s) {
-            if src.is_some() {
+        // Every CSM of the rescored class takes its Percolator score; one
+        // without a score leaves the FDR population rather than competing on
+        // the pair-score scale.
+        for ((dst, src), r) in score.iter_mut().zip(s).zip(&results) {
+            if r.csm.as_ref().is_some_and(|c| c.intra == intra) {
                 *dst = src;
             }
         }
@@ -404,7 +409,7 @@ pub(crate) fn run_xl(
     for (&row, v) in levels.csm_rows.iter().zip(&levels.csm_q) {
         q[row] = *v;
     }
-    let csm_path = sibling(output_pin_path, ".xl.tsv");
+    let csm_path = sibling(report_base, ".xl.tsv");
     let n = write_csms(
         &csm_path,
         spectra_for_xl,
@@ -415,13 +420,13 @@ pub(crate) fn run_xl(
         prepared,
     )?;
     crate::xl_fdr::write_levels(
-        &sibling(output_pin_path, ".xl.residue_pairs.tsv"),
-        &sibling(output_pin_path, ".xl.ppi.tsv"),
+        &sibling(report_base, ".xl.residue_pairs.tsv"),
+        &sibling(report_base, ".xl.ppi.tsv"),
         &levels,
         &results,
         spectra_for_xl,
     )?;
-    let dbl_path = sibling(output_pin_path, ".xl.doublets.tsv");
+    let dbl_path = sibling(report_base, ".xl.doublets.tsv");
     write_doublets(&dbl_path, spectra_for_xl, &results, &table)?;
     eprintln!(
         "Wrote {} ({n} CSMs), the residue-pair, protein-pair and doublet tables \

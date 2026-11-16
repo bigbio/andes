@@ -50,7 +50,7 @@ pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
     let mut k = 0;
     while k < order.len() {
         let mut end = k;
-        while end < order.len() && scores[order[end]] == scores[order[k]] {
+        while end < order.len() && scores[order[end]].total_cmp(&scores[order[k]]).is_eq() {
             counts.add(classes[order[end]]);
             end += 1;
         }
@@ -74,6 +74,12 @@ pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
 mod tests {
     use super::*;
     use PairClass::*;
+
+    #[test]
+    fn q_values_terminate_on_nan_scores() {
+        let q = q_values(&[2.0, f64::NAN, f64::NAN, 1.0], &[TT, TD, TT, TT]);
+        assert_eq!(q.len(), 4);
+    }
 
     #[test]
     fn fdr_subtracts_dd_and_clamps() {

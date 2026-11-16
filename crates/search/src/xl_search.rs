@@ -843,7 +843,10 @@ fn search_spectrum(
     if z < cfg.min_precursor_charge {
         return None;
     }
-    let precursor_mass = (spec.precursor_mz - PROTON) * z as f64;
+    let precursor_mass = crate::precursor_cal::adjusted_observed_neutral_mass(
+        (spec.precursor_mz - PROTON) * z as f64,
+        prepared.params.precursor_mass_shift_ppm,
+    );
     let peaks = sorted_peaks(spec);
     let mut doublets = summarize_doublets(&peaks, z, cfg);
     let prec_tol = precursor_window_da(prepared.params, precursor_mass);

@@ -1260,6 +1260,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (cli.quant_dir.is_some(), "--quant-dir"),
             (cli.chimeric, "--chimeric"),
             (cli.localize.is_some(), "--localize"),
+            (cli.tmt.is_some(), "--tmt"),
+            (cli.label.is_some(), "--label"),
         ] {
             if on {
                 unsupported.push(flag);
@@ -2536,7 +2538,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &cli,
             &spectra,
             &prepared,
-            &output_pin_path,
+            &report_base,
             spectrum_paths,
             &run_ends,
             t_total,

@@ -174,6 +174,7 @@ pub(crate) fn write_xl_pin(
     prepared: &PreparedSearch,
     run_of: &dyn Fn(usize) -> String,
     intra: Option<bool>,
+    linker_mass: f64,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<&str> = vec![
@@ -192,7 +193,7 @@ pub(crate) fn write_xl_pin(
         let pa = &table.peptides()[c.alpha.pep as usize];
         let pb = &table.peptides()[c.beta.pep as usize];
         let label = if c.class == PairClass::TT { 1 } else { -1 };
-        let calc = pa.peptide.mass() + pb.peptide.mass();
+        let calc = pa.peptide.mass() + pb.peptide.mass() + linker_mass;
         let f = features(r, c, table);
         debug_assert_eq!(f.len(), FEATURES.len());
         let bare = |p: &XlPeptide| String::from_utf8_lossy(&p.bare()).into_owned();

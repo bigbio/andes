@@ -34,6 +34,7 @@ pub struct XlConfig {
     pub open_min_votes: u16,
     pub open_cleavable: bool,
     pub stub_weight: f32,
+    pub decouple_top: usize,
 }
 
 fn exp_env<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -55,6 +56,7 @@ impl XlConfig {
             open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
             open_cleavable: exp_env("ANDES_XL_OPEN", 0u8) == 1,
             stub_weight: exp_env("ANDES_XL_STUBW", 0.0f32),
+            decouple_top: exp_env("ANDES_XL_DECOUPLE", 0usize),
         }
     }
 }
@@ -1098,6 +1100,32 @@ fn search_spectrum_at(
         v.sort();
         v
     };
+    if cfg.decouple_top > 0 && !combos.is_empty() {
+        combos.sort_by(|x, y| y.score.total_cmp(&x.score));
+        combos.truncate(cfg.decouple_top);
+        let fz = z.saturating_sub(1).clamp(1, 2);
+        let tol = prepared.fragment_tolerance_da;
+        for c in combos.iter_mut() {
+            let (pa, pb) = (&table.peptides[c.a.pep as usize], &table.peptides[c.b.pep as usize]);
+            if pa.bare() == pb.bare() {
+                continue;
+            }
+            let (ma, mb) = (table.index.mass(c.a.pep), table.index.mass(c.b.pep));
+            let (Some(xa), Some(xb)) = (
+                hit_peptide(table, &c.a, mb, linker, mods),
+                hit_peptide(table, &c.b, ma, linker, mods),
+            ) else {
+                continue;
+            };
+            let sa = rescore(&without_peaks(spec, &by_ions(&xb, fz), tol), prepared, z, &[&xa])[0]
+                + stub_bonus(&ctx, ma, linker);
+            let sb = rescore(&without_peaks(spec, &by_ions(&xa, fz), tol), prepared, z, &[&xb])[0]
+                + stub_bonus(&ctx, mb, linker);
+            c.a.score = sa;
+            c.b.score = sb;
+            c.score = sa.min(sb);
+        }
+    }
     let best = combos.iter().enumerate().max_by(|(_, x), (_, y)| {
         x.score
             .total_cmp(&y.score)

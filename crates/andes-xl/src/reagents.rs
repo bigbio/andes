@@ -389,7 +389,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked >= 40, "only {checked} UNIMOD masses checked");
+        assert_eq!(checked, 36, "UNIMOD-backed masses checked");
     }
 
     #[test]

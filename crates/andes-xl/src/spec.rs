@@ -320,18 +320,22 @@ fn lookup(db: &UnimodDb, name: &str, spec: &str) -> Result<&'static Reagent, XlS
     })
 }
 
-/// Up to three reagent names within a small edit distance of `token`.
+/// Up to three reagent names within a small edit distance of `token`,
+/// closest first; on a tie, the name of the token's length first.
 fn suggest(token: &str) -> Vec<String> {
     let t = token.trim().to_ascii_lowercase();
-    let mut scored: Vec<(usize, &str)> = reagents::names()
-        .map(|n| (edit_distance(&t, &n.to_ascii_lowercase()), n))
-        .filter(|(d, _)| *d <= 2)
+    let mut scored: Vec<(usize, usize, &str)> = reagents::names()
+        .map(|n| {
+            let d = edit_distance(&t, &n.to_ascii_lowercase());
+            (d, n.len().abs_diff(t.len()), n)
+        })
+        .filter(|(d, _, _)| *d <= 2)
         .collect();
     scored.sort();
     scored
         .into_iter()
         .take(3)
-        .map(|(_, n)| n.to_string())
+        .map(|(_, _, n)| n.to_string())
         .collect()
 }
 

@@ -58,7 +58,9 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   −2.6 ppm, spread 1.3 ppm, 5 ppm features, 20 ppm retrieval) gave 1747 / 1681, below a flat 7 ppm.
   `--dia` on Orbitrap-class MS2 now uses 7 ppm unless `--fragment-tol-*` is set. Matching the
   co-elution and summed-apex columns at 7 or 12 ppm too (they use 20 and 10 ppm) gave 1817 / 1755 and
-  1821 / 1785 with q ≤ 0.01 at 1.0–1.1 % true FDP on raw02; not kept.
+  1821 / 1785 with q ≤ 0.01 at 1.0–1.1 % true FDP on raw02; not kept. At 7 ppm, `--trainFDR` 0.02 /
+  0.05 / 0.10 give 1726 / 1801 / 1822 on raw01 and 1703 / 1819 / 1824 on raw02 (0.05 kept: 0.10 is
+  inside seed noise), and andes-ms2 at NCE 16 gives 1767 / 1811 (not kept).
 - **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
   1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
   1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633

@@ -573,10 +573,14 @@ pub(crate) fn refine_rt(
                 min_hessian: 20.0,
                 ..TrainParams::default()
             };
-            let model = train_gbdt_regression(&ds, &params, 42).map_err(|e| format!("{e}"))?;
+            // A residual the model cannot learn (the gate rejects it) leaves
+            // this fold unrefined: the column then equals andes-rt's own error.
+            let model = train_gbdt_regression(&ds, &params, 42).ok();
             for &i in rows.iter().filter(|&&i| fold(i) % 3 == k) {
-                let refined = pred[i] + model.predict_value(&row_x(i)) as f64;
-                err[i] = (obs[i] - refined).abs();
+                let shift = model
+                    .as_ref()
+                    .map_or(0.0, |m| m.predict_value(&row_x(i)) as f64);
+                err[i] = (obs[i] - pred[i] - shift).abs();
             }
         }
         let mut a: Vec<f64> = anchors.iter().map(|&i| err[i]).collect();
@@ -761,6 +765,15 @@ mod tests {
         std::fs::write(&pin, &bare).unwrap();
         assert!(!refine_rt(&pin, &spectra, &|_| true).unwrap());
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), bare);
+
+        // A residual with nothing to learn (noise unrelated to the peptide)
+        // fails the regressor's quality gate; the column is still written.
+        for (i, s) in spectra.iter_mut().enumerate() {
+            let pred = 10.0 + (i % 100) as f64 * 0.5;
+            s.rt_seconds = Some((pred + ((i * 7919) % 13) as f64 * 0.1) * 60.0);
+        }
+        std::fs::write(&pin, &text).unwrap();
+        assert!(refine_rt(&pin, &spectra, &|_| true).unwrap());
     }
 
     #[test]

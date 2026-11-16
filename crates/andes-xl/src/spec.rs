@@ -12,8 +12,10 @@
 //!   comma-separated residues and protein termini, each in the modification
 //!   site grammar (`K, S, T, Y, Protein N-term`; `KSTY` also works). A
 //!   heterobifunctional reagent gives its two ends apart with `/`:
-//!   `EDC (K, Protein N-term / D, E, Protein C-term)`. Peptide termini are not
-//!   link sites (digestion follows the cross-linking).
+//!   `EDC (K, Protein N-term / D, E, Protein C-term)`. `N-term` is the
+//!   N-terminus of every peptide, for synthetic peptide libraries or samples
+//!   linked after digestion (a protein linked before digestion has only its
+//!   protein N-terminus free).
 //!
 //! A config `search.xl` can also be a map ([`XlDecl`]) that defines a linker
 //! the table lacks: intact `mass`, `sites`, and for an MS-cleavable linker its
@@ -444,16 +446,17 @@ fn parse_end(spec: &str, sites: &str, end: &str) -> Result<LinkEnd, XlSpecError>
                 }
                 (ResidueSpec::Wildcard, ModLocation::ProtNTerm) => out.protein_n_term = true,
                 (ResidueSpec::Wildcard, ModLocation::ProtCTerm) => out.protein_c_term = true,
-                (_, ModLocation::NTerm | ModLocation::CTerm) => {
+                (ResidueSpec::Wildcard, ModLocation::NTerm) => out.peptide_n_term = true,
+                (ResidueSpec::Wildcard, ModLocation::CTerm) => {
                     return Err(bad(format!(
-                        "`{item}`: peptide termini are not link sites; write Protein N-term or \
-                         Protein C-term"
+                        "`{item}`: the peptide C-terminus is not a link site; write Protein \
+                         C-term"
                     )))
                 }
                 _ => {
                     return Err(bad(format!(
-                        "`{item}`: a protein terminus takes no residue; write the residue and \
-                         the terminus apart"
+                        "`{item}`: a terminus takes no residue; write the residue and the \
+                         terminus apart"
                     )))
                 }
             }
@@ -504,6 +507,9 @@ mod tests {
         assert_eq!(x.describe_sites(), "K, S, T, Y, Protein N-term");
         let z = resolve("DSS (K)").unwrap();
         assert!(!z.ends[0].protein_n_term);
+        let n = resolve("DSBU (K, N-term)").unwrap();
+        assert!(n.ends[0].peptide_n_term && !n.ends[0].protein_n_term);
+        assert_eq!(n.describe_sites(), "K, N-term");
     }
 
     #[test]
@@ -530,8 +536,10 @@ mod tests {
         assert!(e.contains("--variable-mods"), "{e}");
         let e = resolve("Xlink:DSSO[54]").unwrap_err().to_string();
         assert!(e.contains("cleavage stub of DSSO"), "{e}");
-        let e = resolve("DSSO (N-term)").unwrap_err().to_string();
-        assert!(e.contains("peptide termini"), "{e}");
+        let e = resolve("EDC (K / D, C-term)").unwrap_err().to_string();
+        assert!(e.contains("C-terminus is not a link site"), "{e}");
+        let e = resolve("DSSO (N-term K)").unwrap_err().to_string();
+        assert!(e.contains("takes no residue"), "{e}");
         let e = resolve("DSSO (Protein N-term K)").unwrap_err().to_string();
         assert!(e.contains("takes no residue"), "{e}");
         let e = resolve("DSSO (K / D / E)").unwrap_err().to_string();

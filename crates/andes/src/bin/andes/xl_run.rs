@@ -404,7 +404,7 @@ pub(crate) fn run_xl(
     } else {
         spectra
     };
-    let mut cfg = XlConfig::new(linker);
+    let mut cfg = XlConfig::new(linker.clone());
     cfg.oracle_spectra = cli.xl_oracle;
     let t = std::time::Instant::now();
     let results = xl_search_run(spectra_for_xl, prepared, &table, &cfg);

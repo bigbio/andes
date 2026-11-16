@@ -71,6 +71,9 @@ pub struct LinkEnd {
     pub residues: Vec<u8>,
     /// The protein N-terminal amine.
     pub protein_n_term: bool,
+    /// Every peptide N-terminal amine: for synthetic peptide libraries, or a
+    /// sample linked after digestion.
+    pub peptide_n_term: bool,
     /// The protein C-terminal carboxyl.
     pub protein_c_term: bool,
 }
@@ -88,6 +91,9 @@ impl LinkEnd {
             .iter()
             .map(|&r| (r as char).to_string())
             .collect();
+        if self.peptide_n_term {
+            parts.push("N-term".into());
+        }
         if self.protein_n_term {
             parts.push("Protein N-term".into());
         }
@@ -145,9 +151,12 @@ impl Crosslinker {
         self.ends.iter().any(|e| e.reacts_with(r))
     }
 
-    /// Whether either end reacts with the protein N-terminus.
-    pub fn protein_n_term(&self) -> bool {
-        self.ends.iter().any(|e| e.protein_n_term)
+    /// Whether either end can sit on a peptide's N-terminal amine (any
+    /// peptide, or a protein N-terminal one).
+    pub fn n_term(&self) -> bool {
+        self.ends
+            .iter()
+            .any(|e| e.protein_n_term || e.peptide_n_term)
     }
 
     /// The forms a link residue can carry: each stub, then the intact form.
@@ -250,6 +259,7 @@ mod tests {
         assert_eq!(names, ["alkene", "thiol", "sulfenic"]);
         assert_eq!(x.ends[0].residues, b"K");
         assert!(x.ends[0].protein_n_term && !x.ends[0].protein_c_term);
+        assert!(!x.ends[0].peptide_n_term);
         assert!(x.is_homobifunctional());
     }
 

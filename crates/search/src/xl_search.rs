@@ -154,7 +154,7 @@ impl XlCandidates {
         // N-terminal; the exact site rule needs the candidate (protein
         // termini, mods) and runs in `from_candidates`.
         let cands = prepared.out_of_core_candidates_where(move |residues, _post| {
-            lk.protein_n_term() || residues.iter().any(|&r| lk.reacts_with(r))
+            lk.n_term() || residues.iter().any(|&r| lk.reacts_with(r))
         });
         Self::from_candidates(cands, linker)
     }

@@ -19,7 +19,8 @@ pub struct LinkSite {
 ///   peptide's C-terminus is a site only when it is also the protein's
 ///   C-terminus.
 /// - The protein N-terminus (residue 0 of a protein N-terminal peptide), when
-///   the linker reacts with it and residue 0 is unmodified.
+///   the end reacts with it and residue 0 is unmodified; with
+///   [`LinkEnd::peptide_n_term`], the N-terminus of every peptide.
 ///
 /// A position that qualifies both ways (a reactive residue 0 of a protein
 /// N-terminal peptide) is listed once, as the residue site, because both
@@ -45,8 +46,7 @@ pub fn link_sites(
             n_term: false,
         });
     }
-    if end.protein_n_term
-        && is_protein_n_term
+    if (end.peptide_n_term || (end.protein_n_term && is_protein_n_term))
         && n > 0
         && !modified.first().copied().unwrap_or(false)
         && out.first().is_none_or(|s| s.pos != 0)
@@ -108,5 +108,17 @@ mod tests {
                 n_term: false
             }]
         );
+    }
+
+    #[test]
+    fn peptide_n_terminus_is_a_site_when_the_end_says_so() {
+        let mut end = Crosslinker::dsso().ends[0].clone();
+        end.peptide_n_term = true;
+        end.protein_n_term = false;
+        let s: Vec<(usize, bool)> = link_sites(b"MAKR", &[false; 4], false, false, &end)
+            .into_iter()
+            .map(|s| (s.pos, s.n_term))
+            .collect();
+        assert_eq!(s, vec![(0, true), (2, false)]);
     }
 }

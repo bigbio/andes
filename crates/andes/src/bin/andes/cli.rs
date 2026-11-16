@@ -655,7 +655,8 @@ pub(crate) struct SearchArgs {
     /// DSPP, DMP, DTBP, DFDNB, BMOE, SMCC, SDA, EDC or DMTMM) or the UNIMOD name or
     /// accession of its intact cross-link (Xlink:DSS[138], UNIMOD:1898), then optionally
     /// its sites in parentheses: "DSSO (K, S, T, Y, Protein N-term)". Without sites the
-    /// reagent's usual ones apply (Lys and the protein N-terminus for NHS esters); a
+    /// reagent's usual ones apply (Lys and the protein N-terminus for NHS esters); N-term
+    /// adds every peptide N-terminus (synthetic peptide libraries), and a
     /// heterobifunctional reagent separates its two ends with /. Masses come from UNIMOD,
     /// or from the cited composition for reagents UNIMOD lacks (DSBSO, CDI, PhoX, SDA,
     /// EDC). A linker not in the table is defined in the config file (search.xl, with

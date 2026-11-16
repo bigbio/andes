@@ -39,7 +39,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   Percolator seed alone moves N@FDP_c 1 % over a range of about 150 (seeds 42, 1, 2, 3, 7). Seed 42,
   used for the first row and the single-seed comparisons below, is at the top of that range on both
   raws. Compare features on the mean over seeds, paired by seed and by thread count: the same seed
-  with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN.
+  with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
+  five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
   with seed 42, 72 % / 69 % on the seed mean, and 88–92 % / 98–101 % of OpenDIA arm E.
 - **MS1 gate** (a candidate is scored only when its monoisotopic m/z has a survey peak within 5 ppm in the

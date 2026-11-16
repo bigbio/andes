@@ -335,20 +335,30 @@ fn suggest(token: &str) -> Vec<String> {
         .collect()
 }
 
+/// Edit distance with adjacent transpositions (optimal string alignment).
 fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0; b.len() + 1];
-    for (i, ca) in a.chars().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            cur[j + 1] = (prev[j] + usize::from(ca != *cb))
-                .min(prev[j + 1] + 1)
-                .min(cur[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut cur);
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
     }
-    prev[b.len()]
+    for (j, v) in d[0].iter_mut().enumerate() {
+        *v = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut v = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = v;
+        }
+    }
+    d[a.len()][b.len()]
 }
 
 /// The mass of one reagent part: its UNIMOD record, or its composition.
@@ -609,6 +619,13 @@ mod tests {
             ..d
         };
         assert!(unknown_stub.resolve(db()).is_err());
+    }
+
+    #[test]
+    fn transpositions_are_one_edit() {
+        assert_eq!(edit_distance("dsos", "dsso"), 1);
+        assert_eq!(edit_distance("dss", "dsso"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
     }
 
     #[test]

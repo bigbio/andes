@@ -106,6 +106,7 @@ fn scan_of(spec: &Spectrum) -> String {
         .map_or_else(|| spec.title.clone(), |s| s.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_csms(
     path: &Path,
     spectra: &[Spectrum],

@@ -1,15 +1,7 @@
-//! Peptide elemental formula and theoretical precursor isotope envelope.
-//!
-//! Standard residues use their exact compositions; a modification contributes
-//! an averagine-shaped allotment of atoms for its mass delta (the delta is
-//! known, its formula is not). The envelope is the exact multinomial fold of
-//! the per-element abundance ladders (`model::isotope`).
-
 use model::amino_acid::standard_composition;
 use model::isotope::{isotope_envelope_and_share_from_formula, isotope_envelope_from_formula};
 use model::mass::{C, H, N, O, S};
 
-/// Atom counts (C, H, N, O, S).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Formula {
     pub c: u32,
@@ -19,7 +11,6 @@ pub struct Formula {
     pub s: u32,
 }
 
-/// Averagine (Senko 1995): C4.9384 H7.7583 N1.3577 O1.4773 S0.0417 per 111.1254 Da.
 const AVERAGINE_MASS: f64 = 111.1254;
 const AVERAGINE: [f64; 5] = [4.9384, 7.7583, 1.3577, 1.4773, 0.0417];
 
@@ -34,7 +25,6 @@ impl Formula {
         }
     }
 
-    /// Averagine atoms for a mass (rounded to integers, never negative).
     pub fn averagine(mass: f64) -> Self {
         let units = (mass / AVERAGINE_MASS).max(0.0);
         let r = |k: usize| (AVERAGINE[k] * units).round().max(0.0) as u32;
@@ -47,16 +37,6 @@ impl Formula {
         }
     }
 
-    /// The atoms a glycan contributes, from its residue counts. Residues are
-    /// POLYMERISED (one water already lost per glycosidic bond): Hex
-    /// C6H10O5, HexNAc C8H13NO5, Fuc C6H10O4, NeuAc C11H17NO8, NeuGc
-    /// C11H17NO9.
-    ///
-    /// The peptide [`Formula::peptide`] already carries its terminal water;
-    /// an attached glycan adds no further H2O. This is the exact formula the
-    /// isotope envelope needs — a glycan carries roughly twice the oxygen and
-    /// ~14 % fewer carbons per dalton than an averagine peptide, which moves
-    /// the M+1/M+2 shares enough to matter for a 3–4 kDa glycopeptide.
     pub fn glycan(hex: u8, hexnac: u8, fuc: u8, neuac: u8, neugc: u8) -> Self {
         let h = hex as u32;
         let n = hexnac as u32;
@@ -72,7 +52,6 @@ impl Formula {
         }
     }
 
-    /// Monoisotopic mass of the formula (Da).
     pub fn monoisotopic_mass(&self) -> f64 {
         self.c as f64 * C
             + self.h as f64 * H
@@ -97,10 +76,6 @@ impl Formula {
         self.s = self.s.saturating_sub(other.s);
     }
 
-    /// Formula of a peptide given its residues (one-letter codes) and the
-    /// modification mass delta carried by each residue (0.0 when unmodified).
-    /// Unknown residues (`U`, `X`, ...) fall back to averagine for a 110 Da
-    /// residue.
     pub fn peptide<I>(residues: I) -> Self
     where
         I: IntoIterator<Item = (u8, f64)>,
@@ -120,14 +95,10 @@ impl Formula {
         f
     }
 
-    /// First `n_isotopes` relative abundances of the precursor envelope,
-    /// normalised to sum 1.
     pub fn envelope(&self, n_isotopes: usize) -> Vec<f64> {
         isotope_envelope_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
     }
 
-    /// [`Self::envelope`] and the share of the whole isotope pattern that
-    /// its `n_isotopes` peaks hold (0 when `n_isotopes == 0`).
     pub fn envelope_and_share(&self, n_isotopes: usize) -> (Vec<f64>, f64) {
         isotope_envelope_and_share_from_formula(self.c, self.h, self.n, self.o, self.s, n_isotopes)
     }
@@ -139,7 +110,6 @@ mod tests {
 
     #[test]
     fn peptide_formula_sums_residues_and_water() {
-        // G + A: C5 H8 N2 O2 + H2O = C5 H10 N2 O3
         let f = Formula::peptide([(b'G', 0.0), (b'A', 0.0)]);
         assert_eq!(
             f,
@@ -178,9 +148,6 @@ mod tests {
 
     #[test]
     fn a_glycopeptide_envelope_is_flatter_than_the_peptide_alone() {
-        // The glycan's oxygen dilutes the 13C share: the same peptide with a
-        // HexNAc2Hex8 attached must put relatively MORE weight on M+2 than
-        // the bare peptide averaged over its extra mass.
         let bare = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
         let mut intact = bare;
         intact.add(Formula::glycan(8, 2, 0, 0, 0));
@@ -204,9 +171,6 @@ mod tests {
 
     #[test]
     fn share_of_the_first_four_isotopes_falls_with_mass() {
-        // Averagine peptides of 1 to 4 kDa: the first four isotopes hold
-        // nearly all of a small peptide's pattern and about three quarters
-        // of a 4 kDa one's.
         let share = |mass: f64| Formula::averagine(mass).envelope_and_share(4).1;
         for (mass, lo, hi) in [
             (1000.0, 0.99, 1.0),

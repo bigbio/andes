@@ -1,15 +1,3 @@
-//! End-to-end `--label`: two synthetic SILAC duplex runs
-//! (`scripts/make_quant_fixtures.py --silac`), searched with the heavy
-//! Lys8/Arg10 labels, rescored natively and quantified in both channels with
-//! match between channels and match between runs.
-//!
-//! The fixture's peptides have H/L ratios of 1, 0.5, 2 or 0.25 (of their
-//! monoisotopes; the molar ratio andes reports is 0.10-0.33 log2 lower,
-//! since a heavy peptide's natural envelope is narrower), every tenth has no
-//! heavy channel, and each channel is triggered for MS2 with probability 0.6,
-//! so many groups are identified in one channel or one run only. The labels
-//! are fully enriched, so the test sets `--label-heavy-enrichment 1`.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -151,9 +139,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
             r.peptide
         );
     }
-    // Every ratio sits near a design level: the molar ratio is 0.10 to 0.33
-    // log2 below the monoisotope design for these peptides (a heavy
-    // peptide's envelope is narrower, so its monoisotope holds more of it).
     let ratios: Vec<&Row> = rows
         .iter()
         .filter(|r| r.channel == 2 && r.log2_ratio.is_some())
@@ -176,8 +161,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
         "{within} of {} ratios near a design level",
         off.len()
     );
-    // The same group gives the same ratio in both runs, whether identified,
-    // matched between channels or transferred.
     let mut by_group: HashMap<(String, u8), Vec<(f64, bool)>> = HashMap::new();
     for r in &ratios {
         by_group
@@ -229,11 +212,6 @@ fn silac_duplex_quantifies_matches_and_transfers() {
     assert!(log.contains("quant: label: match between runs:"), "{log}");
 }
 
-/// Dimethyl triplex (`make_quant_fixtures.py --dimethyl`): every amine
-/// labelled, L:M:H of 1:1:1, 1:0.5:0.25 or 0.25:1:2 (of the fully labelled
-/// monoisotopes), the deuterated channels eluting 1.5 s and 3 s early and
-/// carrying their lower isotopologues at 99 % 2H, the medium overlapping the
-/// light M+4.
 #[test]
 fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
     let tmp = tempfile::tempdir().unwrap();
@@ -287,9 +265,6 @@ fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
         assert_eq!(count(ch, "below_detection"), 0, "channel {ch}");
     }
 
-    // Monoisotope ratios from the molar ones: the fully labelled
-    // monoisotope's share of a channel is its natural π0 (the formula the fit
-    // uses, carbamidomethyl C as in the search) times 0.99 per 2H atom.
     let mut spec = quant::label::LabelSpec::parse("dimethyl3").unwrap();
     spec.enrichment_heavy = 1.0;
     spec.enrichment_2h_chemical = 1.0;

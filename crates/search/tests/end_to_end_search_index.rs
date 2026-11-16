@@ -1,7 +1,3 @@
-//! End-to-end: load FASTA → build SearchIndex → assert decoy-generation
-//! shape invariants. Exercises the production pipeline (FASTA reader →
-//! decoy gen) on real fixtures.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -23,7 +19,7 @@ fn bsa_end_to_end() {
     let target =
         FastaReader::load_all(BufReader::new(File::open(fasta("BSA.fasta")).unwrap())).unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
-    assert_eq!(idx.db.len(), 2); // 1 target + 1 decoy
+    assert_eq!(idx.db.len(), 2);
 }
 
 #[test]

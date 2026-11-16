@@ -1,18 +1,3 @@
-//! Manual regression check for the glycan-first pre-filter against real mouse
-//! glycopeptide spectra. Gated on two env vars (the data is not vendored):
-//!
-//! ```text
-//! ANDES_GLYCO_GDB=/path/to/N-glycan-mouse.gdb \
-//! ANDES_GLYCO_MGF=/path/to/glycopeptide-filtered.mgf \
-//! cargo test -p glyco --test glycan_first_mouse -- --nocapture
-//! ```
-//!
-//! It loads the glycan DB, builds the Y-complementary ion index, stream-parses
-//! the first `N` spectra from the MGF, and runs `search_glycans` on each. It is a
-//! sanity check, not a gold-standard assertion: a glycopeptide spectrum should
-//! fire the diagnostic gate and (when its core Y ions are present) retrieve
-//! candidates.
-
 use std::env;
 use std::io::BufRead;
 
@@ -26,9 +11,6 @@ struct MgfSpectrum {
     peaks: Vec<(f64, f32)>,
 }
 
-/// Stream-parse at most `max_n` MGF spectra. Returns as soon as `max_n` complete
-/// `BEGIN IONS … END IONS` blocks are seen (so a 500 MB filtered MGF is not
-/// loaded whole).
 fn parse_mgf_limited(path: &str, max_n: usize) -> Vec<MgfSpectrum> {
     let mut out = Vec::new();
     let mut cur: Option<MgfSpectrum> = None;
@@ -72,8 +54,6 @@ fn parse_mgf_limited(path: &str, max_n: usize) -> Vec<MgfSpectrum> {
 
 #[test]
 fn glycan_first_retrieves_candidates_on_mouse_spectra() {
-    // Skip (not fail) when the data env vars are absent — the mouse data is not
-    // vendored, so this test must be a no-op in normal CI.
     let (Ok(gdb), Ok(mgf)) = (env::var("ANDES_GLYCO_GDB"), env::var("ANDES_GLYCO_MGF")) else {
         eprintln!("skipping: ANDES_GLYCO_GDB / ANDES_GLYCO_MGF not set");
         return;
@@ -91,7 +71,7 @@ fn glycan_first_retrieves_candidates_on_mouse_spectra() {
 
     let idx = GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan);
     let cfg = GlycanConfig {
-        min_core_ions: 1, // permissive pre-filter, matches the driver
+        min_core_ions: 1,
         top_k: 100,
         ..GlycanConfig::default()
     };
@@ -143,8 +123,6 @@ fn glycan_first_retrieves_candidates_on_mouse_spectra() {
         fired,
         total_candidates
     );
-    // Sanity: on a glycopeptide-filtered run the gate should fire on the large
-    // majority, and a substantial fraction should retrieve candidates.
     assert!(
         fired > 0,
         "diagnostic gate never fired — data or parser problem"

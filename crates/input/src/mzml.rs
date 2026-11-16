@@ -1,10 +1,3 @@
-//! Streaming mzML reader. Event-driven via quick-xml; no serde tree.
-//!
-//! By default only MS2 spectra are emitted (ms level == 2). The parser
-//! decodes base64 peak arrays (32-bit or 64-bit float, little-endian)
-//! with optional zlib compression and zips (m/z, intensity) pairs into
-//! `Vec<(f64, f32)>` sorted ascending by m/z.
-
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -16,78 +9,44 @@ use quick_xml::{events::Event, Reader};
 use model::scan::{Ms1Scan, NoiseProfile, ProductScan, ScanContext};
 use model::{ActivationMethod, InstrumentType, Spectrum};
 
-// Mass-analyzer cvParams used by `detect_instrument_type`. Sourced from the
-// PSI-MS controlled vocabulary (HUPO-PSI MS ontology). When no `--instrument`
-// flag is given, the CLI defaults to low-resolution ion-trap routing; per-file
-// auto-detection reads these terms to pick a sensible bundled model
-// (LTQ Velos data → cid_lowres; Orbitrap CID → cid_highres).
-//
-// Ion-trap family → InstrumentType::LowRes.
-const CV_ANALYZER_ION_TRAP: &str = "MS:1000264"; // ion trap (generic)
-const CV_ANALYZER_QUAD_ION_TRAP: &str = "MS:1000082"; // quadrupole ion trap
-const CV_ANALYZER_RADIAL_LIT: &str = "MS:1000083"; // radial ejection linear ion trap
-const CV_ANALYZER_LINEAR_ION_TRAP: &str = "MS:1000291"; // linear ion trap
-                                                        // Orbitrap / FT family → InstrumentType::QExactive / HighRes.
-const CV_ANALYZER_ORBITRAP: &str = "MS:1000484"; // orbitrap
-const CV_ANALYZER_FTICR: &str = "MS:1000079"; // Fourier transform ion cyclotron resonance
-                                              // TOF.
-const CV_ANALYZER_TOF: &str = "MS:1000084"; // time-of-flight
+const CV_ANALYZER_ION_TRAP: &str = "MS:1000264";
+const CV_ANALYZER_QUAD_ION_TRAP: &str = "MS:1000082";
+const CV_ANALYZER_RADIAL_LIT: &str = "MS:1000083";
+const CV_ANALYZER_LINEAR_ION_TRAP: &str = "MS:1000291";
+const CV_ANALYZER_ORBITRAP: &str = "MS:1000484";
+const CV_ANALYZER_FTICR: &str = "MS:1000079";
+const CV_ANALYZER_TOF: &str = "MS:1000084";
 
-// Instrument-model cvParams in `<instrument>` / `<referenceableParamGroup>`
-// that explicitly identify a QExactive-family box. We don't enumerate every
-// Orbitrap model — falling back to "MS:1000484 orbitrap analyzer ⇒ QExactive"
-// covers the typical case. These exist for cases where the analyzer cvParam
-// is absent but the instrument model is recorded.
 const CV_MODEL_Q_EXACTIVE: &str = "MS:1001911";
 const CV_MODEL_Q_EXACTIVE_HF: &str = "MS:1002523";
 const CV_MODEL_Q_EXACTIVE_HF_X: &str = "MS:1002634";
 const CV_MODEL_Q_EXACTIVE_PLUS: &str = "MS:1002877";
 const CV_MODEL_ORBITRAP_FUSION: &str = "MS:1002416";
-// Orbitrap Astral instrument model (PSI-MS MS:1003378). Checked BEFORE the
-// generic Orbitrap-analyzer → QExactive mapping so Astral wins.
 const CV_MODEL_ORBITRAP_ASTRAL: &str = "MS:1003378";
 
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
-/// Spectrum representation: profile (`MS:1000128`) vs centroided
-/// (`MS:1000127`). Profile spectra carry the raw peak shape; their shoulders
-/// flood the intensity-rank scorer, so we centroid them in `build_peaks`.
 const CV_PROFILE: &str = "MS:1000128";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
-/// Isolation-window lower offset in Da (selected m/z − lower = window start).
 const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
-/// Isolation-window target m/z: the centre the offsets are measured from.
 const CV_ISOLATION_TARGET_MZ: &str = "MS:1000827";
-/// Isolation-window upper offset in Da (selected m/z + upper = window end).
 const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
-/// `scan window lower limit` / `scan window upper limit` (under `<scanWindow>`).
 const CV_SCAN_WINDOW_LOWER: &str = "MS:1000501";
 const CV_SCAN_WINDOW_UPPER: &str = "MS:1000500";
-/// `FAIMS compensation voltage`.
 const CV_FAIMS_CV: &str = "MS:1001581";
-/// Thermo filter string; its activation chain names the supplemental collision of an
-/// EThcD/ETciD scan that some converters leave out of `<activation>`.
 const CV_FILTER_STRING: &str = "MS:1000512";
-/// Older mzML files sometimes use plain m/z accession in selectedIon.
 const CV_MZ_PLAIN: &str = "MS:1000040";
 const CV_CHARGE_STATE: &str = "MS:1000041";
 const CV_PEAK_INTENSITY: &str = "MS:1000042";
 const CV_MZ_ARRAY: &str = "MS:1000514";
 const CV_INTENSITY_ARRAY: &str = "MS:1000515";
-/// `sampled noise m/z array` / `sampled noise intensity array`: the
-/// instrument's noise estimate along m/z (ThermoRawFileParser `--noiseData`).
 const CV_NOISE_MZ_ARRAY: &str = "MS:1002743";
 const CV_NOISE_ARRAY: &str = "MS:1002744";
 const CV_64BIT: &str = "MS:1000523";
 const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
-/// Mantissa truncation followed by zlib: the values stay IEEE floats, so the
-/// array decodes exactly like a zlib one.
 const CV_TRUNCATION_ZLIB: &str = "MS:1003088";
 
-/// Binary encodings the reader cannot decode (MS-Numpress, prediction after
-/// truncation, zstd, grid encoding). A spectrum carrying one fails with
-/// [`MzMLParseError::UnsupportedCompression`] instead of yielding garbage peaks.
 const UNSUPPORTED_COMPRESSION: &[(&str, &str)] = &[
     ("MS:1002312", "MS-Numpress linear prediction"),
     ("MS:1002313", "MS-Numpress positive integer"),
@@ -106,41 +65,26 @@ const UNSUPPORTED_COMPRESSION: &[(&str, &str)] = &[
     ("MS:1003826", "coordinate grid encoding"),
 ];
 
-// Activation-method CV accessions (inside <precursor><activation>).
-// Mapped to the five canonical ActivationMethod variants per PSI-MS
-// (HUPO-PSI MS ontology). Unknown / unhandled child terms fall through
-// and the spectrum's activation_method stays None.
-const CV_CID: &str = "MS:1000133"; // collision-induced dissociation
-const CV_HCD: &str = "MS:1000422"; // beam-type CID = HCD
-const CV_ETD: &str = "MS:1000598"; // electron transfer dissociation
-const CV_PQD: &str = "MS:1000599"; // pulsed Q dissociation
-const CV_UVPD: &str = "MS:1000435"; // photodissociation (PSI-MS UVPD term)
-                                    // ECD is MS:1000250; we don't have a dedicated variant for it — callers
-                                    // that need ECD usually look up either ETD or treat as electron-based.
-                                    // We map ECD → ETD for electron-based activation grouping when ECD is
-                                    // the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
-const CV_ECD: &str = "MS:1000250"; // electron capture dissociation
+const CV_CID: &str = "MS:1000133";
+const CV_HCD: &str = "MS:1000422";
+const CV_ETD: &str = "MS:1000598";
+const CV_PQD: &str = "MS:1000599";
+const CV_UVPD: &str = "MS:1000435";
+const CV_ECD: &str = "MS:1000250";
 
-// Child terms of the methods above, written by newer converters.
-const CV_TRAP_CID: &str = "MS:1002472"; // trap-type collision-induced dissociation
-const CV_HIGH_ENERGY_BEAM_CID: &str = "MS:1002481"; // higher energy beam-type CID
-const CV_UVPD_CHILD: &str = "MS:1003246"; // ultraviolet photodissociation
+const CV_TRAP_CID: &str = "MS:1002472";
+const CV_HIGH_ENERGY_BEAM_CID: &str = "MS:1002481";
+const CV_UVPD_CHILD: &str = "MS:1003246";
 
-// The collisional half of EThcD/ETciD, written next to an ETD/ECD term.
-const CV_SUPPLEMENTAL_HCD: &str = "MS:1002678"; // supplemental beam-type CID
-const CV_SUPPLEMENTAL_CID: &str = "MS:1002679"; // supplemental CID
+const CV_SUPPLEMENTAL_HCD: &str = "MS:1002678";
+const CV_SUPPLEMENTAL_CID: &str = "MS:1002679";
 
-// A combined method written as a single term.
-const CV_ETHCD: &str = "MS:1002631"; // electron-transfer/higher-energy collision dissociation
-const CV_ETCID: &str = "MS:1003182"; // electron-transfer/collision-induced dissociation
+const CV_ETHCD: &str = "MS:1002631";
+const CV_ETCID: &str = "MS:1003182";
 
-/// Unit: minutes → multiply by 60 to get seconds.
 const CV_UNIT_MINUTE: &str = "UO:0000031";
-/// The obsolete PSI-MS `minute` term, still written by older converters.
 const CV_UNIT_MINUTE_LEGACY: &str = "MS:1000038";
 
-/// Whether a `scan start time` is in minutes: the unit accession says so, or,
-/// when the converter wrote only a unit name, the name does.
 fn is_minute_unit(unit_accession: &str, unit_name: &str) -> bool {
     match unit_accession {
         CV_UNIT_MINUTE | CV_UNIT_MINUTE_LEGACY => true,
@@ -185,9 +129,6 @@ pub enum MzMLParseError {
     },
 }
 
-// io::Error → MzMLParseError via the Zlib variant.
-// Cannot use #[from] because quick_xml::Error already wraps io::Error and that
-// would introduce an overlapping From impl.
 impl From<std::io::Error> for MzMLParseError {
     fn from(e: std::io::Error) -> Self {
         MzMLParseError::Zlib(e)
@@ -201,14 +142,8 @@ enum State {
     Spectrum,
     Scan,
     SelectedIon,
-    /// Inside `<precursor><isolationWindow>` — we read the lower/upper
-    /// offset cvParams here and set the `SpectrumBuilder` isolation fields.
     IsolationWindow,
-    /// Inside `<precursor><activation>` — we read activation-method
-    /// cvParams here and set `SpectrumBuilder::activation_method`.
     Activation,
-    /// Inside `<productList>`: its `<isolationWindow>` describes the product
-    /// (fragment) isolation, not the precursor's, so its cvParams are ignored.
     ProductList,
     BinaryDataArray,
     Binary,
@@ -220,10 +155,8 @@ struct BinaryArrayCtx {
     is_intensity: bool,
     is_noise_mz: bool,
     is_noise: bool,
-    /// 32 or 64 bits.
     precision_bits: u8,
     zlib: bool,
-    /// An encoding from [`UNSUPPORTED_COMPRESSION`], as `(accession, name)`.
     unsupported: Option<(&'static str, &'static str)>,
     b64_text: String,
 }
@@ -243,8 +176,6 @@ impl BinaryArrayCtx {
     }
 }
 
-/// Emit the EThcD labelling notice at most once per process (the detection
-/// fires per-spectrum and would otherwise spam thousands of identical lines).
 pub(crate) fn log_ethcd_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -269,7 +200,6 @@ pub(crate) fn log_ethcd_once() {
     }
 }
 
-/// Emit the profile-centroiding notice at most once per process.
 fn log_profile_centroid_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -285,15 +215,6 @@ fn log_profile_centroid_once() {
     }
 }
 
-/// Centroid a profile-mode peak list (ascending by m/z). Each profile peak
-/// spans many sample points; we collapse it to a single point: the
-/// intensity-weighted mean m/z over the peak's flanks, with the apex intensity.
-///
-/// A point is a peak apex when it is `>=` its left neighbour and `>` its right
-/// neighbour (the right-strict rule keeps flat plateaus from emitting twice).
-/// From each apex we walk down both flanks until the signal stops descending
-/// (a valley, the next peak, or a zero) and integrate that window. Boundary
-/// apexes at index 0 / n-1 are not emitted; real profile peaks are interior.
 fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
     let n = profile.len();
     if n < 3 {
@@ -304,13 +225,10 @@ fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
     while i < n - 1 {
         let (prev, cur, next) = (profile[i - 1].1, profile[i].1, profile[i + 1].1);
         if cur > 0.0 && cur >= prev && cur > next {
-            // Descend the left flank: include l-1 while moving left keeps the
-            // intensity non-increasing and above baseline.
             let mut l = i;
             while l > 0 && profile[l - 1].1 <= profile[l].1 && profile[l - 1].1 > 0.0 {
                 l -= 1;
             }
-            // Descend the right flank symmetrically.
             let mut r = i;
             while r + 1 < n && profile[r + 1].1 <= profile[r].1 && profile[r + 1].1 > 0.0 {
                 r += 1;
@@ -328,7 +246,7 @@ fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
             if wsum > 0.0 {
                 out.push((msum / wsum, apex));
             }
-            i = r + 1; // resume past this peak
+            i = r + 1;
         } else {
             i += 1;
         }
@@ -339,73 +257,33 @@ fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
 #[derive(Debug, Default)]
 struct SpectrumBuilder {
     id: String,
-    /// The `<spectrum index>` attribute: the scan number's fallback when the
-    /// native id names none.
     index: Option<i32>,
     ms_level: Option<u32>,
     rt_seconds: Option<f64>,
     precursor_mz: Option<f64>,
-    /// Thermo-specific monoisotopic-corrected precursor m/z, when the mzML
-    /// file is produced from a Thermo .raw and the instrument firmware ran
-    /// its on-board deisotoping. Lives under `<scan>` as a userParam:
-    ///   `<userParam name="[Thermo Trailer Extra]Monoisotopic M/Z:" value="..."/>`
-    /// When present, this is preferred over `selectedIon.MS:1000744` because
-    /// the raw isolation m/z may be off-by-one-or-more C13 isotopes for
-    /// Orbitrap-style data — Thermo firmware deisotoping is preferred over
-    /// the raw isolation m/z when the trailer userParam is present.
     monoisotopic_mz_override: Option<f64>,
     precursor_charge: Option<i32>,
     precursor_intensity: Option<f32>,
-    /// `<selectedIon>` elements opened so far in this spectrum. Only the first
-    /// one sets the precursor m/z, charge and intensity, so a spectrum listing
-    /// several ions never combines the m/z of one with the charge of another.
     selected_ions: u32,
-    /// Activation method recorded under `<precursor><activation>` — set
-    /// when we see a known cvParam (CID/HCD/ETD/PQD/UVPD/ECD). Stays
-    /// `None` when no `<activation>` block is present or the term is
-    /// unknown.
     activation_method: Option<ActivationMethod>,
-    /// Whether the current `<activation>` block carried an electron-transfer/
-    /// capture term (ETD or ECD). Combined with `act_saw_collisional` this
-    /// detects EThcD/ETciD (supplemental activation) order-independently.
     act_saw_electron: bool,
-    /// Whether the current `<activation>` block carried a collisional term
-    /// (HCD or CID) — the supplemental half of EThcD/ETciD.
     act_saw_collisional: bool,
-    /// Whether the scan's Thermo filter string chains an electron activation with a
-    /// collisional one in its last stage (see [`filter_has_supplemental_collision`]).
-    /// ThermoRawFileParser writes only the ETD term for the two-token filter dialect
-    /// (`391.19@etd55.49 391.19@hcd20.00`), so the filter is the only record there.
     filter_supplemental: bool,
-    /// Whether this spectrum is profile-mode (`MS:1000128`). Profile spectra are
-    /// centroided in `build_peaks` so their peak-shoulders don't flood the
-    /// intensity-rank scorer (common for un-centroided Orbitrap/Astral mzMLs).
     is_profile: bool,
-    /// Isolation-window lower offset in Da, from `<isolationWindow>`
-    /// `MS:1000828`. `None` when the mzML omits the isolation window.
     isolation_lower_offset: Option<f64>,
-    /// Isolation-window upper offset in Da, from `<isolationWindow>`
-    /// `MS:1000829`. `None` when the mzML omits the isolation window.
     isolation_upper_offset: Option<f64>,
-    /// Isolation-window target m/z, from `<isolationWindow>` `MS:1000827`.
     isolation_target_mz: Option<f64>,
-    /// `<precursor spectrumRef="...">`: the native id of the scan this one was
-    /// produced from. Links an MS3 reporter scan to its MS2 for quantification.
     parent_ref: Option<String>,
-    /// First `<scanWindow>` lower / upper limit: the acquired m/z range.
     scan_window_lower: Option<f64>,
     scan_window_upper: Option<f64>,
-    /// `FAIMS compensation voltage`, when recorded.
     faims_cv: Option<f32>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
-    /// Sampled noise arrays, kept only under noise capture.
     noise_mz_array: Option<Vec<f64>>,
     noise_array: Option<Vec<f64>>,
 }
 
 impl SpectrumBuilder {
-    /// The reporter-region noise of this scan from its sampled noise arrays.
     fn take_noise(&mut self) -> Option<NoiseProfile> {
         let mz = self.noise_mz_array.take()?;
         let noise = self.noise_array.take()?;
@@ -416,12 +294,6 @@ impl SpectrumBuilder {
     }
 }
 
-/// What we extract from a `<cvParam>` element without holding a reference
-/// into the event buffer.
-/// PSI-MS accession for an activation `userParam` name, matched exactly
-/// (case-insensitive) against the method's PSI-MS name or its abbreviation.
-/// Anything else returns `None`, so an unrelated userParam never sets the
-/// activation.
 fn activation_user_param_accession(name: &str) -> Option<&'static str> {
     match name.trim().to_ascii_lowercase().as_str() {
         "cid" | "collision-induced dissociation" => Some(CV_CID),
@@ -453,26 +325,12 @@ impl CvParamInfo {
     }
 }
 
-/// Side structure produced by the opt-in MS1-capture reader path
-/// ([`MzMLReader::read_with_ms1`]). It records the peak lists of the captured
-/// MS1 scans (stored ONCE) and, for each emitted MS2 spectrum, the index of
-/// its most-recent preceding MS1.
-///
-/// The chimeric MS1 isotope filter consumes this to subtract co-isolated
-/// precursors from the MS2 candidate space. Producing it is opt-in; the
-/// default reader path never builds one and stays MS2-only.
 #[derive(Debug, Default, Clone)]
 pub struct Ms1Link {
-    /// Peak lists of the captured MS1 scans, in file order. Stored ONCE
-    /// (not duplicated per MS2).
     pub ms1_peaks: Vec<Vec<(f64, f32)>>,
-    /// For each emitted MS2 (by its index in the returned `Vec<Spectrum>`),
-    /// the index into `ms1_peaks` of the most-recent preceding MS1, or
-    /// `None` if no MS1 preceded it. Length equals the number of emitted MS2.
     pub ms2_to_ms1: Vec<Option<usize>>,
 }
 
-/// Streaming mzML reader. Emits MS2 spectra by default.
 pub struct MzMLReader<R: BufRead> {
     xml: Reader<R>,
     buf: Vec<u8>,
@@ -482,49 +340,22 @@ pub struct MzMLReader<R: BufRead> {
     current: Option<SpectrumBuilder>,
     binary_ctx: Option<BinaryArrayCtx>,
     done: bool,
-    /// When `true`, [`Self::read_with_ms1`] additionally captures MS1 scans
-    /// (level 1) into an [`Ms1Link`] instead of discarding them. Has NO effect
-    /// on the default [`Iterator`] path or on `read_with_ms1` emitting MS2-only
-    /// — it only controls whether MS1 peaks are retained for linkage.
     capture_ms1: bool,
-    /// MS1 peak lists captured during a `read_with_ms1` run (capture on).
-    /// Stored once; the default path never touches this.
     captured_ms1: Vec<Vec<(f64, f32)>>,
-    /// Index (into `captured_ms1`) of the most-recent preceding MS1, or
-    /// `None` if no MS1 has been seen yet. Read when emitting each MS2 to
-    /// build `Ms1Link::ms2_to_ms1`.
     latest_ms1_idx: Option<usize>,
-    /// Quantification capture: keep EVERY MS1 scan of the run (RT + centroids)
-    /// in `run_ms1`, whichever read path is used. Off by default; the label-free
-    /// quantification builds its run index from this.
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
-    /// Quantification capture: keep MS3+ scans (SPS-MS3 reporter scans) in
-    /// `product_scans` with their parent reference instead of dropping them.
-    /// They are never emitted as searchable spectra.
     capture_product_scans: bool,
     product_scans: Vec<ProductScan>,
-    /// Quantification capture: the [`ScanContext`] (survey-scan reference,
-    /// acquired m/z range, FAIMS voltage) of every emitted MS2.
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
-    /// Quantification capture: the reporter-region noise of captured MS3+
-    /// scans and scan contexts, from the sampled noise arrays when present.
     capture_noise: bool,
-    /// Strict mode (finding 4.1). When `true`, the default [`Iterator`] yields
-    /// the parse `Err` for a malformed spectrum (then stops) instead of
-    /// silently resyncing past it. Default `false` (tolerant resync) preserves
-    /// the historical behavior for callers that intentionally skip bad scans.
     strict: bool,
-    /// Count of malformed spectra skipped by the tolerant path. Lets a tolerant
-    /// caller observe that data was dropped (see [`Self::skipped_count`]).
     skipped: usize,
-    /// The messages of the first few skipped spectra, for the run log.
     skipped_errors: Vec<String>,
 }
 
 impl<R: BufRead> MzMLReader<R> {
-    /// Create a reader that emits MS2 spectra (ms level == 2).
     pub fn new(reader: R) -> Self {
         let mut xml = Reader::from_reader(reader);
         xml.trim_text(true);
@@ -553,87 +384,58 @@ impl<R: BufRead> MzMLReader<R> {
         }
     }
 
-    /// Opt into strict parsing (finding 4.1): the default [`Iterator`] will
-    /// surface a malformed spectrum as `Err` (then end) instead of skipping it.
-    /// Default-tolerant behavior is preserved unless this is set.
     pub fn strict(mut self) -> Self {
         self.strict = true;
         self
     }
 
-    /// Number of malformed spectra the tolerant iterator skipped so far. A
-    /// tolerant caller can check this after iteration to detect dropped data.
     pub fn skipped_count(&self) -> usize {
         self.skipped
     }
 
-    /// The parse errors of the first [`MAX_SKIPPED_ERRORS`] skipped spectra.
     pub fn skipped_errors(&self) -> &[String] {
         &self.skipped_errors
     }
 
-    /// Widen or narrow the ms-level filter (e.g. `with_ms_level_range(1, 2)`
-    /// emits both MS1 and MS2).
     pub fn with_ms_level_range(mut self, min: u32, max: u32) -> Self {
         self.ms_level_min = min;
         self.ms_level_max = max;
         self
     }
 
-    /// Opt in to MS1 capture for the [`Self::read_with_ms1`] path. When
-    /// enabled, MS1 scans (level 1) are retained in the returned [`Ms1Link`]
-    /// and each emitted MS2 is linked to its most-recent preceding MS1.
-    ///
-    /// This flag has NO effect on the default [`Iterator`] path, which always
-    /// emits MS2-only. Default is `false` (no capture).
     pub fn with_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_ms1 = capture;
         self
     }
 
-    /// Keep every MS1 scan of the run (retention time + centroids) for
-    /// label-free quantification, on any read path. Take them with
-    /// [`Self::take_run_ms1`] after the stream is exhausted. Off by default.
     pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_run_ms1 = capture;
         self
     }
 
-    /// Keep MS3 and higher scans (with their `<precursor spectrumRef>`) for
-    /// reporter-ion quantification instead of dropping them. They are not
-    /// emitted as spectra. Take them with [`Self::take_product_scans`].
     pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
         self.capture_product_scans = capture;
         self
     }
 
-    /// Record the acquisition context of every emitted spectrum (its survey
-    /// scan reference, acquired m/z range and FAIMS voltage) for
-    /// quantification. Take them with [`Self::take_scan_contexts`].
     pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
         self.capture_scan_context = capture;
         self
     }
 
-    /// Keep the reporter-region noise (`sampled noise m/z array` and `sampled
-    /// noise intensity array`) of captured product scans and scan contexts,
-    /// for reporter signal-to-noise. Files without these arrays give `None`.
     pub fn with_noise_capture(mut self, capture: bool) -> Self {
         self.capture_noise = capture;
         self
     }
 
-    /// The scan contexts recorded so far (see [`Self::with_scan_context_capture`]).
     pub fn take_scan_contexts(&mut self) -> Vec<ScanContext> {
         std::mem::take(&mut self.scan_contexts)
     }
 
-    /// The MS1 scans captured so far (see [`Self::with_run_ms1_capture`]).
     pub fn take_run_ms1(&mut self) -> Vec<Ms1Scan> {
         std::mem::take(&mut self.run_ms1)
     }
 
-    /// The MS3+ scans captured so far (see [`Self::with_product_scan_capture`]).
     pub fn take_product_scans(&mut self) -> Vec<ProductScan> {
         std::mem::take(&mut self.product_scans)
     }
@@ -646,29 +448,13 @@ impl<R: BufRead> MzMLReader<R> {
         Self::build_spectrum(sb)
     }
 
-    /// Build a [`Spectrum`] from a completed builder, applying the
-    /// Thermo-trailer precursor preference and the ascending-m/z invariant.
-    /// Returns `Ok(None)` for spectra without any precursor m/z (e.g. an MS2
-    /// that never recorded a precursor). Caller is responsible for the
-    /// ms-level filter (see [`Self::finish_spectrum`]).
     fn build_spectrum(sb: SpectrumBuilder) -> Result<Option<Spectrum>, MzMLParseError> {
-        // Prefer the Thermo Trailer Extra monoisotopic m/z when available —
-        // the instrument firmware's deisotoping is more accurate than the
-        // raw isolation m/z (selectedIon.MS:1000744) for Orbitrap-class
-        // data. Falls back to the selected ion when the trailer is absent.
-        // Kim et al. (Nat Commun 5:5277, 2014) use the deisotoped precursor
-        // mass for Orbitrap-class data when available.
         let precursor_mz = match (sb.monoisotopic_mz_override, sb.precursor_mz) {
             (Some(m), _) => m,
             (None, Some(v)) => v,
-            // MS2 without any precursor m/z: skip rather than error.
             (None, None) => return Ok(None),
         };
 
-        // Reject a non-finite or non-positive precursor m/z (garbage from a
-        // malformed file) — it would produce nonsense search windows. The
-        // Thermo and timsTOF readers already gate on `precursor_mz > 0`; do the
-        // same here so all formats behave consistently.
         if !precursor_mz.is_finite() || precursor_mz <= 0.0 {
             return Ok(None);
         }
@@ -691,8 +477,6 @@ impl<R: BufRead> MzMLReader<R> {
         }))
     }
 
-    /// Zip the decoded m/z and intensity arrays into ascending-by-m/z peaks.
-    /// Shared by [`Self::build_spectrum`] and the MS1-capture path.
     fn build_peaks(
         mz_array: Option<Vec<f64>>,
         intensity_array: Option<Vec<f64>>,
@@ -708,7 +492,6 @@ impl<R: BufRead> MzMLReader<R> {
             });
         }
 
-        // Drop non-finite / non-positive peaks before scoring.
         let mut peaks: Vec<(f64, f32)> = mz_vals
             .into_iter()
             .zip(int_vals)
@@ -716,15 +499,10 @@ impl<R: BufRead> MzMLReader<R> {
             .filter(|&(mz, inten)| mz.is_finite() && mz > 0.0 && inten.is_finite() && inten >= 0.0)
             .collect();
 
-        // Enforce ascending-by-m/z invariant required by downstream consumers.
         if !peaks.windows(2).all(|w| w[0].0 <= w[1].0) {
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
 
-        // H1: centroid profile-mode spectra. Profile peaks span many sample
-        // points; left raw, their shoulders dominate the intensity-rank scorer
-        // and the spectrum is near-unscorable. Collapse each peak to one
-        // intensity-weighted centroid.
         if is_profile {
             log_profile_centroid_once();
             peaks = centroid_profile(&peaks);
@@ -733,8 +511,6 @@ impl<R: BufRead> MzMLReader<R> {
         Ok(peaks)
     }
 
-    /// Inside the spectrum's first `<selectedIon>`, the one whose m/z, charge
-    /// and intensity are the precursor's.
     fn in_first_selected_ion(&self) -> bool {
         self.state == State::SelectedIon
             && self
@@ -753,7 +529,6 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            // Profile-mode spectrum: flag it so build_peaks centroids the peaks.
             CV_PROFILE => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.is_profile = true;
@@ -794,10 +569,6 @@ impl<R: BufRead> MzMLReader<R> {
             CV_CHARGE_STATE if self.in_first_selected_ion() => {
                 if let Ok(z) = cv.value.parse::<i32>() {
                     if let Some(sb) = self.current.as_mut() {
-                        // A charge state of 0 means "unknown" — store it as
-                        // absent (None) rather than Some(0), which would later
-                        // be treated as a real charge; so does a negative or
-                        // out-of-range value.
                         sb.precursor_charge = model::spectrum::known_precursor_charge(i64::from(z));
                     }
                 }
@@ -811,9 +582,6 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            // Isolation-window offsets under `<precursor><isolationWindow>`.
-            // These are only consumed by the `--chimeric` path; absent in
-            // most fixtures, so the builder fields stay `None`.
             CV_ISOLATION_LOWER_OFFSET if self.state == State::IsolationWindow => {
                 if let Ok(off) = cv.value.parse::<f64>() {
                     if let Some(sb) = self.current.as_mut() {
@@ -836,7 +604,6 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            // Acquired m/z range: the first `<scanWindow>` of the scan.
             CV_SCAN_WINDOW_LOWER if self.state == State::Scan => {
                 if let (Ok(v), Some(sb)) = (cv.value.parse::<f64>(), self.current.as_mut()) {
                     sb.scan_window_lower.get_or_insert(v);
@@ -858,19 +625,6 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
 
-            // Activation-method cvParams under <precursor><activation>.
-            // PSI-MS accessions map to the five canonical variants. ECD
-            // (MS:1000250) is grouped with ETD for electron-based param routing.
-            //
-            // Selection rule:
-            //   - ETD always wins (unconditional override).
-            //   - Other methods: first-wins. A spectrum with multiple
-            //     `<precursor><activation>` blocks (MS3 SPS, supplementary
-            //     activation) records the first activation we see.
-            //
-            // Why first-wins matters: TMT SPS-MS3 mzMLs chain CID (MS2
-            // isolation) → HCD (MS3 fragmentation). First-wins routes those
-            // to a CID-trained model.
             CV_CID | CV_TRAP_CID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
@@ -888,21 +642,16 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
             CV_ETD if self.state == State::Activation => {
-                // ETD wins unconditionally over other activation methods.
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
                     sb.activation_method = Some(ActivationMethod::ETD);
                 }
             }
-            // Supplemental activation is never the primary method: it only marks
-            // the block as EThcD/ETciD when an electron term is also present.
             CV_SUPPLEMENTAL_HCD | CV_SUPPLEMENTAL_CID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
                 }
             }
-            // A single combined term carries both halves; the block's closing
-            // tag resolves it like ETD + supplemental collision.
             CV_ETHCD | CV_ETCID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
@@ -911,7 +660,6 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
             CV_ECD if self.state == State::Activation => {
-                // ECD is electron-based — group with ETD for param routing.
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
                     if sb.activation_method.is_none() {
@@ -985,9 +733,6 @@ impl<R: BufRead> MzMLReader<R> {
     fn pump(&mut self) -> Result<Option<Spectrum>, MzMLParseError> {
         loop {
             self.buf.clear();
-            // Read the next event. The lifetime of `event` is tied to `self.buf`,
-            // so we must *not* hold onto it across a `&mut self` method call.
-            // We extract what we need (as owned Strings) before calling helpers.
             let event = self.xml.read_event_into(&mut self.buf)?;
 
             match event {
@@ -1019,10 +764,6 @@ impl<R: BufRead> MzMLReader<R> {
                             }
                         }
                         b"precursor" if self.state == State::Spectrum => {
-                            // `<precursor spectrumRef="...">` names the scan this
-                            // one was produced from (MS3 → its MS2). First wins:
-                            // an SPS-MS3 lists one <precursor> per notch, all
-                            // pointing at the same MS2.
                             if let Some(sb) = self.current.as_mut() {
                                 if sb.parent_ref.is_none() {
                                     sb.parent_ref = attr_str(e, b"spectrumRef");
@@ -1033,37 +774,16 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::ProductList;
                         }
                         b"isolationWindow" if self.state == State::Spectrum => {
-                            // `<isolationWindow>` is a sibling of
-                            // `<selectedIon>` / `<activation>` under
-                            // `<precursor>`. We don't track the intermediate
-                            // `<precursor>` / `<precursorList>` elements, so
-                            // we transition from Spectrum here. The closing
-                            // tag pops us back to Spectrum.
                             self.state = State::IsolationWindow;
                         }
                         b"activation" if self.state == State::Spectrum => {
-                            // `<activation>` lives under
-                            // `<precursorList><precursor>…</precursor></precursorList>`.
-                            // We don't track the intermediate `<precursor>` /
-                            // `<precursorList>` elements, so we transition
-                            // from Spectrum here. The closing tag pops us
-                            // back to Spectrum.
                             self.state = State::Activation;
-                            // H6: EThcD/ETciD detection is per-block — an electron AND a
-                            // collisional term must co-occur in the SAME <activation>
-                            // block (supplemental activation), not merely somewhere in the
-                            // spectrum. Reset the flags here so separate activation blocks
-                            // (e.g. CID then ETD across MS stages) don't falsely combine.
                             if let Some(sb) = self.current.as_mut() {
                                 sb.act_saw_electron = false;
                                 sb.act_saw_collisional = false;
                             }
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
-                            // The arrays of a spectrum the level filter drops and
-                            // no capture keeps are never decoded (MS1 and MS3 scans
-                            // of an MS2 search without quantification). `ms level`
-                            // precedes the binary arrays in mzML.
                             let dropped = self
                                 .current
                                 .as_ref()
@@ -1084,19 +804,13 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
 
-                // Self-closing elements — mostly cvParam and userParam.
                 Event::Empty(ref e) => {
                     let tag = e.local_name().as_ref().to_owned();
                     if tag == b"cvParam" {
-                        // Extract info before any &mut self call.
                         if let Some(cv) = CvParamInfo::from_bytes_start(e) {
                             self.apply_cv_param(cv);
                         }
                     } else if tag == b"userParam" && self.state == State::Activation {
-                        // Some converters (Bruker timsTOF exports among them)
-                        // name the dissociation method in a userParam instead of
-                        // a PSI-MS cvParam. Map the unambiguous names onto their
-                        // accession so they follow the cvParam selection rule.
                         if let Some(accession) =
                             attr_str(e, b"name").and_then(|n| activation_user_param_accession(&n))
                         {
@@ -1110,29 +824,14 @@ impl<R: BufRead> MzMLReader<R> {
                     } else if tag == b"userParam"
                         && matches!(self.state, State::Scan | State::Spectrum)
                     {
-                        // The only userParam we care about is the Thermo
-                        // monoisotopic-correction recorded by the instrument
-                        // firmware. It lives under <scan> and is preferred
-                        // over selectedIon.MS:1000744 (raw isolation m/z) when
-                        // present. Orbitrap precursors are routinely
-                        // mis-isotoped by the isolation logic, and the
-                        // Trailer Extra value carries the deisotoped C0 peak.
                         if let (Some(name), Some(val)) =
                             (attr_str(e, b"name"), attr_str(e, b"value"))
                         {
-                            // Match either the canonical Thermo string or a
-                            // few near-equivalent forms seen in older
-                            // proteomics workflows (case-insensitive on the
-                            // "Monoisotopic" word). Strict accept-list — no
-                            // unrelated userParams sneak through.
                             let normalized = name.to_lowercase();
                             if normalized.contains("monoisotopic m/z")
                                 || normalized.contains("monoisotopic mz")
                             {
                                 if let Ok(mz) = val.parse::<f64>() {
-                                    // mzML files sometimes emit "0" or
-                                    // negative sentinels when the firmware
-                                    // couldn't decide. Treat as absent.
                                     if mz > 0.0 {
                                         if let Some(sb) = self.current.as_mut() {
                                             sb.monoisotopic_mz_override = Some(mz);
@@ -1158,11 +857,6 @@ impl<R: BufRead> MzMLReader<R> {
                             let sb = self.current.take();
                             self.state = State::Outside;
                             if let Some(mut sb) = sb {
-                                // Quantification captures (inert by default).
-                                // MS1: keep the whole scan for the run index. The
-                                // arrays are cloned only when the level filter
-                                // would also emit the MS1 (`--ms-level 1`), so
-                                // the common path moves them.
                                 if self.capture_run_ms1 && sb.ms_level == Some(1) {
                                     let emits_ms1 = self.ms_level_min <= 1 && !self.capture_ms1;
                                     let (mz, inten) = if emits_ms1 {
@@ -1188,7 +882,6 @@ impl<R: BufRead> MzMLReader<R> {
                                         continue;
                                     }
                                 }
-                                // MS3+: keep for reporter quantification, never emit.
                                 if self.capture_product_scans && sb.ms_level.unwrap_or(0) >= 3 {
                                     let level = sb.ms_level.unwrap_or(3) as u8;
                                     let noise = sb.take_noise();
@@ -1253,12 +946,6 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"activation" if self.state == State::Activation => {
-                            // H6: if THIS block carried both an electron-transfer/capture
-                            // term and a supplemental collisional term, it is EThcD/ETciD:
-                            // the spectrum carries c/z• AND b/y ions, labelled EThcD. A
-                            // converter that wrote only the electron term is caught by the
-                            // scan's filter string. Logged once.
-                            // --ethcd-activation etd keeps EThcD/ETciD classified as ETD.
                             if let Some(sb) = self.current.as_mut() {
                                 if sb.act_saw_electron
                                     && (sb.act_saw_collisional || sb.filter_supplemental)
@@ -1305,17 +992,6 @@ impl<R: BufRead> MzMLReader<R> {
         }
     }
 
-    /// Drain the reader, returning the emitted MS2 spectra plus an
-    /// [`Ms1Link`] linking each MS2 to its most-recent preceding MS1.
-    ///
-    /// The returned `Vec<Spectrum>` is exactly what the default [`Iterator`]
-    /// path produces (MS2-only, in file order). When [`Self::with_ms1_capture`]
-    /// is `false` (default), `Ms1Link::ms1_peaks` is empty and every entry in
-    /// `ms2_to_ms1` is `None`; only the linkage bookkeeping is added on top of
-    /// the unchanged MS2 stream. When capture is `true`, MS1 scans are
-    /// retained once in `ms1_peaks` and each MS2 links to its preceding MS1.
-    ///
-    /// `ms2_to_ms1.len()` always equals the number of returned MS2 spectra.
     pub fn read_with_ms1(mut self) -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
         if self.capture_ms1 {
             self.ms_level_min = 1;
@@ -1331,15 +1007,10 @@ impl<R: BufRead> MzMLReader<R> {
                     spectra.push(s);
                 }
                 Ok(None) => break,
-                Err(_e) => {
-                    // Resync past the malformed spectrum and keep parsing (skip the
-                    // bad scan, not the rest of the file). Only an unreadable XML
-                    // stream stops us.
-                    match self.resync_to_next_spectrum() {
-                        Ok(true) => continue,
-                        Ok(false) | Err(_) => break,
-                    }
-                }
+                Err(_e) => match self.resync_to_next_spectrum() {
+                    Ok(true) => continue,
+                    Ok(false) | Err(_) => break,
+                },
             }
         }
 
@@ -1350,24 +1021,6 @@ impl<R: BufRead> MzMLReader<R> {
         Ok((spectra, link))
     }
 
-    /// Streaming, bounded-memory, tolerant variant of [`Self::read_with_ms1`] for
-    /// the chimeric cascade.
-    ///
-    /// Calls `on_chunk(ms2_spectra, ms1_link)` for each batch of up to
-    /// `chunk_size` MS2 spectra, where `ms1_link` covers ONLY that chunk. RSS
-    /// stays bounded by the chunk size: at most the MS1 scans referenced by the
-    /// in-flight chunk are retained, never the whole file (each MS2 links to its
-    /// most-recent preceding MS1, so only that carry-over scan crosses a chunk
-    /// boundary). Stops after `cap` total MS2 (`usize::MAX` = unbounded).
-    ///
-    /// Tolerant: a malformed spectrum does NOT abort the run. The first parse
-    /// error stops streaming and the successfully-parsed spectra so far are still
-    /// delivered (mirroring the MS2-only streaming path); the error count and the
-    /// first few messages are returned for reporting.
-    ///
-    /// The quantification captures ([`Self::with_run_ms1_capture`],
-    /// [`Self::with_scan_context_capture`]) work on this path too: take them
-    /// from the reader once it returns.
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -1378,7 +1031,7 @@ impl<R: BufRead> MzMLReader<R> {
         F: FnMut(Vec<Spectrum>, Ms1Link),
     {
         self.capture_ms1 = true;
-        self.ms_level_min = 1; // let MS1 reach the capture hook; output stays MS2-only
+        self.ms_level_min = 1;
 
         let mut err_count = 0usize;
         let mut first_errors: Vec<String> = Vec::new();
@@ -1387,8 +1040,6 @@ impl<R: BufRead> MzMLReader<R> {
         let mut chunk: Vec<Spectrum> = Vec::with_capacity(chunk_size);
         let mut chunk_ms1: Vec<Vec<(f64, f32)>> = Vec::new();
         let mut links: Vec<Option<usize>> = Vec::with_capacity(chunk_size);
-        // Most-recent MS1 peaks, carried across chunk boundaries. `carry_in_chunk`
-        // is its index within the CURRENT `chunk_ms1`, or `None` until copied in.
         let mut carry: Option<Vec<(f64, f32)>> = None;
         let mut carry_in_chunk: Option<usize> = None;
 
@@ -1398,10 +1049,8 @@ impl<R: BufRead> MzMLReader<R> {
             }
             match self.pump() {
                 Ok(Some(ms2)) => {
-                    // A newer MS1 was captured since the last MS2: adopt the most
-                    // recent as the carry and clear the reader's buffer to bound RSS.
                     if self.latest_ms1_idx.is_some() {
-                        carry = self.captured_ms1.pop(); // newest; older ones unreferenced
+                        carry = self.captured_ms1.pop();
                         self.captured_ms1.clear();
                         self.latest_ms1_idx = None;
                         carry_in_chunk = None;
@@ -1430,7 +1079,7 @@ impl<R: BufRead> MzMLReader<R> {
                         chunk = Vec::with_capacity(chunk_size);
                         chunk_ms1 = Vec::new();
                         links = Vec::with_capacity(chunk_size);
-                        carry_in_chunk = None; // re-copy carry into the next chunk on demand
+                        carry_in_chunk = None;
                     }
                 }
                 Ok(None) => break,
@@ -1439,9 +1088,6 @@ impl<R: BufRead> MzMLReader<R> {
                     if first_errors.len() < 3 {
                         first_errors.push(format!("{e}"));
                     }
-                    // Resync past the bad scan and keep parsing the rest of the file
-                    // (skip-one-bad-spectrum, not truncate-the-tail). Only a broken
-                    // XML stream — where resync itself can't read — stops us.
                     match self.resync_to_next_spectrum() {
                         Ok(true) => continue,
                         Ok(false) | Err(_) => break,
@@ -1462,12 +1108,6 @@ impl<R: BufRead> MzMLReader<R> {
         (err_count, first_errors)
     }
 
-    /// After a recoverable per-spectrum parse error, discard the partial spectrum
-    /// and skip events until the next `<spectrum>` start, so streaming RESYNCS and
-    /// continues past one bad scan instead of truncating the rest of the file.
-    /// Returns `Ok(true)` positioned at a fresh spectrum (caller continues),
-    /// `Ok(false)` at EOF. Propagates `Err` only when the XML stream itself is
-    /// unreadable (broken markup) — that is genuinely unrecoverable.
     fn resync_to_next_spectrum(&mut self) -> Result<bool, MzMLParseError> {
         self.current = None;
         self.binary_ctx = None;
@@ -1496,7 +1136,6 @@ impl<R: BufRead> MzMLReader<R> {
     }
 }
 
-/// How many skipped-spectrum messages [`MzMLReader::skipped_errors`] keeps.
 pub const MAX_SKIPPED_ERRORS: usize = 3;
 
 impl<R: BufRead> Iterator for MzMLReader<R> {
@@ -1539,24 +1178,14 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
     }
 }
 
-// ── Parallel whole-file read ────────────────────────────────────────────────
-
-/// Bytes per piece of [`read_spectra_parallel`]. Each worker holds one piece
-/// in memory while it parses it.
 const PARALLEL_PIECE_BYTES: u64 = 16 << 20;
 
-/// Offset of the first `<spectrum` start tag at or after `from`, or `None`
-/// when the rest of the file holds none. A `<spectrum` followed by
-/// whitespace is a start tag: `<spectrumList` is not, and `<` cannot occur
-/// unescaped inside attribute values, text or base64 data.
 fn next_spectrum_start(file: &std::fs::File, from: u64) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom};
     const PAT: &[u8] = b"<spectrum";
     let mut f = file;
     f.seek(SeekFrom::Start(from))?;
     let mut block = vec![0u8; 1 << 20];
-    // Bytes carried over from the previous block, so a tag split across two
-    // blocks is still found.
     let keep = PAT.len();
     let mut carried = 0usize;
     let mut block_start = from;
@@ -1581,15 +1210,6 @@ fn next_spectrum_start(file: &std::fs::File, from: u64) -> std::io::Result<Optio
     }
 }
 
-/// The spectra of an uncompressed mzML file with MS level in
-/// `[ms_level_min, ms_level_max]`, parsed by `threads` workers and returned in
-/// file order, together with the errors the parse reported.
-///
-/// The file is cut into pieces at `<spectrum` start tags, so every spectrum
-/// lies whole inside one piece, and each piece is parsed by its own
-/// [`MzMLReader`]; the reader keeps no state across spectra, so the result is
-/// the list one sequential reader yields. The last piece stops at
-/// `</spectrumList`.
 pub fn read_spectra_parallel(
     path: &std::path::Path,
     ms_level_min: u32,
@@ -1605,8 +1225,6 @@ pub fn read_spectra_parallel(
     )
 }
 
-/// Byte ranges `[start, end)` of `path`, cut at `<spectrum` start tags about
-/// every `piece_bytes`, so every spectrum lies whole inside one range.
 fn spectrum_pieces(path: &std::path::Path, piece_bytes: u64) -> std::io::Result<Vec<(u64, u64)>> {
     let file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
@@ -1626,8 +1244,6 @@ fn spectrum_pieces(path: &std::path::Path, piece_bytes: u64) -> std::io::Result<
         .collect())
 }
 
-/// The bytes of piece `i` of `pieces`; the last piece stops at
-/// `</spectrumList`.
 fn piece_bytes(
     path: &std::path::Path,
     pieces: &[(u64, u64)],
@@ -1648,8 +1264,6 @@ fn piece_bytes(
     Ok(bytes)
 }
 
-/// `parse(i)` for every piece index `0..n_pieces` on `threads` workers, in
-/// piece order.
 fn map_pieces<T: Send>(
     n_pieces: usize,
     threads: usize,
@@ -1703,7 +1317,6 @@ fn read_spectra_in_pieces(
                 Err(e) => errors.push(e.to_string()),
             }
         }
-        // One entry per skipped spectrum, so the caller's count is exact.
         let kept = reader.skipped_errors().to_vec();
         let unlisted = reader.skipped_count() - kept.len();
         errors.extend(kept);
@@ -1723,30 +1336,14 @@ fn read_spectra_in_pieces(
     Ok((spectra, errors))
 }
 
-/// MS2 spectra with their survey scans, from [`read_ms1_linked_parallel`].
 #[derive(Debug, Default)]
 pub struct Ms1LinkedRead {
-    /// The MS2 spectra in file order.
     pub spectra: Vec<Spectrum>,
-    /// Per spectrum, the index into `run_ms1` of the most recent MS1 scan
-    /// before it, or `None` when no MS1 scan precedes it.
     pub ms2_to_ms1: Vec<Option<usize>>,
-    /// Every MS1 scan of the run in file order, as
-    /// [`MzMLReader::with_run_ms1_capture`] keeps them.
     pub run_ms1: Vec<Ms1Scan>,
-    /// The scan context of every MS2 spectrum when requested, as
-    /// [`MzMLReader::with_scan_context_capture`] keeps them.
     pub contexts: Vec<ScanContext>,
 }
 
-/// The MS2 spectra, MS1 scans and MS2 scan contexts of an uncompressed mzML
-/// file, parsed by `threads` workers: the spectra, scans and links a
-/// sequential [`MzMLReader`] with run-MS1 capture reads through
-/// [`MzMLReader::read_with_ms1_chunked`]. The file is cut into pieces as in
-/// [`read_spectra_parallel`]; an MS2 spectrum at the start of a piece links
-/// to the last MS1 scan of the pieces before it. `None` when any spectrum
-/// fails to parse, so the caller can take the sequential reader's
-/// skip-and-resync path instead.
 pub fn read_ms1_linked_parallel(
     path: &std::path::Path,
     threads: usize,
@@ -1770,7 +1367,6 @@ fn read_ms1_linked_in_pieces(
     piece_bytes_target: u64,
 ) -> std::io::Result<Option<Ms1LinkedRead>> {
     let pieces = spectrum_pieces(path, piece_bytes_target)?;
-    // Per piece: its read with piece-local MS1 indices, or `None` on a parse error.
     let parse_piece = |i: usize| -> std::io::Result<Option<Ms1LinkedRead>> {
         let bytes = piece_bytes(path, &pieces, i)?;
         let mut reader = MzMLReader::new(bytes.as_slice())
@@ -1818,34 +1414,6 @@ fn read_ms1_linked_in_pieces(
     Ok(Some(out))
 }
 
-// ── Instrument-type detection (separate, lightweight pass) ──────────────────
-
-/// Quick mzML scan that returns the dominant
-/// [`InstrumentType`] of MS2 spectra in the file.
-///
-/// Strategy:
-/// 1. Parse `<instrumentConfigurationList>` and build a map from
-///    `id` → analyzer [`InstrumentType`] using the analyzer / instrument-model
-///    cvParams listed at the top of this module.
-/// 2. As `<spectrum>` elements stream by, inspect their `<scan>`'s
-///    `instrumentConfigurationRef=` attribute. Tally analyzer types for MS2
-///    spectra only, stop after `MAX_PEEK` MS2 scans (early exit).
-/// 3. Return the most-common analyzer mapped through `InstrumentType`. If no
-///    MS2 scan referenced a known IC, fall back to the run-level
-///    `defaultInstrumentConfigurationRef`. If nothing resolves, return `None`.
-///
-/// This intentionally does *not* mutate `MzMLReader`. We keep the
-/// instrument-detection path as a separate, one-shot pre-pass so the main
-/// streaming reader stays focused on per-spectrum data and remains
-/// peak-memory-friendly.
-/// Whether the last activation stage of a Thermo filter string chains an
-/// electron-based activation with a collisional one: EThcD/ETciD.
-///
-/// Two dialects occur. Older firmware chains the stage in one token,
-/// `784.37@etd50.00@hcd25.00`; newer firmware writes one token per activation of
-/// the same precursor, `391.19@etd55.49 391.19@hcd20.00`. The last stage is the
-/// run of trailing `@` tokens that share the last token's precursor m/z, so an
-/// MS3 (`900.00@cid35.00 450.20@etd50.00`, a different precursor) is not EThcD.
 pub fn filter_has_supplemental_collision(filter: &str) -> bool {
     let head = filter.split('[').next().unwrap_or("");
     let mut tokens = head.split_whitespace();
@@ -1880,21 +1448,10 @@ pub fn filter_has_supplemental_collision(filter: &str) -> bool {
     electron && collisional
 }
 
-/// How an EThcD/ETciD spectrum (electron transfer WITH a supplemental collisional term)
-/// should be labelled.
-///
-/// Default `false` labels it `EThcD`, which routes it to the EThcD (b/y + c/z) model.
-/// `--ethcd-activation etd` labels it ETD instead.
 static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Tripped the first time the policy is consulted. Installing after that point
-/// means something already read the default, which is how the activation
-/// pre-pass once relabelled every EThcD spectrum as HCD regardless of the flag.
 static ETHCD_POLICY_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Install the EThcD labelling policy. Call once, BEFORE reading any spectrum —
-/// the mzML reader consults it per spectrum, and a late install silently leaves
-/// every spectrum read so far labelled under the default.
 pub fn init_ethcd_as_etd(as_etd: bool) {
     debug_assert!(
         !ETHCD_POLICY_READ.load(std::sync::atomic::Ordering::Relaxed) || !as_etd,
@@ -1904,7 +1461,6 @@ pub fn init_ethcd_as_etd(as_etd: bool) {
     let _ = ETHCD_AS_ETD.set(as_etd);
 }
 
-/// The installed EThcD labelling policy, shared with the Thermo reader.
 #[inline]
 pub fn ethcd_as_etd_policy() -> bool {
     ethcd_as_etd()
@@ -1920,17 +1476,14 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     let mut xml = Reader::from_reader(reader);
     xml.trim_text(true);
 
-    /// Internal scan state. Mirrors the structure of the streaming reader
-    /// without sharing it, since the instrument-type detection cares about
-    /// a different subset of the mzML schema.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum S {
         Outside,
         ReferenceableParamGroupList,
-        ReferenceableParamGroup, // inside <referenceableParamGroup id="X">
+        ReferenceableParamGroup,
         InstrumentConfigurationList,
-        InstrumentConfiguration, // inside <instrumentConfiguration id="X">
-        ComponentListAnalyzer,   // inside <componentList><analyzer>
+        InstrumentConfiguration,
+        ComponentListAnalyzer,
         Run,
         Spectrum,
         Scan,
@@ -1939,31 +1492,17 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     let mut state = S::Outside;
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
 
-    // IC id → detected InstrumentType.
     let mut ic_map: HashMap<String, InstrumentType> = HashMap::new();
-    // Stored under the IC currently being parsed.
     let mut current_ic_id: Option<String> = None;
     let mut current_ic_type: Option<InstrumentType> = None;
-    // The IC's first mass analyzer. An ion trap here beats the instrument model:
-    // a hybrid (Orbitrap Fusion, Elite, Velos) records its model on every IC,
-    // but the IC its ion-trap MS2 scans reference reads at unit resolution.
     let mut current_ic_analyzer: Option<InstrumentType> = None;
 
-    // referenceableParamGroup id → instrument-model InstrumentType. mzML emits
-    // the `<referenceableParamGroupList>` BEFORE `<instrumentConfigurationList>`,
-    // so this map is fully built by the time an `<instrumentConfiguration>`
-    // resolves a `<referenceableParamGroupRef>`. ThermoRawFileParser 2.0 puts
-    // the instrument-model cvParam (e.g. Orbitrap Astral MS:1003378) in such a
-    // group rather than inline in the IC — without following the ref, Astral
-    // mzMLs misdetect as the generic QExactive (orbitrap-analyzer) fallback.
     let mut rpg_map: HashMap<String, InstrumentType> = HashMap::new();
     let mut current_rpg_id: Option<String> = None;
     let mut current_rpg_type: Option<InstrumentType> = None;
 
-    // run-level defaultInstrumentConfigurationRef.
     let mut default_ic_ref: Option<String> = None;
 
-    // Tally of InstrumentType for MS2 spectra (via per-scan ref).
     let mut ms2_counts: HashMap<InstrumentType, usize> = HashMap::new();
     let mut current_spec_is_ms2: Option<bool> = None;
     let mut current_spec_ic_ref: Option<String> = None;
@@ -1975,8 +1514,6 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
         buf.clear();
         let event = match xml.read_event_into(&mut buf) {
             Ok(e) => e,
-            // On parse error we just return whatever we've found so far —
-            // detection is best-effort, never load-bearing for correctness.
             Err(_) => break,
         };
         match event {
@@ -2026,22 +1563,11 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
 
             Event::Empty(ref e) => {
                 let tag = e.local_name().as_ref().to_owned();
-                // A self-closing `<scan instrumentConfigurationRef="..."/>`
-                // doesn't fire a Start event. Capture the IC ref attribute
-                // here so files that emit empty `<scan/>` elements still
-                // route correctly. Common in trimmed test fixtures.
                 if tag == b"scan" && state == S::Spectrum {
                     if let Some(r) = attr_str(e, b"instrumentConfigurationRef") {
                         current_spec_ic_ref = Some(r);
                     }
-                    // Don't transition state — the spectrum tag is still
-                    // open; the End handler for `<spectrum>` consumes it.
                 }
-                // An <instrumentConfiguration> that pulls its instrument-model
-                // cvParam from a <referenceableParamGroup> does so via a
-                // self-closing <referenceableParamGroupRef ref="..."/>. Resolve
-                // it against the group map; the group's model wins for this IC
-                // (mirrors the inline "model wins outright" rule).
                 if tag == b"referenceableParamGroupRef" && state == S::InstrumentConfiguration {
                     if let Some(r) = attr_str(e, b"ref") {
                         if let Some(&t) = rpg_map.get(&r) {
@@ -2052,7 +1578,6 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                 if tag == b"cvParam" {
                     let acc = attr_str(e, b"accession").unwrap_or_default();
                     match state {
-                        // Within <analyzer>: pick up the mass-analyzer cvParam.
                         S::ComponentListAnalyzer => {
                             let typ = match acc.as_str() {
                                 CV_ANALYZER_ORBITRAP => Some(InstrumentType::QExactive),
@@ -2065,31 +1590,18 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                                 _ => None,
                             };
                             if let Some(t) = typ {
-                                // First analyzer wins for a given IC when
-                                // mzMLs declare more than one (PSI-MS practice).
                                 if current_ic_type.is_none() {
                                     current_ic_type = Some(t);
                                 }
                                 current_ic_analyzer.get_or_insert(t);
                             }
                         }
-                        // Within <instrumentConfiguration> at the top level
-                        // (not inside <analyzer>): an instrument-model cvParam
-                        // may be present and gives us a stronger signal for
-                        // Orbitrap-class boxes than analyzer alone.
-                        // OrbitrapAstral is checked FIRST so it wins over the
-                        // generic QExactive group.
                         S::InstrumentConfiguration => {
                             let cv_name = attr_str(e, b"name").unwrap_or_default();
                             if let Some(t) = instrument_model_type(acc.as_str(), &cv_name) {
-                                // Model wins outright if seen.
                                 current_ic_type = Some(t);
                             }
                         }
-                        // Same instrument-model cvParams, but inside a
-                        // <referenceableParamGroup>: captured so an IC that
-                        // references the group (via <referenceableParamGroupRef>)
-                        // can resolve its model. First model in the group wins.
                         S::ReferenceableParamGroup => {
                             let cv_name = attr_str(e, b"name").unwrap_or_default();
                             if current_rpg_type.is_none() {
@@ -2098,7 +1610,6 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                                 }
                             }
                         }
-                        // Within <spectrum>: pick up ms-level.
                         S::Spectrum => {
                             if acc == CV_MS_LEVEL {
                                 let val = attr_str(e, b"value").unwrap_or_default();
@@ -2148,8 +1659,6 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         state = S::Spectrum;
                     }
                     b"spectrum" if state == S::Spectrum => {
-                        // Tally if this was MS2 and we know its IC ref (or the
-                        // file-wide default IC).
                         let is_ms2 = current_spec_is_ms2.unwrap_or(false);
                         if is_ms2 {
                             let ic_ref = current_spec_ic_ref
@@ -2180,24 +1689,19 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
         }
     }
 
-    // Prefer the dominant analyzer across MS2 scans.
     if !ms2_counts.is_empty() {
         return ms2_counts
             .iter()
-            // Deterministic tie-break (HashMap order is randomised per process).
             .max_by_key(|(&k, &n)| (n, std::cmp::Reverse(k as u8)))
             .map(|(&t, _)| t);
     }
 
-    // No MS2-referenced IC info — fall back to default IC if it's known.
     if let Some(r) = default_ic_ref.as_ref() {
         if let Some(&t) = ic_map.get(r) {
             return Some(t);
         }
     }
 
-    // No default-IC info either — use the first IC we found (some mzMLs only
-    // declare one IC and don't reference it from each scan).
     if ic_map.len() == 1 {
         return ic_map.into_values().next();
     }
@@ -2205,14 +1709,6 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     None
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Map an instrument-model cvParam (`accession` + the cvParam `name`) to an
-/// [`InstrumentType`]. OrbitrapAstral is checked first so it wins over the
-/// generic QExactive (orbitrap-analyzer) group; a `name` containing "astral"
-/// is a robustness fallback for files that use an unregistered/future
-/// accession. Used both for inline `<instrumentConfiguration>` cvParams and
-/// for cvParams inside a referenced `<referenceableParamGroup>`.
 fn instrument_model_type(acc: &str, name: &str) -> Option<InstrumentType> {
     match acc {
         CV_MODEL_ORBITRAP_ASTRAL => Some(InstrumentType::OrbitrapAstral),
@@ -2231,7 +1727,6 @@ fn instrument_model_type(acc: &str, name: &str) -> Option<InstrumentType> {
     }
 }
 
-/// Extract a named attribute value as an owned String.
 fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
     e.attributes()
         .filter_map(|a| a.ok())
@@ -2243,9 +1738,6 @@ fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String
         })
 }
 
-/// Parse the scan number from a spectrum id attribute: `scan=N` (Thermo,
-/// e.g. `"controllerType=0 controllerNumber=1 scan=1234"`), else `index=N`
-/// (e.g. timsTOF conversions), else `scanId=N` (Bruker).
 fn extract_scan_from_id(id: &str) -> Option<i32> {
     ["scan=", "index=", "scanId="].iter().find_map(|key| {
         id.split_whitespace()
@@ -2253,13 +1745,10 @@ fn extract_scan_from_id(id: &str) -> Option<i32> {
     })
 }
 
-/// The scan number of a spectrum: from its native id, else its 1-based
-/// position in the file, so no spectrum is left without one.
 fn scan_number(id: &str, index: Option<i32>) -> Option<i32> {
     extract_scan_from_id(id).or_else(|| index.map(|i| i.saturating_add(1)))
 }
 
-/// Decode a `<binaryDataArray>` payload: base64 → optional zlib → f64 values.
 fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError> {
     if let Some((accession, name)) = ctx.unsupported {
         return Err(MzMLParseError::UnsupportedCompression { accession, name });
@@ -2308,8 +1797,6 @@ fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError>
     Ok(out)
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2321,7 +1808,6 @@ mod tests {
             .collect()
     }
 
-    /// Minimal valid mzML wrapper around raw `<spectrum>` XML.
     fn wrap_spectra(spectra: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -2334,8 +1820,6 @@ mod tests {
 </mzML>"#
         )
     }
-
-    // ── Encoding helpers ──────────────────────────────────────────────────────
 
     fn encode_f64_b64(vals: &[f64]) -> String {
         use byteorder::WriteBytesExt;
@@ -2579,8 +2063,6 @@ mod tests {
         assert_eq!(spectra[0].precursor_charge, Some(2));
     }
 
-    /// Several `<selectedIon>` entries: the precursor is the first ion's m/z and
-    /// charge together, never the m/z of one and the charge of another.
     #[test]
     fn first_selected_ion_gives_mz_and_charge_together() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -2617,13 +2099,10 @@ mod tests {
             )
         };
         for second in [
-            // m/z only: must not replace the first ion's m/z under its charge
             r#"<cvParam accession="MS:1000744" name="selected ion m/z" value="733.70"/>"#,
-            // m/z and charge
             r#"<cvParam accession="MS:1000744" name="selected ion m/z" value="733.70"/>
                <cvParam accession="MS:1000041" name="charge state" value="3"/>
                <cvParam accession="MS:1000042" name="peak intensity" value="50"/>"#,
-            // charge only
             r#"<cvParam accession="MS:1000041" name="charge state" value="4"/>"#,
         ] {
             let spectra = collect_ok(&wrap_spectra(&ions(second)));
@@ -2634,7 +2113,6 @@ mod tests {
         }
     }
 
-    /// A charge state too large for the search (held as `u8`) is unknown.
     #[test]
     fn out_of_range_charge_state_is_treated_as_absent() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -2654,8 +2132,6 @@ mod tests {
 
     #[test]
     fn charge_state_zero_is_treated_as_absent() {
-        // A `charge state` of 0 means "unknown" and must be stored as None, not
-        // Some(0), which downstream code would treat as a real charge.
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
         let spec = ms2_spectrum_xml(
@@ -2672,8 +2148,6 @@ mod tests {
 
     #[test]
     fn non_finite_and_nonpositive_peaks_are_filtered() {
-        // NaN / Inf / negative-m/z points must be dropped before reaching the
-        // scorer. Only the two finite, positive-m/z peaks should survive.
         let mz_b64 = encode_f64_b64(&[f64::NAN, 100.0, -50.0, f64::INFINITY, 200.0]);
         let int_b64 = encode_f64_b64(&[10.0, 1000.0, 10.0, 10.0, 500.0]);
         let spec = ms2_spectrum_xml(
@@ -2695,8 +2169,6 @@ mod tests {
 
     #[test]
     fn nonpositive_precursor_mz_is_skipped() {
-        // A precursor m/z <= 0 is garbage and would yield nonsense search
-        // windows; the spectrum must be dropped (Ok(None)).
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
         let spec = ms2_spectrum_xml(
@@ -2761,8 +2233,6 @@ mod tests {
             .map(|r| r.expect("parse error"))
             .collect();
 
-        // tiny.pwiz.mzML: scan=19 MS1, scan=20 MS2, scan=21 MS1, scan=22 MS1.
-        // Only scan=20 should pass the default MS2 filter.
         assert!(!spectra.is_empty(), "expected at least one MS2 spectrum");
         let s = &spectra[0];
         assert!(!s.peaks.is_empty(), "MS2 spectrum should have peaks");
@@ -2782,8 +2252,6 @@ mod tests {
 
     #[test]
     fn numpress_array_is_an_error_not_garbage_peaks() {
-        // Eight bytes that would decode as one plausible-looking f64 if the
-        // encoding were ignored.
         let b64 = encode_f64_b64(&[100.0]);
         let xml = ms2_spectrum_xml(
             "scan=1",
@@ -2835,17 +2303,10 @@ mod tests {
         );
     }
 
-    /// Thermo Trailer Extra `Monoisotopic M/Z` userParam under `<scan>`
-    /// overrides the raw isolation m/z (`selectedIon.MS:1000744`). Kim et al.
-    /// (Nat Commun 5:5277, 2014) prefer the firmware-deisotoped precursor for
-    /// Thermo Orbitrap data; load-bearing for TMT / Orbitrap recall.
     #[test]
     fn thermo_trailer_monoisotopic_overrides_selected_ion_mz() {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
-        // Same shape as ms2_spectrum_xml but with a Thermo trailer under
-        // <scan>. selectedIon m/z = 625.338 (raw isolation), trailer
-        // monoisotopic m/z = 625.004 (firmware deisotoping, off by 1 C13/3).
         let xml = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
               <cvParam accession="MS:1000511" name="ms level" value="2"/>
@@ -2886,8 +2347,6 @@ mod tests {
         );
     }
 
-    /// When the Thermo trailer is absent, the reader still falls back to
-    /// `selectedIon.MS:1000744`. Regression test for the existing path.
     #[test]
     fn precursor_mz_falls_back_to_selected_ion_without_trailer() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -2904,9 +2363,6 @@ mod tests {
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
     }
 
-    /// A zero or negative trailer value (firmware "no decision" sentinel)
-    /// must not override a real selectedIon m/z — otherwise we'd plant a
-    /// nonsense precursor mass.
     #[test]
     fn zero_thermo_trailer_does_not_override() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -2962,8 +2418,6 @@ mod tests {
         );
         assert_eq!(scan_number("index=101", Some(0)), Some(101));
     }
-
-    // ── Activation-method parsing ────────────────────────────────────────────
 
     fn spectrum_xml_with_activation(activation_cv: Option<&str>) -> String {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -3031,7 +2485,6 @@ mod tests {
 
     #[test]
     fn parses_ecd_as_etd() {
-        // ECD is electron-based; we collapse to ETD for param routing.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
             "MS:1000250",
         ))));
@@ -3046,8 +2499,6 @@ mod tests {
         assert_eq!(spectra[0].activation_method, None);
     }
 
-    /// Build a spectrum whose single `<activation>` block carries TWO cvParams
-    /// (e.g. ETD + supplemental HCD) — the EThcD/ETciD shape.
     fn spectrum_xml_with_two_activations(cv1: &str, cv2: &str) -> String {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
@@ -3081,9 +2532,6 @@ mod tests {
 
     #[test]
     fn ethcd_etd_plus_hcd_is_labelled_ethcd() {
-        // ETD (MS:1000598) + supplemental HCD (MS:1000422) in one block = EThcD.
-        // Order ETD-then-HCD: pure-ETD precedence would mis-label it ETD; the
-        // EThcD detector must override to EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000598",
             "MS:1000422",
@@ -3094,7 +2542,6 @@ mod tests {
 
     #[test]
     fn ethcd_detection_is_order_independent() {
-        // HCD-then-ETD: same EThcD shape, reversed cvParam order → still EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000422",
             "MS:1000598",
@@ -3105,8 +2552,6 @@ mod tests {
 
     #[test]
     fn supplemental_activation_terms_mark_ethcd_and_etcid() {
-        // msconvert writes EThcD as ETD + "supplemental beam-type CID"
-        // (MS:1002678) and ETciD as ETD + "supplemental CID" (MS:1002679).
         for supp in ["MS:1002678", "MS:1002679"] {
             for (a, b) in [("MS:1000598", supp), (supp, "MS:1000598")] {
                 let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(a, b)));
@@ -3125,7 +2570,6 @@ mod tests {
             "FTMS + p NSI d Full ms2 784.37@etd50.00@hcd25.00 [120.00-2000.00]",
             "ITMS + c NSI d Full ms2 652.10@etd100.00@cid35.00 [50.00-1315.00]",
             "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00@hcd20.00 [100.00-1000.00]",
-            // One token per activation of the same precursor (newer firmware).
             "FTMS + p NSI d Full ms2 391.1936@etd55.49 391.1936@hcd20.00 [100.0000-1184.0000]",
             "FTMS + c NSI d sa Full ms2 361.9050@etd143.26@hcd28.00 [100.0000-734.0000]",
         ] {
@@ -3134,7 +2578,6 @@ mod tests {
         for f in [
             "FTMS + p NSI d Full ms2 784.37@etd50.00 [120.00-2000.00]",
             "FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]",
-            // A collisional MS2 stage followed by an ETD MS3 stage is not EThcD.
             "FTMS + c NSI Full ms3 900.00@cid35.00 450.20@etd50.00 [100.00-1000.00]",
             "FTMS + c NSI Full ms3 900.00@hcd35.00 450.20@etd50.00 [100.00-1000.00]",
             "FTMS + p NSI Full ms [350.00-1800.00]",
@@ -3144,8 +2587,6 @@ mod tests {
         }
     }
 
-    /// ThermoRawFileParser writes only the ETD term for the two-token filter
-    /// dialect; the scan's filter string still marks the spectrum EThcD.
     #[test]
     fn etd_term_with_supplemental_filter_string_is_labelled_ethcd() {
         let xml = spectrum_xml_with_activation(Some("MS:1000598")).replace(
@@ -3160,7 +2601,6 @@ mod tests {
         );
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
-        // The same ETD term with a pure-ETD filter stays ETD.
         let xml = spectrum_xml_with_activation(Some("MS:1000598")).replace(
             "<scanList count=\"1\"><scan/></scanList>",
             "<scanList count=\"1\"><scan><cvParam accession=\"MS:1000512\" name=\"filter string\" \
@@ -3173,16 +2613,15 @@ mod tests {
     #[test]
     fn combined_and_child_activation_terms() {
         for (cv, want) in [
-            ("MS:1002631", ActivationMethod::EThcD), // EThcD as one term
-            ("MS:1003182", ActivationMethod::EThcD), // ETciD as one term
-            ("MS:1002472", ActivationMethod::CID),   // trap-type CID
-            ("MS:1002481", ActivationMethod::HCD),   // higher energy beam-type CID
+            ("MS:1002631", ActivationMethod::EThcD),
+            ("MS:1003182", ActivationMethod::EThcD),
+            ("MS:1002472", ActivationMethod::CID),
+            ("MS:1002481", ActivationMethod::HCD),
             ("MS:1003246", ActivationMethod::UVPD),
         ] {
             let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(cv))));
             assert_eq!(spectra[0].activation_method, Some(want), "{cv}");
         }
-        // A supplemental term without an electron term does not set a method.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
             "MS:1002678",
         ))));
@@ -3191,7 +2630,6 @@ mod tests {
 
     #[test]
     fn etcid_etd_plus_cid_is_labelled_ethcd() {
-        // ETciD: ETD (MS:1000598) + supplemental CID (MS:1000133) → EThcD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
             "MS:1000598",
             "MS:1000133",
@@ -3202,17 +2640,15 @@ mod tests {
 
     #[test]
     fn centroid_profile_collapses_one_peak_to_intensity_weighted_centroid() {
-        // A single symmetric profile peak sampled at 5 points around m/z 100.2.
         let prof = [
             (100.0, 1.0f32),
             (100.1, 4.0),
-            (100.2, 9.0), // apex
+            (100.2, 9.0),
             (100.3, 4.0),
             (100.4, 1.0),
         ];
         let c = centroid_profile(&prof);
         assert_eq!(c.len(), 1, "one peak ⇒ one centroid");
-        // Symmetric ⇒ centroid m/z == apex m/z; intensity == apex.
         assert!(
             (c[0].0 - 100.2).abs() < 1e-9,
             "centroid m/z {} != 100.2",
@@ -3223,14 +2659,13 @@ mod tests {
 
     #[test]
     fn centroid_profile_separates_two_peaks() {
-        // Two peaks separated by a baseline (zero) point ⇒ two centroids.
         let prof = [
             (200.0, 1.0f32),
-            (200.1, 5.0), // apex 1
+            (200.1, 5.0),
             (200.2, 1.0),
-            (200.3, 0.0), // valley/baseline
+            (200.3, 0.0),
             (200.4, 2.0),
-            (200.5, 8.0), // apex 2
+            (200.5, 8.0),
             (200.6, 2.0),
         ];
         let c = centroid_profile(&prof);
@@ -3239,9 +2674,6 @@ mod tests {
         assert!((c[1].0 - 200.5).abs() < 1e-9);
     }
 
-    /// Profile spectrum (MS:1000128) with a 3-point peak is centroided down to
-    /// a single peak on parse; without the profile flag the 3 points pass
-    /// through verbatim. Exercises the is_profile flag wiring end-to-end.
     fn profile_spectrum_xml(profile: bool) -> String {
         let mz_b64 = encode_f64_b64(&[150.0, 150.1, 150.2]);
         let int_b64 = encode_f64_b64(&[2.0, 9.0, 2.0]);
@@ -3276,7 +2708,6 @@ mod tests {
         assert_eq!(prof[0].peaks.len(), 1, "profile 3-point peak ⇒ 1 centroid");
         assert!((prof[0].peaks[0].0 - 150.1).abs() < 1e-9);
 
-        // Centroided spectrum (MS:1000127): the 3 points pass through unchanged.
         let cent = collect_ok(&wrap_spectra(&profile_spectrum_xml(false)));
         assert_eq!(
             cent[0].peaks.len(),
@@ -3285,15 +2716,10 @@ mod tests {
         );
     }
 
-    /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).
-    /// First-wins selection (modulo ETD precedence) routes TMT SPS data to a
-    /// CID-trained model.
     #[test]
     fn multiple_activations_first_wins() {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
-        // Two `<precursor>` blocks: first CID (MS:1000133), second HCD
-        // (MS:1000422). First-wins → CID.
         let xml = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
               <cvParam accession="MS:1000511" name="ms level" value="3"/>
@@ -3329,7 +2755,6 @@ mod tests {
             int = bda_plain("MS:1000515", &int_b64),
         );
 
-        // Wrap and widen to MS3 so the spectrum isn't filtered out.
         let wrapped = format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
 <mzML xmlns="http://psi.hupo.org/ms/mzml">
@@ -3386,9 +2811,6 @@ mod tests {
         spectra[0].activation_method
     }
 
-    /// Bruker timsTOF mzML exports name the method in a userParam
-    /// (`<userParam name="CID"/>`) with no PSI-MS cvParam; it must still set
-    /// the activation.
     #[test]
     fn activation_user_param_sets_activation() {
         assert_eq!(
@@ -3403,12 +2825,10 @@ mod tests {
             activation_of(r#"<userParam name="ETD"/>"#),
             Some(ActivationMethod::ETD)
         );
-        // Unrelated userParams leave the activation unset.
         assert_eq!(
             activation_of(r#"<userParam name="collision energy" value="35"/>"#),
             None
         );
-        // A cvParam in the same block keeps its first-wins precedence.
         assert_eq!(
             activation_of(
                 r#"<cvParam accession="MS:1000422" name="HCD" value=""/><userParam name="CID"/>"#
@@ -3417,12 +2837,6 @@ mod tests {
         );
     }
 
-    /// H6 regression: an electron term and a collisional term in SEPARATE
-    /// `<activation>` blocks (here CID in precursor 1, ETD in precursor 2) is
-    /// NOT supplemental activation and must NOT be mis-detected as EThcD.
-    /// Per-block scoping keeps the flags from combining across blocks; the
-    /// result follows the per-cvParam rules (ETD's unconditional precedence),
-    /// never the false-positive HCD.
     #[test]
     fn separate_activation_blocks_do_not_falsely_trigger_ethcd() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -3466,7 +2880,6 @@ mod tests {
             .map(|r| r.expect("parse error"))
             .collect();
         assert_eq!(spectra.len(), 1);
-        // Must NOT be the false-positive EThcD; ETD wins per its precedence.
         assert_ne!(
             spectra[0].activation_method,
             Some(ActivationMethod::EThcD),
@@ -3475,17 +2888,10 @@ mod tests {
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
     }
 
-    /// H6: an electron-transfer term + a collisional term within a SINGLE
-    /// `<activation>` block is supplemental activation (EThcD/ETciD), NOT pure
-    /// ETD. Giving ETD unconditional precedence here under-scores the b/y
-    /// ions the supplemental collision produces, so the detector labels such
-    /// blocks EThcD. (CID-then-ETD order; mirror of the
-    /// ETD-then-CID `etcid_*` test → confirms order-independence.)
     #[test]
     fn etd_plus_supplemental_collisional_is_labelled_ethcd() {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
-        // Activation has CID first, then ETD → EThcD/ETciD.
         let xml = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
               <cvParam accession="MS:1000511" name="ms level" value="2"/>
@@ -3516,12 +2922,6 @@ mod tests {
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::EThcD));
     }
 
-    // ── Isolation-window parsing ─────────────────────────────────────────────
-
-    /// `<precursor><isolationWindow>` carries the lower/upper offsets
-    /// (`MS:1000828` / `MS:1000829`). The parser must capture them on the
-    /// emitted `Spectrum` without disturbing the sibling `<selectedIon>`
-    /// precursor m/z. Load-bearing for the `--chimeric` co-isolation path.
     #[test]
     fn parses_isolation_window_offsets() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -3561,13 +2961,9 @@ mod tests {
         assert_eq!(spectra[0].isolation_lower_offset, Some(1.5));
         assert_eq!(spectra[0].isolation_upper_offset, Some(1.5));
         assert_eq!(spectra[0].isolation_target_mz, Some(500.5));
-        // The isolation-window target (MS:1000827) must NOT clobber the
-        // selectedIon precursor m/z.
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
     }
 
-    /// A `<productList>` isolation window (the fragment isolation of an
-    /// SRM/PRM-style scan) must not overwrite the precursor's.
     #[test]
     fn product_isolation_window_does_not_overwrite_precursor_window() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -3615,7 +3011,6 @@ mod tests {
         assert_eq!(spectra[0].peaks.len(), 1);
     }
 
-    /// When the mzML omits `<isolationWindow>`, both offsets stay `None`.
     #[test]
     fn missing_isolation_window_yields_none() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -3634,8 +3029,6 @@ mod tests {
         assert_eq!(spectra[0].isolation_target_mz, None);
     }
 
-    /// Build an mzML wrapper with one or more `<instrumentConfiguration>`
-    /// blocks and `<run>`-level `defaultInstrumentConfigurationRef`.
     fn wrap_with_instrument_configs(
         instrument_configs: &str,
         default_ic_ref: &str,
@@ -3715,7 +3108,6 @@ mod tests {
 
     #[test]
     fn detect_instrument_ion_trap_analyzer_to_lowres() {
-        // Linear ion trap (MS:1000291) — LTQ Velos and similar.
         let xml = wrap_with_instrument_configs(
             &ic_block("IC1", "MS:1000291"),
             "IC1",
@@ -3760,14 +3152,11 @@ mod tests {
 
     #[test]
     fn detect_instrument_ms2_referenced_ic_wins_pxd001819_pattern() {
-        // Mimics PXD001819: MS1 uses IC1 (orbitrap) but MS2 uses IC2 (ion trap).
-        // The MS2-referenced IC must win → LowRes.
         let ics = format!(
             "{}\n{}",
-            ic_block("IC1", "MS:1000484"), // orbitrap
-            ic_block("IC2", "MS:1000264"), // ion trap
+            ic_block("IC1", "MS:1000484"),
+            ic_block("IC2", "MS:1000264"),
         );
-        // MS2 references IC2.
         let xml = wrap_with_instrument_configs(&ics, "IC1", &ms2_spectrum_with_ic_ref("IC2"));
         let result = detect_instrument_type(Cursor::new(xml));
         assert_eq!(result, Some(InstrumentType::LowRes));
@@ -3775,8 +3164,6 @@ mod tests {
 
     #[test]
     fn detect_instrument_falls_back_to_default_ic_when_scan_lacks_ref() {
-        // Spectrum's <scan> has no instrumentConfigurationRef — falls back to
-        // run-level defaultInstrumentConfigurationRef.
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
         let spec = format!(
@@ -3807,7 +3194,6 @@ mod tests {
 
     #[test]
     fn detect_instrument_returns_none_when_no_ic_info() {
-        // No instrumentConfigurationList block at all.
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
         let spec = ms2_spectrum_xml(
@@ -3822,9 +3208,6 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    /// One MS1 followed by two MS2 spectra: the capture path stores the MS1
-    /// peaks once, emits only the two MS2 spectra, and links both MS2 to the
-    /// single preceding MS1 (index 0).
     #[test]
     fn ms1_capture_links_two_ms2_to_preceding_ms1() {
         let ms1_mz_b64 = encode_f64_b64(&[111.0, 222.0]);
@@ -4023,7 +3406,6 @@ mod tests {
             intb = bda_plain("MS:1000515", &encode_f64_b64(&[1000.0, 2000.0])),
         );
         let xml = wrap_spectra(&format!("{ms2}{ms3}"));
-        // Default reader: the MS3 is filtered out and not captured.
         let mut plain = MzMLReader::new(Cursor::new(xml.clone()));
         let n = plain
             .by_ref()
@@ -4032,7 +3414,6 @@ mod tests {
             .len();
         assert_eq!(n, 1);
         assert!(plain.take_product_scans().is_empty());
-        // Capture on: still one emitted MS2, and the MS3 is in the side table.
         let mut reader = MzMLReader::new(Cursor::new(xml)).with_product_scan_capture(true);
         let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
         assert_eq!(spectra.len(), 1);
@@ -4099,13 +3480,11 @@ mod tests {
             .with_noise_capture(true);
         let spectra: Vec<Spectrum> = reader.by_ref().map(|r| r.expect("parse")).collect();
         assert_eq!(spectra.len(), 1);
-        // The noise arrays never reach the peak list.
         assert_eq!(spectra[0].peaks, vec![(126.1277, 1000.0)]);
         let contexts = reader.take_scan_contexts();
         let ms3s = reader.take_product_scans();
         for noise in [&contexts[0].noise, &ms3s[0].noise] {
             let noise = noise.as_ref().expect("noise captured");
-            // 120, 130 and the first point above 140 (200) are kept.
             assert_eq!(noise.len(), 3);
             assert!((noise.at(125.0) - 150.0).abs() < 1e-4);
         }
@@ -4119,10 +3498,6 @@ mod tests {
 
     #[test]
     fn chunked_ms1_linkage_matches_batch_across_boundaries() {
-        // Layout exercising both an MS1 carry-over across a chunk boundary and a
-        // new MS1 mid-chunk:  MS1#a, MS2_1, MS2_2, MS2_3, MS1#b, MS2_4.
-        // With chunk_size=2: chunk1=[1,2]→a; chunk2=[3,4] where 3 carries over a
-        // and 4 links to the new b.
         let ms1a = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="2">
               <cvParam accession="MS:1000511" name="ms level" value="1"/>
@@ -4204,15 +3579,12 @@ mod tests {
                 _ => panic!("MS2 #{i} linkage presence differs from batch: {cr:?} vs {br:?}"),
             }
         }
-        assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
-        assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+        assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2));
+        assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1));
     }
 
     #[test]
     fn chunked_read_keeps_run_ms1_and_scan_contexts_for_quantification() {
-        // The chimeric read path streams MS1 for co-isolation; with the
-        // quantification captures on it must also keep every MS1 scan of the
-        // run and the context of every MS2, exactly as the plain iterator does.
         let ms1 = |id: &str, rt_min: f64, mz: f64| {
             format!(
                 r#"<spectrum index="0" id="{id}" defaultArrayLength="1">
@@ -4290,8 +3662,6 @@ mod tests {
 
     #[test]
     fn iterator_resyncs_past_a_malformed_spectrum() {
-        // The default Iterator path must skip a bad scan and still yield the next
-        // good spectrum — same resync semantics as `read_with_ms1` / chunked.
         let good1 = ms2_spectrum_xml(
             "scan=1",
             &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
@@ -4336,9 +3706,6 @@ mod tests {
 
     #[test]
     fn chunked_resyncs_past_a_malformed_spectrum() {
-        // A bad MS2 (invalid base64 in its m/z array) sits between two good MS2s.
-        // The reader must resync past the bad scan and still deliver BOTH good ones
-        // — NOT truncate the file at the first error.
         let good1 = ms2_spectrum_xml(
             "scan=1",
             &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
@@ -4387,7 +3754,6 @@ mod tests {
         );
     }
 
-    /// An MS2 that appears BEFORE any MS1 links to `None`.
     #[test]
     fn ms1_capture_ms2_before_any_ms1_links_to_none() {
         let ms2a = ms2_spectrum_xml(
@@ -4440,8 +3806,6 @@ mod tests {
         assert_eq!(link.ms2_to_ms1, vec![None, Some(0)]);
     }
 
-    /// With capture OFF (default), the new path is not engaged and the plain
-    /// iterator still emits MS2-only with no MS1 side effects.
     #[test]
     fn ms1_capture_off_yields_empty_link() {
         let mz_b64 = encode_f64_b64(&[100.0, 200.0]);
@@ -4466,8 +3830,6 @@ mod tests {
 
     #[test]
     fn detect_instrument_qexactive_model_cv_param() {
-        // No analyzer cvParam, but a Q Exactive instrument-model cvParam
-        // appears at the top of the IC block.
         let ic = r#"<instrumentConfiguration id="IC1">
             <cvParam accession="MS:1001911" name="Q Exactive" value=""/>
             <componentList count="3">
@@ -4485,13 +3847,6 @@ mod tests {
 
     #[test]
     fn detect_instrument_astral_model_in_referenceable_param_group() {
-        // ThermoRawFileParser-2.0 layout: the Orbitrap Astral instrument-model
-        // cvParam (MS:1003378) lives in a <referenceableParamGroup>, and the IC
-        // pulls it in via <referenceableParamGroupRef>. The IC's own <analyzer>
-        // carries the generic orbitrap term (which ALONE maps to QExactive), so
-        // this regression-guards that the group's model is resolved and wins —
-        // otherwise every Astral mzML in this common layout misdetects as
-        // QExactive and never reaches an OrbitrapAstral-keyed scoring model.
         let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <mzML xmlns="http://psi.hupo.org/ms/mzml">
   <referenceableParamGroupList count="1">
@@ -4525,10 +3880,6 @@ mod tests {
         assert_eq!(result, Some(InstrumentType::OrbitrapAstral));
     }
 
-    /// Orbitrap Fusion OT-IT: the model term sits on both ICs (here through a
-    /// referenceableParamGroup), MS1 on the orbitrap IC, MS2 on the ion-trap IC.
-    /// The MS2 IC must read as low-res, and an orbitrap IC with the same model
-    /// as high-res.
     #[test]
     fn detect_instrument_fusion_ion_trap_ms2_is_low_res() {
         let doc = |ms2_ic: &str| {
@@ -4573,7 +3924,6 @@ mod tests {
 
     #[test]
     fn truncated_binary_array_is_rejected() {
-        // 12 raw bytes is not a multiple of the 8-byte f64 width → must error.
         let truncated_b64 = STANDARD.encode([0u8; 12]);
         let spec = ms2_spectrum_xml(
             "scan=1",
@@ -4593,7 +3943,6 @@ mod tests {
         );
     }
 
-    /// A spectrum with invalid base64 in its `<binary>` block (parse error).
     fn malformed_spectrum() -> String {
         ms2_spectrum_xml(
             "scan=bad",
@@ -4614,8 +3963,6 @@ mod tests {
 
     #[test]
     fn tolerant_iterator_skips_and_counts_malformed_spectrum() {
-        // Bad spectrum followed by a good one: tolerant default skips the bad
-        // scan, still yields the good one, and records the skip.
         let good = ms2_spectrum_xml(
             "scan=2",
             &bda_plain("MS:1000514", &encode_f64_b64(&[150.0, 300.0])),
@@ -4633,7 +3980,6 @@ mod tests {
         );
     }
 
-    /// One spectrum's fields, for comparing two reads of the same file.
     fn spectrum_fingerprint(s: &Spectrum) -> String {
         format!(
             "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
@@ -4674,7 +4020,6 @@ mod tests {
             if (min, max) == (2, 2) {
                 assert!(!sequential.is_empty(), "the fixture carries MS2 spectra");
             }
-            // Piece sizes from smaller than one spectrum up to the whole file.
             for piece in [1_000u64, 7_919, 65_536, 1 << 30] {
                 for threads in [1, 3] {
                     let (spectra, errors) =

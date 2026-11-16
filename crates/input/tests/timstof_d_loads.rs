@@ -1,15 +1,3 @@
-//! Integration test for the native Bruker timsTOF `.d` reader.
-//!
-//! Built only under `--features timstof`. Reading a real `.d` needs a Bruker
-//! dataset on disk (each `.d` is ~1-3.5 GB), so this test is a no-op unless the
-//! `ANDES_TEST_D` env var points at a `.d` directory — keeping CI green on
-//! machines without one. With the var set it opens the `.d`, streams the MS2
-//! spectra, and asserts the model invariants the search path relies on.
-//!
-//! Example:
-//!   ANDES_TEST_D=/data/HeLa_IAA_F51_1.d \
-//!     cargo test -p input --features timstof --test timstof_d_loads
-
 #![cfg(feature = "timstof")]
 
 use input::TimsTofReader;
@@ -41,8 +29,6 @@ fn reads_real_d_when_env_set() {
             spec.precursor_mz
         );
 
-        // Peaks must be ascending by m/z — the scorer and chimeric co-isolation
-        // detection binary-search this list.
         assert!(
             spec.peaks.windows(2).all(|w| w[0].0 <= w[1].0),
             "spectrum {i} peaks are not ascending by m/z"

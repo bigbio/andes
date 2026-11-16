@@ -1,30 +1,3 @@
-//! Native Bruker timsTOF `.d` reader (`feature = "timstof"`).
-//!
-//! Wraps the pure-Rust [`timsrust`] crate and yields the same [`Spectrum`]
-//! model as the mzML/MGF/Thermo readers, so the search path is
-//! format-agnostic. A Bruker `.d` is a DIRECTORY holding a TDF SQLite database
-//! (`analysis.tdf`) plus its binary blob (`analysis.tdf_bin`); `timsrust` reads
-//! both natively with NO vendor runtime and NO bundling.
-//!
-//! Built only under `--features timstof`. mzML/MGF reading never pulls in
-//! `timsrust`.
-//!
-//! Scope: DDA-PASEF. Each precursor of the run becomes one centroided MS2
-//! fragment spectrum, summed over all its PASEF selections and converted to
-//! m/z with the run's calibration (see [`crate::timstof_ms2`]); it carries the
-//! precursor's m/z, charge, retention time, parent MS1 frame and ion mobility.
-//! MS2 spectra are built in parallel batches. On request the reader also yields the run's MS1 survey frames,
-//! summed over ion mobility and centroided (see [`crate::timstof_ms1`]), with
-//! the same capture interface as the mzML and Thermo readers: every MS1 scan
-//! for quantification ([`TimsTofReader::with_run_ms1_capture`]), the
-//! acquisition context of each MS2 with its parent frame and precursor
-//! mobility ([`TimsTofReader::with_scan_context_capture`]), and MS2 chunks
-//! linked to their parent MS1 for the MS1-linked search paths
-//! ([`TimsTofReader::read_with_ms1_chunked`]). MS1 frames are decoded in
-//! parallel batches as the MS2 stream reaches them, so only one batch of
-//! frames is held besides the captured centroids. A TDF holds MS1 and PASEF
-//! MS2 frames only; there are no MS3 scans.
-
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -46,14 +19,12 @@ use crate::timstof_ms2::{
 };
 use crate::{Ms1Link, Spectrum};
 
-/// Error opening or reading a Bruker timsTOF `.d` directory.
 #[derive(Debug, thiserror::Error)]
 pub enum TimsTofParseError {
     #[error("failed to open Bruker .d '{path}': {source}{hint}")]
     Open {
         path: String,
         source: Box<FrameReaderError>,
-        /// Extra guidance for a known unsupported layout (empty otherwise).
         hint: &'static str,
     },
     #[error(
@@ -75,10 +46,6 @@ pub enum TimsTofParseError {
     },
 }
 
-/// Guidance appended to an open error whose cause is a known unsupported `.d`
-/// layout. Frame compression type 1 is the scheme written by early timsTOF
-/// acquisition software (data from about 2018 and before); the reader only
-/// decodes the later type 2.
 fn open_error_hint(message: &str) -> &'static str {
     if message.contains("Compression type 1") {
         " (this .d uses the frame compression of early timsTOF acquisition software, \
@@ -88,10 +55,6 @@ fn open_error_hint(message: &str) -> &'static str {
     }
 }
 
-/// The run folder inside `dir` when `dir` has no `analysis.tdf` of its own but
-/// a `.d` folder inside it has one: archives that wrap the run in a folder of
-/// the same name unpack to `X.d/X.d/`. The reader panics on the outer folder,
-/// so it is caught here first.
 fn nested_run_folder(dir: &Path) -> Option<PathBuf> {
     if !dir.is_dir() || dir.join("analysis.tdf").exists() {
         return None;
@@ -109,46 +72,29 @@ fn nested_run_folder(dir: &Path) -> Option<PathBuf> {
     nested.into_iter().next()
 }
 
-/// MS1 frames decoded per parallel batch.
 const MS1_BATCH: usize = 64;
-/// MS1 frames sampled across the run for the m/z calibration.
 const CALIBRATION_FRAMES: usize = 400;
 
-/// The MS1 survey frames of a `.d`, decoded lazily in file order.
 struct Ms1Frames {
     frames: FrameReader,
-    /// Frame-reader positions and frame ids of the MS1 frames, in file order.
     positions: Vec<usize>,
     ids: Vec<usize>,
-    /// Frame id → `(T1, T2)` temperatures.
     temperatures: HashMap<usize, [f64; 2]>,
     calibration: MzCalibration,
-    /// Mobility scan index → 1/K0.
     im: timsrust::converters::Scan2ImConverter,
-    /// Resolve each frame's centroids by ion mobility (see
-    /// [`TimsTofReader::with_ms1_mobility`]).
     resolve: bool,
-    /// Next entry of `positions` to decode.
     cursor: usize,
-    /// Decoded frames not yet handed out.
     ready: VecDeque<DecodedMs1>,
 }
 
-/// One decoded MS1 frame: its frame id, the scan quantification captures
-/// and, for a mobility-resolved scan, the frame's centroids summed over
-/// mobility (what the MS1-linked search paths read).
 struct DecodedMs1 {
     id: usize,
     scan: Ms1Scan,
     summed: Option<Vec<(f64, f32)>>,
 }
 
-/// The `Frames` temperatures and the vendor precursor peaks of a `.d`.
 struct TdfTables {
     temperatures: HashMap<usize, [f64; 2]>,
-    /// Parent frame id → monoisotopic m/z of its precursors
-    /// (`MonoisotopicMz`, else `LargestPeakMz` when the monoisotopic peak was
-    /// not determined).
     precursor_peaks: HashMap<usize, Vec<f64>>,
 }
 
@@ -158,8 +104,6 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let mut temperatures = HashMap::new();
-    // Older schemas may lack the temperature columns; the calibration then
-    // has no temperature terms.
     if let Ok(mut stmt) = conn.prepare("SELECT Id, T1, T2 FROM Frames") {
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -218,12 +162,6 @@ fn to_peaks(
     peaks
 }
 
-/// Mobility-resolved centroids converted to `(m/z, intensity)` and 1/K0,
-/// m/z ascending. The calibration's intensity term is evaluated at each
-/// component's own intensity, although the calibration is fitted on
-/// centroids summed over mobility: a component's `sqrt(m/z)` differs from
-/// the summed centroid's by the intensity coefficient times
-/// `ln(summed / component)`, a fraction of a ppm at the term's scale.
 fn to_resolved_peaks(
     centroids: &[MobilityCentroid],
     calibration: &MzCalibration,
@@ -276,7 +214,6 @@ impl Ms1Frames {
                 ids.push(f.index);
             }
         }
-        // The acquisition-range model of timsrust as `sqrt(m/z) = a + b * tof`.
         let conv = metadata.mz_converter;
         let intercept = conv.convert(0.0).sqrt();
         let slope = conv.convert(1.0).sqrt() - intercept;
@@ -319,8 +256,6 @@ impl Ms1Frames {
         self.temperatures.get(&id).copied().unwrap_or([0.0; 2])
     }
 
-    /// Fit the m/z calibration on up to [`CALIBRATION_FRAMES`] MS1 frames
-    /// spread over the run that have precursors.
     fn calibrate(
         &self,
         base: &MzCalibration,
@@ -405,8 +340,6 @@ impl Ms1Frames {
                             (frame.rt_in_seconds, summed, Vec::new(), None)
                         }
                     }
-                    // A frame that cannot be decoded is kept as an empty scan
-                    // so the survey series keeps its time points.
                     Err(_) => (
                         self.frames
                             .get_frame_without_coordinates(pos)
@@ -433,8 +366,6 @@ impl Ms1Frames {
         self.ready.extend(decoded);
     }
 
-    /// Hand the decoded MS1 frames with an id up to `frame_id` (all remaining
-    /// frames for `None`) to `sink`, in file order.
     fn take_up_to(&mut self, frame_id: Option<usize>, mut sink: impl FnMut(DecodedMs1)) {
         loop {
             while let Some(d) = self.ready.front() {
@@ -451,20 +382,16 @@ impl Ms1Frames {
     }
 }
 
-/// An emitted MS2, the id of its parent MS1 frame and its precursor 1/K0.
 type Ms2Item = (Spectrum, Option<usize>, f64);
 
-/// Native id of an MS1 frame: `frame=<TDF frame id>`.
 fn ms1_native_id(frame_id: usize) -> String {
     format!("frame={frame_id}")
 }
 
-/// Precursors whose MS2 spectra are built per parallel batch.
 const MS2_BATCH: usize = 1024;
 
 struct Ms2Source {
     frames: FrameReader,
-    /// Frame id → position in `frames`.
     positions: HashMap<usize, usize>,
     rows: HashMap<usize, FrameRow>,
     precursors: Vec<PasefPrecursor>,
@@ -510,9 +437,6 @@ impl Ms2Source {
         })
     }
 
-    /// Build the MS2 spectra of `precursors[range]`: the frames they need are
-    /// decoded once each, in parallel, then the spectra are assembled in
-    /// parallel. Precursors without a usable m/z yield nothing.
     fn build(
         &self,
         range: std::ops::Range<usize>,
@@ -542,8 +466,6 @@ impl Ms2Source {
             .collect()
     }
 
-    /// One precursor's spectrum from its decoded frames (see
-    /// [`crate::timstof_ms2`]).
     fn assemble(
         &self,
         p: &PasefPrecursor,
@@ -557,7 +479,6 @@ impl Ms2Source {
         let mut error: Option<String> = None;
         for s in &p.selections {
             let Some(result) = decoded.get(&s.frame_id) else {
-                // A frame recorded with no peaks contributes nothing.
                 continue;
             };
             match result {
@@ -618,10 +539,6 @@ impl Ms2Source {
     }
 }
 
-/// The [`Spectrum`] of a precursor, or `None` without a positive precursor m/z
-/// (the mzML and Thermo readers skip such scans too).
-// `!(mz > 0.0)` deliberately rejects NaN as well as 0 / negative m/z — the
-// same precursor-sanity idiom the Thermo reader uses.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn to_spectrum(
     p: &PasefPrecursor,
@@ -632,15 +549,11 @@ fn to_spectrum(
         return None;
     }
     let scan_number = i32::try_from(p.id).ok()?;
-    // 0 (or an absurd value) means "unknown"; the engine then sweeps the
-    // configured charge range.
     let precursor_charge = p.charge.and_then(model::spectrum::known_precursor_charge);
     let precursor_intensity = p
         .intensity
         .filter(|i| i.is_finite() && *i > 0.0)
         .map(|i| i as f32);
-    // The quadrupole isolation window is recorded as a centre m/z and a total
-    // width; the model stores symmetric lower / upper offsets.
     let (isolation_lower_offset, isolation_upper_offset) = if p.isolation_width > 0.0 {
         let half = p.isolation_width / 2.0;
         (Some(half), Some(half))
@@ -655,10 +568,6 @@ fn to_spectrum(
         rt_seconds,
         scan: Some(scan_number),
         peaks,
-        // timsTOF DDA-PASEF is CID/HCD-style beam-type fragmentation; the
-        // `.d` does not record a discrete activation cvParam the resolver
-        // keys on, so this stays `None` and the param resolver uses its
-        // default (or an explicit `--fragmentation`/`--instrument`).
         activation_method: None,
         isolation_lower_offset,
         isolation_upper_offset,
@@ -666,35 +575,21 @@ fn to_spectrum(
     })
 }
 
-/// Reader over a Bruker timsTOF `.d` directory, yielding [`Spectrum`] values.
-///
-/// Every emitted spectrum is a PASEF MS2 fragment spectrum, one per precursor
-/// in precursor-id order, so there is no MS-level filter. MS1 survey frames
-/// are read alongside on request.
 pub struct TimsTofReader {
     ms2: Ms2Source,
     dir: PathBuf,
-    /// Next precursor (index into the precursor list) to build.
     next: usize,
-    /// Built MS2 not yet handed out.
     ready: VecDeque<Result<Ms2Item, TimsTofParseError>>,
-    /// The run's TOF → m/z calibration, fitted on the first MS2 request.
     calibration: Option<MzCalibration>,
-    /// Quantification capture (see the mzML reader): every MS1 frame of the
-    /// run, and the acquisition context of every emitted MS2.
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
-    /// Opened on the first MS1 or MS2 request.
     ms1: Option<Ms1Frames>,
-    /// Captured MS1 scans are resolved by ion mobility.
     ms1_mobility: bool,
 }
 
 impl TimsTofReader {
-    /// Open a `.d` directory. The path is the `.d` folder itself (which holds
-    /// `analysis.tdf` + `analysis.tdf_bin`), not a file inside it.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, TimsTofParseError> {
         let p = path.as_ref();
         if let Some(nested) = nested_run_folder(p) {
@@ -719,26 +614,16 @@ impl TimsTofReader {
         })
     }
 
-    /// Keep every MS1 frame (retention time + centroids summed over ion
-    /// mobility) for label-free quantification; take them with
-    /// [`Self::take_run_ms1`] once the stream is exhausted.
     pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_run_ms1 = capture;
         self
     }
 
-    /// Resolve the captured MS1 scans by ion mobility: each centroid summed
-    /// over mobility is split into its ion-mobility components, each with its
-    /// 1/K0 ([`Ms1Scan::mobility`]); see [`crate::timstof_ms1`]. The
-    /// MS1-linked search paths keep reading the centroids summed over
-    /// mobility.
     pub fn with_ms1_mobility(mut self, resolve: bool) -> Self {
         self.ms1_mobility = resolve;
         self
     }
 
-    /// Record the acquisition context of every emitted MS2 (parent MS1 frame
-    /// and precursor ion mobility); take them with [`Self::take_scan_contexts`].
     pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
         self.capture_scan_context = capture;
         self
@@ -752,12 +637,10 @@ impl TimsTofReader {
         std::mem::take(&mut self.scan_contexts)
     }
 
-    /// Number of MS2 spectra in the `.d` (precursors with a PASEF selection).
     pub fn len(&self) -> usize {
         self.ms2.precursors.len()
     }
 
-    /// Whether the `.d` has no spectra.
     pub fn is_empty(&self) -> bool {
         self.ms2.precursors.is_empty()
     }
@@ -772,9 +655,6 @@ impl TimsTofReader {
         Ok(self.ms1.as_mut().expect("just opened"))
     }
 
-    /// The next MS2 with its parent MS1 frame id and precursor ion mobility,
-    /// or `None` at the end of the run. The m/z calibration is fitted on the
-    /// first call (from the MS1 frames, see [`Ms1Frames::open`]).
     fn next_ms2(&mut self) -> Option<Result<Ms2Item, TimsTofParseError>> {
         loop {
             if let Some(item) = self.ready.pop_front() {
@@ -814,16 +694,6 @@ impl TimsTofReader {
         }
     }
 
-    /// Stream MS2 in `chunk_size` batches, each paired with a bounded
-    /// [`Ms1Link`] (the MS1 frames reached in that chunk plus, per MS2, the
-    /// index of its parent MS1 frame). Mirrors `MzMLReader::read_with_ms1_chunked`
-    /// so the MS1-linked search paths consume a `.d` like mzML. The last MS1
-    /// of a chunk is carried into the next chunk (index 0) so the first MS2 of
-    /// a chunk still links to its parent across the boundary. Stops after
-    /// `cap` MS2.
-    ///
-    /// Returns `(error_count, sample_errors)`: unreadable MS2 are counted and
-    /// skipped. The quantification captures work on this path too.
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -841,9 +711,7 @@ impl TimsTofReader {
         let mut chunk: Vec<Spectrum> = Vec::new();
         let mut ms1_peaks: Vec<Vec<(f64, f32)>> = Vec::new();
         let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
-        // (frame id, index into `ms1_peaks`) of the latest MS1 reached.
         let mut current: Option<(usize, usize)> = None;
-        // Whether an MS2 of the chunk linked to `current`.
         let mut current_linked = false;
         let mut emitted = 0usize;
         while emitted < cap {
@@ -875,7 +743,6 @@ impl TimsTofReader {
                         }
                         (false, summed) => summed.unwrap_or(d.scan.peaks),
                     };
-                    // A frame no MS2 linked to is replaced, not kept.
                     match current {
                         Some((_, idx)) if !current_linked => {
                             ms1_peaks[idx] = peaks;
@@ -936,8 +803,6 @@ impl TimsTofReader {
         }
     }
 
-    /// Collision energy (eV) and isolation width of the first `n` MS2 spectra.
-    /// The `.d` records no FAIMS voltage.
     pub fn sample_ms2_meta(&self, n: usize) -> crate::Ms2MetaSample {
         let mut out = crate::Ms2MetaSample::default();
         for p in self.ms2.precursors.iter().take(n) {

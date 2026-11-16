@@ -1,91 +1,9 @@
-//! Transfer FDR of match-between-runs: a cross-validated GBDT separates
-//! transfer targets from their decoys, and the K-decoy estimator turns the
-//! held-out scores into q-values.
-//!
-//! The transfer q-value is an internal quant-quality score that decides which
-//! transferred MS1 quantities are reported; it is not an identification FDR.
-//! The identified rows' quality q-value (`quant_q`) is the same estimate over
-//! the identified targets and their decoys, fitted separately with
-//! [`IDENTIFIED_FEATURES`].
-//!
-//! Folds: a hash of the precursor id (splitmix64, seeded) gives each precursor
-//! one of three folds, so its targets and decoys in every run share a fold.
-//! For each fold a classifier (target = 1, decoy = 0, validation groups = the
-//! precursor) is trained on the other two folds and scores the held-out fold.
-//! Scores are the raw boosted margins and are compared within a fold only.
-//!
-//! Bagging: a fold's classifier can be the mean of several members, each
-//! trained on its own row set (a [`TrainingSample`] of its own seed) with its
-//! own trainer seed ([`member_seed`]); a row's score is the mean of the
-//! members' margins. Every member of a fold is trained on the other folds
-//! only, so the mean is held out like a single model's. The members average
-//! out the variance of one boosted model trained on a sample of the rows,
-//! which at hundreds of runs moves the scores of the transfers near the
-//! threshold more than their evidence does.
-//!
-//! q-values, per fold: rank the fold's scored rows by score; at threshold `c`,
-//! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1))`, capped at 1, with `D`/`T` the
-//! decoys/targets at or above `c` and `K` the fold's decoy-to-target row
-//! ratio; q is the running minimum of `FDR` from the lowest score up. The `+1`
-//! is the finite-sample correction: a target above every decoy is not given
-//! q = 0, and no target reaches q <= 0.01 unless at least `1 / (0.01 K)`
-//! targets score above every decoy. The accepted set at
-//! any threshold is the union of the folds' accepted sets, so its estimated FDR
-//! is at most the threshold. The same estimate is made with one decoy family
-//! at a time (`K` = that family's ratio).
-//!
-//! Identity decoys (family [`IDENTITY`]): the transfers of decoy precursors
-//! that passed the library's donor rules with decoy PSMs. The mass- and
-//! RT-shift decoys model a transfer of the right peptide onto the wrong peak;
-//! a false donor identification sits on a real MS1 feature that recurs in
-//! every run, which they cannot model. Under target-decoy competition each
-//! identity-decoy entry stands for one false target entry, so the accepted
-//! identity-decoy transfers estimate the accepted target transfers of false
-//! donors, and the combined estimate adds that share:
-//! `FDR(c) = (D(c) + 1) / (K * max(T(c), 1)) + D_id(c) / max(T(c), 1)`,
-//! with `D` and `K` over the wrong-peak families only. The two error classes
-//! overlap (a false donor's transfer can also land on a wrong peak), so the
-//! sum is conservative. Without identity-decoy rows it is the wrong-peak
-//! estimate. Identity decoys are negatives of the classifier's training like
-//! the other decoys (held out by the same folds), so it learns what sets a
-//! false donor's transfer apart where it can.
-//!
-//! `K` is counted over the rows passed in, which are the rows that have
-//! features: a target or decoy without evidence takes no part. When decoys are
-//! missing (no RT-shift decoy near a run edge, a window too short to fit), `K`
-//! falls below the nominal number of decoys per target and each remaining
-//! decoy counts for more targets, rather than the missing decoys being counted
-//! as absent false hits; this errs on the conservative side.
-//!
-//! Prior strata: a transfer row also belongs to one of at most [`MAX_STRATA`] strata of
-//! the prior that its precursor is present in its run (how often the runs
-//! most like this one identified it; computed by the caller). A target and its decoys share their
-//! (precursor, run) and so their stratum, which makes the decoys of a stratum
-//! its own null: the pooled estimate cannot know that a precursor identified
-//! nowhere else is far more likely absent than one identified in most runs.
-//! The pooled q-value of a stratified classifier is then the stratum-local
-//! K-decoy estimate with `kappa` pseudo-targets at the fold's pooled q-value
-//! of the same score,
-//! `FDR_s(c) = ((D_s(c) + 1) / K + D_id,s(c) + kappa q_fold(c)) / (T_s(c) + kappa)`
-//! (`K` the fold's decoy-to-target ratio), where `kappa` is estimated from
-//! the between-stratum spread of the false rate ([`stratum_kappa`]),
-//! again as the running minimum from the lowest score up: a stratum with few
-//! rows takes the pooled estimate, one with many its own. The other
-//! estimates stay pooled over the strata. The stratum travels above the
-//! family's 4 bits ([`pack_family`]).
-//!
-//! A row gets no score when its fold's training set is single-class or fails
-//! the trainer's quality gate, and no q-value when it has no score or its fold
-//! (restricted to the estimate's families) lacks targets or decoys.
-
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
 use rayon::prelude::*;
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
-/// Cross-validation folds.
 pub const N_FOLDS: usize = 3;
 
-/// Feature names of the transfer classifier, in [`FdrRow::x`] order.
 pub const TRANSFER_FEATURES: &[&str] = &[
     "llr",
     "rt_z",
@@ -107,11 +25,6 @@ pub const TRANSFER_FEATURES: &[&str] = &[
     "log10_donor_pep",
 ];
 
-/// Feature names of the identified-row quality classifier: the template-fit
-/// evidence of [`TRANSFER_FEATURES`] without `n_donor_runs`, `library_q` and
-/// `neighbour_donor_rate`, which are the same for an identified target and
-/// its decoys, and without the donor shape comparison (an identified row is
-/// itself a donor).
 pub const IDENTIFIED_FEATURES: &[&str] = &[
     "llr",
     "rt_z",
@@ -126,17 +39,8 @@ pub const IDENTIFIED_FEATURES: &[&str] = &[
     "log10_amplitude_snr",
 ];
 
-/// Most prior strata of a transfer classifier (the stratum travels in the
-/// high nibble of the family byte, [`pack_family`]).
 pub const MAX_STRATA: usize = 16;
-/// The q-value level at which the between-stratum variance of the false
-/// rate is measured to set the shrinkage ([`stratum_kappa`]); a fold that
-/// never reaches it is measured at its lowest q.
 pub const EB_LEVEL: f64 = 0.01;
-/// The stratum of a prior of presence in `[0, 1]` given the ascending
-/// `edges` of the strata (a prior of at most `edges[0]` is stratum 0, one in
-/// `(edges[i-1], edges[i]]` stratum `i`, above the last edge the last
-/// stratum); 0 when it is not finite.
 pub fn stratum_of(prior: f64, edges: &[f64]) -> u8 {
     if !prior.is_finite() {
         return 0;
@@ -144,24 +48,6 @@ pub fn stratum_of(prior: f64, edges: &[f64]) -> u8 {
     edges.iter().filter(|&&e| prior > e).count() as u8
 }
 
-/// The shrinkage of the strata's local false-rate estimates towards the
-/// fold's pooled one, in pseudo-targets, by empirical Bayes. `strata` holds
-/// for each stratum the targets `n` and the decoy-implied false hits `x`
-/// accepted at the operating level, `k` the decoy-to-target ratio. The rate
-/// `x / n` of a stratum varies around the pooled rate `p` with variance
-/// `v0 / n`, `v0 = p / k`, from the decoy counts alone, plus a
-/// between-stratum variance `tau^2`. Over the `s` strata with targets
-/// (`N` targets in all), `z = sum n (x / n - p)^2 / v0` has expectation
-/// about `(s - 1) + (N - sum n^2 / N) tau^2 / v0`. The method-of-moments
-/// ratio computed is
-/// `rho = (z - (s - 1)) / (N - sum n^2 / N - (s - 1))`, an estimate of
-/// `tau^2 / v0` (the `- (s - 1)` in the denominator makes it slightly
-/// larger, negligible for `N` much above `s`). The result is
-/// `kappa = (1 - rho) / rho = 1 / rho - 1`, at least 0: one pseudo-target
-/// less than the empirical-Bayes `v0 / tau^2`. A stratum of `n` targets
-/// weighs the pooled rate by `kappa / (n + kappa)`. Infinite (no
-/// stratification) when the strata do not differ beyond the decoy noise
-/// (`rho <= 0`).
 pub fn stratum_kappa(strata: &[(f64, f64)], k: f64) -> f64 {
     let live: Vec<&(f64, f64)> = strata.iter().filter(|(n, _)| *n > 0.0).collect();
     let s = live.len() as f64;
@@ -190,64 +76,44 @@ pub fn stratum_kappa(strata: &[(f64, f64)], k: f64) -> f64 {
     }
 }
 
-/// A family in the low 4 bits with its stratum above them.
 pub fn pack_family(family: u8, stratum: impl Into<u32>) -> u32 {
     u32::from(family & 0x0F) | (stratum.into() << 4)
 }
 
-/// The family and the stratum of a packed family.
 pub const fn unpack_family(packed: u32) -> (u8, usize) {
     ((packed & 0x0F) as u8, (packed >> 4) as usize)
 }
 
-/// [`FdrRow::family`] of a target.
 pub const TARGET: u8 = 0;
-/// [`FdrRow::family`] of a mass-shift decoy.
 pub const MASS_SHIFT: u8 = 1;
-/// [`FdrRow::family`] of an RT-shift decoy.
 pub const RT_SHIFT: u8 = 2;
-/// [`FdrRow::family`] of an identity decoy: the target probe of a decoy
-/// precursor's transfer.
 pub const IDENTITY: u8 = 3;
 
-/// One target or decoy to be scored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrRow {
     pub precursor: u32,
     pub is_decoy: bool,
-    /// [`TARGET`], [`MASS_SHIFT`], [`RT_SHIFT`] or [`IDENTITY`].
     pub family: u8,
     pub x: Vec<f32>,
 }
 
-/// Per-row output of [`transfer_qvalues`], in input order.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FdrResult {
-    /// The wrong-peak families and the identity decoys.
     pub q: Vec<Option<f64>>,
-    /// Both wrong-peak families, without the identity decoys.
     pub q_wrong_peak: Vec<Option<f64>>,
-    /// Mass-shift decoys only; `None` for RT-shift decoy rows.
     pub q_mass_only: Vec<Option<f64>>,
-    /// RT-shift decoys only; `None` for mass-shift decoy rows.
     pub q_rt_only: Vec<Option<f64>>,
-    /// Held-out raw margin, comparable within a fold; NaN when unscored.
     pub score: Vec<f32>,
 }
 
-/// What the cross-validation could not score, for the caller to log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FdrCounts {
-    /// One message per fold without a model.
     pub failed_folds: Vec<String>,
-    /// Rows without a score.
     pub unscored: usize,
-    /// Scored rows without a pooled q-value.
     pub no_q: usize,
 }
 
-/// The fold of a precursor (splitmix64 of its id).
 pub fn fold_of(precursor: u32, seed: u64) -> usize {
     let mut z = (seed ^ (precursor as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
         .wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -257,13 +123,11 @@ pub fn fold_of(precursor: u32, seed: u64) -> usize {
     (z % N_FOLDS as u64) as usize
 }
 
-/// Cross-validated q-values of transfer targets and decoys.
 #[cfg(test)]
 pub fn transfer_qvalues(rows: &[FdrRow], seed: u64) -> FdrResult {
     transfer_fdr(rows, seed).result
 }
 
-/// Trains the classifier of `fold` on the rows of the other folds.
 fn train_fold(
     rows: &[FdrRow],
     folds: &[usize],
@@ -301,19 +165,12 @@ fn train_fold(
         .map_err(|e| format!("fold {fold}: {e:?}"))
 }
 
-/// The fold models of one classifier: fold `f`'s members are trained on the
-/// rows of the other folds and score the rows of fold `f`.
 pub struct FoldModels {
     seed: u64,
-    /// Per fold, the members that trained (empty when none did).
     models: Vec<Vec<GbdtPeakModel>>,
-    /// One message per fold without a model.
     pub failed_folds: Vec<String>,
 }
 
-/// The seed of bagging member `m` (its training sample and its trainer):
-/// `seed` itself for the first member, so that one member is the classifier
-/// of a single model.
 pub fn member_seed(seed: u64, m: usize) -> u64 {
     if m == 0 {
         seed
@@ -322,17 +179,10 @@ pub fn member_seed(seed: u64, m: usize) -> u64 {
     }
 }
 
-/// Trains the fold models on `rows` (all the rows, or a sample of whole
-/// precursors: see [`TrainingSample`]).
-///
-/// # Panics
-/// When the rows do not all have the same number of features.
 pub fn train_folds(rows: &[FdrRow], seed: u64) -> FoldModels {
     train_bagged_folds(&[rows], seed, &TrainParams::default())
 }
 
-/// Boosting settings of the transfer classifier: the trainer's defaults with
-/// a learning rate of [`TRANSFER_LEARNING_RATE`].
 pub fn transfer_train_params() -> TrainParams {
     TrainParams {
         learning_rate: TRANSFER_LEARNING_RATE,
@@ -342,16 +192,6 @@ pub fn transfer_train_params() -> TrainParams {
 
 pub const TRANSFER_LEARNING_RATE: f32 = 0.3;
 
-/// Trains the fold models of a bagged classifier with boosting settings
-/// `params`: member `m` is trained on `sets[m]` with the trainer seed of
-/// [`member_seed`]`(seed, m)`; the folds
-/// are those of `seed` for every member. A fold whose members all fail has
-/// no model; a fold with some members left averages those (the others are
-/// logged).
-///
-/// # Panics
-/// When `sets` is empty or the rows do not all have the same number of
-/// features.
 pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64, params: &TrainParams) -> FoldModels {
     assert!(!sets.is_empty(), "a classifier needs at least one member");
     let nf = sets
@@ -407,14 +247,9 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64, params: &TrainParams) -
     }
 }
 
-/// Rows per call of the batched GBDT evaluation; the batches of one fold
-/// are scored in parallel (each row's margin does not depend on the batch).
 const PREDICT_BATCH: usize = 4096;
 
 impl FoldModels {
-    /// The held-out raw margins of `xs` (rows of precursor `precursors[i]`)
-    /// into `out`: `None` for a row whose fold has no model. A bagged fold
-    /// scores the mean of its members' margins (summed in member order).
     pub fn score(&self, precursors: &[u32], xs: &[&[f32]], out: &mut Vec<Option<f32>>) {
         out.clear();
         out.resize(xs.len(), None);
@@ -440,14 +275,11 @@ impl FoldModels {
         }
     }
 
-    /// Members per fold (the most of any fold).
     pub fn members(&self) -> usize {
         self.models.iter().map(Vec::len).max().unwrap_or(0)
     }
 }
 
-/// The mean margin of `members` on `rows` into `out`; one member's margin
-/// as it is.
 fn predict_mean(members: &[GbdtPeakModel], rows: &[&[f32]], out: &mut [f32]) {
     let Some((first, rest)) = members.split_first() else {
         return;
@@ -469,14 +301,6 @@ fn predict_mean(members: &[GbdtPeakModel], rows: &[&[f32]], out: &mut [f32]) {
     }
 }
 
-/// Items (training rows, normalisation cells) collected over a stream, at
-/// most `cap` of them, by sampling units: every item carries a unit id (a
-/// precursor, or a precursor in one run), a unit's items are kept when the
-/// top `level` bits of a hash of its id are zero, and `level` rises by one
-/// each time the kept items exceed `cap`. The kept set is thus every item of
-/// the units at the final level, whatever the order the items came in, and
-/// all items when they never exceed `cap`. Items carry a sort key so that
-/// [`TrainingSample::into_items`] can return them in a fixed order.
 pub struct TrainingSample<K, T = FdrRow> {
     cap: usize,
     seed: u64,
@@ -500,19 +324,14 @@ impl<K: Ord, T> TrainingSample<K, T> {
         level == 0 || sample_hash(unit, seed) >> (64 - level) == 0
     }
 
-    /// Whether an item of sampling unit `unit` offered now would be kept
-    /// (so that an item need only be built when it is).
     pub fn wants(&self, unit: u64) -> bool {
         Self::kept(self.seed, unit, self.level)
     }
 
-    /// An item of unit `unit` that [`TrainingSample::wants`] declined:
-    /// counted as offered.
     pub fn skip(&mut self) {
         self.seen += 1;
     }
 
-    /// Offers `item` of sampling unit `unit`.
     pub fn push(&mut self, key: K, unit: u64, item: T) {
         self.seen += 1;
         if !Self::kept(self.seed, unit, self.level) {
@@ -526,13 +345,10 @@ impl<K: Ord, T> TrainingSample<K, T> {
         }
     }
 
-    /// Items offered, items kept and the share of units kept.
     pub fn stats(&self) -> (usize, usize, f64) {
         (self.seen, self.items.len(), 0.5f64.powi(self.level as i32))
     }
 
-    /// The kept items, sorted by key (a stable sort: items of equal keys keep
-    /// their order of arrival).
     pub fn into_items(self) -> Vec<T> {
         let mut items = self.items;
         items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -540,16 +356,10 @@ impl<K: Ord, T> TrainingSample<K, T> {
     }
 }
 
-/// The sampling unit of a training row: its precursor in its run, so that a
-/// sample keeps every precursor (in some runs) and a target stays with its
-/// decoys. Folds are by precursor, so a held-out precursor is never trained
-/// on.
 pub fn row_unit(precursor: u32, run: u16) -> u64 {
     ((precursor as u64) << 16) | run as u64
 }
 
-/// The unit hash of [`TrainingSample`] (splitmix64 of the id, on a seed
-/// apart from the folds').
 pub fn sample_hash(unit: u64, seed: u64) -> u64 {
     let mut z = (seed ^ 0x5bd1_e995_7a4f_3c21 ^ unit.wrapping_mul(0x9e37_79b9_7f4a_7c15))
         .wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -558,16 +368,11 @@ pub fn sample_hash(unit: u64, seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The q-value estimates of a classifier's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Estimate {
-    /// The wrong-peak families and the identity decoys.
     Pooled = 0,
-    /// Both wrong-peak families.
     WrongPeak = 1,
-    /// Mass-shift decoys only.
     MassOnly = 2,
-    /// RT-shift decoys only.
     RtOnly = 3,
 }
 
@@ -579,7 +384,6 @@ const ESTIMATES: [Estimate; 4] = [
 ];
 
 impl Estimate {
-    /// Whether rows of `family` take part in this estimate.
     fn keeps(self, family: u8) -> bool {
         match self {
             Estimate::Pooled => true,
@@ -590,7 +394,6 @@ impl Estimate {
     }
 }
 
-/// `0.0` for `-0.0`: scores equal under `==` are one value.
 fn canonical(s: f32) -> f32 {
     if s == 0.0 {
         0.0
@@ -599,8 +402,6 @@ fn canonical(s: f32) -> f32 {
     }
 }
 
-/// A fold's q-value as a step function of the score: the ascending scores at
-/// which q drops, with the q from each up to the next.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Steps {
     at: Vec<f32>,
@@ -608,36 +409,22 @@ pub(crate) struct Steps {
 }
 
 impl Steps {
-    /// The q of a row of the estimate scoring `s` (a score that took part).
     fn of_member(&self, s: f32) -> f64 {
         let s = canonical(s);
         let k = self.at.partition_point(|&a| a.total_cmp(&s).is_le());
         self.q[k.max(1) - 1]
     }
 
-    /// The q of the highest fitted score at or below `s`, or of the lowest
-    /// when `s` is below them all ([`TransferFdr::pseudo_q`]).
     fn at_or_below(&self, s: f32) -> f64 {
         let k = self.at.partition_point(|&a| a <= s);
         self.q[k.max(1) - 1]
     }
 }
 
-/// The held-out scores of one classifier's rows, per fold and family, kept
-/// to turn them into q-values: 4 bytes per scored row held.
-///
-/// A mergeable summary: [`FoldScores::merge`] of the scores of disjoint row
-/// sets gives the scores of their union, whatever the order, so the rows can
-/// be scored in parallel pieces. The scores held can be taken out
-/// ([`FoldScores::take_held`], to be sorted and written elsewhere) and given
-/// back to [`FoldScores::finish_with`] as ascending streams: the step
-/// functions only need each fold's scores in ascending order.
 pub struct FoldScores {
     seed: u64,
     strata: usize,
-    /// Per group (`fold * strata + stratum`) and family.
     scores: Vec<[Vec<f32>; 4]>,
-    /// Rows with a finite score, per group and family, held or taken out.
     counts: Vec<[usize; 4]>,
     members: Vec<usize>,
     unscored: usize,
@@ -648,7 +435,6 @@ impl FoldScores {
         Self::with_strata(seed, 1)
     }
 
-    /// Scores kept per prior stratum (`strata` of them, at least 1).
     pub fn with_strata(seed: u64, strata: usize) -> Self {
         let groups = N_FOLDS * strata.max(1);
         Self {
@@ -661,9 +447,6 @@ impl FoldScores {
         }
     }
 
-    /// One row of `precursor` and `family` (packed with its stratum, see
-    /// [`pack_family`]) with its held-out score (`None` when its fold has no
-    /// model).
     pub fn add(&mut self, precursor: u32, family: u32, score: Option<f32>) {
         let (family, stratum) = unpack_family(family);
         let group = fold_of(precursor, self.seed) * self.strata + stratum.min(self.strata - 1);
@@ -680,10 +463,6 @@ impl FoldScores {
         }
     }
 
-    /// Adds the rows of `other` (scored with the same seed's folds).
-    ///
-    /// # Panics
-    /// When `other` has another seed.
     pub fn merge(&mut self, other: FoldScores) {
         assert_eq!(self.seed, other.seed, "fold scores of different seeds");
         assert_eq!(self.strata, other.strata, "fold scores of different strata");
@@ -702,13 +481,10 @@ impl FoldScores {
         self.unscored += other.unscored;
     }
 
-    /// Scores held in memory.
     pub fn held(&self) -> usize {
         self.scores.iter().flatten().map(Vec::len).sum()
     }
 
-    /// The scores held, per fold and family, in arrival order, taken out (the
-    /// counts stay).
     pub fn take_held(&mut self) -> Vec<[Vec<f32>; 4]> {
         self.scores
             .iter_mut()
@@ -716,21 +492,11 @@ impl FoldScores {
             .collect()
     }
 
-    /// The q-value step functions; `failed_folds` are the folds without a
-    /// model (for the counts).
     #[cfg(test)]
     pub fn finish(self, failed_folds: &[String]) -> QValues {
         self.finish_with(failed_folds, None, |_, _| Vec::new())
     }
 
-    /// [`FoldScores::finish`] with, for each fold and family, the scores
-    /// taken out by [`FoldScores::take_held`] given back by `taken(fold,
-    /// family)` as ascending streams (any number of them). The result is the
-    /// one of every score held in memory. With `thresholds`, only the pooled
-    /// estimate keeps its whole step function; the others keep the steps
-    /// where q first reaches each threshold, which answer
-    /// [`QValues::accepts`] at those thresholds exactly (about a quarter of
-    /// the memory).
     pub fn finish_with<'a>(
         mut self,
         failed_folds: &[String],
@@ -754,7 +520,6 @@ impl FoldScores {
                     *t += c;
                 }
             }
-            // The fold's rows of all its strata, as one set.
             let streams: [SortedMerge<'_>; 4] = std::array::from_fn(|f| {
                 let mut runs: Vec<Box<dyn Iterator<Item = f32> + '_>> = Vec::new();
                 for g in groups.clone() {
@@ -785,8 +550,6 @@ impl FoldScores {
                 let global = fold_steps[Estimate::Pooled as usize].as_ref();
                 let mut kappa = f64::INFINITY;
                 if let Some(c_op) = global.and_then(|g| {
-                    // The first score at the level, or the lowest q the fold
-                    // reaches when it never gets there.
                     g.at.iter()
                         .zip(&g.q)
                         .find(|(_, &q)| q <= EB_LEVEL)
@@ -821,9 +584,6 @@ impl FoldScores {
                     kappa = stratum_kappa(&counts, k);
                 }
                 eprintln!("[mbr] transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
-                // Each stratum's PEP is the pooled one shifted on the logit
-                // scale; the shift is the maximum-likelihood fit of which of
-                // the stratum's rows are wrong-peak decoys.
                 let mut fold_betas = Vec::with_capacity(strata);
                 if let Some(pool) = peps.last().and_then(Option::as_ref) {
                     for g in groups.clone() {
@@ -885,7 +645,6 @@ impl FoldScores {
     }
 }
 
-/// `ln(p / (1 - p))`, with `p` kept inside `[1e-9, 1 - 1e-9]`.
 fn logit(p: f64) -> f64 {
     let p = p.clamp(1e-9, 1.0 - 1e-9);
     (p / (1.0 - p)).ln()
@@ -895,11 +654,6 @@ fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// The maximum-likelihood logit shift `b` of a stratum's PEP: with
-/// `pep = sigmoid(z + b)` at a row's pooled logit `z`, a row at that score is
-/// a decoy with probability `K pep / (K pep + 1)` (`K` decoys per target).
-/// The score equation `sum_decoys (1 - p)(1 - pep) = sum_targets p (1 - pep)`
-/// falls in `b`; solved by bisection on `[-30, 30]`. 0 without both classes.
 fn logit_shift(targets: &[f64], decoys: &[f64], k: f64) -> f64 {
     if targets.is_empty() || decoys.is_empty() {
         return 0.0;
@@ -926,12 +680,6 @@ fn logit_shift(targets: &[f64], decoys: &[f64], k: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// The pooled local false rate of a fold by score, in two
-/// parts: the wrong-peak part `(D / K) / T` and the false-donor part
-/// `D_id / T`, each an antitone step function (blocks of distinct scores
-/// with ascending lower edges, made non-increasing in the score by pooling
-/// adjacent violators, capped at 1). No bins or smoothing constants: the
-/// blocks are the ones the monotone fit needs.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PepSteps {
     wrong_peak: Antitone,
@@ -939,7 +687,6 @@ pub(crate) struct PepSteps {
 }
 
 impl PepSteps {
-    /// The wrong-peak and false-donor parts of the PEP of score `s`.
     pub(crate) fn of(&self, s: f32) -> (f64, f64) {
         (self.wrong_peak.of(s), self.identity.of(s))
     }
@@ -952,8 +699,6 @@ pub(crate) struct Antitone {
 }
 
 impl Antitone {
-    /// The rate of the block with the highest lower edge at or below `s`, or
-    /// of the lowest block below them all; 0 without blocks.
     fn of(&self, s: f32) -> f64 {
         if self.rate.is_empty() {
             return 0.0;
@@ -963,10 +708,8 @@ impl Antitone {
     }
 }
 
-/// Pool-adjacent-violators state of one antitone rate `f / t` by score.
 #[derive(Default)]
 struct AntitoneFit {
-    /// (lower edge, targets, expected false targets) of the pooled blocks.
     blocks: Vec<(f32, f64, f64)>,
 }
 
@@ -976,7 +719,6 @@ impl AntitoneFit {
             return;
         }
         self.blocks.push((c, t, f));
-        // A higher block may not have a higher rate than the one below.
         let rate = |t: f64, f: f64| if t > 0.0 { f / t } else { f64::INFINITY };
         while self.blocks.len() >= 2 {
             let n = self.blocks.len();
@@ -1002,7 +744,6 @@ impl AntitoneFit {
     }
 }
 
-/// Builds [`PepSteps`] in one ascending walk over a fold's scores.
 pub(crate) struct PepBuilder {
     k: f64,
     wrong_peak: AntitoneFit,
@@ -1045,12 +786,8 @@ impl PepBuilder {
     }
 }
 
-/// The walk up one stratum's scores that gives its pooled step function
-/// (see the module's prior strata).
 struct StratumWalk<'g> {
     k: f64,
-    /// Targets, wrong-peak decoys and identity decoys of the stratum at or
-    /// above the current score.
     t: usize,
     d: usize,
     d_id: usize,
@@ -1061,8 +798,6 @@ struct StratumWalk<'g> {
 }
 
 impl<'g> StratumWalk<'g> {
-    /// `k` is the fold's decoy-to-target ratio, `local` the stratum's finite
-    /// scores per family, `global` the fold's pooled step function.
     fn new(k: f64, local: [usize; 4], global: &'g Steps, kappa: f64) -> Self {
         Self {
             k,
@@ -1095,13 +830,11 @@ impl<'g> StratumWalk<'g> {
         self.d_id -= at[IDENTITY as usize];
     }
 
-    /// The step function; `None` when the stratum has no score.
     fn finish(self) -> Option<Steps> {
         (!self.steps.at.is_empty()).then_some(self.steps)
     }
 }
 
-/// Ascending streams of scores merged into one ascending stream.
 struct SortedMerge<'a> {
     runs: Vec<Box<dyn Iterator<Item = f32> + 'a>>,
     heads: Vec<Option<f32>>,
@@ -1113,12 +846,10 @@ impl<'a> SortedMerge<'a> {
         Self { runs, heads }
     }
 
-    /// The lowest score left.
     fn peek(&self) -> Option<f32> {
         self.heads.iter().flatten().copied().min_by(f32::total_cmp)
     }
 
-    /// Takes every score equal to `c` (the lowest left) and counts them.
     fn take_equal(&mut self, c: f32) -> usize {
         let mut n = 0;
         for (head, run) in self.heads.iter_mut().zip(&mut self.runs) {
@@ -1131,9 +862,6 @@ impl<'a> SortedMerge<'a> {
     }
 }
 
-/// Calls `visit(c, at)` for each distinct score `c` of the four families'
-/// ascending streams, lowest first, with `at[f]` the scores of family `f`
-/// equal to `c`. Stops when `visit` returns `false`.
 fn walk_scores(
     mut by_family: [SortedMerge<'_>; 4],
     mut visit: impl FnMut(f32, [usize; 4]) -> bool,
@@ -1154,34 +882,22 @@ fn walk_scores(
     }
 }
 
-/// The K-decoy step functions of one fold, every [`Estimate`] at once, built
-/// from the fold's distinct scores visited in ascending order (see
-/// [`kdecoy_steps`] for the estimate).
 pub(crate) struct StepsBuilder {
     walks: [Option<KdecoyWalk>; 4],
 }
 
-/// The state of one estimate's walk up the scores.
 struct KdecoyWalk {
     e: Estimate,
     k: f64,
-    /// Targets, wrong-peak decoys and identity decoys at or above the
-    /// current score.
     t: usize,
     d: usize,
     d_id: usize,
     running: f64,
     steps: Steps,
-    /// Keep only the first step and those where q first reaches one of
-    /// these; `None` keeps every step.
     only_at: Option<Vec<f64>>,
 }
 
 impl StepsBuilder {
-    /// The walks over a fold whose finite scores number `totals[f]` per
-    /// family. With `thresholds`, the estimates other than the pooled one
-    /// keep only their first step and the steps where q first reaches each
-    /// threshold.
     pub fn new(totals: [usize; 4], thresholds: Option<&[f64]>) -> Self {
         Self {
             walks: ESTIMATES.map(|e| {
@@ -1204,8 +920,6 @@ impl StepsBuilder {
         }
     }
 
-    /// The next distinct score `c` (ascending, canonical) with `at[f]` rows of
-    /// family `f` scoring it.
     pub(crate) fn visit(&mut self, c: f32, at: [usize; 4]) {
         for w in self.walks.iter_mut().flatten() {
             let kept = |f: usize| w.e.keeps(f as u8);
@@ -1241,18 +955,11 @@ impl StepsBuilder {
         }
     }
 
-    /// The step functions by [`Estimate`]; `None` for an estimate without
-    /// targets or wrong-peak decoys.
     pub fn finish(self) -> [Option<Steps>; 4] {
         self.walks.map(|w| w.map(|w| w.steps))
     }
 }
 
-/// The K-decoy q-values (`FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)`) over one fold's sorted scores by
-/// family, as a step function; `None` without targets or wrong-peak decoys
-/// among the estimate's rows. Walks the scores upwards: at each distinct
-/// score `c`, `T`, `D` and `D_id` at or above it are the totals minus the
-/// rows below, and q is the running minimum of the FDR from the bottom.
 #[cfg(test)]
 fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
     let mut builder = StepsBuilder::new([0, 1, 2, 3].map(|f| by_family[f].len()), None);
@@ -1269,31 +976,19 @@ fn kdecoy_steps(by_family: &[Vec<f32>; 4], e: Estimate) -> Option<Steps> {
     [a, b, c, d].into_iter().nth(e as usize).flatten()
 }
 
-/// The q-values of one classifier's rows: per fold and [`Estimate`], a step
-/// function of the held-out score.
 pub struct QValues {
     seed: u64,
     strata: usize,
     steps: Vec<[Option<Steps>; 4]>,
-    /// Per fold and stratum, the pooled step function of the stratum; empty
-    /// without strata.
     stratum_steps: Vec<Vec<Option<Steps>>>,
-    /// Per fold, the pooled local false rate (PEP) by score.
     peps: Vec<Option<PepSteps>>,
-    /// Per fold and stratum, the logit shift of the stratum's PEP; empty
-    /// without strata.
     stratum_beta: Vec<Vec<f64>>,
-    /// Per [`Estimate`], whether its step functions are whole (else they
-    /// answer [`QValues::accepts`] at `thresholds` only).
     whole: [bool; 4],
     thresholds: Vec<f64>,
     pub counts: FdrCounts,
 }
 
 impl QValues {
-    /// The row's posterior error probability (local false rate) at its
-    /// held-out score: its fold's pooled PEP with the wrong-peak part shifted
-    /// to its stratum; `None` without a finite score or a PEP fit in the fold.
     pub fn pep(&self, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         let s = score.filter(|s| s.is_finite())?;
         let fold = fold_of(precursor, self.seed);
@@ -1305,12 +1000,9 @@ impl QValues {
             .and_then(|b| b.get(stratum))
             .copied()
             .unwrap_or(0.0);
-        // The stratum shift applies to the wrong-peak part, which the
-        // stratum's own decoys measure; the false-donor part stays pooled.
         Some((sigmoid(logit(wrong_peak) + beta) + identity).min(1.0))
     }
 
-    /// Steps of every step function, held in memory (12 bytes each).
     pub fn steps(&self) -> usize {
         self.steps
             .iter()
@@ -1320,7 +1012,6 @@ impl QValues {
             .sum()
     }
 
-    /// Steps of the pooled estimate's step functions.
     pub fn pooled_steps(&self) -> usize {
         self.steps
             .iter()
@@ -1329,12 +1020,6 @@ impl QValues {
             .sum()
     }
 
-    /// The q-value under estimate `e` of a row of `precursor` and `family`
-    /// scoring `score`; `None` when it has no score, its family takes no part
-    /// in `e`, or its fold lacks targets or decoys.
-    ///
-    /// # Panics
-    /// When the step functions of `e` were kept at thresholds only.
     pub fn q(&self, e: Estimate, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         assert!(
             self.whole[e as usize],
@@ -1343,12 +1028,6 @@ impl QValues {
         self.step_q(e, precursor, family, score)
     }
 
-    /// Whether the row's q-value under `e` (see [`QValues::q`]) is at most
-    /// `t`; `false` without one.
-    ///
-    /// # Panics
-    /// When the step functions of `e` were kept at thresholds only and `t`
-    /// is not one of them.
     pub fn accepts(
         &self,
         e: Estimate,
@@ -1381,19 +1060,12 @@ impl QValues {
         Some(steps.of_member(s))
     }
 
-    /// The pooled step function of a stratum of `fold`, if the classifier is
-    /// stratified.
     fn stratum_steps_of(&self, fold: usize, stratum: usize) -> Option<&Option<Steps>> {
         self.stratum_steps
             .get(fold)
             .and_then(|v| v.get(stratum.min(self.strata - 1)))
     }
 
-    /// The pooled q of a row outside the fit (a pseudo-transfer) scoring
-    /// `score` under its fold's model: the q of the fold's scored row with the
-    /// highest score at or below it, or of the fold's lowest row when it
-    /// scores below all of them. `None` without a score or without q-values
-    /// in the fold.
     pub fn pseudo_q(&self, precursor: u32, family: u32, score: Option<f32>) -> Option<f64> {
         let s = score?;
         let fold = fold_of(precursor, self.seed);
@@ -1405,8 +1077,6 @@ impl QValues {
     }
 }
 
-/// The fitted fold models with their q-values over a slice of rows, kept to
-/// score rows that took no part in the fit.
 #[cfg(test)]
 pub struct TransferFdr {
     pub result: FdrResult,
@@ -1415,11 +1085,6 @@ pub struct TransferFdr {
     q: QValues,
 }
 
-/// [`transfer_qvalues`] keeping the fold models: [`train_folds`] on every
-/// row, then each row scored by its fold's model and given its q-values.
-///
-/// # Panics
-/// When the rows do not all have the same number of features.
 #[cfg(test)]
 pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
     let models = train_folds(rows, seed);
@@ -1455,8 +1120,6 @@ pub fn transfer_fdr(rows: &[FdrRow], seed: u64) -> TransferFdr {
 
 #[cfg(test)]
 impl TransferFdr {
-    /// The q-value of a row outside the fit (a pseudo-transfer), scored by
-    /// the model of its precursor's fold: see [`QValues::pseudo_q`].
     pub fn pseudo_q(&self, precursor: u32, x: &[f32]) -> Option<f64> {
         let mut s = Vec::new();
         self.models.score(&[precursor], &[x], &mut s);
@@ -1464,12 +1127,6 @@ impl TransferFdr {
     }
 }
 
-/// K-decoy q-values of `(row, score, family)` into `q[row]`, with `K` the
-/// wrong-peak-decoy-to-target ratio of `items` and
-/// `FDR = (D + 1) / (K * max(T, 1)) + D_id / max(T, 1)` (`D` wrong-peak
-/// decoys, `D_id` identity decoys at or above the score). Leaves `q`
-/// untouched when `items` has no targets or no wrong-peak decoys. The
-/// reference of [`kdecoy_steps`].
 #[cfg(test)]
 fn kdecoy_q(items: &[(usize, f32, u8)], q: &mut [Option<f64>]) {
     let targets = items.iter().filter(|it| it.2 == TARGET).count();
@@ -1513,7 +1170,6 @@ fn kdecoy_q(items: &[(usize, f32, u8)], q: &mut [Option<f64>]) {
 mod tests {
     use super::*;
 
-    /// Deterministic standard normal draws (splitmix64 + Box-Muller).
     struct Normal(u64);
 
     impl Normal {
@@ -1536,8 +1192,6 @@ mod tests {
         }
     }
 
-    /// `n` precursors, each with one target (mean `target_mean`) and one
-    /// decoy per listed family (mean 0).
     fn rows(n: u32, target_mean: f32, families: &[u8], seed: u64) -> Vec<FdrRow> {
         let mut g = Normal(seed);
         let mut out = Vec::new();
@@ -1594,9 +1248,6 @@ mod tests {
 
     #[test]
     fn null_experiments_rarely_accept_a_target() {
-        // 10,000 experiments of 20 targets and 40 decoys, every score drawn
-        // from one distribution: any accepted target is a false discovery,
-        // so the share of experiments that accept one is their mean FDP.
         let mut g = Normal(77);
         let n_exp = 10_000;
         let mut with_false = 0usize;
@@ -1615,7 +1266,6 @@ mod tests {
         eprintln!(
             "null experiments: {with_false} of {n_exp} ({frac:.4}) accept a target at q <= 0.01"
         );
-        // 0.01 plus about five binomial standard errors at n = 10,000.
         assert!(
             frac <= 0.015,
             "{frac} of the null experiments accept a target"
@@ -1624,8 +1274,6 @@ mod tests {
 
     #[test]
     fn mixture_fdp_stays_near_the_estimate() {
-        // 30% of the targets are present (shifted on four features), the rest
-        // are drawn like the decoys.
         let mut g = Normal(21);
         let mut rows = Vec::new();
         let mut present = Vec::new();
@@ -1709,7 +1357,6 @@ mod tests {
         let r = transfer_qvalues(&only_decoys, 1);
         assert!(r.q.iter().all(Option::is_none));
 
-        // Fold 0 holds targets only: its rows have no decoys to estimate from.
         let seed = 5;
         let mixed: Vec<FdrRow> = rows(600, 3.0, &[1, 2], 4)
             .into_iter()
@@ -1756,8 +1403,6 @@ mod tests {
 
     #[test]
     fn k_follows_the_decoy_to_target_ratio() {
-        // Four decoys per target at the same scores as the targets: FDR = 1
-        // only when K is the observed ratio 4, not an assumed 2.
         let mut rows = Vec::new();
         for p in 0..400u32 {
             let v = vec![p as f32; TRANSFER_FEATURES.len()];
@@ -1806,8 +1451,6 @@ mod tests {
         assert!(fdr.pseudo_q(0, &low).is_some_and(|q| q > 0.1));
     }
 
-    /// `rows(n, 3.0, [1, 2])` plus `n_id` identity decoys drawn like the
-    /// targets: false donors whose transfers look like real ones.
     fn with_identity(n: u32, n_id: u32, seed: u64) -> Vec<FdrRow> {
         let mut out = rows(n, 3.0, &[MASS_SHIFT, RT_SHIFT], seed);
         let mut g = Normal(seed ^ 0xabc);
@@ -1822,9 +1465,6 @@ mod tests {
 
     #[test]
     fn identity_decoys_add_their_share_to_the_estimate() {
-        // 1,000 well separated targets and 30 identity decoys that look like
-        // targets: the wrong-peak estimate accepts nearly every target at
-        // 0.01, the combined one sees about 3 % false donors and keeps few.
         let rows = with_identity(1000, 30, 31);
         {
             let r = transfer_fdr(&rows, 5).result;
@@ -1849,9 +1489,6 @@ mod tests {
 
     #[test]
     fn kdecoy_counts_identity_decoys_once_each() {
-        // 100 targets, then 50 mass-shift decoys and 2 identity decoys below
-        // them: K = 0.5. Over all rows (D + 1) / (K T) + D_id / T =
-        // 51 / 50 + 2 / 100, capped at 1; over the targets alone 1 / 50.
         let mut items: Vec<(usize, f32, u8)> =
             (0..100).map(|i| (i, 1000.0 - i as f32, TARGET)).collect();
         items.extend((100..150).map(|i| (i, 10.0 - i as f32 * 0.01, MASS_SHIFT)));
@@ -1873,7 +1510,6 @@ mod tests {
 
     #[test]
     fn step_functions_match_the_per_row_estimate() {
-        // Coarse scores (many ties, both zeros) over every family.
         let mut g = Normal(99);
         for trial in 0..20u64 {
             let n = 50 + 37 * trial as usize;
@@ -1967,8 +1603,6 @@ mod tests {
         }
     }
 
-    /// Pooled q-values of `rows` under a classifier of `members` members,
-    /// each trained on all the rows.
     fn bagged_q(rows: &[FdrRow], members: usize, seed: u64) -> Vec<Option<f64>> {
         let sets: Vec<&[FdrRow]> = (0..members).map(|_| rows).collect();
         let models = train_bagged_folds(&sets, seed, &TrainParams::default());
@@ -2018,7 +1652,6 @@ mod tests {
                 );
             }
         }
-        // Members differ (their trainer seeds), so the mean is not one of them.
         let m = &bagged.models[0];
         assert_ne!(
             m[0].predict_value(&rows[0].x),
@@ -2028,8 +1661,6 @@ mod tests {
 
     #[test]
     fn bagging_keeps_the_mixture_calibrated_and_steadier_across_seeds() {
-        // As mixture_fdp_stays_near_the_estimate, with weaker targets: the
-        // accepted sets of two seeds overlap more with 8 members than with 1.
         let mut g = Normal(41);
         let mut rows = Vec::new();
         let mut present = Vec::new();
@@ -2148,7 +1779,6 @@ mod tests {
             (t.n_rounds, t.max_depth, t.n_bins, t.early_stop_rounds),
             (d.n_rounds, d.max_depth, d.n_bins, d.early_stop_rounds)
         );
-        // The classifier trains and separates a clear mixture at this rate.
         let rows = rows(400, 3.0, &[1, 2], 31);
         let sets: Vec<&[FdrRow]> = vec![&rows];
         let models = train_bagged_folds(&sets, 3, &t);
@@ -2174,9 +1804,6 @@ mod tests {
         );
     }
 
-    /// Two strata with the same score distribution of targets but a decoy
-    /// rate ten times higher in the second: the pooled estimate cannot tell
-    /// them apart, the stratified one does.
     fn two_strata_scores(strata: usize) -> FoldScores {
         let mut g = Normal(77);
         let mut fs = FoldScores::with_strata(9, strata);
@@ -2184,8 +1811,6 @@ mod tests {
             let stratum = (p % 2) as u8;
             let packed = |family: u8| pack_family(family, stratum);
             fs.add(p, packed(TARGET), Some(g.draw() + 2.5));
-            // Stratum 0: decoys score like noise; stratum 1: a tenth of
-            // them score like targets.
             for f in [MASS_SHIFT, RT_SHIFT] {
                 let hit = stratum == 1 && g.unit() < 0.05;
                 fs.add(p, packed(f), Some(g.draw() + if hit { 2.5 } else { 0.0 }));
@@ -2228,10 +1853,8 @@ mod tests {
 
     #[test]
     fn shrinkage_follows_the_between_stratum_spread() {
-        // Strata that differ far beyond the decoy noise: little shrinkage.
         let apart = [(5000.0, 5.0), (5000.0, 100.0), (5000.0, 400.0)];
         assert!(stratum_kappa(&apart, 1.0) < 50.0);
-        // Strata alike within the noise: none.
         let alike = [(5000.0, 52.0), (5000.0, 48.0), (5000.0, 50.0)];
         assert!(stratum_kappa(&alike, 1.0).is_infinite());
         assert!(stratum_kappa(&[(100.0, 1.0)], 1.0).is_infinite());

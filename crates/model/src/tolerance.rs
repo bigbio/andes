@@ -1,5 +1,3 @@
-//! Mass tolerances.
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tolerance {
     Ppm(f64),
@@ -14,9 +12,6 @@ impl Tolerance {
         }
     }
 
-    /// Return the raw numeric value stored in the tolerance — NOT converted to Da.
-    ///
-    /// For `Ppm(20.0)` this returns `20.0`; for `Da(0.5)` it returns `0.5`.
     pub fn raw_value(&self) -> f64 {
         match self {
             Tolerance::Ppm(v) => *v,
@@ -25,9 +20,6 @@ impl Tolerance {
     }
 }
 
-/// Asymmetric precursor mass tolerance. The precursor calibrator produces
-/// asymmetric `(left, right)` pairs; symmetric tolerances are a special
-/// case constructed via `symmetric`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrecursorTolerance {
     pub left: Tolerance,

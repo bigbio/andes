@@ -1,11 +1,6 @@
-//! End-to-end smoke tests: invoke andes on various fixtures and verify
-//! the PIN and TSV outputs exist with sensible content.
-
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Resolve a path relative to the workspace root (three levels above the
-/// cli crate's manifest directory: cli → crates → rust → astral-speed).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -58,11 +53,9 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         "unexpected PIN header: {pin_header}"
     );
 
-    // Assert that at least one data row carries a real BSA accession (P02769)
-    // in the Proteins column — confirms real accessions are threaded through.
     let pin_has_bsa_accession = pin_content
         .lines()
-        .skip(1) // skip header
+        .skip(1)
         .any(|line| line.contains("P02769"));
     assert!(
         pin_has_bsa_accession,
@@ -92,11 +85,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     );
 }
 
-/// `--psm-fdr` is a threshold, not a switch: andes does not compute FDR unless asked
-/// with `--rescore` / `--rescore-native`. That is deliberate, but for a long time
-/// the help text claimed the opposite and nothing was printed, so a user asking
-/// for 1% FDR got an ordinary search and no filtered output with no indication
-/// why. The behaviour stays; the silence does not.
 #[test]
 fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -197,11 +185,6 @@ fn cli_accepts_min_length_max_length_flags() {
 
 #[test]
 fn cli_accepts_mod_fragmentation_protocol_flags() {
-    // Verify the TMT-CLI flags parse and the param resolver picks up a real
-    // bundled model. We use the existing BSA fixture (no actual TMT spectra)
-    // and pass TMT-style modification lists — the binary should exit 0 because
-    // all flags are valid. (--instrument was removed: analyzer resolution is
-    // metadata-detected for mzML/.raw/.d and `--fragment-tol-*` for MGF.)
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -220,9 +203,6 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
     .arg("HCD")
     .arg("--protocol")
     .arg("TMT")
-    // Allow a wider tolerance — the TMT-labelled candidates differ in mass
-    // and we just want to confirm the binary exits cleanly, not assert
-    // recall on a non-TMT fixture.
     .arg("--precursor-tol")
     .arg("100ppm")
     .status()
@@ -237,8 +217,6 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
 
 #[test]
 fn cli_rejects_invalid_protocol_index() {
-    // Out-of-range --protocol must produce a non-zero exit with the
-    // helpful error message from `parse_protocol`.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -265,7 +243,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    // Lower min-peaks so we don't filter out the tiny fixture's sparse spectra.
     .arg("--min-peaks")
     .arg("1")
     .status()
@@ -280,7 +257,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         "PIN output should be written for mzML input"
     );
 
-    // The PIN must at least contain a header row.
     let pin_content = std::fs::read_to_string(&pin_path).unwrap();
     let first_line = pin_content.lines().next().unwrap_or("");
     assert!(
@@ -291,8 +267,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
 
 #[test]
 fn bench_mode_max_spectra_produces_nonempty_pin() {
-    // Regression for send_chunks bench-cap bug: --max-spectra 100 must not
-    // drop the entire final partial chunk.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("bench.pin");
 
@@ -394,11 +368,6 @@ fn cli_accepts_precursor_cal_off() {
     assert!(pin_path.exists());
 }
 
-/// Smoke guard for the canonical (named + merged-range) CLI surface that the
-/// quantms andes module passes: named `--fragmentation/--protocol`, the
-/// `--enzyme-specificity` name, the merged `--charge`/`--isotope-error` ranges,
-/// and the unit-bearing `--precursor-tol`. Legacy numeric forms and split-range
-/// flags were removed (andes is pre-release, no back-compat).
 #[test]
 fn cli_accepts_canonical_named_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
@@ -443,9 +412,6 @@ fn cli_accepts_canonical_named_param_values() {
 
 #[test]
 fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
-    // MGF carries no analyzer metadata. With no --fragmentation/--fragment-tol
-    // flags, decision E applies: assume CID / low-res / 0.5 Da (cid_lowres_tryp)
-    // and emit a warning so the user knows a default was chosen.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -471,9 +437,6 @@ fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
 
 #[test]
 fn mgf_fragment_tol_ppm_selects_high_res_model() {
-    // --fragment-tol-ppm on MGF input declares high-resolution MS/MS, so the
-    // resolver selects a QExactive (high-res) model rather than the low-res
-    // default.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -520,7 +483,6 @@ fn fragment_tol_flags_are_mutually_exclusive() {
     );
 }
 
-/// Peptide whose 3+ ETD spectrum the c/z regression below searches.
 const ETD_PEPTIDE: &str = "FPEVQGELISLLEK";
 
 fn residue_mass(aa: u8) -> f64 {
@@ -538,8 +500,6 @@ fn residue_mass(aa: u8) -> f64 {
     }
 }
 
-/// A 3+ ETD spectrum of `ETD_PEPTIDE` holding only its singly charged c and z•
-/// ions (13 + 13 peaks) and no b/y ion.
 fn etd_cz_only_mgf() -> String {
     const PROTON: f64 = 1.007276;
     const H2O: f64 = 18.010565;
@@ -551,8 +511,8 @@ fn etd_cz_only_mgf() -> String {
     for i in 1..res.len() {
         let prefix: f64 = res[..i].iter().sum();
         let suffix: f64 = res[i..].iter().sum();
-        peaks.push(prefix + NH3 + PROTON); // c
-        peaks.push(suffix + H2O - NH3 + H + PROTON); // z•
+        peaks.push(prefix + NH3 + PROTON);
+        peaks.push(suffix + H2O - NH3 + H + PROTON);
     }
     peaks.sort_by(f64::total_cmp);
     let mut mgf = format!(
@@ -566,7 +526,6 @@ fn etd_cz_only_mgf() -> String {
     mgf
 }
 
-/// Each PIN row's `Label:Peptide`.
 fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
     let text = std::fs::read_to_string(pin).expect("read PIN");
     let mut lines = text.lines();
@@ -585,20 +544,12 @@ fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-/// Low-resolution ETD under the default candidate index: the fragment-ion index
-/// holds only b/y ions, so a spectrum explained by c/z ions alone must not be
-/// retrieved through it. The ETD search keeps enumeration and scores the
-/// target. (Its peptide-level decoy has the same mass and also competes; on
-/// this synthetic spectrum of equal-intensity c/z peaks it can outrank the
-/// target, so the test asks for the target row, not for rank 1.)
 #[test]
 fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mgf = dir.path().join("etd.mgf");
     let fasta = dir.path().join("etd.fasta");
     std::fs::write(&mgf, etd_cz_only_mgf()).unwrap();
-    // The peptide is the whole protein: the target and its decoy are the only
-    // candidates.
     std::fs::write(&fasta, format!(">sp|ETD1|ETD1_TEST\n{ETD_PEPTIDE}\n")).unwrap();
     for extra in [&[][..], &["--fragment-index", "off"][..]] {
         let pin = dir.path().join(format!("etd{}.pin", extra.len()));

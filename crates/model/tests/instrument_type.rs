@@ -1,5 +1,3 @@
-//! Pin `InstrumentType` variant names to the andes instrument-class enum.
-
 use model::InstrumentType;
 
 #[test]

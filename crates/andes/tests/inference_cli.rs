@@ -1,6 +1,3 @@
-//! `andes inference` over two runs' Percolator results: one dataset-level set
-//! of protein groups in the QPX pg view.
-
 use std::process::Command;
 
 use arrow::array::{Array, BooleanArray, Float64Array, ListArray, StringArray};
@@ -25,8 +22,6 @@ fn inference_writes_one_dataset_level_pg_view() {
         ">sp|P1|A\nMAAAKCCCKR\n>sp|P2|B\nMDDDKEEEKR\n>sp|P3|C\nMGGGKR\n",
     )
     .unwrap();
-    // Run 1 sees P1, run 2 sees P1 and P2; P3 only through a decoy-beaten PSM.
-    // Both runs share SpecIds, as per-run files do.
     write(
         &d.join("r1.percolator.target.psms.txt"),
         &[("s_1_1", 5.0, 0.001, "K.CCCK.R", "sp|P1|A")],
@@ -83,13 +78,11 @@ fn inference_writes_one_dataset_level_pg_view() {
     let rows: Vec<(String, bool, f64)> = (0..batch.num_rows())
         .map(|i| (anchor.value(i).to_string(), decoy.value(i), q.value(i)))
         .collect();
-    // P1 has two peptides from two runs; P3 lost to its decoy.
     assert_eq!(rows[0].0, "sp|P1|A");
     assert!(!rows[0].1 && rows[0].2 == 0.0);
     assert!(rows.iter().any(|r| r.0 == "sp|P2|B" && !r.1));
     assert!(rows.iter().any(|r| r.0 == "sp|P3|C" && !r.1 && r.2 == 1.0));
     assert!(rows.iter().any(|r| r.0 == "XXX_sp|P3|C" && r.1));
-    // Groups span both runs; two runs means no run-level q.
     let runs = col("grouped_runs");
     let runs = runs.as_any().downcast_ref::<ListArray>().unwrap();
     let names = runs.value(0);

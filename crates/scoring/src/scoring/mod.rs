@@ -1,5 +1,3 @@
-//! Rank-based PSM scoring using the loaded Param model.
-
 pub mod fragment_error;
 pub mod fragment_ions;
 pub mod psm_score;

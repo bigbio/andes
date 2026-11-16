@@ -1,14 +1,3 @@
-//! Parity and speed check for `rt_native` against the PyTorch reference.
-//!
-//! ```text
-//! cargo run --release -p onnx-infer --example rt_native_check -- \
-//!   --weights andes_rt.artn --reference rt_reference.tsv [--threads 8] [--repeat 20]
-//! ```
-//!
-//! The reference TSV (from `scripts/student/rt_export.py`) has columns
-//! `format` (`proforma` | `andes`), `peptide`, `index`. Prints the largest
-//! absolute difference and single-thread / multi-thread throughput.
-
 use std::io::{BufRead, BufReader};
 use std::time::Instant;
 

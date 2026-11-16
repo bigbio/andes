@@ -1,24 +1,7 @@
-//! Positional-isomer identity of a PSM.
-//!
-//! Two PSMs on one spectrum are positional isomers when they carry the same
-//! residues and the same multiset of modification mass deltas, with the
-//! modifications on different sites. Site alternatives of one peptide score
-//! almost identically, so the per-spectrum rows keep one of them
-//! ([`collapse_isomers`]).
-
 use crate::candidate_gen::Candidate;
 use crate::psm::PsmMatch;
 use model::IsomerClass;
 
-/// Identity of a PSM up to the placement of its modifications: the precursor it
-/// was matched at, its charge, its target/decoy side, and its [`IsomerClass`]
-/// (residues and the sorted multiset of its modification mass deltas,
-/// terminal mods included, since they are carried on the terminal residue). Two PSMs with equal keys are
-/// positional isomers — the same peptide with the same modifications on
-/// different sites.
-///
-/// A target and a decoy never share a key, so a decoy that repeats a target's
-/// residues keeps its own row and its `-1` label.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IsomerKey {
     precursor_mz_bits: u64,
@@ -28,9 +11,6 @@ pub struct IsomerKey {
 }
 
 impl IsomerKey {
-    /// The key of `psm` (whose primary candidate is `cand`) on a spectrum with
-    /// precursor m/z `spectrum_precursor_mz`. A chimeric secondary is keyed at
-    /// its own precursor (`precursor_mz_override`).
     pub fn new(spectrum_precursor_mz: f64, psm: &PsmMatch, cand: &Candidate) -> Self {
         Self {
             precursor_mz_bits: psm
@@ -44,13 +24,6 @@ impl IsomerKey {
     }
 }
 
-/// The PSMs that represent each positional-isomer class of one spectrum, in
-/// the order given: of the PSMs sharing an [`IsomerKey`], the first one is
-/// kept and the rest are dropped. `psms_best_first` must be in rank order
-/// (best first), so the kept PSM is the best-ranked isomer.
-///
-/// Returns, for each kept PSM, its index in `psms_best_first` and the indices
-/// of the PSMs collapsed into it (empty when it has no isomer).
 pub fn collapse_isomers<'a, I>(
     spectrum_precursor_mz: f64,
     psms_best_first: I,
@@ -143,9 +116,9 @@ mod tests {
         let s2 = || pep(vec![aa(b'S'), modded(b'T', phospho), aa(b'K')]);
         let cands = vec![
             cand(s1(), 0, false),
-            cand(s2(), 0, false), // isomer of 0
-            cand(s2(), 1, true),  // decoy: its own class
-            cand(s2(), 2, false), // isomer of 0 in another protein
+            cand(s2(), 0, false),
+            cand(s2(), 1, true),
+            cand(s2(), 2, false),
             cand(pep(vec![aa(b'S'), aa(b'T'), aa(b'K')]), 0, false),
         ];
         let psms = vec![

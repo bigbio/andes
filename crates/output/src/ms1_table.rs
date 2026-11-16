@@ -1,19 +1,3 @@
-//! Per-run MS1 table `<stem>.ms1.parquet`: one row per MS1 survey scan of a
-//! run, in the order of its [`Ms1RunIndex`] (retention time). It is the run's
-//! MS1 for the quantification stages, both the persistent `--quant-dir`
-//! artifact and the in-process scratch copy kept while the search runs.
-//!
-//! Columns: `native_id` (empty when the source has none), `rt_s`, `faims_cv`
-//! (null without FAIMS), and the scan's m/z-sorted centroids as two lists of
-//! equal length, `mz` and `intensity`, and, for a run whose survey scans are
-//! resolved by ion mobility, a last column `mobility` (the 1/K0 of each
-//! centroid; schema 1.1). The values are stored bit for bit, so a
-//! round trip rebuilds the same index. The key-value metadata carries the
-//! schema version (`andes.ms1.schema`; a reader rejects another major) and the
-//! run stem (`andes.ms1.run`). A row group holds a bounded number of scans, so
-//! writing and reading stream; [`write_ms1_table`] writes `<path>.partial` and
-//! renames it into place once complete.
-
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,7 +19,6 @@ pub const MS1_SCHEMA_MAJOR: u32 = 1;
 
 const SCHEMA_KEY: &str = "andes.ms1.schema";
 const SCHEMA_VERSION: &str = "1.0";
-/// Schema version of a table with the `mobility` column.
 const SCHEMA_VERSION_MOBILITY: &str = "1.1";
 pub const RUN_KEY: &str = "andes.ms1.run";
 const SCANS_PER_GROUP: usize = 256;
@@ -71,8 +54,6 @@ fn schema(with_mobility: bool) -> Schema {
     Schema::new(fields)
 }
 
-/// ZSTD, no dictionaries (scan ids and centroid values rarely repeat), and
-/// byte-stream-split floats, which compress better than plain ones.
 fn properties(version: &str, run: &str, with_mobility: bool) -> WriterProperties {
     let list_values =
         |name: &str| ColumnPath::new(vec![name.to_string(), "list".into(), "item".into()]);
@@ -132,7 +113,6 @@ fn batch(
         Arc::new(intensity),
     ];
     if schema.fields().len() == COLUMNS.len() {
-        // A scan without mobility (none of its own) stores an empty list.
         let k0_offs = offsets(scans.clone().map(|i| index.mobility(i).len()))?;
         let k0 = Float32Array::from_iter_values(
             scans
@@ -183,7 +163,6 @@ pub fn write_ms1<W: Write + Send>(out: W, run: &str, index: &Ms1RunIndex) -> Res
     write_with_version(out, run, index, SCHEMA_VERSION)
 }
 
-/// `<path>.partial`, where a table is written before it is renamed to `path`.
 pub fn partial_path(path: &Path) -> PathBuf {
     let mut partial = path.as_os_str().to_owned();
     partial.push(".partial");
@@ -222,7 +201,6 @@ fn column<T: 'static>(b: &RecordBatch, i: usize) -> Result<&T, String> {
     })
 }
 
-/// The values of a list column and its offsets, checked to be null-free.
 fn list<T: 'static + Array>(b: &RecordBatch, i: usize) -> Result<(&T, &[i32]), String> {
     let list = column::<ListArray>(b, i)?;
     let values = list.values().as_any().downcast_ref::<T>().ok_or_else(|| {
@@ -342,11 +320,6 @@ pub fn read_ms1(file: File, path: &Path) -> Result<Ms1RunIndex, String> {
     read(file).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Median spacing in seconds between consecutive MS1 scans of the same FAIMS
-/// compensation voltage (all scans when there is none), read from the `rt_s`
-/// and `faims_cv` columns only. A precursor is sampled at its own voltage, so
-/// this is the time between two of its MS1 points. `None` with fewer than two
-/// scans of any voltage. Every error names `path`.
 pub fn read_ms1_scan_spacing(path: &Path) -> Result<Option<f64>, String> {
     let named = |e: String| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| named(e.to_string()))?;
@@ -357,7 +330,6 @@ pub fn read_ms1_scan_spacing(path: &Path) -> Result<Option<f64>, String> {
         .with_projection(mask)
         .build()
         .map_err(|e| named(e.to_string()))?;
-    // Scans are stored in retention-time order; the last RT per voltage.
     let mut last: std::collections::HashMap<Option<u32>, f64> = std::collections::HashMap::new();
     let mut gaps: Vec<f64> = Vec::new();
     for b in reader {
@@ -406,8 +378,6 @@ mod tests {
         }
     }
 
-    /// Bit-exact equality of two indexes: order, RT, ids, FAIMS voltage,
-    /// centroids and detection limits.
     fn assert_same(a: &Ms1RunIndex, b: &Ms1RunIndex) {
         assert_eq!(a.len(), b.len());
         for i in 0..a.len() {
@@ -441,7 +411,6 @@ mod tests {
                 Some(-45.0),
             ),
             scan(1.0, vec![], "", None),
-            // Equal RT: the stored order is kept.
             scan(1.0, vec![(-0.0, 5.0)], "scan=9", Some(-0.0)),
             scan(2.5, vec![(500.0, 1.0)], "contr\u{e9}l\u{e9}=3", Some(nan)),
         ])
@@ -450,7 +419,6 @@ mod tests {
     #[test]
     fn scan_spacing_is_per_faims_voltage() {
         let dir = tempfile::tempdir().unwrap();
-        // Two voltages alternating every 1 s: each voltage is sampled every 2 s.
         let faims: Vec<Ms1Scan> = (0..10)
             .map(|i| {
                 let cv = if i % 2 == 0 { -45.0 } else { -60.0 };
@@ -460,14 +428,12 @@ mod tests {
         let p = dir.path().join("faims.ms1.parquet");
         write_ms1_table(&p, "faims", &Ms1RunIndex::new(faims)).unwrap();
         assert_eq!(read_ms1_scan_spacing(&p).unwrap(), Some(2.0));
-        // No FAIMS: every MS1 scan, 1.5 s apart.
         let plain: Vec<Ms1Scan> = (0..5)
             .map(|i| scan(1.5 * i as f64, vec![(500.0, 1.0)], "", None))
             .collect();
         let p = dir.path().join("plain.ms1.parquet");
         write_ms1_table(&p, "plain", &Ms1RunIndex::new(plain)).unwrap();
         assert_eq!(read_ms1_scan_spacing(&p).unwrap(), Some(1.5));
-        // One scan: no spacing.
         let p = dir.path().join("one.ms1.parquet");
         let one = Ms1RunIndex::new(vec![scan(3.0, vec![], "", None)]);
         write_ms1_table(&p, "one", &one).unwrap();
@@ -498,7 +464,6 @@ mod tests {
                 "frame=1",
                 None,
             ),
-            // A scan without centroids in a mobility-resolved run.
             scan(2.0, vec![], "frame=3", None),
         ];
         scans[0].mobility = vec![0.91, 1.02, 0.85];
@@ -583,7 +548,6 @@ mod tests {
             "{e}"
         );
 
-        // A Parquet file without the schema key (another andes table).
         let other = dir.path().join("other.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
         let mut w =

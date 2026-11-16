@@ -1,21 +1,3 @@
-//! Theoretical isotope envelope (averagine approximation).
-//!
-//! Used by the chimeric MS1 filter to compare a peptide's expected precursor
-//! isotope distribution against the observed MS1 envelope.
-
-/// Approximate the relative intensities of the first `n_isotopes` peaks of a
-/// peptide's precursor isotope envelope from its neutral monoisotopic `mass`,
-/// using the averagine + Poisson model. Returns a vector of length
-/// `n_isotopes` normalized to sum 1.0 (empty when `n_isotopes == 0`).
-///
-/// Model: an averagine residue is ~111.1 Da and contains ~4.94 carbons, so a
-/// peptide of `mass` Da has roughly `mass / 111.1 * 4.94 ≈ mass * 0.0445`
-/// carbons. With natural 13C abundance 1.07%, the expected number of 13C atoms
-/// is `lambda ≈ carbons * 0.0107 ≈ mass * 4.76e-4`. The isotope peak
-/// intensities follow a Poisson distribution in the number of 13C atoms:
-/// `p_k = e^-lambda * lambda^k / k!`. (This ignores other heavy isotopes
-/// — N15/O18/S34/S33 — which is the standard averagine first approximation and
-/// is sufficient for an envelope-shape match.)
 pub fn averagine_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
     if n_isotopes == 0 {
         return Vec::new();
@@ -36,24 +18,12 @@ pub fn averagine_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
     env
 }
 
-/// Per-atom isotope abundance ladders (`[M, M+1, M+2, ...]`), natural
-/// abundances (IUPAC/CIAAW representative values). Index k is the fraction of
-/// atoms that are k nominal mass units above the lightest isotope.
 const C_ISO: &[f64] = &[0.9893, 0.0107];
 const H_ISO: &[f64] = &[0.999_885, 0.000_115];
 const N_ISO: &[f64] = &[0.996_36, 0.003_64];
 const O_ISO: &[f64] = &[0.997_57, 0.000_38, 0.002_05];
 const S_ISO: &[f64] = &[0.9499, 0.0075, 0.0425, 0.0, 0.0001];
 
-/// Theoretical isotope envelope of a molecule from its elemental formula
-/// (C, H, N, O, S atom counts), as the first `n_isotopes` nominal-mass peaks
-/// normalised to sum 1.0. Exact per-element multinomial convolution (no
-/// averagine, no Poisson approximation): every atom's own ladder is folded
-/// in, so the O18 and S34 contributions to M+2 are kept — they matter for
-/// glycans, whose oxygen fraction is roughly twice a peptide's.
-///
-/// Empty when `n_isotopes == 0`. A formula with no atoms returns a pure
-/// monoisotope (`[1, 0, 0, ...]`).
 pub fn isotope_envelope_from_formula(
     c: u32,
     h: u32,
@@ -65,15 +35,6 @@ pub fn isotope_envelope_from_formula(
     isotope_envelope_and_share_from_formula(c, h, n, o, s, n_isotopes).0
 }
 
-/// The envelope of [`isotope_envelope_from_formula`] and the share of the
-/// whole isotope pattern that its `n_isotopes` peaks hold: the probability
-/// that a molecule is fewer than `n_isotopes` nominal mass units above the
-/// monoisotope. Every per-atom ladder sums to 1 and a peak only receives
-/// from lower peaks, so the peaks kept by the convolution are the exact
-/// fractions of the whole pattern and the share is their sum before the
-/// envelope is normalised.
-///
-/// `(empty, 0.0)` when `n_isotopes == 0`.
 pub fn isotope_envelope_and_share_from_formula(
     c: u32,
     h: u32,
@@ -114,18 +75,6 @@ pub fn isotope_envelope_and_share_from_formula(
     (env, sum)
 }
 
-/// Approximate elemental formula of an N-glycopeptide of neutral mass `mass`
-/// (Da), as (C, H, N, O, S) atom counts.
-///
-/// A glycopeptide is not averagine: the glycan half carries ~14% fewer
-/// carbons per Da and about twice the oxygen, so the peptide averagine
-/// (`averagine_isotope_envelope`) overstates M+1 and understates the O18
-/// share of M+2. This blends the peptide averagine residue
-/// (C4.9384 H7.7583 N1.3577 O1.4773 S0.0417 per 111.1254 Da) with an
-/// average complex N-glycan (HexNAc4 Hex5 Fuc1 NeuAc1 = C79 H129 N5 O57 per
-/// 2059.73 Da) at equal mass share — the typical split for a tryptic
-/// N-glycopeptide in the 2.5–5 kDa range where the precursor
-/// mono-correction operates. Counts are rounded to whole atoms.
 pub fn glycopeptide_formula(mass: f64) -> (u32, u32, u32, u32, u32) {
     const PEP: [f64; 5] = [
         4.9384 / 111.1254,
@@ -149,9 +98,6 @@ pub fn glycopeptide_formula(mass: f64) -> (u32, u32, u32, u32, u32) {
     (at(0), at(1), at(2), at(3), at(4))
 }
 
-/// Theoretical precursor isotope envelope of an N-glycopeptide of neutral
-/// mass `mass`, first `n_isotopes` peaks normalised to sum 1.0. See
-/// [`glycopeptide_formula`] for the element model.
 pub fn glycopeptide_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
     let (c, h, n, o, s) = glycopeptide_formula(mass);
     isotope_envelope_from_formula(c, h, n, o, s, n_isotopes)
@@ -163,8 +109,6 @@ mod tests {
 
     #[test]
     fn share_is_the_fraction_of_the_whole_pattern_in_the_kept_peaks() {
-        // Reference values from an untruncated convolution of the same
-        // per-atom ladders: (C, H, N, O, S), share of M..M+3, M..M+4.
         let cases = [
             ((5, 10, 2, 3, 0), 0.999_977_287_454, 0.999_999_081_304),
             ((44, 70, 12, 13, 0), 0.995_235_617_258, 0.999_268_002_862),
@@ -176,9 +120,6 @@ mod tests {
             let (_, got5) = isotope_envelope_and_share_from_formula(c, h, n, o, s, 5);
             assert!((got4 - share4).abs() < 1e-10, "C{c}: {got4} vs {share4}");
             assert!((got5 - share5).abs() < 1e-10, "C{c}: {got5} vs {share5}");
-            // The envelope times the share is each peak's fraction of the
-            // whole pattern: the same peaks of a 60-isotope envelope, which
-            // holds all of it.
             let (env60, all) = isotope_envelope_and_share_from_formula(c, h, n, o, s, 60);
             assert!((all - 1.0).abs() < 1e-12, "C{c}: {all}");
             for k in 0..4 {
@@ -190,7 +131,6 @@ mod tests {
             assert!((env4.iter().sum::<f64>() - 1.0).abs() < 1e-12);
             assert_eq!(env4, isotope_envelope_from_formula(c, h, n, o, s, 4));
         }
-        // 2 kDa peptide M+1 fraction of the whole pattern, as a spot check.
         let (env, share) = isotope_envelope_and_share_from_formula(89, 140, 24, 27, 1, 4);
         assert!((env[1] * share - 0.333_883_045_9).abs() < 1e-9);
         assert_eq!(
@@ -220,8 +160,6 @@ mod tests {
 
     #[test]
     fn averagine_plus_one_grows_with_mass() {
-        // The +1 isotope's relative height increases with peptide mass
-        // (more carbons -> higher 13C probability).
         let small = averagine_isotope_envelope(1000.0, 4);
         let large = averagine_isotope_envelope(3000.0, 4);
         let ratio_small = small[1] / small[0];
@@ -245,10 +183,6 @@ mod tests {
 
     #[test]
     fn formula_envelope_is_normalized_and_matches_known_shape() {
-        // Bovine insulin-like size check is overkill; use a peptide of known
-        // formula: angiotensin II DRVYIHPF = C50 H71 N13 O12, M0 1045.53.
-        // First-order expectation: M+1/M0 ~ 50*0.0107 + 13*0.00364 + 71*0.000115
-        // + 12*0.00038 = 0.60; M+2/M0 ~ 0.20 (13C pairs + O18).
         let env = isotope_envelope_from_formula(50, 71, 13, 12, 0, 5);
         let sum: f64 = env.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "sum {sum}");
@@ -267,9 +201,6 @@ mod tests {
 
     #[test]
     fn glycopeptide_envelope_has_fewer_carbons_than_averagine() {
-        // Same mass, same convolution: the glycopeptide model must put LESS
-        // weight on M+1 relative to M0 than an all-peptide averagine formula
-        // (fewer carbons and far less nitrogen per Da).
         let m = 3500.0;
         let g = glycopeptide_isotope_envelope(m, 6);
         let pep = |d: f64| (m * d / 111.1254).round() as u32;

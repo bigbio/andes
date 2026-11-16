@@ -1,36 +1,3 @@
-//! Predicted-spectrum and RT features for every row of a Percolator PIN, with
-//! tract or ONNX Runtime (`--backend tract|ort`).
-//!
-//! Reads an andes PIN and the mzML it was searched from, predicts fragment
-//! intensities and/or retention time for each distinct peptidoform with one
-//! model family's exported ONNX graphs, and writes one feature row per PIN row
-//! (targets and decoys alike) to a TSV keyed by `SpecId`. RT calibration and
-//! PIN assembly happen downstream (`scripts/rescore_pin_arms.py`).
-//!
-//! ```text
-//! cargo run --release -p onnx-infer --features tract --example rescore_pin -- \
-//!   --model peptdeep --pin search.pin --mzml run.mzML --models DIR --out features.tsv \
-//!   --frag-tol 0.5 --frag-unit da --threads 8
-//! ```
-//!
-//! `--backend ort` (build with `--features ort`) runs the graphs on ONNX
-//! Runtime; `--intra-threads N` gives each ONNX Runtime session an N-thread
-//! operator pool (default 1: parallelism comes from `--threads` workers).
-//!
-//! `--model` selects the family (feature-column prefix in brackets):
-//!
-//! | `--model` | Graphs in `DIR` | Outputs |
-//! |---|---|---|
-//! | `peptdeep` (`pdeep`) | `peptdeep_{rt,ms2}_dynamic.json`, `peptdeep_mods.json` | RT + b/y z1–2 |
-//! | `ms2pip` (`ms2pip`) | `ms2pip_<M>_{b,y}.json`, `M` = `--ms2pip-model` | b/y z1 |
-//! | `deeplc` (`deeplc`) | `deeplc_rt.json` | RT |
-//! | `prosit` (`prosit`) | `prosit_irt.json`, `prosit_intensity_hcd.json` (`--nce`) | iRT + b/y z1–3 |
-//! | `andes-ms2` (`ams2`) | `andes_ms2.ams2` (or `--models FILE`); `--nce` (`NA` = unknown), `--activation`, `--instrument` | b/y z1–2 |
-//!
-//! Output columns: `SpecId`, `observed_retention_time`, `<prefix>_irt` (NA
-//! without an RT model), `<prefix>_missing` (1 when the model cannot encode the
-//! row), then the spectral-match features (NA without an MS2 model).
-
 #[path = "common/models.rs"]
 mod models;
 
@@ -116,12 +83,10 @@ fn parse_args() -> Args {
     a
 }
 
-/// Process CPU time (user + system) in seconds; 0 where `/proc` is absent.
 fn cpu_s() -> f64 {
     std::fs::read_to_string("/proc/self/stat")
         .ok()
         .and_then(|s| {
-            // Fields after the parenthesised command name; utime, stime are 14, 15.
             let rest = s.rsplit_once(')')?.1;
             let f: Vec<&str> = rest.split_whitespace().collect();
             let t = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
@@ -141,8 +106,6 @@ fn rss_mb() -> f64 {
         .map_or(0.0, |kb| kb / 1024.0)
 }
 
-/// Run `jobs` across worker threads, each with shared handles on `master`;
-/// returns (wall, process CPU) seconds.
 fn run_parallel<J: Sync, F>(
     master: &[OnnxSession],
     threads: usize,
@@ -178,7 +141,6 @@ where
     (t0.elapsed().as_secs_f64(), cpu_s() - c0)
 }
 
-/// Group item indices by `key` and chunk each group into batches.
 fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
     let mut by: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, k) in keys.enumerate() {
@@ -263,8 +225,6 @@ fn main() {
     }
     let mut forms: Vec<(Form, Mass)> = Vec::new();
     let mut form_ix: HashMap<Form, usize> = HashMap::new();
-    // Columns a row needs; shorter rows, blank lines and rows whose ScanNr is not
-    // an integer (a `DefaultDirection` line, a truncated file) are skipped.
     let n_cols = charge_cols
         .iter()
         .map(|(i, _)| *i)
@@ -325,8 +285,6 @@ fn main() {
         "mzML errors: {:?}",
         &errs[..errs.len().min(3)]
     );
-    // Spectra without a scan number cannot be joined to a PIN row; of duplicate
-    // scan numbers the first spectrum is kept. Both are counted, not fatal.
     let mut by_scan: HashMap<i32, usize> = HashMap::new();
     let (mut no_scan, mut dup_scan) = (0usize, 0usize);
     for (i, s) in spectra.iter().enumerate() {
@@ -359,7 +317,6 @@ fn main() {
         rss_mb()
     );
 
-    // RT over distinct supported forms.
     let mut rt_pred = vec![f32::NAN; forms.len()];
     if pred.has_rt() {
         let rt_forms: Vec<usize> = (0..forms.len())
@@ -386,7 +343,6 @@ fn main() {
         );
     }
 
-    // MS2 over distinct supported (form, charge).
     let mut fz_ix: HashMap<(usize, u8), usize> = HashMap::new();
     let mut fz: Vec<(usize, u8)> = Vec::new();
     if !pred.ions().is_empty() {
@@ -443,7 +399,6 @@ fn main() {
         let obs_rt = spec
             .and_then(|s| s.rt_seconds)
             .map_or(f64::NAN, |s| s / 60.0);
-        // A non-finite prediction (overflow in a model) is missing, not a value.
         let irt = r.form.map_or(f32::NAN, |f| rt_pred[f]);
         let irt = if irt.is_finite() { irt } else { f32::NAN };
         let ms2 = match (r.form, spec) {

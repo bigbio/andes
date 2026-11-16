@@ -1,51 +1,9 @@
-//! Glycan-first candidate retrieval ("glycan ion indexing").
-//!
-//! This is the search-strategy counterpart to the backbone-first driver: instead
-//! of enumerating `precursor − glycan` for every glycan and then scoring the
-//! backbone, we index each glycan's *Y-complementary fragment ions* once and,
-//! per spectrum, use the MS/MS peaks via `precursor − peak` to retrieve candidate
-//! glycans in O(peaks × charge × neighbourhood bins), independent of the
-//! glycan-database size.
-//!
-//! Pipeline (matches the spec's "main part"):
-//!
-//! ```text
-//! glycan database → Y-complementary ion generation → ion index → peak query
-//!     → candidate retrieval → core-ion filter → diagnostic-ion filter → top-K
-//! ```
-//!
-//! # Mass conventions (the one place to get right)
-//!
-//! Everything here is in **residue convention** for the glycan (Σ of residue
-//! masses, no extra +H₂O), but the precursor passed to [`search_glycans`] is the
-//! **neutral monoisotopic mass** `M = peptide_neutral + Σ(glycan residues)`, i.e.
-//! `(m/z − H⁺)·z` *without* the −H₂O that the backbone driver subtracts. This is
-//! what makes the complementary query exact:
-//!
-//! ```text
-//! Y-ion peak (charge z):   m/z = (peptide_neutral + y_comp + z·H⁺) / z
-//! neutral at charge z:     (m/z − H⁺)·z = peptide_neutral + y_comp
-//! query mass:              M − (peptide_neutral + y_comp) = glycan − y_comp
-//! ```
-//!
-//! `glycan − y_comp` is exactly the Y-complementary ion mass the index stores.
-//! Subtracting H₂O from the precursor (residue convention) would shift every
-//! query by −18.0106 Da and make the index miss everything.
-//!
-//! Masses and thresholds that the reference figure does not pin down (exact
-//! Y-ion formula, core definitions, diagnostic-ion list, scoring weights) are
-//! exposed in [`GlycanConfig`], [`GlycanCore`] and [`DiagnosticIon`] rather than
-//! silently assumed.
-
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::glycan_db::GlycanComp;
 use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC, PROTON};
 
-/// A monosaccharide counted in a glycan composition. Extensible: add a variant
-/// here, its residue mass in [`Monosaccharide::residue_mass`], and (if it has a
-/// diagnostic ion) an entry in the configured [`DiagnosticIon`] table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Monosaccharide {
     Hex,
@@ -56,9 +14,6 @@ pub enum Monosaccharide {
 }
 
 impl Monosaccharide {
-    /// Residue mass (free monosaccharide − H₂O): the mass contributed when the
-    /// monosaccharide is polymerised into a glycan. Single source of truth is
-    /// [`crate::glycan_mass`]; this is the enum-indexed view.
     pub fn residue_mass(self) -> f64 {
         match self {
             Monosaccharide::Hex => HEX,
@@ -69,7 +24,6 @@ impl Monosaccharide {
         }
     }
 
-    /// Neutral (free, reducing-end) monosaccharide mass = residue + H₂O.
     pub fn neutral_mass(self) -> f64 {
         self.residue_mass() + crate::glycan_mass::WATER
     }
@@ -85,31 +39,21 @@ impl Monosaccharide {
     }
 }
 
-/// A glycan: a unique id plus its monosaccharide composition.
 #[derive(Debug, Clone)]
 pub struct Glycan {
     pub id: u32,
     pub composition: GlycanComp,
 }
 
-/// One Y-complementary fragment ion of a glycan: the glycan part *lost* when a
-/// Y ion fragments, i.e. `full glycan − Y ion`. Indexed at `mass`; `is_core`
-/// records whether the *corresponding Y ion* was a trimannosyl-core Y ion.
 #[derive(Debug, Clone)]
 struct GlycanIon {
     glycan_id: u32,
-    /// Y-complementary mass (residue convention, peptide-independent).
     mass: f64,
     is_core: bool,
 }
 
-/// A diagnostic (oxonium / B-type) ion used to decide whether a spectrum is a
-/// glycopeptide and which monosaccharides its glycan carries. `counts` is the
-/// (hex, hexnac, fuc, neuac, neugc) the ion implies; an ion is "consistent" with
-/// a composition only if every implied count is present in the composition.
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticIon {
-    /// Ion m/z (proton already added).
     pub mz: f64,
     pub hex: u8,
     pub hexnac: u8,
@@ -119,7 +63,6 @@ pub struct DiagnosticIon {
 }
 
 impl DiagnosticIon {
-    /// True when `comp` contains every monosaccharide this ion implies.
     pub fn consistent_with(&self, comp: &GlycanComp) -> bool {
         comp.hex >= self.hex
             && comp.hexnac >= self.hexnac
@@ -129,45 +72,37 @@ impl DiagnosticIon {
     }
 }
 
-/// The default N-glycan diagnostic-ion panel: the 28 oxonium (B-fragment) ions
-/// of Glyco-Decipher's `OxoniumIonEnum`. `counts` are the monosaccharides each
-/// ion implies (a fragment implies ≥ that many of each monosaccharide).
-/// Configurable via [`GlycanConfig::diagnostic_ions`].
-///
-/// Oxonium ions and their water losses are computed from the residue masses in
-/// [`crate::glycan_mass`]; cross-ring fragments, which are not residue sums,
-/// carry the exact m/z of their cation formula.
 pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
     use crate::glycan_mass::WATER;
     const IONS: [(f64, u8, u8, u8, u8, u8); 28] = [
-        (84.04439, 0, 1, 0, 0, 0),                                // HexNAc C4H6NO+
-        (85.02841, 1, 0, 0, 0, 0),                                // Hex C4H5O2+
-        (97.02841, 1, 0, 0, 0, 0),                                // Hex C5H5O2+
-        (HEX + PROTON - 3.0 * WATER, 1, 0, 0, 0, 0),              // Hex−3H2O
-        (115.03897, 1, 0, 0, 0, 0),                               // Hex C5H7O3+
-        (126.05495, 0, 1, 0, 0, 0),                               // HexNAc C6H8NO2+
-        (HEX + PROTON - 2.0 * WATER, 1, 0, 0, 0, 0),              // Hex−2H2O
-        (138.05495, 0, 1, 0, 0, 0),                               // HexNAc C7H8NO2+
-        (144.06552, 0, 1, 0, 0, 0),                               // HexNAc C6H10NO3+
-        (HEX + PROTON - WATER, 1, 0, 0, 0, 0),                    // Hex−H2O
-        (HEX + PROTON, 1, 0, 0, 0, 0),                            // Hex
-        (HEXNAC + PROTON - 2.0 * WATER, 0, 1, 0, 0, 0),           // HexNAc−2H2O
-        (HEXNAC + PROTON - WATER, 0, 1, 0, 0, 0),                 // HexNAc−H2O
-        (HEXNAC + PROTON, 0, 1, 0, 0, 0),                         // HexNAc
-        (NEUAC + PROTON - WATER, 0, 0, 0, 1, 0),                  // NeuAc−H2O
-        (NEUGC + PROTON - WATER, 0, 0, 0, 0, 1),                  // NeuGc−H2O
-        (NEUAC + PROTON, 0, 0, 0, 1, 0),                          // NeuAc
-        (NEUGC + PROTON, 0, 0, 0, 0, 1),                          // NeuGc
-        (2.0 * HEX + PROTON, 2, 0, 0, 0, 0),                      // Hex2
-        (HEX + HEXNAC + PROTON, 1, 1, 0, 0, 0),                   // HexHexNAc
-        (HEX + NEUAC + PROTON, 1, 0, 0, 1, 0),                    // HexNeuAc
-        (HEX + HEXNAC + FUC + PROTON, 1, 1, 1, 0, 0),             // HexHexNAcFuc
-        (2.0 * HEX + HEXNAC + PROTON, 2, 1, 0, 0, 0),             // Hex2HexNAc
-        (HEX + HEXNAC + NEUAC + PROTON, 1, 1, 0, 1, 0),           // HexHexNAcNeuAc
-        (3.0 * HEX + HEXNAC + PROTON, 3, 1, 0, 0, 0),             // Hex3HexNAc
-        (HEX + HEXNAC + NEUAC + FUC + PROTON, 1, 1, 1, 1, 0),     // HexHexNAcNeuAcFuc
-        (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0),       // Hex3HexNAc2
-        (3.0 * HEX + 2.0 * HEXNAC + FUC + PROTON, 3, 2, 1, 0, 0), // Hex3HexNAc2Fuc
+        (84.04439, 0, 1, 0, 0, 0),
+        (85.02841, 1, 0, 0, 0, 0),
+        (97.02841, 1, 0, 0, 0, 0),
+        (HEX + PROTON - 3.0 * WATER, 1, 0, 0, 0, 0),
+        (115.03897, 1, 0, 0, 0, 0),
+        (126.05495, 0, 1, 0, 0, 0),
+        (HEX + PROTON - 2.0 * WATER, 1, 0, 0, 0, 0),
+        (138.05495, 0, 1, 0, 0, 0),
+        (144.06552, 0, 1, 0, 0, 0),
+        (HEX + PROTON - WATER, 1, 0, 0, 0, 0),
+        (HEX + PROTON, 1, 0, 0, 0, 0),
+        (HEXNAC + PROTON - 2.0 * WATER, 0, 1, 0, 0, 0),
+        (HEXNAC + PROTON - WATER, 0, 1, 0, 0, 0),
+        (HEXNAC + PROTON, 0, 1, 0, 0, 0),
+        (NEUAC + PROTON - WATER, 0, 0, 0, 1, 0),
+        (NEUGC + PROTON - WATER, 0, 0, 0, 0, 1),
+        (NEUAC + PROTON, 0, 0, 0, 1, 0),
+        (NEUGC + PROTON, 0, 0, 0, 0, 1),
+        (2.0 * HEX + PROTON, 2, 0, 0, 0, 0),
+        (HEX + HEXNAC + PROTON, 1, 1, 0, 0, 0),
+        (HEX + NEUAC + PROTON, 1, 0, 0, 1, 0),
+        (HEX + HEXNAC + FUC + PROTON, 1, 1, 1, 0, 0),
+        (2.0 * HEX + HEXNAC + PROTON, 2, 1, 0, 0, 0),
+        (HEX + HEXNAC + NEUAC + PROTON, 1, 1, 0, 1, 0),
+        (3.0 * HEX + HEXNAC + PROTON, 3, 1, 0, 0, 0),
+        (HEX + HEXNAC + NEUAC + FUC + PROTON, 1, 1, 1, 1, 0),
+        (3.0 * HEX + 2.0 * HEXNAC + PROTON, 3, 2, 0, 0, 0),
+        (3.0 * HEX + 2.0 * HEXNAC + FUC + PROTON, 3, 2, 1, 0, 0),
     ];
     IONS.iter()
         .map(|&(mz, hex, hexnac, fuc, neuac, neugc)| DiagnosticIon {
@@ -181,21 +116,15 @@ pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
         .collect()
 }
 
-/// The default O-glycan diagnostic-ion panel: the reducing-end GalNAc oxonium
-/// (204.09, shared with N-glycans' HexNAc) plus the O-glycan-specific core-1
-/// (Gal-GalNAc, 366.14), sialyl-Tn (NeuAc-GalNAc, 495.18) and sialyl-T
-/// (NeuAc-Gal-GalNAc, 657.23) oxonium ions, and the low-mass HexNAc fragments
-/// every GalNAc produces. `counts` are the monosaccharides each ion implies.
-/// Configurable via [`GlycanConfig::diagnostic_ions`].
 pub fn o_glycan_diagnostic_ions() -> Vec<DiagnosticIon> {
     const IONS: [(f64, u8, u8, u8, u8, u8); 7] = [
-        (138.0550, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (168.0660, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (186.0760, 0, 1, 0, 0, 0), // HexNAc/GalNAc fragment
-        (204.0867, 0, 1, 0, 0, 0), // GalNAc (reducing-end)
-        (366.1395, 1, 1, 0, 0, 0), // Gal-GalNAc (core-1)
-        (495.1821, 0, 1, 0, 1, 0), // NeuAc-GalNAc (sialyl-Tn)
-        (657.2349, 1, 1, 0, 1, 0), // NeuAc-Gal-GalNAc (sialyl-T)
+        (138.0550, 0, 1, 0, 0, 0),
+        (168.0660, 0, 1, 0, 0, 0),
+        (186.0760, 0, 1, 0, 0, 0),
+        (204.0867, 0, 1, 0, 0, 0),
+        (366.1395, 1, 1, 0, 0, 0),
+        (495.1821, 0, 1, 0, 1, 0),
+        (657.2349, 1, 1, 0, 1, 0),
     ];
     IONS.iter()
         .map(|&(mz, hex, hexnac, fuc, neuac, neugc)| DiagnosticIon {
@@ -209,36 +138,18 @@ pub fn o_glycan_diagnostic_ions() -> Vec<DiagnosticIon> {
         .collect()
 }
 
-/// Core Y-ion ladder for N-glycans: `(hexnac, hex)` compositions that stay on the
-/// peptide, innermost (Y1) first. These are the trimannosyl-core ladder Y1..Y5.
-pub const N_CORE_Y_LADDER: [(u8, u8); 5] = [
-    (1, 0), // Y1 = HexNAc
-    (2, 0), // Y2 = 2HexNAc
-    (2, 1), // Y3 = 2HexNAc+Hex
-    (2, 2), // Y4 = 2HexNAc+2Hex
-    (2, 3), // Y5 = 2HexNAc+3Hex (full trimannosyl core)
-];
+pub const N_CORE_Y_LADDER: [(u8, u8); 5] = [(1, 0), (2, 0), (2, 1), (2, 2), (2, 3)];
 
-/// Core Y-ion ladder for O-glycans: only the reducing-end GalNAc (Y1). O-glycan
-/// cores 1–4 (and beyond) all share the GalNAc → Ser/Thr linkage, so a single
-/// GalNAc is the only "core" rung; every other residue is antenna.
-pub const O_CORE_Y_LADDER: [(u8, u8); 1] = [(1, 0)]; // Y1 = GalNAc (HexNAc)
+pub const O_CORE_Y_LADDER: [(u8, u8); 1] = [(1, 0)];
 
-/// The glycan core (reducing-end) type. Determines which Y ions count as *core*
-/// ions, whether core-fucose is recognized, and the default core-ion filter
-/// threshold. A single [`GlycanIonIndex`] indexes one core type at a time
-/// (glycan databases are likewise shipped separately for N- and O-glycans).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GlycanCore {
-    /// Canonical N-glycan trimannosyl core (GlcNAc₂Man₃).
     #[default]
     NGlycan,
-    /// O-glycan core: the reducing-end GalNAc (HexNAc).
     OGlycan,
 }
 
 impl GlycanCore {
-    /// Core composition `(hexnac, hex)` retained at the reducing end.
     pub fn core_composition(self) -> (u8, u8) {
         match self {
             GlycanCore::NGlycan => (2, 3),
@@ -246,7 +157,6 @@ impl GlycanCore {
         }
     }
 
-    /// Core Y-ion ladder, Y1 first, ending at the full core.
     pub fn core_y_ladder(self) -> &'static [(u8, u8)] {
         match self {
             GlycanCore::NGlycan => &N_CORE_Y_LADDER,
@@ -254,16 +164,10 @@ impl GlycanCore {
         }
     }
 
-    /// Whether one Fuc may be core-fucose (α1-6 on the reducing-end GlcNAc of an
-    /// N-glycan). When true and the composition carries ≥1 Fuc, one Fuc is pinned
-    /// to the core and retained on every core Y ion instead of being an antenna
-    /// residue. (Any Fuc beyond the first stays antenna/Lewis fucose.)
     pub fn core_fucose(self) -> bool {
         matches!(self, GlycanCore::NGlycan)
     }
 
-    /// Default minimum matched core Y ions for the glycan-first core filter:
-    /// 2 for N-glycans (Y-ladder), 1 for O-glycans (single GalNAc).
     pub fn default_min_core_ions(self) -> u32 {
         match self {
             GlycanCore::NGlycan => 2,
@@ -272,23 +176,9 @@ impl GlycanCore {
     }
 }
 
-/// Generate every Y-complementary ion of one glycan from its tree topology.
-///
-/// A Y ion stays on the peptide and always contains the reducing-end residue; each
-/// one is produced by a SINGLE glycosidic-bond cleavage (the GlycoDecipher /
-/// GlycoWorkbench B/Y convention — one Y per bond, O(n), not the combinatorial
-/// multi-cleavage set). The ion stored here is the Y-COMPLEMENT — the glycan mass
-/// that was LOST (the observed ion is `peptide + (full − lost)`). For each
-/// single-cleavage retained mass we emit `lost = full − retained`, flagging
-/// `is_core` when the retained mass is at most the trimannosyl/GalNAc core (the
-/// core-ladder rungs). The intact precursor (lost ≈ 0) is skipped; Y0 (the bare
-/// peptide, everything lost) is appended last.
 fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     let c = &glycan.composition;
     let (core_hn, core_h) = core.core_composition();
-    // Core fucose consumes at most one Fuc; the rest is antenna fucose. Read the
-    // structural fact from the glycan (recorded by the .gdb loader) instead of
-    // guessing "first Fuc is core"; the guess is wrong for antenna/Lewis fucose.
     let core_fuc: u8 = if core.core_fucose() {
         c.core_fuc.min(1)
     } else {
@@ -300,9 +190,6 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     let mut ions = Vec::with_capacity(retained.len() + 1);
     for r in retained {
         let lost = c.mass - r;
-        // The intact precursor (r == full mass) is not a fragment ion; its lost
-        // mass is 0 up to float noise. A real lost mass is ≥ one residue (~146 Da),
-        // so 1e-6 cleanly separates the two.
         if lost <= 1e-6 {
             continue;
         }
@@ -313,7 +200,6 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
         });
     }
 
-    // Y0: the bare peptide (everything lost).
     ions.push(GlycanIon {
         glycan_id: glycan.id,
         mass: c.mass,
@@ -323,8 +209,6 @@ fn generate_y_ions(glycan: &Glycan, core: GlycanCore) -> Vec<GlycanIon> {
     ions
 }
 
-/// Compact index record: `glycan_id` in the high 31 bits, `is_core` in the low
-/// bit. Glycan ids must fit in 31 bits (asserted at index build).
 #[inline]
 pub fn encode_glycan_record(glycan_id: u32, is_core: bool) -> u32 {
     debug_assert!(
@@ -334,7 +218,6 @@ pub fn encode_glycan_record(glycan_id: u32, is_core: bool) -> u32 {
     (glycan_id << 1) | (is_core as u32)
 }
 
-/// Inverse of [`encode_glycan_record`].
 #[inline]
 pub fn decode_glycan_record(encoded: u32) -> (u32, bool) {
     (encoded >> 1, (encoded & 1) != 0)
@@ -345,31 +228,16 @@ pub fn mass_to_bin(mass: f64, bin_width: f64) -> i64 {
     (mass / bin_width).round() as i64
 }
 
-/// Hash index from (binned) Y-complementary ion mass to compact glycan records.
-///
-/// Construction is O(number of glycan ions); a query is O(peaks × neighbourhood
-/// bins), independent of the number of glycans. Each record stores the exact ion
-/// mass so a query can apply the true tolerance window (not just the bin).
 pub struct GlycanIonIndex {
     bin_width: f64,
-    /// ppm tolerance, when set; the acceptance window is `mass * ppm * 1e-6`
-    /// (floored at [`PPM_FLOOR_DA`]). `None` means a fixed-Da window `bin_width`.
     tol_ppm: Option<f64>,
-    /// Core (reducing-end) type the indexed glycans share; drives Y-ion generation.
     core: GlycanCore,
-    /// bin → `(exact_ion_mass, encoded_record)`.
     bins: HashMap<i64, Vec<(f64, u32)>>,
 }
 
-/// Absolute floor (Da) on a ppm acceptance window, so a light fragment is not
-/// held to an unrealistically tight tolerance.
 pub const PPM_FLOOR_DA: f64 = 0.005;
 
 impl GlycanIonIndex {
-    ///
-    /// `bin_width` is a fixed Da bin for the integer keys (kept fine enough that
-    /// the neighbourhood walk covers every admissible match; exact tolerance is
-    /// checked per record at query time via `tol_ppm` or `bin_width`).
     pub fn new(bin_width: f64, tol_ppm: Option<f64>, core: GlycanCore) -> Self {
         GlycanIonIndex {
             bin_width: bin_width.max(1e-4),
@@ -391,7 +259,6 @@ impl GlycanIonIndex {
         self.bins.is_empty()
     }
 
-    /// Add one glycan's Y-complementary ions to the index.
     pub fn add_glycan(&mut self, glycan: &Glycan) {
         assert!(
             glycan.id < (1 << 31),
@@ -407,7 +274,6 @@ impl GlycanIonIndex {
         }
     }
 
-    /// Build an index over a whole database of glycans of one core type.
     pub fn build(
         glycans: &[Glycan],
         bin_width: f64,
@@ -421,7 +287,6 @@ impl GlycanIonIndex {
         idx
     }
 
-    /// Half-window (Da) for a query mass.
     fn window_da(&self, mass: f64) -> f64 {
         match self.tol_ppm {
             Some(ppm) => (mass * ppm * 1e-6).max(PPM_FLOOR_DA),
@@ -429,9 +294,6 @@ impl GlycanIonIndex {
         }
     }
 
-    /// Query the index for `query_mass`, returning the encoded records whose ion
-    /// mass is within tolerance. Each returned `u32` is a
-    /// [`encode_glycan_record`] value; decode with [`decode_glycan_record`].
     pub fn query(&self, query_mass: f64) -> Vec<u32> {
         let tol = self.window_da(query_mass);
         let lo = mass_to_bin(query_mass - tol, self.bin_width);
@@ -450,7 +312,6 @@ impl GlycanIonIndex {
     }
 }
 
-/// A candidate glycan with the evidence accumulated from a spectrum.
 #[derive(Debug, Clone)]
 pub struct GlycanCandidate {
     pub glycan_id: u32,
@@ -461,29 +322,14 @@ pub struct GlycanCandidate {
     pub mass_errors: Vec<f64>,
 }
 
-/// Tunable search parameters. Fields that the reference figure leaves open are
-/// explicit here (and in [`DiagnosticIon`]) rather than hard-coded.
 #[derive(Debug, Clone)]
 pub struct GlycanConfig {
-    /// Mass tolerance in ppm (used for both the index window and scoring).
     pub tol_ppm: f64,
-    /// Minimum diagnostic (oxonium) ions required for a spectrum to be treated
-    /// as a glycopeptide at all.
     pub min_diagnostic_ions: u32,
-    /// Minimum matched core ions a candidate must have to survive core filtering.
-    /// pGlyco3 uses 2 for N-glycans and 1 for O-glycans.
     pub min_core_ions: u32,
-    /// Number of top candidates to return per spectrum. pGlyco3 keeps the top 100
-    /// candidate glycan compositions for the peptide search.
     pub top_k: usize,
-    /// Diagnostic-ion panel (defaults to [`default_diagnostic_ions`]).
     pub diagnostic_ions: Vec<DiagnosticIon>,
-    /// When true, discard a candidate whose variable monosaccharides (Fuc, NeuAc,
-    /// NeuGc) are not supported by a fired diagnostic ion. Hex/HexNAc are present
-    /// in every N-glycan and are therefore not gated.
     pub diagnostic_filter: bool,
-    /// Weights for the score: (y-ion, core-ion, diagnostic). Configurable so the
-    /// scoring formula is not silently fixed.
     pub score_weights: (f32, f32, f32),
 }
 
@@ -501,32 +347,12 @@ impl Default for GlycanConfig {
     }
 }
 
-/// The result of a glycan-first search over one spectrum.
 #[derive(Debug, Clone)]
 pub struct GlycanSearchResult {
     pub is_glycopeptide: bool,
     pub candidates: Vec<GlycanCandidate>,
 }
 
-/// Search the glycan ion index for a spectrum.
-///
-/// `peaks` is `(m/z, intensity)`, sorted by m/z ascending. `glycans` is the
-/// glycan list the index was built from, indexed by `glycan_id`. `precursor_mass`
-/// is the **neutral monoisotopic mass** `M = peptide_neutral + Σ(glycan residues)`
-/// (`(m/z − H⁺)·z`, *without* the −H₂O the backbone driver applies); see the
-/// module docs. `precursor_charge` bounds the fragment-charge ladder.
-///
-/// Pipeline:
-///
-/// 1. **Diagnostic precheck** — enough oxonium ions to call the spectrum a
-///    glycopeptide.
-/// 2. **Y-complementary retrieval** — for each peak and each charge,
-///    `q = M − (m/z − H⁺)·z` is looked up in the index; matches accumulate
-///    per-glycan total and core (via the index's `is_core` bit) counts.
-/// 3. **Core-ion filter** — keep a glycan only with ≥ `min_core_ions` core ions.
-/// 4. **Diagnostic-ion filter** — drop glycans whose variable monosaccharides
-///    lack diagnostic-ion support.
-/// 5. **Score + top-K** — `w_y·y + w_c·core + w_d·diag`, top `top_k` returned.
 pub fn search_glycans(
     index: &GlycanIonIndex,
     config: &GlycanConfig,
@@ -547,9 +373,6 @@ pub fn search_glycans(
         };
     }
 
-    // 2. Y-complementary retrieval. Each peak is interpreted at every charge
-    // from 1 up to the precursor charge, so multiply-charged Y ions (frequent in
-    // glycopeptide MS/MS) are not lost to a charge-1-only read.
     let mut y_count: HashMap<u32, u32> = HashMap::new();
     let mut core_count: HashMap<u32, u32> = HashMap::new();
     let zmax = precursor_charge.max(1);
@@ -570,7 +393,6 @@ pub fn search_glycans(
         }
     }
 
-    // 3–5. Core filter, diagnostic filter, score, top-K.
     let mut gids: Vec<u32> = y_count.keys().copied().collect();
     gids.sort_unstable();
     let mut candidates = Vec::with_capacity(gids.len().min(config.top_k));
@@ -606,18 +428,11 @@ pub fn search_glycans(
     candidates.truncate(config.top_k);
 
     GlycanSearchResult {
-        // The diagnostic panel passed above, which is what makes this a
-        // glycopeptide spectrum. Whether retrieval then found candidates is
-        // reported by `candidates`, and the two are not the same question.
         is_glycopeptide: true,
         candidates,
     }
 }
 
-/// Diagnostic-ion support for a candidate's variable monosaccharides: a glycan
-/// claiming Fuc/NeuAc/NeuGc must have at least one fired diagnostic ion implying
-/// that residue. Hex/HexNAc are in every N-glycan and are not gated (they would
-/// be for O-glycans or other core definitions — a configuration point).
 fn diagnostic_supported(comp: &GlycanComp, matched: &[&DiagnosticIon]) -> bool {
     if comp.fuc > 0 && !matched.iter().any(|di| di.fuc > 0) {
         return false;
@@ -631,7 +446,6 @@ fn diagnostic_supported(comp: &GlycanComp, matched: &[&DiagnosticIon]) -> bool {
     true
 }
 
-/// Binary search for a peak within a ppm window of `target_mz`.
 fn has_peak(peaks: &[(f64, f32)], target_mz: f64, tol_ppm: f64) -> bool {
     let tol = (target_mz * tol_ppm * 1e-6).max(PPM_FLOOR_DA);
     let idx = peaks.partition_point(|&(mz, _)| mz < target_mz - tol);
@@ -646,8 +460,6 @@ mod tests {
         glycan_with_core_fuc(id, hex, hexnac, fuc, neuac, neugc, 0)
     }
 
-    /// Like [`glycan`], but with `core_fuc` set on the composition (a Fuc that is
-    /// a direct child of the reducing-end GlcNAc).
     fn glycan_core_fuc(id: u32, hex: u8, hexnac: u8, fuc: u8, neuac: u8, neugc: u8) -> Glycan {
         glycan_with_core_fuc(id, hex, hexnac, fuc, neuac, neugc, 1)
     }
@@ -675,8 +487,6 @@ mod tests {
         assert_eq!(Monosaccharide::NeuAc.residue_mass(), NEUAC);
     }
 
-    /// Every panel ion sits within 1 ppm of the m/z of its cation formula,
-    /// computed here from element masses independently of the residue table.
     #[test]
     fn diagnostic_panel_matches_cation_formulas() {
         const C: f64 = 12.0;
@@ -688,34 +498,34 @@ mod tests {
             c as f64 * C + h as f64 * H + n as f64 * N + o as f64 * O - E
         };
         let formulas: [(u32, u32, u32, u32); 28] = [
-            (4, 6, 1, 1),    // 84
-            (4, 5, 0, 2),    // 85
-            (5, 5, 0, 2),    // 97
-            (6, 5, 0, 2),    // 109 Hex−3H2O
-            (5, 7, 0, 3),    // 115
-            (6, 8, 1, 2),    // 126
-            (6, 7, 0, 3),    // 127 Hex−2H2O
-            (7, 8, 1, 2),    // 138
-            (6, 10, 1, 3),   // 144
-            (6, 9, 0, 4),    // 145 Hex−H2O
-            (6, 11, 0, 5),   // 163 Hex
-            (8, 10, 1, 3),   // 168 HexNAc−2H2O
-            (8, 12, 1, 4),   // 186 HexNAc−H2O
-            (8, 14, 1, 5),   // 204 HexNAc
-            (11, 16, 1, 7),  // 274 NeuAc−H2O
-            (11, 16, 1, 8),  // 290 NeuGc−H2O
-            (11, 18, 1, 8),  // 292 NeuAc
-            (11, 18, 1, 9),  // 308 NeuGc
-            (12, 21, 0, 10), // Hex2
-            (14, 24, 1, 10), // HexHexNAc
-            (17, 28, 1, 13), // HexNeuAc
-            (20, 34, 1, 14), // HexHexNAcFuc
-            (20, 34, 1, 15), // Hex2HexNAc
-            (25, 41, 2, 18), // HexHexNAcNeuAc
-            (26, 44, 1, 20), // Hex3HexNAc
-            (31, 51, 2, 22), // HexHexNAcNeuAcFuc
-            (34, 57, 2, 25), // Hex3HexNAc2
-            (40, 67, 2, 29), // Hex3HexNAc2Fuc
+            (4, 6, 1, 1),
+            (4, 5, 0, 2),
+            (5, 5, 0, 2),
+            (6, 5, 0, 2),
+            (5, 7, 0, 3),
+            (6, 8, 1, 2),
+            (6, 7, 0, 3),
+            (7, 8, 1, 2),
+            (6, 10, 1, 3),
+            (6, 9, 0, 4),
+            (6, 11, 0, 5),
+            (8, 10, 1, 3),
+            (8, 12, 1, 4),
+            (8, 14, 1, 5),
+            (11, 16, 1, 7),
+            (11, 16, 1, 8),
+            (11, 18, 1, 8),
+            (11, 18, 1, 9),
+            (12, 21, 0, 10),
+            (14, 24, 1, 10),
+            (17, 28, 1, 13),
+            (20, 34, 1, 14),
+            (20, 34, 1, 15),
+            (25, 41, 2, 18),
+            (26, 44, 1, 20),
+            (31, 51, 2, 22),
+            (34, 57, 2, 25),
+            (40, 67, 2, 29),
         ];
         let panel = default_diagnostic_ions();
         assert_eq!(panel.len(), formulas.len());
@@ -741,24 +551,20 @@ mod tests {
     #[test]
     fn mass_binning_is_deterministic() {
         assert_eq!(mass_to_bin(1000.0, 0.1), mass_to_bin(1000.0, 0.1));
-        assert_eq!(mass_to_bin(203.08, 0.02), 10154); // round(203.08/0.02)
+        assert_eq!(mass_to_bin(203.08, 0.02), 10154);
     }
 
     #[test]
     fn generate_y_ions_respects_core_ladder() {
-        // Man3GlcNAc2 (hex=3, hexnac=2): no antenna, so the only Y ions are the
-        // core ladder Y4..Y1 (Y5 == intact precursor, skipped) plus Y0 → 5 ions.
         let g = glycan(0, 3, 2, 0, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
         assert_eq!(ions.len(), 5);
-        // The Y1 core complement: lost = full − HexNAc = 3Hex+1HexNAc, is_core.
         let y1_comp = 3.0 * HEX + HEXNAC;
         let y1 = ions
             .iter()
             .find(|i| (i.mass - y1_comp).abs() < 1e-6)
             .expect("Y1 complement present");
         assert!(y1.is_core);
-        // The full-glycan loss (Y0, bare peptide) is present and NOT core.
         let y0 = ions
             .iter()
             .find(|i| (i.mass - g.composition.mass).abs() < 1e-6)
@@ -768,15 +574,9 @@ mod tests {
 
     #[test]
     fn generate_y_ions_is_structure_aware_not_full_power_set() {
-        // Hex5HexNAc4: the full power set would be (4+1)·(5+1) = 30 sub-compositions;
-        // the topology-derived ladder (a linear biosynthetic chain) emits 9 (8
-        // single-cleavage complements + Y0), and no ion trims the core
-        // while keeping an antenna residue.
         let g = glycan(0, 5, 4, 0, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
         assert_eq!(ions.len(), 9);
-        // Every non-core ion (except Y0, the full loss) must leave the whole core
-        // intact on the peptide.
         for ion in &ions {
             if !ion.is_core {
                 let remaining = g.composition.mass - ion.mass;
@@ -789,12 +589,9 @@ mod tests {
 
     #[test]
     fn o_glycan_core_ion_is_single_galnac() {
-        // Core-1 O-glycan Galβ1-3GalNAc = Hex1HexNAc1. Core = GalNAc(HexNAc), so
-        // the only core Y ion is Y1 (remaining == GalNAc), whose complement is the
-        // Gal residue (Hex); plus Y0.
         let g = glycan(0, 1, 1, 0, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::OGlycan);
-        assert_eq!(ions.len(), 2); // {Gal lost → Y1 core}, {everything lost → Y0}
+        assert_eq!(ions.len(), 2);
         let y1 = ions
             .iter()
             .find(|i| (i.mass - HEX).abs() < 1e-6)
@@ -809,29 +606,18 @@ mod tests {
 
     #[test]
     fn n_glycan_core_fucose_is_a_separate_branch_of_the_reducing_end() {
-        // Man3Fuc (Hex3HexNAc2Fuc1) with core_fuc = 1: the Fuc is a direct child
-        // of the reducing-end GlcNAc, so topologically it can be lost on its own
-        // (a real Y-ion: cleave the GlcNAc-Fuc bond) AND kept on every other
-        // reducing-end fragment. Single-glycosidic-bond-cleavage Y-ions: the linear
-        // chain `(N(F)(N(H(H(H)))))` has 5 bonds → 5 lost masses (F alone, H, 2H,
-        // 3H, N+3H) + Y0 = 6 ions.
         let g = glycan_core_fuc(0, 3, 2, 1, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
         assert_eq!(ions.len(), 6);
-        // The core fuc is lost alone: complement = FUC (retained = the trimannosyl
-        // core), a topology-correct ion the old pinned ladder never emitted.
         assert!(
             ions.iter().any(|i| (i.mass - FUC).abs() < 1e-6),
             "core Fuc must be losable alone (separate branch)"
         );
-        // The Y1+fuc core rung (remaining = HexNAc + Fuc, complement = 3Hex +
-        // 1HexNAc) is still present and flagged core.
         let y1 = ions
             .iter()
             .find(|i| (i.mass - (3.0 * HEX + HEXNAC)).abs() < 1e-6)
             .expect("Y1+Fuc complement present");
         assert!(y1.is_core);
-        // This is a pure-core glycan, so every non-Y0 ion is a core rung.
         for ion in &ions {
             if !ion.is_core {
                 assert!(
@@ -844,20 +630,12 @@ mod tests {
 
     #[test]
     fn antenna_fucose_stays_antenna_not_pinned_to_core() {
-        // Same composition (Hex3HexNAc2Fuc1) as the core-fucose test, but with
-        // core_fuc = 0 (a Fuc on an outer mannose, not the reducing-end GlcNAc).
-        // The Fuc is an antenna residue: it is lost alone (mass == FUC), and the
-        // core ladder does NOT carry +Fuc on every rung.
         let g = glycan(0, 3, 2, 1, 0, 0);
         let ions = generate_y_ions(&g, GlycanCore::NGlycan);
-        // The antenna Fuc is lost as a standalone ion (its complement is the core).
         assert!(
             ions.iter().any(|i| (i.mass - FUC).abs() < 1e-6),
             "antenna Fuc must be lost alone"
         );
-        // Unlike the core-fucose case, there is no ion at the "3Hex + HexNAc"
-        // complement (that is the core-fucose Y1 rung signature, present only
-        // when the Fuc rides the core).
         assert!(
             !ions
                 .iter()
@@ -870,8 +648,6 @@ mod tests {
     fn index_retrieves_glycan_by_complementary_ion() {
         let glycans = vec![glycan(7, 3, 2, 0, 0, 0)];
         let idx = GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan);
-        // Query the Y1 complement (full − HexNAc = 3Hex + 1HexNAc), which must
-        // retrieve glycan 7 with the core flag set.
         let q = 3.0 * HEX + HEXNAC;
         let hits = idx.query(q);
         assert!(
@@ -883,32 +659,22 @@ mod tests {
 
     #[test]
     fn search_returns_candidates_for_glycopeptide_spectrum() {
-        // glycan ids must equal their index in `glycans` (the driver assigns ids
-        // via enumerate), since `search_glycans` looks up the composition by id.
-        let glycans = vec![
-            glycan(0, 5, 2, 0, 0, 0), // Man5 (distractor)
-            glycan(1, 3, 2, 0, 0, 0), // Man3 (truth)
-        ];
+        let glycans = vec![glycan(0, 5, 2, 0, 0, 0), glycan(1, 3, 2, 0, 0, 0)];
         let idx = GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan);
         let cfg = GlycanConfig::default();
-        // Man3 (Hex3HexNAc2) glycopeptide: peptide 1000, glycan 892.32, charge 3.
-        // precursor_mass is the NEUTRAL mass M = peptide_neutral + glycan.
         let peptide = 1000.0;
         let precursor_mass = peptide + 3.0 * HEX + 2.0 * HEXNAC;
         let mut peaks = vec![
-            (204.0867, 100.0), // HexNAc oxonium
-            (366.1395, 80.0),  // HexHexNAc oxonium
-            (138.0550, 50.0),  // HexNAc fragment
-            // Core Y ions (peptide + core fragments), m/z at charge 1.
-            (peptide + HEXNAC + PROTON, 60.0),       // Y1
-            (peptide + 2.0 * HEXNAC + PROTON, 50.0), // Y2
+            (204.0867, 100.0),
+            (366.1395, 80.0),
+            (138.0550, 50.0),
+            (peptide + HEXNAC + PROTON, 60.0),
+            (peptide + 2.0 * HEXNAC + PROTON, 50.0),
         ];
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let comps: Vec<GlycanComp> = glycans.iter().map(|g| g.composition.clone()).collect();
         let result = search_glycans(&idx, &cfg, &comps, precursor_mass, 3, &peaks);
         assert!(result.is_glycopeptide);
-        // The true Man3 glycan (id 1) must be retrieved; Man5 (id 0) must be
-        // filtered out (its Y1/Y2 complements are non-core).
         assert!(result.candidates.iter().any(|c| c.glycan_id == 1));
         assert!(result.candidates.iter().all(|c| c.glycan_id != 0));
     }
@@ -926,15 +692,12 @@ mod tests {
 
     #[test]
     fn diagnostic_filter_rejects_unsupported_sialic_acid() {
-        // A sialylated glycan (NeuAc present) with no NeuAc diagnostic ion fired
-        // must be filtered out when diagnostic_filter is on.
-        let glycans = vec![glycan(0, 3, 2, 0, 1, 0)]; // Man3 + NeuAc
+        let glycans = vec![glycan(0, 3, 2, 0, 1, 0)];
         let idx = GlycanIonIndex::build(&glycans, 0.02, Some(20.0), GlycanCore::NGlycan);
         let cfg = GlycanConfig {
             diagnostic_filter: true,
             ..GlycanConfig::default()
         };
-        // Peaks: core Y ions + HexNAc/HexHexNAc diagnostics, but NO sialic ion.
         let peptide = 1000.0;
         let precursor_mass = peptide + 3.0 * HEX + 2.0 * HEXNAC + NEUAC;
         let mut peaks = vec![
@@ -952,13 +715,6 @@ mod tests {
         );
     }
 
-    /// Phase 8 benchmark: index construction + query cost. Query time must scale
-    /// with peaks × bins, not with the number of glycans (the whole point of the
-    /// index). Prints timing for eyeballing; assertions keep it regression-safe.
-    ///
-    /// The glycan DB is read from the `.gdb` at `$ANDES_GLYCO_GDB` when set (so
-    /// the benchmark measures the *input* database, e.g. N-glycan-mouse.gdb's
-    /// 1234 compositions); otherwise it falls back to the built-in common list.
     #[test]
     fn benchmark_index_construction_and_query() {
         let comps = match std::env::var("ANDES_GLYCO_GDB") {

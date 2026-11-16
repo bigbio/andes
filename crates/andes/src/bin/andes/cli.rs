@@ -1,12 +1,3 @@
-//! Command-line argument definitions and value parsers.
-//!
-//! Help layout: every option has a `help_heading`. `-h` shows the main options
-//! of the first five headings (Input and output, Search, FDR, Modes,
-//! Quantification); `--help` shows every option that is not `hide = true`.
-//! An advanced option is `hide_short_help = true`; `hide = true` is kept for
-//! test hooks and diagnostics. The first paragraph of a doc comment is the
-//! `-h` text, the whole comment the `--help` text.
-
 use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValue, TypedValueParser};
@@ -29,10 +20,7 @@ pub(crate) const H_ISOBARIC: &str = "Isobaric (TMT, iTRAQ)";
 pub(crate) const H_LFQ: &str = "Label-free";
 pub(crate) const H_LABEL: &str = "Labelled pairs";
 pub(crate) const H_GLYCO: &str = "Glycopeptides";
-/// `--help` heading of the advanced FDR flags, each of which inherits a main
-/// FDR flag when unset.
 pub(crate) const ADVANCED_FDR: &str = "Advanced FDR";
-/// `--help` heading of the advanced options of the `quant` stages.
 pub(crate) const H_ADVANCED: &str = "Advanced";
 
 /// Fragmentation method of MGF spectra.
@@ -111,20 +99,12 @@ pub(crate) enum ScoreFlag {
     Strong,
 }
 
-/// Trees kept per GBDT ensemble when `--gbdt-max-trees` is unset (standard search).
 pub(crate) const DEFAULT_GBDT_MAX_TREES: usize = 100;
 
-/// `--psm-fdr` and `--quant-fdr` when not given.
 pub(crate) const DEFAULT_FDR: f64 = 0.01;
 
-/// The floor of the default `--proteoform-fdr`.
 pub(crate) const PROTEOFORM_FDR_FLOOR: f64 = 0.05;
 
-/// The quantification q-value of `--label` (channels and transfers), of the
-/// `lfq.parquet` `accepted` flag and of the `--glyco --lfq --mbr` transfers
-/// when neither `--quant-fdr` nor the value's advanced flag is given: their
-/// q-values come from one target/decoy competition per run with few decoys,
-/// too coarse for 0.01.
 pub(crate) const COARSE_QUANT_FDR: f64 = 0.05;
 
 /// `--fragment-index`: candidate retrieval.
@@ -171,9 +151,6 @@ pub(crate) enum PredictorBackend {
     Ort,
 }
 
-/// A value parser that accepts what `parse` accepts and lists `values`
-/// (name, help) as the possible values in the help. For flags whose parser
-/// takes more than a fixed set of names (aliases, lists, any case).
 #[derive(Clone)]
 pub(crate) struct Listed<T> {
     values: &'static [(&'static str, &'static str)],
@@ -213,7 +190,6 @@ impl<T: Clone + Send + Sync + 'static> TypedValueParser for Listed<T> {
     }
 }
 
-/// `--enzyme` names; `parse_enzymes` also takes their aliases and lists.
 pub(crate) const ENZYMES: &[(&str, &str)] = &[
     ("trypsin", ""),
     ("chymotrypsin", ""),
@@ -227,7 +203,6 @@ pub(crate) const ENZYMES: &[(&str, &str)] = &[
     ("nonspecific", ""),
 ];
 
-/// `--decoy-strategy` names; `DecoyStrategy::from_name` also takes their aliases.
 pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
     ("shuffle", "seeded shuffle of each segment"),
     (
@@ -246,7 +221,6 @@ pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
     ),
 ];
 
-/// `--tmt` kits; `quant::Plex::parse` also takes their `plex`/TMTpro spellings.
 pub(crate) const PLEXES: &[(&str, &str)] = &[
     ("tmt6", ""),
     ("tmt10", ""),
@@ -259,7 +233,6 @@ pub(crate) const PLEXES: &[(&str, &str)] = &[
     ("itraq8", ""),
 ];
 
-/// `--uniprot-evidence` levels.
 pub(crate) const EVIDENCE_LEVELS: &[(&str, &str)] = &[
     (
         "experimental",
@@ -276,15 +249,12 @@ pub(crate) const EVIDENCE_LEVELS: &[(&str, &str)] = &[
     ),
 ];
 
-/// `--precursor-cal` modes.
 pub(crate) const PRECURSOR_CAL_MODES: &[(&str, &str)] = &[
     ("off", ""),
     ("auto", "skip the correction when the sample is too small"),
     ("on", ""),
 ];
 
-/// A modification list of `--fixed-mods` or `--variable-mods` (or their
-/// config keys), resolved against the bundled UNIMOD table.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModList(pub(crate) Vec<model::Modification>);
 
@@ -414,10 +384,6 @@ pub(crate) struct DatabaseArgs {
     pub(crate) knockoffs: usize,
 }
 
-/// The search options: `andes` without a subcommand.
-// `spectrum`, `database` and `output_pin` are optional at the clap level so
-// that a subcommand can be given without them; `main` checks them when no
-// subcommand is given.
 #[derive(Args, Debug)]
 #[command(group(
     clap::ArgGroup::new("glycan_db")
@@ -426,7 +392,6 @@ pub(crate) struct DatabaseArgs {
         .required(false),
 ))]
 pub(crate) struct SearchArgs {
-    // ── Input and output ──────────────────────────────────────────────────
     /// YAML file of options (config.example.yaml); a flag on the command line wins
     ///
     /// Sections and keys: DOCS.md §1b.
@@ -479,7 +444,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_IO)]
     pub(crate) output_parquet: Option<PathBuf>,
 
-    // ── Search ────────────────────────────────────────────────────────────
     /// Precursor mass tolerance in ppm or Da, e.g. 20ppm or 0.02da
     #[arg(long, value_name = "TOL", default_value = "20ppm", value_parser = parse_precursor_tol,
           help_heading = H_SEARCH)]
@@ -510,8 +474,6 @@ pub(crate) struct SearchArgs {
     pub(crate) charge: (u8, u8),
 
     /// Isotope-error offsets tried, as MIN..MAX (or MIN-MAX) [default: -1..2, 0..2 with --glyco]
-    // An `Option`, so that an explicit -1..2 is told apart from the default and
-    // kept under --glyco.
     #[arg(long, value_name = "MIN..MAX", value_parser = parse_isotope_error_range,
           hide_short_help = true, help_heading = H_SEARCH)]
     pub(crate) isotope_error: Option<(i8, i8)>,
@@ -558,7 +520,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
     pub(crate) decoy_seed: u64,
 
-    // ── FDR ───────────────────────────────────────────────────────────────
     /// PSM-level FDR: the q-value threshold of the reported PSMs [default: 0.01]
     ///
     /// It sets the filtered <stem>.q<fdr>.tsv output (target PSMs at q <= this), the PSMs
@@ -600,7 +561,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_FDR)]
     pub(crate) rescore: bool,
 
-    // ── Modes ─────────────────────────────────────────────────────────────
     /// Also search co-isolated peptides: a second PSM per scan from its MS1 isolation window
     ///
     /// Pass 1 is the normal search and keeps the same --top-n candidates per scan; pass 2
@@ -727,7 +687,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_MODES)]
     pub(crate) refine_config: Option<PathBuf>,
 
-    // ── Quantification ────────────────────────────────────────────────────
     /// Isobaric reporter-ion quantification with this labelling kit
     ///
     /// Writes <stem>.tmt.parquet and, with --output-parquet, the QPX
@@ -799,7 +758,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    // ── Rescoring ─────────────────────────────────────────────────────────
     /// Rescore with the built-in rescorer instead of Percolator (no Percolator needed)
     ///
     /// Percolator's algorithm in process: a 3-fold cross-validated semi-supervised linear
@@ -841,7 +799,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) keep_pin: bool,
 
-    // ── Calibration and runtime ───────────────────────────────────────────
     /// Precursor mass calibration pre-pass
     ///
     /// auto and on learn a systematic ppm shift from confident PSMs in a pre-pass and
@@ -948,10 +905,6 @@ pub(crate) struct SearchArgs {
     /// Applies to the fragment-intensity and rich-ion ensembles. Fewer trees change the
     /// predicted intensities, so the PIN feature values and, with --score strong, which
     /// candidate ranks first.
-    // The default of 100 keeps identifications at 1% FDR of all 300 trees on the
-    // high- and low-resolution benchmark sets at about a third less run time;
-    // under --glyco the ensembles are a negligible share of the run, so every
-    // tree is kept. Measurements: DOCS.md §11 and the benchmark notes.
     #[arg(long, value_name = "N", hide_short_help = true, help_heading = H_RUNTIME)]
     pub(crate) gbdt_max_trees: Option<usize>,
 
@@ -959,7 +912,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide = true, default_value = "0")]
     pub(crate) max_spectra: usize,
 
-    // ── Prediction ────────────────────────────────────────────────────────
     /// Predicted features added to the PIN, comma-separated
     ///
     /// Predicted retention times are calibrated to the observed ones per input file.
@@ -997,7 +949,6 @@ pub(crate) struct SearchArgs {
           help_heading = H_PREDICTION)]
     pub(crate) predictor_batch: usize,
 
-    // ── Isobaric ──────────────────────────────────────────────────────────
     /// MS level of the reporter ions: 2 (the identified MS2) or 3 (its SPS-MS3 scan) [default: 3 for SPS-MS3 data, else 2]
     ///
     /// 3 is the default when the MS2 is low-resolution, cannot separate the plex's channels
@@ -1066,7 +1017,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) mbr_wrong_log2: f64,
 
-    // ── Label-free ────────────────────────────────────────────────────────
     /// MS1 m/z tolerance of the isotope chromatograms, e.g. 10ppm [default: 10ppm]
     #[arg(long, value_name = "TOL", value_parser = parse_precursor_tol, hide_short_help = true,
           help_heading = H_LFQ)]
@@ -1093,7 +1043,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_LFQ)]
     pub(crate) lfq_min_cosine: f64,
 
-    // ── Labelled pairs ────────────────────────────────────────────────────
     /// Reference channel of the --label ratios, 1-based
     #[arg(long, value_name = "N", default_value_t = 1, hide_short_help = true,
           help_heading = H_LABEL)]
@@ -1122,7 +1071,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_LABEL)]
     pub(crate) label_heavy_enrichment: f64,
 
-    // ── Glycopeptides ─────────────────────────────────────────────────────
     /// External .gdb glycan database of --glyco (instead of --glyco-species)
     ///
     /// Each canonical string keeps its tree structure (core- or antenna-fucose), and the
@@ -1246,7 +1194,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FILE", hide = true)]
     pub(crate) glyco_mbr_match_train: Option<PathBuf>,
 
-    // ── Advanced FDR ──────────────────────────────────────────────────────
     /// q-value threshold of proteoform claims [default: the larger of --psm-fdr and 0.05]
     ///
     /// With rescoring, the filtered TSV, the proteoform table and quantification accept
@@ -1600,77 +1547,60 @@ pub(crate) struct QuantFinalizeArgs {
 
 pub(crate) type Cli = SearchArgs;
 
-/// The effective FDR thresholds: each advanced flag inherits its main flag.
 impl SearchArgs {
-    /// `--psm-fdr`.
     pub(crate) fn psm_fdr(&self) -> f64 {
         self.psm_fdr.unwrap_or(DEFAULT_FDR)
     }
 
-    /// `--proteoform-fdr`: the larger of `--psm-fdr` and 0.05 when unset.
     pub(crate) fn proteoform_fdr(&self) -> f64 {
         proteoform_fdr(self.proteoform_fdr, self.psm_fdr())
     }
 
-    /// `--mbr-donor-fdr`: `--psm-fdr` when unset.
     pub(crate) fn mbr_donor_fdr(&self) -> f64 {
         self.mbr_donor_fdr.unwrap_or_else(|| self.psm_fdr())
     }
 
-    /// `--quant-transfer-fdr` of the label-free and isobaric transfers:
-    /// `--quant-fdr` when unset.
     pub(crate) fn quant_transfer_fdr(&self) -> f64 {
         self.quant_transfer_fdr
             .or(self.quant_fdr)
             .unwrap_or(DEFAULT_FDR)
     }
 
-    /// `--quant-transfer-fdr` of the `--label` and `--glyco` transfers:
-    /// `--quant-fdr` when unset, [`COARSE_QUANT_FDR`] when neither is given.
     pub(crate) fn coarse_transfer_fdr(&self) -> f64 {
         self.quant_transfer_fdr
             .or(self.quant_fdr)
             .unwrap_or(COARSE_QUANT_FDR)
     }
 
-    /// `--quant-channel-fdr`: `--quant-fdr` when unset, [`COARSE_QUANT_FDR`]
-    /// when neither is given.
     pub(crate) fn quant_channel_fdr(&self) -> f64 {
         self.quant_channel_fdr
             .or(self.quant_fdr)
             .unwrap_or(COARSE_QUANT_FDR)
     }
 
-    /// The feature q-value of `accepted` in `lfq.parquet`: `--quant-fdr`,
-    /// [`COARSE_QUANT_FDR`] when not given.
     pub(crate) fn lfq_feature_fdr(&self) -> f64 {
         self.quant_fdr.unwrap_or(COARSE_QUANT_FDR)
     }
 }
 
 impl ProteinArgs {
-    /// `--proteoform-fdr`: the larger of `--psm-fdr` and 0.05 when unset.
     pub(crate) fn proteoform_fdr(&self) -> f64 {
         proteoform_fdr(self.proteoform_fdr, self.psm_fdr)
     }
 }
 
 impl QuantLibraryArgs {
-    /// `--mbr-donor-fdr`: `--psm-fdr` when unset.
     pub(crate) fn mbr_donor_fdr(&self) -> f64 {
         self.mbr_donor_fdr.unwrap_or(self.psm_fdr)
     }
 }
 
 impl QuantFinalizeArgs {
-    /// `--quant-transfer-fdr`: `--quant-fdr` when unset.
     pub(crate) fn quant_transfer_fdr(&self) -> f64 {
         self.quant_transfer_fdr.unwrap_or(self.quant_fdr)
     }
 }
 
-/// The proteoform claim threshold: `explicit`, else the larger of the PSM
-/// threshold and [`PROTEOFORM_FDR_FLOOR`].
 fn proteoform_fdr(explicit: Option<f64>, psm_fdr: f64) -> f64 {
     explicit.unwrap_or(psm_fdr.max(PROTEOFORM_FDR_FLOOR))
 }
@@ -1745,7 +1675,6 @@ pub(crate) enum GlycoSpeciesFlag {
 }
 
 impl GlycoSpeciesFlag {
-    /// The kebab-case key `load_species_glycan_db` expects.
     pub(crate) fn key(self) -> &'static str {
         match self {
             GlycoSpeciesFlag::Human => "human",
@@ -1783,8 +1712,6 @@ pub(crate) enum PrecursorMonoFlag {
     Auto,
 }
 
-/// Parse a `--config` value of a CLI enum by its CLI name; `what` names it in
-/// the error.
 pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -> Result<E, String> {
     <E as ValueEnum>::from_str(s, ignore_case).map_err(|_| {
         let names: Vec<String> = E::value_variants()
@@ -1796,14 +1723,12 @@ pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -
     })
 }
 
-/// Parse `--decoy-strategy` (any case; `rev`, `shuf` and `off` too).
 pub(crate) fn parse_decoy_strategy(s: &str) -> Result<DecoyStrategy, String> {
     DecoyStrategy::from_name(s).ok_or_else(|| {
         format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/none)")
     })
 }
 
-/// The `--decoy-strategy` name of `strategy`.
 pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
     match strategy {
         DecoyStrategy::Shuffle => "shuffle",
@@ -1813,33 +1738,21 @@ pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
     }
 }
 
-/// Parse `--enzyme`: a protease or a `,`/`+` list of them, as
-/// `parse_enzymes` reads it; the value is kept as given.
 pub(crate) fn parse_enzyme_list(s: &str) -> Result<String, String> {
     crate::model_select::parse_enzymes(s)
         .map(|_| s.to_string())
         .map_err(|e| e.to_string())
 }
 
-/// Parse `--tmt` kit names.
 pub(crate) fn parse_plex(s: &str) -> Result<quant::Plex, String> {
     quant::Plex::parse(s)
 }
 
-/// In a `MIN-MAX` dash range, the separator is the first `-` whose preceding
-/// char is an ASCII digit: any earlier `-` is MIN's sign and any `-` right after
-/// it is MAX's sign. This makes signed endpoints unambiguous — `2-5`→(2,5),
-/// `-1-2`→(-1,2), `-3--1`→(-3,-1) — which a naive `split`/`rsplit` on `-` cannot.
 pub(crate) fn dash_sep_index(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     (1..b.len()).find(|&i| b[i] == b'-' && b[i - 1].is_ascii_digit())
 }
 
-/// Parse a `MIN..MAX` (or `MIN-MAX`) range into a `(min, max)` pair, generic
-/// over the integer type so it serves both `--charge` (u8) and
-/// `--isotope-error` (i8, negatives allowed). The `-` separator is tried only
-/// when the value does not parse as `..`; signed endpoints are supported in both
-/// forms (`-1..2`, `-3--1`).
 pub(crate) fn parse_int_range<T>(s: &str, label: &str) -> Result<(T, T), String>
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
@@ -1866,14 +1779,8 @@ where
     Ok((lo, hi))
 }
 
-/// Largest precursor charge state andes will search. Beyond this the candidate
-/// space is dominated by noise and the fragment model is untrained.
 pub(crate) const MAX_SUPPORTED_CHARGE: u8 = 50;
 
-/// Parse `--charge MIN..MAX` (also `MIN-MAX`) into `(u8, u8)`.
-///
-/// Domain-validates (finding 3.8): the minimum charge must be >= 1 (charge 0 is
-/// not a real precursor) and the maximum must be within the supported bound.
 pub(crate) fn parse_charge_range(s: &str) -> Result<(u8, u8), String> {
     let (lo, hi) = parse_int_range::<u8>(s, "charge")?;
     if lo < 1 {
@@ -1889,12 +1796,10 @@ pub(crate) fn parse_charge_range(s: &str) -> Result<(u8, u8), String> {
     Ok((lo, hi))
 }
 
-/// Parse `--isotope-error MIN..MAX` (also `MIN-MAX`) into `(i8, i8)`; negatives allowed.
 pub(crate) fn parse_isotope_error_range(s: &str) -> Result<(i8, i8), String> {
     parse_int_range::<i8>(s, "isotope-error")
 }
 
-/// Parse `--precursor-tol VALUE+unit` (e.g. `20ppm`, `0.02da`/`0.02Da`).
 pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     let t = s.trim();
     let lower = t.to_ascii_lowercase();
@@ -1923,9 +1828,6 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     })
 }
 
-/// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
-/// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
-/// bad value is rejected at parse time with a clear message.
 pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1939,7 +1841,6 @@ pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
-/// A finite number `>= 0`.
 pub(crate) fn parse_non_negative(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1953,8 +1854,6 @@ pub(crate) fn parse_non_negative(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
-/// A finite `f32 >= 0` (`--chimeric-max-kl`: a KL divergence bound, where 0
-/// accepts only exact averagine matches and a negative value would accept none).
 pub(crate) fn parse_non_negative_f32(s: &str) -> Result<f32, String> {
     let v = parse_non_negative(s)?;
     if v > f32::MAX as f64 {
@@ -1963,8 +1862,6 @@ pub(crate) fn parse_non_negative_f32(s: &str) -> Result<f32, String> {
     Ok(v as f32)
 }
 
-/// Parse a fragment-tolerance scalar (`--fragment-tol-ppm` / `--fragment-tol-da`)
-/// — must be a finite, strictly-positive width (finding 3.8).
 pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1978,9 +1875,6 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
-/// A directory option (`--index-cache-dir`, `--temp-dir`): the flag when given,
-/// else the directory of `output` (the output prefix or file), so the default does
-/// not depend on the environment.
 pub(crate) fn dir_or_output_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
     match flag {
         Some(dir) => dir.to_path_buf(),
@@ -1991,12 +1885,10 @@ pub(crate) fn dir_or_output_dir(flag: Option<&Path>, output: &Path) -> PathBuf {
     }
 }
 
-/// Creates the scratch directory `dir`; an error names `--temp-dir`.
 pub(crate) fn ensure_scratch_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| scratch_dir_error(dir, &e))
 }
 
-/// The error for a scratch directory that cannot be created or written.
 pub(crate) fn scratch_dir_error(dir: &Path, e: &dyn std::fmt::Display) -> String {
     format!(
         "cannot create temporary files in {} ({e}); pass --temp-dir with a writable directory",
@@ -2004,7 +1896,6 @@ pub(crate) fn scratch_dir_error(dir: &Path, e: &dyn std::fmt::Display) -> String
     )
 }
 
-/// Parse `--precursor-cal`: off, auto or on, in any case.
 pub(crate) fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
     match s.to_ascii_lowercase().as_str() {
         "auto" => Ok(PrecursorCalMode::Auto),
@@ -2022,7 +1913,6 @@ pub(crate) fn parse_uniprot_evidence(s: &str) -> Result<input::EvidenceLevel, St
     })
 }
 
-/// `--transfer-models`: 1 to 64 members.
 fn parse_transfer_models(s: &str) -> Result<usize, String> {
     match s.parse::<usize>() {
         Ok(n) if (1..=64).contains(&n) => Ok(n),
@@ -2133,7 +2023,6 @@ mod enzyme_cli_tests {
 
     #[test]
     fn duplicate_tokens_are_deduped_preserving_order() {
-        // "trypsin,trypsin,gluc" and the alias "tryp" collapse to [Trypsin, GluC].
         let (primary, extras) = parse_enzymes("trypsin, tryp , gluc, gluc").unwrap();
         assert_eq!(primary, Enzyme::Trypsin);
         assert_eq!(extras, vec![Enzyme::GluC]);
@@ -2318,8 +2207,6 @@ mod fdr_parameter_tests {
         }
     }
 
-    /// `-h` shows the main FDR flags only; `--help` adds the advanced ones
-    /// under their own heading.
     #[test]
     fn short_help_omits_the_advanced_flags() {
         let advanced = [
@@ -2331,7 +2218,6 @@ mod fdr_parameter_tests {
         let mut cmd = SearchWrap::command();
         let short = cmd.render_help().to_string();
         let long = cmd.render_long_help().to_string();
-        // The flag's own line, not a mention in another flag's text.
         let line = |flag: &str| format!("{flag} <");
         for main in ["--psm-fdr", "--protein-fdr", "--quant-fdr"] {
             assert!(short.contains(&line(main)), "-h misses {main}");
@@ -2416,8 +2302,6 @@ mod spelling_tests {
         }
     }
 
-    /// The flags whose parser takes aliases, lists or any case accept what
-    /// that parser accepts, and only that.
     #[test]
     fn listed_flags_accept_the_spellings_of_their_parsers() {
         accepts(
@@ -2474,8 +2358,6 @@ mod spelling_tests {
         );
     }
 
-    /// The enum flags that were parsed ignoring case still are; numbers and
-    /// other names are refused.
     #[test]
     fn case_insensitive_enum_flags() {
         accepts(
@@ -2502,7 +2384,6 @@ mod spelling_tests {
         rejects("--enzyme-specificity", &["2", "nonspecific", ""]);
     }
 
-    /// The other enum flags keep their exact, case-sensitive names.
     #[test]
     fn exact_enum_flags_are_unchanged() {
         accepts("--score", &["auto", "rank", "strong"]);
@@ -2525,7 +2406,6 @@ mod spelling_tests {
         rejects("--ethcd-activation", &["hcd"]);
     }
 
-    /// `--config` reads the same spellings through `parse_enum`.
     #[test]
     fn config_enum_parser_names_the_values() {
         let e = parse_enum::<PredictFeature>("predict entry", "ms3", true).unwrap_err();
@@ -2565,7 +2445,6 @@ mod help_layout_tests {
         args: QuantFinalizeArgs,
     }
 
-    /// The long options listed in a rendered help, in order.
     fn listed(help: &str) -> Vec<String> {
         help.lines()
             .filter(|l| l.starts_with("      --"))
@@ -2608,7 +2487,6 @@ mod help_layout_tests {
         "--quant-dir",
     ];
 
-    /// The test hooks and diagnostics that no help lists.
     const HIDDEN: &[&str] = &[
         "decoy_seed",
         "cal_min_spec_keys",
@@ -2682,7 +2560,6 @@ mod help_layout_tests {
         }
     }
 
-    /// Help text is plain: no Markdown emphasis, issue numbers or research notes.
     #[test]
     fn help_text_is_plain() {
         for mut cmd in [
@@ -2697,8 +2574,6 @@ mod help_layout_tests {
         }
     }
 
-    /// The modification lists parse on the command line; an unknown name
-    /// fails with close names.
     #[test]
     fn modification_lists_parse_and_suggest() {
         let a = SearchWrap::try_parse_from([
@@ -2722,8 +2597,6 @@ mod help_layout_tests {
         assert!(e.contains("did you mean Oxidation?"), "{e}");
     }
 
-    /// `andes inference` and `quant finalize` describe the database options
-    /// as the search does.
     #[test]
     fn database_options_have_the_same_help_everywhere() {
         let help_of = |cmd: &clap::Command, id: &str| {

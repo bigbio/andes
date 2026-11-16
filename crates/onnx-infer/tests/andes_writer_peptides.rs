@@ -1,8 +1,3 @@
-//! `RtPeptide::from_andes` on peptide strings produced by andes's own writer
-//! (`model::Peptide`'s `Display`, the PIN peptide column). The strings and
-//! their expected ProForma are kept in `fixtures/andes_writer_peptides.tsv`,
-//! which `scripts/student/test_rt_parsing.py` reads for the Python parser.
-
 use std::path::PathBuf;
 
 use model::mod_spec::parse_mod_list;
@@ -17,8 +12,6 @@ fn aa_set(fixed: &str, variable: &str) -> AminoAcidSet {
         .unwrap()
 }
 
-/// `seq` with residue 1 taken from the `first_loc` variants whose delta is
-/// `first_delta`, and every other residue in its fixed-mod (Anywhere) form.
 fn written(
     set: &AminoAcidSet,
     seq: &[u8],

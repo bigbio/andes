@@ -1,276 +1,3 @@
-//! Golden gates for the enumeration retrieval path (`--fragment-index off`) of
-//! the out-of-core candidate index, driven through the real CLI.
-//!
-//! Rows are sorted before comparison, so the gates check content, not the
-//! writer's row order.
-//!
-//! Floating-point features (RichIonLLR, RankScoreFloat, ...) go through the
-//! platform's `exp`/`log`/`pow`, whose last-ulp rounding differs between C
-//! libraries (glibc vs macOS libm), and a 1-ulp change can move the sixth
-//! printed significant digit. So no gate hashes float columns bit for bit:
-//!
-//! - the `--chimeric` and `--refine` slice cases compare against a golden PIN
-//!   (`test-fixtures/goldens/*.pin.gz`, header + sorted rows) row by row —
-//!   every non-float field exactly, every float field to one unit in its sixth
-//!   significant digit (see `fields_match`);
-//! - the E. coli cases (too large to commit as PINs) compare a digest of the
-//!   non-float columns (`identity_digest`: row count + FNV-1a 64 over the header
-//!   and the sorted rows with float fields blanked), and for calibration also
-//!   the pre-pass outcome line. The non-float columns hold every row's SpecId,
-//!   label, scan, charge, peptide, proteins and integer features, so a change in
-//!   the candidate set, its order or its multiplicity still fails the gate.
-//!
-//! The defects these gates were built for need real scale to surface — a fixed
-//! modification on a real proteome (the `base_record_multiplicity` fixed-mod
-//! mass offset), proteins with an N-terminal Met whose two enumeration passes
-//! both reach the precursor window (the candidate ORDER), a calibration pre-pass
-//! that must run on the out-of-core index — so they search the in-repo
-//! `test.mgf.gz` + `ecoli.fasta`. Those four cases are `#[ignore]`d (a full
-//! E. coli search each, ~20 s release, minutes in debug):
-//!
-//! ```text
-//! cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
-//! ```
-//!
-//! The `--chimeric` and `--refine` cases run on a 150-scan MS1-bearing slice and
-//! are not ignored.
-//!
-//! GOLDENS (recorded 2026-10-11 on x86-64 Linux / glibc). The E. coli and
-//! `--chimeric` goldens were recorded from the in-memory candidate list
-//! (whole-database enumeration + a mass-bucket lookup), the path these searches
-//! took before the out-of-core index became the only one, and the out-of-core
-//! enumeration reproduced each of those PINs byte for byte after sorting. The
-//! `--refine` golden was recorded the same way, with the second pass on the
-//! in-memory candidate list; searching the anchored database through an
-//! in-memory out-of-core index reproduced it (and the Astral benchmark PIN with
-//! `--refine`) byte for byte.
-//!
-//! REGENERATED 2026-10-13 when the writers began collapsing positional isomers
-//! (one row per peptide and modification multiset per spectrum precursor and
-//! charge). Each new golden was checked against the previous binary's PIN for
-//! the same command line with its isomer alternatives removed (first row in
-//! emission order kept): identical row for row with SpecId excluded, SpecIds
-//! unique, every spectrum's first row unchanged. Rows dropped, all isomer
-//! alternatives (Ox-M sites, protein-N-terminal Acetyl vs internal K, and on the
-//! refine slice deamidation sites, plus 24 rows repeating a kept modified
-//! peptide with different flanking residues):
-//!
-//! | case | rows before | rows after |
-//! |---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 77,097 | 74,442 |
-//! | E. coli fixed mods only | 75,750 | 75,750 |
-//! | E. coli one variable mod | 77,110 | 74,998 |
-//! | `--chimeric` slice | 1,751 | 1,717 |
-//! | `--refine` slice | 1,764 | 1,595 |
-//!
-//! REGENERATED 2026-10-13 when the positional-isomer key began separating
-//! target from decoy and a kept row began listing the proteins of the rows
-//! collapsed into it. Against the previous binary's PIN for the same command
-//! line: same rows and SpecIds, every spectrum's winner unchanged, every
-//! column but `Proteins` identical; `Proteins` gains accessions on the rows
-//! whose collapsed copies came from another protein (same residues, different
-//! flanking residues). No target/decoy pair had collided, so no row returned.
-//!
-//! | case | rows | rows with new proteins |
-//! |---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 74,442 | 2 |
-//! | E. coli fixed mods only | 75,750 | 0 (golden unchanged) |
-//! | E. coli one variable mod | 74,998 | 4 |
-//! | `--chimeric` slice | 1,717 | 0 (golden unchanged) |
-//! | `--refine` slice | 1,595 | 24 |
-//!
-//! REGENERATED 2026-10-14 for the `--chimeric` slice after merging main, whose
-//! Pass 2 no longer emits a secondary that repeats a retained candidate (main's
-//! golden: 1,749 rows). The new golden is main's with its positional-isomer
-//! alternatives removed: 34 rows dropped, the remaining 1,715 identical row for
-//! row with SpecId excluded (no row gains a protein on this slice), every
-//! spectrum's winner unchanged. Against this branch's previous golden (1,717
-//! rows) it lacks exactly main's two dropped Pass-2 rows (scans 60160 and
-//! 60179); every other row is identical with SpecId excluded.
-//!
-//! REGENERATED 2026-10-14 (E. coli digests) when the MGF reader began taking
-//! the scan number from the TITLE (`... scan=N`) instead of reporting 0. Same
-//! row counts; with ScanNr set back to 0 and SpecId's scan field back to `_0_`,
-//! each new PIN digests to its previous golden exactly, so only those two
-//! fields changed.
-//!
-//! REGENERATED 2026-10-14 (E. coli digests) when the PIN charge one-hot columns
-//! began spanning every charge a PSM carries, not only the `--charge` range.
-//! Against the PIN without that change, for the same command line: same rows and
-//! SpecIds, every non-charge field identical; the header gains `charge6`, set
-//! on the rows of spectra with a declared 6+ precursor, which previously had an
-//! all-zero charge vector. The slice goldens carry no out-of-range charge and
-//! are unchanged.
-//!
-//! | case | rows | rows moved to `charge6` |
-//! |---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 74,442 | 37 |
-//! | E. coli fixed mods only | 75,750 | 35 |
-//! | E. coli one variable mod | 74,998 | 40 |
-//!
-//! The E. coli digests above carry both of these changes together (TITLE scan
-//! numbers and the widened charge columns); row counts are unchanged.
-//!
-//! REGENERATED 2026-10-14 for the `--chimeric` slice when Pass 2 began reporting
-//! co-isolated envelopes at their monoisotopic peak, ranking secondaries over
-//! distinct peptidoforms and filling their features on the primaries' scales.
-//! Pass 1 is untouched: the same command line without `--chimeric` writes a
-//! byte-identical PIN before and after. Against the previous golden (1,715 rows)
-//! the new one has 1,716: all 1,449 primary rows keep their peptide, label and
-//! charge; the Pass-2 rows go from 266 to 267, 243 old ones replaced by 244 new
-//! ones (mostly secondaries searched at M rather than M+1). DeltaRT, AbsDeltaRT and
-//! DeltaRTNorm move on every row because the RT fit includes the secondary rows; RawScore, RankScore, RankScoreFloat,
-//! RawScoreCal, CandidateRankEntropy and ListwiseScoreGap move on ~20 matched
-//! rows. The E. coli and `--refine` goldens are unchanged.
-//!
-//! REGENERATED 2026-10-14 for two candidate-generation changes: the
-//! N-terminal Met-cleaved walk emits only the peptides starting at the
-//! post-Met residue (main enumerated every other span of an M-initial protein
-//! twice), and a residue's side-chain mods stack with its terminal mods
-//! (protein N-terminal Acetyl with Ox-M, e.g. `_.M+58.00548IVLPRR`). Every
-//! golden was recorded from this branch's binary with the test's command
-//! lines; main's binary reproduces the previous goldens byte for byte. Against
-//! main's PIN, rows keyed by spectrum, charge, peptide and label; "top row" is
-//! the highest-RawScore row of a spectrum and charge:
-//!
-//! | case | rows main → branch | only main / only branch | top row changed |
-//! |---|---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 74,442 → 75,638 | 7,105 / 8,301 | 550 of 5,574 |
-//! | E. coli fixed mods only | 75,750 → 77,975 | 7,198 / 9,423 | 534 of 5,562 |
-//! | E. coli one variable mod | 74,998 → 76,087 | 7,109 / 8,198 | 535 of 5,568 |
-//! | `--chimeric` slice | 1,715 → 1,717 | 131 / 133 | 19 of 250 |
-//! | `--refine` slice | 1,595 → 1,612 | 138 / 155 | 13 of 150 |
-//!
-//! Each spectrum's candidate pool loses the duplicate copies, so the rows
-//! below the top fill with other peptides and the pool statistics move on
-//! shared rows: `CandidateRankEntropy`, `ListwiseScoreGap`, `DeltaRankScore`,
-//! `TailorScore`, and `RawScore` / `RawScoreCal`, which fuse them; on the
-//! slices also the `DeltaRT` columns, whose RT fit follows the top rows.
-//! `Proteins` no longer repeats an M-initial protein's accession. The
-//! precursor-cal pre-pass outcome line is unchanged (492 with PSMs, 55 below
-//! the RawScore floor).
-//!
-//! COMBINED 2026-10-14 (review branch: input, output, search and
-//! candidate-generation changes together). E. coli: the PINs equal the
-//! candidate-generation branch's (whose binary reproduces its digests) except
-//! `ScanNr`/`SpecId` on every row (MGF TITLE scan numbers) and the `charge6`
-//! column, whose 35-41 out-of-range-charge rows per case move from no charge
-//! bit to `charge6`; same row counts, no top-row change. `--refine` slice:
-//! unchanged from the candidate-generation golden. `--chimeric` slice: Pass 1
-//! (the search without `--chimeric`, 1,451 rows) is identical to the
-//! candidate-generation branch in every column; of the 1,718 rows, 12 are in
-//! neither parent golden and 1 in both is dropped, all Pass-2 secondaries
-//! (the search branch's Pass 2 choosing among the new candidate set).
-//!
-//! REGENERATED 2026-10-15 when six provenance columns (`IsVariant`,
-//! `IsIsoform`, `IsChain`, `RefCompetitor`, `DeltaRefScore`, `IsotopeMimic`)
-//! were appended before `Peptide`. For every case the new PIN with those six
-//! columns removed reproduced the previous golden exactly (slices row for row,
-//! E. coli digests equal), and every value in the six columns is 0.
-//!
-//! COMBINED 2026-10-15 (review branch merged with the provenance columns):
-//! every golden with the six provenance columns removed equals this branch's
-//! previous golden (slices row for row, E. coli digests equal), and every
-//! value in the six columns is 0; the calibration outcome line is unchanged.
-//!
-//! REGENERATED 2026-10-19 when PSMs began to be ordered by a total order:
-//! `rank_score`, then `score`, then a hash of the peptide content (residues,
-//! modification deltas, target/decoy), then charge, isotope offset and mass
-//! error. Exact ties used to go to whichever PSM reached the queue first, i.e.
-//! candidate enumeration order; the per-charge dedup and the spectrum-level
-//! merge now also hand PSMs to the queue best first, so the queue keeps the top
-//! N plus every tie at the N-th. Against the previous binary's PIN for the same
-//! command line, rows keyed by spectrum, charge, peptide and label, "top row"
-//! the highest-RawScore row of a spectrum and charge:
-//!
-//! | case | rows before → after | only before / only after | top row changed |
-//! |---|---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 75,638 → 75,391 | 8,100 / 7,853 | 509 of 5,562 |
-//! | E. coli fixed mods only | 77,975 → 77,450 | 6,994 / 6,469 | 436 of 5,550 |
-//! | E. coli one variable mod | 76,087 → 75,525 | 7,925 / 7,363 | 503 of 5,557 |
-//! | `--chimeric` slice | 1,718 → 1,717 | 225 / 224 | 34 of 250 |
-//! | `--refine` slice | 1,612 → 1,589 | 238 / 215 | 21 of 150 |
-//!
-//! The E. coli runs score in strong mode, where the winner is re-ranked by a
-//! score that folds in statistics of the retained pool (`CandidateRankEntropy`,
-//! `ListwiseScoreGap`, `DeltaRankScore`), so changing which tied rows are kept
-//! below the top moves those statistics and, through them, some winners. The
-//! calibration outcome line is unchanged.
-//!
-//! REGENERATED 2026-10-21 when every SpecId began to carry its input's file
-//! stem (`test.mgf/`, `astral_pxd070049_slice.mzML/`) and the charge one-hot
-//! columns began to follow `--charge` only, a charge outside it setting the
-//! nearest edge column. Against the previous binary's PIN for the same command
-//! line, with the stem put in front of each SpecId and each row's charge
-//! clamped to 2..5: every row identical. The E. coli PINs lose `charge6`; its
-//! rows set `charge5`:
-//!
-//! | case | rows | rows moved from `charge6` to `charge5` |
-//! |---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 75,391 | 41 |
-//! | E. coli fixed mods only | 77,450 | 44 |
-//! | E. coli one variable mod | 75,525 | 42 |
-//!
-//! The slice goldens carry no charge outside 2..5; only their SpecIds change.
-//!
-//! RECOMPUTED 2026-10-24 when the PIN gained the `FileName` column (after
-//! `CalcMass`): every row count is unchanged and the digests moved only by the
-//! new column (the input stem, constant on these single-input searches); the slice
-//! goldens had the column inserted into every row.
-//!
-//! REGENERATED 2026-10-22 when decoys became peptide-level (each cleavage
-//! segment shuffled with its cleavage residues in place). Targets and their
-//! scoring are unchanged; the decoy candidates, and through the pool
-//! statistics some winners, move:
-//!
-//! | case | rows | target rows | decoy rows |
-//! |---|---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 75,391 -> 75,028 | — | — |
-//! | E. coli fixed mods only | 77,450 -> 77,496 | — | — |
-//! | E. coli one variable mod | 75,525 -> 75,570 | — | — |
-//! | `--chimeric` slice | 1,717 -> 1,718 | 881 -> 827 | 836 -> 891 |
-//! | `--refine` slice | 1,589 -> 1,580 | 805 -> 760 | 784 -> 820 |
-//!
-//! The pre-pass outcome line reads 489 spectra with PSMs (was 492) and 63
-//! below the RawScore floor (was 55).
-//!
-//! REGENERATED 2026-11-02 when `enzN` began counting a Met-clipped protein
-//! N-terminal peptide (`M.` flank, initiator Met removed) as starting at a
-//! terminus (bigbio/andes#293). Only `enzN` moved, 0 -> 1, on every row whose
-//! Peptide starts with `M.`; under a fully specific digest those are exactly
-//! the Met-clipped rows. With `enzN` set back to 0 on them, each new PIN
-//! reproduces its previous golden (slices row for row, E. coli digests equal).
-//! The calibration outcome line is unchanged.
-//!
-//! | case | rows | enzN 0 -> 1 (targets / decoys) |
-//! |---|---|---|
-//! | E. coli default mods (and precursor-cal auto) | 75,028 | 3,502 (1,802 / 1,700) |
-//! | E. coli fixed mods only | 77,496 | 1,945 (953 / 992) |
-//! | E. coli one variable mod | 75,570 | 1,699 (859 / 840) |
-//! | `--chimeric` slice | 1,718 | 57 (32 / 25) |
-//! | `--refine` slice | 1,580 | 44 (27 / 17) |
-//!
-//! REGENERATED 2026-11-07 when two columns, `IsotopeErrorAbs` and
-//! `IsotopeErrorNeg`, were appended before `Peptide`. Both are functions of
-//! `isotope_error`, so the slice goldens were rewritten by inserting them into
-//! every row (rows and all other fields unchanged). The E. coli row counts are
-//! unchanged and their digests moved with the two integer columns.
-//!
-//! REGENERATED 2026-11-14 (slices) when the built-in default modifications began
-//! using the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464).
-//! E. coli default-mods and precursor-cal cases: 75028 -> 75009 rows, new digest;
-//! the fixed-only and one-variable-mod cases list their mods and are unchanged.
-//! Chimeric: 1718 rows; the mass columns move on the rows with a default mod,
-//! the RT columns move on every row, and oxidised peptides print `+15.99492`.
-//! Refine: 1580 -> 1545 rows, Pass 1 unchanged (1444). Before, the default
-//! Oxidation (15.99491) and the refine tier's Oxidation (15.994915) were two
-//! modifications, so Pass 2 re-emitted 43 default-oxidation forms as refinement
-//! rows; they are one modification now (refinement rows 136 -> 101).
-//!
-//! To regenerate after an intentional change, run the case's command line (see
-//! `run`), then either digest the PIN with `identity_digest` (E. coli) or write
-//! its header and sorted rows, gzipped, over the case's golden PIN (slices).
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -281,12 +8,10 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
-/// A field printed as a non-integer number (`0.3`, `1e-07`, `inf`, `NaN`).
 fn is_float_field(v: &str) -> bool {
     v.parse::<f64>().is_ok() && v.parse::<i64>().is_err()
 }
 
-/// Columns holding a non-integer number in any row.
 fn float_columns(rows: &[String]) -> Vec<bool> {
     let mut float = Vec::new();
     for row in rows {
@@ -300,8 +25,6 @@ fn float_columns(rows: &[String]) -> Vec<bool> {
     float
 }
 
-/// Row count and FNV-1a 64 of the header and the sorted rows with every float
-/// column's fields blanked, each line followed by a newline.
 fn identity_digest(header: &str, rows: &[String]) -> (usize, u64) {
     let float = float_columns(rows);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -327,10 +50,6 @@ fn identity_digest(header: &str, rows: &[String]) -> (usize, u64) {
     (rows.len(), h)
 }
 
-/// Two PIN fields agree: identical text, or two floats within one unit of the
-/// sixth significant digit (`%g`-style output) or of the sixth decimal
-/// (fixed-point output) — the most a last-ulp difference in the platform's
-/// math library moves a printed value.
 fn fields_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -342,8 +61,6 @@ fn fields_match(a: &str, b: &str) -> bool {
     (x - y).abs() <= 1e-5 * x.abs().max(y.abs()) + 1e-6
 }
 
-/// Compare a PIN (header + sorted rows) with a gzipped golden PIN holding the
-/// header and the sorted rows; panics listing the first differing fields.
 fn assert_matches_golden_pin(header: &str, rows: &[String], golden: &str) {
     use std::io::Read;
     let path = workspace_root().join(golden);
@@ -394,7 +111,6 @@ fn assert_matches_golden_pin(header: &str, rows: &[String], golden: &str) {
     );
 }
 
-/// A PIN's header and its rows, sorted.
 fn read_pin(path: &Path) -> (String, Vec<String>) {
     let text = std::fs::read_to_string(path).expect("read pin");
     let mut lines = text.lines();
@@ -404,11 +120,6 @@ fn read_pin(path: &Path) -> (String, Vec<String>) {
     (header, rows)
 }
 
-/// The pre-pass's outcome line with its timing stripped, or `None` if the
-/// pre-pass never scored (threshold skip / calibration off). Both a learned
-/// shift and an "insufficient confident PSMs" report carry the PSM counts the
-/// pre-pass resolved through the candidate index, so equality of this line
-/// with the golden is the calibration half of the gate.
 fn calibration_outcome(stderr: &str) -> Option<String> {
     stderr
         .lines()
@@ -419,16 +130,11 @@ fn calibration_outcome(stderr: &str) -> Option<String> {
         .map(|l| l.split("; elapsed").next().unwrap_or(l).to_string())
 }
 
-/// Run `andes` from the workspace root with `args` and an output PIN; returns the
-/// header, the sorted rows and stderr.
 fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_andes"))
         .current_dir(workspace_root())
         .args(args)
-        // The goldens pin the search's own columns; predicted features are
-        // covered by their own tests.
         .args(["--predict", "none"])
-        // The goldens were recorded with one missed cleavage at most.
         .args(["--max-missed-cleavages", "1"])
         .arg("--output-pin")
         .arg(out)
@@ -448,14 +154,11 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
     (header, rows, stderr)
 }
 
-/// One E. coli case: (rows, `identity_digest` FNV-1a 64, calibration outcome line).
 type Golden = (usize, u64, Option<&'static str>);
 
 const ECOLI_DEFAULT_MODS: Golden = (75_009, 0xc189_0f50_38d5_c9ea, None);
 const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0xa181_3557_efb7_ae83, None);
 const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x428b_4490_d8f0_7cbc, None);
-/// The pre-pass scores but the sample is too small to calibrate, so the PIN
-/// equals the calibration-off one.
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_009,
     0xc189_0f50_38d5_c9ea,
@@ -478,11 +181,8 @@ fn assert_ecoli_golden(label: &str, mods: &[&str], precursor_cal: &str, golden: 
         "1",
         "--precursor-cal",
         precursor_cal,
-        // The fixture has ~5.8k SpecKeys, below the 10k production threshold;
-        // force the pre-pass so the calibration-on case actually calibrates.
         "--cal-min-spec-keys",
         "1000",
-        // Enumeration: every candidate in each precursor window is scored.
         "--fragment-index",
         "off",
     ];
@@ -490,9 +190,6 @@ fn assert_ecoli_golden(label: &str, mods: &[&str], precursor_cal: &str, golden: 
     let (header, rows, stderr) = run(&args, &pin);
     let cal = calibration_outcome(&stderr);
     if precursor_cal != "off" {
-        // The pre-pass must have SCORED (either it learned a shift, or it
-        // reports how many sampled spectra had PSMs). A threshold skip
-        // ("SpecKeys < ...") means it never ran and the gate would be vacuous.
         assert!(
             cal.is_some(),
             "[{label}] the calibration pre-pass did not score:\n{stderr}"
@@ -520,8 +217,6 @@ fn ecoli_pin_matches_golden_with_default_mods() {
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_fixed_mods_only() {
-    // No variable mods with a fixed Cam-C: isolates the `base_record_multiplicity`
-    // fixed-mod defect from any variable-mod expansion.
     assert_ecoli_golden(
         "fixed mods only",
         &[
@@ -558,22 +253,11 @@ fn ecoli_pin_matches_golden_with_one_variable_mod() {
 #[test]
 #[ignore = "runs a full E. coli search (~20 s release)"]
 fn ecoli_pin_matches_golden_with_precursor_calibration_on() {
-    // The calibration pre-pass runs on the out-of-core index.
     assert_ecoli_golden("precursor-cal auto", &[], "auto", ECOLI_PRECURSOR_CAL_AUTO);
 }
 
-// ── --chimeric ──────────────────────────────────────────────────────────────
-//
-// Fixture: `test-fixtures/astral_pxd070049_slice.mzML.gz`, 150 consecutive MS2
-// scans with their two linked MS1 scans, cut unmodified from the middle of the
-// PRIDE PXD070049 run `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw`
-// (Orbitrap Astral DDA, human/yeast/E. coli; converted with ThermoRawFileParser).
-// The chimeric Pass 2 needs the MS1 scans, which `test.mgf.gz` lacks.
-
 const CHIMERIC_MZML: &str = "test-fixtures/astral_pxd070049_slice.mzML.gz";
 
-/// Run a search on the chimeric fixture, with or without `--chimeric`;
-/// returns (header, sorted rows, stderr).
 fn run_slice(fragment_index: &str, chimeric: bool, out: &Path) -> (String, Vec<String>, String) {
     let mut args = vec![
         "--spectrum",
@@ -599,9 +283,6 @@ fn run_chimeric(fragment_index: &str, out: &Path) -> (String, Vec<String>, Strin
 
 const CHIMERIC_SLICE_PIN: &str = "test-fixtures/goldens/chimeric_slice.pin.gz";
 
-/// Chimeric secondaries: the rows a `--chimeric` run adds over the same search
-/// without it. Pass 1 of the cascade is that search, so the difference is the
-/// rows Pass 2 contributed.
 fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) -> usize {
     let (_, plain_rows, _) = run_slice(
         fragment_index,
@@ -614,9 +295,6 @@ fn secondary_rows(fragment_index: &str, chimeric_rows: &[String], dir: &Path) ->
         .expect("a --chimeric run must not emit fewer rows than the plain search")
 }
 
-/// Rows that repeat a (scan, peptidoform, charge, label) already emitted: the
-/// chimeric Pass 2 must not re-emit a peptide the scan's retained Pass-1
-/// candidates already carry (it would sit in its own competition group).
 fn duplicate_identifications(header: &str, rows: &[String]) -> Vec<String> {
     let cols: Vec<&str> = header.split('\t').collect();
     let col = |name: &str| cols.iter().position(|c| *c == name).expect(name);
@@ -649,9 +327,6 @@ fn chimeric_enumeration_pin_matches_golden() {
     assert_matches_golden_pin(&header, &rows, CHIMERIC_SLICE_PIN);
 }
 
-/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
-/// shape is gated: the run completes, SpecIds stay unique, and the number of
-/// chimeric secondaries stays close to the enumeration run.
 #[test]
 fn chimeric_fragment_index_runs_with_unique_specids() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -676,16 +351,6 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
     );
 }
 
-// ── --refine ────────────────────────────────────────────────────────────────
-//
-// The refinement cascade runs after the scan, over the candidates the Pass-1
-// PSMs reference (the materialized candidates synced into
-// `prepared.candidates`); Pass 2 searches an in-memory out-of-core index of the
-// anchored database. Enumeration must reproduce the golden unified PIN, and
-// fragment-index retrieval must give a well-formed one. The Astral slice searched against E. coli alone has
-// a single anchor at the default 1% gate; `--psm-fdr 1.0` anchors
-// every best-target peptide so Pass 2 contributes a few hundred rows.
-
 fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String) {
     run(
         &[
@@ -709,7 +374,6 @@ fn run_refine(fragment_index: &str, out: &Path) -> (String, Vec<String>, String)
 
 const REFINE_SLICE_PIN: &str = "test-fixtures/goldens/refine_slice.pin.gz";
 
-/// Number of rows with `IsRefinement = 1`.
 fn refinement_rows(header: &str, rows: &[String]) -> usize {
     let col = header
         .split('\t')
@@ -732,9 +396,6 @@ fn refine_enumeration_pin_matches_golden() {
     assert_matches_golden_pin(&header, &rows, REFINE_SLICE_PIN);
 }
 
-/// Fragment-index retrieval changes Pass 1's candidates by design, so only the
-/// shape is gated: the index runs under `--refine`, the cascade adds rows,
-/// SpecIds stay unique and no scan carries the same peptide twice.
 #[test]
 fn refine_on_the_fragment_index_writes_a_well_formed_pin() {
     let dir = tempfile::tempdir().expect("tempdir");

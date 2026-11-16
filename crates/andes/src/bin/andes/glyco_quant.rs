@@ -1,92 +1,3 @@
-//! Intact-glycopeptide label-free quantification from MS1, modelled on the
-//! published method of Zeng et al., *Nat. Commun.* 2022.
-//!
-//! What is quantified: every TARGET row the glyco PIN emits (the top-1-per-scan
-//! collapse, or the full dump under `--debug-glyco`), identified by its INTACT
-//! precursor — peptide backbone + glycan composition + charge. The PIN also
-//! carries decoy-backbone rows for Percolator; those are skipped here, since a
-//! decoy precursor is not a glycopeptide and the decoy evidence this
-//! quantification uses is its own exchangeable twin (+11 Th, extracted for
-//! every target). A glycan topology is carried through from the search for
-//! reporting, but it is NOT part of the target: two topologies of one
-//! composition are the same mass and therefore one MS1 feature. That is a
-//! property of the measurement, not a simplification.
-//!
-//! Where this deliberately differs from the peptide `--lfq` path, and why:
-//!
-//! * **The envelope is the real glycopeptide formula.** The peptide's
-//!   elemental formula (from its residues and modification deltas) plus the
-//!   glycan's residue composition (`Formula::glycan`). A glycan carries ~twice
-//!   the oxygen and ~14 % fewer carbons per dalton than an averagine peptide,
-//!   which moves the M+1/M+2 shares — the isotope-cosine gate reads exactly
-//!   those shares, so an averagine envelope would score a true glycopeptide
-//!   like a wrong one.
-//! * **The envelope is longer.** A 3–4 kDa glycopeptide's monoisotopic peak is
-//!   a minority of its envelope (M+2/M+3 can be taller). Isotopes are
-//!   extracted until the extracted window holds [`ISOTOPE_COVERAGE`] of the
-//!   theoretical distribution, between [`MIN_ISOTOPES`] and
-//!   [`MAX_ISOTOPES`]. Extracting a fixed four, as for peptides, would read a
-//!   truncated envelope and systematically distort the cosine and the mono
-//!   share.
-//! * **The intensity is the monoisotopic peak, not the envelope sum.** As in
-//!   the published method, `Area` is the monoisotopic XIC integrated over the
-//!   peak and divided by its theoretical share of the extracted envelope; the
-//!   higher isotopes feed only the cosine. For a 3–4 kDa glycopeptide the
-//!   monoisotope is 16–28 % of the envelope (a 3.5–6x multiplier), and the
-//!   M+1..M+n traces are the ones most exposed to co-eluting interferences,
-//!   which an envelope sum accumulates. The trade-off is that monoisotopic
-//!   noise is amplified by the same factor. The raw observed mono area is
-//!   still reported (`MonoArea`) next to the scaled `Area`.
-//! * **The search's isotope offset is honoured.** When the search matched the
-//!   precursor at M+i, the observed peak sits at `mono + i·ISOTOPE/z`; the
-//!   extraction starts there and the theoretical envelope is rotated by i.
-//!   Otherwise a true M+1 precursor would have its monoisotope extracted from
-//!   the M−1 position and fail `min_mono_share`.
-//!
-//! Cross-run matching (`--glyco --mbr`) is deliberately simpler than the peptide
-//! `--mbr`: a robust piecewise-linear RT map per run to the first input,
-//! fitted on the glycopeptides both runs accepted (outlier-trimmed, one knot
-//! per 300 anchors). The match itself is the published cross-run scorer
-//! (`glyco_match`): the donor's isotope reference XIC is slid across the target
-//! run over the alignment uncertainty (60–120 s) and scored by a small MLP, and
-//! the chosen window — not the predicted apex — is what gets quantified; with
-//! no fitted map, a transfer falls back to the mapped apex with a three-sigma
-//! window clamped to 10–60 s. The transfers compete against their own decoy
-//! twins, as a separate competition from the identified features, so a transfer
-//! never borrows an identified feature's score distribution.
-//!
-//! What is NOT here (yet): FQR (a two-component GMM over a +10 Da decoy's
-//! scores, as in the published method). The feature q-value below is a picked
-//! target/decoy q-value against the same exchangeable twin the peptide LFQ
-//! path uses
-//! (`mono_mz + 11 Th`, no RT shift), not FQR. It gates **transfers** only:
-//! a transfer's sole evidence is its MS1 feature, whereas an identification
-//! is confirmed by its MS2 (the identification FDR is controlled upstream by
-//! Percolator), so for identified features the q-value is reported but never
-//! vetoes a feature that passed the cosine and mono-share gates.
-//!
-//! Outputs, next to `<base>.glyco.pin`:
-//!
-//! * `<base>.glyco.lfq.tsv` — one row per quantified (run, scan, glycopeptide,
-//!   charge) feature, including the decoy evidence and the picked feature
-//!   q-value. `Evidence` says `Identified` or `Transferred` (the latter has
-//!   scan 0 and a `{donor SpecId}_mbr_{run}` SpecId). `SpecId` matches the PIN
-//!   byte for byte, so a Percolator `q-value` column joins on it.
-//! * `<base>.glyco.quant.tsv` — per run and glycopeptide (peptide + site +
-//!   composition), summed over charge states. `NScans` counts the run's own MS2
-//!   identifications; `NTransferred` counts the features transferred in by
-//!   `--glyco --mbr` (which have no scan).
-//! * `<base>.glyco.site.tsv` — per run, peptide and site: the glycoform shares
-//!   (each composition's area over the site's total glyco area).
-//! * `<base>.glyco.protein.tsv` — per run and protein: the summed glycopeptide
-//!   area and Top3 (sum of the three largest glycopeptide areas).
-//! * `<base>.glyco.matrix.tsv` — the same glycopeptide areas pivoted: one row
-//!   per (peptide, site, composition), one column per run, empty where a run
-//!   did not quantify it. This is the multi-fraction comparison view; the
-//!   per-run tables above are its long form.
-//! * `<base>.glyco.protein_matrix.tsv` — the protein pivot: per run, the
-//!   protein's summed glycopeptide area and Top3.
-
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -109,31 +20,15 @@ use crate::cli::Cli;
 use crate::glyco_match;
 use crate::quant_run::RunMs1;
 
-/// Fraction of the theoretical precursor envelope the extracted isotope
-/// window must cover. The published method sums the whole theoretical
-/// distribution; beyond ~95 % the remaining isotopes are below the MS1 noise
-/// floor.
 const ISOTOPE_COVERAGE: f64 = 0.95;
 
-/// Isotopes extracted per feature, bounds. The floor matches the peptide
-/// path's four; the ceiling keeps a very large glycopeptide's XIC count
-/// bounded (24 isotope traces at 10 ppm is still cheap, but the marginal
-/// signal past ~14 is noise).
 const MIN_ISOTOPES: usize = 4;
 const MAX_ISOTOPES: usize = 14;
 
-/// Isotopes the theoretical envelope is computed over before trimming. An
-/// M+3-selected precursor of a 5 kDa glycopeptide still needs its upper tail.
 const ENVELOPE_ISOTOPES: usize = 28;
 
-/// Default RT half-window around the identifying scan, s. Twice the peptide
-/// `--lfq` default: an intact glycopeptide's XIC is wider, and a HILIC anchor
-/// can sit a scan or two off the apex, so 60 s clips the peak on the late
-/// side. `--lfq-rt-window` still overrides it.
 const DEFAULT_RT_WINDOW_S: f64 = 120.0;
 
-/// How a feature was measured: from its own identifying MS2 scan, or
-/// transferred into a run that did not identify it (match-between-runs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Evidence {
     Identified,
@@ -149,32 +44,17 @@ impl Evidence {
     }
 }
 
-/// One (run, scan, glycopeptide, charge) target.
 #[derive(Debug, Clone)]
 struct Target {
     run_idx: usize,
-    /// Run name (input file stem), repeated per row: the tables are per run.
     run: String,
-    /// The PIN's `SpecId`, byte for byte, for an identified target;
-    /// `{donor SpecId}_mbr_{run}` for a transfer, which no PIN row names.
     spec_id: String,
-    /// 0 for a transfer: no MS2 scan in this run identified it.
     scan: i32,
     evidence: Evidence,
-    /// Extraction half-window around `anchor_rt`, seconds. The identified
-    /// window is `--lfq-rt-window`; a transfer's is set by the match scorer
-    /// (its chosen peak window), or the alignment uncertainty when the
-    /// scorer could not run.
     window_s: f64,
-    /// Match search half-window (`--glyco --mbr` transfers), seconds: how far
-    /// the donor's extraction window may slide from the RT prediction.
     search_s: f64,
-    /// The identified row this transfer was built from (a `rows` index).
     donor: Option<usize>,
-    /// `pre.SEQ_WITH_MODS.post` — the peptide identity across proteins and
-    /// charge states.
     peptide: String,
-    /// Peptide + glycans are grouped by this (peptide, composition) pair.
     glycan: String,
     topology: String,
     site: String,
@@ -185,7 +65,6 @@ struct Target {
     theo_mz: f64,
     ppm: f64,
     anchor_rt: f64,
-    /// Theoretical envelope from the observed peak, trimmed and normalised.
     envelope: Vec<f64>,
 }
 
@@ -201,31 +80,22 @@ impl Target {
     }
 }
 
-/// One target's measurement.
 struct FeatureRow {
     target: Target,
     feature: Option<FeatureQuant>,
     decoy: Option<FeatureQuant>,
     score: Option<f32>,
     q: Option<f64>,
-    /// The match score (transfers scored by the matcher; `score`
-    /// is this value then).
     match_score: Option<f32>,
-    /// The decoy twin's match score, the other half of that competition.
     decoy_match: Option<f32>,
 }
 
-/// Settings resolved from the `--lfq*` flags (the glyco path reuses them).
 struct Settings {
     params: LfqParams,
-    /// `--quant-transfer-fdr` of the glycopeptide transfers.
     transfer_fdr: f64,
     core: GlycanCore,
     debug: bool,
-    /// `--glyco --mbr`: transfer accepted glycopeptides into runs that did not
-    /// identify them.
     mbr: bool,
-    /// `--glyco-mbr-match-train`: where to write the match-training table.
     match_train: Option<PathBuf>,
 }
 
@@ -248,7 +118,6 @@ impl Settings {
     }
 }
 
-/// Quantify the emitted glyco PSMs and write the four tables.
 pub(crate) fn run(
     glyco_pin_path: &Path,
     spectra: &[Spectrum],
@@ -282,11 +151,6 @@ pub(crate) fn run(
     let mut rows = feature_rows(targets, quantified, &settings);
     assign_qvalues(&mut rows, &settings);
 
-    // ── Match-between-runs (`--glyco --mbr`) ─────────────────────────────────
-    // Transfers are built from the accepted identified features and quantified
-    // in the runs that did not identify the glycopeptide, then scored as their
-    // own target/decoy competition (a transfer has a predicted RT and a
-    // narrow window, so its score distribution is not the identified one's).
     let run_names: Vec<&str> = runs.iter().map(|r| r.stem).collect();
     let alignment = if (settings.mbr || settings.match_train.is_some()) && runs.len() > 1 {
         Some(Alignment::build(&rows, &run_names, &settings))
@@ -304,9 +168,6 @@ pub(crate) fn run(
         let (transfers, counts) = build_transfers(&rows, &run_names, &settings, alignment);
         transfer_counts = counts;
         if !transfers.is_empty() {
-            // The match scorer needs the donor's own XIC as well as the
-            // target run's; references are read run by run, then the
-            // transfers are measured.
             let refs = build_match_references(&rows, &transfers, runs, &settings)?;
             let (found, measured) = measure_transfers(&transfers, &refs, runs, &settings)?;
             transfer_counts.measured = found;
@@ -358,7 +219,6 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// Build one target per emitted glyco hit that carries a composition.
 fn build_targets(
     spectra: &[Spectrum],
     results: &[GlycoSpectrumResult],
@@ -395,14 +255,6 @@ fn build_targets(
             let Some(cand) = candidates.get(cand_idx) else {
                 continue;
             };
-            // The glyco PIN is a Percolator input: it carries the decoy-backbone
-            // rows the search scored. Those are not measurements of a
-            // glycopeptide — their intact precursor is a random mass, so any
-            // feature found there is noise that would enter the target side of
-            // the q-value competition and the roll-up tables. The peptide LFQ
-            // path also quantifies targets only. The decoy evidence this
-            // quantification uses is its own exchangeable twin (the same
-            // glycopeptide at `mono_mz + 11 Th`), extracted for every target.
             if cand.is_decoy {
                 decoy_rows += 1;
                 continue;
@@ -413,16 +265,8 @@ fn build_targets(
             };
             let charge = hit.psm.charge_used.max(1);
             let z = charge as f64;
-            // Intact precursor: the peptide's exact neutral mass (the residue
-            // masses the search scored) plus the glycan's residue mass. The
-            // elemental formula is the same glycan composition; it is what the
-            // isotope envelope is computed from.
             let intact_mass = cand.peptide.mass() + comp.mass;
             let theo_mz = intact_mass / z + PROTON;
-            // The search matched this precursor at M+offset: the observed peak
-            // is offset isotopes above the monoisotope. Glyco searches use the
-            // 0..=2 window, so a negative offset cannot arise here; clamping it
-            // keeps a user-widened window from extracting below the envelope.
             let offset = hit.psm.isotope_offset.max(0) as usize;
             let mono_mz = theo_mz + offset as f64 * ISOTOPE / z;
             let mut formula = peptide_formula(cand);
@@ -434,9 +278,6 @@ fn build_targets(
                 comp.neugc,
             ));
             let envelope = extracted_envelope(&formula.envelope(ENVELOPE_ISOTOPES), offset);
-            // The mass error of the MONOISOTOPIC hypothesis: the observed
-            // precursor is offset isotopes above it, so remove that offset
-            // before taking the difference (the PIN's `dm` does the same).
             let observed_mono_mz = spec.precursor_mz - offset as f64 * ISOTOPE / z;
             let ppm = (theo_mz - observed_mono_mz) / theo_mz * 1e6;
             let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
@@ -486,8 +327,6 @@ fn build_targets(
     out
 }
 
-/// The peptide's elemental formula, from its residues and modification deltas
-/// (the same construction as the peptide `--lfq` path).
 fn peptide_formula(cand: &Candidate) -> Formula {
     Formula::peptide(
         cand.peptide
@@ -497,12 +336,6 @@ fn peptide_formula(cand: &Candidate) -> Formula {
     )
 }
 
-/// The theoretical envelope from isotope `offset` onward, trimmed to
-/// [`ISOTOPE_COVERAGE`] of the distribution and normalised to sum 1.
-///
-/// The trimmed total is the coverage denominator: `envelope(n)` normalises
-/// over the `n` computed isotopes, so the tail past `ENVELOPE_ISOTOPES` is
-/// ignored — it is below 10⁻⁵ of the distribution at these masses.
 fn extracted_envelope(full: &[f64], offset: usize) -> Vec<f64> {
     let tail = full.get(offset.min(full.len())..).unwrap_or(&[]);
     if tail.is_empty() {
@@ -529,23 +362,14 @@ fn extracted_envelope(full: &[f64], offset: usize) -> Vec<f64> {
     env
 }
 
-/// One target's measurement: its feature and its decoy twin, both optional
-/// (no peak in the window).
 #[derive(Debug, Clone, Default)]
 struct Measurement {
     feature: Option<FeatureQuant>,
     decoy: Option<FeatureQuant>,
-    /// The match score of the transferred window. Set only when both
-    /// this row's and its decoy's match scores exist, so the transfer's
-    /// target/decoy competition stays symmetric.
     match_score: Option<f32>,
-    /// The decoy twin's match score (set together with `match_score`).
     decoy_match: Option<f32>,
 }
 
-/// Quantify every target in its run. One run's MS1 scans are resident at a
-/// time (as in the peptide LFQ path); the returned vector is indexed like
-/// `targets`.
 fn measure(
     targets: &[Target],
     runs: &[RunMs1<'_>],
@@ -555,8 +379,6 @@ fn measure(
     measure_with(targets, runs, settings, phase, measure_identified)
 }
 
-/// Quantify one identified target in its own run: the envelope over the search
-/// RT, mono-scaled to the monoisotopic intensity, plus the +11 Th decoy twin.
 fn measure_identified(
     ms1: &quant::ms1_index::Ms1RunIndex,
     t: &Target,
@@ -580,9 +402,6 @@ fn measure_identified(
     }
 }
 
-/// Quantify every target in its run with `f`, one run's MS1 scans resident at
-/// a time (as in the peptide LFQ path); the returned vector is indexed like
-/// `targets`.
 fn measure_with(
     targets: &[Target],
     runs: &[RunMs1<'_>],
@@ -625,16 +444,11 @@ fn measure_with(
     ))
 }
 
-/// One donor feature's match references in its own run: the identified
-/// feature's isotope XIC and the same XIC at the decoy twin's m/z.
 struct MatchReferences {
     target: glyco_match::Reference,
     decoy: Option<glyco_match::Reference>,
 }
 
-/// Build the match references of every donor a transfer names, grouped by run
-/// so one run's MS1 scans are resident at a time. References are keyed by the
-/// donor's `rows` index; one donor may serve several target runs.
 fn build_match_references(
     rows: &[FeatureRow],
     transfers: &[Target],
@@ -684,11 +498,6 @@ fn build_match_references(
     Ok(refs)
 }
 
-/// Measure the transfers with the match scorer: slide the donor's
-/// extraction window across the target run, let the model choose the window
-/// and score it, then quantify that window with the ordinary extractor. The
-/// decoy twin gets its own reference and its own scored window, so the
-/// transfer q-value stays a symmetric competition.
 fn measure_transfers(
     targets: &[Target],
     refs: &HashMap<usize, MatchReferences>,
@@ -722,8 +531,6 @@ fn measure_transfers(
                 }
             }
         }
-        // The competition is target against decoy: use the match score only
-        // when both sides have one.
         if match_score.is_none() || decoy_match.is_none() {
             match_score = None;
             decoy_match = None;
@@ -770,12 +577,6 @@ fn measure_transfers(
     })
 }
 
-/// The published label-free intensity: the extracted isotope at the search's
-/// offset divided by its theoretical share of the extracted envelope
-/// (`Σ_i theo_i / theo_offset`). `envelope` is normalised over the extracted
-/// isotopes, so its first element is that share; the higher isotopes enter
-/// only through the envelope cosine, so interference in an M+1..M+n trace
-/// does not move the reported quantity.
 fn mono_area(f: &FeatureQuant, envelope: &[f64]) -> f64 {
     match (f.isotope_areas.first(), envelope.first()) {
         (Some(&mono), Some(&share)) if share > 0.0 => mono / share,
@@ -783,8 +584,6 @@ fn mono_area(f: &FeatureQuant, envelope: &[f64]) -> f64 {
     }
 }
 
-/// The `--lfq` parameters of one row: its own extraction window (a transfer's
-/// is the alignment uncertainty, an identified feature's `--lfq-rt-window`).
 fn params_of(row: &FeatureRow, settings: &Settings) -> LfqParams {
     LfqParams {
         rt_window_s: row.target.window_s,
@@ -792,9 +591,6 @@ fn params_of(row: &FeatureRow, settings: &Settings) -> LfqParams {
     }
 }
 
-/// Rows with their feature scores, before any q-value. The decoy twin is
-/// extracted with the same procedure at a shifted m/z; the competition follows
-/// the peptide LFQ path.
 fn feature_rows(
     targets: Vec<Target>,
     quantified: Vec<Measurement>,
@@ -815,9 +611,6 @@ fn feature_rows(
                 rt_window_s: target.window_s,
                 ..settings.params.clone()
             };
-            // A matched transfer is scored by the model, not by the cosine
-            // gate: eligibility is the model's (and `quantify`'s own)
-            // judgement, applied identically to the decoy twin.
             let score = match (m.match_score, m.decoy_match) {
                 (Some(score), Some(_)) => Some(score),
                 _ => m
@@ -838,9 +631,6 @@ fn feature_rows(
         .collect()
 }
 
-/// Picked target/decoy q-values over `rows`, which must be one evidence class
-/// (identified features and transfers are separate competitions: their windows
-/// and their search spaces differ). The height scale is the class's own.
 fn assign_qvalues(rows: &mut [FeatureRow], settings: &Settings) {
     let max_apex = rows
         .iter()
@@ -864,19 +654,6 @@ fn assign_qvalues(rows: &mut [FeatureRow], settings: &Settings) {
     }
 }
 
-/// Whether a row's feature enters the quant tables.
-///
-/// A transfer has no MS2 of its own, so its only FDR control is the picked
-/// feature q against the +11 Th decoy twin. Its competition score is the
-/// match score of the window the model chose (falling back to the
-/// isotope-envelope competition when either side has no match). An
-/// identification does not need that gate: the peptide, composition and site
-/// are already confirmed by the MS2 evidence (Percolator controls their FDR),
-/// and the quantification quality gates that do matter are the envelope cosine
-/// (`score`, None when below `--lfq-min-cosine`) and `min_mono_share`, which
-/// reject a feature extracted on the wrong isotope. The published method
-/// likewise never re-filters an identification on MS1 decoy evidence; the
-/// q-value is still computed and reported in `FeatureQValue` for both classes.
 fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
     if row.feature.is_none() {
         return false;
@@ -887,59 +664,32 @@ fn accepted(row: &FeatureRow, settings: &Settings) -> bool {
     }
 }
 
-/// Fewest shared glycopeptides (same peptide, composition and charge,
-/// quantified in a run and in the reference run) that make a cross-run RT map.
 const MBR_MIN_ANCHORS: usize = 50;
-/// Largest RT-map residual (robust σ) a transfer may be predicted from, s.
-/// Above this the alignment is not informative enough to place a predicted
-/// apex (the transfer would carry no RT evidence the identified window does
-/// not already carry), so the run is not used.
 const MBR_MAX_RESIDUAL_S: f64 = 45.0;
-/// Anchors per RT knot: the map is piecewise-linear between equal-count bins
-/// of [`MBR_ANCHORS_PER_KNOT`] anchors, which follows a non-linear gradient
-/// warp one straight line cannot (measured on two mouse-liver runs: 36 s
-/// residual for one line, 28 s piecewise).
 const MBR_ANCHORS_PER_KNOT: usize = 300;
 const MBR_MIN_KNOTS: usize = 3;
 const MBR_MAX_KNOTS: usize = 10;
-/// Transfer search half-window bounds, s: never tighter than the minimum (an
-/// apex can sit a scan or two from the prediction) nor wider than the
-/// identified window.
 const MBR_MIN_WINDOW_S: f64 = 10.0;
 const MBR_MAX_WINDOW_S: f64 = 60.0;
-/// Bounds of the match search half-window, s: how far the donor's whole
-/// extraction window may slide from its RT prediction. The original searches
-/// ±2 min; the RT map is a better prior, so andes searches 3σ within these.
 const MBR_MATCH_MIN_SEARCH_S: f64 = 60.0;
 const MBR_MATCH_MAX_SEARCH_S: f64 = 120.0;
 
-/// What the transfer stage did, for the log.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct TransferCounts {
-    /// Runs with a usable RT map to the reference (run 0 always has one).
     maps: usize,
-    /// Shared glycopeptides the maps were fitted on, summed over runs.
     anchors: usize,
-    /// (glycopeptide, run) transfers attempted.
     candidates: usize,
-    /// Of those, how many had a feature in the target run.
     measured: usize,
 }
 
-/// A monotone piecewise-linear RT map between one run and the reference run
-/// (run 0), defined by knots `(xs, ys)` that increase strictly in both
-/// coordinates: `rt_ref = f(rt_run)`. Between knots the map is linear; past the
-/// outermost anchors it extrapolates on the nearest segment's slope.
 #[derive(Debug, Clone, PartialEq)]
 struct RtMap {
     xs: Vec<f64>,
     ys: Vec<f64>,
-    /// Robust residual σ of the map, seconds on the reference run's scale.
     sigma_s: f64,
 }
 
 impl RtMap {
-    /// The identity map of the reference run itself.
     fn identity() -> RtMap {
         RtMap {
             xs: vec![0.0, 1.0],
@@ -952,16 +702,11 @@ impl RtMap {
         interpolate(&self.xs, &self.ys, rt)
     }
 
-    /// The run's RT for a reference-run RT; `None` if the knots are not
-    /// strictly increasing (never built that way, but inversion would divide
-    /// by zero).
     fn inverse(&self, rt_ref: f64) -> Option<f64> {
         let ys_are_increasing = self.ys.windows(2).all(|w| w[1] > w[0]);
         ys_are_increasing.then(|| interpolate(&self.ys, &self.xs, rt_ref))
     }
 
-    /// d(run RT)/d(reference RT) at `rt_ref`: converts a residual on the
-    /// reference scale onto the run's own scale.
     fn inverse_scale(&self, rt_ref: f64) -> f64 {
         let i = self
             .ys
@@ -972,8 +717,6 @@ impl RtMap {
     }
 }
 
-/// Piecewise-linear `v -> w` through knots `(a, b)`, extrapolating on the
-/// first/last segment.
 fn interpolate(a: &[f64], b: &[f64], v: f64) -> f64 {
     debug_assert!(a.len() >= 2 && a.len() == b.len());
     let i = a
@@ -984,9 +727,6 @@ fn interpolate(a: &[f64], b: &[f64], v: f64) -> f64 {
     b[i] + slope * (v - a[i])
 }
 
-/// Least-squares line `y = a + b·x` of `pairs`, `None` for fewer than three
-/// points, a degenerate x spread, or a non-increasing slope (an RT map must be
-/// monotone).
 fn fit_line(pairs: &[(f64, f64)]) -> Option<(f64, f64)> {
     if pairs.len() < 3 {
         return None;
@@ -1006,11 +746,6 @@ fn fit_line(pairs: &[(f64, f64)]) -> Option<(f64, f64)> {
     Some((my - slope * mx, slope))
 }
 
-/// A robust RT map from `(rt_run, rt_ref)` anchors. A least-squares line
-/// trims obvious mis-pairs (beyond 3 MAD of its residuals); the kept anchors
-/// are binned into equal counts and each bin's median becomes a knot, so the
-/// map follows a non-linear gradient warp. `sigma_s` is the MAD-scaled
-/// residual of the kept anchors around the finished map.
 fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
     let (intercept, slope) = fit_line(pairs)?;
     let residuals: Vec<f64> = pairs
@@ -1037,8 +772,6 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
         let bin = &kept[k * kept.len() / bins..(k + 1) * kept.len() / bins];
         let x = crate::quant_mbr::median(bin.iter().map(|p| p.0).collect());
         let y = crate::quant_mbr::median(bin.iter().map(|p| p.1).collect());
-        // A knot that does not advance would make the map non-monotone; drop
-        // it (the neighbouring segments already cover that RT span).
         let advances = xs.last().is_none_or(|&px| x > px) && ys.last().is_none_or(|&py| y > py);
         if advances {
             xs.push(x);
@@ -1064,30 +797,14 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
     map.sigma_s.is_finite().then_some(map)
 }
 
-/// A glycopeptide's measurement identity across runs: peptide, composition,
-/// charge (the same intact precursor).
 type GlycoKey = (String, String, u8);
 
 fn glyco_key(t: &Target) -> GlycoKey {
     (t.peptide.clone(), t.glycan.clone(), t.charge)
 }
 
-/// Build the transfers: for every accepted identified feature, every other
-/// run with an RT map that did NOT identify its glycopeptide gets a target at
-/// the predicted RT, searched in a window set by the alignment uncertainty.
-///
-/// A key's best-scoring accepted donor is used, so one (glycopeptide, run)
-/// pair is measured once even when several runs identified the glycopeptide.
-/// A run that identified the glycopeptide but rejected the feature (q above
-/// the threshold) is not a transfer target: resurrecting a rejected
-/// identification as a transfer would bypass the rejection.
-/// The cross-run alignment `--glyco --mbr` works from: every glycopeptide each
-/// run identified, its best accepted donor, and the run's RT map to the first
-/// input. Shared by the transfer builder and the match-model training dump.
 struct Alignment {
-    /// Every key each run identified, accepted or not.
     identified: Vec<std::collections::HashSet<GlycoKey>>,
-    /// The best accepted donor per key and run (a `rows` index).
     donor: Vec<HashMap<GlycoKey, usize>>,
     maps: Vec<Option<RtMap>>,
     counts: TransferCounts,
@@ -1096,7 +813,7 @@ struct Alignment {
 impl Alignment {
     fn build(rows: &[FeatureRow], run_names: &[&str], settings: &Settings) -> Self {
         let mut counts = TransferCounts {
-            maps: 1, // the reference run is its own map
+            maps: 1,
             ..TransferCounts::default()
         };
         let mut identified: Vec<std::collections::HashSet<GlycoKey>> =
@@ -1164,17 +881,11 @@ impl Alignment {
         }
     }
 
-    /// The RT of `rt` in run `from_idx` expressed in run `to_idx`'s scale, and
-    /// the combined alignment σ of the prediction, seconds.
     fn predict(&self, from_idx: usize, to_idx: usize, rt: f64) -> Option<(f64, f64)> {
         let from = self.maps[from_idx].as_ref()?;
         let to = self.maps[to_idx].as_ref()?;
         let t_ref = from.forward(rt);
         let predicted = to.inverse(t_ref)?;
-        // Both ends contribute: the donor run's map error at the donor RT and
-        // the target run's inverse map error at the prediction (the residual is
-        // on the reference scale; the local inverse slope converts it to the
-        // target run's scale).
         let sigma = (from.sigma_s.powi(2) + (to.sigma_s * to.inverse_scale(t_ref)).powi(2)).sqrt();
         Some((predicted, sigma))
     }
@@ -1193,8 +904,6 @@ fn build_transfers(
         counts,
     } = alignment;
     let mut counts = *counts;
-    // One transfer per (key, target run), from the best-scoring donor. The
-    // donor's score orders two runs that both identified the key.
     let mut best: HashMap<(GlycoKey, usize), (f32, Target)> = HashMap::new();
     for (i, row) in rows.iter().enumerate() {
         if row.target.evidence != Evidence::Identified
@@ -1225,9 +934,6 @@ fn build_transfers(
                 continue;
             };
             let window = (3.0 * sigma).clamp(MBR_MIN_WINDOW_S, MBR_MAX_WINDOW_S);
-            // The matcher slides the donor's whole extraction window across
-            // the alignment uncertainty; 60 s is the floor (the map's residual
-            // is a robust σ, so 3σ can be small on a clean gradient).
             let search = (3.0 * sigma).clamp(MBR_MATCH_MIN_SEARCH_S, MBR_MATCH_MAX_SEARCH_S);
             let score = row.score.unwrap_or(f32::NEG_INFINITY);
             let slot = (key.clone(), r);
@@ -1250,7 +956,6 @@ fn build_transfers(
             best.insert(slot, (score, target));
         }
     }
-    // HashMap order is not deterministic; sort so the tables are.
     let mut transfers: Vec<Target> = best.into_values().map(|(_, t)| t).collect();
     transfers.sort_by(|a, b| {
         (
@@ -1274,15 +979,6 @@ fn build_transfers(
     (transfers, counts)
 }
 
-/// Write the training table of the match scorer (`--glyco-mbr-match-train`).
-///
-/// For every ordered pair of runs that both accepted a glycopeptide, score the
-/// donor's reference against the target run exactly as `--glyco --mbr` does, and
-/// label each scored window: positive when it covers the peak the target run
-/// identified on its own, negative otherwise. Every window of the decoy twin
-/// (+11 Th) is negative. Positives therefore come from runs where the answer is
-/// known, which is what lets the model learn the target-versus-decoy boundary
-/// the transfer q-value needs.
 fn dump_match_training(
     rows: &[FeatureRow],
     runs: &[RunMs1<'_>],
@@ -1387,8 +1083,6 @@ fn dump_match_training(
                     .map(|m| (m.stop_rt.min(tf.rt_stop) - m.start_rt.max(tf.rt_start)).max(0.0))
                     .collect();
                 if !overlaps.iter().any(|&o| o >= min_overlap && o > 0.0) {
-                    // The prediction put the true peak outside every scored
-                    // window; the pair carries no positive and is skipped.
                     continue;
                 }
                 let group = &key.0;
@@ -1453,7 +1147,6 @@ fn write_training_row(
     writeln!(out, "\t{group}\t{donor_run}>{target_run}")
 }
 
-/// The path of an output table: `<base>.glyco.<kind>.tsv` beside the PIN.
 fn output_path(pin: &Path, kind: &str) -> PathBuf {
     let s = pin.to_string_lossy();
     match s.strip_suffix(".glyco.pin") {
@@ -1548,26 +1241,17 @@ fn write_feature_table(
     out.flush().map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Counts reported after the roll-up.
 struct Kept {
     glycopeptides: usize,
     sites: usize,
 }
 
-/// The roll-up tables: per run and glycopeptide, per run and site, per run and
-/// protein, and the two cross-run matrices (`run_names` is the column order).
-/// Only accepted features enter them: a feature the exchangeable decoy
-/// explains is not a measurement of that glycopeptide.
 fn write_rollup_tables(
     pin: &Path,
     rows: &[FeatureRow],
     run_names: &[&str],
     settings: &Settings,
 ) -> Result<Kept, String> {
-    // One feature per (run, peptidoform, composition, charge): the same
-    // peptide+charge elutes once, so PSMs from different scans of one elution
-    // describe the same XIC. Keep the best-scoring one; the others are
-    // duplicates of one measurement, not replicates.
     #[derive(PartialEq, Eq, Hash)]
     struct Key(String, String, String, u8);
     let mut best: HashMap<Key, usize> = HashMap::new();
@@ -1603,7 +1287,6 @@ fn write_rollup_tables(
         best_q: f64,
         charges: BTreeSet<u8>,
         scans: BTreeSet<i32>,
-        /// Features transferred into this run (no MS2 of their own).
         transferred: usize,
         proteins: String,
         site: String,
@@ -1634,8 +1317,6 @@ fn write_rollup_tables(
         e.best_q = e.best_q.min(row.q.unwrap_or(1.0));
         e.charges.insert(row.target.charge);
         match row.target.evidence {
-            // A transfer has no identifying scan in this run (scan 0 is a
-            // placeholder); NScans counts MS2 evidence only.
             Evidence::Identified => {
                 e.scans.insert(row.target.scan);
             }
@@ -1684,7 +1365,6 @@ fn write_rollup_tables(
     out.flush()
         .map_err(|e| format!("{}: {e}", quant_path.display()))?;
 
-    // Site rows: each glycoform's share of its site's total glyco signal.
     let mut site_total: HashMap<(String, String), f64> = HashMap::new();
     for ((run, peptide, _), g) in &glyco_rows {
         *site_total
@@ -1727,10 +1407,6 @@ fn write_rollup_tables(
     out.flush()
         .map_err(|e| format!("{}: {e}", site_path.display()))?;
 
-    // Cross-run glycopeptide matrix: one row per (peptide, composition), one
-    // area column per run in `run_names` order, empty where that run did not
-    // quantify the glycopeptide. This is the view a multi-fraction experiment
-    // compares across; the per-run tables above are its long form.
     struct MatrixRow {
         site: String,
         proteins: String,
@@ -1799,8 +1475,6 @@ fn write_rollup_tables(
     );
     writeln!(out, "Run\tProtein\tGlycopeptides\tSummedArea\tTop3")
         .map_err(|e| format!("{}: {e}", protein_path.display()))?;
-    // Cross-run protein matrix, the same pivot: per run, the protein's summed
-    // glycopeptide area and Top3 (empty where the run quantified none).
     let mut protein_matrix: HashMap<String, HashMap<String, (f64, f64)>> = HashMap::new();
     for ((run, acc), areas) in &per_protein {
         let mut sorted = areas.clone();
@@ -1864,8 +1538,6 @@ fn write_rollup_tables(
     })
 }
 
-/// `HexNAc2Hex8Fuc0NeuAc0NeuGc0` — the composition half of the PIN's glycan
-/// tag, identical to `output::glyco_pin`'s rendering.
 fn composition_label(comp: &GlycanComp) -> String {
     format!(
         "HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}",
@@ -1873,9 +1545,6 @@ fn composition_label(comp: &GlycanComp) -> String {
     )
 }
 
-/// The glycosite the PIN reports for this backbone: the sequon position when
-/// the sequence determines it, `N?` / `S/T?` when it does not (the same rule
-/// as `output::glyco_pin::glycan_tag_with_site`).
 fn site_label(residues: &[u8], post: u8, core: GlycanCore) -> String {
     match core {
         GlycanCore::NGlycan => match glyco::sequon::glycosites(residues, post).as_slice() {
@@ -1889,10 +1558,6 @@ fn site_label(residues: &[u8], post: u8, core: GlycanCore) -> String {
     }
 }
 
-/// Every protein accession this PSM's candidate list resolves to, `;`-joined.
-/// The accession rule matches `output::row_context::resolve_accession` (the
-/// PIN's `Proteins` columns), including its `PROT_<index>` fallback for a
-/// candidate whose protein record is absent from the index.
 fn proteins_of(
     psm: &search::psm::PsmMatch,
     candidates: &[Candidate],
@@ -1911,9 +1576,6 @@ fn proteins_of(
         .join(";")
 }
 
-/// A float cell: six decimals, or empty for a value with no measurement
-/// (NaN). Empty keeps the column numeric in pandas rather than mixing in the
-/// string `NaN`.
 fn fmt(v: f64) -> String {
     if v.is_finite() {
         format!("{v:.6}")
@@ -1981,8 +1643,6 @@ mod tests {
         }
     }
 
-    /// A glycopeptide target with a real envelope, at `mono_mz`, anchored at
-    /// `anchor_rt`.
     fn target(mono_mz: f64, charge: u8, anchor_rt: f64) -> Target {
         let mut f = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
         f.add(Formula::glycan(8, 2, 0, 0, 0));
@@ -2010,9 +1670,6 @@ mod tests {
         }
     }
 
-    /// One run with a single glycopeptide eluting as a Gaussian at 100 s
-    /// (sigma 4 s, 1 Hz scans), its isotope pattern from the target's own
-    /// theoretical envelope.
     fn synthetic_run(t: &Target) -> quant::ms1_index::Ms1RunIndex {
         let z = t.charge as f64;
         let scans = (0..200)
@@ -2046,9 +1703,6 @@ mod tests {
         assert!((f.apex_rt - 100.0).abs() <= 1.0, "{f:?}");
         assert!(f.cosine > 0.99, "{f:?}");
         assert!(f.n_isotopes_found >= MIN_ISOTOPES as u32, "{f:?}");
-        // Mono-scaled area = mono area / mono share. With the observed
-        // isotope shares equal to theory, that is the Gaussian area of the
-        // whole envelope (height · sigma · √(2π), envelope normalised to 1).
         let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
         assert!((f.area / expected - 1.0).abs() < 0.03, "{f:?}");
         assert!(m.decoy.is_none(), "{:?}", m.decoy);
@@ -2057,8 +1711,6 @@ mod tests {
     #[test]
     fn an_isotope_offset_extracts_the_observed_peak() {
         let mut t = target(800.0, 2, 97.0);
-        // The search matched M+1: the feature sits one isotope above the
-        // monoisotope, and the envelope starts there.
         t.mono_mz += ISOTOPE / 2.0;
         t.isotope_offset = 1;
         let mut f = Formula::peptide(b"IGNTTNA".iter().map(|&r| (r, 0.0)));
@@ -2071,8 +1723,6 @@ mod tests {
         assert!(f.cosine > 0.99, "{f:?}");
     }
 
-    /// A run with only the monoisotopic trace: the higher isotope channels,
-    /// which interference and low S/N mostly affect, are absent.
     fn synthetic_run_mono_only(t: &Target) -> quant::ms1_index::Ms1RunIndex {
         let scans = (0..200)
             .map(|i| {
@@ -2096,9 +1746,6 @@ mod tests {
 
     #[test]
     fn mono_intensity_survives_dropped_isotope_traces() {
-        // The point of the mono estimator: losing the M+1..M+n channels
-        // changes the cosine, not the quantity. With the envelope sum it
-        // would lose the fraction those channels carried.
         let t = target(800.0, 2, 97.0);
         let full = measure_identified(&synthetic_run(&t), &t, &LfqParams::default());
         let mono_only = measure_identified(&synthetic_run_mono_only(&t), &t, &LfqParams::default());
@@ -2151,11 +1798,10 @@ mod tests {
         let mut a = row(target(800.0, 2, 97.0), 100.0, 0.9, 0.001);
         a.target.scan = 1;
         let mut b = row(target(800.0, 2, 97.0), 100.0, 0.5, 0.001);
-        b.target.scan = 2; // same peptide+charge: a duplicate XIC, dropped
+        b.target.scan = 2;
         let mut c = row(target(800.0, 3, 97.0), 50.0, 0.8, 0.002);
         c.target.scan = 3;
         c.target.charge = 3;
-        // A transfer is the class the feature q still gates.
         let mut rejected = row(target(800.0, 2, 97.0), 999.0, 0.99, 0.5);
         rejected.target.evidence = Evidence::Transferred;
         rejected.target.scan = 0;
@@ -2204,12 +1850,7 @@ mod tests {
     fn an_identified_feature_is_not_vetoed_by_its_decoy_q() {
         let dir = tempfile::tempdir().unwrap();
         let pin = dir.path().join("run.glyco.pin");
-        // q = 0.5 is above the feature FDR; the MS2 identification is the
-        // evidence, so the feature still enters the tables (the method never
-        // re-filters an identification on MS1 decoy evidence).
         let identified = row(target(800.0, 2, 97.0), 100.0, 0.9, 0.5);
-        // A transfer with the same q is rejected: its feature is its only
-        // evidence, so the q gates it.
         let mut transfer = row(target(800.0, 2, 98.0), 50.0, 0.9, 0.5);
         transfer.target.evidence = Evidence::Transferred;
         transfer.target.scan = 0;
@@ -2232,7 +1873,6 @@ mod tests {
         a.target.run = "r1".into();
         let mut b = row(target(800.0, 2, 97.0), 40.0, 0.9, 0.001);
         b.target.run = "r2".into();
-        // A second glycoform, quantified only in r2.
         let mut other = row(target(800.0, 2, 97.0), 7.0, 0.9, 0.001);
         other.target.run = "r2".into();
         other.target.glycan = "HexNAc3Hex4Fuc0NeuAc0NeuGc0".into();
@@ -2252,7 +1892,6 @@ mod tests {
                 "r2"
             ]
         );
-        // Sorted by peptide, then composition.
         assert_eq!(m[1][2], "HexNAc2Hex8Fuc0NeuAc0NeuGc0");
         assert_eq!(m[1][4], "2");
         assert!((m[1][5].parse::<f64>().unwrap() - 100.0).abs() < 1e-6);
@@ -2281,7 +1920,6 @@ mod tests {
 
     #[test]
     fn the_rt_map_recovers_a_linear_shift() {
-        // rt_ref = 4 + 1.1 · rt_run, exactly.
         let pairs: Vec<(f64, f64)> = (0..100)
             .map(|i| {
                 let x = i as f64 * 3.0;
@@ -2300,8 +1938,6 @@ mod tests {
 
     #[test]
     fn the_rt_map_follows_a_non_linear_warp() {
-        // A gradient drift that no straight line follows: ±40 s in the
-        // middle of the run, back to 0 at both ends.
         let pairs: Vec<(f64, f64)> = (0..900)
             .map(|i| {
                 let x = i as f64 * 4.0;
@@ -2309,8 +1945,6 @@ mod tests {
                 (x, x + 40.0 * (phase).sin())
             })
             .collect();
-        // A straight line through these anchors would leave a ~25 s residual
-        // (the sine peak), which is above the 3 MAD trim width.
         let map = fit_rt_map(&pairs).expect("map");
         assert!(map.sigma_s < 10.0, "{map:?}");
         for x in [400.0, 1800.0, 3200.0] {
@@ -2332,8 +1966,6 @@ mod tests {
                 (x, 4.0 + 1.1 * x)
             })
             .collect();
-        // Five mis-identified anchors: without trimming they would move the
-        // map away from every true anchor.
         for i in (0..900).step_by(180) {
             pairs[i].1 += 1000.0;
         }
@@ -2347,8 +1979,6 @@ mod tests {
         assert!(map.sigma_s < 0.5, "{map:?}");
     }
 
-    /// An accepted identified row for `key` in `run_idx` with its apex at
-    /// `apex_rt`.
     fn identified_row(
         key: usize,
         run_idx: usize,
@@ -2382,13 +2012,9 @@ mod tests {
         for k in 0..n {
             let rt = 100.0 + 2.0 * k as f64;
             rows.push(identified_row(k, 0, "r1", rt, 0.01, 10.0));
-            // run 2 is 0.8x the reference scale plus 50 s.
             rows.push(identified_row(k, 1, "r2", 0.8 * rt + 50.0, 0.01, 10.0));
         }
         rows.push(identified_row(n, 0, "r1", 500.0, 0.01, 20.0));
-        // Identified in run 2 but its feature failed the cosine gate (score
-        // None): not an anchor donor and not a transfer target. The decoy q
-        // alone would no longer reject an identified feature.
         rows.push(identified_row(n + 1, 0, "r1", 520.0, 0.01, 20.0));
         let mut rejected = identified_row(n + 1, 1, "r2", 466.0, 0.5, 20.0);
         rejected.score = None;
@@ -2405,15 +2031,12 @@ mod tests {
         assert_eq!(t.evidence, Evidence::Transferred);
         assert_eq!(t.scan, 0);
         assert!(t.spec_id.ends_with("_mbr_r2"), "{}", t.spec_id);
-        // The prediction is the inverse map of the donor's apex: run 2 elutes
-        // at 0.8 · rt_ref + 50 s.
         let expected = 0.8 * 500.0 + 50.0;
         assert!(
             (t.anchor_rt - expected).abs() < 1e-6,
             "{} vs {expected}",
             t.anchor_rt
         );
-        // Clean anchors leave no residual, so the window is the floor.
         assert!(
             (t.window_s - MBR_MIN_WINDOW_S).abs() < 1e-9,
             "{:?}",

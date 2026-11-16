@@ -1,21 +1,3 @@
-//! Shared-feature evidence and downgrade: does the MS1 feature of a transfer
-//! belong to another compound?
-//!
-//! A transfer whose fitted feature is also claimed by another probed target
-//! of the run ([`crate::claims`]) is either a second real compound on that
-//! feature (isobaric residue combinations, permutations) or a feature that
-//! belongs to the claimant alone. The MS2 scans of the receiving run that
-//! cover the feature tell them apart in part: fragment ions that only the
-//! transfer's sequence has (and not the claimant's) are present or absent,
-//! and the covering scans were identified as the transfer's peptide, as a
-//! claimant's, as something else, or not at all ([`SharedEvidence`]).
-//!
-//! A small gradient-boosted classifier ([`Model`]) turns these facts and the
-//! claim geometry into the probability that an accepted transfer is a shared
-//! feature; finalize reports such a transfer as `shared_feature` instead of
-//! `transfer_ms1` / `transfer_ms2`. The model is a shipped resource with its
-//! provenance (`resources/quant/shared_feature_model.txt`).
-
 use std::collections::HashMap;
 
 use model::Tolerance;
@@ -23,43 +5,29 @@ use model::Tolerance;
 use crate::claims::Claim;
 use crate::ms2::{Fragment, Ms2RunIndex};
 
-/// Covering scans of a feature: within this many fitted widths of the apex
-/// (and not closer than [`COVER_MIN_S`]).
 pub const COVER_WIDTHS: f64 = 2.0;
-/// Least half-width of the covering window, seconds.
 pub const COVER_MIN_S: f64 = 5.0;
 
-/// The MS2 evidence of one transfer row against its claimants.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SharedEvidence {
-    /// Scans covering the feature.
     pub n_scans: u16,
-    /// Of them: no identification, identified as the transfer's peptide, as
-    /// a claimant's, as another peptide.
     pub n_unid: u16,
     pub n_id_target: u16,
     pub n_id_claimant: u16,
     pub n_id_other: u16,
-    /// Fragment ions of the transfer's sequence absent from the claimant
-    /// with the best-scoring pair: ions found in the covering scans, and
-    /// ions looked for (ions x scans); the same for the claimant's own.
     pub hit_target: u32,
     pub n_target: u32,
     pub hit_claimant: u32,
     pub n_claimant: u32,
-    /// Summed share of the scan intensity carried by the matched ions.
     pub int_target: f32,
     pub int_claimant: f32,
 }
 
 impl SharedEvidence {
-    /// A claimant with distinguishing ions on both sides was scored.
     pub fn scored(&self) -> bool {
         self.n_target > 0 && self.n_claimant > 0
     }
 
-    /// Share of the transfer's own ions found minus the claimant's; 0 when
-    /// not scored.
     pub fn dfrac(&self) -> f64 {
         if !self.scored() {
             return 0.0;
@@ -68,7 +36,6 @@ impl SharedEvidence {
             - f64::from(self.hit_claimant) / f64::from(self.n_claimant)
     }
 
-    /// Intensity share of the transfer's own ions minus the claimant's.
     pub fn dint(&self) -> f64 {
         if !self.scored() {
             return 0.0;
@@ -77,15 +44,12 @@ impl SharedEvidence {
     }
 }
 
-/// The peptides identified at the MS2 scans of one run, by scan retention
-/// time (the exact value of the donor PSM).
 #[derive(Debug, Clone, Default)]
 pub struct ScanIdentity {
     by_rt: HashMap<u64, Vec<u32>>,
 }
 
 impl ScanIdentity {
-    /// Records that peptide `peptide` was identified at the scan at `rt`.
     pub fn add(&mut self, rt: f64, peptide: u32) {
         let v = self.by_rt.entry(rt.to_bits()).or_default();
         if !v.contains(&peptide) {
@@ -98,8 +62,6 @@ impl ScanIdentity {
     }
 }
 
-/// The fragment ladder of a precursor: its peptide id and the sorted m/z of
-/// its b/y ions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ions {
     pub peptide: u32,
@@ -114,7 +76,6 @@ impl Ions {
     }
 }
 
-/// Ions of `a` with no ion of `b` within `tol`.
 fn distinguishing(a: &[f64], b: &[f64], tol: Tolerance) -> Vec<f64> {
     a.iter()
         .copied()
@@ -126,8 +87,6 @@ fn distinguishing(a: &[f64], b: &[f64], tol: Tolerance) -> Vec<f64> {
         .collect()
 }
 
-/// Ions found in the sorted peak list, and the summed intensity of the most
-/// intense peak within `tol` of each.
 fn match_ions(peaks: &[(f32, f32)], ions: &[f64], tol: Tolerance) -> (u32, f64) {
     let (mut hits, mut sum) = (0u32, 0.0f64);
     for &x in ions {
@@ -147,11 +106,9 @@ fn match_ions(peaks: &[(f32, f32)], ions: &[f64], tol: Tolerance) -> (u32, f64) 
     (hits, sum)
 }
 
-/// A transfer probe and its claimants.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<'a> {
     pub mz: f64,
-    /// Fitted apex and width, seconds.
     pub t0: f64,
     pub w: f64,
     pub faims: Option<f32>,
@@ -159,8 +116,6 @@ pub struct Query<'a> {
     pub claimants: &'a [&'a Ions],
 }
 
-/// The evidence of probe `q` in the MS2 scans of run `index`, whose scans
-/// `identity` says were identified.
 pub fn evidence(
     index: &Ms2RunIndex,
     identity: &ScanIdentity,
@@ -239,27 +194,21 @@ pub fn evidence(
     best.map_or(out, |(_, e)| e)
 }
 
-/// The features of the shared-feature model, in the order of the shipped
-/// model's `features` line (a model names the ones it uses).
 pub const FEATURES: [&str; 21] = [
     "isid", "co", "min_dt", "n_claim", "n_id_co", "n_any_co", "n_tr_co", "n_scans", "scored",
     "dfrac", "dint", "fT", "fP", "n_unid", "n_idT", "n_idP", "n_idO", "A", "logq", "loglr", "w",
 ];
 
-/// What the features are computed from: one accepted transfer row.
 #[derive(Debug, Clone, Copy)]
 pub struct Row<'a> {
     pub claim: &'a Claim,
     pub shared: Option<&'a SharedEvidence>,
-    /// An MS2 scan of the run supports the transfer (`Ms2Evidence::supports`).
     pub ms2_supported: bool,
     pub transfer_q: f64,
     pub llr: f64,
-    /// Fitted width, seconds.
     pub width: f64,
 }
 
-/// The value of feature `name` of `row`; `None` for an unknown name.
 pub fn feature(name: &str, row: &Row<'_>) -> Option<f64> {
     let c = row.claim;
     let e = row.shared.copied().unwrap_or_default();
@@ -296,27 +245,21 @@ pub fn feature(name: &str, row: &Row<'_>) -> Option<f64> {
     })
 }
 
-/// One regression tree: split nodes `(feature, threshold, left, right)`
-/// (a value goes left when `x <= threshold`) and leaves.
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
     Split(usize, f64, usize, usize),
     Leaf(f64),
 }
 
-/// The shipped shared-feature classifier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
-    /// The model's own description (the `#` lines of the resource).
     pub provenance: Vec<String>,
     features: Vec<String>,
     trees: Vec<Vec<Node>>,
-    /// A transfer is a shared feature when its probability exceeds this.
     pub threshold: f64,
 }
 
 impl Model {
-    /// Parses the text resource. Errors name the offending line.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut provenance = Vec::new();
         let (mut features, mut threshold) = (Vec::new(), None);
@@ -388,7 +331,6 @@ impl Model {
         })
     }
 
-    /// The model compiled into the binary.
     pub fn shipped() -> &'static Model {
         static MODEL: std::sync::OnceLock<Model> = std::sync::OnceLock::new();
         MODEL.get_or_init(|| {
@@ -399,7 +341,6 @@ impl Model {
         })
     }
 
-    /// Probability that the transfer `row` is a shared feature.
     pub fn probability(&self, row: &Row<'_>) -> f64 {
         let x: Vec<f64> = self
             .features
@@ -422,14 +363,10 @@ impl Model {
         1.0 / (1.0 + (-raw).exp())
     }
 
-    /// The transfer is a shared feature: it has a claimant and the model's
-    /// probability exceeds the threshold.
     pub fn is_shared(&self, row: &Row<'_>) -> bool {
         row.claim.n > 0 && !self.trees.is_empty() && self.probability(row) > self.threshold
     }
 
-    /// Whether the model reads the MS2 distinguishing-ion evidence (else the
-    /// extract can skip computing it).
     pub fn needs_ms2_evidence(&self) -> bool {
         self.features.iter().any(|f| {
             matches!(
@@ -585,8 +522,6 @@ mod tests {
         assert!(m.needs_ms2_evidence());
         assert!(m.provenance.iter().any(|l| l.contains("trained")));
         assert!(m.provenance.iter().any(|l| l.contains("held-out")));
-        // A transfer with no claimant at all is never downgraded, whatever
-        // else the row says.
         let row = Row {
             claim: &Claim::default(),
             shared: None,

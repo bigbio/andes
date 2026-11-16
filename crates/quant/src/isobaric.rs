@@ -1,22 +1,8 @@
-//! Isobaric reporter-ion quantification: plex tables, extraction and
-//! isotope-impurity correction.
-//!
-//! Reporter m/z values are the ones OpenMS's `IsobaricQuantitationMethod`
-//! subclasses carry (TMT 6/10/11/16/18/32/35, iTRAQ 4/8). Extraction takes the
-//! most intense centroid within a tolerance of each reporter (Sage's rule;
-//! OpenMS takes the nearest within `reporter_mass_shift`). Impurity correction
-//! reads the vendor lot sheet in the OpenMS text form (one line per channel,
-//! `-2/-1/+1/+2` percentages, eight columns for TMTpro 16/18) and solves the
-//! observed = M · true system by non-negative least squares, as
-//! `IsobaricIsotopeCorrector` does. The deuterated TMTpro 32/35-plex kits have
-//! no correction: OpenMS always applies the identity for them.
-
 use model::scan::NoiseProfile;
 use model::Tolerance;
 
 use crate::nnls::nnls;
 
-/// One reporter channel: its name (as quantms labels it) and exact m/z.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Channel {
     pub name: &'static str,
@@ -103,15 +89,7 @@ const TMT18: &[Channel] = &[
     ch("135N", 135.151600),
 ];
 
-/// What trading one 13C for a 2H adds (2H − 13C): each deuterated TMTpro
-/// reporter, and each deuterated tag on a peptide, is this much heavier than
-/// its non-deuterated twin.
 pub const DEUTERATED_TAG_SHIFT_DA: f64 = 0.002922;
-
-// TMTpro 32/35-plex add the deuterated reagents: each `D` channel sits
-// DEUTERATED_TAG_SHIFT_DA above its non-deuterated twin (`127D` above `127C`,
-// `128ND` above `128N`, `128CD` above `128C`). Reference kit order: each nominal
-// mass lists N, C, ND, CD, so the tables are not sorted by m/z.
 
 const TMT32: &[Channel] = &[
     ch("126", 126.127726),
@@ -204,7 +182,6 @@ const ITRAQ8: &[Channel] = &[
     ch("121", 121.1220),
 ];
 
-/// Supported isobaric labelling kits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Plex {
     Tmt6,
@@ -219,9 +196,6 @@ pub enum Plex {
 }
 
 impl Plex {
-    /// Parse a CLI name: `tmt6`, `tmt10`, `tmt11`, `tmt16`, `tmt18`, `tmt32`,
-    /// `tmt35`, `itraq4`, `itraq8` (case-insensitive, `plex` suffix optional,
-    /// e.g. `tmt10plex`).
     pub fn parse(s: &str) -> Result<Self, String> {
         let lower = s.trim().to_ascii_lowercase();
         let key = lower.strip_suffix("plex").unwrap_or(&lower);
@@ -244,7 +218,6 @@ impl Plex {
         })
     }
 
-    /// The kit's name in quantms form (`tmt10plex`, `itraq4plex`, ...).
     pub fn name(&self) -> &'static str {
         match self {
             Plex::Tmt6 => "tmt6plex",
@@ -259,9 +232,6 @@ impl Plex {
         }
     }
 
-    /// The QPX / mzTab label prefix for this kit's channels: `TMT126`,
-    /// `ITRAQ114`, ... (the canonical spelling, which QPX value validation
-    /// requires).
     pub fn label_prefix(&self) -> &'static str {
         match self {
             Plex::Itraq4 | Plex::Itraq8 => "ITRAQ",
@@ -287,9 +257,6 @@ impl Plex {
         self.channels().len()
     }
 
-    /// Smallest m/z distance between two reporter channels of the kit
-    /// (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, 2.9 mDa for the
-    /// TMTpro 32/35-plex deuterated twins, ~1 Th otherwise).
     pub fn min_channel_spacing(&self) -> f64 {
         let mut mz: Vec<f64> = self.channels().iter().map(|c| c.mz).collect();
         mz.sort_by(f64::total_cmp);
@@ -298,9 +265,6 @@ impl Plex {
             .fold(f64::INFINITY, f64::min)
     }
 
-    /// Default reporter tolerance in ppm on Orbitrap reporter scans: 20, or 10
-    /// for TMTpro 32/35-plex, whose 2.9 mDa channel spacing a 20 ppm window
-    /// would reach across (half the spacing is 10.8 ppm at 135 Th).
     pub fn default_reporter_ppm(&self) -> f64 {
         if self.has_deuterated_channels() {
             10.0
@@ -309,15 +273,10 @@ impl Plex {
         }
     }
 
-    /// Whether the kit includes the deuterated TMTpro reagents (32/35-plex).
     pub fn has_deuterated_channels(&self) -> bool {
         matches!(self, Plex::Tmt32 | Plex::Tmt35)
     }
 
-    /// Reject a reporter tolerance under which two channels can read the same
-    /// peak: the window must stay below half the closest channel spacing at
-    /// every reporter m/z. A 0.3 Da ion-trap window on a TMT10 scan, for
-    /// example, would report 127N and 127C as the same value.
     pub fn check_tolerance(&self, tol: Tolerance) -> Result<(), String> {
         let half_spacing = self.min_channel_spacing() / 2.0;
         let widest = self
@@ -337,11 +296,6 @@ impl Plex {
         Ok(())
     }
 
-    /// The label mass added to K and the peptide N-terminus by this kit
-    /// (Unimod monoisotopic delta), for the run log and the default fixed mod.
-    /// TMTpro 32/35-plex carry the TMTpro mass: their deuterated tags are
-    /// [`DEUTERATED_TAG_SHIFT_DA`] heavier (304.2101) and have no Unimod entry
-    /// of their own, which the default 20 ppm precursor window absorbs.
     pub fn label_mass(&self) -> f64 {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 => 229.162932,
@@ -351,11 +305,6 @@ impl Plex {
         }
     }
 
-    /// Number of impurity columns per channel in the vendor sheet: four
-    /// (`-2/-1/+1/+2`) for TMT ≤ 11-plex and iTRAQ, eight for TMTpro 16/18
-    /// (`-2C13/-N15-C13/-C13/-N15/+N15/+C13/+N15+C13/+2C13`). `None` for
-    /// TMTpro 32/35-plex, which have no impurity correction (OpenMS ignores a
-    /// sheet for them and always applies the identity).
     pub fn correction_columns(&self) -> Option<usize> {
         match self {
             Plex::Tmt6 | Plex::Tmt10 | Plex::Tmt11 | Plex::Itraq4 | Plex::Itraq8 => Some(4),
@@ -364,9 +313,6 @@ impl Plex {
         }
     }
 
-    /// Index of the channel that column `col` of channel `from`'s impurity
-    /// row spills into, or `None` when that isotopologue is not a channel of
-    /// the kit (the spill is still subtracted from the channel's own share).
     fn affected(&self, from: usize, col: usize) -> Option<usize> {
         let chans = self.channels();
         let (nominal, series) = parse_channel(chans[from].name, *self);
@@ -376,21 +322,21 @@ impl Plex {
                 (d, SeriesChange::Same)
             }
             _ => match col {
-                0 => (-2, SeriesChange::Same), // -2C13
-                1 => (-2, SeriesChange::NToC), // -N15-C13
-                2 => (-1, SeriesChange::Same), // -C13
-                3 => (-1, SeriesChange::NToC), // -N15
-                4 => (1, SeriesChange::CToN),  // +N15
-                5 => (1, SeriesChange::Same),  // +C13
-                6 => (2, SeriesChange::CToN),  // +N15+C13
-                _ => (2, SeriesChange::Same),  // +2C13
+                0 => (-2, SeriesChange::Same),
+                1 => (-2, SeriesChange::NToC),
+                2 => (-1, SeriesChange::Same),
+                3 => (-1, SeriesChange::NToC),
+                4 => (1, SeriesChange::CToN),
+                5 => (1, SeriesChange::Same),
+                6 => (2, SeriesChange::CToN),
+                _ => (2, SeriesChange::Same),
             },
         };
         let target_series = match (series, series_change) {
             (s, SeriesChange::Same) => s,
             (Series::N, SeriesChange::NToC) => Series::C,
             (Series::C, SeriesChange::CToN) => Series::N,
-            (Series::Plain, SeriesChange::CToN) => Series::N, // 126 behaves as C
+            (Series::Plain, SeriesChange::CToN) => Series::N,
             _ => return None,
         };
         let target_nominal = nominal as i32 + delta;
@@ -418,8 +364,6 @@ enum SeriesChange {
     CToN,
 }
 
-/// Nominal mass and isotope series of a channel name. TMT 10/11-plex's `126`
-/// carries no 15N and sits in the 13C series; its `131` (TMT10) is `131N`.
 fn parse_channel(name: &str, plex: Plex) -> (u32, Series) {
     let (digits, suffix) = name.split_at(name.trim_end_matches(['N', 'C']).len());
     let nominal: u32 = digits.parse().unwrap_or(0);
@@ -447,9 +391,6 @@ fn series_compatible(have: Series, want: Series, plex: Plex) -> bool {
     }
 }
 
-/// Extract the reporter intensities of `plex` from an m/z-sorted centroid
-/// list: the most intense peak within `tol` of each channel m/z, 0.0 when no
-/// peak lies in the window. The result has one entry per channel, in kit order.
 pub fn extract_reporters(peaks: &[(f64, f32)], plex: Plex, tol: Tolerance) -> Vec<f32> {
     plex.channels()
         .iter()
@@ -472,13 +413,10 @@ pub fn extract_reporters(peaks: &[(f64, f32)], plex: Plex, tol: Tolerance) -> Ve
         .collect()
 }
 
-/// The instrument noise at each reporter m/z of `plex`, in kit order.
 pub fn reporter_noise(noise: &NoiseProfile, plex: Plex) -> Vec<f32> {
     plex.channels().iter().map(|c| noise.at(c.mz)).collect()
 }
 
-/// Per-channel signal-to-noise: each reporter intensity over the noise at its
-/// m/z (`noise` from [`reporter_noise`]). A channel without signal is 0.
 pub fn signal_to_noise(values: &[f32], noise: &[f32]) -> Vec<f32> {
     values
         .iter()
@@ -487,30 +425,14 @@ pub fn signal_to_noise(values: &[f32], noise: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Isotope impurity matrix `M` with `observed = M · true`: `m[target][source]`
-/// is the fraction of channel `source`'s signal that is read in channel
-/// `target`; the diagonal is what remains after every listed spill.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorrectionMatrix {
     plex: Plex,
     n: usize,
-    /// Row-major `n × n`.
     m: Vec<f64>,
 }
 
 impl CorrectionMatrix {
-    /// Parse the quantms / vendor sheet text: one line per channel in kit
-    /// order, `-2/-1/+1/+2` percentages (eight entries for TMTpro 16/18)
-    /// separated by `/`. An optional `<channel>:` or `<channel>,` prefix names
-    /// the row; `#` starts a comment; `NA`, `-1` and blank entries mean no
-    /// spill. TMTpro 32/35-plex have no correction and are refused.
-    ///
-    /// ```text
-    /// # TMT10plex lot XY
-    /// 126:0.0/0.0/5.09/0.0
-    /// 127N:0.0/0.17/5.57/0.0
-    /// ...
-    /// ```
     pub fn parse(plex: Plex, text: &str) -> Result<Self, String> {
         let n = plex.n_channels();
         let cols = Self::check_supported(plex)?;
@@ -528,8 +450,6 @@ impl CorrectionMatrix {
         }
         let mut m = vec![0.0f64; n * n];
         for (from, row) in rows.iter().enumerate() {
-            // Labels must agree with kit order: silently discarding a swapped
-            // label would apply a different channel's correction coefficients.
             let (label, body) = match row.find([':', ',']) {
                 Some(p) if !row[..p].contains('/') => (Some(row[..p].trim()), row[p + 1..].trim()),
                 _ => match row.split_once(char::is_whitespace) {
@@ -596,7 +516,6 @@ impl CorrectionMatrix {
         Ok(Self { plex, n, m })
     }
 
-    /// The sheet's column count for `plex`, or why the kit takes no sheet.
     pub fn check_supported(plex: Plex) -> Result<usize, String> {
         plex.correction_columns().ok_or_else(|| {
             format!(
@@ -624,13 +543,10 @@ impl CorrectionMatrix {
         })
     }
 
-    /// Entry `(target, source)`.
     pub fn get(&self, target: usize, source: usize) -> f64 {
         self.m[target * self.n + source]
     }
 
-    /// Corrected (true) channel intensities for one spectrum's observed
-    /// reporter vector, by NNLS. All-zero input stays all-zero.
     pub fn correct(&self, observed: &[f32]) -> Vec<f32> {
         if observed.len() != self.n || observed.iter().all(|&v| v <= 0.0) {
             return observed.to_vec();
@@ -678,7 +594,6 @@ mod tests {
         for plex in ALL {
             let c = plex.channels();
             if matches!(plex, Plex::Tmt32 | Plex::Tmt35) {
-                // Reference kit order: sorted by nominal mass, N/C before ND/CD.
                 assert!(
                     c.windows(2).all(|w| w[0].mz.floor() <= w[1].mz.floor()),
                     "{plex:?}"
@@ -705,11 +620,8 @@ mod tests {
                 .iter()
                 .any(|d| d.name == c.name && (d.mz - c.mz).abs() < 2e-6)
         };
-        // Every TMTpro 18-plex and 32-plex channel is a 35-plex channel at
-        // the same m/z.
         assert!(Plex::Tmt18.channels().iter().all(in_35));
         assert!(Plex::Tmt32.channels().iter().all(in_35));
-        // Each deuterated channel is 2H − 13C = 2.922 mDa above its twin.
         let mz = |name: &str| {
             Plex::Tmt35
                 .channels()
@@ -748,7 +660,6 @@ mod tests {
         assert_eq!(r[1], 0.0);
         assert_eq!(r[2], 300.0);
         assert_eq!(r[9], 10.0);
-        // A 0.3 Da ion-trap window around 127N (126.82..127.42) picks up the 127C peak.
         let r2 = extract_reporters(&peaks, Plex::Tmt10, Tolerance::Da(0.3));
         assert_eq!(r2[1], 300.0);
         assert_eq!(r2[0], 900.0);
@@ -761,7 +672,6 @@ mod tests {
                 .unwrap();
         let noise = reporter_noise(&profile, Plex::Tmt6);
         assert_eq!(noise.len(), 6);
-        // 126.13 sits between 125 (100) and 127 (300).
         assert!(
             (noise[0] - (100.0 + 200.0 * 1.127725 / 2.0)).abs() < 0.1,
             "{noise:?}"
@@ -776,25 +686,19 @@ mod tests {
 
     #[test]
     fn tolerance_must_separate_the_closest_channels() {
-        // N/C pairs are 6.3 mDa apart: 20 ppm (2.7 mDa at 135 Th) is fine,
-        // an ion-trap 0.3 Da window is not.
         assert!((Plex::Tmt10.min_channel_spacing() - 0.00632).abs() < 1e-5);
         assert!(Plex::Tmt10.check_tolerance(Tolerance::Ppm(20.0)).is_ok());
         assert!(Plex::Tmt18.check_tolerance(Tolerance::Ppm(20.0)).is_ok());
         assert!(Plex::Tmt10.check_tolerance(Tolerance::Da(0.3)).is_err());
         assert!(Plex::Tmt16.check_tolerance(Tolerance::Da(0.005)).is_err());
-        // One-dalton kits tolerate an ion-trap window.
         assert!(Plex::Tmt6.check_tolerance(Tolerance::Da(0.3)).is_ok());
         assert!(Plex::Itraq8.check_tolerance(Tolerance::Da(0.3)).is_ok());
-        // The deuterated twins are 2.9 mDa apart: 20 ppm (2.7 mDa) reaches
-        // across, 10 ppm does not.
         for plex in [Plex::Tmt32, Plex::Tmt35] {
             assert!(plex.has_deuterated_channels());
             assert!((plex.min_channel_spacing() - DEUTERATED_TAG_SHIFT_DA).abs() < 5e-6);
             assert!(plex.check_tolerance(Tolerance::Ppm(20.0)).is_err());
             assert!(plex.check_tolerance(Tolerance::Ppm(10.0)).is_ok());
         }
-        // Every kit's default Orbitrap tolerance passes its own check.
         for plex in ALL {
             let tol = Tolerance::Ppm(plex.default_reporter_ppm());
             assert!(plex.check_tolerance(tol).is_ok(), "{plex:?}");
@@ -803,7 +707,6 @@ mod tests {
 
     #[test]
     fn deuterated_channels_are_read_separately() {
-        // 128N, 128ND, 128C, 128CD within 9.2 mDa, each its own peak.
         let peaks = vec![
             (128.128116, 100.0f32),
             (128.131038, 200.0),
@@ -829,28 +732,24 @@ mod tests {
     fn tmt10_affected_channels_follow_the_c13_series() {
         let p = Plex::Tmt10;
         let idx = |name: &str| p.channels().iter().position(|c| c.name == name).unwrap();
-        // 126 +1 → 127C, +2 → 128C; 126 −1 → none.
         assert_eq!(p.affected(idx("126"), 2), Some(idx("127C")));
         assert_eq!(p.affected(idx("126"), 3), Some(idx("128C")));
         assert_eq!(p.affected(idx("126"), 1), None);
-        // 127N +1 → 128N; 128N −1 → 127N.
         assert_eq!(p.affected(idx("127N"), 2), Some(idx("128N")));
         assert_eq!(p.affected(idx("128N"), 1), Some(idx("127N")));
-        // 130N +1 → 131 (which is the N series in TMT10); 130C +1 → none.
         assert_eq!(p.affected(idx("130N"), 2), Some(idx("131")));
         assert_eq!(p.affected(idx("130C"), 2), None);
-        // 127C −1 → 126.
         assert_eq!(p.affected(idx("127C"), 1), Some(idx("126")));
     }
 
     #[test]
     fn tmt6_and_itraq_use_plain_nominal_neighbours() {
         let p = Plex::Tmt6;
-        assert_eq!(p.affected(0, 2), Some(1)); // 126 +1 → 127
-        assert_eq!(p.affected(5, 2), None); // 131 +1 → nothing
+        assert_eq!(p.affected(0, 2), Some(1));
+        assert_eq!(p.affected(5, 2), None);
         let q = Plex::Itraq8;
         let idx = |name: &str| q.channels().iter().position(|c| c.name == name).unwrap();
-        assert_eq!(q.affected(idx("119"), 2), None); // 120 is not a channel
+        assert_eq!(q.affected(idx("119"), 2), None);
         assert_eq!(q.affected(idx("119"), 3), Some(idx("121")));
     }
 
@@ -858,7 +757,6 @@ mod tests {
     fn tmtpro_eight_column_mapping() {
         let p = Plex::Tmt16;
         let idx = |name: &str| p.channels().iter().position(|c| c.name == name).unwrap();
-        // 127C: +N15 → 128N, +C13 → 128C, +N15+C13 → 129N, −C13 → 126, −N15 → none.
         assert_eq!(p.affected(idx("127C"), 4), Some(idx("128N")));
         assert_eq!(p.affected(idx("127C"), 5), Some(idx("128C")));
         assert_eq!(p.affected(idx("127C"), 6), Some(idx("129N")));
@@ -870,7 +768,6 @@ mod tests {
 
     #[test]
     fn parses_text_matrix_and_corrects() {
-        // TMT6 with a 5 % +1 spill from every channel except the last.
         let text = "126:0.0/0.0/5.0/0.0\n127:0.0/0.0/5.0/0.0\n128:0.0/0.0/5.0/0.0\n\
                     129:0.0/0.0/5.0/0.0\n130:0.0/0.0/5.0/0.0\n131:0.0/0.0/0.0/0.0\n";
         let m = CorrectionMatrix::parse(Plex::Tmt6, text).unwrap();

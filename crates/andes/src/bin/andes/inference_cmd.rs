@@ -1,12 +1,3 @@
-//! `andes inference`: protein groups over the rescored PSMs of one or more
-//! runs, written as the QPX protein-group view.
-//!
-//! The database is loaded with the search's options, so protein families,
-//! knockoff entries and decoy pairs are the ones the PSMs were searched
-//! against. The class and knockoff q-values are applied as in a search, then
-//! [`output::infer_protein_groups`] runs once over every run's PSMs: one
-//! parsimony and one picked competition, so the q-values are dataset-level.
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -16,7 +7,6 @@ use crate::cli::{DatabaseArgs, InferenceArgs, ProteinArgs};
 use crate::model_select::parse_enzymes;
 use crate::search::load_claim_database;
 
-/// A run name from a Percolator result file name.
 fn run_name(path: &Path) -> String {
     let name = path
         .file_name()
@@ -37,18 +27,6 @@ fn run_name(path: &Path) -> String {
     name
 }
 
-/// Every file's rows, each under a key of its own: the row's number among all
-/// rows read, in decimal.
-///
-/// Nothing downstream reads a key's text: the FDR stages and the inference
-/// use keys only to find and to tell rows apart, and none of their results
-/// depends on the keys (each sorts by rank and breaks ties as the map
-/// iterates, which is random either way). A dataset-level PSM file has tens
-/// of millions of rows, so keying by the `PSMId` itself (and keeping it again
-/// in `psm_id`, and the whole file as one string while parsing) would cost
-/// tens of gigabytes. Files are read one line at a time; `psm_id` is left
-/// empty. A `PSMId` repeated within a file is still an error, as in
-/// [`output::parse_psm_results`], found by a 128-bit hash of each id.
 fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>, String> {
     let mut all = HashMap::new();
     for p in paths {
@@ -81,8 +59,6 @@ fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>,
     Ok(all)
 }
 
-/// A 128-bit hash of a PSM id: two SipHash runs with different salts, so two
-/// distinct ids of one file collide with odds near 2^-128 per pair.
 fn id_hash(id: &str) -> u128 {
     use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
     let half = |salt: u8| {
@@ -94,12 +70,8 @@ fn id_hash(id: &str) -> u128 {
     (u128::from(half(0)) << 64) | u128::from(half(1))
 }
 
-/// The masses of the search's `restrict_to: annotated` modifications and its
-/// fixed terminal mods.
 type SiteMods = (Vec<f64>, Vec<(model::modification::ModLocation, f64)>);
 
-/// [`SiteMods`] of the search's modification lists (the built-in defaults
-/// have neither).
 fn annotated_site_masses(db: &DatabaseArgs) -> Result<SiteMods, Box<dyn std::error::Error>> {
     let aa = crate::model_select::search_aa_set(db, None)
         .map_err(|e| format!("building the amino-acid set: {e}"))?;
@@ -112,8 +84,6 @@ fn annotated_site_masses(db: &DatabaseArgs) -> Result<SiteMods, Box<dyn std::err
     ))
 }
 
-/// Protein groups over the rescored PSMs in `psms` and `decoy_psms` (as
-/// `andes inference`), from `database` read with the search's options.
 pub(crate) fn infer_from_files(
     database: &Path,
     a: &ProteinArgs,
@@ -156,8 +126,6 @@ pub(crate) fn infer_from_files(
     let mut knockoffs =
         output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
-    // Placements of a `restrict_to: annotated` modification on a knockoff site exist
-    // only for the site q-values. Only those modifications make such rows.
     if !restricted.is_empty() {
         knockoffs.extend(
             output::site_claims(
@@ -272,11 +240,6 @@ mod tests {
         proteins: ProteinArgs,
     }
 
-    /// Peptides and PSMs counted for the group of a protein with one
-    /// annotated phosphosite (S15) and three knockoff sites (S5, S25, S35),
-    /// from three PSMs: phospho on the real site, phospho on a knockoff site,
-    /// and an unmodified peptide. `args` are the database flags, `config` the
-    /// content of the search's `--config` file.
     fn counted_with(args: &[&str], config: Option<&str>) -> (usize, usize) {
         use clap::{CommandFactory, FromArgMatches};
         let dir = tempfile::tempdir().unwrap();
@@ -325,7 +288,6 @@ mod tests {
     fn annotated_site_mods_on_knockoff_sites_count_for_no_group() {
         let config = "search:\n  variable_mods:\n    - {name: Phospho, sites: S, restrict_to: annotated}\n";
         assert_eq!(counted_with(&[], Some(config)), (2, 2));
-        // A list on the command line replaces the config's.
         assert_eq!(
             counted_with(&["--variable-mods", "Phospho (S)"], Some(config)),
             (3, 3)
@@ -334,8 +296,6 @@ mod tests {
 
     #[test]
     fn knockoff_site_placements_count_without_an_annotated_site_mod() {
-        // The same modification allowed on any S: a placement on a knockoff
-        // site is an ordinary identification.
         assert_eq!(counted_with(&["--variable-mods", "Phospho (S)"], None), (3, 3));
         assert_eq!(counted_with(&[], None), (3, 3));
     }

@@ -1,44 +1,21 @@
-//! andes-ms2: a small fragment-intensity CNN evaluated in plain Rust (no ONNX runtime).
-//!
-//! The network is defined in `scripts/student/ms2/ms2_model.py`; this module
-//! reproduces its forward pass from an `AMS20001` weight file. Peptides are
-//! encoded as in [`rt_native`](crate::rt_native) (tokens with I as L, plus the
-//! elemental composition of each position's modifications), so any
-//! modification of the built-in Unimod table is accepted.
-//!
-//! The model is conditioned on precursor charge, NCE (or "unknown"), activation
-//! ([`ACTIVATIONS`]) and instrument family ([`INSTRUMENTS`]). It predicts
-//! [`N_ION`] channels per cleavage site ([`ION_TYPES`]); site `i` is the cleavage
-//! after residue `i + 1`, its b ion the N-terminal fragment and its y ion the
-//! complementary C-terminal fragment. The first four channels are b 1+, b 2+,
-//! y 1+, y 2+ (the PeptDeep `b_z1, b_z2, y_z1, y_z2` order).
-
 use std::path::Path;
 
 use crate::rt_native::mods::N_COMP;
 use crate::rt_native::{read_tensors, silu, Conv, RtError, RtPeptide, Tensor};
 
-/// Unimod accession of phosphorylation.
 const PHOSPHO: u32 = 21;
-/// Unimod accession of oxidation.
 const OXIDATION: u32 = 35;
 const N_TOK: usize = 23;
 
-/// Neutral loss of an ion channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeutralLoss {
-    /// Intact fragment.
     None,
-    /// −H3PO4 (97.9769 Da), from phosphorylated S/T.
     H3po4,
-    /// −CH4SO (63.9983 Da), from oxidised M.
     Ch4so,
 }
 
-/// One output channel: (b ion?, fragment charge, neutral loss).
 pub type IonType = (bool, u8, NeutralLoss);
 
-/// Output channels per cleavage site, in model order.
 pub const ION_TYPES: [IonType; 12] = [
     (true, 1, NeutralLoss::None),
     (true, 2, NeutralLoss::None),
@@ -53,11 +30,8 @@ pub const ION_TYPES: [IonType; 12] = [
     (false, 1, NeutralLoss::Ch4so),
     (false, 2, NeutralLoss::Ch4so),
 ];
-/// Channels per cleavage site.
 pub const N_ION: usize = ION_TYPES.len();
-/// Channels without a neutral loss (b 1+, b 2+, y 1+, y 2+).
 pub const N_BASE_ION: usize = 4;
-/// Activation vocabulary (dissociation + MS2 analyser); index 0 = unknown.
 pub const ACTIVATIONS: [&str; 6] = [
     "unknown",
     "HCD-FTMS",
@@ -66,7 +40,6 @@ pub const ACTIVATIONS: [&str; 6] = [
     "CID-FTMS",
     "HCD-ASTMS",
 ];
-/// Instrument families; index 0 = unknown.
 pub const INSTRUMENTS: [&str; 7] = [
     "unknown",
     "QExactive",
@@ -76,15 +49,12 @@ pub const INSTRUMENTS: [&str; 7] = [
     "Astral",
     "LTQ",
 ];
-/// Precursor charges are one-hot encoded up to this value; higher charges share the last slot.
 pub const MAX_CHARGE: usize = 6;
 
-/// Index in [`ACTIVATIONS`] (0 when not listed).
 pub fn activation_index(name: &str) -> usize {
     ACTIVATIONS.iter().position(|a| *a == name).unwrap_or(0)
 }
 
-/// Index in [`INSTRUMENTS`] for a free-text instrument model name (0 = unknown).
 pub fn instrument_class(name: &str) -> usize {
     let s: String = name
         .to_lowercase()
@@ -114,21 +84,15 @@ pub fn instrument_class(name: &str) -> usize {
     }
 }
 
-/// Acquisition conditions the prediction is conditioned on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ms2Conditions {
-    /// Precursor charge (≥ 1).
     pub charge: u8,
-    /// Normalised collision energy, `None` when unknown.
     pub nce: Option<f32>,
-    /// Index in [`ACTIVATIONS`].
     pub activation: usize,
-    /// Index in [`INSTRUMENTS`].
     pub instrument: usize,
 }
 
 impl Ms2Conditions {
-    /// Conditions from an activation name ([`ACTIVATIONS`]) and an instrument model name.
     pub fn new(charge: u8, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
         Self {
             charge,
@@ -138,7 +102,6 @@ impl Ms2Conditions {
         }
     }
 
-    /// Charge one-hot followed by `[NCE / 100, NCE known]`.
     fn numeric(&self) -> [f32; MAX_CHARGE + 2] {
         let mut v = [0.0f32; MAX_CHARGE + 2];
         v[(self.charge as usize).clamp(1, MAX_CHARGE) - 1] = 1.0;
@@ -150,14 +113,9 @@ impl Ms2Conditions {
     }
 }
 
-/// Which channels exist for `p` at precursor `charge`: `(n − 1) × N_ION`,
-/// site-major. A channel is absent when its fragment charge exceeds the
-/// precursor charge or, for a loss channel, when the fragment holds no pS/pT
-/// (H3PO4) or oxidised M (CH4SO).
 pub fn valid_mask(p: &RtPeptide, charge: u8) -> Vec<bool> {
     let seq = p.sequence.as_bytes();
     let n = seq.len();
-    // per residue (1-based, slot 0 = before the first residue): carriers, then prefix sums
     let (mut ph, mut ox) = (vec![0u32; n + 1], vec![0u32; n + 1]);
     for &(pos, id) in &p.mods {
         if (1..=n).contains(&pos) {
@@ -192,7 +150,6 @@ pub fn valid_mask(p: &RtPeptide, charge: u8) -> Vec<bool> {
     v
 }
 
-/// Dense layer, torch layout `w[out][in]`.
 struct Linear {
     din: usize,
     dout: usize,
@@ -236,7 +193,6 @@ struct Attention {
     proj: Conv,
 }
 
-/// The andes-ms2 network.
 pub struct Ms2Model {
     emb: Vec<f32>,
     emb_dim: usize,
@@ -254,7 +210,6 @@ pub struct Ms2Model {
     head2: Conv,
 }
 
-/// Reusable per-thread buffers for [`Ms2Model::predict_with`].
 #[derive(Default)]
 pub struct Ms2Scratch {
     input: Vec<f32>,
@@ -268,30 +223,23 @@ pub struct Ms2Scratch {
     film: Vec<f32>,
     hc: Vec<f32>,
     site: Vec<f32>,
-    /// FiLM and head conditioning per conditioning vector (`cond` as bits),
-    /// computed by the model at address `cond_model`.
     cond_cache: Vec<CondEntry>,
     cond_model: usize,
 }
 
-/// The conditioning outputs of one `cond` vector.
 struct CondEntry {
     key: Vec<u32>,
     film: Vec<f32>,
     hc: Vec<f32>,
 }
 
-/// Distinct conditioning vectors kept per scratch (a run has a few charges
-/// under one activation, instrument and NCE).
 const COND_CACHE: usize = 64;
 
 impl Ms2Model {
-    /// Load an `AMS20001` weight file written by `ms2_model.export_weights`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, RtError> {
         Self::from_bytes(&std::fs::read(path)?)
     }
 
-    /// Parse an `AMS20001` blob.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, RtError> {
         let bad = |m: &str| RtError::Format(m.to_string());
         let t = read_tensors(buf, b"AMS20001")?;
@@ -398,7 +346,6 @@ impl Ms2Model {
         })
     }
 
-    /// Number of parameters.
     pub fn n_params(&self) -> usize {
         let conv = |c: &Conv| c.w.len() + c.b.len();
         self.emb.len()
@@ -421,14 +368,10 @@ impl Ms2Model {
             + conv(&self.head2)
     }
 
-    /// Predicted intensities, `(n − 1) × N_ION` site-major, clipped at 0 and with
-    /// absent channels ([`valid_mask`]) set to 0. `None` when the peptide cannot
-    /// be encoded, has fewer than two residues, or `charge` is 0.
     pub fn predict(&self, p: &RtPeptide, c: &Ms2Conditions) -> Option<Vec<f32>> {
         self.predict_with(p, c, &mut Ms2Scratch::default())
     }
 
-    /// As [`predict`](Self::predict), reusing `scratch` across calls.
     pub fn predict_with(
         &self,
         p: &RtPeptide,
@@ -442,7 +385,6 @@ impl Ms2Model {
         Some(out)
     }
 
-    /// The unprocessed network output (same layout as [`predict`](Self::predict)).
     pub fn predict_raw_with(
         &self,
         p: &RtPeptide,
@@ -506,7 +448,6 @@ impl Ms2Model {
         s.z.resize(np * ch, 0.0);
         self.inp.apply(&s.input, np, &mut s.x);
 
-        // FiLM-modulated residual dilated convolutions
         for (b, (conv, mix)) in self.blocks.iter().enumerate() {
             conv.apply(&s.x, np, &mut s.h);
             let gamma = &film[(2 * b) * ch..(2 * b + 1) * ch];
@@ -562,8 +503,6 @@ impl Ms2Model {
             }
         }
 
-        // site head: head1 is a k = 2 conv, so its output at token p reads tokens
-        // p − 1 and p; site j (between residues j + 1 and j + 2) is token j + 2.
         self.head1.apply(&s.x, np, &mut s.h);
         s.site.clear();
         for j in 0..n - 1 {
@@ -612,8 +551,6 @@ mod tests {
         assert!(valid_mask(&p, 2)[1]);
     }
 
-    /// Parity with the PyTorch model on the committed random-weight fixture
-    /// (`ms2_export.py --random`), in ProForma and andes PIN notation.
     #[test]
     fn matches_pytorch_reference() {
         let model = Ms2Model::load(fixture("tiny.ams2")).unwrap();
@@ -670,7 +607,6 @@ mod tests {
         assert!(max_err < 1e-4, "max relative error {max_err}");
     }
 
-    /// A scratch reused across conditions gives the bits of a fresh scratch.
     #[test]
     fn reused_scratch_matches_fresh_scratch() {
         let model = Ms2Model::load(fixture("tiny.ams2")).unwrap();

@@ -1,17 +1,3 @@
-//! andes-rt: a small retention-time CNN evaluated in plain Rust (no ONNX runtime).
-//!
-//! The network and the encoding are defined in `scripts/student/rt_model.py`;
-//! this module reproduces its forward pass from an `ARTN0001` weight file.
-//!
-//! Encoding: tokens `[N-term, residues…, C-term]` (N-term = 1, C-term = 2,
-//! residue = 3 + index in [`AA`]; I is encoded as L) and, per position, the summed elemental
-//! composition of its modifications (see [`mods`]) scaled by [`COMP_SCALE`].
-//! N-terminal mods sit on the N-term token, C-terminal mods on the C-term token,
-//! so an unseen PTM is described by its composition rather than by a learned id.
-//!
-//! The output is a dimensionless retention index; map it to minutes per run
-//! with a monotone calibration on confident PSMs.
-
 pub mod mods;
 
 use std::collections::HashMap;
@@ -20,37 +6,26 @@ use std::path::Path;
 
 use mods::N_COMP;
 
-/// Residue alphabet, in token order.
 pub const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
-/// Longest supported peptide.
 pub const MAX_LEN: usize = 50;
-/// Scale applied to the composition features before the network.
 pub const COMP_SCALE: [f32; N_COMP] = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 1.0];
 const N_TOK: usize = 23;
 
-/// Errors from loading weights or encoding peptides.
 #[derive(Debug, thiserror::Error)]
 pub enum RtError {
-    /// I/O failure reading the weight file.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// Malformed or inconsistent weight file.
     #[error("weights: {0}")]
     Format(String),
 }
 
-/// A peptidoform: residues plus Unimod modifications by position
-/// (0 = N-terminus, 1..=n residues, n + 1 = C-terminus).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RtPeptide {
-    /// One-letter residues.
     pub sequence: String,
-    /// (position, Unimod id), sorted.
     pub mods: Vec<(usize, u32)>,
 }
 
 impl RtPeptide {
-    /// Parse ProForma with Unimod accessions, e.g. `[UNIMOD:737]-PEPS[UNIMOD:21]K`.
     pub fn from_proforma(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         let mut mods = Vec::new();
@@ -107,16 +82,6 @@ impl RtPeptide {
         })
     }
 
-    /// Parse an andes PIN peptide (`K.M+42.01056+15.99491PEPS+79.96633K.D`).
-    ///
-    /// Mass deltas follow their residue; N-terminal deltas follow the first
-    /// residue, and the first one that is N-term-capable goes to the N-terminus
-    /// (`K+42.01` reads as N-terminal acetyl, the common case). andes writes an
-    /// N-terminal and a residue mod on residue 1 as one summed delta
-    /// (`_.C+99.03203PEPTIDEK.R` is acetyl + carbamidomethyl-C); a delta there
-    /// that matches no single entry is split into the N-terminal + residue
-    /// pair closest in mass. `None` when a delta matches no Unimod entry (or,
-    /// on residue 1, no pair) within 2 mDa.
     pub fn from_andes(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
@@ -177,7 +142,6 @@ impl RtPeptide {
         })
     }
 
-    /// ProForma with Unimod accessions (inverse of [`from_proforma`](Self::from_proforma)).
     pub fn to_proforma(&self) -> String {
         let n = self.sequence.len();
         let tag = |pos: usize| -> String {
@@ -203,7 +167,6 @@ impl RtPeptide {
         out
     }
 
-    /// Tokens and scaled composition rows, or `None` if unsupported.
     pub fn encode(&self) -> Option<(Vec<usize>, Vec<[f32; N_COMP]>)> {
         let n = self.sequence.len();
         if n == 0 || n > MAX_LEN {
@@ -212,7 +175,6 @@ impl RtPeptide {
         let mut tok = Vec::with_capacity(n + 2);
         tok.push(1);
         for c in self.sequence.bytes() {
-            // I is encoded as L: the training sequences carry no I.
             let c = if c == b'I' { b'L' } else { c };
             tok.push(3 + AA.iter().position(|&a| a == c)?);
         }
@@ -236,8 +198,6 @@ impl RtPeptide {
     }
 }
 
-/// Conv layer with weights stored `[k][in][out]` so the inner loop runs over
-/// contiguous output channels.
 pub(crate) struct Conv {
     pub(crate) k: usize,
     pub(crate) cin: usize,
@@ -273,13 +233,6 @@ impl Conv {
         })
     }
 
-    /// `y[p] = b + Σ_k Σ_i w[k][i] · x[p + (k - k/2)·dil]` with zero padding.
-    ///
-    /// Output is computed in register tiles of [`TILE_P`] positions ×
-    /// [`TILE_O`] channels, so one load of a weight row serves every position
-    /// of the tile. Each output element still sums bias, then taps `k`
-    /// ascending, then inputs `i` ascending; channels beyond the last full
-    /// tile take the same order one position at a time.
     pub(crate) fn apply(&self, x: &[f32], n: usize, y: &mut [f32]) {
         let (cin, cout) = (self.cin, self.cout);
         let half = (self.k / 2) as isize;
@@ -334,13 +287,9 @@ impl Conv {
     }
 }
 
-/// Output positions per [`Conv::apply`] register tile.
 const TILE_P: usize = 4;
-/// Output channels per [`Conv::apply`] register tile.
 const TILE_O: usize = 16;
 
-/// One kernel tap over the rows of `acc` (consecutive positions whose inputs
-/// are the consecutive rows of `xs`).
 fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], cin: usize, cout: usize, o0: usize) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
     use avx::tap;
@@ -353,7 +302,6 @@ fn tap_rows(acc: &mut [[f32; TILE_O]], xs: &[f32], wk: &[f32], cin: usize, cout:
     }
 }
 
-/// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
 #[cfg_attr(
     all(target_arch = "x86_64", target_feature = "avx", not(test)),
     allow(dead_code)
@@ -381,8 +329,6 @@ fn tap<const R: usize>(
     *acc = a;
 }
 
-/// [`tap`] with the accumulators held in AVX registers: per element the same
-/// multiply, then add, in the same order, eight channels per instruction.
 #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
 mod avx {
     use super::TILE_O;
@@ -390,24 +336,15 @@ mod avx {
         __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
     };
 
-    /// AVX vectors per tile row.
     const V: usize = TILE_O / 8;
     const _: () = assert!(TILE_O == 16, "the AVX tap holds 2 × 8 channels per row");
 
-    /// The 16 floats of `row` as two vectors.
-    ///
-    /// # Safety
-    /// The CPU must support AVX (the module is compiled only when it is enabled).
     #[inline(always)]
     unsafe fn load(row: &[f32; TILE_O]) -> [__m256; V] {
         let p = row.as_ptr();
         [_mm256_loadu_ps(p), _mm256_loadu_ps(p.add(8))]
     }
 
-    /// Writes two vectors to the 16 floats of `row`.
-    ///
-    /// # Safety
-    /// As [`load`].
     #[inline(always)]
     unsafe fn store(row: &mut [f32; TILE_O], a: [__m256; V]) {
         let p = row.as_mut_ptr();
@@ -415,10 +352,6 @@ mod avx {
         _mm256_storeu_ps(p.add(8), a[1]);
     }
 
-    /// `a + w · x` per lane (multiply, then add; no fused multiply-add).
-    ///
-    /// # Safety
-    /// As [`load`].
     #[inline(always)]
     unsafe fn step(a: [__m256; V], w: [__m256; V], x: f32) -> [__m256; V] {
         let b = _mm256_set1_ps(x);
@@ -428,13 +361,11 @@ mod avx {
         ]
     }
 
-    /// The weights of input `i` for output channels `o0..o0 + TILE_O`.
     #[inline(always)]
     fn row_weights(wk: &[f32], i: usize, cout: usize, o0: usize) -> &[f32; TILE_O] {
         wk[i * cout + o0..][..TILE_O].try_into().unwrap()
     }
 
-    /// `acc[r][o] += w[i][o0 + o] · xs[r][i]` for `i` ascending.
     #[inline(always)]
     pub(super) fn tap<const R: usize>(
         acc: &mut [[f32; TILE_O]; R],
@@ -446,7 +377,6 @@ mod avx {
     ) {
         let xs = &xs[..R * cin];
         // SAFETY: AVX is enabled for this build (module `cfg`), and every load
-        // and store goes through a TILE_O-float array.
         unsafe {
             let mut a: [[__m256; V]; R] = std::array::from_fn(|r| load(&acc[r]));
             for i in 0..cin {
@@ -467,8 +397,6 @@ pub(crate) struct Tensor {
     pub(crate) data: Vec<f32>,
 }
 
-/// Parse a tensor file: 8-byte `magic`, u32 tensor count, then per tensor u32
-/// name length, UTF-8 name, u32 ndim, u32 dims and little-endian f32 data.
 pub(crate) fn read_tensors(
     buf: &[u8],
     magic: &[u8; 8],
@@ -526,7 +454,6 @@ pub(crate) fn silu(v: f32) -> f32 {
     v / (1.0 + (-v).exp())
 }
 
-/// The andes-rt network.
 pub struct RtModel {
     emb: Vec<f32>,
     emb_dim: usize,
@@ -541,7 +468,6 @@ pub struct RtModel {
     fc2_b: f32,
 }
 
-/// Reusable per-thread buffers for [`RtModel::predict_with`].
 #[derive(Default)]
 pub struct Scratch {
     input: Vec<f32>,
@@ -551,14 +477,12 @@ pub struct Scratch {
 }
 
 impl RtModel {
-    /// Load an `ARTN0001` weight file written by `rt_model.export_weights`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, RtError> {
         let mut buf = Vec::new();
         std::fs::File::open(path)?.read_to_end(&mut buf)?;
         Self::from_bytes(&buf)
     }
 
-    /// Parse an `ARTN0001` blob.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, RtError> {
         let bad = |m: &str| RtError::Format(m.to_string());
         let t = read_tensors(buf, b"ARTN0001")?;
@@ -617,7 +541,6 @@ impl RtModel {
         })
     }
 
-    /// Number of parameters.
     pub fn n_params(&self) -> usize {
         let conv = |c: &Conv| c.w.len() + c.b.len();
         self.emb.len()
@@ -635,12 +558,10 @@ impl RtModel {
             + 1
     }
 
-    /// Retention index for one peptidoform; `None` if it cannot be encoded.
     pub fn predict(&self, p: &RtPeptide) -> Option<f32> {
         self.predict_with(p, &mut Scratch::default())
     }
 
-    /// As [`predict`](Self::predict), reusing `scratch` across calls.
     pub fn predict_with(&self, p: &RtPeptide, s: &mut Scratch) -> Option<f32> {
         let (tok, comp) = p.encode()?;
         let n = tok.len();
@@ -700,9 +621,6 @@ impl RtModel {
 mod tests {
     use super::*;
 
-    /// `Conv::apply` sums in the order bias, tap, input, so it matches this
-    /// per-element reference bit for bit, across tile edges, padding and
-    /// channel remainders.
     #[test]
     fn conv_apply_matches_reference_bitwise() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -757,7 +675,6 @@ mod tests {
         }
     }
 
-    /// The AVX tap and the portable tap give the same bits.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
     #[test]
     fn avx_tap_matches_portable_tap() {

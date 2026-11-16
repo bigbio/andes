@@ -1,38 +1,11 @@
-//! The ion-mobility window of a run's MS1 extraction.
-//!
-//! On a run whose survey scans are resolved by ion mobility
-//! ([`crate::ms1_index::Ms1Scan::mobility`]), a precursor's traces are read
-//! within a window of 1/K0 around its library mobility (the median precursor
-//! 1/K0 of its donor PSMs), so a co-eluting ion at the same m/z but another
-//! mobility does not enter its traces. The window is learned per run from
-//! the run's identified precursors: for each, the 1/K0 of the most intense
-//! MS1 centroid of its monoisotopic m/z near its PSM's retention time,
-//! against its library mobility. The median of those differences is the
-//! run's offset (the run's mobility scale against the library's) and their
-//! robust standard deviation (1.4826 times the median absolute deviation) its
-//! scale; the window is the library mobility plus the offset, within
-//! [`GATE_SIGMAS`] scales. The differences are collected within
-//! [`SEARCH_K0`] of the library mobility, then again within [`REFINE_SIGMAS`]
-//! scales of the first offset, and the offset and scale refitted.
-
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
-/// Half-width (V·s/cm²) of the first search for each identified precursor's
-/// centroid around its library mobility; it only bounds the pairs the
-/// offset and scale are estimated from.
 pub const SEARCH_K0: f64 = 0.1;
-/// Pairs beyond this many scales of the first offset are left out of the
-/// refit.
 pub const REFINE_SIGMAS: f64 = 4.0;
-/// Half-width of the extraction window, in learned scales.
 pub const GATE_SIGMAS: f64 = 3.0;
-/// Fewest pairs a window is learned from; with fewer, the run has none.
 pub const MIN_PAIRS: usize = 50;
-/// Floor of the learned scale (V·s/cm²), about one mobility scan.
 pub const MIN_SIGMA: f64 = 1e-3;
 
-/// One identified precursor of the run: monoisotopic m/z, PSM retention time
-/// (seconds) and library mobility (1/K0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobilityObservation {
     pub mz: f64,
@@ -40,15 +13,10 @@ pub struct MobilityObservation {
     pub k0: f32,
 }
 
-/// A run's learned mobility scale (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunMobility {
-    /// Median of (centroid 1/K0 − library 1/K0) over the pairs.
     pub offset: f64,
-    /// Robust standard deviation of those differences, floored at
-    /// [`MIN_SIGMA`].
     pub sigma: f64,
-    /// Pairs in the final estimate.
     pub pairs: usize,
 }
 
@@ -73,7 +41,6 @@ fn median(v: &mut [f64]) -> f64 {
     }
 }
 
-/// Median and robust standard deviation of `d` (not empty).
 fn location_scale(d: &[f64]) -> (f64, f64) {
     let mut v = d.to_vec();
     let m = median(&mut v);
@@ -81,9 +48,6 @@ fn location_scale(d: &[f64]) -> (f64, f64) {
     (m, 1.4826 * median(&mut dev))
 }
 
-/// The 1/K0 differences of the observations whose most intense centroid in
-/// the isotope-0 slice (`± tol_ppm`), over the scans within `rt_half_s` of
-/// the PSM, lies within `half` of `k0 + centre`.
 fn differences(
     ms1: &Ms1RunIndex,
     obs: &[MobilityObservation],
@@ -127,11 +91,6 @@ fn differences(
     out
 }
 
-/// Learn the run's mobility scale from its identified precursors `obs`
-/// (see the module docs); `tol_ppm` is the extraction's m/z half-width and
-/// `rt_half_s` the retention-time half-width searched around each PSM.
-/// `None` when the run is not mobility-resolved or gives fewer than
-/// [`MIN_PAIRS`] pairs.
 pub fn learn(
     ms1: &Ms1RunIndex,
     obs: &[MobilityObservation],
@@ -164,9 +123,6 @@ mod tests {
     use super::*;
     use crate::ms1_index::Ms1Scan;
 
-    /// Scans every second: precursor `p` (m/z 500 + p) elutes at 100 + 10 p
-    /// s with 1/K0 0.8 + 0.001 p + `shift`; an interferer at the same m/z,
-    /// four times as intense, sits 0.2 V·s/cm² away (outside the search).
     fn run(n: usize, shift: f32) -> Ms1RunIndex {
         let scans = (0..(20 * n + 200))
             .map(|k| {

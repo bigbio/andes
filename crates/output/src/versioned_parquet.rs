@@ -1,13 +1,3 @@
-//! Writer and reader shared by the final quantification tables
-//! (`<stem>.tmt.parquet`, `<stem>.lfq.parquet`, `<stem>.mbr.parquet`,
-//! `<stem>.mbr_validation.parquet`).
-//!
-//! Each table records its schema version under its own key-value metadata key
-//! (`andes.<table>.schema`, `<major>.<minor>`); a reader rejects any other
-//! major. A minor version only adds columns, so readers look columns up by
-//! name. Files are written to `<path>.partial` and renamed into place, ZSTD
-//! compressed.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -22,11 +12,8 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 
-/// Rows per Parquet row group.
 pub(crate) const BATCH_ROWS: usize = 65_536;
 
-/// Identity of one versioned table: its metadata key, the version this build
-/// writes and the major it reads, and a name for error messages.
 pub(crate) struct TableVersion {
     pub key: &'static str,
     pub version: &'static str,
@@ -34,9 +21,6 @@ pub(crate) struct TableVersion {
     pub what: &'static str,
 }
 
-/// A versioned table being written batch by batch to `<path>.partial`,
-/// renamed to `path` by [`TableWriter::finish`]; dropped unfinished, the
-/// partial file is removed. Every error names the file.
 pub(crate) struct TableWriter {
     path: PathBuf,
     partial: PathBuf,
@@ -44,8 +28,6 @@ pub(crate) struct TableWriter {
 }
 
 impl TableWriter {
-    /// Creates `<path>.partial` with the table's schema version and `extra` as
-    /// key-value metadata.
     pub(crate) fn create(
         path: &Path,
         table: &TableVersion,
@@ -92,7 +74,6 @@ impl TableWriter {
             .map_err(|e| format!("{}: {e}", self.partial.display()))
     }
 
-    /// Closes the file and renames it into place.
     pub(crate) fn finish(mut self) -> Result<(), String> {
         let w = self.writer.take().expect("writer is open until finish");
         let done = w
@@ -117,9 +98,6 @@ impl Drop for TableWriter {
     }
 }
 
-/// Writes `batches` (all with `schema`) to `path` through `<path>.partial`,
-/// with the table's schema version and `extra` as key-value metadata. Every
-/// error names the file.
 pub(crate) fn write_table(
     path: &Path,
     table: &TableVersion,
@@ -141,8 +119,6 @@ pub struct ReadTable {
     pub meta: HashMap<String, String>,
 }
 
-/// Reads every batch of `path` after checking its schema version against
-/// `table`. Every error names the file.
 pub(crate) fn read_table(path: &Path, table: &TableVersion) -> Result<ReadTable, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| err(&e))?;

@@ -1,13 +1,3 @@
-//! Integration test for the native Thermo `.raw` reader.
-//!
-//! Requires the `thermo` feature, the .NET 8 runtime, and a real `.raw` file
-//! pointed to by the `ANDES_TEST_RAW` environment variable. The `.raw` format is
-//! proprietary and the files are large, so no fixture is committed; the test
-//! skips (passes) when `ANDES_TEST_RAW` is unset, and runs in environments that
-//! have a `.raw` available (e.g. the benchmark host).
-//!
-//! Run with:  `ANDES_TEST_RAW=/path/sample.raw cargo test -p input --features thermo`
-
 #![cfg(feature = "thermo")]
 
 use input::ThermoRawReader;
@@ -59,8 +49,6 @@ fn thermo_raw_reads_ms2_spectra() {
     );
 }
 
-/// The MS1-linked chunked reader (used by `--chimeric`) must emit every MS2 and
-/// keep `ms2_to_ms1` aligned 1:1 with the emitted spectra in each chunk.
 #[test]
 fn thermo_raw_chunked_ms1_link_is_consistent() {
     let path = match test_raw_path() {

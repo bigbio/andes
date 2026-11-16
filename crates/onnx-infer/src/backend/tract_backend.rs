@@ -1,5 +1,3 @@
-//! [`tract`](https://github.com/sonos/tract) ONNX backend (pure Rust, Apache-2.0).
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,7 +9,6 @@ use crate::tensor::NamedTensor;
 
 type TractRunnable = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
-/// Tract-backed session.
 pub struct TractSession {
     model: Arc<TractRunnable>,
     input_names: Vec<String>,
@@ -20,8 +17,6 @@ pub struct TractSession {
     output_shapes: Vec<Option<Vec<Option<usize>>>>,
 }
 
-/// The shape an inference fact states: `None` for an open (unknown-rank) shape,
-/// else one entry per axis, `None` where the axis is not a fixed integer.
 fn fact_shape(model: &InferenceModel, outlet: OutletId) -> Option<Vec<Option<usize>>> {
     use tract_onnx::tract_hir::infer::GenericFactoid;
     let fact = model.outlet_fact(outlet).ok()?;
@@ -40,16 +35,11 @@ fn fact_shape(model: &InferenceModel, outlet: OutletId) -> Option<Vec<Option<usi
 }
 
 impl TractSession {
-    /// Load and optimize an ONNX file.
     pub fn load(path: &Path) -> Result<Self> {
         let inferred = tract_onnx::onnx()
             .model_for_path(path)
             .map_err(|e| Error::Inference(format!("tract load {}: {e}", path.display())))?;
 
-        // Capture ONNX-facing names before optimization rewrites the graph.
-        // An input is a source node named after its tensor. An output is an
-        // outlet of an arbitrary node: its ONNX tensor name is the outlet
-        // label, while the node name is the producing operator's name.
         let input_names: Vec<String> = inferred
             .inputs
             .iter()
@@ -165,8 +155,6 @@ impl InferenceBackend for TractSession {
             let arr = tract_ndarray::ArrayD::from_shape_vec(nt.shape.clone(), nt.data.clone())
                 .map_err(|e| Error::Inference(format!("ndarray shape for `{}`: {e}", nt.name)))?;
             let tensor: Tensor = arr.into();
-            // NamedTensor carries f32; graphs with integer inputs (token / index
-            // tensors such as PeptDeep `aa_indices`) need a cast to the declared type.
             let dt = self
                 .model
                 .model()
@@ -196,7 +184,6 @@ impl InferenceBackend for TractSession {
                 .get(i)
                 .cloned()
                 .unwrap_or_else(|| format!("output_{i}"));
-            // Integer outputs (e.g. TreeEnsembleClassifier labels) come back as f32.
             let t = if t.datum_type() == f32::datum_type() {
                 t.into_tensor()
             } else {

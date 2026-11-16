@@ -56,3 +56,7 @@
 .ci-legend span { margin-right: 1rem; font-size: 0.72rem; }
 .ci-legend i { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.3rem; }
 .ci-legend i.ci-expected-key { border-radius: 0; transform: rotate(45deg) scale(0.8); background: var(--md-default-fg-color); }
+.ci-tip { position: fixed; display: none; z-index: 10; pointer-events: none; white-space: pre-line; max-width: 24rem; padding: 0.3rem 0.5rem; border-radius: 6px; font-size: 0.65rem; background: var(--md-default-fg-color); color: var(--md-default-bg-color); }
+#andes-ci svg circle:hover { r: 6; }
+#andes-ci [data-tip] { cursor: pointer; }
+#andes-ci svg .ci-expected { pointer-events: none; }

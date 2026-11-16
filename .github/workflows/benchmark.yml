@@ -5,15 +5,18 @@ name: Benchmarks
 # `benchmarks` branch; the page reads that file directly, so no site rebuild is needed.
 #
 # Runner: repo variable BENCH_RUNNER (JSON, e.g. '["self-hosted","benchmark"]'); default
-# ubuntu-latest (4 vCPU, 16 GB), which fits the single-run sets. The 6-run Astral LFQ set
-# (proteobench-astral, 15.5 GB of spectra) needs a bigger runner with a persistent BENCH_DATA.
-# Datasets: repo variable BENCH_DATASETS (space-separated keys of docs/benchmarks/ci/datasets.json),
-# or the workflow_dispatch input.
+# ubuntu-latest (4 vCPU, 16 GB). Pushes run the single-run sets (BENCH_DATASETS). A weekly
+# schedule runs the 6-run Astral LFQ set (BENCH_WEEKLY_DATASETS, 15.5 GB of spectra, too big
+# for the cache, so a hosted runner downloads it each week). With a self-hosted runner and a
+# persistent BENCH_DATA, add proteobench-astral to BENCH_DATASETS to run it on every push.
+# Datasets: space-separated keys of docs/benchmarks/ci/datasets.json, or the workflow_dispatch input.
 
 on:
   push:
     branches: [main]
     paths: [crates/**, Cargo.lock, Cargo.toml, resources/**, docs/benchmarks/ci/**, .github/workflows/benchmark.yml]
+  schedule:
+    - cron: "0 2 * * 0"   # Sunday 02:00 UTC: the quantification set
   workflow_dispatch:
     inputs:
       datasets:
@@ -36,10 +39,18 @@ jobs:
     runs-on: ${{ fromJSON(vars.BENCH_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 300
     env:
-      DATASETS: ${{ inputs.datasets || vars.BENCH_DATASETS || 'PXD007683 PXD001819 PXD070049' }}
+      DATASETS: ${{ inputs.datasets || (github.event_name == 'schedule' && (vars.BENCH_WEEKLY_DATASETS || 'proteobench-astral')) || vars.BENCH_DATASETS || 'PXD007683 PXD001819 PXD070049' }}
       BENCH_DATA: ${{ vars.BENCH_DATA || format('{0}/bench-data', github.workspace) }}
       BENCH_HOST: ${{ vars.BENCH_HOST || 'GitHub ubuntu-latest, 4 vCPU, 16 GB' }}
     steps:
+      # A hosted runner has about 14 GB free. Remove preinstalled toolchains that this job does
+      # not use to get about 30 GB more for the multi-run sets.
+      - name: Free disk space (hosted runner)
+        if: ${{ !vars.BENCH_DATA }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v4
 
       # thermo deps need rustc >= 1.88, see release.yml
@@ -66,9 +77,10 @@ jobs:
           print("key=" + "-".join(sorted(names)))
           EOF
 
-      # Hosted runners start empty: keep spectra and databases between runs (10 GB cache limit).
+      # Hosted runners start empty: keep spectra and databases between runs (10 GB cache limit,
+      # so the weekly multi-run set is downloaded each time).
       - uses: actions/cache@v4
-        if: ${{ !vars.BENCH_DATA }}
+        if: ${{ !vars.BENCH_DATA && github.event_name != 'schedule' }}
         with:
           path: ${{ env.BENCH_DATA }}
           key: bench-data-${{ steps.sets.outputs.key }}-v1

@@ -57,7 +57,7 @@
     const fmtd = (x) => new Date(x).toLocaleDateString("en-US", { month: "short", day: "numeric" });
     g += `<text x="${L}" y="${H - 6}">${fmtd(x0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fmtd(x1)}</text>`;
     const line = pts.map((p) => `${X(p.x)},${Y(p.y)}`).join(" ");
-    const dots = pts.map((p) => `<circle cx="${X(p.x)}" cy="${Y(p.y)}" r="3"><title>${esc(p.t)}: ${p.y.toLocaleString("en-US")}</title></circle>`).join("");
+    const dots = pts.map((p) => `<a href="https://github.com/bigbio/andes/commit/${esc(p.c)}"><circle cx="${X(p.x)}" cy="${Y(p.y)}" r="4" data-tip="${esc(label)}: ${esc(p.y.toLocaleString("en-US"))}&#10;${esc(p.t)}"/></a>`).join("");
     return `<div class="ci-chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}">
       <text x="${L - 40}" y="14" class="ci-label">${label}</text>${g}<polyline points="${line}"/>${dots}</svg></div>`;
   }
@@ -66,7 +66,7 @@
     return sets.map((d) => {
       const rs = rows.filter((r) => r.dataset === d && r.status === "ok");
       const charts = HISTORY.map(([k, label]) => chart(rs.filter((r) => r[k] != null)
-        .map((r) => ({ x: +when(r), y: r[k], t: (r.commit || "").slice(0, 7) })), label)).join("");
+        .map((r) => ({ x: +when(r), y: r[k], c: r.commit, t: `${(r.commit || "").slice(0, 7)} · ${when(r).toLocaleDateString("en-CA")} · ${r.message || ""}` })), label)).join("");
       return `<h3>${esc(d)} <span class="ci-dim">· ${esc(rs.at(-1)?.description)}</span></h3><div class="ci-charts">${charts}</div>`;
     }).join("");
   }
@@ -98,7 +98,7 @@
     }
     ratios.forEach((g, i) => {
       const y = T + i * rowH + rowH / 2, c = COLORS[g.group] || "#888";
-      s += `<g stroke="${c}" fill="none"><title>${g.group} ${g.comparison}: median ${f3(g.median)}, IQR ${f3(g.q1)} to ${f3(g.q3)}, n=${g.n}</title>
+      s += `<g stroke="${c}" fill="none" data-tip="${g.group} ${g.comparison}: median ${f3(g.median)}, middle 50% ${f3(g.q1)} to ${f3(g.q3)}, expected ${f3(g.expected)}, n=${num(g.n)}">
         <line x1="${X(g.lo)}" x2="${X(g.q1)}" y1="${y}" y2="${y}"/><line x1="${X(g.q3)}" x2="${X(g.hi)}" y1="${y}" y2="${y}"/>
         <line x1="${X(g.lo)}" x2="${X(g.lo)}" y1="${y - 7}" y2="${y + 7}"/><line x1="${X(g.hi)}" x2="${X(g.hi)}" y1="${y - 7}" y2="${y + 7}"/>
         <rect x="${X(g.q1)}" y="${y - 13}" width="${Math.max(1, X(g.q3) - X(g.q1))}" height="26" fill="${c}" fill-opacity="0.25"/>
@@ -169,6 +169,15 @@
       const act = e.target.dataset.act;
       if (act) { el.dataset[act] = e.target.value; if (act === "qset") delete el.dataset.qcommit; draw(); }
     });
+    // Instant tooltip for chart points and quant boxes (anything with data-tip).
+    const tip = document.querySelector(".ci-tip") || document.body.appendChild(document.createElement("div"));
+    tip.className = "ci-tip";
+    el.addEventListener("mousemove", (e) => {
+      const t = e.target.closest("[data-tip]");
+      tip.style.display = t ? "block" : "none";
+      if (t) { tip.textContent = t.dataset.tip; tip.style.left = e.clientX + 12 + "px"; tip.style.top = e.clientY + 12 + "px"; }
+    });
+    el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
     draw();
   }
 

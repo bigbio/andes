@@ -149,7 +149,9 @@ fn write_csms(
             r.charge.to_string(),
             format!("{:.5}", r.precursor_mass),
             c.class.name().to_string(),
-            if c.intra { "intra" } else { "inter" }.to_string(),
+            andes_xl::rollup::LinkClass::of(c.intra, c.homotypic)
+                .name()
+                .to_string(),
             s.map_or("NA".to_string(), |v| format!("{v:.4}")),
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             format!("{:.3}", c.pair_score),

@@ -1092,8 +1092,11 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
 stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
-link classes are scored by the pair score `min(alpha, beta)`; q-values are
-`max(TD - DD, 2) / TT` per link class (intra- and inter-protein).
+link classes are scored by the pair score `min(alpha, beta)`. q-values are computed per link
+class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
+`max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer
+or one peptide paired with itself) takes `max(DD + TD + 1, 2) / TT`, because a random homotypic
+match pairs a peptide with itself and is TT or DD with equal odds but never TD.
 
 ---
 

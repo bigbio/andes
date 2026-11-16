@@ -673,8 +673,9 @@ pub(crate) struct SearchArgs {
     /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
     /// (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does
     /// not change them) and the q-values, from the
-    /// target-target, target-decoy and decoy-decoy counts split by intra- and inter-protein
-    /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
+    /// target-target, target-decoy and decoy-decoy counts split by intra-protein, homotypic
+    /// (one peptide sequence on both sides) and inter-protein links and pooled over the runs,
+    /// of the matches (<base>.xl.tsv), residue pairs
     /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
     /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
     #[arg(long, value_name = "LINKER", value_parser = parse_xl, hide_short_help = true,

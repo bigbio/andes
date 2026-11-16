@@ -40,12 +40,32 @@ impl ClassCounts {
         let false_tt = (self.td as f64 + 1.0 - self.dd as f64).max(MIN_FALSE);
         (false_tt / self.tt as f64).min(1.0)
     }
+
+    /// FDR of homotypic pairs, the same peptide sequence on both sides. A random match
+    /// pairs a random peptide with itself, so it is TT or DD with equal odds and
+    /// practically never TD: the false TT number about DD, not TD − DD.
+    pub fn fdr_homotypic(&self) -> f64 {
+        if self.tt == 0 {
+            return 1.0;
+        }
+        let false_tt = (self.dd as f64 + self.td as f64 + 1.0).max(MIN_FALSE);
+        (false_tt / self.tt as f64).min(1.0)
+    }
 }
 
 /// q-values of CSMs with scores `scores` (higher is better) and classes
 /// `classes`, by the floored `(TD − DD) / TT` estimate at each score threshold, made
 /// monotone from the bottom up. Ties share one threshold.
 pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
+    q_values_by(scores, classes, ClassCounts::fdr)
+}
+
+/// [`q_values`] for homotypic pairs ([`ClassCounts::fdr_homotypic`]).
+pub fn q_values_homotypic(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
+    q_values_by(scores, classes, ClassCounts::fdr_homotypic)
+}
+
+fn q_values_by(scores: &[f64], classes: &[PairClass], fdr: fn(&ClassCounts) -> f64) -> Vec<f64> {
     assert_eq!(scores.len(), classes.len());
     let mut order: Vec<usize> = (0..scores.len()).collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
@@ -58,7 +78,7 @@ pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
             counts.add(classes[order[end]]);
             end += 1;
         }
-        let f = counts.fdr();
+        let f = fdr(&counts);
         for &i in &order[k..end] {
             fdr_at[i] = f;
         }
@@ -100,6 +120,19 @@ mod tests {
         };
         assert!((c.fdr() - 0.2).abs() < 1e-12);
         assert_eq!(ClassCounts::default().fdr(), 1.0);
+    }
+
+    #[test]
+    fn homotypic_fdr_counts_dd_as_false_targets() {
+        let c = ClassCounts {
+            tt: 100,
+            td: 0,
+            dd: 9,
+        };
+        assert!((c.fdr_homotypic() - 0.10).abs() < 1e-12);
+        assert!((c.fdr() - 0.02).abs() < 1e-12);
+        let q = q_values_homotypic(&[3.0, 2.0, 1.0], &[TT, TT, DD]);
+        assert!((q[0] - 1.0).abs() < 1e-12 && (q[2] - 1.0).abs() < 1e-12);
     }
 
     #[test]

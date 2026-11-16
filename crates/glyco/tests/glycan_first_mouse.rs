@@ -4,7 +4,7 @@
 //! ```text
 //! ANDES_GLYCO_GDB=/path/to/N-glycan-mouse.gdb \
 //! ANDES_GLYCO_MGF=/path/to/glycopeptide-filtered.mgf \
-//! cargo test -p andes-glyco --test glycan_first_mouse -- --nocapture
+//! cargo test -p glyco --test glycan_first_mouse -- --nocapture
 //! ```
 //!
 //! It loads the glycan DB, builds the Y-complementary ion index, stream-parses
@@ -16,9 +16,9 @@
 use std::env;
 use std::io::BufRead;
 
-use andes_glyco::glycan_db::{load_glycan_gdb, GlycanComp};
-use andes_glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use andes_glyco::glycan_mass::PROTON;
+use glyco::glycan_db::{load_glycan_gdb, GlycanComp};
+use glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
+use glyco::glycan_mass::PROTON;
 
 struct MgfSpectrum {
     pepmass: f64,

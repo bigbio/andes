@@ -6,7 +6,7 @@
 //!
 //! 1. The predicted index is `glyco_index(backbone_index, glycan_comp, coeffs)`
 //!    — the backbone index PLUS the per-monosaccharide RP offset
-//!    (`andes_glyco::rt_offset`), where NeuAc/NeuGc carry the OPPOSITE sign to
+//!    (`glyco::rt_offset`), where NeuAc/NeuGc carry the OPPOSITE sign to
 //!    the neutral hexoses (they retain the glycopeptide LATER on RP).
 //! 2. The three shared PIN features (`DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm`) are
 //!    populated in place on each glyco hit's `PsmMatch::features` so the glyco
@@ -33,8 +33,8 @@ use scoring_crate::rt_model::{calibrate, RtIndexModel};
 use search::candidate_gen::Candidate;
 use search::glyco_search::GlycoSpectrumResult;
 
-use andes_glyco::glycan_db::GlycanComp;
-use andes_glyco::rt_offset::{glyco_index, GlycanRtCoeffs};
+use glyco::glycan_db::GlycanComp;
+use glyco::rt_offset::{glyco_index, GlycanRtCoeffs};
 
 const SECONDS_PER_MINUTE: f64 = 60.0;
 
@@ -247,9 +247,9 @@ fn glycan_tiebreak_key(hit: &search::glyco_search::FullGlycoPsm) -> (u8, u8, u8,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use andes_glyco::glyco_psm::GlycoPsmKey;
-    use andes_glyco::hybrid::Source;
-    use andes_glyco::rt_offset::glycan_index_offset;
+    use glyco::glyco_psm::GlycoPsmKey;
+    use glyco::hybrid::Source;
+    use glyco::rt_offset::glycan_index_offset;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;

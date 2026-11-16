@@ -1,0 +1,12 @@
+[package]
+name = "percolator-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon = "1.10"
+
+[dev-dependencies]
+tempfile = "3.10"

@@ -78,6 +78,37 @@ def fix_links(text, page_dir):
     return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", repl, text)
 
 
+def map_repo_links(text, src, rel):
+    site_map = {
+        "DOCS.md": "reference.md",
+        "TRAIN.md": "training.md",
+        "docs/benchmarks/README.md": "benchmarks/details.md",
+    }
+    slug_page = {}
+    for page, (_, heads) in README_PAGES.items():
+        seen = {}
+        for h in heads:
+            slug_page[gh_slug(h.replace("`", ""), seen)] = page
+
+    def repl(m):
+        label, target = m.group(1), m.group(2)
+        if re.match(r"^(https?:|mailto:|#)", target):
+            return m.group(0)
+        path, _, frag = target.partition("#")
+        src_dir = ROOT / Path(src).parent
+        repo = Path(os.path.relpath(src_dir / path, ROOT)).as_posix() if path else ""
+        if repo in site_map:
+            return f"[{label}]({_rel(rel, site_map[repo])}{'#' + frag if frag else ''})"
+        if repo == "README.md" and frag in slug_page:
+            return f"[{label}]({_rel(rel, slug_page[frag])}#{frag})"
+        if path and (ROOT / repo).exists():
+            base = TREE if (ROOT / repo).is_dir() else BLOB
+            return f"[{label}]({base}{repo}{'#' + frag if frag else ''})"
+        return m.group(0)
+
+    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", repl, text)
+
+
 def gh_slug(heading, seen):
     """GitHub's heading anchor: the links in README/DOCS were written against it."""
     slug = re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
@@ -158,14 +189,17 @@ def main(out_dir, help_dir):
         pages[rel] = anchor_headings(fix_links(page, Path(rel).parent))
 
     # Full reference and training guide: whole files, with their own H1.
-    for src, rel in (("DOCS.md", "reference.md"), ("TRAIN.md", "training.md"), ("docs/benchmarks/README.md", "benchmarks/details.md")):
+    for src, rel in (("DOCS.md", "reference.md"), ("TRAIN.md", "training.md"), ("docs/benchmarks/README.md", "benchmarks/details.md"), ("docs/benchmarks/glyco/pxd065680.md", "benchmarks/glyco.md")):
         text = (ROOT / src).read_text(encoding="utf-8")
         base_dir = ROOT / Path(src).parent
         # benchmark doc links are relative to docs/benchmarks/
-        if src.startswith("docs/benchmarks"):
+        if src == "docs/benchmarks/README.md":
             text = re.sub(r"\]\((?!https?:|#|mailto:)([^)\s]+)\)",
                           lambda m: f"]({BLOB}docs/benchmarks/{m.group(1).removeprefix('./')})", text)
-        pages[rel] = anchor_headings(fix_links(text, Path(rel).parent))
+        if src == "docs/benchmarks/glyco/pxd065680.md":
+            pages[rel] = anchor_headings(map_repo_links(text, src, rel))
+        else:
+            pages[rel] = anchor_headings(fix_links(text, Path(rel).parent))
     for rel, text in retarget_fragments(pages).items():
         write(out, rel, text)
 

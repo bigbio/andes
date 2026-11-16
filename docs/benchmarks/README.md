@@ -11,7 +11,8 @@ leaderboard. Section 2 gives the date and the andes commit behind each row.
 ## 1. Summary
 
 Builds: identification `2051616b` (2026-10-23; timsTOF and entrapment rows `2ee76dd6`, 2026-11-07/09),
-label-free quantification `09e1c00d` (2026-11-05), TMT `0cfa03cc`; Percolator 3.7.1 `-Y`.
+label-free quantification `09e1c00d` (2026-11-05), glycopeptide LFQ `0f036477` (2026-11-11), TMT
+`0cfa03cc`; Percolator 3.7.1 `-Y`.
 
 One row per metric. 🟢 andes better · 🟡 similar · 🔴 andes worse, with how much: **minor** (usable
 as is), **moderate** (usable with care), **major** (results hurt). ⚪ no other tool measured.
@@ -57,8 +58,9 @@ family, sign-aware, MBR on)
 | Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
-| Blank run, PXD016921 | rows identified in the blank | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| Blank run, PXD016921 | rows identified in the blank | 0 on main of 2026-11-09, after #333 `e841aae0` (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
 | Blank run, PXD016921 | rows transferred into the blank | 0, not attempted | 85 unfiltered (9 at `Match q-value ≤ 0.01`) | 0, not scored | ⚪ not tested: andes and FragPipe make no transfer decision |
+| Glycopeptide LFQ, PXD005553 (5 fractions, `0f036477`) | matrix fill, identified-only → +MBR | 58.6% → 85.1% (held-out 10%: 83.7% → 84.7%; the MBR scorer is trained on these fractions) | | | ⚪ |
 | TMT knockout, PXD017803 hrMS2 | interference (lower is better) | 0.192 (0.000 with `--tmt-unmix on`) | 0.156 | | 🔴 default, 🟢 with the option |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | 97,107 | | 🟢 +54% |
 | TMT known ratios, PXD007683 | protein ratio error | 0.213 | 0.159 | | 🔴 1.3x (moderate) |
@@ -71,7 +73,7 @@ ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the 
 
 Note on DE false calls: andes' protein values are tighter than the other tools', so small real
 shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls (seed
-42 on current main; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
+42 on main of 2026-11-09, after #333 `e841aae0`; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
 level; without that level andes has 955 true positives and 24 false calls
 against MaxQuant's 953 and 31. Analysis in section 2.3, *Differential expression*.
 
@@ -362,7 +364,8 @@ PXD009815, QE, Astral):
 
 Spread of unchanged proteins within a condition (tool ÷ andes; PXD009740 / PXD009815 / QE): MaxQuant
 1.15 / 1.55 / 1.26, FragPipe 1.40 / 1.30 / 1.25. True positives / false calls by minimal fold change
-(seed 42 on main after #333, 2026-11-09; the table above is the mean over seeds at `09e1c00d`, e.g.
+(seed 42 at `e841aae0` (2026-11-08, the #333 per-run q-values), measured 2026-11-09; the table above is
+the mean over seeds at `09e1c00d`, e.g.
 PXD009740 reads 1,287 / 320 here and 1,300 / 305 above):
 
 | set | tool | all | \|log2 FC\| ≥ 0.3 | ≥ 0.5 | ≥ 1.0 |
@@ -380,7 +383,7 @@ PXD009740 reads 1,287 / 320 here and 1,300 / 305 above):
 - At `|log2 FC| ≥ 0.5`, andes has 167 false calls against MaxQuant's 74 on PXD009740 (🔴 2.3x), 39
   against 36 on PXD009815 and 11 against 18 on QE; Astral was not recomputed. Still behind on
   PXD009815 at large fold changes (21 against 6 at ≥ 1.0) and in wrong-sign calls (18 against 2 at
-  seed 42 after #333; 7 against 2 in the table above).
+  seed 42 on `e841aae0`; 7 against 2 in the table above).
 - Why: andes's protein values are tighter, so small real shifts of "unchanged" proteins reach
   significance; the truth labels assume no change at all, which stops holding below about 1.4-fold
   (|log2 FC| 0.5). The calls are not made by transferred values: from identified cells alone the
@@ -428,7 +431,7 @@ Per-level table: [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#ups1-per-le
 #### Absence: false transfers and the blank run
 
 PXD014415: yeast rows among the transferred rows of the 20 human-only runs. PXD016921: rows
-reported in the blank run (andes on current main, with per-run q-values). Classes (definition in
+reported in the blank run (andes on main of 2026-11-09, after #333 `e841aae0`, with per-run q-values). Classes (definition in
 section 4) are enriched / not specific / only
 absent / no reference.
 
@@ -442,7 +445,7 @@ absent / no reference.
 | rate, enriched plus no-reference rows | 0.052% | — | 0.072% | 🟢 |
 | identified classes | 38 / 412 / 1 / 0 | — | 8 / 56 / 5 / 139 | ⚪ |
 | identified rate, enriched only / with no-reference | 0.0053% / 0.0055% | — | 0.0014% / 0.0270% | 🔴 / 🟢 |
-| blank run, rows identified | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| blank run, rows identified | 0 on main of 2026-11-09, after #333 `e841aae0` (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
 | blank run, transfers attempted | 0 (run not aligned) | not reported | 25 candidates | ⚪ |
 | blank run, rows transferred | 0 (65 at `09e1c00d`) | 85; 9 at `Match q-value ≤ 0.01` | 0 (scorer not trained) | ⚪ not tested |
 
@@ -638,32 +641,30 @@ done
 For the quick tier search `MouseLiver-Z-T-1` alone, skip pooling and pass `--run MouseLiver-Z-T-1` to
 `score_vs_truth.py`; pool all fractions for the deep tier, because one fraction has too few decoys.
 
-### Label-free quantification, ProteoBench (commands; converter tested)
+### Label-free quantification, ProteoBench (tested script; converter tested)
 
 Inputs: the six runs of a module (QExactive `LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}.raw`
 of PXD028735, about 21 GB; Astral `LFQ_Astral_DDA_15min_50ng_Condition_{A,B}_REP{1,2,3}.raw` of
 PXD070049, about 15 GB) and `ProteoBenchFASTA_MixedSpecies_HYE.fasta` (31,889 entries). The measured
-runs read peak-picked mzML; `R` is a run's stem; unlisted flags are the defaults.
+runs read peak-picked mzML.
+
+Run [`reproduce/run_proteobench.sh`](reproduce/run_proteobench.sh) from a scratch directory; it
+writes `q/`, `pb/`, `pb05/` and `custom_input.tsv` to the current directory, and `--module` is `qe`
+or `astral`:
 
 ```bash
-# 1. per run: search, Percolator (--rescore) and the run's MS1, MS2 and PSM tables in q/
-andes --spectrum $R.mzML --database ProteoBenchFASTA_MixedSpecies_HYE.fasta \
-      --rescore --output-pin $R.pin --quant-dir q/ --threads 8
-# 2. once: the library, from every run's Percolator results (one --psms/--decoy-psms per run)
-andes quant library --quant-dir q/ --psms $R=$R.percolator.target.psms.txt \
-      --decoy-psms $R=$R.percolator.decoy.psms.txt ...
-# 3. per run
-andes quant extract --quant-dir q/ --run $R
-# 4. once per transfer threshold (the default --quant-fdr is 0.01)
-andes quant finalize --quant-dir q/ -o pb
-andes quant finalize --quant-dir q/ -o pb05 --quant-fdr 0.05
-# 5. ProteoBench "Custom" table (python3 + pyarrow); --module qe or astral
-python3 proteobench/andes_to_proteobench.py --mbr pb.mbr.parquet --quant-dir q/ \
-      --module qe --column quantity_normalized -o custom_input.tsv
+docs/benchmarks/reproduce/run_proteobench.sh qe "$DATA"/ProteoBenchFASTA_MixedSpecies_HYE.fasta \
+      "$DATA"/LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}.mzML
 ```
 
-6. Score with `proteobench` 0.18.6 (`DDAQuantIonModuleQExactive` or `DDAQuantIonAstralModule`
-   `.benchmarking(custom_input.tsv, "Custom", ...)`).
+Per run it searches and rescores (`--rescore`, which runs Percolator 3.7.1) and writes the run's MS1, MS2 and PSM tables to `q/`; then it builds the library from every run's
+Percolator results (one `--psms`/`--decoy-psms` per run), extracts each run and finalizes twice
+(the default `--quant-fdr` is 0.01, plus the 0.05 run in `pb05/`), and writes the ProteoBench
+"Custom" table with `proteobench/andes_to_proteobench.py --column quantity_normalized`. It needs
+python3 with pyarrow and prints the same provenance line as `run.sh`.
+
+Score with `proteobench` 0.18.6 (`DDAQuantIonModuleQExactive` or `DDAQuantIonAstralModule`
+`.benchmarking(custom_input.tsv, "Custom", ...)`).
 
 The converter keeps `identified`, `transfer_ms2` and `transfer_ms1` rows; `--column quantity` writes
 the raw quantity and `--evidence identified` the identification-only table (tests:
@@ -806,6 +807,8 @@ Channel layout and scoring are in section 4.
       ADDITIONAL_BENCHMARKS.md  supplementary tables (per-run, per-level, full leaderboards, andes-only diagnostics)
       reproduce/     database, download and run scripts (no hardcoded paths)
       glyco/         glyco harness: pooling, yield, entrapment, reference scoring
+      glyco/pxd065680.md  PXD065680 five-tool comparison (source of the site glyco page)
+      glyco/quant_mouse_liver/  glycopeptide LFQ + MBR benchmark, PXD005553 (5 fractions)
       configs/       per-engine parameter files
       proteobench/   andes MBR output -> ProteoBench "Custom" table (python3 + pyarrow)
       entrap_common.py  shared entrapment rules (ALL-ENTRAP_, I/L rescue, T/E)

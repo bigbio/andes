@@ -287,7 +287,7 @@ pub struct DoubletSummary {
     pub top_rel_intensity: f64,
     pub n_full_pairs: usize,
     pub n_half_pairs: usize,
-    /// Doublet-mass counts for the M1 probe, `[floor][iso][spacing]`: floors
+    /// Doublet-mass counts for the doublet probe, `[floor][iso][spacing]`: floors
     /// [`PROBE_FLOORS`] of the base peak; any doublet, or isotope-confirmed
     /// only; the linker's spacing, or the null spacings [`PROBE_NULL_SHIFTS`]
     /// (mean count over the two).

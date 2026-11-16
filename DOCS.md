@@ -1052,6 +1052,40 @@ the restricted mods are never placed and andes warns.
 not from these lists; the lists set the modifications of the peptide backbone, as in any
 search (e.g. `--glyco --glyco-species human --variable-mods "Oxidation (M)"`).
 
+### Crosslinkers (`--xl`, experimental)
+
+The crosslinker is written like a modification, `Name (sites)`: a reagent name or alias, or
+the UNIMOD name or accession of its intact cross-link, then optional sites
+(`--xl "DSSO (K, S, T, Y, Protein N-term)"`). Without sites the reagent's usual ones apply.
+`N-term` is every peptide N-terminus (synthetic peptide libraries); a heterobifunctional
+reagent separates its ends with `/`. The config key is `search.xl` (the same string, or a map
+that defines a linker the table lacks: `mass`, `sites`, `stubs`, `doublets`, `monolinks`; see
+`config.example.yaml`). Monolinks are variable modifications, e.g.
+`--variable-mods "Xlink:DSSO[176] (K)"`.
+
+| Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
+|---|---|---|---|---|
+| DSSO | 158.0038 | alkene 54.0106, thiol 85.9826, sulfenic 103.9932 | K, Protein N-term | UNIMOD |
+| DSBU (BuUrBu) | 196.0848 | Bu 85.0528, BuUr 111.0320 | K, Protein N-term | UNIMOD |
+| DSBSO (Azide-A-DSBSO) | 308.0388 | alkene 54.0106, thiol 236.0177, sulfenic 254.0283 | K, Protein N-term | Kaake et al. 2014; Matzinger et al. 2020 |
+| CDI | 25.9793 | amine 0, isocyanate 25.9793 | K, S, T, Y, Protein N-term | Hage et al. 2017 |
+| DSS (BS3) | 138.0681 | | K, Protein N-term | UNIMOD |
+| BS2G (DSG) | 96.0211 | | K, Protein N-term | UNIMOD |
+| EGS (sulfo-EGS) | 226.0477 | | K, Protein N-term | UNIMOD |
+| DST (sulfo-DST) | 113.9953 | | K, Protein N-term | UNIMOD |
+| DSP (DTSSP) | 173.9809 | | K, Protein N-term | UNIMOD |
+| PhoX (DSPP) | 209.9718 | | K, Protein N-term | Steigenberger et al. 2019 |
+| DMP | 122.0844 | | K, Protein N-term | UNIMOD |
+| DTBP | 172.0129 | | K, Protein N-term | UNIMOD |
+| DFDNB | 163.9858 | | K, Protein N-term | UNIMOD |
+| BMOE | 220.0484 | | C | UNIMOD |
+| SMCC (sulfo-SMCC) | 219.0895 | | K, Protein N-term / C | UNIMOD |
+| SDA (sulfo-SDA) | 82.0419 | | K, S, T, Y, Protein N-term / any residue | Belsom et al. 2016 |
+| EDC (DMTMM) | -18.0106 | | K, Protein N-term / D, E, Protein C-term | Leitner et al. 2014 |
+
+The search currently runs MS-cleavable, homobifunctional linkers: candidates come from the
+reporter doublets of the cleavage stubs.
+
 ---
 
 ## 3. Output formats

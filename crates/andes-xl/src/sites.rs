@@ -1,6 +1,6 @@
 //! Link-site rules: where on a peptide the linker can sit.
 
-use crate::crosslinker::Crosslinker;
+use crate::crosslinker::LinkEnd;
 
 /// A residue position the linker can occupy on a peptide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -11,7 +11,8 @@ pub struct LinkSite {
     pub n_term: bool,
 }
 
-/// Every site of a peptide with residues `residues` that `linker` can occupy.
+/// Every site of a peptide with residues `residues` that linker end `end` can
+/// occupy.
 ///
 /// - A reactive residue that carries no other modification (`modified[i]` is
 ///   false). A linked Lys blocks tryptic cleavage, so a reactive residue at the
@@ -28,12 +29,12 @@ pub fn link_sites(
     modified: &[bool],
     is_protein_n_term: bool,
     is_protein_c_term: bool,
-    linker: &Crosslinker,
+    end: &LinkEnd,
 ) -> Vec<LinkSite> {
     let n = residues.len();
     let mut out = Vec::new();
     for (i, &r) in residues.iter().enumerate() {
-        if !linker.reacts_with(r) || modified.get(i).copied().unwrap_or(false) {
+        if !end.reacts_with(r) || modified.get(i).copied().unwrap_or(false) {
             continue;
         }
         if i + 1 == n && !is_protein_c_term {
@@ -44,7 +45,7 @@ pub fn link_sites(
             n_term: false,
         });
     }
-    if linker.protein_n_term
+    if end.protein_n_term
         && is_protein_n_term
         && n > 0
         && !modified.first().copied().unwrap_or(false)
@@ -64,10 +65,11 @@ pub fn link_sites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crosslinker::Crosslinker;
 
     fn sites(seq: &[u8], nterm: bool, cterm: bool) -> Vec<(usize, bool)> {
         let unmod = vec![false; seq.len()];
-        link_sites(seq, &unmod, nterm, cterm, &Crosslinker::dsso())
+        link_sites(seq, &unmod, nterm, cterm, &Crosslinker::dsso().ends[0])
             .into_iter()
             .map(|s| (s.pos, s.n_term))
             .collect()
@@ -97,7 +99,7 @@ mod tests {
             &[true, false, true, false, false, false],
             true,
             false,
-            &x,
+            &x.ends[0],
         );
         assert_eq!(
             s,

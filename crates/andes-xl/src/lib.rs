@@ -1,10 +1,12 @@
-//! Crosslinking (XL-MS) search building blocks for andes, starting with the
-//! MS-cleavable linker DSSO.
+//! Crosslinking (XL-MS) search building blocks for andes.
 //!
-//! This crate holds the pure, dependency-free parts of the crosslink search
-//! (linker chemistry, the reporter-doublet detector, link-site rules, pair mass
-//! lookup, decoy classes and pair FDR). Peptide scoring lives in
-//! `search::xl_search`, which scores every peptide with the andes core scorer.
+//! This crate holds the scorer-free parts of the crosslink search: the
+//! crosslinker spec and reagent table ([`spec`], [`reagents`]; masses from
+//! UNIMOD or cited compositions), linker chemistry, the reporter-doublet
+//! detector, link-site rules, pair mass lookup, decoy classes and pair FDR.
+//! Peptide scoring lives in `search::xl_search`, which scores every peptide
+//! with the andes core scorer. The examples below use DSSO; another
+//! MS-cleavable linker has its own stubs and doublet spacings.
 //!
 //! # Design: how a crosslink maps onto the andes core scorer
 //!
@@ -21,8 +23,9 @@
 //! spectrum scorer: model selection, fragment tolerance, precursor-peak
 //! filtering and partition choice are those of the standard search.
 //!
-//! The link-residue masses ([`crosslinker::LinkForm`]) cover what a DSSO
-//! fragment carries:
+//! The link-residue masses ([`crosslinker::LinkForm`]: each stub of the
+//! linker's cleavage, then the intact form) cover what a DSSO fragment
+//! carries:
 //!
 //! | form | mass on the link residue | which fragments |
 //! |---|---|---|
@@ -31,9 +34,9 @@
 //! | sulfenic stub | 103.9932 | as thiol, before water loss |
 //! | intact partner | partner peptide + 158.0038 | b/y ions of the uncleaved crosslink |
 //!
-//! Every allowed site ([`sites::link_sites`]: an unmodified Lys that is not the
-//! peptide's C-terminal residue unless it is the protein's, or the protein
-//! N-terminus) and every form is scored; the peptide's score is the best over
+//! Every allowed site ([`sites::link_sites`]: an unmodified reactive residue
+//! that is not the peptide's C-terminal residue unless it is the protein's,
+//! or the protein N-terminus when the linker reacts with it) and every form is scored; the peptide's score is the best over
 //! (site, form), and the per-form bests are kept as features.
 //!
 //! **Pair score.** The CSM score is `min(score_alpha, score_beta)`, so a strong
@@ -42,7 +45,8 @@
 //! features.
 //!
 //! **Candidates from doublets.** DSSO cleaves in MS2 into the alkene and thiol
-//! forms of each peptide, 31.9721 Da apart ([`doublet`]). A doublet fixes one
+//! forms of each peptide, 31.9721 Da apart ([`doublet`]; every reporter
+//! doublet of the linker is searched). A doublet fixes one
 //! peptide's mass; the precursor fixes the other's as
 //! `M(precursor) - M(peptide) - M(linker)` (isotope offsets 0..=1). A pair is
 //! *full* when both masses carry a doublet, *half* when only one does and the
@@ -81,5 +85,7 @@ pub mod decoy;
 pub mod doublet;
 pub mod fdr;
 pub mod pair;
+pub mod reagents;
 pub mod rollup;
 pub mod sites;
+pub mod spec;

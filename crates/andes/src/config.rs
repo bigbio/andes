@@ -16,8 +16,8 @@
 //! hook that forces the calibration pre-pass on tiny inputs),
 //! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
 //! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
-//! scorer), and the experimental crosslink search `--xl` with its developer
-//! hooks `--xl-oracle` and `--xl-rescore-inter`. The test `every_search_flag_has_a_config_key` keeps that list
+//! scorer), and the crosslink search's developer hooks `--xl-oracle` and
+//! `--xl-rescore-inter`. The test `every_search_flag_has_a_config_key` keeps that list
 //! honest.
 //!
 //! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
@@ -84,6 +84,8 @@ pub struct SearchCfg {
     pub fixed_mods: Option<Vec<serde_yaml::Value>>,
     /// `--variable-mods`, as `fixed_mods`.
     pub variable_mods: Option<Vec<serde_yaml::Value>>,
+    /// `--xl`: the crosslinker, `Name (sites)` or a map (see [`xl_linker`]).
+    pub xl: Option<serde_yaml::Value>,
     /// `ipf`, as `--localize`.
     pub localize: Option<String>,
     /// `auto`, `on` or `off`, as `--fragment-index`.
@@ -412,6 +414,105 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
             d.sites = parsed.sites;
         }
         (None, _, _) => return Err("`sites` is missing".into()),
+    }
+    Ok(d)
+}
+
+/// The crosslinker of `search.xl`: the CLI string `Name (sites)` or a map.
+///
+/// ```yaml
+/// xl: DSSO (K, S, T, Y, Protein N-term)
+/// # or a linker the reagent table lacks:
+/// xl:
+///   name: MyLinker          # a label with `mass`; a reagent name without it
+///   mass: 158.003765        # intact cross-link mass in Da
+///   sites: K, Protein N-term   # one end, or `end / end`; optional for a named reagent
+///   stubs: {alkene: 54.010565, thiol: 85.982635, sulfenic: 103.9932}   # MS-cleavable only
+///   doublets: [[alkene, thiol]]   # reporter doublets; optional with exactly two stubs
+///   monolinks: {water: 176.01433}
+/// ```
+pub fn xl_linker(
+    key: &str,
+    v: &serde_yaml::Value,
+) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+    use andes_xl::spec::XlDecl;
+    use serde_yaml::Value;
+    let at = |e: String| format!("{key}: {e}");
+    let decl = match v {
+        Value::String(s) => XlDecl::parse(s).map_err(|e| at(e.to_string()))?,
+        Value::Mapping(map) => xl_decl(map).map_err(at)?,
+        _ => {
+            return Err(at(
+                "expected `Name (sites)` or a map with `name` or `mass`".into()
+            ))
+        }
+    };
+    decl.resolve(model::unimod::bundled())
+        .map_err(|e| at(e.to_string()))
+}
+
+fn xl_decl(map: &serde_yaml::Mapping) -> Result<andes_xl::spec::XlDecl, String> {
+    use serde_yaml::Value;
+    let text = |key: &str, v: &Value| -> Result<String, String> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(format!("`{key}` must be a string")),
+        }
+    };
+    // `{name: mass, ...}` in written order.
+    let masses = |key: &str, v: &Value| -> Result<Vec<(String, f64)>, String> {
+        let Value::Mapping(m) = v else {
+            return Err(format!("`{key}` is a map of name: mass"));
+        };
+        m.iter()
+            .map(|(k, v)| {
+                let name = k.as_str().ok_or(format!("`{key}`: names are strings"))?;
+                let mass = v
+                    .as_f64()
+                    .ok_or(format!("`{key}`: `{name}` takes a mass in Da"))?;
+                Ok((name.to_string(), mass))
+            })
+            .collect()
+    };
+    let mut d = andes_xl::spec::XlDecl::default();
+    for (k, v) in map {
+        let key = k.as_str().ok_or("crosslinker keys are strings")?;
+        match key {
+            "name" => d.name = Some(text(key, v)?),
+            "mass" => {
+                d.mass = Some(
+                    v.as_f64()
+                        .ok_or("`mass` is a number (the intact cross-link mass in Da)")?,
+                )
+            }
+            "sites" => d.sites = Some(text(key, v)?),
+            "stubs" => d.stubs = masses(key, v)?,
+            "monolinks" => d.monolinks = masses(key, v)?,
+            "doublets" => {
+                let pairs = v
+                    .as_sequence()
+                    .ok_or("`doublets` is a list of [light, heavy]")?;
+                for p in pairs {
+                    match p.as_sequence().map(Vec::as_slice) {
+                        Some([a, b]) => d.doublets.push((text(key, a)?, text(key, b)?)),
+                        _ => return Err("`doublets`: each is a pair of stub names".into()),
+                    }
+                }
+            }
+            other => {
+                return Err(format!(
+                    "unknown key `{other}` (expected name, mass, sites, stubs, doublets, monolinks)"
+                ))
+            }
+        }
+    }
+    // `name: "DSSO (K)"` carries its sites.
+    if d.mass.is_none() && d.sites.is_none() {
+        if let Some(name) = d.name.clone() {
+            let parsed = andes_xl::spec::XlDecl::parse(&name).map_err(|e| e.to_string())?;
+            d.name = parsed.name;
+            d.sites = parsed.sites;
+        }
     }
     Ok(d)
 }
@@ -749,6 +850,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    if let Some(v) = &cfg.search.xl {
+        if !cli_set(m, "xl") {
+            args.xl = Some(xl_linker("search.xl", v)?);
+        }
+    }
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
@@ -1309,7 +1415,6 @@ glyco:
         "glyco_scans",
         "glyco_mbr_match_train",
         "ipf_debug",
-        "xl",
         "xl_oracle",
         "xl_rescore_inter",
     ];
@@ -1378,6 +1483,44 @@ glyco:
                 "needs a variable",
             ),
             ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
+    }
+
+    #[test]
+    fn crosslinker_applies_with_cli_precedence() {
+        let a = applied("search:\n  xl: DSSO (K, S, T, Y, Protein N-term)\n", &[]).unwrap();
+        let x = a.xl.unwrap();
+        assert_eq!(x.name, "DSSO");
+        assert_eq!(x.ends[0].residues, b"KSTY");
+        let a = applied("search:\n  xl: DSSO (K)\n", &["--xl", "DSBU"]).unwrap();
+        assert_eq!(a.xl.unwrap().name, "DSBU");
+        let yaml = "search:\n  xl:\n    name: MyLinker\n    mass: 158.003765\n    sites: K, Protein N-term\n    \
+                    stubs: {alkene: 54.010565, thiol: 85.982635, sulfenic: 103.9932}\n    \
+                    doublets: [[alkene, thiol]]\n    monolinks: {water: 176.01433}\n";
+        let x = applied(yaml, &[]).unwrap().xl.unwrap();
+        assert_eq!(x.name, "MyLinker");
+        let c = x.cleavage.unwrap();
+        assert_eq!(c.stubs.len(), 3);
+        assert_eq!(c.doublets, vec![(0, 1)]);
+        assert_eq!(x.monolinks.len(), 1);
+        let x = applied("search:\n  xl: {name: \"BS3 (K)\"}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.name, "DSS");
+        assert!(!x.ends[0].protein_n_term);
+        for (bad, msg) in [
+            ("search:\n  xl: DSOS\n", "did you mean DSSO"),
+            ("search:\n  xl: {mass: 100.0}\n", "needs `sites`"),
+            ("search:\n  xl: {name: DSSO, stubs: {a: 1.0}}\n", "need"),
+            (
+                "search:\n  xl: {name: DSSO, sitess: K}\n",
+                "unknown key `sitess`",
+            ),
+            ("search:\n  xl: 42\n", "expected `Name (sites)`"),
         ] {
             let e = applied(bad, &[]).unwrap_err();
             assert!(e.contains(msg), "{e}");

@@ -26,7 +26,12 @@ fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn peptide_cols(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> Vec<String> {
+fn peptide_cols(
+    h: &PeptideHit,
+    table: &XlCandidates,
+    prepared: &PreparedSearch,
+    linker: &Crosslinker,
+) -> Vec<String> {
     let p = &table.peptides()[h.pep as usize];
     let proteins: Vec<&str> = p
         .proteins
@@ -41,42 +46,60 @@ fn peptide_cols(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch)
             "NA".to_string()
         }
     };
-    vec![
+    let site_kind = if h.site.n_term {
+        "nterm".to_string()
+    } else {
+        p.peptide
+            .residues
+            .get(h.site.pos)
+            .map_or("NA".to_string(), |aa| (aa.residue as char).to_string())
+    };
+    let mut cols = vec![
         p.peptide.to_proforma(),
         (h.site.pos + 1).to_string(),
-        if h.site.n_term { "nterm" } else { "K" }.to_string(),
+        site_kind,
         proteins.join(";"),
         u8::from(p.is_decoy).to_string(),
         fmt(h.score),
-        h.form.name().to_string(),
-        fmt(h.form_scores[0]),
-        fmt(h.form_scores[1]),
-        fmt(h.form_scores[2]),
-        fmt(h.form_scores[3]),
+        linker.form_name(h.form).to_string(),
+    ];
+    cols.extend(linker.forms().map(|f| fmt(h.form_scores[f.index()])));
+    cols.extend([
         h.n_sites.to_string(),
         h.gap_next.map_or("NA".to_string(), |g| format!("{g:.3}")),
         format!("{:.2}", h.mass_err_ppm),
         p.peptide.length().to_string(),
-    ]
+    ]);
+    cols
 }
 
-const PEP_COLS: [&str; 15] = [
-    "peptide",
-    "site",
-    "site_kind",
-    "proteins",
-    "decoy",
-    "score",
-    "form",
-    "score_alkene",
-    "score_thiol",
-    "score_sulfenic",
-    "score_intact",
-    "n_sites",
-    "gap_next",
-    "mass_err_ppm",
-    "length",
-];
+/// Per-peptide columns: `score_<form>` for each form of the linker (its stubs,
+/// then `intact`) sit between `form` and `n_sites`.
+fn pep_cols(linker: &Crosslinker) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "peptide",
+        "site",
+        "site_kind",
+        "proteins",
+        "decoy",
+        "score",
+        "form",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    v.extend(
+        linker
+            .forms()
+            .map(|f| format!("score_{}", linker.form_name(f))),
+    );
+    v.extend(
+        ["n_sites", "gap_next", "mass_err_ppm", "length"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    v
+}
 
 fn scan_of(spec: &Spectrum) -> String {
     spec.scan
@@ -91,6 +114,7 @@ fn write_csms(
     q: &[Option<f64>],
     table: &XlCandidates,
     prepared: &PreparedSearch,
+    linker: &Crosslinker,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<String> = [
@@ -116,7 +140,7 @@ fn write_csms(
     .map(|s| s.to_string())
     .collect();
     for side in ["alpha", "beta"] {
-        head.extend(PEP_COLS.iter().map(|c| format!("{side}_{c}")));
+        head.extend(pep_cols(linker).iter().map(|c| format!("{side}_{c}")));
     }
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
@@ -143,8 +167,8 @@ fn write_csms(
             r.doublets.masses.len().to_string(),
             format!("{:.4}", r.doublets.top_rel_intensity),
         ];
-        row.extend(peptide_cols(&c.alpha, table, prepared));
-        row.extend(peptide_cols(&c.beta, table, prepared));
+        row.extend(peptide_cols(&c.alpha, table, prepared, linker));
+        row.extend(peptide_cols(&c.beta, table, prepared, linker));
         writeln!(w, "{}", row.join("\t"))?;
         n += 1;
     }
@@ -297,6 +321,57 @@ fn report(results: &[XlSpectrumResult]) {
     );
 }
 
+/// The linkers the search runs: MS-cleavable ones (candidates from reporter
+/// doublets) with one site set for both ends.
+fn check_searchable(linker: &Crosslinker) -> Result<(), String> {
+    if linker.cleavage.is_none() {
+        return Err(format!(
+            "--xl {}: a non-cleavable linker; the crosslink search finds candidates from \
+             the reporter doublets of an MS-cleavable linker (DSSO, DSBU, DSBSO, CDI or a \
+             custom linker with stubs)",
+            linker.name
+        ));
+    }
+    if !linker.is_homobifunctional() {
+        return Err(format!(
+            "--xl {} ({}): a heterobifunctional linker; the crosslink search takes one site \
+             set for both ends",
+            linker.name,
+            linker.describe_sites()
+        ));
+    }
+    Ok(())
+}
+
+fn report_linker(linker: &Crosslinker) {
+    let stubs = linker.cleavage.as_ref().map_or(String::new(), |c| {
+        let s: Vec<String> = c
+            .stubs
+            .iter()
+            .map(|s| format!("{} {:+.6}", s.name, s.mass))
+            .collect();
+        let d: Vec<String> = (0..c.doublets.len())
+            .map(|k| format!("{:.6}", c.doublet_delta(k)))
+            .collect();
+        format!(
+            "; stubs {}; doublet spacing {} Da",
+            s.join(", "),
+            d.join(", ")
+        )
+    });
+    eprintln!(
+        "[xl] linker {}{}: intact {:+.6} Da, sites {}{}",
+        linker.name,
+        linker
+            .accession
+            .as_deref()
+            .map_or(String::new(), |a| format!(" ({a})")),
+        linker.intact,
+        linker.describe_sites(),
+        stubs
+    );
+}
+
 /// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
 /// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
 /// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. CSMs are scored by the
@@ -312,13 +387,9 @@ pub(crate) fn run_xl(
     run_ends: &[usize],
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let name = cli.xl.as_deref().unwrap_or_default();
-    let linker = Crosslinker::by_name(name).ok_or_else(|| {
-        format!(
-            "--xl {name}: unknown linker (known: {})",
-            Crosslinker::known_names().join(", ")
-        )
-    })?;
+    let linker: Crosslinker = cli.xl.clone().ok_or("--xl: no crosslinker")?;
+    check_searchable(&linker)?;
+    report_linker(&linker);
     let t = std::time::Instant::now();
     let table = XlCandidates::from_out_of_core(prepared, &linker);
     let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
@@ -415,6 +486,7 @@ pub(crate) fn run_xl(
         &q,
         &table,
         prepared,
+        &linker,
     )?;
     crate::xl_fdr::write_levels(
         &sibling(report_base, ".xl.residue_pairs.tsv"),

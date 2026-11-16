@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
+use andes_xl::crosslinker::{LinkForm, MAX_STUBS};
 use andes_xl::decoy::PairClass;
 use andes_xl::fdr::ClassCounts;
 use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item};
@@ -69,7 +70,7 @@ fn spec_id(r: &XlSpectrumResult) -> String {
 }
 
 fn best_stub(h: &PeptideHit) -> f64 {
-    h.form_scores[..3]
+    h.form_scores[..MAX_STUBS]
         .iter()
         .copied()
         .filter(|v| v.is_finite())
@@ -112,9 +113,9 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
         bg,
         bgm,
         best_stub(&c.alpha),
-        c.alpha.form_scores[3].max(-1000.0) as f64,
+        c.alpha.form_scores[LinkForm::Intact.index()].max(-1000.0) as f64,
         best_stub(&c.beta),
-        c.beta.form_scores[3].max(-1000.0) as f64,
+        c.beta.form_scores[LinkForm::Intact.index()].max(-1000.0) as f64,
         c.alpha.n_sites as f64,
         c.beta.n_sites as f64,
         la,

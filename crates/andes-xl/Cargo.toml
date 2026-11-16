@@ -5,3 +5,5 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+model = { path = "../model" }
+thiserror = { workspace = true }

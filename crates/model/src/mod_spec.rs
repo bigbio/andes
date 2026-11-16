@@ -300,7 +300,12 @@ pub fn describe(m: &Modification) -> String {
 }
 
 /// The sites of `spec`: `(residue, location)` per site, in written order.
-fn parse_sites(item: &str, spec: &str) -> Result<Vec<(ResidueSpec, ModLocation)>, ModSpecError> {
+/// `item` names the list item in the error. The crosslinker spec of `--xl`
+/// parses each of its comma-separated sites with this grammar.
+pub fn parse_sites(
+    item: &str,
+    spec: &str,
+) -> Result<Vec<(ResidueSpec, ModLocation)>, ModSpecError> {
     const TERMINI: &[(&str, ModLocation)] = &[
         ("protein n-term", ModLocation::ProtNTerm),
         ("protein c-term", ModLocation::ProtCTerm),

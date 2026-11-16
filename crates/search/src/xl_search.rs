@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Mutex;
 
-use andes_xl::crosslinker::{Crosslinker, LinkForm, ISOTOPE_SPACING, PROTON};
+use andes_xl::crosslinker::{Crosslinker, LinkForm, ISOTOPE_SPACING, N_FORMS, PROTON};
 use andes_xl::decoy::PairClass;
 use andes_xl::doublet::{
     find_doublets, group_by_mass, stub_ions_present, DoubletMass, DoubletParams,
@@ -119,6 +119,8 @@ fn n_term_blocked(p: &Peptide) -> bool {
 }
 
 fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
+    // A homobifunctional linker: both ends react with the same sites.
+    let end = &linker.ends[0];
     let residues: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
     let mut modified: Vec<bool> = c
         .peptide
@@ -130,7 +132,7 @@ fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
     // it; a side-chain mod on residue 0 (e.g. carbamidomethyl Cys) leaves the
     // amine free. Lys side chains with any mod are taken.
     if let Some(first) = modified.first_mut() {
-        let side_chain_reactive = linker.reacts_with(residues[0]);
+        let side_chain_reactive = end.reacts_with(residues[0]);
         if !side_chain_reactive {
             *first = n_term_blocked(&c.peptide);
         }
@@ -140,7 +142,7 @@ fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
         &modified,
         c.is_protein_n_term,
         c.is_protein_c_term,
-        linker,
+        end,
     )
 }
 
@@ -152,7 +154,7 @@ impl XlCandidates {
         // N-terminal; the exact site rule needs the candidate (protein
         // termini, mods) and runs in `from_candidates`.
         let cands = prepared.out_of_core_candidates_where(move |residues, _post| {
-            lk.protein_n_term || residues.iter().any(|&r| lk.reacts_with(r))
+            lk.protein_n_term() || residues.iter().any(|&r| lk.reacts_with(r))
         });
         Self::from_candidates(cands, linker)
     }
@@ -245,7 +247,8 @@ struct MassPair {
     b_tol: f64,
     kind: PairKind,
     iso: u8,
-    /// Stub ions of the complement seen (half pairs; 3 for full pairs).
+    /// Stub ions of the complement seen (half pairs; the linker's number of
+    /// stubs for full pairs).
     b_stub_ions: u8,
 }
 
@@ -261,8 +264,8 @@ pub struct PeptideHit {
     /// `score_psm + psm_edge_score` of the best (site, form).
     pub score: f32,
     /// Best score of each [`LinkForm`] over the sites (indexed by
-    /// [`LinkForm::index`]).
-    pub form_scores: [f32; 4],
+    /// [`LinkForm::index`]; `-inf` for a form the linker does not have).
+    pub form_scores: [f32; N_FORMS],
     /// Number of sites scored.
     pub n_sites: u8,
     /// Score of the best peptide of another sequence for the same mass query
@@ -370,12 +373,19 @@ pub struct XlSpectrumResult {
 /// Leaked stub modifications, one per (form, existing residue mod delta).
 /// Bounded: the existing delta comes from the search's modification set.
 struct StubMods {
+    /// Modification name of each form, by [`LinkForm::index`].
+    names: Vec<String>,
     cache: Mutex<HashMap<(LinkForm, u64), &'static Modification>>,
 }
 
 impl StubMods {
-    fn new() -> Self {
+    fn new(linker: &Crosslinker) -> Self {
+        let mut names = vec![String::new(); N_FORMS];
+        for form in linker.forms() {
+            names[form.index()] = format!("XL:{}", linker.form_name(form));
+        }
         StubMods {
+            names,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -385,7 +395,7 @@ impl StubMods {
         let mut c = self.cache.lock().expect("stub mod cache");
         c.entry(key).or_insert_with(|| {
             let mut m = Modification::new(
-                format!("XL:{}", form.name()),
+                self.names[form.index()].clone(),
                 existing + stub,
                 ResidueSpec::Wildcard,
                 ModLocation::Anywhere,
@@ -434,9 +444,9 @@ fn score_peptide(
 ) -> Option<PeptideHit> {
     let p = &table.peptides[pep_idx as usize];
     let mut best: Option<(f32, LinkSite, LinkForm)> = None;
-    let mut form_scores = [f32::NEG_INFINITY; 4];
+    let mut form_scores = [f32::NEG_INFINITY; N_FORMS];
     for &site in &p.sites {
-        for form in LinkForm::ALL {
+        for form in linker.forms() {
             let Some(delta) = form.delta(linker, partner_mass) else {
                 continue;
             };
@@ -559,9 +569,10 @@ fn mass_pairs(
     z: u8,
     cfg: &XlConfig,
 ) -> Vec<MassPair> {
-    let Some(cleavage) = cfg.linker.cleavage else {
+    let Some(cleavage) = cfg.linker.cleavage.as_ref() else {
         return Vec::new();
     };
+    let n_stub_forms = cleavage.stubs.len() as u8;
     let dtol = |m: f64| m * cfg.doublet_mass_tol_ppm * 1e-6;
     let mut out: Vec<MassPair> = Vec::new();
     for iso in cfg.isotope_offsets.clone() {
@@ -578,7 +589,7 @@ fn mass_pairs(
                         b_tol: dtol(lo.mass),
                         kind: PairKind::Full,
                         iso,
-                        b_stub_ions: 3,
+                        b_stub_ions: n_stub_forms,
                     });
                 }
             }
@@ -605,7 +616,7 @@ fn mass_pairs(
             let stubs = stub_ions_present(
                 peaks,
                 b_mass,
-                &cleavage,
+                cleavage,
                 z.saturating_sub(1).max(1),
                 cfg.doublet.tol_ppm,
             );
@@ -714,9 +725,9 @@ fn rescores(
     let max_z = z.saturating_sub(1).max(1);
     let tol = prepared.fragment_tolerance_da;
     let mut stubs = Vec::new();
-    if let Some(c) = linker.cleavage {
+    if let Some(c) = linker.cleavage.as_ref() {
         for m in [ma, mb] {
-            for stub in [c.alkene, c.thiol, c.sulfenic] {
+            for stub in c.stub_masses() {
                 for q in 1..=max_z {
                     stubs.push((m + stub) / q as f64 + PROTON);
                 }
@@ -762,10 +773,10 @@ fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSum
         tic: peaks.iter().map(|p| p.1 as f64).sum(),
         ..Default::default()
     };
-    let Some(cleavage) = cfg.linker.cleavage else {
+    let Some(cleavage) = cfg.linker.cleavage.as_ref() else {
         return s;
     };
-    let ds = find_doublets(peaks, z, &cleavage, &cfg.doublet);
+    let ds = find_doublets(peaks, z, cleavage, &cfg.doublet);
     s.n_doublets = ds.len();
     s.n_doublets_iso = ds.iter().filter(|d| d.isotope_confirmed).count();
     if s.base_peak > 0.0 {
@@ -788,14 +799,10 @@ fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSum
                 group_by_mass(&iso, cfg.doublet_mass_tol_ppm).len() as f32,
             ]
         };
-        let real = count(&cleavage);
+        let real = count(cleavage);
         let mut null = [0.0_f32; 2];
         for shift in PROBE_NULL_SHIFTS {
-            let c = andes_xl::crosslinker::Cleavage {
-                thiol: cleavage.thiol + shift,
-                ..cleavage
-            };
-            let n = count(&c);
+            let n = count(&cleavage.with_heavy_shift(shift));
             null[0] += n[0] / PROBE_NULL_SHIFTS.len() as f32;
             null[1] += n[1] / PROBE_NULL_SHIFTS.len() as f32;
         }
@@ -1039,7 +1046,7 @@ pub fn xl_search_run(
     table: &XlCandidates,
     cfg: &XlConfig,
 ) -> Vec<XlSpectrumResult> {
-    let mods = StubMods::new();
+    let mods = StubMods::new(&cfg.linker);
     // The oracle runs on the first `oracle_spectra` spectra that pass the
     // charge gate, in input order.
     let eligible: Vec<usize> = spectra
@@ -1105,15 +1112,16 @@ mod tests {
 
     #[test]
     fn link_mass_is_on_the_site_and_in_the_peptide_mass() {
-        let mods = StubMods::new();
-        let p = pep(b"PEPKTIDE");
         let x = Crosslinker::dsso();
-        let stub = LinkForm::Alkene.delta(&x, 0.0).unwrap();
-        let q = with_link_mass(&p, 3, LinkForm::Alkene, stub, &mods);
+        let mods = StubMods::new(&x);
+        let p = pep(b"PEPKTIDE");
+        let stub = LinkForm::Stub(0).delta(&x, 0.0).unwrap();
+        let q = with_link_mass(&p, 3, LinkForm::Stub(0), stub, &mods);
+        assert_eq!(q.residues[3].mod_.unwrap().name, "XL:alkene");
         assert!((q.mass() - p.mass() - stub).abs() < 1e-9);
         assert!((q.residues[3].mod_.unwrap().mass_delta - stub).abs() < 1e-12);
         // The same form reuses one modification record.
-        let r = with_link_mass(&p, 3, LinkForm::Alkene, stub, &mods);
+        let r = with_link_mass(&p, 3, LinkForm::Stub(0), stub, &mods);
         assert!(std::ptr::eq(
             q.residues[3].mod_.unwrap(),
             r.residues[3].mod_.unwrap()
@@ -1132,7 +1140,7 @@ mod tests {
     #[test]
     fn mass_pairs_find_full_and_half_pairs() {
         let cfg = XlConfig::new(Crosslinker::dsso());
-        let c = cfg.linker.cleavage.unwrap();
+        let thiol = cfg.linker.cleavage.as_ref().unwrap().stubs[1].mass;
         let (ma, mb) = (1500.0, 900.0);
         let prec = ma + mb + cfg.linker.intact;
         let dm = |m: f64| DoubletMass {
@@ -1146,10 +1154,11 @@ mod tests {
         let full = mass_pairs(&[], &[dm(ma), dm(mb)], prec, 0.01, 4, &cfg);
         assert_eq!(full.len(), 1);
         assert_eq!(full[0].kind, PairKind::Full);
+        assert_eq!(full[0].b_stub_ions, 3);
         assert!((full[0].a_mass - ma).abs() < 1e-9 && (full[0].b_mass - mb).abs() < 1e-9);
         // One doublet: a half pair only with a stub ion of the complement.
         assert!(mass_pairs(&[], &[dm(ma)], prec, 0.01, 4, &cfg).is_empty());
-        let stub_peak = [((mb + c.thiol) / 2.0 + PROTON, 10.0_f32)];
+        let stub_peak = [((mb + thiol) / 2.0 + PROTON, 10.0_f32)];
         let half = mass_pairs(&stub_peak, &[dm(ma)], prec, 0.01, 4, &cfg);
         assert_eq!(half.len(), 1);
         assert_eq!(half[0].kind, PairKind::Half);

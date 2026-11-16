@@ -300,6 +300,14 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
         .map_err(|e| e.to_string())
 }
 
+/// A `--xl` crosslinker spec `Name (sites)`, resolved against the reagent
+/// table and the bundled UNIMOD table.
+pub(crate) fn parse_xl(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+    andes_xl::spec::XlDecl::parse(s)
+        .and_then(|d| d.resolve(model::unimod::bundled()))
+        .map_err(|e| e.to_string())
+}
+
 /// The protein database options shared by the search, `andes inference` and
 /// `andes quant finalize`: how the database is digested and expanded, and how
 /// a decoy is recognised. Inference and finalize take the search's values.
@@ -640,7 +648,20 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) glyco: bool,
 
-    /// Crosslink search with an MS-cleavable linker into <base>.xl.tsv (experimental)
+    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO" (experimental)
+    ///
+    /// The linker is written like a modification: a reagent name (DSSO, DSBU or BuUrBu,
+    /// DSBSO, CDI; non-cleavable DSS or BS3, BS2G or DSG, EGS, DST, DSP or DTSSP, PhoX or
+    /// DSPP, DMP, DTBP, DFDNB, BMOE, SMCC, SDA, EDC or DMTMM) or the UNIMOD name or
+    /// accession of its intact cross-link (Xlink:DSS[138], UNIMOD:1898), then optionally
+    /// its sites in parentheses: "DSSO (K, S, T, Y, Protein N-term)". Without sites the
+    /// reagent's usual ones apply (Lys and the protein N-terminus for NHS esters); a
+    /// heterobifunctional reagent separates its two ends with /. Masses come from UNIMOD,
+    /// or from the cited composition for reagents UNIMOD lacks (DSBSO, CDI, PhoX, SDA,
+    /// EDC). A linker not in the table is defined in the config file (search.xl, with
+    /// mass, sites, stubs and doublets). Monolinks are variable modifications
+    /// (--variable-mods "Xlink:DSSO[176] (K)"). The search runs MS-cleavable,
+    /// homobifunctional linkers.
     ///
     /// Each MS2 is searched for the linker's reporter doublets; the doublet peptide masses
     /// and the precursor give the candidate peptide pairs, and each peptide is scored with
@@ -652,9 +673,9 @@ pub(crate) struct SearchArgs {
     /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
     /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
     /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
-    #[arg(long, value_name = "LINKER", value_parser = ["dsso"], hide_short_help = true,
+    #[arg(long, value_name = "LINKER", value_parser = parse_xl, hide_short_help = true,
           help_heading = H_MODES, conflicts_with = "glyco")]
-    pub(crate) xl: Option<String>,
+    pub(crate) xl: Option<andes_xl::crosslinker::Crosslinker>,
 
     /// With --xl: also run the exhaustive pair search (no doublet gate) on the first N spectra
     #[arg(

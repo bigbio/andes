@@ -541,9 +541,12 @@ alike:
 | `dia_ms1_found`, `dia_ms1_abs_ppm`, `dia_ms1_log_int`, `dia_ms1_iso_cos` | Monoisotopic MS1 peak in the nearest survey scan: present, \|ppm\| error, log10 intensity, cosine of the first three isotopes against averagine. |
 | `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
 | `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
+| `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
 
 Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
-intensities. The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
+intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
+`--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP
+against the default 0.01, error control unchanged). The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
 after target-decoy competition, as in `docs/benchmarks/dia/eval_dia.py`. Measured results and the
 gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 

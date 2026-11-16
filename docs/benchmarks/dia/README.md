@@ -29,7 +29,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 |---|---|---|---|---|---|
 | andes `--dia` | 1404 / 1499 | 0.004 / 0.005 | 0.042 / 0.046 | 1559 / 1651 | 1707 / 1691 |
 | andes `--dia`, mean of 5 Percolator seeds | 1394 / 1565 | 0.007 / 0.009 | | 1496 / 1594 (1421–1575 / 1524–1651) | 1685 / 1727 |
-| andes `--dia`, `--trainFDR 0.05` (default with `--dia --rescore`), mean of 5 seeds | 1493 / 1602 | 0.005 / 0.011 | 0.049 / 0.044 | **1635 / 1611** (1568–1672 / 1557–1647) | 1793 / 1744 |
+| andes `--dia`, `--trainFDR 0.05` (default with `--dia --rescore`), mean of 5 seeds | 1493 / 1602 | 0.005 / 0.011 | 0.049 / 0.044 | 1635 / 1611 (1568–1672 / 1557–1647) | 1793 / 1744 |
+| andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds (current) | 1433 / 1589 | 0.004 / 0.007 | | **1634 / 1687** (1619–1646 / 1620–1725) | 1798 / 1819 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -43,8 +44,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
-  with seed 42, 72 % / 69 % on the seed mean (79 % / 70 % with `--trainFDR 0.05`), and 88–92 % /
-  98–101 % of OpenDIA arm E (97 % / 99 % with `--trainFDR 0.05`).
+  with seed 42, 72 % / 69 % on the seed mean, and 79 % / 73 % with `--trainFDR 0.05` and the
+  summed-apex columns; of OpenDIA arm E it reaches 96 % / 104 %.
 - **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
   1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
   1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633
@@ -173,15 +174,18 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   and 309 / 362 / 268 (in `dia.rs` at 20 / 10 / 5 ppm). On the full raws at 20 ppm, seed 42: 1539 / 1564
   against 1559 / 1651. At 10 ppm, mean over 5 seeds paired with the baseline: N@FDP_c 1 % 1452 / 1681
   against 1496 / 1594 (raw01 lower on 5 of 5 seeds, raw02 higher on 5 of 5), N@FDP_c 2 % 1703 / 1788
-  against 1685 / 1727. Mixed, so not kept. The slice is too small to rank features (±50 IDs between
-  near-identical runs); judge on full raws and several Percolator seeds.
+  against 1685 / 1727. Mixed under `--trainFDR 0.01`. Under `--trainFDR 0.05` (5 seeds, paired):
+  1634 / 1687 against 1635 / 1611 (raw01 neutral, raw02 +76, higher on 4 of 5 seeds), N@FDP_c 2 %
+  1798 / 1819 against 1793 / 1744, with the raw01 seed spread narrowing from 104 to 27. Kept
+  (`dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain`, 10 ppm). The slice is too small to rank features
+  (±50 IDs between near-identical runs); judge on full raws and several Percolator seeds.
 
 Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
 best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's
 lowest-intensity quartile and 80 % of its highest. Against decoys of the same score, the missed ones
 differ most in `matchedIonRatio` (AUC 0.75) and the andes-ms2 agreement (0.71), features the PIN
-already has. Counting repeats over adjacent scans does not add separable evidence (above); what is
-left is deconvolving the apex scans or an empirical fragment library from the run.
+already has. Counting repeats over adjacent scans adds a little on raw02 (above); what is left is
+deconvolving the apex scans or an empirical fragment library from the run.
 
 ## Reproduce
 

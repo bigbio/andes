@@ -46,7 +46,7 @@ use rayon::prelude::*;
 use crate::predicted::{read_pin, write_pin, NONE};
 
 /// The columns added to the PIN, in order.
-pub(crate) const COLUMNS: [&str; 13] = [
+pub(crate) const COLUMNS: [&str; 16] = [
     "dia_frag_corr",
     "dia_frag_coelute",
     "dia_apex_offset",
@@ -60,6 +60,9 @@ pub(crate) const COLUMNS: [&str; 13] = [
     "dia_n_frag",
     "dia_support",
     "dia_support_top1",
+    "dia_sum_n2",
+    "dia_sum_frac2",
+    "dia_sum_gain",
 ];
 
 /// Cycles traced either side of the row's scan. ponytail: fixed; ±5 cycles is
@@ -74,6 +77,8 @@ const MIN_ION_LEN: usize = 3;
 const COELUTE_MIN_CORR: f64 = 0.6;
 /// Fragment m/z tolerance (ppm).
 const FRAG_PPM: f64 = 20.0;
+/// Fragment m/z tolerance (ppm) for the summed-apex columns.
+const SUM_PPM: f64 = 10.0;
 /// MS1 m/z tolerance (ppm).
 const MS1_PPM: f64 = 10.0;
 
@@ -181,8 +186,20 @@ pub(crate) fn add_to_pin(
                 ms1.get(run).and_then(Option::as_ref),
             );
             let (s_any, s_top) = support(r.form, r.charge, w, p as u32);
-            f[COLUMNS.len() - 2] = s_any;
-            f[COLUMNS.len() - 1] = s_top;
+            f[11] = s_any;
+            f[12] = s_top;
+            // Neighbouring cycles of the same window: the scan before and after.
+            let nb = |k: Option<usize>| k.map(|k| spectra[win[k] as usize].peaks.as_slice());
+            let (n2, frac2, gain) = apex_sum(
+                spectra[r.spec as usize].peaks.as_slice(),
+                nb(p.checked_sub(1)),
+                nb((p + 1 < win.len()).then_some(p + 1)),
+                &table.forms[r.form as usize].1,
+                r.charge,
+            );
+            f[13] = n2;
+            f[14] = frac2;
+            f[15] = gain;
             f
         })
         .collect();
@@ -363,7 +380,60 @@ fn row_features(
         n_frag,
         0.0,
         0.0,
+        0.0,
+        0.0,
+        0.0,
     ]
+}
+
+/// Summed-apex evidence: of the peptide's b/y ions (length >= [`MIN_ION_LEN`],
+/// charge up to min(2, precursor charge)), how many are present in at least two
+/// of the row's scan and the previous and next cycle of its window, as a count
+/// and a fraction, and how many the neighbours add to the scan. A weak true
+/// precursor spans 2-3 cycles on a fast DIA cycle, so its fragments repeat in
+/// the next scan; a chance match in one scan does not.
+fn apex_sum(
+    here: &[(f64, f32)],
+    prev: Option<&[(f64, f32)]>,
+    next: Option<&[(f64, f32)]>,
+    mass: &Mass,
+    charge: u8,
+) -> (f64, f64, f64) {
+    let n = mass.res.len();
+    let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+    let mut prefix = mass.nterm;
+    let (mut ions, mut n2, mut gain) = (0usize, 0usize, 0usize);
+    let has =
+        |s: Option<&[(f64, f32)]>, mz: f64| s.is_some_and(|s| best_peak(s, mz, SUM_PPM).is_some());
+    for i in 0..n.saturating_sub(1) {
+        prefix += mass.res[i];
+        for z in 1..=charge.min(2) {
+            let zf = z as f64;
+            let mut mzs = Vec::with_capacity(2);
+            if i + 1 >= MIN_ION_LEN {
+                mzs.push((prefix + zf * PROTON) / zf);
+            }
+            if n - i - 1 >= MIN_ION_LEN {
+                mzs.push((total - prefix + H2O + zf * PROTON) / zf);
+            }
+            for mz in mzs {
+                ions += 1;
+                let (a, b, c) = (has(Some(here), mz), has(prev, mz), has(next, mz));
+                if a as u8 + b as u8 + c as u8 >= 2 {
+                    n2 += 1;
+                }
+                if !a && (b || c) {
+                    gain += 1;
+                }
+            }
+        }
+    }
+    let frac = if ions > 0 {
+        n2 as f64 / ions as f64
+    } else {
+        0.0
+    };
+    (n2 as f64, frac, gain as f64)
 }
 
 /// Percolator's positive-set FDR for training on a DIA PIN, unless the user
@@ -439,6 +509,15 @@ mod tests {
         let (_, other) = parse_peptide("K.GGGGWWWWK.A").unwrap();
         let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1));
         assert_eq!((g[0], g[5], g[10]), (0.0, 0.0, 0.0));
+
+        // Summed apex: every y ion repeats in scans 3-5, so all count with
+        // either neighbour; a lone scan or an absent peptide counts none.
+        let n = ys.len() as f64;
+        let (n2, _, gain) = apex_sum(refs[4], Some(refs[3]), Some(refs[5]), &mass, z);
+        assert_eq!((n2, gain), (n, 0.0));
+        assert_eq!(apex_sum(refs[4], None, None, &mass, z).0, 0.0);
+        assert_eq!(apex_sum(refs[4], Some(refs[3]), None, &mass, z).0, n);
+        assert_eq!(apex_sum(refs[4], None, None, &other, z).0, 0.0);
     }
 
     #[test]

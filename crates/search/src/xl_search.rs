@@ -32,14 +32,10 @@ pub struct XlConfig {
     pub oracle_spectra: usize,
     pub open_top_k: usize,
     pub open_min_votes: u16,
-    pub open_cleavable: bool,
     pub stub_weight: f32,
-    pub decouple_top: usize,
 }
 
-fn exp_env<T: std::str::FromStr>(k: &str, d: T) -> T {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
-}
+pub const STUB_ION_WEIGHT: f32 = 3.0;
 
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
@@ -47,16 +43,14 @@ impl XlConfig {
             linker,
             doublet: DoubletParams::default(),
             doublet_mass_tol_ppm: 10.0,
-            isotope_offsets: 0..=1,
+            isotope_offsets: 0..=2,
             min_precursor_charge: 3,
             min_peptide_mass: 400.0,
             top_per_mass: 4,
             oracle_spectra: 0,
             open_top_k: 50,
             open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
-            open_cleavable: exp_env("ANDES_XL_OPEN", 0u8) == 1,
-            stub_weight: exp_env("ANDES_XL_STUBW", 0.0f32),
-            decouple_top: exp_env("ANDES_XL_DECOUPLE", 0usize),
+            stub_weight: STUB_ION_WEIGHT,
         }
     }
 }
@@ -159,11 +153,7 @@ fn sites_of(c: &Candidate, linker: &Crosslinker, end: usize) -> Vec<LinkSite> {
 }
 
 impl XlCandidates {
-    pub fn from_out_of_core(
-        prepared: &PreparedSearch<'_>,
-        linker: &Crosslinker,
-        open_cleavable: bool,
-    ) -> Self {
+    pub fn from_out_of_core(prepared: &PreparedSearch<'_>, linker: &Crosslinker) -> Self {
         let keep = |lk: Crosslinker| {
             move |residues: &[u8], _post: u8| {
                 lk.n_term()
@@ -173,7 +163,7 @@ impl XlCandidates {
         };
         let cands = prepared.out_of_core_candidates_where(keep(linker.clone()));
         let mut table = Self::from_candidates(cands, linker);
-        if (linker.cleavage.is_none() || open_cleavable) && !table.peptides.is_empty() {
+        if linker.cleavage.is_none() && !table.peptides.is_empty() {
             let records: Vec<_> = prepared
                 .out_of_core_records_where(keep(linker.clone()))
                 .into_iter()
@@ -503,10 +493,16 @@ fn stub_bonus(ctx: &SpecCtx<'_>, mass: f64, linker: &Crosslinker) -> f32 {
     let Some(c) = linker.cleavage.as_ref() else {
         return 0.0;
     };
-    let n = stub_ions_present(ctx.peaks, mass, c, ctx.z.saturating_sub(1).max(1), ctx.stub_tol_ppm)
-        .iter()
-        .filter(|&&v| v)
-        .count();
+    let n = stub_ions_present(
+        ctx.peaks,
+        mass,
+        c,
+        ctx.z.saturating_sub(1).max(1),
+        ctx.stub_tol_ppm,
+    )
+    .iter()
+    .filter(|&&v| v)
+    .count();
     ctx.stub_weight * n as f32
 }
 
@@ -1100,32 +1096,6 @@ fn search_spectrum_at(
         v.sort();
         v
     };
-    if cfg.decouple_top > 0 && !combos.is_empty() {
-        combos.sort_by(|x, y| y.score.total_cmp(&x.score));
-        combos.truncate(cfg.decouple_top);
-        let fz = z.saturating_sub(1).clamp(1, 2);
-        let tol = prepared.fragment_tolerance_da;
-        for c in combos.iter_mut() {
-            let (pa, pb) = (&table.peptides[c.a.pep as usize], &table.peptides[c.b.pep as usize]);
-            if pa.bare() == pb.bare() {
-                continue;
-            }
-            let (ma, mb) = (table.index.mass(c.a.pep), table.index.mass(c.b.pep));
-            let (Some(xa), Some(xb)) = (
-                hit_peptide(table, &c.a, mb, linker, mods),
-                hit_peptide(table, &c.b, ma, linker, mods),
-            ) else {
-                continue;
-            };
-            let sa = rescore(&without_peaks(spec, &by_ions(&xb, fz), tol), prepared, z, &[&xa])[0]
-                + stub_bonus(&ctx, ma, linker);
-            let sb = rescore(&without_peaks(spec, &by_ions(&xa, fz), tol), prepared, z, &[&xb])[0]
-                + stub_bonus(&ctx, mb, linker);
-            c.a.score = sa;
-            c.b.score = sb;
-            c.score = sa.min(sb);
-        }
-    }
     let best = combos.iter().enumerate().max_by(|(_, x), (_, y)| {
         x.score
             .total_cmp(&y.score)
@@ -1361,6 +1331,13 @@ mod tests {
         let k = p.sites.iter().find(|s| !s.n_term).unwrap();
         assert_eq!(p.occurrences_at(n), &[(0, 0)]);
         assert_eq!(p.occurrences_at(k), &[(0, 0), (1, 7)]);
+    }
+
+    #[test]
+    fn defaults_search_two_missing_isotopes_and_credit_stub_ions() {
+        let cfg = XlConfig::new(Crosslinker::dsso());
+        assert_eq!(cfg.isotope_offsets, 0..=2);
+        assert_eq!(cfg.stub_weight, STUB_ION_WEIGHT);
     }
 
     #[test]

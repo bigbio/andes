@@ -509,7 +509,7 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_SEARCH)]
     pub(crate) charge: (u8, u8),
 
-    /// Isotope-error offsets tried, as MIN..MAX (or MIN-MAX) [default: -1..2, 0..2 with --glyco]
+    /// Isotope-error offsets tried, as MIN..MAX (or MIN-MAX) [default: -1..2, 0..2 with --glyco or --xl]
     // An `Option`, so that an explicit -1..2 is told apart from the default and
     // kept under --glyco.
     #[arg(long, value_name = "MIN..MAX", value_parser = parse_isotope_error_range,

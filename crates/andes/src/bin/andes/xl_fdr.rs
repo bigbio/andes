@@ -408,11 +408,7 @@ pub(crate) fn report_levels(l: &Levels) {
     );
     eprintln!(
         "[xl] residue pair: {}",
-        counts_line(
-            l.rp.iter()
-                .zip(&l.rp_q)
-                .map(|(g, q)| (g.class, g.link, *q))
-        )
+        counts_line(l.rp.iter().zip(&l.rp_q).map(|(g, q)| (g.class, g.link, *q)))
     );
     eprintln!(
         "[xl] residue pair (>=2 CSMs): {}",

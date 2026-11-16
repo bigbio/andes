@@ -414,8 +414,7 @@ pub(crate) fn run_xl(
     let linker: Crosslinker = cli.xl.clone().ok_or("--xl: no crosslinker")?;
     report_linker(&linker);
     let t = std::time::Instant::now();
-    let mut cfg = XlConfig::new(linker.clone());
-    let table = XlCandidates::from_out_of_core(prepared, &linker, cfg.open_cleavable);
+    let table = XlCandidates::from_out_of_core(prepared, &linker);
     let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
     eprintln!(
         "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
@@ -433,6 +432,7 @@ pub(crate) fn run_xl(
     } else {
         spectra
     };
+    let mut cfg = XlConfig::new(linker.clone());
     cfg.oracle_spectra = cli.xl_oracle;
     if let Some((lo, hi)) = cli.isotope_error {
         cfg.isotope_offsets = lo..=hi;

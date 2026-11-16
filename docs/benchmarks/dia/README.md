@@ -169,7 +169,12 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   1 % 1700 / 1722 against 1634 / 1687 (raw01 higher on 5 of 5 seeds, raw02 on 4 of 5), N@FDP_c 2 %
   1899 / 1853 against 1798 / 1819, q ≤ 0.01 at 0.25 / 0.42 % true FDP. It helps once Percolator
   trains on enough positives; the seed-42, `--trainFDR 0.01` rejection above was noise. This offline
-  model (gradient boosting, anchors from a previous Percolator run) is not yet in andes.
+  model (gradient boosting, anchors from a previous Percolator run) is not yet in andes. Variants
+  that andes could compute in one pass, same 5 seeds (N@FDP_c 1 %, raw01 / raw02, against 1634 / 1687):
+  ridge on Percolator anchors 1634 / 1753, ridge on anchors from target-decoy competition on
+  `RawScore` at q ≤ 1 % 1603 / 1745, boosting on those anchors 1635 / 1722, at q ≤ 5 % 1648 / 1717.
+  raw02 gains 30–66 with every variant; raw01 gains only with boosting on Percolator anchors, though
+  its RT error is no smaller than ridge's (median 0.24 min for both, against 0.30 unrefined).
 - **Shared-scan interference** is not where the errors are. Of the targets at precursor q ≤ 5 % on
   raw01, 1,884 rank first in their scan (2.0 % entrapment) and 36 rank second (8 %), so a filter on
   rank would remove at most three false IDs.

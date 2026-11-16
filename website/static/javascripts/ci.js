@@ -57,7 +57,10 @@
     const fmtd = (x) => new Date(x).toLocaleDateString("en-US", { month: "short", day: "numeric" });
     g += `<text x="${L}" y="${H - 6}">${fmtd(x0)}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${fmtd(x1)}</text>`;
     const line = pts.map((p) => `${X(p.x)},${Y(p.y)}`).join(" ");
-    const dots = pts.map((p) => `<a href="https://github.com/bigbio/andes/commit/${esc(p.c)}"><circle cx="${X(p.x)}" cy="${Y(p.y)}" r="4" data-tip="${esc(label)}: ${esc(p.y.toLocaleString("en-US"))}&#10;${esc(p.t)}"/></a>`).join("");
+    const dots = pts.map((p) => {
+      const tipText = `${label}: ${p.y.toLocaleString("en-US")}\n${p.t}`;
+      return `<a href="https://github.com/bigbio/andes/commit/${esc(p.c)}" aria-label="${esc(tipText.replace("\n", ", "))}" data-tip="${esc(tipText)}"><circle cx="${X(p.x)}" cy="${Y(p.y)}" r="4"/></a>`;
+    }).join("");
     return `<div class="ci-chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${label}">
       <text x="${L - 40}" y="14" class="ci-label">${label}</text>${g}<polyline points="${line}"/>${dots}</svg></div>`;
   }
@@ -78,10 +81,10 @@
       `<tr><td>${when(r).toLocaleString("en-CA")}</td><td>${sha(r)}</td>
        <td>${esc(r.dataset)}<br><small>${esc(r.description)}</small></td>
        <td>${num(r.psms)}</td><td>${num(r.peptides)}</td><td>${num(r.protein_groups)}</td>
-       <td>${dur(r.wall_s)}</td><td>${gb(r.peak_rss_gb)}</td><td>${status(r)}</td></tr>`).join("");
+       <td>${dur(r.wall_s)}</td><td>${gb(r.peak_rss_gb)}</td><td><small>${esc(r.host)}</small></td><td>${status(r)}</td></tr>`).join("");
     return `<label>dataset <select data-act="table">${opts}</select></label>
       <table class="ci-table"><thead><tr><th>when</th><th>commit</th><th>dataset</th><th>PSMs</th>
-      <th>peptides</th><th>protein groups</th><th>runtime</th><th>RSS</th><th>status</th></tr></thead>
+      <th>peptides</th><th>protein groups</th><th>runtime</th><th>RSS</th><th>host</th><th>status</th></tr></thead>
       <tbody>${body}</tbody></table>`;
   }
 
@@ -98,13 +101,13 @@
     }
     ratios.forEach((g, i) => {
       const y = T + i * rowH + rowH / 2, c = COLORS[g.group] || "#888";
-      s += `<g stroke="${c}" fill="none" data-tip="${g.group} ${g.comparison}: median ${f3(g.median)}, middle 50% ${f3(g.q1)} to ${f3(g.q3)}, expected ${f3(g.expected)}, n=${num(g.n)}">
+      s += `<g stroke="${c}" fill="none" data-tip="${esc(g.group)} ${esc(g.comparison)}: median ${f3(g.median)}, middle 50% ${f3(g.q1)} to ${f3(g.q3)}, expected ${f3(g.expected)}, n=${num(g.n)}">
         <line x1="${X(g.lo)}" x2="${X(g.q1)}" y1="${y}" y2="${y}"/><line x1="${X(g.q3)}" x2="${X(g.hi)}" y1="${y}" y2="${y}"/>
         <line x1="${X(g.lo)}" x2="${X(g.lo)}" y1="${y - 7}" y2="${y + 7}"/><line x1="${X(g.hi)}" x2="${X(g.hi)}" y1="${y - 7}" y2="${y + 7}"/>
         <rect x="${X(g.q1)}" y="${y - 13}" width="${Math.max(1, X(g.q3) - X(g.q1))}" height="26" fill="${c}" fill-opacity="0.25"/>
         <line x1="${X(g.median)}" x2="${X(g.median)}" y1="${y - 13}" y2="${y + 13}" stroke-width="2"/></g>` +
         (g.expected == null ? "" : `<path d="M${X(g.expected)} ${y - 7}l7 7-7 7-7-7z" class="ci-expected"/>`) +
-        `<text x="${L - 12}" y="${y + 4}" text-anchor="end" class="ci-label">${g.group} ${g.comparison}</text>` +
+        `<text x="${L - 12}" y="${y + 4}" text-anchor="end" class="ci-label">${esc(g.group)} ${esc(g.comparison)}</text>` +
         `<text x="${W - R + 12}" y="${y + 4}">n=${num(g.n)}</text>`;
     });
     s += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle" class="ci-label">log2 ratio (condition / reference)</text>`;
@@ -112,27 +115,31 @@
   }
 
   function quant(rows, el) {
-    const q = rows.filter((r) => r.quant && r.quant.ratios?.length);
+    // Keep a run without ratio estimates: its counts and CVs are still results.
+    const q = rows.filter((r) => r.quant);
     if (!q.length) return "<p>No quantification runs yet.</p>";
     const sets = [...new Set(q.map((r) => r.dataset))];
     const set = sets.includes(el.dataset.qset) ? el.dataset.qset : sets[0];
     const runs = q.filter((r) => r.dataset === set).reverse();
-    const r = runs.find((x) => x.commit === el.dataset.qcommit) || runs[0], Q = r.quant;
+    const id = (x) => `${x.commit}|${x.run_at}`;   // a commit can be benchmarked more than once
+    const r = runs.find((x) => id(x) === el.dataset.qcommit) || runs[0], Q = r.quant;
+    const ratios = Q.ratios || [], cv = Q.cv || [];
     const opt = (v, cur, label) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(label)}</option>`;
-    const ratioRows = Q.ratios.map((g) => `<tr><td>${g.group}</td><td>${g.comparison}</td><td>${num(g.n)}</td>
+    const ratioRows = ratios.map((g) => `<tr><td>${esc(g.group)}</td><td>${esc(g.comparison)}</td><td>${num(g.n)}</td>
       <td>${f3(g.median)}</td><td>${f3(g.q1)} to ${f3(g.q3)}</td><td>${f3(g.expected)}</td><td>${f3(g.bias)}</td><td>${f3(g.mae)}</td></tr>`).join("");
-    const cvRows = Q.cv.map((c) => `<tr><td>${c.group}</td><td>${c.condition}</td><td>${num(c.n)}</td><td>${(100 * c.median_cv).toFixed(1)}%</td></tr>`).join("");
+    const cvRows = cv.map((c) => `<tr><td>${esc(c.group)}</td><td>${esc(c.condition)}</td><td>${num(c.n)}</td><td>${(100 * c.median_cv).toFixed(1)}%</td></tr>`).join("");
     const legend = Object.entries(COLORS).map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("") +
       '<span><i class="ci-expected-key"></i>expected ratio</span>';
     return `<div class="ci-card ci-quant"><h4>Quantification accuracy and precision</h4>
       <div class="ci-controls"><label>Benchmark set <select data-act="qset">${sets.map((s) => opt(s, set, s)).join("")}</select></label>
-      <label>Commit <select data-act="qcommit">${runs.map((x) => opt(x.commit, r.commit, x.commit.slice(0, 7) + " · " + when(x).toLocaleString("en-CA"))).join("")}</select></label></div>
+      <label>Commit <select data-act="qcommit">${runs.map((x) => opt(id(x), id(r), x.commit.slice(0, 7) + " · " + when(x).toLocaleString("en-CA") + " · run " + x.run_at)).join("")}</select></label></div>
       <p class="ci-dim">${num(Q.quantified)} ${esc(Q.level)}s quantified (${esc(Q.rows)}). Ratios use mean log2 intensity
       per condition, at least 2 observed replicates per condition, no imputation.</p>
-      <p class="ci-legend">${legend}</p>${boxes(Q.ratios)}
-      <p class="ci-dim">Boxes: middle 50%; center line: median. Whiskers: outermost observations within 1.5 × IQR. Hover a row for exact values.</p>
+      ${ratios.length ? `<p class="ci-legend">${legend}</p>${boxes(ratios)}
+      <p class="ci-dim">Boxes: middle 50%; center line: median. Whiskers: outermost observations within 1.5 × IQR. Hover a box for exact values.</p>
       <table class="ci-table"><thead><tr><th>Group</th><th>Comparison</th><th>n</th><th>Median log2</th><th>Middle 50%</th>
-      <th>Expected</th><th>Bias</th><th>Median absolute error</th></tr></thead><tbody>${ratioRows}</tbody></table>
+      <th>Expected</th><th>Bias</th><th>Median absolute error</th></tr></thead><tbody>${ratioRows}</tbody></table>`
+      : "<p>No ratio estimates in this run: no precursor had at least 2 observed replicates in a condition and in the reference.</p>"}
       <h4>Replicate precision</h4><p class="ci-dim">Sample SD / mean on linear intensities; at least two observed replicates.</p>
       <table class="ci-table"><thead><tr><th>Group</th><th>Condition</th><th>n</th><th>Median CV</th></tr></thead><tbody>${cvRows}</tbody></table></div>`;
   }
@@ -178,6 +185,15 @@
       if (t) { tip.textContent = t.dataset.tip; tip.style.left = e.clientX + 12 + "px"; tip.style.top = e.clientY + 12 + "px"; }
     });
     el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+    // The same details on keyboard focus (chart points are links, so Tab reaches them).
+    el.addEventListener("focusin", (e) => {
+      const t = e.target.closest("[data-tip]");
+      if (!t) return;
+      const b = t.getBoundingClientRect();
+      tip.textContent = t.dataset.tip; tip.style.display = "block";
+      tip.style.left = b.right + 8 + "px"; tip.style.top = b.bottom + 8 + "px";
+    });
+    el.addEventListener("focusout", () => { tip.style.display = "none"; });
     draw();
   }
 

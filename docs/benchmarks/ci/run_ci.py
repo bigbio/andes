@@ -105,7 +105,7 @@ def quant(mbr, quant_dir, design, amounts):
         cond = runs.get(os.path.basename(run_).split(".")[0])
         transfer = not ev.startswith("identified")
         if (cond is None or ev.endswith("below_threshold") or ev == "shared_feature" or v is None
-                or not v > 0 or (lq or 1) > 0.01 or (transfer and (tq is None or tq > 0.01))):
+                or not v > 0 or lq is None or lq > 0.01 or (transfer and (tq is None or tq > 0.01))):
             continue
         vals.setdefault(k, {}).setdefault(cond, []).append(v)
 
@@ -140,6 +140,12 @@ def bench(name, ds, data, andes, threads, workdir):
     specs, fasta = spectra(Path(data) / ds["fetch"]), Path(data) / "databases" / ds["database"]
     if not specs or not fasta.is_file():
         return {**rec, "status": "missing", "error": f"no spectra in {data}/{ds['fetch']} or no {fasta}"}
+    if "quant" in ds:  # a partial download must not give an `ok` record with fewer runs
+        design = (HERE / ds["quant"]["design"]).read_text().split("\n")[1:]
+        have = {Path(s).name.split(".")[0] for s in specs}
+        absent = sorted({r.split("\t")[0] for r in design if r.strip()} - have)
+        if absent:
+            return {**rec, "status": "missing", "error": f"no spectrum file for design run(s) {absent}"}
     stem = out / "run"
     cmd = [andes, *sum((["--spectrum", s] for s in specs), []), "--database", str(fasta),
            "--threads", str(threads), "--rescore", "--output-pin", f"{stem}.pin", *ds.get("args", [])]
@@ -160,14 +166,17 @@ def bench(name, ds, data, andes, threads, workdir):
                precursors=prec and prec[0], peptides=seqs and int(seqs.group(1).replace(",", "")),
                protein_groups=groups and groups[0])
     rec["throughput"] = round(rec["spectra"] / wall, 1) if rec["spectra"] else None
-    if ds.get("entrapment"):
-        n, hits, _ = E.count_percolator_psms(f"{stem}.percolator.target.psms.txt", 0.01,
-                                             E.SampleSequences(str(fasta)))
-        t, e, _ = E.te_ratio(str(fasta))
-        rec["true_fdp"] = round(hits / max(n, 1) * (1 + t / max(e, 1)), 5)
-    if "quant" in ds:
-        q = ds["quant"]
-        rec["quant"] = quant(f"{stem}.mbr.parquet", out / "quant", HERE / q["design"], HERE / q["amounts"])
+    try:  # keep the IDs and cost measured above when an evaluation step fails
+        if ds.get("entrapment"):
+            n, hits, _ = E.count_percolator_psms(f"{stem}.percolator.target.psms.txt", 0.01,
+                                                 E.SampleSequences(str(fasta)))
+            t, e, _ = E.te_ratio(str(fasta))
+            rec["true_fdp"] = round(hits / max(n, 1) * (1 + t / max(e, 1)), 5)
+        if "quant" in ds:
+            q = ds["quant"]
+            rec["quant"] = quant(f"{stem}.mbr.parquet", out / "quant", HERE / q["design"], HERE / q["amounts"])
+    except Exception as exc:  # noqa: BLE001 - any failure here is a result to record
+        rec.update(status="failed", error=f"evaluation: {type(exc).__name__}: {exc}")
     return rec
 
 
@@ -191,7 +200,12 @@ def main(argv=None):
               "host": a.host}
     bad = 0
     for n in names:
-        rec = {**commit, **bench(n, all_ds[n], a.data, a.andes, a.threads, a.workdir)}
+        try:
+            res = bench(n, all_ds[n], a.data, a.andes, a.threads, a.workdir)
+        except Exception as exc:  # noqa: BLE001 - record it, then run the next dataset
+            res = {"dataset": n, "description": all_ds[n].get("description", ""),
+                   "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        rec = {**commit, **res}
         bad += rec["status"] != "ok"
         with open(a.out, "a") as fh:
             fh.write(json.dumps(rec) + "\n")

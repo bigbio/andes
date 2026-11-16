@@ -523,41 +523,20 @@ fn protein_family<'p>(prepared: &'p PreparedSearch<'_>, pi: u32) -> &'p str {
 /// The intra/inter class of a pair, by one rule for targets and decoys:
 /// intra when the peptides' proteins share a family (a protein and its decoy
 /// are one family, so a target peptide linked to a decoy peptide of its own
-/// protein is an intra TD), or either peptide's sequence (I = L) occurs in a
-/// protein of the other.
+/// protein is an intra TD). Only protein membership decides: a sequence test
+/// against the other peptide's proteins would find target sequences (I/L
+/// variants, non-enzymatic contexts) that shuffled decoys never match, and
+/// would move random TT matches, but not their TD and DD estimators, into
+/// the intra class.
 fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool {
     let fam_b: Vec<&str> = b
         .proteins
         .iter()
         .map(|&p| protein_family(prepared, p))
         .collect();
-    if a.proteins
+    a.proteins
         .iter()
         .any(|&p| fam_b.contains(&protein_family(prepared, p)))
-    {
-        return true;
-    }
-    let il = |s: &[u8]| -> Vec<u8> {
-        s.iter()
-            .map(|&r| if r == b'I' { b'L' } else { r })
-            .collect()
-    };
-    let occurs_in = |pep: &XlPeptide, prots: &[u32]| {
-        let needle = il(&pep.bare());
-        prots.iter().any(|&pi| {
-            prepared
-                .idx
-                .db
-                .proteins
-                .get(pi as usize)
-                .is_some_and(|prot| {
-                    il(&prot.sequence)
-                        .windows(needle.len())
-                        .any(|w| w == needle.as_slice())
-                })
-        })
-    };
-    occurs_in(a, &b.proteins) || occurs_in(b, &a.proteins)
 }
 
 fn precursor_window_da(params: &crate::search_params::SearchParams, mass: f64) -> f64 {

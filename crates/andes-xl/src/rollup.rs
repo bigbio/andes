@@ -143,10 +143,10 @@ mod tests {
         ];
         let g = group_by(&items, |_, it| it.key.clone());
         let q = split_q_values(&g, |_| true);
-        // Intra: TT then TD -> 0, 1/1. Inter: two TT -> 0.
-        assert_eq!(q, vec![Some(0.0), Some(1.0), Some(0.0), Some(0.0)]);
+        // Each class is too small to clear the MIN_FALSE floor: q = 1.
+        assert_eq!(q, vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0)]);
         let q = split_q_values(&g, |g| g.class == TT);
         assert_eq!(q[1], None);
-        assert_eq!(q[0], Some(0.0));
+        assert_eq!(q[0], Some(1.0));
     }
 }

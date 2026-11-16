@@ -3,10 +3,19 @@
 //! Above a score threshold, TD matches estimate the TT matches with one false
 //! peptide plus those with two, and DD matches estimate those with two false
 //! peptides counted twice over in TD, so the false TT matches number
-//! `TD − DD` and `FDR = (TD − DD) / TT`, clamped at 0 when `DD > TD`. The estimate is made
-//! separately for each link class (intra- and inter-protein) by the caller.
+//! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate is made separately for
+//! each link class (intra- and inter-protein) by the caller.
+//!
+//! At small counts `TD − DD` fluctuates to 0 or below by chance, and a
+//! monotone pass would carry that dip down to every lower threshold. The
+//! estimate is therefore floored at [`MIN_FALSE`]` / TT`: a set is accepted at
+//! FDR `α` only when `TT · α ≥ MIN_FALSE`, the minimum-TD validity check of
+//! xiFDR (Fischer & Rappsilber 2017).
 
 use crate::decoy::PairClass;
+
+/// Fewest false matches an accepted set is assumed to hold.
+pub const MIN_FALSE: f64 = 2.0;
 
 /// Counts of a set of CSMs by class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,17 +38,19 @@ impl ClassCounts {
         }
     }
 
-    /// `(TD − DD) / TT`, clamped at 0; 0 when there are no TT matches.
+    /// `max(TD − DD, MIN_FALSE) / TT`, capped at 1; 1 when there are no TT
+    /// matches.
     pub fn fdr(&self) -> f64 {
         if self.tt == 0 {
-            return 0.0;
+            return 1.0;
         }
-        (self.td as f64 - self.dd as f64).max(0.0) / self.tt as f64
+        let false_tt = (self.td as f64 - self.dd as f64).max(MIN_FALSE);
+        (false_tt / self.tt as f64).min(1.0)
     }
 }
 
 /// q-values of CSMs with scores `scores` (higher is better) and classes
-/// `classes`, by the `(TD − DD) / TT` estimate at each score threshold, made
+/// `classes`, by the floored `(TD − DD) / TT` estimate at each score threshold, made
 /// monotone from the bottom up. Ties share one threshold.
 pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
     assert_eq!(scores.len(), classes.len());
@@ -82,33 +93,45 @@ mod tests {
     }
 
     #[test]
-    fn fdr_subtracts_dd_and_clamps() {
+    fn fdr_subtracts_dd_and_is_floored() {
         let c = ClassCounts {
             tt: 100,
             td: 7,
             dd: 2,
         };
         assert!((c.fdr() - 0.05).abs() < 1e-12);
+        // DD above TD is a chance dip, not zero false matches.
         let c = ClassCounts {
             tt: 10,
             td: 1,
             dd: 3,
         };
-        assert_eq!(c.fdr(), 0.0);
-        assert_eq!(ClassCounts::default().fdr(), 0.0);
+        assert!((c.fdr() - 0.2).abs() < 1e-12);
+        assert_eq!(ClassCounts::default().fdr(), 1.0);
+    }
+
+    #[test]
+    fn small_sets_cannot_reach_a_low_q() {
+        // 25 TT and no decoys: q is 2/25, never 0.
+        let scores: Vec<f64> = (0..25).map(|i| 100.0 - i as f64).collect();
+        let q = q_values(&scores, &[TT; 25]);
+        assert!(q.iter().all(|&v| (v - 0.08).abs() < 1e-12));
     }
 
     #[test]
     fn q_values_are_monotone_and_share_ties() {
-        let scores = [10.0, 9.0, 8.0, 8.0, 7.0, 6.0];
-        let classes = [TT, TT, TD, TT, TT, TD];
+        // 200 TT above 4 TD and 1 DD, then a tie of one TT and one TD.
+        let mut scores: Vec<f64> = (0..205).map(|i| 1000.0 - i as f64).collect();
+        let mut classes = vec![TT; 200];
+        classes.extend([TD, TD, TD, TD, DD]);
+        scores.extend([1.0, 1.0]);
+        classes.extend([TT, TD]);
         let q = q_values(&scores, &classes);
-        // Thresholds: 10 -> 0/1, 9 -> 0/2, 8 -> 1/3, 7 -> 1/4, 6 -> 2/4.
-        assert_eq!(q[0], 0.0);
-        assert_eq!(q[1], 0.0);
-        assert!((q[2] - 0.25).abs() < 1e-12);
-        assert_eq!(q[2], q[3]);
-        assert!((q[4] - 0.25).abs() < 1e-12);
-        assert!((q[5] - 0.5).abs() < 1e-12);
+        // Above the decoys: 2/200 floor. All 205: (4-1)/200. Tie: (5-1)/201.
+        assert!((q[0] - 0.01).abs() < 1e-12);
+        assert!((q[204] - 0.015).abs() < 1e-12);
+        assert_eq!(q[205], q[206]);
+        assert!((q[205] - 4.0 / 201.0).abs() < 1e-12);
+        assert!(q.windows(2).take(204).all(|w| w[0] <= w[1]));
     }
 }

@@ -3,7 +3,9 @@
 //! Above a score threshold, TD matches estimate the TT matches with one false
 //! peptide plus those with two, and DD matches estimate those with two false
 //! peptides counted twice over in TD, so the false TT matches number
-//! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate is made separately for
+//! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate counts one TD more,
+//! `(TD + 1 − DD) / TT`, which removes most of the excess the monotone pass
+//! picks up from chance dips in mid-sized sets. It is made separately for
 //! each link class (intra- and inter-protein) by the caller.
 
 use crate::decoy::PairClass;
@@ -35,7 +37,7 @@ impl ClassCounts {
         if self.tt == 0 {
             return 1.0;
         }
-        let false_tt = (self.td as f64 - self.dd as f64).max(MIN_FALSE);
+        let false_tt = (self.td as f64 + 1.0 - self.dd as f64).max(MIN_FALSE);
         (false_tt / self.tt as f64).min(1.0)
     }
 }
@@ -90,7 +92,7 @@ mod tests {
             td: 7,
             dd: 2,
         };
-        assert!((c.fdr() - 0.05).abs() < 1e-12);
+        assert!((c.fdr() - 0.06).abs() < 1e-12);
         let c = ClassCounts {
             tt: 10,
             td: 1,
@@ -116,9 +118,9 @@ mod tests {
         classes.extend([TT, TD]);
         let q = q_values(&scores, &classes);
         assert!((q[0] - 0.01).abs() < 1e-12);
-        assert!((q[204] - 0.015).abs() < 1e-12);
+        assert!((q[204] - 0.02).abs() < 1e-12);
         assert_eq!(q[205], q[206]);
-        assert!((q[205] - 4.0 / 201.0).abs() < 1e-12);
+        assert!((q[205] - 5.0 / 201.0).abs() < 1e-12);
         assert!(q.windows(2).take(204).all(|w| w[0] <= w[1]));
     }
 }

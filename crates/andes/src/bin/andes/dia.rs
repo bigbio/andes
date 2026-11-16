@@ -81,7 +81,7 @@ const FRAG_PPM: f64 = 20.0;
 const SUM_PPM: f64 = 10.0;
 /// MS1 m/z tolerance (ppm).
 const MS1_PPM: f64 = 10.0;
-/// Search fragment tolerance (ppm) of `--dia` on Orbitrap-class MS2 when none is set.
+/// Search fragment tolerance (ppm) of `--dia` on Orbitrap Astral MS2 when none is set.
 pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
 
 /// Adds the [`COLUMNS`] to every row of `pin`. `spectra` keep their peaks;

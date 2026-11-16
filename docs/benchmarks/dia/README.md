@@ -58,7 +58,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   1666 on raw01, 1685 / 1819 / 1833 / 1731 / 1747 on raw02. 7 ppm is higher than 20 ppm on raw01 for
   5 of 5 seeds and on raw02 for 4 of 5. Measuring on a 30,000-spectrum sample instead (offset −3.3 /
   −2.6 ppm, spread 1.3 ppm, 5 ppm features, 20 ppm retrieval) gave 1747 / 1681, below a flat 7 ppm.
-  `--dia` on Orbitrap-class MS2 now uses 7 ppm unless `--fragment-tol-*` is set. Matching the
+  `--dia` on Orbitrap Astral MS2 now uses 7 ppm unless `--fragment-tol-*` is set (other analyzers keep
+  20 ppm: only Astral was measured). Matching the
   co-elution and summed-apex columns at 7 or 12 ppm too (they use 20 and 10 ppm) gave 1817 / 1755 and
   1821 / 1785 with q ≤ 0.01 at 1.0–1.1 % true FDP on raw02; not kept. At 7 ppm, `--trainFDR` 0.02 /
   0.05 / 0.10 give 1726 / 1801 / 1822 on raw01 and 1703 / 1819 / 1824 on raw02 (0.05 kept: 0.10 is

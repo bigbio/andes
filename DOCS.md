@@ -550,7 +550,7 @@ against the default 0.01, error control unchanged). With `--dia --rescore` andes
 per run: a gradient-boosted model of the andes-rt residual, fitted on the first Percolator pass's
 targets at q ≤ 1 % (at least 300 per run), adds `dia_rt_refined_err` (|observed − refined RT|,
 minutes, out of fold by peptidoform) and Percolator runs a second time (+32 / +60 precursors at
-1 % true FDP on the Astral benchmark). It needs `--predict rt`. On Orbitrap-class MS2, `--dia`
+1 % true FDP on the Astral benchmark). It needs `--predict rt`. On Orbitrap Astral MS2, `--dia`
 searches and scores fragments at 7 ppm unless `--fragment-tol-*` is set: the per-run fragment
 error measurement needs 100 confident PSMs, which a DIA sample rarely yields (+135 / +72 precursors
 at 1 % true FDP against 20 ppm on the Astral benchmark). The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)

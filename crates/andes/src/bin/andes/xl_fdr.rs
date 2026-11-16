@@ -166,6 +166,7 @@ fn accessions<'a>(p: &XlPeptide, prepared: &'a PreparedSearch) -> Vec<(u32, &'a 
 /// Write the pair-aware PIN of the CSMs: one row per spectrum with a CSM of
 /// link class `intra` (both classes when `None`), label +1 for TT and -1 for
 /// TD and DD.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_xl_pin(
     path: &Path,
     spectra: &[Spectrum],

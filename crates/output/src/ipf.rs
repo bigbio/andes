@@ -1,14 +1,3 @@
-//! IPF site localization after rescoring (`--localize ipf`).
-//!
-//! Each identified target PSM (rescored, within the run's PSM cutoff) is
-//! localized with the PSM's PEP as the prior (see [`search::ipf`]). Its
-//! [`search::ipf::IpfEvidence`] is built after rescoring, from the retained
-//! peaks, so every row kind (main, `--refine` Pass 2, `--chimeric`
-//! secondaries) gets it the same way, each input file with the fragment error
-//! it was searched with. The ion PEP model is fit once per run on
-//! the evidence of confident target PSMs. Peptidoform q-values are model-based
-//! over every localized PSM, as in PyProphet IPF.
-
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -16,7 +5,6 @@ use search::ipf::{localize, model_fdr, IonPepModel, IpfEvidence};
 
 use crate::percolator::PercolatorPsm;
 
-/// PSM q-value below which a target's ion evidence trains the ion PEP model.
 pub const TRAIN_Q: f64 = 0.01;
 
 #[derive(Debug, Clone)]
@@ -25,39 +13,24 @@ pub struct IpfRow {
     pub peptide: String,
     pub psm_q: f64,
     pub psm_pep: f64,
-    /// The reported (search) placement: 1-based residue and its mod name.
     pub reported_sites: Vec<(u16, String)>,
-    /// The most probable placement: 1-based residue and its mod name.
     pub best_sites: Vec<(u16, String)>,
-    /// Localization probability of the best placement given the PSM is right.
     pub best_prob: f64,
-    /// Peptidoform PEP (1 - posterior of the best placement, h0 included).
     pub pep: f64,
     pub q: f64,
     pub n_forms: usize,
     pub site_ions: usize,
     pub matched_ions: usize,
     pub truncated: bool,
-    /// Localization probability of each (1-based residue, mod name) that some
-    /// placement modifies, in residue order: the posterior mass of the
-    /// placements that put that mod on that residue.
     pub site_probs: Vec<(u16, String, f64)>,
-    /// Debug (`--ipf-debug`): every placement as
-    /// `sites|search_score|ipf_log_evidence`, `;`-separated. Empty otherwise.
     pub forms_debug: String,
 }
 
-/// Run IPF on every target PSM of `map` that has evidence in `evidence`
-/// (keyed by PIN `SpecId`). Returns rows sorted by PSM id and the model.
-/// `debug` fills [`IpfRow::forms_debug`].
 pub fn localize_psms(
     map: &HashMap<String, PercolatorPsm>,
     evidence: &HashMap<String, IpfEvidence>,
     debug: bool,
 ) -> (Vec<IpfRow>, IonPepModel) {
-    // Two passes: fit on the search's placements, localize, refit on the
-    // placements IPF prefers (so the model does not just learn the search's
-    // choice), as an EM step.
     let train: Vec<&IpfEvidence> = map
         .iter()
         .filter(|(_, p)| p.q_value <= TRAIN_Q)
@@ -108,8 +81,6 @@ pub fn localize_psms(
                     .map(|((s, m), p)| (s, m.to_string(), p))
                     .collect(),
                 forms_debug: if debug {
-                    // Evidence-only posterior (no PSM prior): its log is the
-                    // IPF log-likelihood up to a constant per PSM.
                     let ll = search::ipf::evidence_posterior(e, &model);
                     e.forms
                         .iter()
@@ -140,24 +111,17 @@ pub fn localize_psms(
     (rows, model)
 }
 
-/// What `psms.parquet` carries for one localized row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IpfQpx {
-    /// Localization probability per (1-based residue, mod name), every
-    /// residue some placement modifies (the `positions.scores` of the
-    /// reported mods).
     pub site_probs: HashMap<(i32, String), f64>,
     pub best_prob: f64,
     pub pep: f64,
     pub q: f64,
-    /// The most probable placement, as [`sites_label`] writes it.
     pub best_sites: String,
-    /// The per-residue probabilities, as the TSV `site_probs` column.
     pub site_probs_label: String,
     pub truncated: bool,
 }
 
-/// The QPX view of every localized row, keyed by PIN `SpecId`.
 pub fn qpx_map(rows: &[IpfRow]) -> HashMap<String, IpfQpx> {
     rows.iter()
         .map(|r| {
@@ -179,14 +143,11 @@ pub fn qpx_map(rows: &[IpfRow]) -> HashMap<String, IpfQpx> {
         .collect()
 }
 
-/// Whether the row's placements carry more than one mod name; the labels
-/// name the mod only then.
 fn mixed_mods(r: &IpfRow) -> bool {
     let first = r.site_probs.first().map(|x| &x.1);
     r.site_probs.iter().any(|x| Some(&x.1) != first)
 }
 
-/// `3;7`, or `3[Phospho];7[Oxidation]` when the row mixes mods.
 pub fn sites_label(sites: &[(u16, String)], r: &IpfRow) -> String {
     let named = mixed_mods(r);
     sites
@@ -196,8 +157,6 @@ pub fn sites_label(sites: &[(u16, String)], r: &IpfRow) -> String {
         .join(";")
 }
 
-/// Residues at probability 0.01 or more, `3:0.981;5:0.019` (named as in
-/// [`sites_label`] when the row mixes mods).
 pub fn site_probs_label(r: &IpfRow) -> String {
     let named = mixed_mods(r);
     r.site_probs
@@ -272,13 +231,9 @@ mod tests {
         }))
     }
 
-    /// Two placements on the same residues that swap which mod sits where are
-    /// told apart: probabilities and sites carry the mod, and the best
-    /// placement can differ from the reported one on identity alone.
     #[test]
     fn placements_that_swap_mods_on_the_same_residues_stay_apart() {
         let (me, di) = (mod_("Methyl", 14.01565), mod_("Dimethyl", 28.0313));
-        // Reported: Methyl on residue 2, Dimethyl on 5. Strong ions favour the swap.
         let e = IpfEvidence {
             forms: vec![vec![1, 4], vec![1, 4]],
             mods: vec![vec![me, di], vec![di, me]],
@@ -296,7 +251,6 @@ mod tests {
                 .collect(),
             form_scores: vec![],
         };
-        // Several confident PSMs so the ion model learns that tier 0 is evidence.
         let mut map = HashMap::new();
         let mut evidence = HashMap::new();
         for i in 0..20 {
@@ -315,7 +269,6 @@ mod tests {
             );
             let mut ei = e.clone();
             if i > 0 {
-                // The training PSMs report the placement their ions support.
                 ei.observed = 1;
             }
             evidence.insert(id, ei);

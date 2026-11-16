@@ -1,7 +1,3 @@
-//! Private scratch storage for a run's MS1 scans, as an MS1 table
-//! (`output::ms1_table`) in a temporary file under `--temp-dir`. No run stays resident while
-//! Percolator trains; quantification loads one run at a time, and the
-//! `--quant-dir` artifact `<stem>.ms1.parquet` is a copy of this file.
 use std::path::Path;
 
 use output::ms1_table::{partial_path, read_ms1, write_ms1};
@@ -13,8 +9,6 @@ pub(crate) struct Ms1Cache {
 }
 
 impl Ms1Cache {
-    /// Writes `index` of run `run` to a new temporary MS1 table in `dir`
-    /// (created if missing).
     pub(super) fn store(index: &Ms1RunIndex, run: &str, dir: &Path) -> Result<Self, String> {
         crate::cli::ensure_scratch_dir(dir)?;
         let file = tempfile::Builder::new()
@@ -36,8 +30,6 @@ impl Ms1Cache {
         read_ms1(file, path)
     }
 
-    /// Copies the table to `path`, through `<path>.partial`, so the file
-    /// appears only once complete. Every error names `path`.
     pub(super) fn persist(&self, path: &Path) -> Result<(), String> {
         let partial = partial_path(path);
         let copied = std::fs::copy(self.file.path(), &partial)
@@ -130,7 +122,6 @@ mod tests {
         assert!(e.contains("x.ms1.parquet"), "{e}");
     }
 
-    /// A scratch directory that cannot be created is an error naming the flag.
     #[test]
     fn unwritable_scratch_dir_is_an_error_naming_the_flag() {
         let dir = tempfile::tempdir().unwrap();

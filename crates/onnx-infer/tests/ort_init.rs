@@ -1,7 +1,3 @@
-//! Explicit runtime initialisation with a file that is not a loadable
-//! library. A separate test binary: a failed load leaves `ort`'s runtime
-//! unusable for the rest of the process.
-
 #![cfg(feature = "ort")]
 
 use onnx_infer::backend::ort_backend::init_runtime;

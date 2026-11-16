@@ -1,21 +1,3 @@
-//! TSV output writer.
-//!
-//! # Column order
-//!
-//! ```text
-//! #SpecFile  SpecID  ScanNum  [Title — only when is_mgf]  FragMethod
-//! Precursor  IsotopeError  PrecursorError(ppm|Da)  Charge
-//! Peptide  Protein  RawScore
-//! ```
-//!
-//! # Column semantics
-//!
-//! * **FragMethod**: `ActivationMethod::name()` for the five canonical variants;
-//!   `"UNKNOWN"` for unknown / unset activation.
-//! * **IsotopeError**: winning isotope offset from the search (`PsmMatch::isotope_offset`).
-//! * **Decoy filtering**: decoys are emitted; downstream Percolator labels them.
-//! * **SpecID for non-MGF**: `"scan=N"` (mzML convention).
-
 use std::io::{self, BufWriter, Write};
 
 use crate::row_context::{emitted_rows, RowContext};
@@ -28,20 +10,6 @@ use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-/// Build the `Modifications` column value for a peptide.
-///
-/// Returns a `;`-joined list of `"{1-based-position}:{accession}"` entries for
-/// every modification with an accession, in ascending position order: one
-/// entry per part of a stacked record (a terminal and a side-chain mod on one
-/// residue give two entries at that position). Returns an empty string when no
-/// residue carries a CV accession.
-///
-/// Used in TSV output only. PIN omits this column because PIN's `Proteins`
-/// column is rest-of-line (the row writer emits one tab-separated accession
-/// per protein in a loop), so a trailing `Modifications` field would be parsed
-/// by Percolator as a phantom extra protein. Percolator already receives
-/// modification positions via the `Peptide` inline mass-delta column; the CURIE
-/// accession column is emitted in andes's TSV only for quantms/SDRF interop.
 pub(crate) fn modifications_field(peptide: &Peptide) -> String {
     let mut parts: Vec<String> = peptide
         .residues
@@ -56,8 +24,6 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
                 .collect::<Vec<_>>()
         })
         .collect();
-    // residues are iterated in index order so ascending is guaranteed, but
-    // sort defensively in case the caller ever reorders.
     parts.sort_by_key(|s| {
         s.split(':')
             .next()
@@ -67,20 +33,6 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
     parts.join(";")
 }
 
-/// Write all PSMs to a tab-separated file at `output_path`.
-///
-/// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
-/// holds the top-N PSMs for `spectra[i]`.
-///
-/// `search_index` is used to resolve protein accessions from
-/// `psm.candidate.protein_index`.  Decoy accessions already carry the prefix
-/// (set by `search::decoy::decoy_db`) — no prefix arithmetic is needed here.
-///
-/// `spec_file_name` is the bare filename (e.g. `"test.mgf"`) written in the
-/// `#SpecFile` column.
-///
-/// `is_mgf` controls whether a `Title` column is emitted in the header and
-/// rows, matching MGF vs mzML output conventions.
 #[allow(
     clippy::too_many_arguments,
     reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API"
@@ -111,10 +63,6 @@ pub fn write_tsv(
     })
 }
 
-/// Write all PSMs to an arbitrary writer — useful for testing without temp
-/// files.
-///
-/// See [`write_tsv`] for parameter documentation.
 #[allow(
     clippy::too_many_arguments,
     reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API"
@@ -172,14 +120,11 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
     ]);
     cols.push("RankScore");
     cols.push("Modifications");
-    // Provenance of the named protein (UniProt XML databases): family
-    // accession, entry kind, and the feature that made the entry.
     cols.extend_from_slice(&["ProteinFamily", "EntryKind", "FeatureIds"]);
 
     writeln!(writer, "{}", cols.join("\t"))
 }
 
-/// Row-writing context: fixed fields derived once per spectrum.
 struct RowCtx<'a> {
     spec_file_name: &'a str,
     is_mgf: bool,
@@ -241,19 +186,14 @@ fn write_psm_row<W: Write>(
         .map(|m| m.name().to_string())
         .unwrap_or_else(|| "UNKNOWN".to_string());
 
-    // For chimeric Pass-2 secondaries, use the co-isolated precursor m/z; `None`
-    // (every ordinary PSM) falls back to the spectrum's. Mirrors `pin.rs`.
     let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
     let precursor = format!("{:.4}", precursor_mz);
 
-    // IsotopeError: winning isotope offset from the search (matches PIN column).
     let isotope_error: i32 = psm.isotope_offset as i32;
 
-    // PrecursorError: mass_error_ppm stored on psm; convert to Da if needed
     let precursor_error = if ppm_mode {
         format!("{:.4}", psm.mass_error_ppm)
     } else {
-        // Convert ppm error back to Da using the (override-aware) precursor m/z
         let da = psm.mass_error_ppm * 1e-6 * precursor_mz;
         format!("{:.4}", da)
     };
@@ -271,7 +211,7 @@ fn write_psm_row<W: Write>(
             spec_file_name,
             spec_id,
             scan_num,
-            spec.title, // Title column (MGF only)
+            spec.title,
             frag_method,
             precursor,
             isotope_error,
@@ -296,8 +236,6 @@ fn write_psm_row<W: Write>(
         )
     };
     let mods = modifications_field(&cand.peptide);
-    // Provenance of the named protein: its family accession, entry kind and
-    // the feature that made it (empty for a reference entry).
     let (family, kind, feature) = match origin {
         Some(o) => (&*o.family, o.kind.name(), &*o.feature),
         None => (protein.as_str(), EntryKind::Reference.name(), ""),
@@ -320,7 +258,6 @@ mod tests {
     use search::candidate_gen::Candidate;
     use search::search_index::SearchIndex;
 
-    /// Build a minimal `SearchIndex` with one target protein.
     fn make_search_index(accession: &str) -> SearchIndex {
         let target = ProteinDb {
             proteins: vec![Protein {
@@ -333,7 +270,6 @@ mod tests {
         SearchIndex::from_target_db(&target, "XXX_")
     }
 
-    /// Build an empty `SearchIndex` for tests that don't inspect protein values.
     fn make_empty_search_index() -> SearchIndex {
         let target = ProteinDb { proteins: vec![] };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -355,7 +291,6 @@ mod tests {
         }
     }
 
-    /// Build a single Candidate fixture. Mirrors the make_candidate in pin.rs.
     fn make_candidate(protein_index: usize, is_decoy: bool) -> Candidate {
         let aa = AminoAcid::standard(b'A').unwrap();
         let peptide = Peptide::new(vec![aa], b'K', b'S');
@@ -428,7 +363,7 @@ mod tests {
     fn parse_rows(output: &[u8]) -> Vec<Vec<String>> {
         let text = std::str::from_utf8(output).unwrap();
         text.lines()
-            .skip(1) // skip header
+            .skip(1)
             .filter(|l| !l.is_empty())
             .map(|l| l.split('\t').map(|s| s.to_string()).collect())
             .collect()
@@ -464,7 +399,6 @@ mod tests {
                 "Peptide",
                 "Protein",
                 "RankScore",
-                // Additive: CV accession-based modification annotation (last column).
                 "Modifications",
                 "ProteinFamily",
                 "EntryKind",
@@ -508,7 +442,7 @@ mod tests {
     fn tsv_handles_empty_queues_gracefully() {
         let params = make_params_ppm();
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-        let queues = vec![TopNQueue::new(10)]; // empty queue
+        let queues = vec![TopNQueue::new(10)];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
@@ -528,9 +462,6 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        // Push 3 PSMs on 3 distinct peptides with descending rank_score (best =
-        // largest). Distinct peptides: a positional isomer of an emitted row
-        // would be collapsed into it.
         for (cidx, score) in [(0u32, 10.0f32), (1, 8.0), (2, 6.0)] {
             let mut psm = make_psm(0, score, score);
             psm.candidate_idxs = vec![cidx];
@@ -556,12 +487,8 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
 
-        // RawScore column (index 11 when is_mgf=true: 0=#SpecFile 1=SpecID
-        // 2=ScanNum 3=Title 4=FragMethod 5=Precursor 6=IsotopeError 7=PrecursorError
-        // 8=Charge 9=Peptide 10=Protein 11=RawScore)
         let scores: Vec<&str> = rows.iter().map(|r| r[11].as_str()).collect();
 
-        // Highest RawScore should come first, lowest last.
         assert_eq!(scores[0], "10", "first row should be the highest-score PSM");
         assert_eq!(scores[2], "6", "last row should be the lowest-score PSM");
     }
@@ -571,7 +498,6 @@ mod tests {
         let params = make_params_ppm();
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Build a peptide with an oxidized methionine (+15.99491 Da)
         let m_unmod = AminoAcid::standard(b'M').unwrap();
         let ox_mod = Modification {
             name: "Oxidation".to_string(),
@@ -593,7 +519,6 @@ mod tests {
             mod_: Some(model::modification::leak_mod(ox_mod)),
         };
         let a = AminoAcid::standard(b'A').unwrap();
-        // Peptide: K.AM(ox)A.S
         let peptide = Peptide::new(vec![a.clone(), m_ox, a], b'K', b'S');
 
         let psm = PsmMatch {
@@ -634,9 +559,6 @@ mod tests {
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
-        // Peptide column is index 9 (0=#SpecFile 1=SpecID 2=ScanNum 3=Title
-        // 4=FragMethod 5=Precursor 6=IsotopeError 7=PrecursorError 8=Charge
-        // 9=Peptide)
         let peptide_col = &rows[0][9];
         assert!(
             peptide_col.contains("+15.99"),
@@ -653,7 +575,6 @@ mod tests {
         let params = make_params_ppm();
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // protein_index = 0 → first target protein
         let psm = make_psm(0, 10.0, 10.0);
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
@@ -716,13 +637,12 @@ mod tests {
         let params = make_params_ppm();
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // SearchIndex: 1 target (idx 0) + 1 decoy (idx 1, accession = "XXX_<base>")
         let psm = make_psm(0, 10.0, 10.0);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
-        let cands = vec![make_candidate(1, true)]; // decoy candidate at protein_index 1
+        let cands = vec![make_candidate(1, true)];
 
         let mut buf = Vec::<u8>::new();
         write_tsv_to(
@@ -801,7 +721,6 @@ mod tests {
             mass: plain_aa.mass,
             mod_: Some(model::modification::leak_mod(make_mod(Some("UNIMOD:393")))),
         };
-        // 6 residues; mod at 0-based 5 → 1-based 6
         let residues = vec![
             plain_aa.clone(),
             plain_aa.clone(),
@@ -916,11 +835,11 @@ mod tests {
         };
         let residues = vec![
             plain_aa.clone(),
-            mod1, // 0-based 1 → 1-based 2
+            mod1,
             plain_aa.clone(),
             plain_aa.clone(),
             plain_aa.clone(),
-            mod2, // 0-based 5 → 1-based 6
+            mod2,
             plain_aa.clone(),
         ];
         let peptide = Peptide::new(residues, b'K', b'S');

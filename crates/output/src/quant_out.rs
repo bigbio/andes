@@ -1,13 +1,3 @@
-//! Quantification tables `<stem>.tmt.parquet`, `<stem>.lfq.parquet` and
-//! `<stem>.label.parquet`, and
-//! the record types the QPX feature parquet is written from.
-//!
-//! `tmt.parquet` has one row per PSM with reporter ions and one column per
-//! channel; `lfq.parquet` one row per quantified feature per run. Both carry
-//! their schema version in the key-value metadata (`andes.tmt.schema`,
-//! `andes.lfq.schema`; a reader rejects another major). Missing values are
-//! null.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,25 +13,15 @@ use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion,
 use quant::isobaric::Plex;
 use quant::lfq::FeatureQuant;
 
-/// One modification on a quantified peptidoform (for the parquet).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModRecord {
     pub name: String,
     pub accession: Option<String>,
-    /// 1-based residue index; 0 for a peptide N-terminal modification and
-    /// peptide length + 1 for a C-terminal one (the QPX position convention).
     pub position: i32,
-    /// The modified residue; `None` for a terminal modification.
     pub amino_acid: Option<char>,
 }
 
 impl ModRecord {
-    /// The record of residue `index` (0-based) of a `len`-residue peptide, or
-    /// `None` when it is unmodified. A modification declared for a peptide or
-    /// protein terminus sits on the end residue; it is reported at the
-    /// terminal position and not on the residue. One stacked record (a
-    /// terminal and a side-chain modification on the same residue, named
-    /// `a+b`) reports at the terminus whole.
     pub fn of_residue(index: usize, len: usize, aa: &model::amino_acid::AminoAcid) -> Option<Self> {
         use model::modification::ModLocation::{CTerm, NTerm, ProtCTerm, ProtNTerm};
         let m = aa.mod_?;
@@ -59,12 +39,9 @@ impl ModRecord {
     }
 }
 
-/// Identification side of a quantified row, shared by both modules.
 #[derive(Debug, Clone)]
 pub struct QuantId {
-    /// Index of the input file (`--spectrum` order).
     pub file_idx: usize,
-    /// File stem of the run (`run_file_name`).
     pub run: String,
     pub spec_id: String,
     pub scan: i32,
@@ -80,69 +57,37 @@ pub struct QuantId {
     pub q_value: Option<f64>,
     pub pep: Option<f64>,
     pub missed_cleavages: Option<i16>,
-    /// 0-based index of the PSM row in `psms.parquet` (the feature's `psm_ids`).
     pub psm_index: i64,
 }
 
-/// One quantified PSM of an isobaric run.
 #[derive(Debug, Clone)]
 pub struct TmtRow {
     pub id: QuantId,
-    /// Native id of the scan the reporters were read from (the MS2 itself, or
-    /// its MS3).
     pub quant_scan_id: String,
     pub quant_ms_level: u8,
     pub purity: Option<f32>,
     pub raw: Vec<f32>,
     pub corrected: Vec<f32>,
-    /// Per-channel signal-to-noise of the corrected intensities (the raw ones
-    /// without a correction matrix), when the reporter scan records noise.
     pub sn: Option<Vec<f32>>,
-    /// Suggested weight of this PSM in a protein or peptide roll-up (0 for a
-    /// PSM the quantification gate removed).
     pub quant_weight: f32,
-    /// The PSM passed the quantification gate.
     pub quant_gate_passed: bool,
-    /// `--tmt-unmix`: the scan's estimated co-isolation interference
-    /// fraction and the channel intensities with it removed (`None` when the
-    /// scan could not be modelled).
     pub interference: Option<f32>,
     pub unmixed: Option<Vec<f32>>,
-    /// Match-between-runs: the evidence of a transferred row; `None` for an
-    /// identified one.
     pub transfer: Option<TransferInfo>,
 }
 
-/// What a transferred reporter row records about its transfer
-/// (`--tmt --mbr`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TransferInfo {
-    /// Internal quant-quality q-value of the row: the running mean, over the
-    /// run set's transfers in ascending predicted risk, of the predicted
-    /// excess error over the identified noise floor. Not an identification
-    /// FDR.
     pub quant_q: f64,
-    /// Predicted probability that the value is wrong (identity or value).
     pub p_wrong: f32,
-    /// The identified noise floor predicted at the same scan covariates.
     pub noise_floor: f32,
-    /// The parts of `p_wrong`: the probability that the scan is another
-    /// peptide's (target-decoy odds of the identity model) and that the value
-    /// of a right-identity transfer is wrong.
     pub p_identity: f32,
     pub p_value: f32,
-    /// Fragment evidence of the donor peptide in the scan: spectral angle,
-    /// matched library fragments and explained library intensity.
     pub angle: f32,
     pub n_matched: u8,
     pub explained: f32,
-    /// Retention-time residual (in predicted widths) and precursor m/z error
-    /// (ppm) against the donor.
     pub rt_z: f32,
     pub ppm: f32,
-    /// Donor evidence: best donor PSM q-value, donor runs, the run of the
-    /// best donor PSM and the highest channel-loading cosine between the
-    /// acceptor and a donor run (similar loading: the same plex mixture).
     pub donor_q: f64,
     pub n_donors: u16,
     pub donor_run: String,
@@ -159,14 +104,12 @@ impl TmtRow {
     }
 }
 
-/// One quantified precursor feature of a label-free run.
 #[derive(Debug, Clone)]
 pub struct LfqRow {
     pub id: QuantId,
     pub feature: FeatureQuant,
     pub score: f32,
     pub feature_q_value: Option<f64>,
-    /// The decoy twin's score (None when the twin found no peak).
     pub decoy_score: Option<f32>,
 }
 
@@ -182,32 +125,17 @@ const LFQ_TABLE: TableVersion = TableVersion {
     major: 1,
     what: "label-free quantification table",
 };
-/// `tmt.parquet` metadata: the plex name and whether a correction matrix was
-/// applied (`true` / `false`).
 pub const TMT_PLEX_KEY: &str = "andes.tmt.plex";
 pub const TMT_CORRECTED_KEY: &str = "andes.tmt.corrected";
-/// `tmt.parquet` metadata: the `--tmt-unmix` mode that produced the file
-/// (`off`, `on` or `auto`); the interference-unmixing block is present
-/// unless it is `off`.
 pub const TMT_UNMIX_KEY: &str = "andes.tmt.unmix";
-/// `tmt.parquet` metadata, present with the unmixing block: the strength in
-/// `0..=1` the interference was removed at, per run (`run=strength`, runs
-/// joined by `,`).
 pub const TMT_UNMIX_STRENGTH_KEY: &str = "andes.tmt.unmix_strength";
 
-/// The interference unmixing of a `tmt.parquet`: the mode and the strength
-/// applied to each run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmixMeta {
-    /// `on` or `auto`.
     pub mode: &'static str,
     pub strengths: Vec<(String, f64)>,
 }
-/// `tmt.parquet` metadata, present with `--mbr`: the table holds transferred
-/// rows and the evidence columns.
 pub const TMT_MBR_KEY: &str = "andes.tmt.mbr";
-/// `lfq.parquet` metadata: the run stems in input order (newline-joined),
-/// and the feature q-value and cosine cuts of the `accepted` column.
 pub const LFQ_RUNS_KEY: &str = "andes.lfq.runs";
 pub const LFQ_FEATURE_FDR_KEY: &str = "andes.lfq.feature_fdr";
 pub const LFQ_MIN_COSINE_KEY: &str = "andes.lfq.min_cosine";
@@ -220,7 +148,6 @@ fn channel_prefix(plex: Plex) -> &'static str {
     }
 }
 
-/// The columns `--tmt --mbr` appends to `tmt.parquet`.
 fn mbr_fields() -> Vec<Field> {
     vec![
         Field::new("evidence_type", DataType::Utf8, false),
@@ -460,18 +387,6 @@ fn tmt_batch(
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-/// Write `tmt.parquet`: one row per PSM with reporter ions, including the
-/// ones the quantification gate removed (`quant_gate_passed` false,
-/// `quant_weight` 0). Columns: the PSM (`filename scannr spec_id quant_scan
-/// quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep
-/// purity`), the channel intensities in kit order (`tmt_126 … tmt_131`,
-/// corrected when a correction matrix was applied), the raw values in a
-/// `raw_` block when one was, then the summed raw reporter intensity, summed
-/// signal-to-noise, roll-up weight and gate result, and a per-channel `sn_`
-/// block (null when the reporter scan carries no noise). With `unmixed`
-/// (`--tmt-unmix on|auto`), the estimated interference fraction and an `unmix_`
-/// channel block follow (null for a scan that could not be modelled). `rt` is
-/// in seconds, `proteins` is `;`-joined.
 pub fn write_tmt_parquet(
     path: &Path,
     plex: Plex,
@@ -482,19 +397,6 @@ pub fn write_tmt_parquet(
     write_tmt(path, plex, rows, corrected, unmixed, false)
 }
 
-/// Like [`write_tmt_parquet`] for `--tmt --mbr` (schema 1.2): after the
-/// other columns, `evidence_type` (`identified` or `transferred`) and, null
-/// for identified rows, `quant_q` (the internal quant-quality q-value of the
-/// transfer, not an identification FDR), `p_wrong` and `noise_floor` (the
-/// predicted probability that the value is wrong and the identified floor at
-/// the same scan covariates), `p_identity` and `p_value` (the parts of
-/// `p_wrong`), the donor peptide's fragment evidence in the
-/// scan (`transfer_angle`, `transfer_matched`, `transfer_explained`), the
-/// retention-time residual in predicted widths (`transfer_rt_z`) and the
-/// precursor m/z error in ppm (`transfer_ppm`), and the donor evidence
-/// (`donor_q`, `donor_runs`, `donor_run`, `donor_batch_cos`). A transferred
-/// row's `peptide`, `charge` and `proteins` are the donor's, `scannr` and
-/// `spec_id` the acceptor scan's, `psm_q_value` and `psm_pep` null.
 pub fn write_tmt_parquet_mbr(
     path: &Path,
     plex: Plex,
@@ -545,8 +447,6 @@ fn write_tmt(
     )
 }
 
-/// Read `tmt.parquet`: its record batches and key-value metadata. Rejects
-/// another major schema version; every error names the file.
 pub fn read_tmt_parquet(path: &Path) -> Result<ReadTable, String> {
     read_table(path, &TMT_TABLE)
 }
@@ -662,26 +562,13 @@ fn lfq_batch(
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-/// What `lfq.parquet` records beside its rows.
 #[derive(Debug, Clone)]
 pub struct LfqTableMeta<'a> {
-    /// Run stems in input order, including runs without a feature.
     pub runs: &'a [String],
-    /// Feature q-value cut of the `accepted` column.
     pub feature_fdr: f64,
-    /// Envelope cosine cut of the `accepted` column.
     pub min_cosine: f32,
 }
 
-/// Write `lfq.parquet` (long): one row per quantified feature in one run
-/// with its PSM anchor, apex, boundaries, areas (`isotope_areas` a list of
-/// the traced isotopes, monoisotope first; `area` their sum over the share
-/// of the whole isotope pattern they hold), the decoy-competition result
-/// and `accepted`
-/// (`accepted[i]` for `rows[i]`: feature q-value and cosine within the run's
-/// cuts). The per-run wide view is the `accepted` rows pivoted on
-/// `(peptide, charge)` × `filename` over `area`, keeping the highest `score`
-/// when a run has more than one.
 pub fn write_lfq_parquet(
     path: &Path,
     rows: &[LfqRow],
@@ -715,76 +602,45 @@ pub fn write_lfq_parquet(
     )
 }
 
-/// Read `lfq.parquet`: its record batches and key-value metadata. Rejects
-/// another major schema version; every error names the file.
 pub fn read_lfq_parquet(path: &Path) -> Result<ReadTable, String> {
     read_table(path, &LFQ_TABLE)
 }
 
-/// One channel of one label group in one run (`label.parquet`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelRow {
-    /// Run stem.
     pub run: String,
-    /// The peptide identity: the peptidoform without its channel labels.
     pub peptide: String,
-    /// The bare sequence.
     pub sequence: String,
     pub charge: u8,
     pub proteins: Vec<String>,
-    /// 1-based channel of the label specification.
     pub channel: u8,
-    /// The channel's short name (`light`, `Lys8+Arg10`).
     pub channel_name: String,
-    /// The SDRF/QPX label (`SILAC heavy`), when the channel has one.
     pub label: Option<String>,
-    /// `identified`, `match_channel`, `transfer`, `below_detection` or
-    /// `not_quantifiable`.
     pub status: String,
-    /// The channel's identifying PSM (best of the run), when identified.
     pub spec_id: Option<String>,
     pub psm_q_value: Option<f64>,
     pub rt_psm: Option<f64>,
-    /// The peptidoform as searched (with this channel's labels), when the
-    /// channel is identified.
     pub labelled_peptidoform: Option<String>,
-    /// Monoisotopic m/z of the channel.
     pub mz: f64,
-    /// Fitted apex of the shared profile and the channel's offset from it.
     pub rt_apex: f64,
     pub rt_shift: f64,
-    /// Fitted Gaussian width (sigma), seconds.
     pub width: f64,
     pub quantity: f64,
     pub quantity_se: f64,
-    /// `quantity + 2 · quantity_se`: the bound of a channel below detection.
     pub quantity_upper: f64,
     pub llr: f64,
     pub envelope_cos: f64,
     pub coherence: f64,
     pub m1_ratio: f64,
-    /// Mass error of the channel's monoisotopic centroids near its apex;
-    /// `None` when no centroid fell within the tolerance there.
     pub mass_err_ppm: Option<f64>,
-    /// Quality q-value of a matched channel (match between channels).
     pub channel_q_value: Option<f64>,
-    /// Log-likelihood ratio of the whole group fit.
     pub group_llr: f64,
-    /// The group was transferred from another run (match between runs).
     pub transfer: bool,
-    /// Transfer q-value of the group (match between runs).
     pub transfer_q_value: Option<f64>,
-    /// `log2(channel / reference)` and its standard error, when both are
-    /// quantified.
     pub log2_ratio: Option<f64>,
     pub log2_ratio_se: Option<f64>,
-    /// `log2_ratio` minus the run's median log-ratio of the channel.
     pub log2_ratio_normalized: Option<f64>,
-    /// `--label-arg-pro`: the share of the channel's quantity carried by its
-    /// heavy-proline form (converted heavy arginine); null when not fitted.
     pub converted_fraction: Option<f64>,
-    /// Shape-free quantity (the channel's own traces integrated around the
-    /// apex, other channels' parts removed).
     pub trace_quantity: f64,
 }
 
@@ -794,19 +650,15 @@ const LABEL_TABLE: TableVersion = TableVersion {
     major: 1,
     what: "labelled-pair quantification table",
 };
-/// `label.parquet` metadata: the label specification, one channel per line
-/// (`<n>: <name>`), the reference channel (1-based) and the run stems.
 pub const LABEL_SPEC_KEY: &str = "andes.label.channels";
 pub const LABEL_REFERENCE_KEY: &str = "andes.label.reference";
 pub const LABEL_RUNS_KEY: &str = "andes.label.runs";
 
-/// What `label.parquet` records beside its rows.
 #[derive(Debug, Clone)]
 pub struct LabelTableMeta<'a> {
     pub channels: &'a [String],
     pub reference: usize,
     pub runs: &'a [String],
-    /// Further metadata keys (the match-between-runs identity-decoy counts).
     pub extra: &'a [(String, String)],
 }
 
@@ -946,9 +798,6 @@ fn label_batch(schema: &Arc<Schema>, rows: &[LabelRow]) -> Result<RecordBatch, S
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-/// Write `label.parquet` (long): one row per (label group, run, channel)
-/// with the channel's status, its quantity from the joint channel fit, the
-/// fit statistics and its log-ratio to the reference channel.
 pub fn write_label_parquet(
     path: &Path,
     rows: &[LabelRow],
@@ -981,7 +830,6 @@ pub fn write_label_parquet(
     )
 }
 
-/// Read `label.parquet`: its record batches and key-value metadata.
 pub fn read_label_parquet(path: &Path) -> Result<ReadTable, String> {
     read_table(path, &LABEL_TABLE)
 }

@@ -1,9 +1,3 @@
-//! Parity of `search::ipf` with PyProphet's own IPF code.
-//!
-//! `fixtures/ipf_parity.json` comes from `fixtures/ipf_parity_fixture.py`, which runs
-//! PyProphet's `apply_bm` (log and linear space) and `compute_model_fdr` from
-//! pyprophet/ipf.py (PyProphet commit 4344e2b) on 300 random PSMs and 208 PEPs.
-
 use search::ipf::{model_fdr, posterior, Evidence};
 
 fn fixture() -> serde_json::Value {

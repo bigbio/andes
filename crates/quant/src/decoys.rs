@@ -1,24 +1,8 @@
-//! Decoy hypotheses for match-between-runs.
-//!
-//! A decoy is a probe that is certainly false but goes through the same fit as
-//! the target it shadows. Two families, one of each per target and run:
-//!
-//! * mass shift: the m/z moves by a whole number of nominal Da scaled by the
-//!   average peptide mass-per-nominal-Da, so the decoy stays in the peptide
-//!   mass-defect band and sees the same background density as a target;
-//! * RT shift: the m/z is kept and the predicted apex moves far outside the
-//!   target's search window.
-//!
-//! Both keep the target's `s` and `w_prior`, so the search breadth is equal.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hypothesis {
     Target,
-    /// Mass-shift decoy carrying the nominal shift `n` in Da.
     MassShiftDecoy(i8),
     RtShiftDecoy,
-    /// Random-RT decoy `i` of [`random_rt_probes`]: the target's m/z at the
-    /// predicted retention time of another library precursor.
     RandomRtDecoy(u8),
 }
 
@@ -41,12 +25,6 @@ fn splitmix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// The target probe followed by its mass-shift decoy and, when a sign fits
-/// inside `run_rt`, its RT-shift decoy.
-///
-/// `charge` must be positive (it divides the mass shift); a zero charge is a
-/// caller bug and trips a debug assertion. `run_rt` is the (start, end) of the
-/// run in the same RT unit as `t_hat`.
 #[allow(clippy::too_many_arguments)]
 pub fn probes(
     precursor: u32,
@@ -137,7 +115,6 @@ mod tests {
 
     #[test]
     fn rt_shift_flips_sign_at_run_edge() {
-        // Near the start only the positive direction fits, whatever the hash says.
         for pre in 0..50u32 {
             let ps = probes(pre, 0, 500.0, 2, 100.0, 10.0, 6.0, (0.0, 3600.0));
             let r = ps
@@ -185,23 +162,15 @@ mod tests {
     }
 }
 
-/// Random-RT decoys per transfer target ([`random_rt_probes`]).
 pub const RANDOM_RT_DECOYS: usize = 4;
-/// Neutral-mass distance (Da) of the precursors whose predicted RTs the
-/// random-RT decoys borrow: close enough to share the target's background,
-/// far enough not to be an isotope or a common modification of it.
 pub const RANDOM_RT_MASS: (f64, f64) = (5.0, 11.0);
 
-/// The predicted retention times of a run's library precursors, by neutral
-/// mass: the RTs the random-RT decoys of the run are drawn from.
 #[derive(Debug, Clone, Default)]
 pub struct RtPool {
-    /// (neutral mass, predicted RT), ascending in mass.
     at: Vec<(f64, f64)>,
 }
 
 impl RtPool {
-    /// `items` are (neutral mass, predicted RT) pairs in any order.
     pub fn new(mut items: Vec<(f64, f64)>) -> Self {
         items.retain(|(m, t)| m.is_finite() && t.is_finite());
         items.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -217,16 +186,6 @@ impl RtPool {
     }
 }
 
-/// Up to `k` random-RT decoys of a target (`mz`, neutral mass `mass`,
-/// predicted at `t_hat` with RT spread `s` and width prior `w_prior`), after
-/// PIP-ECHO (Solivais et al., J Proteome Res 2025): each is the target's
-/// own m/z at the predicted RT of another library precursor of the run whose
-/// neutral mass is [`RANDOM_RT_MASS`] away and whose RT lies outside the
-/// target's search window (more than `4 (s + w_prior)` from `t_hat`), inside
-/// `run_rt`. The RTs follow where real peptides elute, so the decoys see the
-/// background a wrong transfer sees, unlike an RT far outside the window.
-/// The draw is deterministic in (precursor, run); fewer than `k` come back
-/// when the pool has fewer candidates.
 #[allow(clippy::too_many_arguments)]
 pub fn random_rt_probes(
     precursor: u32,
@@ -274,10 +233,8 @@ mod random_rt_tests {
 
     #[test]
     fn random_rt_decoys_borrow_rts_of_nearby_masses_outside_the_window() {
-        // Masses 1000 (the target's), 994, 1003 (too close), 1008, 1020 (too far).
         let pool = RtPool::new(vec![(994.0, 300.0), (1003.0, 900.0), (1008.0, 1500.0), (1020.0, 2000.0), (1008.0, 1010.0)]);
         let ps = random_rt_probes(7, 1, 501.0, 1000.0, 1000.0, 5.0, 5.0, (0.0, 3600.0), &pool, 4);
-        // 994 -> 300 and 1008 -> 1500 qualify; 1008 -> 1010 is inside the window (sep 40 s).
         let mut ts: Vec<f64> = ps.iter().map(|p| p.t_hat).collect();
         ts.sort_by(f64::total_cmp);
         assert_eq!(ts, vec![300.0, 1500.0]);

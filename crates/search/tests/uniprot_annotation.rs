@@ -1,9 +1,3 @@
-//! Candidate generation over a UniProt XML database: sequence-variant entries
-//! yield only the peptides that carry the variant, mods declared
-//! `restrict_to: annotated` land only on annotated residues, decoys mirror both, and
-//! every expansion path (in-RAM, lazy precursor window, fragment-index walk)
-//! produces the same candidate set.
-
 use std::collections::{BTreeSet, HashSet};
 
 use input::{load_uniprot_xml, EvidenceLevel, UniProtOptions};
@@ -23,18 +17,12 @@ fn spec(list: &str, fixed: bool) -> Vec<Modification> {
     model::mod_spec::parse_mod_list(list, fixed).unwrap()
 }
 
-/// The one variable modification of a single-site item, restricted to the
-/// sites the database annotates.
 fn annotated(item: &str) -> Modification {
     let mut m = spec(item, false).remove(0);
     m.annotated_site_mass = Some(m.mass_delta);
     m
 }
 
-/// P1 (tryptic peptides AGSPEK | TLSYR | SDSPAK | VNSTQR, 0-based S2, S8, S11,
-/// S13, S19, T6, T20) is phosphorylated at S2 (experimental), S13
-/// (experimental) and T20 (by similarity), and has a natural variant K16N
-/// (removes a cleavage site), a deletion of Y9, and an unannotated twin P2.
 const XML: &str = r#"<uniprot xmlns="http://uniprot.org/uniprot">
 <entry dataset="Swiss-Prot">
   <accession>P00001</accession>
@@ -136,15 +124,12 @@ fn restricted_phospho_lands_only_on_annotated_sites() {
             placed.insert((accession(&idx, c).to_string(), pos));
         }
     }
-    // Experimental evidence: S2 and S13 of P1 only; T20 is "by similarity",
-    // and P2 has no annotation.
     let expect: BTreeSet<(String, usize)> = [2, 13]
         .into_iter()
         .map(|p| ("sp|P00001|ONE_HUMAN".to_string(), p))
         .collect();
     assert_eq!(placed, expect);
 
-    // Curated evidence admits T20 too.
     let idx = SearchIndex::from_target_db(&target_db(EvidenceLevel::Curated, false), "XXX");
     let curated: BTreeSet<usize> = enumerate_candidates(&idx, &params(true), "XXX")
         .filter(|c| !c.is_decoy)
@@ -152,7 +137,6 @@ fn restricted_phospho_lands_only_on_annotated_sites() {
         .collect();
     assert_eq!(curated, BTreeSet::from([2, 13, 20]));
 
-    // Unrestricted phospho goes on every S/T of both proteins.
     let free: BTreeSet<usize> = enumerate_candidates(&idx, &params(false), "XXX")
         .filter(|c| !c.is_decoy && c.protein_index == 1)
         .flat_map(|c| phospho_positions(&c))
@@ -195,7 +179,6 @@ fn decoys_carry_the_sites_on_the_same_residues() {
                 assert_eq!(tv.end - tv.start, dv.end - dv.start, "{strategy:?}");
             }
         }
-        // Restricted phospho on decoys only where the decoy annotation says.
         for c in enumerate_candidates(&idx, &params(true), "XXX").filter(|c| c.is_decoy) {
             let p = &idx.db.proteins[c.protein_index];
             for pos in phospho_positions(&c) {
@@ -207,8 +190,6 @@ fn decoys_carry_the_sites_on_the_same_residues() {
             }
         }
     }
-    // Pseudo-reversal mirrors each site within its tryptic peptide (AGSPEK,
-    // SDSPAK, VNSTQR with K/R in place): S2/S13/T20 → 2/13/18.
     let idx =
         SearchIndex::from_target_db_with_strategy(&target, "XXX", None, DecoyStrategy::Reverse, 7);
     let decoy = &idx.db.proteins[target.len()];
@@ -271,15 +252,12 @@ fn variant_entries_yield_only_peptides_carrying_the_variant() {
             );
         }
     }
-    // K17N removes the cleavage after K17: SDSPANVNSTQR is the variant peptide.
     assert!(cands
         .iter()
         .any(|c| c.protein_index == 1 && c.peptide.to_string() == "R.SDSPANVNSTQR.-"));
-    // The Y10 deletion: TLSR.
     assert!(cands
         .iter()
         .any(|c| c.protein_index == 2 && c.peptide.to_string() == "K.TLSR.S"));
-    // Decoy variants yield only spans covering their mirrored variant.
     let n = target.len();
     for pi in [n + 1, n + 2] {
         let v = idx.db.proteins[pi].variant_region().unwrap();
@@ -303,9 +281,6 @@ fn every_expansion_path_agrees_with_annotation() {
     assert_every_path_agrees(&idx, &p);
 }
 
-/// The lazy precursor window, the plain per-record expansion, the bounded walk
-/// the fragment index is built from and its materialisation all see the
-/// in-RAM candidate set.
 fn assert_every_path_agrees(idx: &SearchIndex, p: &SearchParams) {
     let mi = MmapCandidateIndex::build_in_memory(idx, p, "XXX").unwrap();
     let inram: Vec<Candidate> = enumerate_candidates(idx, p, "XXX").collect();
@@ -329,8 +304,6 @@ fn assert_every_path_agrees(idx: &SearchIndex, p: &SearchParams) {
         assert_eq!(lazy, want, "precursor {precursor}");
     }
 
-    // Per record: the plain expansion, the bounded walk the fragment index is
-    // built from, and its materialisation see the same forms.
     let tables = FormWalkTables::new(p);
     let mut all: HashSet<_> = HashSet::new();
     for i in 0..mi.len() {
@@ -352,9 +325,6 @@ fn assert_every_path_agrees(idx: &SearchIndex, p: &SearchParams) {
     assert_eq!(all, want, "records expand to the in-RAM candidate set");
 }
 
-/// A protein starting `MS…` whose Ser2 is N-acetylated after initiator-Met
-/// removal (an N-terminal site), searched with a protein-N-term Acetyl
-/// restricted to annotated sites.
 const NTERM_XML: &str = r#"<uniprot>
 <entry dataset="Swiss-Prot">
   <accession>P00003</accession>
@@ -397,17 +367,12 @@ fn decoys_keep_terminal_sites_at_their_terminus() {
                 .count()
         };
         assert_eq!(acetylated(false), 2, "{strategy:?}");
-        // Following its residue, the site would sit deep inside the decoy,
-        // where a protein-N-term mod never applies.
         assert!(acetylated(true) > 0, "{strategy:?}: no decoy N-term acetyl");
     }
 }
 
 #[test]
 fn unrestricted_terminal_mod_is_not_hidden_by_a_restricted_twin() {
-    // Acetyl-K restricted to annotated sites, protein-N-term Acetyl on any
-    // residue unrestricted: an unannotated protein starting with K must still
-    // get its protein-N-term acetyl on that K.
     let mut builder = AminoAcidSetBuilder::new_standard();
     builder = builder
         .add_variable_mod(annotated("Acetyl (K)"))
@@ -441,7 +406,6 @@ fn unrestricted_terminal_mod_is_not_hidden_by_a_restricted_twin() {
 fn variant_window_walk_equals_filtering_the_whole_protein() {
     use model::{ProteinAnnotation, VariantRegion};
     use std::sync::Arc;
-    // Long enough that the window around the variants excludes most of it.
     let seq = b"MAGSPEKTLSYRSDSPAKVNSTQRLLEDKGHIMPQRSTVAEKNNGLKDDCPWYRAHMESKTLIAGFRVEPQK".repeat(3);
     for region in [
         VariantRegion { start: 40, end: 41 },
@@ -521,10 +485,6 @@ fn index_cache_key_tells_variant_entries_apart() {
 
 #[test]
 fn variants_in_repeats_add_no_canonical_peptides() {
-    // MWAQRSTYKQQQRLE with Q4 duplicated (MWAQQRSTYKQQQRLE) and one Q of the
-    // QQQ run deleted (MWAQRSTYKQQRLE). A region taken from UniProt's
-    // coordinates would let QRST (dup) and QQRL (del) through, though both
-    // read exactly like the canonical protein.
     let xml = r#"<uniprot><entry dataset="Swiss-Prot">
   <accession>P00009</accession><name>REP_HUMAN</name>
   <feature type="sequence variant" evidence="1">
@@ -578,8 +538,6 @@ fn variants_in_repeats_add_no_canonical_peptides() {
             "variant peptide {v} reads canonical"
         );
     }
-    // The decoys carry regions of the same shape (the stretch a span must
-    // hold), inside the protein.
     let n = target.len();
     for i in [1, 2] {
         let len = target.proteins[i].len() as u32;
@@ -594,10 +552,6 @@ fn variants_in_repeats_add_no_canonical_peptides() {
     }
 }
 
-/// A precursor with signal peptide 1-5 and propeptide 6-8 (mature chain
-/// 9-30, released peptide 13-18), an entry whose isoform 2 replaces
-/// STN(2-4) by Q and drops 20-27, and one with a C-terminal propeptide
-/// (chain 1-20).
 const PROCESSED_XML: &str = r#"<uniprot>
 <entry dataset="Swiss-Prot">
   <accession>P00010</accession><name>TEN_HUMAN</name>
@@ -672,9 +626,6 @@ fn chain_entries_yield_only_their_new_termini() {
             .map(|c| c.peptide.to_string())
             .collect()
     };
-    // The mature chain starts at D9: DTHK and DTHKSEIAHR (one missed
-    // cleavage) are its N-terminal spans, protein N-termini with and without
-    // Acetyl; nothing else, and no Met-cleaved walk.
     let mut chain = from(1);
     chain.sort();
     assert_eq!(
@@ -692,16 +643,12 @@ fn chain_entries_yield_only_their_new_termini() {
         .iter()
         .filter(|c| c.protein_index == 1)
         .all(|c| c.is_protein_n_term && c.start_offset_in_protein == 0));
-    // The released peptide SEIAHR is both termini at once.
     let peptide = from(2);
     assert!(!peptide.is_empty());
     assert!(cands
         .iter()
         .filter(|c| c.protein_index == 2)
         .all(|c| c.start_offset_in_protein == 0 && c.is_protein_c_term));
-    // The chain before the C-terminal propeptide ends at H20: AFDYH and
-    // LLGEERAFDYH (one missed cleavage) are its C-terminal spans; its
-    // N-terminus is the precursor's, so nothing starts there.
     let mut c_chain = from(6);
     c_chain.sort();
     assert_eq!(c_chain, ["K.LLGEERAFDYH.-", "R.AFDYH.-"], "{c_chain:?}");
@@ -709,9 +656,7 @@ fn chain_entries_yield_only_their_new_termini() {
         .iter()
         .filter(|c| c.protein_index == 6)
         .all(|c| c.is_protein_c_term && !c.is_protein_n_term));
-    // The isoform is an ordinary protein: all of its tryptic spans.
     assert!(from(4).len() > 2, "{:?}", from(4));
-    // Decoy chains keep their new-terminus flags, and yield only those spans.
     let n = target.len();
     for pi in [n + 1, n + 2, n + 6] {
         let d = &idx.db.proteins[pi];
@@ -766,9 +711,6 @@ fn every_expansion_path_agrees_on_isoforms_and_chains() {
     }
 }
 
-/// Builds `target` into a search index under `strategy`, enumerates with
-/// `p`, and returns each target protein's candidates and its decoy's (the
-/// decoy of target `i` is protein `n + i`).
 fn target_and_decoy_forms(
     target: &ProteinDb,
     p: &SearchParams,
@@ -791,7 +733,6 @@ fn target_and_decoy_forms(
         .collect()
 }
 
-/// A protein-N-terminal pyro-Glu on Q, annotated at residue 1.
 const PYRO_XML: &str = r#"<uniprot>
 <entry dataset="Swiss-Prot">
   <accession>P00030</accession><name>PYRO_HUMAN</name>
@@ -824,16 +765,12 @@ fn residue_specific_terminal_mods_get_decoys() {
         DecoyStrategy::Shuffle,
         DecoyStrategy::Sequon,
     ] {
-        // The Q and its site stay at the decoy's N-terminus. Following the
-        // residue alone, or moving the site alone onto another residue,
-        // leaves no modified decoy.
         let idx = SearchIndex::from_target_db_with_strategy(&target, "XXX", None, strategy, 7);
         let decoy = &idx.db.proteins[1];
         assert_eq!(decoy.sequence[0], b'Q', "{strategy:?}");
         assert_eq!(decoy.mod_sites()[0].position, 0, "{strategy:?}");
         let forms = target_and_decoy_forms(&target, &p, strategy);
         for (side, forms) in [("target", &forms[0].0), ("decoy", &forms[0].1)] {
-            // Every N-terminal span has its modified twin.
             let n_terminal = forms
                 .iter()
                 .filter(|c| c.start_offset_in_protein == 0)
@@ -842,14 +779,11 @@ fn residue_specific_terminal_mods_get_decoys() {
         }
         assert!(modified(&forms[0].0) > 0, "{strategy:?}");
         if strategy == DecoyStrategy::Reverse {
-            // How many N-terminal spans a shuffled decoy has is chance.
             assert!(modified(&forms[0].1) > 0, "{strategy:?}: no modified decoy");
         }
     }
 }
 
-/// Precursors whose mature chains have only a new N-terminus (`APEPTIDEK`
-/// after `MSSQ`, the review case) or longer chains with both kinds of ends.
 const CHAIN_DECOY_XML: &str = r#"<uniprot>
 <entry dataset="Swiss-Prot">
   <accession>P00040</accession><name>FORTY_HUMAN</name>
@@ -881,8 +815,6 @@ fn chain_decoys_keep_the_terminal_spans() {
         .collect();
     assert_eq!(chains.len(), 3);
 
-    // The review case: trypsin, min length 6, no missed cleavage. APEPTIDEK
-    // has one target span; its plain reverse KEDITPEPA had none.
     let base = || AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut p = SearchParams::default_tryptic(base());
     p.min_length = 6;
@@ -898,8 +830,6 @@ fn chain_decoys_keep_the_terminal_spans() {
     );
     assert_eq!(d[0].peptide.to_string(), "_.EDITPEPAK.-");
 
-    // Every enzyme and strategy: the decoy chain has the target chain's
-    // terminal spans, with the same lengths and masses.
     let shape = |forms: &[Candidate]| {
         let mut v: Vec<(bool, usize, u64)> = forms
             .iter()
@@ -936,7 +866,6 @@ fn chain_decoys_keep_the_terminal_spans() {
                 let (t, d) = &forms[i];
                 assert!(!t.is_empty(), "{enzyme:?} {strategy:?} chain {i}");
                 assert_eq!(shape(t), shape(d), "{enzyme:?} {strategy:?} chain {i}");
-                // A decoy, not the target again.
                 let seqs = |f: &[Candidate]| -> HashSet<String> {
                     f.iter().map(|c| c.peptide.to_string()).collect()
                 };
@@ -953,7 +882,6 @@ fn chain_decoys_keep_the_terminal_spans() {
 
 #[test]
 fn shuffled_variant_parts_keep_their_width() {
-    // The review case: three changed residues near the end of the decoy.
     let protein = |region: VariantRegion| Protein {
         accession: "v".to_string(),
         description: String::new(),
@@ -978,7 +906,6 @@ fn shuffled_variant_parts_keep_their_width() {
     let decoy = &shuffled(&db, 2).proteins[0];
     let v = decoy.variant_parts()[0];
     assert_eq!((v.end - v.start, v.end <= 17), (3, true), "{v:?}");
-    // Every seed and region shape: the part keeps its width and stays inside.
     for seed in 0..300 {
         for region in [
             VariantRegion { start: 4, end: 7 },
@@ -1010,7 +937,6 @@ fn shuffled_variant_parts_keep_their_width() {
     }
 }
 
-/// A variant changing K2 and R13 and keeping RAPEPTIDEK between them.
 const MULTI_XML: &str = r#"<uniprot>
 <entry dataset="Swiss-Prot">
   <accession>P00050</accession><name>FIFTY_HUMAN</name>
@@ -1052,7 +978,6 @@ fn variant_peptides_carry_a_change_not_just_its_neighbourhood() {
         v.sort();
         v
     };
-    // The canonical APEPTIDEK is not a variant peptide.
     assert!(from_variant(0).is_empty(), "{:?}", from_variant(0));
     let mut with_one: Vec<String> = from_variant(1);
     with_one.dedup();
@@ -1060,7 +985,6 @@ fn variant_peptides_carry_a_change_not_just_its_neighbourhood() {
         with_one,
         ["M.ERAPEPTIDEK.E", "R.APEPTIDEKEGH.-", "_.MERAPEPTIDEK.E"]
     );
-    // Decoys get parts of the same widths.
     for strategy in [
         DecoyStrategy::Reverse,
         DecoyStrategy::Shuffle,
@@ -1108,9 +1032,6 @@ fn origins_follow_entries_onto_decoys() {
 
 #[test]
 fn origin_alone_leaves_the_reverse_decoy_unchanged() {
-    // Isoforms now always carry an annotation (their origin). Without a chain
-    // or a protein-terminal site, the decoy is the one the same sequence gets
-    // without an annotation.
     let target = processed_db();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let plain = SearchIndex::from_target_db(
@@ -1153,8 +1074,6 @@ fn index_knows_whether_it_holds_alternative_entries() {
     assert!(with.has_alternative_entries);
 }
 
-/// N10D and D18N on one entry: with deamidation searched, D10 is the
-/// canonical N10 deamidated, and N18 deamidated is the canonical D18.
 const DEAMIDATION_XML: &str = r#"<uniprot xmlns="http://uniprot.org/uniprot">
 <entry dataset="Swiss-Prot">
   <accession>P00030</accession><name>DEAM_HUMAN</name>
@@ -1202,18 +1121,14 @@ fn variant_forms_a_searched_mod_makes_canonical_are_left_out() {
         v.sort();
         v
     };
-    // Without deamidation both variants are searched as they are.
     let plain = variant_forms(&deamidation_params(false), false);
     assert!(plain.iter().any(|f| f.contains("VLDGSTR")), "{plain:?}");
     assert!(plain.iter().any(|f| f.contains("APENLTGR")), "{plain:?}");
-    // With deamidation: VLDGSTR is canonical VLNGSTR deamidated, so N10D yields
-    // nothing; D18N keeps APENLTGR but not its deamidated form (= APEDLTGR).
     let deam = deamidation_params(true);
     let forms = variant_forms(&deam, false);
     assert!(!forms.iter().any(|f| f.contains("VLD")), "{forms:?}");
     assert!(forms.iter().any(|f| f.contains("APENLTGR")), "{forms:?}");
     assert!(!forms.iter().any(|f| f.contains("APEN+0.98")), "{forms:?}");
-    // Decoys make the same decision, and every expansion path agrees.
     assert_eq!(forms.len(), variant_forms(&deam, true).len());
     assert_every_path_agrees(&idx, &deam);
 }

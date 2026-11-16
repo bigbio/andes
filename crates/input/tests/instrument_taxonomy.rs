@@ -1,11 +1,8 @@
-
 use std::io::Cursor;
 
 use input::mzml::detect_instrument_type;
 use model::InstrumentType;
 
-/// PSI-MS accession `MS:1003378` (Orbitrap Astral instrument model) must map
-/// to `InstrumentType::OrbitrapAstral`, NOT the generic `QExactive`.
 #[test]
 fn instrument_taxonomy_astral_accession_ms1003378() {
     let xml = wrap_with_model_cv_ic("IC1", "MS:1003378", "Orbitrap Astral");
@@ -17,8 +14,6 @@ fn instrument_taxonomy_astral_accession_ms1003378() {
     );
 }
 
-/// Name-substring fallback: an unknown accession whose `name` attribute
-/// contains "astral" (case-insensitive) must also map to `OrbitrapAstral`.
 #[test]
 fn instrument_taxonomy_astral_name_fallback_case_insensitive() {
     let xml = wrap_with_model_cv_ic("IC1", "MS:9999999", "Orbitrap ASTRAL HF");
@@ -58,8 +53,6 @@ fn instrument_taxonomy_timstof_name_round_trip() {
     assert_eq!(InstrumentType::from_name(v.name()), Some(v));
 }
 
-/// Existing `QExactive` still maps from a plain Orbitrap analyzer cvParam
-/// (`MS:1000484`) — `OrbitrapAstral` must not shadow the generic Orbitrap path.
 #[test]
 fn instrument_taxonomy_generic_orbitrap_still_qexactive() {
     let xml = wrap_with_analyzer_cv_ic("IC1", "MS:1000484");

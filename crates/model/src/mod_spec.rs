@@ -1,49 +1,18 @@
-//! The modification lists of a search: `--fixed-mods` / `--variable-mods` on
-//! the command line and `search.fixed_mods` / `search.variable_mods` in the
-//! config file.
-//!
-//! A list is comma-separated items `Name (sites)`, e.g.
-//! `Oxidation (M), Phospho (STY), Acetyl (Protein N-term), Gln->pyro-Glu (N-term Q)`.
-//!
-//! - **Name**: a UNIMOD name (`Phospho`), a UNIMOD accession (`UNIMOD:21`) or
-//!   an alias from `resources/unimod_aliases.tsv` (`GlyGly`), any case. The
-//!   mass and the accession come from the bundled UNIMOD table
-//!   ([`crate::unimod`]); the record's UNIMOD name is the one written out.
-//! - **Sites**: residues (`STY`); a terminus (`N-term`, `C-term`,
-//!   `Protein N-term`, `Protein C-term`, or UNIMOD's `Any N-term`,
-//!   `Any C-term`); or a terminus followed by residues (`N-term Q`: Q at the
-//!   peptide N-terminus).
-//!
-//! A config item can also be a [`ModDecl`] map, which adds the attributes the
-//! command line does not take (neutral losses, loss class, annotated-only
-//! sites, cleavage blocking, diagnostic ions) and custom masses.
-
 use crate::modification::{loss_class_id, ModLocation, Modification, ResidueSpec};
 use crate::unimod::{UnimodDb, UnimodMod, UnimodResolveError};
 
-/// One declared modification before it is resolved against UNIMOD and
-/// expanded into one [`Modification`] per site.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModDecl {
-    /// UNIMOD name, accession or alias; with `mass`, a free label.
     pub name: Option<String>,
-    /// Custom mass shift in Da; the name is then not looked up.
     pub mass: Option<f64>,
-    /// Site spec, as inside the parentheses of `Name (sites)`.
     pub sites: String,
-    /// Neutral-loss masses (Da) of the mod's fragment ions.
     pub neutral_loss: Vec<f64>,
-    /// `glyco`, `phospho`, `sulfo` or `generic` (the default with losses).
     pub loss_class: Option<String>,
-    /// `annotated` or `any` (the default).
     pub restrict_to: Option<String>,
-    /// `blocked` or `kept` (the default).
     pub cleavage: Option<String>,
-    /// m/z of singly charged ions the mod gives off when fragmented.
     pub diagnostic_ions: Vec<f64>,
 }
 
-/// Why a modification list or item was rejected. Each message names the item.
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum ModSpecError {
     #[error("`{item}`: unknown modification `{name}`{}", suggestion(.suggestions, *.table_empty))]
@@ -103,8 +72,6 @@ fn suggestion(suggestions: &[String], table_empty: bool) -> String {
 }
 
 impl ModDecl {
-    /// Parse one `Name (sites)` item. The sites are the last parenthesised
-    /// group, so names with parentheses work: `Label:13C(6) (K)`.
     pub fn parse(item: &str) -> Result<Self, ModSpecError> {
         let s = item.trim();
         let err_item = || s.to_string();
@@ -142,7 +109,6 @@ impl ModDecl {
         })
     }
 
-    /// How the item reads in messages: `Name (sites)`.
     pub fn label(&self) -> String {
         let name = match (&self.name, self.mass) {
             (Some(n), _) => n.clone(),
@@ -152,10 +118,6 @@ impl ModDecl {
         format!("{name} ({})", self.sites)
     }
 
-    /// The modifications this declaration stands for, one per site, in the
-    /// order the sites are written. A UNIMOD name gives the mass, name and
-    /// accession; a custom `mass` keeps the declared name (or `+<mass>`) and
-    /// has no accession.
     pub fn resolve(&self, fixed: bool, db: &UnimodDb) -> Result<Vec<Modification>, ModSpecError> {
         let item = self.label();
         let (name, mass_delta, accession) = match (self.mass, &self.name) {
@@ -188,7 +150,6 @@ impl ModDecl {
                 item: item.clone(),
                 value: v.clone(),
             })?,
-            // Losses without a class pool as generic.
             None if !self.neutral_loss.is_empty() => 255,
             None => 0,
         };
@@ -233,8 +194,6 @@ impl ModDecl {
     }
 }
 
-/// Split a comma-separated list at the commas outside parentheses. An empty
-/// or blank list has no items.
 pub fn split_list(list: &str) -> Result<Vec<&str>, ModSpecError> {
     if list.trim().is_empty() {
         return Ok(Vec::new());
@@ -261,12 +220,10 @@ pub fn split_list(list: &str) -> Result<Vec<&str>, ModSpecError> {
     Ok(items.into_iter().map(str::trim).collect())
 }
 
-/// Parse a `Name (sites), ...` list against the bundled UNIMOD table.
 pub fn parse_mod_list(list: &str, fixed: bool) -> Result<Vec<Modification>, ModSpecError> {
     parse_mod_list_with(list, fixed, crate::unimod::bundled())
 }
 
-/// [`parse_mod_list`] against a given UNIMOD table.
 pub fn parse_mod_list_with(
     list: &str,
     fixed: bool,
@@ -279,7 +236,6 @@ pub fn parse_mod_list_with(
     Ok(mods)
 }
 
-/// `Name (site)` of one expanded modification, as a list item would name it.
 pub fn describe(m: &Modification) -> String {
     let terminus = match m.location {
         ModLocation::Anywhere => "",
@@ -376,9 +332,6 @@ fn lookup(db: &UnimodDb, token: &str, item: &str) -> Result<UnimodMod, ModSpecEr
     }
 }
 
-/// Up to three names close to `token`: by edit distance (case-insensitive),
-/// at most a third of the token's length (at least 2), or names that start
-/// with the token.
 pub fn suggest(db: &UnimodDb, token: &str) -> Vec<String> {
     let t = token.trim().to_ascii_lowercase();
     let limit = (t.chars().count() / 3).max(2);
@@ -409,7 +362,6 @@ pub fn suggest(db: &UnimodDb, token: &str) -> Vec<String> {
     out
 }
 
-/// Levenshtein distance over chars.
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -504,7 +456,6 @@ xref: delta_mono_mass "6.020129"
         assert_eq!(m[0].name, "Phospho");
         let m = parse_mod_list_with("unimod:4 (C)", true, &db()).unwrap();
         assert_eq!((m[0].name.as_str(), m[0].fixed), ("Carbamidomethyl", true));
-        // An alias resolves to its record, under the record's UNIMOD name.
         let m = parse_mod_list_with("GlyGly (K)", false, &db()).unwrap();
         assert_eq!(m[0].name, "GG");
         assert_eq!(m[0].accession.as_deref(), Some("UNIMOD:121"));
@@ -530,7 +481,6 @@ xref: delta_mono_mass "6.020129"
             one("Acetyl (Protein N-term MS)"),
             vec![(Specific(b'M'), ProtNTerm), (Specific(b'S'), ProtNTerm)]
         );
-        // Repeated residues count once; names with parentheses keep them.
         assert_eq!(one("Oxidation (MM)"), vec![(Specific(b'M'), Anywhere)]);
         let m = parse_mod_list_with("Label:13C(6) (K)", false, &db).unwrap();
         assert_eq!(m[0].name, "Label:13C(6)");
@@ -596,7 +546,6 @@ xref: delta_mono_mass "6.020129"
             .unwrap_err()
             .to_string();
         assert!(msg.contains("did you mean Oxidation?"), "{msg}");
-        // A prefix suggests the names it starts.
         assert_eq!(suggest(&db, "Carbamido"), vec!["Carbamidomethyl".to_string()]);
         assert_eq!(suggest(&db, "GlyGl"), vec!["GlyGly".to_string()]);
         let msg = parse_mod_list_with("Frobnicate (K)", false, &db)
@@ -747,7 +696,6 @@ xref: delta_mono_mass "6.020129"
         assert_eq!((m.name.as_str(), m.mass_delta), ("MyTag", 12.3456));
         assert_eq!((m.residue, m.location), (ResidueSpec::Wildcard, ModLocation::NTerm));
         assert!(m.fixed && m.accession.is_none());
-        // A UNIMOD name with a mass is a label, not a lookup.
         let decl = ModDecl {
             name: Some("Phospho".into()),
             mass: Some(80.0),

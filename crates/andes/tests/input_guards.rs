@@ -1,7 +1,3 @@
-//! Input checks that run before a search: a database that already holds
-//! decoys, spectrum files of different acquisition classes in one search, and
-//! an mzML that names its analyzer but no activation.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -40,8 +36,6 @@ fn bsa_with_reversed_copy(dir: &Path, decoy_accession: &str) -> PathBuf {
     path
 }
 
-/// The high-resolution Orbitrap fixture, inflated, with every line holding
-/// `drop` removed and every `from` replaced by `to`.
 fn edited_orbitrap_mzml(
     dir: &Path,
     name: &str,
@@ -91,7 +85,6 @@ fn database_with_named_decoys_stops_the_search() {
     assert!(err.contains("rev_sp|P02769|ALBU_BOVIN"), "{err}");
 }
 
-/// No decoy word in the accession: the reversed sequence is the evidence.
 #[test]
 fn database_with_reversed_records_stops_the_search() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -103,7 +96,6 @@ fn database_with_reversed_records_stops_the_search() {
     assert!(err.contains("exact reverse of another record"), "{err}");
 }
 
-/// The fix the message names: declare the decoys and generate none.
 #[test]
 fn declared_decoys_without_generation_are_accepted() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -175,9 +167,6 @@ fn inputs_of_the_same_class_are_searched_together() {
     assert!(!err.contains("differs from the first input"), "{err}");
 }
 
-/// Without an activation term the analyzer is still read: the file stays on
-/// the high-resolution model instead of falling back to peak inference or the
-/// ion-trap default.
 #[test]
 fn analyzer_is_read_from_an_mzml_without_activation() {
     let dir = tempfile::tempdir().expect("tempdir");

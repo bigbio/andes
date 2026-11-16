@@ -1,13 +1,3 @@
-//! Thread-count invariance: a search returns the same PSMs, in the same order,
-//! whatever the Rayon thread count, with and without fragment-index retrieval.
-//!
-//! Each spectrum's pipeline runs on one worker, but PSMs reach a spectrum's queue
-//! in candidate-enumeration order and the candidate store is filled in completion
-//! order, so exact score ties used to be settled by push order. They are settled
-//! by the `PsmMatch` total order now (`rank_score`, `score`, then peptide content),
-//! and this test pins that down on real spectra whose scores tie often: the toy
-//! scorer below gives integral scores.
-
 mod common;
 use common::*;
 
@@ -29,7 +19,6 @@ use search::{PreparedSearch, SearchIndex, SearchParams};
 
 const FRAG_TOL_DA: f64 = 0.5;
 
-/// A b/y rank scorer with coarse rank probabilities, so many candidates tie.
 fn scorer() -> RankScorer {
     let part = Partition {
         charge: 2,
@@ -116,8 +105,6 @@ fn fixture_inputs() -> (Vec<Spectrum>, SearchIndex) {
     (spectra, idx)
 }
 
-/// One line per retained PSM, in output order, with everything the PIN writer
-/// reads from it: peptide, decoy flag, proteins, charge, scores and errors.
 fn signature(queues: &[TopNQueue], cands: &[Candidate]) -> Vec<String> {
     let mut out = Vec::new();
     for (i, q) in queues.iter().enumerate() {

@@ -1,21 +1,3 @@
-// Glyco PIN writer for andes.
-//
-// Writes a Percolator-consumable `.glyco.pin` file for glycopeptide PSMs
-// produced by `search::glyco_search::glyco_search_run`.
-//
-// Column layout: standard PIN columns (from `psm_feature_values`) +
-// glyco-specific columns appended AFTER `RankScoreFloat`, BEFORE
-// `Peptide`/`Proteins`:
-//   OxoniumScore, NCoreOxoniumIons, YLadderScore, CoreYHits,
-//   GlycanMass, IsGlycanDb
-//
-// The `Peptide` column appends a glycan composition tag for DB hits:
-//   `[HexNAc{n}Hex{m}Fuc{f}NeuAc{a}NeuGc{g}@N{site}]`
-// where `@N{site}` is the 1-based position of the sequon Asn in the backbone
-// when the backbone has exactly one N-X-S/T (internal, or completed by the
-// residue after the peptide), and `@N?` when it has zero or several (andes
-// does not localize between sequons by default).
-
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
@@ -37,14 +19,6 @@ use crate::row_context::RowContext;
 use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
 use search::precursor_mono::MonoCorrection;
 
-/// `--precursor-mono` columns, appended after `IsobaricRTMargin` whenever the
-/// correction ran (`--glyco`, `--precursor-mono auto`, mzML or `.raw` input),
-/// also when it fitted no spectrum; a spectrum without a fit writes 0s.
-/// `MonoShift`: isotopes subtracted from the recorded precursor before the
-/// search (0 = as recorded); `MonoFit`: cosine of the observed MS1 envelope
-/// against the glycopeptide isotope model at the SEARCHED precursor;
-/// `MonoFitGain`: `MonoFit` minus the fit at the recorded precursor (0 when
-/// unshifted); `MonoSNR`: searched monoisotope intensity over the MS1 median.
 pub const GLYCO_PIN_MONO_COLS: [&str; 4] = ["MonoShift", "MonoFit", "MonoFitGain", "MonoSNR"];
 
 fn write_glyco_header<W: Write>(
@@ -71,7 +45,7 @@ fn write_glyco_header<W: Write>(
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
     }
-    cols.push("chargeHi".to_string()); // overflow flag for z > max_charge (z6/z7)
+    cols.push("chargeHi".to_string());
 
     cols.extend_from_slice(&[
         "enzN".to_string(),
@@ -123,53 +97,32 @@ fn write_glyco_header<W: Write>(
         "RawScore".to_string(),
         "RawScoreCal".to_string(),
         "RankScoreFloat".to_string(),
-        // Engine-wide retention-time columns (ADDITIVE; mirror the shared
-        // `psm_feature_values` tail so the glyco PIN carries the SAME RT
-        // features as the standard PIN). 0.0 (neutral) without observed RT.
         "DeltaRT".to_string(),
         "AbsDeltaRT".to_string(),
         "DeltaRTNorm".to_string(),
-        // Glyco-specific columns (appended after the RT block, before Peptide/Proteins)
         "OxoniumScore".to_string(),
         "NCoreOxoniumIons".to_string(),
         "YLadderScore".to_string(),
-        // Completeness of the assigned composition's OWN predicted Y ladder,
-        // in [0,1]. Unlike YLadderScore (an unnormalised intensity sum that
-        // grows with glycan size), predicting rungs you cannot support LOWERS
-        // this. Targets the measured failing stage: choosing the mass split.
         "YHitFrac".to_string(),
-        "PartialGlycanBY".to_string(), // idea B: sequence-specific partial-glycan b/y evidence
+        "PartialGlycanBY".to_string(),
         "CoreYHits".to_string(),
         "GlycanMass".to_string(),
         "IsGlycanDb".to_string(),
-        "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
-        "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
-        "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
-        "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
-        "CzExplained".to_string(), // ETD c/z analytical explained-intensity LLR (additive; graded-model de-risk; ETD only, else 0)
-        "CzChanceLlr".to_string(), // ETD c/z prior-weighted chance-match surprise (additive; graded-model de-risk; ETD only, else 0)
-        // Glyco RT rank (ADDITIVE, appended LAST): within-scan rank of this
-        // candidate's AbsDeltaRT among competing glycoforms, normalized to (0,1].
-        // The isobaric-glycoform-disambiguation feature. 0.0 (neutral)
-        // when the scan has <2 candidate hits or RT is unavailable.
+        "Y0Y1Anchor".to_string(),
+        "SialicConsistency".to_string(),
+        "CzHyperscore".to_string(),
+        "CzIntensity".to_string(),
+        "CzExplained".to_string(),
+        "CzChanceLlr".to_string(),
         "DeltaRTRank".to_string(),
-        // Isobaric-glycan RT margin (ADDITIVE): how much better the assigned
-        // composition fits the observed RT than the best near-isobaric alternative
-        // on the same backbone. >0 ⇒ composition RT-consistent. 0.0
-        // when RT unavailable / no isobaric alternative / de-novo hit.
         "IsobaricRTMargin".to_string(),
-        // Terminal columns
         "Peptide".to_string(),
         "Proteins".to_string(),
     ]);
 
-    // Apply the column policy LAST, so header and row writer share one source
-    // of truth (`glyco_col_kept`) and cannot drift positionally.
     cols.retain(|c| glyco_col_kept(c));
     if mono {
-        // Present whenever the `--precursor-mono` correction ran; MonoFit varies
-        // on every fitted row.
-        let at = cols.len() - 2; // before Peptide/Proteins
+        let at = cols.len() - 2;
         for (i, c) in GLYCO_PIN_MONO_COLS.iter().enumerate() {
             cols.insert(at + i, c.to_string());
         }
@@ -189,10 +142,7 @@ fn write_glyco_psm_row<W: Write>(
     candidates: &[Candidate],
     search_index: &SearchIndex,
     params: &SearchParams,
-    // All of THIS scan's candidate hits (for the within-scan DeltaRTRank).
     scan_hits: &[FullGlycoPsm],
-    // `Some(..)` when the run carried `--precursor-mono` (outer), and the
-    // scan's own correction when it had a linked MS1 (inner).
     mono: Option<Option<&MonoCorrection>>,
     core: GlycanCore,
 ) -> io::Result<()> {
@@ -209,13 +159,6 @@ fn write_glyco_psm_row<W: Write>(
     let precursor_mz = spec.precursor_mz;
     let exp_mass = precursor_mz * charge - charge * PROTON;
 
-    // CalcMass: the INTACT glycopeptide neutral mass (peptide backbone +
-    // glycan), NOT the bare backbone alone. The b/y scoring against Percolator
-    // is bare-backbone (see module doc), but CalcMass/dm/absdm here are
-    // compared against the observed PRECURSOR mass, which includes the
-    // glycan. Omitting `glycan_mass` (0.0 for de-novo hits without a resolved
-    // composition) previously left `dm`/`absdm` off by ~the glycan mass,
-    // corrupting the mass-error PIN features Percolator uses for q-values.
     let calc_mass = cand.peptide.mass() + key.glycan_mass;
     let mass = exp_mass;
 
@@ -228,7 +171,6 @@ fn write_glyco_psm_row<W: Write>(
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
 
-    // SpecId, Label, ScanNr, ExpMass, CalcMass, FileName, mass
     write!(writer, "{}\t{}\t{}\t", spec_id, label, scan)?;
     write_mass(writer, exp_mass)?;
     writer.write_all(b"\t")?;
@@ -239,23 +181,16 @@ fn write_glyco_psm_row<W: Write>(
         write_double(writer, mass)?;
     }
 
-    // RankScore, isotope_error, peplen, dm, absdm
     write!(writer, "\t{}\t{}\t{}\t", raw_score, isotope_error, peplen)?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
 
-    // Charge one-hot; a charge below the columns sets the lowest one, a charge
-    // above them sets only `chargeHi`.
     let hot_charge = psm.charge_used.max(min_charge);
     for c in min_charge..=max_charge {
         let flag: u8 = if c == hot_charge { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
-    // chargeHi overflow: 1 when the glycopeptide's charge exceeds the one-hot range
-    // (glyco tries the spectrum's own charge, which reaches z6/z7 on high-charge
-    // glycopeptides — otherwise those get an ALL-ZERO charge vector and Percolator
-    // cannot isolate them from lower charges with different target/decoy separation).
     let charge_hi: u8 = if psm.charge_used > max_charge {
         b'1'
     } else {
@@ -263,7 +198,6 @@ fn write_glyco_psm_row<W: Write>(
     };
     writer.write_all(&[b'\t', charge_hi])?;
 
-    // enzN, enzC, enzInt (the standard PIN's rule, see `crate::percolator_enz`)
     let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
@@ -331,23 +265,12 @@ fn write_glyco_psm_row<W: Write>(
         write_double_tab(writer, key.cz_chance_llr as f64)?;
     }
 
-    // Glyco RT rank (ADDITIVE, LAST): within-scan AbsDeltaRT rank of THIS hit
-    // among the scan's competing glycoforms, normalized to (0,1]. Reuses the
-    // `abs_delta_rt` populated by `populate_glyco_rt_features`. A glycan-decoy
-    // row shares the row_idx of its paired target, so it takes that hit's rank
-    // (its AbsDeltaRT is the same peptide-axis RT delta). 0.0 when <2 candidates.
     if glyco_col_kept("DeltaRTRank") {
         write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?;
     }
 
-    // Isobaric-glycan RT margin (ADDITIVE): from `psm.features`, populated by
-    // `populate_glyco_rt_features`. >0 ⇒ the assigned composition fits the observed
-    // RT better than the best near-isobaric alternative. A glycan-decoy
-    // row shares its paired target's psm, so it inherits the same value.
     write_double_tab(writer, psm.features.isobaric_rt_margin as f64)?;
 
-    // `--precursor-mono` columns (see `GLYCO_PIN_MONO_COLS`). A scan without a
-    // linked MS1 writes the neutral row (0, 0, 0, 0).
     if let Some(m) = mono {
         match m {
             Some(c) => {
@@ -365,19 +288,6 @@ fn write_glyco_psm_row<W: Write>(
         }
     }
 
-    // Peptide column: backbone sequence + optional glycan tag.
-    //
-    // The tag carries the glycosite as `@N<pos>` (1-based position of the sequon
-    // Asn in the backbone) ONLY when the backbone has exactly one N-X-S/T sequon,
-    // counting a boundary sequon completed by the residue after the peptide, in
-    // which case the site is a fact about the sequence and needs no evidence.
-    // With two or more sequons it emits `@N?`: andes does not localize between
-    // them by default (the site used internally for c/z scoring is the first
-    // sequon, a positional convention, not a localization), and printing that
-    // heuristic choice as if it were an assignment would be a false claim.
-    //
-    // Target and glycan-decoy rows are tagged identically, so this is symmetric
-    // on the FDR axis; and PSM-level q-values do not depend on the Peptide string.
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let glycan_tag = match &key.glycan {
         Some(g) => glycan_tag_with_site(g, &residues, cand.peptide.post, core),
@@ -385,7 +295,6 @@ fn write_glyco_psm_row<W: Write>(
     };
     write!(writer, "\t{}{}", cand.peptide, glycan_tag)?;
 
-    // Proteins column(s).
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
         let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
@@ -394,9 +303,6 @@ fn write_glyco_psm_row<W: Write>(
     writeln!(writer)
 }
 
-/// Render the Peptide-column glycan tag, including the glycosite when the
-/// backbone determines it. See the call site for why an ambiguous backbone
-/// emits `@N?` rather than andes's internal first-sequon convention.
 fn glycan_tag_with_site(
     g: &glyco::glycan_db::GlycanComp,
     residues: &[u8],
@@ -428,28 +334,6 @@ fn glycan_tag_with_site(
     )
 }
 
-/// Write a glyco PIN file from the output of `glyco_search_run`.
-///
-/// Standard PIN columns are written using `psm_feature_values`; six
-/// glyco-specific columns are appended after `RankScoreFloat`:
-///   OxoniumScore, NCoreOxoniumIons, YLadderScore, CoreYHits,
-///   GlycanMass, IsGlycanDb
-///
-/// `Peptide` column appends `[HexNAc{n}Hex{m}...]` for DB glycan hits.
-/// Column policy for the glyco PIN.
-///
-/// ALWAYS dropped (structurally dead on every glyco path, verified in data):
-/// `mass` duplicates ExpMass; IsolationWindowEfficiency / PrecursorIsotopeKL /
-/// PrecursorSNR are chimeric-only and hardcoded 0 here; IsRefinement / NumMods /
-/// RefinementModClass are refinement-only; the five ModSite* columns are 0
-/// because the glycan is never a variable mod on the feature peptide;
-/// RawScoreCal is byte-identical to RawScore under the 1-hit collapse
-/// (strong_score_calibrated_loo returns its input for len<2); DeltaRTRank is
-/// structurally 0 under the collapse (delta_rt_rank returns 0 for <2 hits).
-/// The six provenance columns are filled only by the standard search's
-/// provenance pass, which the glyco driver does not run.
-/// IsotopeErrorAbs / IsotopeErrorNeg (the isotope-offset class of the standard
-/// PIN) are not emitted: the glyco PIN was not benchmarked with them.
 const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "mass",
     "IsolationWindowEfficiency",
@@ -475,13 +359,10 @@ const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
     "IsotopeErrorNeg",
 ];
 
-/// Is `name` emitted? Charge one-hots are always kept.
 fn glyco_col_kept(name: &str) -> bool {
     name.starts_with("charge") || !GLYCO_PIN_ALWAYS_DROP.contains(&name)
 }
 
-/// Test-only wrapper so the column-policy guard can inspect headers without a
-/// full search. Not part of the public API surface for callers.
 #[doc(hidden)]
 pub fn write_glyco_header_for_test<W: Write>(
     writer: &mut W,
@@ -520,29 +401,12 @@ pub fn write_glyco_pin(
     })
 }
 
-/// Select which hits of ONE scan to emit into the FDR PIN.
-///
-/// `collapse=true` (the honest default) keeps only the single best PSM — the
-/// top-1-per-scan TDC winner, by `rank_score` then `YLadderScore`, lowest hit
-/// index breaking full ties. This is REQUIRED for a valid per-scan FDR:
-/// Percolator does NOT do target/decoy competition within a scan, so emitting the
-/// ~4.5 correlated (peptide×glycan) alternatives per scan fabricates the
-/// target/decoy balance and produces fake recovery (collapsing one
-/// benchmark's 1.02M rows to 5,954 changed 155 "recovered" to 0 @1% FDR).
-/// The non-glyco path enforces the same one-PSM-per-scan rule
-/// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
-/// ONLY, never for FDR.
 pub fn select_emitted_hits(
     hits: &[FullGlycoPsm],
     collapse: bool,
     enumerated_only: bool,
 ) -> Vec<usize> {
-    // GI-1: a glyco IDENTIFICATION requires an ENUMERATED glycan composition. The
-    // de-novo branch (glycan = None) reports a bare precursor−backbone mass
-    // RESIDUAL that is not in the glycan DB — ~half of raw glyco rows. Those are
-    // not glycopeptide IDs and must not enter the FDR PIN. Filter them out first, THEN collapse.
     if !collapse {
-        // Diagnostic dump: all hits (optionally enumerated-filtered).
         return (0..hits.len())
             .filter(|&i| !enumerated_only || hits[i].glycan_key.glycan.is_some())
             .collect();
@@ -550,24 +414,8 @@ pub fn select_emitted_hits(
     if hits.is_empty() {
         return Vec::new();
     }
-    // Collapse over ALL hits first — the TDC winner is the best rank_score
-    // REGARDLESS of enumeration (Codex: filtering first would promote a
-    // 2nd-place enumerated hit when the real winner is de-novo, inflating IDs).
-    // Ordering is the `gp` fused selector `rank + K·ladder + J·core_y`, the SHARED
-    // single source of truth with the driver's pre-feature reduction: it MUST match
-    // glyco_search's gp collapse exactly (same rank/ladder/core-Y/k/j) or the scored
-    // winner and the written row diverge (the collapse-parity bug).
-    // The PIN-side collapse is over a SINGLE hit under the honest collapse path (the
-    // driver already reduced the scan), so these weights are never decisive here; use
-    // the same constants the driver uses.
     let gp_k = GLYCO_GP_K_DEFAULT;
     let gp_j = GLYCO_GP_J_DEFAULT;
-    // v2 hyperscore term: the driver (glyco_search) is the SOLE authority for the gp
-    // winner — under the honest `collapse=true` path it already reduced each scan to a
-    // SINGLE hit before feature extraction, so this max_by is over one element and its
-    // score is never decisive. The hyperscore needs raw peaks the PIN writer does not
-    // hold, so pass 0.0 here; it cannot change any real output. (rank/ladder/core-Y are
-    // stored fields, so the rest of the ordering stays consistent with the driver.)
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
             let sa = glyco_gp_fused_score_iso(
@@ -595,19 +443,12 @@ pub fn select_emitted_hits(
             sa.total_cmp(&sb).then(b.cmp(&a))
         })
         .expect("non-empty");
-    // Emit only if the scan's actual winner has an enumerated glycan; if the
-    // winner is de-novo, the scan has NO enumerated ID → drop it. The driver may
-    // promote an enumerated candidate while CHOOSING a winner, but once a de-novo
-    // candidate has won target-decoy competition the scan has no enumerated
-    // identification, and promoting the losing runner-up would add a target that
-    // did not win. See `enumerated_only_drops_de_novo_hits`.
     if enumerated_only && hits[winner].glycan_key.glycan.is_none() {
         return Vec::new();
     }
     vec![winner]
 }
 
-/// Write glyco PIN to an arbitrary writer (useful for testing).
 #[allow(clippy::too_many_arguments)]
 pub fn write_glyco_pin_to<W: Write>(
     writer: &mut W,
@@ -617,7 +458,6 @@ pub fn write_glyco_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
     debug: bool,
-    // `--precursor-mono` corrections aligned with `spectra`; `None` = flag off.
     mono: Option<&[Option<MonoCorrection>]>,
     core: GlycanCore,
 ) -> io::Result<()> {
@@ -626,10 +466,6 @@ pub fn write_glyco_pin_to<W: Write>(
 
     write_glyco_header(writer, min_charge, max_charge, mono.is_some())?;
 
-    // Top-1-per-scan collapse + enumerated-only is the honest default (see
-    // `select_emitted_hits`). `--debug-glyco` restores the full multi-row / de-novo
-    // dump for DIAGNOSTICS ONLY (that PIN must never be fed to an FDR tool). MUST
-    // mirror the driver's `GlycoConfig.debug` so the kept row == the driver's hit.
     let collapse = !debug;
     let enumerated_only = !debug;
 
@@ -679,17 +515,11 @@ pub fn write_glyco_pin_to<W: Write>(
     Ok(())
 }
 
-/// Write a tab then a double in %.6g style.
 fn write_double_tab<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     writer.write_all(b"\t")?;
     write_double(writer, v)
 }
 
-/// Write a neutral mass with six decimal places (trailing zeros trimmed).
-///
-/// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
-/// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
-/// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
 fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if !v.is_finite() || v == 0.0 {
         return writer.write_all(b"0");
@@ -703,7 +533,6 @@ fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     write_trim_fixed(writer, &buf[..len])
 }
 
-/// Minimal %.6g double formatter (mirrors pin.rs write_double).
 fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if v.is_nan() || v.is_infinite() || v == 0.0 {
         return writer.write_all(b"0");
@@ -763,7 +592,6 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
         mantissa.len()
     };
     writer.write_all(&mantissa[..mantissa_end])?;
-    // Parse and reformat exponent with explicit sign.
     let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
     let exp_val: i32 = exp_str.parse().unwrap_or(0);
     write!(writer, "e{:+03}", exp_val)
@@ -826,20 +654,12 @@ mod tests {
     #[test]
     fn glycan_tag_reports_an_unambiguous_glycosite_and_refuses_an_ambiguous_one() {
         let g = GlycanComp::from_counts(2, 5, 0, 0, 0, 0);
-        // exactly one N-X-S/T: the site is a fact about the sequence.
         assert!(glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan).contains("@N3 "));
-        // the sequon may sit at the very start; positions are 1-based.
         assert!(glycan_tag_with_site(&g, b"NLTAAK", b'A', GlycanCore::NGlycan).contains("@N1 "));
-        // two sequons: andes does not localize by default, so it must not pick.
         assert!(glycan_tag_with_site(&g, b"ANLTANCSK", b'A', GlycanCore::NGlycan).contains("@N? "));
-        // no sequon at all is also "not a site andes assigned".
         assert!(glycan_tag_with_site(&g, b"AAAAK", b'A', GlycanCore::NGlycan).contains("@N? "));
-        // a boundary sequon (…N-K | S-…) is the peptide's only glycosite.
         assert!(glycan_tag_with_site(&g, b"AAANK", b'S', GlycanCore::NGlycan).contains("@N4 "));
-        // an internal sequon plus a boundary one is two sites, not one.
         assert!(glycan_tag_with_site(&g, b"ANLTANK", b'T', GlycanCore::NGlycan).contains("@N? "));
-        // the composition itself is unchanged by the site suffix, and the canonical
-        // tree is appended so topology-distinct isomers stay distinct Peptide tags.
         assert!(
             glycan_tag_with_site(&g, b"AANLTK", b'A', GlycanCore::NGlycan)
                 .starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0")
@@ -899,16 +719,11 @@ mod tests {
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
-        // DeltaRTRank is structurally 0 under the 1-hit collapse (delta_rt_rank
-        // returns 0.0 for <2 hits), so the column policy drops it ALWAYS -- the
-        // 2026-08-29 plasma measurement that motivated the policy. This test now
-        // pins its ABSENCE; resurrecting it must be a deliberate act.
         assert!(
             !cols.contains(&"DeltaRTRank"),
             "structurally dead DeltaRTRank is back"
         );
         assert!(pos("DeltaRTNorm") < pos("CzChanceLlr"));
-        // IsobaricRTMargin is the live RT-evidence column, immediately before Peptide.
         assert!(
             cols.contains(&"IsobaricRTMargin"),
             "header missing IsobaricRTMargin"
@@ -938,7 +753,6 @@ mod tests {
 
     #[test]
     fn is_glycan_db_flag_correct() {
-        // DB hit → IsGlycanDb = 1
         let db_key = make_key(true, 1234.0);
         assert_eq!(
             if db_key.glycan_source == Source::Db {
@@ -948,7 +762,6 @@ mod tests {
             },
             1
         );
-        // DeNovo hit → IsGlycanDb = 0
         let dn_key = make_key(false, 0.0);
         assert_eq!(
             if dn_key.glycan_source == Source::Db {
@@ -981,7 +794,6 @@ mod tests {
 
     fn make_glyco_candidate() -> Candidate {
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        // "NSTK" contains an N-X-S/T sequon (N-S-T).
         let peptide = Peptide::from_str("K.NSTK.R", &aa_set).expect("valid peptide");
         Candidate {
             peptide,
@@ -1040,11 +852,6 @@ mod tests {
         }
     }
 
-    /// BUG 3: `CalcMass` in the glyco PIN row must be the INTACT glycopeptide
-    /// neutral mass (`peptide.mass() + glycan_mass`), not the bare backbone
-    /// alone. Before the fix, `CalcMass = cand.peptide.mass()` only, which
-    /// left `dm`/`absdm` off by ~the glycan mass (here 892.317 Da for
-    /// HexNAc2Hex3) since the observed `ExpMass` is the intact precursor.
     #[test]
     fn calc_mass_includes_glycan_mass() {
         let search_index = make_glyco_search_index("sp|P00000|TEST");
@@ -1052,11 +859,9 @@ mod tests {
         let params = make_glyco_params();
 
         let glycan_mass =
-            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX; // ~892.317 Da
+            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX;
         let peptide_neutral_mass = candidates[0].peptide.mass();
 
-        // Precursor m/z consistent with the INTACT glycopeptide at z=2 so
-        // `dm` should be near 0 once CalcMass correctly includes the glycan.
         let intact_neutral = peptide_neutral_mass + glycan_mass;
         let z = 2.0_f64;
         let precursor_mz = (intact_neutral + z * PROTON) / z;
@@ -1114,11 +919,6 @@ mod tests {
         let calc_mass: f64 = row_cols[calc_mass_col].parse().unwrap();
         let dm: f64 = row_cols[dm_col].parse().unwrap();
 
-        // `write_double` formats with ~6 significant digits (see `write_double`
-        // in this file), so a masses-in-the-thousands value round-trips to
-        // within ~0.01 Da, not exact float precision. The bug this test
-        // guards against (omitting `glycan_mass`, ~892 Da here) is 4+ orders
-        // of magnitude larger than this formatting tolerance.
         assert!(
             (calc_mass - intact_neutral).abs() < 0.05,
             "CalcMass must equal peptide.mass() + glycan_mass ({:.4}), got {:.4} \
@@ -1137,13 +937,6 @@ mod tests {
         );
     }
 
-    /// L1 (the core harness bug): the FDR PIN must emit ONE PSM per scan — the
-    /// top-1 TDC winner by the shared `gp` fused score. Emitting all ~4.5
-    /// (peptide×glycan) alternatives fabricates the target/decoy balance and
-    /// produced the fake ~30% recovery. `select_emitted_hits(_, true)` must
-    /// return only the best. The gp score `rank + K·ladder + J·core_y` (K=50)
-    /// is ladder-dominated, so the highest-`y_ladder` hit wins with `rank_score`
-    /// as the tiebreak.
     #[test]
     fn top1_collapse_keeps_only_the_best_hit_per_scan() {
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
@@ -1157,7 +950,7 @@ mod tests {
         let hits = vec![
             make_hit(5.0, 1.0),
             make_hit(10.0, 0.5),
-            make_hit(8.0, 2.0), // highest y_ladder → the winner (ladder-primary default)
+            make_hit(8.0, 2.0),
         ];
         assert_eq!(
             select_emitted_hits(&hits, true, false),
@@ -1170,7 +963,6 @@ mod tests {
             "diagnostic mode keeps all"
         );
 
-        // Full tie on y_ladder → break by rank_score, then lowest index.
         let tied = vec![make_hit(1.0, 7.0), make_hit(3.0, 7.0), make_hit(3.0, 7.0)];
         assert_eq!(
             select_emitted_hits(&tied, true, false),
@@ -1179,11 +971,6 @@ mod tests {
         );
     }
 
-    /// The `gp` fused `rank + K·ladder` collapse (the shipped default selector)
-    /// rescues a rank-strong hit that a bare ladder-primary collapse would reject for
-    /// a spurious tiny ladder edge (the P0 failure mode: a wrong mass-split wins on a
-    /// coincidental summed Y-ladder intensity despite truth's stronger b/y). This
-    /// asserts the exact ordering expression `select_emitted_hits` uses.
     #[test]
     fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
         use glyco::glyco_psm::{
@@ -1197,11 +984,7 @@ mod tests {
                 psm: make_minimal_psm(0, rank),
             }
         }
-        // idx 0 = truth (strong b/y rank, modest ladder); idx 1 = wrong split
-        // (spurious tiny ladder edge that a bare ladder-primary collapse would pick).
         let hits = vec![make_hit(15.0, 0.05), make_hit(2.0, 0.06)];
-        // The shipped gp default rescues the rank-strong truth (idx 0):
-        // 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5 (a bare ladder collapse would pick idx 1).
         assert_eq!(
             select_emitted_hits(&hits, true, false),
             vec![0],
@@ -1213,7 +996,7 @@ mod tests {
                 h.psm.rank_score,
                 h.glycan_key.y_ladder_intensity_score,
                 h.glycan_key.core_y_hits as f32,
-                0.0, // hyperscore: PIN-side single-hit collapse, never decisive (see select_emitted_hits)
+                0.0,
                 k,
                 j,
                 0.0,
@@ -1232,9 +1015,6 @@ mod tests {
         );
     }
 
-    /// GI-1: a de-novo hit (glycan = None, a bare mass residual) is NOT a glyco
-    /// identification and must be dropped by the enumerated-only filter — even
-    /// when it has the highest rank_score. The best ENUMERATED hit wins the scan.
     #[test]
     fn enumerated_only_drops_de_novo_hits() {
         fn hit(is_db: bool, rank: f32) -> FullGlycoPsm {
@@ -1243,27 +1023,22 @@ mod tests {
                 psm: make_minimal_psm(0, rank),
             }
         }
-        // de-novo hit has the HIGHER rank_score → it is the TDC winner. Under
-        // enumerated-only the scan is DROPPED (not a lower enumerated hit promoted).
         let hits = vec![hit(false, 20.0), hit(true, 8.0), hit(true, 5.0)];
         assert!(
             select_emitted_hits(&hits, true, true).is_empty(),
             "de-novo TDC winner → scan dropped, NOT a losing enumerated hit promoted"
         );
-        // enumerated_only=false: de-novo (rank 20, idx 0) wins the raw collapse.
         assert_eq!(
             select_emitted_hits(&hits, true, false),
             vec![0],
             "without the filter the de-novo residual wins"
         );
-        // When the ENUMERATED hit is the winner, it is emitted.
         let db_wins = vec![hit(true, 20.0), hit(false, 8.0), hit(true, 5.0)];
         assert_eq!(
             select_emitted_hits(&db_wins, true, true),
             vec![0],
             "enumerated winner is emitted"
         );
-        // A scan with ONLY de-novo hits yields nothing under enumerated-only.
         let denovo_only = vec![hit(false, 9.0), hit(false, 4.0)];
         assert!(
             select_emitted_hits(&denovo_only, true, true).is_empty(),
@@ -1271,10 +1046,6 @@ mod tests {
         );
     }
 
-    /// Every emitted glyco PIN row must have exactly as many tab-separated
-    /// fields as the header (header↔row column-count consistency), and the
-    /// DeltaRTRank column must be present and parseable. This is the guard that
-    /// appending DeltaRTRank did not desynchronise the header and the rows.
     #[test]
     fn header_and_row_column_counts_match_with_delta_rt_rank() {
         let search_index = make_glyco_search_index("sp|P00000|TEST");
@@ -1290,9 +1061,6 @@ mod tests {
 
         let mut key = make_key(true, glycan_mass);
         key.glycan = Some(GlycanComp::from_counts(2, 3, 0, 0, 0, 0));
-        // Distinctive values on columns near the redesign block, so a header/writer
-        // ORDER drift (not just a count drift) is caught: the value must appear
-        // under its own header name.
         key.y_ladder_intensity_score = 1.25;
         key.core_y_hits = 3;
         key.cz_hyperscore = 2.5;

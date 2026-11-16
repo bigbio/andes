@@ -1,6 +1,3 @@
-//! Protein database loading: FASTA or UniProt XML, plain or gzipped, chosen
-//! by file extension.
-
 use std::path::Path;
 
 use model::ProteinDb;
@@ -9,7 +6,6 @@ use crate::fasta::{FastaParseError, FastaReader};
 use crate::peff::{load_peff, PeffError, PeffLoadStats};
 use crate::uniprot::{load_uniprot_xml, UniProtLoadStats, UniProtOptions, UniProtParseError};
 
-/// Format of a protein database file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseFormat {
     Fasta,
@@ -18,8 +14,6 @@ pub enum DatabaseFormat {
 }
 
 impl DatabaseFormat {
-    /// `.xml` (or `.xml.gz`, case-insensitive) is UniProt XML, `.peff` PEFF;
-    /// anything else is read as FASTA.
     pub fn of_path(path: &Path) -> Self {
         let name = path
             .file_name()
@@ -61,9 +55,6 @@ pub enum DatabaseError {
     Peff(#[from] PeffError),
 }
 
-/// Load the target database at `path` (gzip is decompressed transparently).
-/// `uniprot` applies to a UniProt XML database; its knockoff options also
-/// apply to a PEFF database's variants.
 pub fn load_protein_database(
     path: &Path,
     uniprot: &UniProtOptions,

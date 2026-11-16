@@ -1,37 +1,19 @@
-//! Per-run MS2 acquisition metadata read from a sample of scans: collision
-//! energy, isolation width and FAIMS compensation voltage.
-//!
-//! These values describe how a run was acquired. The search uses them for the
-//! acquisition context it carries next to the selected scoring model (the
-//! predictor NCE, the reported isolation width, FAIMS cycling). The values are
-//! read from the first MS2 scans only, so a sample costs milliseconds.
-
 use std::io::BufRead;
 
 use quick_xml::{events::Event, Reader};
 
-/// `collision energy` (PSI-MS `MS:1000045`) under `<precursor><activation>`.
 const CV_COLLISION_ENERGY: &str = "MS:1000045";
-/// `normalized collision energy` (`MS:1000138`), written by some converters
-/// instead of `MS:1000045`.
 const CV_NORMALIZED_COLLISION_ENERGY: &str = "MS:1000138";
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
 const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
 const CV_FAIMS_CV: &str = "MS:1001581";
 
-/// Acquisition metadata of the first MS2 scans of a run.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ms2MetaSample {
-    /// MS2 scans inspected.
     pub n_ms2: usize,
-    /// Collision energy of each scan that records one, in the unit the file
-    /// uses (NCE for Thermo HCD, eV for Bruker and most TOF instruments).
     pub collision_energies: Vec<f64>,
-    /// Full isolation width (lower + upper offset, Th) of each scan that
-    /// records one.
     pub isolation_widths: Vec<f64>,
-    /// FAIMS compensation voltage of each scan that records one.
     pub faims_cvs: Vec<f32>,
 }
 
@@ -50,12 +32,10 @@ fn median(values: &[f64]) -> Option<f64> {
 }
 
 impl Ms2MetaSample {
-    /// Median collision energy of the sampled scans.
     pub fn median_collision_energy(&self) -> Option<f64> {
         median(&self.collision_energies)
     }
 
-    /// Smallest and largest sampled collision energy.
     pub fn collision_energy_range(&self) -> Option<(f64, f64)> {
         let lo = self
             .collision_energies
@@ -72,12 +52,10 @@ impl Ms2MetaSample {
         Some((lo, hi))
     }
 
-    /// Median full isolation width (Th) of the sampled scans.
     pub fn median_isolation_width(&self) -> Option<f64> {
         median(&self.isolation_widths)
     }
 
-    /// Distinct FAIMS compensation voltages, ascending (empty without FAIMS).
     pub fn distinct_faims_cvs(&self) -> Vec<f32> {
         let mut v: Vec<f32> = self
             .faims_cvs
@@ -91,9 +69,6 @@ impl Ms2MetaSample {
     }
 }
 
-/// Read collision energy, isolation width and FAIMS CV from the first `n` MS2
-/// spectra of an mzML. Best effort: a parse error ends the sample with what
-/// was read so far.
 pub fn sample_mzml_ms2_meta<R: BufRead>(reader: R, n: usize) -> Ms2MetaSample {
     let mut xml = Reader::from_reader(reader);
     xml.trim_text(true);
@@ -102,7 +77,6 @@ pub fn sample_mzml_ms2_meta<R: BufRead>(reader: R, n: usize) -> Ms2MetaSample {
 
     let mut in_spectrum = false;
     let mut in_activation = false;
-    // `<product>` holds the product isolation window, not the precursor's.
     let mut in_product = false;
     let mut ms_level: Option<u32> = None;
     let mut ce: Option<f64> = None;
@@ -187,41 +161,22 @@ pub fn sample_mzml_ms2_meta<R: BufRead>(reader: R, n: usize) -> Ms2MetaSample {
     out
 }
 
-/// Spacing of the first 13C isotope peak (Da).
 const ISOTOPE_SPACING_DA: f64 = 1.003_354_8;
-/// Half-width of the isotope-pair window, in ppm of the expected m/z.
 const PAIR_TOL_PPM: f64 = 10.0;
-/// Offsets (Da) of the control windows next to the expected isotope m/z.
-/// They measure how often an unrelated peak falls in a window of the same
-/// width, so the isotope count can be compared with chance.
 const CONTROL_OFFSETS_DA: [f64; 6] = [-0.21, -0.14, -0.07, 0.07, 0.14, 0.21];
-/// Most intense peaks per spectrum used for the pair count.
 const PAIR_PEAKS_PER_SPECTRUM: usize = 200;
-/// Isotope-pair enrichment over chance at or above which the fragments are
-/// read as high resolution.
 pub const HIGH_RES_MIN_ENRICHMENT: f64 = 4.0;
-/// Enrichment below which the fragments are read as low resolution.
 pub const LOW_RES_MAX_ENRICHMENT: f64 = 1.8;
-/// Isotope pairs needed before a high-resolution call is made.
 const MIN_PAIRS_HIGH: usize = 100;
-/// Peaks needed before any call is made.
 const MIN_PEAKS: usize = 5_000;
 
-/// Fragment-resolution evidence from the peaks of a spectrum sample.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolutionEvidence {
-    /// Spectra inspected.
     pub spectra: usize,
-    /// Peaks used (the most intense of each spectrum).
     pub peaks: usize,
-    /// Peaks with a +1.00335/z partner (z = 1, 2) within ±10 ppm.
     pub isotope_pairs: usize,
-    /// Mean count of the same test in the control windows (chance level).
     pub chance_pairs: f64,
-    /// `isotope_pairs / chance_pairs`.
     pub enrichment: f64,
-    /// `Some(true)` high resolution, `Some(false)` low resolution, `None` when
-    /// the sample cannot tell.
     pub high_res: Option<bool>,
 }
 
@@ -236,8 +191,6 @@ impl ResolutionEvidence {
     }
 }
 
-/// Count peaks of `mzs` (sorted ascending) with a partner at `mz + delta`
-/// within `PAIR_TOL_PPM`.
 fn count_partners(mzs: &[f64], delta: f64) -> usize {
     let mut n = 0;
     for &mz in mzs {
@@ -251,12 +204,6 @@ fn count_partners(mzs: &[f64], delta: f64) -> usize {
     n
 }
 
-/// Infer whether fragment spectra were read at high resolution from their
-/// peaks alone. A high-resolution analyzer resolves 13C isotope peaks at
-/// 1.00335/z apart to within a few ppm; an ion trap reports peaks at roughly
-/// 0.1 Da precision, so pairs at that exact spacing are no more frequent than
-/// at any nearby spacing. The call compares the isotope-pair count with the
-/// same count in control windows offset by 0.07 to 0.21 Da.
 pub fn infer_fragment_resolution(spectra: &[model::Spectrum]) -> ResolutionEvidence {
     let mut peaks = 0usize;
     let mut pairs = 0usize;
@@ -381,7 +328,6 @@ mod tests {
         assert_eq!(s.collision_energies, vec![28.0, 30.0]);
         assert_eq!(s.median_collision_energy(), Some(29.0));
         assert_eq!(s.collision_energy_range(), Some((28.0, 30.0)));
-        // The product isolation window (9 + 9) is not the precursor's.
         let w = s.median_isolation_width().unwrap();
         assert!((w - 1.4).abs() < 1e-9, "{w}");
         assert_eq!(s.distinct_faims_cvs(), vec![-65.0, -45.0]);
@@ -422,8 +368,6 @@ mod tests {
         }
     }
 
-    /// Spectra of fragment isotope envelopes (monoisotopic + 13C peak) plus
-    /// noise peaks, with each peak's m/z perturbed by `mz_sd_da`.
     fn synthetic(n_spectra: usize, mz_sd_da: f64, seed: u64) -> Vec<model::Spectrum> {
         let mut r = Lcg(seed);
         (0..n_spectra)
@@ -453,7 +397,6 @@ mod tests {
 
     #[test]
     fn orbitrap_like_peaks_are_called_high_resolution() {
-        // ~2 ppm m/z error at m/z 700.
         let ev = infer_fragment_resolution(&synthetic(300, 0.0015, 7));
         assert_eq!(ev.high_res, Some(true), "{}", ev.describe());
         assert!(ev.enrichment > 10.0, "{}", ev.describe());
@@ -461,7 +404,6 @@ mod tests {
 
     #[test]
     fn ion_trap_like_peaks_are_called_low_resolution() {
-        // ~0.1 Da m/z error, the precision of an ion-trap centroid.
         let ev = infer_fragment_resolution(&synthetic(300, 0.1, 11));
         assert_eq!(ev.high_res, Some(false), "{}", ev.describe());
     }

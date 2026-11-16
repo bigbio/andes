@@ -1,18 +1,9 @@
-//! End-to-end test for the QPX `--output-parquet` `.idparquet/` writer.
-//!
-//! Runs a default search over the BSA fixture with `--output-parquet`, then
-//! opens `psms.parquet` with the `arrow`/`parquet` reader and asserts the
-//! column names + Arrow types match the OpenMS QPX 1.0 PSM schema and that at
-//! least one row was written. Also checks the QPX schema metadata is present and
-//! that the sibling `search_params.parquet` was produced.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-/// Resolve a path relative to the workspace root (crates/andes → workspace root).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -69,8 +60,6 @@ fn search_writes_qpx_idparquet_bundle() {
     );
     assert!(md.contains_key("uuid"), "uuid metadata missing");
 
-    // Expected (column name, Arrow DataType string) for the scalar columns +
-    // the list/struct columns (checked by name + top-level DataType variant).
     let by_name: HashMap<&str, &arrow::datatypes::DataType> = schema
         .fields()
         .iter()
@@ -124,9 +113,6 @@ fn search_writes_qpx_idparquet_bundle() {
         let DataType::List(elem) = dt else {
             panic!("column `{name}` should be a List, got {dt:?}");
         };
-        // QPX/Parquet LIST convention: the list element field must be named
-        // `element` (arrow-rs defaults to `item`; regression guard for the
-        // OpenMS interop fix).
         assert_eq!(
             elem.name(),
             "element",
@@ -141,8 +127,6 @@ fn search_writes_qpx_idparquet_bundle() {
 
     let mut reader = builder.build().expect("build parquet reader");
     let mut total = 0usize;
-    // Whether we saw at least one PSM whose `psm_metavalues` carries the
-    // andes:-prefixed discriminative features with parseable numeric values.
     let mut saw_features = false;
     let mut saw_andes_rankscore = false;
     let mut saw_andes_rawscore = false;

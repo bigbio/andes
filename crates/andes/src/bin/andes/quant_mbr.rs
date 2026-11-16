@@ -1,150 +1,3 @@
-//! Match-between-runs stages shared by the stage subcommands and the
-//! all-in-one run.
-//!
-//! Extract: for one run, every library precursor is measured on the run's
-//! MS1 table (`<stem>.ms1.parquet`) by the template fit of
-//! [`quant::evidence`], whether the run identified it or not, and the rows go
-//! to `<stem>.extract.parquet`.
-//!
-//! Per library entry and run:
-//!
-//! * identified in the run (a donor run: a target PSM at PSM q-value within
-//!   the library's donor threshold): an `Identified` target fit with the
-//!   prior centred on the best donor PSM's RT and `s = max(w_prior(t), dt)`
-//!   (the run's own elution width there, floored at its MS1 scan spacing),
-//!   with its decoy probes ([`quant::decoys::probes`], same prior), plus a
-//!   `PseudoTransfer` target fit with the alignment prior computed without
-//!   this run's own observation. The best PSM of a run is not always taken
-//!   on the elution peak: an abundant peptide is fragmented again on its
-//!   tail, minutes after the apex, and that PSM can score best. The
-//!   identified fit, which stays within three elution widths of the PSM,
-//!   then measures the tail. So when the fit at the position the other runs
-//!   predict is a different peak (apexes further apart than the two fitted
-//!   widths together) with more than [`CONSENSUS_PEAK_FACTOR`] times the
-//!   amplitude of a positive identified fit, the identified row takes that
-//!   fit ([`prefer_consensus_peak`]; counted in the extract log). An
-//!   identified fit without signal, or a lower one at the predicted
-//!   position, changes nothing. Each decoy probe of the pair gets the same
-//!   chance: the decoy moved by the same offset is fitted too, and the decoy
-//!   row takes that fit by the same rule, so the identified targets and
-//!   their decoys are measured alike;
-//! * not identified: a `Transfer` target and its decoy probes, with the
-//!   alignment prior, when the [`TransferSelection`] keeps the pair (it
-//!   decides from the library alone, before any fit, and skips the target
-//!   and its decoy probes together);
-//! * an unaligned run gets its `Identified` rows (target and decoys) only (no
-//!   pseudo-transfers, no transfers); pairs without a prediction, and identified pairs whose
-//!   best PSM RT is not finite, are skipped and counted.
-//!
-//! An entry is fitted on the MS1 series of its FAIMS compensation voltage.
-//! An entry without a voltage, or any entry in a run without FAIMS, is fitted
-//! on the whole run; an entry whose voltage the FAIMS run lacks gets no rows
-//! there and is counted (never fitted on another voltage's series or on the
-//! mixed series). Only one copy of the run's MS1 is held at a time: the scans
-//! of a FAIMS run are moved into one series per voltage for the voltage
-//! entries' width scale, width-prior fits and rows; the split is dropped and
-//! the MS1 table read again for the whole-run entries' rows, which use the
-//! same width prior. A run with at most one voltage is never split.
-//!
-//! Run scales: every elution-time scale of the fits is derived from the run's
-//! own MS1 before any row is fitted (the extract log and the
-//! `andes.extract.run_scales` tag record them):
-//!
-//! * `dt`, the median spacing of the run's MS1 scans of one FAIMS voltage:
-//!   the floor of every RT prior width `s` and of the width scale;
-//! * `w_run`, the width scale: up to 500 identified pairs, spread evenly
-//!   over the library (identity decoys left out), are fitted with the width
-//!   free on `{0.5, 0.7, 1, 1.4, 2} * w` with `s = max(w, dt)`, and `w` becomes
-//!   the median fitted width of the usable fits (positive amplitude, LLR at
-//!   least 25), floored at `dt`. The rounds start at `w = 6 s` and stop when a
-//!   round moves `w` by less than 10 % (at most 6 rounds), so the result is
-//!   the run's own width, wherever it starts. With fewer than 20 usable fits
-//!   in a round, `w_run = max(6 s, dt)`.
-//!
-//! Width prior: the identified pairs (of the voltage series in a FAIMS run)
-//! are fitted with the width free on `{0.5, 0.7, 1, 1.4, 2} * w_run` and
-//! `s = max(w_run, dt)`; `w_prior(t)` is the fitted width through 20
-//! equal-count bins of fitted apex RT (median per bin, then a running median
-//! of 3 over the bins), interpolated linearly between the bin medians and held
-//! constant beyond them. With fewer than 20 usable fits, `w_prior = w_run`
-//! everywhere.
-//!
-//! Finalize: the transfer targets and decoys of every run go to the
-//! cross-validated transfer FDR of [`crate::transfer_fdr`] (features
-//! [`TRANSFER_FEATURES`], built by [`transfer_features`]); rows without
-//! evidence or with a non-finite feature take no part and get no q-value.
-//! The identified targets and their decoys go, separately, through the same
-//! machinery with their own models (features [`IDENTIFIED_FEATURES`], built
-//! by [`identified_features`]): their prior is centred on the PSM's RT, so
-//! their feature distribution is not the transfers', and the transfer
-//! q-values stay what they are without them. Each identified target gets the
-//! quality q-value `quant_q`. An accepted transfer gets `measurement_q`, the
-//! running mean, over its run's accepted transfers in ascending probability of
-//! a wrong measurement, of that probability (a model trained on the
-//! pseudo-transfers: see `quant_finalize`), and its `quant_q` is the larger of
-//! `transfer_q` and `measurement_q`; a transfer below the threshold keeps its
-//! `transfer_q`. `quant_q` is so the largest error estimate made for the row:
-//! a cut on it keeps a row only when each of its estimates passes the cut,
-//! and is not the error rate of the rows it keeps.
-//! With a quality threshold, an identified row above it (or without a
-//! q-value) is `identified_below_threshold`. Each
-//! pseudo-transfer is scored by the model of its precursor's fold, which never
-//! saw it, and placed against that fold's transfer scores. `<base>.mbr.parquet`
-//! gets one row per identified or transferred (precursor, run) target, and
-//! `<base>.mbr_validation.parquet` the pseudo-transfer acceptance rate, the
-//! wrong-peak rate (`|t0_pseudo - t0_identified| > w_identified`), the
-//! wrong-measurement rate (a wrong peak, or a fitted quantity off by more
-//! than a factor of 2 from the identified fit's; the peak alone where either
-//! fit has no positive quantity) and the
-//! accepted transfer counts of the pooled and per-family estimates. The
-//! acceptance rate is optimistic for real transfers: the alignment map was
-//! fitted with the pseudo-transfer's own run observation as an anchor, and
-//! only the consensus RT leaves it out.
-//!
-//! Reported quantity: one relative elution width per precursor. Its relative
-//! width `k` is the median, over its identified target rows with a fit of
-//! positive amplitude, of `width_ratio`: the fitted width over the width
-//! prior `w_prior(t)` of the row's run at the row's expected RT. A row with
-//! fitted width `w` reports `A * w' * sqrt(2 pi)` and
-//! `amplitude_se * w' * sqrt(2 pi)` with
-//! `w' = k * (w / width_ratio) * (width_ratio / k)^lambda_run`: the relative
-//! width times the width prior of the row's own run, aligned or not, moved
-//! the share `lambda_run` of the way (in log scale) to the row's own fitted
-//! width `w`; a transfer row keeps `lambda_run = 0` ([`row_width_weight`]).
-//! `lambda_run` in `[0, 1]` is learned per run from the data,
-//! without labels ([`run_width_weights`]): the normalisation reference cells
-//! of a run take the weight that makes them agree best with the same
-//! precursors in the other runs, so a run whose peaks are really narrower or
-//! wider than its width prior says keeps that change in its quantities, and a
-//! run whose width deviations are fit noise keeps the relative width alone. A
-//! row of a precursor without such a fit reports the extract's own
-//! `quantity` and `quantity_se`. The extract tables keep the per-run values.
-//!
-//! Whole isotope pattern: the fits use the first four isotopes of a
-//! precursor, so the values above are the area of those four. The reported
-//! `quantity` and `quantity_se` are these divided by the precursor's
-//! `isotope_share` (library table): the share of the whole pattern the four
-//! isotopes hold, from the same formula as the envelope. The extract tables,
-//! the fits, the model features and the normalisation offsets keep the
-//! four-isotope values.
-//!
-//! Trace area (`quant finalize --quant-trace-fraction F`, default 0.1; `--mbr`
-//! uses the default): the brightest share `F` of the precursors, ranked by the
-//! median amplitude
-//! signal-to-noise `A / amplitude_se` of their identified target fits,
-//! report the extract's template-free `trace_quantity` and
-//! `trace_quantity_se` in every run instead (a row whose trace area is not
-//! positive keeps the template quantity, decided per row). The choice is per
-//! precursor, so a precursor's runs are measured alike apart from such rows. `quant_q` and the transfer q-values
-//! do not use the reported quantity and are unchanged.
-//!
-//! Normalised quantity: `quantity_normalized` is the reported quantity with
-//! its run's offset at the row's apex RT removed ([`quant::normalize`]: a
-//! level per run and an RT-local term). The offsets are fitted on the
-//! identified targets with `quant_q <= 0.01` and a positive quantity; a run
-//! without enough of them reports null. `quantity` stays the measurement
-//! without the offset.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -166,96 +19,47 @@ use crate::transfer_fdr::{IDENTIFIED_FEATURES, TRANSFER_FEATURES};
 
 pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
 
-/// Elution width, seconds, at which the run's width-scale rounds start, and
-/// the width scale of a run with too few usable identified fits.
 const SEED_WIDTH_S: f64 = 6.0;
-/// Width grid of the width-scale and width-prior fits, as multiples of the
-/// current width scale.
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
-/// Most identified pairs fitted per round of the width-scale estimate.
 const SCALE_PAIRS: usize = 500;
-/// Most rounds of the width-scale estimate.
 const SCALE_MAX_ROUNDS: usize = 6;
-/// The width-scale estimate stops once a round changes it by less than this
-/// ratio.
 const SCALE_CONVERGED: f64 = 1.1;
-/// Equal-count RT bins of the width prior; also the fewest usable fits.
 const WIDTH_PRIOR_BINS: usize = 20;
-/// Smallest log-likelihood ratio of an identified fit that enters the width
-/// prior; fits below it are not used.
 const WIDTH_FIT_MIN_LLR: f64 = 25.0;
 
-/// What one run's extraction skipped, for the caller to log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ExtractCounts {
-    /// The run is unaligned: only its identified rows were produced.
     pub unaligned: bool,
-    /// Entries whose FAIMS voltage the run lacks (no rows).
     pub foreign_cv: usize,
-    /// Identified pairs whose best PSM RT is not finite (no identified and
-    /// no pseudo-transfer row).
     pub nonfinite_best_rt: usize,
-    /// Identified pairs without a prediction from the other runs (no
-    /// pseudo-transfer row).
     pub no_pseudo_prediction: usize,
-    /// Unidentified pairs without a prediction (no transfer rows).
     pub no_prediction: usize,
-    /// Identified pairs whose other donor runs are all in other alignment
-    /// components (no pseudo-transfer row; not in `no_pseudo_prediction`).
     pub pseudo_other_component: usize,
-    /// Unidentified pairs whose donor runs are all in other alignment
-    /// components (no transfer rows; not in `no_prediction`).
     pub other_component: usize,
-    /// Unidentified pairs with a prediction that the transfer selection
-    /// skips (no transfer rows).
     pub not_selected: usize,
-    /// Identified pairs measured on the peak at the position the other runs
-    /// predict instead of the one at their PSM ([`prefer_consensus_peak`]).
     pub consensus_peak: usize,
-    /// Decoy rows of identified pairs measured on their counterpart at that
-    /// position, under the same rule ([`prefer_consensus_peak`]).
     pub consensus_peak_decoys: usize,
-    /// Identified fits that set the run's width prior.
     pub width_fits: usize,
-    /// Fewer than the needed identified fits: the width prior is the run's
-    /// width scale everywhere.
     pub width_prior_fallback: bool,
-    /// The run's MS1 scan spacing and width scale.
     pub scales: RunScales,
 }
 
-/// The elution-time scales of one run, derived from its MS1 before any row is
-/// fitted (see the module docs).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct RunScales {
-    /// Median spacing of the MS1 scans of one FAIMS voltage, seconds; `None`
-    /// with fewer than two scans of any voltage.
     pub spacing_s: Option<f64>,
-    /// Width scale `w_run`, seconds.
     pub width_s: f64,
-    /// Usable fits of the last width-scale round.
     pub width_fits: usize,
-    /// Width-scale rounds run.
     pub rounds: usize,
-    /// Too few usable fits: `width_s` is [`SEED_WIDTH_S`] (floored at the
-    /// spacing).
     pub fallback: bool,
-    /// The run's learned ion-mobility scale, on a mobility-resolved run with
-    /// enough identified precursors that have a library mobility.
     pub mobility: Option<RunMobility>,
-    /// The run's learned claim windows (`None`: too few same-compound pairs,
-    /// so no claims).
     pub claim_windows: Option<claims::Windows>,
 }
 
 impl RunScales {
-    /// Floor of the RT prior width `s` and of the width scale, seconds: the
-    /// scan spacing (0 when unknown).
     fn floor_s(&self) -> f64 {
         self.spacing_s.unwrap_or(0.0)
     }
 
-    /// The `andes.extract.run_scales` tag value.
     pub(crate) fn describe(&self) -> String {
         let spacing = self
             .spacing_s
@@ -295,27 +99,14 @@ impl ExtractCounts {
     }
 }
 
-/// Which unidentified (precursor, run) pairs of an aligned run extract
-/// measures as transfers. It decides from the library alone, before any fit,
-/// and a skipped pair gets no rows at all: neither its target nor its decoy
-/// probes. The transfer FDR therefore sees the kept pairs exactly as without
-/// a selection (each with its full set of decoys), and an identity-decoy
-/// entry is selected by the same rule as a target entry, from its own donor
-/// runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TransferSelection {
-    /// Skip a pair with fewer other aligned donor runs than this fraction of
-    /// the library's aligned runs other than the acceptor, rounded up; 0
-    /// keeps every pair.
     pub min_donor_fraction: f64,
 }
 
-/// Default of [`TransferSelection::min_donor_fraction`]: every pair whose
-/// entry finalize can transfer is measured.
 pub(crate) const DEFAULT_MIN_DONOR_FRACTION: f64 = 0.0;
 
 impl TransferSelection {
-    /// Every pair with a prediction is measured.
     pub(crate) const OFF: TransferSelection = TransferSelection {
         min_donor_fraction: 0.0,
     };
@@ -324,8 +115,6 @@ impl TransferSelection {
         self.min_donor_fraction <= 0.0
     }
 
-    /// The fewest other aligned donor runs a pair needs in a library of
-    /// `aligned_runs` aligned runs.
     fn min_donors(&self, aligned_runs: usize) -> u16 {
         let others = aligned_runs.saturating_sub(1) as f64;
         (self.min_donor_fraction * others)
@@ -333,7 +122,6 @@ impl TransferSelection {
             .clamp(0.0, u16::MAX as f64) as u16
     }
 
-    /// One line for the extract table metadata and the log.
     pub(crate) fn describe(&self, aligned_runs: usize) -> String {
         format!(
             "min_donor_fraction={} ({} of {} other aligned runs)",
@@ -352,7 +140,6 @@ impl Default for TransferSelection {
     }
 }
 
-/// [`TransferSelection`] resolved for one library.
 #[derive(Debug, Clone, Copy)]
 struct PairGate {
     min_donors: u16,
@@ -366,22 +153,17 @@ impl PairGate {
         }
     }
 
-    /// True when the transfer of `e` with `other_donors` other aligned donor
-    /// runs is measured.
     fn keeps(&self, _e: &LibraryEntry, other_donors: u16) -> bool {
         other_donors >= self.min_donors
     }
 }
 
-/// The rows of one run, in library order then probe order, and the counts.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RunExtract {
     pub rows: Vec<ExtractRow>,
     pub counts: ExtractCounts,
 }
 
-/// One in-memory copy of the run's MS1 (the whole run or its split). In tests
-/// it counts the live copies of the calling thread.
 struct Held;
 
 impl Held {
@@ -399,7 +181,6 @@ impl Drop for Held {
     }
 }
 
-/// Per-thread counters of MS1 copies and MS1 table reads, for tests.
 #[cfg(test)]
 mod tracking {
     use std::cell::Cell;
@@ -429,26 +210,18 @@ mod tracking {
         LOADS.set(0);
     }
 
-    /// `(peak live copies, MS1 table reads)` since the last reset.
     pub(super) fn stats() -> (usize, usize) {
         (PEAK.get(), LOADS.get())
     }
 }
 
-/// Where an entry is fitted in one run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Group {
-    /// The whole run.
     Whole,
-    /// The series at `voltages[k]` (the run's split order).
     Series(usize),
-    /// Not at all: the FAIMS run lacks the entry's voltage.
     Foreign,
 }
 
-/// Per entry, where it is fitted in a run with FAIMS `voltages`. A run
-/// without FAIMS, and an entry without a voltage, use the whole run; a run
-/// with one voltage is fitted whole, and so is an entry at that voltage.
 fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Group> {
     entries
         .iter()
@@ -464,20 +237,14 @@ fn entry_groups(voltages: &[f32], entries: &[LibraryEntry]) -> Vec<Group> {
         .collect()
 }
 
-/// `w_prior(t)` as `(RT, width)` knots, or the run's width scale when there
-/// are none; with the floor of an identified pair's RT prior width.
 #[derive(Debug, Clone, PartialEq)]
 struct WidthPrior {
     knots: Vec<(f64, f64)>,
-    /// `w_prior` without knots, seconds.
     default_s: f64,
-    /// Floor of an identified pair's `s`, seconds.
     floor_s: f64,
 }
 
 impl WidthPrior {
-    /// From fitted `(apex RT, width)` pairs; the run's width scale everywhere
-    /// with fewer than [`WIDTH_PRIOR_BINS`] of them.
     fn from_fits(mut fits: Vec<(f64, f64)>, scales: &RunScales) -> Self {
         let n = fits.len();
         let default_s = scales.width_s;
@@ -517,7 +284,6 @@ impl WidthPrior {
         self.knots.is_empty()
     }
 
-    /// `w_prior` at RT `t`.
     fn at(&self, t: f64) -> f64 {
         let k = &self.knots;
         let Some((first, last)) = k.first().zip(k.last()) else {
@@ -540,14 +306,11 @@ impl WidthPrior {
 }
 
 impl WidthPrior {
-    /// RT prior width `s` of an identified pair whose PSM is at `t`: the
-    /// elution width there, floored at the scan spacing.
     fn identified_s(&self, t: f64) -> f64 {
         self.at(t).max(self.floor_s)
     }
 }
 
-/// Median of a non-empty vector (mean of the middle two for an even length).
 pub(crate) fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(f64::total_cmp);
     let n = v.len();
@@ -558,7 +321,6 @@ pub(crate) fn median(mut v: Vec<f64>) -> f64 {
     }
 }
 
-/// The RT of `entry`'s best PSM in `run`, when the run identified it.
 fn identified_rt(entry: &LibraryEntry, run: u16) -> Option<f64> {
     entry
         .best_rt
@@ -567,8 +329,6 @@ fn identified_rt(entry: &LibraryEntry, run: u16) -> Option<f64> {
         .map(|&(_, rt)| rt)
 }
 
-/// Fits `jobs[k].1` on `series[jobs[k].0]`, in job order; one [`fit_many`]
-/// sweep per series.
 fn fit_on_series(
     series: &[&Ms1RunIndex],
     jobs: &[(usize, FitJob)],
@@ -588,8 +348,6 @@ fn fit_on_series(
     out
 }
 
-/// The entries among `ids` that the run identified at a finite RT, identity
-/// decoys left out, with that RT.
 fn identified_targets(ids: &[usize], run: u16, lib: &Library) -> Vec<(usize, f64)> {
     ids.iter()
         .filter_map(|&i| {
@@ -603,8 +361,6 @@ fn identified_targets(ids: &[usize], run: u16, lib: &Library) -> Vec<(usize, f64
         .collect()
 }
 
-/// The width-free fit job of an identified pair: prior centred on its PSM RT
-/// `rt` with width `s`, widths [`WIDTH_PRIOR_GRID`] times `scale`.
 fn width_job(
     lib: &Library,
     i: usize,
@@ -629,17 +385,10 @@ fn width_job(
     }
 }
 
-/// Whether a width-free fit enters the width scale and the width prior.
 fn usable_width_fit(ev: &Evidence) -> bool {
     ev.amplitude > 0.0 && ev.llr >= WIDTH_FIT_MIN_LLR
 }
 
-/// The run's width scale (see the module docs) from the identified pairs
-/// among the entries `ids`, each fitted on `series[series_of(id)]`, with
-/// `spacing_s` the run's MS1 scan spacing. Each round fits at most
-/// [`SCALE_PAIRS`] pairs, every k-th of the identified ones in library
-/// order, one at a time ([`fit_on_grid_gated`] gives the result [`fit_many`]
-/// would, without its sweep over the whole run).
 #[allow(clippy::too_many_arguments)]
 fn width_scale<F>(
     ids: &[usize],
@@ -700,10 +449,6 @@ where
     out
 }
 
-/// The usable width-free fits `(t0, w)` of the identified pairs among the
-/// entries `ids` (identity decoys left out), each fitted on
-/// `series[series_of(id)]` with widths [`WIDTH_PRIOR_GRID`] times the run's
-/// width scale and `s = max(w_run, dt)`.
 #[allow(clippy::too_many_arguments)]
 fn width_fits<F>(
     ids: &[usize],
@@ -733,8 +478,6 @@ where
 
 type EntryRows = (Vec<ExtractRow>, ExtractCounts);
 
-/// Fills `slots[id]` with the rows of each entry in `ids`, fitted on
-/// `series[series_of(id)]`.
 #[allow(clippy::too_many_arguments)]
 fn rows_into<F>(
     slots: &mut [Option<EntryRows>],
@@ -793,34 +536,14 @@ fn rows_into<F>(
     }
 }
 
-/// Amplitude of the fit at the position the other runs predict, as a
-/// multiple of the identified fit's, above which an identified pair is
-/// measured there (see the module docs). 2 is the factor beyond which two
-/// measurements of one cell count as different ([`crate::quant_finalize`],
-/// the wrong-measurement label).
 pub(crate) const CONSENSUS_PEAK_FACTOR: f64 = 2.0;
 
-/// Whether a row fitted as `own` is measured as `other` instead: `other` is
-/// another peak (the apexes lie further apart than the sum of the two
-/// fitted widths) with more than [`CONSENSUS_PEAK_FACTOR`] times the
-/// amplitude of a positive `own`.
 fn takes_other_peak(own: &Evidence, other: &Evidence) -> bool {
     (other.t0 - own.t0).abs() > own.w + other.w
         && own.amplitude > 0.0
         && other.amplitude > CONSENSUS_PEAK_FACTOR * own.amplitude
 }
 
-/// Gives the identified target row of one entry's `rows` the fit of its
-/// pseudo-transfer row when that fit is another, larger peak
-/// ([`takes_other_peak`]). The PSM of such a pair was taken off the elution
-/// apex (mostly on the tail of an abundant peptide), where the identified
-/// fit, held near the PSM, reads a fraction of the peak the other runs
-/// measure. Each decoy row of the identified pair gets the same chance:
-/// `counterparts` holds, per decoy row index, the fit of the same decoy moved
-/// to the pseudo-transfer's position, and the decoy row takes it by the same
-/// rule, so the identified targets and their decoys are measured alike.
-/// Returns whether the target moved and how many decoy rows did. The
-/// pseudo-transfer row keeps its fit.
 fn prefer_consensus_peak(
     rows: &mut [ExtractRow],
     counterparts: &[(usize, Option<Evidence>)],
@@ -851,14 +574,8 @@ fn prefer_consensus_peak(
     (true, decoys)
 }
 
-/// The planned rows of one entry (each with its probe), the counterpart
-/// probes of its identified decoy rows (row index, probe; see
-/// [`prefer_consensus_peak`]), and the counts.
 type PlannedRows = (Vec<(ExtractRow, Probe)>, Vec<(usize, Probe)>, ExtractCounts);
 
-/// The rows of one library entry in `run`, each with the probe to fit on
-/// `ms1` and no evidence yet. An unaligned run gets the identified row only;
-/// a transfer that `gate` skips gets no rows.
 #[allow(clippy::too_many_arguments)]
 fn entry_rows(
     e: &LibraryEntry,
@@ -919,8 +636,6 @@ fn entry_rows(
             }
             match lib.alignment.predict_excluding(e.precursor, run) {
                 Some((t_hat, s)) => {
-                    // Each decoy of the identified pair, moved by the offset
-                    // that takes the PSM's RT to the predicted one.
                     let (lo, hi) = run_rt();
                     for (k, (r, p)) in rows.iter().enumerate() {
                         if r.kind == Hypothesis::Target {
@@ -960,8 +675,6 @@ fn entry_rows(
         None => match lib.alignment.predict(e.precursor, run) {
             Some(_) if !gate.keeps(e, other_donors) => counts.not_selected += 1,
             Some((t_hat, s)) => {
-                // The target and its mass-shift decoy; the RT decoys are
-                // random-RT decoys drawn from the run's predicted RTs.
                 let w = wp.at(t_hat);
                 for probe in probes(e.precursor, run, meta.mz, charge, t_hat, s, w, run_rt())
                     .into_iter()
@@ -994,14 +707,8 @@ fn entry_rows(
     (rows, counterparts, counts)
 }
 
-/// Most identified precursors the run's mobility scale is learned from.
 const MOBILITY_PAIRS: usize = 2000;
 
-/// The run's learned ion-mobility scale ([`quant::mobility::learn`]) from up
-/// to [`MOBILITY_PAIRS`] of its identified target entries with a library
-/// mobility, spread evenly over the library, each searched within
-/// [`SEED_WIDTH_S`] of its best PSM's retention time; `None` on a run that
-/// is not mobility-resolved.
 fn run_mobility(
     run: u16,
     lib: &Library,
@@ -1031,14 +738,6 @@ fn run_mobility(
     quant::mobility::learn(ms1, &obs, ep.tol_ppm, SEED_WIDTH_S)
 }
 
-/// Measures every library precursor in run `run` from its MS1 table: its
-/// identified pairs, and the transfers that `selection` keeps.
-///
-/// An unaligned run yields its identified rows only and `counts.unaligned`.
-/// Errors: `run` outside the library's runs, an entry whose precursor has no
-/// metadata, or an unreadable MS1 table (the message names the file).
-/// The predicted RTs of `lib`'s precursors in `run`, by neutral mass: where
-/// the run's random-RT decoys are drawn from.
 fn rt_pool(lib: &Library, run: u16) -> quant::decoys::RtPool {
     quant::decoys::RtPool::new(
         lib.entries
@@ -1178,24 +877,14 @@ pub(crate) fn extract_run(
     Ok(finish(slots, width_fit_count, &wp, scales))
 }
 
-/// MS2 evidence of one run's transfer and pseudo-transfer rows, by role and
-/// decoy family, for the extract log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Ms2Counts {
-    /// Per role (0 transfer, 1 pseudo-transfer) and family (0 target, 1 mass
-    /// shift, 2 RT shift): rows with MS2 evidence, of them with at least one
-    /// scan in the window, and of them supported
-    /// ([`quant::ms2::Ms2Evidence::supports`]).
     pub rows: [[usize; 3]; 2],
     pub with_scan: [[usize; 3]; 2],
     pub supported: [[usize; 3]; 2],
-    /// Transfer and pseudo-transfer rows with a fit whose entry has no
-    /// library spectrum (no MS2 evidence).
     pub no_spectrum: usize,
 }
 
-/// The m/z of a probe of precursor `meta` with hypothesis `kind`, as
-/// [`quant::decoys::probes`] builds it.
 fn probe_mz(meta: &quant::library::PrecursorMeta, kind: Hypothesis) -> f64 {
     match kind {
         Hypothesis::MassShiftDecoy(n) => {
@@ -1205,15 +894,6 @@ fn probe_mz(meta: &quant::library::PrecursorMeta, kind: Hypothesis) -> f64 {
     }
 }
 
-/// Sets the MS2 evidence of every transfer and pseudo-transfer row with a
-/// fit: the best scan of run `ms2` for the entry's library spectrum
-/// (`spectra`, per precursor id) among the scans isolating the row's probe
-/// m/z within its fitted elution window, at the entry's FAIMS voltage. A
-/// decoy row is scored with its target's spectrum on its own m/z and window.
-/// A pseudo-transfer leaves out the scans of its run's donor PSMs
-/// (`donor_scans`, per precursor id), whose identifications make it a
-/// pseudo-transfer; a transfer has none in its run. Rows of entries without
-/// a spectrum, identified rows and rows without a fit keep `None`.
 pub(crate) fn attach_ms2(
     rows: &mut [ExtractRow],
     lib: &Library,
@@ -1272,28 +952,17 @@ pub(crate) fn attach_ms2(
     c
 }
 
-/// What [`attach_shared`] did, for the extract log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SharedCounts {
-    /// Transfer rows with a claimant and a fit.
     pub claimed: usize,
-    /// Of them: covered by at least one MS2 scan, and scored against a
-    /// claimant with distinguishing ions on both sides.
     pub with_scan: usize,
     pub scored: usize,
 }
 
-/// Peptidoform of a `"<peptidoform>/<charge>"` library key.
 fn peptidoform_of(key: &str) -> &str {
     key.rsplit_once('/').map_or(key, |(p, _)| p)
 }
 
-/// Sets the MS2 distinguishing-ion evidence ([`quant::shared`]) of every
-/// transfer target row of run `run` that has a claimant and a fit: the
-/// scans of `ms2` covering its feature, identified through the donor PSMs of
-/// the run (`donor_scans`, per precursor id), against the fragment ladders
-/// of the row's precursor and its claimants (`mods` resolves modification
-/// accessions). Other rows keep `None`.
 pub(crate) fn attach_shared(
     rows: &mut [ExtractRow],
     lib: &Library,
@@ -1380,16 +1049,12 @@ pub(crate) fn attach_shared(
     c
 }
 
-/// `d run RT / d consensus RT` of run `run`'s map at run RT `rt`; `None` for
-/// an unaligned run or a slope that is not finite and positive.
 pub(crate) fn local_slope(maps: &[Option<RunMap>], run: u16, rt: f64) -> Option<f64> {
     let map = maps.get(run as usize)?.as_ref()?;
     let slope = map.slope_at(map.invert(rt));
     (slope.is_finite() && slope > 0.0).then_some(slope)
 }
 
-/// Per precursor, the relative width `k` of the module docs, from the
-/// identified target rows among `rows`.
 #[cfg(test)]
 pub(crate) fn relative_widths<'a>(
     rows: impl IntoIterator<Item = &'a ExtractRow>,
@@ -1403,12 +1068,6 @@ pub(crate) fn relative_widths<'a>(
     ratios.into_iter().map(|(p, k)| (p, median(k))).collect()
 }
 
-/// The log2 deviation `log2(width_ratio / k)` of evidence `e` from the
-/// precursor's relative width `k = relative_width`, which the run width
-/// weight multiplies in [`reported_quantity`]; `None` when that quantity does
-/// not depend on the weight (a trace area with `trace`, no relative width,
-/// or no finite positive width prior `w / width_ratio`), and 0 when the
-/// deviation is not finite.
 pub(crate) fn width_deviation(
     e: &Evidence,
     relative_width: Option<f64>,
@@ -1423,15 +1082,6 @@ pub(crate) fn width_deviation(
     Some(if d.is_finite() { d } else { 0.0 })
 }
 
-/// `(quantity, quantity_se)` of evidence `e`: with `trace`, its trace area
-/// when that is positive; else at the width
-/// `k * w_prior * 2^(own_weight * d)`: the precursor's relative width
-/// `k = relative_width` times the width prior of the row's run, `w_prior =
-/// w / width_ratio`, moved by the run width weight `own_weight` (in `[0, 1]`,
-/// [`run_width_weights`]) along the row's [`width_deviation`] `d`, so that
-/// weight 0 is `k * w_prior` and weight 1 the row's own fitted width `w`; or
-/// the extract's own values without a relative width or without a finite
-/// positive width prior.
 pub(crate) fn reported_quantity(
     e: &Evidence,
     relative_width: Option<f64>,
@@ -1451,9 +1101,6 @@ pub(crate) fn reported_quantity(
     }
 }
 
-/// A normalisation reference cell's part in [`run_width_weights`]: its
-/// precursor and run, the log2 of its [`reported_quantity`] at weight 0,
-/// and its [`width_deviation`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WidthCell {
     pub precursor: u32,
@@ -1462,20 +1109,12 @@ pub(crate) struct WidthCell {
     pub deviation: f64,
 }
 
-/// The candidate run width weights are `0, 1/STEPS, ..., 1`.
 const WIDTH_WEIGHT_STEPS: u32 = 10;
-/// Fewest cells of a precursor for its cells to have a leave-one-out mean.
 const WIDTH_WEIGHT_MIN_PRECURSOR_CELLS: usize = 4;
-/// Fewest such cells of a run for its weight to be learned; a run with fewer
-/// keeps weight 0.
 const WIDTH_WEIGHT_MIN_RUN_CELLS: usize = 11;
-/// Passes over the runs.
 const WIDTH_WEIGHT_PASSES: usize = 2;
-/// A larger weight replaces a smaller one only when it lowers the run's
-/// spread (log2) by more than this.
 const WIDTH_WEIGHT_TOLERANCE: f64 = 1e-6;
 
-/// Median absolute deviation from the median of `v` (reordered).
 fn median_absolute_deviation(v: &mut [f64]) -> f64 {
     let mid = |v: &mut [f64]| {
         v.sort_unstable_by(f64::total_cmp);
@@ -1493,27 +1132,12 @@ fn median_absolute_deviation(v: &mut [f64]) -> f64 {
     mid(v)
 }
 
-/// Per run (`runs` of them, by run index), the weight of [`reported_quantity`]
-/// learned from `cells` (one per precursor and run), without labels. A
-/// cell's residual is its log2 quantity at its run's weight minus the mean of
-/// its precursor's other cells (precursors with at least
-/// [`WIDTH_WEIGHT_MIN_PRECURSOR_CELLS`] cells); a run's spread is the median
-/// absolute deviation of its cells' residuals, which ignores the run's own
-/// offset (the normalisation's part). Run by run, with the other runs at
-/// their current weights, the weight of the smallest spread among
-/// `0, 0.1, ..., 1` is taken (the smallest weight on a tie), in
-/// [`WIDTH_WEIGHT_PASSES`] passes; a run's own weight does not move the means
-/// its residuals are taken against, so each candidate costs one pass over
-/// the run's cells. A run with fewer than [`WIDTH_WEIGHT_MIN_RUN_CELLS`] such
-/// cells keeps 0, the precursor's relative width alone.
 pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
     let mut weights = vec![0.0; runs];
     let mut order: Vec<usize> = (0..cells.len())
         .filter(|&i| (cells[i].run as usize) < runs)
         .collect();
     order.sort_by_key(|&i| (cells[i].precursor, cells[i].run));
-    // Per cell its precursor's group; the group sizes and sums of the cells'
-    // log2 quantities at the current weights.
     let mut group = vec![usize::MAX; cells.len()];
     let (mut size, mut sum) = (Vec::new(), Vec::new());
     for g in order.chunk_by(|&a, &b| cells[a].precursor == cells[b].precursor) {
@@ -1539,7 +1163,6 @@ pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
                 continue;
             }
             let current = weights[run];
-            // Residual at weight 0: the cell minus its precursor's other cells.
             base.clear();
             base.extend(members.iter().map(|&i| {
                 let (c, g) = (&cells[i], group[i]);
@@ -1569,8 +1192,6 @@ pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
     weights
 }
 
-/// A one-line description of run width weights `weights`: how many runs took
-/// each weight.
 pub(crate) fn describe_width_weights(weights: &[f64]) -> String {
     let mut counts = [0usize; WIDTH_WEIGHT_STEPS as usize + 1];
     for &w in weights {
@@ -1585,11 +1206,6 @@ pub(crate) fn describe_width_weights(weights: &[f64]) -> String {
         .join(", ")
 }
 
-/// The width weight of row `r` at run width weights `weights`: its run's
-/// weight for an identified row, 0 for any other. A transfer's fitted width
-/// is not confirmed by an identification of the peak, and transfers of low
-/// abundance fit narrower peaks than their precursor's relative width, so a
-/// transfer keeps the relative width.
 pub(crate) fn row_width_weight(r: &ExtractRow, weights: &[f64]) -> f64 {
     if r.role == Role::Identified {
         weights.get(r.run as usize).copied().unwrap_or(0.0)
@@ -1598,9 +1214,6 @@ pub(crate) fn row_width_weight(r: &ExtractRow, weights: &[f64]) -> f64 {
     }
 }
 
-/// The normalisation reference cells of `cells` (each with its
-/// [`width_deviation`]) at the run width weights learned from them
-/// ([`run_width_weights`], `runs` runs), and the weights.
 pub(crate) fn weigh_widths(
     cells: Vec<(NormCell, Option<f64>)>,
     runs: usize,
@@ -1629,16 +1242,11 @@ pub(crate) fn weigh_widths(
     (cells, weights)
 }
 
-/// `(quantity, quantity_se)` of the whole isotope pattern, from the pair
-/// measured on the library envelope, whose isotopes hold `share` of it.
 pub(crate) fn whole_pattern((quantity, se): (f64, f64), share: f32) -> (f64, f64) {
     let share = f64::from(share);
     (quantity / share, se / share)
 }
 
-/// `amplitude / amplitude_se` of a fit. NaN when the standard error is not
-/// positive (zero, negative or NaN), so a row with such a fit gets no
-/// features; 0 with an infinite standard error (a fit without information).
 pub(crate) fn amplitude_snr(e: &Evidence) -> f64 {
     if e.amplitude_se > 0.0 {
         e.amplitude / e.amplitude_se
@@ -1647,33 +1255,22 @@ pub(crate) fn amplitude_snr(e: &Evidence) -> f64 {
     }
 }
 
-/// Shape features of a row without a donor reference: no width or tailing
-/// difference, and an isotope cosine of -1 (below any real cosine).
 pub(crate) const NO_SHAPE: [f64; 3] = [0.0, 0.0, -1.0];
 
-/// The peak shapes of every precursor's identified fits, the donor reference
-/// of the transfer shape features: per precursor, `(run, width on the
-/// consensus scale, tailing, isotope profile)` of its identified targets in
-/// aligned runs with a positive amplitude.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DonorShapes {
     fits: HashMap<u32, Vec<DonorFit>>,
 }
 
-/// One identified fit: run, width on the consensus scale,
-/// tailing and isotope profile.
 pub(crate) type DonorFit = (u16, f64, f64, [f64; 4]);
 
-/// Isotope heights clamped at 0 and scaled to sum 1; `None` when all are 0
-/// or not finite.
 pub(crate) fn iso_profile(h: &[f64; 4]) -> Option<[f64; 4]> {
     let c = h.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
     let sum: f64 = c.iter().sum();
     (sum > 0.0).then(|| c.map(|v| v / sum))
 }
 
-/// `a . b / (|a| |b|)`; -1 when either is zero.
 pub(crate) fn cosine(a: &[f64; 4], b: &[f64; 4]) -> f64 {
     let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f64>().sqrt();
@@ -1685,10 +1282,6 @@ pub(crate) fn cosine(a: &[f64; 4], b: &[f64; 4]) -> f64 {
     }
 }
 
-/// The donor fit of an identified target row: run, width on the consensus
-/// scale, tailing and isotope profile; `None` for any other row, or without
-/// a positive amplitude, a finite positive width, a finite tailing, the
-/// run's map or an isotope profile.
 pub(crate) fn donor_fit(r: &ExtractRow, maps: &[Option<RunMap>]) -> Option<DonorFit> {
     if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
         return None;
@@ -1702,9 +1295,6 @@ pub(crate) fn donor_fit(r: &ExtractRow, maps: &[Option<RunMap>]) -> Option<Donor
     Some((r.run, e.w / slope, e.tailing, iso))
 }
 
-/// The `width_ratio` of an identified target row, the input of the relative
-/// width `k`; `None` for any other row, or without a positive amplitude, a
-/// finite positive width or a finite positive ratio.
 pub(crate) fn relative_fit_width(r: &ExtractRow) -> Option<f64> {
     if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
         return None;
@@ -1716,7 +1306,6 @@ pub(crate) fn relative_fit_width(r: &ExtractRow) -> Option<f64> {
 
 #[cfg(test)]
 impl DonorShapes {
-    /// From the identified target rows among `rows`.
     pub(crate) fn from_rows<'a>(
         rows: impl IntoIterator<Item = &'a ExtractRow>,
         maps: &[Option<RunMap>],
@@ -1731,14 +1320,7 @@ impl DonorShapes {
     }
 }
 
-/// The donor reference of the transfer shape features.
 pub(crate) trait ShapeReference {
-    /// `[log width ratio, tailing difference, isotope cosine]` of `row`'s fit
-    /// against the median of its precursor's identified fits in the other
-    /// runs (the row's own run left out, so a pseudo-transfer is not
-    /// compared with the identification it shadows): the width on the
-    /// consensus scale, the tailing and the isotope profile. [`NO_SHAPE`]
-    /// without a reference, a positive amplitude or the run's map.
     fn features(&self, row: &ExtractRow, maps: &[Option<RunMap>]) -> [f64; 3];
 }
 
@@ -1771,18 +1353,6 @@ impl ShapeReference for DonorShapes {
     }
 }
 
-/// The transfer FDR features of a row, in [`TRANSFER_FEATURES`] order, with
-/// `neighbour_rate` the share of the run's most similar runs that identified
-/// the precursor ([`crate::quant_finalize::EntryIndex::neighbour_rate`]);
-/// `None` without evidence or with a non-finite value. The last three
-/// compare the row's peak shape with its precursor's identified fits in the
-/// other runs ([`DonorShapes::features`]): width, tailing and isotope
-/// ratios, none of them a quantity. The MS2 evidence is
-/// not a feature: MS2 support shows that the peptide was isolated, not that
-/// the quantified MS1 peak is its peak, and the decoys cannot imitate a
-/// transfer of the right peptide on the wrong peak (with MS2 features the
-/// accepted wrong-peak rate rose from 1.0 % to 3.6 % on ProteoBench). It only
-/// labels accepted transfers `transfer_ms2`.
 pub(crate) fn transfer_features(
     row: &ExtractRow,
     shapes: &impl ShapeReference,
@@ -1818,9 +1388,6 @@ pub(crate) fn transfer_features(
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// The identified-row quality features of a row, in [`IDENTIFIED_FEATURES`]
-/// order: the fit evidence only (no donor count, library q-value or other
-/// run's measurement); `None` without evidence or with a non-finite value.
 pub(crate) fn identified_features(row: &ExtractRow) -> Option<Vec<f32>> {
     let e = row.evidence.as_ref()?;
     let snr = amplitude_snr(e);
@@ -1842,7 +1409,6 @@ pub(crate) fn identified_features(row: &ExtractRow) -> Option<Vec<f32>> {
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// The decoy family of a hypothesis: 0 target, 1 mass shift, 2 RT shift.
 pub(crate) fn family(kind: Hypothesis) -> u8 {
     match kind {
         Hypothesis::Target => 0,
@@ -1851,7 +1417,6 @@ pub(crate) fn family(kind: Hypothesis) -> u8 {
     }
 }
 
-/// `<base>.mbr.parquet` and `<base>.mbr_validation.parquet`.
 pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     let with = |suffix: &str| {
         let mut s = base.as_os_str().to_owned();
@@ -1861,9 +1426,6 @@ pub(crate) fn mbr_paths(base: &Path) -> (PathBuf, PathBuf) {
     (with(".mbr.parquet"), with(".mbr_validation.parquet"))
 }
 
-/// Sets the same-run claim of every fitted transfer target of `rows`: the
-/// other fitted identified or transferred targets of the run on the same MS1
-/// feature (see [`claims`]).
 fn assign_claims(rows: &mut [ExtractRow], lib: &Library) -> Option<claims::Windows> {
     let mut probes = Vec::new();
     let mut transfers = Vec::new();
@@ -1942,11 +1504,8 @@ mod tests {
     const CHARGE: u8 = 2;
     const WIDTH: f64 = 4.2;
     const AMPLITUDE: f64 = 1e6;
-    /// Precursors 0..BOTH are identified in runs 0 and 1.
     const BOTH: u32 = 30;
-    /// Identified in run 0 only.
     const ONLY_RUN0: u32 = 30;
-    /// Identified in run 1 only.
     const ONLY_RUN1: u32 = 31;
     const N_PREC: u32 = 32;
     const N_RUNS: usize = 3;
@@ -1971,23 +1530,12 @@ mod tests {
         }
     }
 
-    /// MS1 scans every second with dense random centroids and every
-    /// precursor's isotope pattern at its apex in `run`. With `faims`, scans
-    /// alternate between two voltages and precursor `p` elutes only in the
-    /// scans at `FAIMS_CVS[p % 2]`.
-    /// Precursors in `silent` give no signal in `run`.
     fn run_scans(run: u16, faims: bool, silent: &dyn Fn(u32) -> bool) -> Vec<Ms1Scan> {
         run_scans_shaped(run, faims, silent, WIDTH, 1.0, 0.0)
     }
 
-    /// Seconds between a precursor's apex and its echo in
-    /// [`run_scans_shaped`].
     const ECHO_AFTER: f64 = 19.0;
 
-    /// [`run_scans`] with elution width `width`, one scan every `step`
-    /// seconds, and, when `echo > 0`, a second peak of every precursor's
-    /// pattern [`ECHO_AFTER`] seconds after its apex at `echo` times its
-    /// amplitude (another species at the same m/z).
     fn run_scans_shaped(
         run: u16,
         faims: bool,
@@ -2038,20 +1586,12 @@ mod tests {
         ms1_tables: Vec<PathBuf>,
     }
 
-    /// Three runs: precursors 0..30 identified in runs 0 and 1, 30 only in
-    /// run 0, 31 only in run 1; run 2 identifies precursor 0 only and is
-    /// unaligned. Run 1 uses FAIMS when `faims`.
     fn fixture(faims: bool) -> Fixture {
         fixture_with(faims, &|_| false, &|_| false)
     }
 
-    /// The PSM q-value threshold of the donor PSMs.
     const DONOR_Q: f64 = 0.01;
 
-    /// [`fixture`] where the precursors in `silent_in_run1` give no MS1
-    /// signal in run 1 (they stay identified there), and the run-1 PSMs of
-    /// the precursors in `weak_in_run1` have a PSM q-value above
-    /// [`DONOR_Q`].
     fn fixture_with(
         faims: bool,
         silent_in_run1: &dyn Fn(u32) -> bool,
@@ -2060,8 +1600,6 @@ mod tests {
         fixture_decoys(faims, silent_in_run1, weak_in_run1, &|_| false)
     }
 
-    /// [`fixture_with`] where the precursors in `decoy` are decoy
-    /// precursors: their PSMs are decoy PSMs, so they are identity decoys.
     fn fixture_decoys(
         faims: bool,
         silent_in_run1: &dyn Fn(u32) -> bool,
@@ -2073,8 +1611,6 @@ mod tests {
         })
     }
 
-    /// [`fixture_decoys`] with the PSM of precursor `p` in run `run` at
-    /// `psm_rt(p, run)`.
     fn fixture_psm_rt(
         faims: bool,
         silent_in_run1: &dyn Fn(u32) -> bool,
@@ -2143,7 +1679,6 @@ mod tests {
         EvidenceParams::default()
     }
 
-    /// [`extract_run`] measuring every transfer pair.
     fn extract_all(
         run: u16,
         ms1_table: &Path,
@@ -2171,7 +1706,6 @@ mod tests {
             assert_eq!(rows.len(), 4, "precursor {p}: {rows:?}");
             let (id, pseudo) = (rows[0], rows[3]);
             assert_eq!((id.role, id.kind), (Role::Identified, Hypothesis::Target));
-            // The identified target's decoys follow it, with its role.
             assert_eq!(rows[1].role, Role::Identified);
             assert!(matches!(rows[1].kind, Hypothesis::MassShiftDecoy(_)));
             assert_eq!(
@@ -2191,7 +1725,6 @@ mod tests {
                 (pseudo.role, pseudo.kind),
                 (Role::PseudoTransfer, Hypothesis::Target)
             );
-            // Precursor 0's donor run 2 is unaligned and not counted.
             assert_eq!((id.n_donor_runs, pseudo.n_donor_runs), (2, 1));
             assert_eq!((id.run, pseudo.run), (1, 1));
             for r in [id, pseudo] {
@@ -2201,7 +1734,6 @@ mod tests {
                 assert!((e.amplitude / AMPLITUDE - 1.0).abs() < 0.1, "{e:?}");
             }
         }
-        // Seen only in run 1: no other run predicts it.
         let rows = rows_of(&out.rows, ONLY_RUN1);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.role == Role::Identified));
@@ -2229,7 +1761,6 @@ mod tests {
         assert_eq!(id.len(), 3, "{rows:?}");
         let rt = identified_rt(entry, 1).unwrap();
         let w = wp.at(rt);
-        // Exactly the probes a transfer gets, with the identified prior.
         let want = probes(
             4,
             1,
@@ -2247,7 +1778,6 @@ mod tests {
         assert_eq!((target.t_hat, target.mz), (rt, mz_of(4)));
         for (row, probe) in &id {
             assert_eq!(row.kind, probe.kind);
-            // Same search breadth for target and decoys.
             assert_eq!((probe.s, probe.w_prior), (target.s, target.w_prior));
         }
         let mass = got[1];
@@ -2264,8 +1794,6 @@ mod tests {
 
     #[test]
     fn identity_decoys_are_measured_as_targets() {
-        // Precursor ONLY_RUN0 as a decoy precursor: its decoy PSM in run 0
-        // makes it an identity decoy on the same real MS1 feature.
         let target = fixture(false);
         let decoy = fixture_decoys(false, &|_| false, &|_| false, &|p| p == ONLY_RUN0);
         let e = decoy
@@ -2276,7 +1804,6 @@ mod tests {
             .unwrap();
         assert!(e.identity_decoy);
         assert_eq!(e.donors, vec![0]);
-        // The decoy moves every entry gate q-value; nothing else differs.
         let same = |rows: Vec<&ExtractRow>| -> Vec<ExtractRow> {
             rows.into_iter()
                 .map(|r| ExtractRow {
@@ -2296,8 +1823,6 @@ mod tests {
             let b =
                 extract_all(run, &decoy.ms1_tables[run as usize], &decoy.lib, &params()).unwrap();
             let rows = rows_of(&b.rows, ONLY_RUN0);
-            // Identified in run 0 (target and decoy probes), a transfer with
-            // its decoys in run 1: the target entry's rows, fitted alike.
             if run == 0 {
                 assert_eq!(rows.len(), 3, "run {run}: {rows:?}");
             } else {
@@ -2315,7 +1840,6 @@ mod tests {
                 assert_eq!(same(rows_of(&a.rows, ONLY_RUN0)), same(rows));
                 assert_eq!(same(a.rows.iter().collect()), same(b.rows.iter().collect()));
             } else {
-                // The width prior of run 0 leaves the identity decoy out.
                 assert_eq!(a.counts.width_fits, b.counts.width_fits + 1);
             }
         }
@@ -2337,7 +1861,6 @@ mod tests {
             let e = d.evidence.as_ref().unwrap();
             assert!(e.llr < target.llr / 10.0, "{d:?}");
         }
-        // The run-1-only precursor is a transfer into run 0.
         let out0 = extract_all(0, &fx.ms1_tables[0], &fx.lib, &params()).unwrap();
         let rows = rows_of(&out0.rows, ONLY_RUN1);
         assert_transfer_layout(&rows);
@@ -2352,9 +1875,6 @@ mod tests {
         assert!(rows.iter().all(|r| r.library_q == lq));
     }
 
-    /// The rows of one transfer pair: the target, its mass-shift decoy, then
-    /// up to `RANDOM_RT_DECOYS` random-RT decoys (fewer when the run's RT pool
-    /// has fewer candidates), and no RT-shift decoy.
     fn assert_transfer_layout(rows: &[&ExtractRow]) {
         assert!(rows.len() >= 2, "{rows:?}");
         assert!(rows.len() <= 2 + quant::decoys::RANDOM_RT_DECOYS, "{rows:?}");
@@ -2368,14 +1888,12 @@ mod tests {
         );
     }
 
-    /// `lib` with the entry of precursor `p` changed by `f`.
     fn with_entry(lib: &Library, p: u32, f: impl Fn(&mut LibraryEntry)) -> Library {
         let mut lib = lib.clone();
         f(lib.entries.iter_mut().find(|e| e.precursor == p).unwrap());
         lib
     }
 
-    /// The rows of `all` without the transfer rows of the pairs in `skipped`.
     fn without(all: &[ExtractRow], skipped: &[(u32, u16)]) -> Vec<ExtractRow> {
         all.iter()
             .filter(|r| !(r.role == Role::Transfer && skipped.contains(&(r.precursor, r.run))))
@@ -2390,8 +1908,6 @@ mod tests {
     #[test]
     fn a_marginal_best_donor_psm_does_not_skip_the_transfer() {
         let fx = fixture(false);
-        // The donor PSM's PEP is a transfer feature in finalize, not a gate:
-        // the transfer is measured as with a confident donor.
         let lib = with_entry(&fx.lib, ONLY_RUN0, |e| e.donor_psm.q = 0.002);
         let all = extract_all(1, &fx.ms1_tables[1], &lib, &params()).unwrap();
         let off = TransferSelection { min_donor_fraction: 0.0 };
@@ -2403,8 +1919,6 @@ mod tests {
     #[test]
     fn selection_skips_transfers_with_too_few_donor_runs() {
         let fx = fixture(false);
-        // Precursor ONLY_RUN1 keeps its alignment observation in run 1 (so
-        // run 0 still has a prediction) but has no donor run left.
         let lib = with_entry(&fx.lib, ONLY_RUN1, |e| e.donors.clear());
         let all = extract_all(0, &fx.ms1_tables[0], &lib, &params()).unwrap();
         assert_transfer_layout(&rows_of(&all.rows, ONLY_RUN1));
@@ -2440,8 +1954,6 @@ mod tests {
 
     #[test]
     fn transfers_stay_inside_an_alignment_component() {
-        // Runs 0/1 share precursors 0..60, runs 2/3 share 60..120; precursor
-        // 120 is identified in run 0 only, 121 in runs 0 and 2.
         let dir = tempfile::tempdir().unwrap();
         let n = 122u32;
         let meta: Vec<PrecursorMeta> = (0..n)
@@ -2485,19 +1997,15 @@ mod tests {
         let index = Ms1RunIndex::new(run_scans(3, false, &|_| false));
         write_ms1_table(&path, "run3", &index).unwrap();
         let out = extract_all(3, &path, &lib, &params()).unwrap();
-        // 0..60 and 120 come from the other component: no rows, counted.
         assert_eq!(out.counts.other_component, 61);
         assert_eq!(out.counts.no_prediction, 0);
         for p in (0..60).chain([120]) {
             assert!(rows_of(&out.rows, p).is_empty(), "{p}");
         }
-        // 121 is transferred from run 2, its donor in this component.
         let rows = rows_of(&out.rows, 121);
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|r| r.role == Role::Transfer), "{rows:?}");
         assert_eq!(rows[0].kind, Hypothesis::Target);
-        // Run 2 identifies 121, but its only other donor is in the other
-        // component: no pseudo-transfer.
         let path = dir.path().join("run2.ms1.parquet");
         let index = Ms1RunIndex::new(run_scans(2, false, &|_| false));
         write_ms1_table(&path, "run2", &index).unwrap();
@@ -2514,8 +2022,6 @@ mod tests {
         assert!(fx.lib.alignment.maps[2].is_none());
         let out = extract_all(2, &fx.ms1_tables[2], &fx.lib, &params()).unwrap();
         assert!(out.counts.unaligned);
-        // Run 2 identifies precursor 0 only: its identified row and decoys,
-        // and no pseudo-transfer or transfer rows.
         assert_eq!(out.rows.len(), 3, "{:?}", out.rows);
         assert!(out.rows.iter().all(|r| r.role == Role::Identified));
         let r = &out.rows[0];
@@ -2561,7 +2067,6 @@ mod tests {
 
     #[test]
     fn psms_above_the_donor_threshold_make_a_transfer() {
-        // Precursor 7's only PSM in run 1 is above the PSM q-value threshold.
         let fx = fixture_with(false, &|_| false, &|p| p == 7);
         let e = fx.lib.entries.iter().find(|e| e.precursor == 7).unwrap();
         assert_eq!(e.donors, vec![0]);
@@ -2579,7 +2084,6 @@ mod tests {
     #[test]
     fn foreign_voltage_entries_are_skipped_and_counted() {
         let mut fx = fixture(true);
-        // Run 1 is acquired at FAIMS_CVS only; run 0 has no FAIMS.
         for e in fx.lib.entries.iter_mut() {
             if e.precursor == ONLY_RUN0 || e.precursor == 3 {
                 e.faims_cv = Some(-30.0);
@@ -2661,9 +2165,6 @@ mod tests {
         );
     }
 
-    /// Run 1 of [`fixture`] with narrow peaks sampled every 0.25 s, and a
-    /// same-m/z peak five times larger [`ECHO_AFTER`] seconds after each
-    /// apex, written next to the fixture's tables.
     fn narrow_run(fx: &Fixture, width: f64) -> PathBuf {
         let path = fx._dir.path().join("narrow.ms1.parquet");
         let index = Ms1RunIndex::new(run_scans_shaped(1, false, &|_| false, width, 0.25, 5.0));
@@ -2671,9 +2172,6 @@ mod tests {
         path
     }
 
-    /// Run 1 of [`fixture`] with 1 s wide peaks sampled every 0.25 s and a
-    /// same-m/z peak of `echo` times the amplitude [`ECHO_AFTER`] seconds
-    /// after each apex, written next to the fixture's tables.
     fn echo_run(fx: &Fixture, echo: f64) -> PathBuf {
         let path = fx._dir.path().join("echo.ms1.parquet");
         let index = Ms1RunIndex::new(run_scans_shaped(1, false, &|_| false, 1.0, 0.25, echo));
@@ -2681,17 +2179,10 @@ mod tests {
         path
     }
 
-    /// Whether the run-1 PSM of precursor `p` sits on the echo in
-    /// [`fixture_late_psms`]: three precursors apart from each other and
-    /// from the ends of the gradient, so the run's map (30 anchors) still
-    /// follows the other PSMs.
     fn late(p: u32) -> bool {
         matches!(p, 8 | 15 | 22)
     }
 
-    /// [`fixture`] where the run-1 PSMs of the [`late`] precursors were
-    /// taken [`ECHO_AFTER`] seconds after the apex (run 0's PSMs are at the
-    /// apex).
     fn fixture_late_psms() -> Fixture {
         fixture_psm_rt(false, &|_| false, &|_| false, &|_| false, &|p, run| {
             let after = if run == 1 && late(p) { ECHO_AFTER } else { 0.0 };
@@ -2701,8 +2192,6 @@ mod tests {
 
     #[test]
     fn identified_pair_with_a_psm_on_the_tail_is_measured_on_the_elution_peak() {
-        // The run-1 PSMs of the late precursors sit on a peak of a twentieth
-        // of the amplitude, 19 s after the apex that run 0 predicts.
         let fx = fixture_late_psms();
         let path = echo_run(&fx, 0.05);
         let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
@@ -2718,7 +2207,6 @@ mod tests {
             if late(p) {
                 assert_eq!(id.evidence, pseudo.evidence, "precursor {p}");
             }
-            // The decoy probes keep the fits of the PSM-centred prior.
             for d in &rows[1..3] {
                 assert_eq!(d.role, Role::Identified);
                 assert_ne!(d.evidence, id.evidence);
@@ -2728,8 +2216,6 @@ mod tests {
 
     #[test]
     fn identified_pair_keeps_a_psm_peak_that_is_not_much_lower() {
-        // The same late PSMs on a peak of 0.6 times the amplitude at the
-        // predicted position: less than the factor, so the PSM's peak stays.
         let fx = fixture_late_psms();
         let path = echo_run(&fx, 0.6);
         let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
@@ -2751,9 +2237,6 @@ mod tests {
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let base: Vec<ExtractRow> = rows_of(&out.rows, 3).into_iter().cloned().collect();
         let fit = base[0].evidence.clone().unwrap();
-        // Rows whose identified fit is `id` and whose pseudo-transfer fit
-        // is `pseudo`, and whether the identified row then takes the
-        // pseudo-transfer's fit.
         let taken = |id: Option<&Evidence>, pseudo: Option<&Evidence>| {
             let mut rows = base.clone();
             rows[0].evidence = id.cloned();
@@ -2775,25 +2258,17 @@ mod tests {
             ..fit.clone()
         };
         let id = at(500.0, 1e4);
-        // Another peak (apexes more than the two widths apart), more than
-        // twice the amplitude.
         assert!(taken(Some(&id), Some(&at(440.0, 2.1e4))));
         assert!(taken(Some(&id), Some(&at(508.1, 1e6))));
-        // Twice the amplitude or less.
         assert!(!taken(Some(&id), Some(&at(440.0, 2e4))));
         assert!(!taken(Some(&id), Some(&at(440.0, 5e3))));
-        // The same peak: apexes within the two widths.
         assert!(!taken(Some(&id), Some(&at(508.0, 1e6))));
         assert!(!taken(Some(&id), Some(&at(500.0, 1e6))));
-        // No signal at the PSM, or a missing fit on either side.
         assert!(!taken(Some(&at(500.0, 0.0)), Some(&at(440.0, 1e6))));
         assert!(!taken(None, Some(&at(440.0, 1e6))));
         assert!(!taken(Some(&id), None));
-        // Without a pseudo-transfer row there is nothing to take.
         let mut rows = base[..3].to_vec();
         assert_eq!(prefer_consensus_peak(&mut rows, &[]), (false, 0));
-        // A decoy row of the identified pair takes its counterpart by the
-        // same rule, whether or not the target moves.
         let mut rows = base.clone();
         rows[0].evidence = Some(id.clone());
         rows[1].evidence = Some(id.clone());
@@ -2811,7 +2286,6 @@ mod tests {
 
     #[test]
     fn narrow_peaks_set_a_narrow_width_scale() {
-        // The rounds start at 6 s; the run's peaks are 1 s wide.
         let fx = fixture(false);
         let path = narrow_run(&fx, 1.0);
         let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
@@ -2832,10 +2306,6 @@ mod tests {
 
     #[test]
     fn identified_fit_stays_on_its_own_peak() {
-        // The PSM is 2 s after a 1 s wide apex; a peak five times larger
-        // elutes 17 s after the PSM, inside a fixed 18 s search. The
-        // identified search spans three run widths around the PSM, so the
-        // fit stays on the identified peak.
         let fx = fixture(false);
         let path = narrow_run(&fx, 1.0);
         let out = extract_all(1, &path, &fx.lib, &params()).unwrap();
@@ -2854,7 +2324,6 @@ mod tests {
 
     #[test]
     fn too_few_identified_fits_fall_back_to_the_seed_width() {
-        // Every identified pair of run 1 is silent: no usable fit.
         let fx = fixture_with(false, &|_| true, &|_| false);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
         let sc = out.counts.scales;
@@ -2901,14 +2370,12 @@ mod tests {
         let (peak, loads) = tracking::stats();
         assert_eq!(peak, 1, "at most one MS1 copy is live");
         assert_eq!(loads, 2, "the whole run is read again for its entries");
-        // The whole-run entry is still measured, in library order.
         assert_transfer_layout(&rows_of(&out.rows, ONLY_RUN0));
         let mut seen: Vec<u32> = out.rows.iter().map(|r| r.precursor).collect();
         seen.dedup();
         let order: Vec<u32> = fx.lib.entries.iter().map(|e| e.precursor).collect();
         assert_eq!(seen, order);
 
-        // Without FAIMS the MS1 table is read once.
         let fx = fixture(false);
         tracking::reset();
         extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
@@ -2917,7 +2384,6 @@ mod tests {
 
     #[test]
     fn width_prior_ignores_identified_pairs_without_signal() {
-        // About 30% of run 1's identified pairs have no MS1 signal.
         let silent = |p: u32| p % 10 < 3;
         let fx = fixture_with(false, &silent, &|_| false);
         let out = extract_all(1, &fx.ms1_tables[1], &fx.lib, &params()).unwrap();
@@ -2937,8 +2403,6 @@ mod tests {
     #[test]
     fn faims_transfer_decoys_use_the_target_voltage_series() {
         let mut fx = fixture(true);
-        // Precursor ONLY_RUN0 elutes at FAIMS_CVS[0] in run 1, where it is a
-        // transfer.
         let e = fx
             .lib
             .entries
@@ -2954,8 +2418,6 @@ mod tests {
             (target.amplitude / AMPLITUDE - 1.0).abs() < 0.1,
             "{target:?}"
         );
-        // The voltage series has one scan every 2 s; the whole run one every
-        // second, which would put about 4w + 1 scans in [t0 - 2w, t0 + 2w].
         for r in &rows {
             let e = r.evidence.as_ref().unwrap();
             assert!(
@@ -2979,8 +2441,6 @@ mod finalize_tests {
 
     use super::*;
 
-    /// One output row of the reference finalize: precursor, run, the table row,
-    /// the fit's mass error and the row's claim.
     type OutEntry<'a> = (u32, u16, MbrRow<'a>, (Option<f64>, claims::Claim));
     use crate::quant_finalize::{
         finalize, finalize_stream, for_each_scored, mismatch, pseudo_example, running_mean_q,
@@ -2994,7 +2454,6 @@ mod finalize_tests {
     };
 
     const N: u32 = 900;
-    /// Every `WRONG_EVERY`-th pseudo-transfer sits 60 s from its identified apex.
     const WRONG_EVERY: u32 = 10;
 
     struct Rng(u64);
@@ -3012,7 +2471,6 @@ mod finalize_tests {
         }
     }
 
-    /// Evidence of a real co-eluting pattern at `t0` (`present`) or of noise.
     fn evidence(g: &mut Rng, present: bool, t0: f64) -> Evidence {
         let (llr, cos, coh) = if present {
             (60.0 + 10.0 * g.normal(), 0.97 + 0.01 * g.normal(), 0.9)
@@ -3070,10 +2528,6 @@ mod finalize_tests {
         }
     }
 
-    /// Run 0 identifies every precursor (with a pseudo-transfer, every
-    /// `WRONG_EVERY`-th at the wrong peak); in run 1 even precursors are
-    /// present and odd ones absent, each with a mass-shift and an RT-shift
-    /// decoy. Precursor 1 has no evidence in run 1.
     fn extract() -> Vec<Vec<ExtractRow>> {
         let mut g = Rng(5);
         let mut run0 = Vec::new();
@@ -3136,9 +2590,6 @@ mod finalize_tests {
         vec!["a".into(), "b".into()]
     }
 
-    /// A header row and one row of cells per table row, numbers formatted
-    /// with `{}` and a null as `NA`, for `<base>.mbr.parquet` or
-    /// `<base>.mbr_validation.parquet` by file name.
     fn table(path: &Path) -> Vec<Vec<String>> {
         use output::mbr_out::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
         let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
@@ -3173,9 +2624,6 @@ mod finalize_tests {
         t
     }
 
-    /// [`library`] with every precursor an entry identified in run 0; those
-    /// in `identity` are identity decoys. Precursor `p`'s best donor PSM has
-    /// q-value `donor_q(p)`.
     fn library_with(identity: &dyn Fn(u32) -> bool, donor_q: &dyn Fn(u32) -> f64) -> Library {
         let mut lib = library();
         lib.entries = (0..N)
@@ -3198,9 +2646,6 @@ mod finalize_tests {
         lib
     }
 
-    /// Every 50th precursor from 2 on: 18 identity decoys, all on a real
-    /// feature in run 1 (even precursors are present there), as the
-    /// transfer of a false donor onto the feature it was misidentified on.
     fn on_real_features(p: u32) -> bool {
         p % 50 == 2
     }
@@ -3225,14 +2670,10 @@ mod finalize_tests {
         );
         assert_eq!((v.target_entries, v.identity_entries), (882, 18));
         assert_eq!(v.decoy_transfers[2], 18);
-        // On real features they look like true transfers and pass ...
         assert!(v.at_threshold.decoys[2] >= 12, "{v:?}");
-        // ... so the transfer q-value counts about 4 % false donors that
-        // the wrong-peak decoys alone do not see.
         assert!(v.at_q01.wrong_peak_only >= 380, "{v:?}");
         assert!(2 * v.at_q01.pooled < v.at_q01.wrong_peak_only, "{v:?}");
         assert!(v.at_threshold.pooled >= 380, "{v:?}");
-        // Without identity decoys the wrong-peak estimate is all there is.
         let plain = library_with(&|_| false, &confident);
         let s = finalize(&stems(), &plain, &extract(), 0.2, None, 7, &mbr, &val).unwrap();
         let v = &s.validation;
@@ -3255,8 +2696,6 @@ mod finalize_tests {
         }
         assert_eq!(s.rows_written, keys.len());
         assert!(s.features.iter().all(|f| !on_real_features(f.precursor)));
-        // The identified quality model and the normalisation never see them
-        // either: every reported identified row is a target's.
         assert_eq!(s.validation.identified, N as usize - 18);
     }
 
@@ -3264,8 +2703,6 @@ mod finalize_tests {
     fn entries_with_a_marginal_best_donor_psm_are_still_scored() {
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
-        // Precursors above 400 have a best donor PSM at q 0.005: their
-        // transfers are scored (the donor PEP is a feature), not dropped.
         let lib = library_with(&|_| false, &|p| if p > 400 { 0.005 } else { 0.001 });
         let s = finalize(&stems(), &lib, &extract(), 0.01, None, 7, &mbr, &val).unwrap();
         let scored_high = s
@@ -3329,8 +2766,6 @@ mod finalize_tests {
         assert_eq!(v.pseudo_transfers, N as usize);
         assert_eq!(v.wrong_peak_pairs, N as usize);
         assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
-        // The fixture's quantities agree, so a wrong measurement is a wrong
-        // peak.
         assert_eq!(v.wrong_measurement, v.wrong_peak);
         assert_eq!(v.at_q01.wrong_measurement, v.at_q01.wrong_peak);
         assert!(v.pseudo_acceptance(&v.at_q01).unwrap() > 0.9, "{v:?}");
@@ -3346,7 +2781,6 @@ mod finalize_tests {
         assert_eq!(get("transfers"), &N.to_string());
         assert_eq!(get("accepted_pooled_q01"), &v.at_q01.pooled.to_string());
 
-        // A looser threshold keeps the q <= 0.01 counts and adds its own.
         let loose = finalize(&stems(), &library(), &extract(), 0.5, None, 7, &mbr, &val).unwrap();
         let w = &loose.validation;
         assert_eq!(w.q_threshold, 0.5);
@@ -3373,7 +2807,6 @@ mod finalize_tests {
         assert_eq!(std::fs::read(&v1).unwrap(), std::fs::read(&v2).unwrap());
     }
 
-    /// [`library`]'s precursors as entries, each identified in run 0.
     fn library_with_entries() -> Library {
         let psms: Vec<PsmIn> = (0..N)
             .map(|p| PsmIn {
@@ -3400,7 +2833,6 @@ mod finalize_tests {
         )
     }
 
-    /// The rows of every run as one shard, for [`reference`].
     struct One<'a>(&'a [ExtractRow]);
 
     impl One<'_> {
@@ -3412,8 +2844,6 @@ mod finalize_tests {
         }
     }
 
-    /// Finalize over every row in memory, one pass per stage: the reference
-    /// of the map-reduce [`finalize_stream`].
     #[allow(clippy::too_many_arguments)]
     fn reference(
         stems: &[String],
@@ -3446,9 +2876,6 @@ mod finalize_tests {
         let shards = One(&all);
         let mut summary = FinalizeSummary::default();
 
-        // Pass 1: the training rows of both classifiers. Spilled shards hold a
-        // precursor's rows of every run, so the source order (run, then library
-        // order, then the order within an entry) is restored by key.
         type Key = (u16, u32, u64);
         let mut t_sample: TrainingSample<Key> = TrainingSample::new(usize::MAX, seed);
         let mut i_sample: TrainingSample<Key> = TrainingSample::new(usize::MAX, seed);
@@ -3479,7 +2906,6 @@ mod finalize_tests {
                         }
                         continue;
                     };
-                    // Source order (run, then row).
                     let key = (0u16, 0u32, seq);
                     let row = FdrRow {
                         precursor: r.precursor,
@@ -3498,9 +2924,6 @@ mod finalize_tests {
         let t_models =
             train_bagged_folds(&[&t_sample.into_items()], seed, &transfer_train_params());
         let i_models = train_folds(&i_sample.into_items(), seed);
-        // The wrong-peak model: the pseudo-transfers judged against the
-        // identified fit of the same cell, and its calibration on held-out
-        // margins.
         let mut w_sample: TrainingSample<u64> = TrainingSample::new(usize::MAX, seed);
         let mut w_seq = 0u64;
         shards.for_each(|rows| {
@@ -3544,7 +2967,6 @@ mod finalize_tests {
         })?;
         let wrong_cal = WrongCalibration::fit(w_held);
 
-        // Pass 2: every row's held-out score, into the q-value step functions.
         let mut t_scores = FoldScores::with_strata(seed, idx.strata());
         let mut i_scores = FoldScores::new(seed);
         shards.for_each(|rows| {
@@ -3571,7 +2993,6 @@ mod finalize_tests {
         let fdr = t_scores.finish(&t_models.failed_folds);
         let id_fdr = i_scores.finish(&i_models.failed_folds);
 
-        // Pass 3: the reference cells of the run normalisation.
         let mut cells: TrainingSample<u64, (NormCell, Option<f64>)> =
             TrainingSample::new(usize::MAX, seed);
         let mut cell_seq = 0u64;
@@ -3633,8 +3054,6 @@ mod finalize_tests {
             identity_entries,
             ..MbrValidation::default()
         };
-        // Decoy transfer rows with a q-value, and their acceptance, by family:
-        // mass shift, RT shift, identity decoy.
         let count_decoy =
             |v: &mut MbrValidation, at: &mut [Accepted; 2], q: Option<f64>, f: usize| {
                 let Some(q) = q else { return };
@@ -3661,7 +3080,6 @@ mod finalize_tests {
                     );
                 }
             }
-            // Per row with features: its family and held-out score.
             let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
             for_each_scored(
                 rows,
@@ -3678,9 +3096,6 @@ mod finalize_tests {
             let q_of = |q: &QValues, e: Estimate, i: usize| {
                 scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
             };
-            // A fit whose amplitude is clamped to 0 found no signal: its
-            // quantity is missing, not zero, in the MBR table and the
-            // feature parquet.
             let reported = |r: &ExtractRow| {
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
                     whole_pattern(
@@ -3695,8 +3110,6 @@ mod finalize_tests {
                 })
             };
             let mut out: Vec<OutEntry<'_>> = Vec::new();
-            // Probability that a transfer's measurement is wrong (1 without
-            // features, a fold model or a calibration).
             let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
             {
                 let at: Vec<usize> = (0..rows.len())
@@ -3723,7 +3136,6 @@ mod finalize_tests {
             let mut wrongs: Vec<(usize, f64)> = Vec::new();
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
-                    // Never reported: only the identity-decoy family's counts.
                     if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
                         count_decoy(&mut v, &mut at, q_of(&fdr, Estimate::Pooled, i), 2);
                     }
@@ -3863,9 +3275,6 @@ mod finalize_tests {
                     ),
                 ));
             }
-            // quant_q of an accepted transfer: the running mean, over its
-            // run's accepted transfers in ascending probability of a wrong
-            // measurement, of that probability.
             let mut by_run: HashMap<u16, Vec<(f64, usize)>> = HashMap::new();
             for &(k, p) in &wrongs {
                 if matches!(
@@ -4081,7 +3490,6 @@ mod finalize_tests {
         assert_eq!(s.validation.identified, one.validation.identified);
         let keys = |f: &[MbrFeature]| f.iter().map(|f| (f.precursor, f.run)).collect::<Vec<_>>();
         assert_eq!(keys(&features), keys(&one.features));
-        // Sampled models still separate the present targets from the decoys.
         assert!(s.validation.transfers_scored > 0);
         let accepted = features
             .iter()
@@ -4114,7 +3522,6 @@ mod finalize_tests {
         let (one, one_f, _, _) = run("one", 1, 1000);
         let (a, a_f, a_m, a_v) = run("a", 3, 1000);
         let (_, _, b_m, b_v) = run("b", 3, 7);
-        // Same seed, other batches: the same bytes.
         assert_eq!((a_m, a_v), (b_m, b_v));
         assert_eq!(a.rows_written, one.rows_written);
         assert_eq!(a.validation.transfers, one.validation.transfers);
@@ -4130,7 +3537,6 @@ mod finalize_tests {
             .filter(|f| f.evidence_type == EvidenceType::TransferMs1)
             .count();
         assert!(accepted > 0, "{accepted}");
-        // The members change the scores, so some q-value differs.
         assert!(a_f
             .iter()
             .zip(&one_f)
@@ -4166,10 +3572,6 @@ mod finalize_tests {
         assert!(!mbr.exists());
     }
 
-    /// A precursor seen in three runs with the same abundance, eluting
-    /// `K_TRUE` times as wide as its run's usual peak: run `r`'s width prior
-    /// is `5 * scale_r`, the apex `A0 / scale_r`, and the fitted width is off
-    /// by `jitter[r]` while the amplitude is right.
     fn jittered_rows(p: u32, jitter: [f64; 3]) -> Vec<ExtractRow> {
         let (a0, w0) = (1e6, 5.0);
         let scales = [1.0, 1.25, 2.0];
@@ -4198,7 +3600,6 @@ mod finalize_tests {
             .collect()
     }
 
-    /// Width of the precursor of [`jittered_rows`] over its run's width prior.
     const K_TRUE: f64 = 1.2;
 
     #[test]
@@ -4215,20 +3616,15 @@ mod finalize_tests {
                     reported_quantity(e, k.get(&3).copied(), false, 0.0)
                 })
                 .collect();
-            // The three runs, of different peak widths, report one quantity:
-            // the jitter is gone.
             for &(q, se) in &per_run {
                 assert!((q / per_run[0].0 - 1.0).abs() < 1e-12, "{per_run:?}");
                 assert!((se / q - 0.01).abs() < 1e-12);
             }
-            // The relative width is the median of the three runs' ratios.
             let mut sorted = jitter;
             sorted.sort_by(f64::total_cmp);
             let want = truth * sorted[1];
             assert!((per_run[0].0 / want - 1.0).abs() < 1e-12, "{per_run:?}");
         }
-        // Raw quantities with jitter 0.7 vs 1.4 differ twofold at equal
-        // abundance; the relative width removes it.
         let rows = jittered_rows(3, [0.7, 1.4, 1.0]);
         let raw = |run: usize| rows[2 * run].evidence.as_ref().unwrap().quantity;
         assert!((raw(1) / raw(0) - 2.0).abs() < 1e-9);
@@ -4237,19 +3633,15 @@ mod finalize_tests {
     #[test]
     fn relative_width_skips_unfitted_rows() {
         let mut rows = jittered_rows(4, [1.0, 0.7, 1.4]);
-        // Only run 0's identified fit counts: run 1's found no signal and
-        // run 2's has no width ratio.
         rows[2].evidence.as_mut().unwrap().amplitude = 0.0;
         rows[4].evidence.as_mut().unwrap().width_ratio = f64::NAN;
         let k = relative_widths(&rows);
         assert!((k[&4] - K_TRUE).abs() < 1e-12, "{k:?}");
-        // A row without a width prior keeps the extract's own quantity.
         let e = rows[4].evidence.as_ref().unwrap();
         assert_eq!(
             reported_quantity(e, Some(k[&4]), false, 0.0),
             (e.quantity, e.quantity_se)
         );
-        // So does a precursor without an identified fit.
         let mut rows = jittered_rows(5, [1.0, 1.0, 1.0]);
         for r in rows.iter_mut().filter(|r| r.role == Role::Identified) {
             r.evidence = None;
@@ -4268,15 +3660,12 @@ mod finalize_tests {
         let k = relative_widths(&rows)[&3];
         let e = rows[0].evidence.as_ref().unwrap();
         let at = |w: f64| reported_quantity(e, Some(k), false, w);
-        // Weight 1 is the row's own fitted area, A * w * sqrt(2 pi).
         assert!((at(1.0).0 / e.quantity - 1.0).abs() < 1e-12);
         assert!((at(1.0).1 / e.quantity_se - 1.0).abs() < 1e-12);
-        // Weight 0.5 is the geometric mean of weight 0 and the own area.
         let mid = (at(0.0).0 * at(1.0).0).sqrt();
         assert!((at(0.5).0 / mid - 1.0).abs() < 1e-12);
         let d = width_deviation(e, Some(k), false).unwrap();
         assert!((d - (0.7f64 / 1.0).log2()).abs() < 1e-12, "{d}");
-        // No relative width, or a trace area: the weight has nothing to move.
         assert_eq!(width_deviation(e, None, false), None);
         let mut t = e.clone();
         t.trace_quantity = 3.0;
@@ -4284,9 +3673,6 @@ mod finalize_tests {
         assert_eq!(reported_quantity(&t, Some(k), true, 1.0).0, 3.0);
     }
 
-    /// Cells of `precursors` precursors in four runs: run 0's peaks really
-    /// change width (its weight-0 quantities miss the change `d`), run 1's
-    /// width deviations are fit noise, runs 2 and 3 have none.
     fn width_cells(precursors: u32) -> Vec<WidthCell> {
         let mut g = Rng(11);
         let mut cells = Vec::new();
@@ -4309,7 +3695,6 @@ mod finalize_tests {
     #[test]
     fn run_width_weights_keep_real_width_changes_and_drop_fit_noise() {
         let cells = width_cells(300);
-        // The run offsets (+run) are the normalisation's part, not the weights'.
         assert_eq!(run_width_weights(&cells, 4), vec![1.0, 0.0, 0.0, 0.0]);
         assert_eq!(run_width_weights(&cells, 5), vec![1.0, 0.0, 0.0, 0.0, 0.0]);
         let mut reversed = cells.clone();
@@ -4319,11 +3704,8 @@ mod finalize_tests {
 
     #[test]
     fn run_width_weights_need_enough_cells() {
-        // Fewer than WIDTH_WEIGHT_MIN_RUN_CELLS precursors: every run keeps 0.
         let few = width_cells(WIDTH_WEIGHT_MIN_RUN_CELLS as u32 - 1);
         assert_eq!(run_width_weights(&few, 4), vec![0.0; 4]);
-        // Precursors in fewer than WIDTH_WEIGHT_MIN_PRECURSOR_CELLS runs have
-        // no leave-one-out mean.
         let three: Vec<WidthCell> = width_cells(300).into_iter().filter(|c| c.run < 3).collect();
         assert_eq!(run_width_weights(&three, 4), vec![0.0; 4]);
         assert_eq!(run_width_weights(&[], 2), vec![0.0; 2]);
@@ -4341,7 +3723,6 @@ mod finalize_tests {
             };
             assert_eq!(row_width_weight(r, &weights), want);
         }
-        // A run beyond the weights keeps 0.
         assert_eq!(row_width_weight(&rows[0], &[]), 0.0);
         let mut transfer = rows[0].clone();
         transfer.role = Role::Transfer;
@@ -4381,18 +3762,14 @@ mod finalize_tests {
         use crate::quant_finalize::{ExtractFiles, ExtractSource};
         let lib = library();
         let mut runs = extract();
-        // The identified signal-to-noise rises with the precursor index.
         for r in runs[0].iter_mut().filter(|r| r.role == Role::Identified) {
             let e = r.evidence.as_mut().unwrap();
             e.amplitude_se = e.amplitude / (10.0 + r.precursor as f64);
             if r.precursor == 0 {
-                // A non-positive trace area keeps the template quantity.
                 e.trace_quantity = 0.0;
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        // The same rows from memory and from extract tables on disk: finalize
-        // reads the identified fits of the tables with a reader of its own.
         let files = ExtractFiles(
             runs.iter()
                 .enumerate()
@@ -4444,7 +3821,6 @@ mod finalize_tests {
                 let key = (o.precursor, o.run);
                 assert_eq!(key, (a.precursor, a.run));
                 assert_eq!(key, (h.precursor, h.run));
-                // The q-values and the evidence type do not use the quantity.
                 for f in [a, h] {
                     assert_eq!(
                         (f.evidence_type, f.transfer_q, f.quant_q),
@@ -4468,13 +3844,11 @@ mod finalize_tests {
                     }
                     continue;
                 }
-                // Every precursor has an identified fit: share 1 traces them all.
                 assert_eq!(
                     (a.quantity, a.quantity_se),
                     (Some(e.trace_quantity), Some(e.trace_quantity_se)),
                     "{name} {key:?}"
                 );
-                // Share 0.5 traces the brighter half, precursors 450 and up.
                 if o.precursor >= N / 2 {
                     assert_eq!(h.quantity, Some(e.trace_quantity), "{name} {key:?}");
                     traced += 1;
@@ -4488,9 +3862,6 @@ mod finalize_tests {
 
     #[test]
     fn finalize_reports_the_quantity_at_the_relative_width() {
-        // Precursor 0 is identified in run 0 (width prior 5) at 0.8 of the
-        // prior and in run 1 (width prior 10) at 1.2: its relative width is
-        // 1, and each row reports its A * the run's width prior * sqrt(2 pi).
         let lib = library();
         let mut runs = extract();
         let mut g = Rng(9);
@@ -4532,8 +3903,6 @@ mod finalize_tests {
         );
     }
 
-    /// Evidence of another precursor's feature caught in the window: strong,
-    /// but with the wrong isotope pattern and a poor elution profile.
     fn foreign(g: &mut Rng, t0: f64) -> Evidence {
         let mut e = evidence(g, true, t0);
         e.llr = 50.0 + 15.0 * g.normal();
@@ -4546,8 +3915,6 @@ mod finalize_tests {
         e
     }
 
-    /// Identified precursor `p` in run 0 is clean, at the wrong peak (no
-    /// signal of its own: `p % 10 == 0`) or interfered (`p % 10 == 5`).
     fn identified_kind(p: u32) -> &'static str {
         match p % 10 {
             0 => "wrong",
@@ -4556,9 +3923,6 @@ mod finalize_tests {
         }
     }
 
-    /// [`extract`] with run 0's identified targets as [`identified_kind`]
-    /// says, each followed by a mass-shift and an RT-shift decoy; a third of
-    /// the decoys catch another precursor's feature.
     fn extract_with_identified_decoys() -> Vec<Vec<ExtractRow>> {
         let mut runs = extract();
         let mut g = Rng(11);
@@ -4630,10 +3994,6 @@ mod finalize_tests {
         );
         assert_eq!(v.identified_below_threshold, 0);
         assert_eq!(s.identified_no_features, 0);
-        // A transfer below the threshold keeps its transfer_q as quant_q; an
-        // accepted one has the larger of its transfer_q and its
-        // measurement_q, the running mean of its run's wrong-measurement
-        // probabilities. No other row has a measurement_q.
         for f in s.features.iter().filter(|f| f.run == 1) {
             if f.evidence_type == EvidenceType::BelowThreshold {
                 assert_eq!(f.quant_q, f.transfer_q);
@@ -4656,9 +4016,6 @@ mod finalize_tests {
         }
     }
 
-    /// [`extract_with_identified_decoys`] with run 1 identifying the even
-    /// precursors as run 0 does (same targets and decoys) at `gain` times run
-    /// 0's quantity; the odd precursors stay transfers into run 1.
     fn extract_two_identified_runs(gain: f64) -> Vec<Vec<ExtractRow>> {
         let mut runs = extract_with_identified_decoys();
         let copies: Vec<ExtractRow> = runs[0]
@@ -4700,8 +4057,6 @@ mod finalize_tests {
         let mut clean = 0;
         for p in (0..N).filter(|p| p % 2 == 0 && identified_kind(*p) == "clean") {
             let (a, b) = (get(p, 0), get(p, 1));
-            // Raw run 1 reads twice run 0; normalised, the two runs agree and
-            // sit halfway (log2 offsets -0.5 and +0.5).
             assert!((b.quantity.unwrap() / a.quantity.unwrap() - 2.0).abs() < 1e-9);
             let (na, nb) = (
                 a.quantity_normalized.unwrap(),
@@ -4712,8 +4067,6 @@ mod finalize_tests {
             clean += 1;
         }
         assert!(clean > 300, "{clean}");
-        // Every other row with a quantity is scaled by its run's offset:
-        // transfers into run 1 and identified rows that are not references.
         for f in s.features.iter().filter(|f| f.quantity.is_some()) {
             let want = f.quantity.unwrap()
                 * if f.run == 0 {
@@ -4741,8 +4094,6 @@ mod finalize_tests {
 
     #[test]
     fn finalize_reports_whole_pattern_quantities() {
-        // The same rows against two libraries that differ only in the
-        // isotope shares: 1 everywhere, and four values by precursor.
         let share = |p: u32| [1.0_f32, 0.948_998_3, 0.871_108_8, 0.5][p as usize % 4];
         let mut lib = library();
         for (p, m) in lib.meta.iter_mut().enumerate() {
@@ -4757,8 +4108,6 @@ mod finalize_tests {
         };
         let (four, four_table, four_validation) = run("four", &library());
         let (whole, whole_table, whole_validation) = run("whole", &lib);
-        // The rows, their evidence types and their q-values do not use the
-        // share, nor does the validation.
         assert_eq!(four_validation, whole_validation);
         assert_eq!(four.len(), whole.len());
         let (mut scaled, mut normalized) = (0, 0);
@@ -4780,14 +4129,12 @@ mod finalize_tests {
                 normalized += 1;
             }
             if f.precursor % 4 == 0 {
-                // Share 1: the same bits.
                 assert_eq!(w.quantity_normalized, f.quantity_normalized);
             } else if f.quantity.is_some() {
                 scaled += 1;
             }
         }
         assert!(scaled > 300 && normalized > 300, "{scaled} {normalized}");
-        // The tables differ in the three quantity columns only.
         assert_eq!(four_table.len(), whole_table.len());
         let quantity_columns = ["quantity", "quantity_se", "quantity_normalized"];
         for (a, b) in four_table.iter().zip(&whole_table) {
@@ -4807,7 +4154,6 @@ mod finalize_tests {
 
     #[test]
     fn finalize_leaves_quantities_unnormalized_without_two_reference_runs() {
-        // Only run 0 has identified rows: no run is normalised.
         let dir = tempfile::tempdir().unwrap();
         let (mbr, val) = mbr_paths(&dir.path().join("x"));
         let runs = extract_with_identified_decoys();
@@ -4838,7 +4184,6 @@ mod finalize_tests {
         };
         assert_eq!(transfers(&plain), transfers(&with));
         assert_eq!(plain.validation.at_q01, with.validation.at_q01);
-        // Without identified decoys there is no identified quality q-value.
         assert!(plain
             .features
             .iter()
@@ -4861,7 +4206,6 @@ mod finalize_tests {
                 EvidenceType::Identified
             };
             assert_eq!(f.evidence_type, want, "{f:?}");
-            // A flagged row keeps its quantity.
             assert!(f.quantity.is_some());
             if below {
                 flagged += 1;
@@ -4912,8 +4256,6 @@ mod finalize_tests {
             at("log10_amplitude_snr"),
             (1e6f64 / 1e4 + 1.0).log10() as f32
         );
-        // A fit without a positive standard error has no signal-to-noise
-        // ratio and gets no features; one without information has ratio 0.
         for se in [0.0, -1.0, f64::NAN] {
             r.evidence.as_mut().unwrap().amplitude_se = se;
             assert!(transfer_features(&r, &DonorShapes::default(), &[], 0.0, 1e-4).is_none());
@@ -4939,8 +4281,6 @@ mod finalize_tests {
     fn a_wrong_measurement_is_a_wrong_peak_or_a_wrong_fitted_quantity() {
         let mut g = Rng(3);
         let id = evidence(&mut g, true, 50.0);
-        // The same apex and amplitude, fitted 2.5 times as wide: the fitted
-        // quantities differ by the widths.
         let mut p = id.clone();
         p.w = 2.5 * id.w;
         p.width_ratio = 2.5 * id.width_ratio;
@@ -4953,20 +4293,15 @@ mod finalize_tests {
             })
         );
         assert_eq!(wrong_label(&p, &id), Some(true));
-        // Within a factor of 2 the quantity agrees; the trace area is not
-        // compared.
         p.quantity = 1.9 * id.quantity;
         p.trace_quantity = 3.0 * id.trace_quantity;
         assert!(!mismatch(&p, &id).unwrap().wrong());
         assert_eq!(wrong_label(&p, &id), Some(false));
-        // An apex at the identified width is the same peak; beyond it is not.
         p.t0 = id.t0 + id.w;
         assert!(!mismatch(&p, &id).unwrap().apex);
         p.t0 = id.t0 + id.w + 0.1;
         let m = mismatch(&p, &id).unwrap();
         assert!(m.apex && m.quantity == Some(false) && m.wrong());
-        // A fit without a quantity: the pair is judged on the apex alone and
-        // has no training label.
         let no_quantity = |e: &Evidence| {
             let mut e = e.clone();
             e.amplitude = 0.0;
@@ -4982,8 +4317,6 @@ mod finalize_tests {
             let m = mismatch(&a, &b).unwrap();
             assert!(!m.apex && m.quantity.is_none() && !m.wrong());
         }
-        // No judgement without an apex in either fit, or without the
-        // identified width.
         let (mut a, mut b) = (p.clone(), id.clone());
         a.t0 = f64::NAN;
         b.t0 = f64::NAN;
@@ -4998,11 +4331,8 @@ mod finalize_tests {
     fn a_pseudo_transfer_copied_into_its_identified_row_has_no_label() {
         let mut g = Rng(21);
         let e = evidence(&mut g, true, 500.0);
-        // The identified row took the pseudo-transfer's fit: nothing to
-        // compare, so no label and no wrong-peak count.
         assert_eq!(mismatch(&e, &e), None);
         assert_eq!(wrong_label(&e, &e), None);
-        // Also when the copied fit carries a NaN feature.
         let mut n = e.clone();
         n.m1_ratio = f64::NAN;
         assert_eq!(mismatch(&n, &n.clone()), None);
@@ -5068,7 +4398,6 @@ mod finalize_tests {
         }
     }
 
-    /// Identity maps for `n` runs (unit slope everywhere).
     fn identity_maps(n: usize) -> Vec<Option<RunMap>> {
         (0..n)
             .map(|_| {
@@ -5077,7 +4406,6 @@ mod finalize_tests {
             .collect()
     }
 
-    /// A fit of width `w`, tailing `tail` and isotope heights `iso`.
     fn shaped(w: f64, tail: f64, iso: [f64; 4]) -> Evidence {
         let mut e = evidence(&mut Rng(9), true, 100.0);
         e.w = w;
@@ -5102,7 +4430,6 @@ mod finalize_tests {
         };
         let donors = [id(0, 4.0, 0.10, DONOR_ISO), id(2, 4.0, 0.10, DONOR_ISO)];
         let shapes = DonorShapes::from_rows(&donors, &maps);
-        // A transfer at the donors' shape agrees on every count.
         let like = row(
             7,
             1,
@@ -5115,8 +4442,6 @@ mod finalize_tests {
             f[0].abs() < 1e-12 && f[1].abs() < 1e-12 && (f[2] - 1.0).abs() < 1e-12,
             "{f:?}"
         );
-        // A decoy of that precursor on another peak (wider, other isotope
-        // ratios) is compared with the same donors and disagrees.
         let other = row(
             7,
             1,
@@ -5142,8 +4467,6 @@ mod finalize_tests {
     #[test]
     fn shape_features_leave_out_the_rows_own_run() {
         let maps = identity_maps(2);
-        // Run 1 identifies the precursor with an odd shape; run 0 is the
-        // only other donor.
         let donors = [
             row(
                 3,
@@ -5172,15 +4495,12 @@ mod finalize_tests {
         assert!((f[0] - (9.0f64 / 4.0).ln()).abs() < 1e-12, "{f:?}");
         assert!((f[1] - 0.5).abs() < 1e-12, "{f:?}");
         assert!(f[2] < 0.99, "{f:?}");
-        // Without another run, or without a map or a fit, there is no
-        // reference.
         let only = DonorShapes::from_rows(&donors[1..], &maps);
         assert_eq!(only.features(&pseudo, &maps), NO_SHAPE);
         assert_eq!(shapes.features(&pseudo, &[None, None]), NO_SHAPE);
         let mut empty = pseudo.clone();
         empty.evidence.as_mut().unwrap().amplitude = 0.0;
         assert_eq!(shapes.features(&empty, &maps), NO_SHAPE);
-        // Decoy and identified decoy rows never become references.
         let decoy = row(
             3,
             0,
@@ -5247,9 +4567,6 @@ mod finalize_tests {
         assert_eq!(get("transfer_ms2"), &ms2_rows.len().to_string());
     }
 
-    /// Run 1: every transfer target and every decoy sits on a clean MS1 peak
-    /// (decoys on other peptides' peaks); only the present targets (even
-    /// precursors) have an MS2 scan that matches their library spectrum.
     fn ambiguous_ms1(with_ms2: bool) -> Vec<Vec<ExtractRow>> {
         let mut runs = extract();
         let mut g = Rng(11);
@@ -5307,9 +4624,6 @@ mod finalize_tests {
             }
             (present, absent)
         };
-        // Decoys on clean peaks make targets and decoys indistinguishable in
-        // MS1; MS2 support of the present targets does not change which
-        // transfers are accepted (it only labels them).
         let (p0, a0) = accepted(false);
         let (p1, a1) = accepted(true);
         eprintln!(
@@ -5380,21 +4694,14 @@ mod finalize_tests {
         ];
         let c = attach_ms2(&mut rows, &lib, &spectra, &donor_scans, &index, tol);
         let m = |i: usize| rows[i].ms2.unwrap();
-        // The target sees both scans at its m/z; the donor-like one wins.
         assert_eq!(m(0).n_scans, 2);
         assert!(m(0).supports());
-        // The mass-shift decoy sees only the scan of its own m/z.
         assert_eq!(m(1).n_scans, 1);
         assert!(!m(1).supports());
-        // The RT-shift decoy at the same m/z elsewhere in the run is scored
-        // with the same spectrum: a scan there with that spectrum supports it.
         assert_eq!(m(2).n_scans, 1);
         assert!(m(2).supports());
-        // The pseudo-transfer leaves out its run's donor scan (RT 100).
         assert_eq!(m(3).n_scans, 1);
         assert!(!m(3).supports());
-        // Identified rows, rows without a fit and entries without a spectrum
-        // get none.
         assert!(rows[4].ms2.is_none() && rows[5].ms2.is_none() && rows[6].ms2.is_none());
         assert_eq!(c.rows[0], [1, 1, 1]);
         assert_eq!(c.supported[0], [1, 0, 1]);

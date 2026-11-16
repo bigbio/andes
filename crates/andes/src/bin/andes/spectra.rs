@@ -1,5 +1,3 @@
-//! Spectrum-file loading, format routing, metadata scanning and precursor calibration.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::SyncSender;
@@ -13,22 +11,12 @@ use search::{
     SpecKey,
 };
 
-/// Statistics returned by the parser-thread helper.
 #[derive(Debug, Default)]
 pub(crate) struct ParseStats {
     pub(crate) error_count: usize,
     pub(crate) first_errors: Vec<String>,
 }
 
-/// Lowercased spectrum-file extension with a trailing `.gz` stripped, so
-/// `run.mzML.gz` reports `mzml` rather than `gz`.
-///
-/// `Path::extension` returns `gz` for a double extension, which silently
-/// defeated the `== "mzml"` guards on the metadata-detection helpers below:
-/// a gzipped mzML skipped instrument and activation detection entirely and
-/// fell back to the low-res default model. The readers those guards protect
-/// all use `open_buf_maybe_gz`, so the guard -- not the reader -- was the
-/// limitation. Mirrors the `.gz` handling in `input_format_flags`.
 pub(crate) fn spectrum_ext_lower(path: &std::path::Path) -> Option<String> {
     let is_gz = path
         .extension()
@@ -48,8 +36,6 @@ pub(crate) fn spectrum_ext_lower(path: &std::path::Path) -> Option<String> {
         .map(|e| e.to_ascii_lowercase())
 }
 
-/// Whether `path` names an archived Bruker `.d` folder (`X.d.zip`,
-/// `X.d.tar`, `X.d.tar.gz`, `X.d.tgz`, `X.d.gz`; case-insensitive).
 pub(crate) fn is_d_archive(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -61,9 +47,6 @@ pub(crate) fn is_d_archive(path: &Path) -> bool {
 }
 
 pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
-    // Strip a trailing `.gz` so the format is detected from the underlying
-    // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
-    // are binary/directory and never gzipped, so this only affects mzML/MGF.
     let is_gz = path
         .extension()
         .and_then(|e| e.to_str())
@@ -87,17 +70,10 @@ pub(crate) fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
     (is_mzml, is_raw, is_d, is_mgf)
 }
 
-/// The per-file SpecId/title prefix, `<stem>/`. Every search applies it, also
-/// with one input: native spectrum titles repeat across files, and PINs from
-/// separate per-file searches are pooled into one Percolator run, so the
-/// SpecIds must be unique across runs, not only within one search.
 pub(crate) fn title_prefix_for(file_stem: &str) -> Option<String> {
     Some(format!("{file_stem}/"))
 }
 
-/// Put `prefix` before every title; a spectrum without a title is named by
-/// its scan. The title is the `SpecId` of the tab-separated outputs (PIN,
-/// TSVs), so a tab or a line break in it becomes a space.
 pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
     const SEPARATORS: [char; 3] = ['\t', '\n', '\r'];
     for spec in chunk.iter_mut() {
@@ -114,8 +90,6 @@ pub(crate) fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
     }
 }
 
-/// Fold the spectra a tolerant mzML reader skipped (malformed or in an
-/// unsupported binary encoding) into `stats`, so the run reports them.
 pub(crate) fn add_mzml_skipped<R: std::io::BufRead>(
     stats: &mut ParseStats,
     reader: &MzMLReader<R>,
@@ -137,7 +111,6 @@ pub(crate) fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     }
 }
 
-/// `msg` followed by the first read error the parser recorded, when there is one.
 pub(crate) fn with_first_read_error(msg: String, first_errors: &[String]) -> String {
     match first_errors.first() {
         Some(e) => format!("{msg} First read error: {e}"),
@@ -145,10 +118,6 @@ pub(crate) fn with_first_read_error(msg: String, first_errors: &[String]) -> Str
     }
 }
 
-/// An input file that yielded no spectra at the searched MS level is an error,
-/// not an empty search: a search of zero spectra would only run on the default
-/// acquisition parameters and write an empty PIN. `found` counts the spectra
-/// the file contributed.
 pub(crate) fn require_spectra(path: &Path, ms_level: u8, found: usize) -> Result<(), String> {
     if found > 0 {
         return Ok(());
@@ -170,18 +139,6 @@ pub(crate) fn require_spectra(path: &Path, ms_level: u8, found: usize) -> Result
     ))
 }
 
-/// Producer helper: drains `reader` into fixed-size chunks of `Spectrum`
-/// and sends them through `tx`. Stops at `bench_cap` total spectra (or
-/// `usize::MAX` for unbounded). Parse errors are counted and the first few
-/// captured for downstream reporting; the channel is closed when the
-/// reader is exhausted or the consumer hangs up.
-///
-/// Generic over the reader's error type so the same helper serves both
-/// MGF and mzML.
-///
-/// Runs on a dedicated thread so chunk N+1 is PARSED while chunk N is SCORED.
-/// Channel capacity is 2 (one in-flight + one queued) so the producer stays at
-/// most one chunk ahead.
 pub(crate) fn send_chunks<R, E>(
     reader: R,
     chunk_size: usize,
@@ -204,8 +161,6 @@ where
                 chunk.push(s);
                 total += 1;
                 if chunk.len() >= chunk_size {
-                    // If the consumer hung up, stop. Sender is moved into the
-                    // function, so dropping returns `Err(SendError(chunk))`.
                     let payload = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_size));
                     if tx.send(payload).is_err() {
                         return stats;
@@ -226,11 +181,6 @@ where
     stats
 }
 
-/// Sends `spectra` (file order; `ms2_to_ms1` indexes `ms1`) through `tx` in
-/// chunks of `chunk_size`, each with the [`Ms1Link`]
-/// [`MzMLReader::read_with_ms1_chunked`] gives it: the peaks of every MS1 scan
-/// the chunk links to, once each, in file order. Stops when the consumer hangs
-/// up.
 pub(crate) fn send_linked_chunks(
     mut spectra: Vec<Spectrum>,
     ms2_to_ms1: &[Option<usize>],
@@ -257,7 +207,6 @@ pub(crate) fn send_linked_chunks(
     }
 }
 
-/// Lightweight metadata collected in one linear file scan for precursorCal.
 #[derive(Debug, Clone)]
 pub(crate) struct SpectrumMeta {
     pub(crate) precursor_charge: Option<i32>,
@@ -302,9 +251,6 @@ pub(crate) fn scan_spectrum_metadata(
     Ok(out)
 }
 
-/// The readable spectra of `items`, numbered as the search reader counts
-/// them: an unreadable spectrum is skipped and takes no index, and
-/// `bench_cap` counts readable spectra only.
 fn readable_spectra<E>(
     items: impl Iterator<Item = Result<Spectrum, E>>,
     bench_cap: usize,
@@ -312,7 +258,6 @@ fn readable_spectra<E>(
     items.filter_map(Result::ok).take(bench_cap).enumerate()
 }
 
-/// Metadata of the readable `.d` spectra, indexed as [`readable_spectra`].
 fn d_metadata<E>(
     items: impl Iterator<Item = Result<Spectrum, E>>,
     bench_cap: usize,
@@ -325,8 +270,6 @@ fn d_metadata<E>(
         .collect()
 }
 
-/// The readable `.d` spectra at `indices`, indexed as [`readable_spectra`]
-/// (the same numbering as [`d_metadata`]).
 fn d_load_by_index<E>(
     items: impl Iterator<Item = Result<Spectrum, E>>,
     indices: &HashSet<usize>,
@@ -344,7 +287,6 @@ fn d_load_by_index<E>(
     loaded
 }
 
-/// The MS2 spectra of a Bruker `.d`, in the order the search reads them.
 type SpectrumIter = Box<dyn Iterator<Item = Result<Spectrum, Box<dyn std::error::Error>>>>;
 
 fn open_d_ms2(path: &Path) -> Result<SpectrumIter, Box<dyn std::error::Error>> {
@@ -424,13 +366,6 @@ pub(crate) fn load_spectra_by_index(
     Ok(loaded)
 }
 
-/// Auto-detect an isobaric label (TMT/TMTpro/iTRAQ 4/8) by sampling the first
-/// `SAMPLE_N` spectra at `ms_level` and inspecting their reporter-ion region.
-///
-/// An SPS-MS3 run carries its reporters in the MS3 scans, not the (ion-trap)
-/// MS2 it searches, so when an MS2 sample shows no label the MS3 scans of an
-/// mzML or `.raw` are sampled too (high-res: SPS-MS3 reporters are read in the
-/// Orbitrap). Returns `None` for label-free data.
 pub(crate) fn detect_isobaric_sampled(
     path: &Path,
     is_mzml: bool,
@@ -452,8 +387,6 @@ pub(crate) fn detect_isobaric_sampled(
     label
 }
 
-/// Whether the MS3 scans of an mzML or Thermo `.raw` carry isobaric reporter
-/// ions (an SPS-MS3 run).
 pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) -> bool {
     if !(is_mzml || is_raw) {
         return false;
@@ -471,9 +404,6 @@ pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) ->
     found
 }
 
-/// Collision energy, isolation width and FAIMS CV of the first MS2 scans of an
-/// mzML, Thermo `.raw` or Bruker `.d`. Empty for MGF and for a file that cannot
-/// be read.
 pub(crate) fn sample_ms2_meta(
     path: &Path,
     is_mzml: bool,
@@ -500,8 +430,6 @@ pub(crate) fn sample_ms2_meta(
     input::Ms2MetaSample::default()
 }
 
-/// The first spectra at `ms_level` of an mzML, MGF, Thermo `.raw` or Bruker
-/// `.d` (MS2 only; a `.d` has no other level with a precursor).
 pub(crate) fn sample_spectra(
     path: &Path,
     is_mzml: bool,
@@ -515,8 +443,6 @@ pub(crate) fn sample_spectra(
         {
             let level = u8::try_from(ms_level).ok()?;
             let mut reader = input::ThermoRawReader::open(path).ok()?;
-            // MS3 scans are sampled for their reporter ions only, so they are
-            // kept without a precursor m/z; MS2 goes through the search path.
             if level >= 3 {
                 return Some(reader.sample_level(level, SAMPLE_N));
             }
@@ -611,19 +537,6 @@ pub(crate) fn run_precursor_calibration(
     Ok(stats)
 }
 
-/// Peek the spectrum file and return the dominant
-/// `ActivationMethod` across the first several MS2 spectra.
-///
-/// Reads up to `MAX_PEEK` spectra (early-exit) and tallies a histogram of
-/// activation methods. Returns the most-common method, or `None` when no
-/// spectra carry an activation cvParam (older mzMLs, MGF, etc.).
-///
-/// Currently only mzML files (`.mzml` / `.mzML` extension) carry an
-/// `<activation>` block. For anything else (MGF, unknown extension) we
-/// return `None` and the caller falls back to the historical default.
-///
-/// When multiple activation methods are present, prints a single
-/// `eprintln!` warning naming the runner-up and its count.
 pub(crate) fn detect_dominant_activation(
     spectrum_path: &std::path::Path,
 ) -> Option<ActivationMethod> {
@@ -655,16 +568,9 @@ pub(crate) fn detect_dominant_activation(
 
     let dominant = counts
         .iter()
-        // Deterministic on ties: HashMap iteration order is randomised per
-        // process, so a bare `max_by_key(count)` picks an ARBITRARY maximum. A
-        // 1:1 interleaved HCD/ETD acquisition ties exactly at 32/32 over the
-        // peeked window and flipped the selected model run-to-run on identical
-        // input. Tie-break on the discriminant so the choice is reproducible.
         .max_by_key(|(&m, &n)| (n, std::cmp::Reverse(m as u8)))
         .map(|(&m, _)| m)?;
 
-    // Warn on mixed activation. The dominant method still wins; this is
-    // purely informational so the user can spot heterogeneous mzMLs.
     if counts.len() > 1 {
         let mut other_pairs: Vec<(ActivationMethod, usize)> = counts
             .iter()
@@ -706,9 +612,6 @@ pub(crate) fn detect_instrument_type_for_path(
     detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
 }
 
-/// Dominant activation and analyzer of one input, each read from the metadata
-/// on its own: an mzML or a `.raw` whose scans name no activation still names
-/// its analyzer. MGF and unreadable inputs give `(None, None)`.
 pub(crate) fn detect_acquisition_metadata(
     spectrum_path: &Path,
 ) -> (Option<ActivationMethod>, Option<InstrumentType>) {
@@ -728,21 +631,12 @@ pub(crate) fn detect_acquisition_metadata(
             (None, None)
         }
     } else if is_d {
-        // timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
         (Some(ActivationMethod::CID), Some(InstrumentType::TimsTOF))
     } else {
         (None, None)
     }
 }
 
-/// Compare a further `--spectrum` input with the first one, whose metadata
-/// selects the model, the fragment tolerance and the score features of the
-/// whole search.
-///
-/// `Err` when the two analyzers are of different resolution classes: the
-/// run-level tolerance would be wrong for one of the files. `Ok(Some(_))` is a
-/// warning for a difference the search tolerates (another analyzer of the same
-/// class, another dominant activation, metadata missing on one side).
 pub(crate) fn compare_with_first_input(
     first_path: &Path,
     first: (Option<ActivationMethod>, Option<InstrumentType>),
@@ -821,7 +715,6 @@ mod acquisition_metadata_tests {
         .unwrap_err();
         assert!(err.contains("a.mzML is high-resolution MS2"), "{err}");
         assert!(err.contains("b.mzML is low-resolution MS2"), "{err}");
-        // Also without an activation on either side.
         assert!(compare(
             (None, Some(InstrumentType::LowRes)),
             (None, Some(InstrumentType::OrbitrapAstral)),
@@ -848,7 +741,6 @@ mod acquisition_metadata_tests {
         .unwrap()
         .unwrap();
         assert!(w.contains("dominant activation CID vs HCD"), "{w}");
-        // Metadata on one side only cannot show a class conflict.
         let w = compare((HCD, Some(InstrumentType::QExactive)), (None, None))
             .unwrap()
             .unwrap();
@@ -904,8 +796,6 @@ mod d_index_tests {
     use super::{d_load_by_index, d_metadata, Spectrum};
     use std::collections::HashSet;
 
-    /// Five spectra (charge 1..=5, one peak per unit of charge) with the
-    /// second one unreadable.
     fn items() -> impl Iterator<Item = Result<Spectrum, String>> {
         (1..=5).map(|z| {
             if z == 2 {
@@ -950,7 +840,6 @@ mod format_routing_tests {
 
     #[test]
     fn gz_is_routed_by_the_underlying_extension() {
-        // (is_mzml, is_raw, is_d, is_mgf)
         assert_eq!(
             input_format_flags(Path::new("x/foo.mzML.gz")),
             (true, false, false, false)

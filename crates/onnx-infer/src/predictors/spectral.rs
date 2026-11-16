@@ -1,11 +1,7 @@
-//! Spectral-match features between predicted and observed fragment intensities.
-
 use super::form::{Mass, H2O, PROTON};
 
-/// One fragment ion type in a predictor's per-site output: (is b ion, charge).
 pub type Ion = (bool, u8);
 
-/// Names of the values [`ms2_features`] returns, in order.
 pub const MS2_FEATURES: [&str; 8] = [
     "spec_pearson_norm",
     "ionb_pearson_norm",
@@ -17,12 +13,9 @@ pub const MS2_FEATURES: [&str; 8] = [
     "pred_explained",
 ];
 
-/// Fragment m/z tolerance for matching predicted ions to observed peaks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FragmentTolerance {
-    /// Absolute window in Da.
     Da(f64),
-    /// Relative window in ppm of the fragment m/z.
     Ppm(f64),
 }
 
@@ -54,15 +47,6 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-/// Spectral-match features ([`MS2_FEATURES`]) between `pred` and the observed
-/// `peaks` (sorted by m/z).
-///
-/// `pred` holds `ions.len()` linear intensities per cleavage site (site `i` =
-/// cleavage after residue `i + 1`). Ions above the precursor `charge` are
-/// skipped. The observed intensity of an ion is the most intense peak within
-/// `tol` of its m/z (0 when none). Predicted and observed vectors are each
-/// normalised to unit sum before the comparisons; `pred_explained` is the
-/// predicted share of ions that matched a peak.
 pub fn ms2_features(
     pred: &[f32],
     ions: &[Ion],
@@ -159,7 +143,6 @@ mod tests {
 
     const BY1: [Ion; 2] = [(true, 1), (false, 1)];
 
-    /// Peaks at every predicted b/y z1 m/z with the predicted intensities.
     fn ideal_peaks(pred: &[f32], mass: &Mass) -> Vec<(f64, f32)> {
         let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
         let mut prefix = mass.nterm;
@@ -203,7 +186,6 @@ mod tests {
         let pred = vec![1.0f32; 14];
         let peaks = ideal_peaks(&[1.0; 14], &mass);
         let f = ms2_features(&pred, &ions, &mass, 2, &peaks, FragmentTolerance::Ppm(20.0));
-        // Only b z1 is compared, and every b z1 ion is present.
         assert!((f[7] - 1.0).abs() < 1e-9);
     }
 }

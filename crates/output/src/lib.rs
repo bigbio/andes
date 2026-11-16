@@ -1,22 +1,3 @@
-//! Output writers: Percolator PIN, TSV.
-//!
-//! # Known column behaviors
-//!
-//! * **FragMethod**: emitted via `ActivationMethod::name()` (e.g. `"HCD"`,
-//!   `"CID"`). Unknown activation is written as `"UNKNOWN"`.
-//!
-//! * **IsotopeError**: the precursor-matching loop tries multiple isotope
-//!   offsets but does not record *which* offset produced the match. The TSV
-//!   column is always written as `0`. Will be fixed once the winning
-//!   isotope offset is threaded into `PsmMatch`.
-//!
-//! * **Decoy filtering**: this writer emits decoy PSMs with the decoy
-//!   prefix preserved in the Protein column; downstream Percolator handles
-//!   decoy labelling.
-//!
-//! * **QValue / PepQValue**: Not emitted; TDA columns are not currently
-//!   produced.
-
 mod atomic;
 pub use atomic::write_atomic;
 pub mod tsv;

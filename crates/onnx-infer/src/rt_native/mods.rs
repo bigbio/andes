@@ -1,24 +1,11 @@
-//! Built-in Unimod elemental compositions (no database lookup).
-//!
-//! Generated from `scripts/student/mod_composition.py`; the RT parity check
-//! fails if the two tables disagree. Heavy isotopes are folded into their
-//! element for the feature vector; `mono` is the exact monoisotopic delta.
-
-/// Composition features per position: C, H, N, O, S, P, other, mass / 100.
 pub const N_COMP: usize = 8;
 
-/// One Unimod entry.
 #[derive(Debug, Clone, Copy)]
 pub struct UnimodEntry {
-    /// Unimod accession number.
     pub id: u32,
-    /// Unimod short name.
     pub name: &'static str,
-    /// Allowed sites: residues, `^` = peptide N-terminus, `$` = C-terminus.
     pub sites: &'static str,
-    /// Element-count delta: C, H, N, O, S, P, other.
     pub elements: [f32; 7],
-    /// Monoisotopic mass delta (Da).
     pub mono: f64,
 }
 
@@ -28,7 +15,6 @@ macro_rules! table {
     };
 }
 
-/// The table, sorted by id.
 pub const UNIMOD: &[UnimodEntry] = table![
     (
         1,
@@ -319,7 +305,6 @@ pub const UNIMOD: &[UnimodEntry] = table![
     ),
 ];
 
-/// Entry by Unimod id.
 pub fn by_id(id: u32) -> Option<&'static UnimodEntry> {
     UNIMOD
         .binary_search_by_key(&id, |e| e.id)
@@ -327,13 +312,6 @@ pub fn by_id(id: u32) -> Option<&'static UnimodEntry> {
         .map(|i| &UNIMOD[i])
 }
 
-/// Unimod id for a mass delta at `residue` (or the N-terminus when `nterm`).
-///
-/// Among candidates within `tol` Da that allow the site, the smallest mass
-/// error wins; the lowest id breaks exact ties (same composition, e.g.
-/// Oxidation over other O-adding entries). TMTpro (304.207145) and iTRAQ8plex
-/// (304.205360) are 1.8 mDa apart, inside a 2 mDa window, and andes writes
-/// five decimals, so the error separates them.
 pub fn match_mass(delta: f64, residue: Option<u8>, nterm: bool, tol: f64) -> Option<u32> {
     UNIMOD
         .iter()
@@ -351,10 +329,6 @@ pub fn match_mass(delta: f64, residue: Option<u8>, nterm: bool, tol: f64) -> Opt
         .map(|e| e.id)
 }
 
-/// Split a delta printed on residue 1 into an N-terminal and a residue entry
-/// whose masses sum to it (andes prints stacked mods as one delta), as
-/// `(n-term id, residue id)`. The pair closest in mass wins; exact ties go to
-/// the lowest N-terminal id, then the lowest residue id.
 pub fn split_nterm_residue(delta: f64, residue: u8, tol: f64) -> Option<(u32, u32)> {
     let nterm: Vec<(u32, f64)> = UNIMOD
         .iter()
@@ -369,7 +343,6 @@ pub fn split_nterm_residue(delta: f64, residue: u8, tol: f64) -> Option<(u32, u3
     crate::andes_peptide::split_nterm_residue_delta(delta, tol, &nterm, &on_residue)
 }
 
-/// Feature vector of one entry (unscaled).
 pub fn features(e: &UnimodEntry) -> [f32; N_COMP] {
     let mut v = [0.0f32; N_COMP];
     v[..7].copy_from_slice(&e.elements);
@@ -394,15 +367,11 @@ mod tests {
 
     #[test]
     fn closest_mass_wins_and_id_breaks_exact_ties() {
-        // TMTpro 304.207145 vs iTRAQ8plex 304.205360: both within 2 mDa.
         assert_eq!(match_mass(304.20715, Some(b'K'), false, 2e-3), Some(2016));
         assert_eq!(match_mass(304.20715, None, true, 2e-3), Some(2016));
         assert_eq!(match_mass(304.20536, Some(b'K'), false, 2e-3), Some(730));
-        // Only iTRAQ8plex is allowed on Y.
         assert_eq!(match_mass(304.20715, Some(b'Y'), false, 2e-3), Some(730));
-        // Equal masses: lowest id (Gln->pyro-Glu 28 over Ammonia-loss 385).
         assert_eq!(match_mass(-17.02655, None, true, 2e-3), Some(28));
-        // Glu->pyro-Glu (27) and Dehydrated (23) share a composition: lowest id.
         assert_eq!(match_mass(-18.01056, Some(b'S'), true, 2e-3), Some(23));
     }
 }

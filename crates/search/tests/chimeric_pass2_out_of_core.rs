@@ -1,20 +1,3 @@
-//! The chimeric Pass 2 (`run_pass2_coisolation`) on the out-of-core candidate
-//! index must find each co-isolated peptide, label collision decoys globally,
-//! and emit the same secondaries whichever retrieval Pass 1 used.
-//!
-//! Each spectrum carries a primary peptide (its precursor) plus the fragment
-//! ions of a co-isolated peptide whose averagine envelope sits in a synthetic
-//! linked MS1 scan inside the isolation window. Two cases:
-//!
-//!  * `DAFLGSFLYEYSR` — an ordinary target secondary;
-//!  * protein-N-term-acetylated `VDLLAGEK` — a COLLISION DECOY: it is the
-//!    N-terminal peptide of a decoy protein the database supplies (generated
-//!    decoys avoid spelling a target peptide), its bare sequence is also
-//!    an internal target peptide, and the target twin has no acetylated form, so
-//!    the twin lies 42 Da outside the secondary's window. Pass 2 must relabel
-//!    it as target (the global relabel), not only when the twin happens to be
-//!    among the window's candidates.
-
 use rustc_hash::FxHashMap;
 
 use input::Ms1Link;
@@ -129,10 +112,6 @@ fn acetyl() -> Modification {
     }
 }
 
-/// Target proteins and the decoy of `P2`, its reversal `VDLLAGEK|R...`, given
-/// in the database (`--decoy-strategy none`): the decoy protein's N-terminal
-/// peptide is `VDLLAGEK`, which `P1` also contains internally (never at a
-/// protein N-terminus).
 fn fixture() -> (SearchIndex, SearchParams) {
     let target = ProteinDb {
         proteins: vec![
@@ -190,9 +169,6 @@ fn envelope(mass: f64, charge: u8, scale: f32) -> Vec<(f64, f32)> {
         .collect()
 }
 
-/// A spectrum selected on `primary` (z=2) that also carries `secondary`'s b/y
-/// ions, and its linked MS1 scan holding both precursors' envelopes. The
-/// isolation window is widened so the z=3 secondary falls inside it.
 fn chimeric_scan(
     primary: &Peptide,
     secondary: &Peptide,
@@ -299,7 +275,6 @@ fn run(fragment_index: bool) -> Vec<Vec<Row>> {
 fn pass2_finds_each_secondary_and_relabels_the_collision_decoy() {
     let rows = run(false);
 
-    // Non-vacuous: every scan has its primary AND one secondary.
     for (scan, r) in rows.iter().enumerate() {
         assert_eq!(
             r.iter().filter(|row| row.0).count(),
@@ -319,9 +294,6 @@ fn pass2_finds_each_secondary_and_relabels_the_collision_decoy() {
     );
 }
 
-/// Fragment-index retrieval changes only Pass 1's candidate shortlist; Pass 2
-/// still enumerates each secondary window, so on this fixture (where Pass 1
-/// finds the same primary) its rows equal those of an enumerated Pass 1.
 #[test]
 fn fragment_index_pass2_secondaries_match_enumeration() {
     let enumerated = run(false);

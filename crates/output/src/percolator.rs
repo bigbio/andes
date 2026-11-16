@@ -1,48 +1,21 @@
-//! Percolator runner: resolve a backend (explicit path → `$PATH` → docker),
-//! invoke Percolator on a PIN, and parse the target-PSM result TSV back into a
-//! `SpecId → PercolatorPsm` map so the QPX writer can join PEP/q-value onto the
-//! per-PSM rows.
-//!
-//! andes does not reimplement Percolator; it orchestrates the real binary (or
-//! the pinned biocontainers docker image) with
-//! `--seed 42 --results-psms … --decoy-results-psms … --weights … --only-psms <PIN>`.
-//! The result TSV is parsed by HEADER NAME (not column index) so it survives the
-//! column-offset differences between engines (e.g. a Sage-style extra `FileName`
-//! column).
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Pinned biocontainers Percolator image used for the docker fallback.
 pub const DEFAULT_PERCOLATOR_IMAGE: &str = "quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2";
 
-/// One parsed Percolator target-PSM result row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PercolatorPsm {
-    /// `PSMId` column — equals the andes PIN `SpecId` byte-for-byte.
     pub psm_id: String,
-    /// `q-value` column (lower is better).
     pub q_value: f64,
-    /// The q-value of the pooled model (`pooled-q-value` column) when `q_value`
-    /// is a per-run q-value ([`apply_per_run_q`]); `None` when it is the pooled one.
     pub pooled_q_value: Option<f64>,
-    /// `posterior_error_probability` column (PEP; lower is better).
     pub pep: f64,
-    /// `score` column (higher is better); `None` when the file has no such
-    /// column or the value is missing or not a finite number.
     pub score: Option<f64>,
-    /// `peptide` column (Percolator's flanked peptide string).
     pub peptide: String,
-    /// `proteinIds` column joined with `\t` collapsed to a single string (the
-    /// rest-of-line after `proteinIds`, tab-separated proteins re-joined by `;`).
     pub proteins: String,
 }
 
 impl PercolatorPsm {
-    /// Report order of PSM rows: q-value, then PEP, both ascending, then `psm_id`.
-    /// `psm_id` is unique within a run (it is the key of the result map), so the
-    /// order is total and does not depend on the iteration order of that map.
     pub fn report_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.q_value
             .total_cmp(&other.q_value)
@@ -51,17 +24,13 @@ impl PercolatorPsm {
     }
 }
 
-/// How Percolator will be invoked.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PercolatorBackend {
-    /// A native binary at this path (explicit `--percolator-bin` or found on `$PATH`).
     Binary(PathBuf),
-    /// The docker fallback with the given image tag.
     Docker { image: String },
 }
 
 impl PercolatorBackend {
-    /// Human-readable provenance string for the run log.
     pub fn describe(&self) -> String {
         match self {
             PercolatorBackend::Binary(p) => format!("binary {}", p.display()),
@@ -70,38 +39,24 @@ impl PercolatorBackend {
     }
 }
 
-/// Errors from backend resolution, invocation, or result parsing.
 #[derive(Debug)]
 pub enum PercolatorError {
-    /// No backend could be resolved (no `--percolator-bin`, none on `$PATH`, no docker).
     NoBackend,
-    /// The requested explicit binary path does not exist / is not executable.
     BinaryNotFound(PathBuf),
-    /// Docker was requested/needed but the `docker` CLI is unavailable.
     DockerUnavailable,
-    /// The Percolator process failed (non-zero exit). Carries captured stderr/stdout tail.
     Run {
         backend: String,
         status: String,
         log_tail: String,
     },
-    /// Spawning the process failed.
     Spawn(std::io::Error),
-    /// I/O while reading the result file.
     Io(std::io::Error),
-    /// The result TSV was missing a required column.
     MissingColumn {
         column: &'static str,
         header: String,
     },
-    /// A result row had fewer columns than the header requires (truncated/corrupt).
     MalformedRow { line: String },
-    /// A `q-value`/PEP field was not a finite number — propagating it as NaN
-    /// would silently corrupt FDR filtering downstream.
     NonFiniteScore { column: &'static str, value: String },
-    /// The same `PSMId` appeared in more than one result row. `PSMId` is the
-    /// join key into the idparquet and must be unique; a duplicate means the
-    /// last-write-wins map would silently drop a PSM.
     DuplicatePsmId { psm_id: String },
 }
 
@@ -170,12 +125,6 @@ impl From<std::io::Error> for PercolatorError {
     }
 }
 
-/// Resolve which Percolator backend to use.
-///
-/// Order: (1) `explicit_bin` (`--percolator-bin`) — hard error if it does not
-/// exist; (2) `percolator` on `$PATH`; (3) docker fallback when `force_docker`
-/// is set OR nothing else was found AND the `docker` CLI is available. Returns
-/// [`PercolatorError::NoBackend`] when none applies.
 pub fn resolve_backend(
     explicit_bin: Option<&Path>,
     force_docker: bool,
@@ -206,7 +155,6 @@ pub fn resolve_backend(
     Err(PercolatorError::NoBackend)
 }
 
-/// Probe `$PATH` for an executable named `bin`. Returns the first hit.
 fn which_on_path(bin: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {
@@ -218,7 +166,6 @@ fn which_on_path(bin: &str) -> Option<PathBuf> {
     None
 }
 
-/// True if the `docker` CLI can be invoked (`docker --version` exits cleanly).
 fn docker_available() -> bool {
     Command::new("docker")
         .arg("--version")
@@ -229,7 +176,6 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Output paths produced by a Percolator run (all in the PIN's parent dir).
 struct ResultPaths {
     target: PathBuf,
     decoy: PathBuf,
@@ -245,11 +191,6 @@ impl ResultPaths {
         }
     }
 
-    /// Delete any result files left over from a previous run, so that a silent
-    /// non-write by Percolator can never be mis-read as this run's output (the
-    /// success check in `run_percolator` trusts `target.exists()`). Absent files
-    /// are fine; a real removal failure is an error (we must not leave a stale
-    /// file we would then read).
     fn clear_stale(&self) -> std::io::Result<()> {
         for p in [&self.target, &self.decoy, &self.weights] {
             match std::fs::remove_file(p) {
@@ -262,10 +203,6 @@ impl ResultPaths {
     }
 }
 
-/// The user's extra Percolator arguments with `--num-threads <threads>` added
-/// in front, unless they already set it. Percolator trains one SVM per
-/// cross-validation fold and by default uses three threads; on more cores it
-/// runs about twice as fast with the same result (measured on a 1M-row PIN).
 pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<String> {
     if extra
         .iter()
@@ -278,11 +215,6 @@ pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<Str
     args
 }
 
-/// Target-decoy competition (`-Y`): Percolator keeps the best PSM of each
-/// spectrum (scan and precursor mass) and estimates q-values from the winners,
-/// instead of choosing a mode from the data. Every benchmark and calibration
-/// figure of andes was measured this way. Added unless the user's arguments
-/// already ask for it.
 fn tdc_flag(extra_args: &[String]) -> Option<String> {
     let set = extra_args
         .iter()
@@ -290,9 +222,6 @@ fn tdc_flag(extra_args: &[String]) -> Option<String> {
     (!set).then(|| "-Y".to_string())
 }
 
-/// Build the argument vector for a NATIVE Percolator invocation (binary path
-/// case). Mirrors `run_percolator_docker.sh`: `--seed 42`, results/decoy/weights,
-/// `--only-psms`, `-Y`, then any user `extra_args`, then the PIN path last.
 fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<String> {
     let mut args = vec![
         "--seed".to_string(),
@@ -311,12 +240,6 @@ fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<Stri
     args
 }
 
-/// Build the full `docker run …` argument vector. The PIN's directory is bind
-/// mounted read-only at `/pin` and the output dir at `/out`, exactly as the
-/// reference script does, so percolator reads/writes in place. Result paths are
-/// rewritten to their `/out` equivalents inside the container. Both mount
-/// sources are made absolute: docker reads a relative or empty `-v` source as
-/// a named volume (or rejects it), not as a host directory.
 fn docker_args(
     image: &str,
     pin: &Path,
@@ -364,18 +287,8 @@ fn docker_args(
     Ok(args)
 }
 
-/// The q-value below which a PSM counts as accepted when judging whether
-/// Percolator's PEP is usable: Percolator's own selection FDR (its default).
 const ACCEPTED_Q: f64 = 0.01;
 
-/// Whether the PEP column is unusable: at least one PSM is accepted at
-/// [`ACCEPTED_Q`] and every accepted PSM has PEP = 1. A posterior error
-/// probability of 1 for each of a set whose false discovery rate is at most 1 %
-/// is a contradiction, so the PEP estimate failed. Percolator's `-Y`
-/// (target-decoy competition) PEP fit does this when a decoy scores far above
-/// every other decoy and near the best targets: the fit then returns 1 for all
-/// PSMs while the q-values stay valid. Whether it happens depends on the
-/// random cross-validation split (the seed), not on the PIN columns.
 pub fn pep_is_degenerate(targets: &HashMap<String, PercolatorPsm>) -> bool {
     let mut accepted = 0usize;
     for p in targets.values().filter(|p| p.q_value <= ACCEPTED_Q) {
@@ -387,17 +300,6 @@ pub fn pep_is_degenerate(targets: &HashMap<String, PercolatorPsm>) -> bool {
     accepted > 0
 }
 
-/// Arguments of a static Percolator pass: the model of the main run applied as
-/// it is (`--static`, weights from that run), without training.
-///
-/// With `tdc` (the per-run pass of [`apply_per_run_q`]) the pass uses
-/// target-decoy competition (`-Y`) and `--override`, which keeps Percolator
-/// from replacing the weights by a default score vector when they separate no
-/// PSM at q < 0.01, as in a run with few real PSMs. Without it (the PEP repair
-/// pass) the q-values and the PSM-level PEP are estimated by Percolator's
-/// mix-max method on all PSMs, and the arguments are those of the pass as it
-/// was before the per-run pass existed. `pin`, the two result files and
-/// `weights` are written as the backend sees them.
 fn static_pass_args(
     pin: String,
     target: String,
@@ -436,9 +338,6 @@ fn static_pass_args(
     args
 }
 
-/// Run a static pass (see [`static_pass_args`]) of `backend` on `pin` with the
-/// model in `weights`, writing the results to `pass`. The PIN and the result
-/// files are in `out_dir` or `pin`'s directory.
 fn run_static_pass(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -501,8 +400,6 @@ fn run_static_pass(
     }
 }
 
-/// `dir` as an absolute host path; the empty parent of a bare file name is
-/// the current directory.
 fn host_dir(dir: &Path) -> std::io::Result<PathBuf> {
     if dir.as_os_str().is_empty() {
         std::env::current_dir()
@@ -511,12 +408,6 @@ fn host_dir(dir: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Run Percolator on `pin` using `backend`, writing result files into the PIN's
-/// parent directory, then parse the TARGET PSMs into a `SpecId → PercolatorPsm`
-/// map. `extra_args` are appended verbatim (from `--percolator-args`).
-///
-/// Returns the parsed map plus the resolved result file paths (so the caller can
-/// log/keep them). The PEP/q join uses the map keyed by `PSMId` (== PIN SpecId).
 pub fn run_percolator(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -525,14 +416,6 @@ pub fn run_percolator(
     run_percolator_with_decoys(backend, pin, extra_args).map(|(targets, _)| targets)
 }
 
-/// [`run_percolator`], also returning the `PSMId`s of the decoy result file.
-/// With target-decoy competition (`-Y`) Percolator keeps one PSM per
-/// scan/`ExpMass` group in either file; the decoy ids let the QPX join tell a
-/// target that lost the competition from one whose join drifted.
-///
-/// When the PIN holds several runs (a `FileName` column with more than one
-/// value) the q-values are Percolator's per-run q-values, see
-/// [`apply_per_run_q`]; the result files are rewritten with them.
 pub fn run_percolator_with_decoys(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -551,9 +434,6 @@ pub fn run_percolator_with_decoys(
     Ok((targets, decoys))
 }
 
-/// The model trained on all the PIN's PSMs: one Percolator run, with the
-/// PEP repair of [`pep_is_degenerate`] when needed. The result files and the
-/// weights stay next to the PIN; the q-values are the pooled ones.
 pub fn run_percolator_pooled(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -590,8 +470,6 @@ pub fn run_percolator_pooled(
     let text = std::fs::read_to_string(&out.target)?;
     let mut targets = parse_psm_results(&text)?;
     if pep_is_degenerate(&targets) {
-        // The main run's results are complete without the repair, so a failed
-        // repair pass is a warning, not the loss of the search.
         if let Err(e) = repair_pep(backend, pin, &out_dir, &out, extra_args, &mut targets) {
             eprintln!("WARN: Percolator's PEP is 1 for every accepted PSM and the mix-max re-estimate failed: {e}");
         }
@@ -599,22 +477,11 @@ pub fn run_percolator_pooled(
     Ok(targets)
 }
 
-/// Result-file column that holds the pooled q-value of a PSM once the
-/// `q-value` column holds the per-run one.
 const POOLED_Q_COLUMN: &str = "pooled-q-value";
-/// PIN column that names the run (input file) of each PSM.
 const RUN_COLUMN: &str = "FileName";
-/// Runs whose scratch PINs are written during one scan of the PIN, and so
-/// are open at once: 64 BufWriters stay far below the usual limit of open
-/// files (256 or more) and a PIN of more runs is read once per 64 of them
-/// (200 runs: four scans) instead of once per run.
 const RUNS_PER_SCAN: usize = 64;
-/// PIN column of the target (1) / decoy (-1) label.
 const LABEL_COLUMN: &str = "Label";
 
-/// The distinct values of the PIN's [`RUN_COLUMN`] in order of first
-/// appearance, with the column's index; `None` when the PIN has no such
-/// column.
 fn pin_runs(pin: &Path) -> std::io::Result<Option<(usize, Vec<String>)>> {
     use std::io::{BufRead, BufReader};
     let mut lines = BufReader::new(std::fs::File::open(pin)?).lines();
@@ -638,22 +505,16 @@ fn pin_runs(pin: &Path) -> std::io::Result<Option<(usize, Vec<String>)>> {
     Ok(Some((col, runs)))
 }
 
-/// The scratch PIN of one run: its path, and its target and decoy PSMs.
 struct RunPin {
     path: PathBuf,
     targets: usize,
     decoys: usize,
 }
 
-/// Path of the scratch PIN of the run with index `i`.
 fn run_pin_path(dir: &Path, stem: &str, i: usize) -> PathBuf {
     dir.join(format!("{stem}.run{i}.pin"))
 }
 
-/// Write the rows of `pin` of each run in `chunk` to its own PIN (the header
-/// and that run's rows), `<dir>/<stem>.run<first + i>.pin`, and count each
-/// run's targets and decoys by the [`LABEL_COLUMN`]. The caller removes the
-/// files, whether this succeeds or not.
 fn write_run_pins(
     pin: &Path,
     col: usize,
@@ -700,7 +561,6 @@ fn write_run_pins(
     Ok(runs)
 }
 
-/// The `SpecId`s (first column) of the PSM rows of the PIN at `path`.
 fn pin_spec_ids(path: &Path) -> std::io::Result<Vec<String>> {
     use std::io::{BufRead, BufReader};
     let mut ids = Vec::new();
@@ -711,11 +571,6 @@ fn pin_spec_ids(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(ids)
 }
 
-/// The Percolator result file `path` as it is and with its `q-value` column
-/// replaced by the values of `q` (keyed by `PSMId`); rows without a value keep
-/// theirs. The replaced values stay in a `pooled-q-value` column before
-/// `proteinIds` (kept as it is when the file already has one). `None` when
-/// the file does not exist. Nothing is written.
 fn render_q_values(
     path: &Path,
     q: &HashMap<String, f64>,
@@ -726,7 +581,6 @@ fn render_q_values(
         Err(e) => return Err(e.into()),
     };
     let mut out = String::with_capacity(text.len() + text.len() / 16);
-    // PSMId, q-value and proteinIds columns, and whether the pooled column is added.
     let mut cols: Option<(usize, usize, usize, bool)> = None;
     for (n, line) in text.lines().enumerate() {
         if n == 0 {
@@ -770,10 +624,6 @@ fn render_q_values(
     Ok(Some((text, out)))
 }
 
-/// Write the per-run q-values into the target and the decoy result file (see
-/// [`render_q_values`]). Both files are read and rendered before either is
-/// written, and each is replaced atomically; if the decoy file cannot be
-/// written the target file is put back, so an error leaves both pooled.
 fn rewrite_result_q_values(
     main: &ResultPaths,
     target_q: &HashMap<String, f64>,
@@ -795,15 +645,12 @@ fn rewrite_result_q_values(
     Ok(())
 }
 
-/// What the pass of one run gave: Percolator's q-values of its target and of
-/// its decoy PSMs by `PSMId`, and the `SpecId`s of all its PSMs.
 struct RunQ {
     target: HashMap<String, f64>,
     decoy: HashMap<String, f64>,
     ids: Vec<String>,
 }
 
-/// The static pass on one run's scratch PIN (see [`apply_per_run_q`]).
 fn score_run(
     backend: &PercolatorBackend,
     run_pin: &Path,
@@ -839,7 +686,6 @@ fn score_run(
             };
             Ok((t, d))
         });
-    // The pass results are scratch, gone whether or not the pass worked.
     let cleared = pass.clear_stale();
     let (t, d) = result?;
     cleared?;
@@ -850,33 +696,6 @@ fn score_run(
     })
 }
 
-/// Per-run q-values for a PIN of several runs (a [`RUN_COLUMN`] with more
-/// than one value): the model of the pooled run is applied to each run's PSMs
-/// on its own (`--static`, the pooled weights, `-Y`) and Percolator estimates
-/// the q-values of that run's target-decoy competition. The scores and the
-/// PEP stay those of the pooled run; the `q-value` of `targets` and of both
-/// result files is replaced, and the pooled q-value goes to the
-/// `pooled-q-value` column.
-///
-/// The scorer of the pass is the model of the pooled run's first
-/// cross-validation bin: `--init-weights` reads one row of weights, the raw
-/// weights of that bin, whereas the pooled scores are held-out scores of the
-/// three bins. On real data the two scores of a PSM correlate at r = 0.998 to
-/// 0.9998 in ordinary runs and 0.983 in a near-empty run, and the mean of the
-/// three bins' raw weights (which this function does not use) does not make
-/// them closer; the q-values are those of the pass's scores, the `score` and
-/// PEP columns those of the pooled run.
-///
-/// A PSM of a run that Percolator scored, which the pass leaves out of the
-/// run's target results (it lost the competition in the run, or has no
-/// result), gets a q-value of 1, and so do all PSMs of a run without targets
-/// or without decoys, for which no FDR can be estimated. A run whose pass
-/// fails for another reason, or whose scratch PIN cannot be written or read,
-/// keeps the pooled q-values of its PSMs, with a warning. The scratch PINs
-/// are removed in every case.
-///
-/// Returns a one-line summary, or `None` when the PIN has one run or no
-/// [`RUN_COLUMN`], or cannot be read (nothing changes).
 pub fn apply_per_run_q(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -923,7 +742,6 @@ pub fn apply_per_run_q(
             Ok(run_pins) => {
                 for (i, (run, rp)) in chunk.iter().zip(&run_pins).enumerate() {
                     let outcome = if rp.targets == 0 || rp.decoys == 0 {
-                        // Percolator needs both labels to estimate an FDR.
                         pin_spec_ids(&rp.path)
                             .map(|ids| {
                                 unscorable.set(unscorable.get() + 1);
@@ -961,13 +779,10 @@ pub fn apply_per_run_q(
                 }
             }
         }
-        // The scratch PINs, whatever happened.
         for i in 0..chunk.len() {
             let _ = std::fs::remove_file(run_pin_path(&out_dir, &stem, first + i));
         }
     }
-    // The result files first: if they cannot be written they and the map
-    // stay pooled together.
     let mut replaced = 0usize;
     let mut note = "";
     match rewrite_result_q_values(&main, &target_q, &decoy_q) {
@@ -1002,11 +817,6 @@ pub fn apply_per_run_q(
     )))
 }
 
-/// Replaces the PEP of `targets` when Percolator's `-Y` PEP fit failed (see
-/// [`pep_is_degenerate`]): a second, static pass with the weights of the main
-/// run estimates the PEP by the mix-max method. The q-values, scores and the
-/// set of PSMs stay those of the main run. If that PEP is degenerate too, the
-/// main run's values are kept and a warning is printed.
 fn repair_pep(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -1045,7 +855,6 @@ fn repair_pep(
             log_tail: tail_lines(&log, 20),
         })
     };
-    // The repair files are scratch: gone whether or not the pass worked.
     pass.clear_stale()?;
     let repaired = result?;
     if pep_is_degenerate(&repaired) {
@@ -1069,17 +878,8 @@ fn repair_pep(
     Ok(())
 }
 
-/// The rescored score of every PIN row, keyed by `SpecId`: target rows, then
-/// decoy rows.
 pub type RowScores = (HashMap<String, f64>, HashMap<String, f64>);
 
-/// The score of every row of `pin` (target rows, decoy rows) under the model
-/// of the main run on that PIN ([`run_percolator_pooled`] must have run): a
-/// static pass with the main run's weights and no target-decoy competition,
-/// so every row of a spectrum keeps its score, not only its group's winner.
-/// The rows of one spectrum can then compete with each other, as the site
-/// posteriors need ([`crate::site_identity::row_posteriors`]). The pass files
-/// are scratch, removed whether or not the pass worked.
 pub fn score_all_rows(
     backend: &PercolatorBackend,
     pin: &Path,
@@ -1118,7 +918,6 @@ pub fn score_all_rows(
     result
 }
 
-/// The result files `run_percolator` writes for `pin`, next to it.
 fn result_paths(pin: &Path) -> ResultPaths {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new("."));
     let stem = pin
@@ -1128,8 +927,6 @@ fn result_paths(pin: &Path) -> ResultPaths {
     ResultPaths::new(out_dir, &stem)
 }
 
-/// The decoy-PSM result file a [`run_percolator`] call on `pin` writes; parse
-/// it with [`parse_psm_results`].
 pub fn decoy_results_path(pin: &Path) -> PathBuf {
     result_paths(pin).decoy
 }
@@ -1140,9 +937,6 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Parse a Percolator score field, rejecting anything that is not a finite
-/// number (empty, non-numeric, NaN, or ±inf) — such a value must not flow into
-/// FDR filtering as a silent NaN.
 fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() => Ok(v),
@@ -1153,14 +947,6 @@ fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
     }
 }
 
-/// Parse a Percolator PSM result TSV into a `PSMId → PercolatorPsm` map.
-///
-/// HEADER-NAME-DRIVEN: the column positions of `PSMId`, `q-value`,
-/// `posterior_error_probability`, `peptide`, and `proteinIds` are located by
-/// matching the header row, so a leading/extra column (e.g. Sage's `FileName`)
-/// does not shift the parse. `proteinIds` is the LAST logical column; every tab
-/// after it is a separate protein id, so the rest of the line is captured and
-/// re-joined with `;`.
 pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
     let mut reader = PsmResultReader::new(text.as_bytes())?;
     let mut map = HashMap::new();
@@ -1182,21 +968,14 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     Ok(map)
 }
 
-/// One row of a Percolator PSM result file, borrowed from its line.
 #[derive(Debug)]
 pub struct PsmResultRow<'a> {
-    /// `PSMId` column.
     pub psm_id: &'a str,
-    /// `q-value` column.
     pub q_value: f64,
-    /// `pooled-q-value` column; `None` when the file has none.
     pub pooled_q: Option<f64>,
-    /// `posterior_error_prob` column.
     pub pep: f64,
-    /// `score` column; `None` when absent, unparseable or not finite.
     pub score: Option<f64>,
     pub peptide: &'a str,
-    /// `proteinIds` and every field after it.
     protein_fields: Vec<&'a str>,
 }
 
@@ -1228,9 +1007,6 @@ impl ResultColumns {
                     header: header.to_string(),
                 })
         };
-        // Match a column by name-prefix. Percolator 3.7.x emits the PEP column as
-        // `posterior_error_prob`; other builds/tools use the full
-        // `posterior_error_probability`. A prefix match accepts both.
         let find_prefix = |prefix: &'static str| -> Result<usize, PercolatorError> {
             cols.iter()
                 .position(|c| c.starts_with(prefix))
@@ -1252,16 +1028,12 @@ impl ResultColumns {
 
     fn row<'a>(&self, line: &'a str) -> Result<PsmResultRow<'a>, PercolatorError> {
         let fields: Vec<&str> = line.split('\t').collect();
-        // Fail loud on a row shorter than the highest non-protein index we read
-        // (truncated/corrupt) — silently skipping it would drop a PSM and bias FDR.
         let max_scalar = self.id.max(self.q).max(self.pep).max(self.peptide);
         if fields.len() <= max_scalar {
             return Err(PercolatorError::MalformedRow {
                 line: line.to_string(),
             });
         }
-        // A non-finite or unparseable q-value/PEP must be an error, never a
-        // silent NaN — NaN compares false in every FDR threshold check.
         let q_value = parse_finite(fields[self.q], "q-value")?;
         let pep = parse_finite(fields[self.pep], "posterior_error_prob")?;
         let pooled_q = self
@@ -1269,8 +1041,6 @@ impl ResultColumns {
             .and_then(|c| fields.get(c))
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite());
-        // The score is optional: a missing, unparseable or non-finite value is
-        // no score. Callers that rank by it reject such PSMs themselves.
         let score = self
             .score
             .and_then(|c| fields.get(c))
@@ -1289,9 +1059,6 @@ impl ResultColumns {
     }
 }
 
-/// The PSM ids of a decoy result file, streamed: only the ids are kept, and
-/// each row is validated as [`parse_psm_results`] validates it (a duplicate id
-/// is an error there too).
 fn decoy_ids<R: std::io::BufRead>(reader: R) -> Result<HashSet<String>, PercolatorError> {
     let mut rows = PsmResultReader::new(reader)?;
     let mut ids = HashSet::new();
@@ -1305,10 +1072,6 @@ fn decoy_ids<R: std::io::BufRead>(reader: R) -> Result<HashSet<String>, Percolat
     Ok(ids)
 }
 
-/// Reads a Percolator PSM result file one row at a time, so a file of any
-/// size is parsed with one line in memory. Lines are split as
-/// [`str::lines`] splits them and empty lines are skipped; the columns are
-/// found by header name as in [`parse_psm_results`].
 pub struct PsmResultReader<R> {
     reader: R,
     line: String,
@@ -1316,7 +1079,6 @@ pub struct PsmResultReader<R> {
 }
 
 impl<R: std::io::BufRead> PsmResultReader<R> {
-    /// Reads the header. Errors: a missing required column, or I/O.
     pub fn new(mut reader: R) -> Result<Self, PercolatorError> {
         let mut line = String::new();
         read_line(&mut reader, &mut line)?;
@@ -1328,8 +1090,6 @@ impl<R: std::io::BufRead> PsmResultReader<R> {
         })
     }
 
-    /// The next row, `None` at the end of the file. Errors: a malformed row,
-    /// a non-finite q-value or PEP, or I/O.
     pub fn next_row(&mut self) -> Result<Option<PsmResultRow<'_>>, PercolatorError> {
         loop {
             if !read_line(&mut self.reader, &mut self.line)? {
@@ -1343,8 +1103,6 @@ impl<R: std::io::BufRead> PsmResultReader<R> {
     }
 }
 
-/// Reads one line into `line` without its `\n` (and then `\r`) ending;
-/// false at the end of the input.
 fn read_line<R: std::io::BufRead>(
     reader: &mut R,
     line: &mut String,
@@ -1397,7 +1155,6 @@ mod tests {
         let first: HashMap<String, PercolatorPsm> =
             rows.iter().map(|p| (p.psm_id.clone(), p.clone())).collect();
         let want = sorted_ids(&first);
-        // Each map has its own random hasher, so each iterates in its own order.
         for _ in 0..8 {
             let m: HashMap<String, PercolatorPsm> = rows
                 .iter()
@@ -1429,8 +1186,6 @@ mod tests {
 
     #[test]
     fn parse_pin_header() {
-        // Real Percolator 3.7.x header: the PEP column is the abbreviated
-        // `posterior_error_prob` (verified against a live percolator:3.7.1 run).
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     title_100_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\tsp|P2\n\
                     title_101_1\t1.0\t0.02\t0.03\tK.ANOTHERK.R\tsp|P3\n";
@@ -1448,7 +1203,6 @@ mod tests {
 
     #[test]
     fn reader_splits_lines_as_str_lines() {
-        // CRLF endings, an empty line, and a last line without an ending.
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\r\n\
                     a_1_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\tsp|P2\r\n\
                     \r\n\
@@ -1478,7 +1232,6 @@ mod tests {
         let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n";
         assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
-        // A non-finite or unparseable score is no score; the row still parses.
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     a_1_1\tnan\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
                     b_1_1\tinf\t0.002\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
@@ -1487,8 +1240,6 @@ mod tests {
         assert_eq!(m.len(), 3);
         assert!(m.values().all(|p| p.score.is_none()));
         assert_eq!(m["a_1_1"].q_value, 0.001);
-        // A score column after the scalar columns does not lengthen the rows
-        // that must be present.
         let text = "PSMId\tq-value\tposterior_error_prob\tpeptide\tproteinIds\tscore\n\
                     a_1_1\t0.001\t0.0005\tR.PEPTIDEK.A\n";
         assert_eq!(parse_psm_results(text).unwrap()["a_1_1"].score, None);
@@ -1502,17 +1253,13 @@ mod tests {
                 .map(|(i, (q, pep))| (format!("r/{i}"), psm(&format!("r/{i}"), *q, *pep)))
                 .collect()
         };
-        // All accepted PSMs at PEP 1: the fit failed.
         assert!(pep_is_degenerate(&map(&[
             (0.0002, 1.0),
             (0.004, 1.0),
             (0.2, 0.3)
         ])));
-        // One accepted PSM below 1 is a working fit.
         assert!(!pep_is_degenerate(&map(&[(0.0002, 1e-20), (0.004, 1.0)])));
-        // PEP 1 only outside the accepted set is the normal tail.
         assert!(!pep_is_degenerate(&map(&[(0.001, 0.0003), (0.3, 1.0)])));
-        // Nothing accepted: nothing to judge.
         assert!(!pep_is_degenerate(&map(&[(0.3, 1.0)])));
         assert!(!pep_is_degenerate(&HashMap::new()));
     }
@@ -1569,8 +1316,6 @@ mod tests {
 
     #[test]
     fn parse_leading_filename_column() {
-        // Sage adds a leading FileName column, shifting q-value to col 4. The
-        // by-NAME lookup must still find every field correctly.
         let text =
             "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
                     sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGTPEPK.L\tDECOY_x\n";
@@ -1682,7 +1427,6 @@ mod tests {
         assert_eq!(args[1], "42");
         assert!(args.contains(&"--only-psms".to_string()));
         assert_eq!(args.iter().filter(|a| *a == "-Y").count(), 1);
-        // A user -Y (either spelling) is not repeated.
         for user in ["-Y", "--post-processing-tdc"] {
             let args = native_args(Path::new("/tmp/d/x.pin"), &out, &[user.into()]);
             assert!(!args.iter().any(|a| a == "-Y" && user != "-Y"));
@@ -1750,7 +1494,6 @@ mod tests {
         let target = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                       a\t1.0\t0.01\t0.001\tK.AAK.R\tP\n";
         std::fs::write(&paths.target, target).unwrap();
-        // No q-value column: the decoy file cannot be rendered.
         std::fs::write(
             &paths.decoy,
             "PSMId\tscore\tpeptide\tproteinIds\nd\t0.1\tK.KAA.R\tXXX_P\n",
@@ -1761,7 +1504,6 @@ mod tests {
         assert!(rewrite_result_q_values(&paths, &target_q, &decoy_q).is_err());
         assert_eq!(std::fs::read_to_string(&paths.target).unwrap(), target);
 
-        // With a readable decoy file both are rewritten and keep the pooled value.
         std::fs::write(
             &paths.decoy,
             "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\nd\t0.1\t0.2\t0.9\tK.KAA.R\tXXX_P\n",

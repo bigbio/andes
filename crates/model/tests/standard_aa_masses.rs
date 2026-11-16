@@ -1,9 +1,3 @@
-//! Pin the 20 standard AA monoisotopic residue masses to IUPAC atomic
-//! compositions (C/H/N/O/S integer counts per residue). Each mass is
-//! computed in-test from those tuples using the chemistry constants in
-//! `model::mass`, then compared to the Rust-built
-//! `AminoAcid::standard(residue).mass`.
-
 use model::amino_acid::AminoAcid;
 use model::mass::{C, H, N, O, S};
 
@@ -13,7 +7,6 @@ fn composition_mass(c: u32, h: u32, n: u32, o: u32, s: u32) -> f64 {
 
 #[test]
 fn all_20_match_iupac_compositions() {
-    // (residue, C, H, N, O, S) — standard 20-residue atomic formulae.
     let reference: &[(u8, u32, u32, u32, u32, u32)] = &[
         (b'G', 2, 3, 1, 1, 0),
         (b'A', 3, 5, 1, 1, 0),
@@ -54,10 +47,6 @@ fn all_20_match_iupac_compositions() {
 
 #[test]
 fn exotic_residues_absent() {
-    // Note: `U` (selenocysteine) IS supported — it's a real co-translationally
-    // inserted residue and selenoprotein peptides would otherwise be dropped
-    // (see amino_acid::tests::selenocysteine_u_is_supported). The ambiguity
-    // codes and pyrrolysine (O) remain unsupported.
     for r in [b'O', b'B', b'Z', b'J', b'X'] {
         assert!(
             AminoAcid::standard(r).is_none(),
@@ -73,7 +62,6 @@ fn exotic_residues_absent() {
 
 #[test]
 fn nominal_masses_match_integer_formulae() {
-    // Integer formula mass: C×12 + H×1 + N×14 + O×16 + S×32.
     let reference: &[(u8, i32)] = &[
         (b'G', 57),
         (b'A', 71),

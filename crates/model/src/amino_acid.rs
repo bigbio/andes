@@ -1,22 +1,3 @@
-//! Amino acid residue with optional modification. Standard residue masses
-//! are computed from atomic composition (C/H/N/O/S counts) so they are
-//! bit-equal to the canonical composition-based mass. Pinned by
-//! `tests/standard_aa_masses.rs`.
-//!
-//! The `mod_` field stores an `Option<&'static Modification>` rather than an
-//! inline `Option<Modification>`. Candidate enumeration clones an
-//! `AminoAcid` for every position × variant during the
-//! `expand_recursive` walk; with the inline layout each clone also
-//! cloned the `Modification`'s `String` `name` (and optional accession),
-//! producing one heap allocation per modified residue per candidate. At
-//! Astral scale that drove `PreparedSearch::prepare` to ~27 GB RSS on a
-//! 31 GB VM. A shared handle makes clones cheap and shrinks `AminoAcid`
-//! to 24 B. It was an `Arc` first; the atomic refcount bump per clone then
-//! became the contended hot spot on PTM-rich out-of-core searches (every
-//! worker thread bumping the one Phospho refcount), so the handle is now a
-//! leaked `'static` reference: cloning it is a pointer copy. The per-search
-//! modification table is a few dozen records, so the leak is negligible.
-
 use crate::mass::{nominal_from, C, H, N, O, S};
 use crate::modification::Modification;
 use std::hash::{Hash, Hasher};
@@ -25,21 +6,11 @@ use std::hash::{Hash, Hasher};
 pub struct AminoAcid {
     pub residue: u8,
     pub mass: f64,
-    /// `None` for unmodified residues; otherwise a shared handle to one of
-    /// the per-search `Modification` records (leaked, `'static`). Copying
-    /// the handle is a pointer copy — see the module-level note for why the
-    /// representation matters.
     pub mod_: Option<&'static Modification>,
 }
 
 impl AminoAcid {
-    /// Look up the standard (unmodified) residue table. Returns `None`
-    /// for any byte not in the standard set.
     pub fn standard(residue: u8) -> Option<Self> {
-        // Selenocysteine (Sec, `U`): composition C3H5NOSe, so it can't be expressed
-        // via the (C,H,N,O,S) tuple — use its monoisotopic residue mass directly.
-        // Without this, selenoprotein peptides (GPX1-4, SELENOP, TXNRD, ...) are
-        // silently dropped by candidate generation.
         if residue == b'U' {
             return Some(AminoAcid {
                 residue: b'U',
@@ -56,13 +27,6 @@ impl AminoAcid {
         })
     }
 
-    /// Attach a modification, returning the modified residue. The `mass`
-    /// field is unchanged; consumers compute total mass as `aa.mass +
-    /// mod_.mass_delta` separately (see `Peptide::mass`).
-    ///
-    /// Accepts either an owned `Modification` (test code; it is leaked to
-    /// `'static`) or a `&'static Modification` (the hot path inside the
-    /// candidate enumerator).
     pub fn with_mod<M: Into<&'static Modification>>(mut self, m: M) -> Self {
         self.mod_ = Some(m.into());
         self
@@ -78,9 +42,6 @@ impl AminoAcid {
     }
 }
 
-// Custom Eq/Hash via to_bits() — bit-exact comparison (NOT IEEE 754).
-// Needed because AminoAcid contains f64, which doesn't implement Eq/Hash
-// directly.
 impl PartialEq for AminoAcid {
     fn eq(&self, other: &Self) -> bool {
         self.residue == other.residue
@@ -110,9 +71,6 @@ fn mods_eq(a: &Option<&'static Modification>, b: &Option<&'static Modification>)
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => {
-            // Fast path: same record ⇒ trivially equal. This is the common
-            // case: the AminoAcidSet hands out one shared handle per
-            // registered mod to every variant.
             if std::ptr::eq(*x, *y) {
                 return true;
             }
@@ -122,10 +80,6 @@ fn mods_eq(a: &Option<&'static Modification>, b: &Option<&'static Modification>)
     }
 }
 
-/// 20 standard AA atomic compositions (C, H, N, O, S). Computing mass
-/// from these integer counts at runtime guarantees bit-equal parity with
-/// a canonical composition-based mass. Public so the quantification crate can
-/// build a peptide's elemental formula for its theoretical isotope envelope.
 pub fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
     Some(match residue {
         b'G' => (2, 3, 1, 1, 0),
@@ -177,7 +131,6 @@ mod tests {
 
     #[test]
     fn selenocysteine_u_is_supported() {
-        // Sec (U): C3H5NOSe monoisotopic residue mass ~150.95364.
         let u = AminoAcid::standard(b'U').expect("U (selenocysteine) must be recognized");
         assert!(
             (u.mass - 150.953636).abs() < 1e-4,
@@ -249,9 +202,8 @@ mod tests {
         let b = AminoAcid::standard(b'G').unwrap();
         assert_eq!(a, b);
 
-        // Two AAs with the same residue but different mass are NOT equal.
         let mut c = a.clone();
-        c.mass = 57.0214637_f64; // slightly off
+        c.mass = 57.0214637_f64;
         assert_ne!(a, c);
     }
 

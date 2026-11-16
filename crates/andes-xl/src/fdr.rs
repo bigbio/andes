@@ -1,30 +1,15 @@
-//! Crosslink FDR from target-target, target-decoy and decoy-decoy counts.
-//!
-//! Above a score threshold, TD matches estimate the TT matches with one false
-//! peptide plus those with two, and DD matches estimate those with two false
-//! peptides counted twice over in TD, so the false TT matches number
-//! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate counts one TD more,
-//! `(TD + 1 − DD) / TT`, which removes most of the excess the monotone pass
-//! picks up from chance dips in mid-sized sets. It is made separately for
-//! each link class (intra- and inter-protein) by the caller.
-
 use crate::decoy::PairClass;
 
 pub const MIN_FALSE: f64 = 2.0;
 
-/// Counts of a set of CSMs by class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClassCounts {
-    /// Target-target matches.
     pub tt: usize,
-    /// Target-decoy matches.
     pub td: usize,
-    /// Decoy-decoy matches.
     pub dd: usize,
 }
 
 impl ClassCounts {
-    /// Add one CSM of class `c`.
     pub fn add(&mut self, c: PairClass) {
         match c {
             PairClass::TT => self.tt += 1,
@@ -42,9 +27,6 @@ impl ClassCounts {
     }
 }
 
-/// q-values of CSMs with scores `scores` (higher is better) and classes
-/// `classes`, by the floored `(TD − DD) / TT` estimate at each score threshold, made
-/// monotone from the bottom up. Ties share one threshold.
 pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
     assert_eq!(scores.len(), classes.len());
     let mut order: Vec<usize> = (0..scores.len()).collect();
@@ -64,7 +46,6 @@ pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
         }
         k = end;
     }
-    // Monotone: q at a threshold is the lowest FDR at that threshold or below.
     let mut q = fdr_at.clone();
     let mut running = f64::INFINITY;
     for &i in order.iter().rev() {

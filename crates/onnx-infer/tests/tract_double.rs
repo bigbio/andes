@@ -1,5 +1,3 @@
-//! Integration test: tract backend × fixture `double.onnx` (y = 2x).
-
 #![cfg(feature = "tract")]
 
 use std::path::PathBuf;

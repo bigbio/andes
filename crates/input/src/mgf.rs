@@ -1,6 +1,3 @@
-//! Streaming, regex-based MGF reader yielding andes's Spectrum.
-//! Sync I/O — MGF is line-oriented.
-
 use std::io::BufRead;
 
 use model::Spectrum;
@@ -22,8 +19,6 @@ impl<R: BufRead> MgfReader<R> {
         }
     }
 
-    /// Read the next non-blank, non-comment line. Returns `Ok(None)`
-    /// at EOF. Advances `line_no`.
     fn next_significant_line(&mut self) -> Result<Option<String>, MgfParseError> {
         loop {
             self.buf.clear();
@@ -108,9 +103,6 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                         }
                     },
                     "CHARGE" => match parse_charge(&value) {
-                        // `CHARGE=0` means "unknown", as in mzML: leave it absent
-                        // so the search enumerates the charge range; so does an
-                        // out-of-range value or a list of several charge states.
                         Ok(z) => {
                             precursor_charge = z
                                 .and_then(|z| model::spectrum::known_precursor_charge(i64::from(z)))
@@ -134,14 +126,14 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                     "SCANS" => {
                         scan = value.parse().ok();
                     }
-                    _ => { /* ignore unknown keys */ }
+                    _ => {}
                 }
                 continue;
             }
 
             match parse_peak(&line) {
                 Ok(Some((mz, intensity))) => peaks.push((mz, intensity)),
-                Ok(None) => { /* peak out of domain: skip */ }
+                Ok(None) => {}
                 Err(()) => {
                     return Some(Err(MgfParseError::BadPeak {
                         line: self.line_no,
@@ -162,9 +154,6 @@ impl<R: BufRead> Iterator for MgfReader<R> {
 
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // `SCANS=` wins; msconvert omits it and puts the scan in the TITLE
-        // instead. Without either, the 1-based position in the file keeps
-        // the PIN `ScanNr` unique.
         let scan = scan
             .or_else(|| scan_from_title(&title))
             .or_else(|| i32::try_from(self.spectrum_index).ok());
@@ -188,9 +177,6 @@ impl<R: BufRead> Iterator for MgfReader<R> {
 fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
     let mut iter = value.split_ascii_whitespace();
     let mz: f64 = iter.next().ok_or(())?.parse().map_err(|_| ())?;
-    // Reject a non-finite or non-positive precursor m/z (e.g. `PEPMASS=0` or
-    // `inf`) — it would produce nonsense search windows. The Thermo and timsTOF
-    // readers gate on `precursor_mz > 0`; do the same here for consistency.
     if !mz.is_finite() || mz <= 0.0 {
         return Err(());
     }
@@ -202,9 +188,6 @@ fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
     Ok((mz, intensity))
 }
 
-/// Scan number carried in an MGF `TITLE`: a native-id `scan=N` token
-/// (`... scan=1234`, `NativeID:"controllerType=0 controllerNumber=1
-/// scan=1234"`), or the TPP/msconvert `name.START.END.CHARGE` form.
 fn scan_from_title(title: &str) -> Option<i32> {
     if let Some(pos) = title.find("scan=") {
         let digits: String = title[pos + "scan=".len()..]
@@ -215,7 +198,6 @@ fn scan_from_title(title: &str) -> Option<i32> {
             return Some(scan);
         }
     }
-    // `name.START.END.CHARGE`, possibly followed by a space and free text.
     let head = title.split_whitespace().next()?;
     let mut fields = head.rsplit('.');
     let charge = fields.next()?;
@@ -229,22 +211,12 @@ fn scan_from_title(title: &str) -> Option<i32> {
     (start > 0 && end >= start).then_some(start)
 }
 
-/// Why a `CHARGE=` value cannot be used.
 #[derive(Debug, PartialEq, Eq)]
 enum ChargeError {
     Malformed,
-    /// A negative charge state: the search computes the precursor mass of a
-    /// protonated ion, which is wrong for a negative-ion spectrum.
     Negative,
 }
 
-/// Parse a `CHARGE=` value: one charge state (`2+`, `2`, `+2`) or several
-/// (`2+ and 3+`, `2+,3+`), as Mascot and msconvert write when the charge was
-/// not determined.
-///
-/// `Ok(Some(z))` when the value names one charge state. `Ok(None)` when it
-/// names several different ones: the charge is then unknown, and the search
-/// enumerates its configured charge range for the spectrum.
 fn parse_charge(value: &str) -> Result<Option<i32>, ChargeError> {
     let mut charge: Option<i32> = None;
     let mut several = false;
@@ -280,12 +252,6 @@ fn parse_charge(value: &str) -> Result<Option<i32>, ChargeError> {
     }
 }
 
-/// Parse one `mz intensity` peak line.
-///
-/// `Err(())` is a syntactically malformed line (hard error upstream). `Ok(None)`
-/// is a syntactically-valid but out-of-domain peak (non-finite / non-positive
-/// m/z, or non-finite / negative intensity) that must be dropped rather than
-/// scored (finding 4.4). `Ok(Some(..))` is a usable peak.
 fn parse_peak(line: &str) -> Result<Option<(f64, f32)>, ()> {
     let mut iter = line.split_ascii_whitespace();
     let mz: f64 = iter.next().ok_or(())?.parse().map_err(|_| ())?;
@@ -349,8 +315,6 @@ mod tests {
 
     #[test]
     fn parse_pepmass_rejects_nonpositive_and_nonfinite() {
-        // A non-positive or non-finite precursor m/z would produce nonsense
-        // search windows — reject it, matching the Thermo/timsTOF readers.
         assert!(parse_pepmass("0").is_err());
         assert!(parse_pepmass("0.0 1000.0").is_err());
         assert!(parse_pepmass("-5.0").is_err());
@@ -475,8 +439,6 @@ mod tests {
 
     #[test]
     fn scan_number_precedence() {
-        // SCANS= wins over the title; the title wins over the file position;
-        // the 1-based file position keeps ScanNr unique otherwise.
         let mgf = "BEGIN IONS\nTITLE=a.10.10.2\nSCANS=99\nPEPMASS=500\n100 1\nEND IONS\n\
                    BEGIN IONS\nTITLE=a.20.20.2\nPEPMASS=500\n100 1\nEND IONS\n\
                    BEGIN IONS\nTITLE=no scan here\nPEPMASS=500\n100 1\nEND IONS\n";
@@ -508,7 +470,6 @@ mod tests {
         assert_eq!(parse_peak("100 -1").unwrap(), None, "negative intensity");
         assert_eq!(parse_peak("100 inf").unwrap(), None, "inf intensity");
         assert_eq!(parse_peak("100 nan").unwrap(), None, "nan intensity");
-        // Zero intensity is allowed (a real, if uninformative, peak).
         assert_eq!(parse_peak("100 0").unwrap(), Some((100.0, 0.0)));
     }
 }

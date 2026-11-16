@@ -1,35 +1,8 @@
-//! Precursor isolation purity: the share of the MS1 ion current inside the
-//! isolation window that belongs to the selected precursor's isotope envelope.
-//!
-//! Follows the OpenMS `PrecursorPurity` / `IsobaricChannelExtractor` rule:
-//! from the MS1 peak nearest the precursor m/z, walk the isotope ladder
-//! (`ISOTOPE / z`) outward in both directions, matching each expected position
-//! to the most intense peak within a ppm tolerance, and divide the summed
-//! envelope intensity inside the window by everything in the window. Low
-//! purity means reporter ions of co-isolated peptides compress the ratios of
-//! this PSM.
-//!
-//! The window is centred on the isolation target m/z the instrument used, not
-//! on the precursor m/z: a monoisotopic precursor assigned after acquisition
-//! can sit below the window when the instrument isolated a heavier isotope.
-//! The ladder still starts at the precursor m/z, so isotopes of the precursor
-//! that fall inside the window count wherever the anchor is.
-
 use model::mass::ISOTOPE;
 
-/// Isotope steps counted inside the window, per direction.
 const MAX_WINDOW_STEPS: usize = 10;
-/// Ladder steps per direction overall, including those outside the window.
 const MAX_LADDER_STEPS: usize = 64;
 
-/// Purity in `0..=1`, or `None` when the window is degenerate or empty.
-///
-/// `ms1` is m/z-sorted. The window is `[centre - lower_off, centre + upper_off]`
-/// where `centre` is `target_mz` (mzML `isolation window target m/z`) or, when
-/// the source records no target, `precursor_mz`. `lower_off` / `upper_off` are
-/// the mzML `isolation window lower/upper offset`. The isotope ladder is
-/// anchored on `precursor_mz`. `charge` 0 is treated as 1. `iso_tol_ppm`
-/// matches isotope peaks (OpenMS default 10 ppm).
 pub fn precursor_purity(
     ms1: &[(f64, f32)],
     precursor_mz: f64,
@@ -58,8 +31,6 @@ pub fn precursor_purity(
     let tol_da = |mz: f64| (mz * iso_tol_ppm * 1e-6).max(0.001);
     let in_window = |mz: f64| (lo..=hi).contains(&mz);
 
-    // Anchor: most intense MS1 peak within tolerance of the precursor m/z.
-    // Without one the precursor contributes nothing (purity 0), not "unknown".
     let Some((anchor_mz, anchor_int)) = best_within(ms1, precursor_mz, tol_da(precursor_mz)) else {
         return Some(0.0);
     };
@@ -127,7 +98,7 @@ mod tests {
     fn interference_lowers_purity() {
         let mz = 500.25;
         let ms1 = vec![
-            (mz - 0.3, 1000.0f32), // co-isolated, not on the ladder
+            (mz - 0.3, 1000.0f32),
             (mz, 1000.0),
             (mz + ISOTOPE / 2.0, 500.0),
         ];
@@ -149,7 +120,6 @@ mod tests {
     #[test]
     fn walks_past_a_missing_isotope() {
         let mz = 800.0;
-        // M+1 missing, M+2 present: still counted as envelope.
         let ms1 = vec![
             (mz, 100.0f32),
             (mz + 2.0 * ISOTOPE / 2.0, 50.0),
@@ -159,10 +129,6 @@ mod tests {
         assert!((p - 0.75).abs() < 1e-6, "{p}");
     }
 
-    /// The window is centred on the isolation target, not on the monoisotopic
-    /// precursor: the instrument isolated M+1 (650.83) of a z=2 precursor whose
-    /// monoisotopic m/z is 650.33. Inside `[650.48, 651.18]` sit M+1 and an
-    /// interferent at 650.95, so purity is 1.1 / 2.1.
     #[test]
     fn window_is_centred_on_the_isolation_target() {
         let ms1 = vec![
@@ -173,8 +139,6 @@ mod tests {
         ];
         let p = precursor_purity(&ms1, 650.33, Some(650.83), 2, 0.35, 0.35, 10.0).unwrap();
         assert!((p - 1.1 / 2.1).abs() < 1e-3, "{p}");
-        // Without a recorded target the window falls back to the precursor
-        // m/z, which here excludes the interferent entirely.
         let p = precursor_purity(&ms1, 650.33, None, 2, 0.35, 0.35, 10.0).unwrap();
         assert!((p - 1.0).abs() < 1e-6, "{p}");
     }

@@ -1,9 +1,3 @@
-//! Core domain types: spectra, peptides, modifications, amino-acid sets, masses.
-//!
-//! Pure types: amino acids, modifications, peptides, enzymes,
-//! tolerances, spectra, proteins, masses, activation, instrument,
-//! protocol. No I/O, no scoring.
-
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;

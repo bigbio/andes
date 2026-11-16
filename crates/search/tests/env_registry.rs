@@ -1,16 +1,3 @@
-//! Every `ANDES_*` environment variable must appear in `docs/ENV_VARS.md`.
-//!
-//!
-//! An undocumented switch is invisible twice over: users cannot find it, and we forget
-//! it exists and tune around it. Requiring a registry entry makes hiding a correction
-//! cost more than deciding what its default should be.
-//!
-//! The engine reads none. Everything that affects a search or a training run is a CLI
-//! flag with a documented default, so a result is reproducible from the command line
-//! that produced it. What remains is test-harness only — variables that select optional
-//! fixtures at `cargo test` time and are never read by the shipped binary — and this
-//! test exists to keep it that way.
-
 use std::collections::BTreeSet;
 
 fn vars_in_sources() -> BTreeSet<String> {
@@ -30,7 +17,6 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            // Skip build artefacts; they contain generated copies of the sources.
             if p.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
@@ -39,20 +25,13 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            // This file names variables only inside its own documentation, and the
-            // registry test itself must not be a source of truth.
             if p.file_name().is_some_and(|n| n == "env_registry.rs") {
                 continue;
             }
-            // Scan READ SITES (`env::var(` / `env::var_os(` with a literal
-            // argument), not name literals, and compare the name
-            // case-insensitively: a variable spelled in any capitalisation is a
-            // read the guard must see.
             for pat in ["env::var(", "env::var_os("] {
                 for (i, _) in text.match_indices(pat) {
                     let rest = &text[i + pat.len()..];
                     let Some(open) = rest.find('"') else { continue };
-                    // Only a literal argument; a computed name is out of scope.
                     if rest[..open].trim() != "" {
                         continue;
                     }
@@ -95,13 +74,10 @@ fn every_env_var_is_documented() {
 
 #[test]
 fn registry_has_no_stale_entries() {
-    // A registry that outlives its variables is as misleading as a missing one: it
-    // suggests switches that no longer do anything.
     let registry = include_str!("../../../docs/ENV_VARS.md");
     let found = vars_in_sources();
     let mut stale = Vec::new();
     for line in registry.lines() {
-        // Table rows only; prose in the header also mentions variable names.
         if !line.starts_with("| `ANDES_") {
             continue;
         }

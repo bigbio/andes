@@ -1,6 +1,3 @@
-//! Bundled search database: target+decoy ProteinDb. Consumed by candidate
-//! generation.
-
 use crate::decoy::{
     build_search_db_for, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
     Proteases, DEFAULT_DECOY_SEED,
@@ -10,34 +7,16 @@ use model::protein::ProteinDb;
 #[derive(Debug, Clone)]
 pub struct SearchIndex {
     pub db: ProteinDb,
-    /// Whether any protein is an isoform, variant or chain entry. Without one,
-    /// the match engine skips its per-candidate origin lookup.
     pub has_alternative_entries: bool,
-    /// Normalized decoy-accession prefix (no trailing `_`). A protein is a decoy
-    /// iff its accession is `"<decoy_prefix>_…"`, independent of FASTA layout
-    /// (supports target-only and shuffle modes). The single source of truth for
-    /// target/decoy membership, shared with candidate generation.
     pub decoy_prefix: String,
-    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms
-    /// `<orig>_rev` decoys). When set, a protein is a decoy iff its accession
-    /// starts with `"<decoy_prefix>_"` OR ends with this suffix. `None` =
-    /// andes-native prefix-only decoys. Set with `--decoy-suffix` (typically
-    /// alongside `--decoy-strategy none`) to consume an externally-built
-    /// target+decoy database without generating extra decoys.
     pub decoy_suffix: Option<String>,
 }
 
 impl SearchIndex {
-    /// Target/decoy membership for `accession` under this index's affix config
-    /// (prefix needle OR optional suffix). Single entry point used by candidate
-    /// generation and the target-protein iterators so the two always agree.
     pub fn is_decoy_accession(&self, accession: &str) -> bool {
         is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
     }
 
-    /// Pipeline: target ProteinDb → peptide-level decoys (fully specific
-    /// trypsin segments) → concat target+decoy. Convenience wrapper for the
-    /// default (Shuffle) strategy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         Self::from_target_db_with_strategy(
             target,
@@ -48,9 +27,6 @@ impl SearchIndex {
         )
     }
 
-    /// Build the search index for a given decoy `strategy`, with decoys for a
-    /// fully specific trypsin search. `seed` drives the shuffles. The combined
-    /// db is target+decoy, or the input verbatim for None.
     pub fn from_target_db_with_strategy(
         target: &ProteinDb,
         decoy_prefix: &str,
@@ -68,8 +44,6 @@ impl SearchIndex {
         )
     }
 
-    /// [`Self::from_target_db_with_strategy`] for a search with `proteases`,
-    /// whose cleavage segments the decoys permute within.
     pub fn from_target_db_for(
         target: &ProteinDb,
         decoy_prefix: &str,
@@ -86,7 +60,6 @@ impl SearchIndex {
             .count();
         match strategy {
             DecoyStrategy::None => {
-                // Target-only / externally-decoyed mode: we generate nothing.
                 if pre == 0 {
                     eprintln!(
                         "WARN: --decoy-strategy none and no input proteins carry the '{norm}_' \
@@ -103,8 +76,6 @@ impl SearchIndex {
                 }
             }
             _ => {
-                // Reverse/Shuffle GENERATE a 1:1 decoy per target. If the FASTA
-                // ALREADY contains decoys, this doubles them and biases FDR.
                 if pre > 0 {
                     eprintln!(
                         "WARN: {pre}/{} input proteins already carry the '{norm}_' decoy prefix — \
@@ -125,23 +96,10 @@ impl SearchIndex {
         }
     }
 
-    /// Look up the `Protein` at the given index in the combined target+decoy
-    /// database.
-    ///
-    /// Target proteins occupy `[0, target_count)` and their accessions are the
-    /// raw FASTA accessions.  Decoy proteins occupy `[target_count, 2 *
-    /// target_count)` and their accessions already carry the decoy prefix (set
-    /// by [`crate::decoy::decoy_db`]).  Returns `None` when `idx` is out of range.
     pub fn protein_at(&self, idx: usize) -> Option<&model::protein::Protein> {
         self.db.proteins.get(idx)
     }
 
-    /// Iterate over target proteins only — every protein whose accession does
-    /// NOT carry the decoy prefix. This matches the target/decoy test used in
-    /// candidate generation exactly, and (unlike the old positional `len()/2`
-    /// split) stays correct under shuffle decoys and target-only/pre-decoyed
-    /// inputs. For the default Reverse strategy on a clean target FASTA it is
-    /// equivalent to the first half of the combined db.
     pub fn iter_target_proteins(&self) -> impl Iterator<Item = &model::protein::Protein> {
         self.db
             .proteins
@@ -149,23 +107,12 @@ impl SearchIndex {
             .filter(move |p| !self.is_decoy_accession(&p.accession))
     }
 
-    /// Clone the TARGET-only proteins into a fresh `ProteinDb` — every protein
-    /// whose accession does NOT carry the decoy prefix (the same membership test
-    /// as [`Self::iter_target_proteins`]). The PTM-refinement cascade uses this
-    /// to recover the target-only db from the combined Pass-1 index, then
-    /// generates fresh decoys for the scoped Pass-2 search.
     pub fn target_db(&self) -> ProteinDb {
         ProteinDb {
             proteins: self.iter_target_proteins().cloned().collect(),
         }
     }
 
-    /// Returns `true` iff `residues` (peptide sequence, no flanking) appears as
-    /// a substring in ANY target protein. Used by the PIN writer to compute
-    /// Label semantics: Label=-1 only when ALL explaining proteins are decoy.
-    ///
-    /// Naive scan: O(target_count × len). Acceptable at BSA scale; for real
-    /// databases a substring index could accelerate — deferred to a perf pass.
     pub fn peptide_has_target_match(&self, residues: &[u8]) -> bool {
         for prot in self.iter_target_proteins() {
             if Self::contains_subsequence(prot.sequence.as_slice(), residues) {
@@ -185,11 +132,6 @@ impl SearchIndex {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
-    /// Append `other`'s proteins after `self`'s into one index space, keeping
-    /// `self`'s `decoy_prefix` (`other`'s is dropped). Mirrors
-    /// [`ProteinDb::concat`]: `other`'s protein at local index `j` lands at
-    /// `self.db.len() + j`, so callers must offset `other`'s `protein_index`
-    /// values by `self.db.len()` when merging its candidates.
     pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
         SearchIndex {
             has_alternative_entries: self.has_alternative_entries || other.has_alternative_entries,
@@ -200,7 +142,6 @@ impl SearchIndex {
     }
 }
 
-/// Whether `db` holds any isoform, variant or chain entry.
 pub fn holds_alternative_entries(db: &ProteinDb) -> bool {
     db.proteins
         .iter()
@@ -258,8 +199,6 @@ mod tests {
 
     #[test]
     fn target_db_returns_only_non_decoy_proteins() {
-        // Combined db = 2 targets + 2 reverse decoys; target_db() recovers the
-        // 2 targets with their original accessions, dropping the prefixed decoys.
         let target = ProteinDb {
             proteins: vec![
                 Protein {
@@ -309,9 +248,6 @@ mod tests {
 
     #[test]
     fn peptide_has_target_match_misses_when_only_in_decoy() {
-        // The pseudo-reversed decoy of MABCDEFGHIK is MIHGFEDCBAK (initiator
-        // Met and K stay). A peptide in the decoy but not the target should
-        // return false.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P1".into(),
@@ -327,7 +263,6 @@ mod tests {
             DecoyStrategy::Reverse,
             DEFAULT_DECOY_SEED,
         );
-        // "IHGFE" appears only in the decoy sequence, not in the target.
         assert_eq!(idx.db.proteins[1].sequence, b"MIHGFEDCBAK");
         assert!(
             !idx.peptide_has_target_match(b"IHGFE"),
@@ -337,7 +272,6 @@ mod tests {
 
     #[test]
     fn peptide_has_target_match_empty_peptide_matches_any_target_protein() {
-        // An empty peptide is trivially a substring of any non-empty protein.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P1".into(),

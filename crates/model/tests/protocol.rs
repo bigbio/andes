@@ -1,5 +1,3 @@
-//! Pin `Protocol` variant names to the andes search-protocol enum.
-
 use model::Protocol;
 
 #[test]

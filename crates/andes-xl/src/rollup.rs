@@ -1,48 +1,28 @@
-//! Roll-up of crosslink-spectrum matches to residue pairs and protein pairs,
-//! with a class-split `(TD − DD) / TT` FDR at each level.
-//!
-//! A level groups the items of the level below by a key and keeps the best
-//! score of each group. Targets and decoys are grouped by the same rule (the
-//! key holds the decoy accessions of decoy peptides, so a group never mixes
-//! classes), and q-values are computed separately for intra- and
-//! inter-protein groups.
-
 use std::collections::BTreeMap;
 
 use crate::decoy::PairClass;
 use crate::fdr::q_values;
 
-/// One item of a level: a CSM, a residue pair or a protein pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
-    /// Group key at this level.
     pub key: String,
-    /// Score (higher is better).
     pub score: f64,
     pub class: PairClass,
     pub intra: bool,
-    /// Number of CSMs behind the item (1 for a CSM).
     pub n_csms: usize,
 }
 
-/// A group of items with its best score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
     pub key: String,
-    /// Best member score.
     pub score: f64,
     pub class: PairClass,
     pub intra: bool,
-    /// Members (items of the level below).
     pub n_members: usize,
-    /// CSMs behind the members.
     pub n_csms: usize,
-    /// Index of the best member in the input.
     pub best: usize,
 }
 
-/// Group `items` by `key_of(item)`; each group takes its best member's score,
-/// class and link class. Groups come out sorted by key.
 pub fn group_by<F: Fn(usize, &Item) -> String>(items: &[Item], key_of: F) -> Vec<Group> {
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -68,9 +48,6 @@ pub fn group_by<F: Fn(usize, &Item) -> String>(items: &[Item], key_of: F) -> Vec
     groups.into_values().collect()
 }
 
-/// Class-split q-values of `groups`: computed among the intra groups and
-/// among the inter groups separately, over the groups that `eligible`
-/// accepts (`None` for the others).
 pub fn split_q_values<F: Fn(&Group) -> bool>(groups: &[Group], eligible: F) -> Vec<Option<f64>> {
     let mut q = vec![None; groups.len()];
     for intra in [true, false] {
@@ -86,7 +63,6 @@ pub fn split_q_values<F: Fn(&Group) -> bool>(groups: &[Group], eligible: F) -> V
     q
 }
 
-/// The groups as items of the next level up.
 pub fn as_items(groups: &[Group], key_of: impl Fn(&Group) -> String) -> Vec<Item> {
     groups
         .iter()

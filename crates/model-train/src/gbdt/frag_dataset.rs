@@ -1,13 +1,3 @@
-//! Regression training dataset builder for per-fragment intensity prediction.
-//!
-//! Pairs per-fragment features (from [`scoring_crate::frag_features`]) with the
-//! observed log-relative intensity, for every matched b/y ion in each gold PSM.
-//! Only MATCHED ions contribute rows — unmatched ions are skipped so the model
-//! trains only on actual observations.
-//!
-//! The target `y` is `ln(obs_intensity / base_peak)`, the log-relative-intensity
-//! space the strong-score `intensity_signal` exponentiates back to linear.
-
 use scoring_crate::frag_features::{extract_frag_features, FRAG_FEATURE_NAMES, N_FRAG_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
@@ -16,16 +6,6 @@ use scoring_crate::RankScorer;
 use crate::gbdt::dataset::{group_id, PsmRow};
 use crate::gbdt::train::RegressionDataset;
 
-/// Build a [`RegressionDataset`] from `rows` using `scorer` to rank peaks.
-///
-/// For each PSM:
-/// 1. Build a [`ScoredSpectrum`] and compute the base peak (max active-peak
-///    intensity). Skip if base_peak ≤ 0 or peptide length < 2.
-/// 2. Enumerate charge-1 b/y ions via [`predict_by_ions`].
-/// 3. For each ion with an observed peak within `scorer.feature_match_tolerance()`
-///    (the SAME tolerance the strong-score cosine uses at serve), push one
-///    regression row: features from [`extract_frag_features`] and target
-///    `y = ln(obs_intensity / base_peak)`.
 pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> RegressionDataset {
     let n_features = N_FRAG_FEATURES;
 
@@ -46,11 +26,6 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
             continue;
         }
 
-        // Match observed peaks at the SAME tolerance the strong-score cosine
-        // uses at serve time (feature_match_tolerance: 20 ppm high-res / 0.5 Da
-        // low-res), NOT the coarse param.mme rank-binning tolerance. On high-res
-        // data a 0.5 Da window pairs spurious junk peaks to non-fragmenting
-        // ions, corrupting the intensity targets and skewing train vs serve.
         let feat_tol = scorer.feature_match_tolerance();
         let seq: String = row
             .peptide
@@ -60,7 +35,6 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
             .collect();
         let gid = group_id(&seq);
 
-        // 1+ AND 2+ fragments — MUST match the serve range in strong_score.rs.
         let predicted = predict_by_ions(row.peptide, 1..=2);
 
         for ion in &predicted {
@@ -139,10 +113,10 @@ mod tests {
     #[test]
     fn frag_dataset_emits_one_row_per_matched_ion() {
         let scorer = make_scorer();
-        let p = pep("PEPTIDEK"); // n=8
+        let p = pep("PEPTIDEK");
         let ions = predict_by_ions(&p, 1..=1);
         let mut peaks: Vec<(f64, f32)> = ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
-        peaks.push((50.0, 10.0)); // junk + ensures >=... peaks
+        peaks.push((50.0, 10.0));
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let spec = spectrum(peaks, 500.0, 2);
         let row = PsmRow {

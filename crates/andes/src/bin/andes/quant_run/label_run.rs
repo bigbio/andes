@@ -1,34 +1,3 @@
-//! `--label`: MS1 labelled-pair quantification (SILAC, dimethyl) of the
-//! confident PSMs, after rescoring.
-//!
-//! Every PSM is mapped onto its *label group* (the peptidoform without its
-//! channel labels, at its charge) and the channel its labels name. Per run:
-//!
-//! 1. the elution width of the run is learned from its identified groups
-//!    (rounds of fits with the width free, as [`crate::quant_mbr`] does);
-//! 2. with deuterium labels, the RT offset of each channel from the
-//!    reference is learned from groups whose channels are all strong when
-//!    fitted one at a time ([`quant::label::learn_rt_shifts`]);
-//! 3. every identified group is fitted once, all channels jointly
-//!    ([`quant::label::fit_group`]), centred on its best PSM. Channels the run
-//!    did not identify get a decoy fit at a non-label mass shift; target/decoy
-//!    competition of the per-channel likelihood ratios over the run gives
-//!    their quality q-values, and [`quant::label::classify_channel`] their
-//!    status (match between channels).
-//!
-//! With `--mbr` (two or more runs), groups identified in some runs are
-//! transferred into the others: the runs are aligned jointly on the
-//! identified groups' fitted apexes ([`quant::align`]), every group missing
-//! from a run is fitted there at its predicted apex, and its whole-group
-//! likelihood ratio competes with a mass-shifted decoy of the group
-//! ([`quant::decoys::MASS_SHIFT_UNITS`]); transfers at the `--quant-transfer-fdr`
-//! q-value are reported.
-//!
-//! Log-ratios are reported per channel against the reference channel, and
-//! normalised by the median log-ratio of the run's identified groups for that
-//! channel (a mixing error per run and channel). Transfers and matched
-//! channels never enter the alignment or the normalisation reference.
-
 use std::collections::HashMap;
 
 use model::mass::PROTON;
@@ -46,17 +15,12 @@ use search::candidate_gen::Candidate;
 use super::{faims_groups, group_of, peptidoform_of, Hit, QuantCollector};
 use model::spectrum::Spectrum;
 
-/// `--label` settings.
 #[derive(Debug, Clone)]
 pub(crate) struct LabelSettings {
     pub spec: LabelSpec,
-    /// Quality q-value cut of a matched channel.
     pub fdr: f64,
-    /// MS1 tolerance of the traces, ppm.
     pub tol_ppm: f64,
-    /// `--mbr`: transfer groups between runs at this q-value.
     pub mbr_fdr: Option<f64>,
-    /// `--label-arg-pro`: fit the heavy proline of converted heavy arginine.
     pub arg_pro: bool,
 }
 
@@ -79,9 +43,6 @@ impl LabelSettings {
     }
 }
 
-/// The label mods of the search: one variable modification per (channel,
-/// label site), with the channel (1-based, the unlabelled channel has none)
-/// that [`model::AminoAcidSetBuilder::with_label_channels`] registers.
 pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, Vec<(String, u8)>) {
     use model::modification::{ModLocation, ResidueSpec};
     let mut mods = Vec::new();
@@ -112,16 +73,6 @@ pub(crate) fn search_label_mods(spec: &LabelSpec) -> (Vec<model::Modification>, 
     (mods, channels)
 }
 
-/// Most labelled sites a peptide of the search can carry. In a specific or
-/// semi-specific digest (`num_tolerable_termini` 2 or 1), a labelled residue
-/// that every enzyme cleaves after (SILAC K/R with trypsin) is a cleavage site
-/// or the C-terminus, so those number at most the missed cleavages plus one.
-/// Labels on other residues (Leu3, or Arg with Lys-C), and every label of a
-/// non-specific digest (where missed cleavages do not apply), number at most
-/// the most such residues in any `max_length` residues of `db`, which bounds
-/// every peptide the search can produce; plus the N-terminus. The labels count
-/// apart from the other variable mods (`SearchParams::max_label_sites`), so
-/// this bounds the labels only.
 pub(crate) fn max_label_sites(
     spec: &LabelSpec,
     enzymes: &[model::enzyme::Enzyme],
@@ -158,8 +109,6 @@ pub(crate) fn max_label_sites(
     bound + free + u32::from(nterm)
 }
 
-/// The most residues of `residues` in any `len` consecutive residues of a
-/// protein of `db`.
 fn most_in_window(db: &model::ProteinDb, residues: &[u8], len: usize) -> u32 {
     let len = len.max(1);
     let hit = |r: &u8| residues.contains(&r.to_ascii_uppercase());
@@ -178,23 +127,16 @@ fn most_in_window(db: &model::ProteinDb, residues: &[u8], len: usize) -> u32 {
     best
 }
 
-/// A run's MS1 index split by FAIMS compensation voltage ([`faims_groups`]).
 type RunSeries = Vec<(Option<f32>, Ms1RunIndex)>;
 
-/// A PSM in label terms.
 struct LabelledHit {
     channel: usize,
-    /// Site of every label instance of the peptide (labelled or, in the
-    /// unlabelled channel, labelable).
     instances: Vec<Site>,
     light_mass: f64,
     key: String,
-    /// Residues with their non-label modification deltas (for the formula).
     residues: Vec<(u8, f64)>,
 }
 
-/// The label group and channel of a candidate; `None` when its labels mix
-/// channels or it has no labelable site.
 fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
     let res = &cand.peptide.residues;
     let mut channel: Option<usize> = None;
@@ -206,7 +148,6 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
     let spec_sites = spec.sites();
     for (i, aa) in res.iter().enumerate() {
         let mut non_label: Vec<&str> = Vec::new();
-        // Whether a non-label part holds the side chain / the terminus.
         let mut side_taken = false;
         let mut term_taken = false;
         let mut non_label_delta = 0.0;
@@ -215,11 +156,8 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
             let mut label_delta = 0.0;
             let n_parts = m.name.split('+').count();
             for (k, part) in m.name.split('+').enumerate() {
-                // A stack lists its side-chain parts first and its terminal
-                // part last, and takes its location from that terminal part.
                 let terminal =
                     m.location != model::modification::ModLocation::Anywhere && k + 1 == n_parts;
-                // The site of a label part: this residue's, then the N-terminus.
                 let site = [Site::Residue(aa.residue), Site::NTerm]
                     .into_iter()
                     .filter(|s| *s != Site::NTerm || i == 0)
@@ -249,8 +187,6 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
             label_mass += label_delta;
             non_label_delta = m.mass_delta - label_delta;
         }
-        // Labelable sites left without a label: a non-label mod takes a
-        // residue's side chain or the N-terminus, not both.
         for s in &spec_sites {
             let here = match s {
                 Site::Residue(r) => *r == aa.residue && !side_taken,
@@ -295,7 +231,6 @@ fn labelled(cand: &Candidate, spec: &LabelSpec) -> Option<LabelledHit> {
     })
 }
 
-/// One label group: a peptide identity at one charge.
 struct Group {
     key: String,
     sequence: String,
@@ -303,21 +238,12 @@ struct Group {
     proteins: Vec<String>,
     channel_mz: Vec<f64>,
     envelopes: Vec<ChannelEnvelope>,
-    /// Channel masses relative to channel 1 (Da).
     deltas: Vec<f64>,
-    /// FAIMS voltage of its best PSM, if any.
     faims_cv: Option<f32>,
-    /// A decoy peptide's group (its decoy PSMs at the targets' cut): measured
-    /// like a target, only to count how often the transfer of a false donor
-    /// identification is accepted; never reported.
     identity_decoy: bool,
-    /// `--label-arg-pro`: per satellite, its parent channel and m/z (the
-    /// parent with one heavy proline from converted heavy arginine).
     satellites: Vec<(usize, f64)>,
 }
 
-/// Mass of the heavy proline that heavy arginine converts to: 13C5 for Arg6
-/// (13C6), 13C5 15N1 for Arg10 (13C6 15N4).
 fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     const C13_C12: f64 = 1.003_354_838;
     const N15_N14: f64 = 0.997_034_886;
@@ -325,10 +251,6 @@ fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }
 
-/// Whether a satellite of `g` lies within `tol_ppm` of an isotope the fit
-/// models (M−2..M+5) of another component: a channel other than its parent,
-/// or another satellite. The two fit components are then nearly collinear
-/// and their split is weakly determined.
 fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
     use quant::label::{HIGHEST_OFFSET, LOWEST_OFFSET};
     let z = f64::from(g.charge.max(1));
@@ -350,32 +272,24 @@ fn satellite_on_another_channel(g: &Group, tol_ppm: f64) -> bool {
     })
 }
 
-/// The best PSM of a group's channel in a run.
 #[derive(Clone, Copy)]
 struct ChannelHit {
     hi: usize,
     rt: f64,
 }
 
-/// A fitted (group, run).
 struct Fitted {
     gid: usize,
     run: usize,
     fit: GroupFit,
-    /// Best PSM per channel in this run (identified channels).
     ids: Vec<Option<ChannelHit>>,
-    /// Per channel, the decoy fits' scores and monoisotopic mass errors
-    /// (missing channels).
     decoy_scores: Vec<Vec<(f64, Option<f64>, f64)>>,
-    /// Per channel, another identified peptide of the run sits on it.
     claimed: Vec<bool>,
     transfer_q: Option<f64>,
     rt_shift: Vec<f64>,
-    /// Per channel, the converted (heavy proline) fraction (`--label-arg-pro`).
     converted: Vec<Option<f64>>,
 }
 
-/// The run-level scales of one MS1 series.
 struct Scales {
     dt: f64,
     w: f64,
@@ -387,10 +301,7 @@ const MIN_WIDTH_FITS: usize = 20;
 const MAX_WIDTH_FITS: usize = 500;
 const MIN_SHIFT_PAIRS: usize = 20;
 const MIN_NORM_RATIOS: usize = 10;
-/// Decoys per target of the channel q-values.
 const N_DECOYS: usize = 4;
-/// Decoys per transfer: a run has fewer transfers than channels, so more
-/// decoys resolve the q-value at the cut.
 const N_TRANSFER_DECOYS: usize = 8;
 
 fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe {
@@ -416,10 +327,6 @@ fn probe_of(g: &Group, t_hat: f64, s: f64, w: f64, shifts: &[f64]) -> GroupProbe
     }
 }
 
-/// [`fit_group`] with the satellites folded into their parent channels: a
-/// parent's amplitude and quantity become the sums, its standard error their
-/// root sum of squares. Also returns each channel's converted fraction (the
-/// satellites' share; `None` without satellites).
 fn fit_folded(
     ms1: &Ms1RunIndex,
     g: &Group,
@@ -451,17 +358,8 @@ fn fit_folded(
     Some((fit, converted))
 }
 
-/// The joint fit at the identified channels' profile (with its satellite
-/// conversions) and the pinned probe it was measured with.
 type ProfileFit = ((GroupFit, Vec<Option<f64>>), GroupProbe);
 
-/// The fit of a group with unidentified channels at the elution profile of
-/// its identified channels: the apex and width are searched with only the
-/// identified channels (and their satellites) free, the others held at 0,
-/// and every channel is then measured jointly at that profile, pinned. Also
-/// returns the pinned probe, from which the decoys of the unidentified
-/// channels are made: neither an unidentified channel nor a decoy can move
-/// the profile onto a species at its own m/z. `rt_z` is the profile fit's.
 fn fit_at_identified_profile(
     ms1: &Ms1RunIndex,
     g: &Group,
@@ -484,19 +382,11 @@ fn fit_at_identified_profile(
     Some(((fit, converted), pinned))
 }
 
-/// Learns the run's elution width from `anchors` (group, RT of its best PSM
-/// in reference time): rounds of fits with the width free, the median
-/// fitted width of the strong fits, until it moves by less than 10 %.
 fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], tol: f64) -> f64 {
     let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-    // The sample is chosen by a hash of each group's key, so one group more
-    // or fewer changes at most one member (a stride over the list would shift
-    // all of them).
     let mut order: Vec<&(usize, f64)> = anchors.iter().collect();
     order.sort_by_key(|(gid, _)| seed_of(&groups[*gid].key, 0));
     let sample: Vec<&(usize, f64)> = order.into_iter().take(MAX_WIDTH_FITS).collect();
-    // The coarse grid finds the width's scale; the fine one, once the coarse
-    // estimate has settled, resolves it to a few percent.
     let mut params = FitParams {
         tol_ppm: tol,
         widths: FREE_WIDTHS,
@@ -517,10 +407,6 @@ fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], to
         if fitted.len() < MIN_WIDTH_FITS {
             return (6.0f64).max(dt);
         }
-        // Each fit picks its width from a grid relative to `w`: their median
-        // is a grid point, at which the iteration would stop (3.6 or 4.2 s
-        // from 6 s, by the sample). The trimmed mean of the log widths moves
-        // continuously and settles where the grid choices balance.
         fitted.sort_by(f64::total_cmp);
         let cut = fitted.len() / 10;
         let core = &fitted[cut..fitted.len() - cut];
@@ -538,12 +424,8 @@ fn learn_width(ms1: &Ms1RunIndex, groups: &[Group], anchors: &[(usize, f64)], to
     w
 }
 
-/// The width grid of [`learn_width`]'s second stage, multiples of the
-/// current estimate.
 const REFINE_WIDTHS: &[f64] = &[0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.25];
 
-/// Learns the channels' RT offsets from the reference: every channel fitted
-/// alone at `anchors`, pairs where both are strong.
 fn learn_shifts(
     ms1: &Ms1RunIndex,
     groups: &[Group],
@@ -589,9 +471,6 @@ fn learn_shifts(
     learn_rt_shifts(&pairs, n, MIN_SHIFT_PAIRS)
 }
 
-/// The decoys of `probe` with its channels `moved` (the unidentified
-/// channels, or every channel for a transfer) moved by the non-label mass
-/// shifts of [`quant::label::decoy_shifts`].
 fn decoy_probes(
     g: &Group,
     probe: &GroupProbe,
@@ -610,7 +489,6 @@ fn decoy_probes(
             for &c in moved {
                 p.channel_mz[c] += shift / z;
             }
-            // Satellites follow the parents in the probe; they move with them.
             let n_ch = g.channel_mz.len();
             for (k, &(parent, _)) in g.satellites.iter().enumerate() {
                 if moved.contains(&parent) {
@@ -622,8 +500,6 @@ fn decoy_probes(
         .collect()
 }
 
-/// The competition score of a group: its strongest channel's
-/// [`channel_score`] with the group's total likelihood ratio.
 fn group_score(fit: &GroupFit) -> f64 {
     let Some(best) = fit
         .channels
@@ -636,7 +512,6 @@ fn group_score(fit: &GroupFit) -> f64 {
 }
 
 fn seed_of(s: &str, run: usize) -> u64 {
-    // FNV-1a: stable across runs of the program.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes().chain((run as u64).to_le_bytes()) {
         h ^= b as u64;
@@ -645,20 +520,14 @@ fn seed_of(s: &str, run: usize) -> u64 {
     h
 }
 
-/// Further `label.parquet` metadata keys and values.
 type Metadata = Vec<(String, String)>;
 
-/// `label.parquet` rows, QPX feature records and further table metadata.
 pub(super) type LabelOutputs = (
     Vec<output::LabelRow>,
     Vec<output::FeatureRecord>,
     Vec<(String, String)>,
 );
 
-/// Per-run label quantification. Returns the `label.parquet` rows, the QPX
-/// feature records (identified and transferred groups, quantified channels)
-/// and the identity-decoy metadata of the transfers. `decoy_hits` are the
-/// decoy PSMs at the targets' cut (identity decoys, `--mbr` only).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn quantify(
     collector: &QuantCollector,
@@ -680,7 +549,6 @@ pub(super) fn quantify(
 
     let mut groups: Vec<Group> = Vec::new();
     let mut gid_of: HashMap<(String, u8), usize> = HashMap::new();
-    // (gid, run) -> best hit per channel.
     let mut ids: HashMap<(usize, usize), Vec<Option<ChannelHit>>> = HashMap::new();
     let mut best_of_group: HashMap<usize, usize> = HashMap::new();
     let (mut mixed, mut no_rt) = (0usize, 0usize);
@@ -796,12 +664,9 @@ pub(super) fn quantify(
     };
     let n_runs = collector.runs.len();
     let mut fitted: Vec<Fitted> = Vec::new();
-    // Per (run, series): scales, kept for the transfers.
     let mut run_scales: Vec<Vec<Option<Scales>>> = Vec::with_capacity(n_runs);
     let mut run_series_cv: Vec<Vec<Option<f32>>> = Vec::with_capacity(n_runs);
 
-    // With match between runs, the last run fitted stays loaded so that the
-    // transfers into it need not decode it again (one run resident at a time).
     let keep_resident = settings.mbr_fdr.is_some() && n_runs >= 2;
     let mut resident: Option<(usize, RunSeries)> = None;
     for (run_idx, run) in collector.runs.iter().enumerate() {
@@ -817,7 +682,6 @@ pub(super) fn quantify(
         let series = faims_groups(ms1);
         let mut scales_here: Vec<Option<Scales>> = Vec::new();
         run_series_cv.push(series.iter().map(|(cv, _)| *cv).collect());
-        // Identified groups of this run, per series.
         let mut by_series: Vec<Vec<(usize, Vec<Option<ChannelHit>>)>> =
             vec![Vec::new(); series.len()];
         let mut keys: Vec<&(usize, usize)> = ids.keys().filter(|(_, r)| *r == run_idx).collect();
@@ -836,7 +700,6 @@ pub(super) fn quantify(
             };
             by_series[si].push((gid, chans));
         }
-        // Identified precursors of the run (claims): (series, charge, mz, rt, gid).
         let mut claims: Vec<(usize, u8, f64, f64, usize)> = Vec::new();
         for (si, list) in by_series.iter().enumerate() {
             for (gid, chans) in list.iter().filter(|(g, _)| !groups[*g].identity_decoy) {
@@ -848,7 +711,6 @@ pub(super) fn quantify(
                 }
             }
         }
-        // Other identified PSMs of the run (not label groups) claim too.
         for h in hits
             .iter()
             .filter(|h| h.run_idx == run_idx && !h.cand.is_decoy)
@@ -867,7 +729,6 @@ pub(super) fn quantify(
                 }
             }
         }
-        // By m/z, for the claim search.
         claims.sort_by(|a, b| a.2.total_cmp(&b.2));
         for (si, (_, ms1)) in series.iter().enumerate() {
             let list = &by_series[si];
@@ -876,8 +737,6 @@ pub(super) fn quantify(
                 continue;
             }
             let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-            // Anchors in the reference channel's time (no shifts yet),
-            // target groups only.
             let anchors: Vec<(usize, f64)> = list
                 .iter()
                 .filter(|(gid, _)| !groups[*gid].identity_decoy)
@@ -941,11 +800,6 @@ pub(super) fn quantify(
                     } else {
                         let ((mut fit, conv), pinned) =
                             fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?;
-                        // The identified channels keep their quantities from the
-                        // free joint fit, as a group with every channel
-                        // identified does; only the unidentified channels (and
-                        // their decoys, made from `pinned`) are read at the
-                        // identified channels' profile.
                         if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
                             let hits = chans.iter();
                             for ((ch, f), hit) in
@@ -961,9 +815,6 @@ pub(super) fn quantify(
                     let mut decoy_scores = vec![Vec::new(); n_ch];
                     if !missing.is_empty() {
                         let seed = seed_of(&g.key, run_idx);
-                        // The decoys move the missing channels' masses of the
-                        // pinned probe: measured at the same profile as the
-                        // channels they stand for, which none of them shaped.
                         for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
                             let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
                             for &c in &missing {
@@ -1015,9 +866,6 @@ pub(super) fn quantify(
         }
     }
 
-    // ── Match between runs ────────────────────────────────────────────────
-    // ── Mass calibration per run: the median and robust spread of the
-    // identified channels' monoisotopic mass errors (strong fits).
     let calib: Vec<(f64, f64)> = (0..n_runs)
         .map(|r| {
             let v: Vec<f64> = fitted
@@ -1038,8 +886,6 @@ pub(super) fn quantify(
             (m, (1.4826 * mad).max(0.5))
         })
         .collect();
-    // Spread of the identified channels' apex offsets per run, floored at a
-    // quarter of the MS1 spacing.
     let offset_sd: Vec<f64> = (0..n_runs)
         .map(|r| {
             let v: Vec<f64> = fitted
@@ -1088,11 +934,6 @@ pub(super) fn quantify(
         meta = stats;
     }
 
-    // ── Channel q-values (match between channels), per run ─────────────────
-    // (fitted index, channel) of every unidentified channel of an identified
-    // group, its score against its decoys'. Each run competes on its own:
-    // runs differ in MS1 density and design (a 1:10 run's weak light channels
-    // would drag a 1:1 run's q-values down).
     let mut channel_q: HashMap<(usize, usize), f64> = HashMap::new();
     for run_idx in 0..n_runs {
         let mut rows: Vec<(f64, f64)> = Vec::new();
@@ -1106,7 +947,6 @@ pub(super) fn quantify(
                     continue;
                 }
                 at.push(((fi, c), rows.len()));
-                // Expected mass error: the group's identified channels'.
                 let (center, sigma) = calib[f.run];
                 let expected = {
                     let v: Vec<f64> = (0..n_ch)
@@ -1119,10 +959,8 @@ pub(super) fn quantify(
                         median(v)
                     }
                 };
-                // Two channels' errors differ by √2 of one's spread.
                 let sd = sigma * std::f64::consts::SQRT_2;
                 let ch = &f.fit.channels[c];
-                // Two channels' apex offsets differ by √2 of one's spread.
                 let st = offset_sd[f.run] * std::f64::consts::SQRT_2;
                 rows.push((
                     channel_score(ch)
@@ -1170,8 +1008,6 @@ pub(super) fn quantify(
         .enumerate()
         .map(|(fi, f)| status_of(fi, f))
         .collect();
-    // Normalisation offsets per (run, channel): identified groups with both
-    // the channel and the reference measured, not transferred.
     let mut offsets: HashMap<(usize, usize), f64> = HashMap::new();
     for run_idx in 0..n_runs {
         for c in (0..n_ch).filter(|&c| c != r) {
@@ -1259,8 +1095,6 @@ pub(super) fn quantify(
                 trace_quantity: ch.trace_quantity,
             });
         }
-        // QPX: one feature per (group, run), quantified channels. A transfer
-        // carries the identification of the group's best PSM in another run.
         if with_records {
             let best = if f.transfer_q.is_some() {
                 best_of_group.get(&f.gid).copied()
@@ -1285,11 +1119,8 @@ pub(super) fn quantify(
                     rec.id_run_file_name = None;
                     rec.psm_ids = Vec::new();
                     rec.scan = Vec::new();
-                    // The donor's peptidoform and m/z, observed in this run
-                    // at that channel's fitted mass error.
                     let c = labelled(hit.cand, spec).map_or(0, |l| l.channel);
                     let calc = g.channel_mz[c];
-                    // No centroid there: no observed m/z and no mass error.
                     let err = f.fit.channels[c].mass_err_ppm;
                     rec.calculated_mz = calc as f32;
                     rec.observed_mz = (calc * (1.0 + err.unwrap_or(0.0) * 1e-6)) as f32;
@@ -1365,9 +1196,6 @@ pub(super) fn quantify(
     Ok((rows, records, meta))
 }
 
-/// Match between runs: every group of the library (identified in some run)
-/// fitted in each run that lacks it, at its aligned apex; the transfers at
-/// the q-value cut.
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     collector: &QuantCollector,
@@ -1380,8 +1208,6 @@ fn transfer(
     fdr: f64,
     mut resident: Option<(usize, RunSeries)>,
 ) -> Result<(Vec<Fitted>, Metadata), String> {
-    // The group score with the mass accuracy of its strongest channel
-    // against the receiving run's calibration.
     let score = |fit: &GroupFit, run: usize| -> f64 {
         let (center, sigma) = calib[run];
         let err = fit
@@ -1389,16 +1215,12 @@ fn transfer(
             .iter()
             .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
             .and_then(|c| c.mass_err_ppm);
-        // The alignment is calibrated (a real transfer's apex is within its
-        // uncertainty of the prediction, `rt_z` ~ N(0, 1)); a decoy that hits
-        // another species' envelope sits anywhere in the search window.
         group_score(fit)
             * quant::label::mass_factor(err, center, sigma)
             * (-0.5 * fit.rt_z * fit.rt_z).exp()
     };
     let n_runs = collector.runs.len();
     let n_ch = groups.first().map_or(0, |g| g.channel_mz.len());
-    // Observations: the fitted apex (reference time) of strong identified fits.
     let observe = |decoy: bool| -> Vec<quant::align::Observation> {
         fitted
             .iter()
@@ -1425,8 +1247,6 @@ fn transfer(
         ..Default::default()
     };
     let mut alignment = quant::align::align(&obs, groups.len(), n_runs, &params);
-    // Identity decoys get their consensus and predictions as a target would,
-    // without moving any run map.
     alignment.add_observations(&observe(true))?;
     let mut present = vec![vec![false; n_runs]; groups.len()];
     for f in fitted {
@@ -1436,8 +1256,6 @@ fn transfer(
     let mut scored: Vec<(f64, f64)> = Vec::new();
     let mut target_rows: Vec<usize> = Vec::new();
     let mut identity_scores: Vec<f64> = Vec::new();
-    // The run still loaded from the fits first; the results are then taken
-    // in run order, as if every run had been visited in turn.
     let mut order: Vec<usize> = (0..n_runs).collect();
     if let Some((r, _)) = &resident {
         order.retain(|x| x != r);
@@ -1465,8 +1283,6 @@ fn transfer(
                     .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?,
             ),
         };
-        // Width scale of a series without identifications: the run's other
-        // series, else the median of every run.
         let fallback = || {
             let all: Vec<f64> = run_scales.iter().flatten().flatten().map(|s| s.w).collect();
             quant::label::median(all)
@@ -1544,9 +1360,6 @@ fn transfer(
         out.push(f);
     }
     let q = weighted_qvalues(&scored);
-    // The q-value of an identity-decoy transfer: that of the weakest target
-    // transfer scoring at least as high (the targets' step function); one
-    // above every target takes the best target's.
     let mut steps: Vec<(f64, f64)> = target_rows.iter().map(|&r| (scored[r].0, q[r])).collect();
     steps.sort_by(|a, b| b.0.total_cmp(&a.0));
     let q_at = |score: f64| -> f64 {
@@ -1559,8 +1372,6 @@ fn transfer(
     };
     let accepted_targets = target_rows.iter().filter(|&&r| q[r] <= fdr).count();
     let accepted_identity = identity_scores.iter().filter(|&&s| q_at(s) <= fdr).count();
-    // Accepted transfers of false donor identifications: identity decoys
-    // stand for the library's false target entries one for one.
     let identity_rate = accepted_identity as f64 / accepted_targets.max(1) as f64;
     let mut kept = Vec::new();
     for (k, mut f) in out.into_iter().enumerate() {
@@ -1594,11 +1405,8 @@ fn transfer(
     Ok((kept, stats))
 }
 
-/// Fewest peptide ratios a protein ratio needs (MaxQuant's "min. ratio
-/// count").
 pub(super) const MIN_RATIO_COUNT: usize = 2;
 
-/// One protein ratio of [`protein_ratios`].
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ProteinRatio {
     pub protein: String,
@@ -1608,29 +1416,17 @@ pub(super) struct ProteinRatio {
     pub channel_name: String,
     pub log2_ratio: f64,
     pub log2_ratio_normalized: Option<f64>,
-    /// Peptide ratios the median is over, and those whose evidence is only
-    /// matched between channels or transferred (no identification of the
-    /// channel in the run).
     pub ratio_count: usize,
     pub inferred_count: usize,
 }
 
-/// Protein ratios as MaxQuant computes them, from `label.parquet` rows: per
-/// run, channel and peptide identity (all charges), the median of its
-/// evidence log-ratios; per protein, the median of its peptides' ratios, from
-/// [`MIN_RATIO_COUNT`] peptides up; the normalised ratio likewise from the
-/// normalised evidence. A peptide's protein is its protein group at the
-/// protein q-value cut when `group_of` gives one, else its accessions joined.
 pub(super) fn protein_ratios(
     rows: &[output::LabelRow],
     group_of: impl Fn(&str) -> Option<(String, String)>,
     min_count: usize,
 ) -> Vec<ProteinRatio> {
     use std::collections::BTreeMap;
-    // (run, protein, lead, channel, name) -> peptide -> (ratios, normalised, identified)
     type Key = (String, String, String, u8, String);
-    // Per peptide: its evidence ratios, normalised ratios, and whether the
-    // channel is identified in some evidence.
     type Evidence = (Vec<f64>, Vec<f64>, bool);
     let mut by: BTreeMap<Key, BTreeMap<String, Evidence>> = BTreeMap::new();
     for r in rows {
@@ -1682,7 +1478,6 @@ pub(super) fn protein_ratios(
     out
 }
 
-/// `<stem>.label_proteins.tsv`: the [`protein_ratios`] as text.
 pub(super) fn protein_ratio_tsv(ratios: &[ProteinRatio]) -> String {
     let mut s = String::from(
         "protein_group\tlead\tfilename\tchannel\tchannel_name\tlog2_ratio\t\
@@ -1710,8 +1505,6 @@ pub(super) fn protein_ratio_tsv(ratios: &[ProteinRatio]) -> String {
 mod tests {
     use super::*;
 
-    /// A heavy channel 20 % converted to its heavy-proline form: fitted with
-    /// the satellite, the channel holds the whole heavy amount.
     #[test]
     fn arg_pro_satellite_is_folded_into_its_channel() {
         use model::scan::Ms1Scan;
@@ -1786,11 +1579,6 @@ mod tests {
         assert!((r - 0.8f64.log2()).abs() < 0.02, "{r}");
     }
 
-    /// A light-only group whose heavy channel is absent, with a strong
-    /// species eluting 6 s later either at the heavy channel's m/z (the
-    /// target's situation) or at a decoy's (the decoy's): the target's heavy
-    /// channel scores no better than that decoy, since both are measured at
-    /// the light channel's profile, which neither moves.
     #[test]
     fn missing_channel_scores_like_its_decoys_next_to_an_interferer() {
         use model::scan::Ms1Scan;
@@ -1812,8 +1600,6 @@ mod tests {
         let ids = vec![Some(ChannelHit { hi: 0, rt: 100.0 }), None];
         let probe = probe_of(&g, 100.0, 4.0, 4.0, &[0.0, 0.0]);
         let params = FitParams::default();
-        // The run: the light channel at apex 100 s, and a species 5x as
-        // strong at `mz`, apex 106 s; sigma 4 s.
         let run = |mz: f64| {
             let scans: Vec<Ms1Scan> = (0..600)
                 .map(|k| {
@@ -1843,8 +1629,6 @@ mod tests {
         let decoy_mz = decoy_probes(&g, &probe, &[1], 10.0, 7, 1)[0].channel_mz[1];
         assert!((decoy_mz - g.channel_mz[1]).abs() > 0.01);
 
-        // The target's situation: the species sits on the heavy channel. A
-        // free joint fit is pulled onto it; the measurement is not.
         let at_heavy = run(g.channel_mz[1]);
         let (free, _) = fit_folded(&at_heavy, &g, &probe, &params).unwrap();
         assert!(free.t0 > 102.0, "free apex {}", free.t0);
@@ -1852,7 +1636,6 @@ mod tests {
             fit_at_identified_profile(&at_heavy, &g, &probe, &ids, &params).unwrap();
         assert!((target.t0 - 100.0).abs() < 0.5, "apex {}", target.t0);
 
-        // The decoy's situation: the same species on the decoy's m/z.
         let at_decoy = run(decoy_mz);
         let (_, pinned) = fit_at_identified_profile(&at_decoy, &g, &probe, &ids, &params).unwrap();
         let dp = decoy_probes(&g, &pinned, &[1], 10.0, 7, 1).remove(0);
@@ -1863,9 +1646,6 @@ mod tests {
             channel_score(&target.channels[1]),
             channel_score(&decoy.channels[1]),
         );
-        // Read at the same pinned profile, the target and the decoy see the
-        // species alike (6 s off the apex their coherence, and so their score,
-        // can be 0): neither scores better than the other.
         assert!(
             (st - sd).abs() <= 0.02 * st.max(sd) + 1e-9,
             "target {st} vs decoy {sd}"
@@ -1876,13 +1656,10 @@ mod tests {
             target.channels[1].apex_offset,
             decoy.channels[1].apex_offset
         );
-        // The identified channel is measured at its own profile.
         let (r, _) = log2_ratio(&target.channels[0], &decoy.channels[0]).unwrap();
         assert!(r.abs() < 0.02, "{r}");
     }
 
-    /// The learned elution width finds the true width and does not jump when
-    /// one group more or fewer is fitted.
     #[test]
     fn learned_width_is_stable() {
         use model::scan::Ms1Scan;
@@ -1941,8 +1718,6 @@ mod tests {
         assert!((all - fewer).abs() < 0.02 * all, "{all} vs {fewer}");
     }
 
-    /// The collinearity check covers every isotope the fit models (M−2..M+5)
-    /// of the other channels, and the other satellites.
     #[test]
     fn satellite_overlap_check_covers_the_modelled_isotopes() {
         let iso = model::mass::ISOTOPE / 2.0;
@@ -1958,31 +1733,24 @@ mod tests {
             satellites,
             identity_decoy: false,
         };
-        // On channel 1's M−1 (a lower isotopologue of a 2H label).
         assert!(satellite_on_another_channel(
             &group(vec![500.0, 510.0], vec![(0, 510.0 - iso)]),
             10.0
         ));
-        // On channel 1's M+5.
         assert!(satellite_on_another_channel(
             &group(vec![500.0, 510.0], vec![(0, 510.0 + 5.0 * iso)]),
             10.0
         ));
-        // On another satellite.
         assert!(satellite_on_another_channel(
             &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 540.0 + iso)]),
             10.0
         ));
-        // Clear of everything.
         assert!(!satellite_on_another_channel(
             &group(vec![500.0, 520.0], vec![(0, 540.0), (1, 560.0)]),
             10.0
         ));
     }
 
-    /// Four channels with three heavy-proline satellites take seven fit
-    /// components, more than the five channels a specification may have:
-    /// the group is still fitted, every channel with its converted part.
     #[test]
     fn four_channels_with_arg_pro_satellites_are_fitted() {
         use model::scan::Ms1Scan;
@@ -2006,7 +1774,6 @@ mod tests {
                 (c, mz[c] + heavy_proline_delta(arg).unwrap() / z)
             })
             .collect();
-        // Channel amplitudes 1 : 0.5 : 0.25 : 2, each heavy one 20 % converted.
         let amps = [1e6, 0.5e6, 0.25e6, 2e6];
         let mut species: Vec<(f64, ChannelEnvelope, f64)> = vec![(mz[0], envs[0], amps[0])];
         for &(c, mp) in &sats {
@@ -2049,7 +1816,6 @@ mod tests {
             satellites: sats,
             identity_decoy: false,
         };
-        // Channel 2's satellite sits on Arg10's M+4 (3 mDa): flagged.
         assert!(satellite_on_another_channel(&g, 10.0));
         let p = probe_of(&g, 100.0, 4.0, 4.0, &[0.0; 4]);
         assert_eq!(p.channel_mz.len(), 7);
@@ -2058,15 +1824,10 @@ mod tests {
             let (r, _) = log2_ratio(&fit.channels[c], &fit.channels[0]).unwrap();
             let want = (amps[c] / amps[0]).log2();
             assert!((r - want).abs() < 0.05, "channel {c}: {r} vs {want}");
-            // Channel 2's satellite (+7.014 at z 2) sits 3 mDa from Arg10's
-            // M+4, inseparable at any MS1 tolerance: a little of it is shared.
             assert!((converted[c].unwrap() - 0.2).abs() < 0.03, "{converted:?}");
         }
     }
 
-    /// A protein N-terminal acetyl holds the N-terminus, not the first
-    /// residue's side chain: light and heavy forms of an acetylated
-    /// `KPEPTIDER` name the same label sites (K and R).
     #[test]
     fn terminal_mod_leaves_the_residue_label_site() {
         use model::amino_acid::AminoAcid;
@@ -2170,7 +1931,6 @@ mod tests {
             converted_fraction: None,
             trace_quantity: 0.0,
         };
-        // Peptide A: charges 2 and 3 (median 1.0); B: 3.0; C: -1.0.
         let rows = vec![
             row("A", 2, 0.5, "identified"),
             row("A", 3, 1.5, "identified"),
@@ -2195,7 +1955,6 @@ mod tests {
     #[test]
     fn max_sites_follow_missed_cleavages() {
         use model::enzyme::Enzyme;
-        // Seven L and five R in all; at most four L in 6 residues.
         let db = model::ProteinDb {
             proteins: vec![model::Protein {
                 accession: "P1".into(),
@@ -2206,18 +1965,13 @@ mod tests {
         };
         let s = LabelSpec::parse("silac2").unwrap();
         assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 2, 2, &db, 50), 3);
-        // Semi-specific spans keep the internal missed-cleavage bound.
         assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 1, 2, &db, 50), 3);
         let d = LabelSpec::parse("dimethyl3").unwrap();
         assert_eq!(max_label_sites(&d, &[Enzyme::Trypsin], 2, 1, &db, 50), 3);
-        // Leu is no cleavage site: its labels are bound by the database, the
-        // most L in any peptide-length window.
         let l = LabelSpec::parse("[][Leu3]").unwrap();
         assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2, 2, &db, 50), 7);
         assert_eq!(max_label_sites(&l, &[Enzyme::Trypsin], 2, 2, &db, 6), 4);
-        // Arg labels with Lys-C are not bound by its cleavages either.
         assert_eq!(max_label_sites(&s, &[Enzyme::LysC], 2, 2, &db, 50), 3 + 5);
-        // A non-specific digest has no missed cleavages: every K/R counts.
         assert_eq!(max_label_sites(&s, &[Enzyme::Trypsin], 0, 2, &db, 50), 5);
     }
 

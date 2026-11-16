@@ -1,4 +1,3 @@
-
 use rustc_hash::FxHashMap;
 
 use model::activation::ActivationMethod;
@@ -12,9 +11,6 @@ use scoring_crate::{Param, RankScorer};
 use search::candidate_gen::Candidate;
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 
-/// Search `spectra` on the out-of-core path with the index built in memory and
-/// `params`' retrieval (per-spectrum enumeration here: `fragment_index_top_k`
-/// is 0), so peakless spectra still reach every candidate in their window.
 fn search_enumerated(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -123,7 +119,7 @@ fn known_peptide_appears_in_top_n() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -154,9 +150,6 @@ fn known_peptide_appears_in_top_n() {
 
 #[test]
 fn top_n_capacity_respected() {
-    // Two anagram proteins: with NoCleavage each yields one peptide, and the two
-    // peptides have identical mass, so both are candidates for the same
-    // precursor. Without competing candidates a cap test cannot fail.
     let target = ProteinDb {
         proteins: vec![
             Protein {
@@ -199,7 +192,6 @@ fn top_n_capacity_respected() {
         queues.into_iter().next().unwrap().into_sorted_vec()
     };
 
-    // Both anagrams are scored, so there is a real competition to cap.
     let uncapped = run(5);
     assert!(
         uncapped.len() > 1,
@@ -207,12 +199,6 @@ fn top_n_capacity_respected() {
         uncapped.len()
     );
 
-    // At capacity the queue deliberately RETAINS rank_score ties (Kim et al.,
-    // Nat Commun 5:5277 — see the merge comment in match_engine.rs), so the
-    // guarantee is not "exactly one row" but "nothing below the best score
-    // survives". A peakless fixture scores every candidate identically, which is
-    // why this is the invariant available here; a cap that stopped working would
-    // let a strictly worse PSM through.
     let capped = run(1);
     assert!(!capped.is_empty(), "top_n = 1 must keep at least one PSM");
     let best = capped[0].rank_score;
@@ -236,7 +222,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -247,7 +233,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None); // no charge!
+    let spec = make_spectrum(mz, None);
     let (queues, _candidates) =
         search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
@@ -269,7 +255,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
     params.charge_range = 2..=3;
-    params.min_peaks = 0; // peakless smoke spectrum; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -281,12 +267,11 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let charge = 3u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None); // charge-missing
+    let spec = make_spectrum(mz, None);
     let (queues, _candidates) =
         search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
-    // The only match must be at charge 3 (the precursor m/z is z=3-exact).
     assert!(
         !top.is_empty(),
         "expected a charge-3 match for charge-missing spectrum"

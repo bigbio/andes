@@ -1,12 +1,7 @@
-//! Errors for the ONNX inference substrate.
-
-#![allow(missing_docs)]
-
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Fallible operations in this crate.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("IO error for {path}: {source}")]
@@ -58,17 +53,13 @@ pub enum Error {
     },
 }
 
-/// Which inference engine to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Pure-Rust [`tract`](https://github.com/sonos/tract) (`--features tract`).
     Tract,
-    /// ONNX Runtime via [`ort`](https://ort.pyke.io) (`--features ort`).
     Ort,
 }
 
 impl BackendKind {
-    /// Cargo feature that enables this backend.
     pub fn feature_name(self) -> &'static str {
         match self {
             Self::Tract => "tract",
@@ -77,5 +68,4 @@ impl BackendKind {
     }
 }
 
-/// Result alias for this crate.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -32,6 +32,12 @@ pub struct XlConfig {
     pub oracle_spectra: usize,
     pub open_top_k: usize,
     pub open_min_votes: u16,
+    pub open_cleavable: bool,
+    pub stub_weight: f32,
+}
+
+fn exp_env<T: std::str::FromStr>(k: &str, d: T) -> T {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 impl XlConfig {
@@ -47,6 +53,8 @@ impl XlConfig {
             oracle_spectra: 0,
             open_top_k: 50,
             open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
+            open_cleavable: exp_env("ANDES_XL_OPEN", 0u8) == 1,
+            stub_weight: exp_env("ANDES_XL_STUBW", 0.0f32),
         }
     }
 }
@@ -149,7 +157,11 @@ fn sites_of(c: &Candidate, linker: &Crosslinker, end: usize) -> Vec<LinkSite> {
 }
 
 impl XlCandidates {
-    pub fn from_out_of_core(prepared: &PreparedSearch<'_>, linker: &Crosslinker) -> Self {
+    pub fn from_out_of_core(
+        prepared: &PreparedSearch<'_>,
+        linker: &Crosslinker,
+        open_cleavable: bool,
+    ) -> Self {
         let keep = |lk: Crosslinker| {
             move |residues: &[u8], _post: u8| {
                 lk.n_term()
@@ -159,7 +171,7 @@ impl XlCandidates {
         };
         let cands = prepared.out_of_core_candidates_where(keep(linker.clone()));
         let mut table = Self::from_candidates(cands, linker);
-        if linker.cleavage.is_none() && !table.peptides.is_empty() {
+        if (linker.cleavage.is_none() || open_cleavable) && !table.peptides.is_empty() {
             let records: Vec<_> = prepared
                 .out_of_core_records_where(keep(linker.clone()))
                 .into_iter()
@@ -476,6 +488,23 @@ struct SpecCtx<'a> {
     scorer: &'a RankScorer,
     z: u8,
     frag_tol: f64,
+    peaks: &'a [(f64, f32)],
+    stub_weight: f32,
+    stub_tol_ppm: f64,
+}
+
+fn stub_bonus(ctx: &SpecCtx<'_>, mass: f64, linker: &Crosslinker) -> f32 {
+    if ctx.stub_weight == 0.0 {
+        return 0.0;
+    }
+    let Some(c) = linker.cleavage.as_ref() else {
+        return 0.0;
+    };
+    let n = stub_ions_present(ctx.peaks, mass, c, ctx.z.saturating_sub(1).max(1), ctx.stub_tol_ppm)
+        .iter()
+        .filter(|&&v| v)
+        .count();
+    ctx.stub_weight * n as f32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,6 +539,7 @@ fn score_peptide(
         }
     }
     let (score, site, form) = best?;
+    let score = score + stub_bonus(ctx, p.peptide.mass(), linker);
     Some(PeptideHit {
         pep: pep_idx,
         site,
@@ -945,6 +975,9 @@ fn search_spectrum_at(
         scorer: prepared.scorer,
         z,
         frag_tol: prepared.fragment_tolerance_da,
+        peaks: &peaks,
+        stub_weight: cfg.stub_weight,
+        stub_tol_ppm: cfg.doublet.tol_ppm,
     };
 
     struct Cand {

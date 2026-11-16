@@ -41,8 +41,9 @@ pub struct XlConfig {
     /// Tolerance of a doublet-derived peptide mass, in ppm: grouping of
     /// doublets across charges and the peptide lookup.
     pub doublet_mass_tol_ppm: f64,
-    /// Precursor isotope offsets tried (0 = monoisotopic).
-    pub isotope_offsets: RangeInclusive<u8>,
+    /// Precursor isotope offsets tried (0 = monoisotopic; negative = the
+    /// precursor picked below the monoisotope).
+    pub isotope_offsets: RangeInclusive<i8>,
     /// Lowest precursor charge searched.
     pub min_precursor_charge: u8,
     /// Lightest peptide mass looked up.
@@ -87,6 +88,12 @@ pub struct XlPeptide {
     /// Every occurrence as (protein index, 0-based start in the protein),
     /// ascending.
     pub occurrences: Vec<(u32, u32)>,
+    /// The occurrences where the peptide's N-terminus is a link site: protein
+    /// N-terminal ones, or all when the linker reacts with every peptide
+    /// N-terminus. Ascending.
+    pub n_term_occurrences: Vec<(u32, u32)>,
+    /// The protein C-terminal occurrences, ascending.
+    pub c_term_occurrences: Vec<(u32, u32)>,
     /// True when every occurrence is a decoy.
     pub is_decoy: bool,
     /// Link sites of the linker's first end (of both ends when the linker is
@@ -101,6 +108,18 @@ impl XlPeptide {
     /// Residues as one-letter codes.
     pub fn bare(&self) -> Vec<u8> {
         self.peptide.residues.iter().map(|aa| aa.residue).collect()
+    }
+
+    /// The occurrences where `site` is a link site: a terminal site holds only
+    /// where the peptide is at that terminus, a residue site everywhere.
+    pub fn occurrences_at(&self, site: &LinkSite) -> &[(u32, u32)] {
+        if site.n_term {
+            &self.n_term_occurrences
+        } else if site.c_term {
+            &self.c_term_occurrences
+        } else {
+            &self.occurrences
+        }
     }
 
     /// The sites of linker end `end` (0 or 1).
@@ -246,7 +265,11 @@ impl XlCandidates {
                 }
             }
         };
+        let any_n_term = linker.ends.iter().any(|e| e.peptide_n_term);
         for c in candidates {
+            let occ = (c.protein_index as u32, c.start_offset_in_protein as u32);
+            let n_occ = (any_n_term || c.is_protein_n_term).then_some(occ);
+            let c_occ = c.is_protein_c_term.then_some(occ);
             let sites = sites_of(&c, linker, 0);
             let sites_end2 = hetero.then(|| sites_of(&c, linker, 1));
             if sites.is_empty() && sites_end2.as_ref().is_none_or(|v| v.is_empty()) {
@@ -257,8 +280,9 @@ impl XlCandidates {
                 Some(&i) => {
                     let p = &mut peptides[i];
                     p.proteins.push(c.protein_index as u32);
-                    p.occurrences
-                        .push((c.protein_index as u32, c.start_offset_in_protein as u32));
+                    p.occurrences.push(occ);
+                    p.n_term_occurrences.extend(n_occ);
+                    p.c_term_occurrences.extend(c_occ);
                     p.is_decoy &= c.is_decoy;
                     merge(&mut p.sites, sites);
                     if let (Some(into), Some(from)) = (p.sites_end2.as_mut(), sites_end2) {
@@ -270,10 +294,9 @@ impl XlCandidates {
                     peptides.push(XlPeptide {
                         peptide: c.peptide,
                         proteins: vec![c.protein_index as u32],
-                        occurrences: vec![(
-                            c.protein_index as u32,
-                            c.start_offset_in_protein as u32,
-                        )],
+                        occurrences: vec![occ],
+                        n_term_occurrences: n_occ.into_iter().collect(),
+                        c_term_occurrences: c_occ.into_iter().collect(),
                         is_decoy: c.is_decoy,
                         sites,
                         sites_end2,
@@ -284,8 +307,14 @@ impl XlCandidates {
         for p in &mut peptides {
             p.proteins.sort_unstable();
             p.proteins.dedup();
-            p.occurrences.sort_unstable();
-            p.occurrences.dedup();
+            for v in [
+                &mut p.occurrences,
+                &mut p.n_term_occurrences,
+                &mut p.c_term_occurrences,
+            ] {
+                v.sort_unstable();
+                v.dedup();
+            }
             p.sites.sort_by_key(|s| (s.pos, s.n_term, s.c_term));
             if let Some(v) = p.sites_end2.as_mut() {
                 v.sort_by_key(|s| (s.pos, s.n_term, s.c_term));
@@ -389,7 +418,7 @@ struct MassPair {
     b_mass: f64,
     b_tol: f64,
     kind: PairKind,
-    iso: u8,
+    iso: i8,
     /// Stub ions of the complement seen (half pairs; the linker's number of
     /// stubs for full pairs).
     b_stub_ions: u8,
@@ -459,7 +488,7 @@ pub struct Csm {
     /// peptide sequence.
     pub second_pair_score: Option<f32>,
     pub kind: PairKind,
-    pub iso: u8,
+    pub iso: i8,
     pub class: PairClass,
     pub intra: bool,
     pub precursor_err_ppm: f64,
@@ -966,6 +995,10 @@ fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSum
     s
 }
 
+/// The crosslink search of one spectrum at its precursor charge. A spectrum
+/// without one is searched at every charge of the search's charge range from
+/// [`XlConfig::min_precursor_charge`] up, and the charge whose CSM has the best
+/// pair score is kept (the lowest charge when none has a CSM).
 #[allow(clippy::too_many_arguments)]
 fn search_spectrum(
     spec_idx: usize,
@@ -976,10 +1009,53 @@ fn search_spectrum(
     mods: &StubMods,
     run_oracle: bool,
 ) -> Option<XlSpectrumResult> {
-    let z = u8::try_from(spec.precursor_charge?).ok()?;
-    if z < cfg.min_precursor_charge {
-        return None;
+    match spec.precursor_charge {
+        Some(z) => {
+            let z = u8::try_from(z).ok()?;
+            if z < cfg.min_precursor_charge {
+                return None;
+            }
+            search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, run_oracle)
+        }
+        None => {
+            let range = &prepared.params.charge_range;
+            let lo = (*range.start()).max(cfg.min_precursor_charge);
+            let mut best: Option<XlSpectrumResult> = None;
+            for z in lo..=*range.end() {
+                let Some(r) =
+                    search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
+                else {
+                    continue;
+                };
+                let score = |r: &XlSpectrumResult| r.csm.as_ref().map(|c| c.pair_score);
+                let better = match &best {
+                    None => true,
+                    Some(b) => match (score(&r), score(b)) {
+                        (Some(x), Some(y)) => x > y,
+                        (Some(_), None) => true,
+                        _ => false,
+                    },
+                };
+                if better {
+                    best = Some(r);
+                }
+            }
+            best
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_spectrum_at(
+    spec_idx: usize,
+    spec: &Spectrum,
+    z: u8,
+    prepared: &PreparedSearch<'_>,
+    table: &XlCandidates,
+    cfg: &XlConfig,
+    mods: &StubMods,
+    run_oracle: bool,
+) -> Option<XlSpectrumResult> {
     let precursor_mass = crate::precursor_cal::adjusted_observed_neutral_mass(
         (spec.precursor_mz - PROTON) * z as f64,
         prepared.params.precursor_mass_shift_ppm,
@@ -1222,8 +1298,8 @@ fn oracle(
 ) -> OracleResult {
     let linker = &cfg.linker;
     let mut n_pairs = 0;
-    let mut best: Option<(u32, u32, f32, u8)> = None;
-    let mut scored: HashMap<(u32, u8, usize), f32> = HashMap::new();
+    let mut best: Option<(u32, u32, f32, i8)> = None;
+    let mut scored: HashMap<(u32, i8, usize), f32> = HashMap::new();
     let csm_key = result.csm.as_ref().map(|c| {
         let (i, j) = (c.alpha.pep, c.beta.pep);
         ((i.min(j), i.max(j)), c.iso)
@@ -1371,6 +1447,29 @@ mod tests {
             s.nominal_residue_mass(),
             model::mass::nominal_from(s.mass() - model::mass::H2O)
         );
+    }
+
+    #[test]
+    fn a_terminal_site_is_reported_only_where_the_peptide_is_terminal() {
+        let cand = |protein: usize, start: usize, n_term: bool| Candidate {
+            peptide: pep(b"AKR"),
+            protein_index: protein,
+            start_offset_in_protein: start,
+            is_decoy: false,
+            is_protein_n_term: n_term,
+            is_protein_c_term: false,
+        };
+        // AKR is protein N-terminal in protein 0 and internal in protein 1.
+        let t = XlCandidates::from_candidates(
+            vec![cand(0, 0, true), cand(1, 7, false)],
+            &Crosslinker::dsso(),
+        );
+        assert_eq!(t.peptides().len(), 1);
+        let p = &t.peptides()[0];
+        let n = p.sites.iter().find(|s| s.n_term).unwrap();
+        let k = p.sites.iter().find(|s| !s.n_term).unwrap();
+        assert_eq!(p.occurrences_at(n), &[(0, 0)]);
+        assert_eq!(p.occurrences_at(k), &[(0, 0), (1, 7)]);
     }
 
     #[test]

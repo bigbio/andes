@@ -391,6 +391,12 @@ pub(crate) fn run_xl(
     };
     let mut cfg = XlConfig::new(linker.clone());
     cfg.oracle_spectra = cli.xl_oracle;
+    // `--isotope-error` (or its config key) replaces the crosslink default
+    // 0..=1 only when set: the linear-search default -1..=2 would double the
+    // mass pairs searched per spectrum.
+    if let Some((lo, hi)) = cli.isotope_error {
+        cfg.isotope_offsets = lo..=hi;
+    }
     let t = std::time::Instant::now();
     let results = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
     eprintln!(

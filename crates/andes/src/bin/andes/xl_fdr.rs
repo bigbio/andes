@@ -154,8 +154,18 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
 /// peptide (a target peptide can also occur in a decoy protein), all for a
 /// decoy peptide.
 fn accessions<'a>(p: &XlPeptide, prepared: &'a PreparedSearch) -> Vec<(u32, &'a str)> {
+    accessions_of(p, &p.occurrences, prepared)
+}
+
+/// `(start, accession)` of `occurrences` of `p`, decoy proteins only for a
+/// decoy peptide.
+fn accessions_of<'a>(
+    p: &XlPeptide,
+    occurrences: &[(u32, u32)],
+    prepared: &'a PreparedSearch,
+) -> Vec<(u32, &'a str)> {
     let idx = prepared.idx;
-    p.occurrences
+    occurrences
         .iter()
         .filter_map(|&(pi, start)| {
             let acc = idx.db.proteins.get(pi as usize)?.accession.as_str();
@@ -277,11 +287,11 @@ pub(crate) fn percolator_scores(
     Ok(scores)
 }
 
-/// Residue-pair side: every occurrence as `accession:position` (1-based
-/// residue of the link site in the protein).
+/// Residue-pair side: every occurrence where the link site holds, as
+/// `accession:position` (1-based residue of the link site in the protein).
 fn rp_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> String {
     let p = &table.peptides()[h.pep as usize];
-    let mut v: Vec<String> = accessions(p, prepared)
+    let mut v: Vec<String> = accessions_of(p, p.occurrences_at(&h.site), prepared)
         .into_iter()
         .map(|(start, acc)| format!("{acc}:{}", start as usize + h.site.pos + 1))
         .collect();
@@ -290,10 +300,10 @@ fn rp_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> S
     v.join(";")
 }
 
-/// Protein-pair side: the peptide's accessions.
+/// Protein-pair side: the accessions where the link site holds.
 fn ppi_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> String {
     let p = &table.peptides()[h.pep as usize];
-    let mut v: Vec<&str> = accessions(p, prepared)
+    let mut v: Vec<&str> = accessions_of(p, p.occurrences_at(&h.site), prepared)
         .into_iter()
         .map(|(_, a)| a)
         .collect();

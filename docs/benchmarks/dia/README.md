@@ -30,7 +30,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | andes `--dia` | 1404 / 1499 | 0.004 / 0.005 | 0.042 / 0.046 | 1559 / 1651 | 1707 / 1691 |
 | andes `--dia`, mean of 5 Percolator seeds | 1394 / 1565 | 0.007 / 0.009 | | 1496 / 1594 (1421–1575 / 1524–1651) | 1685 / 1727 |
 | andes `--dia`, `--trainFDR 0.05` (default with `--dia --rescore`), mean of 5 seeds | 1493 / 1602 | 0.005 / 0.011 | 0.049 / 0.044 | 1635 / 1611 (1568–1672 / 1557–1647) | 1793 / 1744 |
-| andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds (current) | 1433 / 1589 | 0.004 / 0.007 | | **1634 / 1687** (1619–1646 / 1620–1725) | 1798 / 1819 |
+| andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds | 1433 / 1589 | 0.004 / 0.007 | | 1634 / 1687 (1619–1646 / 1620–1725) | 1798 / 1819 |
+| andes `--dia --rescore` (current: + two-pass RT refinement), mean of 5 seeds | 1432 / 1612 | 0.004 / 0.005 | 0.044 / 0.038 | **1666 / 1747** (1627–1688 / 1648–1792) | 1872 / 1884 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -44,8 +45,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
-  with seed 42, 72 % / 69 % on the seed mean, and 79 % / 73 % with `--trainFDR 0.05` and the
-  summed-apex columns; of OpenDIA arm E it reaches 96 % / 104 %.
+  with seed 42, 72 % / 69 % on the seed mean, and 81 % / 76 % with `--trainFDR 0.05`, the
+  summed-apex columns and the two-pass RT refinement; of OpenDIA arm E it reaches 98 % / 107 %.
 - **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
   1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
   1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633
@@ -175,6 +176,13 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   `RawScore` at q ≤ 1 % 1603 / 1745, boosting on those anchors 1635 / 1722, at q ≤ 5 % 1648 / 1717.
   raw02 gains 30–66 with every variant; raw01 gains only with boosting on Percolator anchors, though
   its RT error is no smaller than ridge's (median 0.24 min for both, against 0.30 unrefined).
+  **Shipped as a second Percolator pass** (`dia::refine_rt`, andes's own gradient boosting, depth 3,
+  200 rounds, out of fold by peptidoform, anchors = first-pass targets at q ≤ 1 %, column
+  `dia_rt_refined_err`): run end to end with `andes --dia --rescore` on codon, then Percolator
+  re-scored on its PIN for 5 seeds: 1666 / 1747 against 1634 / 1687 (raw01 higher on 5 of 5 seeds,
+  raw02 on 4 of 5), N@FDP_c 2 % 1872 / 1884, q ≤ 0.01 at 0.44 / 0.47 % true FDP. It adds one
+  Percolator run (3–6 min) and ~8 s of fitting per raw. A boosting refit with a ridge on
+  hinge-basis RT (spline) gave 1649 / 1745, a little below.
 - **Shared-scan interference** is not where the errors are. Of the targets at precursor q ≤ 5 % on
   raw01, 1,884 rank first in their scan (2.0 % entrapment) and 36 rank second (8 %), so a filter on
   rank would remove at most three false IDs.

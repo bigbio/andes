@@ -436,6 +436,183 @@ fn apex_sum(
     (n2 as f64, frac, gain as f64)
 }
 
+/// The column [`refine_rt`] adds.
+pub(crate) const RT_REFINED: &str = "dia_rt_refined_err";
+/// Anchors needed in a run before its RT residual model is fitted.
+const RT_MIN_ANCHORS: usize = 300;
+
+/// Run-specific RT refinement, between two Percolator passes (`--dia --rescore`).
+///
+/// andes-rt is trained across labs, so in one run its calibrated prediction
+/// is off by a peptide-dependent residual (robust sigma ~0.43 min on the
+/// Astral benchmark). For each run, a gradient-boosted regressor learns that
+/// residual (observed minus `andesrt_predicted_rt`) from residue composition,
+/// length, oxidations and predicted RT, on the target rows Percolator's first
+/// pass accepts at q <= 1 %. Every row gets `|observed - refined|` in minutes,
+/// predicted out of fold (3 folds by peptide) so an anchor's own observation
+/// never shapes its value. On the benchmark this lifts precursors at 1 % true
+/// FDP by 32 / 60 over 5 Percolator seeds; ridge or anchors from `RawScore`
+/// alone help one raw only (docs/benchmarks/dia/README.md).
+///
+/// Returns `false` (PIN untouched) without andes-rt columns or when no run has
+/// [`RT_MIN_ANCHORS`] anchors.
+pub(crate) fn refine_rt(
+    pin: &Path,
+    spectra: &[Spectrum],
+    accepted: &dyn Fn(&str) -> bool,
+) -> Result<bool, String> {
+    use model_train::gbdt::train::{train_gbdt_regression, RegressionDataset, TrainParams};
+
+    let t0 = Instant::now();
+    let table = read_pin(pin, spectra, &[RT_REFINED.to_string()])?;
+    // SpecId, file and andes-rt predicted RT per row (read_pin keeps neither).
+    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    let mut lines = text.lines().filter(|l| !l.is_empty());
+    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    let at = |n: &str| h.iter().position(|c| *c == n);
+    let (Some(c_id), Some(c_file), Some(c_pred)) =
+        (at("SpecId"), at("FileName"), at("andesrt_predicted_rt"))
+    else {
+        return Ok(false);
+    };
+    let mut files: Vec<&str> = Vec::new();
+    let mut run = Vec::with_capacity(table.rows.len());
+    let mut anchor = Vec::with_capacity(table.rows.len());
+    let mut pred = Vec::with_capacity(table.rows.len());
+    for line in lines {
+        let x: Vec<&str> = line.split('\t').collect();
+        let f = x[c_file];
+        run.push(files.iter().position(|g| *g == f).unwrap_or_else(|| {
+            files.push(f);
+            files.len() - 1
+        }));
+        anchor.push(accepted(x[c_id]));
+        pred.push(x[c_pred].parse::<f64>().unwrap_or(f64::NAN));
+    }
+    if run.len() != table.rows.len() {
+        return Err(format!("{}: rows changed while refining RT", pin.display()));
+    }
+    let obs: Vec<f64> = table
+        .rows
+        .iter()
+        .map(|r| {
+            (r.spec != NONE)
+                .then(|| spectra[r.spec as usize].rt_seconds)
+                .flatten()
+                .map_or(f64::NAN, |t| t / 60.0)
+        })
+        .collect();
+    // Features per peptidoform: residue counts, length, oxidations; predicted
+    // RT is appended per row.
+    const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
+    let form_x: Vec<Vec<f32>> = table
+        .forms
+        .iter()
+        .map(|(f, _)| {
+            let mut v = vec![0f32; AA.len() + 2];
+            for b in f.seq.bytes() {
+                if let Some(i) = AA.iter().position(|&a| a == b) {
+                    v[i] += 1.0;
+                }
+            }
+            v[AA.len()] = f.seq.len() as f32;
+            v[AA.len() + 1] = f
+                .mods
+                .iter()
+                .filter(|(_, m)| matches!(m, onnx_infer::predictors::form::Mod::Oxidation))
+                .count() as f32;
+            v
+        })
+        .collect();
+    let nf = AA.len() + 3;
+    let names: Vec<String> = (0..nf).map(|i| format!("f{i}")).collect();
+    let row_x = |i: usize| {
+        let mut v = form_x[table.rows[i].form as usize].clone();
+        v.push(pred[i] as f32);
+        v
+    };
+    let usable = |i: usize| {
+        let r = &table.rows[i];
+        r.form != NONE && pred[i].is_finite() && obs[i].is_finite()
+    };
+    // Folds by peptidoform, so a peptide's rows are never predicted by a model
+    // trained on it.
+    let fold = |i: usize| (table.rows[i].form as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
+
+    let mut err = vec![f64::NAN; table.rows.len()];
+    let mut report = Vec::new();
+    for r in 0..files.len() {
+        let rows: Vec<usize> = (0..table.rows.len())
+            .filter(|&i| run[i] == r && usable(i))
+            .collect();
+        let anchors: Vec<usize> = rows
+            .iter()
+            .copied()
+            .filter(|&i| anchor[i] && !table.rows[i].decoy)
+            .collect();
+        if anchors.len() < RT_MIN_ANCHORS {
+            report.push(format!("{}: {} anchors, skipped", files[r], anchors.len()));
+            continue;
+        }
+        for k in 0..3u64 {
+            let train: Vec<usize> = anchors
+                .iter()
+                .copied()
+                .filter(|&i| fold(i) % 3 != k)
+                .collect();
+            let ds = RegressionDataset {
+                x: train.iter().flat_map(|&i| row_x(i)).collect(),
+                y: train.iter().map(|&i| (obs[i] - pred[i]) as f32).collect(),
+                groups: train.iter().map(|&i| table.rows[i].form).collect(),
+                n_features: nf,
+                feature_names: names.clone(),
+            };
+            let params = TrainParams {
+                n_rounds: 200,
+                max_depth: 3,
+                min_hessian: 20.0,
+                ..TrainParams::default()
+            };
+            let model = train_gbdt_regression(&ds, &params, 42).map_err(|e| format!("{e}"))?;
+            for &i in rows.iter().filter(|&&i| fold(i) % 3 == k) {
+                let refined = pred[i] + model.predict_value(&row_x(i)) as f64;
+                err[i] = (obs[i] - refined).abs();
+            }
+        }
+        let mut a: Vec<f64> = anchors.iter().map(|&i| err[i]).collect();
+        let mut b: Vec<f64> = anchors.iter().map(|&i| (obs[i] - pred[i]).abs()).collect();
+        a.sort_by(f64::total_cmp);
+        b.sort_by(f64::total_cmp);
+        report.push(format!(
+            "{}: {} anchors, median |error| {:.2} -> {:.2} min",
+            files[r],
+            anchors.len(),
+            b[b.len() / 2],
+            a[a.len() / 2]
+        ));
+    }
+    if err.iter().all(|e| !e.is_finite()) {
+        eprintln!("DIA RT refinement: {}", report.join("; "));
+        return Ok(false);
+    }
+    // Rows without a value (skipped run, no RT) take the median.
+    let mut fin: Vec<f64> = err.iter().copied().filter(|e| e.is_finite()).collect();
+    fin.sort_by(f64::total_cmp);
+    let med = fin[fin.len() / 2];
+    for e in &mut err {
+        if !e.is_finite() {
+            *e = med;
+        }
+    }
+    write_pin(pin, &table, &[RT_REFINED.to_string()], &[err])?;
+    eprintln!(
+        "DIA RT refinement: {} [{:.2}s]",
+        report.join("; "),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(true)
+}
+
 /// Percolator's positive-set FDR for training on a DIA PIN, unless the user
 /// set `--trainFDR`. A DIA PIN has about ten candidate rows per scan and few
 /// PSMs at 1 %, so the default (`--trainFDR 0.01`) trains on too few
@@ -518,6 +695,72 @@ mod tests {
         assert_eq!(apex_sum(refs[4], None, None, &mass, z).0, 0.0);
         assert_eq!(apex_sum(refs[4], Some(refs[3]), None, &mass, z).0, n);
         assert_eq!(apex_sum(refs[4], None, None, &other, z).0, 0.0);
+    }
+
+    /// The refined error learns a peptide-dependent RT offset the predictor
+    /// misses (W-containing peptides 2 min late); without andes-rt columns
+    /// the PIN is left as it was.
+    #[test]
+    fn refine_rt_learns_a_run_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("x.pin");
+        let mut text = String::from(
+            "SpecId\tLabel\tScanNr\tFileName\tRawScore\tcharge2\tandesrt_predicted_rt\tPeptide\tProteins\n",
+        );
+        let mut spectra = Vec::new();
+        for i in 0..1200usize {
+            // Distinct peptides (i in base 8 over 8 residues); every third has a
+            // W, which elutes 2 min later than predicted.
+            let core: String = (0..4)
+                .map(|k| b"AELKSVTG"[(i >> (3 * k)) & 7] as char)
+                .collect();
+            let w = i % 3 == 0;
+            let pep = format!("K.{core}{}R.A", if w { "W" } else { "F" });
+            let pred = 10.0 + (i % 100) as f64 * 0.5;
+            let obs = pred + if w { 2.0 } else { 0.0 };
+            let scan = i as i32 + 1;
+            spectra.push(Spectrum {
+                title: format!("t.{scan}"),
+                precursor_mz: 500.0,
+                precursor_intensity: None,
+                precursor_charge: Some(2),
+                rt_seconds: Some(obs * 60.0),
+                scan: Some(scan),
+                peaks: vec![(100.0, 1.0)],
+                activation_method: None,
+                isolation_lower_offset: None,
+                isolation_upper_offset: None,
+                isolation_target_mz: None,
+            });
+            text.push_str(&format!(
+                "t.{scan}_{scan}_1\t1\t{scan}\tr\t{}\t1\t{pred}\t{pep}\tP1\n",
+                100 - i % 50
+            ));
+        }
+        std::fs::write(&pin, &text).unwrap();
+        assert!(refine_rt(&pin, &spectra, &|_| true).unwrap());
+        let out = std::fs::read_to_string(&pin).unwrap();
+        let h: Vec<&str> = out.lines().next().unwrap().split('\t').collect();
+        let c = h.iter().position(|c| *c == RT_REFINED).unwrap();
+        assert_eq!(h[c + 1], "Peptide");
+        let mut e: Vec<f64> = out
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').nth(c).unwrap().parse().unwrap())
+            .collect();
+        e.sort_by(f64::total_cmp);
+        // Unrefined: a third of rows are 2 min off. Refined: the offset is learned.
+        assert!(
+            e[e.len() * 9 / 10] < 0.5,
+            "90th percentile {}",
+            e[e.len() * 9 / 10]
+        );
+
+        // No andes-rt column: PIN untouched.
+        let bare = text.replace("\tandesrt_predicted_rt", "\tother");
+        std::fs::write(&pin, &bare).unwrap();
+        assert!(!refine_rt(&pin, &spectra, &|_| true).unwrap());
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), bare);
     }
 
     #[test]

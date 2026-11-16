@@ -2865,9 +2865,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             let extra = output::percolator_args_with_threads(&user_args, cli.threads);
             let t_resc = std::time::Instant::now();
-            let (map, decoys) =
+            let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
+            // DIA: refine RT on the first pass's IDs, then rescore with it.
+            if cli.dia
+                && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
+                    map.get(id).is_some_and(|p| p.q_value <= 0.01)
+                })?
+            {
+                (map, decoys) =
+                    output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("{e}"))?;
+            }
             rescore_decoys = Some(decoys);
             eprintln!(
                 "Rescore: Percolator produced {} target PSMs [{:.2}s]",

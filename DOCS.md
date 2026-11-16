@@ -546,7 +546,11 @@ alike:
 Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
 intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
 `--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP
-against the default 0.01, error control unchanged). The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
+against the default 0.01, error control unchanged). With `--dia --rescore` andes then refines RT
+per run: a gradient-boosted model of the andes-rt residual, fitted on the first Percolator pass's
+targets at q ≤ 1 % (at least 300 per run), adds `dia_rt_refined_err` (|observed − refined RT|,
+minutes, out of fold by peptidoform) and Percolator runs a second time (+32 / +60 precursors at
+1 % true FDP on the Astral benchmark). It needs `--predict rt`. The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
 after target-decoy competition, as in `docs/benchmarks/dia/eval_dia.py`. Measured results and the
 gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 

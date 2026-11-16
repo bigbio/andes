@@ -31,7 +31,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | andes `--dia`, mean of 5 Percolator seeds | 1394 / 1565 | 0.007 / 0.009 | | 1496 / 1594 (1421–1575 / 1524–1651) | 1685 / 1727 |
 | andes `--dia`, `--trainFDR 0.05` (default with `--dia --rescore`), mean of 5 seeds | 1493 / 1602 | 0.005 / 0.011 | 0.049 / 0.044 | 1635 / 1611 (1568–1672 / 1557–1647) | 1793 / 1744 |
 | andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds | 1433 / 1589 | 0.004 / 0.007 | | 1634 / 1687 (1619–1646 / 1620–1725) | 1798 / 1819 |
-| andes `--dia --rescore` (current: + two-pass RT refinement), mean of 5 seeds | 1432 / 1612 | 0.004 / 0.005 | 0.044 / 0.038 | **1666 / 1747** (1627–1688 / 1648–1792) | 1872 / 1884 |
+| andes `--dia --rescore` + two-pass RT refinement, 20 ppm fragments, mean of 5 seeds | 1432 / 1612 | 0.004 / 0.005 | 0.044 / 0.038 | 1666 / 1747 (1627–1688 / 1648–1792) | 1872 / 1884 |
+| andes `--dia --rescore` (current: + 7 ppm fragments), mean of 5 seeds | 1589 / 1755 | 0.004 / 0.009 | 0.043 / 0.050 | **1801 / 1819** (1733–1828 / 1748–1882) | 1964 / 1962 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -45,8 +46,17 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
-  with seed 42, 72 % / 69 % on the seed mean, and 81 % / 76 % with `--trainFDR 0.05`, the
-  summed-apex columns and the two-pass RT refinement; of OpenDIA arm E it reaches 98 % / 107 %.
+  with seed 42, 72 % / 69 % on the seed mean, and 87 % / 79 % with `--trainFDR 0.05`, the
+  summed-apex columns, the two-pass RT refinement and 7 ppm fragments; it is above OpenDIA arm E
+  (106 % / 112 %).
+- **Fragment tolerance.** andes measures each run's fragment mass error from 100 confident PSMs of a
+  3,000-spectrum sample. A DIA scan's best candidate rarely reaches 1 % q (21 of 3,000 on raw01), so
+  the measurement never fired and the search kept the 20 ppm default. Mean of 5 seeds, N@FDP_c 1 %
+  with `--fragment-tol-ppm` 5 / 7 / 10 / 15 / 20 (retrieval and features): 1567 / 1801 / 1720 / 1695 /
+  1666 on raw01, 1685 / 1819 / 1833 / 1731 / 1747 on raw02. 7 ppm is higher than 20 ppm on raw01 for
+  5 of 5 seeds and on raw02 for 4 of 5. Measuring on a 30,000-spectrum sample instead (offset −3.3 /
+  −2.6 ppm, spread 1.3 ppm, 5 ppm features, 20 ppm retrieval) gave 1747 / 1681, below a flat 7 ppm.
+  `--dia` on Orbitrap-class MS2 now uses 7 ppm unless `--fragment-tol-*` is set.
 - **Percolator training FDR.** A DIA PIN has about ten candidate rows per scan and only ~6.7k PSMs at
   1 %, so Percolator's default `--trainFDR 0.01` trains on few positives. Mean N@FDP_c 1 % over seeds
   1, 2, 3 (10 threads, paired): `--trainFDR` 0.01 / 0.02 / 0.05 / 0.10 give 1449 / 1552 / 1615 / 1633
@@ -205,6 +215,8 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   NCE 22 1665 / 1784 (3 / 3 of 5). Agreement with anchor spectra rises as NCE falls (median spectral
   angle 0.721 / 0.750 / 0.770 at NCE 28 / 25 / 22), but the ID gain is at most +28 and inside seed
   noise on raw02. Not shipped; a per-run NCE search on anchor agreement is not worth its cost.
+- **Both raws in one run** (`--spectrum raw01 --spectrum raw02`, one pooled Percolator model,
+  per-run q-values), 5 seeds, scored per raw: 1632 / 1745 against 1666 / 1747. Pooling does not help.
 
 Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
 best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's

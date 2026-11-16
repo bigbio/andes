@@ -966,11 +966,30 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Feature tolerances and the fragment-index vote mode follow the
     // acquisition, not the model's instrument.
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
+    // `--dia` on Orbitrap-class MS2: retrieval and features at 7 ppm unless set.
+    // The per-run measurement needs 100 confident PSMs, which a DIA sample rarely
+    // has, so it would leave 20 ppm (docs/benchmarks/dia: 7 ppm +135 / +72
+    // precursors at 1 % FDP over 20 ppm on Astral).
+    let dia_tol_default = cli.dia
+        && acquisition.high_res
+        && !matches!(
+            acquisition.analyzer,
+            Some(InstrumentType::TOF | InstrumentType::TimsTOF)
+        )
+        && cli.fragment_tol_ppm.is_none()
+        && cli.fragment_tol_da.is_none();
+    if dia_tol_default {
+        cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
+        eprintln!(
+            "--dia: fragment tolerance {} ppm (high-res MS2)",
+            crate::dia::FRAGMENT_TOL_PPM
+        );
+    }
     // An explicit `--fragment-tol-*` sets the feature tolerance on every input
     // format, detected analyzer or not, and replaces the per-run measurement.
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
-        if instrument_was_detected {
+        if instrument_was_detected && !dia_tol_default {
             eprintln!(
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())

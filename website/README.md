@@ -9,10 +9,10 @@ the binary's own `--help`.
 
 | path | what |
 |---|---|
-| `pages/` | hand-written pages (landing, benchmark overview) |
+| `pages/` | hand-written pages (landing, benchmark overview, CI page) |
 | `benchmarks.json` | numbers behind the figures, copied from the benchmark tables; update with them |
 | `make_plots.py` | figures (SVG) from `benchmarks.json` |
-| `static/` | CSS and `CNAME` |
+| `static/` | CSS, `CNAME`, and `javascripts/ci.js` (the CI page: reads `results.jsonl` from the `benchmarks` branch, see `docs/benchmarks/ci/`) |
 | `build.sh` | the whole build: `./website/build.sh target/debug/andes` |
 
 Local preview (needs a built `andes` binary and `pip install -r website/requirements.txt`):

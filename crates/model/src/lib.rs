@@ -22,6 +22,7 @@ pub mod scan;
 pub mod spectrum;
 pub mod tolerance;
 pub mod unimod;
+pub mod xl_reagents;
 
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;

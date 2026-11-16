@@ -1,7 +1,3 @@
-//! The `--xl` standalone driver: crosslink search, the pair-aware
-//! `.xl.pin`, optional Percolator rescoring (`--rescore`), and the CSM,
-//! residue-pair, protein-pair and doublet tables.
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +8,6 @@ use model::Spectrum;
 use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
 use search::PreparedSearch;
 
-/// `<base>.<suffix>` next to the PIN path (a trailing `.pin` is replaced).
 fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
     let mut s = if report_base
         .extension()
@@ -26,7 +21,12 @@ fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn peptide_cols(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> Vec<String> {
+fn peptide_cols(
+    h: &PeptideHit,
+    table: &XlCandidates,
+    prepared: &PreparedSearch,
+    linker: &Crosslinker,
+) -> Vec<String> {
     let p = &table.peptides()[h.pep as usize];
     let proteins: Vec<&str> = p
         .proteins
@@ -41,48 +41,67 @@ fn peptide_cols(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch)
             "NA".to_string()
         }
     };
-    vec![
+    let site_kind = if h.site.n_term {
+        "nterm".to_string()
+    } else if h.site.c_term {
+        "cterm".to_string()
+    } else {
+        p.peptide
+            .residues
+            .get(h.site.pos)
+            .map_or("NA".to_string(), |aa| (aa.residue as char).to_string())
+    };
+    let mut cols = vec![
         p.peptide.to_proforma(),
         (h.site.pos + 1).to_string(),
-        if h.site.n_term { "nterm" } else { "K" }.to_string(),
+        site_kind,
         proteins.join(";"),
         u8::from(p.is_decoy).to_string(),
         fmt(h.score),
-        h.form.name().to_string(),
-        fmt(h.form_scores[0]),
-        fmt(h.form_scores[1]),
-        fmt(h.form_scores[2]),
-        fmt(h.form_scores[3]),
+        linker.form_name(h.form).to_string(),
+    ];
+    cols.extend(linker.forms().map(|f| fmt(h.form_scores[f.index()])));
+    cols.extend([
         h.n_sites.to_string(),
         h.gap_next.map_or("NA".to_string(), |g| format!("{g:.3}")),
         format!("{:.2}", h.mass_err_ppm),
         p.peptide.length().to_string(),
-    ]
+    ]);
+    cols
 }
 
-const PEP_COLS: [&str; 15] = [
-    "peptide",
-    "site",
-    "site_kind",
-    "proteins",
-    "decoy",
-    "score",
-    "form",
-    "score_alkene",
-    "score_thiol",
-    "score_sulfenic",
-    "score_intact",
-    "n_sites",
-    "gap_next",
-    "mass_err_ppm",
-    "length",
-];
+fn pep_cols(linker: &Crosslinker) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "peptide",
+        "site",
+        "site_kind",
+        "proteins",
+        "decoy",
+        "score",
+        "form",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    v.extend(
+        linker
+            .forms()
+            .map(|f| format!("score_{}", linker.form_name(f))),
+    );
+    v.extend(
+        ["n_sites", "gap_next", "mass_err_ppm", "length"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    v
+}
 
 fn scan_of(spec: &Spectrum) -> String {
     spec.scan
         .map_or_else(|| spec.title.clone(), |s| s.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_csms(
     path: &Path,
     spectra: &[Spectrum],
@@ -91,6 +110,7 @@ fn write_csms(
     q: &[Option<f64>],
     table: &XlCandidates,
     prepared: &PreparedSearch,
+    linker: &Crosslinker,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<String> = [
@@ -116,7 +136,7 @@ fn write_csms(
     .map(|s| s.to_string())
     .collect();
     for side in ["alpha", "beta"] {
-        head.extend(PEP_COLS.iter().map(|c| format!("{side}_{c}")));
+        head.extend(pep_cols(linker).iter().map(|c| format!("{side}_{c}")));
     }
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
@@ -143,8 +163,8 @@ fn write_csms(
             r.doublets.masses.len().to_string(),
             format!("{:.4}", r.doublets.top_rel_intensity),
         ];
-        row.extend(peptide_cols(&c.alpha, table, prepared));
-        row.extend(peptide_cols(&c.beta, table, prepared));
+        row.extend(peptide_cols(&c.alpha, table, prepared, linker));
+        row.extend(peptide_cols(&c.beta, table, prepared, linker));
         writeln!(w, "{}", row.join("\t"))?;
         n += 1;
     }
@@ -297,12 +317,89 @@ fn report(results: &[XlSpectrumResult]) {
     );
 }
 
-/// Crosslink mode: search every spectrum for crosslinks of `--xl`'s linker and
-/// write `<base>.xl.pin`, `<base>.xl.tsv` (CSMs), `<base>.xl.residue_pairs.tsv`,
-/// `<base>.xl.ppi.tsv` and `<base>.xl.doublets.tsv`. CSMs are scored by the
-/// pair score; with `--rescore` the intra-links are scored by Percolator on
-/// their own PIN (`<base>.xl.intra.pin`). The FDR is pooled over every input
-/// run.
+fn report_linker(linker: &Crosslinker) {
+    let stubs = linker.cleavage.as_ref().map_or(String::new(), |c| {
+        let s: Vec<String> = c
+            .stubs
+            .iter()
+            .map(|s| format!("{} {:+.6}", s.name, s.mass))
+            .collect();
+        let d: Vec<String> = (0..c.doublets.len())
+            .map(|k| format!("{:.6}", c.doublet_delta(k)))
+            .collect();
+        format!(
+            "; stubs {}; doublet spacing {} Da",
+            s.join(", "),
+            d.join(", ")
+        )
+    });
+    eprintln!(
+        "[xl] linker {}{}: intact {:+.6} Da, sites {}{}",
+        linker.name,
+        linker
+            .accession
+            .as_deref()
+            .map_or(String::new(), |a| format!(" ({a})")),
+        linker.intact,
+        linker.describe_sites(),
+        stubs
+    );
+}
+
+pub(crate) fn water_monolink_mods(linker: &Crosslinker) -> Vec<model::Modification> {
+    use model::modification::{ModLocation, ResidueSpec};
+    let Some(water) = linker
+        .monolinks
+        .iter()
+        .find(|m| m.name.ends_with("water") || water_record(&m.name))
+    else {
+        return Vec::new();
+    };
+    let end = &linker.ends[0];
+    let mut sites: Vec<(ResidueSpec, ModLocation)> = end
+        .residues
+        .iter()
+        .map(|&r| (ResidueSpec::Specific(r), ModLocation::Anywhere))
+        .collect();
+    if end.protein_n_term {
+        sites.push((ResidueSpec::Wildcard, ModLocation::ProtNTerm));
+    }
+    if end.peptide_n_term {
+        sites.push((ResidueSpec::Wildcard, ModLocation::NTerm));
+    }
+    sites
+        .into_iter()
+        .map(|(residue, location)| model::Modification {
+            accession: water.accession.clone(),
+            ..model::Modification::new(water.name.clone(), water.mass, residue, location, false)
+        })
+        .collect()
+}
+
+fn water_record(name: &str) -> bool {
+    model::xl_reagents::bundled().reagents.iter().any(|r| {
+        r.monolinks
+            .iter()
+            .any(|m| m.name == "water" && m.unimod.as_deref() == Some(name))
+    })
+}
+
+pub(crate) fn xl_default_variable_mods(
+    explicit: Option<&crate::cli::ModList>,
+    linker: &Crosslinker,
+) -> Option<crate::cli::ModList> {
+    if explicit.is_some() {
+        return None;
+    }
+    let mono = water_monolink_mods(linker);
+    if mono.is_empty() {
+        return None;
+    }
+    let mut mods = crate::model_select::default_variable_mods();
+    mods.extend(mono);
+    Some(crate::cli::ModList(mods))
+}
+
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
@@ -312,20 +409,20 @@ pub(crate) fn run_xl(
     run_ends: &[usize],
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let name = cli.xl.as_deref().unwrap_or_default();
-    let linker = Crosslinker::by_name(name).ok_or_else(|| {
-        format!(
-            "--xl {name}: unknown linker (known: {})",
-            Crosslinker::known_names().join(", ")
-        )
-    })?;
+    let linker: Crosslinker = cli.xl.clone().ok_or("--xl: no crosslinker")?;
+    report_linker(&linker);
     let t = std::time::Instant::now();
     let table = XlCandidates::from_out_of_core(prepared, &linker);
     let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
     eprintln!(
-        "[xl] {} linkable peptidoforms ({} decoy) [{:.2}s]",
+        "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
         table.peptides().len(),
         n_decoy,
+        if table.has_open_index() {
+            "; open-mass fragment index built (non-cleavable linker)"
+        } else {
+            ""
+        },
         t.elapsed().as_secs_f64()
     );
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {
@@ -333,8 +430,11 @@ pub(crate) fn run_xl(
     } else {
         spectra
     };
-    let mut cfg = XlConfig::new(linker);
+    let mut cfg = XlConfig::new(linker.clone());
     cfg.oracle_spectra = cli.xl_oracle;
+    if let Some((lo, hi)) = cli.isotope_error {
+        cfg.isotope_offsets = lo..=hi;
+    }
     let t = std::time::Instant::now();
     let results = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
     eprintln!(
@@ -344,7 +444,6 @@ pub(crate) fn run_xl(
         t.elapsed().as_secs_f64()
     );
     report(&results);
-    // The input run of a spectrum: the first run whose end lies past it.
     let run_of = |i: usize| -> String {
         let k = run_ends.partition_point(|&end| end <= i);
         spectrum_paths
@@ -364,11 +463,6 @@ pub(crate) fn run_xl(
         cfg.linker.intact,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
-    // Inter-links keep the pair score: a Percolator model over all CSMs or
-    // over the inter rows does not hold the inter FDR on the PXD042173 truth.
-    // `--rescore` rescores the intra-links with a Percolator model trained on
-    // the intra rows only; `--xl-rescore-inter` (a comparison) does the same
-    // for the inter rows.
     let mut score: Vec<Option<f64>> = results
         .iter()
         .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
@@ -394,7 +488,7 @@ pub(crate) fn run_xl(
         }
         Ok(())
     };
-    if cli.rescore {
+    if cli.xl_rescore_intra {
         rescore_class(true, ".xl.intra.pin")?;
     }
     if cli.xl_rescore_inter {
@@ -415,6 +509,7 @@ pub(crate) fn run_xl(
         &q,
         &table,
         prepared,
+        &linker,
     )?;
     crate::xl_fdr::write_levels(
         &sibling(report_base, ".xl.residue_pairs.tsv"),
@@ -432,4 +527,45 @@ pub(crate) fn run_xl(
         t_total.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linker(spec: &str) -> Crosslinker {
+        crate::cli::parse_xl(spec).unwrap()
+    }
+
+    #[test]
+    fn the_water_monolink_sits_on_the_link_sites_of_the_first_end() {
+        let m = water_monolink_mods(&linker("DSSO"));
+        assert_eq!(m.len(), 2);
+        assert!(m.iter().all(|m| m.name == "Xlink:DSSO[176]" && !m.fixed));
+        assert_eq!(m[0].accession.as_deref(), Some("UNIMOD:1878"));
+        assert!((m[0].mass_delta - 176.01433).abs() < 1e-9);
+        assert_eq!(water_monolink_mods(&linker("DSS (K)")).len(), 1);
+        assert_eq!(water_monolink_mods(&linker("DSBU (K, N-term)")).len(), 2);
+        let b = water_monolink_mods(&linker("DSBSO"));
+        assert_eq!(b[0].name, "DSBSO:water");
+        assert!(water_monolink_mods(&linker("CDI")).is_empty());
+        assert!(water_monolink_mods(&linker("DTBP")).is_empty());
+    }
+
+    #[test]
+    fn an_explicit_variable_mod_list_replaces_the_monolink_default() {
+        let x = linker("DSS");
+        let d = xl_default_variable_mods(None, &x).unwrap().0;
+        assert_eq!(
+            d.len(),
+            crate::model_select::default_variable_mods().len() + 2
+        );
+        assert!(d.iter().any(|m| m.name == "Xlink:DSS[156]"));
+        let explicit = crate::cli::parse_variable_mods("Oxidation (M)").unwrap();
+        assert!(xl_default_variable_mods(Some(&explicit), &x).is_none());
+        let off = crate::cli::parse_variable_mods("").unwrap();
+        assert!(off.0.is_empty());
+        assert!(xl_default_variable_mods(Some(&off), &x).is_none());
+        assert!(xl_default_variable_mods(None, &linker("CDI")).is_none());
+    }
 }

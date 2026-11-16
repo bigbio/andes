@@ -1,132 +1,170 @@
-//! Crosslinker chemistry: intact mass, MS-cleavage stubs and reactive sites.
-
-/// Monoisotopic mass of the 13C-12C isotope spacing.
 pub const ISOTOPE_SPACING: f64 = 1.003_354_835;
-/// Proton mass.
 pub const PROTON: f64 = 1.007_276_49;
 
-/// Stub masses left on a peptide when an MS-cleavable linker breaks in MS2.
-#[derive(Debug, Clone, Copy, PartialEq)]
+pub const MAX_STUBS: usize = model::xl_reagents::MAX_STUBS;
+pub const N_FORMS: usize = MAX_STUBS + 1;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stub {
+    pub name: String,
+    pub mass: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cleavage {
-    /// Alkene stub (DSSO: C3H2O).
-    pub alkene: f64,
-    /// Unsaturated thiol stub (DSSO: C3H2OS), the sulfenic acid minus water.
-    pub thiol: f64,
-    /// Sulfenic acid stub (DSSO: C3H4O2S); alkene + sulfenic = intact linker.
-    pub sulfenic: f64,
+    pub stubs: Vec<Stub>,
+    pub doublets: Vec<(usize, usize)>,
 }
 
 impl Cleavage {
-    /// The reporter-doublet spacing: thiol minus alkene stub (neutral mass).
-    pub fn doublet_delta(&self) -> f64 {
-        self.thiol - self.alkene
+    pub fn doublet_delta(&self, k: usize) -> f64 {
+        let (l, h) = self.doublets[k];
+        self.stubs[h].mass - self.stubs[l].mass
+    }
+
+    pub fn doublet_light(&self, k: usize) -> f64 {
+        self.stubs[self.doublets[k].0].mass
+    }
+
+    pub fn stub_masses(&self) -> impl Iterator<Item = f64> + '_ {
+        self.stubs.iter().map(|s| s.mass)
+    }
+
+    pub fn with_heavy_shift(&self, shift: f64) -> Cleavage {
+        let mut c = self.clone();
+        let mut heavy: Vec<usize> = c.doublets.iter().map(|d| d.1).collect();
+        heavy.sort_unstable();
+        heavy.dedup();
+        for h in heavy {
+            c.stubs[h].mass += shift;
+        }
+        c
     }
 }
 
-/// A crosslinking reagent.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Crosslinker {
-    /// Lower-case name used on the command line.
-    pub name: &'static str,
-    /// Mass added to the two peptides by the intact linker.
-    pub intact: f64,
-    /// Stub masses when the linker is MS-cleavable.
-    pub cleavage: Option<Cleavage>,
-    /// Residues the linker reacts with (one-letter codes).
-    pub residues: &'static [u8],
-    /// Whether the linker also reacts with the protein N-terminal amine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkEnd {
+    pub residues: Vec<u8>,
     pub protein_n_term: bool,
+    pub peptide_n_term: bool,
+    pub protein_c_term: bool,
 }
 
-impl Crosslinker {
-    /// DSSO (disuccinimidyl sulfoxide): C6H6O3S2 on two primary amines.
-    pub fn dsso() -> Self {
-        Crosslinker {
-            name: "dsso",
-            intact: 158.003_765,
-            cleavage: Some(Cleavage {
-                alkene: 54.010_565,
-                thiol: 85.982_635,
-                sulfenic: 103.993_200,
-            }),
-            residues: b"K",
-            protein_n_term: true,
-        }
-    }
-
-    /// The linker named `name` (case-insensitive), if andes knows it.
-    pub fn by_name(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "dsso" => Some(Self::dsso()),
-            _ => None,
-        }
-    }
-
-    /// Names accepted by [`Self::by_name`].
-    pub fn known_names() -> &'static [&'static str] {
-        &["dsso"]
-    }
-
-    /// Whether the linker reacts with residue `r`.
+impl LinkEnd {
     pub fn reacts_with(&self, r: u8) -> bool {
         self.residues.contains(&r)
     }
+
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = self
+            .residues
+            .iter()
+            .map(|&r| (r as char).to_string())
+            .collect();
+        if self.peptide_n_term {
+            parts.push("N-term".into());
+        }
+        if self.protein_n_term {
+            parts.push("Protein N-term".into());
+        }
+        if self.protein_c_term {
+            parts.push("Protein C-term".into());
+        }
+        parts.join(", ")
+    }
 }
 
-/// What the link residue of a peptide carries in a fragment spectrum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Monolink {
+    pub name: String,
+    pub accession: Option<String>,
+    pub mass: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Crosslinker {
+    pub name: String,
+    pub accession: Option<String>,
+    pub intact: f64,
+    pub cleavage: Option<Cleavage>,
+    pub ends: [LinkEnd; 2],
+    pub monolinks: Vec<Monolink>,
+}
+
+impl Crosslinker {
+    pub fn dsso() -> Self {
+        crate::spec::XlDecl::parse("DSSO")
+            .and_then(|d| d.resolve(model::unimod::bundled()))
+            .expect("DSSO resolves from the bundled UNIMOD table")
+    }
+
+    pub fn is_homobifunctional(&self) -> bool {
+        self.ends[0] == self.ends[1]
+    }
+
+    pub fn reacts_with(&self, r: u8) -> bool {
+        self.ends.iter().any(|e| e.reacts_with(r))
+    }
+
+    pub fn n_term(&self) -> bool {
+        self.ends
+            .iter()
+            .any(|e| e.protein_n_term || e.peptide_n_term)
+    }
+
+    pub fn forms(&self) -> impl Iterator<Item = LinkForm> {
+        let n = self.cleavage.as_ref().map_or(0, |c| c.stubs.len());
+        (0..n as u8)
+            .map(LinkForm::Stub)
+            .chain(std::iter::once(LinkForm::Intact))
+    }
+
+    pub fn form_name(&self, form: LinkForm) -> &str {
+        match form {
+            LinkForm::Intact => "intact",
+            LinkForm::Stub(k) => self
+                .cleavage
+                .as_ref()
+                .and_then(|c| c.stubs.get(k as usize))
+                .map_or("stub", |s| s.name.as_str()),
+        }
+    }
+
+    pub fn describe_sites(&self) -> String {
+        if self.is_homobifunctional() {
+            self.ends[0].describe()
+        } else {
+            format!("{} / {}", self.ends[0].describe(), self.ends[1].describe())
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LinkForm {
-    /// Alkene stub after MS2 cleavage.
-    Alkene,
-    /// Thiol stub after MS2 cleavage.
-    Thiol,
-    /// Sulfenic acid stub after MS2 cleavage.
-    Sulfenic,
-    /// The uncleaved linker with the partner peptide.
+    Stub(u8),
     Intact,
 }
 
 impl LinkForm {
-    /// Every form, in a fixed order.
-    pub const ALL: [LinkForm; 4] = [
-        LinkForm::Alkene,
-        LinkForm::Thiol,
-        LinkForm::Sulfenic,
-        LinkForm::Intact,
-    ];
-
-    /// The stub forms (cleaved linker).
-    pub const STUBS: [LinkForm; 3] = [LinkForm::Alkene, LinkForm::Thiol, LinkForm::Sulfenic];
-
-    /// Short name used in output columns.
-    pub fn name(self) -> &'static str {
+    pub fn index(self) -> usize {
         match self {
-            LinkForm::Alkene => "alkene",
-            LinkForm::Thiol => "thiol",
-            LinkForm::Sulfenic => "sulfenic",
-            LinkForm::Intact => "intact",
+            LinkForm::Stub(k) => k as usize,
+            LinkForm::Intact => MAX_STUBS,
         }
     }
 
-    /// Index into [`Self::ALL`].
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    /// Mass this form puts on the link residue. `partner_mass` is the neutral
-    /// mass of the other peptide (used by [`LinkForm::Intact`] only). `None`
-    /// when the linker is not cleavable and the form is a stub.
     pub fn delta(self, linker: &Crosslinker, partner_mass: f64) -> Option<f64> {
         match self {
             LinkForm::Intact => Some(partner_mass + linker.intact),
-            LinkForm::Alkene => linker.cleavage.map(|c| c.alkene),
-            LinkForm::Thiol => linker.cleavage.map(|c| c.thiol),
-            LinkForm::Sulfenic => linker.cleavage.map(|c| c.sulfenic),
+            LinkForm::Stub(k) => linker
+                .cleavage
+                .as_ref()
+                .and_then(|c| c.stubs.get(k as usize))
+                .map(|s| s.mass),
         }
     }
 }
 
-/// Neutral mass of a crosslink of peptides `a` and `b` (neutral masses).
 pub fn crosslink_mass(linker: &Crosslinker, a: f64, b: f64) -> f64 {
     a + b + linker.intact
 }
@@ -140,24 +178,65 @@ mod tests {
     #[test]
     fn dsso_stubs_add_up_to_the_intact_linker() {
         let x = Crosslinker::dsso();
-        let c = x.cleavage.unwrap();
-        // alkene + sulfenic acid = intact linker; thiol = sulfenic - water.
-        assert!((c.alkene + c.sulfenic - x.intact).abs() < 1e-5);
-        assert!((c.sulfenic - H2O - c.thiol).abs() < 1e-5);
-        assert!((c.doublet_delta() - 31.972_07).abs() < 1e-4);
+        let c = x.cleavage.as_ref().unwrap();
+        let m: Vec<f64> = c.stub_masses().collect();
+        assert!((m[0] + m[2] - x.intact).abs() < 1e-5);
+        assert!((m[2] - H2O - m[1]).abs() < 1e-5);
+        assert_eq!(c.doublets, vec![(0, 1)]);
+        assert!((c.doublet_delta(0) - 31.972_07).abs() < 1e-4);
+        assert!((c.doublet_light(0) - 54.010_565).abs() < 1e-9);
     }
 
     #[test]
-    fn linker_lookup_is_case_insensitive() {
-        assert_eq!(Crosslinker::by_name("DSSO"), Some(Crosslinker::dsso()));
-        assert_eq!(Crosslinker::by_name("bs3"), None);
+    fn dsso_keeps_the_constants_of_the_first_search() {
+        let x = Crosslinker::dsso();
+        let c = x.cleavage.as_ref().unwrap();
+        assert_eq!(x.intact, 158.003_765);
+        let m: Vec<f64> = c.stub_masses().collect();
+        assert_eq!(m, vec![54.010_565, 85.982_635, 103.993_200]);
+        let names: Vec<&str> = c.stubs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["alkene", "thiol", "sulfenic"]);
+        assert_eq!(x.ends[0].residues, b"K");
+        assert!(x.ends[0].protein_n_term && !x.ends[0].protein_c_term);
+        assert!(!x.ends[0].peptide_n_term);
+        assert!(x.is_homobifunctional());
+    }
+
+    #[test]
+    fn forms_are_the_stubs_then_intact() {
+        let x = Crosslinker::dsso();
+        let f: Vec<LinkForm> = x.forms().collect();
+        assert_eq!(
+            f,
+            vec![
+                LinkForm::Stub(0),
+                LinkForm::Stub(1),
+                LinkForm::Stub(2),
+                LinkForm::Intact
+            ]
+        );
+        assert_eq!(x.form_name(LinkForm::Stub(1)), "thiol");
+        assert_eq!(LinkForm::Intact.index(), MAX_STUBS);
+        let mut y = x.clone();
+        y.cleavage = None;
+        assert_eq!(y.forms().collect::<Vec<_>>(), vec![LinkForm::Intact]);
+        assert_eq!(LinkForm::Stub(0).delta(&y, 0.0), None);
     }
 
     #[test]
     fn intact_form_carries_the_partner() {
         let x = Crosslinker::dsso();
         assert!((LinkForm::Intact.delta(&x, 1000.0).unwrap() - 1_158.003_765).abs() < 1e-9);
-        assert!((LinkForm::Alkene.delta(&x, 1000.0).unwrap() - 54.010_565).abs() < 1e-9);
+        assert!((LinkForm::Stub(0).delta(&x, 1000.0).unwrap() - 54.010_565).abs() < 1e-9);
         assert!((crosslink_mass(&x, 1000.0, 2000.0) - 3_158.003_765).abs() < 1e-9);
+    }
+
+    #[test]
+    fn heavy_shift_moves_only_the_heavy_doublet_stub() {
+        let c = Crosslinker::dsso().cleavage.unwrap();
+        let s = c.with_heavy_shift(5.0);
+        assert_eq!(s.stubs[0].mass, c.stubs[0].mass);
+        assert!((s.stubs[1].mass - c.stubs[1].mass - 5.0).abs() < 1e-12);
+        assert_eq!(s.stubs[2].mass, c.stubs[2].mass);
     }
 }

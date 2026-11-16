@@ -955,3 +955,59 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     assert!(want.len() < all.len());
     assert_eq!(got, want);
 }
+
+#[test]
+fn fragment_index_open_mass_query_ignores_the_precursor() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let fi = ChunkFragmentIndex::build(
+        prepared.mmap_index.records(),
+        &idx,
+        &params,
+        Tolerance::Da(0.05),
+        0.0,
+        5000.0,
+    );
+    let (queues, cands) = run_search(&idx, &params, &spectra, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        let truth = &cands[best.primary_candidate_idx() as usize].peptide;
+        let truth_seq: Vec<u8> = truth.residues.iter().map(|a| a.residue).collect();
+        let z = spec.precursor_charge.unwrap() as u8;
+        let mut moved = spec.clone();
+        moved.precursor_mz += 600.0 / z as f64;
+        let sel = fi.query_mass_range(&moved, 0.0, 5000.0, Tolerance::Da(0.05), 5, 3, 0);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let seqs: Vec<Vec<u8>> = mats
+            .iter()
+            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+            .collect();
+        assert!(
+            seqs.contains(&truth_seq),
+            "{}: truth not retrieved by the open-mass query",
+            spec.title
+        );
+        let windowed = fi.query(&moved, &[z], &params, Tolerance::Da(0.05), 5, 3, 0);
+        let mats = fi.materialise(&windowed, &idx, &params, None, &|_| {});
+        assert!(mats.iter().all(|c| c
+            .peptide
+            .residues
+            .iter()
+            .map(|a| a.residue)
+            .collect::<Vec<_>>()
+            != truth_seq));
+        let m = truth.mass();
+        let sel = fi.query_mass_range(&moved, m + 2.0, 5000.0, Tolerance::Da(0.05), 50, 1, 0);
+        for &(id, _) in &sel {
+            assert!(fi.form_mass(id) >= m + 2.0);
+        }
+    }
+}

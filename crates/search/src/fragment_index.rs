@@ -401,6 +401,49 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
+        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        select_top_k(&mut sel, top_k);
+        sel.into_iter()
+            .filter(|&(id, _, _)| {
+                let m = self.form_mass[id as usize];
+                exact.iter().any(|&(a, b)| m >= a && m <= b)
+            })
+            .map(|(id, v, _)| (id, v))
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_mass_range(
+        &self,
+        spec: &Spectrum,
+        lo: f64,
+        hi: f64,
+        fragment_tol: Tolerance,
+        top_k: usize,
+        min_matched: u16,
+        vote_peaks: usize,
+    ) -> Vec<(u32, u16)> {
+        if lo > hi {
+            return Vec::new();
+        }
+        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        select_top_k(&mut sel, top_k);
+        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
+    }
+
+    pub fn form_mass(&self, id: u32) -> f64 {
+        self.form_mass[id as usize]
+    }
+
+    fn vote(
+        &self,
+        spec: &Spectrum,
+        lo: f64,
+        hi: f64,
+        fragment_tol: Tolerance,
+        min_matched: u16,
+        vote_peaks: usize,
+    ) -> Vec<(u32, u16, f32)> {
         // Form ids are mass-ordered, so the window is an id range.
         let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
         let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
@@ -414,7 +457,7 @@ impl ChunkFragmentIndex {
         let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
         let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
         let row_len = self.n_blocks + 1;
-        let mut sel: Vec<(u32, u16, f32)> = VOTE_BUF.with(|cell| {
+        VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             let (counts, touched) = &mut *buf;
             if counts.len() < width {
@@ -463,15 +506,7 @@ impl ChunkFragmentIndex {
                 *slot = (0, 0.0);
             }
             sel
-        });
-        select_top_k(&mut sel, top_k);
-        sel.into_iter()
-            .filter(|&(id, _, _)| {
-                let m = self.form_mass[id as usize];
-                exact.iter().any(|&(a, b)| m >= a && m <= b)
-            })
-            .map(|(id, v, _)| (id, v))
-            .collect()
+        })
     }
 
     /// Materialise selected forms as candidates, in (record, k) order, by

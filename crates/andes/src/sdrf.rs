@@ -1,31 +1,3 @@
-//! SDRF input (`--sdrf design.sdrf.tsv`): the search settings an SDRF-Proteomics
-//! file records, applied below the command line and the `--config` file.
-//!
-//! Read from the SDRF:
-//! - `comment[data file]`: the spectrum files, looked up next to the SDRF (the
-//!   CLI or config `spectrum` replaces them).
-//! - `comment[cleavage agent details]` (every such column): the protease list.
-//! - `comment[modification parameters]` (every such column): fixed and
-//!   variable modifications, written as the `Name (sites)` lists of
-//!   `--fixed-mods` / `--variable-mods` (the UNIMOD accession when given).
-//! - `comment[precursor mass tolerance]`.
-//! - `comment[label]`: the quantification. Every row `label free sample` is
-//!   `--lfq`; TMT / iTRAQ labels give the smallest plex holding them
-//!   (`--tmt`); SILAC light / medium / heavy give the `--label` channels from
-//!   the `Label:` modifications; DIMETHYL0/4/8 give `dimethyl2` / `dimethyl3`.
-//! - `comment[dissociation method]`: checked against what the files record.
-//!
-//! Not applied: `comment[fragment mass tolerance]` (andes measures each run's
-//! fragment error; `--fragment-tol-*` fixes one), and the sample and factor
-//! columns, which describe the samples, not the search.
-//!
-//! One andes run searches every input with one setting, so the rows must
-//! agree on the protease, modifications, tolerance and label kind; rows that
-//! disagree are an error that names the column and two files.
-//!
-//! Precedence: a value given on the command line or in the `--config` file
-//! wins over the SDRF, which wins over the built-in default.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +30,7 @@ pub struct SdrfSettings {
     pub variable_mods: Option<Vec<String>>,
     pub quant: Option<Quant>,
     pub dissociation: Option<ActivationMethod>,
+    pub xl: Option<String>,
 }
 
 const DATA_FILE: &str = "comment[data file]";
@@ -67,6 +40,7 @@ const PRECURSOR_TOL: &str = "comment[precursor mass tolerance]";
 const FRAGMENT_TOL: &str = "comment[fragment mass tolerance]";
 const LABEL: &str = "comment[label]";
 const DISSOCIATION: &str = "comment[dissociation method]";
+const XL: &str = "comment[cross-linker]";
 
 /// Read and check an SDRF file.
 pub fn read(path: &Path) -> Result<SdrfSettings, String> {
@@ -104,6 +78,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     let (cleave, mods) = (cols(CLEAVAGE), cols(MODS));
     let (ptol, ftol) = (cols(PRECURSOR_TOL), cols(FRAGMENT_TOL));
     let (label_col, diss) = (cols(LABEL), cols(DISSOCIATION));
+    let xl_col = cols(XL);
 
     let mut rows: Vec<RowSettings> = Vec::new();
     for (n, line) in lines.enumerate() {
@@ -145,6 +120,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
             fragment_tol: ftol.first().and_then(|&i| cell(i)),
             label: label_col.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
             dissociation: diss.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
+            xl: xl_col.first().and_then(|&i| cell(i)),
         });
     }
     if rows.is_empty() {
@@ -166,6 +142,11 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     agree(&rows, LABEL, |r| {
         r.label.as_deref().map(label_kind).unwrap_or("").to_string()
     })?;
+    agree(&rows, XL, |r| r.xl.clone().unwrap_or_default())?;
+    if let Some(v) = &rows[0].xl {
+        andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+            .map_err(|e| format!("`{XL}`: {e}"))?;
+    }
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
@@ -206,6 +187,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         variable_mods,
         quant,
         dissociation: first.dissociation.as_deref().and_then(dissociation_of),
+        xl: first.xl.clone(),
     })
 }
 
@@ -236,6 +218,7 @@ struct RowSettings {
     fragment_tol: Option<String>,
     label: Option<String>,
     dissociation: Option<String>,
+    xl: Option<String>,
 }
 
 /// Every row must give the same `key` for `column`.
@@ -650,6 +633,7 @@ pub struct ConfigKeys {
     variable_mods: bool,
     precursor_tol: bool,
     quant: bool,
+    xl: bool,
 }
 
 impl ConfigKeys {
@@ -661,6 +645,7 @@ impl ConfigKeys {
             variable_mods: cfg.search.variable_mods.is_some(),
             precursor_tol: cfg.search.precursor_tol.is_some(),
             quant: cfg.quant.tmt.is_some() || cfg.quant.lfq.is_some() || cfg.quant.label.is_some(),
+            xl: cfg.search.xl.is_some(),
         }
     }
 }
@@ -766,6 +751,20 @@ pub fn apply(
                     applied.push(format!("--label {spec}"));
                 }
             }
+        }
+    }
+    if let Some(v) = &s.xl {
+        if cli("xl") || cfg.xl {
+            kept.push("xl");
+        } else {
+            let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+                .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
+            applied.push(format!(
+                "crosslink search --xl {} ({})",
+                x.name,
+                x.describe_sites()
+            ));
+            args.xl = Some(x);
         }
     }
     args.sdrf_dissociation = s.dissociation;
@@ -1013,5 +1012,73 @@ mod tests {
         assert_eq!(tolerance("20 mmu").unwrap(), "0.02da");
         assert_eq!(norm_header("Comment [ Data File ]"), "comment[data file]");
         assert!(enzyme_of("NT=Pepsin").is_err());
+    }
+
+    const HX: &[&str] = &[
+        "source name",
+        "comment[data file]",
+        "comment[label]",
+        "comment[cross-linker]",
+    ];
+
+    #[test]
+    fn the_crosslinker_is_read_checked_and_must_agree() {
+        let row = |f: &'static str, x: &'static str| -> Vec<&'static str> {
+            vec!["s", f, "label free sample", x]
+        };
+        let dsso = "NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98";
+        let t = sdrf(HX, &[&row("a.raw", dsso), &row("b.raw", dsso)]);
+        let s = parse(&t, Path::new(".")).unwrap();
+        assert_eq!(s.xl.as_deref(), Some(dsso));
+        let t = sdrf(
+            HX,
+            &[&row("a.raw", dsso), &row("b.raw", "NT=DSS;AC=XLMOD:02001")],
+        );
+        let e = parse(&t, Path::new(".")).unwrap_err();
+        assert!(e.contains("cross-linker") && e.contains("differs"), "{e}");
+        let t = sdrf(HX, &[&row("a.raw", "NT=DSS;CL=yes")]);
+        let e = parse(&t, Path::new(".")).unwrap_err();
+        assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
+        let t = sdrf(HX, &[&row("a.raw", "not applicable")]);
+        assert_eq!(parse(&t, Path::new(".")).unwrap().xl, None);
+    }
+
+    #[test]
+    fn the_sdrf_crosslinker_applies_below_the_command_line_and_the_config() {
+        use clap::{CommandFactory, FromArgMatches};
+        let s = SdrfSettings {
+            xl: Some("NT=DSBU;AC=XLMOD:02120;TA=K,nterm".into()),
+            ..Default::default()
+        };
+        let run = |extra: &[&str], yaml: Option<&str>| -> crate::SearchArgs {
+            let base = [
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ];
+            let m = crate::TopCli::command()
+                .try_get_matches_from(base.iter().chain(extra))
+                .unwrap();
+            let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
+            let mut keys = ConfigKeys::default();
+            if let Some(y) = yaml {
+                let c = crate::config::RunConfig::from_yaml_str(y).unwrap();
+                keys = ConfigKeys::of(&c);
+                crate::config::apply(c, &mut a, &m).unwrap();
+            }
+            apply(&s, &mut a, &m, keys).unwrap();
+            a
+        };
+        let x = run(&[], None).xl.unwrap();
+        assert_eq!(x.name, "DSBU");
+        assert_eq!(x.describe_sites(), "K, Protein N-term");
+        assert_eq!(run(&["--xl", "DSS"], None).xl.unwrap().name, "DSS");
+        let cfg = Some("search:\n  xl: DSSO\n");
+        assert_eq!(run(&[], cfg).xl.unwrap().name, "DSSO");
+        assert_eq!(run(&["--xl", "DSS"], cfg).xl.unwrap().name, "DSS");
     }
 }

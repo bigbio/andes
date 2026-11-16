@@ -87,6 +87,11 @@ dependencies = [
 [[package]]
 name = "andes-xl"
 version = "0.4.0"
+dependencies = [
+ "model",
+ "serde_yaml",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "android-tzdata"
@@ -1829,6 +1834,8 @@ name = "model"
 version = "0.4.0"
 dependencies = [
  "rustc-hash",
+ "serde",
+ "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
 ]

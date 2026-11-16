@@ -953,31 +953,9 @@ impl<'a> PreparedSearch<'a> {
         &self,
         keep: impl Fn(&[u8], u8) -> bool + Sync,
     ) -> Vec<Candidate> {
-        let mi = &self.mmap_index;
         let db = self.idx;
         let params = self.params;
-        let mut kept: Vec<crate::candidate_index::IndexRecord> = (0..mi.len())
-            .into_par_iter()
-            .filter_map(|i| {
-                let rec = mi.record_at(i);
-                let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
-                let start = rec.start_offset as usize;
-                let end = start + rec.length as usize;
-                let span = seq.get(start..end)?;
-                let post = seq.get(end).copied().unwrap_or(b'-');
-                keep(span, post).then_some(rec)
-            })
-            .collect();
-        // Identical copies of a span (the N-terminal-Met re-enumeration) share a
-        // key; their count is the enumeration multiplicity.
-        kept.par_sort_unstable_by_key(base_record_key);
-        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
-        for rec in kept {
-            match records.last_mut() {
-                Some((last, n)) if base_record_key(last) == base_record_key(&rec) => *n += 1,
-                _ => records.push((rec, 1)),
-            }
-        }
+        let records = self.out_of_core_records_where(keep);
         // Same ordering as `expand_mmap_window_candidates`: protein, enumeration
         // pass, start, length; a span's peptidoforms keep their expansion order
         // because the sort is stable and records arrive in key order.
@@ -1007,6 +985,35 @@ impl<'a> PreparedSearch<'a> {
             cands.retain(|c| self.keeps(c));
         }
         cands
+    }
+
+    pub fn out_of_core_records_where(
+        &self,
+        keep: impl Fn(&[u8], u8) -> bool + Sync,
+    ) -> Vec<(crate::candidate_index::IndexRecord, u32)> {
+        let mi = &self.mmap_index;
+        let db = self.idx;
+        let mut kept: Vec<crate::candidate_index::IndexRecord> = (0..mi.len())
+            .into_par_iter()
+            .filter_map(|i| {
+                let rec = mi.record_at(i);
+                let seq = &db.db.proteins.get(rec.protein_index as usize)?.sequence;
+                let start = rec.start_offset as usize;
+                let end = start + rec.length as usize;
+                let span = seq.get(start..end)?;
+                let post = seq.get(end).copied().unwrap_or(b'-');
+                keep(span, post).then_some(rec)
+            })
+            .collect();
+        kept.par_sort_unstable_by_key(base_record_key);
+        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
+        for rec in kept {
+            match records.last_mut() {
+                Some((last, n)) if base_record_key(last) == base_record_key(&rec) => *n += 1,
+                _ => records.push((rec, 1)),
+            }
+        }
+        records
     }
 
     /// The peptide of the candidate at GLOBAL index `global_idx`: an entry of

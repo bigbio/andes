@@ -300,6 +300,12 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
         .map_err(|e| e.to_string())
 }
 
+pub(crate) fn parse_xl(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+    andes_xl::spec::XlDecl::parse(s)
+        .and_then(|d| d.resolve(model::unimod::bundled()))
+        .map_err(|e| e.to_string())
+}
+
 /// The protein database options shared by the search, `andes inference` and
 /// `andes quant finalize`: how the database is digested and expanded, and how
 /// a decoy is recognised. Inference and finalize take the search's values.
@@ -640,21 +646,40 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) glyco: bool,
 
-    /// Crosslink search with an MS-cleavable linker into <base>.xl.tsv (experimental)
+    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO" (experimental)
     ///
-    /// Each MS2 is searched for the linker's reporter doublets; the doublet peptide masses
-    /// and the precursor give the candidate peptide pairs, and each peptide is scored with
-    /// the standard scorer carrying the cleaved stub or its partner on the link residue.
+    /// The linker is written like a modification: a reagent name (DSSO, DSBU or BuUrBu,
+    /// DSBSO, CDI; non-cleavable DSS or BS3, BS2G or DSG, EGS, DST, DSP or DTSSP, PhoX or
+    /// DSPP, DMP, DTBP, DFDNB, BMOE, SMCC, SDA, EDC or DMTMM), its XLMOD accession
+    /// (XLMOD:02126), or the UNIMOD name or accession of its intact cross-link
+    /// (Xlink:DSS[138], UNIMOD:1898), then optionally
+    /// its sites in parentheses: "DSSO (K, S, T, Y, Protein N-term)". Without sites the
+    /// reagent's usual ones apply (Lys and the protein N-terminus for NHS esters); N-term
+    /// adds every peptide N-terminus (synthetic peptide libraries), and a
+    /// heterobifunctional reagent separates its two ends with /. The reagents and their
+    /// masses (UNIMOD records, or cited compositions for reagents UNIMOD lacks) are the
+    /// entries of resources/crosslinkers.yaml; a reagent the table lacks is an entry of the
+    /// same schema in the config file (search.xl). An --sdrf comment[cross-linker] column
+    /// sets the linker when neither the command line nor the config does. Monolinks are
+    /// variable modifications, by UNIMOD
+    /// record or as reagent:quencher (--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)").
+    ///
+    /// For an MS-cleavable linker each MS2 is searched for the reporter doublets; the doublet
+    /// peptide masses and the precursor give the candidate peptide pairs. For a non-cleavable
+    /// linker the fragment-ion index retrieves one peptide by its fragments that do not
+    /// carry the link, and its partner is looked up by the remaining precursor mass. Each
+    /// peptide is scored with the standard scorer carrying the cleaved stub or its partner on
+    /// the link residue.
     /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
-    /// (<base>.xl.pin; --rescore scores the intra-links with Percolator, the inter-links
-    /// keep the pair score) and the q-values, from the
+    /// (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does
+    /// not change them) and the q-values, from the
     /// target-target, target-decoy and decoy-decoy counts split by intra- and inter-protein
     /// links and pooled over the runs, of the matches (<base>.xl.tsv), residue pairs
     /// (<base>.xl.residue_pairs.tsv) and protein pairs (<base>.xl.ppi.tsv), with the
     /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
-    #[arg(long, value_name = "LINKER", value_parser = ["dsso"], hide_short_help = true,
+    #[arg(long, value_name = "LINKER", value_parser = parse_xl, hide_short_help = true,
           help_heading = H_MODES, conflicts_with = "glyco")]
-    pub(crate) xl: Option<String>,
+    pub(crate) xl: Option<andes_xl::crosslinker::Crosslinker>,
 
     /// With --xl: also run the exhaustive pair search (no doublet gate) on the first N spectra
     #[arg(
@@ -665,6 +690,13 @@ pub(crate) struct SearchArgs {
         requires = "xl"
     )]
     pub(crate) xl_oracle: usize,
+
+    /// With --xl: rescore the intra-link CSMs with Percolator (comparison only)
+    ///
+    /// Trains a Percolator model on the intra-link rows alone (<base>.xl.intra.pin) and
+    /// scores them with it; without it the intra-links keep the pair score.
+    #[arg(long = "xl-rescore-intra", hide = true, requires = "xl")]
+    pub(crate) xl_rescore_intra: bool,
 
     /// With --xl: also rescore the inter-link CSMs with Percolator (comparison only)
     ///
@@ -2587,6 +2619,7 @@ mod help_layout_tests {
         "glyco_mbr_match_train",
         "ipf_debug",
         "xl_oracle",
+        "xl_rescore_intra",
         "xl_rescore_inter",
     ];
 

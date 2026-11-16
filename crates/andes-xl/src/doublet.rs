@@ -1,34 +1,9 @@
-//! Reporter-doublet detection for MS-cleavable linkers.
-//!
-//! When an MS-cleavable linker such as DSSO breaks in MS2, each peptide is
-//! released twice: once with the alkene stub and once with the thiol stub.
-//! The two ions sit `delta / z` apart in m/z at fragment charge `z`
-//! (`delta` = thiol − alkene = 31.9721 Da for DSSO). A doublet therefore
-//! measures one peptide's neutral mass:
-//!
-//! ```text
-//! M(peptide) = z · (mz_light − proton) − alkene
-//! ```
-//!
-//! The detector works on the raw centroided peaks (no deconvolution): every
-//! peak above an intensity floor is tried as the light member at each charge
-//! `1..=max_charge` (capped at precursor charge − 1, since the other peptide
-//! carries at least one charge), and the heavy member is looked up within a
-//! ppm window. A doublet whose two members both have a peak one isotope
-//! spacing below them is an isotope copy of a lower doublet and is dropped.
-//! Doublets of the same peptide at several charges collapse into one
-//! [`DoubletMass`].
-
 use crate::crosslinker::{Cleavage, ISOTOPE_SPACING, PROTON};
 
-/// Settings of [`find_doublets`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DoubletParams {
-    /// m/z tolerance of the heavy member and of the isotope checks, in ppm.
     pub tol_ppm: f64,
-    /// Highest fragment charge tried for a doublet.
     pub max_charge: u8,
-    /// Intensity floor of both members, as a fraction of the base peak.
     pub min_rel_intensity: f64,
 }
 
@@ -42,37 +17,23 @@ impl Default for DoubletParams {
     }
 }
 
-/// One light/heavy peak pair at one charge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Doublet {
-    /// Index of the light (alkene) member in the peak list.
     pub light_idx: usize,
-    /// Index of the heavy (thiol) member in the peak list.
     pub heavy_idx: usize,
-    /// Fragment charge.
     pub charge: u8,
-    /// Neutral mass of the peptide, from the light member.
     pub peptide_mass: f64,
-    /// Heavy-member m/z error against its expected position, in ppm.
     pub error_ppm: f64,
-    /// Summed intensity of the two members.
     pub intensity: f64,
-    /// Whether either member has its +1 isotope peak at this charge.
     pub isotope_confirmed: bool,
 }
 
-/// The doublets of one peptide mass, merged over charges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DoubletMass {
-    /// Neutral peptide mass, from the most intense doublet of the group.
     pub mass: f64,
-    /// Summed intensity of the group's doublets.
     pub intensity: f64,
-    /// Number of charges at which the doublet was seen.
     pub n_charges: u8,
-    /// Whether any member doublet is isotope-confirmed.
     pub isotope_confirmed: bool,
-    /// Lowest charge in the group.
     pub min_charge: u8,
 }
 
@@ -81,7 +42,6 @@ fn ppm_window(mz: f64, ppm: f64) -> f64 {
     mz * ppm * 1e-6
 }
 
-/// Index of the most intense peak within `tol` of `mz` in m/z-sorted `peaks`.
 pub fn find_peak(peaks: &[(f64, f32)], mz: f64, tol: f64) -> Option<usize> {
     let lo = peaks.partition_point(|p| p.0 < mz - tol);
     let mut best: Option<usize> = None;
@@ -96,8 +56,6 @@ pub fn find_peak(peaks: &[(f64, f32)], mz: f64, tol: f64) -> Option<usize> {
     best
 }
 
-/// Every doublet in `peaks` (sorted by m/z) for a precursor of charge
-/// `precursor_charge`.
 pub fn find_doublets(
     peaks: &[(f64, f32)],
     precursor_charge: u8,
@@ -112,12 +70,14 @@ pub fn find_doublets(
     let base = peaks.iter().map(|p| p.1).fold(0.0_f32, f32::max) as f64;
     let floor = base * params.min_rel_intensity;
     let max_z = params.max_charge.min(precursor_charge - 1).max(1);
-    let delta = cleavage.doublet_delta();
+    let spacings: Vec<(f64, f64)> = (0..cleavage.doublets.len())
+        .map(|k| (cleavage.doublet_delta(k), cleavage.doublet_light(k)))
+        .collect();
     for (i, &(mz, inten)) in peaks.iter().enumerate() {
         if (inten as f64) < floor || inten <= 0.0 {
             continue;
         }
-        for z in 1..=max_z {
+        for (z, &(delta, light)) in (1..=max_z).flat_map(|z| spacings.iter().map(move |s| (z, s))) {
             let zf = z as f64;
             let target = mz + delta / zf;
             let tol = ppm_window(target, params.tol_ppm);
@@ -128,8 +88,6 @@ pub fn find_doublets(
                 continue;
             }
             let iso = ISOTOPE_SPACING / zf;
-            // Isotope copy of a lower doublet: both members have a peak one
-            // isotope spacing below.
             let below_light = find_peak(peaks, mz - iso, ppm_window(mz, params.tol_ppm));
             let below_heavy = find_peak(peaks, peaks[j].0 - iso, tol);
             if below_light.is_some() && below_heavy.is_some() {
@@ -141,7 +99,7 @@ pub fn find_doublets(
                 light_idx: i,
                 heavy_idx: j,
                 charge: z,
-                peptide_mass: zf * (mz - PROTON) - cleavage.alkene,
+                peptide_mass: zf * (mz - PROTON) - light,
                 error_ppm: (peaks[j].0 - target) / target * 1e6,
                 intensity: inten as f64 + peaks[j].1 as f64,
                 isotope_confirmed: above_light.is_some() || above_heavy.is_some(),
@@ -151,8 +109,6 @@ pub fn find_doublets(
     out
 }
 
-/// Collapse doublets of the same peptide mass (within `tol_ppm`) seen at
-/// several charges into one entry each, most intense first.
 pub fn group_by_mass(doublets: &[Doublet], tol_ppm: f64) -> Vec<DoubletMass> {
     let mut sorted: Vec<&Doublet> = doublets.iter().collect();
     sorted.sort_by(|a, b| a.peptide_mass.total_cmp(&b.peptide_mass));
@@ -191,18 +147,15 @@ pub fn group_by_mass(doublets: &[Doublet], tol_ppm: f64) -> Vec<DoubletMass> {
     out
 }
 
-/// Which stub ions of a peptide of neutral mass `mass` are present at any
-/// charge `1..=max_charge`: `[alkene, thiol, sulfenic]`.
 pub fn stub_ions_present(
     peaks: &[(f64, f32)],
     mass: f64,
     cleavage: &Cleavage,
     max_charge: u8,
     tol_ppm: f64,
-) -> [bool; 3] {
-    let stubs = [cleavage.alkene, cleavage.thiol, cleavage.sulfenic];
-    let mut out = [false; 3];
-    for (k, stub) in stubs.iter().enumerate() {
+) -> Vec<bool> {
+    let mut out = vec![false; cleavage.stubs.len()];
+    for (k, stub) in cleavage.stub_masses().enumerate() {
         for z in 1..=max_charge.max(1) {
             let mz = (mass + stub) / z as f64 + PROTON;
             if find_peak(peaks, mz, ppm_window(mz, tol_ppm)).is_some() {
@@ -227,6 +180,20 @@ mod tests {
         Crosslinker::dsso().cleavage.unwrap()
     }
 
+    struct Dsso {
+        alkene: f64,
+        thiol: f64,
+        sulfenic: f64,
+    }
+
+    fn masses(c: &Cleavage) -> Dsso {
+        Dsso {
+            alkene: c.stubs[0].mass,
+            thiol: c.stubs[1].mass,
+            sulfenic: c.stubs[2].mass,
+        }
+    }
+
     fn sorted(mut p: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
         p.sort_by(|a, b| a.0.total_cmp(&b.0));
         p
@@ -234,41 +201,42 @@ mod tests {
 
     #[test]
     fn finds_a_doublet_at_charge_two_and_recovers_the_mass() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 1234.5678;
         let peaks = sorted(vec![
             (ion(m + c.alkene, 2), 100.0),
             (ion(m + c.thiol, 2), 80.0),
             (500.0, 10.0),
         ]);
-        let d = find_doublets(&peaks, 4, &c, &DoubletParams::default());
+        let d = find_doublets(&peaks, 4, &cl, &DoubletParams::default());
         let z2: Vec<_> = d.iter().filter(|d| d.charge == 2).collect();
         assert_eq!(z2.len(), 1);
         assert!((z2[0].peptide_mass - m).abs() < 1e-6);
         assert!(!z2[0].isotope_confirmed);
-        // No charge-1 doublet: the spacing at z1 is 31.97, not 15.99.
         assert!(d.iter().all(|d| d.charge != 1));
     }
 
     #[test]
     fn charge_is_capped_below_the_precursor_charge() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 2000.0;
         let peaks = sorted(vec![
             (ion(m + c.alkene, 3), 50.0),
             (ion(m + c.thiol, 3), 50.0),
         ]);
-        // A z3 doublet needs a precursor of charge >= 4.
-        assert!(find_doublets(&peaks, 3, &c, &DoubletParams::default()).is_empty());
+        assert!(find_doublets(&peaks, 3, &cl, &DoubletParams::default()).is_empty());
         assert_eq!(
-            find_doublets(&peaks, 4, &c, &DoubletParams::default()).len(),
+            find_doublets(&peaks, 4, &cl, &DoubletParams::default()).len(),
             1
         );
     }
 
     #[test]
     fn isotope_copies_are_dropped_and_mark_the_monoisotope() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 1500.0;
         let i1 = ISOTOPE_SPACING;
         let peaks = sorted(vec![
@@ -277,7 +245,7 @@ mod tests {
             (ion(m + c.alkene + i1, 1), 60.0),
             (ion(m + c.thiol + i1, 1), 60.0),
         ]);
-        let d = find_doublets(&peaks, 3, &c, &DoubletParams::default());
+        let d = find_doublets(&peaks, 3, &cl, &DoubletParams::default());
         let z1: Vec<_> = d.iter().filter(|d| d.charge == 1).collect();
         assert_eq!(z1.len(), 1);
         assert!((z1[0].peptide_mass - m).abs() < 1e-6);
@@ -286,7 +254,8 @@ mod tests {
 
     #[test]
     fn intensity_floor_removes_weak_members() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 1000.0;
         let peaks = sorted(vec![
             (ion(m + c.alkene, 1), 1.0),
@@ -297,16 +266,17 @@ mod tests {
             min_rel_intensity: 0.01,
             ..DoubletParams::default()
         };
-        assert!(find_doublets(&peaks, 3, &c, &p).is_empty());
+        assert!(find_doublets(&peaks, 3, &cl, &p).is_empty());
         assert_eq!(
-            find_doublets(&peaks, 3, &c, &DoubletParams::default()).len(),
+            find_doublets(&peaks, 3, &cl, &DoubletParams::default()).len(),
             1
         );
     }
 
     #[test]
     fn grouping_merges_charges_of_one_peptide() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 1800.0;
         let peaks = sorted(vec![
             (ion(m + c.alkene, 1), 10.0),
@@ -314,7 +284,7 @@ mod tests {
             (ion(m + c.alkene, 2), 30.0),
             (ion(m + c.thiol, 2), 30.0),
         ]);
-        let d = find_doublets(&peaks, 4, &c, &DoubletParams::default());
+        let d = find_doublets(&peaks, 4, &cl, &DoubletParams::default());
         let g = group_by_mass(&d, 10.0);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].n_charges, 2);
@@ -324,12 +294,56 @@ mod tests {
 
     #[test]
     fn stub_ions_are_found_at_any_charge() {
-        let c = dsso();
+        let cl = dsso();
+        let c = masses(&cl);
         let m = 900.0;
         let peaks = sorted(vec![(ion(m + c.sulfenic, 2), 5.0)]);
         assert_eq!(
-            stub_ions_present(&peaks, m, &c, 3, 10.0),
-            [false, false, true]
+            stub_ions_present(&peaks, m, &cl, 3, 10.0),
+            vec![false, false, true]
         );
+    }
+
+    fn resolve(spec: &str) -> Cleavage {
+        crate::spec::XlDecl::parse(spec)
+            .and_then(|d| d.resolve(model::unimod::bundled()))
+            .unwrap()
+            .cleavage
+            .unwrap()
+    }
+
+    #[test]
+    fn other_cleavable_linkers_use_their_own_spacing() {
+        for name in ["DSBU", "CDI", "DSBSO"] {
+            let cl = resolve(name);
+            let (l, h) = cl.doublets[0];
+            let (light, heavy) = (cl.stubs[l].mass, cl.stubs[h].mass);
+            let m = 1400.0;
+            let peaks = sorted(vec![(ion(m + light, 2), 50.0), (ion(m + heavy, 2), 40.0)]);
+            let d = find_doublets(&peaks, 4, &cl, &DoubletParams::default());
+            assert_eq!(d.len(), 1, "{name}");
+            assert!((d[0].peptide_mass - m).abs() < 1e-6, "{name}");
+            assert!(find_doublets(&peaks, 4, &dsso(), &DoubletParams::default()).is_empty());
+        }
+    }
+
+    #[test]
+    fn every_doublet_of_a_linker_is_searched() {
+        let mut cl = dsso();
+        cl.doublets.push((0, 2));
+        let c = masses(&cl);
+        let (m1, m2) = (1100.0, 1700.0);
+        let peaks = sorted(vec![
+            (ion(m1 + c.alkene, 1), 30.0),
+            (ion(m1 + c.thiol, 1), 30.0),
+            (ion(m2 + c.alkene, 2), 20.0),
+            (ion(m2 + c.sulfenic, 2), 20.0),
+        ]);
+        let d = find_doublets(&peaks, 4, &cl, &DoubletParams::default());
+        let g = group_by_mass(&d, 10.0);
+        let mut found: Vec<f64> = g.iter().map(|g| g.mass).collect();
+        found.sort_by(f64::total_cmp);
+        assert_eq!(found.len(), 2);
+        assert!((found[0] - m1).abs() < 1e-6 && (found[1] - m2).abs() < 1e-6);
     }
 }

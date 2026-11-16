@@ -1,11 +1,8 @@
-//! `--xl` rescoring and FDR: the pair-aware PIN, the Percolator scores of its
-//! rows, and the roll-up of CSMs to residue pairs and protein pairs with a
-//! class-split `(TD - DD) / TT` FDR at each level.
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
+use andes_xl::crosslinker::{LinkForm, MAX_STUBS};
 use andes_xl::decoy::PairClass;
 use andes_xl::fdr::ClassCounts;
 use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item};
@@ -13,7 +10,6 @@ use model::Spectrum;
 use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
 use search::PreparedSearch;
 
-/// PIN feature columns, in order.
 const FEATURES: [&str; 46] = [
     "pair_score",
     "alpha_score",
@@ -63,13 +59,12 @@ const FEATURES: [&str; 46] = [
     "min_decoupled",
 ];
 
-/// The row id of a CSM in the PIN and Percolator's results.
 fn spec_id(r: &XlSpectrumResult) -> String {
     format!("xl{}", r.spec_idx)
 }
 
 fn best_stub(h: &PeptideHit) -> f64 {
-    h.form_scores[..3]
+    h.form_scores[..MAX_STUBS]
         .iter()
         .copied()
         .filter(|v| v.is_finite())
@@ -112,9 +107,9 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
         bg,
         bgm,
         best_stub(&c.alpha),
-        c.alpha.form_scores[3].max(-1000.0) as f64,
+        c.alpha.form_scores[LinkForm::Intact.index()].max(-1000.0) as f64,
         best_stub(&c.beta),
-        c.beta.form_scores[3].max(-1000.0) as f64,
+        c.beta.form_scores[LinkForm::Intact.index()].max(-1000.0) as f64,
         c.alpha.n_sites as f64,
         c.beta.n_sites as f64,
         la,
@@ -149,12 +144,17 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
     ]
 }
 
-/// Accessions of a peptide's proteins: target accessions only for a target
-/// peptide (a target peptide can also occur in a decoy protein), all for a
-/// decoy peptide.
 fn accessions<'a>(p: &XlPeptide, prepared: &'a PreparedSearch) -> Vec<(u32, &'a str)> {
+    accessions_of(p, &p.occurrences, prepared)
+}
+
+fn accessions_of<'a>(
+    p: &XlPeptide,
+    occurrences: &[(u32, u32)],
+    prepared: &'a PreparedSearch,
+) -> Vec<(u32, &'a str)> {
     let idx = prepared.idx;
-    p.occurrences
+    occurrences
         .iter()
         .filter_map(|&(pi, start)| {
             let acc = idx.db.proteins.get(pi as usize)?.accession.as_str();
@@ -163,9 +163,6 @@ fn accessions<'a>(p: &XlPeptide, prepared: &'a PreparedSearch) -> Vec<(u32, &'a 
         .collect()
 }
 
-/// Write the pair-aware PIN of the CSMs: one row per spectrum with a CSM of
-/// link class `intra` (both classes when `None`), label +1 for TT and -1 for
-/// TD and DD.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_xl_pin(
     path: &Path,
@@ -227,9 +224,6 @@ pub(crate) fn write_xl_pin(
     Ok(n)
 }
 
-/// Percolator's score of every CSM row of the PIN at `pin` (target and decoy
-/// result files), aligned with `results`; `None` for spectra whose CSM is not
-/// in the PIN.
 pub(crate) fn percolator_scores(
     cli: &Cli,
     pin: &Path,
@@ -276,11 +270,9 @@ pub(crate) fn percolator_scores(
     Ok(scores)
 }
 
-/// Residue-pair side: every occurrence as `accession:position` (1-based
-/// residue of the link site in the protein).
 fn rp_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> String {
     let p = &table.peptides()[h.pep as usize];
-    let mut v: Vec<String> = accessions(p, prepared)
+    let mut v: Vec<String> = accessions_of(p, p.occurrences_at(&h.site), prepared)
         .into_iter()
         .map(|(start, acc)| format!("{acc}:{}", start as usize + h.site.pos + 1))
         .collect();
@@ -289,10 +281,9 @@ fn rp_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> S
     v.join(";")
 }
 
-/// Protein-pair side: the peptide's accessions.
 fn ppi_side(h: &PeptideHit, table: &XlCandidates, prepared: &PreparedSearch) -> String {
     let p = &table.peptides()[h.pep as usize];
-    let mut v: Vec<&str> = accessions(p, prepared)
+    let mut v: Vec<&str> = accessions_of(p, p.occurrences_at(&h.site), prepared)
         .into_iter()
         .map(|(_, a)| a)
         .collect();
@@ -309,23 +300,17 @@ fn pair_key(a: String, b: String) -> String {
     }
 }
 
-/// The three FDR levels of a crosslink search.
 pub(crate) struct Levels {
-    /// CSM items (one per spectrum with a scored CSM) and their result index.
     pub csm_items: Vec<Item>,
     pub csm_rows: Vec<usize>,
     pub csm_q: Vec<Option<f64>>,
     pub rp: Vec<Group>,
     pub rp_q: Vec<Option<f64>>,
-    /// q-values among the residue pairs with at least two CSMs.
     pub rp_q2: Vec<Option<f64>>,
     pub ppi: Vec<Group>,
     pub ppi_q: Vec<Option<f64>>,
 }
 
-/// Roll the scored CSMs up to residue pairs and protein pairs. Every level
-/// takes the best score of its group and gets class-split q-values; the
-/// residue pairs also get q-values among those with at least two CSMs.
 pub(crate) fn roll_up(
     results: &[XlSpectrumResult],
     score: &[Option<f64>],
@@ -374,9 +359,6 @@ pub(crate) fn roll_up(
     let rp_q2 = split_q_values(&rp, |g| g.n_csms >= 2);
     let rp_items = as_items(&rp, |g| ppi_of_csm[g.best].clone());
     let ppi = group_by(&rp_items, |_, it| it.key.clone());
-    // Protein pairs are thresholded for inter-links only: an intra protein
-    // pair is a protein with itself, and its q-value says nothing the residue
-    // pairs do not.
     let ppi_q = split_q_values(&ppi, |g| !g.intra);
     Levels {
         csm_items,
@@ -410,7 +392,6 @@ fn counts_line(classes: impl Iterator<Item = (PairClass, bool, Option<f64>)>) ->
     parts.join("; ")
 }
 
-/// Print the TT/TD/DD counts of every level.
 pub(crate) fn report_levels(l: &Levels) {
     eprintln!(
         "[xl] CSM: {}",
@@ -454,7 +435,6 @@ fn fmt_q(q: Option<f64>) -> String {
     q.map_or("NA".to_string(), |v| format!("{v:.5}"))
 }
 
-/// Write `<base>.xl.residue_pairs.tsv` and `<base>.xl.ppi.tsv`.
 pub(crate) fn write_levels(
     rp_path: &PathBuf,
     ppi_path: &PathBuf,

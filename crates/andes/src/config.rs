@@ -1,30 +1,3 @@
-//! YAML run-configuration file (`--config run.yaml`).
-//!
-//! A single YAML file can set every search parameter, grouped by experimental
-//! design to mirror the DOCS §1a taxonomy (`io`, `search`, `scoring`, `decoys`,
-//! `chimeric`, `refine`, `rescoring`, `glyco`). Every key is optional; omitted
-//! keys keep their built-in default.
-//!
-//! PRECEDENCE: an explicit CLI flag ALWAYS wins over the YAML value, which wins
-//! over the built-in default. We detect "explicit CLI flag" with clap's
-//! `ValueSource::CommandLine`, so the YAML only fills parameters the user did
-//! not type on the command line. Unknown keys are a hard error (`deny_unknown_
-//! fields`) so a typo never silently no-ops.
-//!
-//! Every search flag has a key here except a few that are CLI-only on purpose:
-//! `--config` itself, and the hidden diagnostics `--cal-min-spec-keys` (a test
-//! hook that forces the calibration pre-pass on tiny inputs),
-//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
-//! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
-//! scorer), and the experimental crosslink search `--xl` with its developer
-//! hooks `--xl-oracle` and `--xl-rescore-inter`. The test `every_search_flag_has_a_config_key` keeps that list
-//! honest.
-//!
-//! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
-//! the CLI accepts (e.g. `precursor_tol: 20ppm`, `charge: "2..5"`, `score: auto`)
-//! and are parsed through the identical validators, so the config and the CLI can
-//! never diverge in what they accept.
-
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -84,6 +57,7 @@ pub struct SearchCfg {
     pub fixed_mods: Option<Vec<serde_yaml::Value>>,
     /// `--variable-mods`, as `fixed_mods`.
     pub variable_mods: Option<Vec<serde_yaml::Value>>,
+    pub xl: Option<serde_yaml::Value>,
     /// `ipf`, as `--localize`.
     pub localize: Option<String>,
     /// `auto`, `on` or `off`, as `--fragment-index`.
@@ -414,6 +388,56 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
         (None, _, _) => return Err("`sites` is missing".into()),
     }
     Ok(d)
+}
+
+pub fn xl_linker(
+    key: &str,
+    v: &serde_yaml::Value,
+) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+    use andes_xl::spec::XlDecl;
+    use serde_yaml::Value;
+    let at = |e: String| format!("{key}: {e}");
+    let db = model::unimod::bundled();
+    match v {
+        Value::String(s) => XlDecl::parse(s)
+            .and_then(|d| d.resolve(db))
+            .map_err(|e| at(e.to_string())),
+        Value::Mapping(map) if map.contains_key("intact") => {
+            let r: model::xl_reagents::Reagent =
+                serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
+            andes_xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
+        }
+        Value::Mapping(map) => {
+            let mut name = None;
+            let mut sites = None;
+            for (k, val) in map {
+                let text = || {
+                    val.as_str().map(str::to_string).ok_or_else(|| {
+                        at(format!("`{}` must be a string", k.as_str().unwrap_or("?")))
+                    })
+                };
+                match k.as_str() {
+                    Some("name") => name = Some(text()?),
+                    Some("sites") => sites = Some(text()?),
+                    other => {
+                        return Err(at(format!(
+                            "unknown key `{}` (a named reagent takes name and sites; a custom \
+                             reagent also takes intact, stubs, doublets, monolinks, aliases, \
+                             xlmod, source)",
+                            other.unwrap_or("?")
+                        )))
+                    }
+                }
+            }
+            let name = name.ok_or_else(|| at("`name` is missing".into()))?;
+            let mut d = XlDecl::parse(&name).map_err(|e| at(e.to_string()))?;
+            if sites.is_some() {
+                d.sites = sites;
+            }
+            d.resolve(db).map_err(|e| at(e.to_string()))
+        }
+        _ => Err(at("expected `Name (sites)` or a map with `name`".into())),
+    }
 }
 
 /// Apply the YAML config onto the parsed `SearchArgs`, respecting CLI precedence.
@@ -749,6 +773,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    if let Some(v) = &cfg.search.xl {
+        if !cli_set(m, "xl") {
+            args.xl = Some(xl_linker("search.xl", v)?);
+        }
+    }
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
@@ -1309,8 +1338,8 @@ glyco:
         "glyco_scans",
         "glyco_mbr_match_train",
         "ipf_debug",
-        "xl",
         "xl_oracle",
+        "xl_rescore_intra",
         "xl_rescore_inter",
     ];
 
@@ -1378,6 +1407,54 @@ glyco:
                 "needs a variable",
             ),
             ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
+    }
+
+    #[test]
+    fn crosslinker_applies_with_cli_precedence() {
+        let a = applied("search:\n  xl: DSSO (K, S, T, Y, Protein N-term)\n", &[]).unwrap();
+        let x = a.xl.unwrap();
+        assert_eq!(x.name, "DSSO");
+        assert_eq!(x.ends[0].residues, b"KSTY");
+        let a = applied("search:\n  xl: DSSO (K)\n", &["--xl", "DSBU"]).unwrap();
+        assert_eq!(a.xl.unwrap().name, "DSBU");
+        let yaml = "search:\n  xl:\n    name: MyLinker\n    sites: K, Protein N-term\n    \
+                    intact: {mass: 158.003765}\n    \
+                    stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]\n    \
+                    doublets: [[alkene, thiol]]\n    monolinks: [{name: water, mass: 176.01433}]\n";
+        let x = applied(yaml, &[]).unwrap().xl.unwrap();
+        assert_eq!(x.name, "MyLinker");
+        let c = x.cleavage.unwrap();
+        assert_eq!(c.stubs.len(), 2);
+        assert_eq!(c.doublets, vec![(0, 1)]);
+        assert_eq!(x.monolinks.len(), 1);
+        let x = applied("search:\n  xl: {name: \"BS3 (K)\"}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.name, "DSS");
+        assert!(!x.ends[0].protein_n_term);
+        let x = applied("search:\n  xl: {name: EDC, sites: K / D}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.ends[1].residues, b"D");
+        for (bad, msg) in [
+            ("search:\n  xl: DSOS\n", "did you mean DSSO"),
+            ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
+            ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
+            (
+                "search:\n  xl: {name: DSSO, sitess: K}\n",
+                "unknown key `sitess`",
+            ),
+            (
+                "search:\n  xl: {name: X, sites: K, intact: {mass: 1.0}, stubz: []}\n",
+                "unknown field `stubz`",
+            ),
+            ("search:\n  xl: 42\n", "expected `Name (sites)`"),
         ] {
             let e = applied(bad, &[]).unwrap_err();
             assert!(e.contains(msg), "{e}");

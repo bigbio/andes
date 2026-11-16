@@ -5,3 +5,8 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+model = { path = "../model" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

@@ -412,6 +412,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .expect("build_global");
     });
     let mut cli = cli;
+    if let Some(x) = &cli.xl {
+        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), x) {
+            cli.db.variable_mods = Some(v);
+        }
+    }
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
     }
@@ -1270,7 +1275,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if !unsupported.is_empty() {
             return Err(format!(
                 "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
-                 tables; --rescore runs Percolator on the .xl.pin)",
+                 tables, scored by the pair score)",
                 unsupported.join(", ")
             )
             .into());

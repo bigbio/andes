@@ -1,12 +1,13 @@
-//! Crosslink search driver (`--xl`): doublet-gated pair lookup and alpha/beta
+//! Crosslink search driver (`--xl`): doublet-gated (MS-cleavable linkers) or
+//! open-mass fragment-index (non-cleavable linkers) pair lookup and alpha/beta
 //! co-scoring with the andes core scorer.
 //!
 //! The design is described in the `andes_xl` crate docs. In short: every
 //! peptide is scored alone with `score_psm + psm_edge_score` on the
 //! spectrum's [`ScoredSpectrum`], carrying its partner (or the cleaved linker
 //! stub) as a mass on the link residue; a CSM is the pair with the best
-//! `min(alpha, beta)` among the peptide masses the reporter doublets and the
-//! precursor allow.
+//! `min(alpha, beta)` among the peptide masses the reporter doublets (or the
+//! open-mass retrieval) and the precursor allow.
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -27,6 +28,7 @@ use rayon::prelude::*;
 use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
 
 use crate::candidate_gen::Candidate;
+use crate::fragment_index::ChunkFragmentIndex;
 use crate::match_engine::PreparedSearch;
 
 /// Settings of the crosslink search.
@@ -50,6 +52,11 @@ pub struct XlConfig {
     /// Spectra (in input order, among those searched) also run through the
     /// exhaustive pair oracle; 0 disables it.
     pub oracle_spectra: usize,
+    /// Open-mass retrieval (non-cleavable linkers): peptides kept per spectrum
+    /// from the fragment-index votes.
+    pub open_top_k: usize,
+    /// Open-mass retrieval: fragment ions a peptide needs to be kept.
+    pub open_min_votes: u16,
 }
 
 impl XlConfig {
@@ -64,6 +71,8 @@ impl XlConfig {
             min_peptide_mass: 400.0,
             top_per_mass: 4,
             oracle_spectra: 0,
+            open_top_k: 50,
+            open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
         }
     }
 }
@@ -80,8 +89,12 @@ pub struct XlPeptide {
     pub occurrences: Vec<(u32, u32)>,
     /// True when every occurrence is a decoy.
     pub is_decoy: bool,
-    /// Link sites.
+    /// Link sites of the linker's first end (of both ends when the linker is
+    /// homobifunctional).
     pub sites: Vec<LinkSite>,
+    /// Link sites of the second end of a heterobifunctional linker; `None`
+    /// for a homobifunctional one.
+    pub sites_end2: Option<Vec<LinkSite>>,
 }
 
 impl XlPeptide {
@@ -89,12 +102,39 @@ impl XlPeptide {
     pub fn bare(&self) -> Vec<u8> {
         self.peptide.residues.iter().map(|aa| aa.residue).collect()
     }
+
+    /// The sites of linker end `end` (0 or 1).
+    pub fn sites_of_end(&self, end: usize) -> &[LinkSite] {
+        match (end, &self.sites_end2) {
+            (1, Some(v)) => v,
+            _ => &self.sites,
+        }
+    }
+}
+
+/// The ends a peptide pair is scored at: `(alpha end, beta end)` for every
+/// assignment of the linker's ends to the two peptides.
+fn end_assignments(linker: &Crosslinker) -> &'static [(usize, usize)] {
+    if linker.is_homobifunctional() {
+        &[(0, 0)]
+    } else {
+        &[(0, 1), (1, 0)]
+    }
+}
+
+/// The open-mass retrieval index of a non-cleavable search: the fragment-ion
+/// index over the linkable base records, and the table row of each indexed
+/// peptidoform.
+pub struct OpenIndex {
+    index: ChunkFragmentIndex,
+    row_of: HashMap<String, u32>,
 }
 
 /// The linkable peptide table of a crosslink search.
 pub struct XlCandidates {
     peptides: Vec<XlPeptide>,
     index: MassIndex,
+    open: Option<OpenIndex>,
 }
 
 /// Peptidoform identity without flanks: residues and modification masses.
@@ -118,9 +158,8 @@ fn n_term_blocked(p: &Peptide) -> bool {
     })
 }
 
-fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
-    // A homobifunctional linker: both ends react with the same sites.
-    let end = &linker.ends[0];
+fn sites_of(c: &Candidate, linker: &Crosslinker, end: usize) -> Vec<LinkSite> {
+    let end = &linker.ends[end];
     let residues: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
     let mut modified: Vec<bool> = c
         .peptide
@@ -147,25 +186,70 @@ fn sites_of(c: &Candidate, linker: &Crosslinker) -> Vec<LinkSite> {
 }
 
 impl XlCandidates {
-    /// The linkable candidates of the out-of-core index of `prepared`.
+    /// The linkable candidates of the out-of-core index of `prepared`; for a
+    /// non-cleavable linker also the open-mass retrieval index over them.
     pub fn from_out_of_core(prepared: &PreparedSearch<'_>, linker: &Crosslinker) -> Self {
-        let lk = linker.clone();
-        // A span is kept when it has a reactive residue or could be protein
+        // A span is kept when it has a reactive residue or could be
         // N-terminal; the exact site rule needs the candidate (protein
         // termini, mods) and runs in `from_candidates`.
-        let cands = prepared.out_of_core_candidates_where(move |residues, _post| {
-            lk.n_term() || residues.iter().any(|&r| lk.reacts_with(r))
-        });
-        Self::from_candidates(cands, linker)
+        let keep = |lk: Crosslinker| {
+            move |residues: &[u8], _post: u8| {
+                lk.n_term()
+                    || lk.ends.iter().any(|e| e.protein_c_term)
+                    || residues.iter().any(|&r| lk.reacts_with(r))
+            }
+        };
+        let cands = prepared.out_of_core_candidates_where(keep(linker.clone()));
+        let mut table = Self::from_candidates(cands, linker);
+        if linker.cleavage.is_none() && !table.peptides.is_empty() {
+            let records: Vec<_> = prepared
+                .out_of_core_records_where(keep(linker.clone()))
+                .into_iter()
+                .map(|(rec, _)| rec)
+                .collect();
+            let masses = &table.index;
+            let lo = (0..masses.len() as u32)
+                .map(|i| masses.mass(i))
+                .fold(f64::MAX, f64::min);
+            let hi = (0..masses.len() as u32)
+                .map(|i| masses.mass(i))
+                .fold(f64::MIN, f64::max);
+            let index = ChunkFragmentIndex::build(
+                records,
+                prepared.idx,
+                prepared.params,
+                prepared.scorer.feature_match_tolerance(),
+                lo - 1.0,
+                hi + 1.0,
+            );
+            let row_of = table
+                .peptides
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (peptidoform_key(&p.peptide), i as u32))
+                .collect();
+            table.open = Some(OpenIndex { index, row_of });
+        }
+        table
     }
 
-    /// The table over `candidates`, keeping those with at least one link site.
+    /// The table over `candidates`, keeping those with at least one link site
+    /// on either end of the linker.
     pub fn from_candidates(candidates: Vec<Candidate>, linker: &Crosslinker) -> Self {
+        let hetero = !linker.is_homobifunctional();
         let mut by_key: HashMap<String, usize> = HashMap::new();
         let mut peptides: Vec<XlPeptide> = Vec::new();
+        let merge = |into: &mut Vec<LinkSite>, from: Vec<LinkSite>| {
+            for s in from {
+                if !into.contains(&s) {
+                    into.push(s);
+                }
+            }
+        };
         for c in candidates {
-            let sites = sites_of(&c, linker);
-            if sites.is_empty() {
+            let sites = sites_of(&c, linker, 0);
+            let sites_end2 = hetero.then(|| sites_of(&c, linker, 1));
+            if sites.is_empty() && sites_end2.as_ref().is_none_or(|v| v.is_empty()) {
                 continue;
             }
             let key = peptidoform_key(&c.peptide);
@@ -176,10 +260,9 @@ impl XlCandidates {
                     p.occurrences
                         .push((c.protein_index as u32, c.start_offset_in_protein as u32));
                     p.is_decoy &= c.is_decoy;
-                    for s in sites {
-                        if !p.sites.contains(&s) {
-                            p.sites.push(s);
-                        }
+                    merge(&mut p.sites, sites);
+                    if let (Some(into), Some(from)) = (p.sites_end2.as_mut(), sites_end2) {
+                        merge(into, from);
                     }
                 }
                 None => {
@@ -193,6 +276,7 @@ impl XlCandidates {
                         )],
                         is_decoy: c.is_decoy,
                         sites,
+                        sites_end2,
                     });
                 }
             }
@@ -202,10 +286,17 @@ impl XlCandidates {
             p.proteins.dedup();
             p.occurrences.sort_unstable();
             p.occurrences.dedup();
-            p.sites.sort_by_key(|s| (s.pos, s.n_term));
+            p.sites.sort_by_key(|s| (s.pos, s.n_term, s.c_term));
+            if let Some(v) = p.sites_end2.as_mut() {
+                v.sort_by_key(|s| (s.pos, s.n_term, s.c_term));
+            }
         }
         let index = MassIndex::new(peptides.iter().map(|p| p.peptide.mass()).collect());
-        XlCandidates { peptides, index }
+        XlCandidates {
+            peptides,
+            index,
+            open: None,
+        }
     }
 
     /// The linkable peptides.
@@ -217,6 +308,54 @@ impl XlCandidates {
     pub fn index(&self) -> &MassIndex {
         &self.index
     }
+
+    /// Whether the open-mass retrieval index was built.
+    pub fn has_open_index(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Table rows of the peptides the fragment-index votes retrieve for
+    /// `spec` with neutral mass in `[lo, hi]`, best votes first, at most
+    /// `top_k` forms; empty without an open index.
+    pub fn open_retrieve(
+        &self,
+        spec: &Spectrum,
+        prepared: &PreparedSearch<'_>,
+        lo: f64,
+        hi: f64,
+        top_k: usize,
+        min_votes: u16,
+    ) -> Vec<u32> {
+        let Some(open) = &self.open else {
+            return Vec::new();
+        };
+        let tol = prepared.scorer.feature_match_tolerance();
+        let sel = open.index.query_mass_range(
+            spec,
+            lo,
+            hi,
+            tol,
+            top_k,
+            min_votes,
+            crate::fragment_index::vote_peaks_for(tol),
+        );
+        let cands = open.index.materialise(
+            &sel,
+            prepared.idx,
+            prepared.params,
+            None,
+            &|_: &mut [Candidate]| {},
+        );
+        let mut rows: Vec<u32> = Vec::new();
+        for c in &cands {
+            if let Some(&r) = open.row_of.get(&peptidoform_key(&c.peptide)) {
+                if !rows.contains(&r) {
+                    rows.push(r);
+                }
+            }
+        }
+        rows
+    }
 }
 
 /// How a candidate mass pair was proposed.
@@ -227,6 +366,9 @@ pub enum PairKind {
     /// One mass carries a doublet; the other is the precursor complement with
     /// at least one stub ion observed.
     Half,
+    /// Open-mass retrieval: one peptide from the fragment-index votes, the
+    /// other the precursor complement (non-cleavable linkers).
+    Open,
 }
 
 impl PairKind {
@@ -234,6 +376,7 @@ impl PairKind {
         match self {
             PairKind::Full => "full",
             PairKind::Half => "half",
+            PairKind::Open => "open",
         }
     }
 }
@@ -434,6 +577,9 @@ struct SpecCtx<'a> {
     frag_tol: f64,
 }
 
+/// The best placement of the linker on peptide `pep_idx` at the sites of
+/// linker end `end`; `None` when the peptide has no site there.
+#[allow(clippy::too_many_arguments)]
 fn score_peptide(
     ctx: &SpecCtx<'_>,
     table: &XlCandidates,
@@ -441,11 +587,13 @@ fn score_peptide(
     partner_mass: f64,
     linker: &Crosslinker,
     mods: &StubMods,
+    end: usize,
 ) -> Option<PeptideHit> {
     let p = &table.peptides[pep_idx as usize];
+    let sites = p.sites_of_end(end);
     let mut best: Option<(f32, LinkSite, LinkForm)> = None;
     let mut form_scores = [f32::NEG_INFINITY; N_FORMS];
-    for &site in &p.sites {
+    for &site in sites {
         for form in linker.forms() {
             let Some(delta) = form.delta(linker, partner_mass) else {
                 continue;
@@ -469,7 +617,7 @@ fn score_peptide(
         form,
         score,
         form_scores,
-        n_sites: p.sites.len().min(255) as u8,
+        n_sites: sites.len().min(255) as u8,
         gap_next: None,
         mass_err_ppm: 0.0,
     })
@@ -487,17 +635,24 @@ fn query(
     linker: &Crosslinker,
     mods: &StubMods,
     keep: usize,
+    end: usize,
 ) -> Vec<PeptideHit> {
-    let mut hits: Vec<PeptideHit> = table
+    let hits: Vec<PeptideHit> = table
         .index
         .within(mass, tol)
         .iter()
         .filter_map(|&i| {
-            let mut h = score_peptide(ctx, table, i, partner_mass, linker, mods)?;
+            let mut h = score_peptide(ctx, table, i, partner_mass, linker, mods, end)?;
             h.mass_err_ppm = (table.index.mass(i) - mass) / mass * 1e6;
             Some(h)
         })
         .collect();
+    rank_hits(hits, table, keep)
+}
+
+/// `hits` best first (ties by index), each with its `gap_next` against the
+/// best hit of another sequence, cut to `keep`.
+fn rank_hits(mut hits: Vec<PeptideHit>, table: &XlCandidates, keep: usize) -> Vec<PeptideHit> {
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.pep.cmp(&b.pep)));
     let bare: Vec<Vec<u8>> = hits
         .iter()
@@ -836,6 +991,22 @@ fn search_spectrum(
     doublets.n_full_pairs = pairs.iter().filter(|p| p.kind == PairKind::Full).count();
     doublets.n_half_pairs = pairs.len() - doublets.n_full_pairs;
 
+    let linker = &cfg.linker;
+    // Open-mass retrieval (non-cleavable linkers): the peptides the fragment
+    // ions vote for, at any mass that leaves room for a partner.
+    let open_rows = if table.has_open_index() {
+        table.open_retrieve(
+            spec,
+            prepared,
+            cfg.min_peptide_mass - prec_tol,
+            precursor_mass - linker.intact - cfg.min_peptide_mass + prec_tol,
+            cfg.open_top_k,
+            cfg.open_min_votes,
+        )
+    } else {
+        Vec::new()
+    };
+
     let mut result = XlSpectrumResult {
         spec_idx,
         charge: z,
@@ -844,7 +1015,7 @@ fn search_spectrum(
         csm: None,
         oracle: None,
     };
-    if pairs.is_empty() && !run_oracle {
+    if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);
     }
     let ctx = SpecCtx {
@@ -853,7 +1024,6 @@ fn search_spectrum(
         z,
         frag_tol: prepared.fragment_tolerance_da,
     };
-    let linker = &cfg.linker;
 
     // Every (alpha, beta) combination of the kept hits of every mass pair.
     struct Cand {
@@ -863,7 +1033,10 @@ fn search_spectrum(
         pair: MassPair,
     }
     let mut combos: Vec<Cand> = Vec::new();
-    for mp in &pairs {
+    for (mp, &(ea, eb)) in pairs
+        .iter()
+        .flat_map(|mp| end_assignments(linker).iter().map(move |e| (mp, e)))
+    {
         let a_hits = query(
             &ctx,
             table,
@@ -873,6 +1046,7 @@ fn search_spectrum(
             linker,
             mods,
             cfg.top_per_mass,
+            ea,
         );
         if a_hits.is_empty() {
             continue;
@@ -886,6 +1060,7 @@ fn search_spectrum(
             linker,
             mods,
             cfg.top_per_mass,
+            eb,
         );
         let iso_mass = mp.iso as f64 * ISOTOPE_SPACING;
         for a in &a_hits {
@@ -904,6 +1079,64 @@ fn search_spectrum(
                     score: a.score.min(b.score),
                     pair: *mp,
                 });
+            }
+        }
+    }
+    // Open-mass pairs: each retrieved peptide is scored with the precursor
+    // complement as its partner, and the partner is looked up by that mass.
+    for iso in cfg.isotope_offsets.clone() {
+        if open_rows.is_empty() {
+            break;
+        }
+        let target = precursor_mass - iso as f64 * ISOTOPE_SPACING - linker.intact;
+        for &(ea, eb) in end_assignments(linker) {
+            let a_hits: Vec<PeptideHit> = open_rows
+                .iter()
+                .filter_map(|&r| {
+                    let b_mass = target - table.index.mass(r);
+                    if b_mass < cfg.min_peptide_mass - prec_tol {
+                        return None;
+                    }
+                    score_peptide(&ctx, table, r, b_mass, linker, mods, ea)
+                })
+                .collect();
+            for a in rank_hits(a_hits, table, usize::MAX) {
+                let a_mass = table.index.mass(a.pep);
+                let b_mass = target - a_mass;
+                let b_hits = query(
+                    &ctx,
+                    table,
+                    b_mass,
+                    prec_tol,
+                    a_mass,
+                    linker,
+                    mods,
+                    cfg.top_per_mass,
+                    eb,
+                );
+                for b in b_hits {
+                    let theo = a_mass
+                        + table.index.mass(b.pep)
+                        + linker.intact
+                        + iso as f64 * ISOTOPE_SPACING;
+                    if (precursor_mass - theo).abs() > prec_tol {
+                        continue;
+                    }
+                    combos.push(Cand {
+                        a,
+                        b,
+                        score: a.score.min(b.score),
+                        pair: MassPair {
+                            a_mass,
+                            a_tol: 0.0,
+                            b_mass,
+                            b_tol: prec_tol,
+                            kind: PairKind::Open,
+                            iso,
+                            b_stub_ions: 0,
+                        },
+                    });
+                }
             }
         }
     }
@@ -953,7 +1186,7 @@ fn search_spectrum(
             intra: is_intra(prepared, pa, pb),
             precursor_err_ppm: (precursor_mass - theo) / theo * 1e6,
             b_stub_ions: c.pair.b_stub_ions,
-            n_mass_pairs: pairs.len(),
+            n_mass_pairs: pairs.len() + open_rows.len(),
             alpha_doublet: doublet_at(&result.doublets.masses, pa.peptide.mass(), cfg),
             beta_doublet: doublet_at(&result.doublets.masses, pb.peptide.mass(), cfg),
             rescores: rescores(spec, prepared, z, table, &alpha, &beta, linker, mods),
@@ -990,7 +1223,7 @@ fn oracle(
     let linker = &cfg.linker;
     let mut n_pairs = 0;
     let mut best: Option<(u32, u32, f32, u8)> = None;
-    let mut scored: HashMap<(u32, u8), f32> = HashMap::new();
+    let mut scored: HashMap<(u32, u8, usize), f32> = HashMap::new();
     let csm_key = result.csm.as_ref().map(|c| {
         let (i, j) = (c.alpha.pep, c.beta.pep);
         ((i.min(j), i.max(j)), c.iso)
@@ -1001,14 +1234,17 @@ fn oracle(
         let pairs = pairs_by_sum(&table.index, target, prec_tol);
         n_pairs += pairs.len();
         for (i, j) in pairs {
-            let mut s = |k: u32| -> f32 {
-                *scored.entry((k, iso)).or_insert_with(|| {
+            let mut s = |k: u32, end: usize| -> f32 {
+                *scored.entry((k, iso, end)).or_insert_with(|| {
                     let partner = target - table.index.mass(k);
-                    score_peptide(ctx, table, k, partner, linker, mods)
+                    score_peptide(ctx, table, k, partner, linker, mods, end)
                         .map_or(f32::NEG_INFINITY, |h| h.score)
                 })
             };
-            let pair = s(i).min(s(j));
+            let pair = end_assignments(linker)
+                .iter()
+                .map(|&(ea, eb)| s(i, ea).min(s(j, eb)))
+                .fold(f32::NEG_INFINITY, f32::max);
             if csm_key == Some(((i, j), iso)) {
                 csm_pair = Some((true, pair));
             }

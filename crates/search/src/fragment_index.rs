@@ -401,6 +401,59 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
+        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        select_top_k(&mut sel, top_k);
+        sel.into_iter()
+            .filter(|&(id, _, _)| {
+                let m = self.form_mass[id as usize];
+                exact.iter().any(|&(a, b)| m >= a && m <= b)
+            })
+            .map(|(id, v, _)| (id, v))
+            .collect()
+    }
+
+    /// Forms with neutral mass in `[lo, hi]` and at least `min_matched`
+    /// singly-charged b/y ions within `fragment_tol` of a peak, at most
+    /// `top_k`, best votes first; only the `vote_peaks` most intense peaks vote
+    /// (0 = every peak). The open-mass counterpart of [`Self::query`]: the
+    /// interval is the caller's, not the spectrum's precursor windows. The
+    /// crosslink search uses it to retrieve a peptide whose partner is unknown,
+    /// by the fragments that do not carry the link.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_mass_range(
+        &self,
+        spec: &Spectrum,
+        lo: f64,
+        hi: f64,
+        fragment_tol: Tolerance,
+        top_k: usize,
+        min_matched: u16,
+        vote_peaks: usize,
+    ) -> Vec<(u32, u16)> {
+        if lo > hi {
+            return Vec::new();
+        }
+        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        select_top_k(&mut sel, top_k);
+        sel.into_iter().map(|(id, v, _)| (id, v)).collect()
+    }
+
+    /// Neutral mass of form `id`.
+    pub fn form_mass(&self, id: u32) -> f64 {
+        self.form_mass[id as usize]
+    }
+
+    /// `(form id, votes, matched intensity)` of every form with neutral mass in
+    /// `[lo, hi]` and at least `min_matched` votes, unordered.
+    fn vote(
+        &self,
+        spec: &Spectrum,
+        lo: f64,
+        hi: f64,
+        fragment_tol: Tolerance,
+        min_matched: u16,
+        vote_peaks: usize,
+    ) -> Vec<(u32, u16, f32)> {
         // Form ids are mass-ordered, so the window is an id range.
         let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
         let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
@@ -414,7 +467,7 @@ impl ChunkFragmentIndex {
         let block_of = |id: u32| self.block_first_id.partition_point(|&f| f <= id) - 1;
         let (blk_lo, blk_hi) = (block_of(id_lo), block_of(id_hi - 1));
         let row_len = self.n_blocks + 1;
-        let mut sel: Vec<(u32, u16, f32)> = VOTE_BUF.with(|cell| {
+        VOTE_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             let (counts, touched) = &mut *buf;
             if counts.len() < width {
@@ -463,15 +516,7 @@ impl ChunkFragmentIndex {
                 *slot = (0, 0.0);
             }
             sel
-        });
-        select_top_k(&mut sel, top_k);
-        sel.into_iter()
-            .filter(|&(id, _, _)| {
-                let m = self.form_mass[id as usize];
-                exact.iter().any(|&(a, b)| m >= a && m <= b)
-            })
-            .map(|(id, v, _)| (id, v))
-            .collect()
+        })
     }
 
     /// Materialise selected forms as candidates, in (record, k) order, by

@@ -53,6 +53,17 @@
 //! complement shows at least one stub ion. Peptides are looked up by mass in a
 //! mass-sorted table of linkable candidates ([`pair::MassIndex`]).
 //!
+//! **Candidates without doublets (non-cleavable linkers).** A peptide's b/y
+//! ions that do not contain its link site carry no partner mass, so the
+//! search's fragment-ion index can retrieve it with the precursor window
+//! opened to every mass that leaves room for a partner (open-mass retrieval,
+//! as in Kojak and xiSEARCH). The top-voted peptides are each scored with the
+//! precursor complement as the partner mass on the link residue, and the
+//! partner is looked up by that mass and scored the same way; the pair score
+//! is again `min(alpha, beta)`. The cost is linear in the database (one
+//! retrieval per spectrum), not quadratic. A heterobifunctional linker scores
+//! each pair at both assignments of its ends to the two peptides.
+//!
 //! **Decoys.** Target and decoy peptides come from the same andes index (the
 //! search's decoy strategy), are looked up and scored identically, and the
 //! CSM class is TT, TD or DD ([`decoy::PairClass`]). Pair FDR is
@@ -75,8 +86,9 @@
 //!
 //! **Correctness check.** [`pair::pairs_by_sum`] is the exhaustive pair
 //! enumerator by precursor mass; it is tested against a brute-force all-pairs
-//! loop, and the search driver can run it as an oracle (no doublet gate) on a
-//! slice of spectra to measure what the doublet gate loses.
+//! loop, and the search driver can run it as an oracle (no doublet gate, no
+//! retrieval) on a slice of spectra to measure what the doublet gate or the
+//! open-mass retrieval loses.
 
 pub mod crosslinker;
 pub mod decoy;

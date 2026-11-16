@@ -660,13 +660,15 @@ pub(crate) struct SearchArgs {
     /// heterobifunctional reagent separates its two ends with /. Masses come from UNIMOD,
     /// or from the cited composition for reagents UNIMOD lacks (DSBSO, CDI, PhoX, SDA,
     /// EDC). A linker not in the table is defined in the config file (search.xl, with
-    /// mass, sites, stubs and doublets). Monolinks are variable modifications
-    /// (--variable-mods "Xlink:DSSO[176] (K)"). The search runs MS-cleavable,
-    /// homobifunctional linkers.
+    /// mass, sites, stubs and doublets). Monolinks are variable modifications, by UNIMOD
+    /// record or as reagent:quencher (--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)").
     ///
-    /// Each MS2 is searched for the linker's reporter doublets; the doublet peptide masses
-    /// and the precursor give the candidate peptide pairs, and each peptide is scored with
-    /// the standard scorer carrying the cleaved stub or its partner on the link residue.
+    /// For an MS-cleavable linker each MS2 is searched for the reporter doublets; the doublet
+    /// peptide masses and the precursor give the candidate peptide pairs. For a non-cleavable
+    /// linker the fragment-ion index retrieves one peptide by its fragments that do not
+    /// carry the link, and its partner is looked up by the remaining precursor mass. Each
+    /// peptide is scored with the standard scorer carrying the cleaved stub or its partner on
+    /// the link residue.
     /// Writes the best crosslink-spectrum match per spectrum into a pair-aware PIN
     /// (<base>.xl.pin; both link classes are scored by the pair score, and --rescore does
     /// not change them) and the q-values, from the

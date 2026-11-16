@@ -1083,8 +1083,11 @@ that defines a linker the table lacks: `mass`, `sites`, `stubs`, `doublets`, `mo
 | SDA (sulfo-SDA) | 82.0419 | | K, S, T, Y, Protein N-term / any residue | Belsom et al. 2016 |
 | EDC (DMTMM) | -18.0106 | | K, Protein N-term / D, E, Protein C-term | Leitner et al. 2014 |
 
-The search currently runs MS-cleavable, homobifunctional linkers: candidates come from the
-reporter doublets of the cleavage stubs.
+MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
+stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
+the fragments that do not carry the link, its partner by the remaining precursor mass). Both
+link classes are scored by the pair score `min(alpha, beta)`; q-values are
+`(TD - DD + 1) / TT` per link class (intra- and inter-protein).
 
 ---
 

@@ -1270,7 +1270,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if !unsupported.is_empty() {
             return Err(format!(
                 "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
-                 tables; --rescore runs Percolator on the .xl.pin)",
+                 tables, scored by the pair score)",
                 unsupported.join(", ")
             )
             .into());

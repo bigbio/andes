@@ -48,6 +48,8 @@ fn peptide_cols(
     };
     let site_kind = if h.site.n_term {
         "nterm".to_string()
+    } else if h.site.c_term {
+        "cterm".to_string()
     } else {
         p.peptide
             .residues
@@ -322,28 +324,6 @@ fn report(results: &[XlSpectrumResult]) {
     );
 }
 
-/// The linkers the search runs: MS-cleavable ones (candidates from reporter
-/// doublets) with one site set for both ends.
-fn check_searchable(linker: &Crosslinker) -> Result<(), String> {
-    if linker.cleavage.is_none() {
-        return Err(format!(
-            "--xl {}: a non-cleavable linker; the crosslink search finds candidates from \
-             the reporter doublets of an MS-cleavable linker (DSSO, DSBU, DSBSO, CDI or a \
-             custom linker with stubs)",
-            linker.name
-        ));
-    }
-    if !linker.is_homobifunctional() {
-        return Err(format!(
-            "--xl {} ({}): a heterobifunctional linker; the crosslink search takes one site \
-             set for both ends",
-            linker.name,
-            linker.describe_sites()
-        ));
-    }
-    Ok(())
-}
-
 fn report_linker(linker: &Crosslinker) {
     let stubs = linker.cleavage.as_ref().map_or(String::new(), |c| {
         let s: Vec<String> = c
@@ -389,15 +369,19 @@ pub(crate) fn run_xl(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let linker: Crosslinker = cli.xl.clone().ok_or("--xl: no crosslinker")?;
-    check_searchable(&linker)?;
     report_linker(&linker);
     let t = std::time::Instant::now();
     let table = XlCandidates::from_out_of_core(prepared, &linker);
     let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
     eprintln!(
-        "[xl] {} linkable peptidoforms ({} decoy) [{:.2}s]",
+        "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
         table.peptides().len(),
         n_decoy,
+        if table.has_open_index() {
+            "; open-mass fragment index built (non-cleavable linker)"
+        } else {
+            ""
+        },
         t.elapsed().as_secs_f64()
     );
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {

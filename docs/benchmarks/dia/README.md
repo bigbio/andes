@@ -28,13 +28,20 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | tool | q ≤ 0.01 N, raw01 / raw02 | FDP_c at q ≤ 0.01 | FDP_c at q ≤ 0.05 | N@FDP_c 1 % | N@FDP_c 2 % |
 |---|---|---|---|---|---|
 | andes `--dia` | 1404 / 1499 | 0.004 / 0.005 | 0.042 / 0.046 | 1559 / 1651 | 1707 / 1691 |
+| andes `--dia`, mean of 5 Percolator seeds | 1394 / 1565 | 0.007 / 0.009 | | 1496 / 1594 (1421–1575 / 1524–1651) | 1685 / 1727 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
 
-- **Error control holds**: andes's q ≤ 0.01 measures 0.4–0.5 % true FDP, and q ≤ 0.05 measures 4.2–4.6 %.
-- **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN, and
-  92 % / 101 % of OpenDIA arm E.
+- **Error control holds**: andes's q ≤ 0.01 measures 0.4–0.5 % true FDP (0.7–0.9 % averaged over seeds),
+  and q ≤ 0.05 measures 4.2–4.6 %.
+- **Percolator seed noise.** The andes PIN is deterministic (byte-identical across runs), but the
+  Percolator seed alone moves N@FDP_c 1 % over a range of about 150 (seeds 42, 1, 2, 3, 7). Seed 42,
+  used for the first row and the single-seed comparisons below, is at the top of that range on both
+  raws. Compare features on the mean over seeds, paired by seed and by thread count: the same seed
+  with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN.
+- **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
+  with seed 42, 72 % / 69 % on the seed mean, and 88–92 % / 98–101 % of OpenDIA arm E.
 - **MS1 gate** (a candidate is scored only when its monoisotopic m/z has a survey peak within 5 ppm in the
   nearest survey scan or one either side): +70 / +82 at N@FDP_c 1 % and 25–42 % less search time. On the
   slice it keeps the MS1 peak of 93 % of DIA-NN's precursors and of 13 % of random library candidates.
@@ -134,7 +141,8 @@ project than this pass. The code is kept behind the hidden flag, with its tests,
 
 ## Rescoring and RT tested on the full raws (Phase A PIN)
 
-N@FDP_c 1 %, raw01 / raw02, against Percolator 1559 / 1651:
+N@FDP_c 1 %, raw01 / raw02, against Percolator 1559 / 1651 (seed 42; the first three items were run on
+that seed only, and differences below about 100 are inside seed noise, see Results):
 
 - **A nonlinear per-run classifier** (semi-supervised gradient boosting on the same 95 features, 3-fold
   cross-validated by precursor, Percolator `-Y` competition): 1553 / 1583 after one round, 1578 / 1561
@@ -152,10 +160,11 @@ N@FDP_c 1 %, raw01 / raw02, against Percolator 1559 / 1651:
 - **Summed apex.** Three columns per row: of the peptide's b/y ions, how many occur in at least two
   of its scan and the previous and next cycle of the same window, that count as a fraction, and how
   many the neighbours add. On the 3-min slice this lifted N@FDP_c 1 % from 285 to 340 (Python, 10 ppm)
-  and 309 / 362 / 268 (in `dia.rs` at 20 / 10 / 5 ppm), but on the full raws it gives 1539 / 1564 at
-  20 ppm and 1540 / 1699 at 10 ppm (N@FDP_c 2 %: 1726 / 1807 against 1707 / 1691). The Percolator seed
-  alone moves raw01 by more: with `--seed 7` baseline 1575 and summed apex 1483. Not kept. The slice is
-  too small to rank features (it varies by ±50 IDs between near-identical runs); judge on full raws.
+  and 309 / 362 / 268 (in `dia.rs` at 20 / 10 / 5 ppm). On the full raws at 20 ppm, seed 42: 1539 / 1564
+  against 1559 / 1651. At 10 ppm, mean over 5 seeds paired with the baseline: N@FDP_c 1 % 1452 / 1681
+  against 1496 / 1594 (raw01 lower on 5 of 5 seeds, raw02 higher on 5 of 5), N@FDP_c 2 % 1703 / 1788
+  against 1685 / 1727. Mixed, so not kept. The slice is too small to rank features (±50 IDs between
+  near-identical runs); judge on full raws and several Percolator seeds.
 
 Where DIA-NN's raw01 IDs sit in andes: 2,195 of 2,361 (93 %) have a row in the PIN, and for 84 % the
 best row is inside DIA-NN's chromatographic peak. andes reaches q ≤ 1 % for 25 % of DIA-NN's

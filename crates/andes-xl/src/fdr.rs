@@ -5,16 +5,9 @@
 //! peptides counted twice over in TD, so the false TT matches number
 //! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate is made separately for
 //! each link class (intra- and inter-protein) by the caller.
-//!
-//! At small counts `TD − DD` fluctuates to 0 or below by chance, and a
-//! monotone pass would carry that dip down to every lower threshold. The
-//! estimate is therefore floored at [`MIN_FALSE`]` / TT`: a set is accepted at
-//! FDR `α` only when `TT · α ≥ MIN_FALSE`, the minimum-TD validity check of
-//! xiFDR (Fischer & Rappsilber 2017).
 
 use crate::decoy::PairClass;
 
-/// Fewest false matches an accepted set is assumed to hold.
 pub const MIN_FALSE: f64 = 2.0;
 
 /// Counts of a set of CSMs by class.
@@ -38,8 +31,6 @@ impl ClassCounts {
         }
     }
 
-    /// `max(TD − DD, MIN_FALSE) / TT`, capped at 1; 1 when there are no TT
-    /// matches.
     pub fn fdr(&self) -> f64 {
         if self.tt == 0 {
             return 1.0;
@@ -100,7 +91,6 @@ mod tests {
             dd: 2,
         };
         assert!((c.fdr() - 0.05).abs() < 1e-12);
-        // DD above TD is a chance dip, not zero false matches.
         let c = ClassCounts {
             tt: 10,
             td: 1,
@@ -112,7 +102,6 @@ mod tests {
 
     #[test]
     fn small_sets_cannot_reach_a_low_q() {
-        // 25 TT and no decoys: q is 2/25, never 0.
         let scores: Vec<f64> = (0..25).map(|i| 100.0 - i as f64).collect();
         let q = q_values(&scores, &[TT; 25]);
         assert!(q.iter().all(|&v| (v - 0.08).abs() < 1e-12));
@@ -120,14 +109,12 @@ mod tests {
 
     #[test]
     fn q_values_are_monotone_and_share_ties() {
-        // 200 TT above 4 TD and 1 DD, then a tie of one TT and one TD.
         let mut scores: Vec<f64> = (0..205).map(|i| 1000.0 - i as f64).collect();
         let mut classes = vec![TT; 200];
         classes.extend([TD, TD, TD, TD, DD]);
         scores.extend([1.0, 1.0]);
         classes.extend([TT, TD]);
         let q = q_values(&scores, &classes);
-        // Above the decoys: 2/200 floor. All 205: (4-1)/200. Tie: (5-1)/201.
         assert!((q[0] - 0.01).abs() < 1e-12);
         assert!((q[204] - 0.015).abs() < 1e-12);
         assert_eq!(q[205], q[206]);

@@ -523,11 +523,7 @@ fn protein_family<'p>(prepared: &'p PreparedSearch<'_>, pi: u32) -> &'p str {
 /// The intra/inter class of a pair, by one rule for targets and decoys:
 /// intra when the peptides' proteins share a family (a protein and its decoy
 /// are one family, so a target peptide linked to a decoy peptide of its own
-/// protein is an intra TD). Only protein membership decides: a sequence test
-/// against the other peptide's proteins would find target sequences (I/L
-/// variants, non-enzymatic contexts) that shuffled decoys never match, and
-/// would move random TT matches, but not their TD and DD estimators, into
-/// the intra class.
+/// protein is an intra TD).
 fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool {
     let fam_b: Vec<&str> = b
         .proteins

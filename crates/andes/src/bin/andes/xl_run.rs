@@ -387,9 +387,6 @@ pub(crate) fn run_xl(
         )?;
         eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;
-        // Every CSM of the rescored class takes its Percolator score; one
-        // without a score leaves the FDR population rather than competing on
-        // the pair-score scale.
         for ((dst, src), r) in score.iter_mut().zip(s).zip(&results) {
             if r.csm.as_ref().is_some_and(|c| c.intra == intra) {
                 *dst = src;

@@ -521,11 +521,15 @@ fn syrk(g: &mut [f64], buf: &[f64], rows: usize, stride: usize, ncols: usize) {
     }
 }
 
+fn gram_batch(stride: usize) -> usize {
+    let part_bytes = (2 * stride * stride + 2 * GROUP * stride + stride) * 8;
+    (GRAM_BYTES / part_bytes).max(1) * CHUNK
+}
+
 fn gram(t: &Train, subset: &[usize], ws: &mut Solve) {
     let stride = t.x.stride;
     let ncols = t.x.ncols;
-    let part_bytes = (2 * stride * stride + 2 * GROUP * stride + stride) * 8;
-    let batch = (GRAM_BYTES / part_bytes / CHUNK).max(1) * CHUNK;
+    let batch = gram_batch(stride);
     let mut gs = [vec![0.0f64; stride * stride], vec![0.0f64; stride * stride]];
     ws.b.fill(0.0);
     let mut scratch = vec![0.0f64; batch.min(subset.len())];
@@ -1113,4 +1117,27 @@ pub(crate) fn mfn_from(
     }
     w.truncate(n);
     w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gram_batch_holds_many_chunk_partials_within_the_workspace() {
+        for stride in [8, 24, 64, 104, 1024, 4096] {
+            let batch = gram_batch(stride);
+            let parts = batch / CHUNK;
+            assert_eq!(batch % CHUNK, 0);
+            let part_bytes = (2 * stride * stride + 2 * GROUP * stride + stride) * 8;
+            assert!(
+                parts == 1 || parts * part_bytes <= GRAM_BYTES,
+                "stride {stride}"
+            );
+            if part_bytes * 2 <= GRAM_BYTES {
+                assert!(parts >= 2, "stride {stride}: {parts} partials");
+            }
+        }
+        assert_eq!(gram_batch(64) / CHUNK, 949);
+    }
 }

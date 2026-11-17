@@ -306,31 +306,35 @@ impl Default for MfnOpts {
     }
 }
 
-struct Train<'a> {
-    x: &'a Rows,
-    rows: Vec<usize>,
-    pos: Vec<bool>,
-    cpos: f64,
-    cneg: f64,
+pub(crate) struct Examples {
+    pub(crate) rows: Vec<usize>,
+    pub(crate) pos: Vec<bool>,
 }
 
-impl<'a> Train<'a> {
-    fn new(x: &'a Rows, idx_pos: &[usize], idx_neg: &[usize], cpos: f64, cneg: f64) -> Self {
+impl Examples {
+    pub(crate) fn from_lists(idx_pos: &[usize], idx_neg: &[usize]) -> Examples {
         let mut ex: Vec<(usize, bool)> = idx_neg
             .iter()
             .map(|&r| (r, false))
             .chain(idx_pos.iter().map(|&r| (r, true)))
             .collect();
         ex.sort_unstable();
-        Train {
-            x,
+        Examples {
             rows: ex.iter().map(|e| e.0).collect(),
             pos: ex.iter().map(|e| e.1).collect(),
-            cpos,
-            cneg,
         }
     }
+}
 
+struct Train<'a> {
+    x: &'a Rows,
+    rows: &'a [usize],
+    pos: &'a [bool],
+    cpos: f64,
+    cneg: f64,
+}
+
+impl Train<'_> {
     fn len(&self) -> usize {
         self.rows.len()
     }
@@ -594,19 +598,31 @@ pub fn l2_svm_mfn(
     cneg: f64,
     opts: &MfnOpts,
 ) -> Vec<f64> {
-    mfn_from(x, idx_pos, idx_neg, cpos, cneg, opts, None)
+    mfn_from(
+        x,
+        &Examples::from_lists(idx_pos, idx_neg),
+        cpos,
+        cneg,
+        opts,
+        None,
+    )
 }
 
 pub(crate) fn mfn_from(
     x: &Rows,
-    idx_pos: &[usize],
-    idx_neg: &[usize],
+    ex: &Examples,
     cpos: f64,
     cneg: f64,
     opts: &MfnOpts,
     start: Option<&[f64]>,
 ) -> Vec<f64> {
-    let t = Train::new(x, idx_pos, idx_neg, cpos, cneg);
+    let t = Train {
+        x,
+        rows: &ex.rows,
+        pos: &ex.pos,
+        cpos,
+        cneg,
+    };
     let n = x.ncols;
     let stride = x.stride;
     let m = t.len();

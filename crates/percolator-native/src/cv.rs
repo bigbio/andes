@@ -4,7 +4,7 @@ use crate::folds::folds_by_spectrum;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
-use crate::svm::{mfn_from, MfnOpts, Rows};
+use crate::svm::{mfn_from, Examples, MfnOpts, Rows};
 use rayon::prelude::*;
 
 const FOLDS: usize = 3;
@@ -52,8 +52,8 @@ struct Fold {
 }
 
 struct TrainSet {
-    idx_neg: Vec<usize>,
-    idx_pos: Vec<usize>,
+    ex: Examples,
+    negatives: usize,
 }
 
 const TASK_BYTES_PER_EXAMPLE: u64 = 96;
@@ -119,16 +119,22 @@ fn fit_positives(
 
 fn train_set(fold: &Fold, s: &[f64], fdr: f64) -> TrainSet {
     let cut = tdc_cut(s, &fold.train_decoy, fdr, true).at_most;
-    let mut idx_pos = Vec::new();
-    let mut idx_neg = Vec::new();
+    let mut ex = Examples {
+        rows: Vec::new(),
+        pos: Vec::new(),
+    };
+    let mut negatives = 0usize;
     for ((&row, &v), &d) in fold.train.iter().zip(s).zip(&fold.train_decoy) {
         if d {
-            idx_neg.push(row);
+            ex.rows.push(row);
+            ex.pos.push(false);
+            negatives += 1;
         } else if cut.is_some_and(|c| v >= c) {
-            idx_pos.push(row);
+            ex.rows.push(row);
+            ex.pos.push(true);
         }
     }
-    TrainSet { idx_neg, idx_pos }
+    TrainSet { ex, negatives }
 }
 
 fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) -> usize {
@@ -243,16 +249,14 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 eprintln!(
                     "Split {}: Training with {} positives and {} negatives",
                     f + 1,
-                    t.idx_pos.len(),
-                    t.idx_neg.len()
+                    t.ex.rows.len() - t.negatives,
+                    t.negatives
                 );
             }
         }
         let task_bytes: Vec<u64> = pairs
             .iter()
-            .map(|&(f, _, _)| {
-                (sets[f].idx_neg.len() + sets[f].idx_pos.len()) as u64 * TASK_BYTES_PER_EXAMPLE
-            })
+            .map(|&(f, _, _)| sets[f].ex.rows.len() as u64 * TASK_BYTES_PER_EXAMPLE)
             .collect();
         let mut fits: Vec<Option<Vec<f64>>> = Vec::with_capacity(pairs.len());
         while fits.len() < pairs.len() {
@@ -268,13 +272,12 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             fits.par_extend((start..end).into_par_iter().map(|k| {
                 let (f, cpos, cfrac) = pairs[k];
                 let t = &sets[f];
-                if t.idx_neg.is_empty() && t.idx_pos.is_empty() {
+                if t.ex.rows.is_empty() {
                     return None;
                 }
                 Some(mfn_from(
                     &x,
-                    &t.idx_pos,
-                    &t.idx_neg,
+                    &t.ex,
                     cpos,
                     cfrac * cpos,
                     &opts,

@@ -135,7 +135,9 @@ fn folds_reproduce_percolator_training_sets() {
     }
 }
 
-fn collision_reference() -> Vec<(String, Vec<(usize, usize, usize)>)> {
+type Split = (usize, usize, usize);
+
+fn collision_reference() -> Vec<(String, Vec<Split>)> {
     std::fs::read_to_string(data("fold_collision_percolator_v3.txt"))
         .unwrap()
         .lines()
@@ -167,7 +169,7 @@ fn colliding_scan_hashes_split_as_percolator_at_one_thread() {
     .unwrap();
     let norm = stdv(&pin);
     let fold = folds_by_spectrum(&pin.meta, 3, 42);
-    let got: Vec<(usize, usize, usize)> = (0..3u8)
+    let got: Vec<Split> = (0..3u8)
         .map(|f| {
             let train: Vec<usize> = (0..pin.meta.len()).filter(|&i| fold[i] != f).collect();
             let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i].label < 0).collect();

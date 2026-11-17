@@ -28,6 +28,7 @@ for d in json.load(open(f'{HERE}/datasets.json')):
     if rc != 0:
         summary[d['name']] = {'error': rc}
         print(d['name'], 'FAILED', rc, flush=True)
+        json.dump(summary, open(summary_path, 'w'), indent=1)
         continue
     r = ev.evaluate(f'{out}/{d["name"]}.xl.tsv', d['truth'])
     r['wall_s'] = round(time.time() - t, 1)

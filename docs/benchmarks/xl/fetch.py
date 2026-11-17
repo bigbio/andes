@@ -29,11 +29,13 @@ def size(url):
 
 
 def part(url, path, lo, hi):
+    done = lambda: os.path.exists(path) and os.path.getsize(path) == hi - lo + 1
     for _ in range(8):
-        if os.path.exists(path) and os.path.getsize(path) == hi - lo + 1:
+        if done():
             return
         subprocess.run(['curl', '-sS', '-f', '--max-time', '600', '-r', f'{lo}-{hi}', '-o', path, url])
-    raise RuntimeError(f'{path}: download failed')
+    if not done():
+        raise RuntimeError(f'{path}: download failed')
 
 
 def fetch_large(url, dest):
@@ -57,8 +59,10 @@ def main(data):
     for sub in ('raw', 'db', 'truth'):
         os.makedirs(f'{data}/{sub}', exist_ok=True)
     for rel, url in SMALL.items():
-        if not os.path.exists(f'{data}/{rel}'):
-            subprocess.run(['curl', '-sS', '-fL', '-o', f'{data}/{rel}', url], check=True)
+        dest = f'{data}/{rel}'
+        if not os.path.exists(dest):
+            subprocess.run(['curl', '-sS', '-fL', '-o', dest + '.tmp', url], check=True)
+            os.rename(dest + '.tmp', dest)
     for d in json.load(open(f'{HERE}/datasets.json')):
         fetch_large(d['url'], f'{data}/raw/{d["raw"]}')
 

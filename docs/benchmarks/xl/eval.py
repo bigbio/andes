@@ -100,11 +100,12 @@ def truth_for(spec):
 
 
 def at_actual(df, fdp=0.01):
-    d = df.sort_values('score', ascending=False)
+    d = df.assign(score=pd.to_numeric(df['score'], errors='coerce')).dropna(subset=['score'])
     t = f = best = 0
-    for v in d['true']:
-        t += v
-        f += not v
+    counts = d.groupby('score')['true'].agg(['sum', 'size']).sort_index(ascending=False)
+    for n_true, n in zip(counts['sum'], counts['size']):
+        t += int(n_true)
+        f += int(n - n_true)
         if f <= fdp * (t + f):
             best = max(best, t)
     return best
@@ -114,7 +115,7 @@ def evaluate(tsv, truth_spec, q=0.01):
     df = pd.read_csv(tsv, sep='\t', low_memory=False)
     tr = truth_for(truth_spec)
     tt = df[df['class'] == 'TT'].copy()
-    tt['true'] = [tr.is_true(r) for r in tt.itertuples(index=False)]
+    tt['true'] = pd.Series([tr.is_true(r) for r in tt.itertuples(index=False)], index=tt.index, dtype=bool)
     tt['rp'] = [tuple(sorted([(bare(r.alpha_peptide), int(r.alpha_site)), (bare(r.beta_peptide), int(r.beta_site))]))
                 for r in tt.itertuples(index=False)]
     out = {}

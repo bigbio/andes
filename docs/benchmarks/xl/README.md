@@ -38,8 +38,9 @@ python3 compare.py reference mytag
 - `true@1%`: true CSMs at andes q ≤ 1 %;
 - `fdp`: the actual false share of those CSMs;
 - `wcls`: the worst actual false share of any link class with at least 50 accepted CSMs;
-- `@act`: the true CSMs at an actual false share of 1 %, ranked by the andes score. This
-  measures the score independently of the FDR estimate.
+- `@act`: the true CSMs at an actual false share of 1 %, ranked by the andes score, with
+  each set of tied scores taken whole. This measures the score independently of the FDR
+  estimate.
 
 ## What xiSEARCH does that the andes crosslink search did not
 
@@ -77,7 +78,7 @@ All runs use 4 threads with `--precursor-tol 20ppm`, the search default. "Refere
 | cla_b1 | 1,322 (0.1 %) | 1,164 (0.0 %) | 1,226 (0.0 %) |
 | cla_b4 | 1,490 (0.0 %) | 1,442 (0.0 %) | 1,629 (0.0 %) |
 | **true CSMs at q ≤ 1 %** | 14,838 | 12,580 | **15,492** |
-| **true CSMs at actual 1 %** (`@act`) | 12,020 | 12,020 | **15,301** |
+| **true CSMs at actual 1 %** (`@act`) | 11,833 | 11,833 | **14,829** |
 
 Cells give true CSMs at andes q ≤ 1 %, with the actual false share in parentheses.
 
@@ -96,7 +97,7 @@ Cells give true CSMs at andes q ≤ 1 %, with the actual false share in parenthe
 
 Rejected (true CSMs at q ≤ 1 % / at actual 1 %, against the variant they were added to):
 
-- **Open-index retrieval for cleavable linkers**: 13,834 / 13,578 → 13,910 / 9,671. It finds
+- **Open-index retrieval for cleavable linkers**: 13,834 / 13,202 → 13,910 / 9,086. It finds
   overlapping peptides of one region (`SEQEIGKATAK` with `MIAKSEQEIGKATAK`) that share their
   fragments, and these give high-scoring false matches.
 - **Decoupled re-ranking** (each peptide scored without its partner's b/y peaks):

@@ -1589,7 +1589,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted;
 
-    let ms1_input = chimeric_active || mono_active;
+    // Crosslink search on Orbitrap data with MS1 (mzML, Thermo .raw): each precursor m/z moves
+    // to the dominant MS1 peak next to it (search::xl_search::PRECURSOR_SNAP_PPM).
+    let xl_snap = cli.xl.is_some() && (is_mzml || is_raw);
+    let mut xl_snapped = 0usize;
+    let ms1_input = chimeric_active || mono_active || xl_snap;
     let mut parse_stats = ParseStats::default();
     let mut mono_table: Vec<Option<MonoCorrection>> = Vec::new();
     let mut mono_stats = MonoStats::default();
@@ -1640,7 +1644,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if ms1_input && !(file_is_mzml || file_is_raw || file_is_d) {
+        let file_ms1 = file_is_mzml || file_is_raw || file_is_d;
+        let file_snap = xl_snap && (file_is_mzml || file_is_raw);
+        if (chimeric_active || mono_active) && !file_ms1 {
             return Err(format!(
                 "{} only supports mzML/.raw/.d inputs, got {}",
                 if chimeric_active {
@@ -1655,7 +1661,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let spectra_before = all_spectra.len();
         let mut run_scans = RunScans::default();
-        let file_stats = if ms1_input {
+        let file_stats = if ms1_input && file_ms1 {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
             let cap = remaining_cap;
@@ -1776,6 +1782,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk_spectra, prefix);
+                }
+                if file_snap {
+                    for (i, spec) in chunk_spectra.iter_mut().enumerate() {
+                        let ms1 = chunk_link
+                            .ms2_to_ms1
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .and_then(|m| chunk_link.ms1_peaks.get(m));
+                        if let Some(mz) = ms1.and_then(|p| {
+                            search::precursor_mono::snap_precursor_mz(
+                                p,
+                                spec.precursor_mz,
+                                search::xl_search::PRECURSOR_SNAP_PPM,
+                                search::xl_search::PRECURSOR_SNAP_RATIO,
+                            )
+                        }) {
+                            spec.precursor_mz = mz;
+                            xl_snapped += 1;
+                        }
+                    }
                 }
                 if mono_active {
                     correct_chunk(
@@ -2292,6 +2319,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.xl.is_some() {
+        if xl_snap {
+            eprintln!(
+                "[xl] {xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
+                search::xl_search::PRECURSOR_SNAP_PPM
+            );
+        }
         crate::xl_run::run_xl(
             &cli,
             &spectra,

@@ -2263,20 +2263,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let proteoform_fdr = cli.proteoform_fdr();
     let use_native = cli.rescore_native;
     let use_percolator = cli.rescore || cli.rescore_native;
-    if !use_percolator {
-        if cli.psm_fdr.is_some() || cli.pep.is_some() {
-            let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
-                (true, true) => "--psm-fdr and --pep",
-                (true, false) => "--psm-fdr",
-                _ => "--pep",
-            };
-            eprintln!(
-                "WARN: {which} set without --rescore or --rescore-native, so no rescoring \
-                 runs and no filtered .tsv is written. andes does not compute FDR on its \
-                 own; the PIN is written for Percolator. Add --rescore to run Percolator \
-                 in-process."
-            );
-        }
+    if !use_percolator && (cli.psm_fdr.is_some() || cli.pep.is_some()) {
+        let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
+            (true, true) => "--psm-fdr and --pep",
+            (true, false) => "--psm-fdr",
+            _ => "--pep",
+        };
+        eprintln!(
+            "WARN: {which} set without --rescore or --rescore-native, so no rescoring \
+             runs and no filtered .tsv is written. andes does not compute FDR on its \
+             own; the PIN is written for Percolator. Add --rescore to run Percolator \
+             in-process."
+        );
     }
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();

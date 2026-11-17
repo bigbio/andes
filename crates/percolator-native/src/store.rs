@@ -20,6 +20,7 @@ pub struct Store {
     nrows: usize,
     block_rows: usize,
     data: Data,
+    budget: Arc<Budget>,
     _ram: Reservation,
 }
 
@@ -60,7 +61,23 @@ impl Store {
                     .for_each(|(i, c)| f(i * rows, c));
             }
             Data::Spill(_) => {
-                let batch = rayon::current_num_threads().max(1);
+                let block = (self.block_rows * self.nfeat * 4) as u64;
+                let threads = rayon::current_num_threads().max(1) as u64;
+                let batch = if block == 0 {
+                    0
+                } else {
+                    (self.budget.available() / block).min(threads)
+                };
+                let held = if batch >= 2 {
+                    Reservation::take(&self.budget, batch * block)
+                } else {
+                    None
+                };
+                let Some(_held) = held else {
+                    self.for_each_block(|start, block| f(start, block));
+                    return;
+                };
+                let batch = batch as usize;
                 let mut pending: Vec<(usize, Vec<f32>)> = Vec::with_capacity(batch);
                 self.for_each_block(|start, block| {
                     pending.push((start, block.to_vec()));
@@ -202,6 +219,7 @@ impl StoreBuilder {
                     nrows: self.nrows,
                     block_rows: self.block_rows,
                     data: Data::Spill(path.clone()),
+                    budget: self.budget.clone(),
                     _ram: Reservation::none(),
                 };
                 flushed.map_err(|e| format!("flush spill file {}: {e}", path.display()))?;
@@ -213,6 +231,7 @@ impl StoreBuilder {
             nrows: self.nrows,
             block_rows: self.block_rows,
             data,
+            budget: self.budget.clone(),
             _ram: std::mem::replace(&mut self.ram, Reservation::none()),
         })
     }
@@ -270,5 +289,58 @@ mod tests {
         assert_eq!(collect(&spill), b);
         drop(spill);
         assert_eq!(std::fs::read_dir(spill_dir.path()).unwrap().count(), 0);
+    }
+
+    fn block_sums(s: &Store, threads: usize, live: &AtomicU64, peak: &AtomicU64) -> Vec<u64> {
+        let br = s.block_rows();
+        let nf = s.nfeat();
+        let out: Vec<AtomicU64> = (0..s.len().div_ceil(br))
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        let block = (br * nf * 4) as u64;
+        let budget = s.budget.clone();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                s.par_for_each_block(|start, b| {
+                    let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    if now > 1 {
+                        assert!(budget.total() - budget.available() >= now * block);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    let mut acc = 0.0f64;
+                    for row in b.chunks_exact(nf) {
+                        for (j, &x) in row.iter().enumerate() {
+                            acc += f64::from(x) * (j as f64 + 0.25);
+                        }
+                    }
+                    out[start / br].store(acc.to_bits(), Ordering::SeqCst);
+                    live.fetch_sub(1, Ordering::SeqCst);
+                });
+            });
+        out.into_iter().map(AtomicU64::into_inner).collect()
+    }
+
+    #[test]
+    fn spilled_parallel_pass_holds_only_the_blocks_the_budget_allows() {
+        let (nrows, nfeat) = (100, 4);
+        let block = 3 * nfeat as u64 * 4;
+        let ram_dir = tempfile::tempdir().unwrap();
+        let ram = build(u64::MAX, ram_dir.path(), nrows, nfeat);
+        let reference = block_sums(&ram, 16, &AtomicU64::new(0), &AtomicU64::new(0));
+        for (limit, most) in [(1, 1), (block + block / 2, 1), (3 * block + block / 2, 3)] {
+            let dir = tempfile::tempdir().unwrap();
+            let spill = build(limit, dir.path(), nrows, nfeat);
+            assert!(spill.is_spilled());
+            let peak = AtomicU64::new(0);
+            let got = block_sums(&spill, 16, &AtomicU64::new(0), &peak);
+            assert_eq!(got, reference, "limit {limit}");
+            let peak = peak.into_inner();
+            assert!(peak <= most, "limit {limit}: {peak} blocks in flight");
+            assert_eq!(spill.budget.available(), limit);
+        }
     }
 }

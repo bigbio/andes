@@ -11,20 +11,27 @@ pub struct Rows {
     data: RowData,
     pub nrows: usize,
     pub ncols: usize,
+    stride: usize,
     _ram: Reservation,
 }
 
 enum RowData {
-    Ram(Vec<f64>),
+    Ram(Vec<f32>),
     Spill(PathBuf),
 }
 
 static ROWS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMut(usize, &[f64])) {
+pub(crate) const LANES: usize = 8;
+
+pub(crate) fn stride_for(ncols: usize) -> usize {
+    ncols.div_ceil(LANES) * LANES
+}
+
+pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMut(usize, &[f32])) {
     let nf = store.nfeat();
-    let ncols = nf + 1;
-    let mut buf = vec![0.0f64; ncols];
+    let stride = stride_for(nf + 1);
+    let mut buf = vec![0.0f32; stride];
     buf[nf] = 1.0;
     if idx.is_empty() {
         return;
@@ -50,7 +57,7 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
                 .zip(&norm.mean)
                 .zip(&norm.inv_sd)
             {
-                *d = (f64::from(x) - m) * sd;
+                *d = ((f64::from(x) - m) * sd) as f32;
             }
             put(p, &buf);
             next += 1;
@@ -68,14 +75,16 @@ pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMu
 impl Rows {
     pub fn gather(store: &Store, norm: &Norm, idx: &[usize]) -> Rows {
         let ncols = store.nfeat() + 1;
-        let mut data = vec![0.0f64; idx.len() * ncols];
+        let stride = stride_for(ncols);
+        let mut data = vec![0.0f32; idx.len() * stride];
         fill(store, norm, idx, |p, row| {
-            data[p * ncols..(p + 1) * ncols].copy_from_slice(row)
+            data[p * stride..(p + 1) * stride].copy_from_slice(row)
         });
         Rows {
             data: RowData::Ram(data),
             nrows: idx.len(),
             ncols,
+            stride,
             _ram: Reservation::none(),
         }
     }
@@ -87,7 +96,8 @@ impl Rows {
         budget: &Arc<Budget>,
     ) -> Result<Rows, String> {
         let ncols = store.nfeat() + 1;
-        let bytes = (idx.len() * ncols * 8) as u64;
+        let stride = stride_for(ncols);
+        let bytes = (idx.len() * stride * 4) as u64;
         if let Some(ram) = Reservation::take(budget, bytes) {
             let mut rows = Rows::gather(store, norm, idx);
             rows._ram = ram;
@@ -103,6 +113,7 @@ impl Rows {
             data: RowData::Spill(path.clone()),
             nrows: idx.len(),
             ncols,
+            stride,
             _ram: Reservation::none(),
         };
         let file = File::create(&path)
@@ -110,17 +121,17 @@ impl Rows {
         file.set_len(bytes)
             .map_err(|e| format!("size spill file {}: {e}", path.display()))?;
         let mut file = file;
-        let mut bytes_row = vec![0u8; ncols * 8];
+        let mut bytes_row = vec![0u8; stride * 4];
         let mut failed = None;
         fill(store, norm, idx, |p, row| {
             if failed.is_some() {
                 return;
             }
-            for (c, v) in bytes_row.chunks_exact_mut(8).zip(row) {
+            for (c, v) in bytes_row.chunks_exact_mut(4).zip(row) {
                 c.copy_from_slice(&v.to_le_bytes());
             }
             let res = file
-                .seek(SeekFrom::Start((p * ncols * 8) as u64))
+                .seek(SeekFrom::Start((p * stride * 4) as u64))
                 .and_then(|_| file.write_all(&bytes_row));
             if let Err(e) = res {
                 failed = Some(e);
@@ -134,10 +145,21 @@ impl Rows {
 
     pub fn from_dense(data: Vec<f64>, nrows: usize, ncols: usize) -> Rows {
         assert_eq!(data.len(), nrows * ncols);
+        let stride = stride_for(ncols);
+        let mut out = vec![0.0f32; nrows * stride];
+        for (dst, src) in out
+            .chunks_exact_mut(stride)
+            .zip(data.chunks_exact(ncols.max(1)))
+        {
+            for (d, &v) in dst.iter_mut().zip(src) {
+                *d = v as f32;
+            }
+        }
         Rows {
-            data: RowData::Ram(data),
+            data: RowData::Ram(out),
             nrows,
             ncols,
+            stride,
             _ram: Reservation::none(),
         }
     }
@@ -146,14 +168,14 @@ impl Rows {
         matches!(self.data, RowData::Spill(_))
     }
 
-    pub fn row(&self, i: usize) -> &[f64] {
+    pub fn row(&self, i: usize) -> &[f32] {
         match &self.data {
-            RowData::Ram(v) => &v[i * self.ncols..(i + 1) * self.ncols],
+            RowData::Ram(v) => &v[i * self.stride..(i + 1) * self.stride],
             RowData::Spill(_) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
         }
     }
 
-    pub(crate) fn scan(&self, ids: &[usize], mut f: impl FnMut(usize, &[f64])) {
+    pub(crate) fn scan(&self, ids: &[usize], mut f: impl FnMut(usize, &[f32])) {
         match &self.data {
             RowData::Ram(_) => {
                 for (k, &i) in ids.iter().enumerate() {
@@ -163,9 +185,9 @@ impl Rows {
             RowData::Spill(path) => {
                 let file = File::open(path).expect("open rows spill file");
                 let mut r = BufReader::with_capacity(8 << 20, file);
-                let width = self.ncols * 8;
+                let width = self.stride * 4;
                 let mut bytes = vec![0u8; width];
-                let mut vals = vec![0.0f64; self.ncols];
+                let mut vals = vec![0.0f32; self.stride];
                 let mut cur = 0usize;
                 for (k, &i) in ids.iter().enumerate() {
                     assert!(i >= cur, "Rows::scan: ids must increase");
@@ -174,8 +196,8 @@ impl Rows {
                             .expect("seek rows spill file");
                     }
                     r.read_exact(&mut bytes).expect("read rows spill file");
-                    for (v, c) in vals.iter_mut().zip(bytes.chunks_exact(8)) {
-                        *v = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                    for (v, c) in vals.iter_mut().zip(bytes.chunks_exact(4)) {
+                        *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                     }
                     f(k, &vals);
                     cur = i + 1;
@@ -189,6 +211,26 @@ impl Drop for Rows {
     fn drop(&mut self) {
         if let RowData::Spill(p) = &self.data {
             let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+pub(crate) fn dot_row(x: &[f32], p: &[f64]) -> f64 {
+    let mut acc = [0.0f64; LANES];
+    for (xc, pc) in x.chunks_exact(LANES).zip(p.chunks_exact(LANES)) {
+        for l in 0..LANES {
+            acc[l] += f64::from(xc[l]) * pc[l];
+        }
+    }
+    ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
+}
+
+pub(crate) fn axpy_row(a: f64, x: &[f32], r: &mut [f64]) {
+    if a != 0.0 {
+        for (rc, xc) in r.chunks_exact_mut(LANES).zip(x.chunks_exact(LANES)) {
+            for l in 0..LANES {
+                rc[l] += a * f64::from(xc[l]);
+            }
         }
     }
 }
@@ -239,7 +281,7 @@ impl Train<'_> {
         }
     }
 
-    fn scan(&self, subset: &[usize], f: impl FnMut(usize, &[f64])) {
+    fn scan(&self, subset: &[usize], f: impl FnMut(usize, &[f32])) {
         let ids: Vec<usize> = subset.iter().map(|&i| self.x_row(i)).collect();
         self.x.scan(&ids, f);
     }
@@ -294,14 +336,6 @@ fn dscal(a: f64, x: &mut [f64]) {
     }
 }
 
-fn gemv_t(row: &[f64], p: &[f64]) -> f64 {
-    let mut t = 0.0;
-    for (&a, &b) in row.iter().zip(p) {
-        t += a * b;
-    }
-    t
-}
-
 struct CgWork {
     z: Vec<f64>,
     q: Vec<f64>,
@@ -323,17 +357,18 @@ fn cgls(
     let active = subset.len();
     let z = &mut ws.z[..active];
     let q = &mut ws.q[..active];
+    let n = t.x.ncols;
     let r = &mut ws.r;
     let p = &mut ws.p;
     r.fill(0.0);
     t.scan(subset, |k, row| {
         let ii = subset[k];
         z[k] = t.c(ii) * (t.y(ii) - o[ii]);
-        daxpy(z[k], row, r);
+        axpy_row(z[k], row, r);
     });
     daxpy(-lambda, beta, r);
     p.copy_from_slice(r);
-    let mut omega1 = ddot(r, r);
+    let mut omega1 = ddot(&r[..n], &r[..n]);
     let mut omega_p = omega1;
     let epsilon2 = epsilon * epsilon;
     let mut cgiter = 0usize;
@@ -341,7 +376,7 @@ fn cgls(
         cgiter += 1;
         let mut omega_q = 0.0;
         t.scan(subset, |k, row| {
-            q[k] = gemv_t(row, p);
+            q[k] = dot_row(row, p);
             omega_q += t.c(subset[k]) * q[k] * q[k];
         });
         let gamma = omega1 / (lambda * omega_p + omega_q);
@@ -354,17 +389,17 @@ fn cgls(
             let ii = subset[k];
             o[ii] += q[k];
             z[k] -= t.c(ii) * q[k];
-            daxpy(z[k], row, r);
+            axpy_row(z[k], row, r);
         });
         let omega_z = ddot(z, z);
-        omega1 = ddot(r, r);
+        omega1 = ddot(&r[..n], &r[..n]);
         if omega1 < epsilon2 * omega_z {
             return true;
         }
         let scale = omega1 * inv_omega2;
         dscal(scale, p);
         daxpy(1.0, r, p);
-        omega_p = ddot(p, p);
+        omega_p = ddot(&p[..n], &p[..n]);
     }
     false
 }
@@ -450,22 +485,22 @@ pub fn l2_svm_mfn(
         cneg,
     };
     let n = x.ncols;
-    let n0 = n - 1;
+    let stride = x.stride;
     let m = t.len();
     let lambda = opts.lambda;
     let mut epsilon = opts.big_epsilon;
     let mut cgitermax = opts.small_cgitermax;
-    let mut w = vec![0.0f64; n];
+    let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
     let mut subset = vec![0usize; m];
-    let (mut active, mut f) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w, &w));
-    let mut w_bar = vec![0.0f64; n];
+    let (mut active, mut f) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
+    let mut w_bar = vec![0.0f64; stride];
     let mut o_bar = vec![0.0f64; m];
     let mut ws = CgWork {
         z: vec![0.0; m],
         q: vec![0.0; m],
-        r: vec![0.0; n],
-        p: vec![0.0; n],
+        r: vec![0.0; stride],
+        p: vec![0.0; stride],
     };
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
     let mut ini = false;
@@ -487,7 +522,7 @@ pub fn l2_svm_mfn(
         let mut rest = subset[active..].to_vec();
         rest.sort_unstable();
         t.scan(&rest, |k, row| {
-            o_bar[rest[k]] = ddot(&row[..n0], &w_bar[..n0]) + w_bar[n0];
+            o_bar[rest[k]] = dot_row(row, &w_bar);
         });
         if !ini {
             cgitermax = opts.cgitermax;
@@ -510,6 +545,7 @@ pub fn l2_svm_mfn(
                 epsilon = opts.epsilon;
                 continue;
             }
+            w_bar.truncate(n);
             return w_bar;
         }
         let delta = line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas);
@@ -519,12 +555,14 @@ pub fn l2_svm_mfn(
         for (oi, &ob) in o.iter_mut().zip(&o_bar) {
             *oi += delta * (ob - *oi);
         }
-        let (a, fl) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w, &w));
+        let (a, fl) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
         active = a;
         f = fl;
         if (f - f_old).abs() < opts.relative_stop_eps * f_old.abs() {
+            w.truncate(n);
             return w;
         }
     }
+    w.truncate(n);
     w
 }

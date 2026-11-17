@@ -38,10 +38,10 @@ fn gradient(x: &Rows, pos: &[usize], neg: &[usize], cpos: f64, cneg: f64, w: &[f
     for (set, y, c) in [(neg, -1.0, cneg), (pos, 1.0, cpos)] {
         for &i in set {
             let row = x.row(i);
-            let o: f64 = row.iter().zip(w).map(|(a, b)| a * b).sum();
+            let o: f64 = row.iter().zip(w).map(|(a, b)| f64::from(*a) * b).sum();
             if 1.0 - y * o > 0.0 {
                 for (gk, &xk) in g.iter_mut().zip(row) {
-                    *gk += c * (o - y) * xk;
+                    *gk += c * (o - y) * f64::from(xk);
                 }
             }
         }
@@ -68,7 +68,13 @@ fn cneg_weights_negatives() {
     assert!(w3[3] < w1[3], "bias {} -> {}", w1[3], w3[3]);
     let mean_neg = |w: &[f64]| {
         neg.iter()
-            .map(|&i| x.row(i).iter().zip(w).map(|(a, b)| a * b).sum::<f64>())
+            .map(|&i| {
+                x.row(i)
+                    .iter()
+                    .zip(w)
+                    .map(|(a, b)| f64::from(*a) * b)
+                    .sum::<f64>()
+            })
             .sum::<f64>()
             / neg.len() as f64
     };
@@ -91,7 +97,10 @@ fn rows_gather_normalises_and_appends_bias() {
     let norm = stdv(&pin);
     let x = Rows::gather(&pin.rows, &norm, &[5, 0, 200]);
     assert_eq!((x.nrows, x.ncols), (3, 6));
-    assert_eq!(x.row(1)[0], (3.109375 - norm.mean[0]) * norm.inv_sd[0]);
+    assert_eq!(
+        x.row(1)[0],
+        ((3.109375 - norm.mean[0]) * norm.inv_sd[0]) as f32
+    );
     assert_eq!(x.row(2)[5], 1.0);
     let all: Vec<usize> = (0..pin.meta.len()).collect();
     let full = Rows::gather(&pin.rows, &norm, &all);

@@ -965,42 +965,42 @@ fn search_spectrum(
         None => {
             let range = &prepared.params.charge_range;
             let lo = (*range.start()).max(cfg.min_precursor_charge);
-            let mut best: Option<XlSpectrumResult> = None;
-            let mut pairs: Vec<(PairKey, f32)> = Vec::new();
-            for z in lo..=*range.end() {
-                let Some(r) =
-                    search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
-                else {
-                    continue;
-                };
-                let score = |r: &XlSpectrumResult| {
-                    r.csm
-                        .as_ref()
-                        .map(|c| combined_pair_score(c.pair_score, c.second_pair_score))
-                };
-                let better = match &best {
-                    None => true,
-                    Some(b) => match (score(&r), score(b)) {
-                        (Some(x), Some(y)) => x > y,
-                        (Some(_), None) => true,
-                        _ => false,
-                    },
-                };
-                pairs.extend(r.pairs.iter().cloned());
-                if better {
-                    best = Some(r);
-                }
-            }
-            // The runner-up is the best other peptide pair at any charge searched.
-            if let Some(b) = best.as_mut() {
-                if let Some(c) = b.csm.as_mut() {
-                    c.second_pair_score = runner_up(&pairs, &c.pair_key);
-                }
-                b.pairs = pairs;
-            }
-            best
+            choose_charge((lo..=*range.end()).filter_map(|z| {
+                search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
+            }))
         }
     }
+}
+
+/// The result of a spectrum without a precursor charge: the charge with the best combined
+/// pair score, which keeps its own runner-up. The peptide pairs of every charge stay with it;
+/// a search over several linkers takes the runner-up from them once the linkers are merged.
+fn choose_charge(trials: impl Iterator<Item = XlSpectrumResult>) -> Option<XlSpectrumResult> {
+    let score = |r: &XlSpectrumResult| {
+        r.csm
+            .as_ref()
+            .map(|c| combined_pair_score(c.pair_score, c.second_pair_score))
+    };
+    let mut best: Option<XlSpectrumResult> = None;
+    let mut pairs: Vec<(PairKey, f32)> = Vec::new();
+    for r in trials {
+        let better = match &best {
+            None => true,
+            Some(b) => match (score(&r), score(b)) {
+                (Some(x), Some(y)) => x > y,
+                (Some(_), None) => true,
+                _ => false,
+            },
+        };
+        pairs.extend(r.pairs.iter().cloned());
+        if better {
+            best = Some(r);
+        }
+    }
+    if let Some(b) = best.as_mut() {
+        b.pairs = pairs;
+    }
+    best
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1392,6 +1392,75 @@ mod tests {
         );
         assert_eq!(combined_pair_score(40.0, Some(45.0)), 40.0);
         assert!(combined_pair_score(40.0, Some(10.0)) > combined_pair_score(40.0, Some(39.0)));
+    }
+
+    fn trial(z: u8, pair: &str, score: f32, second: Option<(&str, f32)>) -> XlSpectrumResult {
+        let key = |p: &str| [p.as_bytes().to_vec(), b"PEPTIDEK".to_vec()];
+        let hit = PeptideHit {
+            pep: 0,
+            site: andes_xl::sites::LinkSite {
+                pos: 0,
+                n_term: false,
+                c_term: false,
+            },
+            form: andes_xl::crosslinker::LinkForm::Intact,
+            score,
+            form_scores: Default::default(),
+            n_sites: 1,
+            gap_next: None,
+            mass_err_ppm: 0.0,
+        };
+        let mut pairs = vec![(key(pair), score)];
+        pairs.extend(second.map(|(p, s)| (key(p), s)));
+        XlSpectrumResult {
+            spec_idx: 0,
+            charge: z,
+            precursor_mass: 0.0,
+            doublets: Default::default(),
+            csm: Some(Csm {
+                alpha: hit,
+                beta: hit,
+                pair_key: key(pair),
+                pair_score: score,
+                second_pair_score: second.map(|(_, s)| s),
+                kind: PairKind::Full,
+                iso: 0,
+                class: PairClass::TT,
+                intra: true,
+                homotypic: false,
+                precursor_err_ppm: 0.0,
+                b_stub_ions: 0,
+                n_mass_pairs: 1,
+                alpha_doublet: None,
+                beta_doublet: None,
+                rescores: Default::default(),
+                charge: z,
+            }),
+            oracle: None,
+            linker: 0,
+            pairs,
+        }
+    }
+
+    #[test]
+    fn an_uncharged_spectrum_keeps_the_runner_up_of_its_chosen_charge() {
+        // Charge 3 (100 / 50, combined 115) beats charge 4 (110 / 109, combined 110.3).
+        let r = choose_charge(
+            [
+                trial(3, "AK", 100.0, Some(("BK", 50.0))),
+                trial(4, "CK", 110.0, Some(("DK", 109.0))),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        let c = r.csm.as_ref().unwrap();
+        assert_eq!(
+            (r.charge, c.pair_score, c.second_pair_score),
+            (3, 100.0, Some(50.0))
+        );
+        // Every charge's pairs stay for a merge over several linkers.
+        assert_eq!(r.pairs.len(), 4);
+        assert_eq!(runner_up(&r.pairs, &c.pair_key), Some(110.0));
     }
 
     #[test]

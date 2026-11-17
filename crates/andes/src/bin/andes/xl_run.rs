@@ -511,6 +511,7 @@ pub(crate) fn run_xl(
         }
     }
     if runs.len() > 1 {
+        settle_runner_ups(&mut results);
         let mut by: Vec<usize> = vec![0; runs.len()];
         for r in results.iter().filter(|r| r.csm.is_some()) {
             by[r.linker] += 1;
@@ -607,9 +608,8 @@ pub(crate) fn run_xl(
     Ok(())
 }
 
-/// One result per spectrum: the CSM with the best pair score over the linkers. Its runner-up
-/// (the delta term of the CSM score) is the best other peptide pair found for the spectrum by
-/// any linker at any charge searched.
+/// One result per spectrum: the CSM with the best pair score over the linkers, with the
+/// peptide pairs every linker found for it (see `settle_runner_ups`).
 fn merge_linkers(
     into: Vec<XlSpectrumResult>,
     other: Vec<XlSpectrumResult>,
@@ -642,9 +642,18 @@ fn merge_one(r: XlSpectrumResult, o: XlSpectrumResult) -> XlSpectrumResult {
         (r, o)
     };
     win.pairs.extend(lose.pairs);
-    let c = win.csm.as_mut().expect("both have a CSM");
-    c.second_pair_score = search::xl_search::runner_up(&win.pairs, &c.pair_key);
     win
+}
+
+/// After several linkers are merged: each CSM's runner-up becomes the best other peptide pair
+/// any linker found for the spectrum at any charge searched. A single-linker search keeps the
+/// runner-up of the chosen charge.
+fn settle_runner_ups(results: &mut [XlSpectrumResult]) {
+    for r in results.iter_mut() {
+        if let Some(c) = r.csm.as_mut() {
+            c.second_pair_score = search::xl_search::runner_up(&r.pairs, &c.pair_key);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +735,7 @@ mod tests {
         for r in it {
             acc = merge_linkers(acc, vec![r]);
         }
+        settle_runner_ups(&mut acc);
         let c = acc[0].csm.as_ref().unwrap();
         (acc[0].linker, c.pair_score, c.second_pair_score)
     }
@@ -754,6 +764,14 @@ mod tests {
         let a = result(0, None, &[]);
         let b = result(1, Some(("AK", 90.0)), &[("AK", 90.0)]);
         assert_eq!(merged(vec![a, b]), (1, 90.0, None));
+        // ... and its runner-up still covers its pairs at other charges.
+        let a = result(0, None, &[]);
+        let b = result(
+            1,
+            Some(("AK", 100.0)),
+            &[("AK", 100.0), ("BK", 50.0), ("CK", 110.0)],
+        );
+        assert_eq!(merged(vec![a, b]), (1, 100.0, Some(110.0)));
     }
 
     #[test]

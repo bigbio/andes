@@ -31,7 +31,11 @@ pub(crate) const GRAM_BYTES: usize = 64 << 20;
 
 const GROUP: usize = 4;
 
-const REACH: f64 = 2.0;
+const REACH_MIN: f64 = 1.0;
+
+const REACH_START: f64 = 2.0;
+
+const REACH_MAX: f64 = 2.0;
 
 const FRESH: u32 = u32::MAX;
 
@@ -698,6 +702,9 @@ struct Screen {
     delta_at: Vec<f64>,
     reach: Vec<f64>,
     slack: f64,
+    lim: f64,
+    last: f64,
+    redo: bool,
 }
 
 impl Screen {
@@ -710,15 +717,23 @@ impl Screen {
             delta_at: Vec::new(),
             reach: Vec::new(),
             slack: 0.0,
+            lim: REACH_START,
+            last: REACH_START,
+            redo: false,
         }
     }
 
     fn bound(&mut self, w_bar: &[f64]) {
+        if !self.lim.is_finite() {
+            self.reach.fill(f64::INFINITY);
+            return;
+        }
+        let lim = self.lim;
         let w = self.w_at.last().expect("current w");
         let e: Vec<f64> = w
             .iter()
             .zip(w_bar)
-            .map(|(&a, &b)| a + REACH * (b - a))
+            .map(|(&a, &b)| a + lim * (b - a))
             .collect();
         let big = self
             .w_at
@@ -732,10 +747,6 @@ impl Screen {
             .map(|wr| dist(w, wr).max(dist(&e, wr)))
             .collect();
         self.slack = 1e-10 * big;
-    }
-
-    fn open_all(&mut self) {
-        self.reach.fill(f64::INFINITY);
     }
 
     fn stale(&self, i: usize) -> bool {
@@ -768,6 +779,7 @@ fn screened_pass(
     let delta_at: &[f64] = &sc.delta_at;
     let reach: &[f64] = &sc.reach;
     let slack = sc.slack;
+    let redo = sc.redo;
     let since = &mut sc.since;
     o_bar
         .par_chunks_mut(CHUNK)
@@ -782,6 +794,9 @@ fn screened_pass(
                 .enumerate()
             {
                 let k = c * CHUNK + j;
+                if redo && *s == FRESH {
+                    continue;
+                }
                 let r = if *s == FRESH { u } else { *s as usize };
                 if !act[k] {
                     let lim =
@@ -1021,6 +1036,8 @@ pub(crate) fn mfn_from(
             *sk = b - a;
         }
         if let Some(sc) = sc.as_mut() {
+            sc.lim = (1.25 * sc.last).clamp(REACH_MIN, REACH_MAX);
+            sc.redo = false;
             sc.bound(&w_bar);
             screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
         } else {
@@ -1067,15 +1084,26 @@ pub(crate) fn mfn_from(
             w_bar.truncate(n);
             return w_bar;
         }
-        let (mut delta, reach) =
+        let (mut delta, mut need) =
             line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, sc.as_ref());
-        let within = reach <= REACH * (1.0 - 1e-6);
         if let Some(sc) = sc.as_mut() {
-            if !within && sc.any_stale() {
-                sc.open_all();
+            loop {
+                let within = need <= sc.lim * (1.0 - 1e-6);
+                if within || !sc.any_stale() {
+                    break;
+                }
+                sc.lim = if need.is_finite() {
+                    (1.25 * need).max(2.0 * sc.lim)
+                } else {
+                    f64::INFINITY
+                };
+                sc.redo = true;
+                sc.bound(&w_bar);
                 screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
-                delta = line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, None).0;
+                (delta, need) =
+                    line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, Some(&*sc));
             }
+            sc.last = delta;
         }
         let f_old = f;
         dscal(1.0 - delta, &mut w);

@@ -81,8 +81,7 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
                     });
                 }
             }
-            zip.extract(&staging)
-                .map_err(|e| corrupt(format!("zip entry could not be extracted ({e})")))?;
+            unpack_zip(&mut zip, &staging, archive)?;
         }
         DArchiveKind::Tar => unpack_tar(BufReader::new(file), &staging, archive)?,
         DArchiveKind::TarGz => {
@@ -116,6 +115,49 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
     let target = dir.join(format!("{run}.d"));
     std::fs::rename(&found, &target).map_err(|e| io(&target, e))?;
     Ok(target)
+}
+
+fn unpack_zip<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    dir: &Path,
+    archive: &Path,
+) -> Result<(), DArchiveError> {
+    let corrupt = |message: String| DArchiveError::Corrupt {
+        path: archive.display().to_string(),
+        message,
+    };
+    let io = |target: &Path, source: std::io::Error| DArchiveError::Io {
+        path: archive.display().to_string(),
+        dir: target.display().to_string(),
+        source,
+    };
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| corrupt(format!("zip entry could not be extracted ({e})")))?;
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(corrupt(format!(
+                "zip entry '{}' points outside the archive folder",
+                entry.name()
+            )));
+        };
+        let out = dir.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| io(&out, e))?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
+        }
+        let mut file = File::create(&out).map_err(|e| io(&out, e))?;
+        std::io::copy(&mut entry, &mut file).map_err(|e| {
+            corrupt(format!(
+                "zip entry '{}' could not be extracted ({e})",
+                entry.name()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn unpack_tar<R: Read>(reader: R, dir: &Path, archive: &Path) -> Result<(), DArchiveError> {
@@ -318,6 +360,37 @@ mod tests {
             matches!(&r, Err(DArchiveError::Symlink { entry, .. }) if entry == "r.d/analysis.tdf"),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn a_zip_entry_outside_the_archive_folder_is_refused() {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("../escaped.txt", opts).unwrap();
+        w.write_all(b"x").unwrap();
+        let (t, r) = unpack("up.d.zip", &w.finish().unwrap().into_inner());
+        assert!(matches!(r, Err(DArchiveError::Corrupt { .. })), "{r:?}");
+        assert!(!t.path().join("out").join("escaped.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_entry_permissions_are_not_applied() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().unix_permissions(0o4777);
+        for (name, data) in RUN_FILES {
+            w.start_file(format!("s.d/{name}"), opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        let (_t, r) = unpack("s.d.zip", &w.finish().unwrap().into_inner());
+        assert_run(&r, "s");
+        let mode = std::fs::metadata(r.unwrap().join("analysis.tdf"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7000, 0, "mode {mode:o}");
+        assert_ne!(mode & 0o777, 0o777, "mode {mode:o}");
     }
 
     #[test]

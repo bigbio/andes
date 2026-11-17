@@ -36,6 +36,10 @@ impl Store {
         self.nfeat
     }
 
+    pub fn is_spilled(&self) -> bool {
+        matches!(self.data, Data::Spill(_))
+    }
+
     pub fn block_rows(&self) -> usize {
         self.block_rows
     }

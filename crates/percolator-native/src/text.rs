@@ -41,6 +41,29 @@ impl Texts {
         self.len() == 0
     }
 
+    pub(crate) fn spill(&mut self, budget: &Budget) -> Result<(), String> {
+        let Data::Ram(v) = &self.data else {
+            return Ok(());
+        };
+        let k = TEXT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = budget.spill_dir().join(format!(
+            "percolator-native-{}-{}.txt",
+            std::process::id(),
+            k
+        ));
+        let res = std::fs::write(&path, v).and_then(|()| File::open(&path));
+        let file = match res {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(format!("spill file {}: {e}", path.display()));
+            }
+        };
+        self.data = Data::Spill(path, Mutex::new(file));
+        self._ram = Reservation::none();
+        Ok(())
+    }
+
     pub fn get(&self, i: usize) -> Result<RowText, String> {
         let (a, b) = (self.offsets[i], self.offsets[i + 1]);
         let bytes = match &self.data {

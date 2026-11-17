@@ -41,6 +41,17 @@ impl Budget {
         self.reserve_keeping(bytes, 0)
     }
 
+    pub fn take_up_to(&self, bytes: u64) -> u64 {
+        let mut got = 0;
+        let _ = self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |r| {
+                got = r.min(bytes);
+                Some(r - got)
+            });
+        got
+    }
+
     pub fn release(&self, bytes: u64) {
         self.remaining.fetch_add(bytes, Ordering::AcqRel);
     }
@@ -64,6 +75,16 @@ impl Reservation {
             budget: Some(budget.clone()),
             bytes,
         })
+    }
+
+    pub fn grow_up_to(&mut self, budget: &Arc<Budget>, bytes: u64) {
+        let got = budget.take_up_to(bytes);
+        self.budget = Some(budget.clone());
+        self.bytes += got;
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
     }
 
     pub fn grow(&mut self, budget: &Arc<Budget>, bytes: u64, keep: u64) -> bool {

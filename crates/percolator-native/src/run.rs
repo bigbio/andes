@@ -1,5 +1,5 @@
 use crate::args::{parse, Args};
-use crate::cv::{train, CvConfig};
+use crate::cv::{make_room, train, CvConfig};
 use crate::direction::init_directions;
 use crate::folds::folds_by_spectrum;
 use crate::merge::merge_folds;
@@ -54,7 +54,7 @@ pub fn run(args: &[String], limit: MemLimit) -> Result<(), String> {
         .num_threads(a.threads)
         .build()
         .map_err(|e| format!("thread pool: {e}"))?;
-    let pin = pool.install(|| read_pin(&a.pin, limit))?;
+    let mut pin = pool.install(|| read_pin(&a.pin, limit))?;
     if pin.meta.is_empty() {
         return Err("ERROR: Reading tab file, could not find any PSMs.".to_string());
     }
@@ -75,6 +75,7 @@ pub fn run(args: &[String], limit: MemLimit) -> Result<(), String> {
     let scores = if a.static_model {
         static_scores(&pin, &a, &is_decoy)?
     } else {
+        make_room(&mut pin)?;
         trained_scores(&pin, &a, &is_decoy, &pool)?
     };
     finish(&pin, &a, &is_decoy, &scores, mode)

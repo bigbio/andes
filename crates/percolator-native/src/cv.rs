@@ -137,6 +137,43 @@ fn train_set(fold: &Fold, s: &[f64], fdr: f64) -> TrainSet {
     TrainSet { ex, negatives }
 }
 
+pub(crate) fn make_room(pin: &mut Pin) -> Result<(), String> {
+    let n = pin.rows.len();
+    let need = Rows::bytes_for(n, pin.rows.nfeat()) + (n as u64 * 2 / 3) * TASK_BYTES_PER_EXAMPLE;
+    if pin.budget.available() < need {
+        pin.texts.spill(&pin.budget)?;
+    }
+    Ok(())
+}
+
+fn fit_reserve(folds: &[Fold]) -> u64 {
+    folds
+        .iter()
+        .map(|f| f.train.len() as u64 * TASK_BYTES_PER_EXAMPLE)
+        .max()
+        .unwrap_or(0)
+}
+
+fn example_union(sets: &[TrainSet]) -> Vec<usize> {
+    let mut all: Vec<usize> = sets
+        .iter()
+        .flat_map(|t| t.ex.rows.iter().copied())
+        .collect();
+    all.par_sort_unstable();
+    all.dedup();
+    all
+}
+
+fn to_positions(rows: &mut [usize], union: &[usize]) {
+    let mut j = 0usize;
+    for r in rows.iter_mut() {
+        while union[j] < *r {
+            j += 1;
+        }
+        *r = j;
+    }
+}
+
 fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) -> usize {
     tdc_cut(s, decoy, fdr, skip_decoys_plus_one).below
 }
@@ -228,7 +265,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         .map(|(fd, w)| score(&pin.rows, &fd.train, w, Some(norm)))
         .collect();
 
-    let x = Rows::all_within(&pin.rows, norm, &pin.budget)?;
+    let keep = fit_reserve(&folds);
+    let full = Rows::all_in_ram(&pin.rows, norm, &pin.budget, keep);
     let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
@@ -236,11 +274,23 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         } else {
             cfg.selection_fdr
         };
-        let sets: Vec<TrainSet> = folds
+        let mut sets: Vec<TrainSet> = folds
             .iter()
             .zip(&train_scores)
             .map(|(fd, s)| train_set(fd, s, fdr))
             .collect();
+        let compact;
+        let x: &Rows = match &full {
+            Some(x) => x,
+            None => {
+                let union = example_union(&sets);
+                compact = Rows::gather_within(&pin.rows, norm, &union, &pin.budget)?;
+                for t in sets.iter_mut() {
+                    to_positions(&mut t.ex.rows, &union);
+                }
+                &compact
+            }
+        };
         if cfg.verbose > 1 {
             eprintln!("Iteration {}:", it + 1);
         }
@@ -276,7 +326,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     return None;
                 }
                 Some(mfn_from(
-                    &x,
+                    x,
                     &t.ex,
                     cpos,
                     cfrac * cpos,

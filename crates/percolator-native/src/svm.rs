@@ -92,20 +92,23 @@ impl Rows {
         }
     }
 
-    pub fn all_within(store: &Store, norm: &Norm, budget: &Arc<Budget>) -> Result<Rows, String> {
+    pub fn bytes_for(nrows: usize, nfeat: usize) -> u64 {
+        (nrows * stride_for(nfeat + 1) * 4) as u64
+    }
+
+    pub fn all_in_ram(store: &Store, norm: &Norm, budget: &Arc<Budget>, keep: u64) -> Option<Rows> {
         let nf = store.nfeat();
         let ncols = nf + 1;
         let stride = stride_for(ncols);
         let n = store.len();
-        let bytes = (n * stride * 4) as u64;
         if nf == 0 || n == 0 {
-            let all: Vec<usize> = (0..n).collect();
-            return Rows::gather_within(store, norm, &all, budget);
+            return None;
         }
-        let Some(ram) = Reservation::take(budget, bytes) else {
-            let all: Vec<usize> = (0..n).collect();
-            return Rows::gather_within(store, norm, &all, budget);
-        };
+        let bytes = Rows::bytes_for(n, nf);
+        let mut ram = Reservation::none();
+        if !ram.grow(budget, bytes, keep) {
+            return None;
+        }
         let mut data = vec![0.0f32; n * stride];
         let br = store.block_rows();
         let parts: Vec<std::sync::Mutex<&mut [f32]>> = data
@@ -127,7 +130,7 @@ impl Rows {
             }
         });
         drop(parts);
-        Ok(Rows {
+        Some(Rows {
             data: RowData::Ram(data),
             nrows: n,
             ncols,

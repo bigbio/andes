@@ -1,4 +1,4 @@
-use crate::budget::Budget;
+use crate::budget::{Budget, Reservation};
 use crate::store::{Store, StoreBuilder};
 use crate::text::{append_record, RowText, Texts, TextsBuilder};
 use rayon::prelude::*;
@@ -29,6 +29,7 @@ pub struct Pin {
     pub meta: Vec<RowMeta>,
     pub texts: Texts,
     pub budget: Arc<Budget>,
+    _per_row: Reservation,
 }
 
 impl Pin {
@@ -237,6 +238,8 @@ fn parse_chunk(
 
 const CHUNK_BYTES: usize = 4 << 20;
 
+const PER_ROW_BYTES: u64 = 160;
+
 fn read_chunk(r: &mut impl BufRead, path: &Path) -> Result<Vec<u8>, String> {
     let mut buf = Vec::with_capacity(CHUNK_BYTES + 4096);
     let err = |e: std::io::Error| format!("read {}: {e}", path.display());
@@ -286,6 +289,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let mut file_ids: HashMap<String, u32> = HashMap::new();
     let mut file_names: Vec<String> = Vec::new();
     let mut default_direction = None;
+    let mut per_row = Reservation::none();
     let batch = rayon::current_num_threads().max(1) * 2;
     let mut lineno = 2usize;
     let mut first = true;
@@ -329,6 +333,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
                 .collect();
             let mut start = 0usize;
             let rows = p.meta.len();
+            per_row.grow_up_to(&budget, rows as u64 * PER_ROW_BYTES);
             for (i, mut m) in p.meta.into_iter().enumerate() {
                 if cols.file.is_some() {
                     m.file = map[m.file as usize];
@@ -348,5 +353,6 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         meta,
         texts: texts.finish()?,
         budget,
+        _per_row: per_row,
     })
 }

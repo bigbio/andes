@@ -763,9 +763,13 @@ re-score is capped at 64 per spectrum.
 
 - **Calibration.** Precursor calibration is off in open search, so the offsets carry the
   instrument's mass error, which scales with peptide mass. The report measures it as the median
-  ppm error of the accepted PSMs within 0.02 Da of zero offset (when there are at least 20) and
-  subtracts it from every offset, `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, for targets and decoys
-  alike.
+  ppm error of the accepted PSMs within 0.02 Da of zero offset (when there are at least 20). It
+  subtracts that error, `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the
+  precursor, for targets and decoys alike.
+  - An offset that localisation refined from the fragment ions keeps its value. The fragments are
+    already recentred.
+  - The PIN marks such a row by a `DeltaMass` that differs from
+    `ExpMass − isotope_error × 1.00336 − CalcMass` by more than 0.0005 Da.
 - **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
   - The precision is 1.4826 × MAD of the calibrated offsets within 0.02 Da of zero, at least
     0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.

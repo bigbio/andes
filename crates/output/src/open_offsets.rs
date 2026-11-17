@@ -7,6 +7,7 @@ use model::unimod::UnimodDb;
 use crate::percolator::PercolatorPsm;
 
 const ISOTOPE_DA: f64 = 1.003_355;
+const REFINED_DA: f64 = 0.0005;
 const MIN_PEAK_PSMS: usize = 2;
 const DEFAULT_PRECISION_DA: f64 = 0.002;
 const MIN_PRECISION_DA: f64 = 0.0005;
@@ -35,6 +36,7 @@ pub struct PinOffset {
     pub decoy: bool,
     pub delta: f64,
     pub calc_mass: f64,
+    pub refined: bool,
     pub site: usize,
     pub sequence: String,
 }
@@ -94,10 +96,12 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
             .position(|c| *c == name)
             .ok_or_else(|| bad(format!("PIN has no {name} column")))
     };
-    let (id_c, label_c, calc_c, delta_c, site_c, pep_c) = (
+    let (id_c, label_c, exp_c, calc_c, iso_c, delta_c, site_c, pep_c) = (
         col("SpecId")?,
         col("Label")?,
+        col("ExpMass")?,
         col("CalcMass")?,
+        col("isotope_error")?,
         col("DeltaMass")?,
         col("OpenSite")?,
         col("Peptide")?,
@@ -124,11 +128,16 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
         let site: usize = get(site_c)?
             .parse()
             .map_err(|e| bad(format!("OpenSite: {e}")))?;
+        let delta = num(delta_c, "DeltaMass")?;
+        let calc_mass = num(calc_c, "CalcMass")?;
+        let precursor_delta =
+            num(exp_c, "ExpMass")? - num(iso_c, "isotope_error")? * ISOTOPE_DA - calc_mass;
         out.push(PinOffset {
             psm_id: get(id_c)?.to_string(),
             decoy: label == "-1",
-            delta: num(delta_c, "DeltaMass")?,
-            calc_mass: num(calc_c, "CalcMass")?,
+            delta,
+            calc_mass,
+            refined: (delta - precursor_delta).abs() > REFINED_DA,
             site,
             sequence: stripped_sequence(get(pep_c)?),
         });
@@ -177,7 +186,7 @@ fn mad(values: &[f64]) -> f64 {
 pub fn ppm_shift(rows: &[&PinOffset]) -> f64 {
     let mut ppm: Vec<f64> = rows
         .iter()
-        .filter(|r| r.delta.abs() < ZERO_WINDOW_DA && r.calc_mass > 0.0)
+        .filter(|r| !r.refined && r.delta.abs() < ZERO_WINDOW_DA && r.calc_mass > 0.0)
         .map(|r| r.delta / r.calc_mass * 1e6)
         .collect();
     if ppm.len() < MIN_CALIBRATION_PSMS {
@@ -187,7 +196,11 @@ pub fn ppm_shift(rows: &[&PinOffset]) -> f64 {
 }
 
 pub fn corrected_delta(row: &PinOffset, ppm: f64) -> f64 {
-    row.delta - ppm * 1e-6 * (row.calc_mass + row.delta)
+    if row.refined {
+        row.delta
+    } else {
+        row.delta - ppm * 1e-6 * (row.calc_mass + row.delta)
+    }
 }
 
 pub fn measured_precision(deltas: &[f64]) -> f64 {
@@ -712,6 +725,7 @@ mod tests {
             decoy,
             delta,
             calc_mass: 1500.0,
+            refined: false,
             site,
             sequence: seq.to_string(),
         }
@@ -807,6 +821,19 @@ mod tests {
     }
 
     #[test]
+    fn fragment_refined_offsets_keep_their_value() {
+        let ppm = 4.0;
+        let mut rows = zero_rows(40, ppm);
+        rows.extend((0..12).map(|i| PinOffset {
+            refined: true,
+            ..row(&format!("o{i}"), false, 15.9949 + 0.0001 * (i % 3) as f64, 3, "PEMTIDEK")
+        }));
+        let r = report(&rows);
+        let ox = r.peaks.iter().find(|p| (p.mass - 15.99).abs() < 0.05).expect("+16 peak");
+        assert!((ox.mass - 15.995).abs() < 0.0005, "{}", ox.mass);
+    }
+
+    #[test]
     fn deamidation_and_an_isotope_step_split_at_the_density_valley() {
         let mut sorted: Vec<f64> = Vec::new();
         for i in 0..60 {
@@ -868,14 +895,16 @@ mod tests {
 
     #[test]
     fn pin_columns_are_read_by_name() {
-        let text = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tDeltaMass\tAbsDeltaMass\tOpenSite\tPeptide\tProteins\n\
-                    s1\t1\t5\t1015.99\t1000.0\t15.9949\t15.9949\t3\tK.PEMTIDEK.R\tP1\n\
-                    s2\t-1\t6\t1000.0\t1000.0\t0.0010\t0.0010\t0\tK.KEDITMEP.R\tdecoy_P1\n";
+        let text = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tisotope_error\tDeltaMass\tAbsDeltaMass\tOpenSite\tPeptide\tProteins\n\
+                    s1\t1\t5\t1015.99\t1000.0\t0\t15.9949\t15.9949\t3\tK.PEMTIDEK.R\tP1\n\
+                    s2\t-1\t6\t1000.001\t1000.0\t0\t0.0010\t0.0010\t0\tK.KEDITMEP.R\tdecoy_P1\n";
         let rows = parse_pin_offsets(std::io::Cursor::new(text)).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].sequence, "PEMTIDEK");
         assert_eq!(rows[0].site, 3);
         assert_eq!(rows[0].calc_mass, 1000.0);
+        assert!(rows[0].refined);
         assert!(rows[1].decoy);
+        assert!(!rows[1].refined);
     }
 }

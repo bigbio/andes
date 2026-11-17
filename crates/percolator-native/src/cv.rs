@@ -9,6 +9,8 @@ use rayon::prelude::*;
 
 const FOLDS: usize = 3;
 
+const GRID_ITERATIONS: usize = 3;
+
 pub struct CvConfig {
     pub iterations: usize,
     pub test_fdr: f64,
@@ -268,6 +270,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let keep = fit_reserve(&folds);
     let full = Rows::all_in_ram(&pin.rows, norm, &pin.budget, keep);
     let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
+    let mut fixed: Option<[usize; FOLDS]> = None;
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
             cfg.initial_selection_fdr
@@ -322,7 +325,10 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             }
             Some(mfn_from(x, &t.ex, cpos, cfrac * cpos, &opts, start, pre))
         };
-        let ks: Vec<usize> = (0..pairs.len()).collect();
+        let ks: Vec<usize> = match fixed {
+            Some(sel) => (0..FOLDS).map(|f| f * per_fold + sel[f]).collect(),
+            None => (0..pairs.len()).collect(),
+        };
         {
             let mut done = 0usize;
             while done < ks.len() {
@@ -378,7 +384,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             }
         }
         drop(sets);
-        let mut estimated = 0usize;
+        let mut picked = [0usize; FOLDS];
         for f in 0..FOLDS {
             let fold_fits = &fits[f * per_fold..(f + 1) * per_fold];
             let tps = fit_positives(pin, norm, &folds[f], fold_fits, cfg.test_fdr);
@@ -393,9 +399,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     }
                 }
             }
-            estimated += best;
             match chosen {
                 Some(k) => {
+                    picked[f] = k;
                     w[f].clone_from(fold_fits[k].as_ref().expect("chosen fit"));
                     if cfg.verbose > 2 {
                         let (_, cpos, cfrac) = pairs[f * per_fold + k];
@@ -412,6 +418,25 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 }
             }
         }
+        if fixed.is_none() && it + 1 >= GRID_ITERATIONS && per_fold > 1 {
+            fixed = Some(picked);
+            if cfg.verbose > 1 {
+                for (f, &k) in picked.iter().enumerate() {
+                    let (_, cpos, cfrac) = pairs[f * per_fold + k];
+                    eprintln!(
+                        "Split {}: using Cpos={cpos}, Cneg={} in the remaining iterations",
+                        f + 1,
+                        cfrac * cpos
+                    );
+                }
+            }
+        }
+        let found: usize = folds
+            .iter()
+            .zip(&train_scores)
+            .map(|(fd, s)| positives(s, &fd.train_decoy, cfg.test_fdr, false))
+            .sum();
+        let estimated = (found as f64 / (FOLDS - 1) as f64) as i64;
         if cfg.verbose > 1 {
             eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);
         }

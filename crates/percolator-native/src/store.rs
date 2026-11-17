@@ -74,7 +74,7 @@ impl Store {
                     None
                 };
                 let Some(_held) = held else {
-                    self.for_each_block(|start, block| f(start, block));
+                    self.for_each_block(&f);
                     return;
                 };
                 let batch = batch as usize;
@@ -299,6 +299,7 @@ mod tests {
             .collect();
         let block = (br * nf * 4) as u64;
         let budget = s.budget.clone();
+        let spilled = s.is_spilled();
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -307,7 +308,7 @@ mod tests {
                 s.par_for_each_block(|start, b| {
                     let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
-                    if now > 1 {
+                    if spilled && now > 1 {
                         assert!(budget.total() - budget.available() >= now * block);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));

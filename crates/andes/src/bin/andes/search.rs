@@ -1384,7 +1384,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &sample,
                     &rescorer,
                 );
-                drop(rescorer);
                 let optimize_path = optimize_dir.path().to_path_buf();
                 if let Err(e) = optimize_dir.close() {
                     eprintln!(

@@ -665,8 +665,9 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 
 ### DIA (`--dia`, experimental)
 
-Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans. Cannot be combined
-with `--chimeric`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
+Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans; a run without MS1
+scans is an error. Cannot be combined with `--chimeric`, `--open-search`, `--refine`, `--glyco` or
+`--xl`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
 
 | Flag | Type | Default | Description |
 |---|---|---|---|

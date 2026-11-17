@@ -600,7 +600,7 @@ pub(crate) struct SearchArgs {
     /// window. With --rescore, Percolator runs with --trainFDR 0.05 and again after a per-run
     /// RT refinement. On Orbitrap Astral the fragment tolerance is 7 ppm unless
     /// --fragment-tol-* is set. Needs mzML or .raw with isolation windows and MS1 scans;
-    /// replaces --chimeric and --precursor-cal.
+    /// replaces --chimeric and --precursor-cal; not with --open-search, --refine, --glyco or --xl.
     #[arg(long, help_heading = H_MODES)]
     pub(crate) dia: bool,
 

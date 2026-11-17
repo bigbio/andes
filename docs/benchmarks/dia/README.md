@@ -195,7 +195,7 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   extra PIN column it gives 1510 / 1648: Percolator weights it, but it barely separates DIA-NN's
   precursors that andes misses from decoys of the same score (AUC 0.46, against 0.49 for the
   unrefined RT error). Those precursors are already at the right RT; their spectra are what is weak.
-  Re-run under `--trainFDR 0.05` on the summed-apex PINs (5 seeds, paired, Percolator on codon): N@FDP_c
+  Re-run under `--trainFDR 0.05` on the summed-apex PINs (5 seeds, paired): N@FDP_c
   1 % 1700 / 1722 against 1634 / 1687 (raw01 higher on 5 of 5 seeds, raw02 on 4 of 5), N@FDP_c 2 %
   1899 / 1853 against 1798 / 1819, q ≤ 0.01 at 0.25 / 0.42 % true FDP. It helps once Percolator
   trains on enough positives; the seed-42, `--trainFDR 0.01` rejection above was noise. This offline
@@ -207,7 +207,7 @@ that seed only, and differences below about 100 are inside seed noise, see Resul
   its RT error is no smaller than ridge's (median 0.24 min for both, against 0.30 unrefined).
   **Shipped as a second Percolator pass** (`dia::refine_rt`, andes's own gradient boosting, depth 3,
   200 rounds, out of fold by peptidoform, anchors = first-pass targets at q ≤ 1 %, column
-  `dia_rt_refined_err`): run end to end with `andes --dia --rescore` on codon, then Percolator
+  `dia_rt_refined_err`): run end to end with `andes --dia --rescore`, then Percolator
   re-scored on its PIN for 5 seeds: 1666 / 1747 against 1634 / 1687 (raw01 higher on 5 of 5 seeds,
   raw02 on 4 of 5), N@FDP_c 2 % 1872 / 1884, q ≤ 0.01 at 0.44 / 0.47 % true FDP. It adds one
   Percolator run (3–6 min) and ~8 s of fitting per raw. A boosting refit with a ridge on

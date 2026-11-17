@@ -6,7 +6,7 @@ use crate::merge::merge_folds;
 use crate::normalize::{score, stdv, Norm};
 use crate::pep::{estimate_pi0, pep_mix_max, pep_tdc, too_good_separation};
 use crate::pin::{read_pin, MemLimit, Pin};
-use crate::scores::{count_at, mix_max_q, tdc_q, tdc_winners};
+use crate::scores::{mix_max_q, tdc_q, tdc_winners};
 use crate::write::{write_results, write_weights, Results};
 use std::collections::HashMap;
 use std::path::Path;
@@ -158,47 +158,19 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
         .collect();
     let all_sets = (1u8 << FOLDS) - 1;
     let mask: Vec<u8> = fold.iter().map(|&f| all_sets & !(1u8 << f)).collect();
-    let default_direction = |overrule: bool| -> Result<Vec<Vec<f64>>, String> {
-        init_directions(pin, &norm, &mask, FOLDS, 0.01, overrule)
-    };
     let path = a.init_weights.as_deref().unwrap_or(Path::new(""));
-    let mut w: Vec<Vec<f64>> = match read_init_weights(path, nf) {
+    let w: Vec<Vec<f64>> = match read_init_weights(path, nf) {
         Some(ww) => vec![ww; FOLDS],
         None => {
             eprintln!(
                 "WARNING: Could not find weights input file {}. Using default weights instead.",
                 path.display()
             );
-            default_direction(false)?
+            init_directions(pin, &norm, &mask, FOLDS, 0.01, false)?
         }
     };
-    let positives = |w: &[Vec<f64>]| -> usize {
-        test.iter()
-            .zip(w)
-            .map(|(rows, wf)| {
-                let s = score(&pin.rows, rows, wf, None);
-                let d: Vec<bool> = rows.iter().map(|&i| is_decoy[i]).collect();
-                count_at(&tdc_q(&s, &d, false), &d, 0.01)
-            })
-            .sum()
-    };
-    let valid = positives(&w) > 0;
-    if !valid && !a.overrule {
-        let from_pin = pin
-            .default_direction
-            .as_deref()
-            .is_some_and(|d| d.iter().any(|&v| v != 0.0));
-        for (wf, dd) in w.iter_mut().zip(default_direction(false)?) {
-            if from_pin {
-                *wf = dd;
-            } else {
-                wf[..nf].copy_from_slice(&dd[..nf]);
-            }
-        }
-    }
     let mut scores = vec![0.0f64; n];
-    for (f, rows) in test.iter().enumerate() {
-        let wf = if valid { &w[f] } else { &w[0] };
+    for (rows, wf) in test.iter().zip(&w) {
         for (&i, s) in rows.iter().zip(score(&pin.rows, rows, wf, None)) {
             scores[i] = s;
         }

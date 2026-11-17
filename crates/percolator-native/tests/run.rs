@@ -1,4 +1,4 @@
-use percolator_native::{fmt_g, mix_max_q, run, tdc_q, MemLimit};
+use percolator_native::{mix_max_q, run, tdc_q, MemLimit};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -66,10 +66,6 @@ fn subset_pin(dir: &Path, name: &str, keep: impl Fn(i8) -> bool) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, out).unwrap();
     path
-}
-
-fn shown(v: f64) -> f64 {
-    fmt_g(v, 6).parse().unwrap()
 }
 
 fn raw_bin1() -> Vec<f64> {
@@ -339,7 +335,7 @@ fn training_output_independent_of_threads() {
 }
 
 #[test]
-fn static_override_keeps_weights_that_separate_nothing() {
+fn static_keeps_weights_that_separate_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let pin = data("svm_ref.pin");
     let w = dir.path().join("flat.weights");
@@ -354,24 +350,13 @@ fn static_override_keeps_weights_that_separate_nothing() {
     got.extend(scores(&o.decoy));
     assert!(got.values().all(|&s| s == 0.5));
 
-    let o = outs(dir.path(), "reset");
+    let o = outs(dir.path(), "kept");
     let mut a = static_args(&o, &w, true, &pin);
     a.retain(|x| x != "--override");
     run(&a, limit(dir.path())).unwrap();
     let mut got = scores(&o.target);
     got.extend(scores(&o.decoy));
-    let rows = pin_rows(&pin);
-    let by_id: HashMap<&str, &PinRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
-    let single = (0..5).any(|j| {
-        [1.0f64, -1.0].iter().any(|&sign| {
-            got.iter()
-                .all(|(id, &s)| s == shown(sign * f64::from(by_id[id.as_str()].features[j]) + 0.5))
-        })
-    });
-    assert!(
-        single,
-        "reset scores are not one raw feature plus the kept bias"
-    );
+    assert!(got.values().all(|&s| s == 0.5));
 }
 
 #[test]

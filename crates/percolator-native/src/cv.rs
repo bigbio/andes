@@ -471,20 +471,12 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     if cfg.verbose > 0 {
         eprintln!("Found {found} test set PSMs with q<{}.", cfg.test_fdr);
     }
-    if found == 0 || init_positives > found {
-        if !cfg.overrule {
-            let from_pin = pin_direction(pin).is_some();
-            for (wf, i) in w.iter_mut().zip(&init) {
-                if from_pin {
-                    wf.clone_from(i);
-                } else {
-                    wf[..nf].copy_from_slice(&i[..nf]);
-                }
-            }
-        }
+    if (found == 0 || init_positives > found) && !cfg.overrule {
+        w = init;
         test = folds
             .iter()
-            .map(|fd| score(&pin.rows, &fd.test, &w[0], Some(norm)))
+            .zip(&w)
+            .map(|(fd, w)| score(&pin.rows, &fd.test, w, Some(norm)))
             .collect();
     }
 

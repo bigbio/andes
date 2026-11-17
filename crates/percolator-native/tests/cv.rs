@@ -151,7 +151,7 @@ fn all_rows(pin: &Pin) -> Vec<usize> {
 }
 
 #[test]
-fn pin_direction_has_priority_and_overrule_keeps_training() {
+fn pin_direction_has_priority_and_overrule_keeps_each_fold_trained() {
     let p = pool(2);
     let (_d, pin) = load(&twins(200), Some(&[0.0, 1.5, -2.0]));
     let norm = stdv(&pin);
@@ -181,7 +181,7 @@ fn pin_direction_has_priority_and_overrule_keeps_training() {
         assert!(wn.iter().all(|v| v.is_finite()));
     }
     for i in 0..pin.meta.len() {
-        let s = score(&pin.rows, &[i], &res.w_norm[0], Some(&norm))[0];
+        let s = score(&pin.rows, &[i], &res.w_norm[res.fold[i] as usize], Some(&norm))[0];
         assert_eq!(res.test_scores[i].to_bits(), s.to_bits());
     }
 }

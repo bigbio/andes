@@ -134,6 +134,21 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   and Clasen families, so the weight is not fitted to the set; 0.3 was taken as one that
   raises all three. Other one-term changes to `min(α, β)` lost: + 0.1–0.3 × max(α, β), a bonus
   for full pairs, a penalty per isotope offset.
+- **Half pairs of triply charged precursors pay 15 in the CSM score** (adopted). A half
+  pair takes its second peptide by mass alone; pooled over the 11 runs, accepted half pairs are 15 % false at charge 3 against
+  2.9 % at 4 and 0.9 % at 5, at any peptide length, and the false ones mostly pair a library
+  peptide with a random one that fits the mass. Against the delta score: 16,797 / 15,912
+  (from 16,427 / 15,206); the ribosome DSBU run's actual false share 3.0 % → 2.4 % (worst
+  class 3.7 % → 2.9 %); Beveridge DSBU loses 9 %, its 3+ half pairs being mostly right.
+  Penalties 5–30 all raise the total (16,607–16,797); dropping these pairs gives 16,746.
+  Held out (never used for tuning): ribosome DSBU replicate 2 rises 2,399 → 2,453 at a false
+  share of 2.1 % → 1.8 %; Beveridge DSS R2 is unchanged (no half pairs).
+- **Non-covalent pairs** (two unlinked peptides whose masses sum to the precursor, as
+  competitor): identical on three runs, −6 % on Clasen batch 1, and 25 min of pair search
+  there; stopped.
+- **Minimum matched fragments per peptide** (2–6, xiFDR's boost filter) and a per-run boost
+  over score, precursor error and pair kind: 16,164–16,446 and +0.9 % (fitted to each run's
+  decoys); not adopted.
 - **Separate FDR for half pairs** (one peptide by its doublet, the other by mass): the
   false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
   groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).

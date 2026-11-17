@@ -103,42 +103,88 @@ fn trained_scores(
     Ok(cv.test_scores)
 }
 
-fn number(token: &str) -> Option<f64> {
-    let plain = token
-        .bytes()
-        .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'e' | b'E'));
-    if plain {
-        token.parse().ok()
-    } else {
-        None
-    }
-}
-
-fn read_init_weights(path: &Path, nf: usize) -> Option<Vec<f64>> {
-    let text = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&text);
-    let mut rest = "";
-    let mut remaining: &str = &text;
-    while !remaining.is_empty() {
-        let (line, tail) = match remaining.find('\n') {
-            Some(k) => (&remaining[..k], &remaining[k + 1..]),
-            None => (remaining, ""),
-        };
-        remaining = tail;
+fn read_init_weights(path: &Path, names: &[String]) -> Result<Option<Vec<f64>>, String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(None);
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let file = path.display();
+    let n = names.len() + 1;
+    let mut lines = text.lines();
+    let mut line_nr = 0usize;
+    let mut names_line = "";
+    let mut found = false;
+    for line in lines.by_ref() {
+        line_nr += 1;
         let first = line.as_bytes().first().copied().unwrap_or(0);
         if first == b'-' || first.is_ascii_digit() {
-            rest = tail;
+            found = true;
             break;
         }
-    }
-    let mut w = vec![0.0f64; nf + 1];
-    for (slot, token) in w.iter_mut().zip(rest.split_ascii_whitespace()) {
-        match number(token) {
-            Some(v) => *slot = v,
-            None => break,
+        if !line.is_empty() && first != b'#' {
+            names_line = line;
         }
     }
-    Some(w)
+    let raw_line = match lines.next() {
+        Some(l) if found => l,
+        _ => {
+            return Err(format!(
+                "ERROR: The weights file {file} has no line of normalized weights followed by a line of raw weights."
+            ))
+        }
+    };
+    if !names_line.is_empty() {
+        let mut got: Vec<&str> = names_line.split('\t').collect();
+        while got.last().is_some_and(|c| c.trim_matches([' ', '\r']).is_empty()) {
+            got.pop();
+        }
+        if let Some(last) = got.last_mut() {
+            *last = last.trim_end_matches([' ', '\r']);
+        }
+        let expected: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once("m0"))
+            .collect();
+        for ix in 0..got.len().max(expected.len()) {
+            if got.get(ix).is_some() && got.get(ix) == expected.get(ix) {
+                continue;
+            }
+            let cell = |v: Option<&&str>| v.map_or("missing".to_string(), |c| format!("\"{c}\""));
+            return Err(format!(
+                "ERROR: The weights file {file} has {} columns, but the input has {} (its features and m0). Column {} is {} in the weights file and {} in the input. Weights are used by the position of the feature, so the file must come from an input with the same features in the same order.",
+                got.len(),
+                expected.len(),
+                ix + 1,
+                cell(got.get(ix)),
+                cell(expected.get(ix))
+            ));
+        }
+    }
+    let raw: Vec<Option<f64>> = raw_line
+        .split_ascii_whitespace()
+        .map(|t| t.parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect();
+    let bad = raw.iter().any(Option::is_none);
+    if bad || raw.len() != n {
+        let what = if bad {
+            "holds a value that is not a finite number".to_string()
+        } else {
+            format!("holds {}", raw.len())
+        };
+        return Err(format!(
+            "ERROR: Line {} of the weights file {file} should hold {n} finite raw weights, one per feature and m0, but {what}.",
+            line_nr + 1
+        ));
+    }
+    let w: Vec<f64> = raw.into_iter().flatten().collect();
+    if n > 1 && w[..n - 1].iter().all(|&v| v == 0.0) {
+        return Err(format!(
+            "ERROR: Line {} of the weights file {file} gives every feature the weight 0, so these weights cannot order the PSMs.",
+            line_nr + 1
+        ));
+    }
+    Ok(Some(w))
 }
 
 fn identity(nf: usize) -> Norm {
@@ -159,7 +205,7 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
     let all_sets = (1u8 << FOLDS) - 1;
     let mask: Vec<u8> = fold.iter().map(|&f| all_sets & !(1u8 << f)).collect();
     let path = a.init_weights.as_deref().unwrap_or(Path::new(""));
-    let w: Vec<Vec<f64>> = match read_init_weights(path, nf) {
+    let w: Vec<Vec<f64>> = match read_init_weights(path, &pin.feature_names)? {
         Some(ww) => vec![ww; FOLDS],
         None => {
             eprintln!(

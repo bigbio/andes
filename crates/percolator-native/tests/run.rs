@@ -338,40 +338,55 @@ fn training_output_independent_of_threads() {
 fn static_keeps_weights_that_separate_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let pin = data("svm_ref.pin");
-    let w = dir.path().join("flat.weights");
+    let w = dir.path().join("reversed.weights");
     std::fs::write(
         &w,
-        "# header\nsep\tf2\tf3\tf4\tf5\tm0\n0\t0\t0\t0\t0\t0\n0\t0\t0\t0\t0\t0.5\n",
+        "# header\nsep\tf2\tf3\tf4\tf5\tm0\n-1\t0\t0\t0\t0\t0.5\n-1\t0\t0\t0\t0\t0.5\n",
     )
     .unwrap();
-    let o = outs(dir.path(), "keep");
-    run(&static_args(&o, &w, true, &pin), limit(dir.path())).unwrap();
-    let mut got = scores(&o.target);
-    got.extend(scores(&o.decoy));
-    assert!(got.values().all(|&s| s == 0.5));
+    let rows = pin_rows(&pin);
+    let want: HashMap<&str, f64> = rows
+        .iter()
+        .map(|r| (r.id.as_str(), dot(&r.features, &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.5])))
+        .collect();
+    for (stem, overrule) in [("keep", true), ("kept", false)] {
+        let o = outs(dir.path(), stem);
+        let mut a = static_args(&o, &w, false, &pin);
+        if overrule {
+            a.insert(0, "--override".into());
+        }
+        run(&a, limit(dir.path())).unwrap();
+        let mut got = scores(&o.target);
+        got.extend(scores(&o.decoy));
+        assert_eq!(got.len(), rows.len());
+        for (id, &s) in &got {
+            assert!((s - want[id.as_str()]).abs() <= 1e-5, "{stem} {id}: {s}");
+        }
+    }
+}
 
-    let o = outs(dir.path(), "kept");
-    let mut a = static_args(&o, &w, true, &pin);
-    a.retain(|x| x != "--override");
-    run(&a, limit(dir.path())).unwrap();
-    let mut got = scores(&o.target);
-    got.extend(scores(&o.decoy));
-    assert!(got.values().all(|&s| s == 0.5));
+fn weights_error(text: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = data("svm_ref.pin");
+    let w = dir.path().join("bad.weights");
+    std::fs::write(&w, text).unwrap();
+    let o = outs(dir.path(), "bad");
+    run(&static_args(&o, &w, true, &pin), limit(dir.path())).unwrap_err()
 }
 
 #[test]
-fn missing_weights_values_read_as_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    let pin = data("svm_ref.pin");
-    let w = dir.path().join("short.weights");
-    std::fs::write(&w, "names\n1\t2\n0\t0\t0\n").unwrap();
-    let o = outs(dir.path(), "short");
-    let mut a = static_args(&o, &w, false, &pin);
-    a.insert(0, "--override".into());
-    run(&a, limit(dir.path())).unwrap();
-    let mut got = scores(&o.target);
-    got.extend(scores(&o.decoy));
-    assert!(got.values().all(|&s| s == 0.0));
+fn weights_file_is_checked_as_percolator_master() {
+    let names = "sep\tf2\tf3\tf4\tf5\tm0\n";
+    let err = weights_error(&format!("{names}0\t0\t0\t0\t0\t0\n0\t0\t0\t0\t0\t0.5\n"));
+    assert!(err.contains("gives every feature the weight 0"), "{err}");
+    let err = weights_error("names\n1\t2\n0\t0\t0\n");
+    assert!(err.contains("has 1 columns, but the input has 6"), "{err}");
+    let err = weights_error(&format!("{names}1\t2\n1\t0\t0\n"));
+    assert!(err.contains("Line 3 of the weights file") && err.contains("but holds 3."), "{err}");
+    let err = weights_error(&format!("{names}1\t2\n1\t0\tx\t0\t0\t0\n"));
+    assert!(err.contains("not a finite number"), "{err}");
+    let err = weights_error(&format!("{names}1\t2\n"));
+    assert!(err.contains("no line of normalized weights"), "{err}");
 }
 
 #[test]

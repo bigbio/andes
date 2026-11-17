@@ -344,7 +344,7 @@ fn single_candidates(db: &UnimodDb) -> Vec<Candidate> {
         .map(|m| Candidate {
             label: format!("{} ({})", m.name, m.accession),
             mass: m.mono_mass,
-            prior: if m.common_sites.is_empty() {
+            prior: if m.common_sites.is_empty() || m.isotopic_label {
                 PRIOR_RARE
             } else {
                 PRIOR_SINGLE
@@ -779,6 +779,11 @@ mod tests {
             .expect("Oxidation");
         assert!(ox.common_sites.contains(&"M".to_string()), "{:?}", ox.common_sites);
         assert!(ox.common_sites.len() < ox.sites.len(), "{:?}", ox.common_sites);
+        assert!(!ox.isotopic_label);
+        let n15 = model::unimod::bundled()
+            .by_accession("UNIMOD:994")
+            .expect("Label:15N(1)");
+        assert!(n15.isotopic_label);
     }
 
     #[test]

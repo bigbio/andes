@@ -9,6 +9,7 @@ pub struct UnimodMod {
     pub mono_mass: f64,
     pub sites: Vec<String>,
     pub common_sites: Vec<String>,
+    pub isotopic_label: bool,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
@@ -38,17 +39,21 @@ impl UnimodDb {
         let mut cur_name: Option<String> = None;
         let mut cur_mass: Option<f64> = None;
         let mut cur_sites: Vec<String> = Vec::new();
-        let mut cur_specs: HashMap<String, (Option<String>, Option<bool>)> = HashMap::new();
+        let mut cur_specs: HashMap<String, SpecFields> = HashMap::new();
 
         let commit = |db: &mut UnimodDb,
                       id: &mut Option<String>,
                       name: &mut Option<String>,
                       mass: &mut Option<f64>,
                       sites: &mut Vec<String>,
-                      specs: &mut HashMap<String, (Option<String>, Option<bool>)>| {
+                      specs: &mut HashMap<String, SpecFields>| {
             let mut common_sites: Vec<String> = Vec::new();
-            for (site, hidden) in specs.drain().map(|(_, v)| v) {
-                if let (Some(site), Some(false)) = (site, hidden) {
+            let isotopic_label = !specs.is_empty()
+                && specs
+                    .values()
+                    .all(|f| f.classification.as_deref() == Some("Isotopic label"));
+            for f in specs.drain().map(|(_, v)| v) {
+                if let (Some(site), Some(false)) = (f.site, f.hidden) {
                     if !common_sites.contains(&site) {
                         common_sites.push(site);
                     }
@@ -63,6 +68,7 @@ impl UnimodDb {
                     mono_mass: mass_v,
                     sites: std::mem::take(sites),
                     common_sites,
+                    isotopic_label,
                 };
                 db.by_name
                     .entry(name_v.to_ascii_lowercase())
@@ -119,13 +125,15 @@ impl UnimodDb {
                     }
                 } else if let Some(site) = parse_spec_site(rest) {
                     if let Some(idx) = spec_index(rest) {
-                        cur_specs.entry(idx).or_default().0 = Some(site.clone());
+                        cur_specs.entry(idx).or_default().site = Some(site.clone());
                     }
                     if !cur_sites.contains(&site) {
                         cur_sites.push(site);
                     }
                 } else if let Some((idx, hidden)) = parse_spec_hidden(rest) {
-                    cur_specs.entry(idx).or_default().1 = Some(hidden);
+                    cur_specs.entry(idx).or_default().hidden = Some(hidden);
+                } else if let Some((idx, class)) = parse_spec_value(rest, "_classification") {
+                    cur_specs.entry(idx).or_default().classification = Some(class);
                 }
             }
         }
@@ -219,6 +227,22 @@ fn parse_quoted_f64(s: &str) -> Option<f64> {
     s[start..end].trim().parse().ok()
 }
 
+#[derive(Default)]
+struct SpecFields {
+    site: Option<String>,
+    hidden: Option<bool>,
+    classification: Option<String>,
+}
+
+fn parse_spec_value(s: &str, field: &str) -> Option<(String, String)> {
+    let idx = spec_index(s)?;
+    let rest = s.strip_prefix("spec_")?;
+    let val = rest[idx.len()..].strip_prefix(field)?;
+    let start = val.find('"')? + 1;
+    let end = val[start..].find('"')? + start;
+    Some((idx, val[start..end].trim().to_string()))
+}
+
 fn spec_index(s: &str) -> Option<String> {
     let rest = s.strip_prefix("spec_")?;
     let underscore = rest.find('_')?;
@@ -226,12 +250,7 @@ fn spec_index(s: &str) -> Option<String> {
 }
 
 fn parse_spec_hidden(s: &str) -> Option<(String, bool)> {
-    let idx = spec_index(s)?;
-    let rest = s.strip_prefix("spec_")?;
-    let val = rest[idx.len()..].strip_prefix("_hidden")?;
-    let start = val.find('"')? + 1;
-    let end = val[start..].find('"')? + start;
-    Some((idx, val[start..end].trim() == "1"))
+    parse_spec_value(s, "_hidden").map(|(idx, v)| (idx, v == "1"))
 }
 
 fn parse_spec_site(s: &str) -> Option<String> {

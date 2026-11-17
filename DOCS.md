@@ -795,7 +795,8 @@ re-score is capped at 64 per spectrum.
   - A candidate's weight is its prior × a Gaussian of the peak's distance from the candidate mass ×
     its site support.
     - The priors are 1 for no modification or for a Unimod entry with at least one common
-      specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare,
+      specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare or
+      that Unimod classifies only as an isotopic label (a label-free run carries no labels),
       0.2 for an isotope error, and 0.05 for "unexplained".
     - An entry plus an isotope step takes the entry's prior × 0.1.
     - A pair takes 0.05 × the two entries' priors.

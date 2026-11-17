@@ -171,6 +171,7 @@ fn monolink_in(table: &ReagentTable, db: &UnimodDb, token: &str) -> Option<Unimo
             mono_mass: p.resolve(db).ok()?.0,
             sites: Vec::new(),
             common_sites: Vec::new(),
+            isotopic_label: false,
         }),
     }
 }

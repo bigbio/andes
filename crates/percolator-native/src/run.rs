@@ -4,9 +4,9 @@ use crate::direction::init_directions;
 use crate::folds::folds_by_spectrum;
 use crate::merge::merge_folds;
 use crate::normalize::{score, stdv, Norm};
-use crate::pep::{estimate_pi0, pep_mix_max, pep_tdc, too_good_separation};
+use crate::pep::{estimate_pi0, pep_from_q, too_good_separation};
 use crate::pin::{read_pin, MemLimit, Pin};
-use crate::scores::{mix_max_q, tdc_q, tdc_winners};
+use crate::scores::{mix_max_q, psm_order, tdc_q, tdc_winners};
 use crate::write::{write_results, write_weights, Results};
 use std::collections::HashMap;
 use std::path::Path;
@@ -250,12 +250,13 @@ fn finish(
     if mode == Mode::Tdc {
         check_separation(&s, &d)?;
     }
-    let (q, pep) = if mode == Mode::MixMax {
-        let pi0 = estimate_pi0(&s, &d);
-        (mix_max_q(&s, &d, pi0), pep_mix_max(&s, &d, pi0))
+    let q = if mode == Mode::MixMax {
+        mix_max_q(&s, &d, estimate_pi0(&s, &d))
     } else {
-        (tdc_q(&s, &d, false), pep_tdc(&s, &d))
+        tdc_q(&s, &d, false)
     };
+    let order = psm_order(&pin.meta, &rows, &s, |i| pin.text(i).map(|t| t.psm_id))?;
+    let pep = pep_from_q(&order, &s, &q, &d)?;
     let res = Results {
         rows: &rows,
         scores: &s,

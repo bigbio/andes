@@ -4,7 +4,7 @@ use crate::folds::folds_by_spectrum;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
-use crate::svm::{l2_svm_mfn, MfnOpts, Rows};
+use crate::svm::{mfn_from, MfnOpts, Rows};
 use rayon::prelude::*;
 
 const FOLDS: usize = 3;
@@ -223,6 +223,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         .collect();
 
     let x = Rows::all_within(&pin.rows, norm, &pin.budget)?;
+    let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
             cfg.initial_selection_fdr
@@ -264,20 +265,27 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 }
             }
             let end = (start + held.len()).max(start + 1);
-            fits.par_extend(pairs[start..end].par_iter().map(|&(f, cpos, cfrac)| {
+            fits.par_extend((start..end).into_par_iter().map(|k| {
+                let (f, cpos, cfrac) = pairs[k];
                 let t = &sets[f];
                 if t.idx_neg.is_empty() && t.idx_pos.is_empty() {
                     return None;
                 }
-                Some(l2_svm_mfn(
+                Some(mfn_from(
                     &x,
                     &t.idx_pos,
                     &t.idx_neg,
                     cpos,
                     cfrac * cpos,
                     &opts,
+                    warm[k].as_deref(),
                 ))
             }));
+        }
+        for (wk, fit) in warm.iter_mut().zip(&fits) {
+            if fit.is_some() {
+                wk.clone_from(fit);
+            }
         }
         drop(sets);
         let mut estimated = 0usize;

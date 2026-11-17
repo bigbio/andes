@@ -539,6 +539,18 @@ pub fn l2_svm_mfn(
     cneg: f64,
     opts: &MfnOpts,
 ) -> Vec<f64> {
+    mfn_from(x, idx_pos, idx_neg, cpos, cneg, opts, None)
+}
+
+pub(crate) fn mfn_from(
+    x: &Rows,
+    idx_pos: &[usize],
+    idx_neg: &[usize],
+    cpos: f64,
+    cneg: f64,
+    opts: &MfnOpts,
+    start: Option<&[f64]>,
+) -> Vec<f64> {
     let t = Train::new(x, idx_pos, idx_neg, cpos, cneg);
     let n = x.ncols;
     let stride = x.stride;
@@ -548,6 +560,11 @@ pub fn l2_svm_mfn(
     let mut cgitermax = opts.small_cgitermax;
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
+    if let Some(w0) = start {
+        w[..n].copy_from_slice(&w0[..n]);
+        let all: Vec<usize> = (0..m).collect();
+        t.scan(&all, |k, row| o[k] = dot_row(row, &w));
+    }
     let mut subset = vec![0usize; m];
     let (mut active, mut f) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
     let mut w_bar = vec![0.0f64; stride];

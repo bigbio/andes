@@ -56,6 +56,7 @@ nav:
       - Knockoff variant FDR: features/knockoffs.md
       - Site claims and identity: features/sites.md
       - Chimeric cascade: features/chimeric.md
+      - DIA search: features/dia.md
       - Retrieval and model choice: features/retrieval.md
       - Protein inference: features/proteins.md
       - Match between runs: features/mbr.md
@@ -73,6 +74,7 @@ nav:
       - Overview: benchmarks/index.md
       - Report summary: benchmarks/details.md
       - Identification: benchmarks/identification.md
+      - DIA (ProteoBench Astral): benchmarks/dia.md
       - Glycoproteomics (PXD065680): benchmarks/glyco.md
       - Label-free quantification: benchmarks/lfq.md
       - TMT quantification: benchmarks/tmt.md

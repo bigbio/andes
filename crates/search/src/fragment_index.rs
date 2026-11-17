@@ -279,11 +279,51 @@ impl ChunkFragmentIndex {
         min_matched: u16,
         vote_peaks: usize,
     ) -> Vec<(u32, u16)> {
+        self.query_where(
+            spec,
+            charges,
+            params,
+            fragment_tol,
+            top_k,
+            min_matched,
+            vote_peaks,
+            &|_| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_where(
+        &self,
+        spec: &Spectrum,
+        charges: &[u8],
+        params: &SearchParams,
+        fragment_tol: Tolerance,
+        top_k: usize,
+        min_matched: u16,
+        vote_peaks: usize,
+        keep: &dyn Fn(f64) -> bool,
+    ) -> Vec<(u32, u16)> {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
         let mut hi = f64::MIN;
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
+            if params.dia {
+                let (w_lo, w_hi) = crate::precursor_matching::dia_neutral_window(
+                    spec,
+                    z,
+                    &params.precursor_tolerance,
+                    params.chimeric_isolation_halfwidth_da,
+                    shift_ppm,
+                );
+                lo = lo.min(w_lo);
+                hi = hi.max(w_hi);
+                exact.push((
+                    w_lo - PRECURSOR_GATE_MARGIN_DA,
+                    w_hi + PRECURSOR_GATE_MARGIN_DA,
+                ));
+                continue;
+            }
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);
@@ -324,6 +364,7 @@ impl ChunkFragmentIndex {
             vote_peaks,
             &complement_masses,
         );
+        sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
         select_top_k(&mut sel, top_k);
         sel.into_iter()
             .filter(|&(id, _, _)| {

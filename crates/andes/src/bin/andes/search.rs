@@ -754,9 +754,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut scorer = RankScorer::new(&param);
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
+    let dia_tol_default = cli.dia
+        && acquisition.analyzer == Some(InstrumentType::OrbitrapAstral)
+        && cli.fragment_tol_ppm.is_none()
+        && cli.fragment_tol_da.is_none();
+    if dia_tol_default {
+        cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
+        eprintln!(
+            "--dia: fragment tolerance {} ppm (Orbitrap Astral MS2)",
+            crate::dia::FRAGMENT_TOL_PPM
+        );
+    }
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
-        if instrument_was_detected {
+        if instrument_was_detected && !dia_tol_default {
             eprintln!(
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())
@@ -807,6 +818,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
+    if cli.dia {
+        if !(is_mzml || is_raw) {
+            return Err("--dia needs mzML or Thermo .raw input (isolation windows and MS1)".into());
+        }
+        if chimeric_active {
+            return Err("--dia and --chimeric cannot be combined: --dia searches every scan across its whole window".into());
+        }
+        if cli.open_search {
+            return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
+        }
+        params.dia = true;
+    }
     if cli.glyco_index_sequon_only && !cli.glyco {
         return Err(
             "--glyco-index-sequon-only requires --glyco (the standard peptide \
@@ -931,6 +954,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
+        eprintln!(
+            "WARN: --precursor-cal is ignored under --dia (a DIA scan has no selected precursor)"
+        );
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+    }
     if let Some(n) = cli.cal_min_spec_keys {
         params.cal_min_spec_keys = n;
     }
@@ -1529,11 +1558,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Predict: {}", p.describe());
     }
     let keep_peaks = cli.refine
+        || cli.dia
         || cli.localize.is_some()
         || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
+    let mut dia_ms1: Vec<Vec<model::scan::Ms1Scan>> = Vec::new();
 
     let t_search_start = std::time::Instant::now();
 
@@ -1869,6 +1900,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if params.fragment_index_top_k > 0
             && !standalone
+            && !cli.dia
             && file_is_mzml
             && !is_gzip_path(input_path)
             && !quant
@@ -1900,7 +1932,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
-            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_ms1 = cli.dia || quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
@@ -1988,7 +2020,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
 
-            let mass_ordered = params.fragment_index_top_k > 0 && !standalone;
+            let mass_ordered = (params.fragment_index_top_k > 0 || cli.dia) && !standalone;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -2018,6 +2050,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
             }
+            let stats = match parser_handle.join() {
+                Ok(Ok((stats, scans))) => {
+                    run_scans = scans;
+                    stats
+                }
+                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+                Err(_) => return Err("parser thread panicked".into()),
+            };
+            if cli.dia && mass_ordered {
+                for s in &mut pending {
+                    s.precursor_charge = None;
+                }
+                prepared.set_dia_ms1(if quant.is_some() {
+                    run_scans.ms1.clone()
+                } else {
+                    std::mem::take(&mut run_scans.ms1)
+                });
+            }
             if mass_ordered {
                 score_mass_ordered(
                     &prepared,
@@ -2031,15 +2081,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut measurer,
                 );
             }
-
-            match parser_handle.join() {
-                Ok(Ok((stats, scans))) => {
-                    run_scans = scans;
-                    stats
-                }
-                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-                Err(_) => return Err("parser thread panicked".into()),
-            }
+            stats
         };
         require_spectra(
             input_path,
@@ -2048,6 +2090,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
         merge_parse_stats(&mut parse_stats, file_stats);
+        if cli.dia {
+            let gated = prepared.take_dia_ms1();
+            dia_ms1.push(if !gated.is_empty() {
+                gated
+            } else if quant.is_some() {
+                run_scans.ms1.clone()
+            } else {
+                std::mem::take(&mut run_scans.ms1)
+            });
+        }
         if let Some(q) = quant.as_mut() {
             q.finish_file(
                 input_path,
@@ -2349,6 +2401,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
+    if cli.dia {
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+    }
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
@@ -2400,16 +2455,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .map_err(|e| format!("{e}"))?;
             eprintln!("Rescore: Percolator backend = {}", backend.describe());
-            let user_args: Vec<String> = cli
+            let mut user_args: Vec<String> = cli
                 .percolator_args
                 .split_whitespace()
                 .map(|s| s.to_string())
                 .collect();
+            if cli.dia {
+                crate::dia::default_train_fdr(&mut user_args);
+            }
             let extra = output::percolator_args_with_threads(&user_args, cli.threads);
             let t_resc = std::time::Instant::now();
-            let (map, decoys) =
+            let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
+            if cli.dia
+                && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
+                    map.get(id).is_some_and(|p| p.q_value <= 0.01)
+                })?
+            {
+                (map, decoys) =
+                    output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("{e}"))?;
+            }
             rescore_decoys = Some(decoys);
             eprintln!(
                 "Rescore: Percolator produced {} target PSMs [{:.2}s]",
@@ -2423,8 +2490,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if has_site_claims {
                 row_scores = Some(
-                    output::score_all_rows(&backend, &output_pin_path, &extra)
-                        .map_err(|e| format!("scoring every PIN row for the site posteriors: {e}"))?,
+                    output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {
+                        format!("scoring every PIN row for the site posteriors: {e}")
+                    })?,
                 );
             }
             if cli.mbr {

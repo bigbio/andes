@@ -8,6 +8,8 @@ mod acquisition;
 mod cli;
 #[path = "../config.rs"]
 mod config;
+#[path = "andes/dia.rs"]
+mod dia;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]

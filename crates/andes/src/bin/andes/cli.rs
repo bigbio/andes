@@ -592,6 +592,18 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) chimeric: bool,
 
+    /// Data-independent acquisition: search every MS2 scan across its isolation window
+    ///
+    /// Each scan is searched against every peptide whose precursor m/z lies in its
+    /// isolation window and has an MS1 peak (spectrum-centric DIA, as MSFragger-DIA); the PIN
+    /// gets fragment and MS1 co-elution columns from the neighbouring cycles of the same
+    /// window. With --rescore, Percolator runs with --trainFDR 0.05 and again after a per-run
+    /// RT refinement. On Orbitrap Astral the fragment tolerance is 7 ppm unless
+    /// --fragment-tol-* is set. Needs mzML or .raw with isolation windows and MS1 scans;
+    /// replaces --chimeric and --precursor-cal.
+    #[arg(long, help_heading = H_MODES)]
+    pub(crate) dia: bool,
+
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
     ///
     /// The modifications are a built-in tier, or the tier of --refine-config.
@@ -2548,6 +2560,7 @@ mod help_layout_tests {
         "--quant-fdr",
         "--rescore",
         "--chimeric",
+        "--dia",
         "--refine",
         "--glyco",
         "--glyco-species",

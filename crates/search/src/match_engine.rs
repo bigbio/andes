@@ -40,6 +40,9 @@ use scoring_crate::scoring::{
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
+const DIA_MS1_GATE_PPM: f64 = 5.0;
+const DIA_MS1_GATE_SCANS: usize = 1;
+
 pub type ScorerLoader = Box<dyn Fn(ActivationMethod) -> Option<RankScorer> + Send + Sync>;
 
 struct PerScanScorers {
@@ -162,6 +165,7 @@ pub struct PreparedSearch<'a> {
     open_rescore_wins: AtomicUsize,
     pub aa_set_for_scoring: AminoAcidSet,
     pub ms1_link: Option<Ms1Link>,
+    pub dia_ms1: Vec<model::scan::Ms1Scan>,
     target_bare_seqs: FxHashSet<Box<[u8]>>,
     candidate_filter: Option<CandidateFilter>,
     open_index: Option<Box<ChunkFragmentIndex>>,
@@ -291,6 +295,16 @@ pub(crate) fn candidate_nominal_bounds(
     params: &SearchParams,
     shift_ppm: f64,
 ) -> (i32, i32) {
+    if params.dia {
+        let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+            spec,
+            z,
+            &params.precursor_tolerance,
+            params.chimeric_isolation_halfwidth_da,
+            shift_ppm,
+        );
+        return (nominal_from(lo - H2O) - 1, nominal_from(hi - H2O) + 1);
+    }
     let charge_f = z as f64;
     let iso_min = *params.isotope_error_range.start() as i32;
     let iso_max = *params.isotope_error_range.end() as i32;
@@ -460,6 +474,7 @@ impl<'a> PreparedSearch<'a> {
             open_rescore_wins: AtomicUsize::new(0),
             aa_set_for_scoring,
             ms1_link: None,
+            dia_ms1: Vec::new(),
             target_bare_seqs,
             candidate_filter: None,
             open_index: None,
@@ -609,6 +624,48 @@ impl<'a> PreparedSearch<'a> {
     pub fn with_ms1_link(mut self, ms1_link: Option<Ms1Link>) -> Self {
         self.ms1_link = ms1_link;
         self
+    }
+
+    pub fn set_dia_ms1(&mut self, mut scans: Vec<model::scan::Ms1Scan>) {
+        scans.retain(|s| s.rt.is_finite());
+        scans.sort_by(|a, b| a.rt.total_cmp(&b.rt));
+        self.dia_ms1 = scans;
+    }
+
+    pub fn take_dia_ms1(&mut self) -> Vec<model::scan::Ms1Scan> {
+        std::mem::take(&mut self.dia_ms1)
+    }
+
+    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
+        let tol = mz * DIA_MS1_GATE_PPM * 1e-6;
+        self.dia_ms1[scans].iter().any(|s| {
+            let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+            s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
+        })
+    }
+
+    fn dia_ms1_scans(&self, rt: Option<f64>) -> Option<std::ops::Range<usize>> {
+        let rt = rt?;
+        if self.dia_ms1.is_empty() {
+            return None;
+        }
+        let i = self.dia_ms1.partition_point(|s| s.rt < rt);
+        let near = match (i.checked_sub(1), (i < self.dia_ms1.len()).then_some(i)) {
+            (Some(a), Some(b)) => {
+                if rt - self.dia_ms1[a].rt <= self.dia_ms1[b].rt - rt {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        Some(
+            near.saturating_sub(DIA_MS1_GATE_SCANS)
+                ..(near + DIA_MS1_GATE_SCANS + 1).min(self.dia_ms1.len()),
+        )
     }
 
     pub fn run_chunk(&self, spectra: &[Spectrum], spectrum_idx_offset: usize) -> Vec<TopNQueue> {
@@ -845,6 +902,18 @@ impl<'a> PreparedSearch<'a> {
                         .filter(|s| s.peaks.len() >= params.min_peaks as usize)
                     {
                         for z in charges_to_try(s, params) {
+                            if params.dia {
+                                let (a, b) = crate::precursor_matching::dia_neutral_window(
+                                    s,
+                                    z,
+                                    &params.precursor_tolerance,
+                                    params.chimeric_isolation_halfwidth_da,
+                                    shift_ppm,
+                                );
+                                lo = lo.min(a);
+                                hi = hi.max(b);
+                                continue;
+                            }
                             let zf = z as f64;
                             let obs = adjusted_observed_neutral_mass(
                                 s.precursor_mz * zf - zf * PROTON,
@@ -948,8 +1017,38 @@ impl<'a> PreparedSearch<'a> {
                 };
 
                 let shift_ppm = params.precursor_mass_shift_ppm;
+                let ms1_gate = if params.dia {
+                    self.dia_ms1_scans(spec.rt_seconds)
+                } else {
+                    None
+                };
+                let dia_windows: SmallVec<[(u8, f64, f64); 4]> = if params.dia {
+                    charges_to_try
+                        .iter()
+                        .map(|&z| {
+                            let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+                                spec,
+                                z,
+                                &params.precursor_tolerance,
+                                params.chimeric_isolation_halfwidth_da,
+                                shift_ppm,
+                            );
+                            (z, lo, hi)
+                        })
+                        .collect()
+                } else {
+                    SmallVec::new()
+                };
                 let mut mmap_cands_owned: Vec<Candidate> = if let Some(fi) = &frag_index {
-                    let sel = fi.query(
+                    let gate = |mass: f64| {
+                        ms1_gate.clone().is_none_or(|r| {
+                            dia_windows.iter().any(|&(z, lo, hi)| {
+                                (lo..=hi).contains(&mass)
+                                    && self.dia_ms1_has(r.clone(), mass / z as f64 + PROTON)
+                            })
+                        })
+                    };
+                    let sel = fi.query_where(
                         spec,
                         &charges_to_try,
                         params,
@@ -957,6 +1056,7 @@ impl<'a> PreparedSearch<'a> {
                         params.fragment_index_top_k as usize,
                         crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                         crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
+                        &gate,
                     );
                     let relabel = |v: &mut [Candidate]| {
                         relabel_collision_decoys_with(v, &self.target_bare_seqs)
@@ -1010,19 +1110,37 @@ impl<'a> PreparedSearch<'a> {
                     for &z in &charges_to_try {
                         let scored_spec = scored_spec_for_charge(z);
                         let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
-                        for offset in
-                            *params.isotope_error_range.start()..=*params.isotope_error_range.end()
-                        {
-                            let matched = matches_precursor(
-                                spec,
-                                &cand.peptide,
-                                z,
-                                offset,
-                                &params.precursor_tolerance,
-                                shift_ppm,
-                            );
-                            if let Some(err) = matched {
-                                iso_errs.push(err);
+                        if params.dia {
+                            let (lo, hi) = dia_windows
+                                .iter()
+                                .find(|w| w.0 == z)
+                                .map_or((f64::MAX, f64::MIN), |w| (w.1, w.2));
+                            let mass = cand.peptide.mass();
+                            let mono_mz = mass / z as f64 + PROTON;
+                            if (lo..=hi).contains(&mass)
+                                && ms1_gate
+                                    .clone()
+                                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz))
+                            {
+                                iso_errs.push(MassError {
+                                    mass_error_da: 0.0,
+                                    mass_error_ppm: 0.0,
+                                    isotope_offset: 0,
+                                });
+                            }
+                        } else {
+                            for offset in params.isotope_error_range.clone() {
+                                let matched = matches_precursor(
+                                    spec,
+                                    &cand.peptide,
+                                    z,
+                                    offset,
+                                    &params.precursor_tolerance,
+                                    shift_ppm,
+                                );
+                                if let Some(err) = matched {
+                                    iso_errs.push(err);
+                                }
                             }
                         }
                         if iso_errs.is_empty() {
@@ -1178,7 +1296,9 @@ impl<'a> PreparedSearch<'a> {
                             activation_method: Some(scorer.param().data_type.activation),
                             features,
                             isotope_offset: err.isotope_offset,
-                            precursor_mz_override: None,
+                            precursor_mz_override: params
+                                .dia
+                                .then(|| cand.peptide.mass() / z as f64 + PROTON),
                             site_evidence: None,
                             tie_key: crate::psm::tie_key_of(cand),
                         };
@@ -2228,6 +2348,41 @@ mod accumulator_tests {
         assert!(accum.index_of.is_empty());
         assert_eq!(accum.intern(&cands[1]), 0);
         assert_eq!(accum.candidates.len(), 1);
+    }
+
+    #[test]
+    fn dia_ms1_gate_reads_neighbouring_survey_scans() {
+        let db = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRK".to_vec(),
+                annotation: None,
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&db, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let mut prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
+        let scan = |rt: f64, mz: f64| model::scan::Ms1Scan {
+            rt,
+            peaks: vec![(mz, 1.0)],
+            ..Default::default()
+        };
+        prepared.set_dia_ms1(vec![
+            scan(30.0, 700.0),
+            scan(10.0, 500.0),
+            scan(20.0, 600.0),
+        ]);
+        assert_eq!(prepared.dia_ms1_scans(None), None);
+        let r = prepared.dia_ms1_scans(Some(9.0)).unwrap();
+        assert_eq!(r, 0..2);
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6)));
+        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6)));
+        assert!(!prepared.dia_ms1_has(r, 700.0));
+        assert_eq!(prepared.dia_ms1_scans(Some(26.0)).unwrap(), 1..3);
     }
 }
 

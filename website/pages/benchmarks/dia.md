@@ -23,17 +23,17 @@ tool calibrates its q-values. The andes bars are the mean of five Percolator see
 
 | | raw01 | raw02 | at 2% true FDP | nominal q ≤ 0.01 | its true FDP |
 |---|---:|---:|---:|---:|---:|
-| andes `--dia` | 1,800 | 1,821 | 1,909 / 1,953 | 1,606 / 1,747 | 0.3% / 0.7% |
+| andes `--dia` | 1,825 | 1,907 | 2,029 / 2,051 | 1,510 / 1,791 | 0.3% / 0.6% |
 | DIA-NN 2.2 | 2,067 | 2,301 | 2,522 / 2,543 | 2,361 / 2,322 | 1.4% / 1.0% |
 | OpenDIA arm E | 1,694 | 1,628 | 1,908 / 1,903 | 1,667 / 1,457 | 1.0% / 0.7% |
 
-andes reaches 87% / 79% of DIA-NN and 106% / 112% of OpenDIA arm E. Its nominal 1% is
-conservative on both runs (0.1–0.5% and 0.6–1.0% over the seeds).
+andes reaches 88% / 83% of DIA-NN and 108% / 117% of OpenDIA arm E. Its nominal 1% is
+conservative on both runs (0.0–0.5% and 0.4–0.8% over the seeds).
 
 ## Time
 
-Wall time per run, 14 threads: andes 5.7–6.8 min, of which the search, PIN and DIA columns take
-about 60–65 s and the two Percolator passes 4.4–5.4 min; DIA-NN 8.8 min (raw02) and 13.5 min
+Wall time per run, 14 threads: andes 6.7–7.5 min, of which the search, prediction, PIN and DIA
+columns take about 2 min and the two Percolator passes 4.7–5.4 min; DIA-NN 8.8 min (raw02) and 13.5 min
 (raw01). The two tools ran on different machines (andes on a cluster node, DIA-NN in Docker on a
 workstation), so the times are indicative only.
 

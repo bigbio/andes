@@ -35,7 +35,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds | 1433 / 1589 | 0.004 / 0.007 | | 1634 / 1687 (1619–1646 / 1620–1725) | 1798 / 1819 |
 | andes `--dia --rescore` + two-pass RT refinement, 20 ppm fragments, mean of 5 seeds | 1432 / 1612 | 0.004 / 0.005 | 0.044 / 0.038 | 1666 / 1747 (1627–1688 / 1648–1792) | 1872 / 1884 |
 | andes `--dia --rescore` (+ 7 ppm fragments), mean of 5 seeds | 1589 / 1755 | 0.004 / 0.009 | 0.043 / 0.050 | 1801 / 1819 (1733–1828 / 1748–1882) | 1964 / 1962 |
-| andes `--dia --rescore`, current (main's UNIMOD masses), mean of 5 seeds | 1606 / 1747 | 0.003 / 0.007 | 0.044 / 0.045 | **1800 / 1821** (1740–1838 / 1791–1853) | 1909 / 1953 |
+| andes `--dia --rescore`, current (main's UNIMOD masses), mean of 5 seeds | 1606 / 1747 | 0.003 / 0.007 | 0.044 / 0.045 | 1800 / 1821 (1740–1838 / 1791–1853) | 1909 / 1953 |
+| andes `--dia --rescore`, + 50-row pool re-ranked by RawScore + andes-ms2 angle, mean of 5 seeds | 1510 / 1791 | 0.003 / 0.006 | 0.047 / 0.046 | **1825 / 1907** (1753–1870 / 1888–1938) | 2029 / 2051 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -52,8 +53,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
   with seed 42, 72 % / 69 % on the seed mean, and 87 % / 79 % with `--trainFDR 0.05`, the
-  summed-apex columns, the two-pass RT refinement and 7 ppm fragments; it is above OpenDIA arm E
-  (106 % / 112 %).
+  summed-apex columns, the two-pass RT refinement and 7 ppm fragments, and 88 % / 83 % with per-scan
+  re-ranking; it is above OpenDIA arm E (108 % / 117 %).
 - **Modification masses.** main now reads modification masses from UNIMOD (Oxidation 15.994915,
   Carbamidomethyl 57.021464, against 15.99491 / 57.02146 in the `mods.txt` the earlier rows used).
   The PIN then writes oxidation as `+15.99492`, which `eval_dia.py` now maps to UniMod:35 as well
@@ -85,6 +86,17 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 - **MS1 gate** (a candidate is scored only when its monoisotopic m/z has a survey peak within 5 ppm in the
   nearest survey scan or one either side): +70 / +82 at N@FDP_c 1 % and 25–42 % less search time. On the
   slice it keeps the MS1 peak of 93 % of DIA-NN's precursors and of 13 % of random library candidates.
+- **Per-scan re-ranking.** Of DIA-NN's precursors that andes finds inside DIA-NN's peak but never
+  ranks first in a scan (192 / 172), the winner is a decoy 45 % of the time, and the true peptide's
+  andes-ms2 angle beats the winner's in about 80 % of cases (median 0.49 vs 0.17). With
+  `--predict ms2`, `--dia` now keeps 50 rows per scan and, after prediction, trims each scan to
+  `--top-n` rows by z(RawScore) + z(`andesms2_spectral_angle`), z-scored over the PIN. Mean of 5
+  seeds, N@FDP_c 1 %: 1825 / 1907 against 1800 / 1821, higher for 4 of 5 seeds on raw01 and 5 of 5
+  on raw02, with q ≤ 0.01 at 0.0–0.5 % / 0.4–0.8 % true FDP. Offline variants on the same PINs:
+  retention pool `STRONG_SCORE_RETENTION_K` 100 (without re-ranking) 1793 / 1836; keep 100, top 10
+  by RawScore 1801 / 1861; keep 100, RawScore + angle 1832 / 1867; keep 50, RawScore + angle
+  1833 / 1884. Cost: search plus prediction 1.0 → 2.0 min, peak memory 13 → 15 GB per run
+  (keeping 100 rows took 49 GB).
 - **Cost per run**: andes search 6–7 min (wall, 14 threads) plus 12–15 min of Percolator; DIA-NN 8.8–21 min
   (`diann-decoys-20261114/RESULT.md`).
 

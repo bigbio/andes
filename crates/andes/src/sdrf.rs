@@ -727,7 +727,7 @@ pub fn apply(
                 x.name,
                 x.describe_sites()
             ));
-            args.xl = Some(x);
+            args.xl = Some(crate::cli::XlSet(vec![x]));
         }
     }
     args.sdrf_dissociation = s.dissociation;
@@ -1033,12 +1033,12 @@ mod tests {
             apply(&s, &mut a, &m, keys).unwrap();
             a
         };
-        let x = run(&[], None).xl.unwrap();
+        let x = run(&[], None).xl.unwrap().0.remove(0);
         assert_eq!(x.name, "DSBU");
         assert_eq!(x.describe_sites(), "K, Protein N-term");
-        assert_eq!(run(&["--xl", "DSS"], None).xl.unwrap().name, "DSS");
+        assert_eq!(run(&["--xl", "DSS"], None).xl.unwrap().0.remove(0).name, "DSS");
         let cfg = Some("search:\n  xl: DSSO\n");
-        assert_eq!(run(&[], cfg).xl.unwrap().name, "DSSO");
-        assert_eq!(run(&["--xl", "DSS"], cfg).xl.unwrap().name, "DSS");
+        assert_eq!(run(&[], cfg).xl.unwrap().0.remove(0).name, "DSSO");
+        assert_eq!(run(&["--xl", "DSS"], cfg).xl.unwrap().0.remove(0).name, "DSS");
     }
 }

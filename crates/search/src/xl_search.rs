@@ -452,6 +452,7 @@ pub struct XlSpectrumResult {
     pub doublets: DoubletSummary,
     pub csm: Option<Csm>,
     pub oracle: Option<OracleResult>,
+    pub linker: usize,
 }
 
 struct StubMods {
@@ -1018,6 +1019,7 @@ fn search_spectrum_at(
         doublets,
         csm: None,
         oracle: None,
+        linker: 0,
     };
     if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);

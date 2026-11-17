@@ -2,7 +2,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
+use crate::xl_fdr::XlRun;
 use andes_xl::crosslinker::Crosslinker;
+use andes_xl::crosslinker::LinkForm;
 use andes_xl::decoy::PairClass;
 use model::Spectrum;
 use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
@@ -26,6 +28,7 @@ fn peptide_cols(
     table: &XlCandidates,
     prepared: &PreparedSearch,
     linker: &Crosslinker,
+    stub_cols: Option<usize>,
 ) -> Vec<String> {
     let p = &table.peptides()[h.pep as usize];
     let proteins: Vec<&str> = p
@@ -60,7 +63,18 @@ fn peptide_cols(
         fmt(h.score),
         linker.form_name(h.form).to_string(),
     ];
-    cols.extend(linker.forms().map(|f| fmt(h.form_scores[f.index()])));
+    match stub_cols {
+        None => cols.extend(linker.forms().map(|f| fmt(h.form_scores[f.index()]))),
+        Some(n) => {
+            let stubs: Vec<String> = linker
+                .forms()
+                .filter(|f| *f != LinkForm::Intact)
+                .map(|f| fmt(h.form_scores[f.index()]))
+                .collect();
+            cols.extend((0..n).map(|k| stubs.get(k).cloned().unwrap_or_else(|| "NA".into())));
+            cols.push(fmt(h.form_scores[LinkForm::Intact.index()]));
+        }
+    }
     cols.extend([
         h.n_sites.to_string(),
         h.gap_next.map_or("NA".to_string(), |g| format!("{g:.3}")),
@@ -70,7 +84,7 @@ fn peptide_cols(
     cols
 }
 
-fn pep_cols(linker: &Crosslinker) -> Vec<String> {
+fn pep_cols(linker: &Crosslinker, stub_cols: Option<usize>) -> Vec<String> {
     let mut v: Vec<String> = [
         "peptide",
         "site",
@@ -83,11 +97,17 @@ fn pep_cols(linker: &Crosslinker) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    v.extend(
-        linker
-            .forms()
-            .map(|f| format!("score_{}", linker.form_name(f))),
-    );
+    match stub_cols {
+        None => v.extend(
+            linker
+                .forms()
+                .map(|f| format!("score_{}", linker.form_name(f))),
+        ),
+        Some(n) => {
+            v.extend((1..=n).map(|k| format!("score_stub{k}")));
+            v.push("score_intact".into());
+        }
+    }
     v.extend(
         ["n_sites", "gap_next", "mass_err_ppm", "length"]
             .iter()
@@ -108,10 +128,16 @@ fn write_csms(
     results: &[XlSpectrumResult],
     score: &[Option<f64>],
     q: &[Option<f64>],
-    table: &XlCandidates,
+    runs: &[XlRun],
     prepared: &PreparedSearch,
-    linker: &Crosslinker,
 ) -> std::io::Result<usize> {
+    let linker = &runs[0].linker;
+    let stub_cols = (runs.len() > 1).then(|| {
+        runs.iter()
+            .map(|r| r.linker.cleavage.as_ref().map_or(0, |c| c.stubs.len()))
+            .max()
+            .unwrap_or(0)
+    });
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<String> = [
         "spectrum",
@@ -136,7 +162,14 @@ fn write_csms(
     .map(|s| s.to_string())
     .collect();
     for side in ["alpha", "beta"] {
-        head.extend(pep_cols(linker).iter().map(|c| format!("{side}_{c}")));
+        head.extend(
+            pep_cols(linker, stub_cols)
+                .iter()
+                .map(|c| format!("{side}_{c}")),
+        );
+    }
+    if stub_cols.is_some() {
+        head.push("crosslinker".into());
     }
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
@@ -165,8 +198,24 @@ fn write_csms(
             r.doublets.masses.len().to_string(),
             format!("{:.4}", r.doublets.top_rel_intensity),
         ];
-        row.extend(peptide_cols(&c.alpha, table, prepared, linker));
-        row.extend(peptide_cols(&c.beta, table, prepared, linker));
+        let run = &runs[r.linker];
+        row.extend(peptide_cols(
+            &c.alpha,
+            &run.table,
+            prepared,
+            &run.linker,
+            stub_cols,
+        ));
+        row.extend(peptide_cols(
+            &c.beta,
+            &run.table,
+            prepared,
+            &run.linker,
+            stub_cols,
+        ));
+        if stub_cols.is_some() {
+            row.push(run.linker.name.clone());
+        }
         writeln!(w, "{}", row.join("\t"))?;
         n += 1;
     }
@@ -178,7 +227,7 @@ fn write_doublets(
     path: &Path,
     spectra: &[Spectrum],
     results: &[XlSpectrumResult],
-    table: &XlCandidates,
+    runs: &[XlRun],
 ) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
@@ -220,6 +269,7 @@ fn write_doublets(
             .collect();
         let (op, os, oc, oa, ob, osup) = match &r.oracle {
             Some(o) => {
+                let table = &runs[r.linker].table;
                 let seq = |i: u32| table.peptides()[i as usize].peptide.to_proforma();
                 match o.best {
                     Some((i, j, s)) => (
@@ -388,12 +438,12 @@ fn water_record(name: &str) -> bool {
 
 pub(crate) fn xl_default_variable_mods(
     explicit: Option<&crate::cli::ModList>,
-    linker: &Crosslinker,
+    linkers: &[Crosslinker],
 ) -> Option<crate::cli::ModList> {
     if explicit.is_some() {
         return None;
     }
-    let mono = water_monolink_mods(linker);
+    let mono: Vec<model::Modification> = linkers.iter().flat_map(water_monolink_mods).collect();
     if mono.is_empty() {
         return None;
     }
@@ -411,41 +461,70 @@ pub(crate) fn run_xl(
     run_ends: &[usize],
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let linker: Crosslinker = cli.xl.clone().ok_or("--xl: no crosslinker")?;
-    report_linker(&linker);
-    let t = std::time::Instant::now();
-    let table = XlCandidates::from_out_of_core(prepared, &linker);
-    let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
-    eprintln!(
-        "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
-        table.peptides().len(),
-        n_decoy,
-        if table.has_open_index() {
-            "; open-mass fragment index built (non-cleavable linker)"
-        } else {
-            ""
-        },
-        t.elapsed().as_secs_f64()
-    );
+    let linkers = cli.xl.clone().ok_or("--xl: no crosslinker")?.0;
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]
     } else {
         spectra
     };
-    let mut cfg = XlConfig::new(linker.clone());
-    cfg.oracle_spectra = cli.xl_oracle;
-    if let Some((lo, hi)) = cli.isotope_error {
-        cfg.isotope_offsets = lo..=hi;
+    let mut runs: Vec<XlRun> = Vec::new();
+    let mut results: Vec<XlSpectrumResult> = Vec::new();
+    for (li, linker) in linkers.into_iter().enumerate() {
+        report_linker(&linker);
+        let t = std::time::Instant::now();
+        let table = XlCandidates::from_out_of_core(prepared, &linker);
+        let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
+        eprintln!(
+            "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
+            table.peptides().len(),
+            n_decoy,
+            if table.has_open_index() {
+                "; open-mass fragment index built (non-cleavable linker)"
+            } else {
+                ""
+            },
+            t.elapsed().as_secs_f64()
+        );
+        let mut cfg = XlConfig::new(linker.clone());
+        cfg.oracle_spectra = cli.xl_oracle;
+        if let Some((lo, hi)) = cli.isotope_error {
+            cfg.isotope_offsets = lo..=hi;
+        }
+        let t = std::time::Instant::now();
+        let mut found = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
+        eprintln!(
+            "[xl] {}: searched {} spectra, {} CSMs [{:.2}s]",
+            linker.name,
+            found.len(),
+            found.iter().filter(|r| r.csm.is_some()).count(),
+            t.elapsed().as_secs_f64()
+        );
+        report(&found);
+        for r in found.iter_mut() {
+            r.linker = li;
+        }
+        if li == 0 {
+            results = found;
+        } else {
+            results = merge_linkers(results, found);
+        }
+        runs.push(XlRun { linker, table });
     }
-    let t = std::time::Instant::now();
-    let results = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
-    eprintln!(
-        "[xl] searched {} spectra, {} CSMs [{:.2}s]",
-        results.len(),
-        results.iter().filter(|r| r.csm.is_some()).count(),
-        t.elapsed().as_secs_f64()
-    );
-    report(&results);
+    if runs.len() > 1 {
+        let mut by: Vec<usize> = vec![0; runs.len()];
+        for r in results.iter().filter(|r| r.csm.is_some()) {
+            by[r.linker] += 1;
+        }
+        let parts: Vec<String> = runs
+            .iter()
+            .zip(&by)
+            .map(|(r, n)| format!("{} {n}", r.linker.name))
+            .collect();
+        eprintln!(
+            "[xl] best CSM per spectrum across linkers: {}",
+            parts.join(", ")
+        );
+    }
     let run_of = |i: usize| -> String {
         let k = run_ends.partition_point(|&end| end <= i);
         spectrum_paths
@@ -458,11 +537,10 @@ pub(crate) fn run_xl(
         &pin_path,
         spectra_for_xl,
         &results,
-        &table,
+        &runs,
         prepared,
         &run_of,
         None,
-        cfg.linker.intact,
     )?;
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
     let mut score: Vec<Option<f64>> = results
@@ -475,11 +553,10 @@ pub(crate) fn run_xl(
             &path,
             spectra_for_xl,
             &results,
-            &table,
+            &runs,
             prepared,
             &run_of,
             Some(intra),
-            cfg.linker.intact,
         )?;
         eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;
@@ -496,7 +573,7 @@ pub(crate) fn run_xl(
     if cli.xl_rescore_inter {
         rescore_class(false, ".xl.inter.pin")?;
     }
-    let levels = crate::xl_fdr::roll_up(&results, &score, &table, prepared);
+    let levels = crate::xl_fdr::roll_up(&results, &score, &runs, prepared);
     crate::xl_fdr::report_levels(&levels);
     let mut q = vec![None; results.len()];
     for (&row, v) in levels.csm_rows.iter().zip(&levels.csm_q) {
@@ -509,9 +586,8 @@ pub(crate) fn run_xl(
         &results,
         &score,
         &q,
-        &table,
+        &runs,
         prepared,
-        &linker,
     )?;
     crate::xl_fdr::write_levels(
         &sibling(report_base, ".xl.residue_pairs.tsv"),
@@ -521,7 +597,7 @@ pub(crate) fn run_xl(
         spectra_for_xl,
     )?;
     let dbl_path = sibling(report_base, ".xl.doublets.tsv");
-    write_doublets(&dbl_path, spectra_for_xl, &results, &table)?;
+    write_doublets(&dbl_path, spectra_for_xl, &results, &runs)?;
     eprintln!(
         "Wrote {} ({n} CSMs), the residue-pair, protein-pair and doublet tables \
          [PHASE TOTAL: {:.2}s]",
@@ -531,12 +607,43 @@ pub(crate) fn run_xl(
     Ok(())
 }
 
+fn merge_linkers(
+    into: Vec<XlSpectrumResult>,
+    other: Vec<XlSpectrumResult>,
+) -> Vec<XlSpectrumResult> {
+    let mut by_spec: std::collections::HashMap<usize, XlSpectrumResult> =
+        other.into_iter().map(|r| (r.spec_idx, r)).collect();
+    let mut out: Vec<XlSpectrumResult> = into
+        .into_iter()
+        .map(|r| {
+            let Some(o) = by_spec.remove(&r.spec_idx) else {
+                return r;
+            };
+            let s = |x: &XlSpectrumResult| x.csm.as_ref().map(|c| c.score());
+            match (s(&r), s(&o)) {
+                (_, None) => r,
+                (None, Some(_)) => o,
+                (Some(a), Some(b)) => {
+                    if b > a {
+                        o
+                    } else {
+                        r
+                    }
+                }
+            }
+        })
+        .collect();
+    out.extend(by_spec.into_values());
+    out.sort_by_key(|r| r.spec_idx);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn linker(spec: &str) -> Crosslinker {
-        crate::cli::parse_xl(spec).unwrap()
+        crate::cli::parse_xl_one(spec).unwrap()
     }
 
     #[test]
@@ -555,19 +662,36 @@ mod tests {
     }
 
     #[test]
+    fn several_linkers_are_a_semicolon_list_and_share_the_monolink_default() {
+        let set = crate::cli::parse_xl("DSSO; DSBU (K)").unwrap();
+        let names: Vec<&str> = set.0.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["DSSO", "DSBU"]);
+        assert_eq!(set.0[1].ends[0].residues, b"K");
+        assert!(crate::cli::parse_xl("DSSO; DSSO (K)")
+            .unwrap_err()
+            .contains("twice"));
+        assert!(crate::cli::parse_xl(" ; ").is_err());
+        let d = xl_default_variable_mods(None, &set.0).unwrap().0;
+        assert!(d.iter().any(|m| m.name == "Xlink:DSSO[176]"));
+        assert!(d.iter().any(|m| m.name == "Xlink:BuUrBu[214]"));
+    }
+
+    #[test]
     fn an_explicit_variable_mod_list_replaces_the_monolink_default() {
         let x = linker("DSS");
-        let d = xl_default_variable_mods(None, &x).unwrap().0;
+        let d = xl_default_variable_mods(None, std::slice::from_ref(&x))
+            .unwrap()
+            .0;
         assert_eq!(
             d.len(),
             crate::model_select::default_variable_mods().len() + 2
         );
         assert!(d.iter().any(|m| m.name == "Xlink:DSS[156]"));
         let explicit = crate::cli::parse_variable_mods("Oxidation (M)").unwrap();
-        assert!(xl_default_variable_mods(Some(&explicit), &x).is_none());
+        assert!(xl_default_variable_mods(Some(&explicit), std::slice::from_ref(&x)).is_none());
         let off = crate::cli::parse_variable_mods("").unwrap();
         assert!(off.0.is_empty());
-        assert!(xl_default_variable_mods(Some(&off), &x).is_none());
-        assert!(xl_default_variable_mods(None, &linker("CDI")).is_none());
+        assert!(xl_default_variable_mods(Some(&off), std::slice::from_ref(&x)).is_none());
+        assert!(xl_default_variable_mods(None, &[linker("CDI")]).is_none());
     }
 }

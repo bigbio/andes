@@ -1,5 +1,9 @@
 # TMT quantification benchmarks
 
+¹ single run: one search with one Percolator seed, or one tool output. andes ranges span seeds,
+draws or runs. The run count behind the FragPipe and quantms knockout values and behind the
+MaxQuant and SIMSI-Transfer match-between-runs rows is not recorded; those values are not marked.
+
 ## Knockout interference and extraction (PXD017803)
 
 Setup: yeast triple knockout, TMTpro 16-plex; two files each of hrMS2, SPS-MS3 and RTS-MS3, as
@@ -11,11 +15,16 @@ non-knockout channel intensity over PSMs of the three knocked-out proteins (lowe
 only scans whose window starts below 126 Th). Reporter extraction and impurity correction match OpenMS
 IsobaricAnalyzer exactly on the same scans.
 
-| acquisition | andes PSMs at 1% (quantified) | andes interference | no gate / purity ≥ 0.9 | MaxQuant PSMs; interference | FragPipe | quantms | PSMs vs MaxQuant | interference vs MaxQuant / FragPipe / quantms |
+| acquisition | andes PSMs at 1% (quantified) | andes interference | no gate / purity ≥ 0.9 | MaxQuant PSMs; interference¹ | FragPipe | quantms | PSMs vs MaxQuant | interference vs MaxQuant / FragPipe / quantms |
 |---|---:|---:|---|---|---:|---:|---|---|
 | SPS-MS3 | 9,806 (8,635) | 0.062 | 0.117 / 0.023 | 6,883; 0.054 | 0.139 | 0.072 | 🟢 ahead | 🔴 behind / 🟢 well ahead / 🟢 ahead |
 | RTS-MS3 | 14,270 (10,518) | 0.027 | 0.033 / 0.015 | 8,930; 0.038 | 0.055 | 0.037 | 🟢 well ahead | 🟢 ahead / 🟢 well ahead / 🟢 ahead |
 | hrMS2 | 13,474 (3,481) | 0.192 | 0.202 / 0.135 | 9,677; 0.156 | 0.214 | 0.180 | 🟢 ahead | 🔴 behind / 🟢 ahead / 🟡 on par; with `--tmt-unmix on` 🟢 well ahead of all three |
+
+![Knockout-channel interference by acquisition, with and without the quantification gate](https://andes.quantms.org/figures/tmt_interference.svg)
+
+Figures: drawn by the site from `website/benchmarks.json`, which `render.py` writes from
+[`results/`](results/).
 
 - `--tmt-unmix on` on hrMS2 gives a median knockout ratio of 0.000 at a background CV of 0.123 (0.079
   without it).
@@ -32,7 +41,7 @@ Setup: human + yeast TMT11 with known yeast ratios, 11 SPS-MS3 fractions, ion-tr
 default gate, `--rescore`, 16 threads, `0cfa03cc`, 2026-11-05; MaxQuant 2.7.0.0 as above. Yeast log2
 ratios against the human-normalised expectation (A/B 1.078; A/C 1.688, nominal 3:1 = 1.585; B/C 0.610).
 
-| metric | andes | MaxQuant 2.7.0.0 | verdict | note |
+| metric | andes | MaxQuant 2.7.0.0¹ | verdict | note |
 |---|---:|---:|---|---|
 | rank-1 target PSMs at 1% (quantified) | 149,121 (128,265) | 97,107 | 🟢 well ahead | +54% |
 | yeast log2 ratio A/B / A/C / B/C | 1.191 / 1.589 / 0.397 | 1.263 / 1.700 / 0.424 | 🟢 well ahead / 🔴 well behind / 🔴 behind | distance to the expectation: andes 0.113 / 0.099 / 0.213, MaxQuant 0.185 / 0.012 / 0.186 |

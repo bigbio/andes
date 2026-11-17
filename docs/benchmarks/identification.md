@@ -1,5 +1,9 @@
 # Identification benchmarks
 
+¹ single run: one search with one Percolator seed, or one tool output. andes ranges span seeds,
+draws or runs. Comet on the timsTOF runs is a mean over six draws; the run count behind the Java
+MS-GF+ UPS1 count is not recorded.
+
 Engines on the benchmark VM (8 threads, `/usr/bin/time`, plain databases, Percolator seed 42): andes
 `2051616b` (2026-10-23), Comet 2025.01 (2026-10-05; phospho 2026-10-06). **‡** UPS1 andes is the
 `2ee76dd6` run below (cluster node, entrapment database), so its cost does not compare with Comet's.
@@ -8,14 +12,23 @@ Engines on the benchmark VM (8 threads, `/usr/bin/time`, plain databases, Percol
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
 | Astral | andes | 52,169 | 114–117 s | 569–636 s | 4.8 GB |
-| | Comet 2025.01 | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| | Comet 2025.01 | 31,435¹ | 217 s¹ | 1,594 s¹ | 8.1 GB¹ |
 | TMT a05058 | andes | 13,516 | 40–47 s | 200–216 s | 1.7 GB |
-| | Comet 2025.01 | 10,504 | 77 s | 568 s | 2.9 GB |
+| | Comet 2025.01 | 10,504¹ | 77 s¹ | 568 s¹ | 2.9 GB¹ |
 | UPS1 | andes | 16,567–16,675 ‡ | 13–15 s ‡ | 71–79 s ‡ | 1.4 GB ‡ |
-| | Comet 2025.01 | 14,734 | 42 s | 309 s | 2.9 GB |
+| | Comet 2025.01 | 14,734¹ | 42 s¹ | 309 s¹ | 2.9 GB¹ |
 | Phospho (PXD007653) | andes | 38,623 | 337 s | 2,160 s | 7.9 GB |
-| | Comet 2025.01 | 33,984 | 1,096 s | 8,399 s | 6.0 GB |
+| | Comet 2025.01 | 33,984¹ | 1,096 s¹ | 8,399 s¹ | 6.0 GB¹ |
 <!-- END generated: engines-cost -->
+
+![PSMs at q ≤ 0.01 per engine](https://andes.quantms.org/figures/psms.svg)
+
+![Wall time, CPU time and peak memory, andes as a percentage of Comet](https://andes.quantms.org/figures/cost_relative.svg)
+
+![Entrapment-estimated true FDP at nominal 1%](https://andes.quantms.org/figures/true_fdp.svg)
+
+Figures: drawn by the site from `website/benchmarks.json`, which `render.py` writes from
+[`results/`](results/).
 
 ## Astral HCD (PXD070049)
 
@@ -25,12 +38,12 @@ Percolator, 2026-10-05.
 
 | metric | andes | Comet 2025.01 | verdict | note |
 |---|---:|---:|---|---|
-| PSMs at `q ≤ 0.01` | 52,169–52,437 | 31,435 | 🟢 well ahead | +66% |
+| PSMs at `q ≤ 0.01` | 52,169–52,437 | 31,435¹ | 🟢 well ahead | +66% |
 | peptides at `q ≤ 0.01` | 31,147–31,238 | — | ⚪ not compared | |
 | true FDP at nominal 1%, peptide-level entrapment (T/E 1.075; 9 database × seed runs) | 0.89–1.08% | — | 🟢 on target | |
 | PSMs / peptides at a true FDP of 1% | 47,267–47,977 / 28,141–28,857 | — | ⚪ not compared | |
 | true FDP, *Arabidopsis* entrapment (T/E 2.228) | 0.99–1.05% (49,965–50,185 PSMs) | — | 🟢 on target | |
-| wall time; CPU time; memory | 114–117 s; 569–636 CPU-s; 4.8 GB | 217 s | 🟢 well ahead | wall 1.9x faster |
+| wall time; CPU time; memory | 114–117 s; 569–636 CPU-s; 4.8 GB | 217 s¹ | 🟢 well ahead | wall 1.9x faster |
 
 ## TMT-labelled, low-res (PXD007683, run a05058)
 
@@ -39,11 +52,11 @@ sequences); andes `2051616b`; Comet 2025.01 as above.
 
 | metric | andes | Comet 2025.01 | verdict | note |
 |---|---:|---:|---|---|
-| PSMs at `q ≤ 0.01` | 13,443–13,516 | 10,504 | 🟢 ahead | +29% |
+| PSMs at `q ≤ 0.01` | 13,443–13,516 | 10,504¹ | 🟢 ahead | +29% |
 | peptides at `q ≤ 0.01` | 11,852–11,922 | — | ⚪ not compared | |
 | true FDP, peptide-level entrapment (T/E 1.073) | 0.67–0.76% (13,325–13,371 PSMs at 1%) | — | 🟢 on target | |
 | true FDP, *Arabidopsis* entrapment (T/E 2.021) | 0.83–1.05% (13,161–13,388 PSMs at 1%) | — | 🟢 on target | |
-| wall time; CPU time; memory | 40–47 s; 200–216 CPU-s; 1.7 GB | 77 s; 568 CPU-s; 2.9 GB | 🟢 well ahead | wall 1.6–1.9x faster |
+| wall time; CPU time; memory | 40–47 s; 200–216 CPU-s; 1.7 GB | 77 s; 568 CPU-s; 2.9 GB¹ | 🟢 well ahead | wall 1.6–1.9x faster |
 
 ## TMT-labelled, high-res (PXD017803, TKO hrMS2)
 
@@ -93,9 +106,9 @@ Comet row used; andes `2051616b`; Comet 2025.01, 2026-10-06.
 
 | metric | andes | Comet 2025.01 | verdict | note |
 |---|---:|---:|---|---|
-| PSMs at `q ≤ 0.01` | 38,596–38,629 (27,693–27,724 phospho-bearing) | 33,984 | 🟢 ahead | +14% |
+| PSMs at `q ≤ 0.01` | 38,596–38,629 (27,693–27,724 phospho-bearing) | 33,984¹ | 🟢 ahead | +14% |
 | peptides at `q ≤ 0.01` | 20,422–20,461 | — | ⚪ not compared | |
-| true FDP, 3 peptide-level shuffles (T/E 1.061) | 0.80–0.99% (38,604–38,843 PSMs at 1%) | 1.77% (whole-protein shuffle) | 🟢 on target | Comet above nominal, on a whole-protein shuffle that can read low |
+| true FDP, 3 peptide-level shuffles (T/E 1.061) | 0.80–0.99% (38,604–38,843 PSMs at 1%) | 1.77%¹ (whole-protein shuffle) | 🟢 on target | Comet above nominal, on a whole-protein shuffle that can read low |
 | true FDP, *Arabidopsis* entrapment (T/E 1.403) | 1.22–1.36% (38,298–38,412 PSMs at 1%) | — | 🔴 above nominal | |
 | wall time; CPU time; memory | 337 s; 2,160 CPU-s; 7.9 GB | — | ⚪ not compared | |
 | agreement with depositors' MaxQuant IDs (PEP ≤ 0.01, 23,563 scans) | 82.4% covered, 95.3% same-scan backbone | — | ⚪ not compared | agreement with the depositors' identifications |

@@ -104,7 +104,8 @@ def tool_cell(tool, ds, key, unit="", spec=""):
     if v is None:
         return "—"
     mark = " ‡" if tool["values"][ds["id"]].get("build", tool.get("build")) != tool.get("build") else ""
-    return f"{fmt(v, spec)}{unit}{mark}"
+    one = "¹" if tool.get("single_run") else ""
+    return f"{fmt(v, spec)}{unit}{one}{mark}"
 
 
 def engines_psms(data):

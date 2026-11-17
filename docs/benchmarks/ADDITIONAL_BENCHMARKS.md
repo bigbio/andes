@@ -77,7 +77,8 @@ Setup: public results of both modules (last updated 2026-07-16, read 2026-10-21,
 `proteobench` 0.17.0; andes by 0.18.6). Per tool the submission with the most precursors and, when
 different, the one with the lowest median |ε|, at ≥ 3 runs. "Transfer control" is what limits the
 error of match-between-runs values, from the submission's parameters, comment and output; "not
-checked" means the parameter file could not be retrieved.
+checked" means the parameter file could not be retrieved. Each submission is one run (n = 1), and
+so is each andes row (one Percolator seed).
 
 QExactive:
 

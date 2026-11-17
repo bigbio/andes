@@ -1,11 +1,19 @@
 # Label-free quantification benchmarks
 
+¹ single run: one search with one Percolator seed, or one tool output. andes ranges span seeds,
+draws or runs.
+
 ## ProteoBench
 
 Setup: ProteoBench "Quant LFQ DDA ion", QExactive (PXD028735) and Astral (PXD070049), six runs each;
 andes `09e1c00d`, 2026-11-05, scored with `proteobench` 0.18.6; public leaderboard read 2026-10-21.
 The summary compares andes with the MaxQuant and FragPipe submissions; every andes view and the whole
 leaderboard are in [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#proteobench).
+
+![Precursors in at least 3 runs against median ratio error, every plotted submission](https://andes.quantms.org/figures/quant_accuracy.svg)
+
+Figures: drawn by the site from `website/benchmarks.json`, which `render.py` writes from
+[`results/`](results/).
 
 - andes' raw `quantity` (what quantms receives) is less accurate than most submissions (QExactive
   median |ε| 0.222, CV 0.245); the default `quantity_normalized` reads 0.161 and 0.117.
@@ -25,7 +33,8 @@ Raw `quantity` column. MBR on = identified rows plus transfers with `transfer_q 
 identified rows. MaxQuant 2.7.0.0 (Standard DDA, LFQ on, 1% PSM and protein FDR, 2 missed
 cleavages, `Intensity` of the evidence table per precursor and run; MBR-off run re-run 2026-11-05,
 MBR-on run from 2026-10). FragPipe 21.1 with IonQuant 1.10.12, MBR on (ion FDR 0.01), normalisation
-off (`--normalization 0`), 2026-10 outputs, no MBR-off run.
+off (`--normalization 0`), 2026-10 outputs, no MBR-off run. MaxQuant and FragPipe give one output
+per set and setting (¹ single run); andes values are seed 42 unless a seed range is given.
 
 | set | what it is | runs | truth |
 |---|---|---:|---|
@@ -56,7 +65,7 @@ off (`--normalization 0`), 2026-10 outputs, no MBR-off run.
 Cells are precursor-by-run values. Each entry reads precursors / proteins (≥ 2 precursors) /
 identified cells + transferred cells.
 
-| set | andes, MBR on | MaxQuant, MBR on | FragPipe, MBR on | verdict | note |
+| set | andes, MBR on | MaxQuant, MBR on¹ | FragPipe, MBR on¹ | verdict | note |
 |---|---|---|---|---|---|
 | PXD009740 | 39,595 / 3,031 / 573,349 + 332,626 | 29,293 / 2,339 / 464,069 + 175,450 | 25,888 / 2,259 / 414,258 + 141,367 | MaxQuant 🟢 ahead · FragPipe 🟢 well ahead | +35% over the best other tool |
 | PXD009815 | 42,686 / 3,362 / 798,525 + 463,945 | 27,459 / 2,453 / 586,274 + 230,204 | 28,286 / 2,691 / 587,049 + 193,057 | MaxQuant 🟢 well ahead · FragPipe 🟢 well ahead | +51% |
@@ -74,7 +83,7 @@ cells are 0.
 
 ### Accuracy and precision
 
-Cells identified by every tool listed for the set. Entries read andes / MaxQuant / FragPipe (MBR on;
+Cells identified by every tool listed for the set. Entries read andes / MaxQuant¹ / FragPipe¹ (MBR on;
 andes MBR-on accuracy equals MBR off because the cells are identified cells). Bright decile = top
 tenth of predicted intensity; gross error = share of cells off by more than 2x. Protein CV is the
 median replicate CV of matched features.
@@ -109,7 +118,7 @@ calls, counted as false, in brackets). Seed 42. Across seeds 42, 1 and 7 andes M
 1,288–1,302 / 305–350 on PXD009740, 841–847 / 153–188 on PXD009815, 1,047–1,050 / 110–120 on QE and
 681–685 / 296–301 on Astral.
 
-| set | andes, MBR on | andes, MBR off | MaxQuant, MBR on | MaxQuant, MBR off | FragPipe, MBR on | true positives vs MaxQuant / FragPipe | false calls vs MaxQuant / FragPipe | note |
+| set | andes, MBR on | andes, MBR off | MaxQuant, MBR on¹ | MaxQuant, MBR off¹ | FragPipe, MBR on¹ | true positives vs MaxQuant / FragPipe | false calls vs MaxQuant / FragPipe | note |
 |---|---|---|---|---|---|---|---|---|
 | PXD009740 | 1,300 / 305 (1) | 1,068 / 180 (0) | 1,304 / 129 (0) | 1,047 / 188 (0) | 1,237 / 302 (0) | 🟡 on par / 🟡 on par | 🔴 well behind / 🟡 on par | 2.4x MaxQuant false calls |
 | PXD009815 | 844 / 153 (7) | 640 / 76 (0) | 844 / 92 (2) | 541 / 54 (2) | 849 / 301 (2) | 🟡 on par / 🟡 on par | 🔴 well behind / 🟢 well ahead | 1.7x MaxQuant false calls |
@@ -124,7 +133,7 @@ PXD009815, QE, Astral):
 | tool | PXD009740 | PXD009815 | QE | Astral | verdict | note |
 |---|---|---|---|---|---|---|
 | andes, MBR on | 1,156 / 272 | 763 / 151 | 983 / 105 | 568 / 297 | true positives 🟡 on par / 🟡 on par / 🟢 ahead / 🟡 on par · false calls 🔴 well behind on all four | +5% to +15% true positives; 1.9–2.5x false calls |
-| MaxQuant, matches filtered | 1,077 / 131 | 725 / 62 | 851 / 42 | 518 / 154 | | |
+| MaxQuant, matches filtered¹ | 1,077 / 131 | 725 / 62 | 851 / 42 | 518 / 154 | | |
 
 Spread of unchanged proteins within a condition (tool ÷ andes; PXD009740 / PXD009815 / QE): MaxQuant
 1.15 / 1.55 / 1.26, FragPipe 1.40 / 1.30 / 1.25 (andes 🟢 ahead of both on every set, 🟢 well ahead
@@ -136,14 +145,14 @@ PXD009740 reads 1,287 / 320 here and 1,300 / 305 above):
 | set | tool | all | \|log2 FC\| ≥ 0.3 | ≥ 0.5 | ≥ 1.0 |
 |---|---|---|---|---|---|
 | QE | andes | 1,049 / 113 | 1,049 / 83 | 1,046 / 11 | 476 / 0 |
-| | MaxQuant | 857 / 37 | 857 / 35 | 852 / 18 | 303 / 2 |
-| | FragPipe | 946 / 43 | 946 / 37 | 945 / 20 | 680 / 8 |
+| | MaxQuant¹ | 857 / 37 | 857 / 35 | 852 / 18 | 303 / 2 |
+| | FragPipe¹ | 946 / 43 | 946 / 37 | 945 / 20 | 680 / 8 |
 | PXD009740 | andes | 1,287 / 320 | 1,287 / 310 | 1,287 / 167 | 1,271 / 27 |
-| | MaxQuant | 1,292 / 129 | 1,292 / 128 | 1,292 / 74 | 1,238 / 25 |
-| | FragPipe | 1,224 / 302 | 1,224 / 302 | 1,224 / 259 | 1,220 / 86 |
+| | MaxQuant¹ | 1,292 / 129 | 1,292 / 128 | 1,292 / 74 | 1,238 / 25 |
+| | FragPipe¹ | 1,224 / 302 | 1,224 / 302 | 1,224 / 259 | 1,220 / 86 |
 | PXD009815 | andes | 853 / 183 | 852 / 60 | 846 / 39 | 800 / 21 |
-| | MaxQuant | 842 / 92 | 842 / 66 | 838 / 36 | 778 / 6 |
-| | FragPipe | 859 / 301 | 859 / 184 | 858 / 102 | 844 / 22 |
+| | MaxQuant¹ | 842 / 92 | 842 / 66 | 838 / 36 | 778 / 6 |
+| | FragPipe¹ | 859 / 301 | 859 / 184 | 858 / 102 | 844 / 22 |
 
 - A fold-change cut closes most of the false-call gap to MaxQuant on PXD009815 and QE but not on
   PXD009740; Astral was not recomputed. andes stays behind on PXD009815 at large fold changes and
@@ -172,14 +181,14 @@ units:
 | set | tool | precursors within 2x | rows | rows within 2x (% of rows) | median \|log2 err\| of rows | precursors within 2x at FragPipe's row count | verdict, as reported / at FragPipe's row count |
 |---|---|---:|---:|---:|---:|---:|---|
 | PXD009740 | andes | 502 | 1,600 | 60.3 | 0.84 | 436.7 | MaxQuant 🟢 ahead / 🟢 ahead · FragPipe 🟡 on par / 🟡 on par |
-| | MaxQuant | 417 | 1,642 | 38.9 | 1.20 | 340.7 | |
-| | FragPipe | 458 | 1,167 | 71.1 | 0.64 | 458.0 | |
+| | MaxQuant¹ | 417 | 1,642 | 38.9 | 1.20 | 340.7 | |
+| | FragPipe¹ | 458 | 1,167 | 71.1 | 0.64 | 458.0 | |
 | PXD009815 | andes | 24 | 565 | 7.6 | 4.75 | 22.1 | MaxQuant 🟡 on par / 🟢 ahead · FragPipe 🔴 well behind / 🔴 well behind |
-| | MaxQuant | 23 | 603 | 6.3 | 4.63 | 19.1 | |
-| | FragPipe | 50 | 443 | 15.6 | 3.73 | 50.0 | |
+| | MaxQuant¹ | 23 | 603 | 6.3 | 4.63 | 19.1 | |
+| | FragPipe¹ | 50 | 443 | 15.6 | 3.73 | 50.0 | |
 | PXD001819 | andes | 0 | 53 | 0.0 | 6.00 | 0.0 | 🟡 on par: counts below 10 for every tool |
-| | MaxQuant | 1 | 68 | 1.5 | 4.25 | 0.5 | |
-| | FragPipe | 3 | 29 | 10.3 | 3.13 | 3.0 | |
+| | MaxQuant¹ | 1 | 68 | 1.5 | 4.25 | 0.5 | |
+| | FragPipe¹ | 3 | 29 | 10.3 | 3.13 | 3.0 | |
 
 Per-level table: [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#ups1-per-level).
 
@@ -195,7 +204,7 @@ reported in the blank run (andes on main of 2026-11-09, after #333 `e841aae0`, w
 [Methods](methods.md#method-notes)) are enriched / not specific / only
 absent / no reference.
 
-| metric | andes | MaxQuant 2.7 | FragPipe | verdict | note |
+| metric | andes | MaxQuant 2.7¹ | FragPipe¹ | verdict | note |
 |---|---|---|---|---|---|
 | yeast rows, identified (MBR off or on) | 451 | — | 208 | ⚪ not compared | no common denominator |
 | yeast rows, transferred; share of transferred rows | 769; 0.20% of 389,423 (seeds 0.19–0.20%) | — | 243; 0.09% of 266,898 | 🔴 well behind | 2.2x at default |
@@ -233,7 +242,7 @@ absent / no reference.
 
 ### Depth at matched true error (PXD014415)
 
-| metric | andes | FragPipe | verdict | note |
+| metric | andes | FragPipe¹ | verdict | note |
 |---|---:|---:|---|---|
 | transferred rows at FragPipe's 0.09% (`transfer_q ≤ 0.003`) | 487,849 (0.88–0.89 × FragPipe's, over seeds) | 550,247 | 🔴 behind | 0.88–0.89x of FragPipe |
 | transferred rows through `quant_q ≤ 0.015` | 428,888 | — | ⚪ not compared | |

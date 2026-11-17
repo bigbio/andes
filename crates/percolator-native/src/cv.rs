@@ -6,7 +6,6 @@ use crate::pin::Pin;
 use crate::scores::tdc_cut;
 use crate::svm::{l2_svm_mfn, MfnOpts, Rows};
 use rayon::prelude::*;
-use std::cmp::Ordering;
 
 const FOLDS: usize = 3;
 
@@ -53,12 +52,11 @@ struct Fold {
 }
 
 struct TrainSet {
-    x: Rows,
     idx_neg: Vec<usize>,
     idx_pos: Vec<usize>,
 }
 
-const TASK_BYTES_PER_EXAMPLE: u64 = 64;
+const TASK_BYTES_PER_EXAMPLE: u64 = 96;
 
 fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
     let nf = pin.rows.nfeat();
@@ -119,34 +117,18 @@ fn fit_positives(
     out
 }
 
-fn descending(pin: &Pin, fold: &Fold, s: &[f64], a: usize, b: usize) -> Ordering {
-    let (ma, mb) = (&pin.meta[fold.train[a]], &pin.meta[fold.train[b]]);
-    (s[b] + 0.0)
-        .total_cmp(&(s[a] + 0.0))
-        .then(mb.scan.cmp(&ma.scan))
-        .then(mb.exp_mass.total_cmp(&ma.exp_mass))
-        .then(a.cmp(&b))
-}
-
-fn train_set(pin: &Pin, norm: &Norm, fold: &Fold, s: &[f64], fdr: f64) -> Result<TrainSet, String> {
+fn train_set(fold: &Fold, s: &[f64], fdr: f64) -> TrainSet {
     let cut = tdc_cut(s, &fold.train_decoy, fdr, true).at_most;
-    let mut pos = Vec::new();
-    let mut neg = Vec::new();
-    for (i, (&v, &d)) in s.iter().zip(&fold.train_decoy).enumerate() {
+    let mut idx_pos = Vec::new();
+    let mut idx_neg = Vec::new();
+    for ((&row, &v), &d) in fold.train.iter().zip(s).zip(&fold.train_decoy) {
         if d {
-            neg.push(i);
+            idx_neg.push(row);
         } else if cut.is_some_and(|c| v >= c) {
-            pos.push(i);
+            idx_pos.push(row);
         }
     }
-    neg.sort_by(|&a, &b| descending(pin, fold, s, a, b));
-    pos.sort_by(|&a, &b| descending(pin, fold, s, a, b));
-    let global: Vec<usize> = neg.iter().chain(&pos).map(|&l| fold.train[l]).collect();
-    Ok(TrainSet {
-        x: Rows::gather_within(&pin.rows, norm, &global, &pin.budget)?,
-        idx_neg: (0..neg.len()).collect(),
-        idx_pos: (neg.len()..neg.len() + pos.len()).collect(),
-    })
+    TrainSet { idx_neg, idx_pos }
 }
 
 fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) -> usize {
@@ -240,6 +222,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         .map(|(fd, w)| score(&pin.rows, &fd.train, w, Some(norm)))
         .collect();
 
+    let x = Rows::all_within(&pin.rows, norm, &pin.budget)?;
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
             cfg.initial_selection_fdr
@@ -249,8 +232,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         let sets: Vec<TrainSet> = folds
             .iter()
             .zip(&train_scores)
-            .map(|(fd, s)| train_set(pin, norm, fd, s, fdr))
-            .collect::<Result<_, _>>()?;
+            .map(|(fd, s)| train_set(fd, s, fdr))
+            .collect();
         if cfg.verbose > 1 {
             eprintln!("Iteration {}:", it + 1);
         }
@@ -287,7 +270,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     return None;
                 }
                 Some(l2_svm_mfn(
-                    &t.x,
+                    &x,
                     &t.idx_pos,
                     &t.idx_neg,
                     cpos,

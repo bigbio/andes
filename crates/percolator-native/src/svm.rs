@@ -89,6 +89,50 @@ impl Rows {
         }
     }
 
+    pub fn all_within(store: &Store, norm: &Norm, budget: &Arc<Budget>) -> Result<Rows, String> {
+        let nf = store.nfeat();
+        let ncols = nf + 1;
+        let stride = stride_for(ncols);
+        let n = store.len();
+        let bytes = (n * stride * 4) as u64;
+        if nf == 0 || n == 0 {
+            let all: Vec<usize> = (0..n).collect();
+            return Rows::gather_within(store, norm, &all, budget);
+        }
+        let Some(ram) = Reservation::take(budget, bytes) else {
+            let all: Vec<usize> = (0..n).collect();
+            return Rows::gather_within(store, norm, &all, budget);
+        };
+        let mut data = vec![0.0f32; n * stride];
+        let br = store.block_rows();
+        let parts: Vec<std::sync::Mutex<&mut [f32]>> = data
+            .chunks_mut(br * stride)
+            .map(std::sync::Mutex::new)
+            .collect();
+        store.par_for_each_block(|start, block| {
+            let mut dst = parts[start / br].lock().expect("rows block lock");
+            for (out, src) in dst.chunks_exact_mut(stride).zip(block.chunks_exact(nf)) {
+                for (((d, &x), &m), &sd) in out[..nf]
+                    .iter_mut()
+                    .zip(src)
+                    .zip(&norm.mean)
+                    .zip(&norm.inv_sd)
+                {
+                    *d = ((f64::from(x) - m) * sd) as f32;
+                }
+                out[nf] = 1.0;
+            }
+        });
+        drop(parts);
+        Ok(Rows {
+            data: RowData::Ram(data),
+            nrows: n,
+            ncols,
+            stride,
+            _ram: ram,
+        })
+    }
+
     pub fn gather_within(
         store: &Store,
         norm: &Norm,
@@ -261,44 +305,51 @@ impl Default for MfnOpts {
 
 struct Train<'a> {
     x: &'a Rows,
-    idx_pos: &'a [usize],
-    idx_neg: &'a [usize],
+    rows: Vec<usize>,
+    pos: Vec<bool>,
     cpos: f64,
     cneg: f64,
 }
 
-impl Train<'_> {
-    fn len(&self) -> usize {
-        self.idx_neg.len() + self.idx_pos.len()
-    }
-
-    fn x_row(&self, i: usize) -> usize {
-        let n = self.idx_neg.len();
-        if i < n {
-            self.idx_neg[i]
-        } else {
-            self.idx_pos[i - n]
+impl<'a> Train<'a> {
+    fn new(x: &'a Rows, idx_pos: &[usize], idx_neg: &[usize], cpos: f64, cneg: f64) -> Self {
+        let mut ex: Vec<(usize, bool)> = idx_neg
+            .iter()
+            .map(|&r| (r, false))
+            .chain(idx_pos.iter().map(|&r| (r, true)))
+            .collect();
+        ex.sort_unstable();
+        Train {
+            x,
+            rows: ex.iter().map(|e| e.0).collect(),
+            pos: ex.iter().map(|e| e.1).collect(),
+            cpos,
+            cneg,
         }
     }
 
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     fn scan(&self, subset: &[usize], f: impl FnMut(usize, &[f32])) {
-        let ids: Vec<usize> = subset.iter().map(|&i| self.x_row(i)).collect();
+        let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
         self.x.scan(&ids, f);
     }
 
     fn y(&self, i: usize) -> f64 {
-        if i < self.idx_neg.len() {
-            -1.0
-        } else {
+        if self.pos[i] {
             1.0
+        } else {
+            -1.0
         }
     }
 
     fn c(&self, i: usize) -> f64 {
-        if i < self.idx_neg.len() {
-            self.cneg
-        } else {
+        if self.pos[i] {
             self.cpos
+        } else {
+            self.cneg
         }
     }
 }
@@ -477,13 +528,7 @@ pub fn l2_svm_mfn(
     cneg: f64,
     opts: &MfnOpts,
 ) -> Vec<f64> {
-    let t = Train {
-        x,
-        idx_pos,
-        idx_neg,
-        cpos,
-        cneg,
-    };
+    let t = Train::new(x, idx_pos, idx_neg, cpos, cneg);
     let n = x.ncols;
     let stride = x.stride;
     let m = t.len();

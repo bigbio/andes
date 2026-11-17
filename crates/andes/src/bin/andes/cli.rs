@@ -790,7 +790,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) rescore_native: bool,
 
-    /// Memory of the native Percolator engine in GB; PIN features beyond it spill to --temp-dir
+    /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
     #[arg(long, value_name = "GB", default_value_t = 16,
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
@@ -1262,12 +1262,12 @@ pub(crate) struct SearchArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct PercolatorArgs {
-    /// Memory of the engine in GB; PIN features beyond it spill to --temp-dir
+    /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
     #[arg(long, value_name = "GB", default_value_t = 16,
           value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) rescore_memory_gb: u64,
 
-    /// Directory of the spilled PIN features, created if missing
+    /// Directory of the spill files, created if missing
     #[arg(long, value_name = "DIR", required = true)]
     pub(crate) temp_dir: PathBuf,
 

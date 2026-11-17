@@ -784,9 +784,9 @@ pub(crate) struct SearchArgs {
     /// Rescore as --rescore, with the native Percolator engine instead of the binary
     ///
     /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
-    /// repair and the scores of every PIN row) runs in process with Percolator 3.7.1's
-    /// algorithm and output files; no Percolator binary or Docker is needed. Takes no
-    /// --percolator-args.
+    /// repair and the scores of every PIN row) runs in process with the algorithm of
+    /// upstream Percolator master (commit a9783ee8) and Percolator's output files; no
+    /// Percolator binary or Docker is needed. Takes no --percolator-args.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) rescore_native: bool,
 
@@ -1271,7 +1271,7 @@ pub(crate) struct PercolatorArgs {
     #[arg(long, value_name = "DIR", required = true)]
     pub(crate) temp_dir: PathBuf,
 
-    /// Percolator 3.7.1 arguments as given to the percolator binary, the PIN last
+    /// Percolator arguments as given to the percolator binary, the PIN last
     #[arg(value_name = "PERCOLATOR_ARGS", required = true, num_args = 1..,
           trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,

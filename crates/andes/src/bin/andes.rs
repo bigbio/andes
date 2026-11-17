@@ -111,7 +111,7 @@ enum Command {
 
     #[command(
         hide = true,
-        about = "Run the native Percolator engine on a Percolator 3.7.1 command line"
+        about = "Run the native Percolator engine (Percolator master a9783ee8) on a Percolator command line"
     )]
     Percolator(Box<cli::PercolatorArgs>),
 }

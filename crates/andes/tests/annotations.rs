@@ -1,6 +1,3 @@
-//! End-to-end: an annotation file next to a FASTA database searches like the
-//! same claims in a UniProt XML database.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -40,10 +37,8 @@ fn search(database: &str, pin: &Path, extra: &[&str]) -> Output {
     out
 }
 
-/// One substitution row: (id, reference, md5, start, end, ref, alt).
 type Substitution<'a> = (&'a str, &'a str, &'a str, i64, i64, &'a str, &'a str);
 
-/// An annotations file with one substitution per row.
 fn write_substitutions(path: &Path, rows: &[Substitution]) {
     let col = |f: &dyn Fn(&Substitution) -> String| -> ArrayRef {
         Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>()))
@@ -114,7 +109,6 @@ fn write_substitutions(path: &Path, rows: &[Substitution]) {
 #[test]
 fn an_annotated_fasta_searches_like_the_uniprot_xml() {
     let dir = tempfile::tempdir().unwrap();
-    // BSA's one curated variant, A214T, written as an annotation of the FASTA.
     let fasta = input::FastaReader::load_all(std::io::BufReader::new(
         std::fs::File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
     ))
@@ -181,8 +175,6 @@ fn rows_that_do_not_fit_are_reported() {
     );
 }
 
-/// A PIN's rows with the UniProt accession spelling `sp|P02769<x>|ALBU_BOVIN`
-/// turned into the PEFF one `sp:P02769<x>`, and each row's proteins sorted.
 fn normalised_rows(pin: &str) -> Vec<String> {
     let header: Vec<&str> = pin.lines().next().unwrap().split('\t').collect();
     let proteins = header.iter().position(|h| *h == "Proteins").unwrap();

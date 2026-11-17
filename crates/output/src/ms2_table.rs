@@ -1,29 +1,3 @@
-//! Per-run MS2 table `<stem>.ms2.parquet`: one row per MS2 scan of a run,
-//! reduced to what match-between-runs needs to check a transfer against the
-//! run's fragment spectra.
-//!
-//! Columns: `native_id`, `spec_key` (the PSM SpecId of the scan's rank-1
-//! match without its `_<rank>[_<row>]` suffix), `rt_s`, `precursor_mz`,
-//! `charge` (0 when unknown), the isolation window as `isolation_target`,
-//! `isolation_lower` and `isolation_upper` (null when the source records
-//! none), `faims_cv` (null without FAIMS), and the scan's most intense
-//! centroids sorted by m/z as two `float32` lists of equal length, `mz` and
-//! `intensity`. Rows are in retention-time order.
-//!
-//! A table written with `--tmt --mbr` adds three columns after `intensity`
-//! (schema 1.1): `reporters` (the scan's raw reporter-ion intensities in kit
-//! order, a `float32` list), `purity` (precursor isolation purity, null when
-//! the run's MS1 scans cannot give it) and `reporter_sn` (summed reporter
-//! signal-to-noise, null without recorded noise). A table without reporters
-//! is schema 1.0 and unchanged.
-//!
-//! The key-value metadata carries the schema version (`andes.ms2.schema`; a
-//! reader rejects another major), the run stem (`andes.ms2.run`), the
-//! fragment tolerance of the search (`andes.ms2.fragment_tol`, e.g. `20ppm`
-//! or `0.5Da`) and the number of centroids kept per scan
-//! (`andes.ms2.top_peaks`). [`write_ms2_table`] writes `<path>.partial` and
-//! renames it into place once complete.
-
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +19,6 @@ use quant::ms2::{Ms2Scan, ScanReporters};
 
 use crate::ms1_table::partial_path;
 
-/// Major version of the table layout. A reader rejects any other major.
 pub const MS2_SCHEMA_MAJOR: u32 = 1;
 
 const SCHEMA_KEY: &str = "andes.ms2.schema";
@@ -53,11 +26,9 @@ const SCHEMA_VERSION: &str = "1.0";
 const RUN_KEY: &str = "andes.ms2.run";
 const TOL_KEY: &str = "andes.ms2.fragment_tol";
 const TOP_KEY: &str = "andes.ms2.top_peaks";
-/// Scans per row group / record batch.
 const SCANS_PER_GROUP: usize = 4096;
 
 const SCHEMA_VERSION_REPORTERS: &str = "1.1";
-/// The columns of a table with reporter ions, after [`COLUMNS`].
 const REPORTER_COLUMNS: [&str; 3] = ["reporters", "purity", "reporter_sn"];
 
 const COLUMNS: [&str; 11] = [
@@ -74,7 +45,6 @@ const COLUMNS: [&str; 11] = [
     "intensity",
 ];
 
-/// A run's MS2 table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ms2Table {
     pub run: String,
@@ -113,7 +83,6 @@ fn schema(with_reporters: bool) -> Schema {
     Schema::new(fields)
 }
 
-/// `20ppm` or `0.5Da`.
 pub fn format_tolerance(t: Tolerance) -> String {
     match t {
         Tolerance::Ppm(v) => format!("{v}ppm"),
@@ -266,8 +235,6 @@ fn write_with_version(path: &Path, t: &Ms2Table, version: &str) -> Result<(), St
     written
 }
 
-/// Writes `table` to `path` (scans in the order given). Every error names
-/// `path`.
 pub fn write_ms2_table(path: &Path, table: &Ms2Table) -> Result<(), String> {
     write_with_version(path, table, SCHEMA_VERSION)
 }
@@ -451,7 +418,6 @@ fn read(path: &Path) -> Result<Ms2Table, String> {
     })
 }
 
-/// Reads the MS2 table at `path`. Every error names `path`.
 pub fn read_ms2_table(path: &Path) -> Result<Ms2Table, String> {
     read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -579,7 +545,6 @@ mod tests {
         let e = read_ms2_table(&dir.path().join("nope.ms2.parquet")).unwrap_err();
         assert!(e.contains("nope.ms2.parquet"), "{e}");
 
-        // A renamed column.
         let r = dir.path().join("r.ms2.parquet");
         let t = table(4);
         let good = batch(&Arc::new(schema(false)), &t.scans, false).unwrap();

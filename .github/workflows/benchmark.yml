@@ -1,0 +1,122 @@
+name: Benchmarks
+
+# End-to-end benchmarks on public PRIDE data. Runs only after a merge to main (a push event),
+# never on a pull request. Each run appends one JSON line per dataset to results.jsonl on the
+# `benchmarks` branch; the page (website/pages/ci.md) reads that file, so no site rebuild is needed.
+#
+# Speed: a merge runs the two smallest sets (BENCH_DATASETS, default TMT + UPS1, 2.2 GB of
+# spectra, cached). The Astral run and the 6-run Astral LFQ set run once a week
+# (BENCH_WEEKLY_DATASETS). Merges that land while a benchmark runs wait, and only the newest
+# one runs next, so a burst of merges gives one benchmark, not one per merge. Merges that touch
+# only docs or the website do not run it (paths filter).
+#
+# Runner: repo variable BENCH_RUNNER (JSON, e.g. '["self-hosted","benchmark"]'); default
+# ubuntu-latest (4 vCPU, 16 GB). On a self-hosted runner with a persistent BENCH_DATA, move
+# sets from BENCH_WEEKLY_DATASETS to BENCH_DATASETS to run them on each merge.
+# Datasets: space-separated keys of docs/benchmarks/ci/datasets.json, or the workflow_dispatch input.
+
+on:
+  push:
+    branches: [main]
+    paths: [crates/**, Cargo.lock, Cargo.toml, resources/**, docs/benchmarks/ci/**, .github/workflows/benchmark.yml]
+  schedule:
+    - cron: "0 2 * * 0"   # Sunday 02:00 UTC: the large sets
+  workflow_dispatch:
+    inputs:
+      datasets:
+        description: "datasets (space-separated; empty = BENCH_DATASETS)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    if: github.repository == 'bigbio/andes' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ fromJSON(vars.BENCH_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 300
+    env:
+      DATASETS: ${{ inputs.datasets || (github.event_name == 'schedule' && (vars.BENCH_WEEKLY_DATASETS || 'PXD070049 proteobench-astral')) || vars.BENCH_DATASETS || 'PXD007683 PXD001819' }}
+      BENCH_DATA: ${{ vars.BENCH_DATA || format('{0}/bench-data', github.workspace) }}
+      BENCH_HOST: ${{ vars.BENCH_HOST || 'GitHub ubuntu-latest, 4 vCPU, 16 GB' }}
+    steps:
+      # A hosted runner has about 14 GB free. The weekly multi-run set needs more: remove
+      # preinstalled toolchains that this job does not use (about 30 GB). Merges skip this step.
+      - name: Free disk space (weekly run on a hosted runner)
+        if: ${{ !vars.BENCH_DATA && github.event_name == 'schedule' }}
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      # thermo deps need rustc >= 1.88, see release.yml.
+      # The release profile (fat LTO) is kept: thin LTO links 2x faster but measured 1.8x the
+      # CPU time on PXD007683, and the page must show the binary that users get.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benchmark
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build andes (release, native .raw)
+        run: RUSTUP_TOOLCHAIN=stable cargo build --release --locked -p andes --features thermo
+
+      - name: Datasets to fetch
+        id: sets
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os
+          ds = json.load(open("docs/benchmarks/ci/datasets.json"))
+          names = os.environ["DATASETS"].split()
+          print("fetch=" + " ".join(sorted({ds[n]["fetch"] for n in names})))
+          print("key=" + "-".join(sorted(names)))
+          EOF
+
+      # Hosted runners start empty: keep spectra and databases between runs (10 GB cache limit,
+      # so the weekly multi-run set is downloaded each time).
+      - uses: actions/cache@v4
+        if: ${{ !vars.BENCH_DATA && github.event_name != 'schedule' }}
+        with:
+          path: ${{ env.BENCH_DATA }}
+          key: bench-data-${{ steps.sets.outputs.key }}-v1
+
+      - name: Fetch spectra and databases
+        run: |
+          pip install -q pyarrow
+          docs/benchmarks/reproduce/build_databases.sh "$BENCH_DATA"
+          docs/benchmarks/reproduce/fetch_spectra.sh "$BENCH_DATA" ${{ steps.sets.outputs.fetch }}
+
+      - name: Run benchmarks
+        run: |
+          python3 docs/benchmarks/ci/run_ci.py --data "$BENCH_DATA" --andes target/release/andes \
+            --out "$RUNNER_TEMP/new.jsonl" --workdir "$RUNNER_TEMP/ci-work" $DATASETS || echo "::warning::a dataset failed; recorded"
+          cat "$RUNNER_TEMP/new.jsonl"
+
+      - name: Append to the benchmarks branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for i in 1 2 3; do
+            git fetch origin benchmarks && git checkout -B benchmarks origin/benchmarks \
+              || { git checkout --orphan benchmarks && git rm -rqf . && touch results.jsonl; }
+            cat "$RUNNER_TEMP/new.jsonl" >> results.jsonl
+            git add results.jsonl
+            git commit -qm "bench: ${GITHUB_SHA::8} ($DATASETS)"
+            git push origin benchmarks && exit 0
+            sleep 5
+          done
+          exit 1

@@ -1,5 +1,3 @@
-//! Integration test: tract reports ONNX output tensor names, not node names.
-
 #![cfg(feature = "tract")]
 
 use std::path::PathBuf;
@@ -10,7 +8,6 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
 }
 
-/// `identity_named.onnx` is `Identity(x) -> y` in a node named `copy_node`.
 #[test]
 fn output_is_named_after_the_graph_output_not_the_node() {
     let path = fixture_dir().join("identity_named.onnx");

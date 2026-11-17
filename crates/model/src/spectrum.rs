@@ -1,14 +1,7 @@
-//! Spectrum — a single tandem MS scan.
-
 use crate::activation::ActivationMethod;
 
-/// Largest precursor charge the search uses: charges are held as `u8` from
-/// candidate generation on.
 pub const MAX_PRECURSOR_CHARGE: i32 = u8::MAX as i32;
 
-/// A reported precursor charge as the readers store it: `Some(z)` for
-/// `1..=MAX_PRECURSOR_CHARGE`, `None` ("unknown", so the configured charge
-/// range is searched) for 0, a negative value or one too large for a `u8`.
 pub fn known_precursor_charge(z: i64) -> Option<i32> {
     (1..=i64::from(MAX_PRECURSOR_CHARGE))
         .contains(&z)
@@ -17,39 +10,16 @@ pub fn known_precursor_charge(z: i64) -> Option<i32> {
 
 #[derive(Debug, Clone)]
 pub struct Spectrum {
-    /// MGF `TITLE=` value (or `<spectrumRef>` for mzML).
-    /// Used as the PSM `SpecID` column in `.pin` output.
     pub title: String,
-    /// `PEPMASS=` first value: precursor m/z.
     pub precursor_mz: f64,
-    /// `PEPMASS=` second value (optional): precursor intensity.
     pub precursor_intensity: Option<f32>,
-    /// `CHARGE=` value, e.g. `2+`. None when absent or not a usable charge
-    /// (see [`known_precursor_charge`]).
     pub precursor_charge: Option<i32>,
-    /// `RTINSECONDS=` value. None when absent.
     pub rt_seconds: Option<f64>,
-    /// `SCANS=` value (scan number). None when absent.
     pub scan: Option<i32>,
-    /// Peak list: (m/z f64, intensity f32). Sorted ascending by m/z by
-    /// the parser.
     pub peaks: Vec<(f64, f32)>,
-    /// Activation method recorded in the source file (mzML `<activation>`
-    /// cvParam, or `ACTIVATION=` in MGF). `None` when the source doesn't
-    /// record one. This is *informational* — used by the CLI binary to
-    /// auto-route to the matching bundled model when the user
-    /// hasn't overridden `--fragmentation`/`--instrument`.
-    /// It is NOT used by the scoring loop directly.
     pub activation_method: Option<ActivationMethod>,
-    /// Isolation-window lower offset in Da (selected m/z − lower = window start).
-    /// `None` when the mzML omits `<isolationWindow>`. Used only by `--chimeric`.
     pub isolation_lower_offset: Option<f64>,
-    /// Isolation-window upper offset in Da (selected m/z + upper = window end).
     pub isolation_upper_offset: Option<f64>,
-    /// Isolation-window target m/z (mzML `MS:1000827`): the centre the lower
-    /// and upper offsets are measured from. It can differ from `precursor_mz`,
-    /// which may be the monoisotopic m/z the instrument assigned. `None` when
-    /// the source does not record it.
     pub isolation_target_mz: Option<f64>,
 }
 

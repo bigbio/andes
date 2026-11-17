@@ -1,31 +1,3 @@
-//! Predicted-spectrum and retention-time features added to the PIN (`--predict`).
-//!
-//! After the PIN is written, each requested predictor scores every row
-//! (targets and decoys alike) and the PIN is rewritten with the new columns
-//! inserted before `Peptide`. Percolator then weighs them with the search
-//! features; andes computes no FDR from them.
-//!
-//! - `rt`: the bundled andes-rt model ([`ANDES_RT_WEIGHTS`]).
-//! - `ms2`: the bundled andes-ms2 model ([`ANDES_MS2_WEIGHTS`]).
-//! - `peptdeep-ms2`, `peptdeep-rt`: AlphaPeptDeep graphs exported to ONNX.
-//! - `deeplc-rt`: the DeepLC graph exported to ONNX.
-//!
-//! The third-party graphs are loaded from `--predictor-models`; they are not
-//! part of andes.
-//!
-//! Columns per predictor (`<p>` = `andesrt`, `pdeep`, `deeplc`):
-//! - RT: `<p>_rt_diff` = |observed − calibrated predicted RT| (minutes) and
-//!   `<p>_predicted_rt`. Predicted RT is mapped to minutes per input file by
-//!   an isotonic fit on anchor PSMs: per spectrum the row with the highest
-//!   `RawScore`, kept when it is a target at target-decoy q ≤ [`ANCHOR_Q`]
-//!   within its file. These anchors only place the calibration curve.
-//! - MS2: `pdeep_<f>` for each spectral-match feature `f` in
-//!   [`MS2_FEATURES`], comparing the predicted b/y (z ≤ 2) intensities with
-//!   the most intense observed peak within the fragment tolerance.
-//! - `<p>_missing`: 1 when the predictor could not score the row (an
-//!   unsupported modification or length, no observed RT, no calibration);
-//!   that row's other columns of the predictor hold the median over scored rows.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -48,23 +20,14 @@ use search::tdc::{qvalues, ScoredLabel};
 
 use crate::cli::{Cli, PredictFeature, PredictorBackend};
 
-/// andes-rt v1 weights (`ARTN0001`): a 77,794-parameter retention-time CNN
-/// trained on retention times from public reanalysed datasets (see
-/// `crates/onnx-infer/scripts/student/NOTES.md`).
-pub(crate) static ANDES_RT_WEIGHTS: &[u8] =
+static ANDES_RT_WEIGHTS: &[u8] =
     include_bytes!("../../../../../resources/predictors/andes_rt.artn");
 
-/// andes-ms2 v1 weights (`AMS20001`): a fragment-intensity CNN trained on
-/// annotated spectra of public reanalysed datasets (see
-/// `crates/onnx-infer/scripts/student/ms2/README.md`).
-pub(crate) static ANDES_MS2_WEIGHTS: &[u8] =
+static ANDES_MS2_WEIGHTS: &[u8] =
     include_bytes!("../../../../../resources/predictors/andes_ms2.ams2");
 
-/// Target-decoy q-value at or below which a file's best-scoring targets anchor
-/// the RT calibration.
 pub(crate) const ANCHOR_Q: f64 = 0.01;
 
-/// One predictor and the PIN blocks it fills.
 struct Source {
     pred: Box<dyn Predictor>,
     sessions: Vec<OnnxSession>,
@@ -72,7 +35,6 @@ struct Source {
     ms2: bool,
 }
 
-/// The predictors `--predict` asked for, loaded.
 pub(crate) struct Predictors {
     sources: Vec<Source>,
     tol: FragmentTolerance,
@@ -80,7 +42,6 @@ pub(crate) struct Predictors {
     batch: usize,
 }
 
-/// The requested blocks, deduplicated; `None` when nothing is requested.
 fn requested(list: &[PredictFeature]) -> Result<Option<Vec<PredictFeature>>, String> {
     let mut v: Vec<PredictFeature> = list.to_vec();
     v.sort_unstable();
@@ -94,7 +55,6 @@ fn requested(list: &[PredictFeature]) -> Result<Option<Vec<PredictFeature>>, Str
     Ok((!v.is_empty()).then_some(v))
 }
 
-/// The AlphaPeptDeep instrument name for a resolved instrument.
 fn peptdeep_instrument(i: InstrumentType) -> &'static str {
     match i {
         InstrumentType::QExactive => "QE",
@@ -105,12 +65,6 @@ fn peptdeep_instrument(i: InstrumentType) -> &'static str {
 }
 
 impl Predictors {
-    /// Load the predictors `cli.predict` names. `None` when it names none.
-    /// A requested third-party model whose files are missing, or an ONNX
-    /// engine this build lacks, is an error here, before the search runs.
-    /// The predictor's instrument and NCE, and the fragment tolerance of the
-    /// MS2 features, come from the acquisition; `model_instrument` is the
-    /// fallback instrument when the file records no analyzer.
     pub(crate) fn from_cli(
         cli: &Cli,
         acquisition: &Acquisition,
@@ -254,12 +208,10 @@ impl Predictors {
         }))
     }
 
-    /// Whether the MS2 features need the spectra's peaks after the search.
     pub(crate) fn needs_peaks(&self) -> bool {
         self.sources.iter().any(|s| s.ms2)
     }
 
-    /// One line naming the loaded blocks.
     pub(crate) fn describe(&self) -> String {
         let blocks: Vec<String> = self
             .sources
@@ -276,7 +228,6 @@ impl Predictors {
         format!("{} (fragment tolerance {:?})", blocks.join(", "), self.tol)
     }
 
-    /// The new PIN columns, in order.
     fn columns(&self) -> Vec<String> {
         let mut cols = Vec::new();
         for s in &self.sources {
@@ -295,10 +246,6 @@ impl Predictors {
         cols
     }
 
-    /// Add the predicted columns to the PIN at `pin` (rewritten in place).
-    /// `spectra` are the searched spectra (with peaks when
-    /// [`Self::needs_peaks`]) and `run_ends` the exclusive end index of each
-    /// input file in `spectra`.
     pub(crate) fn add_to_pin(
         &self,
         pin: &Path,
@@ -313,7 +260,6 @@ impl Predictors {
         let run_of = |spec: u32| run_ends.partition_point(|&e| e <= spec as usize);
         let n_runs = run_ends.len().max(1);
 
-        // Observed RT (minutes) and run per row.
         let obs: Vec<f64> = table
             .rows
             .iter()
@@ -327,7 +273,6 @@ impl Predictors {
             .collect();
         let anchors = anchor_rows(&table.rows, n_runs, &run_of);
 
-        // Per predictor: its feature columns and its missing flags.
         let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
         for src in &self.sources {
@@ -399,17 +344,12 @@ impl Predictors {
                 );
             }
             let flags: Vec<f64> = miss.iter().map(|&m| f64::from(u8::from(m))).collect();
-            // A missing row takes the column median over the predictor's scored rows.
             for col in &mut cols {
                 impute_median(col, &flags);
             }
             blocks.push((cols, flags));
         }
 
-        // Every configured predictor adds its columns, also when it scored no
-        // row (e.g. no retention times in the input; its columns are then 0 and
-        // its missing flag 1). The columns follow the --predict configuration
-        // only, so the PINs of separately searched runs share one header.
         for (src, (_, flags)) in self.sources.iter().zip(&blocks) {
             if n > 0 && flags.iter().all(|&m| m != 0.0) {
                 eprintln!(
@@ -441,7 +381,6 @@ impl Predictors {
         Ok(())
     }
 
-    /// RT prediction per distinct form (NaN when unsupported).
     fn predict_rt(&self, src: &Source, forms: &[(Form, Mass)]) -> Result<Vec<f32>, String> {
         let pred = src.pred.as_ref();
         let ix: Vec<usize> = (0..forms.len())
@@ -471,7 +410,6 @@ impl Predictors {
         Ok(out.into_inner().expect("RT output lock"))
     }
 
-    /// The MS2 feature columns; marks rows the model could not score.
     fn ms2_block(
         &self,
         src: &Source,
@@ -567,10 +505,8 @@ impl Predictors {
     }
 }
 
-/// Row index sentinel: no spectrum / no parsed peptidoform.
 pub(crate) const NONE: u32 = u32::MAX;
 
-/// The fields of one PIN row the predictors need.
 pub(crate) struct PinRow {
     pub(crate) spec: u32,
     pub(crate) form: u32,
@@ -579,16 +515,12 @@ pub(crate) struct PinRow {
     pub(crate) score: f64,
 }
 
-/// Pass 1 over the PIN.
 pub(crate) struct PinTable {
     pub(crate) rows: Vec<PinRow>,
     pub(crate) forms: Vec<(Form, Mass)>,
-    /// Column index of `Peptide` (new columns go before it).
     peptide_col: usize,
 }
 
-/// `spec_id` base (`<title or scan=N>_<scan>`) → spectrum index; bases that
-/// occur twice map to [`NONE`].
 fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
     let mut m: HashMap<String, u32> = HashMap::with_capacity(spectra.len());
     for (i, s) in spectra.iter().enumerate() {
@@ -603,8 +535,6 @@ fn spectrum_bases(spectra: &[Spectrum]) -> HashMap<String, u32> {
     m
 }
 
-/// The spectrum of a PIN row: its SpecId is the spectrum base followed by
-/// `_<rank>` or `_<rank>_<row>`; the spectrum's scan must equal `ScanNr`.
 fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, scan: i32) -> u32 {
     let mut s = spec_id;
     for _ in 0..2 {
@@ -621,12 +551,6 @@ fn locate(bases: &HashMap<String, u32>, spectra: &[Spectrum], spec_id: &str, sca
     NONE
 }
 
-/// A PIN row's precursor charge. The charge one-hot is clamped to the searched
-/// `--charge` range (`edges`), so a hot edge column can stand for a charge
-/// beyond it. There the charge comes from `ExpMass` and the spectrum's
-/// precursor m/z (`ExpMass = z · (m/z − proton)`) when they agree on a whole
-/// charge beyond that edge; a co-isolated precursor's row (another m/z) does
-/// not agree and keeps the column's charge. 0 when no column is hot.
 fn row_charge(
     hot: Option<u8>,
     edges: (u8, u8),
@@ -777,14 +701,7 @@ pub(crate) fn read_pin(
     })
 }
 
-/// Per input file, the rows that anchor the RT calibration: the best-scoring
-/// row of each spectrum, when it is a target at q ≤ [`ANCHOR_Q`] among the
-/// file's best rows.
-pub(crate) fn anchor_rows(
-    rows: &[PinRow],
-    n_runs: usize,
-    run_of: &dyn Fn(u32) -> usize,
-) -> Vec<Vec<usize>> {
+fn anchor_rows(rows: &[PinRow], n_runs: usize, run_of: &dyn Fn(u32) -> usize) -> Vec<Vec<usize>> {
     let mut best: HashMap<u32, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if r.spec == NONE {
@@ -824,8 +741,7 @@ pub(crate) fn anchor_rows(
         .collect()
 }
 
-/// Replace non-finite values and rows flagged in `miss` by the median of the rest.
-pub(crate) fn impute_median(col: &mut [f64], miss: &[f64]) {
+fn impute_median(col: &mut [f64], miss: &[f64]) {
     let mut ok: Vec<f64> = col
         .iter()
         .zip(miss)
@@ -847,8 +763,6 @@ pub(crate) fn impute_median(col: &mut [f64], miss: &[f64]) {
     }
 }
 
-/// Pass 2: copy the PIN with the new columns inserted before `Peptide`, then
-/// replace the original.
 pub(crate) fn write_pin(
     pin: &Path,
     table: &PinTable,
@@ -917,8 +831,6 @@ pub(crate) fn write_pin(
     std::fs::rename(&tmp, pin).map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))
 }
 
-/// The first `k` tab-separated fields of `line` and the rest, each without
-/// the tab between them; `None` when `line` has no more than `k` fields.
 fn split_before_field(line: &str, k: usize) -> Option<(&str, &str)> {
     if k == 0 {
         return Some(("", line));
@@ -927,7 +839,6 @@ fn split_before_field(line: &str, k: usize) -> Option<(&str, &str)> {
     Some((&line[..i], &line[i + 1..]))
 }
 
-/// Integers as integers, other values with six significant digits.
 fn push_value(buf: &mut String, v: f64) {
     use std::fmt::Write as _;
     if v.fract() == 0.0 && v.abs() < 1e15 {
@@ -940,7 +851,6 @@ fn push_value(buf: &mut String, v: f64) {
     }
 }
 
-/// Group item indices by `key` and chunk each group into batches of `batch`.
 fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
     let mut by: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, k) in keys.enumerate() {
@@ -954,8 +864,6 @@ fn batches(keys: impl Iterator<Item = usize>, batch: usize) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// Run `jobs` on `threads` workers, each with its own handles on `master`.
-/// The first error stops the remaining jobs and is returned.
 fn run_parallel<J: Sync, F>(
     master: &[OnnxSession],
     threads: usize,
@@ -1002,7 +910,6 @@ where
     }
 }
 
-/// Process CPU time (user + system) in seconds; 0 where `/proc` is absent.
 fn process_cpu_seconds() -> f64 {
     std::fs::read_to_string("/proc/self/stat")
         .ok()
@@ -1056,28 +963,19 @@ mod tests {
         assert_eq!(locate(&b, &spectra, "run.10.10.2_10_2_1", 10), 0);
         assert_eq!(locate(&b, &spectra, "scan=11_11_1", 11), 1);
         assert_eq!(locate(&b, &spectra, "a_b_12_1_0", 12), 2);
-        // ScanNr must agree with the spectrum.
         assert_eq!(locate(&b, &spectra, "run.10.10.2_10_1", 9), NONE);
         assert_eq!(locate(&b, &spectra, "other_5_1", 5), NONE);
     }
 
-    /// The one-hot is clamped to the `--charge` columns; the predictor gets the
-    /// PSM's true charge from ExpMass and the precursor m/z at an edge.
     #[test]
     fn row_charge_recovers_a_charge_beyond_the_columns() {
         let mz = 500.0;
         let exp = |z: f64| Some(z * (mz - model::PROTON));
-        // Interior column: exact.
         assert_eq!(row_charge(Some(3), (2, 4), exp(3.0), Some(mz)), 3);
-        // A 6+ precursor written into the charge4 column.
         assert_eq!(row_charge(Some(4), (2, 4), exp(6.0), Some(mz)), 6);
-        // A 1+ precursor written into the charge2 column.
         assert_eq!(row_charge(Some(2), (2, 4), exp(1.0), Some(mz)), 1);
-        // A real 4+ at the edge stays 4.
         assert_eq!(row_charge(Some(4), (2, 4), exp(4.0), Some(mz)), 4);
-        // A co-isolated precursor (ExpMass from another m/z) keeps the column.
         assert_eq!(row_charge(Some(4), (2, 4), Some(3456.789), Some(mz)), 4);
-        // No ExpMass column or no located spectrum: the column.
         assert_eq!(row_charge(Some(4), (2, 4), None, Some(mz)), 4);
         assert_eq!(row_charge(Some(4), (2, 4), exp(6.0), None), 4);
         assert_eq!(row_charge(None, (2, 4), exp(6.0), Some(mz)), 0);
@@ -1085,8 +983,6 @@ mod tests {
 
     #[test]
     fn anchors_are_confident_best_rows_per_file() {
-        // 40 spectra in one file: best rows are targets with descending scores,
-        // a decoy at the bottom; each spectrum also has a lower-scoring row.
         let mut rows = Vec::new();
         for s in 0..40u32 {
             rows.push(PinRow {
@@ -1211,11 +1107,8 @@ mod tests {
             assert!(d.is_finite() && d >= 0.0);
         }
         assert!(!dir.path().join("x.pin.predict.tmp").exists());
-        // A second pass refuses to add the same columns again.
         assert!(preds.add_to_pin(&pin, &spectra, &[spectra.len()]).is_err());
 
-        // Without retention times no row is scored: the header is the same,
-        // the columns are 0 and every row is flagged missing.
         std::fs::write(&pin, &text).unwrap();
         for s in &mut spectra {
             s.rt_seconds = None;

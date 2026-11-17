@@ -3,7 +3,7 @@
 #
 #   ./fetch_spectra.sh <data-dir> [dataset ...]
 #
-# Datasets: astral tmt ups1 glyco-mouse phospho   (default: astral tmt ups1)
+# Datasets: astral tmt ups1 glyco-mouse phospho astral-lfq   (default: astral tmt ups1)
 # Resolves real download URLs through the PRIDE API rather than hardcoding FTP paths,
 # so it keeps working when the archive layout changes. Re-running skips files already
 # present, and prints a checksum for each so you can confirm you have what we had.
@@ -16,7 +16,7 @@ API="https://www.ebi.ac.uk/pride/ws/archive/v3/projects"
 # dataset -> accession, then the exact filenames we use from it
 declare -A ACC=(
   [astral]=PXD070049 [tmt]=PXD007683 [ups1]=PXD001819
-  [glyco-mouse]=PXD005553 [phospho]=PXD007653
+  [glyco-mouse]=PXD005553 [phospho]=PXD007653 [astral-lfq]=PXD070049
 )
 declare -A WANT=(
   # VERIFIED against the PRIDE file listing on 2026-09-05 -- each pattern resolves to
@@ -26,6 +26,7 @@ declare -A WANT=(
   [ups1]='UPS1_5000amol_R1\.raw'                               # 1 file, 1.70 GB
   [glyco-mouse]='MouseLiver-Z-T-[1-5]\.raw'                    # 5 fractions, 12.6 GB (deep tier); pGlyco2 liver set
   [phospho]='20151014_QEp6_NaKr_SA_totalliver_control2_phospho\.raw'   # 1 file, 3.72 GB; single-shot TiO2, NOT the _SDBRPS_FR* fractions
+  [astral-lfq]='LFQ_Astral_DDA_15min_50ng_Condition_[AB]_REP[123]\.raw'  # 6 files, 15.5 GB; ProteoBench Astral DDA module (CI quantification)
 )
 
 # The PRIDE API serves AT MOST 100 files per page whatever pageSize you ask for. PXD070049

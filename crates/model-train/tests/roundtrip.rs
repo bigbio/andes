@@ -13,7 +13,6 @@ use scoring_crate::param_model::{
 };
 use std::path::Path;
 
-/// Open the canonical bundled Parquet store.
 fn bundled_store() -> model_train::store::ModelStore {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -22,9 +21,6 @@ fn bundled_store() -> model_train::store::ModelStore {
     model_train::store::ModelStore::open(bundled).expect("open bundled model store")
 }
 
-// Two distinct bundled models used purely as round-trip Param fixtures (any
-// two distinct own-trained v1 models work; the previously used `cid_tof_alp` /
-// `hcd_tof_alp` were dropped as un-sourceable in the v1 own-trained bundle).
 fn fixture() -> Param {
     bundled_store()
         .load_param("hcd_qexactive_tryp")
@@ -37,8 +33,6 @@ fn fixture2() -> Param {
         .expect("load uvpd_qexactive_tryp from store")
 }
 
-/// Construct a minimal `Param` that contains loss-ion entries (loss_class != 0)
-/// in both `rank_dist_table` and `frag_off_table`.
 fn param_with_loss_ions() -> Param {
     let part = Partition {
         charge: 2,
@@ -46,19 +40,16 @@ fn param_with_loss_ions() -> Param {
         seg_num: 0,
     };
 
-    // intact prefix ion (loss_class = 0)
     let intact = IonType::Prefix {
         charge: 1,
         offset_bits: 1.0_f32.to_bits(),
         loss_class: 0,
     };
-    // phospho-loss prefix ion (loss_class = 2)
     let phospho_loss = IonType::Prefix {
         charge: 1,
         offset_bits: 2.0_f32.to_bits(),
         loss_class: 2,
     };
-    // generic-loss suffix ion (loss_class = 255)
     let generic_loss = IonType::Suffix {
         charge: 1,
         offset_bits: 3.0_f32.to_bits(),
@@ -174,8 +165,6 @@ fn roundtrip_two_models_isolated() {
     assert_eq!(loaded2, orig2, "model_b round-trip failed");
 }
 
-/// A model with loss ions (loss_class != 0) must survive a store round-trip
-/// with loss_class preserved.
 #[test]
 fn loss_class_survives_store_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -191,14 +180,12 @@ fn loss_class_survives_store_round_trip() {
         "round-tripped loss-ion Param must equal the original"
     );
 
-    // Also directly verify that the specific loss_class values are preserved.
     let part = Partition {
         charge: 2,
         parent_mass: 1500.0,
         seg_num: 0,
     };
 
-    // Check rank_dist_table ion keys
     let ion_map = loaded
         .rank_dist_table
         .get(&part)
@@ -224,7 +211,6 @@ fn loss_class_survives_store_round_trip() {
         ion_map.keys().collect::<Vec<_>>()
     );
 
-    // Check frag_off_table ion types
     let frags = loaded
         .frag_off_table
         .get(&part)
@@ -242,19 +228,12 @@ fn loss_class_survives_store_round_trip() {
     );
 }
 
-/// A GBDT blob stored via `write_models_with_gbdt` must survive a round-trip:
-/// `load_param` should return a `Param` whose `gbdt_peak_model` is `Some(…)`
-/// and whose `predict_logit` produces the expected value.
 #[test]
 fn gbdt_blob_roundtrips_through_store() {
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
 
-    // Minimal one-split tree: feature[0] <= 0.5 → leaf -1.0; else → leaf +2.0
-    // apply_sigmoid=true, isotonic=identity ([0,1]→[0,1]).
-    // predict_logit([1.0]) → sigmoid(2.0) ≈ 0.8808 → logit ≈ 2.0
     let model = GbdtPeakModel {
         packed: Default::default(),
-        // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
         feature_names: scoring_crate::peak_features::FEATURE_NAMES
             .iter()
@@ -277,8 +256,6 @@ fn gbdt_blob_roundtrips_through_store() {
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("with_gbdt.parquet");
 
-    // Re-use param_with_loss_ions() as a structurally valid Param; the GBDT
-    // blob is passed separately via write_models_with_gbdt.
     let param = param_with_loss_ions();
 
     write_models_with_gbdt(&store_path, &[("toy", &param, Some(blob.clone()))])
@@ -300,9 +277,6 @@ fn gbdt_blob_roundtrips_through_store() {
     );
 }
 
-/// Every bundled model carries only loss_class == 0 ion types: the bundle was
-/// trained before neutral-loss classes existed, and the reader must surface
-/// that as an explicit zero rather than anything else.
 #[test]
 fn bundled_store_ion_types_have_zero_loss_class() {
     let bundled = Path::new(concat!(
@@ -320,7 +294,6 @@ fn bundled_store_ion_types_have_zero_loss_class() {
     for id in &ids {
         let param = store.load_param(id).expect("load bundled model");
 
-        // All rank_dist ion types must have loss_class == 0
         for (part, ion_map) in &param.rank_dist_table {
             for ion in ion_map.keys() {
                 assert_eq!(
@@ -333,7 +306,6 @@ fn bundled_store_ion_types_have_zero_loss_class() {
             }
         }
 
-        // All frag_off ion types must have loss_class == 0
         for (part, frags) in &param.frag_off_table {
             for fof in frags {
                 assert_eq!(
@@ -348,19 +320,12 @@ fn bundled_store_ion_types_have_zero_loss_class() {
     }
 }
 
-/// Multi-model write with per-model GBDT blobs must round-trip correctly:
-/// - model A has a GBDT blob → loaded param has Some(gbdt_peak_model)
-/// - model B has no blob → loaded param has None
-/// - both models' source ledgers are preserved
-/// - both models can be loaded after write
 #[test]
 fn multi_model_write_preserves_blobs_and_sources() {
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
 
-    // Build a minimal GbdtPeakModel and serialise it to bytes (same as A2.4 test).
     let model = GbdtPeakModel {
         packed: Default::default(),
-        // Must match the peak-feature contract (finding 3.1) to load.
         n_features: scoring_crate::peak_features::N_FEATURES as u32,
         feature_names: scoring_crate::peak_features::FEATURE_NAMES
             .iter()
@@ -380,10 +345,9 @@ fn multi_model_write_preserves_blobs_and_sources() {
     };
     let blob_a = model.to_bytes();
 
-    let param_a = param_with_loss_ions(); // model A: will get GBDT blob
-    let param_b = fixture(); // model B: no GBDT blob
+    let param_a = param_with_loss_ions();
+    let param_b = fixture();
 
-    // Build a minimal SourceLedger + empty CountStats for each model.
     let make_ledger = |id: &str| SourceLedger {
         source_id: id.to_string(),
         dataset: format!("dataset_{id}"),
@@ -403,26 +367,20 @@ fn multi_model_write_preserves_blobs_and_sources() {
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("multi_blob.parquet");
 
-    // Write both models in one call via the new function.
     let models = &[
         ("model_a", &param_a, sources_a.as_slice()),
         ("model_b", &param_b, sources_b.as_slice()),
     ];
-    let blobs: &[Option<Vec<u8>>] = &[
-        Some(blob_a.clone()), // model A has a GBDT blob
-        None,                 // model B has no blob
-    ];
+    let blobs: &[Option<Vec<u8>>] = &[Some(blob_a.clone()), None];
     write_all_models_with_sources_and_gbdt_pub(&store_path, models, blobs)
         .expect("write_all_models_with_sources_and_gbdt_pub failed");
 
-    // --- Round-trip assertions ---
     let store = ModelStore::open(&store_path).unwrap();
     let ids = store.model_ids();
     assert_eq!(ids.len(), 2, "must have 2 models; got {:?}", ids);
     assert!(ids.contains(&"model_a".to_string()), "model_a missing");
     assert!(ids.contains(&"model_b".to_string()), "model_b missing");
 
-    // model A: blob present + correct prediction
     let loaded_a = store.load_param("model_a").expect("load model_a");
     let gm_a = loaded_a
         .gbdt_peak_model
@@ -433,14 +391,12 @@ fn multi_model_write_preserves_blobs_and_sources() {
         "model_a: predict_logit([1.0]) expected ≈ 2.0, got {logit}"
     );
 
-    // model B: no blob
     let loaded_b = store.load_param("model_b").expect("load model_b");
     assert!(
         loaded_b.gbdt_peak_model.is_none(),
         "model_b must have no gbdt_peak_model"
     );
 
-    // Both models' source ledgers survived.
     let ledgers_a = store.load_sources("model_a").expect("load_sources model_a");
     assert_eq!(ledgers_a.len(), 1, "model_a must have 1 source ledger");
     assert_eq!(ledgers_a[0].source_id, "src_a");
@@ -450,19 +406,13 @@ fn multi_model_write_preserves_blobs_and_sources() {
     assert_eq!(ledgers_b[0].source_id, "src_b");
 }
 
-/// A `frag_intensity_model_bytes` blob stored alongside a manifest row must
-/// survive a write→read round-trip: `load_param` returns a `Param` whose
-/// `frag_intensity_model` is `Some(…)` and whose `predict_value` gives the
-/// expected raw tree sum.
 #[test]
 fn frag_intensity_model_roundtrips_through_store() {
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
     use std::sync::Arc;
 
-    // Minimal model: single leaf → constant 3.5.
     let model = GbdtPeakModel {
         packed: Default::default(),
-        // Must match the frag-intensity feature contract (finding 3.1) to load.
         n_features: scoring_crate::frag_features::N_FRAG_FEATURES as u32,
         feature_names: scoring_crate::frag_features::FRAG_FEATURE_NAMES
             .iter()
@@ -486,10 +436,8 @@ fn frag_intensity_model_roundtrips_through_store() {
     let store_path = tmp.path().join("frag_intensity.parquet");
 
     let mut param = param_with_loss_ions();
-    // Attach the model to the Param before writing, so the writer can read it from the field.
     param.frag_intensity_model = Some(Arc::new(model));
 
-    // The write path reads frag_intensity_model from the Param and persists the blob.
     model_train::store::write_models(&store_path, &[("toy".to_string(), &param)])
         .expect("write_models failed");
 
@@ -508,7 +456,6 @@ fn frag_intensity_model_roundtrips_through_store() {
         "predict_value expected 3.5, got {v}"
     );
 
-    // Verify the blob byte-matches.
     assert_eq!(
         fim.to_bytes(),
         blob,
@@ -516,19 +463,13 @@ fn frag_intensity_model_roundtrips_through_store() {
     );
 }
 
-/// A `rich_ion_model_bytes` blob stored alongside a manifest row must
-/// survive a write→read round-trip: `load_param` returns a `Param` whose
-/// `rich_ion_model` is `Some(…)` and whose `predict_value` gives the
-/// expected raw tree sum.
 #[test]
 fn rich_ion_model_round_trips_through_store() {
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
     use std::sync::Arc;
 
-    // Minimal model: single leaf → constant 2.71.
     let model = GbdtPeakModel {
         packed: Default::default(),
-        // Must match the rich-ion feature contract (finding 3.1) to load.
         n_features: scoring_crate::ion_features::N_ION_FEATURES as u32,
         feature_names: scoring_crate::ion_features::ION_FEATURE_NAMES
             .iter()
@@ -552,10 +493,8 @@ fn rich_ion_model_round_trips_through_store() {
     let store_path = tmp.path().join("rich_ion.parquet");
 
     let mut param = param_with_loss_ions();
-    // Attach the model to the Param before writing, so the writer can read it from the field.
     param.rich_ion_model = Some(Arc::new(model));
 
-    // The write path reads rich_ion_model from the Param and persists the blob.
     model_train::store::write_models(&store_path, &[("toy".to_string(), &param)])
         .expect("write_models failed");
 
@@ -574,7 +513,6 @@ fn rich_ion_model_round_trips_through_store() {
         "predict_value expected 2.71, got {v}"
     );
 
-    // Verify the blob byte-matches.
     assert_eq!(
         rim.to_bytes(),
         blob,
@@ -582,14 +520,12 @@ fn rich_ion_model_round_trips_through_store() {
     );
 }
 
-/// A model written WITHOUT `rich_ion_model` (None) must load with
-/// `rich_ion_model == None` — back-compat with old stores.
 #[test]
 fn missing_rich_ion_model_column_loads_as_none() {
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("no_rich_ion.parquet");
 
-    let param = param_with_loss_ions(); // rich_ion_model is None
+    let param = param_with_loss_ions();
     model_train::store::write_models(&store_path, &[("m".to_string(), &param)])
         .expect("write_models failed");
 
@@ -604,14 +540,12 @@ fn missing_rich_ion_model_column_loads_as_none() {
     );
 }
 
-/// A model written WITHOUT `frag_intensity_model` (None) must load with
-/// `frag_intensity_model == None` — back-compat with old stores.
 #[test]
 fn missing_frag_intensity_model_column_loads_as_none() {
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("no_frag_intensity.parquet");
 
-    let param = param_with_loss_ions(); // frag_intensity_model is None
+    let param = param_with_loss_ions();
     model_train::store::write_models(&store_path, &[("m".to_string(), &param)])
         .expect("write_models failed");
 

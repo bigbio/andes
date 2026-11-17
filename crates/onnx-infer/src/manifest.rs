@@ -1,5 +1,3 @@
-//! Sidecar JSON describing an ONNX model for tooling (provenance, I/O names, extras).
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,17 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Declares one model input or output tensor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TensorSpec {
-    /// ONNX graph input/output name.
     pub name: String,
-    /// Optional human description (e.g. "peptide embedding", "NCE").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Optional shape hint, one entry per axis. Omit it (or `null`) to leave
-    /// the shape unchecked. An axis of `null`, a negative number (`-1`) or a
-    /// symbol name (`"batch"`) is dynamic and matches any size.
     #[serde(
         default,
         deserialize_with = "deserialize_shape",
@@ -27,9 +19,6 @@ pub struct TensorSpec {
     pub shape: Option<Vec<Option<usize>>>,
 }
 
-/// Reads a manifest shape: `null` for no shape, else a list whose entries are
-/// a fixed size (non-negative integer) or a dynamic axis (`null`, a negative
-/// integer or a symbol name), written the ways ONNX tools print dynamic axes.
 fn deserialize_shape<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<Option<usize>>>, D::Error>
@@ -67,77 +56,50 @@ where
         .map(Some)
 }
 
-/// Where the weights came from (licensing / independence paperwork).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Provenance {
-    /// Short origin label (e.g. "AlphaPeptDeep 1.2.0", "own-train 2026-10").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
-    /// SPDX license of the *weights* (may differ from this crate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-    /// URL or path to NOTICE / training corpus statement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
-    /// Free-form notes (training accessions, exclusions, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
 
-/// Task hint so callers can pick the right post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTask {
-    /// Generic / unknown.
     #[default]
     Generic,
-    /// Fragment-intensity predictor (e.g. AlphaPeptDeep MS2).
     Ms2Intensity,
-    /// Retention-time predictor.
     RetentionTime,
-    /// Ion-mobility / CCS predictor.
     Ccs,
-    /// Gradient-boosted tree ensemble (andes AGBD / ONNX TreeEnsemble).
     TreeEnsemble,
-    /// De novo sequence model (logits / CTC / token probs).
     DeNovo,
-    /// Other rescoring feature model.
     Rescoring,
 }
 
-/// Sidecar manifest living next to (or pointing at) an `.onnx` file.
-///
-/// Designed so search engines, de novo tools, and rescoring pipelines share one
-/// loader: tool-specific knobs go in [`ModelManifest::extras`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelManifest {
-    /// Stable id for logs and PIN provenance (e.g. `alphapept-ms2-v1`).
     pub id: String,
-    /// Optional human description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Path to the `.onnx` file. Relative paths are resolved against the
-    /// directory containing the manifest JSON.
     pub onnx: PathBuf,
-    /// Declared inputs (order is the default feed order when names match).
     #[serde(default)]
     pub inputs: Vec<TensorSpec>,
-    /// Declared outputs.
     #[serde(default)]
     pub outputs: Vec<TensorSpec>,
-    /// What the model is for.
     #[serde(default)]
     pub task: ModelTask,
-    /// Licensing / training provenance for the weights.
     #[serde(default)]
     pub provenance: Provenance,
-    /// Escape hatch for NCE calibration keys, RT units, vocab paths, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extras: BTreeMap<String, serde_json::Value>,
 }
 
 impl ModelManifest {
-    /// Read a manifest from JSON on disk.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = fs::read_to_string(path).map_err(|source| Error::Io {
@@ -153,7 +115,6 @@ impl ModelManifest {
         Ok(m)
     }
 
-    /// Resolve a relative `onnx` path against the manifest file's parent.
     fn resolve_onnx_path(&mut self, manifest_path: &Path) -> Result<()> {
         if self.onnx.is_absolute() {
             return Ok(());
@@ -163,7 +124,6 @@ impl ModelManifest {
         Ok(())
     }
 
-    /// Basic structural checks (does not open the ONNX file).
     pub fn validate(&self) -> Result<()> {
         if self.id.trim().is_empty() {
             return Err(Error::ManifestInvalid("id must be non-empty".into()));
@@ -182,8 +142,6 @@ impl ModelManifest {
                 spec.name
             )));
         }
-        // Names must be unique within the inputs and within the outputs; ONNX
-        // allows one name on both sides (a graph input passed straight through).
         let mut in_names = std::collections::HashSet::new();
         for spec in &self.inputs {
             if !in_names.insert(&spec.name) {
@@ -205,7 +163,6 @@ impl ModelManifest {
         Ok(())
     }
 
-    /// Absolute/resolved path to the ONNX weights.
     pub fn onnx_path(&self) -> &Path {
         &self.onnx
     }
@@ -255,7 +212,6 @@ mod tests {
         assert_eq!(no_shape.shape, None);
         assert!(parse("[1.5]").is_err());
         assert!(parse("[true]").is_err());
-        // Dynamic axes are written back as `null`.
         let spec = parse(r#"[-1, 8]"#).unwrap();
         assert_eq!(
             serde_json::to_string(&spec).unwrap(),

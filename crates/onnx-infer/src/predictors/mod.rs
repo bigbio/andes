@@ -1,19 +1,3 @@
-//! Retention-time and fragment-intensity predictors over andes peptidoforms.
-//!
-//! A [`Predictor`] turns parsed peptidoforms ([`form::Form`]) into retention
-//! time and/or fragment-intensity predictions. Peptidoforms a model cannot
-//! encode are rejected by [`Predictor::supports_rt`] /
-//! [`Predictor::supports_ms2`] and become missing values downstream, never a
-//! silently wrong tensor.
-//!
-//! - [`NativeRt`]: the andes-rt model ([`crate::rt_native`]), plain Rust.
-//! - [`NativeMs2`]: the andes-ms2 model ([`crate::ms2_native`]), plain Rust.
-//! - [`PeptDeep`]: AlphaPeptDeep RT and MS2 graphs exported to ONNX.
-//! - [`DeepLc`]: the DeepLC RT graph exported to ONNX.
-//!
-//! [`spectral::ms2_features`] compares a prediction with an observed
-//! spectrum; [`calibration::RtCalibration`] maps predicted RT to minutes.
-
 pub mod calibration;
 pub mod form;
 pub mod spectral;
@@ -34,18 +18,13 @@ use crate::{BackendKind, BackendOptions, OnnxSession};
 use form::{Form, Mod};
 use spectral::Ion;
 
-/// The engine ONNX graphs are loaded with.
 #[derive(Clone, Debug)]
 pub struct Engine {
-    /// tract or ONNX Runtime.
     pub kind: BackendKind,
-    /// Engine options.
     pub opts: BackendOptions,
 }
 
 impl Engine {
-    /// Load the graph a sidecar manifest in `dir` names. The error names the
-    /// manifest path.
     pub fn load(&self, dir: &Path, manifest: &str) -> Result<OnnxSession> {
         let path = dir.join(manifest);
         if !path.is_file() {
@@ -59,46 +38,29 @@ impl Engine {
     }
 }
 
-/// A model family that predicts RT and/or fragment intensities.
 pub trait Predictor: Sync {
-    /// Feature-column prefix (`pdeep`, `deeplc`, `andesrt`).
     fn prefix(&self) -> &str;
-    /// Per-site ion layout of [`Self::ms2`] output; empty when no MS2 model.
     fn ions(&self) -> &[Ion];
-    /// Whether the family has an RT model.
     fn has_rt(&self) -> bool;
-    /// Whether the RT model can encode `form`.
     fn supports_rt(&self, form: &Form) -> bool;
-    /// Whether the MS2 model can encode `form` at `charge`.
     fn supports_ms2(&self, form: &Form, charge: u8) -> bool;
-    /// Forms in one RT / MS2 batch must share this key.
     fn batch_key(&self, form: &Form) -> usize;
-    /// Load the model graphs once; worker threads get [`OnnxSession::share`]d
-    /// handles.
     fn sessions(&self) -> Result<Vec<OnnxSession>>;
-    /// RT prediction (model units) per form.
     fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Result<Vec<f32>>;
-    /// Per form: (len − 1) sites × `ions().len()` linear intensities, site `i`
-    /// = cleavage after residue `i + 1`; ions above the precursor charge are 0.
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>>;
 }
 
-// ---------------------------------------------------------------- andes-rt
-
-/// The andes-rt retention-time model; no ONNX graphs.
 pub struct NativeRt {
     model: RtModel,
 }
 
 impl NativeRt {
-    /// The model from an `ARTN0001` weight buffer.
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         let model = RtModel::from_bytes(buf)
             .map_err(|e| Error::InvalidArg(format!("andes-rt weights: {e}")))?;
         Ok(Self { model })
     }
 
-    /// The model from an `ARTN0001` weight file.
     pub fn load(path: &Path) -> Result<Self> {
         let model = RtModel::load(path)
             .map_err(|e| Error::InvalidArg(format!("andes-rt weights {}: {e}", path.display())))?;
@@ -144,14 +106,8 @@ impl Predictor for NativeRt {
     }
 }
 
-// ---------------------------------------------------------------- andes-ms2
-
-/// Plain b/y 1+/2+ channels of andes-ms2, in the order of its output sites.
 const MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
 
-/// The andes-ms2 fragment-intensity model; no ONNX graphs. Predictions are
-/// conditioned on the activation (`HCD-FTMS`, `CID-ITMS`...), the NCE and the
-/// instrument family of the acquisition.
 pub struct NativeMs2 {
     model: Ms2Model,
     nce: Option<f32>,
@@ -160,9 +116,6 @@ pub struct NativeMs2 {
 }
 
 impl NativeMs2 {
-    /// The model from an `AMS20001` weight buffer and the acquisition
-    /// conditions (`nce` `None` when unknown; an unlisted activation or
-    /// instrument name is "unknown").
     pub fn from_bytes(
         buf: &[u8],
         nce: Option<f32>,
@@ -229,38 +182,26 @@ impl Predictor for NativeMs2 {
     }
 }
 
-// ---------------------------------------------------------------- PeptDeep
-
-/// `peptdeep_mods.json`: the alphabase modification vectors and the
-/// instrument table the exported graphs were built with.
 #[derive(Deserialize)]
 pub struct PeptDeepMeta {
-    /// Length of one modification vector.
     pub mod_dim: usize,
-    /// alphabase modification name -> feature vector.
     pub mods: HashMap<String, Vec<f32>>,
-    /// MS2 output columns.
     pub ms2_frag_types: Vec<String>,
-    /// Upper-case instrument name -> index.
     pub instrument_index: HashMap<String, i64>,
-    /// Index of an instrument outside `instrument_index`.
     pub unknown_instrument_index: i64,
 }
 
-/// Graph manifests and the metadata file of an exported PeptDeep model.
 pub const PEPTDEEP_FILES: [&str; 3] = [
     "peptdeep_rt_dynamic.json",
     "peptdeep_ms2_dynamic.json",
     "peptdeep_mods.json",
 ];
 
-/// AlphaPeptDeep RT and MS2 graphs.
 pub struct PeptDeep {
     dir: PathBuf,
     meta: PeptDeepMeta,
     nce: f32,
     instrument: i64,
-    /// Columns of b_z1, b_z2, y_z1, y_z2 in the MS2 output.
     cols: [usize; 4],
     engine: Engine,
     load_rt: bool,
@@ -270,11 +211,6 @@ pub struct PeptDeep {
 const PDEEP_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
 
 impl PeptDeep {
-    /// Read `peptdeep_mods.json` from `dir`. `instrument` is matched
-    /// case-insensitively against the model's instrument table (an unknown name
-    /// takes the model's unknown-instrument index). `load_rt` / `load_ms2`
-    /// select which graphs [`Predictor::sessions`] loads; a missing requested
-    /// graph manifest is an error here.
     pub fn new(
         dir: &Path,
         nce: f32,
@@ -329,17 +265,14 @@ impl PeptDeep {
         })
     }
 
-    /// alphabase modification names the model's metadata carries.
     pub fn known_mods(&self) -> impl Iterator<Item = &str> {
         self.meta.mods.keys().map(String::as_str)
     }
 
-    /// The MS2 graph's output columns, by fragment type.
     pub fn ms2_frag_types(&self) -> &[String] {
         &self.meta.ms2_frag_types
     }
 
-    /// Output columns of b_z1, b_z2, y_z1, y_z2 (the order of [`Predictor::ms2`]).
     pub fn ms2_columns(&self) -> [usize; 4] {
         self.cols
     }
@@ -382,7 +315,6 @@ impl PeptDeep {
             .collect()
     }
 
-    /// Session slots: RT graph first (when loaded), then MS2.
     fn slot(&self, ms2: bool) -> usize {
         usize::from(ms2 && self.load_rt)
     }
@@ -472,19 +404,14 @@ impl Predictor for PeptDeep {
     }
 }
 
-// ---------------------------------------------------------------- DeepLC
-
-/// Graph manifest of an exported DeepLC model.
 pub const DEEPLC_FILE: &str = "deeplc_rt.json";
 
-/// The DeepLC RT graph.
 pub struct DeepLc {
     dir: PathBuf,
     engine: Engine,
 }
 
 impl DeepLc {
-    /// DeepLC from `dir`; a missing graph manifest is an error.
     pub fn new(dir: &Path, engine: Engine) -> Result<Self> {
         if !dir.join(DEEPLC_FILE).is_file() {
             return Err(Error::InvalidArg(format!(
@@ -498,8 +425,6 @@ impl DeepLc {
         })
     }
 
-    /// pyro-Glu goes on the first residue (site 1), as `Q[Gln->pyro-Glu]` in
-    /// the ProForma of `scripts/deeplc_reference.py`; every other mod keeps its site.
     pub fn peptide(f: &Form) -> DeepLcPeptide<'_> {
         let site = |s: usize, m: Mod| match m {
             Mod::GlnPyroGlu | Mod::GluPyroGlu => 1,

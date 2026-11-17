@@ -1,5 +1,3 @@
-//! Decoy generation on Tryp_Pig_Bov.fasta.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -15,7 +13,6 @@ fn fixture_path() -> PathBuf {
         .expect("canonicalize Tryp_Pig_Bov.fasta path")
 }
 
-/// The fully cleaved tryptic segments of `seq` (cut after every K and R).
 fn tryptic_segments(seq: &[u8]) -> Vec<&[u8]> {
     seq.split_inclusive(|&r| r == b'K' || r == b'R').collect()
 }
@@ -46,8 +43,6 @@ fn tryp_pig_bov_pseudo_reverses_every_tryptic_peptide() {
             x.sort_unstable();
             y.sort_unstable();
             assert_eq!(x, y, "composition stays");
-            // Pseudo-reversal: the residues before the last, reversed, after
-            // an initiator Met, unless a redraw replaced a palindrome.
             let lead = usize::from(k == 0 && a[0] == b'M');
             let mut want = a[lead..a.len() - 1].to_vec();
             want.reverse();

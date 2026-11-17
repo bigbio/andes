@@ -1,103 +1,3 @@
-//! HIGH-RES glyco serve-path golden.
-//!
-//! REGENERATED 2026-10-21 (single-cleavage Y-ions) when Y-ion generation was aligned
-//! with GlycoDecipher's B/Y convention: ONE Y ion per glycosidic bond (O(n)),
-//! replacing the combinatorial root-containing-subtree set that over-generated
-//! multi-cleavage fragments for branched glycans. Verified before copying: header
-//! identical, 120 -> 120 rows, 4 winner flips — all same-peptide glycan-annotation
-//! changes: three on THRB_HUMAN R.SRYPHKPEINSTTHPGADLQENFCR.N@N10 (core-fucosylated
-//! di-fucose `(N(F)(N(H(H(N(F)(H)))(H(N(H))))))` -> mono-sialylated
-//! `(N(N(H(H(N(A)(H)))(H(N(H))))))`) and one on VTNC_HUMAN
-//! K.NNATVHEQVGGPSLTSDLQAQSK.G@N2 (core-fucosylated di-sialylated -> tri-sialylated
-//! `(N(N(H(H(N(A)(H))(N(A)(H)))(H(N(A)(H))))))`). `YLadderScore` moved on 119 rows,
-//! `YHitFrac` on 116, `GlycanMass` on the 4 flipped rows, and `DeltaRT`/`AbsDeltaRT`/
-//! `DeltaRTNorm` on all 120 (winner flips shift the per-run RT-calibration anchors).
-//! No SpecId/protein changes; the peptide candidate pool is untouched.
-//!
-//! REGENERATED 2026-10-21 when the glycan tree topology was retained and Y-ions
-//! derived from it. Verified before copying: header identical, 120 -> 120 rows,
-//! 0 winner flips. The Peptide column gained the canonical tree suffix on all 120
-//! rows; `YLadderScore`/`YHitFrac` moved on 104 rows and the per-spectrum competition
-//! statistics (`CandidateRankEntropy` on 20, `RawScore` on 13, `TailorScore` and
-//! `ListwiseScoreGap` on 1 each) moved as the candidate pool changed; SpecIds and
-//! proteins unchanged.
-//!
-//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
-//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
-//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
-//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
-//! only sequon is N18-R|T): `@N?` -> `@N18`.
-//!
-//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
-//! only the peptides starting at the post-Met residue (it had enumerated every
-//! other span of an M-initial protein a second time) and side-chain mods began
-//! stacking with terminal mods. Against the previous binary: 120 rows, every
-//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
-//! candidate pool changes, so
-//! `CandidateRankEntropy` and `RawScore` moved on 117 rows,
-//! `ListwiseScoreGap` on 83 and `TailorScore` on 15.
-//!
-//! REGENERATED 2026-09-09 when the glycan-first pre-filter's Y-ion generation
-//! became structure-aware (core + antenna-subset losses + core ladder, replacing
-//! the full 2^n power set that over-generated physically-impossible "trim a core
-//! mannose while keeping its antenna" fragments). Verified before copying: header
-//! identical; 116 -> 115 rows — one decoy winner dropped (scan 4357,
-//! XXX_CO4B_HUMAN) — and 4 winners flipped: three targets re-ranked onto the
-//! E. coli background (CERU_HUMAN->NMPC_ECOLI, THRB_HUMAN->YHFZ_ECOLI,
-//! CLUS_HUMAN->MDTG_ECOLI) and one target->decoy (PON1_HUMAN->XXX_APOB_HUMAN, a
-//! spectrum where both old and new winners are weak: CoreYHits 3->0). Net decoy
-//! winners 4->4. DeltaRT/AbsDeltaRT/DeltaRTNorm moved on every row because the
-//! winner changes shift the per-run RT-calibration anchors. The glycan-first
-//! top_k was then aligned to the field-standard 100 (was 50); that widened the candidate
-//! pool and moved only the per-spectrum competition statistics (RawScore,
-//! TailorScore, DeltaRankScore, CandidateRankEntropy, ListwiseScoreGap) on 4
-//! rows, with 0 winner flips.
-//!
-//! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
-//! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
-//! model for MGF requires `--fragment-tol-ppm`, which calls
-//! `set_fragment_tol_override` and replaces `mme` -- the very window we want to
-//! guard. So the flag needed to get there is the flag that neutralises the guard.
-//!
-//! An mzML fixture carries analyzer metadata, so the instrument is auto-detected and
-//! the override is never involved. That makes this the test that actually pins the
-//! window commit 539a3857 ("fix(train)") changed while asserting "Serving is untouched".
-//!
-//! It guards two things at once:
-//!   1. the high-res glyco serve path, as a pinned output (the PIN comparison), and
-//!   2. that instrument detection survives a `.gz` input (the model assertion) --
-//!      a gzipped mzML used to skip detection entirely and silently fall back to
-//!      `cid_lowres_tryp`, i.e. the low-res model on high-res Orbitrap data.
-//!
-//! MEASURED LIMIT, so nobody assumes more of this test than it delivers: on this
-//! fixture the high-res configuration is NOT sensitive to the fused-selector
-//! weights -- sweeping a fused-selector weight produced 0 differing lines, where
-//! the same sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
-//! window leaves too little candidate competition for the weight to change a
-//! winner. So selector regressions are caught by the LOW-RES golden; this one
-//! catches model/detection regressions and any gross change to the emitted rows.
-//!
-//! Regenerating is a deliberate act: diff the columns first and know which ones moved.
-//!
-//!   ./target/release/andes \
-//!     --spectrum test-fixtures/orbitrap_lumos_120.mzML.gz \
-//!     --database test-fixtures/glyco_fixture.fasta \
-//!     --glyco --glyco-tol-ppm 20 \
-//!     --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
-//!     --output-pin <tmp>/out.pin
-//!   cp <tmp>/out.glyco.pin test-fixtures/parity/goldens/glyco_highres.pin
-//!
-//! REGENERATED 2026-10-22 when decoys became peptide-level: 120 rows, decoy
-//! winners 1 -> 1; the candidate-pool columns move with the new decoy
-//! candidates.
-//!
-//! COMBINED 2026-10-14 (review branch: glyco and candidate-generation changes
-//! together). Against each parent golden the only differences are the other
-//! branch's changes: the boundary-sequon `@N18` tag on 2 peptides and the
-//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
-//! `ListwiseScoreGap`, `TailorScore`); 120 rows, SpecIds and proteins
-//! unchanged.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -109,15 +9,6 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Compare one PIN row field-by-field.
-///
-/// Identity and integer fields must match EXACTLY; floating-point fields are
-/// compared with a relative tolerance. An optimised build vectorises differently
-/// on different targets (this golden passed on Linux and Windows and failed on
-/// macOS in release), so a last-digit difference in a derived score is a property
-/// of the host, not a regression. Anything a real change moves -- a different
-/// peptide, a different glycan, a different winner -- is either a non-numeric
-/// field or a numeric one that moves far more than 1e-6.
 fn row_diff(golden: &str, actual: &str) -> Option<String> {
     let g: Vec<&str> = golden.split('\t').collect();
     let a: Vec<&str> = actual.split('\t').collect();
@@ -130,10 +21,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
         }
         match (gf.parse::<f64>(), af.parse::<f64>()) {
             (Ok(gv), Ok(av)) => {
-                // `f64::from_str` accepts "NaN"/"inf", and every ordered comparison
-                // against NaN is false -- so a naive `(gv - av).abs() > tol` would
-                // report a NaN where a number belongs as EQUAL and wave a real
-                // regression through. Handle the non-finite cases explicitly.
                 if gv.is_nan() || av.is_nan() {
                     if gv.is_nan() != av.is_nan() {
                         return Some(format!("field {i}: {gf} vs {af} (NaN mismatch)"));
@@ -146,16 +33,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
                     }
                     continue;
                 }
-                // The PIN is TEXT with ~6 significant figures, so the comparison
-                // cannot be tighter than the print precision: two values that agree
-                // to within float noise still print differently when they straddle a
-                // rounding boundary (macOS CI produced `0.45316` vs `0.453159`, a
-                // relative difference of 2.2e-6, from arithmetic that is otherwise
-                // identical). 1e-5 relative clears that with room to spare and is
-                // still five orders of magnitude tighter than any real change --
-                // flipping a selector weight moves this same column from -2.02 to
-                // -3.40. The absolute floor keeps near-zero values from being held
-                // to denormal noise.
                 let tol = 1e-5 * gv.abs().max(av.abs()).max(1.0);
                 if (gv - av).abs() > tol {
                     return Some(format!("field {i}: {gf} vs {af}"));
@@ -167,9 +44,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
     None
 }
 
-/// Sort key for aligning rows: the SpecId column, which is scan-derived and
-/// stable. Sorting by the whole line would let a last-digit float difference
-/// reorder rows and produce a spurious mismatch.
 fn spec_id(row: &str) -> &str {
     row.split('\t').next().unwrap_or(row)
 }
@@ -185,20 +59,11 @@ fn glyco_highres_pin_matches_golden() {
         assert!(f.exists(), "fixture missing: {}", f.display());
     }
 
-    // A per-process temp dir, not a fixed shared name: two concurrent runs (two
-    // `cargo test` invocations, two CI jobs sharing /tmp, or a retry overlapping
-    // its predecessor) would otherwise delete each other's output and fail on a
-    // missing PIN rather than on a real mismatch.
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let tmp = tmpdir.path();
     let out = tmp.join("out.pin");
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
-    // Deliberately NO --fragmentation / --fragment-tol-ppm: the point is that the
-    // instrument is auto-detected from the mzML, which is what puts the run on the
-    // high-res branch. The glycan source is a committed, NeuGc-free fixture .gdb
-    // (header `H,N,A,F`); `--glyco` no longer has a `--glyco-taxon` species knob, so
-    // the human behaviour is pinned by the .gdb's own NeuGc-free content.
     let result = Command::new(&binary)
         .arg("--spectrum")
         .arg(&spectra)
@@ -220,9 +85,6 @@ fn glyco_highres_pin_matches_golden() {
         String::from_utf8_lossy(&result.stderr)
     );
 
-    // Detection must survive the .gz. If this regresses, the run silently drops to
-    // cid_lowres_tryp and every downstream number changes for a reason no output
-    // explains -- which is exactly how this was missed before.
     let log = format!(
         "{}{}",
         String::from_utf8_lossy(&result.stdout),
@@ -270,12 +132,6 @@ fn glyco_highres_pin_matches_golden() {
     }
 }
 
-/// `--precursor-mono auto` on an mzML with NO MS1 scans (this fixture declares
-/// "MS1 spectrum" only in its file-content header): the run streams with the MS1
-/// link, fits nothing, says so, and writes a `.glyco.pin` identical to the
-/// golden — Mono columns present and 0 on every row — while the diagnostic dump still has one NA row
-/// per MS2. (The linked case is covered by the `mono` unit tests and the
-/// measured pGlyco2 liver run in docs/benchmarks/README.md.)
 #[test]
 fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let root = repo_root();
@@ -319,7 +175,6 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
     let actual = std::fs::read_to_string(tmpdir.path().join("out.glyco.pin")).expect("read pin");
     let golden_txt = std::fs::read_to_string(&golden).expect("read golden");
     let a_hdr = actual.lines().next().unwrap();
-    // The Mono columns follow the flag and the input format, not the fits.
     assert!(
         a_hdr.contains("MonoShift"),
         "Mono columns are written without a fitted MS2: {a_hdr}"
@@ -334,7 +189,6 @@ fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
             "unfitted Mono values"
         );
     }
-    // Same rows as the golden (order-insensitive, like the golden test above).
     let mut a_rows: Vec<&str> = actual.lines().skip(1).collect();
     let mut g_rows: Vec<&str> = golden_txt.lines().skip(1).collect();
     a_rows.sort_by_key(|r| spec_id(r).to_string());

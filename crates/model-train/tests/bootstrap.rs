@@ -1,8 +1,3 @@
-//! Integration tests for [`model_train::labeled::bootstrap_labels`].
-//!
-//! Uses the BSA fixture (test-fixtures/test.mgf + test-fixtures/BSA.fasta)
-//! and the hcd_qexactive_tryp seed model.
-
 use std::io::BufReader;
 use std::path::Path;
 
@@ -13,11 +8,6 @@ use search::SearchParams;
 
 use model_train::labeled::bootstrap_labels;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Resolve path relative to the workspace root (CARGO_MANIFEST_DIR/../../..).
 fn fixture(rel: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -26,7 +16,6 @@ fn fixture(rel: &str) -> std::path::PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Standard BSA-search AminoAcidSet: Carbamidomethyl-C fixed + Oxidation-M variable.
 fn bsa_aa_set() -> model::AminoAcidSet {
     let cam = Modification {
         name: "Carbamidomethyl".into(),
@@ -63,7 +52,6 @@ fn bsa_aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load hcd_qexactive_tryp from the canonical Parquet store.
 fn load_hcd_scorer() -> RankScorer {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -76,7 +64,6 @@ fn load_hcd_scorer() -> RankScorer {
     RankScorer::new(&param)
 }
 
-/// Load spectra from BSA test.mgf fixture.
 fn load_bsa_spectra() -> Vec<model::Spectrum> {
     let path = fixture("test-fixtures/test.mgf.gz");
     let file = input::open_buf_maybe_gz(&path).expect("open test.mgf");
@@ -85,15 +72,6 @@ fn load_bsa_spectra() -> Vec<model::Spectrum> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-/// Basic smoke test: bootstrap_labels runs without error, returns a Vec,
-/// is deterministic, and every returned match has confidence <= train_fdr.
-///
-/// We use a lenient FDR of 0.5 to maximise the chance of a non-empty result
-/// on the small BSA fixture.
 #[test]
 fn bootstrap_labels_bsa_smoke() {
     let cache = tempfile::tempdir().expect("cache dir");
@@ -124,7 +102,6 @@ fn bootstrap_labels_bsa_smoke() {
 
     let matches = result.unwrap();
 
-    // Every returned match must satisfy its claimed confidence threshold.
     for m in &matches {
         assert!(
             m.confidence <= train_fdr,
@@ -132,7 +109,6 @@ fn bootstrap_labels_bsa_smoke() {
             m.confidence,
             train_fdr
         );
-        // spectrum_index must be in range.
         assert!(
             m.spectrum_index < spectra.len(),
             "spectrum_index {} out of range (spectra.len()={})",
@@ -141,7 +117,6 @@ fn bootstrap_labels_bsa_smoke() {
         );
     }
 
-    // Determinism: running twice must produce the same count.
     let result2 = bootstrap_labels(
         &spectra,
         &db_path,
@@ -159,7 +134,6 @@ fn bootstrap_labels_bsa_smoke() {
         result2.len()
     );
 
-    // Log the count for informational purposes (not a hard failure if 0).
     eprintln!(
         "bootstrap_labels BSA @ train_fdr={}: {} confident target PSMs",
         train_fdr,
@@ -167,8 +141,6 @@ fn bootstrap_labels_bsa_smoke() {
     );
 }
 
-/// Strict test with train_fdr = 0.05 — fewer matches expected.
-/// Every confidence value must still be <= 0.05.
 #[test]
 fn bootstrap_labels_bsa_strict_fdr() {
     let cache = tempfile::tempdir().expect("cache dir");
@@ -204,7 +176,6 @@ fn bootstrap_labels_bsa_strict_fdr() {
     );
 }
 
-/// FDR monotonicity: lenient FDR must produce at least as many matches as strict.
 #[test]
 fn bootstrap_labels_bsa_lenient_ge_strict() {
     let cache = tempfile::tempdir().expect("cache dir");

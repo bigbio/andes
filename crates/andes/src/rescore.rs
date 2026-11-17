@@ -1,39 +1,4 @@
 #![allow(clippy::needless_range_loop)]
-//! Native (Percolator-free) PSM rescorer: a cross-validated, semi-supervised
-//! linear model over the PIN features, then target-decoy competition → per-PSM
-//! q-value + PEP.
-//!
-//! ROLE: the self-contained fallback for when a Percolator backend is not
-//! available. Percolator (`--rescore`) remains the recommended path and the
-//! reference cross-check.
-//!
-//! METHOD (the Percolator algorithm, `-Y` semantics):
-//!
-//! * **Competition groups.** Rows sharing the input file, `ScanNr` and the
-//!   `ExpMass` text form one group, the same groups Percolator's target-decoy
-//!   competition (`-Y`) uses with the PIN `FileName` column. Each group
-//!   reports one PSM: its best-scoring row, target or decoy.
-//!   q-values are computed over these winners only, so a spectrum never
-//!   contributes several rows at one precursor mass.
-//! * **Cross-validation.** Rows are folded by spectrum (3 folds); every row is
-//!   scored by a model trained on the other folds. Held-out scores are put on
-//!   a common scale per fold (the training split's q = 0.01 threshold maps to
-//!   0, its median decoy to -1) before the folds are pooled.
-//! * **Semi-supervised training.** Within a training split, the initial score
-//!   is the single feature that accepts the most target winners at q ≤ 0.01
-//!   (over the search's rank-1 row of each group). Each round, the target
-//!   winners at q ≤ 0.01 are the positives and every decoy winner a negative;
-//!   an L2-regularised logistic regression on standardised features gives the
-//!   next score. Training on every target as a positive instead (half of them
-//!   false) teaches the model what separates false targets from decoys, which
-//!   breaks the target-decoy assumption the q-values rest on.
-//! * **PEP.** Isotonic fit of the decoy share among winners against the final
-//!   score: PEP = decoys / targets at that score, capped at 1.
-//!
-//! `ExpMass`, `CalcMass` and `FileName` are not features (as in Percolator).
-//! The output maps match `output::run_percolator` with `-Y`: winning targets,
-//! and the winning decoys separately; rows that lost their group are in
-//! neither.
 
 use std::collections::HashMap;
 
@@ -42,52 +7,31 @@ use rayon::prelude::*;
 use search::tdc::{qvalues, ScoredLabel};
 
 const N_FOLDS: usize = 3;
-/// Training rounds per fold; the positives are re-selected every round.
 const N_ROUNDS: usize = 10;
-/// q-value at which target winners become positive training examples.
 const TRAIN_Q: f64 = 0.01;
-/// Inverse L2 strength of the logistic regression (loss weight; the penalty
-/// is `|w|² / 2`).
 const L2_C: f64 = 0.1;
-/// A training split with fewer positives or negatives than this keeps the
-/// score it has (the initial single feature when no round could be trained).
 const MIN_TRAIN_CLASS: usize = 10;
-/// PIN columns between `ScanNr` and `Peptide` that are not features.
 const NON_FEATURES: [&str; 3] = ["ExpMass", "CalcMass", "FileName"];
 const PROB_EPS: f64 = 1e-6;
-/// Rows per partial sum in the logistic fit.
 const CHUNK: usize = 4096;
 
-/// Numeric feature matrix + labels parsed from a Percolator PIN.
 struct PinData {
     spec_ids: Vec<String>,
     peptides: Vec<String>,
     proteins: Vec<String>,
     is_decoy: Vec<bool>,
-    /// Hash of each row's spectrum key, for the fold assignment: the rows of
-    /// one spectrum (its ranks and co-isolated peptides) share a fold.
     spectrum_hashes: Vec<u64>,
-    /// Competition group of each row (input file + `ScanNr` + `ExpMass` text),
-    /// densely numbered.
     groups: Vec<u32>,
-    /// The first row of its group in PIN order: the search's rank-1 PSM there.
     first_in_group: Vec<bool>,
-    /// row-major, `n_rows × n_features`
     x: Vec<f32>,
     n_features: usize,
 }
 
-/// Parse a Percolator PIN. Layout:
-/// `SpecId \t Label \t ScanNr \t <numeric features…> \t Peptide \t Proteins…`.
-/// Feature columns = everything strictly between `ScanNr` and `Peptide`,
-/// except `ExpMass`, `CalcMass` and `FileName`.
 fn parse_pin(text: &str) -> Result<PinData, String> {
     let mut lines = text.lines();
     let header = lines.next().ok_or("empty PIN")?;
     let cols: Vec<&str> = header.split('\t').collect();
     let find = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
-    // Require an explicit PSM identifier column — never silently fall back to
-    // column 0, which would let a malformed header join on an arbitrary field.
     let id_i = find("SpecId")
         .or_else(|| find("PSMId"))
         .ok_or("PIN missing SpecId/PSMId column")?;
@@ -121,9 +65,6 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
-        // A truncated row is corruption, not something to silently drop — a
-        // dropped row would quietly undercount the rescored set. (lineno+2 = the
-        // 1-based file line, accounting for the header consumed above.)
         if f.len() <= pep_i {
             return Err(format!(
                 "PIN line {} is truncated: {} columns, expected > {}",
@@ -132,9 +73,6 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
                 pep_i
             ));
         }
-        // Label is FDR-critical — require exactly 1 (target) or -1 (decoy); fail
-        // loud on anything else rather than defaulting to target and corrupting
-        // the FDR.
         let raw = f[label_i].trim();
         let label: i32 = raw
             .parse()
@@ -148,9 +86,6 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
             })?;
         d.is_decoy.push(label < 0);
         d.spec_ids.push(f[id_i].to_string());
-        // ScanNr is part of the spectrum key the CV folds use and of the
-        // competition group; a bad value would silently mis-fold or mis-group
-        // the spectrum, so fail loud instead of defaulting.
         let scan_raw = f[scan_i].trim();
         let scan: u32 = scan_raw.parse().map_err(|_| {
             format!(
@@ -184,10 +119,6 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
     let mut group_ids: HashMap<String, u32> = HashMap::new();
     for (row, key) in keys.iter().enumerate() {
         d.spectrum_hashes.push(fnv1a(key));
-        // Without an ExpMass column the spectrum is the group. With one, the
-        // group is the input file, ScanNr and ExpMass: scan numbers repeat
-        // across the files of one search, and spectra of different files must
-        // never compete.
         let group_key = match exp_txt[row] {
             Some(m) => format!("{}\t{}\t{m}", run_of(&d.spec_ids[row]), scans[row]),
             None => format!("{key}\t{}", scans[row]),
@@ -204,14 +135,12 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
     Ok(d)
 }
 
-/// `spec_id` without its trailing `_{scan}_{rank}`, when it has that form.
 fn strip_single(spec_id: &str, scan: u32) -> Option<&str> {
     let mut it = spec_id.rsplitn(3, '_');
     let (rank, sc, rest) = (it.next()?, it.next()?, it.next()?);
     (is_number(rank) && sc.parse() == Ok(scan)).then_some(rest)
 }
 
-/// `spec_id` without its trailing `_{scan}_{rank}_{row}`, when it has that form.
 fn strip_multi(spec_id: &str, scan: u32) -> Option<&str> {
     let mut it = spec_id.rsplitn(4, '_');
     let (row, rank, sc, rest) = (it.next()?, it.next()?, it.next()?, it.next()?);
@@ -222,17 +151,6 @@ fn is_number(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Each row's spectrum key: its SpecId (`{title}_{scan}_{rank}`; the rows of a
-/// multi-row scan add `_{row}`) without that suffix. The title, not ScanNr,
-/// identifies the spectrum: ScanNr is 0 when a native id carries no scan
-/// number, and repeats across the files of one search.
-///
-/// The suffix is read from the right, so a title that itself ends in
-/// `_{scan}` keeps it. A SpecId can still read both ways (`t_10_10_1` is
-/// title `t_10` with rank 1, or title `t` with rank 10 and row 1); a
-/// multi-row reading is taken only when another row of the PIN shares its
-/// key, since every multi-row scan emits at least two rows. A SpecId that
-/// fits neither form is its own key.
 fn spectrum_keys(spec_ids: &[String], scans: &[u32]) -> Vec<String> {
     let mut multi_count: HashMap<&str, u32> = HashMap::new();
     for (id, &scan) in spec_ids.iter().zip(scans) {
@@ -261,7 +179,6 @@ fn fnv1a(s: &str) -> u64 {
     })
 }
 
-/// Deterministic fold assignment by spectrum (splitmix64 of its key hash).
 fn fold_of(spectrum: u64, seed: u64) -> usize {
     let mut z =
         (seed ^ spectrum.wrapping_mul(0x9e37_79b9_7f4a_7c15)).wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -271,8 +188,6 @@ fn fold_of(spectrum: u64, seed: u64) -> usize {
     (z % N_FOLDS as u64) as usize
 }
 
-/// The best-scoring row of each competition group among `rows` (ties: the
-/// earlier row), in `rows` order.
 fn winners(d: &PinData, rows: &[usize], score: &[f64]) -> Vec<usize> {
     let mut best: HashMap<u32, usize> = HashMap::with_capacity(rows.len());
     for (k, &r) in rows.iter().enumerate() {
@@ -289,7 +204,6 @@ fn winners(d: &PinData, rows: &[usize], score: &[f64]) -> Vec<usize> {
     out
 }
 
-/// Monotone TDC q-values of `idx` (positions into `score` / `rows`).
 fn tdc_q(d: &PinData, rows: &[usize], score: &[f64], idx: &[usize]) -> Vec<f64> {
     let items: Vec<ScoredLabel> = idx
         .iter()
@@ -301,7 +215,6 @@ fn tdc_q(d: &PinData, rows: &[usize], score: &[f64], idx: &[usize]) -> Vec<f64> 
     qvalues(&items)
 }
 
-/// A linear score over standardised features: `b + Σ w_j (x_j − μ_j) / σ_j`.
 struct LinearModel {
     w: Vec<f64>,
     b: f64,
@@ -319,14 +232,9 @@ impl LinearModel {
     }
 }
 
-/// L2-regularised logistic regression by Newton's method on standardised
-/// features (`z`, row-major, `nf` columns), starting from `w`/`b`.
-/// Minimises `C Σ log(1 + e^{-y f}) + |w|²/2`; the intercept is not penalised.
 fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
     let p = nf + 1;
     let n = y.len();
-    // Partial sums over fixed row chunks, added in chunk order: the result
-    // does not depend on the thread count or scheduling.
     let n_chunks = n.div_ceil(CHUNK);
     let objective = |w: &[f64], b: f64| -> f64 {
         let parts: Vec<f64> = (0..n_chunks)
@@ -337,7 +245,6 @@ fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
                     let row = &z[i * nf..(i + 1) * nf];
                     let f = b + row.iter().zip(w).map(|(a, c)| a * c).sum::<f64>();
                     let m = if y[i] { f } else { -f };
-                    // log(1 + e^{-m}), stable for large |m|
                     loss += if m > 0.0 {
                         (-m).exp().ln_1p()
                     } else {
@@ -351,7 +258,6 @@ fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
     };
     let mut obj = objective(w, *b);
     for _ in 0..50 {
-        // Gradient and Hessian over [w, b]; partial sums per chunk.
         let (wr, br) = (&*w, *b);
         let parts: Vec<(Vec<f64>, Vec<f64>)> = (0..n_chunks)
             .into_par_iter()
@@ -397,13 +303,10 @@ fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
             g[a] += w[a];
             h[a * p + a] += 1.0;
         }
-        // The intercept is unpenalised; a tiny ridge keeps the system
-        // positive definite when every row has the same label.
         h[nf * p + nf] += 1e-9;
         let Some(step) = cholesky_solve(&h, &g, p) else {
             return;
         };
-        // Damped Newton: halve the step until the objective does not rise.
         let mut t = 1.0;
         loop {
             let nw: Vec<f64> = (0..nf).map(|a| w[a] - t * step[a]).collect();
@@ -427,7 +330,6 @@ fn fit_logistic(z: &[f64], y: &[bool], nf: usize, w: &mut [f64], b: &mut f64) {
     }
 }
 
-/// Solve `H x = g` for a symmetric positive definite `H` (row-major `p × p`).
 fn cholesky_solve(h: &[f64], g: &[f64], p: usize) -> Option<Vec<f64>> {
     let mut l = vec![0.0f64; p * p];
     for i in 0..p {
@@ -465,9 +367,6 @@ fn cholesky_solve(h: &[f64], g: &[f64], p: usize) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// One fold's model and the affine map that puts its scores on the common
-/// scale; `trained` is false when no round could be trained (the initial
-/// single-feature score is used).
 struct FoldModel {
     model: LinearModel,
     shift: f64,
@@ -475,8 +374,6 @@ struct FoldModel {
     trained: bool,
 }
 
-/// Train on `rows` (the training split): standardise, pick the initial
-/// feature, then `N_ROUNDS` semi-supervised rounds.
 fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
     let nf = d.n_features;
     let n = rows.len();
@@ -511,8 +408,6 @@ fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
         .map(|(r, j)| (d.x[r * nf + j] as f64 - mean[j]) * inv_sd[j])
         .collect();
 
-    // Initial score: the feature (and sign) accepting the most target
-    // winners at q ≤ TRAIN_Q over the search's rank-1 rows.
     let rank1: Vec<usize> = (0..n).filter(|&k| d.first_in_group[rows[k]]).collect();
     let (mut best_j, mut best_sign, mut best_n) = (0usize, 1.0f64, 0usize);
     for j in 0..nf {
@@ -572,8 +467,6 @@ fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
             .flat_map(|&k| z[k * nf..(k + 1) * nf].iter().copied())
             .collect();
         if !trained {
-            // Start the first fit from zero, not from the single-feature
-            // direction (whose scale is arbitrary).
             w.iter_mut().for_each(|v| *v = 0.0);
             b = 0.0;
         }
@@ -582,8 +475,6 @@ fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
         score = score_all(&w, b);
     }
 
-    // Common scale: the q = TRAIN_Q threshold of the training split maps to
-    // 0 and its median decoy winner to -1.
     let win = winners(d, rows, &score);
     let q = tdc_q(d, rows, &score, &win);
     let threshold = win
@@ -612,8 +503,6 @@ fn train_fold(d: &PinData, rows: &[usize]) -> FoldModel {
     }
 }
 
-/// Cross-validated scores of every row on the common scale, and the number of
-/// folds that kept the initial single-feature score.
 fn cv_scores(d: &PinData, seed: u64) -> (Vec<f64>, usize) {
     let n = d.is_decoy.len();
     let nf = d.n_features;
@@ -641,16 +530,9 @@ fn cv_scores(d: &PinData, seed: u64) -> (Vec<f64>, usize) {
     (out, untrained)
 }
 
-/// PEP of each winner (in `idx` order, `score` descending not required):
-/// decoys / targets at that score from an isotonic fit of the decoy share,
-/// capped at 1. Winners with exactly equal scores start as one block, so they
-/// share one PEP whatever their order in `idx`.
 fn winner_pep(d: &PinData, idx: &[usize], score: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..idx.len()).collect();
     order.sort_by(|&a, &b| score[idx[b]].total_cmp(&score[idx[a]]));
-    // Pool adjacent violators: the decoy share must not fall as the score
-    // falls. Blocks of (sum, count) in descending-score order; a run of tied
-    // scores enters as one block.
     let mut sums: Vec<f64> = Vec::new();
     let mut counts: Vec<f64> = Vec::new();
     let mut start = 0usize;
@@ -697,8 +579,6 @@ fn winner_pep(d: &PinData, idx: &[usize], score: &[f64]) -> Vec<f64> {
     pep
 }
 
-/// Native rescore a PIN → `SpecId → PercolatorPsm` of the winning targets
-/// (monotone TDC q-value + PEP). Same map shape as `output::run_percolator`.
 #[cfg(test)]
 pub fn native_rescore_pin(
     pin_text: &str,
@@ -707,26 +587,14 @@ pub fn native_rescore_pin(
     native_rescore_pin_all(pin_text, seed).map(|r| r.targets)
 }
 
-/// The native rescorer's result: the winning target and decoy PSMs of every
-/// competition group, keyed by SpecId (the decoys feed FDR within each
-/// class, protein inference and the match-between-runs library), plus run
-/// diagnostics.
 pub struct NativeRescore {
     pub targets: HashMap<String, PercolatorPsm>,
     pub decoys: HashMap<String, PercolatorPsm>,
-    /// The held-out score of every target row and every decoy row, winners
-    /// and losers of their competition group: the rows of a spectrum compete
-    /// on them for the site posteriors.
     pub row_scores: output::RowScores,
-    /// Rows that lost target-decoy competition in their group.
     pub competed_away: usize,
-    /// Cross-validation folds whose training split had too few confident
-    /// targets or decoys to train on; they ranked by the best single feature.
     pub untrained_folds: usize,
 }
 
-/// Native rescore of a PIN, keeping the winning decoys; see
-/// [`native_rescore_pin`].
 pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore, String> {
     let d = parse_pin(pin_text)?;
     let n = d.is_decoy.len();
@@ -756,17 +624,12 @@ pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore
             peptide: d.peptides[i].clone(),
             proteins: d.proteins[i].clone(),
         };
-        // Target-only result contract (as `output::run_percolator`): a decoy
-        // in the target map would reach the filtered TSV / QPX as an accepted
-        // identification.
         let map = if d.is_decoy[i] {
             &mut decoys
         } else {
             &mut targets
         };
         if map.insert(d.spec_ids[i].clone(), psm).is_some() {
-            // SpecIds are unique per emitted PSM (multi-row scans carry a
-            // per-row suffix); a collision means a corrupt PIN.
             return Err(format!(
                 "duplicate PSM identifier {:?} in PIN",
                 d.spec_ids[i]
@@ -795,14 +658,11 @@ pub fn native_rescore_pin_all(pin_text: &str, seed: u64) -> Result<NativeRescore
 mod tests {
     use super::*;
 
-    /// Build a synthetic PIN with one separating feature `f1` (targets high,
-    /// decoys low) plus a pure-noise feature `f2`.
     fn synth_pin(n: usize, separable: bool) -> String {
         let mut s = String::from("SpecId\tLabel\tScanNr\tf1\tf2\tPeptide\tProteins\n");
         for i in 0..n {
             let is_decoy = i % 2 == 1;
             let label = if is_decoy { -1 } else { 1 };
-            // deterministic pseudo-noise in [0,1)
             let noise = (((i as u64).wrapping_mul(2654435761) >> 8) % 1000) as f32 / 1000.0;
             let f1 = if separable {
                 if is_decoy {
@@ -826,7 +686,6 @@ mod tests {
     fn separable_targets_get_low_q() {
         let pin = synth_pin(600, true);
         let map = native_rescore_pin(&pin, 42).unwrap();
-        // many target PSMs should reach q <= 0.01
         let confident = map
             .values()
             .filter(|p| !p.psm_id.ends_with("_-1") && p.q_value <= 0.01)
@@ -835,7 +694,6 @@ mod tests {
             confident > 50,
             "expected many confident targets, got {confident}"
         );
-        // a clearly-high-scoring target must have a small PEP
         let min_pep = map
             .values()
             .filter(|p| !p.psm_id.ends_with("_-1"))
@@ -849,9 +707,6 @@ mod tests {
 
     #[test]
     fn rows_without_scan_numbers_are_folded_by_spectrum() {
-        // Every ScanNr 0 (native ids without a scan number): the folds must
-        // still split the spectra, or one fold holds everything and nothing
-        // is scored.
         let pin = synth_pin(600, true)
             .lines()
             .enumerate()
@@ -890,8 +745,6 @@ mod tests {
             keys(&[("run/cycle=4 experiment=2_0_1", 0)]),
             ["run/cycle=4 experiment=2"]
         );
-        // Rank or row equal to the scan number: every row of the spectrum
-        // keeps the same key.
         assert_eq!(keys(&[("run/x_1_1", 1)]), ["run/x"]);
         assert_eq!(
             keys(&[("run/x_1_1_0", 1), ("run/x_1_2_1", 1)]),
@@ -909,10 +762,7 @@ mod tests {
 
     #[test]
     fn spectrum_key_keeps_a_title_ending_in_the_scan() {
-        // Single-row scan, title `file_10` at scan 10.
         assert_eq!(keys(&[("run/file_10_10_1", 10)]), ["run/file_10"]);
-        // Multi-row scan of the same title: every row, whatever its rank and
-        // row, shares one key.
         assert_eq!(
             keys(&[
                 ("run/file_10_10_1_0", 10),
@@ -921,19 +771,16 @@ mod tests {
             ]),
             ["run/file_10", "run/file_10", "run/file_10"]
         );
-        // Title `file_10_10` at scan 10, multi-row and single-row.
         assert_eq!(
             keys(&[("r/file_10_10_10_1_0", 10), ("r/file_10_10_10_2_1", 10)]),
             ["r/file_10_10", "r/file_10_10"]
         );
         assert_eq!(keys(&[("r/file_10_10_10_1", 10)]), ["r/file_10_10"]);
-        // A SpecId in neither form is its own key.
         assert_eq!(keys(&[("other-tool-psm-7", 3)]), ["other-tool-psm-7"]);
     }
 
     #[test]
     fn pure_noise_yields_few_confident() {
-        // No real signal → the CV must NOT manufacture confident IDs (no leakage).
         let pin = synth_pin(600, false);
         let map = native_rescore_pin(&pin, 7).unwrap();
         let confident = map
@@ -948,15 +795,12 @@ mod tests {
 
     #[test]
     fn decoys_never_appear_in_results() {
-        // Target-only contract: no decoy row may surface in the result map, even
-        // a high-scoring (low-q) one — otherwise it leaks into the filtered TSV.
         let pin = synth_pin(600, true);
         let map = native_rescore_pin(&pin, 42).unwrap();
         assert!(
             map.keys().all(|k| !k.ends_with("_-1")),
             "a decoy SpecId leaked into the target-only result map"
         );
-        // And the synthetic PIN had n/2 decoys, so the map must be target-only.
         assert!(
             map.len() <= 300,
             "result map must exclude decoys, got {} entries",
@@ -972,7 +816,6 @@ mod tests {
         assert_eq!(all.decoys.len(), 300);
         assert!(all.decoys.keys().all(|k| k.ends_with("_-1")));
         assert!(all.targets.values().all(|p| p.score.is_some()));
-        // Separable data: the targets outscore the decoys on average.
         let mean = |v: Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
         let t = mean(all.targets.values().map(|p| p.score.unwrap()).collect());
         let d = mean(all.decoys.values().map(|p| p.score.unwrap()).collect());
@@ -981,7 +824,6 @@ mod tests {
 
     #[test]
     fn malformed_rows_fail_loud() {
-        // Truncated row, bad label, bad scan, and non-numeric feature must all error.
         let base = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\n";
         assert!(
             native_rescore_pin(&format!("{base}s1\t1\t10\n"), 1).is_err(),
@@ -1001,9 +843,6 @@ mod tests {
         );
     }
 
-    /// Deterministic pseudo-noise in [0, 1).
-    /// Rows of two files with the same ScanNr and ExpMass are different
-    /// spectra: each file's rows compete only among themselves.
     #[test]
     fn spectra_of_different_files_never_compete() {
         let mut s = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tPeptide\tProteins\n");
@@ -1038,8 +877,6 @@ mod tests {
 
     #[test]
     fn one_psm_per_scan_and_precursor_mass() {
-        // Every spectrum has a target and a decoy row at one ExpMass and a
-        // second target at another ExpMass (another charge).
         let mut s = String::from("SpecId\tLabel\tScanNr\tExpMass\tf1\tf2\tPeptide\tProteins\n");
         for i in 0..400u64 {
             let good = i % 2 == 0;
@@ -1060,7 +897,6 @@ mod tests {
             ));
         }
         let r = native_rescore_pin_all(&s, 42).unwrap();
-        // 800 groups, one winner each.
         assert_eq!(r.targets.len() + r.decoys.len(), 800);
         assert_eq!(r.competed_away, 400);
         for i in 0..400 {
@@ -1073,11 +909,9 @@ mod tests {
             );
             assert!(r.targets.contains_key(&format!("s{i}_{i}_1_2")));
         }
-        // Every row keeps its score, the competition's losers included.
         assert_eq!(r.row_scores.0.len(), 800);
         assert_eq!(r.row_scores.1.len(), 400);
         assert!((0..400).all(|i| r.row_scores.1.contains_key(&format!("s{i}_{i}_2_1"))));
-        // PEP: within [0, 1], never above 1, and falls as the score rises.
         let mut v: Vec<(f64, f64)> = r
             .targets
             .values()
@@ -1089,18 +923,11 @@ mod tests {
         assert!(v.windows(2).all(|w| w[1].1 <= w[0].1 + 1e-12));
     }
 
-    /// The root cause of the old rescorer's excess false discoveries: training
-    /// every target as a positive teaches the model what separates FALSE
-    /// targets from decoys. Here false targets score higher on a feature
-    /// (`art`) than decoys and correct targets do. A rescorer trained
-    /// on all targets ranks them above the decoys; the semi-supervised one
-    /// learns only what the confident targets show.
     #[test]
     fn false_targets_unlike_decoys_are_not_rewarded() {
         let mut s = String::from("SpecId\tLabel\tScanNr\tsig\tart\tPeptide\tProteins\n");
         let n = 3000u64;
         for i in 0..n {
-            // 1/3 correct targets, 1/3 false targets, 1/3 decoys.
             let (label, sig, art, prot) = match i % 3 {
                 0 => (1, 1.8 + 2.0 * noise(i, 1), 0.4 * noise(i, 2), "TRUE"),
                 1 => (1, 2.0 * noise(i, 1), 0.2 + 0.4 * noise(i, 2), "FALSE"),
@@ -1154,7 +981,6 @@ mod tests {
 
     #[test]
     fn logistic_fit_separates_and_solver_handles_spd() {
-        // x > 0 → positive.
         let z: Vec<f64> = (0..200).map(|i| (i as f64 - 99.5) / 50.0).collect();
         let y: Vec<bool> = z.iter().map(|&v| v > 0.0).collect();
         let (mut w, mut b) = (vec![0.0], 0.0);
@@ -1180,13 +1006,10 @@ mod tests {
         }
     }
 
-    /// A target and a decoy with exactly equal scores get one PEP, the same
-    /// whichever comes first.
     #[test]
     fn tied_scores_share_one_pep_in_any_order() {
         let score = [3.0, 2.0, 2.0, 1.0];
         let idx = [0, 1, 2, 3];
-        // Order A: the tied target comes first; order B: the tied decoy does.
         let a = winner_pep(&pin_data(&[false, false, true, false]), &idx, &score);
         let b = winner_pep(&pin_data(&[false, true, false, false]), &idx, &score);
         assert_eq!(a[1], a[2], "tied rows share a PEP");

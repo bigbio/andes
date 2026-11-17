@@ -1,97 +1,43 @@
-//! Same-run claims on an MS1 feature: which other probed target of the run
-//! sits on the same feature.
-//!
-//! A target row (identified or transferred, fitted) is *claimed* by another
-//! target row of the same run when the two have the same charge, neutral
-//! masses within the run's learned mass window of each other and apexes
-//! within its learned apex window ([`Windows`]). The claim is *co-apex* when the apexes are
-//! closer than the sum of the two fitted widths: the two probes then measure
-//! one MS1 feature, whose quantity is inherently shared between the two
-//! compounds (isobaric residue combinations, permutations) or belongs to the
-//! claimant alone (a transfer into a run that does not contain the analyte).
-//!
-//! The claim is a fact about the run's probes, not a verdict: nothing here
-//! removes or re-weights a measurement. The best claimant is the identified
-//! one when there is any, then the one with the nearest apex.
-//!
-//! The mass and apex windows are learned per run ([`learn_windows`]) from
-//! the agreement of the run's own identified peptides seen at two charge
-//! states (one compound measured twice: the difference of their measured
-//! mass errors and of their fitted apexes) against the density of chance
-//! partners: the window is the contour where the same-compound density falls
-//! to the chance density. A run with too few such pairs has no claims.
-
-/// Extent of the pair search for the chance density: relative neutral mass,
-/// parts per million, and apex difference, seconds. This is the extent of the
-/// search, not a claim window.
 pub const SEARCH_PPM: f64 = 20.0;
 pub const SEARCH_S: f64 = 60.0;
-/// Fewest same-compound pairs a run needs for its windows.
 pub const MIN_PAIRS: usize = 30;
-/// Quantile of the deviation from the median that equals one standard
-/// deviation of a normal law.
 const ONE_SD_QUANTILE: f64 = 0.6827;
 
-/// One fitted target row of a run, as the claim search sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Probe {
-    /// Precursor id (distinguishes the row from its own claimants).
     pub precursor: u32,
     pub charge: u8,
-    /// Neutral mass, Da.
     pub mass: f64,
-    /// Fitted apex and width, seconds.
     pub t0: f64,
     pub w: f64,
-    /// The precursor is identified in this run.
     pub identified: bool,
-    /// Id of the peptidoform (the charge states of one peptidoform share it).
     pub peptide: u32,
-    /// Measured mass error of the fit, ppm.
     pub mass_err_ppm: f64,
 }
 
-/// The claim windows of a run and what they were learned from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Windows {
-    /// Half-width of the neutral-mass window, ppm.
     pub ppm: f64,
-    /// Half-width of the apex window, seconds.
     pub seconds: f64,
-    /// Robust standard deviation of the mass-error and apex differences of
-    /// one compound seen at two charge states.
     pub sd_ppm: f64,
     pub sd_s: f64,
-    /// Same-compound pairs behind the standard deviations.
     pub pairs: usize,
 }
 
-/// The claims on one row.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Claim {
-    /// Best claimant: identified first, then nearest apex; `None` without a
-    /// claimant.
     pub claimant: Option<u32>,
-    /// The next two claimants in the same order.
     pub others: [Option<u32>; 2],
-    /// Apex of the best claimant minus the row's apex, seconds.
     pub dt_s: Option<f32>,
-    /// Smallest absolute apex difference over all claimants, seconds.
     pub min_abs_dt_s: Option<f32>,
-    /// The best claimant is identified in the run.
     pub identified: bool,
-    /// The best claimant is co-apex.
     pub co_apex: bool,
-    /// Claimants within the window.
     pub n: u16,
-    /// Co-apex claimants.
     pub n_co_apex: u16,
-    /// Co-apex claimants identified in the run.
     pub n_identified_co_apex: u16,
 }
 
 impl Claim {
-    /// The claimants, best first (at most three).
     pub fn claimants(&self) -> impl Iterator<Item = u32> + '_ {
         self.claimant
             .into_iter()
@@ -99,16 +45,12 @@ impl Claim {
     }
 }
 
-/// The value below which `q` of the sorted `v` lie, interpolated linearly.
 fn quantile(v: &[f64], q: f64) -> f64 {
     let pos = q * (v.len() - 1) as f64;
     let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
     v[lo] + (v[hi] - v[lo]) * (pos - lo as f64)
 }
 
-/// Robust standard deviation of `x`: the one-sigma quantile of the deviation
-/// from the median; when over a third of the values sit exactly on the
-/// median, the root mean square of the deviations clipped at `clip`.
 fn robust_sd(x: &mut [f64], clip: f64) -> f64 {
     x.sort_by(f64::total_cmp);
     let median = quantile(x, 0.5);
@@ -122,11 +64,8 @@ fn robust_sd(x: &mut [f64], clip: f64) -> f64 {
     ms.sqrt()
 }
 
-/// The claim windows of a run from its fitted `probes`; `None` when the run
-/// has fewer than [`MIN_PAIRS`] same-compound pairs or a degenerate spread.
 pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     let fitted = |p: &Probe| p.mass.is_finite() && p.t0.is_finite() && p.w.is_finite();
-    // Same compound, two charge states: lower charge minus higher charge.
     let mut by_peptide: std::collections::HashMap<u32, Vec<&Probe>> = Default::default();
     for p in probes
         .iter()
@@ -156,8 +95,6 @@ pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     if !(sd_ppm > 0.0 && sd_s > 0.0) {
         return None;
     }
-    // Chance partners of the identified rows: the outer part of the search
-    // rectangle, where no same-compound pair reaches.
     let order = sorted_by_mass(probes);
     let (mut anchors, mut outer) = (0usize, 0usize);
     for me in probes.iter().filter(|p| p.identified && fitted(p)) {
@@ -186,8 +123,6 @@ pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     if anchors == 0 {
         return None;
     }
-    // Chance partners per anchor per ppm per second over the outer
-    // three quarters of the rectangle (+-20 ppm x +-60 s).
     let u = (outer as f64 + 1.0) / (anchors as f64 * 3.0 * SEARCH_PPM * SEARCH_S);
     let f0 = 1.0 / (2.0 * std::f64::consts::PI * sd_ppm * sd_s);
     let l = (2.0 * (f0 / u).ln()).max(0.0).sqrt();
@@ -200,7 +135,6 @@ pub fn learn_windows(probes: &[Probe]) -> Option<Windows> {
     })
 }
 
-/// Indices of the fitted probes ordered by (charge, mass).
 fn sorted_by_mass(probes: &[Probe]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..probes.len())
         .filter(|&i| {
@@ -216,10 +150,6 @@ fn sorted_by_mass(probes: &[Probe]) -> Vec<usize> {
     order
 }
 
-/// The claims on the rows `rows` (indices into `probes`) from all `probes`
-/// within `windows`; one [`Claim`] per index of `rows`, in order. Rows or
-/// probes without a finite apex, width or mass take no part. Without
-/// windows (a run with too few same-compound pairs) no row has a claim.
 pub fn assign(probes: &[Probe], rows: &[usize], windows: Option<Windows>) -> Vec<Claim> {
     let Some(win) = windows else {
         return vec![Claim::default(); rows.len()];
@@ -236,7 +166,6 @@ pub fn assign(probes: &[Probe], rows: &[usize], windows: Option<Windows>) -> Vec
                 (probes[j].charge, probes[j].mass) < (me.charge, me.mass - tol)
             });
             let mut claim = Claim::default();
-            // The three best claimants: (identified, apex distance, precursor).
             let mut best: Vec<(bool, f64, u32, usize)> = Vec::with_capacity(4);
             let mut min_dt = f64::INFINITY;
             for &j in &order[lo..] {
@@ -381,8 +310,6 @@ mod tests {
         );
     }
 
-    /// Peptides seen at two charge states with a small spread of the mass
-    /// error and apex, and unrelated partners spread over the run.
     fn run_probes(n: usize) -> Vec<Probe> {
         let mut out = Vec::new();
         let mut state = 12345u64;
@@ -416,14 +343,11 @@ mod tests {
     #[test]
     fn windows_follow_the_same_compound_spread() {
         let w = learn_windows(&run_probes(400)).expect("enough pairs");
-        // Uniform differences of width 1 have a standard deviation near 0.41
-        // (triangular law, quantile 0.6827 of |d|).
         assert!(w.sd_ppm > 0.2 && w.sd_ppm < 0.6, "{w:?}");
         assert!(w.sd_s > 0.2 && w.sd_s < 0.6, "{w:?}");
         assert!(w.ppm > 3.0 * w.sd_ppm && w.ppm <= SEARCH_PPM, "{w:?}");
         assert!(w.seconds > 3.0 * w.sd_s && w.seconds <= SEARCH_S, "{w:?}");
         assert_eq!(w.pairs, 400);
-        // Twice the mass-error spread widens the mass window.
         let mut loose = run_probes(400);
         for p in &mut loose {
             p.mass_err_ppm *= 2.0;
@@ -444,7 +368,6 @@ mod tests {
     fn exact_agreement_gives_a_root_mean_square_spread() {
         let mut x = vec![0.0; 80];
         x.extend([3.0, -3.0, 6.0]);
-        // 68 % quantile of the deviation is 0: the clipped root mean square.
         let sd = robust_sd(&mut x, 60.0);
         assert!((sd - ((9.0 + 9.0 + 36.0) / 83.0f64).sqrt()).abs() < 1e-12);
     }

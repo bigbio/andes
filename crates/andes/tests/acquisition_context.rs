@@ -1,7 +1,3 @@
-//! The acquisition context on metadata-less input: an MGF carries no analyzer,
-//! so the fragment resolution is read from its peaks, and the selected model
-//! and the feature tolerances follow that class.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -13,7 +9,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Run a search and return its stderr.
 fn run(spectrum: &str, database: &str, extra: &[&str]) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))
@@ -38,9 +33,6 @@ fn banner_line<'a>(stderr: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no `{key}` line in:\n{stderr}"))
 }
 
-/// Orbitrap HCD spectra exported to MGF without any activation or analyzer
-/// line: the peaks are read as high resolution and the high-res HCD model is
-/// selected, instead of the ion-trap default.
 #[test]
 fn metadataless_orbitrap_mgf_is_read_as_high_resolution() {
     let err = run(
@@ -61,8 +53,6 @@ fn metadataless_orbitrap_mgf_is_read_as_high_resolution() {
     );
 }
 
-/// An explicit `--fragment-tol-da` names the low-resolution class and wins
-/// over the peak inference.
 #[test]
 fn fragment_tol_flag_wins_over_the_peak_inference() {
     let err = run(
@@ -78,7 +68,6 @@ fn fragment_tol_flag_wins_over_the_peak_inference() {
     assert!(banner_line(&err, "model ").contains("cid_lowres_tryp"));
 }
 
-/// Ion-trap spectra stay on the low-resolution model.
 #[test]
 fn metadataless_ion_trap_mgf_stays_low_resolution() {
     let err = run(
@@ -91,9 +80,6 @@ fn metadataless_ion_trap_mgf_stays_low_resolution() {
     assert!(banner_line(&err, "model ").contains("cid_lowres_tryp"));
 }
 
-/// On an mzML whose analyzer is detected, an explicit `--fragment-tol-ppm`
-/// sets the feature tolerance (it used to be ignored with a warning) and
-/// replaces the per-run fragment-error measurement.
 #[test]
 fn explicit_fragment_tol_is_honoured_on_detected_input() {
     let err = run(
@@ -109,9 +95,6 @@ fn explicit_fragment_tol_is_honoured_on_detected_input() {
     assert!(!err.contains("Fragment error:"), "{err}");
 }
 
-/// Without an override a high-resolution run measures its fragment error
-/// before scoring. This fixture has too few confident PSMs, so the PIN
-/// features keep the 20 ppm class default and say so.
 #[test]
 fn high_res_run_measures_or_reports_its_fragment_error() {
     let err = run(

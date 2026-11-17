@@ -1,18 +1,3 @@
-//! The match-between-runs library on disk: `library.parquet` (one row per
-//! precursor id: identity, proteins and, for library entries, the entry
-//! fields (with the identity-decoy flag and the best donor PSM's score,
-//! q-value and PEP), the empirical fragment spectrum of the best donor PSM and the
-//! retention times of every donor PSM) and `alignment.parquet` (one row per run: the run map, residual
-//! widths, anchor statistics, alignment component and the run's
-//! observations). Together they
-//! rebuild the [`Library`] exactly, so an extract in another process gives the
-//! same rows as one in the process that built the library.
-//!
-//! Each file carries a schema version in its key-value metadata; a reader
-//! rejects a different major version. `library.parquet` also records the run
-//! stems in run-index order and the library entry gate. Both files are written
-//! to `<path>.partial` and renamed into place once complete.
-
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,11 +18,8 @@ use quant::align::{Alignment, RunAlignment, RunMap};
 use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
-/// Major version of both layouts. A reader rejects any other major.
 pub const LIBRARY_SCHEMA_MAJOR: u32 = 5;
-/// File name of the precursor table inside the quant directory.
 pub const LIBRARY_FILE: &str = "library.parquet";
-/// File name of the alignment table inside the quant directory.
 pub const ALIGNMENT_FILE: &str = "alignment.parquet";
 
 const LIBRARY_KEY: &str = "andes.library.schema";
@@ -45,37 +27,22 @@ const ALIGNMENT_KEY: &str = "andes.alignment.schema";
 const RUNS_KEY: &str = "andes.library.runs";
 const MAX_Q_KEY: &str = "andes.library.max_q";
 const DONOR_Q_KEY: &str = "andes.library.donor_q";
-/// The donor PSM PEP cap; an empty value when there is none.
 const DONOR_PEP_KEY: &str = "andes.library.donor_pep";
-/// Key of [`library_fingerprint`] in `library.parquet`; extract tables copy it.
 pub const FINGERPRINT_KEY: &str = "andes.library.fingerprint";
 const ALIGNMENT_FINGERPRINT_KEY: &str = "andes.alignment.fingerprint";
 const SCHEMA_VERSION: &str = "5.0";
-/// Rows per Parquet row group / record batch of the precursor table.
 const BATCH_ROWS: usize = 65_536;
 const ENVELOPE_LEN: usize = 4;
 
-/// A library with what the stages around it need: the run stems in
-/// run-index order, the entry gate and donor PSM thresholds it was built with,
-/// and the `;`-joined protein accessions per precursor id.
 #[derive(Debug, Clone)]
 pub struct StoredLibrary {
     pub runs: Vec<String>,
-    /// Library entry gate (internal precursor-level gate, not an
-    /// identification FDR).
     pub max_q: f64,
-    /// PSM q-value threshold of the donor PSMs (`--quant-fdr`).
     pub donor_q: f64,
-    /// PSM PEP cap of the donor PSMs (`--pep`), when given.
     pub donor_pep: Option<f64>,
     pub library: Library,
-    /// Per precursor id; same length as `library.meta`.
     pub proteins: Vec<String>,
-    /// Per precursor id: the empirical fragment spectrum of an entry's best
-    /// donor PSM, when its scan gave one; same length as `library.meta`.
     pub spectra: Vec<Option<LibrarySpectrum>>,
-    /// Per precursor id: `(run, RT)` of every donor PSM of an entry; same
-    /// length as `library.meta`.
     pub donor_scans: Vec<Vec<(u16, f64)>>,
 }
 
@@ -83,8 +50,6 @@ fn list(item: DataType) -> DataType {
     DataType::List(Arc::new(Field::new("item", item, true)))
 }
 
-/// The precursor table's columns; `ion_mobility` (an entry's median donor
-/// precursor 1/K0) is the last and is present only when some entry has one.
 fn library_schema(with_mobility: bool) -> Schema {
     let mut fields = vec![
         Field::new("key", DataType::Utf8, false),
@@ -133,7 +98,6 @@ fn alignment_schema() -> Schema {
     ])
 }
 
-/// 64-bit FNV-1a over the bytes fed to it.
 struct Fnv(u64);
 
 impl Fnv {
@@ -161,8 +125,6 @@ impl Fnv {
     }
 }
 
-/// A stable hash of an alignment's stored state (maps, residual widths,
-/// anchor statistics, components and observations of every run).
 pub fn alignment_fingerprint(a: &Alignment) -> String {
     let mut h = Fnv::new();
     let runs = a.runs();
@@ -197,8 +159,6 @@ pub fn alignment_fingerprint(a: &Alignment) -> String {
     h.hex()
 }
 
-/// A stable hash of a stored library: run stems, entry gate, donor PSM
-/// thresholds, precursor metadata and proteins, entries and the alignment.
 pub fn library_fingerprint(lib: &StoredLibrary) -> String {
     let mut h = Fnv::new();
     h.u64(lib.runs.len() as u64);
@@ -266,7 +226,6 @@ pub fn library_fingerprint(lib: &StoredLibrary) -> String {
     h.hex()
 }
 
-/// `<dir>/library.parquet` and `<dir>/alignment.parquet`.
 pub fn library_paths(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join(LIBRARY_FILE), dir.join(ALIGNMENT_FILE))
 }
@@ -442,8 +401,6 @@ fn alignment_batch(
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
 }
 
-/// Writes one Parquet file through `<path>.partial`; `batches` produces the
-/// record batches in order.
 fn write_parquet(
     path: &Path,
     schema: Arc<Schema>,
@@ -583,7 +540,6 @@ fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(),
     )
 }
 
-/// Writes `<dir>/library.parquet` and `<dir>/alignment.parquet`.
 pub fn write_library(dir: &Path, lib: &StoredLibrary) -> Result<(), String> {
     write_versioned(dir, lib, SCHEMA_VERSION)
 }
@@ -597,8 +553,6 @@ pub(crate) fn write_with_schema_version(
     write_versioned(dir, lib, version)
 }
 
-/// Opens a versioned table: checks the schema version under `key` and the
-/// column names and types. Returns the reader and the key-value metadata.
 fn open(
     path: &Path,
     key: &str,
@@ -668,7 +622,6 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
     })
 }
 
-/// Values of row `i` of a list column.
 fn items<T: Clone + 'static, A: Array + 'static>(
     l: &ListArray,
     i: usize,
@@ -697,8 +650,6 @@ fn u16s(l: &ListArray, i: usize, path: &Path) -> Result<Vec<u16>, String> {
     items::<u16, UInt16Array>(l, i, path, |a| a.values())
 }
 
-/// Reads `<dir>/library.parquet` and `<dir>/alignment.parquet`. Every error
-/// names the file.
 pub fn read_library(dir: &Path) -> Result<StoredLibrary, String> {
     let (lib_path, align_path) = library_paths(dir);
     let lerr = |e: &dyn std::fmt::Display| format!("{}: {e}", lib_path.display());
@@ -1009,8 +960,6 @@ mod tests {
     use quant::align::AlignParams;
     use quant::library::{build_library, PsmIn};
 
-    /// 300 precursors over three warped runs, 20 decoys (one an identity
-    /// decoy), a FAIMS voltage on some, precursor 0 seen in run 0 only.
     fn stored() -> StoredLibrary {
         let n = 320usize;
         let meta: Vec<PrecursorMeta> = (0..n)
@@ -1040,7 +989,6 @@ mod tests {
                     run: r,
                     precursor: p,
                     rt,
-                    // Decoy 300 passes the entry gate: an identity decoy.
                     score: match p {
                         300 => 250.5,
                         _ if decoy => 1.0,
@@ -1153,7 +1101,6 @@ mod tests {
     #[test]
     fn library_rejects_unknown_major_version_naming_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        // An older layout (major 4 has no `isotope_share`) and a later one.
         for version in ["4.0", "6.0"] {
             write_with_schema_version(dir.path(), &stored(), version).unwrap();
             let e = read_library(dir.path()).unwrap_err();
@@ -1188,7 +1135,6 @@ mod tests {
         other.library.meta[3].isotope_share = 0.5;
         assert_ne!(library_fingerprint(&s), library_fingerprint(&other));
 
-        // An alignment.parquet from another library is rejected by name.
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         write_library(a.path(), &s).unwrap();

@@ -1,9 +1,3 @@
-//! Integration tests for [`model_train::accumulate::StatsAccumulator`].
-//!
-//! The TDD test builds a synthetic PSM where the spectrum peaks are placed
-//! at the exact theoretical ion m/z values so we can assert deterministic
-//! rank counts.
-
 use std::path::Path;
 
 use model::amino_acid::AminoAcid;
@@ -16,10 +10,6 @@ use scoring_crate::scoring::rank_scorer::RankScorer;
 use model_train::accumulate::{merge, StatsAccumulator};
 use model_train::counts::CountStats;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn make_peptide(seq: &[u8]) -> Peptide {
     let residues: Vec<AminoAcid> = seq
         .iter()
@@ -28,9 +18,7 @@ fn make_peptide(seq: &[u8]) -> Peptide {
     Peptide::new(residues, b'_', b'-')
 }
 
-/// Load the bundled hcd_qexactive_tryp model and build a RankScorer.
 fn load_hcd_scorer() -> (Param, RankScorer) {
-    // Load the hcd_qexactive_tryp model from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
@@ -43,23 +31,6 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
     (param, scorer)
 }
 
-// ---------------------------------------------------------------------------
-// Helper: build a synthetic spectrum for a known peptide
-//
-// The strategy:
-//   - For each internal split of `peptide`, compute the theoretical m/z of
-//     each ion type in the scorer's trained partition ion list.
-//   - Place a peak at that exact m/z with a strictly decreasing intensity
-//     (most-intense = split 1 prefix ion gets intensity N*1000, etc.).
-//   - Add a few "decoy" peaks at odd m/z values with low intensity.
-//
-// With this construction, the peak placed for the *first* split's first ion
-// gets rank 1.
-//
-// Returns (spectrum, expected_partition, expected_ion_type, expected_rank=1)
-// for the single most-intense matched ion.
-// ---------------------------------------------------------------------------
-
 fn build_synthetic_spectrum(
     peptide: &Peptide,
     scorer: &RankScorer,
@@ -70,7 +41,6 @@ fn build_synthetic_spectrum(
     let n = peptide.length();
     assert!(n >= 2, "peptide must have at least 2 residues");
 
-    // Compute nominal masses the same way score_psm does.
     let peptide_nominal = peptide.nominal_residue_mass();
     let mut prefix_acc = 0.0_f64;
     let mut prefix_nominals: Vec<i32> = vec![0];
@@ -80,25 +50,15 @@ fn build_synthetic_spectrum(
         prefix_nominals.push(nominal_from(prefix_acc));
     }
 
-    // Derive the parent_mass from the precursor.
     const PROTON: f64 = 1.007_276_49;
     let parent_mass = (precursor_mz - PROTON) * (charge as f64);
 
-    // We'll enumerate ions for the first split position, pick the first
-    // prefix ion we find (HCD has many y-ions, but the partition will have
-    // prefix AND suffix — we want the one we can control most easily).
-    // In practice for HCD_QExactive we expect both b-ions (prefix) and y-ions (suffix).
-    //
-    // Strategy: for split=1, compute ALL ion m/z values; assign intensity
-    // proportional to 10000 / (1 + ion_list_index) so the first one has rank 1.
     let num_segs = param.num_segments as usize;
 
-    // Collect ALL (theo_mz, partition, ion_type, intensity) for all splits.
-    // Splits processed in order 1..n, intensity descends so split=1 ions are rank-1.
     let mut all_ions: Vec<(f64, Partition, IonType, f32)> = Vec::new();
     let mut global_index = 0usize;
 
-    #[allow(clippy::needless_range_loop)] // `split` indexes parallel arrays
+    #[allow(clippy::needless_range_loop)]
     for split in 1..n {
         let prefix_nom = prefix_nominals[split] as f64;
         let suffix_nom = (peptide_nominal - prefix_nominals[split]) as f64;
@@ -119,7 +79,6 @@ fn build_synthetic_spectrum(
                     if theo_mz <= 0.0 {
                         continue;
                     }
-                    // Strictly decreasing intensity: first ion gets highest.
                     let intensity = 100_000.0_f32 / (1.0 + global_index as f32);
                     all_ions.push((theo_mz, partition, ion, intensity));
                     global_index += 1;
@@ -133,20 +92,14 @@ fn build_synthetic_spectrum(
         "expected at least one ion from the peptide/scorer combo"
     );
 
-    // Sort peaks by m/z (required by scoring) — this does NOT change relative
-    // intensity ordering because we want rank determined by our intensity
-    // assignment, which is independent of m/z ordering.
     let mut peaks: Vec<(f64, f32)> = all_ions
         .iter()
         .map(|&(mz, _, _, intensity)| (mz, intensity))
         .collect();
-    // Add a few low-intensity decoys at arbitrary m/z far from any ion.
     peaks.push((2000.1, 0.001));
     peaks.push((2001.1, 0.001));
     peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Find expected: the first ion in our enumeration is the most intense,
-    // so after ranking it will be rank 1.
     let (_, expected_partition, expected_ion, _) = all_ions[0];
 
     let spectrum = Spectrum {
@@ -166,28 +119,12 @@ fn build_synthetic_spectrum(
     (spectrum, expected_partition, expected_ion)
 }
 
-// ---------------------------------------------------------------------------
-// TDD test: write this first (it will fail until StatsAccumulator is correct),
-// then implement until it passes.
-// ---------------------------------------------------------------------------
-
-/// Core known-rank synthetic test.
-///
-/// Builds a synthetic spectrum where the first ion gets rank 1 by design.
-/// Verifies that `StatsAccumulator::accumulate` records `rank_index == 0`
-/// (rank 1, index = rank - 1 = 0) for the (partition, ion_type) of that ion
-/// in `CountStats::rank`, AND that the charge histogram is bumped.
 #[test]
 fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     let (_param, scorer) = load_hcd_scorer();
 
-    // Use a peptide long enough to have multiple splits so we exercise both
-    // prefix and suffix ions.  "PEPTIDE" is 7 residues; tryptic (ends K/R not
-    // required here — we only need the scoring path).
     let peptide = make_peptide(b"PEPTIDE");
 
-    // Precursor: choose mz/charge so parent_mass is mid-range for the fixture.
-    // Peptide mass(PEPTIDE) ≈ 799.36 Da; charge=2 → precursor_mz ≈ 400.69.
     let charge: u8 = 2;
     let peptide_mass = peptide.mass();
     const PROTON: f64 = 1.007_276_49;
@@ -196,13 +133,10 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     let (spectrum, expected_partition, expected_ion) =
         build_synthetic_spectrum(&peptide, &scorer, precursor_mz, charge);
 
-    // Run the accumulator.
     let accumulator = StatsAccumulator::new(&scorer);
     let mut stats = CountStats::new();
     accumulator.accumulate(&mut stats, &spectrum, &peptide, charge);
 
-    // The first ion (highest intensity) must have been matched at rank 1.
-    // In CountStats, rank_index = rank - 1 = 0.
     let rank_index = 0u32;
     let count = stats.rank_count(&expected_partition, expected_ion, rank_index);
     assert!(
@@ -215,7 +149,6 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
         count
     );
 
-    // Charge histogram must be bumped exactly once (one PSM).
     let charge_count = stats.charge.get(&(charge as i32)).copied().unwrap_or(0);
     assert_eq!(
         charge_count, 1,
@@ -223,16 +156,6 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     );
 }
 
-/// Ion-existence accumulation test.
-///
-/// Regression guard for the bug where `accumulate` never called
-/// `bump_existence`, leaving `counts.existence` empty so the estimator fell
-/// back to a uniform 0.25 existence prior (dead edge term).
-///
-/// The synthetic spectrum places a peak at every theoretical ion position, so
-/// consecutive backbone nodes are both observed → existence index 3
-/// ("both present"). The accumulator must therefore record at least one count
-/// at index 3.
 #[test]
 fn accumulator_records_ion_existence_both_present() {
     let (_param, scorer) = load_hcd_scorer();
@@ -263,12 +186,6 @@ fn accumulator_records_ion_existence_both_present() {
     );
 }
 
-/// Ion-existence on an empty spectrum: no real peak is ever matched, so the
-/// "current node observed" bit (index 1 or 3) must never be set. The only
-/// observed node is the mass-0 source/sink terminal (`observed_node_mass`
-/// returns `Some(0.0)` by convention), which can set the "previous observed"
-/// bit on the terminal-adjacent edge → index 2. So indices ⊆ {0, 2}, matching
-/// exactly what `edge_score` would see at scoring time.
 #[test]
 fn accumulator_records_ion_existence_both_absent_on_empty_spectrum() {
     let (_param, scorer) = load_hcd_scorer();
@@ -312,10 +229,6 @@ fn accumulator_records_ion_existence_both_absent_on_empty_spectrum() {
     );
 }
 
-/// Missing-ion slot test.
-///
-/// An empty spectrum means every ion is unmatched → the "missing ion" slot
-/// (`rank_index = max_rank`) must accumulate counts.
 #[test]
 fn accumulator_records_missing_ions_on_empty_spectrum() {
     let (_param, scorer) = load_hcd_scorer();
@@ -343,8 +256,6 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
     let mut stats = CountStats::new();
     accumulator.accumulate(&mut stats, &empty_spec, &peptide, charge);
 
-    // With no peaks, every ion is unmatched.  The rank map must have at least
-    // one (partition, ion) key with a non-zero count at max_rank index.
     let max_rank = scorer.max_rank();
     let has_missing = stats
         .rank
@@ -355,7 +266,6 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
         "expected missing-ion counts at rank_index={max_rank} on empty spectrum"
     );
 
-    // Charge must still be bumped.
     assert_eq!(
         stats.charge.get(&(charge as i32)).copied().unwrap_or(0),
         1,
@@ -363,11 +273,6 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
     );
 }
 
-/// Parallel merge test.
-///
-/// Accumulate into two separate CountStats, then merge.  The merged result
-/// must equal the sum of the two individual accumulators (each run on the
-/// same PSM, so merged counts = 2 × single).
 #[test]
 fn merge_doubles_counts_for_same_psm() {
     let (_param, scorer) = load_hcd_scorer();
@@ -386,7 +291,6 @@ fn merge_doubles_counts_for_same_psm() {
     let mut part2 = CountStats::new();
     accumulator.accumulate(&mut part2, &spectrum, &peptide, charge);
 
-    // Expected: same as a single accumulation scaled by 2.
     let mut expected = CountStats::new();
     accumulator.accumulate(&mut expected, &spectrum, &peptide, charge);
     accumulator.accumulate(&mut expected, &spectrum, &peptide, charge);
@@ -398,7 +302,6 @@ fn merge_doubles_counts_for_same_psm() {
     );
 }
 
-/// `merge` on an empty Vec returns an empty CountStats.
 #[test]
 fn merge_empty_is_default() {
     let merged = merge(vec![]);
@@ -409,9 +312,6 @@ fn merge_empty_is_default() {
     );
 }
 
-/// Verify that the scorer's `ion_match_facts` method (used internally) produces
-/// non-empty results for our synthetic peptide — this is a sanity check that the
-/// scoring crate's public surface is working correctly before testing the accumulator.
 #[test]
 fn ion_match_facts_non_empty_for_synthetic_psm() {
     use scoring_crate::ScoredSpectrum;
@@ -432,8 +332,6 @@ fn ion_match_facts_non_empty_for_synthetic_psm() {
         "ion_match_facts should return at least one fact for a 7-residue peptide"
     );
 
-    // At least one fact must be matched (rank = Some(_)) since we placed peaks
-    // exactly at the theoretical ion positions.
     let matched = facts.iter().filter(|f| f.rank.is_some()).count();
     assert!(
         matched > 0,

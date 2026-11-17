@@ -1,6 +1,3 @@
-//! Entries built from [`Annotation`]s of a reference protein, and knockoff
-//! annotations, whatever database the annotations come from.
-
 use std::sync::Arc;
 
 use model::{
@@ -8,25 +5,12 @@ use model::{
     ProteinAnnotation, ProteinDb, SiteAnchor, SiteClaim, Substitution, VariantRegion,
 };
 
-/// How knockoff variant entries are made. A knockoff is a real variant's
-/// substitution moved to another position of the same sequence that holds the
-/// same residue, in a matched context and far from every known variant: an
-/// almost certainly false target that a mass coincidence or an isotope error
-/// fits as well as it fits the real variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnockoffOptions {
-    /// Knockoffs per substitution, at most.
     pub per_variant: usize,
-    /// The search's enzyme: a knockoff sits in another enzymatic span of a
-    /// similar length.
     pub enzyme: Enzyme,
 }
 
-/// The entry `annotation` makes from `reference`, or `None` for a kind that
-/// makes no entry (`Reference`). The entry carries the reference's sites that
-/// its edits keep, plus the annotation's own; its origin names the
-/// reference's family (for a reference with no origin, its primary
-/// accession).
 pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Protein> {
     let base = &reference.sequence;
     let family: Arc<str> = reference.origin().map_or_else(
@@ -103,9 +87,6 @@ pub fn build_entry(reference: &Protein, annotation: &Annotation) -> Option<Prote
     })
 }
 
-/// The primary accession of a database accession: the middle field of
-/// `sp|P04637|P53_HUMAN`, the part after the database prefix of `sp:P04637`
-/// (PEFF), else the whole accession.
 pub fn primary_accession(accession: &str) -> &str {
     let parts: Vec<&str> = accession.split('|').collect();
     match parts.as_slice() {
@@ -115,8 +96,6 @@ pub fn primary_accession(accession: &str) -> &str {
     }
 }
 
-/// `accession` with `_<id>` added to its middle field (`sp|P04637|P53_HUMAN`
-/// → `sp|P04637_<id>|P53_HUMAN`), or appended when it has no such field.
 pub fn suffixed_accession(accession: &str, id: &str) -> String {
     let parts: Vec<&str> = accession.split('|').collect();
     match parts.as_slice() {
@@ -125,7 +104,6 @@ pub fn suffixed_accession(accession: &str, id: &str) -> String {
     }
 }
 
-/// `base` with `edits` applied.
 fn apply(base: &[u8], edits: &[Edit]) -> Vec<u8> {
     let mut sequence = Vec::with_capacity(base.len());
     let mut at = 0;
@@ -138,7 +116,6 @@ fn apply(base: &[u8], edits: &[Edit]) -> Vec<u8> {
     sequence
 }
 
-/// `(start, end, replacement length)` of each edit.
 fn triples(edits: &[Edit]) -> Vec<(usize, usize, usize)> {
     edits
         .iter()
@@ -146,11 +123,6 @@ fn triples(edits: &[Edit]) -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
-/// The parts of the edited sequence that read differently from `base`, in its
-/// coordinates. Each edit's parts come from the sequences, not the edit's
-/// coordinates: an indel in a repeat can slide along it, spans past the shared
-/// prefix or suffix would read like reference peptides, and so would one
-/// inside a run the replacement keeps.
 fn variant_regions(base: &[u8], edits: &[Edit]) -> Vec<VariantRegion> {
     let mut current = base.to_vec();
     let mut shift = 0i64;
@@ -165,7 +137,6 @@ fn variant_regions(base: &[u8], edits: &[Edit]) -> Vec<VariantRegion> {
     regions
 }
 
-/// Mass of the replacement residues minus the mass of those they replace.
 fn delta_da(base: &[u8], edits: &[Edit]) -> f64 {
     let mass = |r: &[u8]| -> f64 {
         r.iter()
@@ -179,9 +150,6 @@ fn delta_da(base: &[u8], edits: &[Edit]) -> f64 {
         .sum()
 }
 
-/// For equal-length edits, each residue that differs and the one it replaced,
-/// in the edited sequence's coordinates, so a form a searched mod makes
-/// canonical is skipped. Empty when any edit changes the length.
 fn substitutions(base: &[u8], sequence: &[u8], edits: &[Edit]) -> Vec<Substitution> {
     if edits
         .iter()
@@ -200,8 +168,6 @@ fn substitutions(base: &[u8], sequence: &[u8], edits: &[Edit]) -> Vec<Substituti
         .collect()
 }
 
-/// Where residue `p` of the edited sequence's source ends up, `None` when an
-/// edit replaced it.
 fn map_through(edits: &[(usize, usize, usize)], p: usize) -> Option<usize> {
     let mut shift = 0i64;
     for &(start, end, len) in edits {
@@ -216,8 +182,6 @@ fn map_through(edits: &[(usize, usize, usize)], p: usize) -> Option<usize> {
     Some((p as i64 + shift) as usize)
 }
 
-/// `sites` carried through `edits`: a site keeps its residue, and is dropped
-/// when an edit replaced that residue.
 fn sites_through(sites: &[ModSite], edits: &[(usize, usize, usize)]) -> Vec<ModSite> {
     sites
         .iter()
@@ -230,7 +194,6 @@ fn sites_through(sites: &[ModSite], edits: &[(usize, usize, usize)]) -> Vec<ModS
         .collect()
 }
 
-/// The change an edit makes, 1-based: `D7H`, `KR120-121EE`, `F508del`.
 pub(crate) fn change_label(original: &[u8], begin: u32, end: u32, replacement: &[u8]) -> String {
     let original = String::from_utf8_lossy(original);
     let range = if begin == end {
@@ -245,13 +208,6 @@ pub(crate) fn change_label(original: &[u8], begin: u32, end: u32, replacement: &
     }
 }
 
-/// Up to `ko.per_variant` knockoff annotations of each single-residue
-/// substitution in `real`, annotations of `sequence`. Their positions keep
-/// clear of every position in `listed` (every variant the source lists on the
-/// sequence, whatever its evidence). `seed_key` (the accession) and the
-/// variant's id seed the choice. A knockoff of `<id>` is named
-/// `KO<i>_<change>_<id>`. Returns the knockoffs and how many substitutions had
-/// no position for one.
 pub fn knockoff_annotations(
     sequence: &[u8],
     seed_key: &str,
@@ -293,8 +249,6 @@ pub fn knockoff_annotations(
     (out, untested)
 }
 
-/// The class a knockoff site's next residue must share with the real site's:
-/// hydrophobic, aromatic, polar, basic, acidic, or the residue itself.
 fn residue_class(r: u8) -> u8 {
     match r {
         b'A' | b'V' | b'L' | b'I' | b'M' => b'h',
@@ -306,8 +260,6 @@ fn residue_class(r: u8) -> u8 {
     }
 }
 
-/// The `[start, end)` span between the enzyme's cleavage sites around residue
-/// `i` (no missed cleavage).
 pub(crate) fn enzymatic_span(seq: &[u8], i: usize, enzyme: Enzyme) -> (usize, usize) {
     let cut = |j: usize| {
         j == 0
@@ -329,22 +281,12 @@ pub(crate) fn enzymatic_span(seq: &[u8], i: usize, enzyme: Enzyme) -> (usize, us
     (a, b)
 }
 
-/// Whether residue `i` is the N of an N-x-S/T sequon (x not P).
 fn sequon(seq: &[u8], i: usize) -> bool {
     seq[i] == b'N' && i + 2 < seq.len() && seq[i + 1] != b'P' && matches!(seq[i + 2], b'S' | b'T')
 }
 
-/// Least distance, in residues, between a knockoff position and any listed
-/// variant position.
 pub(crate) const KNOCKOFF_MIN_DISTANCE: usize = 10;
 
-/// Knockoff positions for a substitution of residue `p` of `seq`: positions
-/// `q` holding the same residue, whose next residue matches (the same residue
-/// when the site is N, Q, K or R or either next residue is P or G, else the
-/// same [`residue_class`]), with the same sequon status, in another enzymatic
-/// span whose length is within 3 of `p`'s and 6..=50, and at least 10 residues
-/// from every position in `listed`. Up to `ko.per_variant` of them, drawn
-/// without replacement by a generator seeded with `seed`.
 pub(crate) fn knockoff_positions(
     seq: &[u8],
     p: usize,
@@ -389,14 +331,12 @@ pub(crate) fn knockoff_positions(
     eligible
 }
 
-/// 64-bit FNV-1a hash.
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
         (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
 
-/// The next value of a SplitMix64 generator.
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *state;
@@ -405,14 +345,10 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Counts from [`add_site_knockoffs`], for the run log.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SiteKnockoffStats {
-    /// Real site claims considered.
     pub sites: usize,
-    /// Knockoff sites added.
     pub knockoffs: usize,
-    /// Real sites for which no position qualified (or terminal sites).
     pub untested: usize,
 }
 
@@ -422,11 +358,6 @@ const DIMETHYL_DA: f64 = 28.0313;
 const DEAMIDATION_DA: f64 = 0.984016;
 const OXIDATION_DA: f64 = 15.994915;
 
-/// The motif status a knockoff site must share with its real site, for the
-/// modification `mass` on residue `seq[q]`: phospho S/T (proline at +1, a
-/// basic residue at −3, an acidic one at +3), phospho Y (an acidic residue at
-/// −1..−4), methyl or dimethyl R, deamidated N and hydroxy P (glycine at +1),
-/// and N's sequon. Any other modification has no motif status.
 fn motif_status(seq: &[u8], q: usize, mass: f64) -> [bool; 3] {
     let at = |i: isize| -> u8 {
         let j = q as isize + i;
@@ -452,9 +383,6 @@ fn motif_status(seq: &[u8], q: usize, mass: f64) -> [bool; 3] {
     }
 }
 
-/// The span a peptide modified at `q` lies in: the enzymatic span, merged
-/// with the next one for a modified K or R, after which the enzyme does not
-/// cut.
 fn modified_span(seq: &[u8], q: usize, enzyme: Enzyme) -> (usize, usize) {
     let (a, b) = enzymatic_span(seq, q, enzyme);
     if matches!(seq[q], b'K' | b'R') && b == q + 1 && b < seq.len() {
@@ -464,15 +392,6 @@ fn modified_span(seq: &[u8], q: usize, enzyme: Enzyme) -> (usize, usize) {
     }
 }
 
-/// Add up to `ko.per_variant` knockoff sites for each real site claim of every
-/// reference protein in `db`. A knockoff site holds the same residue in a
-/// matched context: the same digestion (a modified K or R blocks cleavage,
-/// so the merged span is compared), the next-residue rule of variant
-/// knockoffs, the same motif status ([`motif_status`]), another span whose
-/// length is within 3 of the real one's and 6..=50, and at least 5 residues
-/// from every real site of the same modification. Terminal sites get none.
-/// A knockoff site is also a `mod_sites` entry, so a `sites=annotated` mod may
-/// be placed there, and a site claim naming the real site it copies.
 pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnockoffStats {
     let mut stats = SiteKnockoffStats::default();
     if ko.per_variant == 0 {
@@ -590,8 +509,6 @@ mod tests {
         enzyme: Enzyme::Trypsin,
     };
 
-    /// A reference protein whose phospho site (S at 0-based `site`) is
-    /// annotated, with `seq`.
     fn reference(seq: &[u8], site: u32) -> ProteinDb {
         let sites = vec![ModSite {
             position: site,
@@ -618,8 +535,6 @@ mod tests {
 
     #[test]
     fn knockoff_sites_match_the_motif_and_stay_clear_of_real_sites() {
-        // Spans GGGGSPGGGK (S then P: proline-directed) alternate with
-        // GGGGSAGGGK (S then A). The real site is the S at 4 (S-P).
         let mut seq = Vec::new();
         for _ in 0..4 {
             seq.extend(b"GGGGSPGGGK");
@@ -656,9 +571,6 @@ mod tests {
 
     #[test]
     fn a_modified_lysine_is_compared_by_its_merged_span() {
-        // Acetyl-K at 9: trypsin does not cut there, so the peptide is
-        // 0..20. A K whose merged span is as long qualifies; one followed by
-        // the protein end does not.
         let seq = b"GGGGGGGGGKGGGGGGGGGRGGGGGGGGGKGGGGGGGGGRGGGGGGGGGK".to_vec();
         let acetyl = 42.010565;
         let mut db = ProteinDb {

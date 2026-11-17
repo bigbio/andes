@@ -1,6 +1,3 @@
-//! Activation methods used by tandem MS spectrum acquisition. The variants
-//! (CID/ETD/HCD/PQD/UVPD/EThcD) are pinned by `tests/activation_method.rs`.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivationMethod {
     CID,
@@ -8,9 +5,6 @@ pub enum ActivationMethod {
     HCD,
     PQD,
     UVPD,
-    /// Electron transfer with supplemental collisional activation (EThcD, and
-    /// ETciD): one spectrum carries both the c/z• series of electron transfer
-    /// and the b/y series of the collisional supplement.
     EThcD,
 }
 
@@ -26,21 +20,9 @@ impl ActivationMethod {
         }
     }
 
-    /// Whether fragment prediction should emit neutral-loss-shifted ions for
-    /// this activation method.
-    ///
-    /// Collisional / vibrational and photon-based activation (CID, HCD, PQD,
-    /// UVPD) cleave labile groups, so neutral-loss fragment ions are expected
-    /// and should be predicted. Electron-based dissociation (ETD, and any
-    /// electron-transfer/-capture variant) preserves labile modifications on
-    /// the backbone fragments, so loss ions are NOT predicted. EThcD adds a
-    /// collisional supplement that cleaves labile groups on the b/y series, so it
-    /// predicts them like the collisional methods.
     pub fn predicts_neutral_losses(self) -> bool {
         match self {
-            // Electron-based: labile mods survive → no loss ions.
             ActivationMethod::ETD => false,
-            // Collisional / photon-based: labile mods fragment → loss ions.
             ActivationMethod::CID
             | ActivationMethod::HCD
             | ActivationMethod::PQD
@@ -49,9 +31,6 @@ impl ActivationMethod {
         }
     }
 
-    /// Case-sensitive lookup. Returns `None` for unknown names, including the
-    /// runtime sentinels `ASWRITTEN` and `FUSION` which never appear in
-    /// bundled models.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "CID" => Some(ActivationMethod::CID),
@@ -115,9 +94,6 @@ mod tests {
 
     #[test]
     fn from_name_runtime_sentinels_unknown() {
-        // ASWRITTEN and FUSION are runtime metadata strings that should
-        // never appear in bundled models; we omit them and return
-        // None so the loader can surface BadEnum.
         assert_eq!(
             ActivationMethod::from_name("As written in the spectrum or CID if no info"),
             None
@@ -136,7 +112,6 @@ mod tests {
 
     #[test]
     fn etd_does_not_predict_neutral_losses() {
-        // Electron-based dissociation preserves labile mods on fragments.
         assert!(!ActivationMethod::ETD.predicts_neutral_losses());
     }
 

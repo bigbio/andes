@@ -1,22 +1,8 @@
-//! Whether a precursor is better explained by whole isotope steps than by a
-//! delta of nearly the same size.
-//!
-//! Deamidation (+0.984016) sits 19 mDa from one isotope step (+1.003355), and so
-//! does an N→D or Q→E substitution. When an unmodified peptide's precursor is
-//! picked on its M+1 peak, the deamidated (or substituted) candidate fits the
-//! precursor within tolerance. Decoys cannot model this. The rule reads only
-//! the precursor mass, so it treats targets and decoys alike.
-
 use model::Peptide;
 
-/// Daltons between successive precursor isotope peaks (13C minus 12C).
 pub const ISOTOPE_STEP_DA: f64 = 1.003_355;
-/// A delta within this many daltons of one or two isotope steps can be
-/// mimicked by a precursor picked on the wrong isotope peak.
 pub const ISOTOPE_MIMIC_TOL_DA: f64 = 0.05;
 
-/// `k·step − delta` when `delta ≈ k·step` with `1 ≤ |k| ≤ 2`, else 0.0.
-/// Deamidation (+0.984016) gives +0.019339.
 pub fn isotope_gap_da(delta_da: f64) -> f64 {
     let k = (delta_da / ISOTOPE_STEP_DA).round();
     let gap = k * ISOTOPE_STEP_DA - delta_da;
@@ -27,7 +13,6 @@ pub fn isotope_gap_da(delta_da: f64) -> f64 {
     }
 }
 
-/// Total gap of the peptide's isotope-like variable mods.
 pub fn mod_shift_da(peptide: &Peptide) -> f64 {
     peptide
         .residues
@@ -38,9 +23,6 @@ pub fn mod_shift_da(peptide: &Peptide) -> f64 {
         .sum()
 }
 
-/// Whether replacing the isotope-like deltas (total gap `shift_da`) by whole
-/// isotope steps gives a smaller precursor error. `mass_error_ppm` is
-/// `peptide − spectrum`.
 pub fn fits_better(peptide: &Peptide, shift_da: f64, mass_error_ppm: f64) -> bool {
     if shift_da == 0.0 {
         return false;
@@ -87,7 +69,6 @@ mod tests {
     fn shift_counts_only_isotope_like_mods() {
         let deam = mod_shift_da(&modded_pep(b'N', 0.984016));
         assert!((deam - 0.019339).abs() < 1e-5, "deamidation gap {deam}");
-        // Oxidation, acetyl and pyro-Glu are not within 50 mDa of ±1–2 isotope steps.
         for d in [15.994915, 42.010565, -17.026549, -18.010565] {
             assert_eq!(mod_shift_da(&modded_pep(b'Q', d)), 0.0, "delta {d}");
         }
@@ -99,14 +80,11 @@ mod tests {
         let pep = modded_pep(b'N', 0.984016);
         let shift = mod_shift_da(&pep);
         let ppm = |err_da: f64| err_da / pep.mass() * 1e6;
-        // Peptide 19 mDa lighter than the precursor: an M+1 pick of the unmodified form.
         assert!(fits_better(&pep, shift, ppm(-0.0193)));
         assert!(fits_better(&pep, shift, ppm(-0.012)));
-        // A real deamidation sits near zero error.
         assert!(!fits_better(&pep, shift, ppm(0.0)));
         assert!(!fits_better(&pep, shift, ppm(-0.008)));
         assert!(!fits_better(&pep, shift, ppm(0.01)));
-        // No isotope-like delta: never a mimic.
         let ox = modded_pep(b'M', 15.994915);
         assert!(!fits_better(&ox, mod_shift_da(&ox), ppm(-0.0193)));
     }

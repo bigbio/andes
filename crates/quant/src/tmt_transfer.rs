@@ -1,75 +1,23 @@
-//! Learned risk of a transferred TMT reporter value.
-//!
-//! A transferred value is the impurity-corrected reporter vector of an MS2
-//! scan that carries no identification at the donor's m/z and aligned
-//! retention time, scored against the donor peptide's fragments. This module
-//! holds the parts that need no I/O:
-//!
-//! * the candidate rule's calibration: the precursor m/z window and the
-//!   retention-time multiplier are read from the run's own identified pairs
-//!   ([`PpmWindow::learn`], [`learn_rt_multiplier`]);
-//! * reporter profiles: per-run channel loading, the empty-channel set and
-//!   the identified empty-channel level that prices carrier spill
-//!   ([`RunProfile`]), and the log2 deviation of two reporter vectors
-//!   ([`log2_deviation`]);
-//! * scan covariates ([`scan_features`], [`fragment_evidence`]);
-//! * a ridge logistic regression ([`Logit`]) and the risk model built from
-//!   it ([`TransferRisk`]): a noise floor `f` (identified scans, judged
-//!   against another identified scan of the same precursor in the run), a
-//!   value risk `g` (free sibling scans of identified precursors, judged
-//!   against the identified scan) and an identity risk (siblings against
-//!   mass-shifted decoy scans);
-//! * [`quant_q`], the running mean of the predicted excess error.
-//!
-//! No label uses the experimental design: a value is wrong when its profile
-//! leaves the reference scan's by more than [`DEFAULT_WRONG_LOG2`] (RMS log2)
-//! or when its empty-channel level exceeds the identified P99 at the same
-//! signal.
-
-// The regression and the profile statistics index several parallel arrays by
-// channel or covariate; index loops are the clearest form there.
 #![allow(clippy::needless_range_loop)]
 
 use crate::ms2::Fragment;
 use model::Tolerance;
 
-/// RMS log2 profile deviation above which a value counts as wrong. It is the
-/// definition of a wrong value (a 41 % channel error), not an acceptance
-/// cut.
 pub const DEFAULT_WRONG_LOG2: f64 = 0.5;
-/// Scan covariates of the floor model.
 pub const N_SCAN: usize = 9;
-/// Transfer-specific covariates added for the value and identity models, in
-/// this order: spectral angle and explained intensity of the donor spectrum,
-/// matched library fragments, retention-time residual in predicted widths,
-/// precursor m/z distance in window half-widths, log10 donor q-value,
-/// channel-loading cosine to the best-matching donor run, log2(1 + donor
-/// runs).
 pub const N_XFER: usize = 8;
-/// Fewest rows (and fewest of each class) to fit a model.
 pub const MIN_TRAIN_ROWS: usize = 200;
-/// Fewest identified scans to calibrate a window from.
 pub const MIN_CALIBRATION: usize = 200;
-/// Fallback precursor window half-width (ppm) and retention-time multiplier
-/// when a run has too few identified pairs to learn them.
 pub const FALLBACK_PPM: f64 = 10.0;
 pub const FALLBACK_RT_K: f64 = 3.0;
-/// Bounds of the learned precursor window half-width, ppm.
 pub const PPM_BOUNDS: (f64, f64) = (1.0, 25.0);
-/// A sorted-loading gap of at least this many log10 units separates empty
-/// channels from loaded ones.
 pub const EMPTY_GAP_LOG10: f64 = 0.7;
-/// Fewest masked siblings and the ridge strength of the value model.
 pub const MIN_VALUE_ROWS: usize = 100;
 const VALUE_L2: f64 = 3.0;
-/// Signal bins of the identified empty-channel P99.
 pub const LEAK_BINS: usize = 5;
 
-/// Standard deviation of a normal distribution per unit of its median
-/// absolute deviation.
 const ROBUST_SIGMA: f64 = 1.4826;
 
-/// Quantile `q` of an ascending slice (linear interpolation); NaN if empty.
 pub fn quantile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
@@ -80,14 +28,12 @@ pub fn quantile(sorted: &[f64], q: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
 }
 
-/// Median of the finite values (NaN if none).
 pub fn median_finite(v: &[f64]) -> f64 {
     let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
     s.sort_by(f64::total_cmp);
     quantile(&s, 0.5)
 }
 
-/// The learned precursor-m/z window: centre and half-width in ppm.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PpmWindow {
     pub centre: f64,
@@ -95,12 +41,6 @@ pub struct PpmWindow {
 }
 
 impl PpmWindow {
-    /// From the signed ppm errors of identified scans against their
-    /// peptides' theoretical m/z: the median, and three robust standard
-    /// deviations (1.4826 x the median absolute deviation) as the half-width,
-    /// within [`PPM_BOUNDS`]. Errors beyond 50 ppm (isotope-offset
-    /// selections) are not part of the distribution. `None` below
-    /// [`MIN_CALIBRATION`] errors.
     pub fn learn(errors: &[f64]) -> Option<Self> {
         let mut e: Vec<f64> = errors
             .iter()
@@ -121,7 +61,6 @@ impl PpmWindow {
         })
     }
 
-    /// The fallback window.
     pub fn fallback() -> Self {
         Self {
             centre: 0.0,
@@ -129,21 +68,15 @@ impl PpmWindow {
         }
     }
 
-    /// Whether signed error `ppm` lies in the window.
     pub fn contains(&self, ppm: f64) -> bool {
         (ppm - self.centre).abs() <= self.half_width
     }
 
-    /// Distance from the centre in half-widths.
     pub fn z(&self, ppm: f64) -> f64 {
         (ppm - self.centre).abs() / self.half_width
     }
 }
 
-/// The retention-time multiplier: three robust standard deviations (1.4826 x
-/// the median of `|observed - predicted| / s`) over identified pairs
-/// predicted without their own run, not below 1. `(FALLBACK_RT_K, false)`
-/// below [`MIN_CALIBRATION`] pairs.
 pub fn learn_rt_multiplier(z: &[f64]) -> (f64, bool) {
     let mut a: Vec<f64> = z
         .iter()
@@ -157,9 +90,6 @@ pub fn learn_rt_multiplier(z: &[f64]) -> (f64, bool) {
     ((3.0 * ROBUST_SIGMA * quantile(&a, 0.5)).max(1.0), true)
 }
 
-/// RMS log2 deviation of two reporter vectors' profiles over the channels
-/// both detect (positive in both), each profile normalised over those
-/// channels. `None` with fewer than three shared channels.
 pub fn log2_deviation(a: &[f32], b: &[f32]) -> Option<f64> {
     let shared: Vec<usize> = (0..a.len().min(b.len()))
         .filter(|&i| a[i] > 0.0 && b[i] > 0.0)
@@ -180,17 +110,11 @@ pub fn log2_deviation(a: &[f32], b: &[f32]) -> Option<f64> {
     Some((ss / shared.len() as f64).sqrt())
 }
 
-/// Channel loading of a run and the identified empty-channel level.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunProfile {
-    /// Median proportion of each channel in the run's identified scans.
     pub loading: Vec<f64>,
-    /// Channels far below the others (empty channels); none for a plex whose
-    /// channels are all loaded.
     pub empty: Vec<usize>,
-    /// Ascending upper edges of the log10 signal bins (`LEAK_BINS - 1`).
     pub bin_edges: Vec<f64>,
-    /// P99 of the identified empty-channel proportion per signal bin.
     pub p99: Vec<f64>,
 }
 
@@ -199,13 +123,11 @@ fn proportions(v: &[f32]) -> Option<Vec<f64>> {
     (s > 0.0).then(|| v.iter().map(|&x| x.max(0.0) as f64 / s).collect())
 }
 
-/// log10(1 + summed corrected reporter signal).
 pub fn log_signal(corrected: &[f32]) -> f64 {
     (1.0 + corrected.iter().map(|&x| x.max(0.0) as f64).sum::<f64>()).log10()
 }
 
 impl RunProfile {
-    /// From the corrected reporter vectors of a run's identified scans.
     pub fn from_identified(corrected: &[Vec<f32>]) -> Self {
         let n = corrected.first().map_or(0, Vec::len);
         let props: Vec<Vec<f64>> = corrected.iter().filter_map(|c| proportions(c)).collect();
@@ -214,7 +136,6 @@ impl RunProfile {
             let col: Vec<f64> = props.iter().map(|p| p[c]).collect();
             *l = median_finite(&col);
         }
-        // Largest gap in the sorted log10 loading.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| loading[a].total_cmp(&loading[b]));
         let logs: Vec<f64> = order
@@ -275,8 +196,6 @@ impl RunProfile {
         profile
     }
 
-    /// Share of the scan's reporter signal in the empty channels; `None`
-    /// without empty channels or signal.
     pub fn empty_prop(&self, corrected: &[f32]) -> Option<f64> {
         if self.empty.is_empty() {
             return None;
@@ -285,8 +204,6 @@ impl RunProfile {
         Some(self.empty.iter().filter_map(|&c| p.get(c)).sum())
     }
 
-    /// Whether the scan's empty-channel share exceeds the identified P99 of
-    /// its signal bin.
     pub fn leak(&self, corrected: &[f32]) -> bool {
         let Some(e) = self.empty_prop(corrected) else {
             return false;
@@ -299,8 +216,6 @@ impl RunProfile {
         e > self.p99[bin.min(self.p99.len() - 1)]
     }
 
-    /// Cosine of two runs' loading vectors (1 for runs of one plex mixture,
-    /// lower across plexes).
     pub fn loading_cosine(&self, other: &Self) -> f64 {
         let dot: f64 = self
             .loading
@@ -318,9 +233,6 @@ impl RunProfile {
     }
 }
 
-/// Share of a scan's fragment ion current and of its ten most intense
-/// fragment peaks that a peptide's b/y ladder explains; peaks below `min_mz`
-/// (the reporter region) are not counted. `(0, 0)` for an empty scan.
 pub fn fragment_evidence(
     ladder: &[Fragment],
     peaks: &[(f32, f32)],
@@ -352,11 +264,6 @@ pub fn fragment_evidence(
     (explained / total, top_hit as f64 / top as f64)
 }
 
-/// Scan covariates, in this order: log10 reporter signal, share of detected
-/// channels, MS1 purity (NaN unknown), log10 summed S/N (NaN unknown),
-/// empty-channel share (0 without empty channels), explained fragment ion
-/// current, share of the ten most intense fragments explained, charge, log10
-/// fragment ion current of the scan.
 #[allow(clippy::too_many_arguments)]
 pub fn scan_features(
     corrected: &[f32],
@@ -383,8 +290,6 @@ pub fn scan_features(
     ]
 }
 
-/// A ridge logistic regression on standardised covariates; missing (NaN)
-/// covariates take the training median.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Logit {
     fill: Vec<f64>,
@@ -398,8 +303,6 @@ fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z.clamp(-30.0, 30.0)).exp())
 }
 
-/// Solves `a x = b` (n x n, row-major) by Gaussian elimination with partial
-/// pivoting; `None` when singular.
 fn solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
         let piv =
@@ -432,14 +335,10 @@ fn solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
 }
 
 impl Logit {
-    /// Fits `y` (0/1) on `x` (rows of equal length) with sample `weights`
-    /// and ridge strength `l2`. `None` below [`MIN_TRAIN_ROWS`] rows or
-    /// [`MIN_TRAIN_ROWS`]`/ 10` of either class.
     pub fn fit(x: &[Vec<f64>], y: &[f64], weights: &[f64], l2: f64) -> Option<Self> {
         Self::fit_min(x, y, weights, l2, MIN_TRAIN_ROWS)
     }
 
-    /// [`Logit::fit`] with a custom least number of rows.
     pub fn fit_min(
         x: &[Vec<f64>],
         y: &[f64],
@@ -481,7 +380,6 @@ impl Logit {
         let z: Vec<Vec<f64>> = x.iter().map(|r| model.standardise(r)).collect();
         let p = d + 1;
         let mut theta = vec![0.0; p];
-        // Start at the weighted base rate.
         let wsum: f64 = weights.iter().sum();
         let base =
             (y.iter().zip(weights).map(|(a, w)| a * w).sum::<f64>() / wsum).clamp(1e-4, 1.0 - 1e-4);
@@ -543,43 +441,29 @@ impl Logit {
             .collect()
     }
 
-    /// Predicted probability of the positive class.
     pub fn predict(&self, x: &[f64]) -> f64 {
         let z = self.standardise(x);
         sigmoid(self.b + self.w.iter().zip(&z).map(|(w, v)| w * v).sum::<f64>())
     }
 }
 
-/// Training rows of the three models.
 #[derive(Debug, Default)]
 pub struct Training {
-    /// Floor: scan covariates of an identified scan and whether it deviates
-    /// from another identified scan of its precursor (or leaks).
     pub floor_x: Vec<Vec<f64>>,
     pub floor_y: Vec<f64>,
-    /// Value: scan and transfer covariates of a free sibling scan and
-    /// whether it deviates from the identified scan (or leaks).
     pub value_x: Vec<Vec<f64>>,
     pub value_y: Vec<f64>,
-    /// Identity: scan and transfer covariates of the best candidate of each
-    /// real attempt (0) and of its mass-shifted decoy attempt (1), found with
-    /// the same breadth. The classifier's odds are then the expected share
-    /// of false targets at those covariates (target-decoy competition).
     pub id_x: Vec<Vec<f64>>,
     pub id_y: Vec<f64>,
 }
 
-/// The fitted risk model.
 #[derive(Debug, Clone)]
 pub struct TransferRisk {
     floor: Logit,
-    /// `None` when too few masked siblings could train it: the value risk is
-    /// then the noise floor (no value excess is claimed).
     value: Option<Logit>,
     identity: Logit,
 }
 
-/// What [`TransferRisk::fit`] could not fit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RiskError {
     TooFewRows { model: &'static str, rows: usize },
@@ -597,7 +481,6 @@ impl std::fmt::Display for RiskError {
 }
 
 impl TransferRisk {
-    /// Fits the three models. Errors name the model without enough rows.
     pub fn fit(t: &Training) -> Result<Self, RiskError> {
         let ones = |n: usize| vec![1.0; n];
         let floor = Logit::fit(&t.floor_x, &t.floor_y, &ones(t.floor_y.len()), 1.0).ok_or(
@@ -612,8 +495,6 @@ impl TransferRisk {
                 rows: t.id_y.len(),
             },
         )?;
-        // The value model learns from the siblings whose identity is more
-        // likely right than wrong.
         let (mut vx, mut vy) = (Vec::new(), Vec::new());
         for (x, y) in t.value_x.iter().zip(&t.value_y) {
             if identity.predict(x) < 0.5 {
@@ -621,8 +502,6 @@ impl TransferRisk {
                 vy.push(*y);
             }
         }
-        // Masked siblings are scarce in low-input runs: fewer rows, a firmer
-        // ridge.
         let value = Logit::fit_min(&vx, &vy, &ones(vy.len()), VALUE_L2, MIN_VALUE_ROWS);
         Ok(Self {
             floor,
@@ -631,8 +510,6 @@ impl TransferRisk {
         })
     }
 
-    /// Probability that the value of a transfer with the right identity is
-    /// wrong (the value model alone).
     pub fn value_risk(&self, scan: &[f64; N_SCAN], xfer: &[f64; N_XFER]) -> f64 {
         let mut full = Vec::with_capacity(N_SCAN + N_XFER);
         full.extend_from_slice(scan);
@@ -643,30 +520,19 @@ impl TransferRisk {
         }
     }
 
-    /// Whether the value model could be fitted (else the noise floor stands
-    /// in for it).
     pub fn value_fitted(&self) -> bool {
         self.value.is_some()
     }
 
-    /// `(p_wrong, floor)` of a transferred value from its scan covariates and
-    /// transfer covariates: the probability that its identity is wrong or its
-    /// value wrong, and the identified noise floor at the same scan
-    /// covariates.
     pub fn predict(&self, scan: &[f64; N_SCAN], xfer: &[f64; N_XFER]) -> (f64, f64) {
         let (p_id, g, f) = self.parts(scan, xfer);
         (p_id + (1.0 - p_id) * g, f)
     }
 
-    /// `(p_identity, p_value, floor)`: the probability that the candidate is
-    /// another peptide's scan, that the value of a right-identity transfer is
-    /// wrong, and the identified noise floor.
     pub fn parts(&self, scan: &[f64; N_SCAN], xfer: &[f64; N_XFER]) -> (f64, f64, f64) {
         let mut full = Vec::with_capacity(N_SCAN + N_XFER);
         full.extend_from_slice(scan);
         full.extend_from_slice(xfer);
-        // Decoys and targets were found with the same breadth: the odds of
-        // the decoy class are the expected share of false targets.
         let p_h = self.identity.predict(&full).clamp(1e-9, 1.0 - 1e-9);
         let p_id = (p_h / (1.0 - p_h)).min(1.0);
         let f = self.floor.predict(scan);
@@ -675,8 +541,6 @@ impl TransferRisk {
     }
 }
 
-/// Calibration table: rows ordered by prediction and cut into `bins` groups of
-/// equal size; per group the mean prediction, the observed rate and the count.
 pub fn calibration(pred: &[f64], observed: &[f64], bins: usize) -> Vec<(f64, f64, usize)> {
     let n = pred.len().min(observed.len());
     if n == 0 || bins == 0 {
@@ -699,10 +563,6 @@ pub fn calibration(pred: &[f64], observed: &[f64], bins: usize) -> Vec<(f64, f64
         .collect()
 }
 
-/// Per value, the smallest mean predicted excess `(p_wrong - floor)` among
-/// the prefixes, ordered by `p_wrong`, that contain it; at least 0. A
-/// q-value-style running quantity: the expected excess error of accepting
-/// every value at least as reliable.
 pub fn quant_q(p_wrong: &[f64], floor: &[f64]) -> Vec<f64> {
     let n = p_wrong.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -737,7 +597,6 @@ mod tests {
         assert!((w.half_width - 2.2239).abs() < 0.05, "{w:?}");
         assert!(w.contains(1.5) && !w.contains(30.0));
         assert!(PpmWindow::learn(&errs[..50]).is_none());
-        // Isotope-offset selections are not part of the distribution.
         let mut with_outliers = errs.clone();
         with_outliers.extend(std::iter::repeat_n(500.0, 300));
         let w2 = PpmWindow::learn(&with_outliers).unwrap();
@@ -765,7 +624,6 @@ mod tests {
     }
 
     fn loaded_scan(carrier: f32, empty: f32) -> Vec<f32> {
-        // Two empty channels, four loaded ones.
         vec![carrier, 40.0, 50.0, 60.0, empty, empty]
     }
 
@@ -779,7 +637,6 @@ mod tests {
         assert_eq!(p.p99.len(), LEAK_BINS);
         assert!(!p.leak(&loaded_scan(300.0, 0.2)));
         assert!(p.leak(&loaded_scan(300.0, 30.0)));
-        // A plex with no empty channel has no leak concept.
         let full: Vec<Vec<f32>> = (0..300)
             .map(|i| vec![100.0 + i as f32, 90.0, 110.0, 95.0])
             .collect();
@@ -896,7 +753,6 @@ mod tests {
         let decoy_like = [0.05, 0.2, 2.0, 0.5, 3.0, 2.0, 1.0, 2.0];
         let (pd, _) = risk.predict(&strong, &decoy_like);
         assert!(pd > ps);
-        // Too few siblings: the value model falls back to the floor.
         let few = Training {
             value_x: t.value_x[..20].to_vec(),
             value_y: t.value_y[..20].to_vec(),
@@ -942,12 +798,10 @@ mod tests {
         let p = [0.01, 0.02, 0.5, 0.03, 0.9];
         let f = [0.01, 0.01, 0.01, 0.01, 0.01];
         let q = quant_q(&p, &f);
-        // Ordered by risk: 0.01, 0.02, 0.03, 0.5, 0.9.
         assert!(q[0].abs() < 1e-12);
         assert!((q[1] - 0.005).abs() < 1e-12);
         assert!((q[3] - 0.01).abs() < 1e-12);
         assert!(q[2] > q[3] && q[4] > q[2]);
-        // Negative excess is clamped to 0, and q never decreases with risk.
         let q2 = quant_q(&[0.001, 0.2], &[0.05, 0.05]);
         assert_eq!(q2[0], 0.0);
         assert!(q2[1] >= q2[0]);

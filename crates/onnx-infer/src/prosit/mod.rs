@@ -1,40 +1,14 @@
-//! Prosit input encoding and output decoding for the exported Prosit 2020
-//! intensity (HCD) and Prosit 2019 iRT graphs.
-//!
-//! Mirrors Koina's `Prosit_Preprocess_peptide` / `_charge` /
-//! `_collision_energy` and `Prosit_2019_intensity_postprocess`:
-//!
-//! - `peptides_in` [B, 30]: residue codes `A=1 C=2 D=3 … Y=20`, oxidised
-//!   methionine `M[UNIMOD:35]` = 21, zero padding. Code 2 means
-//!   carbamidomethylated cysteine: the models were not trained on free
-//!   cysteine, so an unmodified C is rejected here.
-//! - `precursor_charge_in` [B, 6]: one-hot charge 1..=6.
-//! - `collision_energy_in` [B, 1]: NCE / 100.
-//! - intensity output [B, 174]: 29 positions × (y+1, y+2, y+3, b+1, b+2, b+3),
-//!   position `k` holding y(k+1) and b(k+1).
-//!
-//! Only carbamidomethyl-C and oxidised M are supported (Prosit 2020's
-//! modification set); any other modification, a residue outside the
-//! alphabet, a length over 30 or a charge outside 1..=6 is an error.
-
 use crate::error::{Error, Result};
 use crate::tensor::NamedTensor;
 
-/// Encoded sequence length.
 pub const SEQ_LEN: usize = 30;
-/// Intensity output values per peptide.
 pub const N_OUT: usize = 174;
-/// Highest precursor charge the one-hot covers.
 pub const MAX_CHARGE: u8 = 6;
 
-/// Residue modification states Prosit 2020 can encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidueState {
-    /// Unmodified residue.
     Plain,
-    /// Carbamidomethylated cysteine (`C[UNIMOD:4]`).
     Carbamidomethyl,
-    /// Oxidised methionine (`M[UNIMOD:35]`).
     Oxidation,
 }
 
@@ -69,7 +43,6 @@ fn code(c: char, state: ResidueState) -> Option<u8> {
     })
 }
 
-/// Encode residues with their per-residue modification state (same length).
 pub fn encode_sequence(sequence: &str, states: &[ResidueState]) -> Result<[f32; SEQ_LEN]> {
     let n = sequence.chars().count();
     if n == 0 || n > SEQ_LEN || states.len() != n {
@@ -91,12 +64,9 @@ pub fn encode_sequence(sequence: &str, states: &[ResidueState]) -> Result<[f32; 
     Ok(out)
 }
 
-/// One Prosit peptide: residues and one state per residue.
 #[derive(Debug, Clone)]
 pub struct PrositPeptide<'a> {
-    /// Residues.
     pub sequence: &'a str,
-    /// Modification state per residue.
     pub states: Vec<ResidueState>,
 }
 
@@ -111,7 +81,6 @@ fn sequences(peptides: &[PrositPeptide<'_>]) -> Result<Vec<f32>> {
     Ok(v)
 }
 
-/// iRT graph input `peptides_in`.
 pub fn pack_irt_batch(peptides: &[PrositPeptide<'_>]) -> Result<NamedTensor> {
     NamedTensor::new(
         "peptides_in",
@@ -120,7 +89,6 @@ pub fn pack_irt_batch(peptides: &[PrositPeptide<'_>]) -> Result<NamedTensor> {
     )
 }
 
-/// Intensity graph inputs (`peptides_in`, `precursor_charge_in`, `collision_energy_in`).
 pub fn pack_intensity_batch(
     peptides: &[PrositPeptide<'_>],
     charges: &[u8],
@@ -149,10 +117,6 @@ pub fn pack_intensity_batch(
     ])
 }
 
-/// Per cleavage site `i` (b(i+1), y(n−1−i)) of an `n`-residue peptide: the
-/// six intensities `[b+1, b+2, b+3, y+1, y+2, y+3]`, as Koina post-processes
-/// them: negatives → 0, fragment charges above the precursor charge → 0, then
-/// scaled to the largest value.
 pub fn decode_intensity(raw: &[f32], n: usize, charge: u8) -> Result<Vec<f32>> {
     if raw.len() != N_OUT || !(2..=SEQ_LEN).contains(&n) {
         return Err(Error::InvalidArg(format!(
@@ -203,12 +167,10 @@ mod tests {
     #[test]
     fn decodes_sites_and_masks_charge() {
         let mut raw = vec![0f32; N_OUT];
-        // position 0: y1+1 = 1, b1+1 = 2, b1+2 = 4 (masked at charge 1)
         raw[0] = 1.0;
         raw[3] = 2.0;
         raw[4] = 4.0;
         let out = decode_intensity(&raw, 3, 1).unwrap();
-        // site 0 = b1 / y2, site 1 = b2 / y1
         assert_eq!(&out[0..6], &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(&out[6..12], &[0.0, 0.0, 0.0, 0.5, 0.0, 0.0]);
         let out = decode_intensity(&raw, 3, 2).unwrap();

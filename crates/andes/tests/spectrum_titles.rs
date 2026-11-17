@@ -1,6 +1,3 @@
-//! A spectrum title is the `SpecId` of the PIN: a tab in a title must not add
-//! a column to the row.
-
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,7 +10,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// The first `n` spectra of the MGF fixture, every title given a tab.
 fn mgf_with_tabbed_titles(n: usize) -> String {
     let gz = std::fs::File::open(fixture("test-fixtures/test.mgf.gz")).expect("gz");
     let mut text = String::new();
@@ -71,7 +67,6 @@ fn a_tab_in_a_title_does_not_shift_the_pin_columns() {
             .unwrap_or_else(|| panic!("no {name} column"))
     };
     let (spec_id, label, scan) = (column("SpecId"), column("Label"), column("ScanNr"));
-    // `Proteins` is the last column and holds one field per protein.
     assert_eq!(column("Proteins"), header.len() - 1);
     let mut rows = 0;
     for line in lines {

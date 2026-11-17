@@ -1,27 +1,10 @@
-//! Picked target–decoy competition for feature-level q-values.
-//!
-//! Every quantified target has a decoy twin extracted with the same
-//! procedure at a shifted m/z. Unrelated real peptides can occur there; the
-//! twin is intended to model a spurious match to the requested ion. The
-//! competition keeps the better of the pair, and the usual
-//! `(decoys + 1) / targets` running ratio over the winners gives each surviving
-//! target an estimated q-value. This is not IonQuant's mixture-model MBR
-//! estimator, nor a substitute for validating the decoy model on real data.
-//! Apply any feature eligibility filters identically to both sides BEFORE
-//! competition; filtering only the reported targets changes the tested set.
-
-/// Score pair of one target and its decoy twin; `None` when no peak was found.
 #[derive(Debug, Clone, Copy)]
 pub struct Pair {
     pub target: Option<f32>,
     pub decoy: Option<f32>,
 }
 
-/// Per-pair q-value of the target, or `None` when the target had no peak or
-/// lost to its decoy. Nonfinite scores are treated as missing. Pairwise ties
-/// conservatively go to the decoy; equal winning scores share one threshold.
 pub fn picked_qvalues(pairs: &[Pair]) -> Vec<Option<f64>> {
-    // Winner per pair: (score, is_decoy, pair index).
     let mut winners: Vec<(f32, bool, usize)> = Vec::with_capacity(pairs.len());
     for (i, p) in pairs.iter().enumerate() {
         match (
@@ -59,7 +42,6 @@ pub fn picked_qvalues(pairs: &[Pair]) -> Vec<Option<f64>> {
         q[start..end].fill((n_d as f64 + 1.0) / n_t.max(1) as f64);
         start = end;
     }
-    // Monotone q: minimum of the raw FDR at this score and every lower score.
     let mut running = f64::INFINITY;
     for value in q.iter_mut().rev() {
         running = running.min(*value);
@@ -90,14 +72,13 @@ mod tests {
         let pairs = vec![
             p(Some(0.9), Some(0.1)),
             p(Some(0.8), None),
-            p(Some(0.2), Some(0.5)), // loses to decoy
+            p(Some(0.2), Some(0.5)),
             p(None, None),
         ];
         let q = picked_qvalues(&pairs);
         assert!(q[0].unwrap() <= 0.5 && q[1].unwrap() <= 0.5);
         assert_eq!(q[2], None);
         assert_eq!(q[3], None);
-        // q is monotone non-decreasing with decreasing score.
         assert!(q[0].unwrap() <= q[1].unwrap());
     }
 
@@ -110,7 +91,6 @@ mod tests {
         let q = picked_qvalues(&pairs);
         let strong = q[0].unwrap();
         assert!(strong < 0.05, "{strong}");
-        // Everything in the tail lost to a decoy → None.
         assert!(q[50..].iter().all(|v| v.is_none()));
     }
 

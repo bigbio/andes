@@ -1,20 +1,3 @@
-//! PSI Extended FASTA Format (PEFF) databases: FASTA whose headers carry
-//! `\Key=value` annotations. The variant, modification and processing keys
-//! become the same claims an annotation file holds (see
-//! [`crate::annotations_file`]), checked and built the same way.
-//!
-//! | key | value | becomes |
-//! |---|---|---|
-//! | `\VariantSimple` | `(pos\|aa[\|tag])…` | a one-residue substitution |
-//! | `\VariantComplex` | `(start\|end\|seq[\|tag])…` | an edit (empty `seq`: a deletion) |
-//! | `\ModResUnimod` | `(pos\|UNIMOD:n\|name)…` | a site, mass from the bundled UniMod |
-//! | `\ModRes` | `(pos\|\|name)…` | a site, mass from UniProt's PTM vocabulary |
-//! | `\ModResPsi` | `(pos\|MOD:n\|name)…` | a site when its name is in UniProt's PTM vocabulary |
-//! | `\Processed` | `(start\|end[\|accession]\|name)…` | a mature chain; signal, transit and propeptides are left out |
-//!
-//! Positions are 1-based and inclusive. `\PName` is the description; other
-//! keys are ignored. Lines starting with `#` are the file header.
-
 use std::io::BufRead;
 
 use model::{PriorTier, Protein, ProteinDb, SiteAnchor};
@@ -25,16 +8,11 @@ use crate::annotations_file::{
 };
 use crate::uniprot_ptm::{clean_description, ptm_mass};
 
-/// Counts from a PEFF load, for the run log.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PeffLoadStats {
-    /// Entries read (= reference proteins).
     pub entries: usize,
-    /// Sites whose modification has no known mass (left out).
     pub sites_without_mass: usize,
-    /// `\Processed` spans that are not mature chains (left out).
     pub processing_not_chain: usize,
-    /// The claims, as for an annotation file.
     pub claims: AnnotationLoadStats,
 }
 
@@ -54,8 +32,6 @@ pub enum PeffError {
     Claims(#[from] AnnotationsError),
 }
 
-/// Load a PEFF database: one reference protein per entry, then the entries its
-/// header keys make (with `knockoffs`, knockoffs of single-residue variants).
 pub fn load_peff<R: BufRead>(
     reader: R,
     knockoffs: Option<KnockoffOptions>,
@@ -115,12 +91,9 @@ pub fn load_peff<R: BufRead>(
     Ok((db, stats))
 }
 
-/// The accession (first token) and the `\Key=value` pairs of a header line
-/// without its `>`.
 fn parse_header(h: &str) -> (String, Vec<(String, String)>) {
     let h = h.trim();
     let (accession, rest) = h.split_once(char::is_whitespace).unwrap_or((h, ""));
-    // A header that starts with a key has no accession.
     let (accession, rest) = if accession.starts_with('\\') {
         ("", h)
     } else {
@@ -135,7 +108,6 @@ fn parse_header(h: &str) -> (String, Vec<(String, String)>) {
     (accession.to_string(), keys)
 }
 
-/// The `(…)` groups of a value, each split on `|`.
 fn groups(value: &str) -> Option<Vec<Vec<&str>>> {
     let mut out = Vec::new();
     let mut rest = value.trim();
@@ -148,7 +120,6 @@ fn groups(value: &str) -> Option<Vec<Vec<&str>>> {
     Some(out)
 }
 
-/// The claims of one entry's header keys.
 fn entry_rows(
     accession: &str,
     seq: &[u8],
@@ -167,7 +138,6 @@ fn entry_rows(
             .filter(|&p| p >= 1)
             .ok_or_else(|| malformed(key, value))
     };
-    // The residues of a 1-based inclusive span, empty when it does not fit.
     let residues = |start: u32, end: u32| -> String {
         let (s, e) = (start as usize - 1, end as usize);
         if s <= e && e <= seq.len() {
@@ -237,8 +207,6 @@ fn entry_rows(
                     let [p, acc, name, ..] = g.as_slice() else {
                         return Err(malformed(key, value));
                     };
-                    // A group may list several positions (`12,25|...`); an
-                    // unknown position (`?`) places nothing.
                     for p in p.split(',').map(str::trim).filter(|p| *p != "?") {
                         let p = pos(p, key, value)?;
                         let site = if key == "ModResUnimod" {
@@ -379,7 +347,6 @@ mod tests {
 
     #[test]
     fn a_variant_that_does_not_fit_is_counted() {
-        // Position 5 holds D, so a variant at 81 is outside the sequence.
         let text = ">sp:P1 \\VariantSimple=(81|N)\nMGGGDLGGGK\n";
         let (db, stats) = load_peff(text.as_bytes(), None).unwrap();
         assert_eq!(db.proteins.len(), 1);

@@ -1,10 +1,3 @@
-//! TDD tests for incremental model training (add/remove/reweight/decay + gate).
-//!
-//! These tests validate the EXACT count-arithmetic property: adding a source
-//! and then removing it restores the original estimated model parameter
-//! exactly, because per-source `CountStats` are re-summed from scratch on
-//! each update.
-
 use std::path::Path;
 
 use model_train::{
@@ -18,12 +11,7 @@ use model_train::{
 };
 use scoring_crate::{param_model::Param, scoring::rank_scorer::RankScorer};
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
 fn fixture_param() -> Param {
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
@@ -100,11 +88,6 @@ fn make_ledger(id: &str) -> SourceLedger {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PART B tests
-// ---------------------------------------------------------------------------
-
-/// EXACTNESS TEST: add s1 then remove s1 must restore the original param P0.
 #[test]
 fn add_then_remove_source_restores_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,14 +97,12 @@ fn add_then_remove_source_restores_model() {
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
 
-    // Estimate P0 from s0 alone and write to store.
     let cfg = EstimatorConfig::default();
     let estimator = model_train::estimate::Estimator::new(cfg.clone());
     let p0 = estimator.estimate(&s0, &param);
 
     write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
-    // Verify P0 round-trips.
     let store = ModelStore::open(&path).unwrap();
     let loaded_p0 = store.load_param("m").unwrap();
     assert_eq!(
@@ -129,20 +110,16 @@ fn add_then_remove_source_restores_model() {
         "P0 must round-trip exactly through the store"
     );
 
-    // update_add: append s1.
     let s1 = make_stats_s1();
     let ledger1 = make_ledger("s1");
     let (candidate_p1, sources_with_s1) =
         update_add(&path, "m", ledger1, s1.clone(), cfg.clone()).unwrap();
     commit_update(&path, "m", &candidate_p1, &sources_with_s1).unwrap();
 
-    // The store now has s0+s1; param should differ from P0.
     let store2 = ModelStore::open(&path).unwrap();
     let p_after_add = store2.load_param("m").unwrap();
-    // (We don't assert on p_after_add vs p0 here — only restore matters.)
     drop(p_after_add);
 
-    // update_remove: remove s1 → should restore P0 exactly.
     let (candidate_p0_restored, sources_s0_only) =
         update_remove(&path, "m", "s1", cfg.clone()).unwrap();
     commit_update(&path, "m", &candidate_p0_restored, &sources_s0_only).unwrap();
@@ -156,7 +133,6 @@ fn add_then_remove_source_restores_model() {
     );
 }
 
-/// Removing a non-existent source returns an error.
 #[test]
 fn remove_nonexistent_source_errors() {
     let dir = tempfile::tempdir().unwrap();
@@ -175,7 +151,6 @@ fn remove_nonexistent_source_errors() {
     );
 }
 
-/// Reweighting a source changes the estimated param and the stored weight.
 #[test]
 fn reweight_source_changes_param() {
     let dir = tempfile::tempdir().unwrap();
@@ -192,7 +167,6 @@ fn reweight_source_changes_param() {
     let (candidate, sources) = update_reweight(&path, "m", "s1", 0.0, cfg).unwrap();
     commit_update(&path, "m", &candidate, &sources).unwrap();
 
-    // After reweight to 0, s1 contributes nothing — check the weight was stored.
     let store = ModelStore::open(&path).unwrap();
     let ledgers = store.load_sources("m").unwrap();
     let l1 = ledgers.iter().find(|l| l.source_id == "s1").unwrap();
@@ -202,7 +176,6 @@ fn reweight_source_changes_param() {
     );
 }
 
-/// Decay with empty dates leaves weights unchanged and emits a warning.
 #[test]
 fn decay_with_empty_date_unchanged() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,13 +184,12 @@ fn decay_with_empty_date_unchanged() {
     let param = fixture_param();
     let s0 = make_stats_s0();
     let mut ledger0 = make_ledger("s0");
-    ledger0.date = String::new(); // empty date
+    ledger0.date = String::new();
     write_model_with_sources(&path, "m", &param, &[(ledger0.clone(), s0)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let (_, sources) = update_decay(&path, "m", 365.0, cfg).unwrap();
 
-    // Weight must be unchanged (since date is empty).
     let updated_ledger = &sources[0].0;
     assert!(
         (updated_ledger.weight - ledger0.weight).abs() < 1e-6,
@@ -225,7 +197,6 @@ fn decay_with_empty_date_unchanged() {
     );
 }
 
-/// commit_update preserves other models in the store.
 #[test]
 fn commit_update_preserves_other_models() {
     let dir = tempfile::tempdir().unwrap();
@@ -235,18 +206,13 @@ fn commit_update_preserves_other_models() {
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
 
-    // Write two models: "m" and "other".
     use model_train::store::write_models;
-    // First write "other" model (no sources).
     write_models(&path, &[("other".to_string(), &param)]).unwrap();
-    // Then add "m" with sources by rebuilding the store.
-    // We need to load "other" and rewrite both.
     {
         let store = ModelStore::open(&path).unwrap();
         let other_param = store.load_param("other").unwrap();
-        let _ = other_param; // just verifying it loads
+        let _ = other_param;
     }
-    // Write "m" with sources into a fresh store (overwrite).
     let path2 = dir.path().join("m2.parquet");
     write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
@@ -256,7 +222,6 @@ fn commit_update_preserves_other_models() {
     let (candidate, sources) = update_add(&path2, "m", ledger1, s1, cfg).unwrap();
     commit_update(&path2, "m", &candidate, &sources).unwrap();
 
-    // "m" must still load.
     let store = ModelStore::open(&path2).unwrap();
     assert!(
         store.load_param("m").is_ok(),
@@ -266,15 +231,8 @@ fn commit_update_preserves_other_models() {
     assert_eq!(ledgers.len(), 2, "must have 2 sources after add+commit");
 }
 
-// ---------------------------------------------------------------------------
-// PART C tests (acceptance gate)
-// ---------------------------------------------------------------------------
-
-/// acceptance_gate_rejects_worse_candidate: the gate rule is
-/// `accepted iff candidate_count >= current_count`.
 #[test]
 fn acceptance_gate_rule() {
-    // Directly test the YieldDelta accept rule without running a real search.
     let accepted = YieldDelta {
         current_count: 10,
         candidate_count: 10,
@@ -294,10 +252,6 @@ fn acceptance_gate_rule() {
     assert!(!worse.is_accepted(), "lower candidate must be rejected");
 }
 
-/// Full end-to-end acceptance gate using the BSA fixture.
-///
-/// Uses the same scorer for both current and candidate → YieldDelta should
-/// show equal counts (accepted).
 #[cfg(test)]
 #[test]
 fn acceptance_gate_same_model_is_accepted() {
@@ -317,12 +271,10 @@ fn acceptance_gate_same_model_is_accepted() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // Load spectra.
     let f = input::open_buf_maybe_gz(&bsa_mgf).expect("open test.mgf");
     let reader = MgfReader::new(BufReader::new(f));
     let spectra: Vec<_> = reader.filter_map(|r| r.ok()).collect();
 
-    // Load scorer from the canonical Parquet store.
     let param = fixture_param();
     let scorer = RankScorer::new(&param);
 
@@ -361,7 +313,6 @@ fn acceptance_gate_same_model_is_accepted() {
         .unwrap();
     let search_params = SearchParams::default_tryptic(aa);
 
-    // Same scorer for both current and candidate → counts should be equal.
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let delta = evaluate_candidate(
         &spectra,
@@ -384,7 +335,6 @@ fn acceptance_gate_same_model_is_accepted() {
     );
 }
 
-/// Serialised GBDT blobs of a Param: (peak, fragment-intensity, rich-ion).
 fn gbdt_blobs(p: &Param) -> [Option<Vec<u8>>; 3] {
     [
         p.gbdt_peak_model.as_ref().map(|m| m.to_bytes()),
@@ -393,9 +343,6 @@ fn gbdt_blobs(p: &Param) -> [Option<Vec<u8>>; 3] {
     ]
 }
 
-/// An update re-estimates the rank tables only: every GBDT carried by the
-/// stored model (a copy of a bundled model) survives the candidate, the gate
-/// input and the committed store byte-identically.
 #[test]
 fn update_keeps_gbdt_models_byte_identical() {
     let dir = tempfile::tempdir().unwrap();
@@ -436,9 +383,6 @@ fn update_keeps_gbdt_models_byte_identical() {
     }
 }
 
-/// Decay is a function of source age, not of how often it runs: decaying,
-/// committing and decaying again on the same day yields the same ledger and
-/// the same candidate as a single decay, and the base weight is kept.
 #[test]
 fn repeated_decay_on_same_day_equals_one_decay() {
     let dir = tempfile::tempdir().unwrap();
@@ -471,13 +415,10 @@ fn repeated_decay_on_same_day_equals_one_decay() {
     }
     commit_update(&path, "m", &twice, &twice_sources).unwrap();
 
-    // The recorded half-life persists, so a later reweight keeps the decay.
     let (reweighted, _) = update_reweight(&path, "m", "s1", 1.0, cfg).unwrap();
     assert_eq!(reweighted, once, "reweight must keep the recorded decay");
 }
 
-/// Update operations refuse a partitioned (directory) store up front instead
-/// of failing at commit time after the work is done.
 #[test]
 fn update_rejects_partitioned_store() {
     let bundled = Path::new(concat!(
@@ -501,10 +442,6 @@ fn update_rejects_partitioned_store() {
     assert!(err.to_string().contains("partitioned"), "{err}");
 }
 
-/// Attaching a GBDT to an existing model replaces only that GBDT: the rank
-/// tables, the other GBDT blobs and the source ledger with its stats survive,
-/// and other models are untouched. A model id not in the store starts from
-/// the fallback with no sources.
 #[test]
 fn attach_to_model_keeps_existing_model_content() {
     let dir = tempfile::tempdir().unwrap();
@@ -540,8 +477,6 @@ fn attach_to_model_keeps_existing_model_content() {
     .unwrap();
     let before = ModelStore::open(&path).unwrap().load_param("m").unwrap();
 
-    // A distinguishable replacement rich-ion model that still satisfies the
-    // rich-ion feature contract: the stored one with its last tree dropped.
     let stored = param
         .rich_ion_model
         .as_deref()

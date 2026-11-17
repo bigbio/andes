@@ -1,13 +1,3 @@
-//! Guard: the glyco PIN must not regrow its structurally dead columns.
-//!
-//! Measured 2026-08-29 on pooled human plasma: 19 of 91 columns were
-//! structurally constant or byte-identical duplicates (RawScoreCal == RawScore
-//! under the 1-hit collapse), and the small-sample Percolator SVM fed on them
-//! produced arbitrary-signed weights. Removing them plus the per-scan
-//! spectrum-level columns and retraining at --trainFDR 0.05 took the pooled
-//! yield from 256.8 +/- 16.5 to 384.6 +/- 23 glycoPSMs @1% with entrapment FDP
-//! 0.00% on all five seeds. This test pins the column policy so the dead set
-//! cannot silently return -- the repo's recurring defect class.
 use std::io::Cursor;
 
 #[test]
@@ -37,7 +27,6 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
             "structurally dead column {dead} is back in the default glyco PIN"
         );
     }
-    // and the live ones the policy must NOT have taken with it
     for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore"] {
         assert!(
             cols.contains(&live),
@@ -46,10 +35,6 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
     }
 }
 
-/// The four ID-neutral research emitters (`--glyco-y-tree`, `--glyco-oxonium-llr`,
-/// `--glyco-rank-masked`, `--glyco-chance-llr-masked`) were measured
-/// identification-neutral and removed. Their columns must not reappear in the
-/// header.
 #[test]
 fn retired_research_columns_are_gone() {
     let retired = [

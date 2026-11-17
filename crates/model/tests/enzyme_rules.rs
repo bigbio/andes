@@ -1,10 +1,5 @@
-//! Pin per-enzyme cleavage rules to standard protease specificities
-//! (Trypsin/LysC/ArgC/AspN/GluC/LysN/chymotrypsin; see ExPASy PeptideCutter
-//! and PSI-MS enzyme terms). Values are biochemical facts; this test guards drift.
-
 use model::enzyme::Enzyme;
 
-/// (variant, residues_cleaved_after, residues_cleaved_before)
 fn reference_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
     vec![
         (Enzyme::Trypsin, b"KR", b""),

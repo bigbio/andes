@@ -1,49 +1,24 @@
-//! Logistic gradient boosting trainer → [`GbdtPeakModel`].
-//!
-//! Implements Newton-step GBDT with logistic loss, quantile binning,
-//! group-disjoint validation splitting, negative undersampling, early stopping,
-//! and PAVA isotonic calibration on the hold-out validation set.
-
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
 use super::isotonic::pava;
 use super::tree::{fit_tree, fit_tree_with_leaves, TreeParams};
 use crate::TrainError;
 
-// ---------------------------------------------------------------------------
-// Quality-gate thresholds (finding 3.6)
-// ---------------------------------------------------------------------------
-
-/// Minimum number of training rows for a classifier/regressor to be trusted.
-/// Below this the model overfits noise and is not deployable.
 pub const MIN_TRAIN_ROWS: usize = 100;
 
-/// Minimum held-out AUC for the classification trainer. AUC ≈ 0.5 means the
-/// model does not discriminate signal from noise and must not be wired.
 pub const MIN_VAL_AUC: f64 = 0.55;
 
-/// Minimum held-out Pearson r and R² for the regression trainer. A non-positive
-/// R² means the model predicts worse than the mean.
 pub const MIN_VAL_PEARSON: f64 = 0.10;
 pub const MIN_VAL_R2: f64 = 0.0;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Row-major continuous feature matrix `x` (n × n_features), binary labels `y`
-/// (0/1), and a `groups` id per row (run+peptide) for leakage-free validation
-/// splitting.
 pub struct Dataset {
     pub x: Vec<f32>,
     pub y: Vec<u8>,
     pub groups: Vec<u32>,
     pub n_features: usize,
-    /// Ordered feature names, one per column of `x`; written into the model.
     pub feature_names: Vec<String>,
 }
 
-/// Hyper-parameters for gradient boosting.
 pub struct TrainParams {
     pub n_rounds: u32,
     pub learning_rate: f32,
@@ -51,28 +26,11 @@ pub struct TrainParams {
     pub n_bins: usize,
     pub lambda: f32,
     pub min_hessian: f32,
-    /// Number of negatives kept per positive during undersampling.
     pub neg_pos_ratio: f32,
-    /// Fraction of groups assigned to validation.
     pub val_fraction: f32,
-    /// Stop if validation logloss does not improve for this many rounds.
     pub early_stop_rounds: u32,
-    /// PAIRWISE ranking objective (RankNet): when `true`, gradients push every
-    /// positive above every negative WITHIN each group instead of the pointwise
-    /// logistic `p − y`. For a top-1 SELECTOR (pick the true backbone per scan) this
-    /// directly optimizes the within-group ordering — offline XGBoost showed pairwise
-    /// beats pointwise (+9 top-1). Early-stopping switches to validation AUC (rank
-    /// quality) since pairwise raw scores are not logloss-calibrated. Default `false`
-    /// (pointwise, backward-compatible with the peak/frag models).
     pub pairwise: bool,
 
-    /// Opt-in fallback (finding 3.6): when `true`, a failed quality gate is
-    /// downgraded from a hard error to a `stderr` warning and the trainer
-    /// returns the (possibly empty/low-quality) model — restoring the historical
-    /// always-return behavior. Default `false`: gate failures are hard errors so
-    /// a non-deployable model is never silently shipped. Intended only for
-    /// small synthetic fixtures / benchmarking where the operator accepts the
-    /// risk.
     pub allow_degenerate: bool,
 }
 
@@ -94,9 +52,6 @@ impl Default for TrainParams {
     }
 }
 
-/// Helper for the quality gates: either return a hard `QualityGate` error, or —
-/// when `allow_degenerate` is set — warn and yield the fallback model so the
-/// historical always-return behavior is preserved for opt-in callers.
 fn gate_or_fallback(
     allow_degenerate: bool,
     reason: String,
@@ -110,11 +65,6 @@ fn gate_or_fallback(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Splitmix64 — one step, returns a pseudo-random u64.
 #[inline]
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -124,19 +74,16 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Map a u64 into [0.0, 1.0).
 #[inline]
 fn to_unit(v: u64) -> f64 {
     (v >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Sigmoid of x, numerically stable.
 #[inline]
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Log-loss over a validation set with raw scores (before sigmoid).
 fn logloss(raw_val: &[f32], val_y: &[u8]) -> f32 {
     let mut sum = 0.0f64;
     for (&r, &y) in raw_val.iter().zip(val_y) {
@@ -151,11 +98,6 @@ fn logloss(raw_val: &[f32], val_y: &[u8]) -> f32 {
     }
 }
 
-/// ROC AUC of `scores` vs binary `labels` (Mann-Whitney U; ties get average
-/// rank). Rank-based, so AUC of the raw GBDT scores equals AUC of the
-/// calibrated P(signal). Returns 0.5 when either class is empty. This is the
-/// offline gate metric: AUC ≈ 0.5 ⇒ the peptide-agnostic peak model has no
-/// discriminative signal; higher ⇒ worth wiring as an additive feature.
 fn auc(scores: &[f32], labels: &[u8]) -> f64 {
     let n = scores.len();
     let n_pos = labels.iter().filter(|&&y| y == 1).count();
@@ -172,7 +114,7 @@ fn auc(scores: &[f32], labels: &[u8]) -> f64 {
         while j + 1 < n && scores[idx[j + 1]] == scores[idx[i]] {
             j += 1;
         }
-        let avg_rank = ((i + 1) + (j + 1)) as f64 / 2.0; // 1-based average rank for ties
+        let avg_rank = ((i + 1) + (j + 1)) as f64 / 2.0;
         for &row in &idx[i..=j] {
             ranks[row] = avg_rank;
         }
@@ -182,15 +124,6 @@ fn auc(scores: &[f32], labels: &[u8]) -> f64 {
     (sum_pos_ranks - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
 }
 
-/// WITHIN-GROUP mean AUC for the pairwise (RankNet) early-stop metric, negated so
-/// smaller = better (matching the loss-minimisation convention). A global AUC
-/// over all rows is wrong for a ranking objective: RankNet only ever compares
-/// rows INSIDE a group, so cross-group order is neither optimised nor meaningful.
-/// This averages the per-group AUC over the validation groups that contain BOTH a
-/// positive and a negative (the only ones where rank quality is defined), in
-/// deterministic group order. Returns `None` when NO validation group is
-/// two-class — the metric is undefined there, so the caller must not early-stop
-/// on it (CodeRabbit).
 fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32> {
     use std::collections::BTreeMap;
     let mut by_group: BTreeMap<u32, (Vec<f32>, Vec<u8>)> = BTreeMap::new();
@@ -216,11 +149,6 @@ fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32>
     }
 }
 
-/// Build quantile bin upper edges for one feature column.
-///
-/// Returns up to `n_bins` distinct upper edges at evenly-spaced quantiles.
-/// The result is ascending and deduplicated. If there are fewer distinct values
-/// than `n_bins`, all distinct values are returned (each as its own upper edge).
 fn compute_bin_uppers(col: &[f32], n_bins: usize) -> Vec<f32> {
     debug_assert!(n_bins <= 256, "n_bins must fit in u8");
     let mut sorted: Vec<f32> = col.iter().copied().filter(|v| v.is_finite()).collect();
@@ -229,10 +157,8 @@ fn compute_bin_uppers(col: &[f32], n_bins: usize) -> Vec<f32> {
         return vec![0.0];
     }
     let n = sorted.len();
-    // Pick up to n_bins quantile positions (using 0-indexed boundary of each bin).
     let mut edges: Vec<f32> = Vec::with_capacity(n_bins);
     for b in 1..=n_bins {
-        // Upper quantile of bin b: index = ceil(b * n / n_bins) - 1 (clamped).
         let idx = (b * n).div_ceil(n_bins).min(n) - 1;
         let v = sorted[idx];
         if edges.last().copied() != Some(v) {
@@ -245,21 +171,12 @@ fn compute_bin_uppers(col: &[f32], n_bins: usize) -> Vec<f32> {
     edges
 }
 
-/// Map a continuous value to its bin index given the precomputed upper edges.
-///
-/// Bin = first index whose upper edge is >= v (i.e., `partition_point(|&u| u < v)`).
-/// This is the EXACT inverse of how `fit_tree` uses thresholds: it stores
-/// `threshold = bin_uppers[feat][bin]` and routes `x <= threshold` left, so a
-/// value at or below the upper edge bins to `<= bin` ↔ goes left. Consistent.
-///
-/// Clamped to `uppers.len() - 1` so result always fits in u8 (since n_bins ≤ 256).
 #[inline]
 fn bin_of(v: f32, uppers: &[f32]) -> u8 {
     let b = uppers.partition_point(|&u| u < v);
     b.min(uppers.len() - 1) as u8
 }
 
-/// Fisher-Yates shuffle of indices (deterministic, seeded via splitmix64).
 fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
     let n = indices.len();
     for i in (1..n).rev() {
@@ -268,15 +185,6 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Core training function
-// ---------------------------------------------------------------------------
-
-/// Fit a GBDT classifier with logistic loss and return a calibrated
-/// [`GbdtPeakModel`].
-///
-/// All randomness is seeded from `seed`; two calls with identical arguments
-/// and seed produce byte-for-byte identical models.
 pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
@@ -287,9 +195,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         )));
     }
 
-    // --- Hard gate: degenerate input (finding 3.6) -----------------------------
-    // Previously these returned a deployable-looking empty model. Now they fail
-    // loudly so a no-signal training set is never silently shipped.
     let empty_classifier = || GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -324,8 +229,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let n_bins = p.n_bins.min(256);
 
-    // --- Step 1: Quantile-bin each feature ------------------------------------
-    // bin_uppers[f] = ascending upper edges for feature f
     let bin_uppers: Vec<Vec<f32>> = (0..nf)
         .map(|f| {
             let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
@@ -333,14 +236,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         })
         .collect();
 
-    // Only the active training rows are binned (Step 3); validation rows are
-    // scored on their continuous features.
-
-    // --- Step 2: Group-disjoint validation split (seeded) ---------------------
-    // Collect distinct group ids in sorted order for determinism.
-    // Hash each group id with the seed using splitmix64 to decide train/val.
-    // A group is validation if hash → unit < val_fraction: a function of the
-    // group id alone, evaluated per row.
     let is_val = |g: u32| {
         let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
         let h = splitmix64(&mut state);
@@ -357,7 +252,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         }
     }
 
-    // Gate: no validation rows (e.g. all groups landed in train) → cannot gate.
     if val_rows.is_empty() {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -366,7 +260,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    // --- Step 3: Negative undersample TRAIN rows (seeded) ---------------------
     let train_pos: Vec<usize> = train_rows
         .iter()
         .copied()
@@ -379,7 +272,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         .collect();
 
     let n_pos_train = train_pos.len();
-    // Gate: no positives in the training split after the disjoint split.
     if n_pos_train == 0 {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -393,17 +285,14 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     if train_neg.len() > n_neg_keep {
         shuffle_indices(&mut train_neg, &mut rng);
         train_neg.truncate(n_neg_keep);
-        train_neg.sort_unstable(); // keep deterministic order
+        train_neg.sort_unstable();
     }
 
     let mut active_train: Vec<usize> = train_pos;
     active_train.extend_from_slice(&train_neg);
-    active_train.sort_unstable(); // deterministic order
+    active_train.sort_unstable();
 
     let n_active = active_train.len();
-    // Gate: the effective training subset (post split + undersample) is what the
-    // trees actually see — the pre-split row count can clear MIN_TRAIN_ROWS while
-    // this does not.
     if n_active < MIN_TRAIN_ROWS {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -412,11 +301,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    // Build per-row compact maps for fast access.
-    // active_train[i] → original row index.
-    // We need: binned subset, x subset for tree eval, y subset.
-
-    // Compact binned array for the active training rows.
     let mut train_binned = vec![0u8; n_active * nf];
     let mut train_y = vec![0u8; n_active];
     for (i, &r) in active_train.iter().enumerate() {
@@ -428,12 +312,8 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let val_n = val_rows.len();
     let val_y: Vec<u8> = val_rows.iter().map(|&r| ds.y[r]).collect();
-    // Validation group ids, for the pairwise WITHIN-GROUP early-stop metric.
     let val_groups: Vec<u32> = val_rows.iter().map(|&r| ds.groups[r]).collect();
 
-    // Pairwise (RankNet) prep: group the active rows by their group id and split
-    // pos/neg, keeping only groups that have BOTH (the only ones that produce pairs).
-    // `pair_groups[k] = (positives, negatives)` as active-index vectors.
     let pair_groups: Vec<(Vec<usize>, Vec<usize>)> = if p.pairwise {
         let mut pos_map: std::collections::HashMap<u32, Vec<usize>> =
             std::collections::HashMap::new();
@@ -452,16 +332,13 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             .filter(|k| neg_map.contains_key(k))
             .copied()
             .collect();
-        gs.sort_unstable(); // determinism
+        gs.sort_unstable();
         gs.into_iter()
             .map(|g| (pos_map[&g].clone(), neg_map[&g].clone()))
             .collect()
     } else {
         Vec::new()
     };
-    // Pairwise training with no group carrying BOTH a positive and a negative
-    // produces zero pairs → zero gradients → a degenerate all-zero model. Fail
-    // loudly instead of silently "training" nothing (CodeRabbit).
     if p.pairwise && pair_groups.is_empty() {
         return Err(TrainError::QualityGate(
             "pairwise (RankNet) training requested but no training group contains \
@@ -470,8 +347,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         ));
     }
 
-    // --- Step 4: Boosting loop ------------------------------------------------
-    // raw scores in logit space; init 0 (sigmoid(0) = 0.5).
     let mut raw_train = vec![0.0f32; n_active];
     let mut raw_val = vec![0.0f32; val_n];
 
@@ -487,21 +362,14 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let mut best_loss = f32::INFINITY;
     let mut best_round: usize = 0;
     let mut no_improve = 0u32;
-    // The validation scores after `best_round` trees (Step 5 reads them).
     let mut best_raw_val = vec![0.0f32; val_n];
     let mut grad = vec![0.0f32; n_active];
     let mut hess = vec![0.0f32; n_active];
 
     for _round in 0..p.n_rounds {
-        // Compute gradients and hessians for active training rows.
         if p.pairwise {
-            // The pair sums accumulate: start from zero every round.
             grad.fill(0.0);
             hess.fill(0.0);
-            // RankNet pairwise loss within each group: for each (positive i, negative
-            // j), `rho = σ(-(s_i − s_j))` is the mis-ranking probability; push i up and
-            // j down. Sum over pairs → per-row grad/hess. Hessian floored so leaves are
-            // well-defined even where a row appears in no pair.
             for (pos, neg) in &pair_groups {
                 for &i in pos {
                     for &j in neg {
@@ -525,25 +393,17 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             }
         }
 
-        // Fit one tree on the active binned training data.
         let (mut tree, leaf_of) =
             fit_tree_with_leaves(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
-        // Apply learning rate shrinkage to all leaf values.
-        // Scaling ALL values is safe: internal nodes have value 0 and are not
-        // reached by eval; leaves carry the actual weight.
         for v in tree.value.iter_mut() {
             *v *= p.learning_rate;
         }
 
-        // Update raw scores: training rows. Each row adds the value of the
-        // leaf the builder put it in, which is the leaf `tree.eval` reaches on
-        // its continuous features (see `fit_tree_with_leaves`).
         for (raw, &leaf) in raw_train.iter_mut().zip(&leaf_of) {
             *raw += tree.value[leaf as usize];
         }
 
-        // Update raw scores: validation rows (continuous x).
         for (j, &r) in val_rows.iter().enumerate() {
             let row = &ds.x[r * nf..(r + 1) * nf];
             raw_val[j] += tree.eval(row);
@@ -551,10 +411,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
         trees.push(tree);
 
-        // Evaluate validation loss for early stopping. Pairwise raw scores are not
-        // logloss-calibrated, so track NEGATIVE WITHIN-GROUP AUC (maximize rank
-        // quality) there; pointwise keeps logloss. A global AUC would score
-        // cross-group order the RankNet loss never optimises — misleading.
         let vloss_opt = if p.pairwise {
             grouped_neg_auc(&raw_val, &val_y, &val_groups)
         } else {
@@ -564,7 +420,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
             Some(vloss) => {
                 if vloss < best_loss - 1e-8 {
                     best_loss = vloss;
-                    best_round = trees.len(); // number of trees at best
+                    best_round = trees.len();
                     best_raw_val.copy_from_slice(&raw_val);
                     no_improve = 0;
                 } else {
@@ -574,9 +430,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
                     }
                 }
             }
-            // No two-class validation group → the pairwise rank metric is
-            // undefined; keep this round's tree and DON'T early-stop on a bogus
-            // metric (eligibility is fixed across rounds, so this is all-or-none).
             None => {
                 best_round = trees.len();
                 best_raw_val.copy_from_slice(&raw_val);
@@ -584,18 +437,10 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         }
     }
 
-    // Truncate to best round.
     trees.truncate(best_round);
 
-    // --- Step 5: PAVA calibration on validation set ---------------------------
-    // The validation scores of the truncated tree set: the running sums at
-    // `best_round`, added tree by tree in the same order as a re-evaluation.
     let raw_val_final = best_raw_val;
 
-    // OFFLINE GATE METRIC: held-out AUC of P(signal) on the group-disjoint
-    // validation set. This is the review's free gate — AUC ≈ 0.5 means the
-    // peptide-agnostic peak model does not discriminate signal from noise and
-    // is not worth wiring.
     let n_pos_val = val_y.iter().filter(|&&y| y == 1).count();
     let val_auc = auc(&raw_val_final, &val_y);
     eprintln!(
@@ -603,8 +448,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         val_n - n_pos_val
     );
 
-    // Hard gates (finding 3.6): an empty ensemble or a non-discriminating model
-    // must not be returned as deployable.
     if trees.is_empty() {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -636,7 +479,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    // Build (p_sigmoid, y) pairs sorted by p_sigmoid.
     let mut cal_pairs: Vec<(f32, f32)> = raw_val_final
         .iter()
         .zip(val_y.iter())
@@ -648,7 +490,6 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let sorted_y: Vec<f32> = cal_pairs.iter().map(|&(_, y)| y).collect();
     let (iso_x, iso_y) = pava(&sorted_p, &sorted_y);
 
-    // --- Return ---------------------------------------------------------------
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -660,25 +501,14 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     })
 }
 
-// ---------------------------------------------------------------------------
-// Regression dataset and trainer
-// ---------------------------------------------------------------------------
-
-/// Row-major continuous feature matrix `x` (n × n_features), continuous labels
-/// `y` (e.g., log-relative intensities), and a `groups` id per row for
-/// leakage-free validation splitting.
 pub struct RegressionDataset {
     pub x: Vec<f32>,
     pub y: Vec<f32>,
     pub groups: Vec<u32>,
     pub n_features: usize,
-    /// Ordered feature names, one per column of `x`; written into the model.
     pub feature_names: Vec<String>,
 }
 
-/// Pearson correlation `r` and coefficient of determination `R² = 1 − SS_res/SS_tot`.
-///
-/// Returns `(0.0, 0.0)` when `y` has zero variance or the slices are empty.
 pub fn pearson_r2(pred: &[f32], y: &[f32]) -> (f64, f64) {
     let n = pred.len().min(y.len());
     if n == 0 {
@@ -703,7 +533,6 @@ pub fn pearson_r2(pred: &[f32], y: &[f32]) -> (f64, f64) {
     }
 
     if var_y < f64::EPSILON || var_p < f64::EPSILON {
-        // Zero variance in y or pred: R² = 1 - SS_res/SS_tot is degenerate.
         return (0.0, 0.0);
     }
 
@@ -712,7 +541,6 @@ pub fn pearson_r2(pred: &[f32], y: &[f32]) -> (f64, f64) {
     (r, r2)
 }
 
-/// Validation MSE over continuous targets.
 fn mse(raw_val: &[f32], val_y: &[f32]) -> f32 {
     if val_y.is_empty() {
         return f32::INFINITY;
@@ -728,23 +556,6 @@ fn mse(raw_val: &[f32], val_y: &[f32]) -> f32 {
     (sum / val_y.len() as f64) as f32
 }
 
-/// Fit a GBDT regressor with squared-error (OLS) loss and return a
-/// [`GbdtPeakModel`] with `apply_sigmoid = false` and empty isotonic
-/// calibration. The raw sum of tree outputs is the prediction.
-///
-/// The boosting gradient is the ordinary residual: `grad_i = pred_i − y_i`;
-/// hessian is constant 1.0 (so the leaf weight `−G/(H+λ)` is the mean
-/// negative residual, i.e. the OLS step direction).
-///
-/// All randomness is seeded from `seed`; two calls with identical arguments
-/// and seed produce byte-for-byte identical models.
-///
-/// # Differences from `train_gbdt` (classification)
-/// - Continuous `y` in [`RegressionDataset`]; no negative undersampling.
-/// - Early stopping on validation MSE (lower = better).
-/// - No PAVA isotonic calibration; `apply_sigmoid = false`.
-///
-/// // TODO: factor the shared boosting loop with the classification path.
 pub fn train_gbdt_regression(
     ds: &RegressionDataset,
     p: &TrainParams,
@@ -768,7 +579,6 @@ pub fn train_gbdt_regression(
         iso_x: vec![],
         iso_y: vec![],
     };
-    // Hard gate: degenerate input (finding 3.6).
     if nf == 0 {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -786,7 +596,6 @@ pub fn train_gbdt_regression(
 
     let n_bins = p.n_bins.min(256);
 
-    // --- Step 1: Quantile-bin each feature ------------------------------------
     let bin_uppers: Vec<Vec<f32>> = (0..nf)
         .map(|f| {
             let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
@@ -801,7 +610,6 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // --- Step 2: Group-disjoint validation split (seeded) ---------------------
     let mut distinct_groups: Vec<u32> = ds.groups.clone();
     distinct_groups.sort_unstable();
     distinct_groups.dedup();
@@ -826,7 +634,6 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // Gate: no validation/training rows → cannot fit or gate.
     if val_rows.is_empty() || train_rows.is_empty() {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -835,10 +642,7 @@ pub fn train_gbdt_regression(
         );
     }
 
-    // --- Step 3: Build compact train/val arrays (NO undersampling) -----------
     let n_active = train_rows.len();
-    // Gate: the post-split training row count is what the trees actually see —
-    // the pre-split row count can clear MIN_TRAIN_ROWS while this does not.
     if n_active < MIN_TRAIN_ROWS {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -858,9 +662,6 @@ pub fn train_gbdt_regression(
     let val_n = val_rows.len();
     let val_y: Vec<f32> = val_rows.iter().map(|&r| ds.y[r]).collect();
 
-    // --- Step 4: Boosting loop (OLS) -----------------------------------------
-    // Init predictions at 0 (a reasonable default; could use mean_y but 0 is
-    // fine for early-stopped boosting).
     let mut raw_train = vec![0.0f32; n_active];
     let mut raw_val = vec![0.0f32; val_n];
 
@@ -878,25 +679,21 @@ pub fn train_gbdt_regression(
     let mut no_improve = 0u32;
 
     for _round in 0..p.n_rounds {
-        // OLS gradient: pred − y; hessian: constant 1.0.
         let grad: Vec<f32> = (0..n_active).map(|i| raw_train[i] - train_y[i]).collect();
         let hess: Vec<f32> = vec![1.0f32; n_active];
 
         let mut tree = fit_tree(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
-        // Apply learning rate shrinkage.
         for v in tree.value.iter_mut() {
             *v *= p.learning_rate;
         }
 
-        // Update train predictions (use compact index, continuous x).
         for i in 0..n_active {
             let r = train_rows[i];
             let row = &ds.x[r * nf..(r + 1) * nf];
             raw_train[i] += tree.eval(row);
         }
 
-        // Update val predictions.
         for (j, &r) in val_rows.iter().enumerate() {
             let row = &ds.x[r * nf..(r + 1) * nf];
             raw_val[j] += tree.eval(row);
@@ -904,7 +701,6 @@ pub fn train_gbdt_regression(
 
         trees.push(tree);
 
-        // Evaluate validation MSE; early-stop on non-improvement.
         let vloss = mse(&raw_val, &val_y);
         if vloss < best_loss - 1e-8 {
             best_loss = vloss;
@@ -918,10 +714,8 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // Truncate to best round.
     trees.truncate(best_round);
 
-    // --- Step 5: Recompute val predictions and log gate metric ---------------
     let mut raw_val_final = vec![0.0f32; val_n];
     for (j, &r) in val_rows.iter().enumerate() {
         let row = &ds.x[r * nf..(r + 1) * nf];
@@ -934,8 +728,6 @@ pub fn train_gbdt_regression(
     let n = val_n;
     eprintln!("train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})");
 
-    // Hard gates (finding 3.6): an empty ensemble or a model that doesn't beat
-    // the mean is not deployable.
     if trees.is_empty() {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -963,7 +755,6 @@ pub fn train_gbdt_regression(
         );
     }
 
-    // --- Return (no sigmoid, no isotonic) ------------------------------------
     Ok(GbdtPeakModel {
         packed: Default::default(),
         n_features: nf as u32,
@@ -974,10 +765,6 @@ pub fn train_gbdt_regression(
         iso_y: vec![],
     })
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -993,17 +780,13 @@ mod tests {
 
     #[test]
     fn auc_perfect_reversed_tied_and_empty() {
-        // Perfect separation: all positives score above all negatives → 1.0.
         let scores = [0.1_f32, 0.2, 0.8, 0.9];
         let labels = [0u8, 0, 1, 1];
         assert!((auc(&scores, &labels) - 1.0).abs() < 1e-9);
-        // Reversed labels (positives score lowest) → 0.0.
         let labels_rev = [1u8, 1, 0, 0];
         assert!((auc(&scores, &labels_rev) - 0.0).abs() < 1e-9);
-        // All-tied scores → 0.5 (no separation).
         let tied = [0.5_f32, 0.5, 0.5, 0.5];
         assert!((auc(&tied, &labels) - 0.5).abs() < 1e-9);
-        // One class empty → 0.5 by convention.
         assert!((auc(&scores, &[0u8, 0, 0, 0]) - 0.5).abs() < 1e-9);
     }
 
@@ -1074,8 +857,6 @@ mod tests {
 
     #[test]
     fn no_positives_fails_quality_gate() {
-        // Finding 3.6: a single-class / too-small training set must now FAIL
-        // loudly instead of silently returning a deployable-looking empty model.
         let ds = Dataset {
             x: vec![0.1f32; 10 * 3],
             y: vec![0u8; 10],
@@ -1089,13 +870,12 @@ mod tests {
 
     #[test]
     fn too_few_rows_fails_quality_gate() {
-        // Below MIN_TRAIN_ROWS, even with both classes present → hard gate.
         let n = MIN_TRAIN_ROWS - 1;
         let mut x = vec![0.0f32; n * 3];
         let mut y = vec![0u8; n];
         for r in 0..n {
             x[r * 3] = (r % 2) as f32;
-            y[r] = (r % 2) as u8; // both classes, separable, but too few rows
+            y[r] = (r % 2) as u8;
         }
         let ds = Dataset {
             x,
@@ -1113,8 +893,6 @@ mod tests {
 
     #[test]
     fn allow_degenerate_returns_fallback_instead_of_error() {
-        // The opt-in fallback (finding 3.6) downgrades the gate to a warning and
-        // returns the (empty) model.
         let ds = Dataset {
             x: vec![0.1f32; 10 * 3],
             y: vec![0u8; 10],
@@ -1138,14 +916,12 @@ mod tests {
         let y = [1.0_f32, 2.0, 3.0, 4.0];
         let (r, r2) = pearson_r2(&y, &y);
         assert!((r - 1.0).abs() < 1e-6 && (r2 - 1.0).abs() < 1e-6);
-        // constant prediction → R2 <= 0
         let (_, r2c) = pearson_r2(&[2.5_f32; 4], &y);
         assert!(r2c <= 1e-6);
     }
 
     #[test]
     fn regression_fits_linear_target_monotone() {
-        // y = 2*x0 - 1; regression GBDT must be monotone increasing in x0.
         let mut st = 0x1234u64;
         let (n, nf) = (4000usize, 2usize);
         let (mut x, mut y, mut g) = (Vec::new(), Vec::new(), Vec::new());
@@ -1155,7 +931,7 @@ mod tests {
             x.push(x0);
             x.push(x1);
             y.push(2.0 * x0 - 1.0);
-            g.push(i as u32); // each row its own group
+            g.push(i as u32);
         }
         let ds = RegressionDataset {
             x,

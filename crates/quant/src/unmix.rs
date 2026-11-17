@@ -1,121 +1,35 @@
-//! Reporter-ion interference correction for isobaric MS2 scans.
-//!
-//! On high-resolution MS2 the reporter ions of a scan come from every ion the
-//! quadrupole let through, not only from the identified precursor. Each scan
-//! gets an isolation-window record from the MS1 scans that border it in time
-//! (the ion current inside the window and the share of it on the precursor's
-//! isotope envelope), and the run's summed reporter intensities are explained
-//! by one regression:
-//!
-//! ```text
-//! S_s = a_z · PIC_s · f_s  +  b · PIC_s · (1 − f_s)  +  c · H_s
-//! ```
-//!
-//! * `S_s` is the scan's summed reporter intensity,
-//! * `PIC_s` its peptide ion current (MS2 ion current above the reporter
-//!   region),
-//! * `f_s` the precursor's share of the window's MS1 ion current,
-//! * `H_s` the ion current hidden below the MS1 detection limit inside the
-//!   window: detection limit × centroid density around the precursor ×
-//!   window width,
-//! * `a_z` (per precursor charge class), `b` and `c` are non-negative and fitted
-//!   per run by robust (bisquare-reweighted) non-negative least squares on
-//!   relative residuals.
-//!
-//! The coefficients are the run's scale factors between MS1 ion current and
-//! reporter yield, so no ground truth is needed. A scan's interference
-//! fraction is the share of its predicted reporter signal that does not come
-//! from the precursor, `1 − a_z·PIC·f / predicted`, capped at
-//! [`MAX_INTERFERENCE`]. The interference is removed with the run's mean
-//! reporter profile (each channel's share of all reporter signal): the
-//! co-isolated ions are, on average, the run's average peptide.
-//!
-//! # Correction strength
-//!
-//! The subtracted share can be scaled by a strength `λ` in `[0, 1]`
-//! (`corrected = raw − λ · interference · total · profile`). `λ = 1` is the
-//! full correction. [`learn_strength`] learns `λ` per run without ground
-//! truth. A PSM's sum-normalised profile is `(1 − λe)·t + λe·b`: its protein's
-//! clean profile `t` plus the run's mean profile `b` in proportion to the
-//! estimated interference `e`. Within each protein, `t` is estimated for each
-//! PSM from the protein's other PSMs (mean profile weighted by the squared
-//! clean share `(1 − e)²`, so the clean PSMs dominate), and `λ` is the
-//! least-squares slope, through the origin, of the PSM's profile deviation
-//! `q − t` on `e (b − t)`.
-//! The slope is weighted by the reference's mass `C / (C + 1)` (`C` in units of
-//! one fully clean PSM); proteins whose profile is close to `b` carry no
-//! weight by themselves, because `b − t` is then small. Noise in the profiles
-//! is orthogonal to the regressor on average, so it does not pull the slope
-//! the way it would pull a profile-distance objective (which grows with every
-//! subtraction, as removing signal amplifies each PSM's noise). Agreement
-//! among all PSMs is not used: it would reward moving every profile to the
-//! run's mean. The reference itself holds `λē` of `b`, so the clean profile is
-//! `t = (r − λē·b) / (1 − λē)` and the slope is iterated to its fixed point.
-//! A run whose proteins give fewer than [`MIN_FIT_SCANS`] effective scans
-//! cannot teach `λ`; it keeps the full estimate (`λ = 1`).
-//!
-//! Joint non-negative least squares over scans linked by shared precursors
-//! (every identified co-isolated precursor subtracted with its own reporter
-//! profile) was measured against this and recovered less of the known
-//! ratios, so only the regression is implemented.
-
 use model::mass::ISOTOPE;
 
 use crate::nnls::nnls;
 
-/// Largest interference fraction removed from one scan.
 pub const MAX_INTERFERENCE: f64 = 0.8;
-/// A run needs at least this many usable scans to fit its model.
 pub const MIN_FIT_SCANS: usize = 100;
-/// Isotope peaks of the precursor are matched within this tolerance.
 const ENVELOPE_PPM: f64 = 10.0;
-/// Isotope positions of the precursor counted inside the window, relative to
-/// the monoisotopic peak.
 const ENVELOPE_ISOTOPES: std::ops::RangeInclusive<i32> = -1..=8;
-/// Half width (Th) of the m/z range whose MS1 centroid density scales the
-/// hidden ion current.
 const DENSITY_HALF_WIDTH: f64 = 5.0;
-/// Bisquare tuning constant and reweighting rounds of the robust fit.
 const BISQUARE_K: f64 = 4.685;
 const ROBUST_ROUNDS: usize = 8;
-/// Regression columns: three precursor charge classes, co-isolated, hidden.
 const N_COEF: usize = 5;
-/// Floor of the robust scale of the relative residuals.
 const MIN_MAD: f64 = 1e-6;
-/// Fixed-point rounds of the strength estimate.
 const SLOPE_ROUNDS: usize = 8;
 
-/// One quantified MS2 scan as the interference model sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanInput {
-    /// Charge of the identified precursor.
     pub charge: u8,
-    /// Reporter intensities, impurity-corrected when a sheet was applied.
     pub reporters: Vec<f32>,
-    /// MS2 ion current above the reporter region.
     pub pic: f64,
-    /// The isolation-window record, `None` without MS1 around the scan.
     pub window: Option<WindowRecord>,
-    /// The protein the PSM maps to, `None` when it maps to several. Scans of
-    /// the same protein are compared when the correction strength is learned.
     pub protein: Option<u32>,
 }
 
-/// The MS1 view of one isolation window at the time of the MS2 scan.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowRecord {
-    /// Ion current inside the window, interpolated between the bordering MS1
-    /// scans.
     pub total: f64,
-    /// The part of `total` on the precursor's isotope envelope.
     pub precursor: f64,
-    /// Ion current estimated below the MS1 detection limit inside the window.
     pub hidden: f64,
 }
 
 impl WindowRecord {
-    /// The precursor's share of the window's visible ion current (1 when the
-    /// window holds no centroid).
     pub fn precursor_fraction(&self) -> f64 {
         if self.total > 0.0 {
             (self.precursor / self.total).clamp(0.0, 1.0)
@@ -125,8 +39,6 @@ impl WindowRecord {
     }
 }
 
-/// One bordering MS1 scan: its retention time, m/z-sorted centroids and
-/// detection limit.
 #[derive(Debug, Clone, Copy)]
 pub struct Survey<'a> {
     pub rt: f64,
@@ -134,7 +46,6 @@ pub struct Survey<'a> {
     pub detection_limit: f32,
 }
 
-/// Window intensity and precursor-envelope intensity of one MS1 scan.
 fn window_sums(peaks: &[(f64, f32)], lo: f64, hi: f64, mono_mz: f64, charge: u8) -> (f64, f64) {
     let start = peaks.partition_point(|p| p.0 < lo);
     let end = start + peaks[start..].partition_point(|p| p.0 <= hi);
@@ -159,20 +70,12 @@ fn window_sums(peaks: &[(f64, f32)], lo: f64, hi: f64, mono_mz: f64, charge: u8)
     (total, envelope.min(total))
 }
 
-/// Centroids per Th within [`DENSITY_HALF_WIDTH`] of `centre`.
 fn centroid_density(peaks: &[(f64, f32)], centre: f64) -> f64 {
     let lo = peaks.partition_point(|p| p.0 < centre - DENSITY_HALF_WIDTH);
     let hi = peaks.partition_point(|p| p.0 <= centre + DENSITY_HALF_WIDTH);
     (hi - lo) as f64 / (2.0 * DENSITY_HALF_WIDTH)
 }
 
-/// The isolation-window record of an MS2 scan at `rt` isolating
-/// `[lo, hi]`, from the MS1 scans before (`prev`) and after (`next`) it.
-/// Intensities are interpolated linearly in retention time; with one
-/// bordering scan, that scan is used. The precursor envelope is the isotope
-/// ladder of `mono_mz` at `charge`. The hidden ion current is the bordering
-/// scans' detection limit times the centroid density around the window times
-/// its width. `None` without a bordering scan or for an empty window range.
 pub fn window_record(
     prev: Option<Survey<'_>>,
     next: Option<Survey<'_>>,
@@ -211,20 +114,12 @@ pub fn window_record(
     Some(rec)
 }
 
-/// A run's fitted interference model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterferenceModel {
-    /// Reporter yield per unit of precursor ion current, by charge class
-    /// (1–2, 3, 4 and more).
     pub precursor: [f64; 3],
-    /// Reporter yield per unit of co-isolated (non-precursor) ion current.
     pub co_isolated: f64,
-    /// Reporter yield per unit of hidden ion current.
     pub hidden: f64,
-    /// Scans the model was fitted on.
     pub n: usize,
-    /// Share of the variance of log summed reporter intensity the model
-    /// explains on those scans.
     pub r2_log: f64,
 }
 
@@ -236,7 +131,6 @@ fn charge_class(z: u8) -> usize {
     }
 }
 
-/// Regression row of a scan, `None` when the scan cannot enter the model.
 fn design_row(s: &ScanInput) -> Option<[f64; N_COEF]> {
     let w = s.window?;
     if !(s.pic.is_finite() && s.pic > 0.0) {
@@ -263,8 +157,6 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 impl InterferenceModel {
-    /// Fit the model on a run's scans. `None` with fewer than
-    /// [`MIN_FIT_SCANS`] usable scans or when every coefficient fits to 0.
     pub fn fit(scans: &[ScanInput]) -> Option<Self> {
         let (rows, y): (Vec<[f64; N_COEF]>, Vec<f64>) = scans
             .iter()
@@ -278,8 +170,6 @@ impl InterferenceModel {
         if m < MIN_FIT_SCANS {
             return None;
         }
-        // Relative residuals: each scan counts by its relative error, so the
-        // most intense scans do not dominate the fit.
         let mut weight = vec![1.0f64; m];
         let mut beta = vec![0.0f64; N_COEF];
         let mut a = vec![0.0f64; m * N_COEF];
@@ -328,8 +218,6 @@ impl InterferenceModel {
         })
     }
 
-    /// The scan's interference fraction in `0..=`[`MAX_INTERFERENCE`], `None`
-    /// when the scan cannot be modelled (no window record, no ion current).
     pub fn interference(&self, scan: &ScanInput) -> Option<f64> {
         let row = design_row(scan)?;
         let beta = self.coefficients();
@@ -356,7 +244,6 @@ fn dot(row: &[f64; N_COEF], beta: &[f64]) -> f64 {
     row.iter().zip(beta).map(|(a, b)| a * b).sum()
 }
 
-/// Each channel's share of all reporter signal of the run's scans.
 pub fn background_profile(scans: &[ScanInput]) -> Option<Vec<f64>> {
     let n = scans.first()?.reporters.len();
     let mut sum = vec![0.0f64; n];
@@ -369,28 +256,18 @@ pub fn background_profile(scans: &[ScanInput]) -> Option<Vec<f64>> {
     (total > 0.0).then(|| sum.iter().map(|v| v / total).collect())
 }
 
-/// One scan after interference removal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unmixed {
-    /// Estimated interference fraction of the scan's reporter signal.
     pub interference: f32,
-    /// Reporter intensities with the interference removed (floored at 0).
     pub reporters: Vec<f32>,
 }
 
-/// How strongly the estimated interference is subtracted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Strength {
-    /// The given strength in `0..=1` (1 = full correction).
     Fixed(f64),
-    /// Learned per run by [`learn_strength`]; 1 when the run cannot teach it:
-    /// the interference estimate is fitted on the run itself, so without
-    /// evidence against it, it is kept in full.
     Learned,
 }
 
-/// Sum-normalised profile of a scan's reporters (negative values count as 0),
-/// `None` when nothing is left.
 fn raw_shares(reporters: &[f32]) -> Option<Vec<f64>> {
     let total = summed(reporters);
     (total > 0.0).then(|| {
@@ -401,16 +278,8 @@ fn raw_shares(reporters: &[f32]) -> Option<Vec<f64>> {
     })
 }
 
-/// The run's correction strength, learned from agreement within proteins
-/// (see the module documentation), in `0..=1`. `eil` is each scan's
-/// interference fraction (`None` for scans that cannot be modelled) and
-/// `profile` the run's mean reporter profile. `None` when the proteins with at
-/// least two scans hold fewer than [`MIN_FIT_SCANS`] effective scans (the
-/// squared sum of the slope's information weights over the sum of their
-/// squares) or no information.
 pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64]) -> Option<f64> {
     let n = profile.len();
-    // Ordered by protein, so the sums below add their terms in one order.
     let mut groups: std::collections::BTreeMap<u32, Vec<usize>> = std::collections::BTreeMap::new();
     for (i, s) in scans.iter().enumerate() {
         if let (Some(g), Some(_)) = (s.protein, eil[i]) {
@@ -419,8 +288,6 @@ pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64])
             }
         }
     }
-    // One entry per scan that has a reference: its profile, the reference's
-    // mean profile and interference, its own interference and the weight.
     struct Term {
         q: Vec<f64>,
         r: Vec<f64>,
@@ -462,9 +329,6 @@ pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64])
             });
         }
     }
-    // The reference holds `λ · ē` of the run profile `b`, so the protein's
-    // clean profile is `(r − λ ē b) / (1 − λ ē)` and the scan's deviation from
-    // it is `λ e (b − t)`: iterate the slope to its fixed point.
     let mut lambda = 1.0f64;
     let mut info = (0.0f64, 0.0f64);
     for _ in 0..SLOPE_ROUNDS {
@@ -492,19 +356,13 @@ pub fn learn_strength(scans: &[ScanInput], eil: &[Option<f64>], profile: &[f64])
     (info.0 * info.0 / info.1 >= MIN_FIT_SCANS as f64).then_some(lambda)
 }
 
-/// The result of [`unmix_run`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmixRun {
-    /// The fitted model, `None` when the run cannot be fitted (every scan is
-    /// then `None`).
     pub model: Option<InterferenceModel>,
-    /// The strength applied.
     pub strength: f64,
-    /// One entry per input scan in order.
     pub scans: Vec<Option<Unmixed>>,
 }
 
-/// Fit the run's model and remove each scan's interference at `strength`.
 pub fn unmix_run(scans: &[ScanInput], strength: Strength) -> UnmixRun {
     let none = |model| UnmixRun {
         model,
@@ -561,7 +419,6 @@ mod tests {
 
     #[test]
     fn window_record_interpolates_between_the_bordering_scans() {
-        // z = 2 precursor at 500.0; one co-isolated peak at 500.2.
         let before = [
             (499.0, 5.0f32),
             (500.0, 100.0),
@@ -579,11 +436,9 @@ mod tests {
             2,
         )
         .unwrap();
-        // Halfway: precursor (100+50)/2 + (300+150)/2 = 300, interferent 50.
         assert!((rec.precursor - 300.0).abs() < 1e-9, "{rec:?}");
         assert!((rec.total - 350.0).abs() < 1e-9, "{rec:?}");
         assert!((rec.precursor_fraction() - 300.0 / 350.0).abs() < 1e-12);
-        // Hidden: detection limit 10 × density × width 0.8.
         let dens_before = 4.0 / 10.0;
         let dens_after = 3.0 / 10.0;
         let expect = 0.5 * 10.0 * dens_before * 0.8 + 0.5 * 10.0 * dens_after * 0.8;
@@ -602,8 +457,6 @@ mod tests {
         assert_eq!(one.precursor_fraction(), 1.0);
     }
 
-    /// Scans generated from the model itself: the fit recovers the
-    /// coefficients and the interference of each scan.
     fn synthetic(n: usize) -> Vec<ScanInput> {
         let (a, b, c) = (1.0, 0.5, 2.0);
         (0..n)
@@ -613,8 +466,6 @@ mod tests {
                 let hidden = 1e4 * ((i * 13) % 5) as f64;
                 let total = a * pic * f + b * pic * (1.0 - f) + c * hidden;
                 let reporters = vec![(total / 4.0) as f32; 4];
-                // The window record stores absolute currents; any scale works
-                // since only the fraction enters the model.
                 ScanInput {
                     charge: 2,
                     reporters,
@@ -656,8 +507,6 @@ mod tests {
 
     #[test]
     fn interference_is_removed_with_the_run_profile() {
-        // Background profile 1:1:1:1 (every scan is flat), except one scan
-        // whose first channel holds the precursor's own signal.
         let mut scans = synthetic(400);
         scans[0].reporters = vec![400.0, 100.0, 100.0, 100.0];
         let run = unmix_run(&scans, Strength::Fixed(1.0));
@@ -670,7 +519,6 @@ mod tests {
             let expect = ((v as f64) - eil * 700.0 * p).max(0.0);
             assert!((u.reporters[k] as f64 - expect).abs() < 1e-2, "{k}");
         }
-        // Interference lowers the flat channels relative to the first.
         assert!(u.reporters[1] / u.reporters[0] < 0.25);
     }
 
@@ -683,9 +531,6 @@ mod tests {
         assert!(out[4].is_some());
     }
 
-    /// 300 scans over 30 proteins with distinct true profiles. With
-    /// `share` of the estimated interference is in the reporter signal as the
-    /// flat background profile (0 = the estimates are noise).
     fn proteins(share: f64) -> (Vec<ScanInput>, Vec<Option<f64>>, Vec<f64>) {
         let bg = vec![0.25; 4];
         let mut scans = Vec::new();

@@ -1,18 +1,9 @@
-//! End-to-end test for the QPX `--output-parquet` `.idparquet/` writer.
-//!
-//! Runs a default search over the BSA fixture with `--output-parquet`, then
-//! opens `psms.parquet` with the `arrow`/`parquet` reader and asserts the
-//! column names + Arrow types match the OpenMS QPX 1.0 PSM schema and that at
-//! least one row was written. Also checks the QPX schema metadata is present and
-//! that the sibling `search_params.parquet` was produced.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-/// Resolve a path relative to the workspace root (crates/andes → workspace root).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -30,7 +21,6 @@ fn search_writes_qpx_idparquet_bundle() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // ── Run a default search asking for the QPX bundle ───────────────────────
     let status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
         .arg(&bsa_mgf)
@@ -44,7 +34,6 @@ fn search_writes_qpx_idparquet_bundle() {
         .expect("run andes search");
     assert!(status.success(), "search should exit 0, got: {status}");
 
-    // ── The bundle directory + its three members must exist ──────────────────
     assert!(qpx_dir.is_dir(), "QPX bundle dir should be created");
     let psms_path = qpx_dir.join("psms.parquet");
     let sp_path = qpx_dir.join("search_params.parquet");
@@ -53,12 +42,10 @@ fn search_writes_qpx_idparquet_bundle() {
     assert!(sp_path.exists(), "search_params.parquet should be written");
     assert!(prot_path.exists(), "proteins.parquet should be written");
 
-    // ── Open psms.parquet and assert schema column names + Arrow types ───────
     let file = std::fs::File::open(&psms_path).expect("open psms.parquet");
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("parquet reader builder");
     let schema = builder.schema().clone();
 
-    // QPX schema metadata must be present on the file.
     let md = schema.metadata();
     assert_eq!(md.get("qpx_version").map(String::as_str), Some("1.0"));
     assert_eq!(md.get("creator").map(String::as_str), Some("andes"));
@@ -73,8 +60,6 @@ fn search_writes_qpx_idparquet_bundle() {
     );
     assert!(md.contains_key("uuid"), "uuid metadata missing");
 
-    // Expected (column name, Arrow DataType string) for the scalar columns +
-    // the list/struct columns (checked by name + top-level DataType variant).
     let by_name: HashMap<&str, &arrow::datatypes::DataType> = schema
         .fields()
         .iter()
@@ -111,7 +96,6 @@ fn search_writes_qpx_idparquet_bundle() {
         assert_eq!(*actual, dt, "column `{name}` has wrong Arrow type");
     }
 
-    // List/struct columns: present + the top-level type is a List.
     for name in [
         "modifications",
         "additional_scores",
@@ -129,9 +113,6 @@ fn search_writes_qpx_idparquet_bundle() {
         let DataType::List(elem) = dt else {
             panic!("column `{name}` should be a List, got {dt:?}");
         };
-        // QPX/Parquet LIST convention: the list element field must be named
-        // `element` (arrow-rs defaults to `item`; regression guard for the
-        // OpenMS interop fix).
         assert_eq!(
             elem.name(),
             "element",
@@ -140,16 +121,12 @@ fn search_writes_qpx_idparquet_bundle() {
         );
     }
 
-    // Column count must equal the full QPX PSM schema (29 columns).
     assert_eq!(schema.fields().len(), 29, "psms.parquet column count");
 
-    // ── At least one data row + populated `psm_metavalues` ───────────────────
     use arrow::array::{Array, ListArray, StringArray, StructArray};
 
     let mut reader = builder.build().expect("build parquet reader");
     let mut total = 0usize;
-    // Whether we saw at least one PSM whose `psm_metavalues` carries the
-    // andes:-prefixed discriminative features with parseable numeric values.
     let mut saw_features = false;
     let mut saw_andes_rankscore = false;
     let mut saw_andes_rawscore = false;

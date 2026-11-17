@@ -1,28 +1,3 @@
-//! The match-between-runs stages as commands: `andes quant library`,
-//! `andes quant extract` and `andes quant finalize`, and the in-process run of
-//! all three behind `andes search --lfq --mbr`. Both paths call the same
-//! functions on the same files in the quant directory, so a scattered run and
-//! an in-process run give the same `<base>.mbr.parquet`.
-//!
-//! Files in the quant directory, per run stem: `<stem>.quant.parquet`,
-//! `<stem>.ms1.parquet` and `<stem>.ms2.parquet` (written by `andes search
-//! --quant-dir`),
-//! `<stem>.extract.parquet` (extract); once per experiment: `library.parquet`
-//! and `alignment.parquet` (library).
-//!
-//! Run index: the position of the run's stem in the sorted stem list.
-//! Precursor: a positional-isomer class of the run tables' precursor keys
-//! (residues, modification masses and charge, [`model::IsomerClass`]), so the
-//! site forms of one peptide that win in different spectra or runs are one
-//! precursor; its key is the `<peptidoform>/<charge>` of the site form of its
-//! best PSM. Precursor id: the position of its class in the sorted union of
-//! every run's classes. The rescorer's PSM score, PSM q-value and PEP
-//! (Percolator's `score`, `q-value` and `posterior_error_prob` columns, or the
-//! native rescorer's) are joined to the run tables on (run, SpecId). Library
-//! confidence ranks precursors by the score; the q-value, and the PEP when
-//! `--pep` is given, pick the donor PSMs, as they pick the PSMs of the per-run
-//! quantification.
-
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -55,31 +30,21 @@ use crate::quant_mbr::{
     TransferSelection,
 };
 
-/// Seed of the transfer FDR's folds and models, in every path.
 pub(crate) const MBR_SEED: u64 = 42;
 
 pub(crate) const TABLE_SUFFIX: &str = ".quant.parquet";
 const MS1_SUFFIX: &str = ".ms1.parquet";
 pub(crate) const MS2_SUFFIX: &str = ".ms2.parquet";
 const EXTRACT_SUFFIX: &str = ".extract.parquet";
-/// Extract-table metadata key of the template-fit m/z tolerance, ppm.
 const TOL_KEY: &str = "andes.extract.tol_ppm";
-/// Extract table metadata key of the transfer selection (absent when every
-/// transfer pair was measured).
 const SELECTION_KEY: &str = "andes.extract.transfer_selection";
-/// Extract table tag: the run's MS1 scan spacing and elution-width scale
-/// ([`crate::quant_mbr::RunScales::describe`]).
 const RUN_SCALES_KEY: &str = "andes.extract.run_scales";
-/// Isotopes per precursor envelope in the run tables and the library.
 const ENVELOPE_LEN: usize = 4;
 
 pub(crate) fn artifact(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{stem}{suffix}"))
 }
 
-/// The run stems of the library, sorted: `runs` when given, else every
-/// `<stem>.quant.parquet` in `dir`. Errors: no runs, a repeated stem, or a
-/// run whose PSM, MS1 or MS2 table is missing (every such file is named).
 pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, String> {
     let mut stems: Vec<String> = if runs.is_empty() {
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -135,12 +100,6 @@ pub(crate) fn library_runs(dir: &Path, runs: &[String]) -> Result<Vec<String>, S
     Ok(stems)
 }
 
-/// Hashes SpecIds and residue sequences under one random key (SipHash, the
-/// standard library's keyed hash). A SpecId becomes 128 bits: two 64-bit
-/// hashes of it, under distinct one-byte prefixes. Two distinct SpecIds of a
-/// set of `n` share a key with probability about `n^2 / 2^129` (below
-/// `1e-22` for 100 million SpecIds), so a map keyed by the hash joins as a
-/// map keyed by the SpecId does, without holding the SpecId strings.
 #[derive(Clone, Default)]
 struct SpecIdKeys(std::collections::hash_map::RandomState);
 
@@ -153,44 +112,29 @@ impl SpecIdKeys {
         h.finish()
     }
 
-    /// The 128-bit key of a SpecId.
     fn key(&self, spec_id: &str) -> u128 {
         (u128::from(self.hash(0, spec_id.as_bytes())) << 64)
             | u128::from(self.hash(1, spec_id.as_bytes()))
     }
 
-    /// A 64-bit hash of a residue sequence.
     fn residues(&self, residues: &[u8]) -> u64 {
         self.hash(2, residues)
     }
 }
 
-/// One rescored PSM as the library joins it: the rescorer's score, PSM
-/// q-value and PEP, the label (from the decoy result file or not) and the
-/// positional-isomer class of the rescorer's peptide string, packed in `tag`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Scored {
     pub score: f64,
-    /// The rescorer's PSM q-value.
     pub q: f64,
-    /// The q-value of the pooled model when `q` is a per-run q-value, else NaN.
     pub pooled_q: f64,
-    /// The rescorer's PSM posterior error probability.
     pub pep: f64,
-    /// From the high bit down: [`RESIDUE_BITS`] bits of the residue hash,
-    /// [`MOD_SET_BITS`] bits of the modification multiset's index in
-    /// [`ScoreSet::mod_sets`], and the decoy label.
     tag: u64,
 }
 
-/// Bits of [`Scored::tag`] that hold the residue hash: two different residue
-/// sequences pass the join check together with probability 2^-40.
 const RESIDUE_BITS: u32 = 40;
-/// Bits of [`Scored::tag`] that hold the modification multiset index.
 const MOD_SET_BITS: u32 = 64 - RESIDUE_BITS - 1;
 
 impl Scored {
-    /// From the decoy result file.
     pub(crate) fn is_decoy(&self) -> bool {
         self.tag & 1 == 1
     }
@@ -204,17 +148,12 @@ impl Scored {
     }
 }
 
-/// Rescored PSMs by SpecId and the file(s) they came from. A SpecId is held
-/// as its 128-bit hash ([`SpecIdKeys`]): 48 bytes per PSM in the map.
 pub(crate) struct ScoreSet {
     pub source: String,
     keys: SpecIdKeys,
     psms: HashMap<u128, Scored, rustc_hash::FxBuildHasher>,
-    /// The distinct modification mass multisets of the PSMs' peptides
-    /// ([`IsomerClass::mod_units`]), and the index of each.
     mod_sets: Vec<Box<[i64]>>,
     mod_set_ids: HashMap<Box<[i64]>, u32, rustc_hash::FxBuildHasher>,
-    /// Scratch space of the peptide parse.
     class: IsomerClass,
 }
 
@@ -230,11 +169,6 @@ impl ScoreSet {
         }
     }
 
-    /// Adds a PSM. Errors (the message names [`Self::source`]): a PSM without
-    /// a score, a peptide whose modifications have no mass in the bundled
-    /// Unimod table, or a SpecId already added; `file` names where the PSM is
-    /// read from, for a SpecId repeated within one label or an unreadable
-    /// peptide.
     #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
@@ -305,7 +239,6 @@ impl ScoreSet {
         }
     }
 
-    /// The rescored PSM of a SpecId.
     pub(crate) fn get(&self, spec_id: &str) -> Option<&Scored> {
         self.psms.get(&self.keys.key(spec_id))
     }
@@ -315,9 +248,6 @@ impl ScoreSet {
         self.psms.len()
     }
 
-    /// Whether `s` has label `is_decoy` and the positional-isomer class
-    /// `class` ([`IsomerClass::matches`]): the same residues and modification
-    /// masses, on any sites.
     fn agrees(&self, s: &Scored, is_decoy: bool, class: &IsomerClass) -> bool {
         s.is_decoy() == is_decoy
             && s.residues() == self.keys.residues(class.residues()) >> (64 - RESIDUE_BITS)
@@ -325,8 +255,6 @@ impl ScoreSet {
     }
 }
 
-/// The target and decoy PSMs of one rescoring result. Errors: a PSM without
-/// a finite score or a SpecId among both (the message names `source`).
 pub(crate) fn rescore_scores(
     targets: &HashMap<String, PercolatorPsm>,
     decoys: &HashMap<String, PercolatorPsm>,
@@ -350,36 +278,21 @@ pub(crate) fn rescore_scores(
     Ok(set)
 }
 
-/// Largest share of a run's joined PSMs that may disagree with the rescoring
-/// result on the peptide's positional-isomer class (residues and modification
-/// masses) or the target/decoy label.
 const MAX_JOIN_MISMATCH: f64 = 0.01;
 
-/// Where the rescorer's scores come from: one set for every run (SpecIds
-/// must then be distinct across runs), loaded once; or one set per run stem,
-/// loaded when that run is joined and dropped after it, so only one run's
-/// scores are held at a time.
 pub(crate) enum ScoreLoader<'a> {
-    /// Called with the number of distinct SpecIds of the run tables, to size
-    /// the set.
     Merged(Box<dyn FnOnce(usize) -> Result<ScoreSet, String> + 'a>),
     PerRun(RunScores<'a>),
 }
 
-/// The score set of one run stem.
 pub(crate) type RunScores<'a> = Box<dyn Fn(&str) -> Result<ScoreSet, String> + Sync + 'a>;
 
-/// Where the Percolator results of `quant library` come from.
 #[derive(Debug, PartialEq)]
 enum ScoreSource {
-    /// One target and one decoy file over every run.
     Merged(PathBuf, PathBuf),
-    /// Per run stem, its target and decoy file.
     PerRun(BTreeMap<String, (PathBuf, PathBuf)>),
 }
 
-/// Reads `--psms` / `--decoy-psms`: either one plain path each, or
-/// `<stem>=<path>` once per run of `stems` in each.
 fn score_source(
     psms: &[String],
     decoys: &[String],
@@ -435,7 +348,6 @@ fn score_source(
     ))
 }
 
-/// The loader of `quant library`'s Percolator results.
 fn score_loader(source: &ScoreSource) -> ScoreLoader<'_> {
     match source {
         ScoreSource::Merged(t, d) => {
@@ -450,8 +362,6 @@ fn score_loader(source: &ScoreSource) -> ScoreLoader<'_> {
     }
 }
 
-/// Scores from Percolator's target and decoy PSM files, read one line at a
-/// time; `capacity` sizes the map (the expected number of PSMs).
 fn percolator_scores(targets: &Path, decoys: &Path, capacity: usize) -> Result<ScoreSet, String> {
     let mut set = ScoreSet::with_capacity(
         format!("{} and {}", targets.display(), decoys.display()),
@@ -480,7 +390,6 @@ fn percolator_scores(targets: &Path, decoys: &Path, capacity: usize) -> Result<S
     Ok(set)
 }
 
-/// The columns of a run table that give a precursor's metadata.
 const META_COLUMNS: [&str; 7] = [
     "precursor_key",
     "is_decoy",
@@ -490,7 +399,6 @@ const META_COLUMNS: [&str; 7] = [
     "proteins",
     "isotope_share",
 ];
-/// The columns of a run table that join its PSMs to the rescoring result.
 const JOIN_COLUMNS: [&str; 7] = [
     "spec_id",
     "precursor_key",
@@ -501,18 +409,13 @@ const JOIN_COLUMNS: [&str; 7] = [
     "ion_mobility",
 ];
 
-/// A precursor key's metadata row: the key's first target row, else its first
-/// row, and the run it came from.
 struct KeyMeta {
     has_target: bool,
     run: usize,
     mz: f64,
     charge: u8,
-    /// The isotope fractions, or the number of them when it is not
-    /// [`ENVELOPE_LEN`].
     envelope: Result<[f32; ENVELOPE_LEN], usize>,
     proteins: String,
-    /// Share of the whole isotope pattern held by the envelope's isotopes.
     isotope_share: f32,
 }
 
@@ -521,7 +424,6 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
 }
 
 impl KeyMeta {
-    /// The metadata of `row`, a row of run `run`.
     fn of(row: &output::run_quant_table::RunPsmRow, run: usize) -> Self {
         Self {
             has_target: !row.is_decoy,
@@ -535,13 +437,8 @@ impl KeyMeta {
     }
 }
 
-/// Runs whose tables are read together by `quant library`, so that the rows
-/// of at most this many runs are held at a time.
 const PARALLEL_RUNS: usize = 32;
 
-/// What pass 2 of the library keeps of one run table: the PSMs that join the
-/// rescoring result and agree with it, each with its site form and, for a
-/// donor PSM, its SpecId; and the counts of the others.
 #[derive(Default)]
 struct RunJoin {
     rows: usize,
@@ -553,9 +450,6 @@ struct RunJoin {
     psms: Vec<(PsmIn, u32, Option<Box<str>>)>,
 }
 
-/// What pass 1 of the library keeps of one run table: its precursor keys
-/// (each with its first target row, else its first row), and the hash of
-/// every SpecId in row order when the scores are merged.
 #[derive(Default)]
 struct RunKeys {
     rows: usize,
@@ -563,10 +457,6 @@ struct RunKeys {
     spec: Vec<u128>,
 }
 
-/// Alignment settings with each run's residual-width floor: half the median
-/// spacing of its MS1 scans of one FAIMS voltage, read from
-/// `<stem>.ms1.parquet`. A run without a readable table, or with fewer than two
-/// MS1 scans, keeps the default floor.
 fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
     let mut ap = AlignParams::default();
     ap.run_min_spacing_s = stems
@@ -591,9 +481,6 @@ fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
     ap
 }
 
-/// Log, per aligned run, how many residual-width knots sit at the run's floor:
-/// where the floor binds, the MS1 sampling and not the observed scatter sets
-/// the transfer RT uncertainty.
 fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
     for (r, knots) in library.alignment.residual_sd.iter().enumerate() {
         let Some(knots) = knots else { continue };
@@ -607,29 +494,6 @@ fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
     }
 }
 
-/// Builds the library over the run tables of `stems` (sorted, as from
-/// [`library_runs`]) with the rescorer's scores joined on (run, SpecId), and
-/// writes it to `dir`. `max_q` is the entry gate, `donor_q` the PSM q-value
-/// and `donor_pep` the optional PSM PEP cap of the donor PSMs. A PSM whose
-/// rescoring result names another positional-isomer class (residues or
-/// modification masses) or target/decoy label is skipped.
-///
-/// A precursor is a positional-isomer class with a charge: the precursor keys
-/// of its site forms join it. Its key is the site form of its best PSM: a donor
-/// PSM when it has one, then the highest score, earliest RT and lowest run, as
-/// [`DonorPsms`] picks the PSM whose scan gives the library spectrum.
-///
-/// The run tables are read twice, one run and one record batch at a time:
-/// first the precursor keys and their metadata (the union of their classes
-/// numbers the precursors), then the PSMs, joined to their run's scores and folded into
-/// per-precursor aggregates ([`quant::library::LibraryBuilder`] and the
-/// donor scans). Memory follows the precursors and their donor runs, plus one
-/// run's scores; with merged scores, the one score set (48 bytes per PSM: a
-/// SpecId is held as its 128-bit hash, see [`ScoreSet`]) and, before it is
-/// read, every SpecId's hash and first run, to name a SpecId shared by two
-/// runs. The Percolator files are read one line at a time. Merged scores are
-/// loaded after the tables' SpecIds are checked, so that a SpecId shared by
-/// two runs fails with the runs named.
 pub(crate) fn build_and_write_library(
     dir: &Path,
     stems: &[String],
@@ -667,14 +531,9 @@ pub(crate) fn build_and_write_library(
     };
     let started = std::time::Instant::now();
     let merged = matches!(scores, ScoreLoader::Merged(_));
-    // Pass 1: every precursor key with its metadata row, and (merged scores
-    // only) the first SpecId shared by two runs.
     let mut keys: BTreeMap<String, KeyMeta> = BTreeMap::new();
-    // SpecId (as its 128-bit hash, see `SpecIdKeys`) -> first run.
     let spec_keys = SpecIdKeys::default();
     let mut seen: HashMap<u128, u32, rustc_hash::FxBuildHasher> = HashMap::default();
-    // The first SpecId shared by two runs: the first run, the second run and
-    // the row of the second run.
     let mut shared: Option<(usize, usize, usize)> = None;
     let mut n_rows = 0usize;
     let columns: Vec<&str> = META_COLUMNS
@@ -684,10 +543,6 @@ pub(crate) fn build_and_write_library(
         .collect();
     let all_runs: Vec<usize> = (0..stems.len()).collect();
     for group in all_runs.chunks(PARALLEL_RUNS) {
-        // Each run's table is read in parallel and reduced to its keys (the
-        // first target row of each, else its first row) and SpecId hashes;
-        // the runs are then merged in run order, which gives the keys of a
-        // sequential read of the rows.
         let read: Vec<Result<RunKeys, String>> = group
             .par_iter()
             .map(|&r| {
@@ -757,7 +612,6 @@ pub(crate) fn build_and_write_library(
         }
         ScoreLoader::PerRun(load) => (None, Some(load)),
     };
-    // Every run's modification masses by name, to read a peptidoform's class.
     let mut mod_masses: HashMap<String, f64> = HashMap::new();
     for p in &paths {
         mod_masses.extend(read_run_quant_mods(p)?);
@@ -768,7 +622,6 @@ pub(crate) fn build_and_write_library(
             .copied()
             .or_else(|| bundled_unimod_mass(tag))
     };
-    // The precursor keys of each positional-isomer class and charge.
     let site_keys: Vec<(String, KeyMeta)> = std::mem::take(&mut keys).into_iter().collect();
     let mut classes: BTreeMap<(IsomerClass, u8), Vec<u32>> = BTreeMap::new();
     for (i, (key, m)) in site_keys.iter().enumerate() {
@@ -776,10 +629,6 @@ pub(crate) fn build_and_write_library(
             .map_err(|e| format!("{}: precursor {key:?}: {e}", paths[m.run].display()))?;
         classes.entry((class, m.charge)).or_default().push(i as u32);
     }
-    // Dense precursor ids over the sorted classes; the first target row of
-    // the class's first site form with one (else of its first site form) gives
-    // its metadata. A decoy row of a class that also has target rows is
-    // dropped: a precursor is all-target or all-decoy.
     let mut meta = Vec::with_capacity(classes.len());
     let mut proteins = Vec::with_capacity(classes.len());
     let mut target_key = Vec::with_capacity(classes.len());
@@ -814,7 +663,6 @@ pub(crate) fn build_and_write_library(
         target_key.push(m.has_target);
         forms.push(sites);
     }
-    // Precursor key -> (precursor id, site form index in `site_keys`).
     let site_keys_ref = &site_keys;
     let id_of: HashMap<&str, (u32, u32)> = forms
         .iter()
@@ -825,15 +673,11 @@ pub(crate) fn build_and_write_library(
                 .map(move |&i| (site_keys_ref[i as usize].0.as_str(), (id as u32, i)))
         })
         .collect();
-    // Pass 2: the PSMs, joined to their run's scores.
     let mut builder = LibraryBuilder::new(meta.len(), stems.len(), donor_q, donor_pep);
     let mut donors = DonorPsms::new(meta.len());
     let mut best = vec![None::<BestForm>; meta.len()];
     let (mut unscored_t, mut unscored_d, mut shadowed, mut mismatched) = (0usize, 0, 0, 0);
     let (mut n_psms, mut donor_psms, mut n_joined) = (0usize, 0usize, 0usize);
-    // The runs are joined in parallel (their tables, their scores, the
-    // isomer-class check); the joined PSMs are then added in run order and
-    // row order, as a sequential read would.
     let join = |r: usize| -> Result<RunJoin, String> {
         let own;
         let set = match (&merged_scores, &per_run) {
@@ -893,8 +737,6 @@ pub(crate) fn build_and_write_library(
                     .push((p, site, donor.then(|| row.spec_id.as_str().into())));
             }
         }
-        // Per-run results whose SpecIds all belong to another run (every SpecId
-        // starts with its run's file stem) would join nothing and pass silently.
         if per_run.is_some() && run.joined == 0 && run.rows > 0 && !set.psms.is_empty() {
             return Err(format!(
                 "run {}: none of the {} rescored PSMs in {} has a SpecId of this run; are these the rescoring results of this run?",
@@ -951,7 +793,6 @@ pub(crate) fn build_and_write_library(
     }
     drop(id_of);
     drop(merged_scores);
-    // Each precursor's key: the site form of its best PSM.
     let (mut multi, mut n_forms) = (0usize, 0usize);
     for (id, b) in best.iter().enumerate() {
         if let Some(b) = b {
@@ -1078,28 +919,20 @@ pub(crate) fn build_and_write_library(
     Ok(stored)
 }
 
-/// What [`entry_spectra`] gave, for the log.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct SpectrumCounts {
     pub with_spectrum: usize,
-    /// The best donor PSM's scan is not in its run's MS2 table.
     pub no_scan: usize,
-    /// The peptidoform holds a residue or modification without a mass.
     pub no_masses: usize,
-    /// Fewer than [`quant::ms2::MIN_LIBRARY_FRAGMENTS`] fragments matched.
     pub too_few: usize,
 }
 
-/// Per precursor id: the library spectrum and the donor PSMs' `(run, RT)`;
-/// and the counts.
 pub(crate) type EntrySpectra = (
     Vec<Option<LibrarySpectrum>>,
     Vec<Vec<(u16, f64)>>,
     SpectrumCounts,
 );
 
-/// The MS2 table scan of a PSM SpecId (`<spec_key>_<rank>` or
-/// `<spec_key>_<rank>_<row>`).
 pub(crate) fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<usize> {
     let mut id = spec_id;
     for _ in 0..2 {
@@ -1111,16 +944,12 @@ pub(crate) fn scan_of(by_key: &HashMap<&str, usize>, spec_id: &str) -> Option<us
     None
 }
 
-/// The best PSM of a precursor so far and its site form, which keys it: a
-/// donor PSM beats any other PSM, then the higher score, earlier RT and lower
-/// run, as [`DonorPsms`] picks the best donor.
 #[derive(Clone, Copy)]
 struct BestForm {
     donor: bool,
     score: f64,
     rt: f64,
     run: u16,
-    /// Index of the site form's precursor key.
     site: u32,
 }
 
@@ -1135,18 +964,12 @@ impl BestForm {
     }
 }
 
-/// The donor PSMs of every precursor as the library's spectra need them,
-/// added one at a time in run order: per precursor id with a donor PSM, the
-/// `(run, RT)` of each donor PSM and the best one (highest score; then
-/// earliest RT, lowest run) with its SpecId.
 pub(crate) struct DonorPsms {
-    /// Per precursor id: its index in `scans` and `best`, or `u32::MAX`.
     slot: Vec<u32>,
     scans: Vec<Vec<(u16, f64)>>,
     best: Vec<(BestDonor, Box<str>)>,
 }
 
-/// What [`DonorPsms`] compares of a donor PSM.
 #[derive(Clone, Copy)]
 struct BestDonor {
     score: f64,
@@ -1163,8 +986,6 @@ impl DonorPsms {
         }
     }
 
-    /// Adds donor PSM `p` with SpecId `spec_id`; ignored when its id is out of
-    /// range.
     pub(crate) fn add(&mut self, p: &PsmIn, spec_id: &str) {
         let id = p.precursor as usize;
         if id >= self.slot.len() {
@@ -1201,12 +1022,6 @@ impl DonorPsms {
         self.scans[i].push((p.run, p.rt));
     }
 
-    /// Per precursor id of `lib`: the empirical fragment spectrum of an
-    /// entry's best donor PSM, matched on its scan in the run's MS2 table at
-    /// the table's fragment tolerance, and the `(run, RT)` of every donor PSM
-    /// of the entry, sorted; empty for a precursor that is not an entry.
-    /// The MS2 tables are read by the runs in parallel. Errors: an unreadable MS2
-    /// or PSM table (the message names it).
     pub(crate) fn finish(
         self,
         dir: &Path,
@@ -1219,8 +1034,6 @@ impl DonorPsms {
             mut scans,
             best: donor_best,
         } = self;
-        // Per precursor id of an entry: its donor scans, sorted, and its best
-        // donor PSM's run and SpecId.
         let mut entry_scans: Vec<Vec<(u16, f64)>> = vec![Vec::new(); n];
         let mut best: Vec<Option<(u16, Box<str>)>> = vec![None; n];
         let mut donor_best: Vec<Option<(BestDonor, Box<str>)>> =
@@ -1240,7 +1053,6 @@ impl DonorPsms {
         drop(slot);
         let mut spectra: Vec<Option<LibrarySpectrum>> = vec![None; n];
         let mut c = SpectrumCounts::default();
-        // The precursor ids whose best donor PSM is in each run, with its SpecId.
         let mut wanted: Vec<Vec<(usize, &str)>> = vec![Vec::new(); stems.len()];
         for (id, b) in best.iter().enumerate() {
             if let Some((run, spec_id)) = b {
@@ -1250,8 +1062,6 @@ impl DonorPsms {
             }
         }
         type Made = Vec<(usize, Result<LibrarySpectrum, u8>)>;
-        // Runs in parallel, each reading its own MS2 table; the results are
-        // taken in run order, so the first error is the first run's.
         let per_run: Vec<Result<Made, String>> = wanted
             .par_iter()
             .zip(stems.par_iter())
@@ -1375,9 +1185,6 @@ fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
     );
 }
 
-/// Measures run `run` of the library on its MS1 table (the transfers that
-/// `selection` keeps), checks its transfer and pseudo-transfer rows against
-/// its MS2 table, and writes `<stem>.extract.parquet`.
 pub(crate) fn extract_and_write(
     dir: &Path,
     stored: &StoredLibrary,
@@ -1445,8 +1252,6 @@ pub(crate) fn extract_and_write(
     Ok(ex.rows)
 }
 
-/// Template-fit settings for an MS1 tolerance (`--lfq-tol`, ppm only;
-/// default 10 ppm).
 pub(crate) fn evidence_params(tol: Option<Tolerance>) -> Result<EvidenceParams, String> {
     match tol {
         None => Ok(EvidenceParams::default()),
@@ -1460,13 +1265,10 @@ pub(crate) fn evidence_params(tol: Option<Tolerance>) -> Result<EvidenceParams, 
     }
 }
 
-/// Peptidoform and charge of a `"<peptidoform>/<charge>"` key.
 pub(crate) fn split_key(key: &str) -> &str {
     key.rsplit_once('/').map_or(key, |(p, _)| p)
 }
 
-/// Bare sequence and modification records of a peptidoform written as
-/// residues with `[...]` tags (a UNIMOD accession or a signed mass delta).
 pub(crate) fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
     let mut seq = String::new();
     let mut mods = Vec::new();
@@ -1489,27 +1291,19 @@ pub(crate) fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
     (seq, mods)
 }
 
-/// The protein groups of the QPX views: the inference over every run's PSMs
-/// and the protein q-value cut.
 pub(crate) struct ProteinGroups<'a> {
     pub inf: &'a Inference,
     pub max_q: f64,
 }
 
-/// What the feature writers did with the features of the protein groups.
 #[derive(Default)]
 pub(crate) struct GroupTally {
-    /// By group id, the features written.
     pub counts: HashMap<usize, FeatureCounts>,
-    /// Features whose peptide counts for no target group.
     pub no_group: usize,
-    /// Features whose group is above the protein q-value cut.
     pub above_cut: usize,
 }
 
 impl GroupTally {
-    /// The group accessions and the group of a feature of the peptide
-    /// `sequence`, counted; `None` (counted) when it has no group at the cut.
     pub(crate) fn assign(
         &mut self,
         pg: &ProteinGroups<'_>,
@@ -1544,8 +1338,6 @@ impl GroupTally {
         }
     }
 
-    /// Writes `quantms.pg.parquet` into `dir`: the groups of `pg` at its cut,
-    /// with the features counted here, over `runs`.
     pub(crate) fn write_pg(
         &self,
         dir: &Path,
@@ -1584,11 +1376,6 @@ impl GroupTally {
     }
 }
 
-/// The QPX feature rows of the MBR table: every row except the
-/// below-threshold and shared-feature transfers and identified rows, which stay in
-/// `<base>.mbr.parquet` only. With `groups`, each row carries its peptide's
-/// protein group, and rows whose peptide has no group at or below the cut
-/// are left out (counted in `tally`). Feature ids continue from `last_id`.
 fn feature_records(
     stored: &StoredLibrary,
     features: &[MbrFeature],
@@ -1670,17 +1457,11 @@ fn feature_records(
         .collect()
 }
 
-/// Transfer FDR, identified quality q-values and the MBR outputs over the
-/// extract rows of `source` ([`finalize_stream`] within `limits`); with
-/// `parquet_dir`, also `<parquet_dir>/quantms.feature.parquet`, written as the
-/// rows come, and with `groups` the features' protein groups and
-/// `<parquet_dir>/quantms.pg.parquet`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_and_write(
     stored: &StoredLibrary,
     source: &dyn ExtractSource,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     seed: u64,
     limits: FinalizeLimits,
     trace_fraction: f64,
@@ -1699,7 +1480,7 @@ pub(crate) fn finalize_and_write(
     };
     let params = FinalizeParams {
         mbr_fdr,
-        quant_feature_fdr,
+        quant_feature_fdr: None,
         seed,
         limits,
         mbr_path: &table,
@@ -1734,8 +1515,6 @@ pub(crate) fn finalize_and_write(
     Ok(())
 }
 
-/// Library, extract (one run at a time) and finalize in this process, from
-/// the per-run artifacts in `dir`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_in_process(
     dir: &Path,
@@ -1746,7 +1525,6 @@ pub(crate) fn run_in_process(
     donor_q: f64,
     donor_pep: Option<f64>,
     mbr_fdr: f64,
-    quant_feature_fdr: Option<f64>,
     base: &Path,
     parquet_dir: Option<&Path>,
     groups: Option<&ProteinGroups<'_>>,
@@ -1762,8 +1540,6 @@ pub(crate) fn run_in_process(
         donor_pep,
     )?;
     let fingerprint = library_fingerprint(&stored);
-    // One run at a time: each extraction is parallel over its precursors and
-    // holds that run's MS1; finalize reads the extract tables back.
     for r in 0..stems.len() {
         extract_and_write(
             dir,
@@ -1784,7 +1560,6 @@ pub(crate) fn run_in_process(
         &stored,
         &files,
         mbr_fdr,
-        quant_feature_fdr,
         MBR_SEED,
         FinalizeLimits::default(),
         crate::quant_finalize::DEFAULT_TRACE_FRACTION,
@@ -1803,8 +1578,8 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
         &a.quant_dir,
         &stems,
         score_loader(&source),
-        a.mbr_library_fdr,
-        a.quant_fdr,
+        a.mbr_donor_fdr(),
+        a.psm_fdr,
         a.pep,
     )
     .map(|_| ())
@@ -1844,9 +1619,6 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// Returns the allocator's free pages to the system. glibc keeps memory freed
-/// by many small allocations (the tens of millions of PSM rows of the
-/// protein inference) in its arenas, where the process's RSS still counts it.
 fn release_free_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     // SAFETY: malloc_trim only releases free heap memory; it is thread safe.
@@ -1888,6 +1660,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         }
         paths.push(path);
     }
+    let transfer_fdr = a.quant_transfer_fdr();
     let limits = FinalizeLimits {
         max_train_rows: a.max_train_rows,
         transfer_models: a.transfer_models,
@@ -1903,8 +1676,6 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         ),
         _ => None,
     };
-    // The inference's PSM maps and database are dropped by now; hand their
-    // pages back before the finalize passes allocate their own.
     if inf.is_some() {
         release_free_memory();
     }
@@ -1915,8 +1686,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     finalize_and_write(
         &stored,
         &ExtractFiles(paths),
-        a.mbr_fdr,
-        a.quant_feature_fdr.0,
+        transfer_fdr,
         a.seed,
         limits,
         a.quant_trace_fraction,
@@ -1926,10 +1696,8 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     )
 }
 
-/// Runs one `andes quant` subcommand.
 pub(crate) fn run_quant_command(cmd: QuantCommand) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = cmd.threads() {
-        // Ignore the error of a pool that is already built (tests).
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global();
@@ -2236,8 +2004,6 @@ mod tests {
         assert_eq!(records[0].proteins[0].0, "P1");
         assert!(records[0].group.is_none());
 
-        // With protein groups: PEPTIDEK's group passes the cut, PEPTMIDEK's
-        // does not.
         let group = |id: usize, lead: &str, q: f64| output::ProteinGroup {
             id,
             lead: lead.into(),
@@ -2288,10 +2054,6 @@ mod tests {
         assert_eq!((tally.no_group, tally.above_cut), (0, 1));
     }
 
-    /// 200 target PSMs of distinct peptides in run `a`, scored by a rescoring
-    /// result at q = 0.001 and PEP = `pep`; the result names `wrong.0` (a
-    /// SpecId) with peptide `wrong.1`. The MS2 table holds every PSM's scan:
-    /// the even ones carry the peptide's b/y ladder, the odd ones noise.
     fn one_run_library(
         dir: &Path,
         pep: f64,
@@ -2406,7 +2168,6 @@ mod tests {
 
     #[test]
     fn donors_honour_the_pep_cap() {
-        // q = 0.001 and PEP = 0.5 for every PSM.
         let dir = tempfile::tempdir().unwrap();
         let (stems, t) = one_run_library(dir.path(), 0.5, None);
         let build = |pep: Option<f64>| {
@@ -2423,8 +2184,6 @@ mod tests {
         };
         let open = build(None);
         assert_eq!(open.library.entries.len(), 200);
-        // The even PSMs' scans carry their ladder: a spectrum each; every
-        // entry keeps its one donor scan.
         let with: Vec<usize> = (0..open.spectra.len())
             .filter(|&id| open.spectra[id].is_some())
             .collect();
@@ -2452,9 +2211,6 @@ mod tests {
 
     #[test]
     fn mismatched_joins_are_not_donors() {
-        // s7_7_1 is PEPTIDEIAK in the run table; the rescoring result names
-        // another peptide, or the same residues with another modification
-        // composition; the same peptide joins.
         for (wrong, joins) in [
             ("K.WRONGPEPTIDEK.A", false),
             ("K.PEPTIDEIAK+8.01420.A", false),
@@ -2487,8 +2243,6 @@ mod tests {
 
     #[test]
     fn a_run_with_mismatched_modifications_fails_the_join_check() {
-        // Every rescoring peptide carries an extra modification the run table
-        // lacks: same residues, another composition.
         let dir = tempfile::tempdir().unwrap();
         let (stems, mut t) = one_run_library(dir.path(), 0.001, None);
         for p in t.values_mut() {
@@ -2511,9 +2265,6 @@ mod tests {
         );
     }
 
-    /// Runs `a`, `b` and `c` share 150 peptides (the alignment anchors); one
-    /// phosphopeptide wins as its S-form in `a` and `c` and as its T-form in
-    /// `b`, where it scores best.
     #[test]
     fn site_forms_of_one_peptide_are_one_precursor() {
         use output::run_quant_table::{write_run_quant_table, RunPsmRow};

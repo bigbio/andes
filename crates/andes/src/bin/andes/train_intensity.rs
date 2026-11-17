@@ -1,5 +1,3 @@
-//! Fragment-intensity GBDT and rich-ion LLR training.
-
 use std::path::PathBuf;
 
 use crate::model_select::load_seed_param;
@@ -101,13 +99,6 @@ pub(crate) struct TrainRichIonLlrArgs {
     pub(crate) allow_degenerate_model: bool,
 }
 
-/// `andes train-intensity-gbdt`: fit a v3 GBDT fragment-intensity regressor
-/// from externally-labeled PSM parquets and embed it in a Parquet model store.
-///
-/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
-/// from the `run_train` path and delegates the store write to
-/// `attach_to_model`, preserving the target model's other content and all
-/// other models.
 pub(crate) fn run_train_intensity_gbdt(
     args: TrainIntensityGbdtArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -125,7 +116,6 @@ pub(crate) fn run_train_intensity_gbdt(
 
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT_FRAG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT_FRAG.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -134,7 +124,6 @@ pub(crate) fn run_train_intensity_gbdt(
             .expect("build_global");
     });
 
-    // ── 2. Read all input parquets ────────────────────────────────────────────
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
         eprintln!("train-intensity-gbdt: reading {} ...", input.display());
@@ -151,12 +140,10 @@ pub(crate) fn run_train_intensity_gbdt(
         args.inputs.len()
     );
 
-    // ── 3. Load seed Param and build the scorer ───────────────────────────────
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
     eprintln!("train-intensity-gbdt: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4. Build frag-intensity regression dataset ────────────────────────────
     eprintln!(
         "train-intensity-gbdt: building frag dataset from {} PSMs ...",
         psms.len()
@@ -176,10 +163,6 @@ pub(crate) fn run_train_intensity_gbdt(
         ds.n_features,
     );
 
-    // ── 5. Train the GBDT regressor ───────────────────────────────────────────
-    // Hard-error if the trainer's quality gate fails (finding 3.6): a training
-    // subcommand must not silently emit a non-deployable model, unless the
-    // operator opts into the degenerate fallback.
     let train_params = TrainParams {
         allow_degenerate: args.allow_degenerate_model,
         ..TrainParams::default()
@@ -190,10 +173,6 @@ pub(crate) fn run_train_intensity_gbdt(
         trained_frag.trees.len()
     );
 
-    // ── 6. Attach the trained model to --model-id in --out-store ─────────────
-    // An existing model keeps its rank tables, other GBDTs and source ledger;
-    // a new one starts from the seed Param, whose selection columns
-    // (activation/instrument/enzyme/protocol) route it.
     let store_path = &args.out_store;
     let existed = attach_to_model(store_path, &model_id, seed_param, |p| {
         p.frag_intensity_model = Some(Arc::new(trained_frag));
@@ -212,14 +191,6 @@ pub(crate) fn run_train_intensity_gbdt(
     Ok(())
 }
 
-/// `andes train-rich-ion-llr`: fit a GBDT rich-ion LLR classifier (logistic;
-/// decoy-aware) from externally-labeled PSM parquets and embed it in a Parquet
-/// model store.
-///
-/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
-/// from the `run_train` path and delegates the store write to
-/// `attach_to_model`, preserving the target model's other content and all
-/// other models.
 pub(crate) fn run_train_rich_ion_llr(
     args: TrainRichIonLlrArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -237,7 +208,6 @@ pub(crate) fn run_train_rich_ion_llr(
 
     let t0 = std::time::Instant::now();
 
-    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
     static POOL_INIT_RICH_ION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT_RICH_ION.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -246,7 +216,6 @@ pub(crate) fn run_train_rich_ion_llr(
             .expect("build_global");
     });
 
-    // ── 2. Read all input parquets ────────────────────────────────────────────
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
         eprintln!("train-rich-ion-llr: reading {} ...", input.display());
@@ -263,12 +232,10 @@ pub(crate) fn run_train_rich_ion_llr(
         args.inputs.len()
     );
 
-    // ── 3. Load seed Param and build the scorer ───────────────────────────────
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
     eprintln!("train-rich-ion-llr: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4. Build rich-ion classification dataset ──────────────────────────────
     eprintln!(
         "train-rich-ion-llr: building ion dataset from {} PSMs ...",
         psms.len()
@@ -288,8 +255,6 @@ pub(crate) fn run_train_rich_ion_llr(
         ds.n_features,
     );
 
-    // ── 5. Train the GBDT classifier (logits held-out AUC) ────────────────────
-    // Hard-error on quality-gate failure (finding 3.6) unless opted out.
     let train_params = TrainParams {
         allow_degenerate: args.allow_degenerate_model,
         ..TrainParams::default()
@@ -300,10 +265,6 @@ pub(crate) fn run_train_rich_ion_llr(
         trained_rich_ion.trees.len()
     );
 
-    // ── 6. Attach the trained model to --model-id in --out-store ─────────────
-    // An existing model keeps its rank tables, other GBDTs and source ledger;
-    // a new one starts from the seed Param, whose selection columns
-    // (activation/instrument/enzyme/protocol) route it.
     let store_path = &args.out_store;
     let existed = attach_to_model(store_path, &model_id, seed_param, |p| {
         p.rich_ion_model = Some(Arc::new(trained_rich_ion));

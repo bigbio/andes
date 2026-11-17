@@ -1,39 +1,3 @@
-//! Bootstrap label adapter: run a seed search, compute target-decoy FDR, and
-//! return the confident target PSMs as [`LabeledMatch`]es for the trainer.
-//!
-//! # Algorithm
-//!
-//! 1. Load the FASTA target database and build a [`SearchIndex`] (targets +
-//!    peptide-level decoys), reusing the same construction as the production binary.
-//! 2. Run the full search with the seed `RankScorer` via
-//!    [`match_spectra_out_of_core`] — the out-of-core path with fragment-ion
-//!    retrieval that `andes search` takes. No search or scoring logic is
-//!    re-implemented here.
-//! 3. For each spectrum take the **best PSM** (highest `rank_score`) from the
-//!    queue.
-//! 4. Sort best-per-spectrum PSMs by `rank_score` descending (best first).
-//! 5. Walk the sorted list computing a running target/decoy count and q-value
-//!    at each position: `q = running_decoys / max(running_targets, 1)`.
-//! 6. Convert to a proper monotone q-value by scanning from the bottom and
-//!    propagating the minimum seen so far.
-//! 7. Emit a [`LabeledMatch`] for every TARGET PSM whose q-value ≤ `train_fdr`.
-//!
-//! # Determinism
-//!
-//! The search engine (`match_spectra_out_of_core`) is deterministic for fixed
-//! inputs and a fixed Rayon thread count. The Rayon thread pool is shared
-//! across the process; the first caller establishes the pool size. For bit-identical
-//! results across runs, the caller should ensure a fixed number of threads
-//! (e.g. via `RAYON_NUM_THREADS`). The FDR computation and the returned Vec
-//! are fully deterministic after the search.
-//!
-//! # Decoy prefix
-//!
-//! The default decoy prefix `"XXX_"` is used. Decoys receive
-//! accessions like `"XXX_P02769"`, and `Candidate::is_decoy` is set by
-//! `starts_with("XXX_")` in `enumerate_candidates`. The prefix is consistent
-//! with the production binary default.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -48,72 +12,18 @@ use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 
 use crate::TrainError;
 
-/// The decoy prefix used by `bootstrap_labels` when building the
-/// decoy database and classifying candidates as target or decoy.
 pub const BOOTSTRAP_DECOY_PREFIX: &str = "XXX_";
 
-/// Fragment-mass tolerance (Da) for the GF node-scoring match window.
-///
-/// Intentionally 0.5 Da regardless of instrument, and MUST stay equal to the
-/// production search binary's `fragment_tol_da` (also 0.5). The generating
-/// function scores over an integer nominal-mass axis (~0.5 Da bins), so the
-/// node-match window cannot be tighter than ~0.5 Da — accurate-mass (ppm)
-/// discrimination is recaptured in the Percolator features, NOT here. Deriving
-/// this from `seed.param().mme` (e.g. 20 ppm) would make training diverge from
-/// the production search and is incorrect.
 const FRAGMENT_TOL_DA: f64 = 0.5;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// A confident target PSM accepted from the bootstrap seed search.
-///
-/// Carries everything the [`crate::accumulate::StatsAccumulator`] needs:
-/// `spectrum`, `peptide`, and `charge`. The spectrum itself is not stored
-/// here — the caller supplies the `spectra` slice to the trainer and looks
-/// up `spectra[spectrum_index]`.
 #[derive(Debug, Clone)]
 pub struct LabeledMatch {
-    /// Index into the `spectra` slice passed to [`bootstrap_labels`].
     pub spectrum_index: usize,
-    /// The accepted (target) peptide for this spectrum.
     pub peptide: Peptide,
-    /// The precursor charge state used when scoring.
     pub charge: u8,
-    /// The q-value (monotone TDC FDR) at which this PSM was accepted.
-    /// Always ≤ the `train_fdr` passed to [`bootstrap_labels`].
     pub confidence: f64,
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Run a seed search over `spectra` against the FASTA `database`, generate
-/// peptide-level decoys automatically, compute target-decoy competition FDR over
-/// the best PSM per spectrum, and return the TARGET PSMs whose q-value ≤
-/// `train_fdr`.
-///
-/// # Arguments
-///
-/// * `spectra`       — the MS2 spectra to search (already loaded by the caller).
-/// * `database`      — path to the FASTA target database (decoys generated internally).
-/// * `seed`          — the scoring model used for the seed search.
-/// * `search_params` — search parameters (enzyme, mods, tolerances, …).
-/// * `train_fdr`     — q-value threshold for accepting a PSM as a confident label.
-/// * `cache_dir`     — directory of the candidate-index cache (created if missing).
-///
-/// # Returns
-///
-/// `Ok(Vec<LabeledMatch>)` — possibly empty when `train_fdr` is very strict or
-/// the fixture is tiny with no confident identifications.
-///
-/// # Errors
-///
-/// Returns [`TrainError::Io`] if the FASTA cannot be opened or read or the
-/// search's candidate index cannot be built, or [`TrainError::Other`] for
-/// downstream parsing failures.
 pub fn bootstrap_labels(
     spectra: &[Spectrum],
     database: &Path,
@@ -122,7 +32,6 @@ pub fn bootstrap_labels(
     train_fdr: f64,
     cache_dir: &Path,
 ) -> Result<Vec<LabeledMatch>, TrainError> {
-    // ── 1. Load FASTA + build SearchIndex (target + peptide-level decoys) ─────────
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
@@ -135,10 +44,6 @@ pub fn bootstrap_labels(
         &Proteases::of(search_params),
     );
 
-    // ── 2. Run the seed search ────────────────────────────────────────────────
-    // Reuse the production out-of-core entry point (fragment-ion retrieval,
-    // mass-ordered chunks, queues returned in input order) — no search logic
-    // is duplicated here.
     let (queues, candidates) = match_spectra_out_of_core(
         spectra,
         &idx,
@@ -149,9 +54,6 @@ pub fn bootstrap_labels(
         cache_dir,
     )?;
 
-    // ── 3. Collect best PSM per spectrum ──────────────────────────────────────
-    // Each TopNQueue is ordered best-first by `rank_score`. We take the single
-    // best entry per spectrum and rank it by its `tdc_score`.
     struct BestPsm {
         spectrum_index: usize,
         peptide: Peptide,
@@ -165,7 +67,6 @@ pub fn bootstrap_labels(
         if queue.is_empty() {
             continue;
         }
-        // peek_top returns the best (highest rank_score).
         if let Some(psm) = queue.peek_top() {
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
@@ -179,10 +80,8 @@ pub fn bootstrap_labels(
         }
     }
 
-    // ── 4-6. Target-decoy q-values, best score first ──────────────────────────
     let mono_q = tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
-    // ── 7. Collect accepted TARGET PSMs ──────────────────────────────────────
     let mut labels: Vec<LabeledMatch> = Vec::new();
     for (psm, q) in best_psms.into_iter().zip(mono_q.into_iter()) {
         if !psm.is_decoy && q <= train_fdr {
@@ -198,28 +97,10 @@ pub fn bootstrap_labels(
     Ok(labels)
 }
 
-/// The score a spectrum's best PSM is ranked by in the target-decoy walk: the
-/// `node + cleavage` score, the one the PIN carries as `RankScore`. Not
-/// `rank_score`, which orders the top-N queue and adds the edge score: on dense
-/// high-resolution spectra a long peptide's edge score runs to hundreds and
-/// puts spurious hits, decoys among them, above the real identifications, so
-/// almost no target passes the q-value cut.
 pub(crate) fn tdc_score(psm: &PsmMatch) -> f32 {
     psm.score
 }
 
-/// Target-decoy q-values over the best PSM per spectrum. Sorts `psms` by
-/// score descending (a NaN score last, a target before a decoy on equal
-/// scores) and returns the q-value of each, in that order.
-///
-/// The running q-value at a position is decoys / max(targets, 1) over the PSMs
-/// at or above it (no `+1` on the decoys, as in Percolator's PSM q-values),
-/// made monotone from the bottom. Raw scores are coarse integers, so ties are
-/// common, and every PSM in an equal-score bucket takes the bucket's WORST
-/// q-value, so a tied decoy fails the whole bucket instead of a favourable
-/// within-tie order accepting a tied target.
-///
-/// Shared by [`bootstrap_labels`] and [`crate::gate::count_target_psms`].
 pub(crate) fn tdc_q_values<T>(
     psms: &mut [T],
     score_of: impl Fn(&T) -> f32,
@@ -258,16 +139,6 @@ pub(crate) fn tdc_q_values<T>(
     q
 }
 
-/// Make q-values conservative across equal-`rank_score` ties.
-///
-/// `psms` MUST be sorted by `rank_score` descending (equal scores contiguous),
-/// matching the order `q` was computed in. For each maximal run of PSMs with
-/// the same `rank_score` (compared on exact `f32` bits, NaN-safe), every q in
-/// that run is set to the WORST (maximum) q seen in the run. This prevents a
-/// favourable within-tie ordering (e.g. target-before-decoy) from accepting a
-/// target at a given FDR when a tied decoy should make the whole bucket fail.
-///
-/// Used by [`tdc_q_values`].
 pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl Fn(&T) -> f32) {
     debug_assert_eq!(psms.len(), q.len());
     let mut start = 0usize;
@@ -277,7 +148,6 @@ pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl
         while end < psms.len() && scores_tie(score_of(&psms[end]), s) {
             end += 1;
         }
-        // Worst (max) q within [start, end).
         let mut worst = q[start];
         for &qi in &q[start + 1..end] {
             if qi > worst {
@@ -291,8 +161,6 @@ pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl
     }
 }
 
-/// Two `rank_score`s tie iff they have identical bit patterns. Treats all NaNs
-/// as a single tie class (they sort together as `NEG_INFINITY` above).
 fn scores_tie(a: f32, b: f32) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
@@ -304,13 +172,11 @@ fn scores_tie(a: f32, b: f32) -> bool {
 mod tests {
     use super::*;
 
-    /// Minimal stand-in for the per-spectrum best PSM used by the FDR walk.
     struct P {
         rank_score: f32,
         is_decoy: bool,
     }
 
-    /// Per-PSM q-values (best score first) plus the number of accepted targets at `fdr`.
     fn fdr(mut psms: Vec<P>, fdr: f64) -> (Vec<f64>, usize) {
         let q = tdc_q_values(&mut psms, |p| p.rank_score, |p| p.is_decoy);
         let accepted = psms
@@ -323,29 +189,21 @@ mod tests {
 
     #[test]
     fn tied_target_and_decoy_bucket_is_counted_conservatively() {
-        // One confident target, then a target tied with a decoy at the same
-        // raw rank_score. With target-before-decoy ordering the running ratio
-        // would dip *before* the decoy is counted, accepting the tied target at
-        // 1% FDR. The conservative bucket pass must give both tied PSMs the same
-        // (worst) q, so the tied decoy makes the bucket fail and the tied target
-        // is NOT accepted.
         let psms = vec![
             P {
                 rank_score: 10.0,
                 is_decoy: false,
-            }, // clearly good target
+            },
             P {
                 rank_score: 5.0,
                 is_decoy: false,
-            }, // tied with decoy below
+            },
             P {
                 rank_score: 5.0,
                 is_decoy: true,
-            }, // tied decoy
+            },
         ];
         let (q, accepted) = fdr(psms, 0.01);
-        // The two tied PSMs share the worst q in their bucket (q = 0.5 here),
-        // so neither passes 1% FDR. Only the first, clearly-good target does.
         assert_eq!(
             accepted, 1,
             "tied target must not be accepted when its bucket has a decoy"
@@ -356,8 +214,6 @@ mod tests {
 
     #[test]
     fn untied_scores_are_unaffected() {
-        // With strictly distinct scores the bucket pass is a no-op: each PSM is
-        // its own bucket, so q-values match the plain monotone TDC result.
         let psms = vec![
             P {
                 rank_score: 10.0,
@@ -377,7 +233,6 @@ mod tests {
         assert!(q[0] <= 0.01 && q[1] <= 0.01);
     }
 
-    /// A PSM as the top-N queue holds it: `rank_score` is `score` plus the edge score.
     fn queued(score: f32, edge: i32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
@@ -396,11 +251,6 @@ mod tests {
         }
     }
 
-    /// The walk ranks by the PIN `RankScore` (`score`), not by the edge-inflated
-    /// queue key. Long peptides on dense high-resolution spectra get edge scores
-    /// in the hundreds: ranked by `rank_score`, three decoys with a huge edge sit
-    /// above every target and no target passes 1% (`train-from-search` found 0
-    /// labels on such timsTOF runs); ranked by `score`, all 200 targets pass.
     #[test]
     fn edge_inflated_decoys_do_not_outrank_targets() {
         let mut hits: Vec<(PsmMatch, bool)> = Vec::new();

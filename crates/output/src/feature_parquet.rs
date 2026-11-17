@@ -1,26 +1,3 @@
-//! `quantms.feature.parquet`: the QPX feature view (OpenMS
-//! `QPXFeatureSchema::schema()`, as `IsobaricWorkflow -out_qpx` and
-//! `ConsensusMapArrowExport` write it).
-//!
-//! One row is "a quantified peptidoform in one run": a label-free feature
-//! carries a single `{label: "LFQ", intensity}`; an isobaric PSM carries one
-//! entry per channel (`TMT126`, `TMT127N`, ...). Normalized or protein-level
-//! values are never written here; they belong to the quantms / OpenMS layer.
-//!
-//! When any record carries match-between-runs columns ([`MbrColumns`]), six
-//! nullable columns follow the QPX ones: `evidence_type` (`identified`,
-//! `transfer_ms2` or `transfer_ms1`; below-threshold rows are not written),
-//! `transfer_q` (the internal transfer
-//! quant-quality q-value, not an identification FDR), `quant_q` (the internal
-//! quality q-value of the row's MS1 feature: the identified-row estimate, or
-//! for a transfer the larger of its `transfer_q` and the running mean of its
-//! probability of a wrong measurement), `quantity_se`,
-//! `claimed_by` (a transfer's best claimant: the `peptidoform/charge` key of
-//! the other target of the run on the same MS1 feature; null without one; the
-//! row and its intensity are unchanged) and `claim_co_apex` (the claimant's
-//! apex is within the two fitted widths, so the feature's intensity is shared).
-//! Otherwise the file has exactly the QPX columns.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,15 +13,9 @@ use parquet::file::properties::WriterProperties;
 
 use crate::quant_out::ModRecord;
 
-/// QPX version of the feature view written here (the psm/feature views are
-/// unchanged between 1.0 and 1.1; OpenMS stamps 1.1).
 const FEATURE_QPX_VERSION: &str = "1.1";
-/// The columns a reader re-derives a feature's identity from (the QPX
-/// feature identity composite).
 const FEATURE_IDENTITY_COMPOSITE: &str = "run_file_name,peptidoform,charge,rt,scan,observed_mz";
 
-/// A protein the peptide maps to: `(accession, start, end, pre, post)` with
-/// 1-based inclusive positions and flanking residues when known.
 pub type ProteinPosition = (
     String,
     Option<i32>,
@@ -53,7 +24,6 @@ pub type ProteinPosition = (
     Option<String>,
 );
 
-/// One quantified feature row.
 #[derive(Debug, Clone, Default)]
 pub struct FeatureRecord {
     pub feature_id: i64,
@@ -66,55 +36,36 @@ pub struct FeatureRecord {
     pub calculated_mz: f32,
     pub observed_mz: f32,
     pub mass_error_ppm: Option<f32>,
-    /// `(score_name, score_value, higher_better)`.
     pub additional_scores: Vec<(String, f64, bool)>,
     pub run_file_name: String,
-    /// `(cv_name, cv_value)`.
     pub cv_params: Vec<(String, String)>,
-    /// Scan number components of the identifying PSM.
     pub scan: Vec<i32>,
     pub rt: Option<f32>,
     pub missed_cleavages: Option<i16>,
-    /// `(label, intensity)`.
     pub intensities: Vec<(String, f32)>,
-    /// `(label, [(intensity_name, value)])`.
     pub additional_intensities: Vec<(String, Vec<(String, f32)>)>,
-    /// Protein accessions with optional positions `(accession, start, end, pre, post)`.
     pub proteins: Vec<ProteinPosition>,
     pub id_run_file_name: Option<String>,
     pub rt_start: Option<f32>,
     pub rt_stop: Option<f32>,
-    /// Row indices into `psms.parquet`.
     pub psm_ids: Vec<i64>,
-    /// Match-between-runs columns; `None` outside match-between-runs.
     pub mbr: Option<MbrColumns>,
-    /// The inferred protein group the peptide counts for; `None` without
-    /// protein inference, when `anchor_protein` is the first of `proteins`
-    /// and `unique` says whether there is one.
     pub group: Option<FeatureGroup>,
 }
 
-/// A feature's protein group from protein inference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureGroup {
-    /// The group's lead accession.
     pub anchor: String,
-    /// Whether the peptide is in no other group (otherwise razor-assigned).
     pub unique: bool,
-    /// The group's dataset-level protein q-value.
     pub global_q: f64,
 }
 
-/// The optional match-between-runs columns of one feature.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MbrColumns {
     pub evidence_type: String,
-    /// Internal transfer quant-quality q-value; `None` for identified rows.
     pub transfer_q: Option<f64>,
-    /// Internal quality q-value of the MS1 feature against its decoys.
     pub quant_q: Option<f64>,
     pub quantity_se: Option<f64>,
-    /// Key of the best other target of the run on the same MS1 feature.
     pub claimed_by: Option<String>,
     pub claim_co_apex: Option<bool>,
 }
@@ -131,8 +82,6 @@ const MBR_FIELDS: [(&str, DataType); 6] = [
 fn has_mbr(records: &[FeatureRecord]) -> bool {
     records.iter().any(|r| r.mbr.is_some())
 }
-
-// ── nested types (QPXPSMSchema / QPXFeatureSchema) ────────────────────────────
 
 pub(crate) fn score_fields() -> Fields {
     Fields::from(vec![
@@ -216,12 +165,10 @@ fn pg_position_fields() -> Fields {
     ])
 }
 
-/// The feature schema, in `QPXFeatureSchema::schema()` order.
 pub fn feature_schema() -> Schema {
     Schema::new(qpx_fields())
 }
 
-/// [`feature_schema`] followed by the match-between-runs columns.
 pub fn feature_schema_mbr() -> Schema {
     let mut fields = qpx_fields();
     fields.extend(
@@ -293,8 +240,6 @@ fn qpx_fields() -> Vec<Field> {
         Field::new("psm_ids", list_type(DataType::Int64), true),
     ]
 }
-
-// ── builders ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn struct_list(
     fields: Fields,
@@ -409,8 +354,6 @@ fn prim_list<T: ArrayBuilder>(values: T, inner: DataType) -> ListBuilder<T> {
     ListBuilder::new(values).with_field(Arc::new(Field::new("element", inner, true)))
 }
 
-/// Build the Arrow batch for `records` (the whole table in one batch), with
-/// the match-between-runs columns when any record carries them.
 pub fn build_feature_batch(records: &[FeatureRecord]) -> std::io::Result<RecordBatch> {
     build_batch(records, has_mbr(records))
 }
@@ -491,7 +434,6 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
                         .append_value(aa.to_string()),
                     None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
                 }
-                // scores: null (andes does not localize)
                 pb.field_builder::<ListBuilder<StructBuilder>>(2)
                     .unwrap()
                     .append_null();
@@ -728,11 +670,8 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Rows per row group of a QPX feature file.
 const FEATURE_CHUNK: usize = 4096;
 
-/// Opens `path` as a QPX feature file, with the match-between-runs columns
-/// when `mbr`.
 fn open_feature_writer(
     path: &Path,
     mbr: bool,
@@ -766,7 +705,6 @@ fn open_feature_writer(
     Ok((writer, schema))
 }
 
-/// Writes one row group of `chunk`.
 fn write_feature_chunk(
     writer: &mut ArrowWriter<std::fs::File>,
     schema: &Arc<Schema>,
@@ -784,8 +722,6 @@ fn write_feature_chunk(
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Write `records` to `path` as a QPX feature file with the schema metadata
-/// OpenMS readers key on (`file_type = feature_file`).
 pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io::Result<()> {
     let mbr = has_mbr(records);
     crate::atomic::write_atomic(path, |path| {
@@ -800,12 +736,6 @@ pub fn write_feature_parquet(path: &Path, records: &[FeatureRecord]) -> std::io:
     })
 }
 
-/// [`write_feature_parquet`] over records given in pieces, in the same row
-/// groups, written to `<path>.partial` and renamed to `path` by
-/// [`FeatureParquetWriter::finish`]. The match-between-runs columns are written when the first
-/// row group has them, or always with [`FeatureParquetWriter::new_mbr`]; with
-/// no records at all the file is [`write_feature_parquet`]'s of none, with
-/// those columns for `new_mbr`.
 pub struct FeatureParquetWriter {
     path: std::path::PathBuf,
     buf: Vec<FeatureRecord>,
@@ -823,8 +753,6 @@ impl FeatureParquetWriter {
         }
     }
 
-    /// A writer that always writes the match-between-runs columns, so a table
-    /// with no rows still has the schema its readers select from.
     pub fn new_mbr(path: &Path) -> Self {
         Self {
             mbr: true,
@@ -954,16 +882,6 @@ mod tests {
         })
     }
 
-    /// Records without match-between-runs columns: the column data bytes
-    /// (everything between the leading magic and the footer, which holds the
-    /// per-write uuid and date in hash-ordered metadata) hash to the value the
-    /// QPX-only writer produces, and the schema and metadata keys are the
-    /// QPX ones.
-    ///
-    /// The pinned hash covers the column-data bytes only and depends on the
-    /// arrow/parquet crate versions: after a version bump it may need
-    /// re-pinning, from the output of the writer as it was before the bump
-    /// (not from the code under test).
     #[test]
     fn records_without_mbr_columns_write_the_qpx_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1082,7 +1000,6 @@ mod tests {
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         assert_eq!(builder.schema().fields().len(), 33);
-        // An empty MBR table keeps the MBR columns.
         FeatureParquetWriter::new_mbr(&p).finish().unwrap();
         let file = std::fs::File::open(&p).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();

@@ -1,25 +1,3 @@
-//! Guard: the STANDARD PIN's always-zero column set must not grow silently.
-//!
-//! Unlike the glyco PIN, this one does not prune its dead columns — downstream
-//! consumers index PIN columns positionally, and the QPX writer shares
-//! `psm_feature_values` with it, so removing a column is a breaking change rather
-//! than hygiene. What is cheap, and what this test does, is pin the set so a NEW
-//! always-zero feature cannot be added without someone noticing.
-//!
-//! Worth recording why pruning is not proposed here: the glyco prune was worth
-//! 256.8 -> 384.6 glycoPSMs, but the benchmark record attributes that to a
-//! data-starved classifier at a few hundred PSMs and states that at ~7,250 PSMs
-//! "the pruning buys nothing". The standard search is in the second regime, so this
-//! is a defect-class guard, not an expected identification win.
-//!
-//! THREE of these are structural — hardcoded 0.0 for every row in every mode,
-//! including under `--chimeric`:
-//!   IsolationWindowEfficiency, PrecursorIsotopeKL, PrecursorSNR
-//! The rest are constant only because of what this fixture is: an MGF (so no
-//! retention time and no linked MS1), searched with a low-resolution model (where
-//! `EdgeScore` is documented as returning 0), with `--refine` off, and with no retention time the
-//! default `andesrt_*` predictor columns are constant too. Those are expected and are listed
-//! so the structural three stand out.
 use std::collections::BTreeSet;
 use std::process::Command;
 
@@ -57,8 +35,6 @@ fn standard_pin_constant_column_set_is_pinned() {
         .filter(|r| r.len() == header.len())
         .collect();
 
-    // Anti-vacuity: without rows every column is trivially "constant" and this
-    // test would pass while asserting nothing.
     assert!(
         rows.len() > 100,
         "fixture must produce many rows for constancy to mean anything, got {}",
@@ -76,11 +52,9 @@ fn standard_pin_constant_column_set_is_pinned() {
         .collect();
 
     let expected: BTreeSet<&str> = [
-        // Structural: hardcoded 0.0 in every mode.
         "IsolationWindowEfficiency",
         "PrecursorIsotopeKL",
         "PrecursorSNR",
-        // Fixture-dependent, listed so the three above stand out.
         "EdgeScore",
         "IsRefinement",
         "NumMods",
@@ -88,16 +62,10 @@ fn standard_pin_constant_column_set_is_pinned() {
         "DeltaRT",
         "AbsDeltaRT",
         "DeltaRTNorm",
-        // The default `--predict rt` columns: an MGF has no retention times, so
-        // no row is scored (0, missing flag 1), but the columns stay so every
-        // PIN of a search configuration has one header.
         "andesrt_rt_diff",
         "andesrt_predicted_rt",
         "andesrt_missing",
-        // The input file: one input here. It exists so Percolator's competition
-        // stays within each input when per-run PINs are pooled.
         "FileName",
-        // Provenance: constant on a FASTA search.
         "IsVariant",
         "IsIsoform",
         "IsChain",
@@ -122,8 +90,6 @@ fn standard_pin_constant_column_set_is_pinned() {
          from this guard's list so it keeps its teeth"
     );
 
-    // Also assert the fixture exercises enough live features for the comparison
-    // above to be meaningful.
     assert!(
         header.len() - constant.len() > 40,
         "expected >40 varying columns, got {}",

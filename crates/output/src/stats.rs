@@ -1,19 +1,3 @@
-//! End-of-run statistics: final tolerances + per-modification PSM tally.
-//!
-//! andes auto-resolves the scoring model, the precursor/fragment tolerances,
-//! and (with `--refine`) the modification set FROM THE DATA — so the parameters
-//! the search *ends* with are not necessarily the ones the user passed on the
-//! CLI (e.g. precursor calibration tightens the window; high-res fragments are
-//! matched at 20 ppm, or at the measured width, even when the input named
-//! none). This module
-//! reports those final, effective values together with a per-modification PSM
-//! count, and writes them both to stderr and to a `<stem>.statistics.log` next to the
-//! PIN output so a run's true parameters are always recoverable.
-//!
-//! After rescoring, [`IdentificationSummary`] adds what the run identified at
-//! the FDR cut: PSM, precursor and peptide counts, identification rates by
-//! charge and by run, precursor mass error, missed cleavages and the PTM tally.
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Write};
@@ -27,26 +11,15 @@ use search::candidate_gen::Candidate;
 use search::psm::TopNQueue;
 use search::search_params::SearchParams;
 
-/// Aggregated end-of-run statistics over the rank-1 PSM of every spectrum.
-///
-/// Counts are taken **pre-FDR** (andes emits a PIN; Percolator applies FDR
-/// downstream), over the best (rank-1) candidate of each spectrum.
 pub struct RunStatistics {
     pub precursor_tolerance: String,
     pub precursor_calibration: String,
-    /// Fragment matching tolerance: candidate retrieval and the match features,
-    /// with the measured width of the PIN match features when one was used.
     pub fragment_tolerance: String,
-    /// Window of the model's rank-table node scores (`param.mme` as served).
-    /// Node scores are indexed by nominal fragment mass, so this window covers
-    /// the nominal-mass rounding error; it is not the matching tolerance of
-    /// the acquisition.
     pub node_score_bin: String,
     pub spectra_with_match: usize,
     pub target_psms: usize,
     pub decoy_psms: usize,
     pub unmodified_target_psms: usize,
-    /// `(modification name, # rank-1 target PSMs carrying ≥1 of it)`, count-desc.
     pub ptm_counts: Vec<(String, usize)>,
 }
 
@@ -57,13 +30,10 @@ fn fmt_tol(t: &Tolerance) -> String {
     }
 }
 
-/// Three decimals at most, without trailing zeros (20 -> "20", 9.87654 -> "9.877").
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
-/// The fragment matching tolerance line: the tolerance of retrieval and the
-/// trained match features, and the measured PIN-feature width when it differs.
 fn fmt_fragment_tolerance(matching: &Tolerance, pin_features: &Tolerance) -> String {
     if pin_features == matching {
         format!("{} (retrieval and match features)", fmt_tol(matching))
@@ -77,13 +47,6 @@ fn fmt_fragment_tolerance(matching: &Tolerance, pin_features: &Tolerance) -> Str
 }
 
 impl RunStatistics {
-    /// Tally the rank-1 PSM of each non-empty spectrum queue.
-    ///
-    /// `matching_tolerance` is the fragment tolerance of candidate retrieval and
-    /// the trained match features, `pin_feature_tolerance` the (possibly
-    /// measured) tolerance of the PIN match features, and `node_score_bin` the
-    /// model's node-score window (`param.mme`); `params` carries the
-    /// post-calibration precursor window.
     pub fn compute(
         queues: &[TopNQueue],
         candidates: &[Candidate],
@@ -103,8 +66,6 @@ impl RunStatistics {
                 continue;
             }
             spectra_with_match += 1;
-            // Rank-1 = best by rank_score (the same ordering the PIN writer uses
-            // for the rank-1 row).
             let psms = q.clone().into_rank_sorted_vec();
             let Some(best) = psms.first() else {
                 continue;
@@ -115,8 +76,6 @@ impl RunStatistics {
                 continue;
             }
             target_psms += 1;
-            // Distinct modification names on this peptide (a fixed Cam-C and a
-            // variable Oxidation both count; each is tallied once per PSM).
             let mut names: BTreeSet<&str> = BTreeSet::new();
             for aa in &cand.peptide.residues {
                 if let Some(m) = aa.mod_.as_ref() {
@@ -132,7 +91,6 @@ impl RunStatistics {
         }
 
         let mut ptm_counts: Vec<(String, usize)> = ptm.into_iter().collect();
-        // Most-frequent first; ties broken alphabetically for stable output.
         ptm_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         Self {
@@ -148,17 +106,11 @@ impl RunStatistics {
         }
     }
 
-    /// Render the human-readable report (shared by stderr and `<stem>.statistics.log`)
-    /// of a run that was not rescored: the pre-FDR tally only.
     pub fn render(&self) -> String {
         self.render_with(None)
     }
 
-    /// Render the report, followed by the identification `summary` of a rescored
-    /// run. The summary carries the PTM tally of the identified PSMs, so the
-    /// pre-FDR PTM list is left out when one is given.
     pub fn render_with(&self, summary: Option<&IdentificationSummary>) -> String {
-        // Width for the PTM name column (incl. the "(unmodified)" sentinel).
         let label_w = self
             .ptm_counts
             .iter()
@@ -211,58 +163,30 @@ impl RunStatistics {
     }
 }
 
-// ── Identification summary (after rescoring) ──────────────────────────────────
-
-/// What one identified PSM contributes to the summary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PsmFacts {
-    /// Index of the input run the spectrum belongs to.
     pub run: usize,
-    /// The charge the PSM was matched at.
     pub charge: u8,
-    /// Modified sequence (residues with their modification accessions).
     pub peptidoform: String,
-    /// Residues only.
     pub sequence: String,
-    /// Precursor error in ppm of the theoretical m/z, after the isotope
-    /// correction the search chose and before any precursor calibration shift
-    /// (the PIN's `dm` over the theoretical m/z).
     pub ppm: f64,
-    /// The same error after the search's precursor calibration (the neutral
-    /// mass scaled by the run's shift); equal to `ppm` when no shift applied.
     pub ppm_calibrated: f64,
-    /// The precursor charge annotated on the PSM's spectrum, `None` when the
-    /// spectrum has none (the search then tries every charge of its range).
     pub spectrum_charge: Option<u8>,
-    /// The PSM is a chimeric secondary, matched at its own precursor.
     pub secondary: bool,
-    /// Enzymatic sites inside the peptide (the PIN's `enzInt`).
     pub missed_cleavages: u32,
-    /// Distinct variable modifications on the peptide (a stack of modifications
-    /// on one residue counts each of its components).
     pub variable_mods: Vec<String>,
-    /// Indices (into the search's [`FixedModSpec`] list) of the fixed
-    /// declarations the peptide carries.
     pub fixed_carried: Vec<usize>,
-    /// Indices of the fixed declarations that apply to at least one site of
-    /// the peptide.
     pub fixed_eligible: Vec<usize>,
 }
 
-/// A fixed modification declaration of the search: its name and where it
-/// applies. The same name can be declared more than once (a label on lysine and
-/// on the N-terminus), each declaration is its own entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixedModSpec {
     pub name: String,
-    /// The residue it targets, `None` for any residue.
     pub residue: Option<char>,
     pub location: ModLocation,
 }
 
 impl FixedModSpec {
-    /// The fixed modifications declared by the search's amino-acid set, in
-    /// declaration order.
     pub fn declared(params: &SearchParams) -> Vec<Self> {
         params
             .aa_set
@@ -280,8 +204,6 @@ impl FixedModSpec {
             .collect()
     }
 
-    /// Whether the declaration applies to `residue` at a position whose
-    /// terminal contexts are `locations`.
     fn applies_at(&self, residue: u8, locations: &[ModLocation]) -> bool {
         self.residue.is_none_or(|r| r as u8 == residue)
             && (self.location == ModLocation::Anywhere || locations.contains(&self.location))
@@ -297,8 +219,6 @@ impl FixedModSpec {
         }
     }
 
-    /// Where it applies, as shown after the name: `C`, `peptide N-terminus`,
-    /// `K at the peptide N-terminus`, `any residue`.
     pub fn target(&self) -> String {
         match (self.residue, self.place()) {
             (Some(r), None) => r.to_string(),
@@ -308,8 +228,6 @@ impl FixedModSpec {
         }
     }
 
-    /// The sites that make a PSM eligible for the declaration: `a C`,
-    /// `a K at the peptide N-terminus`, `the peptide N-terminus`, `a residue`.
     fn site_text(&self) -> String {
         match (self.residue, self.place()) {
             (Some(r), None) => format!("a {r}"),
@@ -320,20 +238,13 @@ impl FixedModSpec {
     }
 }
 
-/// How the modifications of one peptide fall against the fixed declarations.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PeptideMods {
-    /// Distinct variable modification names.
     pub variable: Vec<String>,
-    /// Indices of the fixed declarations the peptide carries.
     pub fixed_carried: Vec<usize>,
-    /// Indices of the fixed declarations that can apply to a site of it.
     pub fixed_eligible: Vec<usize>,
 }
 
-/// The terminal contexts of residue `i` of an `n`-residue peptide, as
-/// [`ModLocation`]s: interior residues are `Anywhere`; the first and last carry
-/// their peptide or protein terminus.
 fn site_locations(i: usize, n: usize, protein_n: bool, protein_c: bool) -> Vec<ModLocation> {
     let mut locations = Vec::new();
     if i == 0 {
@@ -356,10 +267,6 @@ fn site_locations(i: usize, n: usize, protein_n: bool, protein_c: bool) -> Vec<M
     locations
 }
 
-/// Split the record name of a stack of modifications into the declared
-/// modification names it joins with `+`. A declared name that itself contains
-/// `+` stays whole. A name that is not a join of declared names (a modification
-/// found by refinement) is one component.
 fn components<'a>(record: &'a str, declared: &[&str]) -> Vec<&'a str> {
     fn split<'a>(rest: &'a str, declared: &[&str]) -> Option<Vec<&'a str>> {
         if rest.is_empty() {
@@ -388,13 +295,6 @@ fn components<'a>(record: &'a str, declared: &[&str]) -> Vec<&'a str> {
     split(record, &longest_first).unwrap_or_else(|| vec![record])
 }
 
-/// Classify the modifications of a peptide by declaration.
-///
-/// `residues` holds each residue with the name of its modification record,
-/// `declared` every declared modification name (fixed and variable). A
-/// component is fixed when a fixed declaration of that name applies at its
-/// site, and then counts for that declaration; otherwise it is variable.
-/// A fixed declaration is eligible when it applies at any site of the peptide.
 pub fn classify_mods(
     residues: &[(u8, Option<&str>)],
     protein_n: bool,
@@ -437,11 +337,6 @@ pub fn classify_mods(
     }
 }
 
-/// The facts of the PSMs whose row id `wanted` accepts, keyed by row id.
-///
-/// Rows are those the PIN writes (`SpecId` as in the Percolator result), so an
-/// id of the rescoring result finds its spectrum here. `run_ends` are the
-/// exclusive end indices of the input runs in `spectra`.
 pub fn psm_facts(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
@@ -545,20 +440,14 @@ pub fn psm_facts(
         .collect()
 }
 
-/// The spectra a search covered: every spectrum, with or without a candidate.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpectraTally {
-    /// Spectra per input run, in input order.
     pub per_run: Vec<usize>,
-    /// Spectra by annotated precursor charge.
     pub by_charge: BTreeMap<u8, usize>,
-    /// Spectra without a usable annotated charge; the search tries every
-    /// charge of its range for these.
     pub unknown_charge: usize,
 }
 
 impl SpectraTally {
-    /// Count `spectra`, whose input runs end at the exclusive indices `run_ends`.
     pub fn of(spectra: &[Spectrum], run_ends: &[usize]) -> Self {
         let mut per_run = Vec::with_capacity(run_ends.len());
         let mut start = 0usize;
@@ -586,104 +475,62 @@ impl SpectraTally {
     }
 }
 
-/// Spectra, PSMs and identification rate of one row of a table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateRow {
     pub label: String,
     pub spectra: usize,
     pub psms: usize,
-    /// PSMs per spectrum; `None` when the row has no spectra to compare to.
     pub rate: Option<f64>,
-    /// Robust z-score of the log rate against the other runs; set for a run
-    /// table with at least three runs.
     pub z: Option<f64>,
 }
 
-/// A run whose rate sits this many robust standard deviations below the median
-/// run (log scale) is marked.
 const LOW_RATE_Z: f64 = -3.0;
-/// Floor of the robust scale of the log rates (a 10 % relative spread), so a
-/// set of near-identical runs does not mark a run for a tiny difference.
 const MIN_LOG_RATE_SCALE: f64 = 0.1;
 
-/// What the summary takes besides the PSM facts.
 #[derive(Debug, Clone, Copy)]
 pub struct SummaryContext<'a> {
-    /// The rescoring backend named in the title, e.g. `Percolator`.
     pub rescorer: &'a str,
-    /// The PSM cut as shown in the title, e.g. `q ≤ 0.01`.
     pub cut: &'a str,
-    /// Decoy PSMs that pass the same cut.
     pub decoys_at_cut: usize,
-    /// The protein-FDR cut and the number of groups at it, when protein
-    /// inference ran.
     pub protein_groups: Option<(f64, usize)>,
-    /// The search's fixed modification declarations, in the order the PSM facts
-    /// index them.
     pub fixed: &'a [FixedModSpec],
-    /// The run's precursor calibration shift in ppm; 0 when none applied.
     pub calibration_shift_ppm: f64,
 }
 
-/// What a rescored run identified at its FDR cut.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdentificationSummary {
-    /// The rescoring backend named in the title.
     pub rescorer: String,
-    /// The cut as shown in the title, e.g. `q ≤ 0.01`.
     pub cut: String,
-    /// Protein groups that pass the cut, when protein inference ran.
     pub protein_groups: Option<(f64, usize)>,
     pub spectra: usize,
     pub psms: usize,
-    /// Identified PSMs whose spectrum could not be found in the search output.
     pub unlinked_psms: usize,
     pub precursors: usize,
     pub peptidoforms: usize,
     pub sequences: usize,
     pub decoys_at_cut: usize,
-    /// `(median, first quartile, third quartile)` of the precursor error, ppm,
-    /// measured before precursor calibration.
     pub mass_error_ppm: Option<(f64, f64, f64)>,
-    /// The run's precursor calibration shift in ppm; 0 when none applied.
     pub calibration_shift_ppm: f64,
-    /// The same statistics after the calibration shift; set only when a shift
-    /// applied.
     pub mass_error_after_shift_ppm: Option<(f64, f64, f64)>,
-    /// The search's fixed modifications with the PSMs that carry each.
     pub fixed_mods: Vec<FixedModRow>,
-    /// `(missed cleavages, PSMs)`, ascending.
     pub missed_cleavages: Vec<(u32, usize)>,
-    /// Rows by PSM charge; spectra are by annotated charge.
     pub by_charge: Vec<RateRow>,
-    /// Every identified PSM was matched at its spectrum's annotated charge and
-    /// is a primary match, so a charge row's PSMs and spectra are comparable.
     pub charge_rates_comparable: bool,
-    /// Spectra without an annotated charge.
     pub unknown_charge_spectra: usize,
-    /// Rows by run; empty for a single run.
     pub by_run: Vec<RateRow>,
-    /// `(variable modification, PSMs carrying it)`, count-desc then name.
     pub ptm_counts: Vec<(String, usize)>,
-    /// PSMs with no variable modification.
     pub unmodified_psms: usize,
 }
 
-/// One fixed modification of the search in the identified PSMs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixedModRow {
     pub name: String,
-    /// Where the declaration applies (see [`FixedModSpec::target`]).
     pub target: String,
-    /// The sites that make a PSM eligible, for the denominator's wording.
     pub site: String,
-    /// PSMs carrying the declaration.
     pub psms: usize,
-    /// PSMs with at least one site the declaration can apply to.
     pub eligible: usize,
 }
 
-/// Quantile of ascending `sorted` by linear interpolation; NaN when empty.
 fn quantile(sorted: &[f64], p: f64) -> f64 {
     match sorted.len() {
         0 => f64::NAN,
@@ -697,8 +544,6 @@ fn quantile(sorted: &[f64], p: f64) -> f64 {
     }
 }
 
-/// Robust z-score of `ln(rate)` of each run against the median and the scaled
-/// MAD of the runs that have a rate; `None` for runs without one.
 fn run_rate_z(rates: &[Option<f64>]) -> Vec<Option<f64>> {
     let logs: Vec<f64> = rates.iter().flatten().map(|&r| r.max(1e-6).ln()).collect();
     if logs.len() < 3 {
@@ -716,17 +561,11 @@ fn run_rate_z(rates: &[Option<f64>]) -> Vec<Option<f64>> {
         .collect()
 }
 
-/// PSMs per spectrum; `None` without spectra, and when there are more PSMs than
-/// spectra (a spectrum with several matches), which is not a rate.
 fn rate_of(psms: usize, spectra: usize) -> Option<f64> {
     (spectra > 0 && psms <= spectra).then(|| psms as f64 / spectra as f64)
 }
 
 impl IdentificationSummary {
-    /// Summarise the identified PSMs `facts`.
-    ///
-    /// `unlinked_psms` counts identified PSMs that have no entry in `facts`.
-    /// `run_names` are the input runs in order.
     pub fn compute(
         tally: &SpectraTally,
         run_names: &[String],
@@ -812,10 +651,6 @@ impl IdentificationSummary {
             ptm.into_iter().map(|(n, c)| (n.to_string(), c)).collect();
         ptm_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-        // A charge row compares the PSMs matched at that charge with the
-        // spectra annotated with it. That holds only when every PSM sits at its
-        // spectrum's annotated charge and is the spectrum's primary match; an
-        // unlinked PSM has no known charge.
         let charge_rates_comparable = unlinked_psms == 0
             && facts
                 .iter()
@@ -892,7 +727,6 @@ impl IdentificationSummary {
         }
     }
 
-    /// Render the section appended to the run summary.
     pub fn render(&self) -> String {
         const LABEL_W: usize = 27;
         let line = |label: &str, value: String| format!("  {label:<LABEL_W$}: {value}\n");
@@ -967,9 +801,6 @@ impl IdentificationSummary {
             ));
         }
 
-        // By charge: spectra by annotated charge, PSMs by the charge they were
-        // matched at. The rates are left out when some PSM sits at another
-        // charge than its spectrum's annotated one, or is a chimeric secondary.
         s.push_str(&rate_table(
             "By charge",
             &self.by_charge,
@@ -1046,8 +877,6 @@ fn unknown_row(unknown: usize) -> Option<(String, usize)> {
     (unknown > 0).then(|| ("unknown".to_string(), unknown))
 }
 
-/// Table of `rows` under `title`: label, spectra, PSMs, rate, and a `<` mark
-/// on the runs whose robust z is low. `extra` is a row with spectra only.
 fn rate_table(title: &str, rows: &[RateRow], extra: Option<(String, usize)>) -> String {
     let label_w = rows
         .iter()
@@ -1098,7 +927,6 @@ fn rate_table(title: &str, rows: &[RateRow], extra: Option<(String, usize)>) -> 
     s
 }
 
-/// `1234567` as `1,234,567`.
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -1111,7 +939,6 @@ fn thousands(n: usize) -> String {
     out
 }
 
-/// `part` of `whole` as `45.4 %`; `-` for an empty whole.
 fn percent(part: usize, whole: usize) -> String {
     if whole == 0 {
         "-".to_string()
@@ -1120,15 +947,12 @@ fn percent(part: usize, whole: usize) -> String {
     }
 }
 
-/// One decimal with an explicit sign and a true minus; a value that rounds to
-/// zero is `+0.0`.
 fn signed(v: f64) -> String {
     let r = (v * 10.0).round() / 10.0;
     let r = if r == 0.0 { 0.0 } else { r };
     format!("{r:+.1}").replace('-', "−")
 }
 
-/// Write the rendered report to `path` (the run's `<stem>.statistics.log`).
 pub fn write_statistics_log(
     stats: &RunStatistics,
     summary: Option<&IdentificationSummary>,
@@ -1185,14 +1009,11 @@ mod tests {
         assert!(out.contains("Carbamidomethyl : 30"));
         assert!(out.contains("Oxidation       : 10"));
         assert!(out.contains("(unmodified)    : 25"));
-        // Most-frequent PTM listed before the rarer one.
         let cam = out.find("Carbamidomethyl").unwrap();
         let ox = out.find("Oxidation").unwrap();
         assert!(cam < ox, "PTMs should be sorted count-descending");
     }
 
-    /// A high-res run reports the tolerance its fragments were matched at, not
-    /// the model's 0.5 Da node-score window, which gets its own line.
     #[test]
     fn high_res_run_reports_matching_tolerance_apart_from_node_score_bin() {
         let params = SearchParams::default_tryptic(
@@ -1303,7 +1124,6 @@ mod tests {
         let s = single_run_summary();
         assert_eq!(s.spectra, 20);
         assert_eq!(s.psms, 4);
-        // (AAK,2), (AAK,3), (BBR,2); two peptidoforms; two sequences.
         assert_eq!((s.precursors, s.peptidoforms, s.sequences), (3, 2, 2));
         assert_eq!(s.decoys_at_cut, 1);
         assert_eq!(s.missed_cleavages, vec![(0, 3), (1, 1)]);
@@ -1312,7 +1132,6 @@ mod tests {
         let z2 = &s.by_charge[0];
         assert_eq!((z2.label.as_str(), z2.spectra, z2.psms), ("2+", 12, 3));
         assert!((z2.rate.unwrap() - 0.25).abs() < 1e-12);
-        // Median of {-1, 1, 2, 3} is 1.5; quartiles interpolate.
         let (m, q1, q3) = s.mass_error_ppm.unwrap();
         assert!((m - 1.5).abs() < 1e-12 && (q1 - 0.5).abs() < 1e-12 && (q3 - 2.25).abs() < 1e-12);
     }
@@ -1362,7 +1181,6 @@ mod tests {
         let out = s.render();
         assert!(out.contains("  unknown"));
         assert!(out.contains("per-charge rates are not shown"));
-        // PSMs at 3+ come from unknown-charge spectra: a 3+ row without spectra.
         assert!(out.contains("  3+"));
         assert!(!out.contains("16.7 %"), "per-charge rates are withheld");
         assert!(!out.contains("Protein groups"));
@@ -1379,7 +1197,6 @@ mod tests {
         assert!(ok.charge_rates_comparable);
         assert_eq!(ok.by_charge[0].rate, Some(0.5));
 
-        // Annotated 2+, matched at 3+.
         let mut other = base.clone();
         other[1].charge = 3;
         let s = summarise(&tally(vec![4], 4, 0), 1, &other, 0);
@@ -1387,20 +1204,17 @@ mod tests {
         assert!(s.by_charge.iter().all(|r| r.rate.is_none()));
         assert!(s.by_charge.iter().any(|r| r.psms > 0));
 
-        // A chimeric secondary at the annotated charge.
         let mut secondary = base.clone();
         secondary[1].secondary = true;
         let s = summarise(&tally(vec![4], 4, 0), 1, &secondary, 0);
         assert!(!s.charge_rates_comparable);
         assert!(s.render().contains("per-charge rates are not shown"));
 
-        // An unlinked PSM has no known charge.
         assert!(!summarise(&tally(vec![4], 4, 0), 1, &base, 1).charge_rates_comparable);
     }
 
     #[test]
     fn no_rate_exceeds_one_hundred_percent() {
-        // Three PSMs on two spectra (a chimeric secondary): not a rate.
         let facts = vec![
             fact(0, 2, "AAK", 0.0, 0, &[]),
             fact(0, 2, "BBK", 0.0, 0, &[]),
@@ -1453,7 +1267,6 @@ mod tests {
         let s = summarise(&tally(vec![100, 100, 100], 300, 0), 3, &facts, 0);
         assert!(s.by_run.iter().all(|r| r.z.is_none_or(|z| z > LOW_RATE_Z)));
         assert!(!s.render().contains("changes no result"));
-        // Two runs: no robust spread, no flag.
         let two = summarise(
             &tally(vec![100, 100], 200, 0),
             2,
@@ -1576,7 +1389,6 @@ mod tests {
             components("Label+Heavy+Oxidation", &declared),
             vec!["Label+Heavy", "Oxidation"]
         );
-        // A name that is not a join of declared names is one component.
         assert_eq!(
             components("Found+Elsewhere", &declared),
             vec!["Found+Elsewhere"]
@@ -1587,13 +1399,11 @@ mod tests {
     fn classify_splits_fixed_from_variable_by_declaration() {
         let fixed = vec![spec("Carbamidomethyl", Some('C'), ModLocation::Anywhere)];
         let declared = ["Carbamidomethyl", "Oxidation", "Acetyl"];
-        // C carries Cam stacked with a variable Acetyl; M carries Oxidation.
         let residues = peptide("ACMK", &[(1, "Carbamidomethyl+Acetyl"), (2, "Oxidation")]);
         let m = classify_mods(&residues, false, false, &fixed, &declared);
         assert_eq!(m.variable, vec!["Acetyl", "Oxidation"]);
         assert_eq!(m.fixed_carried, vec![0]);
         assert_eq!(m.fixed_eligible, vec![0]);
-        // No C: not eligible, nothing carried.
         let none = classify_mods(&peptide("AMK", &[]), false, false, &fixed, &declared);
         assert!(none.fixed_eligible.is_empty() && none.fixed_carried.is_empty());
     }
@@ -1615,13 +1425,11 @@ mod tests {
 
     #[test]
     fn terminal_fixed_declarations_are_separate_rows_with_their_own_denominator() {
-        // TMT on lysine and on the peptide N-terminus, one name.
         let fixed = vec![
             spec("TMT", Some('K'), ModLocation::Anywhere),
             spec("TMT", None, ModLocation::NTerm),
         ];
         let declared = ["TMT"];
-        // Peptide A-K-R: N-term TMT on A, K carries TMT.
         let both = classify_mods(
             &peptide("AKR", &[(0, "TMT"), (1, "TMT")]),
             false,
@@ -1631,8 +1439,6 @@ mod tests {
         );
         assert_eq!(both.fixed_carried, vec![0, 1]);
         assert_eq!(both.fixed_eligible, vec![0, 1]);
-        // Peptide K-A: the first residue is both a K and the N-terminus, so a
-        // stack of two TMT components is carried by both declarations.
         let k_first = classify_mods(
             &peptide("KA", &[(0, "TMT+TMT")]),
             false,
@@ -1641,8 +1447,6 @@ mod tests {
             &declared,
         );
         assert_eq!(k_first.fixed_carried, vec![0, 1]);
-        // At a protein N-terminus the peptide-N-terminal declaration does not
-        // apply and the lysine one does.
         let prot = classify_mods(
             &peptide("KA", &[(0, "TMT")]),
             true,
@@ -1722,13 +1526,11 @@ mod tests {
             &with_shift,
         );
         assert_eq!(s.mass_error_ppm.unwrap().0, 3.0);
-        // The quantiles come from each PSM's own corrected error.
         assert_eq!(s.mass_error_after_shift_ppm.unwrap().0, 0.0);
         let out = s.render();
         assert!(out.contains("Precursor mass error (raw) : median +3.0 ppm"));
         assert!(out.contains("after calibration shift"));
         assert!(out.contains("median +0.0 ppm (IQR −0.5 … +0.5)  [shift +3.0 ppm]"));
-        // No shift: no second line, whatever the calibrated values hold.
         let none = summarise(&tally(vec![10], 10, 0), 1, &[a, b], 0);
         assert!(none.mass_error_after_shift_ppm.is_none());
         assert!(!none.render().contains("after calibration shift"));

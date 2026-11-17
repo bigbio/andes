@@ -1,37 +1,3 @@
-//! Per-run extraction table `<stem>.extract.parquet`: one row per fitted
-//! (precursor, run, hypothesis) of the match-between-runs extract stage, with
-//! the template-fit evidence. The file carries a schema version in its
-//! key-value metadata; a reader rejects a different major version.
-//!
-//! Encoding: `kind` is 0 for a target, 1 for a mass-shift decoy (its nominal
-//! shift in `mass_shift`) and 2 for an RT-shift decoy; `mass_shift` is 0 for
-//! the other kinds. `role` is 0 identified, 1 transfer, 2 pseudo-transfer;
-//! identified and transfer targets are each followed by their decoys (same
-//! role), pseudo-transfers have none. Schema 2 added the identified rows'
-//! decoys; a schema-1 table has none, so it is rejected. Schema 3 added the
-//! MS2 evidence of the transfer and pseudo-transfer rows (`ms2_n_scans`,
-//! `ms2_n_matched`, `ms2_angle`, `ms2_explained`; null for identified rows
-//! and rows without a fit); a schema-2 table is rejected. Schema 4 added
-//! the per-isotope heights `iso_h0`..`iso_h3` and the `tailing` of the fit;
-//! a schema-3 table is rejected. Schema 5 added the template-free trace area
-//! `trace_quantity` and its `trace_quantity_se`; a schema-4 table is
-//! rejected. Schema 6 added the same-run claims of the transfer rows
-//! (`claim_*`, see `quant::claims`: the best other probed target on the same
-//! MS1 feature and the counts of claimants); a schema-5 table is rejected.
-//! Schema 7 learns the claim windows per run (the extract tag
-//! `andes.extract.run_scales` carries them), adds the second and third
-//! claimant and the smallest apex distance of the claimants
-//! (`claim_precursor2`, `claim_precursor3`, `claim_min_dt_s`) and the MS2
-//! distinguishing-ion evidence of the transfer rows that have a claimant
-//! (`shared_*`, see `quant::shared`; null for other rows); a schema-6 table is
-//! rejected.
-//! The evidence columns are null when the fit was not possible.
-//! `n_donor_runs` counts the aligned runs with a PSM of the precursor, this
-//! run included for an identified row and excluded otherwise: the runs that
-//! informed the prediction. `library_q` is the internal library entry gate,
-//! not an identification FDR. The file is written to `<path>.partial` and
-//! renamed into place once complete.
-
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -53,49 +19,30 @@ use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 use quant::shared::SharedEvidence;
 
-/// Major version of the table layout. A reader rejects any other major.
 pub const EXTRACT_SCHEMA_MAJOR: u32 = 7;
 
 const SCHEMA_KEY: &str = "andes.extract.schema";
 const SCHEMA_VERSION: &str = "7.0";
-/// Rows per Parquet row group / record batch.
 const BATCH_ROWS: usize = 65_536;
 
-/// Why a (precursor, run) pair was measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractRole {
-    /// Identified in this run; the prior is centred on its best PSM's RT.
-    /// The target and its decoys carry this role.
     Identified,
-    /// Not identified in this run; the prior comes from the alignment.
     Transfer,
-    /// Identified in this run, measured as if it were a transfer (alignment
-    /// prior without this run's observation).
     PseudoTransfer,
 }
 
-/// One fitted hypothesis of one library precursor in one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractRow {
     pub precursor: u32,
     pub run: u16,
     pub kind: Hypothesis,
     pub role: ExtractRole,
-    /// `None` when the extraction window held too few scans.
     pub evidence: Option<Evidence>,
-    /// Aligned runs with a PSM of the precursor, excluding this run except
-    /// for an identified row.
     pub n_donor_runs: u16,
-    /// Library confidence (internal quant gate, not an identification FDR).
     pub library_q: f64,
-    /// The MS2 evidence of a transfer or pseudo-transfer row with a fit;
-    /// `None` otherwise.
     pub ms2: Option<Ms2Evidence>,
-    /// The same-run claims on the row (transfer targets with a fit; the
-    /// default claim, no claimant, elsewhere).
     pub claim: Claim,
-    /// The MS2 distinguishing-ion evidence of a transfer row that has a
-    /// claimant; `None` otherwise.
     pub shared: Option<Box<SharedEvidence>>,
 }
 
@@ -147,14 +94,9 @@ fn f64_fields(e: &Evidence) -> [f64; 20] {
     ]
 }
 
-/// Columns before the evidence block.
 const N_KEY_COLUMNS: usize = 7;
-/// The MS2 evidence columns, after the fit evidence.
 const MS2_COLUMNS: [&str; 4] = ["ms2_n_scans", "ms2_n_matched", "ms2_angle", "ms2_explained"];
-/// The claim columns, after the MS2 evidence.
 const CLAIM_COLUMNS: usize = 7;
-/// The columns of schema 7 after the claim columns: two further claimants,
-/// the smallest claimant apex distance, then the shared-feature evidence.
 const CLAIM_EXTRA_COLUMNS: usize = 3;
 const SHARED_COLUMNS: usize = 11;
 const N_COLUMNS: usize = N_KEY_COLUMNS
@@ -231,9 +173,6 @@ fn encode_kind(k: Hypothesis) -> (u8, i8) {
     }
 }
 
-/// The hypothesis of a `(kind, mass_shift)` pair; `None` for an unknown kind
-/// or a shift inconsistent with it (non-zero for a target or an RT-shift
-/// decoy, zero for a mass-shift decoy).
 fn decode_kind(code: u8, shift: i8) -> Option<Hypothesis> {
     match (code, shift) {
         (0, 0) => Some(Hypothesis::Target),
@@ -436,13 +375,10 @@ fn write_file(
     Ok(())
 }
 
-/// Write the extraction table of one run.
 pub fn write_extract_table(path: &Path, rows: &[ExtractRow]) -> Result<(), String> {
     write_versioned(path, rows, SCHEMA_VERSION, schema(), &[])
 }
 
-/// Write the extraction table of one run with extra key-value metadata
-/// `tags` (read back by [`read_extract_tags`]).
 pub fn write_extract_table_tagged(
     path: &Path,
     rows: &[ExtractRow],
@@ -451,11 +387,6 @@ pub fn write_extract_table_tagged(
     write_versioned(path, rows, SCHEMA_VERSION, schema(), tags)
 }
 
-/// An extraction table written in pieces (e.g. a shard of several runs'
-/// rows), with row groups of at most `row_group_rows` rows, to
-/// `<path>.partial` and renamed into place by [`ExtractTableWriter::finish`].
-/// Read back by [`read_extract_table`]. Dropped unfinished, the partial file
-/// is removed.
 pub struct ExtractTableWriter {
     path: std::path::PathBuf,
     partial: std::path::PathBuf,
@@ -542,8 +473,6 @@ impl Drop for ExtractTableWriter {
     }
 }
 
-/// The number of rows of an extraction table, from its footer. Every error
-/// names `path`.
 pub fn extract_table_rows(path: &Path) -> Result<usize, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| err(&e))?;
@@ -551,8 +480,6 @@ pub fn extract_table_rows(path: &Path) -> Result<usize, String> {
     Ok(builder.metadata().file_metadata().num_rows().max(0) as usize)
 }
 
-/// The key-value metadata of an extraction table, without reading its rows.
-/// Every error names `path`.
 pub fn read_extract_tags(path: &Path) -> Result<Vec<(String, String)>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| err(&e))?;
@@ -588,7 +515,6 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
     })
 }
 
-/// Read an extraction table. Every error names `path`.
 pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
     let mut rows = Vec::new();
     for b in ExtractTableReader::open(path, BATCH_ROWS)? {
@@ -597,16 +523,12 @@ pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
     Ok(rows)
 }
 
-/// An extraction table read in record batches of at most `batch_rows` rows,
-/// in file order (see [`read_extract_table`]). Every error names the file.
 pub struct ExtractTableReader {
     path: std::path::PathBuf,
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
-    /// Read by [`ExtractTableReader::open_identified_fits`].
     fits_only: bool,
 }
 
-/// The evidence columns of [`ExtractTableReader::open_identified_fits`].
 const FIT_EVIDENCE: [&str; 10] = [
     "amplitude",
     "t0",
@@ -621,16 +543,10 @@ const FIT_EVIDENCE: [&str; 10] = [
 ];
 
 impl ExtractTableReader {
-    /// Opens `path` and checks its schema version.
     pub fn open(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, false)
     }
 
-    /// Opens `path` to read its identified target rows only, with the
-    /// columns of their peak shape: the keys, and of the evidence the
-    /// amplitude and its standard error, apex, width, width ratio, isotope
-    /// heights and tailing. The other
-    /// evidence values are NaN (counts 0) and the MS2 evidence is `None`.
     pub fn open_identified_fits(path: &Path, batch_rows: usize) -> Result<Self, String> {
         Self::open_with(path, batch_rows, true)
     }
@@ -712,8 +628,6 @@ impl Iterator for ExtractTableReader {
     }
 }
 
-/// The identified target rows of one record batch read by
-/// [`ExtractTableReader::open_identified_fits`].
 fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let at = |name: &str| {
@@ -786,7 +700,6 @@ fn decode_fit_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, Str
     Ok(rows)
 }
 
-/// The rows of one record batch of an extraction table at `path`.
 fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let mut rows = Vec::with_capacity(b.num_rows());
@@ -1138,7 +1051,6 @@ mod tests {
         write_extract_table(&p, &rows()).unwrap();
         assert!(p.exists());
         assert!(!dir.path().join("c.extract.parquet.partial").exists());
-        // A failed write leaves neither file.
         let bad = dir.path().join("missing-dir").join("d.extract.parquet");
         let e = write_extract_table(&bad, &rows()).unwrap_err();
         assert!(e.contains("d.extract.parquet"), "{e}");
@@ -1185,7 +1097,6 @@ mod tests {
         assert!(rows[0].evidence.is_some());
         let schema = Arc::new(schema());
         let mut cols = batch(&schema, &rows).unwrap().columns().to_vec();
-        // Null `trace_quantity` on the first row, the other evidence present.
         let at = schema.index_of("trace_quantity").unwrap();
         let old = cols[at].as_any().downcast_ref::<Float64Array>().unwrap();
         let mut b = Float64Builder::new();

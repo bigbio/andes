@@ -1,13 +1,3 @@
-//! Micro-benchmark of the shipped GBDT evaluator for the compiled-ensemble comparison
-//! (competitive plan, standard-search stop condition: "no hand-written SIMD/bitvector
-//! tree traversal before the exact compiled ensemble benchmark").
-//!
-//! Ignored by default. Run with
-//!   ANDES_GBDT_DIR=<dir from scripts/gbdt_bench/export_gbdt.py> \
-//!   cargo test --release -p scoring --test gbdt_bench -- --ignored --nocapture
-//! It loads `frag.agbd` and `rows.f32`, times `predict_value_batch` over all rows in
-//! per-PSM-sized batches, prints ns/row and rows/s, and writes `preds_rust.f32` so the
-//! compiled evaluators can be checked against it.
 use scoring::gbdt_eval::GbdtPeakModel;
 use std::time::Instant;
 
@@ -38,7 +28,6 @@ fn bench_predict_value_batch() {
     );
 
     let mut out = vec![0.0f32; n];
-    // Per-PSM batch size ~ 4*(n-1) ions for a 13-mer at two charges: 48 rows.
     for &batch in &[48usize, 512, n] {
         let mut best = f64::MAX;
         for _ in 0..5 {
@@ -56,7 +45,6 @@ fn bench_predict_value_batch() {
             ns_row / model.trees.len() as f64
         );
     }
-    // Reference predictions for the exactness check of the compiled evaluators.
     model.predict_value_batch(&rows, &mut out);
     let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(format!("{dir}/preds_rust.f32"), bytes).expect("write preds");

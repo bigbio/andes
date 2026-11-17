@@ -1,5 +1,3 @@
-//! Handcrafted MGF strings exercising parser edge cases.
-
 use input::{MgfParseError, MgfReader, Spectrum};
 use std::io::Cursor;
 

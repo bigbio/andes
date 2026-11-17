@@ -1,6 +1,3 @@
-//! Peptide. The `Display` impl is byte-parity-gated by
-//! `tests/peptide_display_parity.rs`.
-
 use std::hash::{Hash, Hasher};
 
 use crate::amino_acid::AminoAcid;
@@ -9,9 +6,6 @@ use crate::mass::{nominal_from, H2O};
 #[derive(Debug, Clone)]
 pub struct Peptide {
     pub residues: Vec<AminoAcid>,
-    /// Flanking residue at the N-terminus (the AA *before* this peptide
-    /// in its source protein). `_` for protein N-term, `-` for protein
-    /// C-term.
     pub pre: u8,
     pub post: u8,
     pub charge: Option<u8>,
@@ -47,16 +41,10 @@ impl Peptide {
         self.residues.len()
     }
 
-    /// Total monoisotopic mass: sum of residue masses + sum of mod deltas
-    /// + `H2O`.
     pub fn mass(&self) -> f64 {
         self.neutral_mass
     }
 
-    /// Residue-only neutral mass (no terminal `H2O`).
-    ///
-    /// `neutral_mass - H2O`, the calibrator's
-    /// `(precursor_mz - proton) * charge - H2O` observed mass convention.
     pub fn residue_mass(&self) -> f64 {
         self.neutral_mass - H2O
     }
@@ -65,17 +53,11 @@ impl Peptide {
         self.nominal_mass
     }
 
-    /// Total nominal residue mass excluding `H2O`.
-    ///
-    /// This matches the search/GF bucket key convention
-    /// `nominal_from(peptide.mass() - H2O)` but avoids re-walking residues.
     pub fn nominal_residue_mass(&self) -> i32 {
         self.nominal_residue_mass
     }
 }
 
-// Custom Eq/Hash: relies on AminoAcid's custom impls (which route f64
-// through to_bits). Same rationale as AminoAcid: f64 doesn't impl Eq/Hash.
 impl PartialEq for Peptide {
     fn eq(&self, other: &Self) -> bool {
         self.pre == other.pre
@@ -97,19 +79,6 @@ impl Hash for Peptide {
 }
 
 impl std::fmt::Display for Peptide {
-    /// Canonical text form: `pre.SEQ_WITH_MODS.post`.
-    ///
-    /// Mod deltas render as `{:+.5}` (signed, 5 decimals) after each modified
-    /// residue. **This output is byte-parity-sensitive**: it is written
-    /// verbatim into the PIN peptide column (`output/src/pin.rs`) that
-    /// Percolator consumes, so the numeric form is preserved exactly for
-    /// back-compat. Charge is not rendered.
-    ///
-    /// `from_str` is the inverse and accepts both this numeric form (matched by
-    /// *tolerance*, since 5-dp rounding is lossy — e.g. `57.021464` →
-    /// `+57.02146`) and the ProForma-ish `[UNIMOD:NN]` accession form emitted by
-    /// [`Peptide::to_proforma`] / the QPX peptidoform. See
-    /// `tests/peptide_round_trip_corpus.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.", self.pre as char)?;
         for aa in &self.residues {
@@ -123,15 +92,6 @@ impl std::fmt::Display for Peptide {
 }
 
 impl Peptide {
-    /// ProForma-ish text form: `pre.SEQ_WITH_MODS.post`, where a modified
-    /// residue carrying an `accession` is followed by `[UNIMOD:NN]` (a lossless
-    /// identity) and an accession-less mod falls back to the `{:+.5}` numeric
-    /// delta. This is the form that round-trips *exactly* through
-    /// [`Peptide::from_str`] when accessions are present, and matches the QPX
-    /// peptidoform (`output/src/qpx.rs`).
-    ///
-    /// Unlike [`std::fmt::Display`], this is **not** written into the
-    /// byte-parity PIN column, so it can use the richer accession syntax.
     pub fn to_proforma(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
@@ -177,21 +137,9 @@ pub enum PeptideParseError {
     AmbiguousMod { token: String, position: usize },
 }
 
-/// Tolerance (Da) for matching an accession-less `{:+.5}` mod delta back to a
-/// known variant in `from_str`. The `Display` form rounds the delta to 5
-/// decimals, so the printed value can differ from the stored bit pattern by up
-/// to half a unit in the last printed place (5e-6). We use a slightly looser
-/// 1e-4 bound so that legitimately distinct mods (which differ by far more, e.g.
-/// the ~3 mDa Phospho/Trimethyl-class spacings are still > 1e-4) remain
-/// distinguishable while round-trip rounding is absorbed. Two variants that fall
-/// within this window of one printed delta are reported as ambiguous rather than
-/// silently picking one.
 pub const MOD_DELTA_MATCH_TOL: f64 = 1e-4;
 
 impl Peptide {
-    /// Parse `pre.SEQ.post` form. `aa_set` provides the variant lookup
-    /// for modified residues (matches mass deltas to known
-    /// `(residue, mass_delta)` pairs).
     pub fn from_str(s: &str, aa_set: &AminoAcidSet) -> Result<Self, PeptideParseError> {
         if s.is_empty() {
             return Err(PeptideParseError::Empty);
@@ -232,8 +180,6 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
         i += 1;
 
         if i < bytes.len() && bytes[i] == b'[' {
-            // ProForma-ish accession form: `[UNIMOD:NN]`. Match the variant by
-            // accession (a lossless identity round trip).
             let start = i;
             let close = s[i..].find(']').map(|off| i + off).ok_or_else(|| {
                 PeptideParseError::UnknownMod {
@@ -275,10 +221,6 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
                     source,
                 })?;
 
-            // Tolerance match: the Display form rounds the delta to 5 dp, so an
-            // exact bit-compare no longer round-trips (e.g. 57.021464 →
-            // +57.02146). Match within `MOD_DELTA_MATCH_TOL`; reject if more
-            // than one variant falls in the window (ambiguous).
             let mut matches = aa_set
                 .variants_for(r, crate::modification::ModLocation::Anywhere)
                 .iter()
@@ -336,7 +278,7 @@ mod tests {
 
     #[test]
     fn mass_is_sum_plus_h2o() {
-        let p = unmod_pep(b"GA"); // G + A masses
+        let p = unmod_pep(b"GA");
         let g = AminoAcid::standard(b'G').unwrap().mass;
         let a = AminoAcid::standard(b'A').unwrap().mass;
         let expected = g + a + H2O;
@@ -377,7 +319,6 @@ mod tests {
     #[test]
     fn nominal_mass_for_g_a() {
         let p = unmod_pep(b"GA");
-        // G + A + H2O ≈ 146.069 → nominal 146
         assert_eq!(p.nominal_mass(), 146);
     }
 

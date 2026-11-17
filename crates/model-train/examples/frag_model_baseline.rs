@@ -1,26 +1,3 @@
-//! How good is the in-house fragment-intensity GBDT as a spectrum predictor?
-//!
-//! For a list of identified PSMs (`SpecId`, andes peptide string) and the mzML
-//! they came from, predicts b/y 1+/2+ intensities with the store's
-//! frag-intensity GBDT and compares them with the observed spectrum using the
-//! same feature definitions as `onnx-infer/examples/rescore_pin.rs` (spectral
-//! angle, cosine, Pearson on sum-normalised b/y vectors; fragment charge above
-//! the precursor charge skipped), so the numbers line up column for column with
-//! the PeptDeep features that example writes. A flat prediction (every ion
-//! equal) is reported as a floor. The andes RT index features (`rt_features`)
-//! and seed index are written as well for an RT baseline.
-//!
-//! ```text
-//! cargo run --release -p model-train --example frag_model_baseline -- \
-//!   --psms conf.tsv --mzml run.mzML --store resources/models --model-id hcd_astral_tryp \
-//!   --frag-tol 20 --frag-unit ppm --out gbdt.tsv
-//! ```
-//!
-//! `--psms` is a TSV with a header containing `SpecId` and `peptide`
-//! (`K.PEPM+15.99491K.D`); the scan number is parsed from `scan=<n>` in SpecId.
-//! The precursor charge is the charge whose theoretical m/z matches the
-//! spectrum's precursor within 30 ppm (isotope offsets 0..=3).
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -37,7 +14,6 @@ use scoring_crate::scoring::{predict_by_ions, predict_frag_intensities};
 const PROTON: f64 = 1.007_276_466_8;
 const C13: f64 = 1.003_354_835;
 
-/// andes mass delta → (residues it may sit on, empty = N-term only; mass; name).
 const MODS: &[(&[u8], f64, &str)] = &[
     (b"C", 57.02146, "Carbamidomethyl"),
     (b"M", 15.99491, "Oxidation"),
@@ -50,8 +26,6 @@ const MODS: &[(&[u8], f64, &str)] = &[
     (b"", -18.01056, "Glu->pyro-Glu"),
 ];
 
-/// Parse `K.PEPM+15.99491K.D` → (residue bytes, per-residue mod delta).
-/// N-terminal deltas follow the first residue and are folded into it.
 fn parse(s: &str) -> Option<(Vec<u8>, Vec<f64>)> {
     let b = s.as_bytes();
     let core = if b.len() > 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
@@ -146,8 +120,6 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-/// (spectral angle, cosine, Pearson) on sum-normalised vectors; identical to
-/// `rescore_pin.rs::ms2_features` for these three columns.
 fn sim(p: &[f64], o: &[f64]) -> [f64; 3] {
     let (sp, so) = (p.iter().sum::<f64>(), o.iter().sum::<f64>());
     let pn: Vec<f64> = p
@@ -252,7 +224,6 @@ fn main() {
             n_skip += 1;
             continue;
         };
-        // Observed b/y by max peak within tolerance; predicted from the GBDT.
         let ions = predict_by_ions(&pep, 1..=2);
         let pred = predict_frag_intensities(&frag, &pep, z);
         let (mut p, mut o) = (Vec::new(), Vec::new());

@@ -1,6 +1,3 @@
-//! Enzymatic cleavage rules. The 8 canonical variants are pinned by
-//! `tests/enzyme_rules.rs`. Custom enzymes are deferred.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Enzyme {
     Trypsin,
@@ -15,15 +12,10 @@ pub enum Enzyme {
     NonSpecific,
 }
 
-/// Cleavage rule table — one per `Enzyme` variant.
-///
-/// `after`: residues whose C-terminal peptide bond is cleaved.
-/// `before`: residues whose N-terminal peptide bond is cleaved.
 struct EnzymeRules {
     after: &'static [u8],
     before: &'static [u8],
-    /// Special flag: NonSpecific cleaves between any pair, NoCleavage never.
-    universal: Option<bool>, // Some(true) = always, Some(false) = never
+    universal: Option<bool>,
 }
 
 impl Enzyme {
@@ -64,7 +56,6 @@ impl Enzyme {
                 before: b"",
                 universal: None,
             },
-            // Alpha-lytic protease cleaves C-terminal to T, A, S and V.
             Enzyme::AlphaLP => EnzymeRules {
                 after: b"TASV",
                 before: b"",
@@ -98,8 +89,6 @@ impl Enzyme {
         }
     }
 
-    /// Case-insensitive name lookup. Common aliases ("Tryp"→Trypsin,
-    /// "Asp-N"→AspN, etc.) are accepted.
     pub fn from_name(s: &str) -> Option<Self> {
         let n = s.trim().to_ascii_lowercase();
         match n.as_str() {
@@ -112,8 +101,6 @@ impl Enzyme {
             "argc" | "arg-c" => Some(Enzyme::ArgC),
             "alp" | "alpha-lp" | "alphalp" => Some(Enzyme::AlphaLP),
             "nocleavage" | "none" => Some(Enzyme::NoCleavage),
-            // Elastase has broad, low-specificity cleavage; treat it as a
-            // non-specific digest (matches the multi-enzyme spec §5).
             "nonspecific" | "all" | "elastase" => Some(Enzyme::NonSpecific),
             _ => None,
         }
@@ -133,37 +120,18 @@ impl Enzyme {
         }
     }
 
-    /// Required by the candidate-generation walk. For builtin enzymes this
-    /// is always `true`: any residue is allowed *inside* a peptide.
     pub fn allows_internal(self, _residue: u8) -> bool {
         true
     }
 
-    // -----------------------------------------------------------------------
-    // GF helpers
-    // -----------------------------------------------------------------------
-
-    /// Returns `true` for N-terminal enzymes (cleavage before the target
-    /// residue: LysN, AspN). `false` for C-terminal enzymes (Trypsin, LysC,
-    /// ArgC, Chymotrypsin, GluC, AlphaLP) and for NoCleavage /
-    /// NonSpecific. LysN and AspN are the only two builtins with
-    /// `is_n_term = true`.
     pub fn is_n_term(self) -> bool {
         matches!(self, Enzyme::LysN | Enzyme::AspN)
     }
 
-    /// `true` for C-terminal enzymes (the negation of `is_n_term`).
     pub fn is_c_term(self) -> bool {
         !self.is_n_term()
     }
 
-    /// Direction-agnostic cleavability: returns `true` if `residue` is a
-    /// cleavage-target for this enzyme.
-    ///
-    /// For C-terminal enzymes (`after` list) this is equivalent to
-    /// `is_cleavable_after`. For N-terminal enzymes (`before` list) this is
-    /// equivalent to `is_cleavable_before`. For NoCleavage always `false`; for
-    /// NonSpecific always `true`.
     pub fn is_cleavable(self, residue: u8) -> bool {
         match self.rules().universal {
             Some(b) => b,
@@ -177,12 +145,6 @@ impl Enzyme {
         }
     }
 
-    /// The residues targeted by this enzyme's primary cleavage rule.
-    ///
-    /// For C-terminal enzymes: the `after` residues (e.g. `[b'K', b'R']` for
-    /// Trypsin). For N-terminal enzymes: the `before` residues (e.g. `[b'K']`
-    /// for LysN). For NoCleavage / NonSpecific: `&[]` (the
-    /// `universal` flag handles cleavability; there are no specific residues).
     pub fn residues(self) -> &'static [u8] {
         if self.rules().universal.is_some() {
             return &[];
@@ -255,7 +217,6 @@ mod tests {
         assert_eq!(Enzyme::from_name("Tryp"), Some(Enzyme::Trypsin));
         assert_eq!(Enzyme::from_name("Asp-N"), Some(Enzyme::AspN));
         assert_eq!(Enzyme::from_name("AspN"), Some(Enzyme::AspN));
-        // Elastase is broad/low-specificity → mapped to NonSpecific.
         assert_eq!(Enzyme::from_name("elastase"), Some(Enzyme::NonSpecific));
         assert_eq!(Enzyme::from_name("garbage"), None);
     }
@@ -285,7 +246,6 @@ mod tests {
         assert_eq!(Enzyme::from_name("AlphaLP"), Some(Enzyme::AlphaLP));
     }
 
-    // GF helper tests
     #[test]
     fn trypsin_is_c_term_and_cleaves_after_kr() {
         assert!(!Enzyme::Trypsin.is_n_term());
@@ -310,7 +270,6 @@ mod tests {
     #[test]
     fn nocleavage_residues_is_empty() {
         assert_eq!(Enzyme::NoCleavage.residues(), &[] as &[u8]);
-        // NoCleavage.isCleavable should return false for all residues.
         assert!(!Enzyme::NoCleavage.is_cleavable(b'K'));
         assert!(!Enzyme::NoCleavage.is_cleavable(b'R'));
         assert!(!Enzyme::NoCleavage.is_cleavable(b'A'));

@@ -1,6 +1,3 @@
-//! Load `astral-speed/test-fixtures/BSA.fasta` (1 protein, ~607
-//! residues) and assert basic invariants.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;

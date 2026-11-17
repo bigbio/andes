@@ -1,7 +1,3 @@
-//! Smoke test exercising the re-exported public API end-to-end. If this
-//! compiles and passes, downstream crates can import the same types
-//! without touching submodule paths.
-
 use model::{
     AminoAcid, AminoAcidSetBuilder, Enzyme, ModLocation, Modification, Peptide, PrecursorTolerance,
     ResidueSpec, Tolerance, H2O, PROTON,
@@ -53,11 +49,7 @@ fn enzyme_and_tolerance_via_public_api() {
 
 #[test]
 fn chemistry_constants_via_public_api() {
-    // Just confirm they're reachable through the re-export and have
-    // sensible (non-zero) values; bit-exact pinning lives in the
-    // chemistry parity test.
     assert_eq!(PROTON, 1.00727649);
-    // Compare via a runtime binding to avoid clippy::assertions_on_constants.
     let h2o: f64 = H2O;
     assert!(h2o > 18.0 && h2o < 18.1);
 }

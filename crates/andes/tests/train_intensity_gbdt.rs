@@ -1,9 +1,3 @@
-//! Integration test for `andes train-intensity-gbdt`.
-//!
-//! Verifies the round-trip: build a tiny synthetic flat parquet → run
-//! `train-intensity-gbdt` → reload the produced store → assert
-//! `param.frag_intensity_model.is_some()` and `predict_value` is finite.
-
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -17,7 +11,6 @@ use parquet::arrow::ArrowWriter;
 
 use model_train::ModelStore;
 
-/// One synthetic PSM row (same schema as the train-from-msnet parquet).
 struct Row {
     seq: &'static str,
     charge: i32,
@@ -29,8 +22,6 @@ struct Row {
     peaks: Vec<(f32, f32)>,
 }
 
-/// Write the flat training parquet at `path` from `rows`.
-/// Schema mirrors `read_msnet_parquet` in andes.rs.
 fn write_flat_parquet(path: &Path, rows: &[Row]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("seq", DataType::Utf8, false),
@@ -134,14 +125,13 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     writer.close().expect("close writer");
 }
 
-/// A handful of fake peaks at plausible b/y-ion m/z values for PEPTIDEK.
 fn fake_peaks() -> Vec<(f32, f32)> {
     vec![
-        (98.06, 1000.0),  // b1 (P)
-        (227.10, 2000.0), // b2 (PE)
-        (324.15, 3000.0), // b3 (PEP)
-        (147.11, 1500.0), // y1 (K)
-        (276.15, 2500.0), // y2 (EK)
+        (98.06, 1000.0),
+        (227.10, 2000.0),
+        (324.15, 3000.0),
+        (147.11, 1500.0),
+        (276.15, 2500.0),
         (500.30, 500.0),
         (600.35, 800.0),
         (700.40, 700.0),
@@ -183,8 +173,6 @@ fn synthetic_rows() -> Vec<Row> {
     ]
 }
 
-/// Round-trip test: build flat parquet → `train-intensity-gbdt` CLI → reload
-/// store → `frag_intensity_model.is_some()` + `predict_value` is finite.
 #[test]
 fn train_intensity_gbdt_roundtrip() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -203,9 +191,6 @@ fn train_intensity_gbdt_roundtrip() {
         .arg("test_frag")
         .arg("--threads")
         .arg("1")
-        // The synthetic fixture is tiny (a few PSMs) and intentionally below the
-        // GBDT quality gate (finding 3.6); opt into the degenerate fallback so
-        // this round-trip test still produces a model to inspect.
         .arg("--allow-degenerate-model")
         .status()
         .expect("run andes train-intensity-gbdt");
@@ -230,7 +215,6 @@ fn train_intensity_gbdt_roundtrip() {
         "frag_intensity_model must be present after train-intensity-gbdt"
     );
 
-    // The model must produce a finite prediction.
     let fim = param.frag_intensity_model.as_ref().unwrap();
     let n_features = scoring_crate::frag_features::N_FRAG_FEATURES;
     let dummy = vec![0.0f32; n_features];
@@ -241,8 +225,6 @@ fn train_intensity_gbdt_roundtrip() {
     );
 }
 
-/// A second model pre-existing in the store must be preserved after
-/// `train-intensity-gbdt` writes the new frag model.
 #[test]
 fn train_intensity_gbdt_preserves_existing_models() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -251,7 +233,6 @@ fn train_intensity_gbdt_preserves_existing_models() {
 
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // First: train a rank-core model into the store via train-from-msnet.
     let s1 = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train")
         .arg("--in")
@@ -267,7 +248,6 @@ fn train_intensity_gbdt_preserves_existing_models() {
         .expect("run train-from-msnet");
     assert!(s1.success(), "train-from-msnet should exit 0, got {s1}");
 
-    // Second: run train-intensity-gbdt; must preserve "existing_model".
     let s2 = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train-intensity-gbdt")
         .arg("--in")

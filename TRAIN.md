@@ -54,7 +54,7 @@ andes --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
 | `--instrument` | instrument of the model, part of its selection key (`QExactive`, `OrbitrapAstral`, `TimsTOF`, …) | the seed's |
 | `--protocol` | experiment-class tag(s) (§4) | `Automatic` |
 | `--model-id` | id written to the store | `trained_<instrument>_<protocol>` |
-| `--mods` | mods.txt (same format as search) | Cam-C + Ox-M |
+| `--fixed-mods`, `--variable-mods` | `Name (sites)` lists, as for the search (DOCS.md §2) | Carbamidomethyl (C); Oxidation (M) |
 | `--date` | ISO-8601 date in the source ledger | today |
 | `--fragment-tol-ppm` / `--fragment-tol-da` | replace the seed's fragment tolerance (`mme`) | the seed's |
 | `--activation` | activation of the model (`EThcD`, `ETD`, …): its selection key and ion series (EThcD: b, y, c, z•); only spectra with that activation are used | the seed's, all spectra |
@@ -79,7 +79,7 @@ Use data matching your instrument and experiment class, from **PRIDE**
 (<https://www.ebi.ac.uk/pride/>; native `.raw`/`.d` work), **ProteoBench**
 (<https://proteobench.readthedocs.io/>) or **MassIVE** (<https://massive.ucsd.edu/>). A few
 thousand confident PSMs make a usable model; more helps high-charge / high-mass partitions.
-Match the enzyme and `--mods` of your searches, and keep a held-out or entrapment set (§7).
+Match the enzyme and the modification lists of your searches, and keep a held-out or entrapment set (§7).
 
 ## 4. Experiment-class catalog (`--protocol`)
 

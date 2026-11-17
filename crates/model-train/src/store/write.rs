@@ -1,13 +1,3 @@
-//! Parquet writer: serialize one or more [`Param`] models to a single file.
-//!
-//! Call [`write_models`] with a slice of `(model_id, &Param)` pairs.
-//! All models are written to **one** Parquet file using `combined_schema()`.
-//! Manifest rows (scalar fields + charge_hist) come first, then table rows
-//! (rank_dist, err_dist, frag_off, precursor_off, partition list).
-//!
-//! Use [`write_model_with_sources`] to also persist per-source sufficient
-//! statistics ([`crate::counts::CountStats`]) and a sources ledger.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,62 +16,31 @@ use crate::counts::CountStats;
 use crate::store::schema::combined_schema;
 use crate::TrainError;
 
-// ── public types ─────────────────────────────────────────────────────────────
-
-/// Metadata for a single training source stored in the Parquet ledger.
-///
-/// One [`SourceLedger`] row is written per `(model_id, source_id)` pair and
-/// accompanies the matching [`CountStats`] sufficient-statistics rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceLedger {
-    /// Unique identifier for this source within the model (e.g. a dataset accession).
     pub source_id: String,
-    /// Human-readable dataset name (e.g. `"PXD001819"`).
     pub dataset: String,
-    /// Number of confident PSMs contributed by this source.
     pub n_psms: i64,
-    /// ISO 8601 date string (e.g. `"2026-01-01"`).
     pub date: String,
-    /// Relative weight applied when mixing this source into training, before
-    /// any age decay.
     pub weight: f32,
-    /// FDR threshold used to select confident PSMs from this source.
     pub train_fdr: f32,
-    /// Half-life (days) of the exponential age decay applied to `weight` each
-    /// time the model is re-estimated, measured from `date` to the day of
-    /// estimation. `None` ⇒ the source is not decayed.
     pub decay_half_life_days: Option<f32>,
-    /// Instrument label (e.g. `"QExactive"`).
     pub instrument: String,
-    /// Experiment class slug(s) (e.g. `"standard"`, `"tmt"`).
     pub experiment_class: String,
 }
 
-// ── type aliases ─────────────────────────────────────────────────────────────
-
-/// One encoded precursor-offset entry: (reduced_charge, offset, tol_is_ppm, tol_val, frequency).
 type PrecursorEntry = (i32, f32, bool, f32, f32);
-
-// ── helpers ──────────────────────────────────────────────────────────────────
 
 fn f32_to_i32_bits(v: f32) -> i32 {
     v.to_bits() as i32
 }
 
-// ── public entry point ───────────────────────────────────────────────────────
-
-/// Write `models` to a Parquet file at `path`.
-///
-/// Rows are sorted by `model_id` within each record kind (manifest first,
-/// then table rows).
 pub fn write_models(path: &Path, models: &[(String, &Param)]) -> Result<(), TrainError> {
     let plain: Vec<(&str, &Param)> = models.iter().map(|(id, p)| (id.as_str(), *p)).collect();
     let blobs: Vec<Option<Vec<u8>>> = vec![None; models.len()];
     write_models_inner(path, &plain, &blobs)
 }
 
-/// Like [`write_models`], but each model may carry a transcoded GBDT blob
-/// (`AGBD` bytes) stored on its manifest row. `None` ⇒ null column (rank-core-only models).
 pub fn write_models_with_gbdt(
     path: &Path,
     models: &[(&str, &Param, Option<Vec<u8>>)],
@@ -101,7 +60,6 @@ fn write_models_inner(
         models.len(),
         "blobs slice must be 1:1 with models"
     );
-    // Delegate to write_model_with_sources with no source data.
     if models.is_empty() {
         let schema = combined_schema();
         let props = WriterProperties::builder()
@@ -118,7 +76,6 @@ fn write_models_inner(
 
     let schema = combined_schema();
 
-    // Sort by model_id for deterministic output, keeping blobs aligned.
     let mut indexed: Vec<(usize, &str, &Param)> = models
         .iter()
         .enumerate()
@@ -131,7 +88,6 @@ fn write_models_inner(
         .map(|(i, _, _)| blobs.get(*i).cloned().flatten())
         .collect();
 
-    // Build manifest rows + table rows.
     let manifest_batch = build_manifest_batch(&schema, &sorted, &sorted_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
@@ -159,14 +115,6 @@ fn write_models_inner(
     Ok(())
 }
 
-/// Write a single model with per-source sufficient statistics to `path`.
-///
-/// Writes manifest + table rows for `param` (same as [`write_models`] for one
-/// model) plus `"source"` (ledger) and `"stat"` (CountStats) rows for each
-/// entry in `sources`.  `sources` may be empty.
-///
-/// `gbdt_blob` is an optional GBDT model blob (`AGBD` bytes) to embed on the
-/// manifest row. Pass `None` to omit (rank-core-only models).
 pub fn write_model_with_sources(
     path: &Path,
     model_id: &str,
@@ -220,8 +168,6 @@ pub fn write_model_with_sources(
     Ok(())
 }
 
-// ── manifest batch ───────────────────────────────────────────────────────────
-
 fn build_manifest_batch(
     schema: &Arc<Schema>,
     models: &[(&str, &Param)],
@@ -229,13 +175,11 @@ fn build_manifest_batch(
 ) -> Result<RecordBatch, TrainError> {
     let n = models.len();
 
-    // Shared columns (non-null).
     let record_kind: ArrayRef = Arc::new(StringArray::from(vec!["manifest"; n]));
     let model_id: ArrayRef = Arc::new(StringArray::from(
         models.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
     ));
 
-    // Nullable manifest scalars.
     let mut activation = StringBuilder::new();
     let mut instrument = StringBuilder::new();
     let mut enzyme = StringBuilder::new();
@@ -252,9 +196,6 @@ fn build_manifest_batch(
     let mut max_charge = Int32Builder::new();
     let mut num_precursor_off = Int32Builder::new();
 
-    // charge_hist: List<Struct<charge: Int32, count: Int32>>
-    // We use with_field() so the inner item is non-null (matching combined_schema's
-    // list_of_struct definition which uses false for the struct item nullability).
     let charge_struct_fields: Fields = vec![
         Field::new("charge", DataType::Int32, false),
         Field::new("count", DataType::Int32, false),
@@ -263,7 +204,7 @@ fn build_manifest_batch(
     let charge_item_field = Arc::new(Field::new(
         "item",
         DataType::Struct(charge_struct_fields.clone()),
-        false, // non-null items, matching schema
+        false,
     ));
     let charge_hist_builder = StructBuilder::new(
         charge_struct_fields.clone(),
@@ -274,11 +215,8 @@ fn build_manifest_batch(
     );
     let mut charge_hist = ListBuilder::new(charge_hist_builder).with_field(charge_item_field);
 
-    // gbdt_model_bytes: manifest-only binary column; null when no blob supplied.
     let mut gbdt_b = BinaryBuilder::new();
-    // frag_intensity_model_bytes: read from Param.frag_intensity_model if set.
     let mut fim_b = BinaryBuilder::new();
-    // rich_ion_model_bytes: read from Param.rich_ion_model if set.
     let mut rim_b = BinaryBuilder::new();
 
     for (i, (_, param)) in models.iter().enumerate() {
@@ -305,7 +243,6 @@ fn build_manifest_batch(
         max_charge.append_value(param.max_charge);
         num_precursor_off.append_value(param.num_precursor_off);
 
-        // charge_hist entries
         let sb = charge_hist.values();
         for &(charge, count) in &param.charge_hist {
             sb.field_builder::<Int32Builder>(0)
@@ -318,26 +255,22 @@ fn build_manifest_batch(
         }
         charge_hist.append(true);
 
-        // gbdt_model_bytes: manifest-only Binary column; None => null cell (rank-core-only models).
         match gbdt_blobs.get(i).and_then(|b| b.as_ref()) {
             Some(bytes) => gbdt_b.append_value(bytes),
             None => gbdt_b.append_null(),
         }
 
-        // frag_intensity_model_bytes: serialise from Param.frag_intensity_model if set.
         match param.frag_intensity_model.as_ref() {
             Some(model) => fim_b.append_value(model.to_bytes()),
             None => fim_b.append_null(),
         }
 
-        // rich_ion_model_bytes: serialise from Param.rich_ion_model if set.
         match param.rich_ion_model.as_ref() {
             Some(model) => rim_b.append_value(model.to_bytes()),
             None => rim_b.append_null(),
         }
     }
 
-    // Table-only and source/stat-only columns: null for manifest rows.
     let null_i32 = null_i32_array(n);
     let null_i64 = null_i64_array(n);
     let null_utf8 = null_utf8_array(n);
@@ -375,45 +308,40 @@ fn build_manifest_batch(
         Arc::new(max_charge.finish()),
         Arc::new(num_precursor_off.finish()),
         Arc::new(charge_hist.finish()),
-        Arc::new(gbdt_b.finish()), // gbdt_model_bytes
-        Arc::new(fim_b.finish()),  // frag_intensity_model_bytes
-        Arc::new(rim_b.finish()),  // rich_ion_model_bytes
-        // table-only → null
-        null_i32.clone(),        // part_charge
-        null_i32.clone(),        // part_mass_bits
-        null_i32.clone(),        // part_seg
-        null_utf8.clone(),       // ion_kind
-        null_i32.clone(),        // ion_charge
-        null_i32.clone(),        // ion_offset_bits
-        null_i32.clone(),        // ion_loss_class
-        null_utf8.clone(),       // table_kind
-        null_float_list,         // values
-        null_precursor_list,     // precursor_offsets
-        null_int32_list.clone(), // frag_off_loss_classes
-        // source/stat-only → null
-        null_utf8.clone(), // source_id
-        null_utf8.clone(), // dataset
-        null_i64,          // n_psms
-        null_utf8.clone(), // date
-        null_f32.clone(),  // weight
-        null_f32.clone(),  // train_fdr
-        null_f32.clone(),  // decay_half_life_days
-        null_utf8.clone(), // src_instrument
-        null_utf8.clone(), // src_experiment_class
-        null_int64_list,   // counts
-        null_int32_list,   // charge_keys
+        Arc::new(gbdt_b.finish()),
+        Arc::new(fim_b.finish()),
+        Arc::new(rim_b.finish()),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_utf8.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_utf8.clone(),
+        null_float_list,
+        null_precursor_list,
+        null_int32_list.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_i64,
+        null_utf8.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_int64_list,
+        null_int32_list,
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-// ── table batch ──────────────────────────────────────────────────────────────
-
 fn build_table_batch(
     schema: &Arc<Schema>,
     models: &[(&str, &Param)],
 ) -> Result<RecordBatch, TrainError> {
-    // Columns parallel to combined_schema table section.
     let mut record_kinds: Vec<&str> = Vec::new();
     let mut model_ids: Vec<&str> = Vec::new();
     let mut part_charges: Vec<Option<i32>> = Vec::new();
@@ -422,21 +350,14 @@ fn build_table_batch(
     let mut ion_kinds: Vec<Option<&str>> = Vec::new();
     let mut ion_charges: Vec<Option<i32>> = Vec::new();
     let mut ion_offset_bits: Vec<Option<i32>> = Vec::new();
-    // ion_loss_class: per-row loss_class for rank_dist/stat rows (nullable; absent in old stores).
     let mut ion_loss_classes: Vec<Option<i32>> = Vec::new();
     let mut table_kinds: Vec<Option<&str>> = Vec::new();
 
-    // Per-row payloads.
     let mut all_values: Vec<Option<Vec<f32>>> = Vec::new();
     let mut all_precursor_offsets: Vec<Option<Vec<PrecursorEntry>>> = Vec::new();
-    // frag_off_loss_classes: parallel per-entry loss_class list for frag_off rows (nullable).
     let mut all_frag_off_loss_classes: Vec<Option<Vec<i32>>> = Vec::new();
 
     for &(model_id, param) in models {
-        // ── partition list (record_kind="partition") ──────────────────────────
-        // Store the sorted partition list so the reader knows the exact order
-        // used for rank_dist / frag_off assignment. We store one row per partition
-        // with table_kind="partition" and no payload.
         for part in &param.partitions {
             record_kinds.push("table");
             model_ids.push(model_id);
@@ -453,8 +374,6 @@ fn build_table_batch(
             all_frag_off_loss_classes.push(None);
         }
 
-        // ── precursor_off_map ─────────────────────────────────────────────────
-        // One row per charge key. Sort by charge for determinism.
         let mut precursor_charges: Vec<i32> = param.precursor_off_map.keys().copied().collect();
         precursor_charges.sort_unstable();
         for charge in precursor_charges {
@@ -484,13 +403,8 @@ fn build_table_batch(
             all_frag_off_loss_classes.push(None);
         }
 
-        // ── frag_off_table ────────────────────────────────────────────────────
-        // Iterate partitions in sorted order (same order the binary reader stores them).
         for part in &param.partitions {
             if let Some(frags) = param.frag_off_table.get(part) {
-                // Encode as flat f32 list: groups of 4 per entry (stride-4, unchanged for
-                // backward compat with old stores).  loss_class is stored in a separate
-                // parallel List<Int32> column `frag_off_loss_classes`.
                 let mut flat: Vec<f32> = Vec::with_capacity(frags.len() * 4);
                 let mut loss_classes: Vec<i32> = Vec::with_capacity(frags.len());
                 for f in frags {
@@ -537,16 +451,8 @@ fn build_table_batch(
             }
         }
 
-        // ── rank_dist_table ───────────────────────────────────────────────────
-        // One row per (partition, ion_type): values = Vec<f32> of length max_rank+1.
-        // Iterate partitions in sorted order to be deterministic.
         for part in &param.partitions {
             if let Some(ion_map) = param.rank_dist_table.get(part) {
-                // Iterate in a stable order: frag_off entries first (in insertion order),
-                // then Noise. This mirrors the binary writer which writes ion types in the
-                // order they appear in frag_off_table, then appends Noise.
-                // We need to reproduce the same order on read. Store the ion_type info
-                // in the row's ion_kind/ion_charge/ion_offset_bits columns.
                 for (ion, freqs) in ion_map {
                     let (kind_str, ic, iob, lc) = encode_ion_type(ion);
                     record_kinds.push("table");
@@ -566,7 +472,6 @@ fn build_table_batch(
             }
         }
 
-        // ── error distribution tables ─────────────────────────────────────────
         for part in &param.partitions {
             if let Some(v) = param.ion_err_dist_table.get(part) {
                 emit_dist_row(
@@ -642,14 +547,12 @@ fn build_table_batch(
 
     let nrows = record_kinds.len();
 
-    // ── build Arrow arrays ───────────────────────────────────────────────────
     let record_kind_arr: ArrayRef = Arc::new(StringArray::from(record_kinds));
     let model_id_arr: ArrayRef = Arc::new(StringArray::from(model_ids));
     let part_charge_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_charges));
     let part_mass_bits_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_mass_bits));
     let part_seg_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_segs));
 
-    // ion_kind: Option<&str> → StringArray
     let ion_kind_arr: ArrayRef = Arc::new(StringArray::from(
         ion_kinds
             .into_iter()
@@ -666,16 +569,12 @@ fn build_table_batch(
             .collect::<Vec<_>>(),
     ));
 
-    // values: List<Float32>
     let values_arr = build_float_list(all_values);
 
-    // precursor_offsets: List<Struct<...>>
     let precursor_arr = build_precursor_list(all_precursor_offsets);
 
-    // frag_off_loss_classes: List<Int32>
     let frag_off_loss_classes_arr = build_int32_list(all_frag_off_loss_classes);
 
-    // manifest-only and source/stat-only columns: null for table rows.
     let null_i32 = null_i32_array(nrows);
     let null_i64 = null_i64_array(nrows);
     let null_utf8 = null_utf8_array(nrows);
@@ -694,27 +593,25 @@ fn build_table_batch(
     let columns: Vec<ArrayRef> = vec![
         record_kind_arr,
         model_id_arr,
-        // manifest-only → null
-        null_utf8.clone(),        // activation
-        null_utf8.clone(),        // instrument
-        null_utf8.clone(),        // enzyme
-        null_utf8.clone(),        // protocol
-        null_i32.clone(),         // version
-        null_f32.clone(),         // mme_val
-        null_bool.clone(),        // mme_is_ppm
-        null_bool.clone(),        // apply_deconv
-        null_f32.clone(),         // deconv_tol
-        null_i32.clone(),         // num_segments
-        null_i32.clone(),         // max_rank
-        null_i32.clone(),         // error_scaling_factor
-        null_i32.clone(),         // min_charge
-        null_i32.clone(),         // max_charge
-        null_i32.clone(),         // num_precursor_off
-        null_charge_hist,         // charge_hist
-        null_binary_array(nrows), // gbdt_model_bytes
-        null_binary_array(nrows), // frag_intensity_model_bytes
-        null_binary_array(nrows), // rich_ion_model_bytes
-        // table columns
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_i32.clone(),
+        null_f32.clone(),
+        null_bool.clone(),
+        null_bool.clone(),
+        null_f32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_charge_hist,
+        null_binary_array(nrows),
+        null_binary_array(nrows),
+        null_binary_array(nrows),
         part_charge_arr,
         part_mass_bits_arr,
         part_seg_arr,
@@ -726,24 +623,21 @@ fn build_table_batch(
         values_arr,
         precursor_arr,
         frag_off_loss_classes_arr,
-        // source/stat-only → null
-        null_utf8.clone(), // source_id
-        null_utf8.clone(), // dataset
-        null_i64,          // n_psms
-        null_utf8.clone(), // date
-        null_f32.clone(),  // weight
-        null_f32.clone(),  // train_fdr
-        null_f32.clone(),  // decay_half_life_days
-        null_utf8.clone(), // src_instrument
-        null_utf8.clone(), // src_experiment_class
-        null_int64_list,   // counts
-        null_int32_list,   // charge_keys
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_i64,
+        null_utf8.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_int64_list,
+        null_int32_list,
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
-
-// ── row emission helpers ─────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn emit_dist_row<'a>(
@@ -782,9 +676,6 @@ fn emit_dist_row<'a>(
     all_frag_off_loss_classes.push(None);
 }
 
-/// Encode an `IonType` to `(kind_str, ion_charge, ion_offset_bits, loss_class)`.
-///
-/// `loss_class` is the fourth field: 0 for intact ions and `IonType::Noise`.
 fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32, i32) {
     match ion {
         IonType::Prefix {
@@ -800,8 +691,6 @@ fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32, i32) {
         IonType::Noise => ("noise", 0, 0, 0),
     }
 }
-
-// ── array builders ───────────────────────────────────────────────────────────
 
 fn build_float_list(rows: Vec<Option<Vec<f32>>>) -> ArrayRef {
     let mut b = ListBuilder::new(Float32Builder::new());
@@ -829,11 +718,7 @@ fn build_precursor_list(rows: Vec<Option<Vec<PrecursorEntry>>>) -> ArrayRef {
     ]
     .into();
 
-    let item_field = Arc::new(Field::new(
-        "item",
-        DataType::Struct(fields.clone()),
-        false, // non-null items, matching schema
-    ));
+    let item_field = Arc::new(Field::new("item", DataType::Struct(fields.clone()), false));
     let sb = StructBuilder::new(
         fields.clone(),
         vec![
@@ -875,8 +760,6 @@ fn build_precursor_list(rows: Vec<Option<Vec<PrecursorEntry>>>) -> ArrayRef {
     }
     Arc::new(lb.finish())
 }
-
-// ── null array helpers ───────────────────────────────────────────────────────
 
 fn null_i32_array(n: usize) -> ArrayRef {
     let mut b = Int32Builder::new();
@@ -931,11 +814,7 @@ fn null_struct_list_array(n: usize, fields: Vec<Field>) -> ArrayRef {
             }
         })
         .collect();
-    let item_field = Arc::new(Field::new(
-        "item",
-        DataType::Struct(fs.clone()),
-        false, // non-null items, matching combined_schema's list_of_struct
-    ));
+    let item_field = Arc::new(Field::new("item", DataType::Struct(fs.clone()), false));
     let sb = StructBuilder::new(fs.clone(), child_builders);
     let mut lb = ListBuilder::new(sb).with_field(item_field);
     for _ in 0..n {
@@ -976,9 +855,6 @@ fn null_int32_list_array(n: usize) -> ArrayRef {
     Arc::new(b.finish())
 }
 
-// ── source batch (record_kind="source") ──────────────────────────────────────
-
-/// Build the source-ledger batch: one row per (model_id, source).
 fn build_source_batch(
     schema: &Arc<Schema>,
     model_id: &str,
@@ -986,11 +862,9 @@ fn build_source_batch(
 ) -> Result<RecordBatch, TrainError> {
     let n = sources.len();
 
-    // Shared columns.
     let record_kind: ArrayRef = Arc::new(StringArray::from(vec!["source"; n]));
     let model_id_col: ArrayRef = Arc::new(StringArray::from(vec![model_id; n]));
 
-    // Source-ledger columns.
     let mut source_id_b = StringBuilder::new();
     let mut dataset_b = StringBuilder::new();
     let mut n_psms_b = Int64Builder::new();
@@ -1013,7 +887,6 @@ fn build_source_batch(
         src_experiment_class_b.append_value(&ledger.experiment_class);
     }
 
-    // Columns that belong to other row kinds are null here.
     let null_i32 = null_i32_array(n);
     let null_utf8 = null_utf8_array(n);
     let null_bool = null_bool_array(n);
@@ -1043,39 +916,36 @@ fn build_source_batch(
     let columns: Vec<ArrayRef> = vec![
         record_kind,
         model_id_col,
-        // manifest-only → null
-        null_utf8.clone(),    // activation
-        null_utf8.clone(),    // instrument
-        null_utf8.clone(),    // enzyme
-        null_utf8.clone(),    // protocol
-        null_i32.clone(),     // version
-        null_f32.clone(),     // mme_val
-        null_bool.clone(),    // mme_is_ppm
-        null_bool.clone(),    // apply_deconv
-        null_f32.clone(),     // deconv_tol
-        null_i32.clone(),     // num_segments
-        null_i32.clone(),     // max_rank
-        null_i32.clone(),     // error_scaling_factor
-        null_i32.clone(),     // min_charge
-        null_i32.clone(),     // max_charge
-        null_i32.clone(),     // num_precursor_off
-        null_charge_hist,     // charge_hist
-        null_binary_array(n), // gbdt_model_bytes
-        null_binary_array(n), // frag_intensity_model_bytes
-        null_binary_array(n), // rich_ion_model_bytes
-        // table-only → null
-        null_i32s.clone(),       // part_charge
-        null_i32s.clone(),       // part_mass_bits
-        null_i32s.clone(),       // part_seg
-        null_utf8.clone(),       // ion_kind
-        null_i32s.clone(),       // ion_charge
-        null_i32s.clone(),       // ion_offset_bits
-        null_i32s.clone(),       // ion_loss_class
-        null_utf8.clone(),       // table_kind
-        null_float_list,         // values
-        null_precursor_list,     // precursor_offsets
-        null_int32_list.clone(), // frag_off_loss_classes
-        // source-only → populated
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_i32.clone(),
+        null_f32.clone(),
+        null_bool.clone(),
+        null_bool.clone(),
+        null_f32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_charge_hist,
+        null_binary_array(n),
+        null_binary_array(n),
+        null_binary_array(n),
+        null_i32s.clone(),
+        null_i32s.clone(),
+        null_i32s.clone(),
+        null_utf8.clone(),
+        null_i32s.clone(),
+        null_i32s.clone(),
+        null_i32s.clone(),
+        null_utf8.clone(),
+        null_float_list,
+        null_precursor_list,
+        null_int32_list.clone(),
         Arc::new(source_id_b.finish()),
         Arc::new(dataset_b.finish()),
         Arc::new(n_psms_b.finish()),
@@ -1085,29 +955,18 @@ fn build_source_batch(
         Arc::new(decay_b.finish()),
         Arc::new(src_instrument_b.finish()),
         Arc::new(src_experiment_class_b.finish()),
-        // stat-only → null
-        null_int64_list, // counts
-        null_int32_list, // charge_keys
+        null_int64_list,
+        null_int32_list,
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-// ── stat batch (record_kind="stat") ──────────────────────────────────────────
-
-/// Build the per-source sufficient-statistics batch.
-///
-/// Row encoding:
-/// - `"rank"` — one row per `(source_id, Partition, IonType)`; counts = rank histogram Vec<u64>.
-/// - `"error"` / `"noise_error"` — one row per `(source_id, Partition)`; counts = error histogram.
-/// - `"existence"` — one row per `(source_id, Partition)`; counts[idx] = existence count for idx.
-/// - `"charge"` — one row per source_id (partition zeroed); counts parallel to charge_keys.
 fn build_stat_batch(
     schema: &Arc<Schema>,
     model_id: &str,
     sources: &[(SourceLedger, CountStats)],
 ) -> Result<RecordBatch, TrainError> {
-    // Accumulate rows.
     let mut record_kinds: Vec<String> = Vec::new();
     let mut model_ids: Vec<String> = Vec::new();
     let mut source_ids: Vec<String> = Vec::new();
@@ -1117,7 +976,6 @@ fn build_stat_batch(
     let mut ion_kinds: Vec<Option<String>> = Vec::new();
     let mut ion_charges: Vec<Option<i32>> = Vec::new();
     let mut ion_offset_bits: Vec<Option<i32>> = Vec::new();
-    // loss_class for rank stat rows; null for non-rank rows.
     let mut ion_loss_classes_stat: Vec<Option<i32>> = Vec::new();
     let mut table_kinds: Vec<Option<String>> = Vec::new();
     let mut all_counts: Vec<Option<Vec<i64>>> = Vec::new();
@@ -1126,8 +984,6 @@ fn build_stat_batch(
     for (ledger, stats) in sources {
         let sid = &ledger.source_id;
 
-        // ── rank ──────────────────────────────────────────────────────────────
-        // Sort for determinism: by (part, ion_kind, ion_charge, ion_offset_bits, loss_class).
         let mut rank_keys: Vec<_> = stats.rank.keys().collect();
         rank_keys.sort_by_key(|(part, ion)| {
             let (ks, ic, iob, lc) = encode_ion_type_str(ion);
@@ -1151,7 +1007,6 @@ fn build_stat_batch(
             all_charge_keys.push(None);
         }
 
-        // ── error ─────────────────────────────────────────────────────────────
         let mut error_keys: Vec<_> = stats.error.keys().collect();
         error_keys.sort();
         for part in error_keys {
@@ -1178,7 +1033,6 @@ fn build_stat_batch(
             );
         }
 
-        // ── noise_error ───────────────────────────────────────────────────────
         let mut ne_keys: Vec<_> = stats.noise_error.keys().collect();
         ne_keys.sort();
         for part in ne_keys {
@@ -1205,9 +1059,6 @@ fn build_stat_batch(
             );
         }
 
-        // ── existence ─────────────────────────────────────────────────────────
-        // Group by partition; within each partition, build counts[idx] = count for idx u32.
-        // Collect all (partition, idx, count) tuples, group by partition.
         let mut existence_by_part: rustc_hash::FxHashMap<Partition, Vec<(u32, u64)>> =
             rustc_hash::FxHashMap::default();
         for (&(part, idx), &count) in &stats.existence {
@@ -1220,7 +1071,6 @@ fn build_stat_batch(
         ex_part_keys.sort();
         for part in ex_part_keys {
             let entries = &existence_by_part[&part];
-            // Build flat list: counts[idx] = count (fill gaps with 0).
             let max_idx = entries.iter().map(|(i, _)| *i).max().unwrap_or(0) as usize;
             let mut flat: Vec<i64> = vec![0i64; max_idx + 1];
             for &(idx, count) in entries {
@@ -1248,8 +1098,6 @@ fn build_stat_batch(
             );
         }
 
-        // ── charge ────────────────────────────────────────────────────────────
-        // One row per source with part fields zeroed; charge map → two parallel lists.
         if !stats.charge.is_empty() {
             let mut charge_kv: Vec<(i32, u64)> =
                 stats.charge.iter().map(|(&k, &v)| (k, v)).collect();
@@ -1278,7 +1126,6 @@ fn build_stat_batch(
         return empty_stat_batch(schema);
     }
 
-    // ── build Arrow arrays ───────────────────────────────────────────────────
     let record_kind_arr: ArrayRef = Arc::new(StringArray::from_iter_values(
         record_kinds.iter().map(|s| s.as_str()),
     ));
@@ -1303,12 +1150,9 @@ fn build_stat_batch(
         table_kinds.into_iter().collect::<Vec<_>>(),
     ));
 
-    // counts: List<Int64>
     let counts_arr = build_int64_list(all_counts);
-    // charge_keys: List<Int32>
     let charge_keys_arr = build_int32_list(all_charge_keys);
 
-    // All other columns are null for stat rows.
     let null_i32 = null_i32_array(nrows);
     let null_i64 = null_i64_array(nrows);
     let null_utf8 = null_utf8_array(nrows);
@@ -1337,27 +1181,25 @@ fn build_stat_batch(
     let columns: Vec<ArrayRef> = vec![
         record_kind_arr,
         model_id_arr,
-        // manifest-only → null
-        null_utf8.clone(),        // activation
-        null_utf8.clone(),        // instrument
-        null_utf8.clone(),        // enzyme
-        null_utf8.clone(),        // protocol
-        null_i32.clone(),         // version
-        null_f32.clone(),         // mme_val
-        null_bool.clone(),        // mme_is_ppm
-        null_bool.clone(),        // apply_deconv
-        null_f32.clone(),         // deconv_tol
-        null_i32.clone(),         // num_segments
-        null_i32.clone(),         // max_rank
-        null_i32.clone(),         // error_scaling_factor
-        null_i32.clone(),         // min_charge
-        null_i32.clone(),         // max_charge
-        null_i32.clone(),         // num_precursor_off
-        null_charge_hist,         // charge_hist
-        null_binary_array(nrows), // gbdt_model_bytes
-        null_binary_array(nrows), // frag_intensity_model_bytes
-        null_binary_array(nrows), // rich_ion_model_bytes
-        // table-only → use the stat row partition/ion/table columns (populated above)
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
+        null_i32.clone(),
+        null_f32.clone(),
+        null_bool.clone(),
+        null_bool.clone(),
+        null_f32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_i32.clone(),
+        null_charge_hist,
+        null_binary_array(nrows),
+        null_binary_array(nrows),
+        null_binary_array(nrows),
         part_charge_arr,
         part_mass_bits_arr,
         part_seg_arr,
@@ -1366,19 +1208,18 @@ fn build_stat_batch(
         ion_offset_bits_arr,
         ion_loss_class_stat_arr,
         table_kind_arr,
-        null_float_list,         // values (table payload, not used by stat)
-        null_precursor_list,     // precursor_offsets (table payload, not used by stat)
-        null_int32_list.clone(), // frag_off_loss_classes (not used by stat)
-        // source/stat-only
+        null_float_list,
+        null_precursor_list,
+        null_int32_list.clone(),
         source_id_arr,
-        null_utf8.clone(), // dataset (stat rows don't repeat ledger fields)
-        null_i64,          // n_psms
-        null_utf8.clone(), // date
-        null_f32.clone(),  // weight
-        null_f32.clone(),  // train_fdr
-        null_f32.clone(),  // decay_half_life_days
-        null_utf8.clone(), // src_instrument
-        null_utf8.clone(), // src_experiment_class
+        null_utf8.clone(),
+        null_i64,
+        null_utf8.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_f32.clone(),
+        null_utf8.clone(),
+        null_utf8.clone(),
         counts_arr,
         charge_keys_arr,
     ];
@@ -1386,7 +1227,6 @@ fn build_stat_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
 }
 
-/// Build an empty stat batch (zero rows) — used when all sources have empty CountStats.
 fn empty_stat_batch(schema: &Arc<Schema>) -> Result<RecordBatch, TrainError> {
     build_stat_batch_empty(schema)
 }
@@ -1457,7 +1297,6 @@ fn push_partition_stat_row(
     all_charge_keys.push(None);
 }
 
-/// Same as `encode_ion_type` — used by the stat batch builder (shared encoding).
 fn encode_ion_type_str(ion: &IonType) -> (&'static str, i32, i32, i32) {
     encode_ion_type(ion)
 }

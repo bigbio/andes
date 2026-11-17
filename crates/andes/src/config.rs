@@ -1,36 +1,9 @@
-//! YAML run-configuration file (`--config run.yaml`).
-//!
-//! A single YAML file can set every search parameter, grouped by experimental
-//! design to mirror the DOCS §1a taxonomy (`io`, `search`, `scoring`, `decoys`,
-//! `chimeric`, `refine`, `rescoring`, `glyco`). Every key is optional; omitted
-//! keys keep their built-in default.
-//!
-//! PRECEDENCE: an explicit CLI flag ALWAYS wins over the YAML value, which wins
-//! over the built-in default. We detect "explicit CLI flag" with clap's
-//! `ValueSource::CommandLine`, so the YAML only fills parameters the user did
-//! not type on the command line. Unknown keys are a hard error (`deny_unknown_
-//! fields`) so a typo never silently no-ops.
-//!
-//! Every search flag has a key here except five that are CLI-only on purpose:
-//! `--config` itself, and the hidden diagnostics `--cal-min-spec-keys` (a test
-//! hook that forces the calibration pre-pass on tiny inputs),
-//! `--precursor-mono-dump` and `--glyco-scans` (per-run debug dumps) and
-//! `--glyco-mbr-match-train` (the developer dump that trains the MBR match
-//! scorer). The test `every_search_flag_has_a_config_key` keeps that list
-//! honest.
-//!
-//! Non-scalar values (tolerances, ranges, enums) are written as the SAME strings
-//! the CLI accepts (e.g. `precursor_tol: 20ppm`, `charge: "2..5"`, `score: auto`)
-//! and are parsed through the identical validators, so the config and the CLI can
-//! never diverge in what they accept.
-
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::SearchArgs;
 
-/// Top-level run config; sections mirror DOCS §1a.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunConfig {
@@ -49,6 +22,7 @@ pub struct RunConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IoCfg {
+    pub sdrf: Option<PathBuf>,
     pub spectrum: Option<Vec<PathBuf>>,
     pub database: Option<PathBuf>,
     pub uniprot_variants: Option<bool>,
@@ -77,15 +51,14 @@ pub struct SearchCfg {
     pub max_mods: Option<u32>,
     pub min_peaks: Option<u32>,
     pub top_n: Option<u32>,
-    pub mods: Option<PathBuf>,
-    /// `auto`, `on` or `off`, as `--fragment-index`.
+    pub fixed_mods: Option<Vec<serde_yaml::Value>>,
+    pub variable_mods: Option<Vec<serde_yaml::Value>>,
+    pub xl: Option<serde_yaml::Value>,
+    pub localize: Option<String>,
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
     pub index_cache_dir: Option<PathBuf>,
-    /// Data-independent acquisition, as `--dia`.
     pub dia: Option<bool>,
-    /// The experimental peptide-centric DIA pass, as `--dia-pc`.
-    pub dia_pc: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -103,11 +76,8 @@ pub struct ScoringCfg {
     pub ms_level: Option<u8>,
     pub max_spectra: Option<usize>,
     pub gbdt_max_trees: Option<usize>,
-    /// `auto` or `off`, as `--precursor-mono`.
     pub precursor_mono: Option<String>,
-    /// `hcd` or `etd`, as `--ethcd-activation`.
     pub ethcd_activation: Option<String>,
-    /// `WINDOW_DA:PEAKS`, as `--peak-filter`.
     pub peak_filter: Option<String>,
 }
 
@@ -133,7 +103,6 @@ pub struct ChimericCfg {
 pub struct RefineCfg {
     pub enabled: Option<bool>,
     pub config: Option<PathBuf>,
-    pub select_psm_fdr: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -141,7 +110,7 @@ pub struct RefineCfg {
 pub struct RescoringCfg {
     pub enabled: Option<bool>,
     pub native: Option<bool>,
-    pub fdr: Option<f64>,
+    pub psm_fdr: Option<f64>,
     pub proteoform_fdr: Option<f64>,
     pub protein_fdr: Option<f64>,
     pub pep: Option<f64>,
@@ -174,51 +143,23 @@ pub struct QuantCfg {
     pub lfq_rt_window: Option<f64>,
     pub lfq_gaussian_width: Option<f64>,
     pub lfq_min_cosine: Option<f64>,
-    pub lfq_feature_fdr: Option<f64>,
     pub label: Option<String>,
     pub label_reference: Option<usize>,
-    pub label_fdr: Option<f64>,
     pub label_arg_pro: Option<bool>,
-    pub label_mbr_fdr: Option<f64>,
     pub label_2h_enrichment_silac: Option<f64>,
     pub label_2h_enrichment_chemical: Option<f64>,
     pub label_heavy_enrichment: Option<f64>,
     pub quant_fdr: Option<f64>,
+    pub quant_transfer_fdr: Option<f64>,
+    pub quant_channel_fdr: Option<f64>,
     pub dir: Option<PathBuf>,
     pub mbr: Option<bool>,
-    pub mbr_library_fdr: Option<f64>,
-    pub mbr_fdr: Option<f64>,
+    pub mbr_donor_fdr: Option<f64>,
     pub mbr_wrong_log2: Option<f64>,
-    /// A number in `(0, 1]` or `off`, as `--quant-feature-fdr`.
-    pub quant_feature_fdr: Option<NumberOrString>,
-}
-
-/// A YAML scalar written as a number or as a string (e.g. `0.05` or `off`),
-/// passed to the CLI validator as its text.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum NumberOrString {
-    Number(f64),
-    String(String),
-}
-
-/// `quant_feature_fdr` through the CLI validator, the error naming the key.
-fn parse_quant_feature_fdr(s: &str) -> Result<crate::cli::FractionOrOff, String> {
-    crate::cli::parse_fraction_or_off(s).map_err(|e| format!("quant_feature_fdr: {e}"))
 }
 
 fn parse_glyco_core(s: &str) -> Result<crate::cli::GlycoCoreFlag, String> {
-    <crate::cli::GlycoCoreFlag as clap::ValueEnum>::from_str(s, true)
-        .map_err(|_| format!("glyco.core: invalid `{s}`: expected n|o"))
-}
-
-impl NumberOrString {
-    fn text(&self) -> String {
-        match self {
-            NumberOrString::Number(v) => v.to_string(),
-            NumberOrString::String(s) => s.clone(),
-        }
-    }
+    crate::cli::parse_enum("glyco.core", s, true)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -230,11 +171,8 @@ pub struct GlycoCfg {
     pub max_peaks: Option<usize>,
     pub debug: Option<bool>,
     pub hcd_pair: Option<bool>,
-    /// External `.gdb` glycan database, as `--glyco-glycan-gdb`.
     pub glycan_gdb: Option<PathBuf>,
-    /// WURCS 2.0 glycan database CSV, as `--glyco-glycan-wurcs`.
     pub glycan_wurcs: Option<PathBuf>,
-    /// Bundled species database, as `--glyco-species`.
     pub species: Option<String>,
     pub min_core_y: Option<u32>,
     pub retrieval_tol_ppm: Option<f64>,
@@ -245,12 +183,10 @@ pub struct GlycoCfg {
 }
 
 impl RunConfig {
-    /// Parse a YAML config string. Unknown keys are rejected.
     pub fn from_yaml_str(s: &str) -> Result<Self, String> {
         serde_yaml::from_str(s).map_err(|e| format!("--config parse error: {e}"))
     }
 
-    /// Load a YAML config file.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let s = std::fs::read_to_string(path)
             .map_err(|e| format!("--config: cannot read {}: {e}", path.display()))?;
@@ -258,65 +194,47 @@ impl RunConfig {
     }
 }
 
-/// True when the flag `id` was set EXPLICITLY on the command line (not a default
-/// and not an env fallback), so the YAML must not override it.
-fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
+pub(crate) fn cli_set(m: &clap::ArgMatches, id: &str) -> bool {
     matches!(
         m.value_source(id),
         Some(clap::parser::ValueSource::CommandLine)
     )
 }
 
-/// Apply the YAML config onto the parsed `SearchArgs`, respecting CLI precedence.
-///
-/// For each parameter: if the user did NOT type the flag (`!cli_set`) and the
-/// YAML provides a value, the YAML value replaces the built-in default. Values
-/// written as strings (tolerances/ranges/enums) go through the exact CLI parsers.
-pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
-    // scalar field, value type == target type
+pub fn apply_db(
+    cfg: &RunConfig,
+    db: &mut crate::cli::DatabaseArgs,
+    m: &clap::ArgMatches,
+) -> Result<(), String> {
     macro_rules! set {
         ($id:literal, $field:ident, $val:expr) => {
-            if let Some(v) = $val {
+            if let Some(v) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = v;
+                    db.$field = v.clone();
                 }
             }
         };
     }
-    // scalar into an Option<> target
     macro_rules! set_opt {
         ($id:literal, $field:ident, $val:expr) => {
-            if let Some(v) = $val {
+            if let Some(v) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = Some(v);
+                    db.$field = Some(v.clone());
                 }
             }
         };
     }
-    // string wire value parsed through a CLI validator `fn(&str) -> Result<T,String>`
     macro_rules! set_parsed {
-        ($id:literal, $field:ident, $val:expr, $parse:path) => {
-            if let Some(s) = $val {
+        ($id:literal, $field:ident, $val:expr, $parse:expr) => {
+            if let Some(s) = &$val {
                 if !cli_set(m, $id) {
-                    args.$field = $parse(&s)?;
+                    db.$field = ($parse)(s)?;
                 }
             }
         };
     }
-
-    // ── io ──
-    set!("spectrum", spectrum, cfg.io.spectrum);
-    set_opt!("database", database, cfg.io.database);
-    set!(
-        "uniprot_variants",
-        uniprot_variants,
-        cfg.io.uniprot_variants
-    );
-    set!(
-        "uniprot_isoforms",
-        uniprot_isoforms,
-        cfg.io.uniprot_isoforms
-    );
+    set!("uniprot_variants", uniprot_variants, cfg.io.uniprot_variants);
+    set!("uniprot_isoforms", uniprot_isoforms, cfg.io.uniprot_isoforms);
     set!("uniprot_chains", uniprot_chains, cfg.io.uniprot_chains);
     set!("annotations", annotations, cfg.io.annotations);
     set!("knockoffs", knockoffs, cfg.io.knockoffs);
@@ -326,12 +244,205 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.io.uniprot_evidence,
         crate::parse_uniprot_evidence
     );
+    set_parsed!(
+        "enzyme",
+        enzyme,
+        cfg.search.enzyme,
+        crate::cli::parse_enzyme_list
+    );
+    if let Some(items) = &cfg.search.fixed_mods {
+        if !cli_set(m, "fixed_mods") {
+            db.fixed_mods = Some(mod_list("search.fixed_mods", items, true)?);
+        }
+    }
+    if let Some(items) = &cfg.search.variable_mods {
+        if !cli_set(m, "variable_mods") {
+            db.variable_mods = Some(mod_list("search.variable_mods", items, false)?);
+        }
+    }
+    set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
+    set_opt!("decoy_suffix", decoy_suffix, cfg.decoys.suffix);
+    Ok(())
+}
+
+pub fn apply_protein_config(
+    p: &mut crate::cli::ProteinArgs,
+    m: &clap::ArgMatches,
+) -> Result<(), String> {
+    if let Some(path) = p.config.clone() {
+        apply_db(&RunConfig::load(&path)?, &mut p.db, m)?;
+    }
+    Ok(())
+}
+
+pub fn mod_list(
+    key: &str,
+    items: &[serde_yaml::Value],
+    fixed: bool,
+) -> Result<crate::cli::ModList, String> {
+    use model::mod_spec::ModDecl;
+    let mut mods = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let at = |e: String| format!("{key}[{i}]: {e}");
+        let decl = match item {
+            serde_yaml::Value::String(s) => ModDecl::parse(s).map_err(|e| at(e.to_string()))?,
+            serde_yaml::Value::Mapping(map) => mod_decl(map).map_err(at)?,
+            _ => {
+                return Err(at(
+                    "expected `Name (sites)` or a map with `name` or `mass` and `sites`".into(),
+                ))
+            }
+        };
+        mods.extend(
+            decl.resolve(fixed, model::unimod::bundled())
+                .map_err(|e| at(e.to_string()))?,
+        );
+    }
+    Ok(crate::cli::ModList(mods))
+}
+
+fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, String> {
+    use serde_yaml::Value;
+    let text = |key: &str, v: &Value| -> Result<String, String> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(format!("`{key}` must be a string")),
+        }
+    };
+    let numbers = |key: &str, v: &Value| -> Result<Vec<f64>, String> {
+        let one = |v: &Value| v.as_f64().ok_or_else(|| format!("`{key}` takes numbers"));
+        match v {
+            Value::Sequence(seq) => seq.iter().map(one).collect(),
+            v => Ok(vec![one(v)?]),
+        }
+    };
+    let mut d = model::mod_spec::ModDecl::default();
+    let mut sites = None;
+    for (k, v) in map {
+        let key = k.as_str().ok_or("modification keys are strings")?;
+        match key {
+            "name" => d.name = Some(text(key, v)?),
+            "mass" => {
+                d.mass = Some(
+                    v.as_f64()
+                        .ok_or("`mass` is a number (the mass shift in Da)")?,
+                )
+            }
+            "sites" => sites = Some(text(key, v)?),
+            "neutral_loss" => d.neutral_loss = numbers(key, v)?,
+            "loss_class" => d.loss_class = Some(text(key, v)?),
+            "restrict_to" => d.restrict_to = Some(text(key, v)?),
+            "cleavage" => d.cleavage = Some(text(key, v)?),
+            "diagnostic_ions" => d.diagnostic_ions = numbers(key, v)?,
+            other => {
+                return Err(format!(
+                    "unknown key `{other}` (expected name, mass, sites, neutral_loss, \
+                     loss_class, restrict_to, cleavage, diagnostic_ions)"
+                ))
+            }
+        }
+    }
+    match (sites, d.name.clone(), d.mass) {
+        (Some(s), _, _) => d.sites = s,
+        (None, Some(name), None) => {
+            let parsed = model::mod_spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
+            d.name = parsed.name;
+            d.sites = parsed.sites;
+        }
+        (None, _, _) => return Err("`sites` is missing".into()),
+    }
+    Ok(d)
+}
+
+pub fn xl_linker(
+    key: &str,
+    v: &serde_yaml::Value,
+) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+    use andes_xl::spec::XlDecl;
+    use serde_yaml::Value;
+    let at = |e: String| format!("{key}: {e}");
+    let db = model::unimod::bundled();
+    match v {
+        Value::String(s) => XlDecl::parse(s)
+            .and_then(|d| d.resolve(db))
+            .map_err(|e| at(e.to_string())),
+        Value::Mapping(map) if map.contains_key("intact") => {
+            let r: model::xl_reagents::Reagent =
+                serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
+            andes_xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
+        }
+        Value::Mapping(map) => {
+            let mut name = None;
+            let mut sites = None;
+            for (k, val) in map {
+                let text = || {
+                    val.as_str().map(str::to_string).ok_or_else(|| {
+                        at(format!("`{}` must be a string", k.as_str().unwrap_or("?")))
+                    })
+                };
+                match k.as_str() {
+                    Some("name") => name = Some(text()?),
+                    Some("sites") => sites = Some(text()?),
+                    other => {
+                        return Err(at(format!(
+                            "unknown key `{}` (a named reagent takes name and sites; a custom \
+                             reagent also takes intact, stubs, doublets, monolinks, aliases, \
+                             xlmod, source)",
+                            other.unwrap_or("?")
+                        )))
+                    }
+                }
+            }
+            let name = name.ok_or_else(|| at("`name` is missing".into()))?;
+            let mut d = XlDecl::parse(&name).map_err(|e| at(e.to_string()))?;
+            if sites.is_some() {
+                d.sites = sites;
+            }
+            d.resolve(db).map_err(|e| at(e.to_string()))
+        }
+        _ => Err(at("expected `Name (sites)` or a map with `name`".into())),
+    }
+}
+
+pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
+    macro_rules! set {
+        ($id:literal, $($field:ident).+, $val:expr) => {
+            if let Some(v) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = v;
+                }
+            }
+        };
+    }
+    macro_rules! set_opt {
+        ($id:literal, $($field:ident).+, $val:expr) => {
+            if let Some(v) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = Some(v);
+                }
+            }
+        };
+    }
+    macro_rules! set_parsed {
+        ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
+            if let Some(s) = $val {
+                if !cli_set(m, $id) {
+                    args.$($field).+ = ($parse)(&s)?;
+                }
+            }
+        };
+    }
+
+    apply_db(&cfg, &mut args.db, m)?;
+
+    set_opt!("sdrf", sdrf, cfg.io.sdrf);
+    set!("spectrum", spectrum, cfg.io.spectrum);
+    set_opt!("database", database, cfg.io.database);
     set_opt!("output_pin", output_pin, cfg.io.output_pin);
     set_opt!("output_tsv", output_tsv, cfg.io.output_tsv);
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
     set_opt!("temp_dir", temp_dir, cfg.io.temp_dir);
 
-    // ── search ──
     set_parsed!(
         "precursor_tol",
         precursor_tol,
@@ -344,20 +455,16 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.search.charge,
         crate::parse_charge_range
     );
-    // isotope_error is Option<(i8,i8)> on the CLI so an EXPLICIT range is
-    // distinguishable from the default (which is mode-dependent: 0..2 under --glyco).
-    // A config-file value counts as explicit, so wrap it in Some.
     if let Some(s) = cfg.search.isotope_error {
         if !cli_set(m, "isotope_error") {
             args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
         }
     }
-    set!("enzyme", enzyme, cfg.search.enzyme);
     set_parsed!(
         "enzyme_specificity",
         enzyme_specificity,
         cfg.search.enzyme_specificity,
-        crate::parse_enzyme_specificity
+        |s: &str| crate::cli::parse_enum("enzyme_specificity", s, true)
     );
     set!(
         "max_missed_cleavages",
@@ -370,8 +477,12 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
     set!("dia", dia, cfg.search.dia);
-    set!("dia_pc", dia_pc, cfg.search.dia_pc);
-    set_opt!("mods", mods, cfg.search.mods);
+    if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
+        if v != "ipf" {
+            return Err(format!("search.localize: '{v}' is not one of: ipf"));
+        }
+        args.localize = Some(v);
+    }
     set_parsed!(
         "fragment_index",
         fragment_index,
@@ -389,7 +500,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.search.index_cache_dir
     );
 
-    // ── scoring ──
     set_parsed!(
         "score",
         score,
@@ -407,17 +517,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "fragmentation",
         fragmentation,
         cfg.scoring.fragmentation,
-        crate::parse_fragmentation
+        |s: &str| crate::cli::parse_enum("fragmentation", s, true)
     );
     set_parsed!(
         "protocol",
         protocol,
         cfg.scoring.protocol,
-        crate::parse_protocol
+        |s: &str| crate::cli::parse_enum("protocol", s, true)
     );
-    // The fragment tolerance is one choice: a `--fragment-tol-ppm` or
-    // `--fragment-tol-da` on the command line replaces both config keys, so a
-    // CLI ppm value never meets a config Da value (or the reverse).
     if !cli_set(m, "fragment_tol_ppm") && !cli_set(m, "fragment_tol_da") {
         set_opt!(
             "fragment_tol_ppm",
@@ -449,13 +556,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set_opt!("peak_filter", peak_filter, cfg.scoring.peak_filter);
 
-    // ── decoys ──
-    set!("decoy_strategy", decoy_strategy, cfg.decoys.strategy);
-    set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
-    set_opt!("decoy_suffix", decoy_suffix, cfg.decoys.suffix);
+    set_parsed!(
+        "decoy_strategy",
+        decoy_strategy,
+        cfg.decoys.strategy,
+        crate::cli::parse_decoy_strategy
+    );
     set!("decoy_seed", decoy_seed, cfg.decoys.seed);
 
-    // ── chimeric ──
     set!("chimeric", chimeric, cfg.chimeric.enabled);
     set!(
         "chimeric_max_coisolated",
@@ -464,25 +572,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set!("chimeric_max_kl", chimeric_max_kl, cfg.chimeric.max_kl);
 
-    // ── refine ──
     set!("refine", refine, cfg.refine.enabled);
     set_opt!("refine_config", refine_config, cfg.refine.config);
-    set!(
-        "refine_select_psm_fdr",
-        refine_select_psm_fdr,
-        cfg.refine.select_psm_fdr
-    );
 
-    // ── rescoring ──
-    // The rescoring backend is one choice: `--rescore` or `--rescore-native` on the
-    // command line replaces the config's `rescoring.enabled` / `rescoring.native`
-    // entirely, so a CLI `--rescore-native` is not overridden by a config that
-    // enables Percolator (which wins when both are set).
     if !cli_set(m, "rescore") && !cli_set(m, "rescore_native") {
         set!("rescore", rescore, cfg.rescoring.enabled);
         set!("rescore_native", rescore_native, cfg.rescoring.native);
     }
-    set_opt!("fdr", fdr, cfg.rescoring.fdr);
+    set_opt!("psm_fdr", psm_fdr, cfg.rescoring.psm_fdr);
     set_opt!(
         "proteoform_fdr",
         proteoform_fdr,
@@ -515,7 +612,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         if !cli_set(m, "predict") {
             args.predict = list
                 .iter()
-                .map(|s| crate::cli::parse_predict_feature(s))
+                .map(|s| crate::cli::parse_enum("predict entry", s, true))
                 .collect::<Result<_, _>>()?;
         }
     }
@@ -528,7 +625,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "predictor_backend",
         predictor_backend,
         cfg.rescoring.predictor_backend,
-        crate::cli::parse_predictor_backend
+        |s: &str| crate::cli::parse_enum("predictor_backend", s, true)
     );
     set_opt!("predictor_nce", predictor_nce, cfg.rescoring.predictor_nce);
     set_opt!(
@@ -542,7 +639,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.predictor_batch
     );
 
-    // ── quant ──
     if let Some(v) = cfg.quant.tmt {
         if !cli_set(m, "tmt") {
             args.tmt = Some(crate::cli::parse_plex(&v)?);
@@ -577,20 +673,13 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.lfq_gaussian_width
     );
     set!("lfq_min_cosine", lfq_min_cosine, cfg.quant.lfq_min_cosine);
-    set!(
-        "lfq_feature_fdr",
-        lfq_feature_fdr,
-        cfg.quant.lfq_feature_fdr
-    );
     set_opt!("label", label, cfg.quant.label);
     set!(
         "label_reference",
         label_reference,
         cfg.quant.label_reference
     );
-    set!("label_fdr", label_fdr, cfg.quant.label_fdr);
     set!("label_arg_pro", label_arg_pro, cfg.quant.label_arg_pro);
-    set!("label_mbr_fdr", label_mbr_fdr, cfg.quant.label_mbr_fdr);
     set!(
         "label_2h_enrichment_silac",
         label_2h_enrichment_silac,
@@ -607,32 +696,32 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.quant.label_heavy_enrichment
     );
     set_opt!("quant_fdr", quant_fdr, cfg.quant.quant_fdr);
+    set_opt!(
+        "quant_transfer_fdr",
+        quant_transfer_fdr,
+        cfg.quant.quant_transfer_fdr
+    );
+    set_opt!(
+        "quant_channel_fdr",
+        quant_channel_fdr,
+        cfg.quant.quant_channel_fdr
+    );
     set_opt!("quant_dir", quant_dir, cfg.quant.dir);
     set!("mbr", mbr, cfg.quant.mbr);
-    set!(
-        "mbr_library_fdr",
-        mbr_library_fdr,
-        cfg.quant.mbr_library_fdr
-    );
-    set!("mbr_fdr", mbr_fdr, cfg.quant.mbr_fdr);
+    set_opt!("mbr_donor_fdr", mbr_donor_fdr, cfg.quant.mbr_donor_fdr);
     set!("mbr_wrong_log2", mbr_wrong_log2, cfg.quant.mbr_wrong_log2);
-    set_parsed!(
-        "quant_feature_fdr",
-        quant_feature_fdr,
-        cfg.quant.quant_feature_fdr.map(|v| v.text()),
-        parse_quant_feature_fdr
-    );
 
-    // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
+    if let Some(v) = &cfg.search.xl {
+        if !cli_set(m, "xl") {
+            args.xl = Some(xl_linker("search.xl", v)?);
+        }
+    }
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
     set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
-    // The glycan database is one choice made in one place: when any flag is
-    // on the command line, the config's choice is ignored entirely, so the CLI
-    // never ends up combined with a config value it overrides.
     if !cli_set(m, "glyco_glycan_gdb")
         && !cli_set(m, "glyco_glycan_wurcs")
         && !cli_set(m, "glyco_species")
@@ -687,12 +776,8 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.glyco.y_max_charge
     );
 
-    // Validate the resolved numeric fields that the CLI enforces via `value_parser`
-    // but the YAML path (plain assignment) would otherwise bypass. Re-checking the
-    // final value is a no-op for CLI-supplied values (already validated by clap) and
-    // rejects out-of-range values injected through `--config`.
-    if let Some(v) = args.fdr {
-        check_unit_fraction("fdr", v)?;
+    if let Some(v) = args.psm_fdr {
+        check_unit_fraction("psm_fdr", v)?;
     }
     if let Some(v) = args.proteoform_fdr {
         check_unit_fraction("proteoform_fdr", v)?;
@@ -703,9 +788,15 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.pep {
         check_unit_fraction("pep", v)?;
     }
-    check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
-    check_unit_fraction("mbr_library_fdr", args.mbr_library_fdr)?;
-    check_unit_fraction("mbr_fdr", args.mbr_fdr)?;
+    for (key, value) in [
+        ("mbr_donor_fdr", args.mbr_donor_fdr),
+        ("quant_transfer_fdr", args.quant_transfer_fdr),
+        ("quant_channel_fdr", args.quant_channel_fdr),
+    ] {
+        if let Some(v) = value {
+            check_unit_fraction(key, v)?;
+        }
+    }
     check_unit_fraction("tmt_min_purity", args.tmt_min_purity)?;
     check_unit_fraction("tmt_max_pep", args.tmt_max_pep)?;
     if !args.tmt_min_sn.is_finite() || args.tmt_min_sn < 0.0 {
@@ -715,9 +806,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         ));
     }
     check_unit_fraction("lfq_min_cosine", args.lfq_min_cosine)?;
-    check_unit_fraction("lfq_feature_fdr", args.lfq_feature_fdr)?;
-    check_unit_fraction("label_fdr", args.label_fdr)?;
-    check_unit_fraction("label_mbr_fdr", args.label_mbr_fdr)?;
     check_unit_fraction("label_2h_enrichment_silac", args.label_2h_enrichment_silac)?;
     check_unit_fraction(
         "label_2h_enrichment_chemical",
@@ -753,9 +841,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.fragment_tol_da {
         check_positive("fragment_tol_da", v)?;
     }
-    // `--fragment-tol-ppm` / `--fragment-tol-da` are mutually exclusive on the CLI
-    // (clap `conflicts_with`); a config that sets both, with neither on the
-    // command line, is ambiguous.
     if args.fragment_tol_ppm.is_some() && args.fragment_tol_da.is_some() {
         return Err(
             "config: `scoring.fragment_tol_ppm` and `scoring.fragment_tol_da` are mutually \
@@ -767,9 +852,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     Ok(())
 }
 
-/// Rules on the merged arguments (CLI, config and defaults together) that clap
-/// cannot check because a value may come from the config file. Runs for every
-/// search, with or without `--config`.
 pub fn check_resolved(args: &SearchArgs) -> Result<(), String> {
     if args.glyco
         && args.glyco_glycan_gdb.is_none()
@@ -786,12 +868,10 @@ pub fn check_resolved(args: &SearchArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse a string into a clap `ValueEnum` (reusing the CLI's accepted names).
 fn parse_value_enum<T: clap::ValueEnum>(s: &str) -> Result<T, String> {
     T::from_str(s, false).map_err(|e| e.to_string())
 }
 
-/// Same bound the CLI's `parse_unit_fraction` enforces: finite and within [0, 1].
 fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
     if !v.is_finite() || !(0.0..=1.0).contains(&v) {
         return Err(format!(
@@ -801,13 +881,10 @@ fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
     Ok(())
 }
 
-/// A tolerance string through the CLI's parser (finite and > 0), with the
-/// error naming the config key.
 fn parse_tol(field: &str, v: &str) -> Result<model::Tolerance, String> {
     crate::parse_precursor_tol(v).map_err(|e| format!("config: `{field}`: {e}"))
 }
 
-/// Same bound the CLI's `parse_positive_tol` enforces: finite and > 0.
 fn check_positive(field: &str, v: f64) -> Result<(), String> {
     if !v.is_finite() || v <= 0.0 {
         return Err(format!(
@@ -873,7 +950,6 @@ glyco:
         assert!(check_positive("frag", -1.0).is_err());
     }
 
-    /// YAML glyco and chimeric numbers go through the CLI's bounds.
     #[test]
     fn yaml_glyco_tol_and_chimeric_kl_are_validated() {
         for bad in [
@@ -895,7 +971,6 @@ glyco:
         assert_eq!(a.chimeric_max_kl, 0.0);
     }
 
-    /// The YAML path must reject values the CLI would reject via `value_parser`.
     #[test]
     fn apply_rejects_out_of_range_and_conflicting_yaml() {
         use clap::{CommandFactory, FromArgMatches};
@@ -911,13 +986,14 @@ glyco:
             ])
             .expect("parse baseline args");
 
-        // out-of-range fdr from YAML → error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let bad = RunConfig::from_yaml_str("rescoring:\n  fdr: 5.0\n").unwrap();
+        let bad = RunConfig::from_yaml_str("rescoring:\n  psm_fdr: 5.0\n").unwrap();
         let e = apply(bad, &mut a, &matches).unwrap_err();
-        assert!(e.contains("fdr"), "expected fdr range error, got: {e}");
+        assert!(
+            e.contains("psm_fdr"),
+            "expected psm_fdr range error, got: {e}"
+        );
 
-        // both fragment tolerances from YAML → mutual-exclusion error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let both =
             RunConfig::from_yaml_str("scoring:\n  fragment_tol_ppm: 20\n  fragment_tol_da: 0.02\n")
@@ -928,16 +1004,14 @@ glyco:
             "expected conflict error, got: {e}"
         );
 
-        // a valid config still applies cleanly
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let ok =
-            RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
-                .unwrap();
+        let ok = RunConfig::from_yaml_str(
+            "rescoring:\n  psm_fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n",
+        )
+        .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
     }
 
-    /// Out-of-range quant values from YAML fail with an error naming the key,
-    /// as the CLI's value parsers would.
     #[test]
     fn apply_rejects_out_of_range_quant_keys() {
         use clap::{CommandFactory, FromArgMatches};
@@ -956,12 +1030,11 @@ glyco:
             ("tmt_min_purity", "1.5"),
             ("tmt_min_purity", "-0.1"),
             ("lfq_min_cosine", "2.0"),
-            ("lfq_feature_fdr", "-0.5"),
             ("quant_fdr", "5.0"),
             ("quant_fdr", ".nan"),
-            ("quant_feature_fdr", "1.5"),
-            ("quant_feature_fdr", "0"),
-            ("quant_feature_fdr", "none"),
+            ("quant_transfer_fdr", "-0.5"),
+            ("quant_channel_fdr", "1.5"),
+            ("mbr_donor_fdr", "2"),
             ("lfq_rt_window", "0"),
             ("lfq_rt_window", "-30"),
             ("lfq_rt_window", ".inf"),
@@ -986,26 +1059,54 @@ glyco:
             );
         }
 
-        // In-range values still apply.
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
         let ok = RunConfig::from_yaml_str(
-            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  lfq_feature_fdr: 0.05\n  \
+            "quant:\n  tmt_min_purity: 0.5\n  lfq_min_cosine: 0.8\n  quant_channel_fdr: 0.05\n  \
              quant_fdr: 0.01\n  lfq_rt_window: 45\n  lfq_tol: 10ppm\n  tmt_tol: 0.003da\n",
         )
         .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
-        assert_eq!(a.quant_feature_fdr.0, None, "the default is off");
-        for (value, want) in [("off", None), ("0.01", Some(0.01)), ("0.05", Some(0.05))] {
-            let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-            let cfg = RunConfig::from_yaml_str(&format!("quant:\n  quant_feature_fdr: {value}\n"))
-                .unwrap();
-            apply(cfg, &mut a, &matches).unwrap();
-            assert_eq!(a.quant_feature_fdr.0, want, "{value}");
+    }
+
+    #[test]
+    fn fdr_keys_apply_and_inherit() {
+        let a = applied(
+            "rescoring:\n  psm_fdr: 0.02\n  proteoform_fdr: 0.06\n  protein_fdr: 0.03\n\
+             quant:\n  quant_fdr: 0.04\n  mbr_donor_fdr: 0.005\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(a.psm_fdr(), 0.02);
+        assert_eq!(a.proteoform_fdr(), 0.06);
+        assert_eq!(a.protein_fdr, Some(0.03));
+        assert_eq!(a.mbr_donor_fdr(), 0.005);
+        assert_eq!(a.quant_transfer_fdr(), 0.04);
+        assert_eq!(a.quant_channel_fdr(), 0.04);
+        let a = applied(
+            "quant:\n  quant_transfer_fdr: 0.02\n  quant_channel_fdr: 0.03\n",
+            &["--quant-transfer-fdr", "0.07"],
+        )
+        .unwrap();
+        assert_eq!(a.quant_transfer_fdr(), 0.07);
+        assert_eq!(a.quant_channel_fdr(), 0.03);
+        assert_eq!(a.mbr_donor_fdr(), 0.01);
+        for old in [
+            "rescoring:\n  fdr: 0.01\n",
+            "refine:\n  select_psm_fdr: 0.01\n",
+            "quant:\n  mbr_fdr: 0.01\n",
+            "quant:\n  mbr_library_fdr: 0.01\n",
+            "quant:\n  label_fdr: 0.05\n",
+            "quant:\n  label_mbr_fdr: 0.05\n",
+            "quant:\n  lfq_feature_fdr: 0.05\n",
+            "quant:\n  quant_feature_fdr: off\n",
+        ] {
+            assert!(
+                RunConfig::from_yaml_str(old).is_err(),
+                "{old} must be rejected"
+            );
         }
     }
 
-    /// The UniProt XML keys apply through the CLI's validator; an explicit CLI
-    /// flag still wins.
     #[test]
     fn uniprot_keys_apply_with_cli_precedence() {
         use clap::{CommandFactory, FromArgMatches};
@@ -1022,17 +1123,17 @@ glyco:
             .try_get_matches_from(base)
             .expect("parse baseline args");
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        assert!(!a.uniprot_variants);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Experimental);
-        assert!(!a.uniprot_isoforms && !a.uniprot_chains);
+        assert!(!a.db.uniprot_variants);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Experimental);
+        assert!(!a.db.uniprot_isoforms && !a.db.uniprot_chains);
         let cfg = RunConfig::from_yaml_str(
             "io:\n  uniprot_variants: true\n  uniprot_isoforms: true\n  uniprot_chains: true\n  \
              uniprot_evidence: curated\n",
         )
         .unwrap();
         apply(cfg, &mut a, &matches).unwrap();
-        assert!(a.uniprot_variants && a.uniprot_isoforms && a.uniprot_chains);
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Curated);
+        assert!(a.db.uniprot_variants && a.db.uniprot_isoforms && a.db.uniprot_chains);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Curated);
 
         let bad = RunConfig::from_yaml_str("io:\n  uniprot_evidence: strong\n").unwrap();
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
@@ -1044,11 +1145,9 @@ glyco:
         let mut a = crate::SearchArgs::from_arg_matches(&cli).unwrap();
         let cfg = RunConfig::from_yaml_str("io:\n  uniprot_evidence: curated\n").unwrap();
         apply(cfg, &mut a, &cli).unwrap();
-        assert_eq!(a.uniprot_evidence, input::EvidenceLevel::Any);
+        assert_eq!(a.db.uniprot_evidence, input::EvidenceLevel::Any);
     }
 
-    /// The predictor keys apply through the CLI's validators; an explicit
-    /// `--predict` still wins.
     #[test]
     fn predict_keys_apply_with_cli_precedence() {
         use crate::cli::{PredictFeature, PredictorBackend};
@@ -1090,7 +1189,6 @@ glyco:
         assert_eq!(a.predict, vec![PredictFeature::None]);
     }
 
-    /// `search.index_cache_dir` applies, and an explicit `--index-cache-dir` wins.
     #[test]
     fn index_cache_dir_key_has_cli_precedence() {
         let yaml = "search:\n  index_cache_dir: from_config\n";
@@ -1111,8 +1209,6 @@ glyco:
         );
     }
 
-    /// The shipped `config.example.yaml` must parse against the current schema, so
-    /// the documented template can never drift from the accepted keys.
     #[test]
     fn shipped_example_config_parses() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.example.yaml");
@@ -1144,23 +1240,21 @@ glyco:
         Ok(a)
     }
 
-    /// Flags deliberately left out of the config file (see the module docs).
     const CLI_ONLY: &[&str] = &[
         "config",
         "cal_min_spec_keys",
         "precursor_mono_dump",
         "glyco_scans",
         "glyco_mbr_match_train",
+        "ipf_debug",
+        "xl_oracle",
+        "xl_rescore_intra",
+        "xl_rescore_inter",
     ];
 
-    /// Every search flag maps to a config key unless it is listed as CLI-only, so
-    /// a new flag cannot silently miss the config file.
     #[test]
     fn every_search_flag_has_a_config_key() {
         use clap::CommandFactory;
-        // `apply` reads a flag's config key through one of these macros, or tests
-        // `cli_set` itself for keys that need custom handling. A checkout with
-        // CRLF line endings (Windows) is normalised before joining the lines.
         let source = include_str!("config.rs")
             .replace("\r\n", "\n")
             .replace("(\n        ", "(");
@@ -1180,9 +1274,101 @@ glyco:
     }
 
     #[test]
+    fn modification_lists_apply_with_cli_precedence() {
+        let yaml = "search:\n  fixed_mods: [\"Carbamidomethyl (C)\", {name: MyTag, mass: 28.0313, sites: N-term}]\n  \
+                    variable_mods:\n    - Oxidation (M)\n    \
+                    - {name: \"Phospho (ST)\", neutral_loss: [97.976896], loss_class: phospho, restrict_to: annotated}\n    \
+                    - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: 215.1502}\n";
+        let a = applied(yaml, &[]).unwrap();
+        let f = &a.db.fixed_mods.as_ref().unwrap().0;
+        assert_eq!(f.len(), 2);
+        assert_eq!((f[0].name.as_str(), f[0].mass_delta), ("Carbamidomethyl", 57.021464));
+        assert_eq!((f[1].name.as_str(), f[1].mass_delta), ("MyTag", 28.0313));
+        assert!(f[1].accession.is_none() && f.iter().all(|m| m.fixed));
+        let v = &a.db.variable_mods.as_ref().unwrap().0;
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[1].neutral_losses, vec![97.976896]);
+        assert_eq!(v[1].loss_class, 2);
+        assert_eq!(v[1].annotated_site_mass, Some(79.966331));
+        assert_eq!(v[3].name, "GG");
+        assert!(v[3].blocks_cleavage);
+        assert_eq!(v[3].diagnostic_ions, vec![215.1502]);
+        let a = applied(yaml, &["--variable-mods", "Phospho (Y)"]).unwrap();
+        assert_eq!(a.db.variable_mods.unwrap().0.len(), 1);
+        assert_eq!(a.db.fixed_mods.unwrap().0.len(), 2);
+        let a = applied("search:\n  variable_mods: []\n", &[]).unwrap();
+        assert!(a.db.variable_mods.unwrap().0.is_empty() && a.db.fixed_mods.is_none());
+        for (bad, msg) in [
+            (
+                "search:\n  variable_mods: [{name: Phospho, sites: S, nuetral_loss: [1.0]}]\n",
+                "unknown key `nuetral_loss`",
+            ),
+            ("search:\n  variable_mods: [Phosho (S)]\n", "did you mean Phospho"),
+            ("search:\n  variable_mods: [{mass: 1.0}]\n", "`sites` is missing"),
+            (
+                "search:\n  fixed_mods: [{name: Phospho, sites: S, restrict_to: annotated}]\n",
+                "needs a variable",
+            ),
+            ("search:\n  variable_mods: [42]\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
+    }
+
+    #[test]
+    fn crosslinker_applies_with_cli_precedence() {
+        let a = applied("search:\n  xl: DSSO (K, S, T, Y, Protein N-term)\n", &[]).unwrap();
+        let x = a.xl.unwrap();
+        assert_eq!(x.name, "DSSO");
+        assert_eq!(x.ends[0].residues, b"KSTY");
+        let a = applied("search:\n  xl: DSSO (K)\n", &["--xl", "DSBU"]).unwrap();
+        assert_eq!(a.xl.unwrap().name, "DSBU");
+        let yaml = "search:\n  xl:\n    name: MyLinker\n    sites: K, Protein N-term\n    \
+                    intact: {mass: 158.003765}\n    \
+                    stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]\n    \
+                    doublets: [[alkene, thiol]]\n    monolinks: [{name: water, mass: 176.01433}]\n";
+        let x = applied(yaml, &[]).unwrap().xl.unwrap();
+        assert_eq!(x.name, "MyLinker");
+        let c = x.cleavage.unwrap();
+        assert_eq!(c.stubs.len(), 2);
+        assert_eq!(c.doublets, vec![(0, 1)]);
+        assert_eq!(x.monolinks.len(), 1);
+        let x = applied("search:\n  xl: {name: \"BS3 (K)\"}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.name, "DSS");
+        assert!(!x.ends[0].protein_n_term);
+        let x = applied("search:\n  xl: {name: EDC, sites: K / D}\n", &[])
+            .unwrap()
+            .xl
+            .unwrap();
+        assert_eq!(x.ends[1].residues, b"D");
+        for (bad, msg) in [
+            ("search:\n  xl: DSOS\n", "did you mean DSSO"),
+            ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
+            ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
+            (
+                "search:\n  xl: {name: DSSO, sitess: K}\n",
+                "unknown key `sitess`",
+            ),
+            (
+                "search:\n  xl: {name: X, sites: K, intact: {mass: 1.0}, stubz: []}\n",
+                "unknown field `stubz`",
+            ),
+            ("search:\n  xl: 42\n", "expected `Name (sites)`"),
+        ] {
+            let e = applied(bad, &[]).unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        }
+    }
+
+    #[test]
     fn new_keys_apply_and_validate() {
         let a = applied(
-            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n  index_cache_dir: shared/cache\n\
+            "search:\n  fragment_index: \"off\"\n  fragment_index_slice_da: 40\n  index_cache_dir: shared/cache\n  \
+             localize: ipf\n\
              scoring:\n  gbdt_max_trees: 0\n  precursor_mono: \"off\"\n  ethcd_activation: etd\n  \
              peak_filter: \"100:20\"\n\
              quant:\n  lfq_gaussian_width: 12.5\n\
@@ -1194,6 +1380,7 @@ glyco:
         .unwrap();
         assert_eq!(a.fragment_index, crate::cli::FragmentIndexFlag::Off);
         assert_eq!(a.fragment_index_slice_da, Some(40.0));
+        assert_eq!(a.localize.as_deref(), Some("ipf"));
         assert_eq!(a.index_cache_dir, Some(PathBuf::from("shared/cache")));
         assert_eq!(a.gbdt_max_trees, Some(0));
         assert_eq!(a.precursor_mono, crate::cli::PrecursorMonoFlag::Off);
@@ -1211,13 +1398,13 @@ glyco:
         assert_eq!(a.glyco_y_max_charge, 4);
         assert!(check_resolved(&a).is_ok());
 
-        // Defaults stay unset, so the search resolves them by mode.
         let d = applied("{}", &[]).unwrap();
         assert_eq!(d.gbdt_max_trees, None);
 
         for bad in [
             "search:\n  fragment_index: sometimes\n",
             "search:\n  fragment_index_slice_da: 0\n",
+            "search:\n  localize: ascore\n",
             "scoring:\n  precursor_mono: maybe\n",
             "quant:\n  lfq_gaussian_width: -1\n",
             "glyco:\n  retrieval_tol_ppm: 0\n",
@@ -1225,8 +1412,9 @@ glyco:
         ] {
             assert!(applied(bad, &[]).is_err(), "{bad} must be rejected");
         }
+        let o = applied("search:\n  localize: ascore\n", &["--localize", "ipf"]).unwrap();
+        assert_eq!(o.localize.as_deref(), Some("ipf"));
 
-        // An explicit CLI flag still wins.
         let a = applied(
             "scoring:\n  gbdt_max_trees: 0\n",
             &["--gbdt-max-trees", "50"],
@@ -1235,7 +1423,6 @@ glyco:
         assert_eq!(a.gbdt_max_trees, Some(50));
     }
 
-    /// A rescoring backend on the command line wins over the config's choice.
     #[test]
     fn cli_rescore_backend_wins_over_yaml() {
         let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
@@ -1251,8 +1438,6 @@ glyco:
         assert!(a.rescore_native && !a.rescore);
     }
 
-    /// A fragment tolerance on the command line replaces both config keys, so a
-    /// CLI ppm value and a config Da value never conflict.
     #[test]
     fn cli_fragment_tol_wins_over_yaml_without_conflict() {
         let a = applied(
@@ -1273,7 +1458,6 @@ glyco:
         assert_eq!(a.fragment_tol_da, Some(0.5));
     }
 
-    /// `--glyco` needs a glycan database whichever way it was switched on.
     #[test]
     fn glyco_requires_a_glycan_database_after_the_merge() {
         let a = applied("glyco:\n  enabled: true\n", &[]).unwrap();
@@ -1287,7 +1471,6 @@ glyco:
         assert!(check_resolved(&a).is_ok());
         assert!(check_resolved(&applied("{}", &[]).unwrap()).is_ok());
 
-        // The WURCS CSV source satisfies the requirement like the other two.
         let a = applied("glyco:\n  glycan_wurcs: w.csv\n", &["--glyco"]).unwrap();
         assert_eq!(
             a.glyco_glycan_wurcs.as_deref(),
@@ -1300,7 +1483,6 @@ glyco:
             Some(std::path::Path::new("w.csv"))
         );
 
-        // Two sources in the config is ambiguous.
         let both = "glyco:\n  enabled: true\n  glycan_gdb: g.gdb\n  species: human\n";
         assert!(applied(both, &[])
             .unwrap_err()
@@ -1309,7 +1491,6 @@ glyco:
         assert!(applied(both, &[])
             .unwrap_err()
             .contains("mutually exclusive"));
-        // A source on the command line replaces the config's choice entirely.
         let a = applied(
             "glyco:\n  glycan_gdb: g.gdb\n",
             &["--glyco-species", "mouse"],

@@ -1,12 +1,3 @@
-//! Shared by the `rescore_pin` and `model_parity` examples: the library
-//! predictors ([`onnx_infer::predictors`]) plus the model families only the
-//! examples run (MS²PIP, andes-ms2 and the Koina-exported graphs).
-//!
-//! Peptidoforms a model cannot encode are rejected by
-//! [`Predictor::supports_rt`] / [`Predictor::supports_ms2`] and become missing
-//! features downstream, never a silently wrong tensor.
-
-// Each example uses a different subset.
 #![allow(dead_code, unused_imports)]
 
 use std::path::Path;
@@ -23,7 +14,6 @@ pub use onnx_infer::predictors::{DeepLc, Engine, PeptDeep, Predictor};
 
 static BACKEND: OnceLock<(BackendKind, BackendOptions)> = OnceLock::new();
 
-/// Parse a `--backend` value.
 pub fn parse_backend(s: &str) -> BackendKind {
     match s {
         "tract" => BackendKind::Tract,
@@ -32,17 +22,14 @@ pub fn parse_backend(s: &str) -> BackendKind {
     }
 }
 
-/// Engine for every graph [`load`]ed afterwards; call once, before loading.
 pub fn set_backend(kind: BackendKind, opts: BackendOptions) {
     BACKEND.set((kind, opts)).expect("set_backend called twice");
 }
 
-/// The engine set by [`set_backend`]; tract with default options otherwise.
 pub fn backend() -> &'static (BackendKind, BackendOptions) {
     BACKEND.get_or_init(|| (BackendKind::Tract, BackendOptions::default()))
 }
 
-/// The engine set by [`set_backend`], for the library predictors.
 pub fn engine() -> Engine {
     let (kind, opts) = backend();
     Engine {
@@ -57,11 +44,8 @@ pub fn load(models: &Path, manifest: &str) -> OnnxSession {
         .unwrap_or_else(|e| panic!("load {manifest}: {e}"))
 }
 
-// ---------------------------------------------------------------- MS²PIP
-
 pub struct Ms2pip {
     pub dir: std::path::PathBuf,
-    /// ms2pip model name (`HCD2021`, `CID`, `TMT`, …).
     pub model: String,
 }
 
@@ -113,12 +97,8 @@ impl Predictor for Ms2pip {
     }
 }
 
-// ---------------------------------------------------------------- andes-ms2
-
-/// b z1, b z2, y z1, y z2: the base ions andes-ms2 predicts per site.
 const ANDES_MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
 
-/// The native andes-ms2 model (`onnx_infer::ms2_native`); no ONNX graphs.
 pub struct AndesMs2 {
     pub model: Ms2Model,
     pub nce: Option<f32>,
@@ -127,7 +107,6 @@ pub struct AndesMs2 {
 }
 
 impl AndesMs2 {
-    /// `path` is the `AMS20001` weight file, or a directory holding `andes_ms2.ams2`.
     pub fn new(path: &Path, nce: Option<f32>, activation: &str, instrument: &str) -> Self {
         let file = if path.is_dir() {
             path.join("andes_ms2.ams2")
@@ -144,7 +123,6 @@ impl AndesMs2 {
         }
     }
 
-    /// The [`RtPeptide`] the form was parsed from (see [`parse_peptide`]).
     pub fn peptide(f: &Form) -> RtPeptide {
         f.rt_peptide()
     }
@@ -196,8 +174,6 @@ impl Predictor for AndesMs2 {
     }
 }
 
-// ---------------------------------------------------------------- Prosit
-
 pub struct Prosit {
     pub dir: std::path::PathBuf,
     pub nce: f32,
@@ -213,7 +189,6 @@ const PROSIT_IONS: [Ion; 6] = [
 ];
 
 impl Prosit {
-    /// `None` when the peptidoform carries anything but CAM-C / oxidised M.
     pub fn peptide(f: &Form) -> Option<PrositPeptide<'_>> {
         let mut states = vec![ResidueState::Plain; f.seq.len()];
         for (site, m) in &f.mods {

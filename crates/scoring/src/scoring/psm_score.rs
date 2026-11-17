@@ -1,18 +1,3 @@
-//! Peptide-spectrum match scoring.
-//!
-//! A peptide of length `n` has `n - 1` internal cleavage sites; fragmenting at
-//! site `s` yields a prefix (residues `0..s`) and a complementary suffix
-//! (residues `s..n`). The match score is the sum over those sites of the
-//! prefix and suffix node scores from the intensity-rank LLR model:
-//!
-//! ```text
-//!   raw_score = Σ_s round( prefix_node(prefix_mass_s) + suffix_node(suffix_mass_s) )
-//! ```
-//!
-//! where `prefix_mass_s` is the nominal mass of the prefix residues and
-//! `suffix_mass_s = peptide_nominal_mass − prefix_mass_s`. The summed integer
-//! is the RawScore used to rank candidate PSMs.
-
 use std::sync::OnceLock;
 
 use crate::param_model::Partition;
@@ -23,26 +8,10 @@ use crate::scoring::strong_score::DENSITY_HW;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 
-/// Whether `scorer` can give an edge a non-zero score: it needs a mass-error
-/// distribution and an ion-existence table (low-res models carry neither).
 pub fn edge_scoring_enabled(scorer: &RankScorer) -> bool {
     scorer.param().error_scaling_factor != 0 && !scorer.param().ion_existence_table.is_empty()
 }
 
-/// Sum the per-cleavage *edge* (bond) scores for a PSM.
-///
-/// Where [`score_psm`] scores the prefix/suffix *nodes* at each cleavage site,
-/// this sums the complementary edge credit: the score of the bond between two
-/// adjacent fragment masses, walked along the spectrum's dominant ion series.
-/// The series direction is set by `main_ion_direction()` — suffix-dominant
-/// spectra (e.g. tryptic HCD) are traversed from the C-terminal end inward,
-/// prefix-dominant spectra from the N-terminal end. Both visit all `n - 1`
-/// internal sites; the direction only fixes which neighbor supplies the
-/// "previous" mass for each edge.
-///
-/// The result is meant as an ADDITIVE rescoring feature: emit it as its own
-/// PIN column next to the unchanged `RawScore` so Percolator can weight it
-/// independently. It must not be folded into `RawScore`.
 pub fn psm_edge_score(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -56,8 +25,6 @@ pub fn psm_edge_score(
     if n < 2 {
         return 0;
     }
-    // Every edge scores 0 without an error model or existence table (see
-    // `ScoredSpectrum::edge_score`); skip building the prefix arrays.
     if !edge_scoring_enabled(scorer) {
         return 0;
     }
@@ -65,7 +32,6 @@ pub fn psm_edge_score(
     let spectrum_parent_mass = scored_spec.parent_mass();
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // Build per-position prefix mass arrays (length n+1; [0]=0, [n]=total).
     let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
     let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
     prefix_mass_arr.push(0.0);
@@ -79,8 +45,6 @@ pub fn psm_edge_score(
             prefix_mass_arr.push(prefix_mass_acc);
             prefix_nominal_arr.push(nominal_from(prefix_mass_acc));
         } else {
-            // Final entry uses the canonical peptide_nominal (computed from
-            // the residue sum) to avoid rounding skew vs the cumulative.
             prefix_mass_arr.push(prefix_mass_acc);
             prefix_nominal_arr.push(peptide_nominal);
         }
@@ -89,10 +53,6 @@ pub fn psm_edge_score(
     let is_prefix_main = scored_spec.main_ion_direction();
     let mut edge_total: i32 = 0;
     if !is_prefix_main {
-        // Suffix-dominant: walk the suffix-ion series from the C-terminus
-        // inward. Each edge runs between suffix mass at site `i+1` (previous)
-        // and site `i` (current); the suffix mass at site `i` is the total
-        // nominal mass minus the prefix nominal up to `i`.
         let nominal_peptide_mass = prefix_nominal_arr[n];
         for i in (1..n).rev() {
             let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
@@ -108,9 +68,6 @@ pub fn psm_edge_score(
             );
         }
     } else {
-        // Prefix-dominant: walk the prefix-ion series from the N-terminus
-        // outward. Each edge runs between prefix mass at site `i-1` (previous)
-        // and site `i` (current).
         for i in 1..n {
             let cur_nominal = prefix_nominal_arr[i];
             let prev_nominal = prefix_nominal_arr[i - 1];
@@ -128,18 +85,6 @@ pub fn psm_edge_score(
     edge_total
 }
 
-/// Collect the per-edge `(partition, ion_existence_index)` facts for a PSM,
-/// walking the cleavage sites in the **exact same order and direction** as
-/// [`psm_edge_score`] (so the training accumulator learns the
-/// `ion_existence_table` under the partition/index the scorer later reads).
-///
-/// Unlike [`psm_edge_score`], this does not consult the existence table or the
-/// `error_scaling_factor`/empty-table guards — it is meant to be called while
-/// *training* a model whose existence table is still empty. The caller feeds
-/// each `(partition, idx)` to `CountStats::bump_existence`.
-///
-/// Returns an empty vec for `charge == 0` or peptides shorter than 2 residues
-/// (no internal cleavage sites), mirroring `psm_edge_score`'s early returns.
 pub fn psm_edge_existence_facts(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -157,8 +102,6 @@ pub fn psm_edge_existence_facts(
     let spectrum_parent_mass = scored_spec.parent_mass();
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // Per-position prefix mass arrays (length n+1; [0]=0, [n]=total) — built
-    // identically to psm_edge_score.
     let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
     let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
     prefix_mass_arr.push(0.0);
@@ -180,7 +123,6 @@ pub fn psm_edge_existence_facts(
     let is_prefix_main = scored_spec.main_ion_direction();
     let mut facts: Vec<(Partition, u32)> = Vec::with_capacity(n - 1);
     if !is_prefix_main {
-        // Suffix-dominant: walk the suffix-ion series from the C-terminus inward.
         let nominal_peptide_mass = prefix_nominal_arr[n];
         for i in (1..n).rev() {
             let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
@@ -195,7 +137,6 @@ pub fn psm_edge_existence_facts(
             facts.push((part, idx as u32));
         }
     } else {
-        // Prefix-dominant: walk the prefix-ion series from the N-terminus outward.
         for i in 1..n {
             let cur_nominal = prefix_nominal_arr[i];
             let prev_nominal = prefix_nominal_arr[i - 1];
@@ -212,18 +153,6 @@ pub fn psm_edge_existence_facts(
     facts
 }
 
-/// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`
-/// across each peptide split position. This produces the integer RawScore
-/// used to rank PSMs.
-///
-/// For each split `i` in `1..n`:
-/// - `nominal_prefix_mass[i] = nominal_from(sum of residues 0..i)`
-/// - `peptide_mass = nominal_prefix_mass[n-1]` = nominal AA-only sum
-/// - `score += round(prefix_score[prm] + suffix_score[srm])`
-///
-/// `fragment_tolerance_da` is forwarded to `ScoredSpectrum::node_score` for
-/// peak-lookup.  The `charge` selects the partition; `parent_mass` is the
-/// peptide neutral mass (residue_sum + H₂O), used for segment selection.
 pub fn score_psm(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -239,25 +168,10 @@ pub fn score_psm(
         return 0.0;
     }
 
-    // Two distinct masses with different roles:
-    //  - `peptide_nominal`: candidate peptide's total nominal residue mass.
-    //    Drives suffix lookup, built from the candidate's residues.
-    //  - `spectrum_parent_mass`: spectrum's OBSERVED neutral mass.
-    //    Drives partition + segment selection across all candidates,
-    //    regardless of iso_off. Using `peptide.mass()` here would mismatch
-    //    iso_off≥1 candidates and cause systematic top-1 flips.
     let spectrum_parent_mass = scored_spec.parent_mass();
 
-    // Total nominal peptide mass = nominal(residue_sum) = nominal(mass - H2O).
-    // Used to compute suffix_nominal = peptide_nominal - prefix_nominal.
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // ── Neutral-loss contribution gate (peptide-aware, additive) ─────────────
-    // Loss ions are scored only when (a) the activation method preserves them
-    // (ETD strips no labile mods → no loss ions), (b) the model carries trained
-    // loss tables, and (c) the peptide actually declares a loss-bearing mod.
-    // For every standard peptide this is false, so the split loop adds nothing
-    // and the integer RawScore is byte-identical to the pre-feature engine.
     let score_losses = scorer
         .param()
         .data_type
@@ -271,14 +185,11 @@ pub fn score_psm(
         });
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
-    // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
     for s in 1..n {
-        // Accumulate exact float mass for residue s-1 (0-indexed).
         let aa = &peptide.residues[s - 1];
         let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
         prefix_mass_acc += residue_mass;
 
-        // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
 
@@ -296,9 +207,6 @@ pub fn score_psm(
             });
         total += contribution;
 
-        // Additive neutral-loss contribution: loss ions for fragments spanning
-        // a loss-bearing residue, scored via the model's pooled per-class loss
-        // tables. Zero (no allocation) for standard peptides via the gate above.
         if score_losses {
             let prefix_losses = crate::scoring::scored_spectrum::span_losses(peptide, 0..s);
             let suffix_losses = crate::scoring::scored_spectrum::span_losses(peptide, s..n);
@@ -316,35 +224,10 @@ pub fn score_psm(
     total as f32
 }
 
-/// Count-rewarding hyperscore over matched backbone b/y ions (andes-glyco 2.0
-/// peptide channel `P`).
-///
-/// `hyperscore = ln(Nb! · Ny!) = ln(Nb!) + ln(Ny!)`, where `Nb`/`Ny` are the
-/// numbers of matched b-type (prefix) and y-type (suffix) theoretical ions (via
-/// the SAME `ion_match_facts` matcher as scoring). This is the X!Tandem /
-/// MSFragger factorial term: it rewards the NUMBER of matched fragments, the axis
-/// the intensity-weighted rank-LLR [`score_psm`] under-rewards. The MSFragger-gap
-/// audit found the residual gp-outranked truth backbones match MORE ions than the
-/// wrong winner yet score a LOWER rank-LLR — exactly what this term corrects.
-///
-/// The b and y factorials are computed SEPARATELY (`ln(Nb!)+ln(Ny!)`), NOT as
-/// `ln((Nb+Ny)!)`: MSFragger's hyperscore is the product `Nb!·Ny!`, and pooling
-/// the two ion series into one factorial over-rewards by the log binomial term.
-/// `ln(n!)` is summed directly (n is small, ≤ peptide_len) to avoid a lgamma
-/// dependency. Additive; never modifies [`score_psm`].
 pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &RankScorer) -> f32 {
     hyperscore_psm_with_matches(scored_spec, peptide, scorer).0
 }
 
-/// [`hyperscore_psm`], also returning the number of matched b/y ions.
-///
-/// The count is computed on the way to the hyperscore and was previously discarded.
-/// It is worth surfacing because it is a far better per-candidate discriminator than
-/// the hyperscore itself: over the reference identifications of a benchmark file it
-/// ranks the correct candidate first for 335 of 581 scans (median rank 1), against
-/// median rank 44 for the glycan-Y ladder that carries the largest weight in the glyco
-/// collapse. The hyperscore compresses the same evidence through two log-factorials,
-/// which flattens exactly the differences the selector needs.
 pub fn hyperscore_psm_with_matches(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -372,51 +255,18 @@ pub fn hyperscore_psm_with_matches(
     )
 }
 
-/// Model-free c/z (ETD) backbone hyperscore for EThcD/AI-ETD glyco spectra.
-///
-/// No trained rank model exists for electron-transfer ions, so this mirrors
-/// [`hyperscore_psm`] with a count-based `ln(N_c!) + ln(N_z!)` over the DISTINCT
-/// backbone positions matched by a c or z• ion (a position counts once even if it
-/// matches at several charges). Ions are the glycopeptide-aware c/z ladder from
-/// [`predict_cz_ions`] — the glycan rides on glycosite-spanning fragments, so this
-/// discriminates the true backbone on ETD spectra where the labile-glycan HCD b/y
-/// ladder is sparse (the high-charge wall). `glycan_mass = 0.0` scores a naked
-/// peptide; `max_frag_charge` bounds the fragment charge sweep (ETD c/z of a
-/// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
-/// The two cz_hyperscore correctness fixes (bug hunt 2026-07-16/17), now DEFAULT
-/// ON after validation (6-frac pooled AI-ETD: +251 backbone-correct @1%, +11%,
-/// 43%→48% of engine M, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
-/// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
-/// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
-/// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse
-/// (traced: a 45-mer decoy beat a 19-mer target).
 fn cz_fix_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    // Always enabled. Without it a long decoy out-counts a shorter true peptide in the
-    // per-scan collapse (traced: a 45-mer decoy beat a 19-mer target). Restoring that is
-    // not a configuration anyone should have.
     *CELL.get_or_init(|| true)
 }
 
-/// Glyco c/z scoring settings, supplied by the caller instead of the environment.
-///
-/// These reach a hot inner function that would otherwise need them threaded through
-/// several signatures, so they are installed once at startup by the binary. Unlike an
-/// environment variable they are typed, validated at the CLI boundary, visible in
-/// `--help`, and have a documented default that applies when nothing installs them
-/// (every library consumer and every test).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CzSettings {
-    /// Override for the c/z fragment-charge ceiling. `None` derives it from the
-    /// spectrum's deconvolution state, which is the correct behaviour in almost all
-    /// cases; set it only to probe higher charges on data known to carry them.
     pub zmax_override: Option<u8>,
 }
 
 static CZ_SETTINGS: OnceLock<CzSettings> = OnceLock::new();
 
-/// Install the c/z settings. Call once, before scoring. A second call is ignored, so a
-/// library consumer cannot have its configuration silently replaced mid-run.
 pub fn init_cz_settings(settings: CzSettings) {
     let _ = CZ_SETTINGS.set(settings);
 }
@@ -426,30 +276,12 @@ fn cz_settings() -> CzSettings {
     CZ_SETTINGS.get().copied().unwrap_or_default()
 }
 
-/// Optional override for the c/z fragment-charge ceiling (`--glyco-cz-max-charge`).
-///
-/// Round-6 audit finding: the bundled models ship `apply_deconvolution = true`, and
-/// [`ScoredSpectrum::nearest_peak_full`] resolves against the DECONVOLUTED peak list —
-/// in which detected z2/z3 isotope clusters have already been charge-reduced to their
-/// z1 m/z. Predicting c/z at charge ≥2 therefore probes m/z that deconvolution has
-/// vacated, adding chance matches rather than evidence. The effective ceiling therefore
-/// DEFAULTS TO 1 when the spectrum was deconvoluted (see [`cz_effective_zmax_for`]),
-/// validated +12 backbone-correct @1%. `--glyco-cz-max-charge <n>` raises it back toward
-/// the call site's own ceiling.
 fn cz_zmax_override() -> Option<u8> {
     use std::sync::OnceLock;
     static CELL: OnceLock<Option<u8>> = OnceLock::new();
     *CELL.get_or_init(|| cz_settings().zmax_override.filter(|&z| z >= 1))
 }
 
-/// Effective c/z fragment-charge ceiling.
-///
-/// The z1 ceiling is only correct when the active model sets
-/// `apply_deconvolution = true`, because it relies on deconvolution having already
-/// charge-reduced detected z2/z3 clusters to their z1 m/z. With deconvolution OFF
-/// (e.g. `etd_lowres_tryp_phosphorylation`) multiply-charged c/z remain at their
-/// true m/z and a ceiling of 1 would make them unmatchable, so the call site's own
-/// ceiling is kept. An explicit `--glyco-cz-max-charge` still wins in both cases.
 pub fn cz_effective_zmax_for(default_zmax: u8, apply_deconvolution: bool) -> u8 {
     match cz_zmax_override() {
         Some(z) => default_zmax.min(z),
@@ -479,7 +311,6 @@ pub fn cz_hyperscore_psm(
         glycan_mass,
         glycosite,
     ) {
-        // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
         let tol_da = if fix {
             (ion.mz * tol_ppm * 1e-6).max(0.01)
         } else {
@@ -499,10 +330,6 @@ pub fn cz_hyperscore_psm(
     let ln_factorial = |m: usize| -> f64 { (2..=m).map(|i| (i as f64).ln()).sum() };
     let raw = ln_factorial(n_c) + ln_factorial(n_z);
     if fix {
-        // Bug 7: normalize by the max attainable score for THIS peptide length so
-        // the term measures FRACTION of the ladder matched, not absolute count —
-        // removing the length bias that let long wrong/decoy peptides win the
-        // collapse. Rescaled to ~0..10 to stay comparable to the gp_cz weight.
         let max_sites = n.saturating_sub(1).max(1);
         let norm = 2.0 * ln_factorial(max_sites);
         if norm > 0.0 {
@@ -515,14 +342,6 @@ pub fn cz_hyperscore_psm(
     }
 }
 
-/// Fraction of base-peak intensity captured by MATCHED glycopeptide-aware c/z ions
-/// (additive PIN feature `CzIntensity`). Where [`cz_hyperscore_psm`] counts distinct
-/// matched backbone positions (presence only — the round-4 audit's "intensity
-/// blindness"), this SUMS the intensity of the matched c/z peaks, normalised by the
-/// base peak — the intensity signal reference glyco scorers weight and andes'
-/// count-only hyperscore discards. A distinct (kind,position) contributes its best
-/// matched intensity once (mirrors the distinct-hit convention of `cz_hyperscore`).
-/// 0.0 on short peptides / when no c/z peak matches. Per-ion ppm tolerance.
 pub fn cz_matched_intensity_frac(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -563,19 +382,6 @@ pub fn cz_matched_intensity_frac(
     summed / base
 }
 
-/// Analytical graded-c/z LLR features (additive PIN; the reviewer-10 DE-RISK gate for
-/// a trained ETD c/z intensity model). Uses an ANALYTICAL intensity prior — non-spanning
-/// c/z (bare backbone, reliably observed) weighted high, glycan-SPANNING c/z (near-noise
-/// under intact-glycan placement) weighted low, high fragment charges down-weighted
-/// (peaks deconvolve only to ~z3) — and returns the asymmetric "explained-intensity LLR"
-/// form that paid for b/y in `strong_score` (NOT cosine, NOT the refuted presence/geometry):
-/// - `explained` = Σ(matched·p)/Σp — fraction of PRIOR-weighted c/z intensity observed;
-///   asymmetric, so a true peptide explains its predicted-bright (bare) c/z and a decoy does not.
-/// - `chance_llr` = Σ matched·p·max(0,−ln p_chance) — prior-weighted local-noise surprise
-///   (a match in a sparse region is more informative) — the piece the refuted structure
-///   features lacked. If graded intensity can't separate here, a trained model won't either.
-///
-/// Both 0.0 on short peptides / no match. Per-ion ppm tolerance.
 pub fn cz_structure_features(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -588,22 +394,17 @@ pub fn cz_structure_features(
     if n < 2 || max_frag_charge == 0 {
         return (0.0, 0.0);
     }
-    // Cap the fragment-charge sweep at 3: peaks deconvolve only to ~z3, so higher
-    // predicted c/z are mostly random matches (audit finding F6).
     let zmax = cz_effective_zmax_for(max_frag_charge.min(3), scored_spec.is_deconvoluted());
     let mut sum_p = 0.0f64;
     let mut sum_matched_p = 0.0f64;
     let mut sum_chance_llr = 0.0f64;
     for ion in predict_cz_ions(peptide, 1..=zmax, glycan_mass, glycosite) {
         let pos = ion.position as usize;
-        // Spanning c/z carry the (near-noise) intact glycan; non-spanning are bare.
         let spanning = match ion.kind {
             IonKind::C => glycosite < pos,
             IonKind::Z => glycosite >= n.saturating_sub(pos),
             _ => false,
         };
-        // Analytical intensity prior: bare c/z reliably present; spanning near-noise;
-        // higher charges rarer (deconv ceiling ~z3).
         let charge_w = if ion.charge <= 2 { 1.0 } else { 0.4 };
         let p = if spanning { 0.15 } else { 1.0 } * charge_w;
         sum_p += p;
@@ -624,19 +425,6 @@ pub fn cz_structure_features(
     (explained, sum_chance_llr as f32)
 }
 
-/// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split
-/// node scores (`prefix_score + suffix_score`) instead of rounding each split to
-/// `i32` before accumulation.
-///
-/// Emitted as the additive `RankScoreFloat` PIN feature so Percolator can
-/// recover the discrimination that per-split integer rounding compresses away on
-/// short / low-evidence peptides (most acute at low resolution, where each
-/// split's LLR is small). Does NOT affect candidate ranking — [`score_psm`] and
-/// the integer `RawScore` are unchanged. Computed only for emitted PSMs.
-///
-/// The peptide-aware neutral-loss contribution that [`score_psm`] adds is
-/// omitted here: it is rare (loss-bearing mods only) and the feature targets the
-/// standard b/y separation.
 pub fn score_psm_float(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -664,9 +452,6 @@ pub fn score_psm_float(
         let contribution = scored_spec
             .cached_split_score_f32(prefix_nominal, suffix_nominal)
             .unwrap_or_else(|| {
-                // Unrounded fallback: node_score_f32 (not node_score) so a cache
-                // miss does not silently revert RankScoreFloat to integer
-                // arithmetic (Codex review #1).
                 scored_spec.node_score_f32(
                     prefix_nominal as f64,
                     suffix_nominal as f64,
@@ -717,9 +502,6 @@ mod tests {
         }
     }
 
-    /// A param whose single partition has `parent_mass = 0.0`, so the floor-
-    /// matching in `find_partition` returns it for *any* peptide mass.
-    /// The prefix-ion frequencies are tuned so that rank-1 hits score positive.
     fn any_mass_param() -> Param {
         use model::activation::ActivationMethod;
         use model::instrument::InstrumentType;
@@ -791,8 +573,6 @@ mod tests {
         p
     }
 
-    /// A param like `any_mass_param` but additionally carrying a trained
-    /// loss-class-1 ion table (rank-1 dominant → positive LLR).
     fn loss_table_param() -> Param {
         let part = Partition {
             charge: 2,
@@ -812,9 +592,6 @@ mod tests {
         p
     }
 
-    /// `T*WW`: loss-bearing T at index 0, then two heavy W residues so that the
-    /// prefix `T*W` (~287 Da) at split s=2 is heavy enough for `intact_mz − Hex`
-    /// to be a positive m/z (a single-residue T prefix would go negative).
     fn loss_peptide_twoheavy() -> Peptide {
         use model::modification::{ModLocation, Modification, ResidueSpec};
         let m = Modification {
@@ -837,8 +614,6 @@ mod tests {
         Peptide::new(vec![t, w1, w2], b'_', b'-')
     }
 
-    /// `score_psm` adds the peptide-aware neutral-loss contribution
-    /// for loss-bearing peptides, and is byte-identical for non-loss peptides.
     #[test]
     fn score_psm_adds_neutral_loss_contribution_and_is_inert_otherwise() {
         let _part = Partition {
@@ -852,18 +627,14 @@ mod tests {
             loss_class: 1,
         };
 
-        // Loss peptide T*WW: at split s=2 the prefix {T*,W} spans the loss
-        // residue and is heavy enough for a positive loss m/z. (At s=1 the
-        // prefix {T*} would go negative and is skipped — no missing penalty.)
         let loss_pep = loss_peptide_twoheavy();
-        let prefix_nominal = nominal_from(loss_pep.residues[0].mass + loss_pep.residues[1].mass); // T*+W
+        let prefix_nominal = nominal_from(loss_pep.residues[0].mass + loss_pep.residues[1].mass);
         let loss_mz = loss_ion.mz(prefix_nominal as f64) - 162.0528;
         assert!(
             loss_mz > 0.0,
             "test setup: loss m/z must be positive, got {loss_mz}"
         );
 
-        // Spectrum with a single peak exactly at the loss m/z (away from precursor).
         let s = Spectrum {
             title: "loss".into(),
             precursor_mz: 800.0,
@@ -890,8 +661,6 @@ mod tests {
             "loss model must add positive loss-ion score: with={with_loss} without={without}"
         );
 
-        // Byte-identical guard: a non-loss peptide scores identically under a
-        // loss-table model and a no-loss model (loss path gated off).
         let plain_pep = pep(b"AAA");
         let sp = Spectrum {
             title: "plain".into(),
@@ -928,9 +697,6 @@ mod tests {
 
     #[test]
     fn empty_spectrum_returns_non_positive_score() {
-        // No peaks → every node lookup is missing → score ≤ 0.
-        // (With node_score iterating all ion types, missing_ion_score is
-        // negative for all configured ions; the sum is non-positive.)
         let peptide = pep(b"AGR");
         let spec = empty_spectrum("empty");
         let scored = ScoredSpectrum::new_without_filtering(&spec);
@@ -942,13 +708,9 @@ mod tests {
 
     #[test]
     fn perfect_match_yields_positive_score() {
-        // Build a spectrum whose peaks fall exactly at the b-ion m/z of each
-        // split position.  Uses `any_mass_param` so the partition lookup
-        // succeeds for the small AGR peptide mass.
         let peptide = pep(b"AGR");
         let param = any_mass_param();
 
-        // Compute b-ion m/z for each split position of AGR.
         let b_ion = IonType::Prefix {
             charge: 1,
             offset_bits: 0.0_f32.to_bits(),
@@ -961,7 +723,7 @@ mod tests {
             prefix_acc += aa.mass;
             let nom = model::mass::nominal_from(prefix_acc) as f64;
             let mz = b_ion.mz(nom);
-            peaks.push((mz, 1000.0_f32 / s as f32)); // rank-1 intensity
+            peaks.push((mz, 1000.0_f32 / s as f32));
         }
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -989,7 +751,6 @@ mod tests {
 
     #[test]
     fn perfect_match_outscores_empty_spectrum() {
-        // A spectrum with matched peaks must outscore an empty spectrum.
         let peptide = pep(b"AGR");
         let param = any_mass_param();
 
@@ -1035,8 +796,6 @@ mod tests {
         );
     }
 
-    /// Verify that `score_psm` equals the manually summed `node_score` calls
-    /// across each split position (this is the definition of the new formula).
     #[test]
     fn score_psm_matches_sum_of_node_scores_across_splits() {
         use model::amino_acid::AminoAcid;
@@ -1046,7 +805,6 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
 
-        // Empty spectrum — all node scores are missing, but the sum should still match.
         let empty_spec = empty_spectrum("empty");
         let scored = ScoredSpectrum::new_without_filtering(&empty_spec);
 

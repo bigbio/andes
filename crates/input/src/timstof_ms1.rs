@@ -1,43 +1,9 @@
-//! MS1 survey frames of a Bruker timsTOF `.d`: summed over ion mobility,
-//! centroided along the time-of-flight axis, and converted to m/z with a
-//! per-run calibration learned from the instrument's own precursor records.
-//!
-//! A TIMS MS1 frame holds one TOF spectrum per mobility scan. Quantification
-//! and the MS1-linked search paths read survey scans as one centroid list per
-//! retention time, so each frame is summed over its scans (per TOF index),
-//! split into peaks at the valleys of the lightly smoothed summed profile,
-//! and each peak is reported at the intensity-weighted TOF position of its
-//! half-height core.
-//!
-//! The TOF → m/z conversion that `timsrust` derives from the acquisition
-//! range (`sqrt(m/z)` linear in the TOF index) is an approximation of the
-//! vendor calibration. The acquisition software records, for every PASEF
-//! precursor, its monoisotopic m/z (`Precursors.MonoisotopicMz`) computed with
-//! the full instrument calibration; it agrees with the theoretical m/z of
-//! identified precursors to about 1 ppm, while the m/z of the largest isotope
-//! peak recorded beside it (`LargestPeakMz`, used only when the monoisotopic
-//! peak was not determined) sits several ppm off. [`fit_calibration`] matches
-//! those m/z values to the centroids of their parent MS1 frames and fits
-//! `sqrt(m/z)` as a cubic in the TOF index plus a linear term in each of the
-//! two frame temperatures the TDF records (`Frames.T1`, `Frames.T2`), which is
-//! what the vendor calibration compensates for. Each vendor m/z is paired
-//! with the most intense centroid in a window, in two passes: a wide window
-//! whose pairs give the offset of the acquisition-range model as the mode of
-//! their offsets, per m/z range (the offset changes by tens of ppm between
-//! low and high m/z), then a narrow window around that offset curve. The fit
-//! is refined by discarding residuals beyond four robust standard deviations.
-
-/// A centroid in the TOF domain: intensity-weighted TOF index, summed
-/// intensity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TofCentroid {
     pub tof: f64,
     pub intensity: f64,
 }
 
-/// Sum the intensities of one frame's points per TOF index. `tof` and
-/// `intensity` are parallel arrays over every mobility scan of the frame;
-/// the result is sorted by TOF index.
 pub(crate) fn sum_over_mobility(tof: &[u32], intensity: &[u32]) -> Vec<(u32, u64)> {
     let n = tof.len().min(intensity.len());
     let mut pairs: Vec<(u32, u32)> = (0..n).map(|i| (tof[i], intensity[i])).collect();
@@ -52,41 +18,18 @@ pub(crate) fn sum_over_mobility(tof: &[u32], intensity: &[u32]) -> Vec<(u32, u64
     out
 }
 
-/// Largest gap (in TOF indices) between two points of one peak. A missing
-/// index between two recorded ones is a zero-count bin inside the peak.
 const MAX_TOF_GAP: u32 = 2;
 
-/// Two maxima of the smoothed profile separated by a valley deeper than this
-/// fraction of the lower maximum are two peaks; a shallower dip is noise on
-/// one peak.
 const VALLEY_SPLIT_FRACTION: f64 = 0.5;
 
-/// Binomial smoothing kernel (standard deviation one TOF bin). An MS1 peak
-/// spans several TOF bins (its full width at half maximum is 3 to 6 bins over
-/// the m/z range), while the counts of a summed frame fluctuate from bin to
-/// bin; peaks are found on the smoothed profile so that this noise does not
-/// split one peak into several.
 const SMOOTHING: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 
-/// The part of a peak its position is taken from: the points whose smoothed
-/// intensity is at least this fraction of the peak's smoothed maximum (the
-/// half-height core, where the shape is symmetric and the tails of
-/// neighbouring peaks weigh least).
 const CORE_FRACTION: f64 = 0.5;
 
-/// Centroid a summed TOF profile (sorted by TOF index). Runs of points no
-/// more than [`MAX_TOF_GAP`] apart are laid out on a dense TOF grid, smoothed
-/// with [`SMOOTHING`], and split at the minima of the smoothed profile;
-/// neighbouring segments are merged again when the smoothed valley between
-/// them is shallower than [`VALLEY_SPLIT_FRACTION`] of the lower segment
-/// maximum. Each peak is reported at the intensity-weighted TOF index of its
-/// core (see [`CORE_FRACTION`]) with the summed intensity of the whole peak.
 pub(crate) fn centroid_profile(profile: &[(u32, u64)]) -> Vec<TofCentroid> {
     centroid_profile_with_bounds(profile, None)
 }
 
-/// [`centroid_profile`], also recording in `bounds` the first and last TOF
-/// index of each peak (parallel to the result).
 pub(crate) fn centroid_profile_with_bounds(
     profile: &[(u32, u64)],
     mut bounds: Option<&mut Vec<(u32, u32)>>,
@@ -104,8 +47,6 @@ pub(crate) fn centroid_profile_with_bounds(
     out
 }
 
-/// Centroid one run of points no more than [`MAX_TOF_GAP`] apart (see
-/// [`centroid_profile`]).
 fn centroid_run(
     run: &[(u32, u64)],
     out: &mut Vec<TofCentroid>,
@@ -130,8 +71,6 @@ fn centroid_run(
                 .sum()
         })
         .collect();
-    // Segments [lo, hi) split at the strict minima of the smoothed profile,
-    // each with its smoothed maximum and the smoothed valley in front of it.
     let mut segments: Vec<(usize, usize, f64, f64)> = Vec::new();
     let mut lo = 0;
     let mut valley = 0.0;
@@ -181,9 +120,6 @@ fn centroid_run(
     }
 }
 
-/// A centroid resolved by ion mobility: intensity-weighted TOF index of its
-/// half-height core, summed intensity, and intensity-weighted mobility scan
-/// index.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MobilityCentroid {
     pub tof: f64,
@@ -191,37 +127,12 @@ pub(crate) struct MobilityCentroid {
     pub scan: f64,
 }
 
-/// Standard deviation (mobility scans) of the Gaussian kernel the mobility
-/// profile of a TOF peak is smoothed with before it is split. A peptide ion
-/// spans tens of mobility scans (full width at half maximum about 0.015 to
-/// 0.03 V·s/cm², 15 to 30 scans), while the counts of one TOF peak are spread
-/// thinly over those scans.
 const MOBILITY_SMOOTHING_SCANS: f64 = 3.0;
 
-/// Points of one TOF peak further apart than this many scans belong to
-/// different mobility runs (the smoothed profile between them is zero).
 const MOBILITY_GAP_SCANS: u32 = 9;
 
-/// Fewest points (TOF index and scan pairs) a mobility component needs to
-/// be a centroid; a smaller one is the scattered counts a TOF index collects
-/// over the frame's mobility range and is left out. A TOF peak without such
-/// a component has no mobility-resolved centroid.
 const MIN_COMPONENT_POINTS: usize = 4;
 
-/// The centroids of one frame: summed over mobility (as [`centroid_profile`]
-/// of [`sum_over_mobility`]) and, when `resolve`, each summed peak split into
-/// its ion-mobility components (empty otherwise).
-///
-/// `scan_offsets[s]..scan_offsets[s + 1]` are the points of mobility scan
-/// `s`. A summed peak's points are grouped by scan into a mobility profile,
-/// cut where two points are more than [`MOBILITY_GAP_SCANS`] apart, smoothed
-/// with a Gaussian of [`MOBILITY_SMOOTHING_SCANS`] and split at its minima;
-/// neighbouring parts are merged again when the valley between them is
-/// shallower than [`VALLEY_SPLIT_FRACTION`] of the lower maximum; parts with
-/// fewer than [`MIN_COMPONENT_POINTS`] points are left out. Each component is
-/// reported at the intensity-weighted TOF index of its own half-height core
-/// (as [`centroid_profile`] places a peak) and the intensity-weighted scan of
-/// its points, with its summed intensity.
 pub(crate) fn centroid_frame(
     scan_offsets: &[usize],
     tof: &[u32],
@@ -235,7 +146,6 @@ pub(crate) fn centroid_frame(
     let mut bounds = Vec::new();
     let summed = centroid_profile_with_bounds(&summed_profile, Some(&mut bounds));
     let n = tof.len().min(intensity.len());
-    // (tof, scan, intensity) of every point, by TOF index.
     let mut points: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
     for s in 0..scan_offsets.len().saturating_sub(1) {
         let (a, b) = (scan_offsets[s].min(n), scan_offsets[s + 1].min(n));
@@ -262,28 +172,21 @@ pub(crate) fn centroid_frame(
     (summed, out)
 }
 
-/// One mobility component of a TOF peak while it is built.
 #[derive(Debug, Clone)]
 struct Component {
-    /// Scan range `[lo, hi]` of its own points.
     lo: u32,
     hi: u32,
     points: usize,
-    /// Summed intensity of its points.
     total: f64,
-    /// Smoothed maximum and the smoothed valley in front of it.
     max: f64,
     valley: f64,
 }
 
-/// Split the points of one TOF peak (`(tof, scan, intensity)`, any order) by
-/// ion mobility; see [`centroid_frame`].
 fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid>) {
     if pts.is_empty() {
         return;
     }
     pts.sort_unstable_by_key(|p| (p.1, p.0));
-    // Per-scan intensity of the peak.
     let mut by_scan: Vec<(u32, f64, usize)> = Vec::new();
     for &(_, s, i) in pts.iter() {
         match by_scan.last_mut() {
@@ -308,7 +211,6 @@ fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid
         mobility_run(&by_scan[start..end], &kernel, half, &mut parts);
         start = end;
     }
-    // Merge across a shallow valley.
     let mut merged: Vec<Component> = Vec::with_capacity(parts.len());
     for c in parts {
         match merged.last_mut() {
@@ -323,15 +225,11 @@ fn split_by_mobility(pts: &mut [(u32, u32, u32)], out: &mut Vec<MobilityCentroid
             _ => merged.push(c),
         }
     }
-    // Parts with too few points are the scattered counts every TOF index
-    // collects over the frame's mobility range; they are left out.
     for c in merged.iter().filter(|c| c.points >= MIN_COMPONENT_POINTS) {
         emit(pts, c.lo, c.hi, out);
     }
 }
 
-/// Split one run of per-scan intensities (scans no more than
-/// [`MOBILITY_GAP_SCANS`] apart) at the minima of its smoothed profile.
 fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mut Vec<Component>) {
     let first = run[0].0;
     let n = (run[run.len() - 1].0 - first) as usize + 1;
@@ -359,7 +257,6 @@ fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mu
         let own: f64 = raw[lo..hi].iter().sum();
         let points: usize = count[lo..hi].iter().sum();
         let max = smooth[lo..hi].iter().copied().fold(0.0, f64::max);
-        // The scan range of its points (zero bins at the ends left out).
         let a = (lo..hi).find(|&k| count[k] > 0).unwrap_or(lo);
         let b = (lo..hi).rev().find(|&k| count[k] > 0).unwrap_or(hi - 1);
         parts.push(Component {
@@ -381,10 +278,6 @@ fn mobility_run(run: &[(u32, f64, usize)], kernel: &[f64], half: i64, parts: &mu
     push(lo, n, valley, parts);
 }
 
-/// Report the points of `pts` (sorted by scan) with scans in `[lo, hi]` as
-/// one centroid: its TOF position from the half-height core of its own TOF
-/// profile (smoothed as in [`centroid_profile`]), its intensity-weighted
-/// scan and its summed intensity.
 fn emit(pts: &[(u32, u32, u32)], lo: u32, hi: u32, out: &mut Vec<MobilityCentroid>) {
     let a = pts.partition_point(|p| p.1 < lo);
     let b = pts.partition_point(|p| p.1 <= hi);
@@ -444,48 +337,28 @@ fn emit(pts: &[(u32, u32, u32)], lo: u32, hi: u32, out: &mut Vec<MobilityCentroi
     });
 }
 
-/// What the m/z of a frame's centroids depends on besides the TOF index and
-/// the centroid's intensity: the frame temperatures (`T1`, `T2`) and its
-/// retention time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FrameConditions {
     pub t: [f64; 2],
     pub rt_s: f64,
 }
 
-/// Conditions a centroid's m/z depends on besides its TOF index: the two
-/// frame temperatures, the natural log of the centroid's summed intensity,
-/// and the frame's retention time (hours) and its square. Intense peaks sit
-/// at a slightly later TOF than weak ones of the same m/z (several ppm across
-/// the intensity range of a run), and the TOF scale drifts over a run by up
-/// to about 10 ppm beyond what the two temperatures explain; the vendor
-/// conversion corrects both and the TOF polynomial alone cannot.
 pub(crate) type Conditions = [f64; 5];
 
-/// The conditions of a centroid of `intensity` in a frame recorded under `f`.
 pub(crate) fn conditions(f: FrameConditions, intensity: f64) -> Conditions {
     let h = f.rt_s / 3600.0;
     [f.t[0], f.t[1], intensity.max(1.0).ln(), h, h * h]
 }
 
-/// TOF → m/z conversion: `sqrt(m/z)` as a polynomial in the scaled TOF index
-/// plus a linear term in each of the [`Conditions`]. With all condition
-/// coefficients zero it is the acquisition-range model
-/// (`sqrt(m/z) = a + b * tof`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MzCalibration {
-    /// TOF indices are divided by this before the polynomial (numerical
-    /// conditioning).
     scale: f64,
-    /// Coefficients of `1, x, x^2, x^3` (x = tof / scale).
     poly: [f64; 4],
-    /// Coefficients of the conditions, each centred on `c_ref`.
     cond: [f64; 5],
     c_ref: Conditions,
 }
 
 impl MzCalibration {
-    /// The acquisition-range model `sqrt(m/z) = intercept + slope * tof`.
     pub fn linear(intercept: f64, slope: f64, scale: f64) -> Self {
         Self {
             scale,
@@ -495,7 +368,6 @@ impl MzCalibration {
         }
     }
 
-    /// m/z of a (fractional) TOF index under conditions `c`.
     pub fn mz(&self, tof: f64, c: Conditions) -> f64 {
         let x = tof / self.scale;
         let p = &self.poly;
@@ -505,39 +377,20 @@ impl MzCalibration {
     }
 }
 
-/// A vendor precursor record matched against its parent frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CalibrationPoint {
-    /// Centroid TOF index in the parent MS1 frame.
     pub tof: f64,
-    /// Vendor-calibrated monoisotopic m/z of the precursor.
     pub mz: f64,
-    /// Conditions of the centroid in its parent frame.
     pub t: Conditions,
 }
 
-/// Matching window (ppm) of the first pass, which finds the run's offset
-/// between the acquisition-range model and the vendor m/z.
 pub(crate) const WIDE_WINDOW_PPM: f64 = 200.0;
-/// Half-width (ppm) of the second matching pass, around that offset.
 pub(crate) const NARROW_WINDOW_PPM: f64 = 15.0;
-/// Fewest matched pairs a fit is made from.
 pub(crate) const MIN_CALIBRATION_POINTS: usize = 200;
-/// Residuals beyond this many robust standard deviations are left out of the
-/// refit.
 const OUTLIER_SIGMAS: f64 = 4.0;
 
-/// Margin (ppm) around a matching window within which the intensity term of
-/// a calibration can move a centroid; candidates are located without it and
-/// then tested with it.
 const MATCH_MARGIN_PPM: f64 = 50.0;
 
-/// Pair each vendor m/z of a frame with the most intense centroid whose m/z
-/// under `calibration` lies within `offset_ppm ± window_ppm` of it. A
-/// selected precursor is among the most intense ions of its frame, so among
-/// the centroids near its m/z the most intense is its counterpart; the
-/// nearest one is as often a neighbouring peak. `centroids` are sorted by TOF
-/// (m/z rises with TOF under any calibration).
 pub(crate) fn match_precursors(
     centroids: &[TofCentroid],
     vendor_mz: &[f64],
@@ -574,22 +427,12 @@ pub(crate) fn match_precursors(
     }
 }
 
-/// Matching rounds after the first fit: the pairs are matched again within
-/// [`REFINE_SIGMAS`] residual standard deviations of the fitted model (at
-/// least [`MIN_REFINE_WINDOW_PPM`]) and the model refitted, so pairs the
-/// first, offset-only window clipped (where the run drifts) come back.
 pub(crate) const REFINE_ROUNDS: usize = 2;
 pub(crate) const REFINE_SIGMAS: f64 = 3.0;
 pub(crate) const MIN_REFINE_WINDOW_PPM: f64 = 8.0;
 
-/// Width (ppm) of the offset histogram bins of [`mode_offset_ppm`].
 const OFFSET_BIN_PPM: f64 = 1.0;
 
-/// The run's offset (ppm) of the linear model from the vendor m/z: the mode
-/// of the matched pairs' offsets (histogram of [`OFFSET_BIN_PPM`] bins,
-/// smoothed over three bins). Correct pairs pile up at the offset while pairs
-/// with a neighbouring peak spread over the whole window, so the mode finds
-/// the offset where a median would be pulled toward the window centre.
 pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration) -> Option<f64> {
     if points.is_empty() {
         return None;
@@ -609,7 +452,6 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
             .sum::<f64>()
     };
     let k = (0..hist.len()).max_by(|&a, &b| smooth(a).total_cmp(&smooth(b)))?;
-    // Refine within the peak: the mean offset of the pairs within one bin.
     let centre = (k as i64 - half) as f64 * OFFSET_BIN_PPM;
     let near: Vec<f64> = points
         .iter()
@@ -619,8 +461,6 @@ pub(crate) fn mode_offset_ppm(points: &[CalibrationPoint], base: &MzCalibration)
     Some(near.iter().sum::<f64>() / near.len().max(1) as f64)
 }
 
-/// Offset (ppm) of a calibration from the vendor m/z as a function of m/z:
-/// linear between knots `(m/z, ppm)`, constant beyond the first and last.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OffsetCurve {
     knots: Vec<(f64, f64)>,
@@ -647,15 +487,9 @@ impl OffsetCurve {
     }
 }
 
-/// Pairs per m/z range of [`offset_curve`], and the most ranges.
 const OFFSET_RANGE_POINTS: usize = 400;
 const OFFSET_MAX_RANGES: usize = 10;
 
-/// The offset of `base` from the vendor m/z as a function of m/z: the pairs
-/// of the wide matching pass are split by vendor m/z into ranges of equal
-/// count (about [`OFFSET_RANGE_POINTS`] each, at most [`OFFSET_MAX_RANGES`]),
-/// and each range contributes a knot at its median m/z with its
-/// [`mode_offset_ppm`]. `None` without pairs.
 pub(crate) fn offset_curve(
     points: &[CalibrationPoint],
     base: &MzCalibration,
@@ -673,7 +507,6 @@ pub(crate) fn offset_curve(
     (!knots.is_empty()).then_some(OffsetCurve { knots })
 }
 
-/// Median of `v` (reorders it); `None` when empty.
 fn median(v: &mut [f64]) -> Option<f64> {
     if v.is_empty() {
         return None;
@@ -683,8 +516,6 @@ fn median(v: &mut [f64]) -> Option<f64> {
     Some(*m)
 }
 
-/// Least-squares solution of `a x = b` for a small dense symmetric system
-/// (Gaussian elimination with partial pivoting); `None` when singular.
 fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
@@ -710,21 +541,14 @@ fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// Spread (standard deviation) below which a condition is treated as
-/// constant over the run and gets no term.
 const MIN_CONDITION_SPREAD: f64 = 1e-3;
 
-/// Summary of a calibration fit.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CalibrationFit {
     pub calibration: MzCalibration,
-    /// Pairs used in the final fit.
     pub n_used: usize,
-    /// Median and robust standard deviation (1.4826 MAD) of the final
-    /// residuals against the vendor m/z, ppm.
     pub median_ppm: f64,
     pub sigma_ppm: f64,
-    /// The same for the acquisition-range model on the same pairs.
     pub base_median_ppm: f64,
     pub base_sigma_ppm: f64,
 }
@@ -737,8 +561,6 @@ fn residual_stats(ppm: &[f64]) -> (f64, f64) {
     (med, 1.4826 * mad)
 }
 
-/// Fit `sqrt(m/z)` against the matched pairs (see the module docs). `None`
-/// with fewer than [`MIN_CALIBRATION_POINTS`] pairs or a singular system.
 pub(crate) fn fit_calibration(
     points: &[CalibrationPoint],
     base: &MzCalibration,
@@ -864,9 +686,6 @@ mod tests {
         assert_eq!(c[0].intensity, 13.0);
     }
 
-    /// A Gaussian peak of `height` at TOF `centre` (standard deviation
-    /// `sigma` bins) over `lo..hi`, with a deterministic count jitter of
-    /// `jitter` (fraction of the value, alternating sign).
     fn gaussian(
         lo: u32,
         hi: u32,
@@ -896,8 +715,6 @@ mod tests {
 
     #[test]
     fn bin_to_bin_noise_does_not_split_one_peak() {
-        // A 2-bin sigma peak with 30 % alternating count noise: one centroid
-        // within a quarter bin (about 1 ppm) of the true centre.
         let p = gaussian(990, 1011, 1000.3, 2.0, 40.0, 0.3);
         let c = centroid_profile(&p);
         assert_eq!(c.len(), 1, "{c:?}");
@@ -906,7 +723,6 @@ mod tests {
 
     #[test]
     fn resolved_peaks_split_and_an_unresolved_shoulder_does_not() {
-        // Two peaks 10 bins apart (5 sigma): two centroids at their centres.
         let p = add(
             &gaussian(990, 1011, 1000.0, 2.0, 100.0, 0.0),
             &gaussian(1000, 1021, 1010.0, 2.0, 60.0, 0.0),
@@ -917,7 +733,6 @@ mod tests {
             (c[0].tof - 1000.0).abs() < 0.2 && (c[1].tof - 1010.0).abs() < 0.2,
             "{c:?}"
         );
-        // 3 bins apart: one peak.
         let q = add(
             &gaussian(990, 1011, 1000.0, 2.0, 100.0, 0.0),
             &gaussian(993, 1014, 1003.0, 2.0, 60.0, 0.0),
@@ -925,7 +740,6 @@ mod tests {
         assert_eq!(centroid_profile(&q).len(), 1);
     }
 
-    /// A frame of `n_scans` mobility scans from `(tof, scan, count)` points.
     fn frame(n_scans: usize, mut pts: Vec<(u32, u32, u32)>) -> (Vec<usize>, Vec<u32>, Vec<u32>) {
         pts.sort_by_key(|p| (p.1, p.0));
         let mut offsets = vec![0usize];
@@ -942,8 +756,6 @@ mod tests {
         (offsets, tof, inten)
     }
 
-    /// An ion: Gaussian in TOF (sd 1.5 bins) around `tof` and in mobility
-    /// (sd 8 scans) around `scan`, `height` counts at its apex.
     fn ion(tof: f64, scan: f64, height: f64) -> Vec<(u32, u32, u32)> {
         let mut out = Vec::new();
         for s in (scan as i64 - 30)..(scan as i64 + 30) {
@@ -977,8 +789,6 @@ mod tests {
 
     #[test]
     fn ions_at_one_tof_are_split_by_mobility() {
-        // Same TOF position, 40 scans (5 sd) apart in mobility: one summed
-        // centroid, two mobility components at their own scans.
         let pts = merge(&[ion(1000.0, 300.0, 20.0), ion(1000.4, 340.0, 80.0)]);
         let (off, tof, inten) = frame(600, pts);
         let (summed, resolved) = centroid_frame(&off, &tof, &inten, true);
@@ -996,8 +806,6 @@ mod tests {
 
     #[test]
     fn scattered_counts_do_not_make_components_of_their_own() {
-        // One ion plus isolated single counts far from it in mobility: one
-        // component at the ion's scan, without the scattered counts.
         let mut noise = Vec::new();
         for s in [20u32, 80, 150, 450, 520] {
             noise.push((1000u32, s, 1u32));
@@ -1009,7 +817,6 @@ mod tests {
         assert_eq!(resolved.len(), 1, "{resolved:?}");
         assert_eq!(resolved[0].intensity, summed[0].intensity - 5.0);
         assert!((resolved[0].scan - 300.0).abs() < 1.0, "{resolved:?}");
-        // A peak of scattered counts only has no resolved centroid.
         let sparse: Vec<(u32, u32, u32)> = [10u32, 90, 200, 333]
             .iter()
             .map(|&s| (2000u32, s, 1u32))
@@ -1028,9 +835,6 @@ mod tests {
         assert_eq!(centroid_profile(&close).len(), 1);
     }
 
-    /// A synthetic instrument: the vendor calibration is a cubic with a
-    /// temperature and an intensity term; the acquisition-range model is
-    /// linear and off.
     fn truth(tof: f64, t: Conditions) -> f64 {
         let x = tof / 400_000.0;
         let root = 10.0 + 31.0 * x + 0.02 * x * x - 0.01 * x * x * x
@@ -1087,7 +891,6 @@ mod tests {
                 }
             })
             .collect();
-        // 5 % wrong matches 30 ppm off.
         for p in points.iter_mut().step_by(20) {
             p.mz *= 1.0 + 30e-6;
         }
@@ -1119,7 +922,6 @@ mod tests {
         };
         let target = base.mz(100_000.0, [0.0; 5]);
         let c = |tof: f64, intensity: f64| TofCentroid { tof, intensity };
-        // Nearest (100_000.4) is weak; the intense one 1 bin away is the peak.
         let centroids = vec![
             c(99_990.0, 50.0),
             c(100_000.4, 1.0),
@@ -1139,7 +941,6 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].tof, 100_001.0);
         out.clear();
-        // Nothing within 0.001 ppm of an offset of +500 ppm.
         match_precursors(
             &centroids,
             &[target],
@@ -1154,7 +955,6 @@ mod tests {
 
     #[test]
     fn the_offset_is_the_mode_not_the_median() {
-        // 300 pairs at +8 ppm, 700 spread uniformly over -150..150 ppm.
         let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
         let t = [0.0; 5];
         let mut points = Vec::new();
@@ -1178,8 +978,6 @@ mod tests {
 
     #[test]
     fn the_offset_curve_follows_an_offset_that_changes_with_mz() {
-        // The offset falls linearly from +80 ppm at the low end to 0 at the
-        // high end; a quarter of the pairs are wrong neighbours.
         let base = MzCalibration::linear(10.0, 31.0 / 400_000.0, 400_000.0);
         let t = [0.0; 5];
         let (lo, hi) = (base.mz(10_000.0, t), base.mz(390_000.0, t));

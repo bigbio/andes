@@ -1,5 +1,3 @@
-//! match_engine smoke tests.
-
 use rustc_hash::FxHashMap;
 
 use model::activation::ActivationMethod;
@@ -13,9 +11,6 @@ use scoring_crate::{Param, RankScorer};
 use search::candidate_gen::Candidate;
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 
-/// Search `spectra` on the out-of-core path with the index built in memory and
-/// `params`' retrieval (per-spectrum enumeration here: `fragment_index_top_k`
-/// is 0), so peakless spectra still reach every candidate in their window.
 fn search_enumerated(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -48,7 +43,6 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     }
 }
 
-/// Minimal RankScorer for smoke tests (no real peaks, just need valid scorer).
 fn tiny_scorer() -> RankScorer {
     let part = Partition {
         charge: 2,
@@ -114,8 +108,6 @@ fn tiny_scorer() -> RankScorer {
 
 #[test]
 fn known_peptide_appears_in_top_n() {
-    // Protein "MKWVTFISLLR" — Trypsin cleaves after K (pos 1) and R (pos 10).
-    // Peptide "WVTFISLLR" (positions 2..11, length 9) is a perfect cleavage.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
@@ -127,7 +119,7 @@ fn known_peptide_appears_in_top_n() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -158,10 +150,6 @@ fn known_peptide_appears_in_top_n() {
 
 #[test]
 fn top_n_capacity_respected() {
-    // NoCleavage gives exactly 1 candidate per protein. Top-N cap at 1.
-    // Two anagram proteins: with NoCleavage each yields one peptide, and the two
-    // peptides have identical mass, so both are candidates for the same
-    // precursor. Without competing candidates a cap test cannot fail.
     let target = ProteinDb {
         proteins: vec![
             Protein {
@@ -193,9 +181,6 @@ fn top_n_capacity_respected() {
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    // Peakless smoke spectra: without this the default `min_peaks = 10` skips the
-    // spectrum entirely and the assertion below runs against an empty queue,
-    // which is what made this test pass with no cap in place at all.
     params.min_peaks = 0;
 
     let run = |top_n: u32| {
@@ -207,7 +192,6 @@ fn top_n_capacity_respected() {
         queues.into_iter().next().unwrap().into_sorted_vec()
     };
 
-    // Both anagrams are scored, so there is a real competition to cap.
     let uncapped = run(5);
     assert!(
         uncapped.len() > 1,
@@ -215,12 +199,6 @@ fn top_n_capacity_respected() {
         uncapped.len()
     );
 
-    // At capacity the queue deliberately RETAINS rank_score ties (Kim et al.,
-    // Nat Commun 5:5277 — see the merge comment in match_engine.rs), so the
-    // guarantee is not "exactly one row" but "nothing below the best score
-    // survives". A peakless fixture scores every candidate identically, which is
-    // why this is the invariant available here; a cap that stopped working would
-    // let a strictly worse PSM through.
     let capped = run(1);
     assert!(!capped.is_empty(), "top_n = 1 must keep at least one PSM");
     let best = capped[0].rank_score;
@@ -244,7 +222,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -255,7 +233,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None); // no charge!
+    let spec = make_spectrum(mz, None);
     let (queues, _candidates) =
         search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
@@ -263,18 +241,8 @@ fn spectrum_without_charge_tries_charge_range() {
     assert_eq!(top[0].charge_used, 2);
 }
 
-/// B3 correctness: for charge-missing spectra, each candidate is scored
-/// against a ScoredSpectrum built with its own charge (not a fixed z=2).
-///
-/// We set up a peptide whose precursor m/z at z=3 matches the spectrum
-/// but at z=2 does not.  With the pre-B3 code (single scored_spec at z=2)
-/// the candidate would still be found but with a mismatched charge.
-/// With the B3 fix (per-charge cache), each charge sees its own ScoredSpectrum
-/// and the PSM's charge_used matches the charge that actually satisfied the
-/// precursor-mass check.
 #[test]
 fn charge_missing_spectrum_uses_per_charge_scored_spec() {
-    // Peptide "WVTFISLLR", a tryptic fragment from BSA-related sequences.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
@@ -286,9 +254,8 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    // charge_range 2..=3; spectrum has no charge.
     params.charge_range = 2..=3;
-    params.min_peaks = 0; // peakless smoke spectrum; not exercising the min-peaks filter
+    params.min_peaks = 0;
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
         .iter()
@@ -297,16 +264,14 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let target_peptide = Peptide::new(target_residues, b'K', b'-');
     let mass = target_peptide.mass();
 
-    // Set the precursor m/z at z=3 so only z=3 satisfies precursor matching.
     let charge = 3u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None); // charge-missing
+    let spec = make_spectrum(mz, None);
     let (queues, _candidates) =
         search_enumerated(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
-    // The only match must be at charge 3 (the precursor m/z is z=3-exact).
     assert!(
         !top.is_empty(),
         "expected a charge-3 match for charge-missing spectrum"

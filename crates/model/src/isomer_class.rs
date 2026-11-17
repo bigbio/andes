@@ -1,35 +1,12 @@
-//! Positional-isomer class of a peptidoform: its residues and the multiset of
-//! its modification mass deltas, without the sites that carry them.
-//!
-//! Two peptidoforms of one class are the same peptide with the same
-//! modifications, possibly on other residues. The class is read from a
-//! [`Peptide`] or from peptide text in any of the notations andes writes or
-//! reads:
-//!
-//! - Percolator / PIN: `K.GAC+57.02146LLPK.I` (flanks, signed mass after the
-//!   residue),
-//! - ProForma-style accessions: `GAC[UNIMOD:4]LLPK`, `[UNIMOD:1]-PEPTIDEK`,
-//! - bracketed masses: `PEPM[+15.99491]K`.
-//!
-//! Modification names and accessions are turned into masses by a resolver
-//! (see [`bundled_unimod_mass`]).
-
 use crate::peptide::Peptide;
 
-/// A modification mass delta in units of 1e-5 Da, the precision of the PIN
-/// `Peptide` column.
 #[inline]
 pub fn mod_mass_units(mass_delta: f64) -> i64 {
     (mass_delta * 100_000.0).round() as i64
 }
 
-/// Largest difference between two modification masses that [`IsomerClass::matches`]
-/// counts as one modification: a mass written to two decimals still matches
-/// its full-precision value.
 pub const MOD_MASS_TOL_DA: f64 = 0.005;
 
-/// The mass of a modification name or `UNIMOD:NN` accession in the bundled
-/// Unimod table.
 pub fn bundled_unimod_mass(token: &str) -> Option<f64> {
     crate::unimod::resolve(token)
         .ok()
@@ -37,12 +14,6 @@ pub fn bundled_unimod_mass(token: &str) -> Option<f64> {
         .map(|m| m.mono_mass)
 }
 
-/// Residues and sorted modification mass deltas (in [`mod_mass_units`]) of a
-/// peptidoform. Terminal modifications count with the others. Equality is
-/// exact: two peptidoforms whose masses come from the same values (one
-/// search's output) compare equal when they are positional isomers. Across
-/// notations, whose masses are rounded differently, compare with
-/// [`Self::matches`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IsomerClass {
     residues: Vec<u8>,
@@ -50,7 +21,6 @@ pub struct IsomerClass {
 }
 
 impl IsomerClass {
-    /// The class of `peptide`.
     pub fn of_peptide(peptide: &Peptide) -> Self {
         let residues = peptide.residues.iter().map(|aa| aa.residue).collect();
         let mut mod_units: Vec<i64> = peptide
@@ -65,17 +35,12 @@ impl IsomerClass {
         }
     }
 
-    /// The class of peptide text; `resolve` gives the mass of a bracketed
-    /// modification that is not a signed number (a name or accession).
-    /// Errors: a modification without a mass, an unreadable mass, or no
-    /// residues.
     pub fn parse(text: &str, resolve: impl Fn(&str) -> Option<f64>) -> Result<Self, String> {
         let mut c = Self::default();
         c.parse_into(text, resolve)?;
         Ok(c)
     }
 
-    /// [`Self::parse`] into `self`, reusing its buffers.
     pub fn parse_into(
         &mut self,
         text: &str,
@@ -84,7 +49,6 @@ impl IsomerClass {
         self.residues.clear();
         self.mod_units.clear();
         let b = text.as_bytes();
-        // Percolator-style flanks: `K.` and `.R`.
         let core = if b.len() >= 4 && b[1] == b'.' && b[b.len() - 2] == b'.' {
             &text[2..text.len() - 2]
         } else {
@@ -129,8 +93,6 @@ impl IsomerClass {
                     .map_err(|_| format!("{text}: unreadable mass {}", &core[start..i]))?;
                 self.mod_units.push(mod_mass_units(mass));
             } else {
-                // ProForma terminal separators (`]-`), lowercase terminal
-                // markers and other punctuation carry no residue or mass.
                 i += 1;
             }
         }
@@ -141,27 +103,19 @@ impl IsomerClass {
         Ok(())
     }
 
-    /// The residues, in order.
     pub fn residues(&self) -> &[u8] {
         &self.residues
     }
 
-    /// The modification mass deltas in [`mod_mass_units`], sorted.
     pub fn mod_units(&self) -> &[i64] {
         &self.mod_units
     }
 
-    /// Whether `self` and `other` are one class up to the rounding of their
-    /// masses: the same residues and, pairing the sorted masses, every pair
-    /// within [`MOD_MASS_TOL_DA`].
     pub fn matches(&self, other: &Self) -> bool {
         self.residues == other.residues && mod_units_match(&self.mod_units, &other.mod_units)
     }
 }
 
-/// Whether two sorted modification mass multisets (in [`mod_mass_units`]) are
-/// equal within [`MOD_MASS_TOL_DA`]: same size, and the sorted masses pair up
-/// within the tolerance.
 pub fn mod_units_match(a: &[i64], b: &[i64]) -> bool {
     let tol = mod_mass_units(MOD_MASS_TOL_DA);
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol)

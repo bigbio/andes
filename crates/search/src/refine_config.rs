@@ -1,17 +1,13 @@
-//! `--refine-config` YAML -> refinement modification spec. A built-in DEFAULT
-//! tier (5 mods, X!Tandem always-on chemistry) is used when no config is given.
-
 use serde::Deserialize;
 
-/// One refinement variable modification.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RefineMod {
     pub name: String,
     pub delta: f64,
-    pub residues: Vec<String>, // e.g. ["M"], ["N","Q"], ["*"]
+    pub residues: Vec<String>,
     #[serde(default = "loc_anywhere")]
-    pub location: String, // anywhere | n_term | c_term | protein_n_term
-    pub class: String, // oxidation | deamidation | nterm_acetyl | nterm_loss | alkyl | other
+    pub location: String,
+    pub class: String,
 }
 fn loc_anywhere() -> String {
     "anywhere".into()
@@ -24,9 +20,6 @@ pub struct RefineConfig {
     #[serde(default = "default_high_res_only")]
     pub high_res_only: bool,
     pub mods: Vec<RefineMod>,
-    /// Diagnostic: add one shuffled entrapment peptide (accession `ENT_<acc>`) per
-    /// Pass-2 anchor, so Pass-2 false discoveries can be counted. Changes the Pass-2
-    /// search space; not for production runs.
     #[serde(default)]
     pub entrapment: bool,
 }
@@ -38,8 +31,6 @@ fn default_high_res_only() -> bool {
 }
 
 impl RefineConfig {
-    /// The built-in DEFAULT tier: the X!Tandem always-on chemistry. Used when
-    /// `--refine` is given without `--refine-config`.
     pub fn default_tier() -> Self {
         let m = |name: &str, delta: f64, res: &[&str], loc: &str, class: &str| RefineMod {
             name: name.into(),
@@ -53,11 +44,6 @@ impl RefineConfig {
             high_res_only: true,
             entrapment: false,
             mods: vec![
-                // Oxidation/hydroxylation (+15.995, Unimod 35). M is the common
-                // artifact; P and K cover collagen/ECM hydroxyproline &
-                // hydroxylysine — heavily-modified proteins whose peptides never
-                // match unmodified, so a closed search loses the whole protein.
-                // (P+K widen the oxidation candidate space ~3-5× vs M-only.)
                 m(
                     "Oxidation",
                     15.994915,
@@ -92,15 +78,7 @@ impl RefineConfig {
         Ok(cfg)
     }
 
-    /// Reject invalid residue/location tokens that would otherwise SILENTLY become
-    /// broad defaults (a residue typo → wildcard = every residue; an unknown
-    /// location → Anywhere), massively (and wrongly) expanding the candidate space.
-    /// A residue must be `"*"` or a single uppercase amino-acid letter; a location
-    /// must be one of the accepted spellings (those `refinement::parse_location`
-    /// recognizes). Fails fast with a clear message.
     pub fn validate(&self) -> Result<(), String> {
-        // Accepted location spellings (lowercased), matching parse_location +
-        // the `anywhere` default.
         const VALID_LOCATIONS: &[&str] = &[
             "anywhere",
             "n_term",
@@ -139,7 +117,6 @@ impl RefineConfig {
         Ok(())
     }
 
-    /// Map a class string to the PIN `refine_mod_class` id (Task 2 encoding).
     pub fn class_id(class: &str) -> u32 {
         match class {
             "oxidation" => 1,

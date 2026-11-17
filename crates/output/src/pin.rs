@@ -1,82 +1,3 @@
-//! PIN output writer.
-//!
-//! Produces a Percolator-consumable `.pin` file with the column layout used
-//! by Kim et al. (Nat Commun 5:5277, 2014) and OpenMS PercolatorAdapter so
-//! that downstream tools (Percolator, MS²Rescore, Mokapot) can consume the
-//! output interchangeably.
-//!
-//! # Column order
-//!
-//! ```text
-//! SpecId  Label  ScanNr  ExpMass  CalcMass  FileName  mass  RawScore  DeNovoScore
-//! lnSpecEValue  lnEValue  isotope_error  peplen  dm  absdm
-//! charge<min>  charge<min+1>  ...  charge<max>   (the --charge range; a PSM
-//!                                                 charge outside it sets the
-//!                                                 nearest edge column)
-//! enzN  enzC  enzInt
-//! NumMatchedMainIons  longest_b  longest_y  longest_y_pct
-//! ExplainedIonCurrentRatio  NTermIonCurrentRatio  CTermIonCurrentRatio
-//! MS2IonCurrent  IsolationWindowEfficiency
-//! MeanErrorTop7  StdevErrorTop7  MeanRelErrorTop7  StdevRelErrorTop7
-//! lnDeltaSpecEValue  matchedIonRatio
-//! Peptide  Proteins
-//! ```
-//!
-//! # Column semantics
-//!
-//! * **Label**: source-protein TDC rule. `Label = -1`
-//!   if the candidate's source protein is a decoy (`cand.is_decoy`), else
-//!   `+1`. Standard target-decoy competition (TDC) labeling avoids inflating
-//!   Percolator's target set with peptides whose hit came from a decoy protein.
-//!
-//! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, set by
-//!   `match_engine.rs` from `MassError::isotope_offset`.
-//!
-//! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`
-//!   (OpenMS PercolatorInfile enzymatic-boundary rules; Kim et al., Nat Commun
-//!   5:5277, 2014 Percolator features).
-//!
-//! * **Proteins**: single column with the real protein accession resolved from
-//!   `SearchIndex::protein_at(candidates[psm.primary_candidate_idx() as usize].protein_index)`.
-//!   Decoy accessions already carry the decoy prefix. Multi-protein support
-//!   merges Candidates that share pepSeq + score.
-//!
-//! * **peplen**: residue count + 2 (includes both flanking residues).
-//!
-//! * **dm / absdm**: mass error in Da using the matched isotope offset.
-//!   `adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge`
-//!   (see `write_psm_row`), then `dm = adjusted_exp_mz - theo_mz` and
-//!   `absdm = |dm|`. `isotope_error` is the PIN column from
-//!   `PsmMatch::isotope_offset`.
-//!
-//! * **CalcMass**: `peptide.mass()` already includes H2O — neutral mass is
-//!   computed directly from the peptide.
-//!
-//! * **FileName**: the input file the spectrum came from (the `<stem>/` prefix
-//!   of `SpecId`). Percolator's target-decoy competition (`-Y`) keeps one PSM
-//!   per file, `ScanNr` and `ExpMass`; scan numbers repeat across inputs, so
-//!   without this column PSMs of different runs that share a `ScanNr` and an
-//!   `ExpMass` would compete when per-run PINs are pooled by concatenation.
-//!
-//! ## Feature columns
-//!
-//! All 14 feature columns are filled from `psm.features` (computed by
-//! `match_engine::compute_psm_features` at scoring time):
-//! - `NumMatchedMainIons` — count of matched charge-1 b/y fragment positions.
-//! - `longest_b` — longest contiguous run of matched b-ions.
-//! - `longest_y` — longest contiguous run of matched y-ions.
-//! - `longest_y_pct` — `longest_y / peptide.length()`.
-//! - `ExplainedIonCurrentRatio` — matched b+y intensity / total MS2 intensity.
-//! - `NTermIonCurrentRatio` — matched b intensity / total MS2 intensity.
-//! - `CTermIonCurrentRatio` — matched y intensity / total MS2 intensity.
-//! - `MS2IonCurrent` — raw sum of all MS2 peak intensities (NOT log10).
-//! - `IsolationWindowEfficiency` — always 0.0 (not available from the Spectrum object).
-//! - `MeanErrorTop7` — mean |ppm| error of top-7 most-intense matched ions.
-//! - `StdevErrorTop7` — population stdev of |ppm| errors for top-7 ions.
-//! - `MeanRelErrorTop7` — mean signed ppm error of top-7 ions.
-//! - `StdevRelErrorTop7` — population stdev of signed ppm errors for top-7.
-//! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
-
 use std::io::{self, BufWriter, Write};
 
 use crate::percolator_enz::enzyme_features;
@@ -89,25 +10,6 @@ use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-// ── shared SpecId formatting ───────────────────────────────────────────────────
-
-/// Format the Percolator `SpecId` (== QPX row identity) for one PSM row.
-///
-/// This is the SINGLE source of truth for the SpecId string, called from BOTH
-/// the PIN writer (here) and the QPX writer (`crate::qpx`) so Percolator's
-/// `PSMId` join key reconstructs identically on both sides.
-///
-/// Rule (must stay stable — it is the PIN/QPX/Percolator join contract):
-/// - single-row scan → `"{spec_id}_{scan}_{rank}"`
-/// - multi-row scan  → `"{spec_id}_{scan}_{rank}_{row_idx}"`
-///
-/// `spec_id` is `spec.title` (or `"scan={scan}"` when the title is empty — see
-/// [`crate::row_context::RowContext`]); `rank` is the 1-based rank from
-/// [`crate::row_context::emitted_rows`] (assigned after positional isomers are
-/// collapsed); `row_idx` is the per-scan emission index; `multi_row` is true when the scan emits more than one row
-/// (under `--chimeric` or when ties at queue capacity are retained), in which
-/// case `_{row_idx}` disambiguates SpecIds that would otherwise collide on equal
-/// `rank`. Single-row scans keep the historical `specID_scan_rank` format.
 pub fn format_spec_id(
     spec_id: &str,
     scan: i32,
@@ -122,17 +24,10 @@ pub fn format_spec_id(
     }
 }
 
-/// The input file a row's `SpecId` names: the `<stem>/` prefix every search puts
-/// on spectrum titles (empty when the `SpecId` has none, e.g. a PIN written by
-/// another tool). Scan numbers repeat across the inputs of one search, so a
-/// rescorer that competes per input keys its groups on this.
 pub fn spec_id_run(spec_id: &str) -> &str {
     spec_id.split_once('/').map_or("", |(run, _)| run)
 }
 
-/// The `SpecId` of every row the PIN writes for one spectrum, with the row's
-/// isotope offset and site evidence. Rows are emitted as [`write_pin`] emits
-/// them (isomers collapsed, ranked by score).
 pub fn emitted_row_evidence(
     spec: &Spectrum,
     queue: &TopNQueue,
@@ -160,52 +55,46 @@ pub fn emitted_row_evidence(
         .collect()
 }
 
-// ── shared per-PSM feature vector ──────────────────────────────────────────────
+pub fn emitted_row_candidates(
+    spec: &Spectrum,
+    queue: &TopNQueue,
+    candidates: &[Candidate],
+) -> Vec<(String, u32, u8)> {
+    let psms = queue.clone().into_rank_sorted_vec();
+    let ranked = emitted_rows(spec, &psms, candidates);
+    let multi_row = ranked.len() > 1;
+    let scan = spec.scan.unwrap_or(0);
+    let title = if spec.title.is_empty() {
+        format!("scan={scan}")
+    } else {
+        spec.title.clone()
+    };
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(row_idx, (rank, psm))| {
+            (
+                format_spec_id(&title, scan, rank, row_idx, multi_row),
+                psm.primary_candidate_idx(),
+                psm.charge_used,
+            )
+        })
+        .collect()
+}
 
-/// How a feature value is rendered (PIN bytes + QPX `value_type`).
-///
-/// This is the SINGLE source of truth for the per-PSM discriminative feature
-/// formatting, shared by the PIN writer (here) and the QPX `.idparquet` writer
-/// (`crate::qpx`) so the two never diverge in which features they emit or how
-/// they format them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FeatureFmt {
-    /// Integer value. PIN: `{}`. QPX `value_type` = `"int"`.
     Int,
-    /// General `%.6g`-style double (see [`write_double`]). PIN: `write_double`.
-    /// QPX `value_type` = `"double"`.
     Double,
-    /// Fixed 6-decimal double (`{:.6}`). Used only by `longest_y_pct` to match
-    /// the historical PIN byte layout. QPX `value_type` = `"double"`.
     Fixed6,
 }
 
-/// One per-PSM discriminative feature: `(name, value, fmt)`.
 pub type Feature = (&'static str, f64, FeatureFmt);
 
-/// Compute the ordered per-PSM discriminative feature vector for one PSM.
-///
-/// This is the SINGLE source of truth for andes's Percolator feature set,
-/// consumed by BOTH the PIN writer (`write_psm_row`) and the QPX `.idparquet`
-/// writer (`crate::qpx::build_psms_batch`, into the `psm_metavalues` column) so
-/// the discriminative power of the PIN and the idparquet never diverge.
-///
-/// The list intentionally EXCLUDES the columns OpenMS' PercolatorAdapter adds
-/// generically (SpecId / Label / ScanNr / ExpMass / CalcMass / mass / peplen /
-/// dm / absdm / the charge one-hots / enzN / enzC / enzInt) and the
-/// non-numeric Peptide / Proteins columns. It DOES include `RankScore` and
-/// `isotope_error` (the two numeric per-PSM signals the PIN writes in its
-/// leading block) plus the entire fragment/error/strong-score feature block.
-///
-/// `rank` is the 1-based rank used to gate `DeltaRankScore` to the rank-1 row
-/// (mirroring the PIN writer), so the value matches the PIN byte-for-byte.
 pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
     use FeatureFmt::{Double, Fixed6, Int};
     let f = &psm.features;
-    // RankScore: the integer-rounded ranking score (matches the PIN `RankScore`
-    // column, which writes `psm.score.round() as i32`).
     let rank_score = psm.score.round() as i32 as f64;
-    // DeltaRankScore is per-spectrum and emitted only on the rank-1 row.
     let delta_rank_score = if rank == 1 {
         f.delta_raw_score as f64
     } else {
@@ -312,30 +201,15 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("RawScore", f.strong_score as f64, Double),
         ("RawScoreCal", f.strong_score_cal as f64, Double),
         ("RankScoreFloat", f.rank_score_float as f64, Double),
-        // ── Engine-wide retention-time features (ADDITIVE; appended LAST so no
-        // existing column index shifts). Populated post-search by
-        // `crate::rt_wiring::populate_rt_features` after per-run calibration;
-        // 0.0 (neutral) when observed RT is unavailable or calibration failed,
-        // making a run without RT byte-identical to the pre-RT baseline here.
-        // DeltaRT = observed_rt_min − predicted_rt_min (signed, minutes);
-        // AbsDeltaRT = |DeltaRT|; DeltaRTNorm = DeltaRT / gradient span. ────────
         ("DeltaRT", f.delta_rt as f64, Double),
         ("AbsDeltaRT", f.abs_delta_rt as f64, Double),
         ("DeltaRTNorm", f.delta_rt_norm as f64, Double),
-        // ── Provenance (additive; set by `crate::provenance`). All 0 on a FASTA
-        // search except IsotopeMimic with isotope-like variable mods. ──
         ("IsVariant", f.is_variant as f64, Int),
         ("IsIsoform", f.is_isoform as f64, Int),
         ("IsChain", f.is_chain as f64, Int),
         ("RefCompetitor", f.ref_competitor as f64, Int),
         ("DeltaRefScore", f.delta_ref_score as f64, Double),
         ("IsotopeMimic", f.isotope_mimic as f64, Int),
-        // ── Isotope-offset class. The signed `isotope_error` column is one linear
-        // term, so Percolator cannot weight offset -1 (a precursor heavier than the
-        // spectrum's by one isotope step, which no monoisotopic pick explains) and
-        // offsets +1 and +2 (an M+1 or M+2 pick) against offset 0 independently.
-        // These two terms with `isotope_error` give every offset its own weight;
-        // Percolator learns the weights from the decoys. ──
         (
             "IsotopeErrorAbs",
             f64::from(psm.isotope_offset.unsigned_abs()),
@@ -349,22 +223,6 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
     ]
 }
 
-// ── public API ───────────────────────────────────────────────────────────────
-
-/// Write all PSMs to a Percolator `.pin` file at `output_path`.
-///
-/// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
-/// holds the top-N PSMs for `spectra[i]`.
-///
-/// `candidates` is the per-search candidate pool owned by `PreparedSearch`.
-/// PSM-to-candidate resolution goes through `candidates[psm.primary_candidate_idx() as usize]`.
-///
-/// `search_index` is used to resolve protein accessions from
-/// `candidates[psm.primary_candidate_idx() as usize].protein_index`. The combined
-/// target+decoy `ProteinDb` inside `search_index` already carries decoy
-/// prefixes in the decoy accessions, so no separate prefix string is needed
-/// for accession lookup. The `Label` column is derived directly from
-/// `cand.is_decoy` (see `write_psm_row`).
 pub fn write_pin(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
@@ -387,9 +245,6 @@ pub fn write_pin(
     })
 }
 
-/// Write all PSMs to an arbitrary writer — useful for testing without temp files.
-///
-/// See [`write_pin`] for parameter documentation.
 pub fn write_pin_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
@@ -400,16 +255,6 @@ pub fn write_pin_to<W: Write>(
 ) -> io::Result<()> {
     let (min_charge, max_charge) = pin_charge_columns(params);
 
-    // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
-    // Percolator joins q-values/PEPs back onto (its result map is keyed by
-    // `PSMId == SpecId`). Two spectra sharing the same title+scan — or several
-    // metadata-less spectra collapsing to `scan=0` — would silently overwrite
-    // each other in that map, mis-annotating or losing FDR for real PSMs.
-    // Pre-scan ALL emitting spectra for base collisions BEFORE writing anything,
-    // so a collision fails the whole write loudly instead of leaving a
-    // partially-written PIN. The base generation mirrors RowContext::new
-    // (row_context.rs): title, or `scan=N` when the title is empty, suffixed
-    // with the scan number.
     let mut seen_spec_bases: std::collections::HashSet<String> =
         std::collections::HashSet::with_capacity(queues.len());
     for (spec_idx, queue) in queues.iter().enumerate() {
@@ -437,9 +282,6 @@ pub fn write_pin_to<W: Write>(
 
     write_header(writer, min_charge, max_charge)?;
 
-    // Rows are formatted in parallel, one buffer per spectrum, and written in
-    // spectrum order, so the file is the same as a sequential write. Batches
-    // bound the formatted-but-unwritten text held in memory.
     let emitting: Vec<usize> = (0..queues.len())
         .filter(|&i| !queues[i].is_empty())
         .collect();
@@ -468,24 +310,13 @@ pub fn write_pin_to<W: Write>(
     Ok(())
 }
 
-/// The charge one-hot columns: the searched `--charge` range. They depend on the
-/// parameters only, never on the PSMs, so the PINs of separately searched runs
-/// share one header and can be pooled into one Percolator run. A declared
-/// precursor charge outside the range sets the nearest edge column.
 fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {
     (*params.charge_range.start(), *params.charge_range.end())
 }
 
-/// Spectra whose PIN rows are formatted in parallel before being written out.
 const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
-// ── header ────────────────────────────────────────────────────────────────────
-
 fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io::Result<()> {
-    // RawScore is the sole score column. The generating function has been
-    // removed, so the GF-derived columns (DeNovoScore / lnSpecEValue / lnEValue
-    // / lnDeltaSpecEValue) are not emitted: Percolator calibrates FDR from
-    // RawScore + the remaining fragment/mass features.
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
         "Label".to_string(),
@@ -494,9 +325,6 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "CalcMass".to_string(),
         "FileName".to_string(),
         "mass".to_string(),
-        // RankScore = the rank-LLR ranking score (formerly "RawScore"; value is
-        // `psm.score`). Renamed so the headline/primary column is "RawScore"
-        // (the fused score, formerly "StrongScore").
         "RankScore".to_string(),
     ];
     cols.extend_from_slice(&[
@@ -514,7 +342,6 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "enzN".to_string(),
         "enzC".to_string(),
         "enzInt".to_string(),
-        // Fragment-coverage + ion-current + error-stat features
         "NumMatchedMainIons".to_string(),
         "longest_b".to_string(),
         "longest_y".to_string(),
@@ -531,156 +358,74 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
     ]);
     cols.extend_from_slice(&[
         "matchedIonRatio".to_string(),
-        // ADDITIVE feature: per-bond edge sum (IES + error_score), emitted as a NEW
-        // column so Percolator can learn weights without disrupting the
-        // existing RawScore distribution (Kim et al., Nat Commun 5:5277, 2014).
         "EdgeScore".to_string(),
-        // ADDITIVE chimeric MS1 precursor-envelope features: emitted
-        // adjacent to EdgeScore so they sit just before Peptide/Proteins.
-        // Both are CURRENTLY ALWAYS 0.0, including under `--chimeric`: the two-pass
-        // cascade computes its own co-isolation features and does not consume these
-        // (see the note in match_engine.rs where they are left at their defaults).
-        // They are kept in the schema because downstream consumers index PIN columns
-        // positionally; `crates/andes/tests/pin_constant_columns.rs` pins the set so it cannot
-        // grow silently.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
-        // ADDITIVE top-1 dominance feature: RawScore(best) − RawScore(2nd-best
-        // distinct peptide) on the rank-1 row, 0.0 elsewhere. Built on
-        // parity-grade RawScore (not the divergent SpecE), so it adds an
-        // orthogonal "lead over the runner-up" signal without touching any
-        // existing column. Populated only when a distinct runner-up was scored
-        // (i.e. effectively needs internal retention ≥ 2 candidates per scan).
         "DeltaRankScore".to_string(),
-        // ADDITIVE Tailor per-spectrum calibration (Yang et al., JPR 2020):
-        // RawScore / (spectrum's top-1% quantile RawScore). Makes RawScores
-        // comparable across spectra (per-spectrum calibration).
         "TailorScore".to_string(),
-        // ADDITIVE strong-score Stage-1 bolt-ons (deterministic, no model
-        // change): PpmGaussianScore = Σ exp(-½(ppm/7)²) over matched ions
-        // (turns fragment mass accuracy into evidence the rank model discards);
         "PpmGaussianScore".to_string(),
-        // NeutralLossIonCount = matched b/y ions with −H2O/−NH3 partner peaks.
         "NeutralLossIonCount".to_string(),
-        // LongestComplementaryLadder = longest consecutive run of complementary
-        // cleavage sites (both b and y matched).
         "LongestComplementaryLadder".to_string(),
-        // ComplementaryIonBalance = Σ over bonds where both b_i and y_{n-i}
-        // matched, weighted by intensity-rank agreement 1/(1+|rank_b−rank_y|)
-        // (ADDITIVE; orthogonal to the run-length ladder above).
         "ComplementaryIonBalance".to_string(),
-        // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
-        // = matched dominant peaks).
         "MeanMatchedIntensityRank".to_string(),
-        // DoublyChargedMatchedIonCount = matched charge-2 b/y ions.
         "DoublyChargedMatchedIonCount".to_string(),
-        // UniqueMatchFraction = within-peptide peak-explanation uniqueness.
         "UniqueMatchFraction".to_string(),
-        // ChanceMatchSurprise = strong-score Stage-2 null moat: Σ max(0,
-        // -ln(ρ·Δ)) per matched ion — how improbable the matches are by chance.
         "ChanceMatchSurprise".to_string(),
-        // IntensitySignal = strong-score S1 numerator: cosine similarity between
-        // frag-intensity predictions and observed relative intensities (0 without model).
         "IntensitySignal".to_string(),
-        // Tier-2 frag-intensity LLR battery (0 without a frag-intensity model).
-        // FragPredExplained = Σ(matched·pred)/Σpred; FragPredChanceLLR =
-        // Σ matched·pred·max(0,−ln p_chance); FragTopKObserved = top-K hit rate.
         "FragPredExplained".to_string(),
         "FragPredChanceLLR".to_string(),
         "FragTopKObserved".to_string(),
-        // RichIonLLR = decoy-aware per-annotated-ion LLR sum (0 without a rich-ion model).
         "RichIonLLR".to_string(),
-        // Refinement-cascade additive columns (0 without --refine):
-        // IsRefinement = from Pass-2 search; NumMods = variable-mod count;
-        // RefinementModClass = mod-class id for subgroup-FDR grouping.
         "IsRefinement".to_string(),
         "NumMods".to_string(),
         "RefinementModClass".to_string(),
-        // Mod-localization site-determining-ion columns (0 for unmodified
-        // peptides). ModSiteShiftedMatched = matched mod-bearing b/y ions;
-        // ModSiteShiftedFrac = matched/total shifted; ModSiteIntensFrac =
-        // shifted/all matched intensity; ModSiteLocalized = 1 if a bracketing
-        // ion pair localizes the mod; ModSiteDetCount = # site-determining ions.
         "ModSiteShiftedMatched".to_string(),
         "ModSiteShiftedFrac".to_string(),
         "ModSiteIntensFrac".to_string(),
         "ModSiteLocalized".to_string(),
         "ModSiteDetCount".to_string(),
-        // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
-        // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
         "CandidateRankEntropy".to_string(),
-        // ListwiseScoreGap = S2 listwise: top-1 − top-2 RawScore in retained queue.
         "ListwiseScoreGap".to_string(),
-        // RawScore = S3 fused signal − null (formerly "StrongScore"; the
-        // headline/primary score, always emitted; ranks when --score strong).
         "RawScore".to_string(),
-        // RawScoreCal = S4 per-spectrum z-scored significance (formerly "StrongScoreCal").
         "RawScoreCal".to_string(),
-        // ADDITIVE float-precision rank score: the unrounded prefix+suffix node
-        // sum (no per-split round() as i32), recovering the discrimination
-        // integer rounding compresses on short low-evidence peptides. Ranking
-        // unchanged; emitted alongside the integer RankScore.
         "RankScoreFloat".to_string(),
-        // ADDITIVE engine-wide retention-time columns (appended LAST, before
-        // Peptide/Proteins). 0.0 (neutral) without observed RT / calibration, so
-        // a run without RT is byte-identical to the pre-RT baseline here.
-        // DeltaRT = observed − predicted (min); AbsDeltaRT = |DeltaRT|;
-        // DeltaRTNorm = DeltaRT / gradient span. Populated by
-        // `crate::rt_wiring::populate_rt_features`.
         "DeltaRT".to_string(),
         "AbsDeltaRT".to_string(),
         "DeltaRTNorm".to_string(),
-        // Provenance (crate::provenance).
         "IsVariant".to_string(),
         "IsIsoform".to_string(),
         "IsChain".to_string(),
         "RefCompetitor".to_string(),
         "DeltaRefScore".to_string(),
         "IsotopeMimic".to_string(),
-        // Isotope-offset class (`|isotope_error|` and its sign), see `psm_feature_values`.
         "IsotopeErrorAbs".to_string(),
         "IsotopeErrorNeg".to_string(),
     ]);
 
-    cols.extend_from_slice(&[
-        // Peptide / Proteins
-        "Peptide".to_string(),
-        "Proteins".to_string(),
-    ]);
+    cols.extend_from_slice(&["Peptide".to_string(), "Proteins".to_string()]);
 
     writeln!(writer, "{}", cols.join("\t"))
 }
 
-/// Format a feature value to a string using the SAME rules the PIN writer uses,
-/// so the QPX `psm_metavalues` strings and the PIN columns are byte-consistent.
-///
-/// - [`FeatureFmt::Int`]: integer (`{}` on the rounded value).
-/// - [`FeatureFmt::Double`]: `%.6g`-style via [`write_double`].
-/// - [`FeatureFmt::Fixed6`]: `{:.6}` fixed point.
 pub fn format_feature_value(value: f64, fmt: FeatureFmt) -> String {
     match fmt {
         FeatureFmt::Int => format!("{}", value.round() as i64),
         FeatureFmt::Fixed6 => format!("{:.6}", value),
         FeatureFmt::Double => {
             let mut buf = Vec::with_capacity(16);
-            // write_double is infallible for an in-memory Vec.
             write_double(&mut buf, value).expect("write_double to Vec is infallible");
             String::from_utf8(buf).expect("write_double emits ASCII")
         }
     }
 }
 
-/// QPX `value_type` string for a feature format (mirrors a comparison engine's convention:
-/// `"int"` for integers, `"double"` for floats).
 pub fn feature_value_type(fmt: FeatureFmt) -> &'static str {
     match fmt {
         FeatureFmt::Int => "int",
         FeatureFmt::Double | FeatureFmt::Fixed6 => "double",
     }
 }
-
-// ── per-spectrum rows ──────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn write_spectrum_rows<W: Write>(
@@ -693,14 +438,9 @@ fn write_spectrum_rows<W: Write>(
     search_index: &SearchIndex,
     params: &SearchParams,
 ) -> io::Result<()> {
-    // Order by rank_score (RawScore) descending — the sole ranking signal.
     let psms = queue.clone().into_rank_sorted_vec();
 
     let ranked = emitted_rows(spec, &psms, candidates);
-    // When a scan emits more than one row, `rank` alone can collide (ranks tie
-    // on equal `rank_score`, and `TopNQueue` retains ties at capacity), so the
-    // SpecId must include the per-row index to stay unique. Single-row scans
-    // keep the historical `specID_scan_rank` format (schema parity).
     let multi_row = ranked.len() > 1;
     for (row_idx, (rank, psm)) in ranked.into_iter().enumerate() {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
@@ -742,61 +482,27 @@ fn write_psm_row<W: Write>(
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
-    // Label by SOURCE PROTEIN accession (standard TDC convention).
-    // An "any-target-match" rule (Label = 1 if peptide sequence appears in
-    // ANY target protein) would inflate target count when a peptide appeared
-    // in both target and decoy proteins. Label by source: decoy protein → -1,
-    // otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
-    // For chimeric Pass-2 secondaries, mass-error columns use the co-isolated
-    // precursor m/z (the secondary's true precursor). `None` (every ordinary PSM)
-    // falls back to the spectrum's precursor m/z, keeping that path byte-identical.
     let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
 
-    // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
     let exp_mass = precursor_mz * charge - charge * PROTON;
 
-    // CalcMass: theoretical neutral mass. peptide.mass() already includes H2O.
-    // ExpMass = mz * charge - charge * PROTON is also a neutral mass.
-    // Both columns must be neutral masses so that dm = ExpMass - CalcMass is a
-    // true mass error (not a charge-induced offset). Fixture reference:
-    // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
-    let calc_mass = cand.peptide.mass(); // includes H2O — neutral mass
+    let calc_mass = cand.peptide.mass();
 
-    // mass: duplicate of ExpMass (column convention).
     let mass = exp_mass;
 
-    // RawScore: integer-rounded score
     let raw_score = psm.score.round() as i32;
 
-    // isotope_error: from PsmMatch::isotope_offset (threaded from
-    // MassError::isotope_offset in match_engine.rs).
     let isotope_error: i32 = psm.isotope_offset as i32;
 
-    // peplen: `residue_count + 2` (counts both flanking residues — the `pre`
-    // and `post` characters in the `Peptide` struct). Without the +2, the
-    // PIN row count and per-row diff disagree with the reference fixture.
     let peplen = cand.peptide.length() + 2;
 
-    // dm / absdm: precursor mass error in Da.
-    //   adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge
-    //   theo_mz         = peptide.mass() / charge + PROTON  (peptide.mass() includes H2O)
-    //   dm              = adjusted_exp_mz - theo_mz
     let (dm, _) = precursor_error(precursor_mz, charge, isotope_error, calc_mass);
     let absdm = dm.abs();
 
-    // matchedIonRatio: from psm.features.
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
-    // Write columns directly into the BufWriter (avoids ~30 String allocs/row).
-    //
-    // SpecId = `specID_scanNum_rank`. Whenever a scan emits more than one row
-    // (under --chimeric, OR because ranks tie on equal `rank_score` and the
-    // `TopNQueue` retained the ties), `_{rank}` can collide, producing duplicate
-    // SpecIds in the PIN (ambiguous downstream mapping). Append the per-row
-    // emission index to disambiguate. Single-row-per-scan keeps the historical
-    // `specID_scan_rank` format so the schema/common case is unchanged.
     write!(
         writer,
         "{}",
@@ -808,44 +514,21 @@ fn write_psm_row<W: Write>(
     write_mass(writer, calc_mass)?;
     write!(writer, "\t{}\t", spec_id_run(&ctx.spec_id))?;
     write_double(writer, mass)?;
-    // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
-    // lnEValue are no longer emitted).
     write!(writer, "\t{}", raw_score)?;
     write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
     write_double(writer, absdm)?;
 
-    // Charge one-hot; a charge outside the columns sets the nearest edge.
     let hot_charge = psm.charge_used.clamp(min_charge, max_charge);
     for c in min_charge..=max_charge {
         let flag: u8 = if c == hot_charge { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
 
-    // enzN, enzC, enzInt — Percolator enzymatic-boundary features.
-    // enzN = boundary between protein-pre and peptide[0]; enzC = boundary
-    // between peptide[last] and protein-post; enzInt = count of internal
-    // positions consistent with the enzyme. Per-rule semantics in
-    // crate::percolator_enz.
-    // A multi-protease digest (`--enzyme a,b`) counts a boundary any of its
-    // enzymes cleaves; a protein N-terminal peptide, Met-clipped included,
-    // has enzN = 1.
     let (enz_n, enz_c, enz_int) = enzyme_features(cand, params.enzyme, &params.extra_enzymes);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
-    // Fragment/error/strong-score feature block — written from the SHARED
-    // per-PSM feature vector (`psm_feature_values`) so the PIN and the QPX
-    // `.idparquet` (`crate::qpx`, `psm_metavalues` column) can never diverge.
-    //
-    // `psm_feature_values` returns the full ordered feature list; its first two
-    // entries (`RankScore`, `isotope_error`) are written inline above in their
-    // historical leading-block positions, so this loop skips them and emits the
-    // tail (`NumMatchedMainIons` … `RawScoreCal`) — the exact PIN column order.
-    //
-    // `matched_ion_ratio` is bound above for the doc cross-reference; the shared
-    // list re-derives the identical value, so the binding is intentionally inert
-    // here (silence the unused-variable lint without changing byte output).
     let _ = matched_ion_ratio;
     let features = psm_feature_values(psm, rank);
     debug_assert_eq!(features[0].0, "RankScore");
@@ -859,11 +542,6 @@ fn write_psm_row<W: Write>(
         }
     }
 
-    // Peptide column (always one).
-    // Proteins column(s): one tab-separated accession per candidate_idx.
-    // After pepSeq+score dedup, a PSM that matches the same peptide across
-    // multiple proteins keeps all protein indices in candidate_idxs, and the
-    // PIN row emits one accession per index for multi-protein shared peptides.
     write!(writer, "\t{}", cand.peptide)?;
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
@@ -873,13 +551,6 @@ fn write_psm_row<W: Write>(
     writeln!(writer)
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// The precursor error of a PSM in m/z units, and the theoretical m/z it is
-/// measured against: observed m/z corrected by the isotope error the search
-/// chose, minus the m/z of the peptide of neutral mass `calc_mass` at `charge`.
-/// The PIN's `dm` column and the identification summary's mass error are this
-/// value.
 pub(crate) fn precursor_error(
     precursor_mz: f64,
     charge: f64,
@@ -891,14 +562,6 @@ pub(crate) fn precursor_error(
     (adjusted_exp_mz - theo_mz, theo_mz)
 }
 
-/// Write a neutral mass with six decimal places (trailing zeros trimmed).
-///
-/// `ExpMass` and `CalcMass` are not Percolator features, but downstream tools read them
-/// to recompute precursor error. Six significant figures would round a 1,000–9,999 Da
-/// mass to 0.01 Da (5–10 ppm), quantizing every error computed from these columns.
-/// The `ExpMass` column text of a row: the neutral precursor mass of
-/// `precursor_mz` at `charge`, printed as [`write_mass`] prints it. Percolator
-/// groups PSMs for target-decoy competition by scan and this value.
 pub(crate) fn exp_mass_text(precursor_mz: f64, charge: u8) -> String {
     let z = charge as f64;
     let mut out = Vec::new();
@@ -919,28 +582,14 @@ fn write_mass<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     write_trim_fixed(writer, &buf[..len])
 }
 
-/// Write a `f64` in `%.6g` style (6 significant figures) directly into
-/// `writer`.
-///
-/// NaN, infinite, or zero values are emitted as the single byte `'0'`.
-///
-/// This formats into a stack-allocated 32-byte buffer (sufficient for any
-/// `%.5e`-style f64) and writes only the trimmed slice — avoiding the
-/// per-call `String` allocation that the previous `format_double` returned.
 fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     if v.is_nan() || v.is_infinite() || v == 0.0 {
         return writer.write_all(b"0");
     }
 
-    // Stack buffer — 32 bytes is more than enough for any "%.5e" or
-    // "%.prec$" formatting of an f64 (sign + 7 mantissa digits + 'e' +
-    // signed 3-digit exponent ≈ 14 bytes worst case).
     let mut buf = [0u8; 32];
     let abs = v.abs();
     if !(1e-4..1e6).contains(&abs) {
-        // Scientific notation, 5 decimal places after dot = 6 significant
-        // digits. Format into stack buffer, then trim trailing zeros from
-        // mantissa and reformat the exponent inline (no heap String).
         let len = {
             let mut cursor = &mut buf[..];
             write!(cursor, "{:.5e}", v)?;
@@ -948,7 +597,6 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
         };
         write_trim_scientific(writer, &buf[..len])
     } else {
-        // Fixed notation. Determine decimal places for 6 sig figs.
         let digits_before_decimal = abs.log10().floor() as i32 + 1;
         let decimal_places = (6 - digits_before_decimal).max(0) as usize;
         let len = {
@@ -960,9 +608,6 @@ fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
     }
 }
 
-/// Write the bytes in `s` to `writer`, trimming any trailing `'0'` (and a
-/// dangling `'.'`) from a fixed-point representation. e.g. `"1.50000"` →
-/// `"1.5"`. If `s` has no `'.'`, it is written verbatim.
 fn write_trim_fixed<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     if !s.contains(&b'.') {
         return writer.write_all(s);
@@ -977,12 +622,6 @@ fn write_trim_fixed<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     writer.write_all(&s[..end])
 }
 
-/// Write a scientific-notation byte slice to `writer`, normalised to `%g`-style
-/// output with explicit signed exponent (`e{:+03}` style).
-///
-/// Rust formats `1.23456e7`; the reference fixture uses `1.23456e+07`. Trim trailing
-/// zeros (and a dangling `.`) from the mantissa, then re-emit the exponent
-/// with explicit sign and a minimum width of 2 digits (`e{:+03}` style).
 fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     let pos = match s.iter().position(|&b| b == b'e') {
         Some(p) => p,
@@ -991,8 +630,6 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     let mantissa = &s[..pos];
     let exp_part = &s[pos + 1..];
 
-    // Trim trailing zeros (and a dangling '.') from the mantissa if it has
-    // a decimal point.
     let mantissa_end = if mantissa.contains(&b'.') {
         let mut end = mantissa.len();
         while end > 0 && mantissa[end - 1] == b'0' {
@@ -1007,14 +644,10 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     };
     writer.write_all(&mantissa[..mantissa_end])?;
 
-    // Parse exponent and re-emit with explicit sign + min width 2. We
-    // accept the same `unwrap_or(0)` semantics as the original code.
     let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
     let exp_val: i32 = exp_str.parse().unwrap_or(0);
     write!(writer, "e{:+03}", exp_val)
 }
-
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1034,7 +667,6 @@ mod tests {
             write_mass(&mut out, v).unwrap();
             String::from_utf8(out).unwrap()
         };
-        // Six significant figures would print 1674.79 and 1674.8 for these two.
         assert_eq!(fmt(1674.791234), "1674.791234");
         assert_eq!(fmt(1674.801234), "1674.801234");
         assert_eq!(fmt(790.3345), "790.3345");
@@ -1043,9 +675,6 @@ mod tests {
         assert_eq!(fmt(f64::NAN), "0");
     }
 
-    // ── fixture helpers ─────────────────────────────────────────────────────
-
-    /// Build a minimal `SearchIndex` with one target protein.
     fn make_search_index(accession: &str) -> SearchIndex {
         let target = ProteinDb {
             proteins: vec![Protein {
@@ -1058,8 +687,6 @@ mod tests {
         SearchIndex::from_target_db(&target, "XXX_")
     }
 
-    /// Build an empty `SearchIndex` for tests that don't care about protein
-    /// accessions (header / label / charge tests).
     fn make_empty_search_index() -> SearchIndex {
         let target = ProteinDb { proteins: vec![] };
         SearchIndex::from_target_db(&target, "XXX_")
@@ -1081,9 +708,6 @@ mod tests {
         }
     }
 
-    /// Build a single Candidate for fixture tests. Mirrors the shape that the
-    /// real candidate enumerator produces. Tests build a `Vec<Candidate>` from
-    /// these and pass it to `write_pin_to`.
     fn make_candidate(protein_index: usize, is_decoy: bool) -> Candidate {
         let aa = AminoAcid::standard(b'A').unwrap();
         let peptide = Peptide::new(vec![aa], b'K', b'S');
@@ -1097,8 +721,6 @@ mod tests {
         }
     }
 
-    /// A target Candidate with residues `seq` and variable mods `(position,
-    /// mass_delta)`.
     fn make_candidate_seq(seq: &[u8], mods: &[(usize, f64)], protein_index: usize) -> Candidate {
         use model::modification::{ModLocation, Modification, ResidueSpec};
         let residues = seq
@@ -1136,7 +758,6 @@ mod tests {
         }
     }
 
-    /// Write one spectrum's queue and return the emitted rows' (SpecId, Peptide).
     fn emitted(psms: Vec<PsmMatch>, cands: &[Candidate]) -> Vec<(String, String)> {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
@@ -1228,26 +849,14 @@ mod tests {
     fn parse_rows(output: &[u8]) -> Vec<Vec<String>> {
         let text = std::str::from_utf8(output).unwrap();
         text.lines()
-            .skip(1) // skip header
+            .skip(1)
             .filter(|l| !l.is_empty())
             .map(|l| l.split('\t').map(|s| s.to_string()).collect())
             .collect()
     }
 
-    // ── Test 1: header columns match the reference fixture ──────────────────
-
-    /// The expected column list is andes's own PIN schema (defined by
-    /// `write_header`), here pinned for charge2..=charge3 (the BSA test uses
-    /// charge_range 2..=3).
-    ///
-    /// The header is asserted column-by-column below.
     #[test]
     fn pin_header_columns_are_gf_free_schema() {
-        // GF-free schema: RawScore is the sole score column; the GF-derived
-        // DeNovoScore / lnSpecEValue / lnEValue / lnDeltaSpecEValue columns are
-        // NOT emitted. The additive feature columns (EdgeScore,
-        // PrecursorIsotopeKL, PrecursorSNR, DeltaRawScore) sit between
-        // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
             "SpecId",
             "Label",
@@ -1343,8 +952,6 @@ mod tests {
         );
     }
 
-    /// Additive refinement-cascade columns are always present in the header
-    /// (they carry 0 without `--refine`). Guards Task 2 of the PTM cascade.
     #[test]
     fn pin_header_has_refinement_columns() {
         let params = make_params(2..=3);
@@ -1362,15 +969,13 @@ mod tests {
         }
     }
 
-    // ── Test 2: decoy PSM gets Label = -1 ────────────────────────────────────
-
     #[test]
     fn pin_writes_label_minus_one_for_decoy() {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 10.0, 0, 2)); // decoy
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
@@ -1381,13 +986,9 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1, "should have 1 data row");
 
-        // Label is column index 1 (SpecId=0, Label=1)
         assert_eq!(rows[0][1], "-1", "decoy PSM should have Label = -1");
     }
 
-    /// `IsotopeErrorAbs` and `IsotopeErrorNeg` follow the PSM's isotope offset
-    /// (`isotope_error` itself stays the signed offset), so every offset of the
-    /// default range -1..=2 gets its own pair of values.
     #[test]
     fn pin_writes_the_isotope_offset_class_columns() {
         let params = make_params(2..=3);
@@ -1444,13 +1045,10 @@ mod tests {
 
     #[test]
     fn write_pin_errors_on_duplicate_spec_id_base() {
-        // Two DISTINCT spectra with identical title+scan collapse to the same
-        // SpecId base; that would silently overwrite each other on the Percolator
-        // q-value/PEP join and corrupt FDR. write_pin must fail loud instead.
         let params = make_params(2..=3);
         let spectra = vec![
             make_spectrum("dup", 7, 500.0),
-            make_spectrum("dup", 7, 600.0), // same title+scan, different spectrum
+            make_spectrum("dup", 7, 600.0),
         ];
         let mut q0 = TopNQueue::new(10);
         q0.push(make_psm(0, 10.0, 10.0, 0, 2));
@@ -1470,8 +1068,6 @@ mod tests {
         );
     }
 
-    /// A PIN write that fails leaves the previous file as it was and no
-    /// `.partial`; a successful one replaces it.
     #[test]
     fn write_pin_is_atomic() {
         let params = make_params(2..=3);
@@ -1503,15 +1099,13 @@ mod tests {
         assert!(!crate::atomic::partial(&path).exists());
     }
 
-    // ── Test 3: charge one-hot encoding ────────────────────────────────────
-
     #[test]
     fn pin_writes_charge_one_hot_correctly() {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 10.0, 0, 2)); // charge 2
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
@@ -1523,7 +1117,6 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        // Find charge2 and charge3 column indices
         let charge2_idx = cols
             .iter()
             .position(|c| c == "charge2")
@@ -1545,8 +1138,6 @@ mod tests {
 
     #[test]
     fn pin_enzyme_features_use_every_enzyme_of_a_multi_protease_digest() {
-        // K.AEAKAE.S: enzN via trypsin (K|A); enzC only via GluC (E|S);
-        // internal (K,A) via trypsin, (E,A) via GluC.
         let cands = vec![make_candidate_seq(b"AEAKAE", &[], 0)];
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
         let idx = make_empty_search_index();
@@ -1570,10 +1161,6 @@ mod tests {
 
     #[test]
     fn pin_enz_n_is_one_for_met_clipped_targets_and_decoys() {
-        // The digest of a target and its generated decoy: the decoy keeps the
-        // initiator Met, so both get the Met-cleaved walk. Every protein
-        // N-terminal peptide, Met-clipped (`pre = 'M'`) or not, has enzN = 1;
-        // the K|P site (PLLSEAVQK) keeps enzN = 0.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P1".to_string(),
@@ -1646,8 +1233,6 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
-        // Declared charges 1 and 6 lie outside --charge 2..3: the header stays
-        // at the range and they set the nearest edge column.
         let cols = parse_header(&buf);
         let charge_cols: Vec<&String> = cols.iter().filter(|c| c.starts_with("charge")).collect();
         assert_eq!(charge_cols, ["charge2", "charge3"]);
@@ -1659,7 +1244,6 @@ mod tests {
             assert_eq!(hot, expected);
         }
 
-        // The same header for PSMs inside the range.
         let mut buf = Vec::<u8>::new();
         write_pin_to(
             &mut buf,
@@ -1675,17 +1259,12 @@ mod tests {
         assert_eq!(charge_cols, ["charge2", "charge3"]);
     }
 
-    // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────
-
     #[test]
     fn chimeric_specids_unique_for_cofragmented_peptides_same_scan() {
         let mut params = make_params(2..=3);
         params.chimeric = true;
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Two distinct peptides (candidates 0 and 1) with the SAME rank_score:
-        // iter_ranked_by_rank_score assigns them the same rank, so without the
-        // chimeric per-row suffix their SpecIds (`spec_scan_rank`) would collide.
         let mut queue = TopNQueue::new(10);
         queue.push(make_psm(0, 10.0, 10.0, 0, 2));
         queue.push(make_psm(0, 9.0, 10.0, 1, 2));
@@ -1705,17 +1284,11 @@ mod tests {
         );
     }
 
-    // ── Test: non-chimeric tied-PSM SpecId uniqueness ──────────────────────
     #[test]
     fn non_chimeric_tied_psms_same_scan_get_distinct_specids() {
-        // With the generating function removed, ranks tie on equal `rank_score`
-        // and `TopNQueue` retains the ties at capacity, so even a *non-chimeric*
-        // scan can emit two rows that would share `spec_scan_rank`. Both rows
-        // must still get distinct SpecIds.
-        let params = make_params(2..=3); // chimeric == false (default)
+        let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Two distinct peptides with the SAME rank_score (10.0) → same rank.
         let mut queue = TopNQueue::new(10);
         queue.push(make_psm(0, 10.0, 10.0, 0, 2));
         queue.push(make_psm(0, 10.0, 10.0, 1, 2));
@@ -1735,14 +1308,11 @@ mod tests {
         );
     }
 
-    // ── Positional-isomer collapse ────────────────────────────────────────────
-
     const PHOSPHO: f64 = 79.96633;
     const OX: f64 = 15.99491;
 
     #[test]
     fn positional_isomers_keep_only_the_best_ranked_site() {
-        // Same residues, same phospho, three different sites: only the best stays.
         let cands = vec![
             make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
             make_candidate_seq(b"SATSK", &[(2, PHOSPHO)], 0),
@@ -1758,7 +1328,6 @@ mod tests {
         );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].1, "K.SATS+79.96633K.S");
-        // A single surviving row takes the single-row SpecId form.
         assert_eq!(rows[0].0, "Scan 1_1_1");
     }
 
@@ -1766,12 +1335,12 @@ mod tests {
     fn non_isomers_are_kept_and_ranks_stay_contiguous() {
         let cands = vec![
             make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
-            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0), // isomer of 0
-            make_candidate_seq(b"SATSK", &[], 0),             // no mod: different multiset
-            make_candidate_seq(b"SATTK", &[(0, PHOSPHO)], 0), // different residues
+            make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
+            make_candidate_seq(b"SATSK", &[], 0),
+            make_candidate_seq(b"SATTK", &[(0, PHOSPHO)], 0),
             make_candidate_seq(b"MSATK", &[(0, OX), (1, PHOSPHO)], 0),
-            make_candidate_seq(b"MSATK", &[(0, OX), (3, PHOSPHO)], 0), // isomer of 4
-            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0),          // different multiset than 4
+            make_candidate_seq(b"MSATK", &[(0, OX), (3, PHOSPHO)], 0),
+            make_candidate_seq(b"MSATK", &[(1, PHOSPHO)], 0),
         ];
         let rows = emitted(
             vec![
@@ -1815,18 +1384,15 @@ mod tests {
             make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
             make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
         ];
-        // Different precursor charge: separate precursor hypotheses.
         let rows = emitted(
             vec![make_psm(0, 10.0, 10.0, 0, 2), make_psm(0, 9.0, 9.0, 1, 3)],
             &cands,
         );
         assert_eq!(rows.len(), 2, "{rows:?}");
-        // A chimeric secondary matched at its own co-isolated precursor.
         let mut secondary = make_psm(0, 9.0, 9.0, 1, 2);
         secondary.precursor_mz_override = Some(501.0);
         let rows = emitted(vec![make_psm(0, 10.0, 10.0, 0, 2), secondary], &cands);
         assert_eq!(rows.len(), 2, "{rows:?}");
-        // The same secondary precursor twice: the isomer collapses within it.
         let mut a = make_psm(0, 9.0, 9.0, 0, 2);
         a.precursor_mz_override = Some(501.0);
         let mut b = make_psm(0, 8.0, 8.0, 1, 2);
@@ -1837,8 +1403,6 @@ mod tests {
 
     #[test]
     fn terminal_mod_isomers_collapse() {
-        // An N-terminal acetyl (carried on the first residue) and the same delta
-        // on an internal K are one multiset on the same residues.
         const ACETYL: f64 = 42.01057;
         let cands = vec![
             make_candidate_seq(b"AKGK", &[(0, ACETYL)], 0),
@@ -1864,7 +1428,6 @@ mod tests {
             make_psm(0, 10.0, 10.0, 1, 2),
             make_psm(0, 10.0, 10.0, 2, 2),
         ];
-        // The uncollapsed emission order of the tie decides which site survives.
         let mut queue = TopNQueue::new(10);
         for p in psms.clone() {
             queue.push(p);
@@ -1882,15 +1445,12 @@ mod tests {
             kept_isomer.1,
             cands[first_isomer as usize].peptide.to_string()
         );
-        // Both survivors share rank 1 and stay distinguishable by row index.
         let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
         assert_eq!(ids, ["Scan 1_1_1_0", "Scan 1_1_1_1"]);
     }
 
     #[test]
     fn target_and_decoy_isomers_are_kept_apart() {
-        // A decoy repeating the target's residues and modification multiset keeps
-        // its own row and label.
         let mut decoy = make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 1);
         decoy.is_decoy = true;
         let cands = vec![make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0), decoy];
@@ -1903,8 +1463,6 @@ mod tests {
 
     #[test]
     fn collapsed_isomers_add_their_proteins_to_the_kept_row() {
-        // Candidates 0 and 1 share protein 0; candidate 2 is the same peptidoform
-        // as 1 in protein 1, scored apart (different flanking residues).
         let cands = vec![
             make_candidate_seq(b"SATSK", &[(0, PHOSPHO)], 0),
             make_candidate_seq(b"SATSK", &[(3, PHOSPHO)], 0),
@@ -1934,13 +1492,11 @@ mod tests {
         assert_eq!(rows[0][pep_col + 1..], ["PROT_0", "PROT_1"]);
     }
 
-    // ── Test 4: empty queue → only header ────────────────────────────────────
-
     #[test]
     fn pin_handles_empty_queue() {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-        let queues = vec![TopNQueue::new(10)]; // empty
+        let queues = vec![TopNQueue::new(10)];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
@@ -1951,8 +1507,6 @@ mod tests {
         assert!(rows.is_empty(), "empty queue should produce no data rows");
     }
 
-    // ── Test 6: real accession emitted for target PSM ─────────────────────────
-
     #[test]
     fn pin_writes_real_accession_when_search_index_provided() {
         let accession = "sp|P02769|ALBU_BOVIN";
@@ -1961,7 +1515,6 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // protein_index = 0 → first target protein
         let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);
@@ -1986,8 +1539,6 @@ mod tests {
         );
     }
 
-    // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
-
     #[test]
     fn pin_writes_decoy_prefix_for_decoy_protein() {
         let accession = "sp|P02769|ALBU_BOVIN";
@@ -1996,8 +1547,6 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // SearchIndex has 1 target (idx 0) + 1 decoy (idx 1). Decoy accession
-        // is set to "XXX_sp|P02769|ALBU_BOVIN" by decoy_db.
         let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);
@@ -2005,7 +1554,7 @@ mod tests {
         let queues = vec![queue];
 
         let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(1, true)]; // protein_index=1 (decoy slot), is_decoy=true
+        let cands = vec![make_candidate(1, true)];
         write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
@@ -2023,9 +1572,6 @@ mod tests {
         );
     }
 
-    // ── PIN emits real feature values ────────────────────────────────────────
-
-    /// Verify that `NumMatchedMainIons` is emitted from `psm.features`.
     #[test]
     fn pin_emits_real_num_matched_main_ions_when_features_populated() {
         let params = make_params(2..=3);
@@ -2057,17 +1603,11 @@ mod tests {
         );
     }
 
-    /// DeltaRawScore is emitted on the rank-1 row from `features.delta_raw_score`
-    /// (a per-spectrum scalar the match engine stores on every retained PSM),
-    /// and gated to 0.0 on rank > 1 rows — mirroring lnDeltaSpecEValue.
     #[test]
     fn pin_emits_delta_raw_score_on_rank1_only() {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Two distinct-rank_score PSMs on one spectrum → rank 1 then rank 2. The
-        // engine stores the same spectrum-level delta on both; the writer must
-        // emit it for rank 1 and 0.0 for rank 2 (no double-attribution).
         let mut psm1 = make_psm(0, 12.0, 12.0, 0, 2);
         psm1.features.delta_raw_score = 7.0;
         let mut psm2 = make_psm(0, 5.0, 5.0, 1, 2);
@@ -2108,7 +1648,6 @@ mod tests {
         );
     }
 
-    /// Verify that `longest_y_pct` is formatted with 6 decimal places.
     #[test]
     fn pin_emits_longest_y_pct_with_six_decimals() {
         let params = make_params(2..=3);

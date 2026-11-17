@@ -1,16 +1,9 @@
-//! Per-PSM provenance features: which kind of database entry the row's peptide
-//! is specific to, how far it scored above the best Reference candidate of its
-//! spectrum, and whether its precursor looks like an isotope mis-pick.
-
 use model::EntryKind;
 use search::candidate_gen::Candidate;
 use search::isotope_mimic::{fits_better, isotope_gap_da, mod_shift_da};
 use search::psm::{PsmMatch, TopNQueue};
 use search::SearchIndex;
 
-/// Fill the provenance features of every PSM in `queues`. `candidates` and
-/// `idx` are the pool and index the PIN resolves through (after a `--refine`
-/// merge, the merged ones).
 pub fn populate_provenance_features(
     queues: &mut [TopNQueue],
     candidates: &[Candidate],
@@ -38,13 +31,6 @@ fn set_features(psm: &mut PsmMatch, candidates: &[Candidate], idx: &SearchIndex)
     }
     let rounded = psm.score.round();
     let peptide = &candidates[psm.primary_candidate_idx() as usize].peptide;
-    // A flag is set when ANY protein of the peptide is of that kind, shared
-    // with a Reference entry or not. Decoy generators do not always keep a
-    // decoy peptide shared with the decoy canonical (a non-specific search
-    // permutes each entry's whole sequence on its own; a chain's new terminus
-    // starts a segment its canonical does not have), so "shared means
-    // reference" would set flags on decoys more often than on targets, and
-    // Percolator would learn the label.
     let f = &mut psm.features;
     f.is_variant = variant as u32;
     f.is_isoform = isoform as u32;
@@ -129,9 +115,6 @@ mod tests {
         q
     }
 
-    /// P0 Reference, P1 its isoform, P2 an N->D variant, and P2's decoy.
-    /// Spectrum 0: PEPTIDEK shared by P0 and P1. Spectrum 1: the variant
-    /// peptide PEPTIDDK (score 30). Spectrum 2: the decoy variant peptide.
     fn fixture() -> (SearchIndex, Vec<Candidate>, Vec<TopNQueue>) {
         let idx = SearchIndex {
             has_alternative_entries: true,
@@ -176,10 +159,6 @@ mod tests {
 
     #[test]
     fn shared_peptide_carries_every_kind_it_maps_to() {
-        // A peptide in the canonical entry and its isoform is flagged as
-        // isoform: decoy generators do not keep a decoy peptide shared with
-        // the decoy canonical, so "shared means reference" would set the flag
-        // on decoys more often than on targets.
         let (idx, cands, mut queues) = fixture();
         queues[0].update_in_place(|p| {
             p.features.ref_competitor = 1;
@@ -234,14 +213,11 @@ mod tests {
 
     #[test]
     fn variant_at_the_isotope_mis_pick_is_flagged() {
-        // N->D (+0.984016): peptide − spectrum = −0.019339 Da is what a one-step
-        // mis-pick of the unsubstituted peptide gives.
         let (idx, cands, mut queues) = fixture();
         let mass = cands[2].peptide.mass();
         queues[1].update_in_place(|p| p.mass_error_ppm = -0.019339 / mass * 1e6);
         populate_provenance_features(&mut queues, &cands, &idx);
         assert_eq!(features(&queues[1]).isotope_mimic, 1);
-        // At zero error the substitution itself explains the precursor.
         let (idx, cands, mut queues) = fixture();
         queues[1].update_in_place(|p| p.mass_error_ppm = 0.0);
         populate_provenance_features(&mut queues, &cands, &idx);

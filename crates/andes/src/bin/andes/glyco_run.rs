@@ -1,22 +1,12 @@
-//! The `--glyco` standalone driver: glyco scoring and `.glyco.pin` output.
-
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 use model::Spectrum;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
-/// Default of `--glyco-tol-ppm`, the Orbitrap MS2 window the glyco defaults
-/// were validated at.
 const DEFAULT_GLYCO_TOL_PPM: f64 = 20.0;
-/// Glyco fragment tolerance on low-resolution (ion-trap) MS2: about 0.5 Da at
-/// m/z 1000, the b/y window of the low-res models. Not benchmarked: no
-/// ion-trap glyco set is in the benchmark suite.
 const LOW_RES_GLYCO_TOL_PPM: f64 = 500.0;
 
-/// The glyco fragment tolerance (ppm) of the run: the configured value when
-/// it was set explicitly or the acquisition is high resolution, else the
-/// low-resolution window (20 ppm never matches a 0.3-0.5 Da ion-trap peak).
 fn glyco_fragment_tol_ppm(configured: f64, explicit: bool, acquisition_high_res: bool) -> f64 {
     if explicit || acquisition_high_res {
         configured
@@ -25,10 +15,6 @@ fn glyco_fragment_tol_ppm(configured: f64, explicit: bool, acquisition_high_res:
     }
 }
 
-/// Glyco mode: run glyco scoring over ALL accumulated spectra and write a
-/// separate `.glyco.pin`. Candidates come from a sequon-only table materialised
-/// from the out-of-core index of `prepared`. The standard PIN is skipped by the
-/// caller.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_glyco(
     cli: &Cli,
@@ -38,38 +24,18 @@ pub(crate) fn run_glyco(
     idx: &SearchIndex,
     output_pin_path: &Path,
     spectrum_paths: &[PathBuf],
-    // The acquisition's fragment resolution class (`crate::acquisition`).
     acquisition_high_res: bool,
-    // `--precursor-mono`: per-spectrum MS1 envelope corrections, aligned with
-    // `spectra` (`Some` only when the flag is active; the PIN then carries the
-    // Mono* columns). `None` keeps the PIN byte-identical.
     mono: Option<&[Option<search::precursor_mono::MonoCorrection>]>,
-    // The isotope-error window to search instead of `params.isotope_error_range`
-    // (`0..=1` once `--precursor-mono auto` corrected precursors; see
-    // `mono::coupled_isotope_window`), with one flag per spectrum of `spectra`
-    // marking those with a verified monoisotope, the only ones that take it.
-    // `None` keeps the params' window everywhere.
     isotope_error_override: Option<(std::ops::RangeInclusive<i8>, Vec<bool>)>,
-    // `--glyco --lfq`: the quant collector holds each run's captured MS1 scans
-    // (and the run boundaries), the intact-glycopeptide quantification's input.
-    // `None` without `--lfq`.
     quant: Option<&crate::quant_run::QuantCollector>,
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
-    // Install scoring settings that reach hot inner functions. Done once here, from
-    // validated CLI values, so no scoring code has to read the environment.
     scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
         zmax_override: cli.glyco_cz_max_charge,
     });
-    andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
+    glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-    // The glycan-first search space comes from one of three sources: an explicit
-    // `.gdb` file (`--glyco-glycan-gdb`), a WURCS 2.0 CSV
-    // (`--glyco-glycan-wurcs`), or a bundled species-specific database
-    // (`--glyco-species`). Trees are parsed with structure preserved (core- vs
-    // antenna-fucose) and NeuGc content is used as-is. The composition enumerator
-    // and its NeuGc/taxon tuning are gone.
     let (glycan_list, source_desc) = match (
         cli.glyco_glycan_gdb.as_ref(),
         cli.glyco_glycan_wurcs.as_ref(),
@@ -78,17 +44,17 @@ pub(crate) fn run_glyco(
         (Some(path), _, _) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("--glyco-glycan-gdb {}: {e}", path.display()))?;
-            let list = andes_glyco::glycan_db::load_glycan_gdb(&content)?;
+            let list = glyco::glycan_db::load_glycan_gdb(&content)?;
             (list, format!("{} (file)", path.display()))
         }
         (None, Some(path), _) => {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("--glyco-glycan-wurcs {}: {e}", path.display()))?;
-            let list = andes_glyco::glycan_db::load_glycan_wurcs_csv(&content)?;
+            let list = glyco::glycan_db::load_glycan_wurcs_csv(&content)?;
             (list, format!("{} (WURCS)", path.display()))
         }
         (None, None, Some(species)) => {
-            let list = andes_glyco::glycan_db::load_species_glycan_db(species.key())?;
+            let list = glyco::glycan_db::load_species_glycan_db(species.key())?;
             (list, format!("--glyco-species {}", species.key()))
         }
         (None, None, None) => {
@@ -100,9 +66,6 @@ pub(crate) fn run_glyco(
             );
         }
     };
-    // A database that parses to nothing leaves the search with no glycan space at
-    // all, and every spectrum then fails to match for a reason no log line
-    // explains. Say so instead.
     if glycan_list.is_empty() {
         return Err(format!(
             "glycan database {source_desc} contains no glycans: `--glyco` has no search space"
@@ -125,9 +88,6 @@ pub(crate) fn run_glyco(
              (--glyco-tol-ppm sets it)"
         );
     }
-    // Finite and > 0 is enforced by clap (`parse_positive_tol`) for the flag and
-    // by the config validation (`config::apply`) for `glyco.tol_ppm`, so NaN and
-    // non-positive values never reach here.
     if glyco_tol_ppm < DEFAULT_GLYCO_TOL_PPM {
         eprintln!(
             "warning: --glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
@@ -135,18 +95,11 @@ pub(crate) fn run_glyco(
              under-fire"
         );
     }
-    // Dev cap on glyco scoring uses the global --max-spectra (was the
-    // redundant --glyco-max-spectra).
     let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]
     } else {
         spectra
     };
-    // Peptide-first RETRIEVAL window, resolved from the ACQUISITION, not from the
-    // selected scoring model: model routing deliberately sends some high-res CID
-    // and ETD acquisitions to a low-res model (`build_selection_key`), and the
-    // scoring window that routing chooses is not the retrieval window the index
-    // should use. An explicit --glyco-retrieval-tol-ppm overrides either way.
     let retrieval_ppm: Option<f64> = cli
         .glyco_retrieval_tol_ppm
         .or_else(|| acquisition_high_res.then_some(glyco_tol_ppm));
@@ -160,9 +113,6 @@ pub(crate) fn run_glyco(
             }
         ),
         None => eprintln!(
-            // The Da fallback builds the index with the resolved MODEL fragment
-            // tolerance, not a constant, so naming a number here would put a
-            // fabricated provenance value into the benchmark record.
             "glyco retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
         ),
     }
@@ -175,18 +125,9 @@ pub(crate) fn run_glyco(
             .as_ref()
             .map(|(_, mask)| mask.clone()),
         isotope_error_override: isotope_error_override.map(|(window, _)| window),
-        // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
-        // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
-        // Measured 2026-09-02 (five seeds): on high-res data the 0.5 Da
-        // window admitted b/y matches ~50x wider than every glycan-side matcher
-        // and was the dominant glyco cost — 20 ppm was 6.9x faster on mouse
-        // PXD011533 and 7x on plasma PXD030622 with identifications neutral
-        // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
-        // --glyco-retrieval-tol-ppm overrides the auto default either way.
         retrieval_tol_ppm: retrieval_ppm,
         full_glycan_db: !cli.glyco_peptide_first,
         debug: cli.debug_glyco,
-        // Single-file only: cross-file pairing is unsound (see guard above).
         hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
     };
     let t_table = std::time::Instant::now();
@@ -219,15 +160,6 @@ pub(crate) fn run_glyco(
         t_glyco.elapsed().as_secs_f64()
     );
 
-    // Derive the glyco PIN path: strip a trailing `.pin` (only), then append
-    // `.glyco.pin`.
-    //
-    // The previous form was `with_extension("").with_extension("glyco.pin")`,
-    // which strips at the LAST dot TWICE — so `PXD011533.Frac1.pin` and
-    // `PXD011533.Frac2.pin` both collapsed to `PXD011533.glyco.pin` and the
-    // second run silently overwrote the first. Pooling fractions is the
-    // recommended practice for stable glyco FDR, so `dataset.FracN.pin` is
-    // exactly the naming users reach for, and the data loss was silent.
     let glyco_pin_path = {
         let mut s = if output_pin_path
             .extension()
@@ -244,11 +176,6 @@ pub(crate) fn run_glyco(
     let mut glyco_results = pass1;
 
     let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
-    // Populate glyco RT PIN features (DeltaRT/AbsDeltaRT/DeltaRTNorm +
-    // predicted_rt_min) in place on each hit, using the engine-wide backbone
-    // RT index + per-monosaccharide offset + per-run self-calibration. The
-    // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
-    // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
     output::populate_glyco_rt_features(
         spectra,
         &mut glyco_results,
@@ -274,9 +201,6 @@ pub(crate) fn run_glyco(
         t_total.elapsed().as_secs_f64()
     );
 
-    // ── Intact-glycopeptide label-free quantification (`--glyco --lfq`) ────
-    // Runs after the PIN so it quantifies exactly the rows the PIN emits
-    // (`select_emitted_hits`), and writes its own tables next to it.
     if let Some(collector) = quant {
         let runs = collector.run_ms1();
         if runs.is_empty() {
@@ -311,7 +235,6 @@ mod glyco_tol_tests {
             glyco_fragment_tol_ppm(20.0, false, false),
             LOW_RES_GLYCO_TOL_PPM
         );
-        // An explicit value wins on either class.
         assert_eq!(glyco_fragment_tol_ppm(20.0, true, false), 20.0);
         assert_eq!(glyco_fragment_tol_ppm(30.0, true, true), 30.0);
     }

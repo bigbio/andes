@@ -1,14 +1,8 @@
-//! Peptidoforms parsed from andes PIN peptide strings, with the fragment
-//! masses the spectral-match features need.
-
 use crate::rt_native::{self, RtPeptide};
 
-/// Proton mass (Da).
 pub const PROTON: f64 = 1.007_276_466_8;
-/// Water mass (Da).
 pub const H2O: f64 = 18.010_564_684;
 
-/// Monoisotopic residue mass of a one-letter amino-acid code.
 pub fn residue_mass(c: char) -> Option<f64> {
     Some(match c {
         'G' => 57.021_463_72,
@@ -34,61 +28,35 @@ pub fn residue_mass(c: char) -> Option<f64> {
     })
 }
 
-/// Modifications the predictors recognise in andes peptide strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Mod {
-    /// Carbamidomethyl (Unimod 4) on C.
     Carbamidomethyl,
-    /// Oxidation (Unimod 35) on M.
     Oxidation,
-    /// Acetyl (Unimod 1) on the N-terminus.
     Acetyl,
-    /// TMT6plex (Unimod 737) on K or the N-terminus.
     Tmt6plex,
-    /// Phospho (Unimod 21) on S, T or Y.
     Phospho,
-    /// Deamidated (Unimod 7) on N or Q.
     Deamidated,
-    /// Gln->pyro-Glu (Unimod 28) on an N-terminal Q.
     GlnPyroGlu,
-    /// Glu->pyro-Glu (Unimod 27) on an N-terminal E.
     GluPyroGlu,
-    /// SILAC heavy lysine, Label:13C(6)15N(2) (Unimod 259) on K.
     Label13C6N2,
-    /// SILAC heavy arginine, Label:13C(6)15N(4) (Unimod 267) on R.
     Label13C6N4,
-    /// SILAC Lys6 / Arg6, Label:13C(6) (Unimod 188) on K or R.
     Label13C6,
-    /// SILAC Lys4, Label:2H(4) (Unimod 481) on K.
     Label2H4,
-    /// SILAC Leu3, Label:2H(3) (Unimod 262) on L.
     Label2H3,
-    /// Dimethyl (Unimod 36) on K, R or the N-terminus (the light reductive
-    /// dimethyl label, or biological methylation).
     Dimethyl,
-    /// Dimethyl:2H(4) (Unimod 199), the intermediate dimethyl label.
     DimethylD4,
-    /// Dimethyl:2H(4)13C(2) (Unimod 510).
     DimethylD4C13,
-    /// Dimethyl:2H(6)13C(2) (Unimod 330), the heavy dimethyl label.
     DimethylD6C13,
 }
 
-/// Where a modification may sit.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Placement {
-    /// On one of the listed residues.
     Residue,
-    /// Peptide N-terminus only (site 0).
     NTerm,
-    /// On one of the listed residues, or the peptide N-terminus.
     ResidueOrNTerm,
-    /// Peptide N-terminus (site 0) of a peptide whose first residue is one of the
-    /// listed residues (alphabase `X^Any_N-term`).
     NTermOf,
 }
 
-/// (mod, Unimod accession, residues, placement)
 const MODS: &[(Mod, u32, &str, Placement)] = &[
     (Mod::Carbamidomethyl, 4, "C", Placement::Residue),
     (Mod::Oxidation, 35, "M", Placement::Residue),
@@ -110,7 +78,6 @@ const MODS: &[(Mod, u32, &str, Placement)] = &[
 ];
 
 impl Mod {
-    /// alphabase / peptdeep name at a site (0 = N-terminus).
     pub fn alphabase(self, site: usize, aa: char) -> String {
         match self {
             Mod::Carbamidomethyl => "Carbamidomethyl@C".into(),
@@ -127,7 +94,6 @@ impl Mod {
             Mod::Label13C6 => format!("Label:13C(6)@{aa}"),
             Mod::Label2H4 => "Label:2H(4)@K".into(),
             Mod::Label2H3 => "Label:2H(3)@L".into(),
-            // The dimethyl labels fragment as the light dimethyl.
             Mod::Dimethyl | Mod::DimethylD4 | Mod::DimethylD4C13 | Mod::DimethylD6C13
                 if site == 0 =>
             {
@@ -139,10 +105,6 @@ impl Mod {
         }
     }
 
-    /// The form the RT and MS2 models score: a stable-isotope label changes
-    /// the mass only (the peptide elutes and fragments as its light form), so
-    /// a SILAC label is left out (`None`) and a heavy dimethyl label scores as
-    /// the light Dimethyl.
     pub fn light_equivalent(self) -> Option<Self> {
         match self {
             m if m.is_isotope_label() => None,
@@ -151,8 +113,6 @@ impl Mod {
         }
     }
 
-    /// A stable-isotope label: it changes the mass only, so the peptide elutes
-    /// and fragments as its light form.
     pub fn is_isotope_label(self) -> bool {
         matches!(
             self,
@@ -160,7 +120,6 @@ impl Mod {
         )
     }
 
-    /// Unimod accession.
     pub fn unimod(self) -> u32 {
         MODS.iter()
             .find(|m| m.0 == self)
@@ -168,8 +127,6 @@ impl Mod {
             .1
     }
 
-    /// The mod with Unimod accession `id`, if it sits at `site` of `seq` (0 =
-    /// N-terminus, 1..=n residue) by its [`Placement`].
     fn at(id: u32, site: usize, seq: &[u8]) -> Option<Self> {
         let &(m, _, residues, placement) = MODS.iter().find(|m| m.1 == id)?;
         let on_residue =
@@ -183,8 +140,6 @@ impl Mod {
         ok.then_some(m)
     }
 
-    /// Elemental composition delta (C, H, N, O, S, P), Unimod; heavy
-    /// isotopes counted as their element.
     pub fn composition(self) -> [i32; 6] {
         match self {
             Mod::Carbamidomethyl => [2, 3, 1, 1, 0, 0],
@@ -207,27 +162,17 @@ impl Mod {
     }
 }
 
-/// One parsed peptidoform.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Form {
-    /// Unmodified residues.
     pub seq: String,
-    /// (site, mod) sorted — site 0 = N-term, 1..=n residue.
     pub mods: Vec<(usize, Mod)>,
 }
 
 impl Form {
-    /// The residue at `site` (the first residue for site 0).
     pub fn residue(&self, site: usize) -> char {
         self.seq.as_bytes()[site.max(1) - 1] as char
     }
 
-    /// The same peptidoform as an [`RtPeptide`] (Unimod accessions by site), as
-    /// the andes-rt and andes-ms2 models read it. Stable-isotope labels are
-    /// scored as their light form ([`Mod::light_equivalent`]): SILAC labels
-    /// are left out, heavy dimethyl labels read as Dimethyl; a labelled
-    /// peptide co-elutes with its light form (deuterium shifts it by a second
-    /// or so) and fragments like it. The label's mass stays in [`Mass`].
     pub fn rt_peptide(&self) -> RtPeptide {
         let mut mods: Vec<(usize, u32)> = self
             .mods
@@ -242,24 +187,12 @@ impl Form {
     }
 }
 
-/// Fragment-mass inputs for one peptidoform.
 #[derive(Clone, Debug)]
 pub struct Mass {
-    /// Residue + residue-mod masses, len n.
     pub res: Vec<f64>,
-    /// N-terminal mod mass.
     pub nterm: f64,
 }
 
-/// Parse an andes PIN peptide (`K.PEPM+15.99491K.D`) with
-/// [`RtPeptide::from_andes`], the parser andes-rt is trained and run with, so
-/// every predictor sees the same sites: a delta printed after the first residue
-/// goes to the N-terminus (site 0) when an N-terminal Unimod entry matches it
-/// (acetyl, TMT, pyro-Glu), as in alphabase, where `Gln->pyro-Glu@Q^Any_N-term`
-/// sits at site 0. A summed N-terminal + residue delta on residue 1
-/// (`C+99.03203`, acetyl + carbamidomethyl) is split by `from_andes` into both
-/// mods. `None` when `from_andes` rejects the string or a modification is
-/// outside [`Mod`] at its site. Masses are the Unimod monoisotopic deltas.
 pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
     let p = RtPeptide::from_andes(s)?;
     let seq = p.sequence.as_bytes();
@@ -324,8 +257,6 @@ mod tests {
         );
     }
 
-    /// N-terminal mods sit at site 0, as in alphabase and in andes-rt training:
-    /// pyro-Glu, and a lone TMT delta printed after a leading K.
     #[test]
     fn places_n_terminal_mods_at_site_zero() {
         let (f, m) = parse_peptide("K.Q-17.02655PEPTIDEK.D").unwrap();
@@ -342,12 +273,9 @@ mod tests {
         let (f, _) = parse_peptide("K.K+229.16293PEPTIDE.D").unwrap();
         assert_eq!(f.mods, vec![(0, Mod::Tmt6plex)]);
         assert_eq!(f.mods[0].1.alphabase(0, 'K'), "TMT6plex@Any_N-term");
-        // Acetyl on an internal K is not an N-terminal acetyl.
         assert!(parse_peptide("K.PEPK+42.01056TIDE.D").is_none());
     }
 
-    /// Every label of `--label` parses with its mass and scores as the light
-    /// form: SILAC labels left out, dimethyl variants as Dimethyl.
     #[test]
     fn label_variants_score_as_their_light_form() {
         let (f, m) = parse_peptide("K.PEPTK+4.02511.D").expect("Lys4");
@@ -357,7 +285,6 @@ mod tests {
         let (f, _) = parse_peptide("K.PEPTR+6.02013.D").expect("Arg6");
         assert_eq!(f.mods, vec![(5, Mod::Label13C6)]);
         assert!(f.rt_peptide().mods.is_empty());
-        // Heavy dimethyl on the N-terminus and K: the models read Dimethyl.
         let (f, m) = parse_peptide("K.P+36.07567EPTK+36.07567.D").expect("Dimethyl8");
         assert_eq!(
             f.mods,
@@ -372,8 +299,6 @@ mod tests {
         assert_eq!(f.mods[0].1.alphabase(0, 'P'), "Dimethyl@Any_N-term");
     }
 
-    /// SILAC heavy K/R parse with their mass, and the RT/MS2 models read the
-    /// light-equivalent peptide.
     #[test]
     fn silac_labels_parse_and_score_as_the_light_form() {
         let heavy = "K.ELC+57.02146VAK+8.01420.R";
@@ -392,11 +317,9 @@ mod tests {
         assert!((m.res[8] - (156.101_111 + 10.008269)).abs() < 1e-6);
         let (light, _) = parse_peptide("K.M+15.99491PEPTIDER.A").unwrap();
         assert_eq!(f.rt_peptide(), light.rt_peptide());
-        // A label on the wrong residue is not a SILAC label.
         assert!(parse_peptide("K.PEPTIDEK+10.00827.A").is_none());
     }
 
-    /// The form and andes-rt read a PIN peptide identically.
     #[test]
     fn matches_from_andes() {
         for s in [
@@ -412,17 +335,12 @@ mod tests {
         }
     }
 
-    /// The PIN string andes writes for a protein N-terminal Cys under fixed
-    /// carbamidomethyl-C and variable protein N-terminal acetyl.
     fn andes_cam_acetyl_nterm_cys() -> String {
-        use model::{AminoAcidSetBuilder, ModLocation, Modification, Peptide};
+        use model::mod_spec::parse_mod_list;
+        use model::{AminoAcidSetBuilder, ModLocation, Peptide};
         let aa_set = AminoAcidSetBuilder::new_standard()
-            .add_fixed_mod(
-                Modification::from_mods_txt_line("57.021464,C,fix,any,Carbamidomethyl").unwrap(),
-            )
-            .add_variable_mod(
-                Modification::from_mods_txt_line("42.010565,*,opt,Prot-N-term,Acetyl").unwrap(),
-            )
+            .add_mods(parse_mod_list("Carbamidomethyl (C)", true).unwrap())
+            .add_mods(parse_mod_list("Acetyl (Protein N-term)", false).unwrap())
             .build()
             .unwrap();
         let first = aa_set
@@ -451,7 +369,6 @@ mod tests {
         assert_eq!(f.mods, vec![(0, Mod::Acetyl), (1, Mod::Carbamidomethyl)]);
         assert!((m.nterm - 42.010565).abs() < 1e-9);
         assert!((m.res[0] - (103.009_184_5 + 57.021464)).abs() < 1e-6);
-        // fixed TMT6plex on K under variable N-terminal acetyl: K+271.17350
         let tmt = "_.K+271.17350PEPTIDEK+229.16293.R";
         let (f, _) = parse_peptide(tmt).unwrap();
         assert_eq!(

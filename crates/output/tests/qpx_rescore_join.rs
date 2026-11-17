@@ -1,17 +1,3 @@
-//! QPX ↔ PIN ↔ Percolator SpecId join contract.
-//!
-//! Percolator's `PSMId` equals the andes PIN `SpecId` byte-for-byte; the QPX
-//! writer must reconstruct that SAME SpecId (via the shared
-//! `output::format_spec_id`) so PEP/q-value join onto the right PSM rows. This
-//! test runs a real BSA search, writes the PIN, harvests its SpecIds, then drives
-//! the QPX writer with a mock rescore map keyed by those SpecIds and asserts:
-//!   1. every PIN SpecId is reproduced by the QPX writer (PEP populated for them);
-//!   2. the join works for single- AND multi-row scans (chimeric/tie cases);
-//!   3. with `rescore = None`, every QPX row's PEP stays null (schema parity);
-//!   4. a result in which Percolator's target-decoy competition (`-Y`) kept one
-//!      PSM per scan/ExpMass group joins, and the competed-away targets are left
-//!      out of the bundle.
-
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -34,7 +20,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Run the shared BSA fixture search and return (spectra, queues, candidates, index, params).
 fn run_bsa_search() -> (
     Vec<model::spectrum::Spectrum>,
     Vec<search::psm::TopNQueue>,
@@ -82,7 +67,6 @@ fn run_bsa_search() -> (
         .build()
         .unwrap();
 
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
@@ -112,7 +96,6 @@ fn run_bsa_search() -> (
     (spectra, queues, candidates, idx, params)
 }
 
-/// Read the PEP column from a written `psms.parquet`.
 fn read_pep_column(psms_path: &Path) -> Vec<Option<f64>> {
     let file = File::open(psms_path).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -142,7 +125,6 @@ fn read_pep_column(psms_path: &Path) -> Vec<Option<f64>> {
     out
 }
 
-/// Harvest the SpecId (col 0) of each non-header PIN row.
 fn pin_spec_ids(pin_path: &Path) -> Vec<String> {
     BufReader::new(File::open(pin_path).unwrap())
         .lines()
@@ -158,7 +140,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
     let (spectra, queues, candidates, idx, params) = run_bsa_search();
     let tmp = tempfile::tempdir().unwrap();
 
-    // 1. Write the PIN, harvest its SpecIds (the Percolator PSMId join keys).
     let pin_path = tmp.path().join("bsa.pin");
     output::write_pin(&pin_path, &spectra, &queues, &candidates, &params, &idx).unwrap();
     let spec_ids = pin_spec_ids(&pin_path);
@@ -168,10 +149,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         spec_ids.len()
     );
 
-    // Sanity: at least one multi-row scan exercises the `_{row_idx}` suffix path
-    // (a SpecId with 4 underscore-segments after the title). Not required for the
-    // join correctness check below, but documents that both formats are present
-    // across the fixture when chimeric/ties occur.
     let has_multi = spec_ids.iter().any(|s| s.matches('_').count() >= 3);
     eprintln!(
         "PIN rows={} multi_row_present={}",
@@ -179,8 +156,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         has_multi
     );
 
-    // 2. Build a mock Percolator map keyed by EVERY PIN SpecId, with a distinct
-    //    PEP/q per row so a mismatched join would be detectable.
     let mut map: HashMap<String, PercolatorPsm> = HashMap::new();
     for (i, sid) in spec_ids.iter().enumerate() {
         map.insert(
@@ -197,8 +172,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         );
     }
 
-    // 3. Write QPX WITH the rescore map → reconstructed SpecIds must hit the map
-    //    so every row's PEP is non-null.
     let qdir = tmp.path().join("rescored.idparquet");
     output::write_qpx(
         &qdir,
@@ -214,6 +187,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         Some(&map),
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
 
@@ -233,8 +207,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         peps.len()
     );
 
-    // The keys actually consumed are exactly the PIN SpecIds (no leftovers means
-    // the QPX reconstructed every key the PIN produced).
     let pin_set: HashSet<&String> = spec_ids.iter().collect();
     assert_eq!(
         pin_set.len(),
@@ -242,7 +214,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         "mock map should have one entry per distinct PIN SpecId"
     );
 
-    // Excluded rows (knockoff PSMs) are left out of the bundle, and only they.
     let excluded: HashSet<String> = [spec_ids[0].clone()].into_iter().collect();
     let qdir_ex = tmp.path().join("excluded.idparquet");
     output::write_qpx(
@@ -259,6 +230,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         Some(&map),
         None,
         &excluded,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -266,7 +238,6 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         spec_ids.len() - 1
     );
 
-    // 4. Write QPX WITHOUT the rescore map → every PEP must be null (schema parity).
     let qdir_off = tmp.path().join("plain.idparquet");
     output::write_qpx(
         &qdir_off,
@@ -282,6 +253,7 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let peps_off = read_pep_column(&qdir_off.join("psms.parquet"));
@@ -350,6 +322,7 @@ fn batched_psms_preserve_global_indices_order_and_rescore_join() {
         Some(&map),
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let builder =
@@ -385,8 +358,6 @@ fn multi_input_rows_carry_their_own_reference_file() {
     use arrow::array::{Int32Array, StringArray};
     let (spectra, queues, candidates, idx, params) = run_bsa_search();
     let seed = queues.iter().position(|q| !q.is_empty()).unwrap();
-    // 1025 spectra span two 1024-spectrum batches; the first input ends inside
-    // the first batch.
     let repeated_spectra: Vec<_> = (0..1025)
         .map(|i| {
             let mut s = spectra[seed].clone();
@@ -412,6 +383,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap();
     let reader =
@@ -447,7 +419,6 @@ fn multi_input_rows_carry_their_own_reference_file() {
     }
     assert!(a > 0 && b > 0, "rows from both inputs: a={a} b={b}");
 
-    // A partition that does not cover the spectra is rejected.
     let err = output::write_qpx(
         &tmp.path().join("bad.idparquet"),
         &repeated_spectra,
@@ -462,6 +433,7 @@ fn multi_input_rows_carry_their_own_reference_file() {
         None,
         None,
         &std::collections::HashSet::new(),
+        None,
     )
     .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -487,6 +459,7 @@ fn dropped_peaks_write_null_peak_lists() {
             None,
             None,
             &std::collections::HashSet::new(),
+            None,
         )
         .unwrap();
         let reader =
@@ -526,15 +499,10 @@ fn dropped_peaks_write_null_peak_lists() {
     );
 }
 
-/// Percolator `-Y` result for a PIN: per (input file, ScanNr, ExpMass) group only the
-/// highest-scoring row survives, in the target file (a target) or the decoy file
-/// (a decoy). Returns (target map, decoy SpecIds, number of target rows removed).
 fn competition_result(pin_path: &Path) -> (HashMap<String, PercolatorPsm>, HashSet<String>, usize) {
     competition_result_by(pin_path, true)
 }
 
-/// [`competition_result`] with the groups kept per input file when `per_input`,
-/// or pooled across the inputs (Percolator without a `FileName` column).
 fn competition_result_by(
     pin_path: &Path,
     per_input: bool,
@@ -594,10 +562,6 @@ fn competition_result_by(
     (targets, decoys, removed)
 }
 
-/// Give every scan a lower-ranked second candidate at the same charge and
-/// precursor, as the top-N chimeric search does: one competition group with two
-/// rows. The alternative is a different target peptide, so the writers'
-/// positional-isomer collapse keeps both rows.
 fn add_runner_up(
     queues: &mut [search::psm::TopNQueue],
     candidates: &[search::candidate_gen::Candidate],
@@ -623,17 +587,9 @@ fn add_runner_up(
     }
 }
 
-/// With top-N candidates per scan, Percolator's target-decoy competition (`-Y`)
-/// removes every target but the winner of its scan/ExpMass group. The join must
-/// accept those rows as competed away when the decoy results are given (and
-/// leave them out of the bundle), and must keep failing without them.
 #[test]
 fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
     let (spectra, mut queues, candidates, idx, params) = run_bsa_search();
-    // Give every scan a lower-ranked second candidate at the same charge and
-    // precursor, as the top-N chimeric search does: one competition group with
-    // two rows. The alternative is a different target peptide, so the writers'
-    // positional-isomer collapse keeps both rows.
     add_runner_up(&mut queues, &candidates);
     let tmp = tempfile::tempdir().unwrap();
     let pin_path = tmp.path().join("bsa.pin");
@@ -660,6 +616,7 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
             Some(&targets),
             decoys,
             &std::collections::HashSet::new(),
+            None,
         )
     };
     let err = write(&tmp.path().join("strict.idparquet"), None).unwrap_err();
@@ -668,22 +625,14 @@ fn qpx_join_accepts_targets_removed_by_target_decoy_competition() {
     let qdir = tmp.path().join("competed.idparquet");
     write(&qdir, Some(&decoys)).unwrap();
     let peps = read_pep_column(&qdir.join("psms.parquet"));
-    // The competed-away targets are left out; every target row left is a
-    // winner with its PEP, and decoy rows keep a null PEP as before.
     assert_eq!(peps.len(), pin_rows - removed);
     assert_eq!(peps.iter().filter(|p| p.is_some()).count(), targets.len());
 }
 
-/// Scan numbers repeat across the inputs of one search, and replicate runs can
-/// share a scan's `ExpMass` text. A rescorer that competes within each input
-/// keeps one PSM per input for such a group, so the join must read the groups
-/// per input: a target that lost its competition in one input is not missing
-/// because another input's row of the same scan and mass won there.
 #[test]
 fn qpx_join_reads_competition_groups_per_input() {
     let (spectra, mut queues, candidates, idx, params) = run_bsa_search();
     add_runner_up(&mut queues, &candidates);
-    // The same spectra as two inputs: every scan number and ExpMass repeats.
     let mut two_inputs = Vec::new();
     for run in ["run_a", "run_b"] {
         for s in &spectra {
@@ -706,8 +655,6 @@ fn qpx_join_reads_competition_groups_per_input() {
     let pin = tmp.path().join("two.pin");
     output::write_pin(&pin, &two_inputs, &two_queues, &candidates, &params, &idx).unwrap();
     let pin_rows = pin_spec_ids(&pin).len();
-    // Percolator's competition groups are per input through the FileName
-    // column: every row names the input its SpecId stem names.
     let pin_text = std::fs::read_to_string(&pin).unwrap();
     let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
     let (id_col, file_col) = (
@@ -749,6 +696,7 @@ fn qpx_join_reads_competition_groups_per_input() {
             Some(targets),
             Some(decoys),
             &HashSet::new(),
+            None,
         )
     };
     let qdir = tmp.path().join("per_input.idparquet");
@@ -757,9 +705,6 @@ fn qpx_join_reads_competition_groups_per_input() {
     assert_eq!(peps.len(), pin_rows - removed);
     assert_eq!(peps.iter().filter(|p| p.is_some()).count(), targets.len());
 
-    // A rescorer that competes across the inputs (a Percolator that ignores the
-    // PIN `FileName` column) leaves one input's rows of a shared scan and mass
-    // without a result: the join reports it instead of writing null q-values.
     let (pooled_targets, pooled_decoys, _) = competition_result_by(&pin, false);
     let err = write(
         &tmp.path().join("pooled.idparquet"),

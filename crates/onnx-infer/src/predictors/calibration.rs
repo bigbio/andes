@@ -1,35 +1,12 @@
-//! Per-run retention-time calibration: predicted index -> observed minutes.
-//!
-//! An isotonic (non-decreasing) fit by pool-adjacent-violators on anchor pairs
-//! (predicted, observed), applied to every row by linear interpolation between
-//! the fitted knots and clamped at the ends. With fewer than
-//! [`MIN_ISOTONIC_ANCHORS`] anchors a least-squares line is used instead.
-
-/// Anchors below which the calibration is a least-squares line.
 pub const MIN_ISOTONIC_ANCHORS: usize = 20;
 
-/// A fitted calibration curve.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtCalibration {
-    /// `y = slope * x + intercept`.
-    Linear {
-        /// Slope.
-        slope: f64,
-        /// Intercept.
-        intercept: f64,
-    },
-    /// Knots `(x, y)`, `x` strictly increasing and `y` non-decreasing.
-    Isotonic {
-        /// Knot positions.
-        x: Vec<f64>,
-        /// Knot values.
-        y: Vec<f64>,
-    },
+    Linear { slope: f64, intercept: f64 },
+    Isotonic { x: Vec<f64>, y: Vec<f64> },
 }
 
 impl RtCalibration {
-    /// Fit on `(predicted, observed)` anchors; non-finite pairs are ignored.
-    /// `None` with fewer than two usable anchors or a degenerate line fit.
     pub fn fit(anchors: &[(f64, f64)]) -> Option<Self> {
         let mut a: Vec<(f64, f64)> = anchors
             .iter()
@@ -55,7 +32,6 @@ impl RtCalibration {
             });
         }
         a.sort_by(|p, q| p.0.total_cmp(&q.0));
-        // Tied x collapse to their mean y, weighted by count.
         let mut ux: Vec<f64> = Vec::new();
         let mut uy: Vec<f64> = Vec::new();
         let mut w: Vec<f64> = Vec::new();
@@ -74,7 +50,6 @@ impl RtCalibration {
         Some(RtCalibration::Isotonic { x: ux, y })
     }
 
-    /// Calibrated value at `x`; non-finite `x` gives NaN.
     pub fn apply(&self, x: f64) -> f64 {
         if !x.is_finite() {
             return f64::NAN;
@@ -97,7 +72,6 @@ impl RtCalibration {
     }
 }
 
-/// Weighted non-decreasing least-squares fit of `y` (ordered by x).
 fn pav(y: &[f64], w: &[f64]) -> Vec<f64> {
     let mut val: Vec<f64> = Vec::with_capacity(y.len());
     let mut wt: Vec<f64> = Vec::with_capacity(y.len());
@@ -127,7 +101,6 @@ mod tests {
 
     #[test]
     fn isotonic_is_monotone_and_robust_to_an_outlier_block() {
-        // y = 10 + 100 x with a deterministic wobble and one off-trend block.
         let n = 2000;
         let mut a: Vec<(f64, f64)> = (0..n)
             .map(|i| {

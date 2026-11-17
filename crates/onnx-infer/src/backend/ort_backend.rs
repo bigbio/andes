@@ -1,17 +1,3 @@
-//! [ONNX Runtime](https://onnxruntime.ai) backend (MIT) through the
-//! [`ort`](https://ort.pyke.io) crate.
-//!
-//! The runtime is a shared library loaded on first use (`ort`'s `load-dynamic`
-//! mode): `ORT_DYLIB_PATH` names it, otherwise the platform loader searches
-//! for `libonnxruntime.so` / `libonnxruntime.dylib` / `onnxruntime.dll`.
-//! [`init_runtime`] sets the path from code instead. Any ONNX Runtime 1.22 or
-//! newer works.
-//!
-//! One loaded model serves every worker thread: [`InferenceBackend::share`]
-//! hands out handles on the same session, and each handle calls the C API
-//! `Run` directly, which ONNX Runtime documents as safe to call concurrently
-//! on one session.
-
 use std::ffi::{c_char, CString};
 use std::path::Path;
 use std::ptr::{self, NonNull};
@@ -27,11 +13,6 @@ use crate::error::{BackendKind, Error, Result};
 use crate::session::{BackendOptions, InferenceBackend};
 use crate::tensor::NamedTensor;
 
-/// Load the ONNX Runtime shared library from `path` instead of
-/// `ORT_DYLIB_PATH` / the loader search path. Call before the first model is
-/// loaded; later calls have no effect. A file that cannot be loaded as the
-/// runtime (not a shared library, an incompatible build, missing
-/// dependencies) is an error.
 pub fn init_runtime(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     if !path.is_file() {
@@ -52,7 +33,6 @@ pub fn init_runtime(path: impl AsRef<Path>) -> Result<()> {
         .map_err(|e| Error::Inference(format!("ONNX Runtime init: {e}")))
 }
 
-/// Resolve the runtime library once, turning `ort`'s load panic into an error.
 fn ensure_runtime() -> Result<()> {
     catch_load(|| {
         ort::api();
@@ -64,8 +44,6 @@ fn ensure_runtime() -> Result<()> {
     })
 }
 
-/// Runs `f`, which may load the runtime library; `ort` panics when the
-/// library cannot be loaded, and the panic message is returned as the error.
 fn catch_load<T>(f: impl FnOnce() -> T) -> std::result::Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
         p.downcast_ref::<String>()
@@ -79,12 +57,10 @@ fn ort_err(what: &str) -> impl Fn(ort::Error) -> Error + '_ {
     move |e| Error::Inference(format!("ort {what}: {e}"))
 }
 
-/// Axis sizes as ONNX Runtime reports them: a negative size is a dynamic axis.
 fn axes(shape: &[i64]) -> Vec<Option<usize>> {
     shape.iter().map(|&d| usize::try_from(d).ok()).collect()
 }
 
-/// One loaded graph, shared by every handle.
 struct Model {
     inner: Arc<SharedSessionInner>,
     input_names: Vec<String>,
@@ -96,14 +72,11 @@ struct Model {
     c_outputs: Vec<CString>,
 }
 
-/// ONNX Runtime session handle.
 pub struct OrtSession {
     model: Arc<Model>,
 }
 
 impl OrtSession {
-    /// Load an ONNX file. `opts.intra_threads` sets the operator thread pool
-    /// of this session (1 = run on the calling thread); inter-op is always 1.
     pub fn load(path: &Path, opts: &BackendOptions) -> Result<Self> {
         ensure_runtime()?;
         let intra = opts.intra_threads.max(1);
@@ -138,7 +111,6 @@ impl OrtSession {
                 }
             }
         }
-        // Non-tensor outputs (ZipMap sequences of maps) are not requested.
         let (output_names, output_shapes): (Vec<String>, Vec<_>) = session
             .outputs
             .iter()
@@ -176,7 +148,6 @@ impl OrtSession {
 
     fn resolve_inputs<'a>(&self, inputs: &'a [NamedTensor]) -> Result<Vec<&'a NamedTensor>> {
         let names = &self.model.input_names;
-        // Single-input convenience: accept any name.
         if names.len() == 1 && inputs.len() == 1 {
             return Ok(vec![&inputs[0]]);
         }
@@ -200,7 +171,6 @@ impl OrtSession {
     }
 }
 
-/// `NamedTensor` data (f32) as a tensor of the graph's declared element type.
 fn to_value(nt: &NamedTensor, ty: TensorElementType) -> Result<DynValue> {
     let shape = nt.shape.clone();
     let v: DynValue = match ty {
@@ -232,7 +202,6 @@ fn to_value(nt: &NamedTensor, ty: TensorElementType) -> Result<DynValue> {
     Ok(v)
 }
 
-/// A tensor output as f32, whatever its element type.
 fn to_named(name: &str, v: &DynValue) -> Result<NamedTensor> {
     let err = |e: ort::Error| Error::Inference(format!("ort output `{name}`: {e}"));
     let ty = match v.dtype() {
@@ -317,8 +286,6 @@ impl InferenceBackend for OrtSession {
         let in_ptrs: Vec<*const ort::sys::OrtValue> = values.iter().map(|v| v.ptr()).collect();
         let mut out_ptrs: Vec<*mut ort::sys::OrtValue> = vec![ptr::null_mut(); out_names.len()];
         // SAFETY: the session pointer lives as long as `m.inner`; name and
-        // value arrays outlive the call and have the lengths passed; ONNX
-        // Runtime allows concurrent `Run` on one session.
         let status = unsafe {
             (ort::api().Run)(
                 m.inner.ptr().cast_mut(),
@@ -333,19 +300,14 @@ impl InferenceBackend for OrtSession {
         };
         // SAFETY: `status` comes straight from the C API.
         unsafe { ort::error::status_to_result(status) }.map_err(ort_err("run"))?;
-        // Take ownership of every output before any early return, so none leak.
         let outputs: Vec<Option<DynValue>> = out_ptrs
             .into_iter()
             .map(|p| {
                 // SAFETY: a non-null pointer returned by `Run` is an owned
-                // OrtValue allocated by this session.
                 NonNull::new(p)
                     .map(|p| unsafe { DynValue::from_ptr(p, Some(Arc::clone(&m.inner))) })
             })
             .collect();
-        // An output may alias an input buffer (a graph that returns an input
-        // as an output), so `values` stays alive until every output is copied
-        // and dropped.
         let result = m
             .output_names
             .iter()

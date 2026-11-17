@@ -1,43 +1,3 @@
-//! `andes quant finalize`: the transfer FDR, the identified rows' quality
-//! q-values, the run normalisation and the MBR outputs over the extract
-//! tables of every run (see [`crate::quant_mbr`] for what each computes), as
-//! a map-reduce over runs.
-//!
-//! Every quantity a row needs from other runs is a per-precursor summary or
-//! a global model, so each run's table is read on its own, in record batches
-//! cut at precursor boundaries, and the runs are processed in parallel. Each
-//! pass reads every table once:
-//!
-//! 1. donor summaries: per precursor, the relative width `k` and the
-//!    sorted values around the middle of its identified fits (width on the
-//!    consensus scale, tailing, isotope heights), which give the median of
-//!    every fit and of every fit but one run's: the shape features leave the
-//!    row's own run out, and that run's fit is in the same table. With more
-//!    donor fits than [`FinalizeLimits::max_donor_fits`] the precursors are
-//!    summarised in groups, one pass each;
-//! 2. the training rows of both classifiers, a [`TrainingSample`] keyed by
-//!    run and row, so that the kept rows enter training in table order (one
-//!    sample per member of the bagged transfer classifier, see
-//!    [`FinalizeLimits::transfer_models`]);
-//! 3. every row's held-out score, into [`FoldScores`] merged run by run;
-//!    above [`FinalizeLimits::max_held_scores`] scores in memory they are
-//!    sorted and written to temporary tables, and read back in order when
-//!    the q-value step functions are built. Each run's transfer scores are
-//!    also written, in row order, to a temporary table;
-//! 4. the reference cells of the run normalisation;
-//! 5. per run, the output rows, sorted by precursor, into a temporary table,
-//!    and the validation counts; the transfer rows take their scores from
-//!    pass 3's table instead of being scored again;
-//!
-//! then the per-run tables are merged by (precursor, run) into
-//! `<base>.mbr.parquet` and handed to the caller.
-//!
-//! Every reduction is exact and does not depend on the order in which the
-//! runs finish, so the outputs are those of one pass over every row in
-//! memory, byte for byte. Memory follows the library (the summaries), the
-//! limits, the q-value step functions and one run's output rows per worker
-//! thread, not the number of runs.
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -83,96 +43,49 @@ use crate::transfer_fdr::{
     TrainingSample, IDENTITY, MAX_STRATA, TARGET, TRANSFER_FEATURES,
 };
 
-/// What one finalize did, for the caller to log.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FinalizeSummary {
     pub validation: MbrValidation,
-    /// Rows of `<base>.mbr.parquet`.
     pub rows_written: usize,
-    /// Transfer targets and decoys without evidence or with a non-finite
-    /// feature (no q-value).
     pub no_features: usize,
     pub fdr: FdrCounts,
-    /// Identified targets and decoys without evidence or with a non-finite
-    /// feature (no quality q-value).
     pub identified_no_features: usize,
     pub identified_fdr: FdrCounts,
-    /// The rows of `<base>.mbr.parquet`, in file order.
     #[cfg(test)]
     pub features: Vec<MbrFeature>,
 }
 
-/// One row of `<base>.mbr.parquet` by precursor id and run index.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MbrFeature {
     pub precursor: u32,
     pub run: u16,
     pub evidence_type: EvidenceType,
     pub quantity: Option<f64>,
-    /// Least-squares standard error of the fitted amplitude at the fixed
-    /// peak shape, times the area factor: the fit error, not the cell's
-    /// run-to-run uncertainty.
     pub quantity_se: Option<f64>,
     pub quantity_normalized: Option<f64>,
     pub transfer_q: Option<f64>,
-    /// For an accepted transfer, the running mean of the wrong-peak
-    /// probability of a model trained on pseudo-transfers (identified cells
-    /// re-measured blind): it sees a wrong peak, not an absent peptide or a
-    /// wrong donor identity.
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
-    /// Intensity-weighted isotope-0 mass error of the fit, ppm.
     pub mass_err_ppm: Option<f64>,
-    /// The same-run claims on a transfer row (default for other rows).
     pub claim: Claim,
 }
 
-/// Limits of finalize: memory follows the library and these limits rather
-/// than the number of runs or rows. None of them changes the outputs except
-/// the two sample caps and the transfer classifier's members.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FinalizeLimits {
-    /// Training rows per classifier (transfers, identified rows), and per
-    /// member of the transfer classifier. Above it the classifier is trained
-    /// on the rows of a hashed sample of (precursor, run) pairs (every row
-    /// still scored by its fold's model).
     pub max_train_rows: usize,
-    /// Members of the bagged transfer classifier: each fold's score is the
-    /// mean margin of this many models, each trained on its own sample of
-    /// the training rows (the same rows when they are all kept) with its
-    /// own seed. Training and scoring time grow with it; one member is the
-    /// single model.
     pub transfer_models: usize,
-    /// Reference cells of the run normalisation. Above it the fit uses a
-    /// hashed sample of whole precursors (coarser RT-local offsets).
     pub max_norm_cells: usize,
-    /// Donor fits (identified targets) summarised in one pass; above it the
-    /// precursors are summarised in groups, one pass over the tables each.
     pub max_donor_fits: usize,
-    /// Held-out scores kept in memory per classifier; above it they are
-    /// sorted and written to temporary tables.
     pub max_held_scores: usize,
-    /// Directory of the temporary tables (removed at the end); `None` for
-    /// the directory of `<base>.mbr.parquet`.
     pub temp_dir: Option<PathBuf>,
 }
 
-/// Default of [`FinalizeLimits::max_train_rows`].
 pub(crate) const DEFAULT_MAX_TRAIN_ROWS: usize = 3_000_000;
-/// Default share of the precursors that report their trace areas (see
-/// [`crate::quant_mbr`], "Trace area"). On six LFQ benchmarks 0.1 lowered
-/// the gross errors of the brightest tenth of the identified cells by 17 to
-/// 43 % and the replicate SD on every set, with differential-expression
-/// calls unchanged; 1 made them worse on three of four sets.
 pub(crate) const DEFAULT_TRACE_FRACTION: f64 = 0.1;
-/// Default of [`FinalizeLimits::transfer_models`].
 pub(crate) const DEFAULT_TRANSFER_MODELS: usize = 8;
-/// Default of [`FinalizeLimits::max_norm_cells`].
 pub(crate) const DEFAULT_MAX_NORM_CELLS: usize = 20_000_000;
-/// Default of [`FinalizeLimits::max_donor_fits`].
 pub(crate) const DEFAULT_MAX_DONOR_FITS: usize = 12_000_000;
-/// Default of [`FinalizeLimits::max_held_scores`].
 pub(crate) const DEFAULT_MAX_HELD_SCORES: usize = 64_000_000;
 
 impl Default for FinalizeLimits {
@@ -188,36 +101,21 @@ impl Default for FinalizeLimits {
     }
 }
 
-/// Rows whose features are built and scored together.
 pub(crate) const SCORE_CHUNK: usize = 65_536;
-/// Rows per record batch read from an extract table.
 const READ_BATCH_ROWS: usize = 65_536;
-/// Rows per row group of a temporary score table.
 const SCORE_GROUP_ROWS: usize = 65_536;
-/// Rows per row group of a temporary output-row table, per batch read back
-/// and per merged batch: small, as the merge reads every run's table at once.
 const OUT_GROUP_ROWS: usize = 4_096;
-/// Temporary tables merged at once; more are merged in groups first.
 const MAX_OPEN_PARTS: usize = 512;
 
-/// The extract rows of every run, as tables ("chunks") read in batches. A
-/// precursor's rows of one run are contiguous and in one chunk, as `andes
-/// quant extract` writes them (one table per run, rows by library entry).
 pub(crate) trait ExtractSource: Sync {
-    /// Tables.
     fn chunks(&self) -> usize;
-    /// The table's name, for messages.
     fn name(&self, chunk: usize) -> String;
-    /// Calls `f` with the rows of table `chunk` in order, a batch at a time.
     fn for_each_batch(
         &self,
         chunk: usize,
         f: &mut dyn FnMut(Vec<ExtractRow>) -> Result<(), String>,
     ) -> Result<(), String>;
 
-    /// [`ExtractSource::for_each_batch`] over the identified targets only,
-    /// of which only the keys and the peak shape (see [`donor_fit`] and
-    /// [`relative_fit_width`]) are read.
     fn for_each_fit_batch(
         &self,
         chunk: usize,
@@ -232,8 +130,6 @@ pub(crate) trait ExtractSource: Sync {
     }
 }
 
-/// Extract rows in memory, one vector per run, handed out in batches of
-/// `batch_rows` rows.
 #[cfg(test)]
 pub(crate) struct ExtractRuns<'a> {
     pub runs: &'a [Vec<ExtractRow>],
@@ -261,7 +157,6 @@ impl ExtractSource for ExtractRuns<'_> {
     }
 }
 
-/// The `<stem>.extract.parquet` files of every run.
 pub(crate) struct ExtractFiles(pub Vec<PathBuf>);
 
 impl ExtractSource for ExtractFiles {
@@ -296,22 +191,12 @@ impl ExtractSource for ExtractFiles {
     }
 }
 
-/// The runs and precursors extract rows may index.
 #[derive(Debug, Clone, Copy)]
 struct Bounds {
     runs: usize,
     precursors: usize,
 }
 
-/// Calls `f(state, chunk, first, block)` on the rows of every table of
-/// `source` in blocks of whole precursors (`first` is the index of the
-/// block's first row in its table), tables in parallel, each table with its
-/// own `state` from `init`, handed to `done` after its last block. With
-/// `fits_only`, the identified targets only
-/// ([`ExtractSource::for_each_fit_batch`]).
-///
-/// Errors: a row outside `bounds`, a precursor whose rows are not contiguous
-/// in its table, and any error of `source`, `f` or `done`.
 fn for_each_block<S>(
     source: &dyn ExtractSource,
     fits_only: bool,
@@ -351,7 +236,6 @@ fn for_each_block<S>(
             let Some(last) = buf.last().map(|r| r.precursor) else {
                 return Ok(());
             };
-            // The last precursor may go on in the next batch.
             let cut = buf.len() - buf.iter().rev().take_while(|r| r.precursor == last).count();
             if cut > 0 {
                 emit(&mut state, &buf[..cut], first)?;
@@ -372,16 +256,12 @@ fn for_each_block<S>(
     })
 }
 
-/// Per (precursor, run) of a block: the identified target's evidence and
-/// donor fit.
 pub(crate) struct BlockContext<'a> {
     identified: HashMap<(u32, u16), &'a Evidence>,
     own: HashMap<(u32, u16), DonorFit>,
 }
 
 impl<'a> BlockContext<'a> {
-    /// Errors on two identified targets with evidence of one (precursor,
-    /// run).
     pub(crate) fn new(rows: &'a [ExtractRow], maps: &[Option<RunMap>]) -> Result<Self, String> {
         let mut identified = HashMap::new();
         let mut own = HashMap::new();
@@ -402,18 +282,14 @@ impl<'a> BlockContext<'a> {
     }
 }
 
-/// Sorted values around the middle of one value of a precursor's donor fits:
-/// enough for the median of them all and of them all but one.
 #[derive(Debug, Clone, Copy)]
 struct MedianWindow {
     n: u32,
-    /// Index of `v[0]` among the sorted values.
     first: u32,
     v: [f64; 3],
 }
 
 impl MedianWindow {
-    /// From every value, sorted ascending by [`f64::total_cmp`].
     fn new(sorted: &[f64]) -> Self {
         let n = sorted.len();
         let first = (n / 2).saturating_sub(1);
@@ -432,8 +308,6 @@ impl MedianWindow {
         self.v[i - self.first as usize]
     }
 
-    /// The median of every value, as [`median`] gives it; `None` without
-    /// values.
     fn median(&self) -> Option<f64> {
         let n = self.n as usize;
         match n {
@@ -443,11 +317,6 @@ impl MedianWindow {
         }
     }
 
-    /// The median of every value but one copy of `x`, which is one of them;
-    /// `None` when it is the only one. With `i` the first position of `x`
-    /// in the sorted values, the `j`-th value left is the `j`-th when
-    /// `j < i` (that is, when it is below `x`) and the `(j + 1)`-th
-    /// otherwise.
     fn median_without(&self, x: f64) -> Option<f64> {
         let m = (self.n as usize).saturating_sub(1);
         if m == 0 {
@@ -468,8 +337,6 @@ impl MedianWindow {
         })
     }
 
-    /// [`MedianWindow::median_without`] `x` when given, else
-    /// [`MedianWindow::median`].
     fn median_of(&self, x: Option<f64>) -> Option<f64> {
         match x {
             Some(x) => self.median_without(x),
@@ -478,8 +345,6 @@ impl MedianWindow {
     }
 }
 
-/// The donor fits of one precursor: width on the consensus scale, tailing
-/// and isotope profile.
 #[derive(Debug, Clone, Copy)]
 struct ShapeSummary {
     width: MedianWindow,
@@ -487,28 +352,18 @@ struct ShapeSummary {
     iso: [MedianWindow; 4],
 }
 
-/// What finalize needs of a precursor's identified rows in every run.
 #[derive(Debug, Clone, Copy, Default)]
 struct PrecursorSummary {
-    /// The relative width `k` (see [`crate::quant_mbr`], "Reported
-    /// quantity").
     relative_width: Option<f64>,
     shape: Option<ShapeSummary>,
-    /// The median amplitude signal-to-noise of the identified target fits,
-    /// read only with [`FinalizeParams::trace_fraction`].
     snr: Option<f64>,
-    /// Whether the precursor reports its trace areas (see
-    /// [`crate::quant_mbr`], "Trace area").
     trace: bool,
 }
 
 type Summaries = HashMap<u32, PrecursorSummary>;
 
-/// One identified row's part of its precursor's summary: precursor, width
-/// ratio, donor fit and amplitude signal-to-noise.
 type SummaryItem = (u32, Option<f64>, Option<DonorFit>, Option<f64>);
 
-/// The summaries of the precursors of `items`, in any order.
 fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
     items.sort_unstable_by_key(|it| it.0);
     let mut out = Summaries::new();
@@ -539,9 +394,6 @@ fn summarise(mut items: Vec<SummaryItem>) -> Summaries {
     out
 }
 
-/// `A / amplitude_se` of an identified target row's fit; `None` for any
-/// other row, or without a positive amplitude and a finite positive
-/// standard error.
 fn identified_snr(r: &ExtractRow) -> Option<f64> {
     if (r.role, r.kind) != (Role::Identified, Hypothesis::Target) {
         return None;
@@ -550,17 +402,11 @@ fn identified_snr(r: &ExtractRow) -> Option<f64> {
     Some(amplitude_snr(e)).filter(|v| *v > 0.0 && v.is_finite())
 }
 
-/// The relative width and the trace flag of `precursor`: what
-/// [`reported_quantity`] takes to report one of its fits.
 fn quantity_rule(summaries: &Summaries, precursor: u32) -> (Option<f64>, bool) {
     let s = summaries.get(&precursor);
     (s.and_then(|s| s.relative_width), s.is_some_and(|s| s.trace))
 }
 
-/// Mark the brightest share `fraction` (in `(0, 1]`) of the precursors with
-/// a signal-to-noise, by that median, to report their trace areas: those at
-/// or above the value of rank `ceil(fraction n)` from the top. Logs the cut
-/// and the distribution it was taken from.
 fn mark_trace_precursors(summaries: &mut Summaries, fraction: f64) {
     let mut snrs: Vec<f64> = summaries.values().filter_map(|s| s.snr).collect();
     if snrs.is_empty() {
@@ -585,8 +431,6 @@ fn mark_trace_precursors(summaries: &mut Summaries, fraction: f64) {
     );
 }
 
-/// The shape reference of the rows of one block: the precursors' summaries
-/// and the block's own donor fits, left out of a row's reference.
 struct BlockShapes<'a> {
     summaries: &'a Summaries,
     own: &'a HashMap<(u32, u16), DonorFit>,
@@ -627,39 +471,25 @@ impl ShapeReference for BlockShapes<'_> {
     }
 }
 
-/// The classifier a row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Table {
     Transfer,
     Identified,
-    /// A pseudo-transfer: scored by the transfer models, outside their fit.
     Pseudo,
 }
 
-/// Most similar runs whose identifications make a precursor's presence
-/// prior ([`EntryIndex::presence_prior`]), at most [`NEIGHBOUR_RUNS`].
 pub(crate) const PRIOR_NEIGHBOURS: usize = 20;
-/// Library entries the strata are cut from, at most (a stride over them).
 const PRIOR_SAMPLE: usize = 20_000;
 
-/// Runs compared with a transfer's run for the `neighbour_donor_rate`
-/// feature: its most similar runs, at most this many.
 pub(crate) const NEIGHBOUR_RUNS: usize = 50;
 
-/// Library lookups of finalize: per precursor id, its entry; per run, its
-/// most similar runs.
 pub(crate) struct EntryIndex<'a> {
     entry_of: Vec<Option<&'a LibraryEntry>>,
-    /// Per run, the [`NEIGHBOUR_RUNS`] other runs whose target entries'
-    /// donor sets are most similar to its own (Jaccard index, ties by run
-    /// index).
     neighbours: Vec<Vec<u16>>,
-    /// Ascending edges of the prior strata ([`strata_edges`]).
     edges: Vec<f64>,
 }
 
 impl<'a> EntryIndex<'a> {
-    /// The index of `lib`'s entries for `runs` runs.
     pub(crate) fn new(lib: &'a Library, runs: usize) -> Self {
         let mut entry_of: Vec<Option<&LibraryEntry>> = vec![None; lib.meta.len()];
         for e in &lib.entries {
@@ -676,7 +506,6 @@ impl<'a> EntryIndex<'a> {
         }
     }
 
-    /// Number of prior strata.
     pub(crate) fn strata(&self) -> usize {
         if self.by_run() {
             self.neighbours.len()
@@ -685,18 +514,10 @@ impl<'a> EntryIndex<'a> {
         }
     }
 
-    /// With 2 to MAX_STRATA runs the stratum of a transfer row is its
-    /// acceptor run, so each run's decoys count its own false rate; with more
-    /// runs the strata are the presence-prior strata.
     fn by_run(&self) -> bool {
         (2..=MAX_STRATA).contains(&self.neighbours.len())
     }
 
-    /// The prior that the row's precursor is present in its run: the share
-    /// of the run's [`PRIOR_NEIGHBOURS`] most similar runs that identified
-    /// it. 0 without an entry or neighbours; the row's own run is never a
-    /// neighbour. A precursor identified nowhere near this run has a prior of
-    /// 0, however often it was identified in runs unlike it.
     pub(crate) fn presence_prior(&self, r: &ExtractRow) -> f64 {
         let (Some(Some(e)), Some(nn)) = (
             self.entry_of.get(r.precursor as usize),
@@ -715,8 +536,6 @@ impl<'a> EntryIndex<'a> {
         hits as f64 / nn.len() as f64
     }
 
-    /// `family` of a row of table `t` with its prior stratum
-    /// ([`pack_family`]); the stratum is 0 outside the transfer tables.
     pub(crate) fn packed(&self, r: &ExtractRow, t: Table, family: u8) -> u32 {
         match t {
             Table::Transfer | Table::Pseudo if self.by_run() => pack_family(family, r.run),
@@ -727,11 +546,6 @@ impl<'a> EntryIndex<'a> {
         }
     }
 
-    /// The share of the row's run's neighbours ([`run_neighbours`]) that
-    /// are donor runs of its precursor's entry: how often the runs most
-    /// like this one identified the precursor. 0 without an entry or
-    /// neighbours. The row's own run is never its neighbour, so a
-    /// pseudo-transfer does not see its own identification.
     pub(crate) fn neighbour_rate(&self, r: &ExtractRow) -> f64 {
         let (Some(Some(e)), Some(nn)) = (
             self.entry_of.get(r.precursor as usize),
@@ -753,9 +567,6 @@ impl<'a> EntryIndex<'a> {
         self.entry_of[p as usize].is_some_and(|e| e.identity_decoy)
     }
 
-    /// The Percolator PEP of the entry's best donor PSM, 1 without one. A
-    /// transfer feature: identity-decoy transfers teach the classifier what a
-    /// weak donor costs.
     pub(crate) fn donor_pep(&self, p: u32) -> f64 {
         self.entry_of
             .get(p as usize)
@@ -764,12 +575,7 @@ impl<'a> EntryIndex<'a> {
             .map_or(1.0, |e| if e.donor_psm.pep.is_finite() { e.donor_psm.pep } else { 1.0 })
     }
 
-
-    /// The classifier of `r` and its family; `None` for a row that takes no
-    /// part in any.
     pub(crate) fn table(&self, r: &ExtractRow) -> Option<(Table, u8)> {
-        // An identity decoy's rows take part only through its transfer
-        // targets, as the identity-decoy family.
         let identity = self.is_identity(r.precursor);
         let t = match r.role {
             Role::Identified if identity => return None,
@@ -782,13 +588,6 @@ impl<'a> EntryIndex<'a> {
     }
 }
 
-/// The ascending edges of the prior strata, learned from the library alone:
-/// cut from the prior ([`EntryIndex::presence_prior`] with `k` neighbours)
-/// of the (precursor, run) pairs without an identification, so that each of
-/// at most [`MAX_STRATA`] strata holds about an equal share of them, as far
-/// as the discrete prior allows. A target and its decoys share their pair,
-/// so these are equal decoy counts. Taken over a stride of at most
-/// [`PRIOR_SAMPLE`] entries.
 pub(crate) fn strata_edges(
     entry_of: &[Option<&LibraryEntry>],
     neighbours: &[Vec<u16>],
@@ -801,13 +600,11 @@ pub(crate) fn strata_edges(
         .copied()
         .filter(|e| !e.identity_decoy)
         .collect();
-    // The neighbours every run has, at most `k`: the prior is hits / m.
     let m = neighbours.iter().map(Vec::len).min().unwrap_or(0).min(k);
     if m == 0 {
         return Vec::new();
     }
     let stride = entries.len().div_ceil(PRIOR_SAMPLE).max(1);
-    // Per number of neighbours identifying the pair: how many pairs.
     let hist = entries
         .iter()
         .step_by(stride)
@@ -841,11 +638,6 @@ pub(crate) fn strata_edges(
     edges
 }
 
-/// The strata edges cut from `hist`, the pair counts per number of
-/// neighbour hits `0..=m` (the prior is hits / m): each stratum closes once
-/// it holds a share `total / MAX_STRATA`; an edge is added only while there
-/// are fewer than `MAX_STRATA - 1`, so at most `MAX_STRATA - 1` edges and
-/// [`MAX_STRATA`] strata.
 fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
     let m = hist.len().saturating_sub(1);
     let total: u64 = hist.iter().sum();
@@ -860,7 +652,6 @@ fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
                 open = 0.0;
             }
         }
-        // A last stratum below one share merges into the one before it.
         if open + (hist[m] as f64) < share && !edges.is_empty() {
             edges.pop();
         }
@@ -868,10 +659,6 @@ fn edges_of_hist(hist: &[u64]) -> Vec<f64> {
     edges
 }
 
-/// Per run of `runs`, the `k` other runs most similar to it, most similar
-/// first: the Jaccard index of the sets of target entries they are donors
-/// of (identity decoys are left out), ties by run index. Computed from the
-/// donor runs only, the same for targets and decoys.
 pub(crate) fn run_neighbours(lib: &Library, runs: usize, k: usize) -> Vec<Vec<u16>> {
     let words = lib.entries.len().div_ceil(64);
     let mut bits = vec![vec![0u64; words]; runs];
@@ -914,8 +701,6 @@ pub(crate) fn run_neighbours(lib: &Library, runs: usize, k: usize) -> Vec<Vec<u1
         .collect()
 }
 
-/// The features of the rows of `rows` whose table passes `want`, built in
-/// parallel (in row order): `(index in rows, table, family, features)`.
 pub(crate) fn table_features(
     rows: &[ExtractRow],
     idx: &EntryIndex<'_>,
@@ -938,10 +723,6 @@ pub(crate) fn table_features(
         .collect()
 }
 
-/// Calls `f(index in rows, table, family, score)` for every row of `rows`
-/// with features whose table passes `want`, in row order: `score` is the
-/// held-out raw margin of its classifier's fold model (`None` for a fold
-/// without a model). Rows are scored [`SCORE_CHUNK`] at a time.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn for_each_scored(
     rows: &[ExtractRow],
@@ -983,14 +764,11 @@ pub(crate) fn for_each_scored(
     }
 }
 
-/// Metadata key and version of the temporary score tables.
 const SCORES_KEY: &str = "andes.finalize_scores.schema";
-/// Metadata key and version of the temporary output-row tables.
 const ROWS_KEY: &str = "andes.finalize_rows.schema";
 const TEMP_VERSION: &str = "1.0";
 const TEMP_MAJOR: &str = "1";
 
-/// A writer of a temporary table with schema version `key`.
 fn temp_writer(
     path: &Path,
     key: &str,
@@ -1011,7 +789,6 @@ fn temp_writer(
     ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| err(&e))
 }
 
-/// A reader of a temporary table with schema version `key` (major 1).
 fn temp_reader(
     path: &Path,
     key: &str,
@@ -1044,7 +821,6 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
         .ok_or_else(|| format!("{}: column {i} has an unexpected type", path.display()))
 }
 
-/// Writes scores, in the order given, as a temporary score table.
 fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let schema = Arc::new(Schema::new(vec![Field::new(
@@ -1068,23 +844,16 @@ fn write_scores(path: &Path, scores: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `r` is a row whose held-out score pass 3 keeps for the later
-/// passes: a transfer row (target or decoy) or an identified row.
 fn is_cached(idx: &EntryIndex<'_>, r: &ExtractRow) -> bool {
     matches!(idx.table(r), Some((Table::Transfer | Table::Identified, _)))
 }
 
-/// The cached value of an identified row that has features but no score (its
-/// fold has no model). A transfer row without features or without a score,
-/// and an identified row without features, cache NaN.
 const NO_SCORE: f32 = f32::INFINITY;
 
-/// The temporary table of the held-out scores of the transfer and identified rows of table `chunk`.
 fn cached_scores_path(dir: &Path, chunk: usize) -> PathBuf {
     dir.join(format!("transfer-scores-{chunk:06}.parquet"))
 }
 
-/// The scores of a table written by [`write_scores`], in order.
 fn read_cached_scores(path: &Path) -> Result<Vec<f32>, String> {
     let error = RefCell::new(None);
     let scores: Vec<f32> = ScoreFile::new(path, &error).collect();
@@ -1094,8 +863,6 @@ fn read_cached_scores(path: &Path) -> Result<Vec<f32>, String> {
     }
 }
 
-/// The scores of a temporary score table, in order. A read error ends the
-/// stream and is kept in `error`.
 struct ScoreFile<'a> {
     path: PathBuf,
     reader: Option<ParquetRecordBatchReader>,
@@ -1159,14 +926,11 @@ impl Iterator for ScoreFile<'_> {
     }
 }
 
-/// The held-out scores of one classifier, merged run by run: in memory up
-/// to a cap, then sorted and written to temporary tables.
 struct ScoreStore<'d> {
     name: &'static str,
     dir: &'d Path,
     cap: usize,
     scores: Mutex<FoldScores>,
-    /// Per spill, per group (fold and stratum), the table of each family.
     spills: Mutex<Vec<Vec<[PathBuf; 4]>>>,
     next: AtomicUsize,
 }
@@ -1183,7 +947,6 @@ impl<'d> ScoreStore<'d> {
         }
     }
 
-    /// Adds the scores of one run.
     fn add(&self, s: FoldScores) -> Result<(), String> {
         let held = {
             let mut all = self.scores.lock().expect("score store lock");
@@ -1209,8 +972,6 @@ impl<'d> ScoreStore<'d> {
         Ok(())
     }
 
-    /// The q-values over every score added (the estimates other than the
-    /// pooled one kept at `thresholds`), and the number of spills.
     fn finish(
         self,
         failed_folds: &[String],
@@ -1238,8 +999,6 @@ impl<'d> ScoreStore<'d> {
     }
 }
 
-/// One output row by precursor id and run index, as the temporary tables
-/// hold it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct OutRow {
     precursor: u32,
@@ -1251,12 +1010,10 @@ struct OutRow {
     transfer_q: Option<f64>,
     quant_q: Option<f64>,
     apex_rt_s: Option<f64>,
-    /// The wrong-measurement q-value of an accepted transfer.
     measurement_q: Option<f64>,
     library_q: f64,
     mass_err_ppm: Option<f64>,
     claim: Claim,
-    /// The transfer's posterior error probability ([`QValues::pep`]).
     transfer_pep: Option<f64>,
 }
 
@@ -1279,7 +1036,6 @@ impl OutRow {
     }
 }
 
-/// The evidence types by their code in the temporary tables.
 const EVIDENCE_CODES: [EvidenceType; 6] = [
     EvidenceType::Identified,
     EvidenceType::IdentifiedBelowThreshold,
@@ -1296,8 +1052,6 @@ fn evidence_code(e: EvidenceType) -> u8 {
         .expect("every evidence type has a code") as u8
 }
 
-/// The optional values of [`OutRow`], in column order after the evidence
-/// type.
 const OUT_VALUES: [&str; 7] = [
     "quantity",
     "quantity_se",
@@ -1308,9 +1062,6 @@ const OUT_VALUES: [&str; 7] = [
     "measurement_q",
 ];
 
-/// The claim values of [`OutRow`], after the mass error: claimant
-/// precursor, apex offset, claimant identified, claimant co-apex, claimants,
-/// co-apex claimants, identified co-apex claimants.
 const OUT_CLAIM: [&str; 7] = [
     "claimant",
     "claim_dt_s",
@@ -1343,7 +1094,6 @@ fn out_schema() -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-/// A temporary table of output rows being written, rows in the order given.
 struct OutWriter {
     path: PathBuf,
     schema: Arc<Schema>,
@@ -1424,7 +1174,6 @@ impl OutWriter {
     }
 }
 
-/// A temporary table of output rows, read in order.
 struct OutReader {
     path: PathBuf,
     reader: ParquetRecordBatchReader,
@@ -1506,10 +1255,6 @@ impl OutReader {
     }
 }
 
-/// Merges the temporary output tables `paths` (each in (precursor, run)
-/// order, no key in two of them) and calls `sink` with the rows in
-/// (precursor, run) order, in batches. More than [`MAX_OPEN_PARTS`] tables
-/// are merged in groups into tables of `dir` first (named by `level`).
 fn merge_out(
     paths: &[PathBuf],
     dir: &Path,
@@ -1561,11 +1306,6 @@ fn merge_out(
     Ok(())
 }
 
-/// Transfer FDR, identified-row quality q-values, pseudo-transfer validation
-/// and the MBR outputs over the extract rows of `runs` (one vector per run;
-/// a row's `run` indexes `stems`, its `precursor` indexes `lib.meta`), held
-/// in memory, without sample caps; [`FinalizeSummary::features`] gets the
-/// rows of `<base>.mbr.parquet`. See [`finalize_stream`].
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize(
@@ -1607,35 +1347,19 @@ pub(crate) fn finalize(
     Ok(summary)
 }
 
-/// What [`finalize_stream`] computes and where it writes.
 pub(crate) struct FinalizeParams<'a> {
-    /// Transfer q-value threshold of the reported transfers.
     pub mbr_fdr: f64,
-    /// Identified-row quality threshold (`identified_below_threshold`).
     pub quant_feature_fdr: Option<f64>,
-    /// Seed of the folds, the models and the samples.
     pub seed: u64,
     pub limits: FinalizeLimits,
     pub mbr_path: &'a Path,
     pub validation_path: &'a Path,
-    /// Share, in `[0, 1]`, of the precursors with an identified fit that
-    /// report their trace areas, the brightest by median amplitude
-    /// signal-to-noise (see [`crate::quant_mbr`], "Trace area"); 0 is off.
     pub trace_fraction: f64,
 }
 
-/// Number of features of the wrong-peak model.
 const WRONG_FEATURES: usize = 11;
-/// Wrong-peak training and calibration rows kept at most (calibration pairs
-/// are thinned by whole units above it).
 const WRONG_CALIBRATION_ROWS: usize = 4_000_000;
 
-/// Features of the wrong-peak model: the fit evidence only (no donor count,
-/// library value or MS2 evidence), with the fitted quantity
-/// (`Evidence::quantity`, the area of the fit at its own width) and its
-/// standard error. `None` with a non-finite feature: a fit without a
-/// positive quantity, or a width ratio or standard error that is not
-/// positive and finite.
 pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     if e.quantity.is_nan() || e.quantity <= 0.0 {
         return None;
@@ -1658,11 +1382,6 @@ pub(crate) fn wrong_features(e: &Evidence) -> Option<Vec<f32>> {
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
 
-/// Wrong-measurement q-value (`measurement_q`) of each `(p_wrong, row)` in
-/// `pool`: the mean `p_wrong` of the rows at or below its own `p_wrong`. Rows
-/// with equal `p_wrong` are one step and share the mean at the end of their
-/// group, so the result does not depend on the order of the rows.
-/// `set(row, q)` receives every row once; `pool` is sorted in place.
 pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usize, f64)) {
     pool.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     let mut sum = 0.0;
@@ -1679,15 +1398,10 @@ pub(crate) fn running_mean_q(pool: &mut [(f64, usize)], mut set: impl FnMut(usiz
     }
 }
 
-/// `quant_q` of an accepted transfer: the larger of its transfer q-value and
-/// its wrong-measurement q-value, so a cut keeps it only when both are at or
-/// below the cut.
 pub(crate) fn transfer_quant_q(transfer_q: Option<f64>, measurement_q: f64) -> f64 {
     transfer_q.map_or(measurement_q, |t| t.max(measurement_q))
 }
 
-/// Whether two fits are one fit copied (bit for bit equal apex, width,
-/// amplitude, LLR and quantity; a NaN compares equal to itself here).
 fn same_fit(a: &Evidence, b: &Evidence) -> bool {
     [
         (a.t0, b.t0),
@@ -1700,35 +1414,18 @@ fn same_fit(a: &Evidence, b: &Evidence) -> bool {
     .all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
-/// How a pseudo-transfer's measurement differs from the identified fit of
-/// the same cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Mismatch {
-    /// The apex is further than the identified width from the identified
-    /// apex.
     pub(crate) apex: bool,
-    /// The fitted quantity is off by more than a factor of 2; `None` when
-    /// either fit has no positive finite quantity.
     pub(crate) quantity: Option<bool>,
 }
 
 impl Mismatch {
-    /// A wrong measurement: either difference. A pair without quantities
-    /// is judged on the apex alone.
     pub(crate) fn wrong(self) -> bool {
         self.apex || self.quantity == Some(true)
     }
 }
 
-/// The [`Mismatch`] of a pseudo-transfer's fit against the identified fit of
-/// the same cell, on the fitted quantities (`Evidence::quantity`: the area
-/// of each fit at its own width, so two fits of one height and different
-/// widths differ). `None` unless both apexes and the identified width are
-/// finite, and `None` when the identified fit is the pseudo-transfer's own
-/// (an identified pair measured at the predicted position,
-/// [`crate::quant_mbr`]): such a pair has no measurement to be compared
-/// with, so it is neither a training example of the wrong-measurement model
-/// nor counted in the wrong-peak rates.
 pub(crate) fn mismatch(pseudo: &Evidence, id: &Evidence) -> Option<Mismatch> {
     if same_fit(pseudo, id) {
         return None;
@@ -1742,31 +1439,22 @@ pub(crate) fn mismatch(pseudo: &Evidence, id: &Evidence) -> Option<Mismatch> {
     })
 }
 
-/// The training label of the wrong-measurement model ([`Mismatch::wrong`]).
-/// `None` unless both fits have a quantity.
 pub(crate) fn wrong_label(pseudo: &Evidence, id: &Evidence) -> Option<bool> {
     let m = mismatch(pseudo, id)?;
     m.quantity.map(|_| m.wrong())
 }
 
-/// A non-increasing step function of the classifier margin: the isotonic
-/// estimate of the probability that a measurement is wrong.
 pub(crate) struct WrongCalibration {
-    /// Lowest margin of each block, ascending.
     lo: Vec<f32>,
-    /// Probability of each block, non-increasing.
     p: Vec<f64>,
 }
 
 impl WrongCalibration {
-    /// Pool-adjacent-violators fit on `(margin, wrong)` pairs; tied margins
-    /// are one point. `None` without pairs.
     pub(crate) fn fit(mut pairs: Vec<(f32, bool)>) -> Option<Self> {
         if pairs.is_empty() {
             return None;
         }
         pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        // Distinct margins, descending: (margin, wrong count, rows).
         let mut pts: Vec<(f32, f64, f64)> = Vec::new();
         for &(s, w) in pairs.iter().rev() {
             match pts.last_mut() {
@@ -1777,7 +1465,6 @@ impl WrongCalibration {
                 _ => pts.push((s, f64::from(u8::from(w)), 1.0)),
             }
         }
-        // Blocks with non-decreasing mean as the margin descends.
         let mut blocks: Vec<(f32, f64, f64)> = Vec::new();
         for pt in pts {
             blocks.push(pt);
@@ -1798,18 +1485,12 @@ impl WrongCalibration {
         })
     }
 
-    /// The probability at margin `s`: that of the block of the nearest
-    /// margin at or below `s` (the highest one below every margin seen).
     pub(crate) fn at(&self, s: f32) -> f64 {
         let k = self.lo.partition_point(|&b| b <= s);
         self.p[k.saturating_sub(1)]
     }
 }
 
-/// A pseudo-transfer target's wrong-measurement label ([`wrong_label`]) and
-/// features ([`wrong_features`]); `None` for any other row, an identity
-/// decoy's row, a row without an identified fit of the same cell, or a pair
-/// without a label or without features.
 pub(crate) fn pseudo_example(
     r: &ExtractRow,
     ctx: &BlockContext<'_>,
@@ -1826,32 +1507,17 @@ pub(crate) fn pseudo_example(
     Some((wrong_label(e, id)?, wrong_features(e)?))
 }
 
-/// The output rows and validation counts of one run.
 #[derive(Default)]
 struct RunOutput {
     rows: Vec<OutRow>,
-    /// Per transfer row: its index in `rows` and its probability of being a
-    /// wrong measurement.
     wrong: Vec<(usize, f64)>,
     validation: MbrValidation,
 }
 
-/// Seconds since `t`, for the pass log.
 fn secs(t: Instant) -> f64 {
     t.elapsed().as_secs_f64()
 }
 
-/// Transfer FDR, identified-row quality q-values, pseudo-transfer validation
-/// and the MBR outputs over the extract rows of `source` (see the module
-/// docs): `<base>.mbr.parquet` in `(precursor, run)` order, its rows handed
-/// to `on_features` in the same order, and `<base>.mbr_validation.parquet`.
-/// With `quant_feature_fdr`, identified rows whose quality q-value is above
-/// it, or missing, are `identified_below_threshold`.
-///
-/// Errors: `mbr_fdr` or `quant_feature_fdr` outside `(0, 1]`, a row whose run
-/// or precursor is out of range, a precursor whose rows of a run are not
-/// contiguous, two identified rows of one (precursor, run), or an unreadable
-/// or unwritable file (the message names it).
 pub(crate) fn finalize_stream(
     stems: &[String],
     lib: &Library,
@@ -1899,7 +1565,6 @@ pub(crate) fn finalize_stream(
     let dir = tmp.path();
     let mut summary = FinalizeSummary::default();
 
-    // Pass 1: donor summaries, in groups of precursors within the fit cap.
     let t0 = Instant::now();
     let upper: usize = lib.entries.iter().map(|e| e.donors.len()).sum();
     let groups = upper.div_ceil(limits.max_donor_fits.max(1)).max(1);
@@ -1927,7 +1592,6 @@ pub(crate) fn finalize_stream(
                 Ok(())
             },
         )?;
-        // One allocation of the exact size, the run vectors freed as they go.
         let mut runs: Vec<Vec<_>> = items.into_inner().expect("summary lock");
         let mut all = Vec::with_capacity(runs.iter().map(Vec::len).sum());
         while let Some(v) = runs.pop() {
@@ -1948,9 +1612,6 @@ pub(crate) fn finalize_stream(
     );
     let summaries = &all_summaries;
 
-    // Pass 2: the training rows of both classifiers (one sample per member
-    // of the transfer classifier), keyed by table and row so that they enter
-    // training in table order.
     let t0 = Instant::now();
     type Key = (u32, u64);
     let members = limits.transfer_models.max(1);
@@ -2024,8 +1685,6 @@ pub(crate) fn finalize_stream(
                 s.push(k, u, row);
             }
             drop(s);
-            // The wrong-peak model learns from the pseudo-transfers: each
-            // judged against the identified fit of the same cell.
             let mut w_rows = Vec::new();
             for (i, r) in rows.iter().enumerate() {
                 let Some((y, x)) = pseudo_example(r, &ctx, &idx) else {
@@ -2070,7 +1729,6 @@ pub(crate) fn finalize_stream(
         }
     }
     let t1 = Instant::now();
-    // Both classifiers' folds train at once.
     let t_sets: Vec<Vec<FdrRow>> = t_samples
         .into_iter()
         .map(TrainingSample::into_items)
@@ -2103,9 +1761,6 @@ pub(crate) fn finalize_stream(
         t_models.members()
     );
 
-    // Pass 3: every row's held-out score, into the q-value step functions;
-    // each run's transfer scores are also kept in a temporary table for
-    // pass 5.
     let t0 = Instant::now();
     let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
     let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
@@ -2159,8 +1814,6 @@ pub(crate) fn finalize_stream(
                     .filter(|(r, _)| is_cached(&idx, r))
                     .map(|(_, s)| s),
             );
-            // Held-out margins of the pseudo-transfers, for the calibration
-            // of the wrong-peak model (whole units thinned above the cap).
             let mut labels = Vec::new();
             let mut xs = Vec::new();
             let mut precursors = Vec::new();
@@ -2186,7 +1839,6 @@ pub(crate) fn finalize_stream(
             Ok(())
         },
         |chunk, (ts, is, cache)| {
-            // One table's transfer scores in row order (NaN without a score).
             write_scores(&cached_scores_path(dir, chunk), &cache)?;
             t_store.add(ts)?;
             i_store.add(is)
@@ -2203,9 +1855,6 @@ pub(crate) fn finalize_stream(
         ),
         None => eprintln!("[mbr] wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1"),
     }
-    // The validation thresholds, VALIDATION_Q then mbr_fdr: the transfer
-    // estimates other than the pooled one are only counted at them, and
-    // the identified rows use the pooled estimate only.
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let t1 = Instant::now();
     let (t_done, i_done) = rayon::join(
@@ -2223,8 +1872,6 @@ pub(crate) fn finalize_stream(
         id_fdr.pooled_steps()
     );
 
-    // Pass 4: the reference cells of the run normalisation, from the
-    // identified rows' scores of pass 3.
     let t0 = Instant::now();
     let cells: Mutex<TrainingSample<Key, (NormCell, Option<f64>)>> =
         Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
@@ -2258,8 +1905,6 @@ pub(crate) fn finalize_stream(
                 {
                     continue;
                 }
-                // A fit without signal reports no quantity (see the outputs
-                // below), so it is no reference cell either.
                 let Some(e) = r.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
                     continue;
                 };
@@ -2309,15 +1954,8 @@ pub(crate) fn finalize_stream(
         secs(t1)
     );
 
-    // Pass 5: per run, the output rows into a temporary table, and the
-    // validation counts. The transfer and identified rows' scores are those
-    // of pass 3 (a transfer row without features or without a fold model,
-    // and an identified row without features, has none); the pseudo-transfer
-    // rows are scored here.
     let t0 = Instant::now();
     let shared_feature = shared::Model::shipped();
-    // Decoy transfer rows with a q-value, and their acceptance, by family:
-    // mass shift, RT shift, identity decoy.
     let count_decoy = |v: &mut MbrValidation, q: Option<f64>, f: usize| {
         let Some(q) = q else { return };
         v.decoy_transfers[f] += 1;
@@ -2346,7 +1984,6 @@ pub(crate) fn finalize_stream(
                 own: &ctx.own,
             };
             let v = &mut out.validation;
-            // Per row with a score: its family and held-out score.
             let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
             for (i, r) in rows.iter().enumerate() {
                 let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
@@ -2378,9 +2015,6 @@ pub(crate) fn finalize_stream(
             let q_of = |q: &QValues, e: Estimate, i: usize| {
                 scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
             };
-            // A fit whose amplitude is clamped to 0 found no signal: its
-            // quantity is missing, not zero, in the MBR table and the
-            // feature parquet.
             let reported = |r: &ExtractRow| {
                 let (k, trace) = quantity_rule(summaries, r.precursor);
                 r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
@@ -2390,8 +2024,6 @@ pub(crate) fn finalize_stream(
                     )
                 })
             };
-            // Probability that a transfer's measurement is wrong (1 without
-            // features, a fold model or a calibration).
             let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
             {
                 let at: Vec<usize> = (0..rows.len())
@@ -2420,7 +2052,6 @@ pub(crate) fn finalize_stream(
             }
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
-                    // Never reported: only the identity-decoy family's counts.
                     if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
                         count_decoy(v, q_of(&fdr, Estimate::Pooled, i), 2);
                     }
@@ -2481,11 +2112,6 @@ pub(crate) fn finalize_stream(
                             v.ms2_rows[0] += 1;
                             v.ms2_supported[0] += usize::from(m.supports());
                         }
-                        // A transfer without a quantity (zero-amplitude fit)
-                        // has nothing to report and is not accepted. The
-                        // transfer FDR pool and its decoys are unchanged,
-                        // so the estimator keeps its symmetry; only the
-                        // targets it would accept shrink.
                         let acc = transfer_accepted(q, mbr_fdr, quantity.is_some());
                         let downgrade = acc
                             && q.is_some_and(|q| {
@@ -2589,11 +2215,6 @@ pub(crate) fn finalize_stream(
             if out.rows.is_empty() {
                 return Ok(());
             }
-            // measurement_q of an accepted transfer: the running mean, over
-            // the run's accepted transfers in ascending probability of a
-            // wrong measurement, of that probability; its quant_q is the
-            // larger of that and its transfer_q (every row is kept; a
-            // transfer below the threshold keeps its transfer_q).
             let mut pool: Vec<(f64, usize)> = out
                 .wrong
                 .iter()
@@ -2658,11 +2279,8 @@ pub(crate) fn finalize_stream(
     );
     summary.fdr = fdr.counts.clone();
     summary.identified_fdr = id_fdr.counts.clone();
-    // Only the output tables are left to read.
     drop((all_summaries, t_models, i_models, norm, fdr, id_fdr));
 
-    // The per-run tables merged into the outputs: one thread merges, one
-    // writes `<base>.mbr.parquet`, and this one hands the rows on.
     summary.rows_written = write_merged(&paths, dir, lib, stems, params.mbr_path, on_features)?;
     write_mbr_validation(params.validation_path, &v)?;
     drop(tmp);
@@ -2675,10 +2293,6 @@ pub(crate) fn finalize_stream(
     Ok(summary)
 }
 
-/// Merges the per-run output tables `paths` into `<base>.mbr.parquet` at
-/// `mbr_path` and hands the rows to `on_features`, both in (precursor, run)
-/// order; the merge, the table writer and `on_features` run in three
-/// threads. Returns the rows written.
 fn write_merged(
     paths: &[PathBuf],
     dir: &Path,
@@ -2738,13 +2352,9 @@ fn write_merged(
                 break;
             }
         }
-        // Unblocks the merge when the rows were not all taken.
         drop(feature_rows);
         let merged = merger.join().expect("output merge thread");
         let written = table.join().expect("output table thread");
-        // The first error by cause: a failed writer or hand-off stops the
-        // merge, which then reports the stop. The table is only finished
-        // (renamed into place) when every row reached it.
         let (writer, n) = written?;
         handed?;
         merged?;
@@ -2753,7 +2363,6 @@ fn write_merged(
     })
 }
 
-/// Logs what finalize did.
 #[allow(clippy::too_many_arguments)]
 fn log_summary(
     stems: &[String],
@@ -2797,7 +2406,7 @@ fn log_summary(
         id_fdr.counts.unscored,
         id_fdr.counts.no_q,
         quant_feature_fdr.map_or(String::new(), |t| format!(
-            "; {} identified_below_threshold at --quant-feature-fdr {t}",
+            "; {} identified_below_threshold at quant_q {t}",
             v.identified_below_threshold
         ))
     );
@@ -2877,16 +2486,12 @@ fn log_summary(
     }
 }
 
-/// Whether a transfer with q-value `q` is accepted at `mbr_fdr`: it passes
-/// the threshold and has a quantity (a fit with zero amplitude has none).
 fn transfer_accepted(q: Option<f64>, mbr_fdr: f64, has_quantity: bool) -> bool {
     has_quantity && q.is_some_and(|q| q <= mbr_fdr)
 }
 
 #[cfg(test)]
 mod tests {
-    /// A transfer whose fit has zero amplitude reports no quantity and is
-    /// not accepted whatever its q-value.
     #[test]
     fn zero_amplitude_transfer_is_not_accepted() {
         use super::transfer_accepted;
@@ -2918,13 +2523,11 @@ mod tests {
             v.sort_unstable();
             v
         };
-        // Signal-to-noise 1..=10 for precursors 0..10, none for precursor 10.
         let mut snrs: Vec<Option<f64>> = (1..=10).map(|v| Some(v as f64)).collect();
         snrs.push(None);
         let mut s = summaries(&snrs);
         mark_trace_precursors(&mut s, 0.3);
         assert_eq!(marked(&s), vec![7, 8, 9]);
-        // ceil(0.25 * 10) = 3 as well; a tie at the cut is kept.
         snrs[6] = Some(8.0);
         let mut s = summaries(&snrs);
         mark_trace_precursors(&mut s, 0.25);
@@ -2932,7 +2535,6 @@ mod tests {
         let mut s = summaries(&snrs);
         mark_trace_precursors(&mut s, 1.0);
         assert_eq!(marked(&s), (0..10).collect::<Vec<u32>>());
-        // A small share still marks the brightest one.
         let mut s = summaries(&snrs);
         mark_trace_precursors(&mut s, 1e-9);
         assert_eq!(marked(&s), vec![9]);
@@ -2941,9 +2543,6 @@ mod tests {
         assert!(marked(&s).is_empty());
     }
 
-    /// Two clusters of runs, entries identified in all runs of one cluster:
-    /// the strata are cut from the prior of the pairs without an
-    /// identification, with ascending edges.
     #[test]
     fn strata_edges_are_ascending_and_bounded() {
         use quant::library::{DonorPsm, LibraryEntry};
@@ -2961,7 +2560,6 @@ mod tests {
                 consensus_rt: 10.0,
                 faims_cv: None,
                 ion_mobility: None,
-                // Cluster 0 (runs 0-5) or 1 (runs 6-11); a few misses.
                 donors: (0..6u16)
                     .map(|r| r + 6 * (p % 2) as u16)
                     .filter(|r| (u32::from(*r) + p) % 7 != 0)
@@ -2985,8 +2583,6 @@ mod tests {
         assert!(edges.len() < MAX_STRATA);
     }
 
-    /// The donor PEP feature reads the PEP of the library's best donor PSM,
-    /// whatever its run and pooled q-values.
     #[test]
     fn the_donor_pep_feature_reads_the_best_donor_psm() {
         use quant::align::AlignParams;
@@ -3025,14 +2621,11 @@ mod tests {
         }
     }
 
-    /// An even histogram fills every one of the `MAX_STRATA` strata, and the
-    /// last one survives packing into the family byte.
     #[test]
     fn an_even_prior_histogram_gives_max_strata() {
         let edges = edges_of_hist(&[1; 32]);
         assert_eq!(edges.len() + 1, MAX_STRATA, "{edges:?}");
         assert!(edges.windows(2).all(|w| w[0] < w[1]), "{edges:?}");
-        // Packed and unpacked, the last stratum is still distinct.
         let last = stratum_of(1.0, &edges);
         assert_eq!(usize::from(last), MAX_STRATA - 1);
         let packed = crate::transfer_fdr::unpack_family(pack_family(TARGET, last));
@@ -3059,7 +2652,6 @@ mod tests {
         let mut g = Lcg(3);
         for n in 0..40usize {
             for _ in 0..20 {
-                // Coarse values with ties and both zeros.
                 let v: Vec<f64> = (0..n)
                     .map(|_| match g.below(9) {
                         0 => 0.0,
@@ -3174,8 +2766,6 @@ mod tests {
         spilled_scores_match(3);
     }
 
-    /// Spilled and in-memory scores give one set of q-values, with `strata`
-    /// prior strata.
     fn spilled_scores_match(strata: usize) {
         let dir = tempfile::tempdir().unwrap();
         let mut g = Lcg(17);
@@ -3245,7 +2835,6 @@ mod tests {
         assert!(c.at(-100.0) >= c.at(0.0) && c.at(0.0) >= c.at(100.0));
         assert!(c.at(100.0) < 0.05 && c.at(-100.0) > 0.8);
         assert!(WrongCalibration::fit(Vec::new()).is_none());
-        // Tied margins are one point: the share of wrong ones.
         let c = WrongCalibration::fit(vec![(1.0, true), (1.0, false), (1.0, false), (1.0, false)])
             .unwrap();
         assert_eq!(c.p, vec![0.25]);
@@ -3260,8 +2849,6 @@ mod tests {
 
     #[test]
     fn tied_wrong_peak_probabilities_share_one_quant_q() {
-        // Groups 0.1 x1, 0.2 x3, 0.5 x2: each group gets the mean over all
-        // rows up to the end of the group.
         let rows = [0.2, 0.5, 0.1, 0.2, 0.5, 0.2];
         let q = quant_qs(&rows);
         let at = |p: f64| -> Vec<f64> {
@@ -3276,7 +2863,6 @@ mod tests {
         assert!(at(0.2).iter().all(|&v| (v - tie).abs() < 1e-12), "{q:?}");
         let all = (0.1 + 3.0 * 0.2 + 2.0 * 0.5) / 6.0;
         assert!(at(0.5).iter().all(|&v| (v - all).abs() < 1e-12), "{q:?}");
-        // Any permutation of the rows gives every row the same quant_q.
         let mut g = Lcg(11);
         let probs: Vec<f64> = (0..500)
             .map(|_| f64::from(g.below(7) as u32) / 10.0)

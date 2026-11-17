@@ -1,14 +1,3 @@
-//! `.pin` schema test for Andes's output.
-//!
-//! Asserts the schema invariant:
-//!   - `RawScore` is present and is the sole score column.
-//!   - `DeNovoScore`, `lnSpecEValue`, `lnEValue`, and `lnDeltaSpecEValue` are
-//!     absent.
-//!   - The additive feature columns (`EdgeScore`, `PrecursorIsotopeKL`,
-//!     `PrecursorSNR`, `DeltaRawScore`) are present, between `matchedIonRatio`
-//!     and `Peptide`.
-//!   - Every data row has at least as many columns as the header.
-
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -38,7 +27,6 @@ fn first_line(path: &std::path::Path) -> String {
         .expect("read first line")
 }
 
-/// Columns that must NOT appear in the schema.
 const GF_COLUMNS: [&str; 4] = [
     "DeNovoScore",
     "lnSpecEValue",
@@ -46,7 +34,6 @@ const GF_COLUMNS: [&str; 4] = [
     "lnDeltaSpecEValue",
 ];
 
-/// Additive feature columns Andes emits between matchedIonRatio and Peptide.
 const ADDITIVE_COLUMNS: [&str; 4] = [
     "EdgeScore",
     "PrecursorIsotopeKL",
@@ -70,8 +57,6 @@ fn rust_pin_header_is_gf_free_schema() {
     let header = first_line(&rust_pin_path);
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // RankScore (rank-LLR, formerly "RawScore") + RawScore (fused, formerly
-    // "StrongScore") present; GF columns absent.
     assert!(
         cols.contains(&"RankScore"),
         "RankScore column must be present:\n{header}"
@@ -87,7 +72,6 @@ fn rust_pin_header_is_gf_free_schema() {
         );
     }
 
-    // Additive feature columns present, between matchedIonRatio and Peptide.
     let matched_ratio_pos = cols
         .iter()
         .position(|c| *c == "matchedIonRatio")
@@ -106,7 +90,6 @@ fn rust_pin_header_is_gf_free_schema() {
         );
     }
 
-    // Proteins must be the very last column (after Peptide).
     let proteins_pos = cols
         .iter()
         .rposition(|c| *c == "Proteins")
@@ -125,10 +108,6 @@ fn rust_pin_header_is_gf_free_schema() {
 
 #[test]
 fn rust_pin_rows_have_at_least_header_column_count() {
-    // Run a real search and assert each data row has at least as many columns
-    // as the header (trailing Proteins columns may add more). Schema-only; no
-    // value comparison against any external reference fixture.
-
     let target_db = FastaReader::load_all(BufReader::new(
         File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
     ))
@@ -169,7 +148,6 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .build()
         .unwrap();
 
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);

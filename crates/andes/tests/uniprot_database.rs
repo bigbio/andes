@@ -1,6 +1,3 @@
-//! End-to-end: a UniProt XML database (`--database *.xml.gz`) searches exactly
-//! like the equivalent UniProt FASTA, and its annotation options run through.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -51,13 +48,11 @@ fn uniprot_xml_database_gives_the_fasta_pin() {
 #[test]
 fn annotated_site_mods_and_variants_run_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n\
-         79.966331,S,opt,any,Phospho,sites=annotated\n\
-         79.966331,T,opt,any,Phospho,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - Oxidation (M)\n    - {name: Phospho, sites: ST, restrict_to: annotated}\n",
     )
     .unwrap();
     let mods = mods.to_str().unwrap();
@@ -66,7 +61,7 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         "test-fixtures/BSA.xml.gz",
         &pin,
         &[
-            "--mods",
+            "--config",
             mods,
             "--uniprot-evidence",
             "curated",
@@ -82,25 +77,16 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         stderr.contains("14 annotated modification sites, 1 variant entries"),
         "{stderr}"
     );
-    // The mature chain after the propeptide (25-607) is a new N-terminus;
-    // BSA has no isoforms.
     assert!(
         stderr.contains("0 isoform entries (0 isoforms not rebuildable), 1 mature-chain entries"),
         "{stderr}"
     );
-    // Ten phosphosites on the canonical entry, inherited by the variant and
-    // the chain entry.
     assert!(
         stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 30 sites on 3 target proteins"),
         "{stderr}"
     );
-    // Every PIN row names either the canonical entry or the variant entry.
     let pin_text = std::fs::read_to_string(&pin).unwrap();
     assert!(pin_text.lines().skip(1).all(|l| l.contains("P02769")));
-    // Provenance columns: a row is flagged when any protein it names is a
-    // variant or chain entry (a decoy peptide the canonical and the chain
-    // decoys share names both); only flagged rows carry a DeltaRefScore. The
-    // canonical BSA entry competes in most spectra.
     let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
     let (var, chain, iso) = (col("IsVariant"), col("IsChain"), col("IsIsoform"));
@@ -130,11 +116,10 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         }
     }
 
-    // The same mods over FASTA: no annotation, so the restricted mods never apply.
     let out = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
-        &["--mods", mods, "--uniprot-variants", "--uniprot-chains"],
+        &["--config", mods, "--uniprot-variants", "--uniprot-chains"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -149,12 +134,10 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         );
     }
 
-    // XML at the default (experimental) evidence keeps only BSA's glycation
-    // site: there is no phosphosite, which is reported, not counted as one.
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("exp.pin"),
-        &["--mods", mods],
+        &["--config", mods],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -167,11 +150,11 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
 #[test]
 fn restricted_artefact_mods_warn_only_with_variants() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         0.984016,N,opt,any,Deamidated,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - {name: Deamidated, sites: N, restrict_to: annotated}\n",
     )
     .unwrap();
     let mods = mods.to_str().unwrap();
@@ -179,7 +162,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("on.pin"),
-        &["--mods", mods, "--uniprot-variants"],
+        &["--config", mods, "--uniprot-variants"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("WARN: Deamidated"), "{stderr}");
@@ -187,7 +170,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("off.pin"),
-        &["--mods", mods],
+        &["--config", mods],
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains(warning));
 }
@@ -224,9 +207,7 @@ fn rescoring_estimates_fdr_within_each_class() {
             "--uniprot-evidence",
             "curated",
             "--rescore-native",
-            // The fixture's few spectra pass no strict cutoff; keep every PSM
-            // so the table has rows to check.
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );
@@ -235,8 +216,6 @@ fn rescoring_estimates_fdr_within_each_class() {
         stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
         "{stderr}"
     );
-    // The proteoform table: one row per family member with accepted evidence,
-    // the canonical entry first.
     let table = std::fs::read_to_string(dir.path().join("xml.proteoforms.tsv")).unwrap();
     let mut lines = table.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -251,7 +230,6 @@ fn rescoring_estimates_fdr_within_each_class() {
     );
     let q_value: f64 = first[4].parse().unwrap();
     assert!((0.0..=1.0).contains(&q_value), "{first:?}");
-    // One class (FASTA): the step reports nothing and changes nothing.
     let plain = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
@@ -273,9 +251,7 @@ fn knockoff_variants_are_searched_but_never_reported() {
             "--uniprot-evidence",
             "any",
             "--rescore-native",
-            // Keep every PSM, knockoff rows included, so their absence from
-            // the reports is what is checked.
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );
@@ -316,24 +292,23 @@ fn knockoff_variants_are_searched_but_never_reported() {
 #[test]
 fn annotated_sites_get_knockoff_sites_and_a_site_table() {
     let dir = tempfile::tempdir().unwrap();
-    let mods = dir.path().join("mods.txt");
+    let mods = dir.path().join("run.yaml");
     std::fs::write(
         &mods,
-        "57.021464,C,fix,any,Carbamidomethyl\n\
-         79.966331,S,opt,any,Phospho,sites=annotated\n\
-         79.966331,T,opt,any,Phospho,sites=annotated\n",
+        "search:\n  fixed_mods: [\"Carbamidomethyl (C)\"]\n  variable_mods:\n    \
+         - {name: Phospho, sites: ST, restrict_to: annotated}\n",
     )
     .unwrap();
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("sites.pin"),
         &[
-            "--mods",
+            "--config",
             mods.to_str().unwrap(),
             "--uniprot-evidence",
             "curated",
             "--rescore-native",
-            "--fdr",
+            "--psm-fdr",
             "1",
         ],
     );
@@ -343,7 +318,6 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
         .find(|l| l.starts_with("Site claims:"))
         .unwrap_or_else(|| panic!("{stderr}"));
     assert!(!line.contains(" 0 knockoff sites"), "{line}");
-    // The real sites are counted without their knockoffs.
     assert!(
         stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 10 sites on 1 target proteins"),
         "{stderr}"

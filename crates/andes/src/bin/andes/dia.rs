@@ -1,36 +1,3 @@
-//! `--dia`: chromatographic co-elution features for the PIN.
-//!
-//! A DIA scan is searched against every peptide whose precursor m/z lies in its
-//! isolation window (`SearchParams::dia`), so a match is a spectrum-level
-//! hypothesis. A true peptide also elutes: its fragments rise and fall
-//! together in the neighbouring cycles of the same window, and its precursor
-//! rises with them in MS1. After the PIN is written, every row (targets and
-//! decoys alike) gets the columns of [`COLUMNS`], read from those traces:
-//!
-//! - the most intense matched b/y fragments of the row's scan (at most
-//!   [`TOP_FRAGMENTS`]) are traced over the scans of the same isolation window
-//!   within [`HALF_CYCLES`] cycles either side;
-//! - `dia_frag_corr`: mean Pearson correlation of each fragment trace with the
-//!   sum of the others; `dia_frag_coelute`: fragments correlating at least
-//!   [`COELUTE_MIN_CORR`];
-//! - `dia_apex_offset`: cycles between the scan and the apex of the summed
-//!   fragment trace; `dia_apex_frac`: the scan's share of the apex intensity;
-//! - `dia_ms1_corr`: correlation of the monoisotopic MS1 trace (nearest survey
-//!   scan of each cycle) with the summed fragment trace;
-//! - `dia_ms1_found`, `dia_ms1_abs_ppm`, `dia_ms1_log_int`, `dia_ms1_iso_cos`:
-//!   the monoisotopic MS1 peak in the survey scan nearest the row's scan, its
-//!   absolute mass error, log10 intensity, and the cosine of its first three
-//!   isotopes against averagine;
-//! - `dia_frag_log_int`: log10 summed intensity of the traced fragments in the
-//!   row's scan; `dia_n_frag`: b/y fragments matched in the row's scan;
-//! - `dia_support`, `dia_support_top1`: other scans of the same window within
-//!   [`HALF_CYCLES`] cycles where the same precursor (peptidoform, charge) has
-//!   a PIN row, and where that row is the scan's best. A true precursor is
-//!   matched across its elution; a chance match rarely repeats in the
-//!   neighbouring cycles (the peptide-centric step of MSFragger-DIA).
-//!
-//! The rescorer weighs them with the search features; nothing here filters.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -45,7 +12,6 @@ use rayon::prelude::*;
 
 use crate::predicted::{read_pin, write_pin, NONE};
 
-/// The columns added to the PIN, in order.
 pub(crate) const COLUMNS: [&str; 16] = [
     "dia_frag_corr",
     "dia_frag_coelute",
@@ -65,28 +31,15 @@ pub(crate) const COLUMNS: [&str; 16] = [
     "dia_sum_gain",
 ];
 
-/// Cycles traced either side of the row's scan. ponytail: fixed; ±5 cycles is
-/// ±8 s on the 1.65 s Astral cycle, learn it from the peak width if other
-/// cycle times need it.
 const HALF_CYCLES: usize = 5;
-/// Fragments traced per row.
 const TOP_FRAGMENTS: usize = 6;
-/// Shortest b/y ion (residues) considered.
 const MIN_ION_LEN: usize = 3;
-/// A fragment co-elutes when its trace correlates at least this with the rest.
 const COELUTE_MIN_CORR: f64 = 0.6;
-/// Fragment m/z tolerance (ppm).
 const FRAG_PPM: f64 = 20.0;
-/// Fragment m/z tolerance (ppm) for the summed-apex columns.
 const SUM_PPM: f64 = 10.0;
-/// MS1 m/z tolerance (ppm).
 const MS1_PPM: f64 = 10.0;
-/// Search fragment tolerance (ppm) of `--dia` on Orbitrap Astral MS2 when none is set.
 pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
 
-/// Adds the [`COLUMNS`] to every row of `pin`. `spectra` keep their peaks;
-/// `ms1[r]` holds input `r`'s survey scans; `run_ends[r]` is the exclusive end
-/// of input `r` in `spectra`.
 pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],
@@ -98,7 +51,6 @@ pub(crate) fn add_to_pin(
     let table = read_pin(pin, spectra, &cols)?;
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
 
-    // Scans of one input and one isolation window, in RT order.
     let mut by_window: HashMap<(usize, i64), Vec<u32>> = HashMap::new();
     for (i, s) in spectra.iter().enumerate() {
         let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
@@ -123,8 +75,6 @@ pub(crate) fn add_to_pin(
         .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
         .collect();
 
-    // Each precursor's rows by (window, cycle), with whether the row is its
-    // scan's best.
     let mut best_of_spec: HashMap<u32, f64> = HashMap::new();
     for r in &table.rows {
         if r.spec != NONE {
@@ -153,7 +103,6 @@ pub(crate) fn add_to_pin(
                     .collect()
             })
             .unwrap_or_default();
-        // One count per scan (a precursor can sit in several rows of a scan).
         seen.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         seen.dedup_by_key(|s| s.0);
         (
@@ -190,7 +139,6 @@ pub(crate) fn add_to_pin(
             let (s_any, s_top) = support(r.form, r.charge, w, p as u32);
             f[11] = s_any;
             f[12] = s_top;
-            // Neighbouring cycles of the same window: the scan before and after.
             let nb = |k: Option<usize>| k.map(|k| spectra[win[k] as usize].peaks.as_slice());
             let (n2, frac2, gain) = apex_sum(
                 spectra[r.spec as usize].peaks.as_slice(),
@@ -219,7 +167,6 @@ pub(crate) fn add_to_pin(
     Ok(())
 }
 
-/// The most intense peak within `tol_ppm` of `mz` in m/z-sorted `peaks`.
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {
     let tol = mz * tol_ppm * 1e-6;
     let lo = peaks.partition_point(|p| p.0 < mz - tol);
@@ -249,8 +196,6 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-/// The [`COLUMNS`] of one row: `scans` are the peak lists of the window's
-/// neighbouring cycles (RTs `rts`), `center` the row's own scan among them.
 fn row_features(
     scans: &[&[(f64, f32)]],
     center: usize,
@@ -261,7 +206,6 @@ fn row_features(
 ) -> [f64; COLUMNS.len()] {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-    // b and y ions of length >= MIN_ION_LEN; z = 2 too above a 2+ precursor.
     let mut ions: Vec<f64> = Vec::new();
     let mut prefix = mass.nterm;
     for i in 0..n.saturating_sub(1) {
@@ -388,12 +332,6 @@ fn row_features(
     ]
 }
 
-/// Summed-apex evidence: of the peptide's b/y ions (length >= [`MIN_ION_LEN`],
-/// charge up to min(2, precursor charge)), how many are present in at least two
-/// of the row's scan and the previous and next cycle of its window, as a count
-/// and a fraction, and how many the neighbours add to the scan. A weak true
-/// precursor spans 2-3 cycles on a fast DIA cycle, so its fragments repeat in
-/// the next scan; a chance match in one scan does not.
 fn apex_sum(
     here: &[(f64, f32)],
     prev: Option<&[(f64, f32)]>,
@@ -409,16 +347,12 @@ fn apex_sum(
         |s: Option<&[(f64, f32)]>, mz: f64| s.is_some_and(|s| best_peak(s, mz, SUM_PPM).is_some());
     for i in 0..n.saturating_sub(1) {
         prefix += mass.res[i];
+        let (b_len, y_len) = (i + 1, n - i - 1);
         for z in 1..=charge.min(2) {
             let zf = z as f64;
-            let mut mzs = Vec::with_capacity(2);
-            if i + 1 >= MIN_ION_LEN {
-                mzs.push((prefix + zf * PROTON) / zf);
-            }
-            if n - i - 1 >= MIN_ION_LEN {
-                mzs.push((total - prefix + H2O + zf * PROTON) / zf);
-            }
-            for mz in mzs {
+            let b = (b_len >= MIN_ION_LEN).then(|| (prefix + zf * PROTON) / zf);
+            let y = (y_len >= MIN_ION_LEN).then(|| (total - prefix + H2O + zf * PROTON) / zf);
+            for mz in [b, y].into_iter().flatten() {
                 ions += 1;
                 let (a, b, c) = (has(Some(here), mz), has(prev, mz), has(next, mz));
                 if a as u8 + b as u8 + c as u8 >= 2 {
@@ -438,26 +372,9 @@ fn apex_sum(
     (n2 as f64, frac, gain as f64)
 }
 
-/// The column [`refine_rt`] adds.
 pub(crate) const RT_REFINED: &str = "dia_rt_refined_err";
-/// Anchors needed in a run before its RT residual model is fitted.
 const RT_MIN_ANCHORS: usize = 300;
 
-/// Run-specific RT refinement, between two Percolator passes (`--dia --rescore`).
-///
-/// andes-rt is trained across labs, so in one run its calibrated prediction
-/// is off by a peptide-dependent residual (robust sigma ~0.43 min on the
-/// Astral benchmark). For each run, a gradient-boosted regressor learns that
-/// residual (observed minus `andesrt_predicted_rt`) from residue composition,
-/// length, oxidations and predicted RT, on the target rows Percolator's first
-/// pass accepts at q <= 1 %. Every row gets `|observed - refined|` in minutes,
-/// predicted out of fold (3 folds by peptide) so an anchor's own observation
-/// never shapes its value. On the benchmark this lifts precursors at 1 % true
-/// FDP by 32 / 60 over 5 Percolator seeds; ridge or anchors from `RawScore`
-/// alone help one raw only (docs/benchmarks/dia/README.md).
-///
-/// Returns `false` (PIN untouched) without andes-rt columns or when no run has
-/// [`RT_MIN_ANCHORS`] anchors.
 pub(crate) fn refine_rt(
     pin: &Path,
     spectra: &[Spectrum],
@@ -467,7 +384,6 @@ pub(crate) fn refine_rt(
 
     let t0 = Instant::now();
     let table = read_pin(pin, spectra, &[RT_REFINED.to_string()])?;
-    // SpecId, file and andes-rt predicted RT per row (read_pin keeps neither).
     let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = text.lines().filter(|l| !l.is_empty());
     let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
@@ -504,8 +420,6 @@ pub(crate) fn refine_rt(
                 .map_or(f64::NAN, |t| t / 60.0)
         })
         .collect();
-    // Features per peptidoform: residue counts, length, oxidations; predicted
-    // RT is appended per row.
     const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
     let form_x: Vec<Vec<f32>> = table
         .forms
@@ -537,16 +451,15 @@ pub(crate) fn refine_rt(
         let r = &table.rows[i];
         r.form != NONE && pred[i].is_finite() && obs[i].is_finite()
     };
-    // Folds by peptidoform, so a peptide's rows are never predicted by a model
-    // trained on it.
     let fold = |i: usize| (table.rows[i].form as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
 
     let mut err = vec![f64::NAN; table.rows.len()];
     let mut report = Vec::new();
-    for r in 0..files.len() {
-        let rows: Vec<usize> = (0..table.rows.len())
-            .filter(|&i| run[i] == r && usable(i))
-            .collect();
+    let mut by_run: Vec<Vec<usize>> = vec![Vec::new(); files.len()];
+    for i in (0..table.rows.len()).filter(|&i| usable(i)) {
+        by_run[run[i]].push(i);
+    }
+    for (r, rows) in by_run.into_iter().enumerate() {
         let anchors: Vec<usize> = rows
             .iter()
             .copied()
@@ -575,8 +488,6 @@ pub(crate) fn refine_rt(
                 min_hessian: 20.0,
                 ..TrainParams::default()
             };
-            // A residual the model cannot learn (the gate rejects it) leaves
-            // this fold unrefined: the column then equals andes-rt's own error.
             let model = train_gbdt_regression(&ds, &params, 42).ok();
             for &i in rows.iter().filter(|&&i| fold(i) % 3 == k) {
                 let shift = model
@@ -601,7 +512,6 @@ pub(crate) fn refine_rt(
         eprintln!("DIA RT refinement: {}", report.join("; "));
         return Ok(false);
     }
-    // Rows without a value (skipped run, no RT) take the median.
     let mut fin: Vec<f64> = err.iter().copied().filter(|e| e.is_finite()).collect();
     fin.sort_by(f64::total_cmp);
     let med = fin[fin.len() / 2];
@@ -619,12 +529,6 @@ pub(crate) fn refine_rt(
     Ok(true)
 }
 
-/// Percolator's positive-set FDR for training on a DIA PIN, unless the user
-/// set `--trainFDR`. A DIA PIN has about ten candidate rows per scan and few
-/// PSMs at 1 %, so the default (`--trainFDR 0.01`) trains on too few
-/// positives: 0.05 gave +139 / +17 at N@FDP_c 1 % (mean of 5 seeds) on the
-/// ProteoBench Astral raws, with the same measured error control
-/// (docs/benchmarks/dia/README.md).
 pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
     if !args
         .iter()
@@ -639,15 +543,12 @@ mod tests {
     use super::*;
     use onnx_infer::predictors::form::parse_peptide;
 
-    /// A peptide whose fragments and precursor elute together scores high
-    /// co-elution; the same scans read for a peptide with no signal score 0.
     #[test]
     fn coeluting_fragments_and_precursor_score_high() {
         let (_, mass) = parse_peptide("K.PEPTIDEKLR.A").unwrap();
         let z = 2u8;
         let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
         let mono = (total + H2O) / z as f64 + PROTON;
-        // y ions of the peptide, z = 1.
         let mut prefix = mass.nterm;
         let mut ys = Vec::new();
         for r in &mass.res[..mass.res.len() - 3] {
@@ -693,8 +594,6 @@ mod tests {
         let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1));
         assert_eq!((g[0], g[5], g[10]), (0.0, 0.0, 0.0));
 
-        // Summed apex: every y ion repeats in scans 3-5, so all count with
-        // either neighbour; a lone scan or an absent peptide counts none.
         let n = ys.len() as f64;
         let (n2, _, gain) = apex_sum(refs[4], Some(refs[3]), Some(refs[5]), &mass, z);
         assert_eq!((n2, gain), (n, 0.0));
@@ -703,9 +602,6 @@ mod tests {
         assert_eq!(apex_sum(refs[4], None, None, &other, z).0, 0.0);
     }
 
-    /// The refined error learns a peptide-dependent RT offset the predictor
-    /// misses (W-containing peptides 2 min late); without andes-rt columns
-    /// the PIN is left as it was.
     #[test]
     fn refine_rt_learns_a_run_offset() {
         let dir = tempfile::tempdir().unwrap();
@@ -715,8 +611,6 @@ mod tests {
         );
         let mut spectra = Vec::new();
         for i in 0..1200usize {
-            // Distinct peptides (i in base 8 over 8 residues); every third has a
-            // W, which elutes 2 min later than predicted.
             let core: String = (0..4)
                 .map(|k| b"AELKSVTG"[(i >> (3 * k)) & 7] as char)
                 .collect();
@@ -755,21 +649,17 @@ mod tests {
             .map(|l| l.split('\t').nth(c).unwrap().parse().unwrap())
             .collect();
         e.sort_by(f64::total_cmp);
-        // Unrefined: a third of rows are 2 min off. Refined: the offset is learned.
         assert!(
             e[e.len() * 9 / 10] < 0.5,
             "90th percentile {}",
             e[e.len() * 9 / 10]
         );
 
-        // No andes-rt column: PIN untouched.
         let bare = text.replace("\tandesrt_predicted_rt", "\tother");
         std::fs::write(&pin, &bare).unwrap();
         assert!(!refine_rt(&pin, &spectra, &|_| true).unwrap());
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), bare);
 
-        // A residual with nothing to learn (noise unrelated to the peptide)
-        // fails the regressor's quality gate; the column is still written.
         for (i, s) in spectra.iter_mut().enumerate() {
             let pred = 10.0 + (i % 100) as f64 * 0.5;
             s.rt_seconds = Some((pred + ((i * 7919) % 13) as f64 * 0.1) * 60.0);

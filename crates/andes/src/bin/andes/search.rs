@@ -1,5 +1,3 @@
-//! The standard database-search driver.
-
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
@@ -14,9 +12,9 @@ use crate::cli::{
 use crate::glyco_run::run_glyco;
 use crate::memlimit::available_memory_budget;
 use crate::model_select::{
-    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, default_aa_set_with_tag,
-    label_from_mods, load_param_from_store, parse_enzymes, resolve_metadataless_selection,
-    routing_protocol, warn_if_universal_protease_combo,
+    cli_fragment_tol_override, cli_fragmentation_to_activation_opt, label_from_mods,
+    load_param_from_store, parse_enzymes, resolve_metadataless_selection, routing_protocol,
+    search_aa_set, warn_if_universal_protease_combo,
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
@@ -42,33 +40,12 @@ use search::{
     SearchIndex, SearchParams, TopNQueue,
 };
 
-/// What [`retrieval_choice`] decided, and what to tell the user about it.
 pub(crate) struct RetrievalChoice {
-    /// Score each spectrum against a fragment-ion-index shortlist rather than
-    /// every peptidoform in its precursor windows.
     pub use_index: bool,
-    /// One human-readable clause naming the reason, or `None` when there is
-    /// nothing to report (`--glyco`, which looks candidates up by backbone mass).
     pub report: Option<String>,
-    /// Set when the user forced the index somewhere it cannot be used.
     pub refused_because: Option<&'static str>,
 }
 
-/// Pick the candidate-retrieval strategy: the fragment-ion index, because it
-/// was MEASURED to win at both resolutions:
-///
-///  - **High-resolution fragments**: +23% PSMs on Astral at equal entrapment FDP
-///    over per-spectrum enumeration.
-///  - **Low-resolution fragments**: only the most intense peaks vote
-///    (`fragment_index::vote_peaks_for`); with every peak voting, the wide bins
-///    let noise swamp the count (TMT 12,281 -> 4,368 PSMs @1%). Capped, the
-///    index matches enumeration on TMT and UPS1 at ~1/19 and ~1/11 of its CPU
-///    time (TMT 289 s vs 5,404 s).
-///
-/// `excluded_because` names a search the index cannot serve, which keeps
-/// enumeration: `--glyco` looks candidates up by backbone mass (precursor minus
-/// glycan) in its own sequon-only candidate table, and ETD/UVPD spectra fragment
-/// into ion series the b/y-only index does not hold.
 pub(crate) fn retrieval_choice(
     fragment_tol: model::tolerance::Tolerance,
     excluded_because: Option<&'static str>,
@@ -109,20 +86,8 @@ pub(crate) fn retrieval_choice(
     }
 }
 
-/// One MS1 scan's (m/z, intensity) peaks, m/z-sorted.
 type Ms1Peaks = Vec<(f64, f32)>;
 
-/// Mass span (Da) of one fragment-index chunk.
-///
-/// A chunk's index holds every peptidoform in its precursor mass window, so
-/// chunks are bounded by MASS SPAN, not only by spectrum count: 1,000 high-mass
-/// phospho spectra spanned 450 Da and their window held 39.7M forms / 3.3G ion
-/// entries. With the allocation-free index build a 150 Da slice at ~120k phospho
-/// forms per Da is ~18M forms / ~5 GB, and each record is expanded once per slice
-/// instead of once per 15 Da. The slice width follows the memory budget:
-/// measured on the phospho space, a 150 Da slice peaks at ~25 GB RSS, about
-/// 0.13 GB per Da over a ~5 GB base, so a 31 GB machine gets ~60 Da and a 96 GB
-/// allowance the full 150 Da. `flag` is `--fragment-index-slice-da`.
 fn index_chunk_span_da(flag: Option<f64>) -> f64 {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     match flag {
@@ -136,15 +101,12 @@ fn index_chunk_span_da(flag: Option<f64>) -> f64 {
     }
 }
 
-/// Whether a spectrum path is gzip-compressed (`.gz`).
 fn is_gzip_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
 }
 
-/// Sort one file's spectra by precursor mass and score them in fragment-index
-/// chunks, appending to `all_spectra` / `all_queues` with peaks dropped.
 #[allow(clippy::too_many_arguments)]
 fn score_mass_ordered(
     prepared: &PreparedSearch,
@@ -176,8 +138,6 @@ fn score_mass_ordered(
             if let Some(q) = quant.as_deref_mut() {
                 q.on_spectrum(&spec);
             }
-            // `--refine` re-scores unidentified spectra in its Pass 2, so their
-            // peaks stay resident.
             if !keep_peaks {
                 spec.peaks = Vec::new();
             }
@@ -187,28 +147,21 @@ fn score_mass_ordered(
     }
 }
 
-/// Measures each input file's fragment mass error once, before its spectra
-/// are scored, and installs it on the scorer (see
-/// [`search::fragment_error`]). Active on high-resolution acquisitions without
-/// a `--fragment-tol-*` override.
 struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
+    per_file: Vec<Option<scoring_crate::scoring::FragmentErrorModel>>,
 }
 
 impl FragmentErrorMeasurer {
-    /// Forget the previous file's measurement.
     fn start_file(&mut self, prepared: &PreparedSearch) {
         self.done = false;
+        self.per_file.push(None);
         if self.enabled {
             prepared.set_fragment_error(None);
         }
     }
 
-    /// Measure on `spectra` (a whole file, or its first chunk) unless this
-    /// file was measured already. Scores up to
-    /// [`search::fragment_error::SAMPLE_SPECTRA`] spectra around the median
-    /// precursor mass, in fragment-index slices when the index is on.
     fn measure<'s>(
         &mut self,
         prepared: &PreparedSearch,
@@ -241,6 +194,9 @@ impl FragmentErrorMeasurer {
         match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {
                 prepared.set_fragment_error(Some(m));
+                if let Some(last) = self.per_file.last_mut() {
+                    *last = Some(m);
+                }
                 eprintln!(
                     "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
@@ -267,24 +223,10 @@ impl FragmentErrorMeasurer {
     }
 }
 
-/// The windowed peak filter setting of the search. The isobaric filter (100 Da
-/// windows, top 20) trims the dense tails of ion-trap CID-MS2; on high-res
-/// HCD-MS2 TMT it measured neutral (TKO hrMS2: 13,390 PSMs off vs 13,387 on),
-/// and on high-res label-free Astral data the same filter lost ~14% of PSMs,
-/// so a high-res acquisition turns it off. An explicit `--peak-filter` wins.
 fn isobaric_peak_filter(explicit: Option<(f64, usize)>, high_res: bool) -> Option<(f64, usize)> {
     explicit.or(high_res.then_some((0.0, 0)))
 }
 
-/// Resolve the PIN path and the durable report base (the filtered q-value
-/// TSV and `<stem>.statistics.log` are named from it).
-///
-/// An explicit `--output-pin` is both. Otherwise the base is `--output-tsv`,
-/// else `--output-parquet`, else `./andes.pin`; with `keep_pin` the PIN is
-/// `<base>.pin`, without it the PIN goes into a temp dir stored in `tmp`.
-/// The output base: `--output-pin`, else `--output-tsv`, else
-/// `--output-parquet`, else `./andes.pin`. Report files and the default scratch
-/// and cache directories sit next to it.
 fn output_base(
     output_pin: Option<&Path>,
     output_tsv: Option<&Path>,
@@ -297,8 +239,6 @@ fn output_base(
         .unwrap_or_else(|| PathBuf::from("andes.pin"))
 }
 
-/// A temporary directory inside `scratch_dir` (created if missing), removed
-/// when dropped; an error names `--temp-dir`.
 fn scratch_tempdir(prefix: &str, scratch_dir: &Path) -> Result<tempfile::TempDir, String> {
     crate::cli::ensure_scratch_dir(scratch_dir)?;
     tempfile::Builder::new()
@@ -328,8 +268,6 @@ fn rescore_pin_destination(
     Ok((path, base))
 }
 
-/// Archives that unpack to the same run folder (`run.d.zip` and `run.d.tar`)
-/// would collide in the scratch directory: refuse them before any is unpacked.
 #[cfg(feature = "timstof")]
 fn check_distinct_d_archive_runs(inputs: &[PathBuf]) -> Result<(), String> {
     let mut seen: std::collections::HashMap<String, &PathBuf> = std::collections::HashMap::new();
@@ -348,10 +286,6 @@ fn check_distinct_d_archive_runs(inputs: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-/// Replace each archived `.d` among `inputs` (`.d.zip`, `.d.tar`,
-/// `.d.tar.gz`, `.d.tgz`, `.d.gz`) by its run folder, unpacked into a
-/// temporary directory inside `scratch_dir` that lives as long as the
-/// returned guard. `None` when no input is an archive.
 fn unpack_d_archives(
     inputs: &mut [PathBuf],
     scratch_dir: &Path,
@@ -391,15 +325,9 @@ fn unpack_d_archives(
 }
 
 pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
-    // Configure the global Rayon worker pool BEFORE anything runs on it: the
-    // acquisition sample of a `.d` opens the timsTOF reader, which runs on the
-    // global pool and would otherwise create it at the default size.
-    // `build_global()` panics if called twice; guard with `OnceLock` so repeated
-    // CLI invocations within a single test process don't blow up.
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -408,11 +336,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .expect("build_global");
     });
     let mut cli = cli;
+    if let Some(x) = &cli.xl {
+        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), x) {
+            cli.db.variable_mods = Some(v);
+        }
+    }
     if cli.top_n == 0 {
         return Err("--top-n must be at least 1".into());
     }
-    // Run-private temporary files go to `--temp-dir`, by default next to the
-    // output; the quantification settings read the resolved directory.
+    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
+        return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
     let scratch_dir = crate::cli::dir_or_output_dir(
         cli.temp_dir.as_deref(),
         &output_base(
@@ -422,28 +356,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
     cli.temp_dir = Some(scratch_dir.clone());
-    // Archived Bruker `.d` inputs are unpacked into the scratch directory for
-    // the run (removed at exit) and searched as `.d` folders.
-    // QPX records the inputs as given; the unpacked run folders are removed on exit.
     let original_spectrum_paths = cli.spectrum.clone();
+    let standalone = cli.glyco || cli.xl.is_some();
     let _d_archives = unpack_d_archives(&mut cli.spectrum, &scratch_dir)?;
-    // `--mbr`: the per-run artifacts go to `--quant-dir`, or to a temporary
-    // directory that lives until the end of the run.
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
-    // Under `--glyco`, `--mbr` is the glyco path's own match-between-runs
-    // inside the intact-glycopeptide tables: no per-run artifacts.
     if cli.mbr && !cli.glyco {
         check_mbr_args(&cli)?;
-        // Before the scratch directory exists: a rejected run writes nothing.
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
-        // `--label --mbr` transfers in memory, without per-run artifacts.
         if cli.quant_dir.is_none() && cli.label.is_none() {
             let dir = scratch_tempdir("andes-quant-", &scratch_dir)?;
             cli.quant_dir = Some(dir.path().to_path_buf());
             _mbr_tmp = Some(dir);
         }
     }
-    // The per-run artifacts are named by the input's stem.
     if cli.quant_dir.is_some() {
         crate::quant_run::check_unique_stems(&cli.spectrum)?;
     }
@@ -451,22 +376,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
         eprintln!("{warning}");
     }
-    // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
-    // list for a multi-protease digest; the FIRST entry is the primary (drives
-    // model selection via build_selection_key + the cleavage-credit feature),
-    // the rest widen candidate enumeration (params.extra_enzymes). The common
-    // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
-    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.db.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.clone().expect("database validated in main");
-    // PIN destination. Normally `--output-pin`. Under `--rescore` /
-    // `--rescore-native` without an explicit path, the PIN (and Percolator's
-    // result files, which sit next to it) goes next to the report base —
-    // `--output-tsv`, else `--output-parquet`, else `./andes` — as
-    // `<base>.pin` when `--keep-pin` is true (the default), or to a temp dir
-    // (kept alive in `_rescore_tmp`, removed at function exit) when it is false.
     let mut _rescore_tmp: Option<tempfile::TempDir> = None;
     let (output_pin_path, report_base) = rescore_pin_destination(
         cli.output_pin.as_deref(),
@@ -485,14 +399,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
-    // ── 1. Load the target database (FASTA or UniProt XML) ───────────────────
     let uniprot_opts = input::UniProtOptions {
-        variants: cli.uniprot_variants,
-        isoforms: cli.uniprot_isoforms,
-        chains: cli.uniprot_chains,
-        evidence: cli.uniprot_evidence,
+        variants: cli.db.uniprot_variants,
+        isoforms: cli.db.uniprot_isoforms,
+        chains: cli.db.uniprot_chains,
+        evidence: cli.db.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: cli.knockoffs,
+            per_variant: cli.db.knockoffs,
             enzyme: search_enzyme,
         }),
     };
@@ -500,7 +413,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         loaded,
         annotations,
         site_knockoffs,
-    } = load_claim_database(&database_path, &cli.annotations, &uniprot_opts)?;
+    } = load_claim_database(&database_path, &cli.db.annotations, &uniprot_opts)?;
     let target_db = loaded.db;
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
@@ -532,9 +445,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(stats) => log_uniprot_load(stats, &uniprot_opts),
         None => {
             for (set, flag) in [
-                (cli.uniprot_variants, "--uniprot-variants"),
-                (cli.uniprot_isoforms, "--uniprot-isoforms"),
-                (cli.uniprot_chains, "--uniprot-chains"),
+                (cli.db.uniprot_variants, "--uniprot-variants"),
+                (cli.db.uniprot_isoforms, "--uniprot-isoforms"),
+                (cli.db.uniprot_chains, "--uniprot-chains"),
             ] {
                 if set {
                     eprintln!(
@@ -547,14 +460,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
-    let decoy_strategy =
-        search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy).ok_or_else(|| {
-            format!(
-                "unknown --decoy-strategy '{}' (expected shuffle/reverse/sequon/none)",
-                cli.decoy_strategy
-            )
-        })?;
+    let decoy_strategy = cli.decoy_strategy;
     let proteases = search::decoy::Proteases {
         primary: search_enzyme,
         extra: extra_enzymes.clone(),
@@ -564,10 +470,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             EnzymeSpecificity::NonSpecific => 0,
         },
     };
-    // Isoform and chain entries share most peptides with their canonical
-    // entry. A non-specific search shuffles each entry's whole sequence on its
-    // own, so the decoys share none, and the provenance columns (and the
-    // decoy search space) would differ between targets and decoys.
     if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
         && proteases.is_non_specific()
         && target_db.proteins.iter().any(|p| {
@@ -585,7 +487,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    // andes is about to generate the decoys: the database must not hold any.
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
             eprintln!("{warning}");
@@ -594,8 +495,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(
         &target_db,
-        &cli.decoy_prefix,
-        cli.decoy_suffix.as_deref(),
+        &cli.db.decoy_prefix,
+        cli.db.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
         &proteases,
@@ -605,63 +506,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64()
     );
 
-    // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
-    //
-    // If --mods is given, parse the mods.txt file. Otherwise use the
-    // defaults: CAM fixed on C, Oxidation variable on M and Acetyl
-    // variable on the protein N-term.
-    //
-    // `num_mods_from_file` is populated only when --mods is given and the
-    // file contains a `NumMods=N` line; it overrides the default
-    // `max_variable_mods_per_peptide` (3) below.
-    let (mut aa, num_mods_from_file) = match &cli.mods {
-        Some(path) => {
-            let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
-                .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_mods_from_file(path)
-                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-                .build()
-                .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
-            eprintln!(
-                "Loaded modifications from {} (NumMods={})",
-                path.display(),
-                n.map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
-            );
-            (set, n)
-        }
-        // No --mods: andes defaults (CAM-C fixed, Ox-M variable, protein-N-term
-        // Acetyl variable). The isobaric
-        // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
-        None => (default_aa_set_with_tag(None)?, None),
-    };
+    let mut aa = search_aa_set(&cli.db, None)?;
 
-    // ── 4. Load Param scoring model ───────────────────────────────────────────
-    //
-    // The model is selected from the canonical Parquet store: for mzML/.raw/.d
-    // the activation+analyzer are auto-detected from metadata; for MGF
-    // (metadata-less) the `--fragmentation` / `--fragment-tol-*` flags drive
-    // `resolve_metadataless_selection`.
-    // Detect the format from the underlying extension, stripping a trailing
-    // `.gz` first so `spectra.mzML.gz` routes as mzML (not mis-routed to MGF by
-    // the bare `.gz`); input::open_maybe_gz then reads it transparently. Native
-    // `.raw` (Thermo, .NET 8) and `.d` (Bruker timsTOF, pure Rust) are
-    // binary/directory and never gzipped. Anything else is treated as MGF.
     let (is_mzml, is_raw, is_d, is_mgf) = input_format_flags(&spectrum_path);
 
-    // MUST precede every spectrum read. The EThcD labelling policy is consulted
-    // by the mzML reader itself, and the activation pre-pass below reads 64
-    // spectra: installed any later, that pre-pass sees the default (`false`),
-    // relabels EThcD as HCD, and the dominant activation that drives model
-    // selection is wrong no matter what `--ethcd-activation` said. The one-shot
-    // warning would also fire there under the wrong policy and suppress the
-    // correct message for the rest of the run.
     input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
 
-    // A `.raw` that cannot be opened (no .NET runtime, unreadable file) fails
-    // here. The metadata samplers below treat an unreadable file as "no
-    // metadata", so a failure left to them would run the search on the default
-    // low-resolution acquisition and only report the error after it.
     if is_raw {
         #[cfg(feature = "thermo")]
         input::ThermoRawReader::open(&spectrum_path).map_err(|e| e.to_string())?;
@@ -672,16 +522,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .into());
     }
 
-    // Detect the activation and the analyzer from the input for auto-routing.
-    // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). The two are read independently, so a
-    // file that names its analyzer but no activation still routes by the
-    // analyzer. An explicit `--fragmentation` overrides the detected
-    // activation (see the resolution below).
     let (detected_activation, detected_instrument) = detect_acquisition_metadata(&spectrum_path);
     let instrument_was_detected = detected_instrument.is_some();
-    // The model, the fragment tolerance and the score features are chosen once,
-    // from the first input: every further input must be of the same class.
     for other_path in &spectrum_paths[1..] {
         let other = detect_acquisition_metadata(other_path);
         if let Some(warning) = compare_with_first_input(
@@ -694,9 +536,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The acquisition context, carried separately from the model chosen below.
-    // Without analyzer metadata and without a `--fragment-tol-*` unit, the
-    // fragment resolution is read from the peaks of the first spectra.
     let peak_evidence = if !instrument_was_detected
         && cli.fragment_tol_ppm.is_none()
         && cli.fragment_tol_da.is_none()
@@ -726,11 +565,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         peak_evidence,
         sample_ms2_meta(&spectrum_path, is_mzml, is_raw, is_d),
     );
+    if let (Some(said), Some(read)) = (cli.sdrf_dissociation, acquisition.activation) {
+        if said != read {
+            eprintln!(
+                "WARN: the SDRF dissociation method is {} but {} records {}; andes follows the file",
+                said.name(),
+                spectrum_path.display(),
+                read.name()
+            );
+        }
+    }
 
-    // The label the run carries: `--tmt <plex>` names it; otherwise it is read
-    // from the reporter ions (also under an explicit `--protocol`, so the
-    // injected tag below gets the kit's mass: TMTpro and iTRAQ 8-plex are
-    // 304.2 Da, not the 229.2 / 144.1 Da of TMT 6–11 and iTRAQ 4-plex).
     let detect = || {
         detect_isobaric_sampled(
             &spectrum_path,
@@ -748,9 +593,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (None, _) => None,
     };
-    // Reporter ions are the evidence of the data; a label declared only by the
-    // modifications (no reporters read, e.g. an MS3 run without them in the
-    // sample) routes the same way.
     let label = label.or_else(|| {
         if cli.protocol == Protocol::Auto {
             label_from_mods(&aa)
@@ -760,26 +602,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     let route_protocol = routing_protocol(cli.protocol, label);
     let t_phase = std::time::Instant::now();
-    // The block also returns the (activation, instrument) it routed on and the
-    // chosen model id, so the resolved-parameter banner can report what was
-    // detected separately from what the substituted model was trained on.
     let (mut param, routed_activation, routed_instrument, resolved_model_id) = {
-        // ── Resolve (activation, instrument) for the Parquet model store. ─────
-        //
-        // Metadata-first precedence: a fully detected (activation, instrument)
-        // wins outright. When only the activation method is detected (analyzer
-        // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
-        // metadata-less resolver folds in `--fragmentation` (which wins over the
-        // detected activation) and the `--fragment-tol-*` flags. Default when no metadata: CID / low-res
-        // (cid_lowres_tryp).
         let detected = (detected_activation, detected_instrument);
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected {
-                // An EXPLICIT --fragmentation must win over detection. It previously
-                // only applied when detection returned no instrument, so on any normal
-                // mzML it was silently discarded — including the EThcD case, where the
-                // reader relabels ETD to HCD and the warning tells the user to "pass
-                // --fragmentation to override". It could not override anything.
                 (Some(method), Some(inst)) => {
                     let chosen = match cli.fragmentation {
                         Fragmentation::Auto => method,
@@ -802,9 +628,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     (chosen, Some(inst))
                 }
-                // The analyzer is recorded but no scan names its activation:
-                // keep the analyzer and take the activation from
-                // `--fragmentation`, else the default of the analyzer's class.
                 (None, Some(inst)) => {
                     let explicit = cli_fragmentation_to_activation_opt(cli.fragmentation);
                     let chosen = explicit.unwrap_or(if inst.is_high_resolution() {
@@ -844,21 +667,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.model_id_override.as_deref(),
         )?;
         eprintln!("Param model: {model_id} (from store)");
-        // A model not trained on this data's cell (a substituted enzyme,
-        // analyser, activation or protocol) was announced by one warning in
-        // `load_param_from_store`.
         (p, activation, instrument_opt, model_id)
     };
-    // Optional GBDT truncation (`--gbdt-max-trees`). Applied to the loaded model
-    // before any scoring so every code path sees the same ensemble.
-    //
-    // BOTH ensembles are truncated. The shipped models carry a frag-intensity
-    // GBDT (~799 KB) *and* a rich-ion GBDT (~842 KB) of comparable size, each
-    // walked per fragment per candidate, so truncating only the first would
-    // leave about half the ensemble cost untouched.
-    // Glyco keeps the full ensembles: the glyco path is candidate-generation bound
-    // (the ensembles profile at ~0.3% of its wall time), so truncating there would
-    // give up prediction fidelity for no speed. An explicit flag still applies.
     let gbdt_k = cli.gbdt_max_trees.unwrap_or(if cli.glyco {
         0
     } else {
@@ -884,24 +694,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         truncate(&mut param.frag_intensity_model, "frag-intensity");
         truncate(&mut param.rich_ion_model, "rich-ion");
     }
-    // Stamp the requested isobaric protocol onto the loaded model so the dense-
-    // spectrum windowed peak filter (ScoredSpectrum) engages on TMT/iTRAQ
-    // searches even when model selection fell back to a non-isobaric table
-    // (there is no bundled CID-TMT model, so `--protocol TMT` resolves to
-    // `cid_lowres_tryp`, whose stored protocol is Standard).
-    // An explicit `--protocol` wins outright. When left at `auto` (the default),
-    // auto-detect TMT/iTRAQ from MS2 reporter ions (mzML/MGF) so the dense-peak
-    // windowed filter engages with zero config — the same path `--protocol TMT`
-    // takes today. Detection returns None for label-free data, so non-isobaric
-    // runs stay byte-identical.
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => {
             param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho
         }
-        // `--protocol auto` (the default) engages the isobaric windowed peak
-        // filter when the run carries a label. Label-free runs are unchanged.
         Protocol::Auto => match label {
             Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
                 eprintln!(
@@ -929,14 +727,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         _ => {}
     }
-    // C1: parameter-free path only (no explicit --mods). When the protocol
-    // resolves to TMT/iTRAQ, or `--tmt` names the kit, inject the tag as a fixed mod on K + peptide
-    // N-term so labeled peptides match their precursor mass — otherwise the
-    // reporter filter engages but every labeled candidate is +tag Da off and
-    // misses. The kit comes from `label` when known, else the protocol's
-    // smaller kit. With explicit --mods the user owns the mod set (they may
-    // already supply the tag), so those runs stay byte-identical.
-    if cli.mods.is_none() {
+    if cli.db.fixed_mods.is_none() {
         let tag = match (param.data_type.protocol, label) {
             (
                 model::protocol::Protocol::TMT,
@@ -950,27 +741,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho, _) => {
                 Some(input::IsobaricLabel::Itraq.tag())
             }
-            // `--tmt PLEX` names the kit whatever the protocol (e.g. phospho).
             (_, Some(l)) if cli.tmt.is_some() => Some(l.tag()),
             _ => None,
         };
         if let Some((name, mass)) = tag {
-            aa = default_aa_set_with_tag(Some((name, mass)))?;
+            aa = search_aa_set(&cli.db, Some((name, mass)))?;
             eprintln!(
                 "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
-                 into the candidate set (no --mods given)"
+                 into the candidate set (no --fixed-mods given)"
             );
         }
     }
     let mut scorer = RankScorer::new(&param);
-    // Feature tolerances and the fragment-index vote mode follow the
-    // acquisition, not the model's instrument.
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
-    // `--dia` on Orbitrap Astral MS2: retrieval and features at 7 ppm unless set.
-    // The per-run measurement needs 100 confident PSMs, which a DIA sample rarely
-    // has, so it would leave 20 ppm (docs/benchmarks/dia: 7 ppm +135 / +72
-    // precursors at 1 % FDP over 20 ppm on Astral). Only Astral was measured; an
-    // Orbitrap run can sit several ppm off, which an uncentred 7 ppm window cuts.
     let dia_tol_default = cli.dia
         && acquisition.analyzer == Some(InstrumentType::OrbitrapAstral)
         && cli.fragment_tol_ppm.is_none()
@@ -982,8 +765,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::dia::FRAGMENT_TOL_PPM
         );
     }
-    // An explicit `--fragment-tol-*` sets the feature tolerance on every input
-    // format, detected analyzer or not, and replaces the per-run measurement.
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
         if instrument_was_detected && !dia_tol_default {
@@ -1000,18 +781,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     report_annotated_site_mods(&aa, &target_db);
-    warn_restricted_artefacts(&aa, cli.uniprot_variants);
+    warn_restricted_artefacts(&aa, cli.db.uniprot_variants);
 
-    // ── 5. Build SearchParams ─────────────────────────────────────────────────
-    // The `sites=annotated` mods, whose knockoff-site placements exist only for
-    // the site claims and are not reported.
     let restricted_site_masses: Vec<f64> = aa
         .distinct_mods()
         .iter()
         .filter_map(|m| m.annotated_site_mass)
         .collect();
-    // `--label`: the channel labels join the search as variable mods that
-    // every labelable site of a peptide carries alike.
     let label_spec = match &cli.label {
         Some(text) => Some(crate::quant_run::label_spec(&cli, text)?),
         None => None,
@@ -1019,29 +795,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(spec) = &label_spec {
         aa = with_label_mods(&aa, spec)?;
     }
-    // Fixed terminal mods stack with a site claim on a peptide's first or
-    // last residue.
     let fixed_terminal_mods = aa.fixed_terminal_deltas();
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
-    // Ranges are validated (min <= max) by the clap value parsers.
     let (charge_min, charge_max) = cli.charge;
     params.charge_range = charge_min..=charge_max;
-    // Round-8: resolve the default by MODE, not by sniffing the value. An explicit
-    // `--isotope-error` (any range, including -1..2) is always honoured verbatim.
-    // Unset under --glyco defaults to 0..=2: an MS1 envelope audit found the firmware
-    // mis-picks the monoisotopic peak only ever too HIGH (0 of 23,907 scans needed a
-    // negative shift), while the iso=-1 arm emitted 28.5% of all candidate rows for
-    // 0.29% of the correct answers at a ~53:47 target:decoy ratio - pure FDR dilution.
-    // Dropping it measured +81 backbone-correct @1%.
     let iso_default = if cli.glyco { (0, 2) } else { (-1, 2) };
     let (iso_min, iso_max) = cli.isotope_error.unwrap_or(iso_default);
     params.isotope_error_range = iso_min..=iso_max;
-    // Pass 2 co-isolation requires MS1 scans, captured by the mzML, Thermo
-    // `.raw` and Bruker `.d` readers. MGF (no MS1) makes `--chimeric` inert, so
-    // keep `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2,
-    // PIN column/SpecId gates, top-N forcing) — the run is then identical to a
-    // normal search.
     let has_ms1 = is_mzml || is_raw || is_d;
     let chimeric_active = cli.chimeric && has_ms1;
     if cli.chimeric && !has_ms1 {
@@ -1050,9 +811,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
              is MGF, so the co-isolation cascade is disabled and the search runs normally."
         );
     }
-    // The cascade pairs MS2 with its preceding MS1 — it is MS2-only by
-    // construction. Ignore a non-2 `--ms-level` under `--chimeric` so MS3+
-    // (e.g. TMT SPS-MS3) can never enter the search on any input format.
     if chimeric_active && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
@@ -1060,9 +818,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
-    // `--dia`: every scan is searched across its whole isolation window. The
-    // chimeric cascade and the precursor calibration both read a selected
-    // precursor the scan does not have, so they are off.
     if cli.dia {
         if !(is_mzml || is_raw) {
             return Err("--dia needs mzML or Thermo .raw input (isolation windows and MS1)".into());
@@ -1072,7 +827,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         params.dia = true;
     }
-    // `--glyco-index-sequon-only`: glyco-only index shrink (see the flag's doc).
     if cli.glyco_index_sequon_only && !cli.glyco {
         return Err(
             "--glyco-index-sequon-only requires --glyco (the standard peptide \
@@ -1086,15 +840,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "candidate index: N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    // `--precursor-mono auto`: MS1 isotope-envelope precursor correction. Glyco
-    // only (the standard path's -1..2 sweep and PIN are untouched), and it needs
-    // MS1, so mzML, Thermo `.raw` or Bruker `.d`; anywhere else it is inert and
-    // says so. When
-    // active the input is streamed with its MS1 link exactly like `--chimeric`
-    // and each chunk's precursors are corrected BEFORE they reach the search.
     let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && has_ms1;
-    // `auto` is the default and the correction is glyco-only, so a search
-    // without --glyco is not told about it; a glyco search without MS1 is.
     if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
         eprintln!(
             "WARN: --precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
@@ -1116,34 +862,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             mono_params.backoff
         );
     }
-    // Fallback isolation half-width (Da) used only when the file omits per-scan
-    // isolation offsets; a fixed sensible default (was the --isolation-halfwidth flag).
     params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
-    // `--chimeric` keeps the same top-N candidates per scan as a plain search.
-    // Pass 2 takes the best one as the primary peptide; the alternatives stay in
-    // the PIN, so a rescorer can promote a lower-ranked candidate. Measured on
-    // the Astral entrapment database, keeping them does not raise the true FDP
-    // at Percolator's nominal 1%.
     params.top_n_psms_per_spectrum = cli.top_n;
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
-    // Glycopeptides frequently carry >=2 missed cleavages (the glycan sterically
-    // protects the nearby cleavage site), so the general default of 1 silently
-    // drops ~6% of true glycopeptides from the digest — concentrated at high
-    // charge. Validated: raising to 2 for --glyco gave z5 22->54 (+2.5x) and
-    // +116 backbone-correct @1% on the pooled AI-ETD benchmark. Floor glyco at 2.
-    // Round-8: raised again 2 -> 3. A sequon-bearing tryptic peptide often needs a
-    // third missed cleavage to reach a length the glyco path can score, and the
-    // reference identification set for this benchmark was itself produced with 3.
-    // Validated on the pooled AI-ETD benchmark: +44 backbone-correct @1%, +91
-    // glycoPSMs, +19 unique glycopeptides, +19 glycosites — and an ENTRAPMENT
-    // measurement (yeast/E.coli, where a glyco ID is false by construction) puts the
-    // true error at 0.14%, i.e. it buys IDs without spending error budget.
-    // Install engine-wide scoring settings from validated CLI values. Done once, before
-    // any spectrum is scored, so no scoring code reads the environment.
     let peak_filter = match cli.peak_filter.as_deref() {
         None => None,
         Some(spec) => {
@@ -1180,10 +905,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     params.max_missed_cleavages = if cli.glyco {
-        // The floor is a default, not a mandate. Raising it to 3 grows the candidate
-        // index by ~40% (13.2M -> 18.8M candidates on a 20k-protein human FASTA,
-        // +4.4 GB resident), which is the difference between running and being
-        // OOM-killed on a 16 GB machine. A user who asked for fewer gets fewer.
         let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
         if explicit && cli.max_missed_cleavages < 3 {
             eprintln!(
@@ -1204,11 +925,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
     params.max_variable_mods_per_peptide = cli.max_mods;
-    if let Some(n) = num_mods_from_file {
-        params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
-    }
     if let Some(spec) = &label_spec {
-        // The labels count apart from the other mods' allowance.
         let enzymes: Vec<_> = std::iter::once(params.enzyme)
             .chain(params.extra_enzymes.iter().copied())
             .collect();
@@ -1239,14 +956,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.cal_min_spec_keys = n;
     }
     params.precursor_mass_shift_ppm = 0.0;
-    params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
+    params.refine_select_psm_fdr = cli.psm_fdr();
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
-        // Auto: strong re-ranking pays on high-res (sharp fragment peaks → the
-        // intensity / rich-ion GBDTs separate target/decoy); on low-res it
-        // collapses the candidate pool → use rank. Keyed off the acquisition's
-        // resolution class.
         ScoreFlag::Auto => {
             if acquisition.high_res {
                 search::ScoreMode::Strong
@@ -1255,13 +968,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    // Every search retrieves its candidates from the out-of-core base-peptide
-    // index; the glyco driver materialises its own sequon-only table from it.
-    // The retrieval strategy is chosen by `retrieval_choice` and reported once;
-    // `--fragment-index` overrides it. Searches the fragment-ion index cannot
-    // serve keep per-spectrum enumeration.
     let retrieval_excluded: Option<&'static str> = if cli.glyco {
         Some("--glyco looks candidates up by backbone mass")
+    } else if cli.xl.is_some() {
+        Some("--xl looks candidates up by peptide mass")
     } else if !search::fragment_index::covers_activation(param.data_type.activation) {
         Some(
             "it holds only b/y ions, and this activation method fragments into \
@@ -1270,7 +980,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    if let (false, Some(reason)) = (cli.glyco, retrieval_excluded) {
+    if let (false, Some(reason)) = (standalone, retrieval_excluded) {
         eprintln!(
             "[auto] {} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
              index is not used: {reason})",
@@ -1305,20 +1015,42 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
-    // it is silently inert, which would mislead a user who set it on purpose (code
-    // review). Warn rather than error so it stays a no-op knob outside glyco mode.
-    // The flag defaults on, so only a value typed on the command line warns.
     if !cli.glyco && arg_present("--glyco-hcd-pair") {
         eprintln!(
             "WARN: --glyco-hcd-pair has no effect without --glyco (it only drives \
              paired-scan candidate generation in glyco mode); ignoring it."
         );
     }
-    // --glyco is a standalone driver (see the `if cli.glyco` early-return block
-    // below): it writes its own `.glyco.pin` and skips the standard PIN/rescore/
-    // TSV/Parquet/refine machinery entirely. Silently ignoring those flags would
-    // mislead a user who expects them to apply, so fail fast instead.
+    if cli.xl.is_some() {
+        let mut unsupported: Vec<&str> = Vec::new();
+        for (on, flag) in [
+            (cli.output_tsv.is_some(), "--output-tsv"),
+            (cli.output_parquet.is_some(), "--output-parquet"),
+            (cli.rescore_native, "--rescore-native"),
+            (cli.refine, "--refine"),
+            (cli.psm_fdr.is_some(), "--psm-fdr"),
+            (cli.pep.is_some(), "--pep"),
+            (cli.lfq, "--lfq"),
+            (cli.mbr, "--mbr"),
+            (cli.quant_dir.is_some(), "--quant-dir"),
+            (cli.chimeric, "--chimeric"),
+            (cli.localize.is_some(), "--localize"),
+            (cli.tmt.is_some(), "--tmt"),
+            (cli.label.is_some(), "--label"),
+        ] {
+            if on {
+                unsupported.push(flag);
+            }
+        }
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
+                 tables, scored by the pair score)",
+                unsupported.join(", ")
+            )
+            .into());
+        }
+    }
     if cli.glyco {
         let mut unsupported: Vec<&str> = Vec::new();
         if cli.output_tsv.is_some() {
@@ -1336,8 +1068,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.refine {
             unsupported.push("--refine");
         }
-        if cli.fdr.is_some() {
-            unsupported.push("--fdr");
+        if cli.psm_fdr.is_some() {
+            unsupported.push("--psm-fdr");
         }
         if cli.pep.is_some() {
             unsupported.push("--pep");
@@ -1351,14 +1083,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        // FDR-TRUST GUARD (adversarial review): reverse/shuffle decoys are generated from
-        // the TARGET proteome and do NOT preserve N-X-S/T sequon DENSITY, but glyco
-        // scoring gates BOTH targets and decoys on that sequon — so a generated
-        // decoy search space is systematically different and the glyco FDR is
-        // ANTI-CONSERVATIVE (q-values users should not trust). Trustworthy glyco FDR
-        // needs an EXTERNAL target+decoy FASTA consumed with `--decoy-strategy none`.
-        // `sequon` restores the N-X-S/T sequon density, so it does NOT trip this
-        // warning; only the sequon-depleting strategies do.
         if !matches!(
             decoy_strategy,
             search::decoy::DecoyStrategy::None | search::decoy::DecoyStrategy::Sequon
@@ -1370,14 +1094,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
                  `--decoy-strategy sequon`, or supply an EXTERNAL target+decoy \
                  FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
-                ds = cli.decoy_strategy
+                ds = crate::cli::decoy_strategy_name(decoy_strategy)
             );
         }
-        // Multi-file paired-scan guard (code review): --glyco-hcd-pair pairs each
-        // ETD spectrum to a nearby HCD spectrum by position + precursor m/z over the
-        // concatenated `all_spectra`. Across multiple --spectrum inputs the pairing
-        // window would straddle file boundaries and silently mis-pair, so disable it
-        // (rather than warn-and-continue) for multi-file runs. Validated per-file.
         if cli.glyco_hcd_pair && spectrum_paths.len() > 1 {
             eprintln!(
                 "WARN: --glyco-hcd-pair is disabled for {} --spectrum inputs: paired-scan \
@@ -1387,16 +1106,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // --refine + --chimeric run together correctly but do NOT fully stack.
-    //
-    // Mechanism: chimeric secondary PSMs do not collapse the refinement's
-    // confident-anchor set (the anchor set GROWS when both are on). What shrinks
-    // is the pool of spectra left for refinement to rescue: chimeric already
-    // explains many of them, so refinement has less work available, not worse
-    // anchors. See the docs for the measured numbers.
-    //
-    // Warn so the user isn't surprised that the combination is much closer to
-    // chimeric alone than to the sum.
     if params.chimeric && cli.refine {
         eprintln!(
             "WARN: --refine + --chimeric do not fully stack in this release — chimeric \
@@ -1409,16 +1118,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
 
-    // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
-    // One consolidated record of every resolved search parameter, so a
-    // (zero-config) run is fully reproducible/auditable from its log. Values that
-    // were auto-detected from the data/store are tagged [detected].
     eprintln!("──────── andes resolved parameters ────────");
     eprintln!("  spectra        : {}", spectrum_path.display());
-    // The activation/instrument lines report what the RUN was routed on and say
-    // where each value came from; the model's own training regime is shown next
-    // to it, so a substituted model (e.g. a high-res HCD model serving a TOF
-    // run) is never presented as the detected instrument.
     let model_source = if cli.model_id_override.is_some() {
         "--model"
     } else {
@@ -1457,14 +1158,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
                   search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
     }
-    eprintln!(
-        "  mods           : {}",
-        if cli.mods.is_some() {
-            "from --mods file"
+    let mod_names = |fixed: bool| {
+        let names: Vec<String> = params
+            .aa_set
+            .distinct_mods()
+            .iter()
+            .filter(|m| m.fixed == fixed && m.parts.is_empty())
+            .map(|m| model::mod_spec::describe(m))
+            .collect();
+        if names.is_empty() {
+            "none".to_string()
         } else {
-            "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected"
+            names.join(", ")
         }
-    );
+    };
+    eprintln!("  fixed mods     : {}", mod_names(true));
+    eprintln!("  variable mods  : {}", mod_names(false));
     eprintln!(
         "  max var-mods   : {} per peptide",
         params.max_variable_mods_per_peptide
@@ -1489,31 +1198,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!(
         "  decoy          : {:?} (prefix {})   chimeric: {}",
-        decoy_strategy, cli.decoy_prefix, params.chimeric
+        decoy_strategy, cli.db.decoy_prefix, params.chimeric
     );
     eprintln!("───────────────────────────────────────────");
 
-    // ── 6+7. Stream-load + chunked search ─────────────────────────────────
-    //
-    // Spectra are parsed and scored in chunks of CHUNK_SIZE. Each chunk's
-    // peak data lives in RAM only for the time it takes to score the chunk,
-    // then is dropped before the next chunk is read. The Vec<Spectrum> that
-    // survives into the PIN/TSV writers retains scan/title/precursor_mz/scan
-    // (the only fields the writers read) but has empty peaks.
-    //
-    // This bounds peak-data memory to ~CHUNK_SIZE × per-spectrum peak size
-    // regardless of dataset size — fixes the Astral-scale OOM where loading
-    // all 123k spectra at once pushed RSS to 28 GB on a 31 GB VM.
     const CHUNK_SIZE: usize = 5000;
 
     let t_phase = std::time::Instant::now();
 
     eprintln!("Using {} worker threads", cli.threads);
 
-    // `PreparedSearch::fragment_tolerance_da`: the Da window of the glyco
-    // peptide-first fragment index on low-res data (high-res data uses the
-    // ppm retrieval window). Node scoring takes the argument but does not
-    // read it, and site evidence uses the scorer's PIN tolerance.
     let fragment_tol_da = 0.5_f64;
 
     let bench_cap = if cli.max_spectra > 0 {
@@ -1522,11 +1216,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         usize::MAX
     };
     let ms_level_u32 = cli.ms_level as u32;
-    // Native `.raw`/`.d` readers search MS2 (identification) scans only. A non-2
-    // `--ms-level` would otherwise make the Thermo iterator emit MS3 scans (which
-    // carry a precursor and would be searched — e.g. TMT SPS-MS3 reporter scans)
-    // or MS1 (no precursor → an empty run). Force MS2 + warn. `--ms-level` still
-    // applies to mzML.
     if (is_raw || is_d) && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} is ignored for native .raw/.d input; these formats \
@@ -1535,8 +1224,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // The precursor-calibration pre-pass reads mzML, MGF and Bruker `.d`. A
-    // Thermo `.raw` would be misread as MGF, so skip calibration and warn.
     if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
         eprintln!(
             "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
@@ -1545,9 +1232,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
 
-    // Calibration pre-pass on the out-of-core index. The index is
-    // content-addressed and precursor-tolerance independent, so the main pass
-    // reopens the same cached file the pre-pass built.
     let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
     let index_path = index_cache_path(&idx, &params, &cache_dir);
     if params.precursor_cal_mode != PrecursorCalMode::Off {
@@ -1557,7 +1241,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &scorer,
             fragment_tol_da,
-            &cli.decoy_prefix,
+            &cli.db.decoy_prefix,
             &index_path,
         )
         .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
@@ -1598,27 +1282,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Content-addressed cache path, so repeated searches over the same FASTA +
-    // params (and the calibration pre-pass just above) share one on-disk index
-    // without rebuilding.
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
         &params,
         &scorer,
         fragment_tol_da,
-        &cli.decoy_prefix,
+        &cli.db.decoy_prefix,
         &index_path,
     )
     .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-    // A run that mixes MS2 activations (decision-tree or alternating HCD/EThcD,
-    // HCD/CID) is scored scan by scan: each scan with the model chosen for its own
-    // activation, by the rules of the run-level choice. An explicit `--model` or
-    // `--fragmentation` names the model for the whole run, and the glyco driver
-    // pairs its own scans, so those keep the single run-level model.
     if cli.model_id_override.is_none()
         && cli.fragmentation == Fragmentation::Auto
-        && !cli.glyco
+        && !standalone
         && instrument_was_detected
         && !resolved_model_id.is_empty()
     {
@@ -1653,8 +1329,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let (model_id, mut p) = route;
-            // The fragment-ion index holds b/y ions only; a scan of an activation it
-            // cannot serve keeps the run's model.
             if index_on && !search::fragment_index::covers_activation(p.data_type.activation) {
                 return None;
             }
@@ -1695,14 +1369,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let bench_mode = cli.max_spectra > 0;
 
-    // ── Quantification setup (`--tmt` / `--lfq`) ──────────────────────────────
-    // Reporter ions are read from each MS2 while its peaks are still in memory;
-    // MS1 scans (purity, label-free chromatograms) and MS3 scans (SPS-MS3
-    // reporters) are captured by the readers next to the MS2 stream and handed
-    // to the collector per file. Quantification itself runs after rescoring.
     let high_res = acquisition.high_res;
-    // Without --tmt-level, SPS-MS3 reporters are read from the MS3 when the
-    // low-resolution MS2 cannot separate the plex's channels.
     let tmt_level = match (cli.tmt_level, cli.tmt) {
         (Some(level), _) => level,
         (None, Some(plex))
@@ -1721,9 +1388,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => 2,
     };
-    // `--glyco --mbr` is the glyco path's own match-between-runs (RT
-    // alignment + XIC transfer inside the intact-glycopeptide tables), not the
-    // peptide library stages. It needs the glyco LFQ stage's features.
     if cli.glyco && cli.mbr && !cli.lfq {
         return Err(
             "--glyco --mbr needs --lfq: match-between-runs transfers the identified intact \
@@ -1733,8 +1397,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut quant: Option<QuantCollector> = QuantSettings::from_cli(&cli, high_res, tmt_level)?
         .map(|mut settings| {
-            // Recorded in each run's MS2 table, where the library matches
-            // its fragment spectra and extract scores transfers.
             settings.fragment_tol = Some(scorer.feature_match_tolerance());
             QuantCollector::new(settings)
         });
@@ -1760,10 +1422,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if cli.glyco {
-            // `--lfq` is the glyco driver's intact-glycopeptide MS1
-            // quantification (`<base>.glyco.lfq.tsv` and the roll-ups), and
-            // `--mbr` its own match-between-runs; the isobaric machinery is
-            // not wired there.
             let mut unsupported: Vec<&str> = Vec::new();
             if s.plex.is_some() {
                 unsupported.push("--tmt");
@@ -1785,16 +1443,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
-                 or add --rescore so only PSMs at q<=--fdr are quantified."
+                 or add --rescore so only PSMs at q<=--psm-fdr are quantified."
             );
         }
         if !cli.glyco {
             eprintln!("Quantification: {}", s.describe());
         }
     }
-    // `--predict`: load the predictors now so a missing model fails before the
-    // search. Glyco mode writes its own `.glyco.pin` and takes none.
-    let predictors = if cli.glyco {
+    let predictors = if standalone {
         None
     } else {
         crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
@@ -1802,28 +1458,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         eprintln!("Predict: {}", p.describe());
     }
-    // Peaks normally go once a spectrum is scored; `--refine` re-scores in its
-    // Pass 2 and `--predict ms2` compares them with predicted spectra.
-    let keep_peaks = cli.refine || cli.dia || predictors.as_ref().is_some_and(|p| p.needs_peaks());
+    let keep_peaks = cli.refine
+        || cli.dia
+        || cli.localize.is_some()
+        || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
-    // Exclusive end index in `all_spectra` of each input, in input order.
     let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
-    // `--dia`: each input's MS1 scans, for the co-elution features.
     let mut dia_ms1: Vec<Vec<model::scan::Ms1Scan>> = Vec::new();
 
     let t_search_start = std::time::Instant::now();
 
-    // Pipeline mzML/MGF parsing with Rayon scoring via a bounded sync_channel.
-    // The parser runs on a dedicated thread and pushes
-    // CHUNK_SIZE-sized `Vec<Spectrum>` payloads through the channel; the main
-    // thread (this one) drains the channel and calls `prepared.run_chunk` on
-    // each chunk (which is itself Rayon-parallel internally). With capacity 2
-    // the parser stays at most one chunk ahead of the scorer, overlapping
-    // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
-    // ~2-3s per chunk) overlaps scoring instead of running serially.
-    // MGF carries no MS level (always treated as MS2). (Native `.raw`/`.d` are
-    // warned separately above.)
     let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF carries no MS \
@@ -1834,18 +1479,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         false
     };
-    let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
+    let _ = mzml_warn_ms_level_emitted;
 
-    // Under `--chimeric` (mzML or Thermo `.raw`), stream MS2 in CHUNK_SIZE batches,
-    // each paired with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
-    // run per chunk on this thread and peaks are dropped immediately, so RSS stays
-    // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
-    // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
-    // pipeline in the `else` branch handles the (default) non-chimeric path.
     let ms1_input = chimeric_active || mono_active;
     let mut parse_stats = ParseStats::default();
-    // `--precursor-mono`: one entry per accumulated spectrum (aligned with
-    // `all_spectra`); stays empty when the flag is off.
     let mut mono_table: Vec<Option<MonoCorrection>> = Vec::new();
     let mut mono_stats = MonoStats::default();
     let mut mono_dump: Option<MonoDump> = match (&cli.precursor_mono_dump, mono_active) {
@@ -1863,11 +1500,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => None,
     };
 
-    // The per-run fragment mass error (high-res acquisitions without an
-    // explicit `--fragment-tol-*`; the glyco driver keeps its own tolerances).
     let mut measurer = FragmentErrorMeasurer {
-        enabled: acquisition.high_res && frag_tol_override.is_none() && !cli.glyco,
+        enabled: acquisition.high_res && frag_tol_override.is_none() && !standalone,
         done: false,
+        per_file: Vec::with_capacity(spectrum_paths.len()),
     };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
@@ -1915,24 +1551,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
             let cap = remaining_cap;
-            // The cascade is MS2-only by construction (MS2 paired with its preceding
-            // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
-            // range to admit MS3 (the .raw chunked reader is already MS2-only).
             let mslevel = 2;
-            // Label-free quantification reads the run's MS1 scans and each MS2's
-            // context from this path too (the reader keeps them next to the
-            // per-chunk co-isolation link).
             let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
-            // Fragment-index retrieval scores MASS-ORDERED chunks (see the
-            // non-MS1 branch below). Each spectrum keeps the part of its linked
-            // MS1 scan Pass 2 reads, so a mass-ordered chunk can carry its own
-            // MS1 link.
-            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !cli.glyco;
-            // Nothing is scored before the whole file is read, so an
-            // uncompressed mzML is parsed by every thread; the chunks sent are
-            // the ones the sequential reader sends.
+            let index_ordered = chimeric_active && params.fragment_index_top_k > 0 && !standalone;
             let parallel_read = index_ordered
                 && file_is_mzml
                 && capture_ms1
@@ -2046,9 +1669,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk_spectra, prefix);
                 }
-                // `--precursor-mono`: correct precursors from the linked MS1
-                // BEFORE anything scores the chunk, so every consumer (the glyco
-                // driver, the PIN's ExpMass) sees the corrected m/z.
                 if mono_active {
                     correct_chunk(
                         &mut chunk_spectra,
@@ -2094,25 +1714,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         offset,
                     );
                     all_queues.extend(queues);
-                } else if !cli.glyco {
-                    // Unreachable today (`mono_active` implies `--glyco`), kept so
-                    // an MS1-linked stream never silently skips the peptide search.
+                } else if !standalone {
                     let queues = prepared.run_chunk(&chunk_spectra, offset);
                     all_queues.extend(queues);
                 }
                 file_offset += chunk_spectra.len();
                 ms1_linked += chunk_link.ms1_peaks.len();
                 for mut spec in chunk_spectra.into_iter() {
-                    // Peaks are normally dropped post-scoring to bound memory
-                    // (only the metadata is needed downstream). Under `--refine`
-                    // or `--glyco` we RETAIN them: refine's Pass-2 re-scores
-                    // unidentified spectra; glyco_search_run needs the full
-                    // peak lists for oxonium ion detection. Memory cost: full
-                    // peak buffer stays resident (acceptable; both are opt-in).
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !keep_peaks && !cli.glyco {
+                    if !keep_peaks && !standalone {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2129,11 +1741,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     INDEX_CHUNK_SIZE,
                     span_da
                 );
-                // Pass 1 per mass-ordered chunk; Pass 2 once over the whole file
-                // afterwards. A chunk's co-isolated precursors are spread over the
-                // whole mass range, so a per-chunk Pass 2 would expand most of the
-                // database once per chunk; one pass expands it once. Peaks stay
-                // resident until then (they already are, for the mass sort).
                 let base = all_spectra.len();
                 let mut scored: Vec<Spectrum> = Vec::with_capacity(pending.len());
                 let mut queues: Vec<search::psm::TopNQueue> = Vec::with_capacity(pending.len());
@@ -2193,7 +1800,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 first_errors,
             }
         } else if params.fragment_index_top_k > 0
-            && !cli.glyco
+            && !standalone
             && !cli.dia
             && file_is_mzml
             && !is_gzip_path(input_path)
@@ -2201,8 +1808,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .is_some_and(|q| q.settings.needs_ms1() || q.settings.needs_ms3())
         {
-            // Fragment-index mode scores mass-ordered chunks, so nothing is
-            // scored until the whole file is read; read it with every thread.
             let (mut spectra, errors) =
                 input::read_spectra_parallel(input_path, ms_level_u32, ms_level_u32, cli.threads)
                     .map_err(|e| format!("read mzML {}: {e}", input_path.display()))?;
@@ -2316,13 +1921,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
 
-            // Fragment-index mode (issue #76) scores MASS-ORDERED chunks: the
-            // per-chunk index covers the peptidoforms of the chunk's precursor
-            // windows, and a chunk in file order spans the whole mass range
-            // (its index is the whole database; 100 GB on phospho). Collect the
-            // stream, sort by precursor mass, then chunk. Peaks for every
-            // spectrum are held until scored (~1 GB for 100k high-res MS2).
-            let mass_ordered = params.fragment_index_top_k > 0 && !cli.glyco;
+            let mass_ordered = params.fragment_index_top_k > 0 && !standalone;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -2335,33 +1934,23 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     pending.extend(chunk);
                     continue;
                 }
-                // SPEED (--glyco): the per-spectrum PEPTIDE search is pure waste in
-                // glyco mode — glyco_search_run re-derives its own candidates from
-                // `prepared` + the retained peaks and writes its own `.glyco.pin`
-                // (the standard PIN is skipped), so these PSM queues are discarded.
-                // Skip the scoring (parsing + peak retention below still run); ~16%
-                // faster on glyco. Non-glyco path is unchanged.
-                if !cli.glyco {
+                if !standalone {
                     measurer.measure(&prepared, chunk.iter(), None);
                     let offset = all_spectra.len();
                     let queues = prepared.run_chunk(&chunk, offset);
                     all_queues.extend(queues);
                 }
                 for mut spec in chunk.into_iter() {
-                    // See the chimeric-loop note above: normally peaks are
-                    // dropped post-scoring to bound memory, but `--refine` or
-                    // `--glyco` needs the full peak lists retained.
                     if let Some(q) = quant.as_mut() {
                         q.on_spectrum(&spec);
                     }
-                    if !keep_peaks && !cli.glyco {
+                    if !keep_peaks && !standalone {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
             }
-            // The parser has sent every spectrum; its MS1 scans are complete.
             let stats = match parser_handle.join() {
                 Ok(Ok((stats, scans))) => {
                     run_scans = scans;
@@ -2370,11 +1959,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
                 Err(_) => return Err("parser thread panicked".into()),
             };
-            // `--dia`: the MS1 precursor gate reads this input's survey scans.
-            // Mass-ordered scoring holds every spectrum until here, so the gate
-            // sees the whole run.
             if cli.dia && mass_ordered {
-                prepared.set_dia_ms1(run_scans.ms1.clone());
+                prepared.set_dia_ms1(if quant.is_some() {
+                    run_scans.ms1.clone()
+                } else {
+                    std::mem::take(&mut run_scans.ms1)
+                });
             }
             if mass_ordered {
                 score_mass_ordered(
@@ -2399,7 +1989,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
         merge_parse_stats(&mut parse_stats, file_stats);
         if cli.dia {
-            dia_ms1.push(if quant.is_some() {
+            let gated = prepared.take_dia_ms1();
+            dia_ms1.push(if !gated.is_empty() {
+                gated
+            } else if quant.is_some() {
                 run_scans.ms1.clone()
             } else {
                 std::mem::take(&mut run_scans.ms1)
@@ -2415,7 +2008,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         run_ends.push(all_spectra.len());
     }
-    // Inputs skipped by the bench cap contribute no spectra.
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
 
     if parse_stats.error_count > 0 {
@@ -2476,17 +2068,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }
 
-    // Drain the per-spectrum materialized candidates accumulated during the scan
-    // into `prepared.candidates` so the PIN/TSV writers resolve every PSM's
-    // `candidate_idxs` against a real candidate slice.
     prepared.sync_materialized_candidates();
 
-    // The glyco PIN carries the Mono columns whenever the correction ran, fitted or
-    // not, so its header follows the command line and the input format, never the
-    // data: the PINs of separately searched runs share one header.
     let mono_columns = mono_active;
-    // No MS1 reached the correction (an MS2-only mzML, or no charges): nothing was
-    // fitted, so the search runs as with the flag off and the Mono columns are 0.
     let mono_active = mono_active && {
         if mono_stats.fitted == 0 {
             eprintln!(
@@ -2530,22 +2114,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
-    // Corrected precursors search a 0..=1 window: the `+2` step only carries the
-    // Hex+Fuc/NeuGc composition degeneracy once the monoisotope is right
-    // (bigbio/andes#64 arm F; rationale on `coupled_isotope_window`). Explicit
-    // window flags win, and nothing changes unless an MS2 was actually fitted.
-    // The glyco scorer reads its window from the prepared index's params, which
-    // are borrowed for the rest of the run, so the narrowed window travels as a
-    // `GlycoConfig` override instead of a mutation.
     let (window, narrowed) = crate::mono::coupled_isotope_window(
         mono_active,
         cli.isotope_error,
         params.isotope_error_range.clone(),
     );
     let glyco_isotope_override = if narrowed {
-        // Only a spectrum whose envelope fitted, with its best fit inside the
-        // narrowed window, has a verified monoisotope; the rest keep the wide
-        // window they would have had without the flag.
         let mask: Vec<bool> = mono_table
             .iter()
             .map(|c| {
@@ -2572,14 +2146,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Downstream code uses these names.
     let spectra = all_spectra;
     let mut queues = all_queues;
 
-    if cli.glyco {
+    if standalone {
         eprintln!(
-            "Standard peptide search skipped in --glyco mode (PSMs unused; glyco driver \
+            "Standard peptide search skipped in --{} mode (PSMs unused; the driver \
              derives its own candidates); {} spectra loaded ({:.2}s)",
+            if cli.glyco { "glyco" } else { "xl" },
             spectra.len(),
             search_elapsed.as_secs_f64()
         );
@@ -2592,10 +2166,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──
-    // When --glyco is active, we run the glyco-PSM scoring driver over ALL
-    // accumulated spectra (candidates from a sequon-only table built from the
-    // out-of-core index) and write a separate `.glyco.pin` file.  The standard PIN is skipped.
+    if cli.xl.is_some() {
+        crate::xl_run::run_xl(
+            &cli,
+            &spectra,
+            &prepared,
+            &report_base,
+            spectrum_paths,
+            &run_ends,
+            t_total,
+        )?;
+        return Ok(());
+    }
+
     if cli.glyco {
         let unfitted: Vec<Option<MonoCorrection>>;
         let mono_for_pin = if mono_active {
@@ -2617,44 +2200,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             acquisition.high_res,
             mono_for_pin,
             glyco_isotope_override,
-            // `--glyco --lfq`: the collector holds each run's MS1 scans, the
-            // intact-glycopeptide quant driver's input. `None` without `--lfq`.
             quant.as_ref(),
             t_total,
         )?;
         return Ok(());
     }
 
-    // ── 7b. PTM-refinement cascade (Pass-2) ───────────────────────────────────
-    // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra
-    // against the confidently-identified proteins, with the refinement
-    // variable-mod tier applied. Computed BEFORE the Pass-1 PIN write (it reads
-    // `&queues`/`&spectra` immutably). The Pass-2 winners ARE merged into
-    // `queues` (force_pushed per scan by `merge_into_pass1`) and written to a
-    // SINGLE unified PIN, so a scan's unmodified Pass-1 and modified Pass-2 PSMs
-    // compete in one report. Pass-2 rows carry `IsRefinement = 1`: one threshold
-    // over the whole PIN lets that small group run at about twice the nominal FDR
-    // (Astral entrapment: ~2% at a merged 1%), so for a 1% FDR on modified PSMs,
-    // threshold the `IsRefinement = 1` rows on their own downstream.
     let refine_output = if cli.refine {
-        // Refinement config: explicit YAML or the built-in 5-mod default tier.
         let base_cfg = match &cli.refine_config {
             Some(p) => search::RefineConfig::from_yaml_str(&std::fs::read_to_string(p)?)
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        // Max variable mods and the entrapment diagnostic for refinement come from
-        // the refine config/tier (set them in the `--refine-config` YAML).
         let cfg = base_cfg;
 
-        // High-res signal: the acquisition's resolution class. High-res
-        // fragments match in ppm (20 ppm vs 0.5 Da ion-trap), which is exactly
-        // the regime where the near-isobaric refinement deltas (e.g.
-        // deamidation +0.984 vs a C13 isotope error) are resolvable.
         let high_res = acquisition.high_res;
 
-        // `high_res_only` comes from the refine config/tier (set it in the
-        // `--refine-config` YAML; the former CLI overrides were removed).
         let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
             eprintln!(
@@ -2662,8 +2223,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             None
         } else {
-            // Target-only db recovered from the Pass-1 combined index; the
-            // cascade regenerates its own decoys for the scoped Pass-2.
             let target_db = idx.target_db();
             let t_refine = std::time::Instant::now();
             let out = search::refinement::run_refinement(
@@ -2674,10 +2233,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &params,
                 &scorer,
                 &cfg,
-                0.01, // report_q = 1% FDR report threshold (spec)
+                0.01,
                 high_res,
                 fragment_tol_da,
-                &cli.decoy_prefix,
+                &cli.db.decoy_prefix,
                 decoy_strategy,
                 1,
             );
@@ -2691,26 +2250,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // ── 8. Write PIN — single unified list (Pass-1 ⊕ merged refine) ──────────
-    // Bench mode still writes PIN (so we can diff against the reference
-    // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    // `pin_candidates`/`pin_index` own the list written to PIN/TSV: the merged
-    // Pass-1 ⊕ Pass-2 candidates when --refine is active, else the Pass-1 pool
-    // moved straight through. Owned (not borrowed) so they outlive the writes.
-    // Owned PIN candidate list + index. In the refine arm we MOVE
-    // `prepared.candidates` into the merge (which extends it in place); in the
-    // non-refine arm we move it straight into the tuple. Either way the Pass-1
-    // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
-    // point (verified), so the move is safe.
     let refine_merged = refine_output.is_some();
-    // `--dia`: every target and decoy peptidoform of the database, for the
-    // peptide-centric pass (Phase B), enumerated before the index is dropped.
-    let dia_library: Vec<search::candidate_gen::Candidate> = if cli.dia && cli.dia_pc {
-        prepared.out_of_core_candidates_where(|_, _| true)
-    } else {
-        Vec::new()
-    };
+    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2729,16 +2271,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         pin_index = idx;
     }
 
-    // Engine-wide retention-time features (additive): after all PSMs are scored
-    // and the final PIN candidate pool is fixed, run per-run RT self-calibration
-    // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
-    // onto each PSM, one calibration per input file. Neutral 0.0 when observed
-    // RT is unavailable or a file's calibration cannot be fit.
     output::populate_rt_features_per_run(&spectra, &mut queues, &pin_candidates, &run_ends);
 
-    // Provenance (additive): entry class, gap to the best Reference candidate,
-    // isotope-mimic flag. All 0 on a FASTA search except IsotopeMimic with
-    // isotope-like variable mods.
     output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
 
     output::write_pin(
@@ -2759,46 +2293,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
     if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1.clone())?;
-    }
-    if cli.dia && cli.dia_pc {
-        let mut start = 0usize;
-        let runs: Vec<crate::dia_pc::Run> = run_ends
-            .iter()
-            .zip(spectrum_paths.iter())
-            .zip(dia_ms1)
-            .map(|((&end, path), ms1)| {
-                let r = crate::dia_pc::Run {
-                    range: start..end,
-                    ms1,
-                    stem: crate::quant_run::run_stem(path),
-                };
-                start = end;
-                r
-            })
-            .collect();
-        let dia_pin = output_pin_path.with_extension("dia.pin");
-        let accession = |c: &search::candidate_gen::Candidate| {
-            pin_index.protein_at(c.protein_index).map_or_else(
-                || format!("PROT_{}", c.protein_index),
-                |p| p.accession.clone(),
-            )
-        };
-        let nce = acquisition.predictor_nce().map(|v| v as f32);
-        crate::dia_pc::write_pin(
-            &dia_pin,
-            &output_pin_path,
-            &spectra,
-            runs,
-            &dia_library,
-            &accession,
-            params.charge_range.clone(),
-            (
-                nce,
-                acquisition.ms2_activation(),
-                acquisition.ms2_instrument(),
-            ),
-        )?;
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
     }
     if cli.refine {
         if refine_merged {
@@ -2808,29 +2303,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── Rescore: run Percolator (or the native rescorer) on the PIN, join ─────
-    // PEP/q-value downstream. Sits BETWEEN the PIN write and the QPX/TSV writes
-    // so the parsed `SpecId → PercolatorPsm` map can be threaded into
-    // `write_qpx` and the filtered TSV. `None` keeps every downstream output
-    // identical to a non-rescore run.
-    //
-    // Backend choice: rescoring runs ONLY when explicitly requested — `--rescore`
-    // forces Percolator, `--rescore-native` forces the native rescorer. `--fdr` /
-    // `--pep` are thresholds applied by such a run; they never start one on their
-    // own (that would silently launch a backend / the non-production native path).
-    let fdr_threshold = cli.fdr.unwrap_or(0.01);
-    let proteoform_fdr = cli.proteoform_fdr.unwrap_or(fdr_threshold.max(0.05));
+    let fdr_threshold = cli.psm_fdr();
+    let proteoform_fdr = cli.proteoform_fdr();
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
         (false, true)
     } else {
-        // Say so. A threshold that silently does nothing is the same defect shape
-        // as a flag that is parsed and never read.
-        if cli.fdr.is_some() || cli.pep.is_some() {
-            let which = match (cli.fdr.is_some(), cli.pep.is_some()) {
-                (true, true) => "--fdr and --pep",
-                (true, false) => "--fdr",
+        if cli.psm_fdr.is_some() || cli.pep.is_some() {
+            let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
+                (true, true) => "--psm-fdr and --pep",
+                (true, false) => "--psm-fdr",
                 _ => "--pep",
             };
             eprintln!(
@@ -2842,20 +2325,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         (false, false)
     };
-    // `--mbr`: the decoy PSMs with their scores, which the target map leaves
-    // out, and where the rescoring result came from.
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
     let mut mbr_source = String::new();
-    // The rescorer's decoy-result ids: with target-decoy competition (Percolator
-    // `-Y`, and the native rescorer) they let the QPX join tell a target that
-    // lost its scan/ExpMass group from one whose join drifted.
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
-    // The rescorer's decoy PSMs with their scores, for FDR within each class.
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
-    // Site claims need every row of a spectrum scored, not only the winner of
-    // each target-decoy competition group, so the rows can compete.
     let has_site_claims = pin_index.iter_target_proteins().any(|p| {
         p.annotation
             .as_deref()
@@ -2884,7 +2359,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
-            // DIA: refine RT on the first pass's IDs, then rescore with it.
             if cli.dia
                 && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
                     map.get(id).is_some_and(|p| p.q_value <= 0.01)
@@ -2935,8 +2409,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     all.untrained_folds
                 );
             }
-            // Like Percolator with -Y: the winning decoys tell the QPX join
-            // which target rows lost their scan/ExpMass group.
             rescore_decoys = Some(all.decoys.keys().cloned().collect());
             rescore_decoy_psms = all.decoys;
             if has_site_claims {
@@ -2958,17 +2430,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None
         };
 
-    // FDR within each evidence class (canonical, isoform, variant, chain): a
-    // target's q-value becomes the larger of the global and its class q-value,
-    // so the filtered TSV, the QPX and quantification accept a PSM only if it
-    // passes both. A search with one class (any FASTA) is left unchanged.
-    // Knockoff rows: in the PIN as targets; left out of the QPX bundle, the
-    // filtered TSV, quantification and every other output.
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
     if let Some(ref mut map) = rescore_map {
-        // A variant peptide a reference protein holds once I and L are taken
-        // as equal identifies that reference too: share it before classes are
-        // assigned. Only rows that could be reported are checked.
         if pin_index.has_alternative_entries {
             let shared = output::share_isobaric_references(
                 map,
@@ -3002,10 +2466,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
-        // Knockoff variants: the knockoff PSMs accepted per substitution class
-        // estimate the false real variant PSMs, and give them a q-value too.
         let outcome =
-            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.knockoffs > 0);
+            output::apply_knockoff_fdr(map, &pin_index, proteoform_fdr, cli.db.knockoffs > 0);
         knockoff_rows = outcome.knockoff_rows;
         let untested: usize = outcome
             .counts
@@ -3041,9 +2503,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 line.join(", ")
             );
         }
-        // Site claims: annotated sites against their knockoff sites; each
-        // accepted site also gets its occupancy and identity from the
-        // posterior of every row among its spectrum's rows.
         let posteriors = row_scores.as_ref().map(|(target_scores, decoy_scores)| {
             let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
                 queues
@@ -3108,9 +2567,84 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
             }
         }
+        if let Some(scoring) = ipf_scoring.as_ref() {
+            use rayon::prelude::*;
+            let t_ipf = std::time::Instant::now();
+            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
+            let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
+            let searched_with = scoring.fragment_error();
+            let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> =
+                std::collections::HashMap::new();
+            let mut lo = 0usize;
+            for (f, &hi) in run_ends.iter().enumerate() {
+                scoring.set_fragment_error(measurer.per_file.get(f).copied().flatten());
+                let part: Vec<(String, search::ipf::IpfEvidence)> = queues[lo..hi]
+                .par_iter()
+                .enumerate()
+                .map(|(j, q)| (lo + j, q))
+                .flat_map_iter(|(i, q)| {
+                    let rows: Vec<(String, u32, u8)> =
+                        output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
+                            .into_iter()
+                            .filter(|(id, c, _)| {
+                                !pin_candidates[*c as usize].is_decoy
+                                    && !knockoff_rows.contains(id)
+                                    && map_ref.get(id).is_some_and(|p| p.q_value <= cutoffs.of(id))
+                            })
+                            .collect();
+                    let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
+                        .iter()
+                        .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
+                        .collect();
+                    let found = if peptides.is_empty() {
+                        Vec::new()
+                    } else {
+                        scoring.evidence(&spectra[i], &peptides)
+                    };
+                    rows.into_iter()
+                        .zip(found)
+                        .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+                evidence.extend(part);
+                lo = hi;
+            }
+            scoring.set_fragment_error(searched_with);
+            let (rows, model) = output::ipf::localize_psms(map_ref, &evidence, cli.ipf_debug);
+            let stem = report_base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "andes".to_string());
+            let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{stem}.ipf.tsv"));
+            output::ipf::write_ipf_tsv(&path, &rows)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            if rows.is_empty() {
+                eprintln!(
+                    "WARN: --localize ipf: no identified target PSM has a variable \
+                     modification with more than one possible site; {} is empty",
+                    path.display()
+                );
+            }
+            let truncated = rows.iter().filter(|r| r.truncated).count();
+            eprintln!(
+                "Wrote IPF localization: {} ({} PSMs, {} with placements limited to the \
+                 {} nearest the search's; ion PEP by intensity quartile {:?}, unmatched \
+                 {:.3}) [{:.2}s]",
+                path.display(),
+                rows.len(),
+                truncated,
+                search::ipf::MAX_PLACEMENTS,
+                model.matched.map(|p| (p * 1000.0).round() / 1000.0),
+                model.unmatched,
+                t_ipf.elapsed().as_secs_f64()
+            );
+            if cli.output_parquet.is_some() {
+                ipf_qpx = Some(output::ipf::qpx_map(&rows));
+            }
+        }
     }
-    // Protein groups: parsimony per protein family and picked target-decoy
-    // q-values, from every rescored row. Independent of quantification.
     let protein_groups = rescore_map.as_ref().map(|map| {
         let cutoffs = output::Cutoffs::new(map, &pin_index, fdr_threshold, proteoform_fdr);
         let inf = output::infer_protein_groups(map, &rescore_decoy_psms, &pin_index, |id| {
@@ -3138,16 +2672,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
     }
-    // The cutoff each row is accepted at: --proteoform-fdr for proteoform
-    // claims (variant-class rows), --fdr for the rest.
     let cutoffs = rescore_map
         .as_ref()
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
-    // Filtered TSV: target PSMs whose q-value passes their cutoff. Written next
-    // to the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM
-    // with the join key + q/PEP + peptide/proteins from the Percolator result.
-    // The PSMs it holds are the identified PSMs of the identification summary.
     let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
@@ -3158,8 +2686,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
         let q_tag = format!("{fdr}").replace('.', "p");
         let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
-        // q-value is the primary set-level FDR control; an optional --pep ANDs a
-        // per-PSM local-FDR cap on top.
         let pep_cap = cli.pep;
         let mut accepted: Vec<&output::PercolatorPsm> = map
             .iter()
@@ -3199,16 +2725,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         identified = Some((accepted, pep_note));
     }
 
-    // ── Run summary: final tolerances + per-modification PSM tally ────────────
-    // andes auto-resolves the scoring model and the precursor/fragment
-    // tolerances from the data, so the FINAL search parameters differ from
-    // whatever the user passed on the CLI. Emit a summary to stderr and write a
-    // `<stem>.statistics.log` next to the PIN so a run's true parameters (and which
-    // PTMs were identified, with PSM counts) are always recoverable.
-    // The fragment line reports the tolerance fragments were matched at; the
-    // node-score window (stored, or learned from the run on high-res data)
-    // covers the rounding error of the nominal-mass node scores and is
-    // reported apart.
     let run_stats = output::RunStatistics::compute(
         &queues,
         &pin_candidates,
@@ -3217,8 +2733,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &scorer.pin_match_tolerance(),
         &scorer.node_score_window(),
     );
-    // After rescoring, the identified PSMs get a summary of their own; it is
-    // appended to the same report.
     let id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
@@ -3234,8 +2748,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .filter_map(|p| facts.get(p.psm_id.as_str()).cloned())
             .collect();
-        // `--mbr` moved the decoy PSMs aside above. Decoys are cut like the
-        // targets: each at the cutoff of its own class, under the `--pep` cap.
         let decoys = if cli.mbr {
             &mbr_decoys
         } else {
@@ -3276,8 +2788,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )
     });
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));
-    // Named after the run like the other reports, so searches writing into
-    // one directory do not overwrite each other's summary.
     let stats_path = {
         let stem = report_base
             .file_stem()
@@ -3291,12 +2801,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
-    // ── QPX `.idparquet/` bundle (optional, quantms-compatible) ──────────────
-    // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
-    // here (not in the bench/TSV arms) so it is produced for every run that asks
-    // for it, including bench mode. Run identifier = the first spectrum file
-    // stem so it is stable across re-runs of the same input; each row's
-    // `reference_file_name` is its own input's path.
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()
@@ -3320,12 +2824,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
+            ipf_qpx.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
-            // Finding 3.9: failure to write an explicitly-requested output is a
-            // hard error, not a WARN-and-exit-0. The user asked for this
-            // artifact; silently exiting 0 without it hides data loss from any
-            // calling pipeline.
             Err(e) => {
                 return Err(format!(
                     "failed to write requested --output-parquet {}: {e}",
@@ -3336,9 +2837,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The rows `psms.parquet` leaves out, from the full rescore map (before the
-    // knockoff rows leave it): the feature parquet numbers its `psm_ids` over
-    // the other rows.
     let omitted_psms = match (&quant, rescore_map.as_ref()) {
         (Some(_), Some(map)) => output::omitted_psm_rows(
             &spectra,
@@ -3355,11 +2853,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         map.retain(|id, _| !knockoff_rows.contains(id));
     }
 
-    // ── Quantification (`--tmt` / `--lfq`) ────────────────────────────────────
-    // After rescoring so the targets are the confident PSMs; after the QPX
-    // write so the feature parquet joins a bundle that already exists.
-    // The QPX views keep the protein groups at `--protein-fdr`, 0.01 unless
-    // given.
     let qpx_groups = protein_groups
         .as_ref()
         .map(|inf| crate::quant_cmd::ProteinGroups {
@@ -3369,8 +2862,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant_run::TmtMbrInput {
         decoys: &mbr_decoys,
         source: &mbr_source,
-        library_fdr: cli.mbr_library_fdr,
-        accept_q: cli.mbr_fdr,
+        library_fdr: cli.mbr_donor_fdr(),
+        accept_q: cli.quant_transfer_fdr(),
         wrong_log2: cli.mbr_wrong_log2,
     });
     let quant_summary = match &quant {
@@ -3392,9 +2885,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    // Proteoform table: per protein family, the canonical entry and each
-    // isoform, variant and chain entry with accepted evidence, its q-value
-    // and quantity. Written with rescoring when the database holds such entries.
     if let (Some(map), Some(cutoffs), true) = (
         rescore_map.as_ref(),
         cutoffs.as_ref(),
@@ -3429,8 +2919,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // `--mbr` inputs; the stages run after the last search output is
-    // written and the search state is released.
     let mbr_job = if cli.mbr && cli.tmt.is_none() && cli.label.is_none() {
         let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
             return Err("--mbr needs --quant-dir and rescoring".into());
@@ -3443,7 +2931,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
         let (donor_q, donor_pep) = quant
             .as_ref()
-            .map(|q| (q.settings.quant_fdr, q.settings.pep_cap))
+            .map(|q| (q.settings.psm_fdr, q.settings.pep_cap))
             .ok_or("--mbr needs --lfq")?;
         Some((dir, stems, scores, ep, donor_q, donor_pep))
     } else {
@@ -3451,7 +2939,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     drop(mbr_decoys);
 
-    // ── 9. Write TSV (optional) ───────────────────────────────────────────────
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
     } else if let Some(ref tsv_path) = cli.output_tsv {
@@ -3467,10 +2954,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>()
                 .join("+")
         };
-        // Use the SAME merged candidate/index pair the PIN write used: after
-        // `merge_into_pass1`, `queues` holds candidate indices into the merged
-        // candidate list (Pass-1 ⊕ offset Pass-2), so resolving them against the
-        // un-merged `prepared.candidates`/`idx` would be wrong/out-of-bounds.
         output::write_tsv(
             tsv_path,
             &spectra,
@@ -3484,9 +2967,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
-    // ── Match-between-runs (`--mbr`): library, extract, finalize ────────────
-    // Every search output is written; the search state is freed first, so
-    // the stages hold one run's MS1 at a time next to the library.
     let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
         release_at_exit(pin_candidates);
         return Ok(());
@@ -3503,11 +2983,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &stems,
         scores,
         &ep,
-        cli.mbr_library_fdr,
+        cli.mbr_donor_fdr(),
         donor_q,
         donor_pep,
-        cli.mbr_fdr,
-        cli.quant_feature_fdr.0,
+        cli.quant_transfer_fdr(),
         &report_base.with_extension(""),
         cli.output_parquet.as_deref(),
         qpx_groups.as_ref(),
@@ -3515,19 +2994,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The target database of a search, with what each source added to it.
 pub(crate) struct ClaimDatabase {
     pub(crate) loaded: input::LoadedDatabase,
-    /// Present when `--annotations` files were given.
     pub(crate) annotations: Option<input::AnnotationLoadStats>,
     pub(crate) site_knockoffs: input::SiteKnockoffStats,
 }
 
-/// Load the target database with every claim a search tests: the file's own,
-/// those of the `annotations` tables, then the knockoff sites of every
-/// annotated site, which are added before decoys are built so they follow to
-/// the decoys like real sites. `andes inference` and `quant finalize` load
-/// through here as well, so they hold the entries and sites of the search.
 pub(crate) fn load_claim_database(
     path: &Path,
     annotations: &[PathBuf],
@@ -3554,10 +3026,6 @@ pub(crate) fn load_claim_database(
     })
 }
 
-/// Log what a UniProt XML load kept: annotated sites, variant entries, and
-/// the features the evidence level or the canonical sequence ruled out.
-/// Log what an annotation source (`--annotations` files or a PEFF header)
-/// added to the database.
 fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
     let dropped: Vec<String> = stats
         .dropped
@@ -3645,16 +3113,8 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
     }
 }
 
-/// Say how many annotated sites each `sites=annotated` mod of `aa` can use,
-/// and warn about one the database annotates no site of its mass for: it is
-/// never placed.
-/// Artefact masses that mimic common substitutions: deamidation (N→D, Q→E),
-/// oxidation (A→S, P→T…), carbamylation, methylation (G→A, S→T, D→E…).
 const ARTEFACT_MASSES: [f64; 4] = [0.984016, 15.994915, 43.005814, 14.015650];
 
-/// With natural variants searched, restricting one of these mods to annotated
-/// sites removes the canonical explanation that competes with a variant of the
-/// same mass.
 fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
     if !variants_on {
         return;
@@ -3687,7 +3147,6 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
         let (mut sites, mut proteins) = (0usize, 0usize);
         let same = |m: f64| (m - mass).abs() <= model::protein::SITE_MASS_TOLERANCE;
         for p in &target_db.proteins {
-            // Annotated sites only, not the knockoff sites added for them.
             let knockoffs: Vec<u32> = p
                 .annotation
                 .as_deref()
@@ -3711,7 +3170,7 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
         }
         if sites == 0 {
             eprintln!(
-                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (sites=annotated), \
+                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (restrict_to: annotated), \
                  but no target protein annotates a site of that mass, so it is never placed. \
                  Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
                  --uniprot-evidence sets which are used."
@@ -3725,9 +3184,6 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
     }
 }
 
-/// `--mbr` needs two or more inputs, `--lfq` and a rescoring run (the
-/// library ranks precursors by the rescored PSM scores), and is label-free
-/// only.
 fn check_mbr_args(cli: &Cli) -> Result<(), String> {
     if cli.spectrum.len() < 2 {
         return Err(format!(
@@ -3768,17 +3224,10 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
-/// The candidate pool is millions of small heap allocations and the process
-/// exits right after the run; freeing them one by one took about a second of
-/// wall time, so the pool is left for the operating system to reclaim.
 fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
     std::mem::forget(candidates);
 }
 
-/// Write the FDR-filtered rescore TSV: one row per accepted target PSM (already
-/// filtered to q ≤ fdr and sorted by [`output::PercolatorPsm::report_cmp`]). Columns: the Percolator join
-/// key (`PSMId`, == PIN SpecId), `q-value`, `posterior_error_probability`,
-/// `peptide`, `proteinIds`.
 pub(crate) fn write_filtered_tsv(
     path: &Path,
     psms: &[&output::PercolatorPsm],
@@ -3807,9 +3256,6 @@ pub(crate) fn write_filtered_tsv(
     })
 }
 
-/// TMTpro 32/35-plex peptides are searched with the TMTpro tag mass, but each
-/// deuterated tag is 2.9 mDa heavier. Below three such tags on a 1000 Da
-/// peptide (8.8 ppm), the precursor window misses the deuterated precursors.
 fn deuterated_tag_warning(
     plex: Option<quant::Plex>,
     precursor_tol: model::Tolerance,
@@ -3835,7 +3281,6 @@ fn deuterated_tag_warning(
     ))
 }
 
-/// The detected-label class of a `--tmt` kit.
 fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
     match plex {
         quant::Plex::Tmt6 | quant::Plex::Tmt10 | quant::Plex::Tmt11 => input::IsobaricLabel::Tmt,
@@ -3846,8 +3291,6 @@ fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
     }
 }
-
-// ── Training pipeline ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod deuterated_tag_warning_tests {
@@ -3882,9 +3325,6 @@ mod retrieval_choice_tests {
         assert!(c.report.unwrap().contains("high-resolution"));
     }
 
-    /// Low-res searches use the index with the vote cap: enumeration
-    /// there took TMT 5,404 s of CPU against 289 s for the capped index, at the
-    /// same PSMs.
     #[test]
     fn low_res_uses_the_capped_index() {
         let c = retrieval_choice(LO, None, FragmentIndexFlag::Auto);
@@ -3919,8 +3359,6 @@ mod retrieval_choice_tests {
         assert!(c.report.unwrap().contains("switched off"));
     }
 
-    /// The index holds b/y ions only: ETD and UVPD keep enumeration at either
-    /// resolution, and forcing the index there is refused with the reason.
     #[test]
     fn activations_outside_the_indexed_ion_series_keep_enumeration() {
         use model::activation::ActivationMethod;
@@ -3944,8 +3382,6 @@ mod retrieval_choice_tests {
         }
     }
 
-    /// A tolerance tight enough to bin usefully counts as high-resolution (no
-    /// vote cap) even when it is expressed in Da.
     #[test]
     fn a_tight_dalton_tolerance_counts_as_high_resolution() {
         let tight = retrieval_choice(Tolerance::Da(0.02), None, FragmentIndexFlag::Auto);
@@ -4010,8 +3446,6 @@ mod rescore_pin_destination_tests {
         assert!(tmp.is_none());
     }
 
-    /// Without `--keep-pin` the PIN lives in a directory under the scratch
-    /// directory that was passed, never in the system temp directory.
     #[test]
     fn no_keep_pin_is_created_in_the_scratch_dir() {
         let scratch = tempfile::tempdir().unwrap();
@@ -4033,7 +3467,6 @@ mod rescore_pin_destination_tests {
         assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
     }
 
-    /// A scratch directory that cannot be created is an error naming the flag.
     #[test]
     fn unwritable_scratch_dir_is_an_error_naming_the_flag() {
         let dir = tempfile::tempdir().unwrap();
@@ -4057,8 +3490,6 @@ mod rescore_pin_destination_tests {
 mod filtered_tsv_tests {
     use super::*;
 
-    /// The filtered TSV is written through `<path>.partial` and renamed, so a
-    /// run that dies mid-write never leaves a truncated table under the name.
     #[test]
     fn filtered_tsv_is_written_through_a_partial_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -4086,11 +3517,8 @@ mod isobaric_peak_filter_tests {
 
     #[test]
     fn high_res_turns_the_isobaric_filter_off_unless_set() {
-        // Low-res: left unset, so the protocol engages the 100 Da / top-20 filter.
         assert_eq!(isobaric_peak_filter(None, false), None);
-        // High-res: a zero window disables it.
         assert_eq!(isobaric_peak_filter(None, true), Some((0.0, 0)));
-        // An explicit --peak-filter wins on either class.
         assert_eq!(
             isobaric_peak_filter(Some((100.0, 20)), true),
             Some((100.0, 20))
@@ -4120,9 +3548,6 @@ mod d_archive_tests {
     }
 }
 
-/// `aa` with the `--label` channel labels added as variable mods and
-/// registered as channels. A label the `--mods` file already declares (same
-/// name, residue and location) is not added twice.
 fn with_label_mods(
     aa: &model::AminoAcidSet,
     spec: &quant::label::LabelSpec,

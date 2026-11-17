@@ -1,4 +1,3 @@
-//! Parquet model store: schema definitions, reading, and writing.
 pub mod read;
 pub mod schema;
 pub mod split;

@@ -1,29 +1,10 @@
-//! Output writers: Percolator PIN, TSV.
-//!
-//! # Known column behaviors
-//!
-//! * **FragMethod**: emitted via `ActivationMethod::name()` (e.g. `"HCD"`,
-//!   `"CID"`). Unknown activation is written as `"UNKNOWN"`.
-//!
-//! * **IsotopeError**: the precursor-matching loop tries multiple isotope
-//!   offsets but does not record *which* offset produced the match. The TSV
-//!   column is always written as `0`. Will be fixed once the winning
-//!   isotope offset is threaded into `PsmMatch`.
-//!
-//! * **Decoy filtering**: this writer emits decoy PSMs with the decoy
-//!   prefix preserved in the Protein column; downstream Percolator handles
-//!   decoy labelling.
-//!
-//! * **QValue / PepQValue**: Not emitted; TDA columns are not currently
-//!   produced.
-
 mod atomic;
 pub use atomic::write_atomic;
 pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::{emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
+pub use pin::{emitted_row_candidates, emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
 
 pub mod stats;
 pub use stats::{
@@ -46,6 +27,7 @@ pub use class_fdr::{apply_class_fdr, ClassCount, Cutoffs};
 pub mod isobaric_sharing;
 pub use isobaric_sharing::share_isobaric_references;
 
+pub mod ipf;
 pub mod knockoff_fdr;
 pub mod site_fdr;
 pub mod site_identity;

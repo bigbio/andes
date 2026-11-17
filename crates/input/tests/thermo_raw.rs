@@ -1,13 +1,3 @@
-//! Integration test for the native Thermo `.raw` reader.
-//!
-//! Requires the `thermo` feature, the .NET 8 runtime, and a real `.raw` file
-//! pointed to by the `ANDES_TEST_RAW` environment variable. The `.raw` format is
-//! proprietary and the files are large, so no fixture is committed; the test
-//! skips (passes) when `ANDES_TEST_RAW` is unset, and runs in environments that
-//! have a `.raw` available (e.g. the benchmark host).
-//!
-//! Run with:  `ANDES_TEST_RAW=/path/sample.raw cargo test -p input --features thermo`
-
 #![cfg(feature = "thermo")]
 
 use input::ThermoRawReader;
@@ -36,8 +26,6 @@ fn thermo_raw_reads_ms2_spectra() {
         ms2 += 1;
         if !checked_first {
             checked_first = true;
-            // First emitted MS2 must carry a precursor, peaks, a scan number,
-            // and a Thermo native-id title.
             assert!(spec.precursor_mz > 0.0, "MS2 must have a precursor m/z");
             assert!(!spec.peaks.is_empty(), "MS2 must have peaks");
             assert!(spec.scan.is_some(), "MS2 must carry a scan number");
@@ -46,7 +34,6 @@ fn thermo_raw_reads_ms2_spectra() {
                 "title should be the Thermo native id, got {:?}",
                 spec.title
             );
-            // Peaks must be finite and intensities non-negative.
             for &(mz, intensity) in spec.peaks.iter().take(50) {
                 assert!(
                     mz.is_finite() && mz > 0.0,
@@ -62,8 +49,6 @@ fn thermo_raw_reads_ms2_spectra() {
     );
 }
 
-/// The MS1-linked chunked reader (used by `--chimeric`) must emit every MS2 and
-/// keep `ms2_to_ms1` aligned 1:1 with the emitted spectra in each chunk.
 #[test]
 fn thermo_raw_chunked_ms1_link_is_consistent() {
     let path = match test_raw_path() {
@@ -79,13 +64,11 @@ fn thermo_raw_chunked_ms1_link_is_consistent() {
     let mut chunks = 0usize;
     reader.read_with_ms1_chunked(5000, 0, |chunk, link| {
         chunks += 1;
-        // One link entry per emitted MS2.
         assert_eq!(
             chunk.len(),
             link.ms2_to_ms1.len(),
             "ms2_to_ms1 length must equal the MS2 count in the chunk"
         );
-        // Every link index is in range of the chunk's MS1 set (or None).
         for &m in &link.ms2_to_ms1 {
             if let Some(idx) = m {
                 assert!(idx < link.ms1_peaks.len(), "ms1 link index out of range");

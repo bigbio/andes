@@ -1,7 +1,3 @@
-//! The `Param` scoring model: the in-memory partition geometry, ion-type
-//! layout, and learned scoring tables that the engine scores against.
-//! Loaded from the canonical Parquet model store (`model-train::ModelStore`).
-
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -36,38 +32,12 @@ pub struct Param {
     pub ion_err_dist_table: FxHashMap<Partition, Vec<f32>>,
     pub noise_err_dist_table: FxHashMap<Partition, Vec<f32>>,
     pub ion_existence_table: FxHashMap<Partition, Vec<f32>>,
-    /// Pre-filtered ion-type list per partition (Noise excluded), populated
-    /// at load time. Used by `ion_types_for_partition_slice` to avoid
-    /// per-call Vec allocation in the node-scoring DP hot path.
-    /// Call `rebuild_cache()` after manually constructing a `Param` in tests
-    /// or any context where the cache was not populated at construction time.
     pub partition_ion_types_cache: FxHashMap<Partition, Vec<IonType>>,
-    /// Optional peptide-agnostic GBDT per-peak signal/noise model. Populated by
-    /// the store reader from the manifest row's `gbdt_model_bytes` blob; `None`
-    /// for stores / slugs without a trained GBDT (scoring is
-    /// then byte-identical to the pre-GBDT engine).
     pub gbdt_peak_model: Option<GbdtPeakModel>,
-    /// Optional GBDT fragment-intensity model (regressor, raw `predict_value`
-    /// output). Populated from the `frag_intensity_model_bytes` manifest column;
-    /// `None` for any store written before this column existed or for slugs
-    /// without a trained intensity regressor.
-    ///
-    /// Wrapped in `Arc` so callers can share one model across parallel search
-    /// threads without cloning the tree arrays.
     pub frag_intensity_model: Option<Arc<GbdtPeakModel>>,
-    /// Optional GBDT rich-ion LLR classifier (logistic, raw `predict_value`
-    /// output). Populated from the `rich_ion_model_bytes` manifest column;
-    /// `None` for any store written before this column existed or for slugs
-    /// without a trained rich-ion classifier.
-    ///
-    /// Wrapped in `Arc` so callers can share one model across parallel search
-    /// threads without cloning the tree arrays.
     pub rich_ion_model: Option<Arc<GbdtPeakModel>>,
 }
 
-/// Build the per-partition ion-type cache (Noise excluded). Single source of
-/// truth for cache construction (the Parquet store reader and
-/// `Param::rebuild_cache`).
 fn build_partition_ion_types_cache(
     frag_off_table: &FxHashMap<Partition, Vec<FragmentOffsetFrequency>>,
 ) -> FxHashMap<Partition, Vec<IonType>> {
@@ -86,41 +56,25 @@ fn build_partition_ion_types_cache(
 }
 
 impl Param {
-    /// Find the partition matching `(charge, parent_mass, seg_num)` via a
-    /// floor lookup (the largest partition ≤ target by lex order on
-    /// `(charge, parent_mass.to_bits(), seg_num)`).
-    ///
-    /// Falls back gracefully:
-    /// - If no partition matches the requested charge: use the smallest
-    ///   charge available with the requested mass + segment.
-    /// - If charge > all available: use the largest available charge.
     pub fn find_partition(&self, charge: i32, parent_mass: f32, seg_num: i32) -> Option<Partition> {
         if self.partitions.is_empty() {
             return None;
         }
 
-        // Build the target partition for the floor lookup.
         let target = Partition {
             charge,
             parent_mass,
             seg_num,
         };
 
-        // partitions is already sorted (loader invariant). Find the largest
-        // partition <= target via binary search.
         let pos = self.partitions.partition_point(|p| p <= &target);
         if pos > 0 {
-            // partitions[pos - 1] is the largest <= target.
             let candidate = self.partitions[pos - 1];
             if candidate.charge == charge {
                 return Some(candidate);
             }
-            // Floor returned a partition with smaller charge: if no
-            // exact-charge match, find smallest available charge, then floor
-            // on (smallest_charge, parent_mass, seg_num).
         }
 
-        // Fall back: find smallest charge in partitions, retry.
         let min_charge = self.partitions.iter().map(|p| p.charge).min()?;
         let max_charge = self.partitions.iter().map(|p| p.charge).max()?;
         let fallback_charge = if charge < min_charge {
@@ -128,13 +82,6 @@ impl Param {
         } else if charge > max_charge {
             max_charge
         } else {
-            // charge is in range but had no exact partition (a gap between
-            // available charges). Prefer the floor candidate — the nearest
-            // partition <= target — over jumping to `partitions.last()` (max
-            // charge / mass / segment), which would score against an unrelated
-            // partition. If the target sorts below every partition (pos == 0,
-            // e.g. parent_mass below the smallest trained mass) there is no
-            // floor, so fall through to the clamp-and-retry path with min_charge.
             let pos = self.partitions.partition_point(|p| p <= &target);
             if pos > 0 {
                 return self.partitions.get(pos - 1).copied();
@@ -153,15 +100,12 @@ impl Param {
                 return Some(candidate);
             }
         }
-        // Last resort: just return any partition with the fallback charge.
         self.partitions
             .iter()
             .find(|p| p.charge == fallback_charge)
             .copied()
     }
 
-    /// Compute the segment number for a peak m/z relative to the peptide's
-    /// parent mass.
     pub fn segment_num_for(&self, peak_mz: f64, parent_mass: f64) -> i32 {
         if parent_mass <= 0.0 || self.num_segments <= 0 {
             return 0;
@@ -170,18 +114,11 @@ impl Param {
         seg.min(self.num_segments - 1).max(0)
     }
 
-    /// Alias for `segment_num_for` matching the name used by the node-scoring DP code
-    /// (`param.segment_num(theo_mz, parent_mass)`).
     #[inline]
     pub fn segment_num(&self, peak_mz: f64, parent_mass: f64) -> usize {
         self.segment_num_for(peak_mz, parent_mass) as usize
     }
 
-    /// Collect the unique ion types (Prefix and Suffix, not Noise) whose
-    /// partition has `seg_num == seg`. Derived from `frag_off_table` keys
-    /// (ion-type membership lives in `frag_off_table`, not `rank_dist_table`).
-    ///
-    /// Returned in stable insertion order; duplicates suppressed.
     pub fn ion_types_for_segment(&self, seg: usize) -> Vec<IonType> {
         let mut seen: std::collections::HashSet<IonType> = std::collections::HashSet::new();
         let mut out: Vec<IonType> = Vec::new();
@@ -202,9 +139,6 @@ impl Param {
         out
     }
 
-    /// Find the partition for `(charge, parent_mass, seg_num)` using the
-    /// floor-lookup semantics of `find_partition`. Returns a synthetic
-    /// partition if none is found (so callers don't need to unwrap).
     pub fn partition_for(&self, charge: u8, parent_mass: f64, seg_num: usize) -> Partition {
         self.find_partition(charge as i32, parent_mass as f32, seg_num as i32)
             .unwrap_or(Partition {
@@ -214,26 +148,16 @@ impl Param {
             })
     }
 
-    /// Ion types for the SPECIFIC partition `(charge, parent_mass, seg)`.
-    ///
-    /// Selects the partition's ion list from `frag_off_table` rather than
-    /// the segment-wide union returned by `ion_types_for_segment`. Used
-    /// in the per-node scoring path.
     pub fn ion_types_for_partition(
         &self,
         charge: u8,
         parent_mass: f64,
         seg: usize,
     ) -> Vec<IonType> {
-        // Compat shim — callers in hot paths should use
-        // `ion_types_for_partition_slice` to avoid the allocation.
         self.ion_types_for_partition_slice(charge, parent_mass, seg)
             .to_vec()
     }
 
-    /// Slice-borrowing version of `ion_types_for_partition`. Reads from the
-    /// pre-filtered `partition_ion_types_cache` populated at param-load time.
-    /// Zero allocations per call. Used by the node-scoring DP hot path.
     pub fn ion_types_for_partition_slice(
         &self,
         charge: u8,
@@ -247,10 +171,6 @@ impl Param {
             .unwrap_or(&[])
     }
 
-    /// Rebuild the `partition_ion_types_cache` from `frag_off_table`.
-    /// Call this after manually constructing a `Param` in tests or any
-    /// context where the cache was not populated at construction time.
-    /// The Parquet store reader builds the cache automatically.
     pub fn rebuild_cache(&mut self) {
         self.partition_ion_types_cache = build_partition_ion_types_cache(&self.frag_off_table);
     }
@@ -291,11 +211,6 @@ impl Hash for Partition {
 
 impl Ord for Partition {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Lex order: charge → seg_num → parent_mass.
-        // The order is load-bearing: a charge → parent_mass → seg_num order
-        // produces wrong floor-lookup results for `find_partition` (seg=0
-        // queries would return a seg=1 partition with the same parent_mass
-        // tier, resolving to the wrong rank distribution table).
         self.charge
             .cmp(&other.charge)
             .then_with(|| self.seg_num.cmp(&other.seg_num))
@@ -311,9 +226,6 @@ impl PartialOrd for Partition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IonType {
-    /// `offset_bits` is `f32::to_bits` so the type can derive Eq/Hash;
-    /// recover the float via `offset()`.
-    /// `loss_class`: 0 = intact (no neutral loss); 1.. = per-mod-class loss pool.
     Prefix {
         charge: i32,
         offset_bits: u32,
@@ -354,34 +266,16 @@ impl IonType {
         matches!(self, IonType::Noise)
     }
 
-    /// Loss-class id: 0 = intact; 1.. = a per-mod-class neutral-loss pool.
     pub fn loss_class(&self) -> u8 {
         match self {
             IonType::Prefix { loss_class, .. } | IonType::Suffix { loss_class, .. } => *loss_class,
             IonType::Noise => 0,
         }
     }
-    /// True if this is a neutral-loss-shifted fragment ion (any loss class).
     pub fn is_loss(&self) -> bool {
         self.loss_class() != 0
     }
 
-    /// [`mz`](Self::mz) computed from the EXACT (unquantised) fragment neutral mass.
-    ///
-    /// [`mz`](Self::mz) recovers the mass from the INTEGER nominal node index
-    /// (`real = node_nominal / INTEGER_MASS_SCALER`), which displaces the theoretical
-    /// m/z by a median 52 ppm (90th pct 133 ppm) for real peptide compositions —
-    /// measured over 300,333 simulated b-ion positions. That is fine for SERVING,
-    /// whose `mme` window (0.5 Da) absorbs it, and it is unavoidable there because the
-    /// node-score cache is indexed by nominal mass. It is NOT fine for TRAINING, which
-    /// records the mass error of each match: the recorded error became the rounding
-    /// artifact rather than the instrument's accuracy, leaving `ion_err` and
-    /// `noise_err` indistinguishable by construction.
-    ///
-    /// Training walks actual peptides and therefore has the exact accumulated fragment
-    /// mass; it uses this. Serving keeps [`mz`](Self::mz).
-    ///
-    /// For `Noise`, returns 0.0.
     pub fn mz_exact(&self, real_mass: f64) -> f64 {
         match self {
             IonType::Prefix {
@@ -401,23 +295,6 @@ impl IonType {
         }
     }
 
-    /// Compute the predicted m/z for this ion type given a **nominal** node mass.
-    ///
-    /// Formula:
-    ///   `real_mass = node_nominal / INTEGER_MASS_SCALER`
-    ///   `mz = real_mass / charge + offset`
-    ///
-    /// The `offset` field already includes the proton mass contribution
-    /// (for b-ions: `offset = PROTON ≈ 1.00728`; for y-ions: `offset = H2O + PROTON ≈ 19.018`).
-    /// The `INTEGER_MASS_SCALER` division converts integer nominal mass back to real
-    /// monoisotopic mass before dividing by charge.
-    ///
-    /// For `Noise`, returns 0.0.
-    ///
-    /// ⚠ The nominal round-trip displaces the result by a median 52 ppm. That is
-    /// harmless for SERVING, whose `mme` window absorbs it, and unavoidable there
-    /// because the node-score cache is indexed by nominal mass — but training should
-    /// use [`mz_exact`](Self::mz_exact) instead.
     pub fn mz(&self, node_nominal: f64) -> f64 {
         match self {
             IonType::Prefix {
@@ -432,8 +309,6 @@ impl IonType {
             } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                // real_mass = node_nominal / INTEGER_MASS_SCALER
-                // mz        = real_mass / charge + offset
                 let real_mass = node_nominal / model::mass::INTEGER_MASS_SCALER as f64;
                 real_mass / c + offset
             }
@@ -441,12 +316,6 @@ impl IonType {
         }
     }
 
-    /// Inverse of `mz`: given an observed peak m/z, recover the real node mass (in Da).
-    ///
-    /// Formula: `real_mass = (mz - offset) * charge`
-    ///
-    /// Returns the real monoisotopic node mass (Da), NOT nominal mass.
-    /// For `Noise`: returns 0.0.
     pub fn mass_from_mz(&self, mz: f64) -> f64 {
         match self {
             IonType::Prefix {
@@ -673,14 +542,8 @@ mod tests {
                 seg_num: 0,
             },
         ];
-        // Sort matches the loader invariant.
         param.partitions.sort();
 
-        // Partition Ord: charge → seg_num → parent_mass.
-        // Sorted order: (2,seg0,500), (2,seg0,1000), (2,seg1,500), (3,seg0,500).
-        // Target (2, 800.0, seg0): floor is (2,seg0,500) — same charge, same seg,
-        // and 500.0 < 800.0. The next candidate (2,seg0,1000) is above 800.0.
-        // seg1 partitions are NOT considered because seg_num 1 > 0 = target seg.
         let p = param.find_partition(2, 800.0, 0).expect("find");
         assert_eq!(p.charge, 2);
         assert_eq!(p.parent_mass, 500.0);
@@ -704,7 +567,6 @@ mod tests {
         ];
         param.partitions.sort();
 
-        // Target charge 1 (below all): falls back to smallest charge = 2.
         let p = param
             .find_partition(1, 500.0, 0)
             .expect("find with fallback");
@@ -728,7 +590,6 @@ mod tests {
         ];
         param.partitions.sort();
 
-        // Target charge 5 (above all): falls back to largest = 3.
         let p = param
             .find_partition(5, 500.0, 0)
             .expect("find with fallback");
@@ -739,17 +600,14 @@ mod tests {
     fn segment_num_clamps_to_max() {
         let mut param = make_param();
         param.num_segments = 3;
-        // peak_mz / parent_mass × num_segments = floor calculation
         assert_eq!(param.segment_num_for(50.0, 100.0), 1);
         assert_eq!(param.segment_num_for(99.0, 100.0), 2);
-        assert_eq!(param.segment_num_for(100.0, 100.0), 2); // clamped
-        assert_eq!(param.segment_num_for(120.0, 100.0), 2); // clamped
+        assert_eq!(param.segment_num_for(100.0, 100.0), 2);
+        assert_eq!(param.segment_num_for(120.0, 100.0), 2);
     }
 
     #[test]
     fn ion_type_mz_prefix_charge1_offset0() {
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
-        // For Prefix(charge=1, offset=0): mz = (node_nominal / 0.999497) / 1 + 0
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix {
             charge: 1,
@@ -763,8 +621,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge2() {
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
-        // For Prefix(charge=2, offset=0): mz = (node_nominal / 0.999497) / 2
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix {
             charge: 2,
@@ -778,8 +634,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_with_b_ion_offset() {
-        // Realistic b-ion case: offset = PROTON (≈1.00728).
-        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + PROTON
         use model::mass::{INTEGER_MASS_SCALER, PROTON};
         let b_ion = IonType::Prefix {
             charge: 1,
@@ -793,7 +647,6 @@ mod tests {
 
     #[test]
     fn ion_type_mz_suffix_same_formula_as_prefix() {
-        // Suffix uses the same mz formula as prefix.
         let offset = 18.01_f32;
         let prefix = IonType::Prefix {
             charge: 1,
@@ -816,12 +669,8 @@ mod tests {
 
     #[test]
     fn ion_type_mass_from_mz_roundtrip() {
-        // mass_from_mz(mz) = (mz - offset) * charge
-        // Returns the REAL monoisotopic mass (Da), not nominal mass.
-        // Round-trip: mz(nominal) → mass_from_mz(mz) = (nominal/scaler/c+offset - offset)*c
-        //           = (nominal / scaler) = real_mass  (NOT the original nominal input).
         use model::mass::INTEGER_MASS_SCALER;
-        let offset = 1.00782_f32; // realistic b-ion offset
+        let offset = 1.00782_f32;
         let ion = IonType::Prefix {
             charge: 1,
             offset_bits: offset.to_bits(),
@@ -830,7 +679,6 @@ mod tests {
         let node_nominal = 100.0_f64;
         let mz = ion.mz(node_nominal);
         let recovered_real_mass = ion.mass_from_mz(mz);
-        // Recovered mass should equal node_nominal / INTEGER_MASS_SCALER (real mass)
         let expected_real_mass = node_nominal / INTEGER_MASS_SCALER as f64;
         assert!(
             (recovered_real_mass - expected_real_mass).abs() < 1e-4,
@@ -905,7 +753,6 @@ mod tests {
             loss_class: 0,
         };
 
-        // Populate frag_off_table (the source of truth for ion_types_for_segment).
         let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
             FxHashMap::default();
         frag_off_table.insert(
@@ -955,13 +802,11 @@ mod tests {
         param.rebuild_cache();
 
         let seg0 = param.ion_types_for_segment(0);
-        // Should return prefix and suffix (not noise), no duplicates.
         assert_eq!(seg0.len(), 2);
         assert!(seg0.iter().all(|i| !i.is_noise()));
         assert!(seg0.iter().any(|i| i.is_prefix()));
         assert!(seg0.iter().any(|i| i.is_suffix()));
 
-        // Segment 1 has no partitions → empty.
         let seg1 = param.ion_types_for_segment(1);
         assert!(seg1.is_empty());
     }
@@ -978,15 +823,8 @@ mod exact_mass_tests {
         }
     }
 
-    /// The defect this guards: `mz` recovers the fragment mass from the INTEGER nominal
-    /// node index, so its theoretical m/z is displaced from the truth. Training matched
-    /// that displaced position inside a 20 ppm window and therefore recorded ~80% of
-    /// real fragments as "missing", collapsing the absent-ion penalty on every
-    /// high-resolution model (measured in the shipped store: missing-slot frequency
-    /// 0.93 for hcd_qexactive_tryp vs 0.45 for cid_lowres_tryp).
     #[test]
     fn nominal_reconstruction_is_displaced_far_beyond_a_highres_window() {
-        // A real tryptic b-ion mass (PEPTIDE-like accumulation), not a round number.
         let real_mass = 1043.487_f64;
         let ion = b_ion();
         let nominal = model::mass::nominal_from(real_mass) as f64;
@@ -1002,14 +840,9 @@ mod exact_mass_tests {
         );
     }
 
-    /// `mz_exact` must be exactly the textbook fragment m/z, so training records the
-    /// instrument's error rather than a rounding artifact.
     #[test]
     fn mz_exact_is_the_true_fragment_mz() {
         let real_mass = 1043.487_f64;
-        // `offset` is stored as f32 bits so IonType can derive Eq/Hash — a deliberate
-        // design choice, so the expectation uses the same round-trip. What matters is
-        // that the MASS is not quantised, which is what this asserts.
         let ion = b_ion();
         let expected = real_mass + ion.offset().expect("prefix ion has an offset") as f64;
         let got = ion.mz_exact(real_mass);
@@ -1017,12 +850,10 @@ mod exact_mass_tests {
             (got - expected).abs() < 1e-9,
             "mz_exact must not quantise the mass: expected {expected}, got {got}"
         );
-        // And it must be within a few ppm of the textbook value.
         let textbook = real_mass + 1.007_276_49_f64;
         assert!(1e6 * (got - textbook).abs() / textbook < 1.0);
     }
 
-    /// Charge scaling must divide the neutral mass, not the m/z.
     #[test]
     fn mz_exact_scales_with_charge() {
         let m = 2000.0_f64;

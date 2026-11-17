@@ -1,95 +1,21 @@
-//! Per-ion intensity-rank log-likelihood-ratio (LLR) scoring.
-//!
-//! Implements the published intensity-rank node-scoring method (Frank,
-//! *J. Proteome Res.* 2005; PMC2738854): peaks are ranked by intensity, and a
-//! matched fragment ion observed at a given rank contributes a log-likelihood
-//! ratio comparing how often a true ion of that type lands at that rank
-//! (`ion_freq`) against how often a random noise peak does (`noise_freq`):
-//!
-//! ```text
-//!   norm        = min(ion_charge, num_segments)
-//!   llr[rank]    = ln( ion_freq[rank] / (noise_freq[rank] * norm) )
-//! ```
-//!
-//! The `norm` term (denoted `charge_or_seg` below) caps the ion's charge at
-//! the model's segment count; it normalizes the noise expectation so that
-//! multiply-charged ions, which can land in several m/z segments, are not
-//! over-credited. It is a model-derived normalization, not a tunable.
-//!
-//! The per-rank frequency tables come from the trained model and have length
-//! `max_rank + 1`. The first `max_rank` entries (indices `0..max_rank`) hold
-//! the LLR for observed ranks `1..=max_rank`; the final entry (index
-//! `max_rank`) is a separate "absent" slot scoring an expected ion that is not
-//! observed in the spectrum (see [`RankScorer::missing_ion_score`]).
-
 use std::collections::HashMap;
 
 use crate::param_model::{IonType, Param, Partition};
 
 #[derive(Debug, Clone)]
 pub struct RankScorer {
-    /// The model this scorer was precomputed from. Held so callers (e.g.
-    /// `match_engine`) can reach precursor-filter settings without threading a
-    /// separate `Param` argument through `ScoredSpectrum::new`.
     param: Param,
-    /// Precomputed LLR tables keyed by `(partition, ion_type)`, each of length
-    /// `max_rank + 1` (entries `0..max_rank` are the observed-rank scores for
-    /// ranks `1..=max_rank`; entry `max_rank` is the absent-ion score). Noise
-    /// is never a key — it only supplies the denominator. This map backs the
-    /// per-ion query API (`node_score`, `missing_ion_score`) used by tests and
-    /// diagnostics; the DP hot path indexes `partition_ion_logs` instead.
     pub(crate) log_table: HashMap<(Partition, IonType), Vec<f32>>,
-    /// Same LLR tables flattened per partition into a dense list of
-    /// `(ion_type, table)` pairs, ordered to match
-    /// `Param::ion_types_for_partition_slice`. The DP loop holds a partition
-    /// fixed across many node evaluations, so iterating this slice replaces a
-    /// `(partition, ion)` hash lookup per ion with a plain array walk — on a
-    /// PXD001819 search that removes on the order of 200M map probes.
     pub(crate) partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
-    /// Per-partition LLR tables for **neutral-loss** ion types only
-    /// (`IonType::is_loss()`), keyed exactly like `partition_ion_logs`. The
-    /// mass-indexed DP hot path (`partition_ion_logs`) is intentionally
-    /// intact-only because a loss ion's m/z shift (`−L/z`) is peptide-specific
-    /// (it comes from the matched peptide's mod, not the model), so loss ions
-    /// must be scored in a peptide-aware pass (`ScoredSpectrum::loss_node_score`)
-    /// rather than the peptide-agnostic cache. Empty for every model without a
-    /// trained loss table (all 39 bundled models) ⇒ no-loss scoring is
-    /// byte-identical to the pre-feature engine.
     pub(crate) partition_loss_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
-    /// Highest observed rank the model distinguishes; ranks beyond this are
-    /// clamped down to it before indexing.
     max_rank: u32,
-    /// CLI override for the fragment-matching tolerance (`--fragment-tol-*`).
-    /// `None` ⇒ derive from the resolution class (20 ppm high-res / 0.5 Da
-    /// low-res) and, for the PIN features, from the measured fragment error.
     fragment_tol_override: Option<model::tolerance::Tolerance>,
-    /// The run's measured fragment mass error (see
-    /// [`RankScorer::set_fragment_error`]).
     fragment_error: crate::scoring::fragment_error::SharedFragmentError,
-    /// Resolution class of the acquisition being searched (see
-    /// [`RankScorer::set_acquisition_high_res`]).
     acquisition_high_res: Option<bool>,
 }
 
-/// Documented smoothing floor for the rank-LLR computation (finding 3.2).
-///
-/// The trained estimator already floors every frequency to a small positive
-/// value (see `model-train`'s `estimate`), so for every bundled / well-formed
-/// model the numerator and denominator are strictly positive and this floor is
-/// never engaged — the resulting LLR is byte-identical to the unguarded
-/// `ln(ion/(noise·norm))`. The floor exists purely so a *corrupt* table (a
-/// zero, negative, or NaN frequency that escaped the estimator) yields a
-/// finite, bounded LLR instead of `±inf`/`NaN` silently propagating through the
-/// DP and `round() as i32`. `1e-9` matches the estimator's own additive floor
-/// scale.
 const FREQ_FLOOR: f32 = 1e-9;
 
-/// Compute one finite rank-LLR entry `ln(ion / (noise · norm))`.
-///
-/// Sanitizes the inputs to keep the result finite: a non-finite or
-/// non-positive numerator/denominator is replaced by [`FREQ_FLOOR`]. For valid
-/// (strictly positive, finite) inputs this is exactly `(ion/(noise·norm)).ln()`,
-/// so happy-path scoring is unchanged.
 #[inline]
 fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
     let num = if ion_freq.is_finite() && ion_freq > 0.0 {
@@ -104,8 +30,6 @@ fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
         FREQ_FLOOR
     };
     let llr = (num / den).ln();
-    // For any valid model the floor is never hit, so this assert documents the
-    // invariant (finite LLRs) without affecting release behavior.
     debug_assert!(
         llr.is_finite(),
         "rank LLR must be finite (ion={ion_freq}, noise={noise_freq}, norm={norm})"
@@ -115,14 +39,9 @@ fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
 
 impl RankScorer {
     pub fn new(param: &Param) -> Self {
-        // Precompute, for every (partition, ion) pair, the per-rank LLR table
-        // ln(ion_freq / (noise_freq * norm)). The noise frequencies are the
-        // shared denominator for all ions within a partition.
         let mut log_table: HashMap<(Partition, IonType), Vec<f32>> = HashMap::new();
 
         for (partition, ion_table) in &param.rank_dist_table {
-            // A partition without a noise distribution has no denominator, so
-            // nothing in it can be scored — skip it entirely.
             let Some(noise_freqs) = ion_table.get(&IonType::Noise) else {
                 continue;
             };
@@ -130,17 +49,11 @@ impl RankScorer {
             for (ion_type, ion_freqs) in ion_table {
                 let ion_charge = match ion_type {
                     IonType::Prefix { charge, .. } | IonType::Suffix { charge, .. } => *charge,
-                    // Noise is the denominator, not a scored ion.
                     IonType::Noise => continue,
                 };
 
-                // Cap the ion charge at the model's segment count (see module
-                // docs): a charge-z ion can fall into up to `num_segments`
-                // segments, so its noise expectation is scaled accordingly.
                 let charge_or_seg = (ion_charge as u32).min(param.num_segments as u32) as f32;
 
-                // Tables may differ in length across releases; the shared
-                // prefix is all that is jointly defined.
                 let rank_count = ion_freqs.len().min(noise_freqs.len());
                 let table: Vec<f32> = (0..rank_count)
                     .map(|r| finite_llr(ion_freqs[r], noise_freqs[r], charge_or_seg))
@@ -150,18 +63,10 @@ impl RankScorer {
             }
         }
 
-        // Flatten the per-pair tables into per-partition dense lists so the DP
-        // hot path can iterate by index. Ion order mirrors
-        // `Param::ion_types_for_partition_slice`; ions with no LLR table
-        // (e.g. missing a noise denominator) are simply absent here.
         let mut partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>> = HashMap::new();
         for (&partition, ions) in &param.partition_ion_types_cache {
             let paired: Vec<(IonType, Vec<f32>)> = ions
                 .iter()
-                // INTACT ONLY: loss ions are excluded from the mass-indexed hot
-                // path (their m/z shift is peptide-specific). This filter makes
-                // the hot path byte-identical even for a model that does carry
-                // loss ion types in its frag-offset cache.
                 .filter(|ion| !ion.is_loss())
                 .filter_map(|&ion| {
                     log_table
@@ -172,11 +77,6 @@ impl RankScorer {
             partition_ion_logs.insert(partition, paired);
         }
 
-        // Loss-ion tables, gathered directly from `log_table` (i.e. from
-        // `rank_dist_table`) so a trained loss table is visible to the
-        // peptide-aware loss pass even when no `FragmentOffsetFrequency` entry
-        // exists for it. Keyed by partition; values are the loss `IonType`s with
-        // their per-rank LLR tables.
         let mut partition_loss_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>> =
             HashMap::new();
         for (&(partition, ion), table) in &log_table {
@@ -187,11 +87,6 @@ impl RankScorer {
                     .push((ion, table.clone()));
             }
         }
-        // `log_table` is a HashMap, so the push order above is non-deterministic.
-        // `loss_node_score` sums these f32 tables and rounds to i32; non-associative
-        // float addition means insertion order can flip the result across runs.
-        // Sort each partition's loss-ion list by a stable IonType key for
-        // reproducible scores.
         for logs in partition_loss_ion_logs.values_mut() {
             logs.sort_by_key(|(ion, _)| match *ion {
                 IonType::Prefix {
@@ -220,9 +115,6 @@ impl RankScorer {
         }
     }
 
-    /// Borrow the dense `(IonType, log_table)` pairs for `partition`. Used by
-    /// the node-scoring DP hot path so per-ion scoring is array indexing, not HashMap
-    /// lookup. Returns empty slice if the partition has no ions.
     pub fn partition_ion_logs(&self, partition: &Partition) -> &[(IonType, Vec<f32>)] {
         self.partition_ion_logs
             .get(partition)
@@ -230,10 +122,6 @@ impl RankScorer {
             .unwrap_or(&[])
     }
 
-    /// Borrow the `(IonType, log_table)` pairs for **neutral-loss** ion types in
-    /// `partition`. Used by the peptide-aware loss-scoring pass
-    /// (`ScoredSpectrum::loss_node_score`). Returns an empty slice for any model
-    /// without a trained loss table — i.e. for every standard search.
     pub fn partition_loss_ion_logs(&self, partition: &Partition) -> &[(IonType, Vec<f32>)] {
         self.partition_loss_ion_logs
             .get(partition)
@@ -241,47 +129,31 @@ impl RankScorer {
             .unwrap_or(&[])
     }
 
-    /// True if this model carries any trained neutral-loss ion table. When
-    /// false, the peptide-aware loss pass is a no-op (byte-identical scoring).
     pub fn has_loss_tables(&self) -> bool {
         !self.partition_loss_ion_logs.is_empty()
     }
 
-    /// Maximum rank used for clamping. Exposed so callers can apply
-    /// rank-clamp / missing-ion semantics without going through `node_score`.
     pub fn max_rank(&self) -> u32 {
         self.max_rank
     }
 
-    /// Return the `Param` this scorer was built from.
     pub fn param(&self) -> &Param {
         &self.param
     }
 
-    /// Set (or clear) the CLI fragment-tolerance override (`--fragment-tol-*`).
     pub fn set_fragment_tol_override(&mut self, tol: Option<model::tolerance::Tolerance>) {
         self.fragment_tol_override = tol;
     }
 
-    /// Set the resolution class of the acquisition being searched. The search
-    /// binary sets it from the run's acquisition context, which can differ from
-    /// the model's instrument (high-res ETD or CID is routed to a low-res
-    /// model). `None` falls back to the model's instrument, as training does.
     pub fn set_acquisition_high_res(&mut self, high_res: Option<bool>) {
         self.acquisition_high_res = high_res;
     }
 
-    /// Whether the fragment spectra are high resolution: the acquisition's
-    /// class when set, else the model's instrument class.
     pub fn acquisition_is_high_res(&self) -> bool {
         self.acquisition_high_res
             .unwrap_or_else(|| self.param.data_type.instrument.is_high_resolution())
     }
 
-    /// Effective fragment-matching tolerance for Percolator-feature and
-    /// peak-match counting. Returns the CLI override when set, else the
-    /// resolution-class default: 20 ppm for high-resolution fragments
-    /// (Kim et al., Nat Commun 5:5277, 2014), 0.5 Da for ion-trap low-res.
     pub fn feature_match_tolerance(&self) -> model::tolerance::Tolerance {
         use model::tolerance::Tolerance;
         self.fragment_tol_override.unwrap_or_else(|| {
@@ -293,25 +165,14 @@ impl RankScorer {
         })
     }
 
-    /// Set (or clear) the run's measured fragment mass error. Takes `&self` so
-    /// the search can set it between input files while the scorer is shared;
-    /// it must not change while a chunk is being scored.
     pub fn set_fragment_error(&self, m: Option<crate::scoring::FragmentErrorModel>) {
         self.fragment_error.set(m);
     }
 
-    /// The run's measured fragment mass error, when one was set.
     pub fn fragment_error(&self) -> Option<crate::scoring::FragmentErrorModel> {
         self.fragment_error.get()
     }
 
-    /// Fragment tolerance of the PIN match features (match counts, ion-current
-    /// ratios, error statistics, the ppm-Gaussian and chance-match terms): the
-    /// CLI override when set, else the tolerance derived from the measured
-    /// fragment error on high-resolution data, else
-    /// [`Self::feature_match_tolerance`]. Features fed to the trained
-    /// fragment-intensity and rich-ion models keep
-    /// [`Self::feature_match_tolerance`], the window they were trained at.
     pub fn pin_match_tolerance(&self) -> model::tolerance::Tolerance {
         if let Some(t) = self.fragment_tol_override {
             return t;
@@ -324,13 +185,6 @@ impl RankScorer {
         }
     }
 
-    /// Fragment window of the rank-table node scores. The model stores one
-    /// (`param.mme`, 0.5 Da on the shipped models); on high-resolution data
-    /// without a CLI tolerance override, a run whose nominal-reference error
-    /// was measured uses the window learned from it
-    /// ([`crate::scoring::FragmentErrorModel::node_window_da`]), never wider
-    /// than the stored one. Training scorers carry no measurement and keep the
-    /// stored window.
     pub fn node_score_window(&self) -> model::tolerance::Tolerance {
         use model::tolerance::Tolerance;
         let stored = self.param.mme;
@@ -346,10 +200,6 @@ impl RankScorer {
         }
     }
 
-    /// Median signed fragment error (ppm) the search removes from a run's
-    /// fragment peaks before scoring them: the measured offset on
-    /// high-resolution data without a CLI tolerance override, else 0. A
-    /// peak observed at `mz` is scored at `mz / (1 + offset * 1e-6)`.
     pub fn fragment_recentre_ppm(&self) -> f64 {
         match self.fragment_error.get() {
             Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
@@ -359,9 +209,6 @@ impl RankScorer {
         }
     }
 
-    /// Centre and width (ppm) of the ppm-Gaussian tight-match term, on peaks
-    /// already recentred by [`Self::fragment_recentre_ppm`]: centre 0 and 1.5
-    /// times the measured spread, else 0 and 7 ppm.
     pub fn ppm_gaussian(&self) -> (f64, f64) {
         match self.fragment_error.get() {
             Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
@@ -374,18 +221,10 @@ impl RankScorer {
         }
     }
 
-    /// LLR for a matched ion observed at intensity `rank` (1-based; rank 1 is
-    /// the most intense peak). Ranks beyond `max_rank` are folded onto
-    /// `max_rank`, so they index the last *observed-rank* entry
-    /// (`max_rank - 1`) — never the absent-ion slot. Returns 0 (neutral) for an
-    /// ion/partition the model doesn't cover.
     pub fn node_score(&self, partition: Partition, ion_type: IonType, rank: u32) -> f32 {
         let Some(table) = self.log_table.get(&(partition, ion_type)) else {
             return 0.0;
         };
-        // Panic-safety: `clamp` requires min <= max. A degenerate model with
-        // `max_rank == 0` would make `clamp(1, 0)` panic. Real models always
-        // have `max_rank > 0`, so this is inert for any valid model.
         if self.max_rank == 0 {
             return 0.0;
         }
@@ -396,10 +235,6 @@ impl RankScorer {
             .unwrap_or(0.0)
     }
 
-    /// LLR penalty for an expected ion that does not appear in the spectrum.
-    /// This is the dedicated absent slot at index `max_rank`, the final entry
-    /// of the `max_rank + 1`-length table. Returns 0 if the ion/partition is
-    /// uncovered.
     pub fn missing_ion_score(&self, partition: Partition, ion_type: IonType) -> f32 {
         let Some(table) = self.log_table.get(&(partition, ion_type)) else {
             return 0.0;
@@ -407,35 +242,6 @@ impl RankScorer {
         table.get(self.max_rank as usize).copied().unwrap_or(0.0)
     }
 
-    /// Ion-pair existence LLR.
-    ///
-    /// Scores whether the prefix/suffix peak pair flanking a cleavage site is
-    /// present, by comparing the model's learned existence probability for the
-    /// pair against the probability that random noise would produce the same
-    /// presence/absence pattern. With `prob_peak` the per-position chance of a
-    /// noise peak, the four patterns indexed `0..=3` get the independent-noise
-    /// baseline:
-    ///
-    /// - index 0 (neither present): `(1 - prob_peak)^2`
-    /// - index 1, 2 (exactly one present): `prob_peak * (1 - prob_peak)`
-    /// - index 3 (both present): `prob_peak^2`
-    ///
-    /// Returns `ln(ion_existence_prob / noise_baseline)`. Yields 0 if the
-    /// partition has no existence table, or `index` is out of range.
-    ///
-    /// Degenerate-input behavior (finding 3.3): for very peak-dense spectra at
-    /// small parent mass, `prob_peak` can exceed 1 (it is a peaks-per-position
-    /// rate, not a clamped probability), which makes the one-present baseline
-    /// (`prob_peak * (1 - prob_peak)`) negative and the both/neither baselines
-    /// degenerate. Historically the code let `ln(positive/negative) = NaN` flow
-    /// through to the caller's `round() as i32`, which maps NaN to 0 — i.e. the
-    /// edge contributed nothing. That is the intended outcome (clamping the
-    /// denominator to a tiny positive value would instead emit a large spurious
-    /// positive score, e.g. `ln(0.028 / 1e-38) ≈ +84`, and inflate DP maxima by
-    /// ~an order of magnitude on short charge-2 peptides). Rather than rely on
-    /// silent NaN→0 rounding, we now detect the out-of-domain case explicitly
-    /// and return the SAME bounded neutral score (`0.0`). The happy-path branch
-    /// (`prob_peak` a valid probability) is unchanged and byte-identical.
     pub fn ion_existence_score(&self, partition: Partition, index: usize, prob_peak: f32) -> f32 {
         let Some(table) = self.param.ion_existence_table.get(&partition) else {
             return 0.0;
@@ -443,11 +249,6 @@ impl RankScorer {
         if index >= table.len() {
             return 0.0;
         }
-        // Out-of-domain `prob_peak` (NaN, or outside [0,1]) makes the noise
-        // baseline non-positive / non-finite, which previously yielded a NaN
-        // that the caller rounded to 0. Return that neutral 0 explicitly so the
-        // edge evidence is dropped deterministically instead of via float NaN
-        // semantics. Valid probabilities take the normal path below unchanged.
         if !prob_peak.is_finite() || !(0.0..=1.0).contains(&prob_peak) {
             return 0.0;
         }
@@ -456,8 +257,6 @@ impl RankScorer {
             3 => prob_peak * prob_peak,
             _ => prob_peak * (1.0 - prob_peak),
         };
-        // Floor an exact-zero learned probability to 0.01 so ln stays finite;
-        // a true 0 would otherwise force ln(0) = -inf for an observed pair.
         let ion_prob = if table[index] == 0.0 {
             0.01
         } else {
@@ -466,13 +265,6 @@ impl RankScorer {
         (ion_prob / noise_baseline).ln()
     }
 
-    /// Mass-error score.
-    ///
-    /// Converts `error` (in Da) to an index using `error_scaling_factor`,
-    /// clamps to `[-esf, esf]`, then returns
-    /// `log(ionErrHist[idx] / noiseErrHist[idx])`.
-    ///
-    /// Returns 0.0 if `error_scaling_factor == 0` or tables are missing.
     pub fn error_score(&self, partition: Partition, error: f32) -> f32 {
         let esf = self.param.error_scaling_factor;
         if esf == 0 {
@@ -512,9 +304,6 @@ mod tests {
     use super::*;
     use crate::testutil::tiny_param;
 
-    /// Build a minimal low-resolution `Param` (LowRes instrument) for
-    /// `feature_match_tolerance` tests. Reuses `tiny_param()` and patches
-    /// `data_type.instrument` to `InstrumentType::LowRes`.
     fn low_res_param() -> Param {
         use model::instrument::InstrumentType;
         let mut p = tiny_param();
@@ -525,17 +314,12 @@ mod tests {
     #[test]
     fn feature_match_tolerance_defaults_by_resolution() {
         use model::tolerance::Tolerance;
-        // tiny_param() uses QExactive → high-resolution → 20 ppm
         let hi = RankScorer::new(&tiny_param());
         assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
-        // low_res_param() uses LowRes → 0.5 Da
         let lo = RankScorer::new(&low_res_param());
         assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
     }
 
-    /// The acquisition's class wins over the model's instrument: high-res ETD
-    /// served by a low-res model matches features at 20 ppm, and low-res data
-    /// served by a high-res model at 0.5 Da.
     #[test]
     fn feature_match_tolerance_follows_the_acquisition() {
         use model::tolerance::Tolerance;
@@ -548,14 +332,10 @@ mod tests {
         assert_eq!(hi_model.feature_match_tolerance(), Tolerance::Da(0.5));
         hi_model.set_acquisition_high_res(None);
         assert_eq!(hi_model.feature_match_tolerance(), Tolerance::Ppm(20.0));
-        // The CLI override still wins.
         lo_model.set_fragment_tol_override(Some(Tolerance::Ppm(7.0)));
         assert_eq!(lo_model.feature_match_tolerance(), Tolerance::Ppm(7.0));
     }
 
-    /// A measured error sets the PIN tolerance and the ppm-Gaussian on
-    /// high-res data only; the model-feature tolerance stays at the class
-    /// default and the CLI override wins over both.
     #[test]
     fn measured_error_sets_pin_tolerance_on_high_res_only() {
         use crate::scoring::FragmentErrorModel;
@@ -588,9 +368,6 @@ mod tests {
         assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
     }
 
-    /// The node-score window follows a measured nominal-reference error on
-    /// high-res data (never wider than the stored window) and keeps the stored
-    /// window without one, on low-res data, and under a CLI override.
     #[test]
     fn node_score_window_is_learned_on_high_res_only() {
         use crate::scoring::FragmentErrorModel;
@@ -642,8 +419,6 @@ mod tests {
 
     #[test]
     fn finite_llr_matches_plain_ln_for_valid_inputs() {
-        // For strictly-positive finite frequencies the helper is exactly the
-        // unguarded ln-ratio (happy-path byte-identical).
         let got = super::finite_llr(0.6, 0.1, 1.0);
         let want = (0.6_f32 / (0.1_f32 * 1.0)).ln();
         assert_eq!(got, want);
@@ -651,7 +426,6 @@ mod tests {
 
     #[test]
     fn finite_llr_stays_finite_on_corrupt_inputs() {
-        // Zero / negative / NaN frequencies must NOT produce ±inf or NaN.
         assert!(
             super::finite_llr(0.0, 0.1, 1.0).is_finite(),
             "zero ion freq"
@@ -681,8 +455,6 @@ mod tests {
 
     #[test]
     fn rank_scorer_new_tables_are_finite_even_with_zero_freqs() {
-        // Inject a degenerate ion table (a zero entry) and confirm the built
-        // LLR table is finite throughout (no -inf from ln(0)).
         let mut param = tiny_param();
         let part = Partition {
             charge: 2,
@@ -723,7 +495,6 @@ mod tests {
             loss_class: 0,
         };
 
-        // Rank 1 → index 0. chargeOrSeg = min(1, 1) = 1. log(0.6 / (0.1 * 1)) = log(6.0).
         let s1 = scorer.node_score(part, ion, 1);
         assert!(
             (s1 - 6.0_f32.ln()).abs() < 1e-5,
@@ -731,7 +502,6 @@ mod tests {
             6.0_f32.ln()
         );
 
-        // Rank 2 → index 1. log(0.3 / 0.2) = log(1.5).
         let s2 = scorer.node_score(part, ion, 2);
         assert!((s2 - 1.5_f32.ln()).abs() < 1e-5);
     }
@@ -751,8 +521,6 @@ mod tests {
             loss_class: 0,
         };
 
-        // rank > max_rank clamps to rank_index = max_rank - 1.
-        // max_rank = 3 → rank_index = 2 → log(0.05 / 0.3).
         let s5 = scorer.node_score(part, ion, 5);
         let expected = (0.05_f32 / 0.3_f32).ln();
         assert!((s5 - expected).abs() < 1e-5);
@@ -773,8 +541,6 @@ mod tests {
             loss_class: 0,
         };
 
-        // missing slot = index `maxRank` = 3 (the last entry in length-4 array).
-        // log(0.001 / 0.4) = log(0.0025).
         let s_missing = scorer.missing_ion_score(part, ion);
         let expected = (0.001_f32 / 0.4_f32).ln();
         assert!((s_missing - expected).abs() < 1e-5);
@@ -782,9 +548,6 @@ mod tests {
 
     #[test]
     fn chargeorseg_uses_min_of_ion_charge_and_num_segments() {
-        // Build a param with num_segments=1 but an ion with charge 3.
-        // charge_or_seg = min(3, 1) = 1.
-        // Verify the log score uses 1 (not 3).
         let mut param = tiny_param();
         let part = Partition {
             charge: 2,
@@ -805,7 +568,6 @@ mod tests {
 
         let scorer = RankScorer::new(&param);
         let s1 = scorer.node_score(part, ion3, 1);
-        // charge_or_seg = min(3, 1) = 1. log(0.6 / (0.1 * 1)) = log(6).
         assert!((s1 - 6.0_f32.ln()).abs() < 1e-5);
     }
 
@@ -823,16 +585,12 @@ mod tests {
             offset_bits: 0.0_f32.to_bits(),
             loss_class: 0,
         };
-        // Out-of-table partition → return 0 (neutral score).
         assert_eq!(scorer.node_score(unknown, ion, 1), 0.0);
         assert_eq!(scorer.missing_ion_score(unknown, ion), 0.0);
     }
 
     #[test]
     fn loss_ions_routed_to_loss_logs_not_intact_path() {
-        // A model carrying a loss-class ion type must expose it ONLY through
-        // partition_loss_ion_logs; the intact hot path must filter it out so
-        // the mass-indexed DP stays peptide-agnostic and intact-only.
         let mut param = tiny_param();
         let part = Partition {
             charge: 2,
@@ -849,21 +607,17 @@ mod tests {
             offset_bits: 0.0_f32.to_bits(),
             loss_class: 1,
         };
-        // Give the loss ion a rank distribution (so it gets an LLR table).
         param
             .rank_dist_table
             .get_mut(&part)
             .unwrap()
             .insert(loss, vec![0.6_f32, 0.3, 0.05, 0.001]);
-        // Populate the ion-type cache with BOTH so we can prove the intact path
-        // filters the loss ion out (an empty cache would pass trivially).
         param
             .partition_ion_types_cache
             .insert(part, vec![intact, loss]);
 
         let scorer = RankScorer::new(&param);
 
-        // Hot path: intact only.
         assert!(scorer
             .partition_ion_logs(&part)
             .iter()
@@ -872,19 +626,16 @@ mod tests {
             .partition_ion_logs(&part)
             .iter()
             .any(|(ion, _)| *ion == intact));
-        // Loss path: carries the loss ion.
         assert!(scorer.has_loss_tables());
         assert!(scorer
             .partition_loss_ion_logs(&part)
             .iter()
             .any(|(ion, _)| *ion == loss));
-        // A standard model has no loss tables.
         assert!(!RankScorer::new(&tiny_param()).has_loss_tables());
     }
 
     #[test]
     fn ion_existence_score_out_of_domain_prob_peak_is_bounded_zero() {
-        // Build a param with an ion-existence table for one partition.
         let mut param = tiny_param();
         let part = Partition {
             charge: 2,
@@ -896,8 +647,6 @@ mod tests {
             .insert(part, vec![0.7, 0.1, 0.1, 0.1]);
         let scorer = RankScorer::new(&param);
 
-        // prob_peak > 1 (dense spectrum): previously produced NaN→round→0.
-        // Now returns an explicit, finite, bounded 0.0 — never NaN/±inf.
         for &index in &[0usize, 1, 2, 3] {
             let s = scorer.ion_existence_score(part, index, 1.5);
             assert!(
@@ -905,13 +654,10 @@ mod tests {
                 "out-of-domain prob_peak must give finite score"
             );
             assert_eq!(s, 0.0, "out-of-domain edge contributes neutral 0");
-            // NaN prob_peak also neutralized.
             let s_nan = scorer.ion_existence_score(part, index, f32::NAN);
             assert_eq!(s_nan, 0.0);
         }
 
-        // A valid in-domain prob_peak still scores via the normal path (finite,
-        // generally non-zero) — happy path unchanged.
         let s_valid = scorer.ion_existence_score(part, 3, 0.3);
         assert!(s_valid.is_finite());
         assert_ne!(
@@ -934,7 +680,6 @@ mod tests {
             offset_bits: 0.0_f32.to_bits(),
             loss_class: 0,
         };
-        // Suffix isn't in the table → return 0.
         assert_eq!(scorer.node_score(part, unknown_ion, 1), 0.0);
     }
 }

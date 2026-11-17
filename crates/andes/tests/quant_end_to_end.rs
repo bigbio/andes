@@ -1,11 +1,3 @@
-//! End-to-end tests for `--tmt` and `--lfq` on the synthetic fixtures built by
-//! `scripts/make_quant_fixtures.py` (six BSA peptides with known intensities).
-//!
-//! The assertions hold the designed numbers of that script: reporter channels
-//! 6..10 at twice channels 1..5 in every MS2, a 1..10 ladder in the MS3, a
-//! precursor purity of 2/3 for the second peptide, and label-free areas
-//! proportional to the designed apex intensities.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,8 +15,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// The header and rows of a quantification table, every cell as text: a
-/// null is empty and a list is `;`-joined.
 fn read_table(t: &output::ReadTable) -> (Vec<String>, Vec<Vec<String>>) {
     let header: Vec<String> = t.batches[0]
         .schema()
@@ -63,8 +53,6 @@ fn read_table(t: &output::ReadTable) -> (Vec<String>, Vec<Vec<String>>) {
     (header, rows)
 }
 
-/// `tmt.parquet` as text, with only the PSMs that passed the quantification
-/// gate, and its row count with the gated ones.
 fn read_tmt(path: &Path) -> (Vec<String>, Vec<Vec<String>>, usize) {
     let t = output::read_tmt_parquet(path).unwrap_or_else(|e| panic!("{e}"));
     let (header, rows) = read_table(&t);
@@ -74,7 +62,6 @@ fn read_tmt(path: &Path) -> (Vec<String>, Vec<Vec<String>>, usize) {
     (header, rows, all)
 }
 
-/// Peptidoform without its `[...]` modification tags.
 fn bare(peptidoform: &str) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
@@ -140,8 +127,12 @@ fn tmt10_ms2_reporters_purity_and_correction() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--output-parquet",
@@ -176,16 +167,11 @@ fn tmt10_ms2_reporters_purity_and_correction() {
         assert_eq!(r[level], "2");
         let raw_a: f64 = r[raw126].parse().unwrap();
         let raw_b: f64 = r[raw129c].parse().unwrap();
-        // Designed pattern: channels 6..10 at twice channels 1..5.
         assert!(
             (raw_b / raw_a - 2.0).abs() < 0.02,
             "{}: {raw_a} vs {raw_b}",
             r[peptide]
         );
-        // The correction undoes the 5 % +1 spill the fixture does NOT contain:
-        // corrected 126 (which receives nothing) is raw/0.95, while 129C is
-        // inflated less than that because a share of its signal is attributed
-        // to the 128C spill.
         let cor_a: f64 = r[c126].parse().unwrap();
         let cor_b: f64 = r[c129c].parse().unwrap();
         assert!(
@@ -199,8 +185,6 @@ fn tmt10_ms2_reporters_purity_and_correction() {
             r[peptide]
         );
         let p: f64 = r[purity].parse().unwrap();
-        // Roll-up weight: purity squared. The fixture carries no noise arrays,
-        // so the S/N cells stay empty.
         let w: f64 = r[weight].parse().unwrap();
         assert!(
             (w - p * p).abs() < 1e-3,
@@ -215,8 +199,6 @@ fn tmt10_ms2_reporters_purity_and_correction() {
             r[peptide]
         );
         if bare(&r[peptide]) == "YLYEIAR" {
-            // Envelope inside the ±0.7 Th window (M, M+1) ≈ 1.5 × mono against an
-            // interferer of 0.5 × mono → purity ≈ 0.75 (plus a little background).
             assert!((0.70..0.80).contains(&p), "interfered purity {p}");
             saw_interfered = true;
         } else {
@@ -232,9 +214,6 @@ fn tmt10_ms2_reporters_purity_and_correction() {
     assert!(names.contains(&"intensities".to_string()));
 }
 
-/// `--tmt-unmix on|auto` adds its block after the existing columns and leaves
-/// them unchanged (`off` writes none); the fixture's handful of scans is too few to fit the run's
-/// interference model, so the block stays empty.
 #[test]
 fn tmt10_unmix_block_follows_the_existing_columns() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,10 +228,12 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
             fixture("test-fixtures/BSA.fasta")
                 .to_string_lossy()
                 .into_owned(),
-            "--mods".to_string(),
-            fixture("test-fixtures/tmt10_mods.txt")
-                .to_string_lossy()
-                .into_owned(),
+            "--fixed-mods".to_string(),
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)".to_string(),
+            "--variable-mods".to_string(),
+            String::new(),
+            "--max-mods".to_string(),
+            "1".to_string(),
             "--output-pin".to_string(),
             pin.to_string_lossy().into_owned(),
             "--tmt".to_string(),
@@ -271,7 +252,6 @@ fn tmt10_unmix_block_follows_the_existing_columns() {
     };
     let (plain_h, plain_rows, plain_key) = run("plain", &["--tmt-unmix", "off"]);
     assert_eq!(plain_key.as_deref(), Some("off"));
-    // `auto` is the default.
     for (stem, extra, mode) in [
         ("unmix", &["--tmt-unmix", "on"][..], "on"),
         ("auto", &[][..], "auto"),
@@ -301,8 +281,12 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--tmt",
@@ -331,16 +315,12 @@ fn tmt10_ms3_reporters_follow_the_sps_scan() {
         );
         let a: f64 = r[c126].parse().unwrap();
         let b: f64 = r[c131].parse().unwrap();
-        // MS3 ladder: channel 10 is ten times channel 1.
         assert!((b / a - 10.0).abs() < 0.05, "{a} vs {b}");
     }
 }
 
 #[test]
 fn tmt35_reads_the_deuterated_kit_in_reference_order() {
-    // The TMT10 fixture's reporters sit on the 35-plex channels of the same
-    // name (TMT10's 131 is 131N); the deuterated channels, 2.9 mDa above
-    // their twins, read nothing at the 10 ppm default.
     let dir = tempfile::tempdir().unwrap();
     let pin = dir.path().join("tmt35.pin");
     let qpx = dir.path().join("tmt35.idparquet");
@@ -351,8 +331,12 @@ fn tmt35_reads_the_deuterated_kit_in_reference_order() {
             .unwrap(),
         "--database",
         fixture("test-fixtures/BSA.fasta").to_str().unwrap(),
-        "--mods",
-        fixture("test-fixtures/tmt10_mods.txt").to_str().unwrap(),
+        "--fixed-mods",
+        "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+        "--variable-mods",
+        "",
+        "--max-mods",
+        "1",
         "--output-pin",
         pin.to_str().unwrap(),
         "--output-parquet",
@@ -415,14 +399,17 @@ fn tmt35_refuses_a_correction_sheet_and_a_20ppm_window() {
     let refused = |extra: &[&str]| {
         let spectrum = fixture("test-fixtures/tmt10_synthetic.mzML.gz");
         let database = fixture("test-fixtures/BSA.fasta");
-        let mods = fixture("test-fixtures/tmt10_mods.txt");
         let mut args = vec![
             "--spectrum",
             spectrum.to_str().unwrap(),
             "--database",
             database.to_str().unwrap(),
-            "--mods",
-            mods.to_str().unwrap(),
+            "--fixed-mods",
+            "Carbamidomethyl (C), TMT10plex (K), TMT10plex (N-term)",
+            "--variable-mods",
+            "",
+            "--max-mods",
+            "1",
             "--output-pin",
             pin.to_str().unwrap(),
             "--tmt",
@@ -437,7 +424,6 @@ fn tmt35_refuses_a_correction_sheet_and_a_20ppm_window() {
             .expect("run andes");
         assert!(!out.status.success(), "andes accepted {extra:?}");
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        // Refused from the command line alone, before the database is loaded.
         assert!(!stderr.contains("target proteins"), "{stderr}");
         stderr
     };
@@ -466,9 +452,7 @@ fn lfq_areas_track_the_designed_intensities() {
         "--output-parquet",
         qpx.to_str().unwrap(),
         "--lfq",
-        // Six targets: the conservative (decoys + 1) / targets estimate cannot
-        // go below 1/6, so the wide table needs a looser cut on this fixture.
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",
@@ -487,7 +471,6 @@ fn lfq_areas_track_the_designed_intensities() {
     let apex = col(&header, "rt_apex");
     let q = col(&header, "feature_q_value");
     let n_iso = col(&header, "n_isotopes");
-    // Designed apex intensities (monoisotopic) and apex RTs.
     let design: HashMap<&str, (f64, f64)> = HashMap::from([
         ("LVNELTEFAK", (1.0e6, 40.0)),
         ("YLYEIAR", (5.0e5, 70.0)),
@@ -497,8 +480,6 @@ fn lfq_areas_track_the_designed_intensities() {
         ("DAFLGSFLYEYSR", (1.5e6, 190.0)),
     ]);
     let iso_areas = col(&header, "isotope_areas");
-    // The mono trace is a Gaussian of the designed height and sigma 4 s, so its
-    // area is height · sigma · sqrt(2π) ≈ 10.03 · height for every peptide.
     let gaussian_area_per_height = 4.0 * (2.0 * std::f64::consts::PI).sqrt();
     for r in &rows {
         let seq_owned = bare(&r[peptide]);
@@ -525,9 +506,6 @@ fn lfq_areas_track_the_designed_intensities() {
             a > mono_area,
             "{seq}: summed area {a} must exceed the mono area {mono_area}"
         );
-        // The area is the whole pattern: the four traced isotopes over the
-        // share of it they hold, 0.979 to 0.996 for these 0.9-1.6 kDa
-        // peptides.
         let traced: f64 = r[iso_areas]
             .split(';')
             .map(|v| v.parse::<f64>().unwrap())
@@ -537,8 +515,6 @@ fn lfq_areas_track_the_designed_intensities() {
             "{seq}: area {a} vs traced isotopes {traced}"
         );
     }
-    // The table records its run and cuts; every feature on this fixture
-    // passes them.
     assert_eq!(
         lfq.meta.get("andes.lfq.runs").map(String::as_str),
         Some("lfq_synthetic")
@@ -556,7 +532,6 @@ fn lfq_areas_track_the_designed_intensities() {
     assert_eq!(n, rows.len());
 }
 
-/// The LFQ fixture search; `extra` is appended.
 fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str]) {
     let spectrum = fixture("test-fixtures/lfq_synthetic.mzML.gz");
     let database = fixture("test-fixtures/BSA.fasta");
@@ -570,7 +545,7 @@ fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str])
         "--output-parquet",
         qpx.to_str().unwrap(),
         "--lfq",
-        "--lfq-feature-fdr",
+        "--quant-fdr",
         "0.2",
         "--threads",
         "2",
@@ -579,7 +554,6 @@ fn run_lfq_fixture(pin: &std::path::Path, qpx: &std::path::Path, extra: &[&str])
     run_andes(&args);
 }
 
-/// SpecIds of a PIN file.
 fn pin_spec_ids(pin: &std::path::Path) -> std::collections::HashSet<String> {
     std::fs::read_to_string(pin)
         .unwrap()
@@ -621,14 +595,11 @@ fn quant_dir_writes_ms1_and_psm_tables() {
         assert_eq!(r.precursor_key, format!("{}/{}", r.peptidoform, r.charge));
         assert!(r.rt_s > 0.0);
     }
-    // HLVDEPQNLIK, C58 H96 N16 O18.
     let p4 = rows.iter().find(|r| r.peptidoform == "HLVDEPQNLIK");
     let share = p4.expect("peptide 4").isotope_share;
     assert!((share - 0.988_732).abs() < 1e-5, "{share}");
 }
 
-/// The real-data slice has rank-1 decoys: `--quant-dir` alone (no `--lfq`)
-/// writes them, unfiltered, with PIN SpecIds.
 #[test]
 fn quant_dir_table_contains_decoys() {
     let out = tempfile::tempdir().unwrap();
@@ -650,7 +621,6 @@ fn quant_dir_table_contains_decoys() {
         "--threads",
         "2",
     ]);
-    // --quant-dir alone quantifies nothing: no feature parquet.
     assert!(out.path().join("slice.idparquet").is_dir());
     assert!(!out
         .path()
@@ -673,10 +643,6 @@ fn quant_dir_table_contains_decoys() {
         assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
     }
 
-    // The MS2 table: every PSM's scan, reduced, with its isolation window;
-    // the best target PSM's scan gives a library spectrum (the slice is
-    // searched against one of its three proteomes, so most lower-ranked
-    // targets are random matches with few fragments).
     let ms2 = output::ms2_table::read_ms2_table(&qdir.join(format!("{stem}.ms2.parquet"))).unwrap();
     assert!(!qdir.join(format!("{stem}.ms2.parquet.partial")).exists());
     assert_eq!(ms2.run, stem);
@@ -700,7 +666,6 @@ fn quant_dir_table_contains_decoys() {
     let best = &targets[..targets.len().min(20)];
     let mut with_spectrum = 0;
     for r in best {
-        // `<spec_key>_<rank>` or `<spec_key>_<rank>_<row>`.
         let one = r.spec_id.rsplit_once('_').unwrap().0;
         let scan = by_key
             .get(one)

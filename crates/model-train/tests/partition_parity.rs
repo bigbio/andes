@@ -1,35 +1,14 @@
-//! Parity gate for protocol-partitioned model stores.
-//!
-//! A partitioned store (a directory of `protocol=<P>/models.parquet` files)
-//! MUST load identically to the single-file store it was split from:
-//! - same set of `model_id`s,
-//! - same `selection_entries()`,
-//! - per-model `load_param(id)` semantically identical (every field, every
-//!   table, every blob).
-//!
-//! The bundled-store test takes one shipped partition file
-//! (`resources/models/protocol=Automatic/models.parquet`, a plain single-file
-//! store of 11 models) as the single-file input, re-partitions it into a temp
-//! dir and proves equivalence. A second test does the same for an external
-//! v1 store if `ANDES_V1_STORE` points at one (used to build the shipped
-//! `resources/models/` partition set).
-
 use std::path::PathBuf;
 
 use model_train::store::{split_store_by_protocol, ModelStore};
 use scoring_crate::param_model::Param;
 
-/// A shipped partition file is itself a complete single-file store (every row
-/// of its 11 models), so it stands in for the retired single-file bundle.
 fn bundled_single_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../resources/models/protocol=Automatic/models.parquet")
 }
 
-/// Assert two stores are equivalent: same model_ids, same selection_entries,
-/// and per-model Param equality.
 fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
-    // 1. Same model_id set.
     let mut a = single.model_ids();
     let mut b = partitioned.model_ids();
     a.sort();
@@ -39,7 +18,6 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         "model_id sets differ between single file and partitioned dir"
     );
 
-    // 2. Same selection_entries (as a sorted set).
     let mut sa: Vec<_> = single
         .selection_entries()
         .into_iter()
@@ -73,14 +51,12 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         "selection_entries differ between single file and partitioned dir"
     );
 
-    // 3. Per-model Param equality.
     for id in &a {
         let pa: Param = single.load_param(id).expect("load_param single");
         let pb: Param = partitioned.load_param(id).expect("load_param partitioned");
         assert_params_equal(id, &pa, &pb);
     }
 
-    // 4. Per-model source ledgers + per-source stats equivalence.
     for id in &a {
         let mut la = single.load_sources(id).expect("load_sources single");
         let mut lb = partitioned
@@ -93,10 +69,6 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
             "[{id}] load_sources differ between single and partitioned"
         );
 
-        // Each (model_id, source_id) that has stat rows must reconstruct
-        // identical sufficient statistics from either layout (CountStats'
-        // PartialEq ignores trailing histogram zeros). Sources without stat
-        // rows must be absent (NoModel) in BOTH layouts.
         for src in &la {
             match (
                 single.load_source_stats(id, &src.source_id),
@@ -119,8 +91,6 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
     }
 }
 
-/// Compare two reconstructed Params field-by-field (the cache field and the
-/// Arc-wrapped models are compared on content, not pointer identity).
 fn assert_params_equal(id: &str, a: &Param, b: &Param) {
     assert_eq!(a.version, b.version, "[{id}] version");
     assert_eq!(a.data_type, b.data_type, "[{id}] data_type");
@@ -170,7 +140,6 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
         "[{id}] ion_existence_table"
     );
 
-    // Model blobs: compare presence + serialized bytes.
     assert_eq!(
         a.frag_intensity_model.as_ref().map(|m| m.to_bytes()),
         b.frag_intensity_model.as_ref().map(|m| m.to_bytes()),
@@ -208,13 +177,6 @@ fn partitioned_store_loads_identical_to_bundled_single_file() {
     assert_stores_equivalent(&single, &partitioned);
 }
 
-/// Verify the *shipped* pyarrow-written partitions (`resources/models/`) load
-/// identically to the v1 single-file store. Unlike the test below, this does
-/// NOT run the Rust splitter — it reads the partitions exactly as they ship,
-/// which are produced by `scripts/split_store_by_protocol.py` (pyarrow/zstd).
-///
-/// Set `ANDES_V1_STORE=/path/to/models_v1_own.parquet` to enable. Skipped
-/// otherwise (the v1 single file is not committed to the repo).
 #[test]
 fn shipped_partitions_load_identical_to_v1_single_file() {
     let Ok(src) = std::env::var("ANDES_V1_STORE") else {
@@ -236,11 +198,6 @@ fn shipped_partitions_load_identical_to_v1_single_file() {
     );
 }
 
-/// Build + verify the partitioned layout for an external v1 store, written to a
-/// temporary directory.
-///
-/// Set `ANDES_V1_STORE=/path/to/models_v1_own.parquet` to enable. Skipped
-/// otherwise.
 #[test]
 fn partitioned_v1_store_loads_identical_when_present() {
     let Ok(src) = std::env::var("ANDES_V1_STORE") else {

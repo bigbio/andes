@@ -1,32 +1,10 @@
-//! Match-between-runs library confidence.
-//!
-//! The functions here decide which precursors enter the transfer library. The
-//! values are internal quant-quality gates, not reported identification FDR;
-//! identification FDR is only ever reported by the PSM-level rescorer.
-
 use crate::align::{align, AlignParams, Alignment, Observation};
 
-/// Precursor-level library entry gate (internal; not an identification FDR).
-///
-/// `rows` holds `(precursor_id, is_decoy, psm_score)` with higher scores
-/// better. Each precursor keeps its best PSM score across all runs, then
-/// precursors are ranked by `(score desc, decoys before targets, id asc)` (ties
-/// are conservative: a target tied with a decoy never gets a lower q than it
-/// would with the decoy first) and run through
-/// target/decoy competition: `(D + 1) / max(T, 1)` at each rank, a running
-/// minimum from the worst rank upwards, clamped to at most 1.
-///
-/// A NaN score is treated as the worst possible score. A precursor id is
-/// expected to be all-target or all-decoy (checked by `debug_assert!`); in release
-/// builds a mixed id is decided by the first row seen. Ids are assumed dense:
-/// the result is indexed by precursor id and has length `max id + 1`, `None`
-/// for ids without rows.
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let Some(max_id) = rows.iter().map(|r| r.0).max() else {
         return Vec::new();
     };
     let n = max_id as usize + 1;
-    // (is_decoy, best score) per id; NaN is mapped to -inf so it is the worst.
     let mut best: Vec<Option<(bool, f64)>> = vec![None; n];
     for &(id, is_decoy, score) in rows {
         let score = if score.is_nan() {
@@ -53,7 +31,6 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         .enumerate()
         .filter_map(|(id, b)| b.map(|(d, s)| (id as u32, d, s)))
         .collect();
-    // Score desc; on ties decoys first (conservative), then id for determinism.
     ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
 
     let mut fdr = Vec::with_capacity(ranked.len());
@@ -75,32 +52,21 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     out
 }
 
-/// One PSM of one run, as the library sees it. `precursor` is a dense id in
-/// `0..meta.len()` shared by every run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PsmIn {
     pub run: u16,
     pub precursor: u32,
     pub rt: f64,
-    /// The rescorer's PSM score (higher is better).
     pub score: f64,
-    /// The rescorer's PSM q-value: whether the PSM is a donor in its run.
     pub q: f64,
-    /// The q-value that gates a precursor's best donor PSM
-    /// ([`PsmIn::gate_q`]); NaN when it is `q`. With per-run q-values it is the
-    /// q-value of the pooled model, which depends on the PSM's score only.
     pub q_gate: f64,
-    /// The rescorer's PSM posterior error probability.
     pub pep: f64,
     pub is_decoy: bool,
     pub faims_cv: Option<f32>,
-    /// Precursor 1/K0 of the PSM's spectrum, when the source records it.
     pub ion_mobility: Option<f32>,
 }
 
 impl PsmIn {
-    /// The q-value that gates the precursor's best donor PSM: [`PsmIn::q_gate`],
-    /// or `q` when there is none.
     pub fn gate_q(&self) -> f64 {
         if self.q_gate.is_nan() {
             self.q
@@ -110,28 +76,19 @@ impl PsmIn {
     }
 }
 
-/// Whether `p` is a donor PSM under the PSM q-value threshold `donor_q` and the
-/// optional PEP cap `donor_pep`.
 pub fn is_donor_psm(p: &PsmIn, donor_q: f64, donor_pep: Option<f64>) -> bool {
     p.q <= donor_q && donor_pep.is_none_or(|c| p.pep <= c)
 }
 
-/// Identity of a precursor: peptidoform and charge key, monoisotopic m/z,
-/// the theoretical isotope fractions of its first four isotopes (sum 1) and
-/// the share of the whole isotope pattern those four hold.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrecursorMeta {
     pub key: String,
     pub mz: f64,
     pub charge: u8,
     pub envelope: [f32; 4],
-    /// In (0, 1]. A quantity fitted on `envelope` is the area of those
-    /// isotopes; divided by this share it is the area of the whole pattern.
     pub isotope_share: f32,
 }
 
-/// The best donor PSM of an entry (highest score; then earliest RT, lowest
-/// run): its rescorer score, PSM q-value and PEP.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DonorPsm {
     pub score: f64,
@@ -139,41 +96,19 @@ pub struct DonorPsm {
     pub pep: f64,
 }
 
-/// A confident precursor that is measured (identified or transferred) in
-/// every run. Its donor runs are the runs with a PSM of it at PSM q-value at
-/// most the library's donor threshold; only those PSMs count below.
-///
-/// An identity decoy is a decoy precursor that passes the same entry gate and
-/// donor rules with its decoy PSMs. It is measured exactly like a target
-/// entry, so its transfers show how often the transfer of a false donor
-/// identification is accepted; it is never reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryEntry {
     pub precursor: u32,
-    /// True for an identity decoy (a decoy precursor's entry).
     pub identity_decoy: bool,
-    /// Library confidence (internal quant gate, not an identification FDR).
     pub q: f64,
-    /// The best donor PSM.
     pub donor_psm: DonorPsm,
-    /// Consensus RT from the joint alignment (NaN without an observation in
-    /// an aligned run).
     pub consensus_rt: f64,
-    /// Most frequent FAIMS compensation voltage among its donor PSMs; the
-    /// smallest value wins a tie; `None` when no donor PSM has one.
     pub faims_cv: Option<f32>,
-    /// Median precursor 1/K0 of its donor PSMs that record one (the mean of
-    /// the middle two for an even count); `None` when none does.
     pub ion_mobility: Option<f32>,
-    /// Donor runs, ascending.
     pub donors: Vec<u16>,
-    /// Per donor run (ascending), the RT of its best-scoring donor PSM
-    /// (earliest RT on equal scores).
     pub best_rt: Vec<(u16, f64)>,
 }
 
-/// The transfer library: entries sorted by m/z, the joint alignment of the
-/// entries' observations, and the precursor table indexed by id.
 #[derive(Debug, Clone)]
 pub struct Library {
     pub entries: Vec<LibraryEntry>,
@@ -181,22 +116,6 @@ pub struct Library {
     pub meta: Vec<PrecursorMeta>,
 }
 
-/// Builds the library from the PSMs of all runs.
-///
-/// Precursors are independent: confidence is [`precursor_qvalues`] over the
-/// best score per precursor id (every PSM, whatever its PSM q-value), with no
-/// per-scan competition. Donor PSMs are the PSMs with PSM `q <= donor_q` and,
-/// when `donor_pep` is given, PSM `pep <= donor_pep`. Entries are the
-/// precursors with `q <= max_q` and at least one donor PSM, sorted by
-/// `(mz, id)`: target precursors, and decoy precursors as identity decoys
-/// (the same rules on their decoy PSMs). The alignment is fitted on one
-/// observation per `(target entry, donor run)`, the RT of the best donor PSM
-/// there; an identity decoy's observations are added after the fit
-/// ([`Alignment::add_observations`]), so they never move a run map but give
-/// the decoy its consensus RT and predictions as a target's would. PSMs with
-/// an id outside `0..meta.len()` or a run outside `0..n_runs` are ignored.
-/// The PSMs are added to a [`LibraryBuilder`] in run order, each run's in
-/// slice order.
 pub fn build_library(
     psms: &[PsmIn],
     meta: Vec<PrecursorMeta>,
@@ -215,7 +134,6 @@ pub fn build_library(
     b.finish(meta, max_q, ap)
 }
 
-/// NaN scores rank worst, as in the confidence gate.
 fn score_of(score: f64) -> f64 {
     if score.is_nan() {
         f64::NEG_INFINITY
@@ -224,7 +142,6 @@ fn score_of(score: f64) -> f64 {
     }
 }
 
-/// A donor PSM reduced to what an entry keeps of it.
 #[derive(Debug, Clone, Copy)]
 struct Donor {
     score: f64,
@@ -247,25 +164,16 @@ impl Donor {
         }
     }
 
-    /// Whether `self` replaces `best`: a higher score (NaN as the worst),
-    /// or an equal score and an earlier RT.
     fn beats(&self, best: &Donor) -> bool {
         let (a, b) = (score_of(self.score), score_of(best.score));
         a > b || (a == b && self.rt < best.rt)
     }
 }
 
-/// The donor PSMs of one precursor, reduced to what an entry needs. Runs
-/// arrive in ascending order: `current` is the best donor PSM of the latest
-/// run; each earlier run left its best donor PSM's `(run, RT)` in `best_rt`
-/// and was folded into `best`, the precursor's best donor PSM over those
-/// runs. `cvs` counts each FAIMS voltage over all its donor PSMs; `k0s`
-/// holds the precursor 1/K0 of every donor PSM that records one.
 #[derive(Debug, Clone)]
 struct DonorRuns {
     current: Donor,
     best: Option<Donor>,
-    /// The label of the best donor PSM of the lowest donor run.
     first_is_decoy: bool,
     best_rt: Vec<(u16, f64)>,
     cvs: Vec<(f32, u32)>,
@@ -284,25 +192,20 @@ impl DonorRuns {
         }
     }
 
-    /// Ends the run of `current`: its best donor PSM is final.
     fn close_run(&mut self) {
         let c = self.current;
         if self.best_rt.is_empty() {
             self.first_is_decoy = c.is_decoy;
         }
         self.best_rt.push((c.run, c.rt));
-        // Runs ascend, so a tie on score and RT keeps the lowest run.
         if self.best.is_none_or(|b| c.beats(&b)) {
             self.best = Some(c);
         }
     }
 }
 
-/// No donor slot.
 const NO_SLOT: u32 = u32::MAX;
 
-/// Median of `v` (reordered), the mean of the middle two for an even count;
-/// `None` when empty.
 fn median_f32(v: &mut [f32]) -> Option<f32> {
     if v.is_empty() {
         return None;
@@ -316,29 +219,17 @@ fn median_f32(v: &mut [f32]) -> Option<f32> {
     })
 }
 
-/// [`build_library`] over a stream of PSMs: [`LibraryBuilder::add`] takes
-/// them one at a time and keeps, per precursor, its best score and, per
-/// donor run, the RT of its best donor PSM, plus its best donor PSM and
-/// voltage counts. Memory follows the precursors and their donor runs (16
-/// bytes per donor run) rather than the PSMs. Each precursor's PSMs must
-/// arrive in ascending run order; adding the PSMs of [`build_library`]'s
-/// slice sorted by run (stably) gives the same library.
 #[derive(Debug, Clone)]
 pub struct LibraryBuilder {
     n_runs: usize,
     donor_q: f64,
     donor_pep: Option<f64>,
-    /// Per precursor id: the label of its first PSM and its best score (NaN
-    /// as the worst), over every PSM.
     best: Vec<Option<(bool, f64)>>,
-    /// Per precursor id: its index in `donors`, or [`NO_SLOT`].
     slot: Vec<u32>,
-    /// The donor PSMs of the precursors with one, in order of their first.
     donors: Vec<DonorRuns>,
 }
 
 impl LibraryBuilder {
-    /// A builder for `n_precursors` precursor ids and `n_runs` runs.
     pub fn new(n_precursors: usize, n_runs: usize, donor_q: f64, donor_pep: Option<f64>) -> Self {
         Self {
             n_runs,
@@ -350,17 +241,10 @@ impl LibraryBuilder {
         }
     }
 
-    /// Whether `p` is a donor PSM: PSM q-value and PEP within the donor
-    /// thresholds.
     pub fn is_donor(&self, p: &PsmIn) -> bool {
         is_donor_psm(p, self.donor_q, self.donor_pep)
     }
 
-    /// Adds one PSM; ignored when its id or run is out of range.
-    ///
-    /// # Panics
-    /// When a donor PSM's run is lower than that of an earlier donor PSM of
-    /// the same precursor.
     pub fn add(&mut self, p: &PsmIn) {
         let id = p.precursor as usize;
         if id >= self.best.len() || p.run as usize >= self.n_runs {
@@ -413,7 +297,6 @@ impl LibraryBuilder {
             d.k0s.push(k0);
         }
         if let Some(cv) = p.faims_cv {
-            // Voltages equal under `==` count together, under the smallest.
             match d.cvs.iter_mut().find(|c| c.0 == cv) {
                 Some(c) => {
                     c.1 += 1;
@@ -426,7 +309,6 @@ impl LibraryBuilder {
         }
     }
 
-    /// The library over the PSMs added: see [`build_library`].
     pub fn finish(self, meta: Vec<PrecursorMeta>, max_q: f64, ap: &AlignParams) -> Library {
         let n_prec = meta.len();
         let n_runs = self.n_runs;
@@ -472,7 +354,6 @@ impl LibraryBuilder {
                     }
                 }
             }
-            // Majority CV over all donor PSMs; smallest value on ties.
             d.cvs.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut faims_cv: Option<f32> = None;
             let mut best_n = 0u32;
@@ -560,7 +441,6 @@ mod tests {
         }
     }
 
-    /// 200 strong targets over two runs plus the supplied extra PSMs.
     fn base(extra: Vec<PsmIn>) -> Vec<PsmIn> {
         let mut v = Vec::new();
         for p in 0..200u32 {
@@ -574,8 +454,6 @@ mod tests {
 
     #[test]
     fn decoys_enter_as_identity_decoys_without_moving_the_alignment() {
-        // Decoy 200 outscores every target and is seen in both runs, at RTs
-        // that would bend the maps if it were an anchor.
         let psms = base(vec![
             psm(0, 200, 5.0, 1000.0, true),
             psm(1, 200, 900.0, 990.0, true),
@@ -600,9 +478,6 @@ mod tests {
             .entries
             .iter()
             .all(|e| e.identity_decoy == (e.precursor == 200)));
-        // The target entries and their predictions are those of a library
-        // built without the decoy (the entry gate q-values aside, which the
-        // decoy's score moves).
         for (a, b) in lib
             .entries
             .iter()
@@ -628,8 +503,6 @@ mod tests {
 
     #[test]
     fn identity_decoys_follow_the_target_entry_rules() {
-        // Decoy 200: no PSM at the donor threshold. Decoy 201: one donor
-        // PSM, but its precursor fails the entry gate (a weak best score).
         let weak = |run, precursor, rt, score| PsmIn {
             q_gate: f64::NAN,
             q: 0.2,
@@ -686,7 +559,6 @@ mod tests {
             &AlignParams::default(),
         );
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
-        // The PSM scoring 90 is above the donor threshold and does not count.
         assert_eq!(
             e0.donor_psm,
             DonorPsm {
@@ -699,8 +571,6 @@ mod tests {
 
     #[test]
     fn best_donor_is_gated_by_its_pooled_q_while_donors_follow_the_run_q() {
-        // Per-run q-values decide the donors; the entry's best donor PSM
-        // carries the pooled q-value that gates it, `q` when there is none.
         let with = |run, rt, score, q, q_gate| PsmIn {
             q_gate,
             q,
@@ -714,7 +584,6 @@ mod tests {
         psms.extend([
             with(0, 10.0, 50.0, 0.004, 0.0002),
             with(1, 11.0, 70.0, 0.0005, 0.03),
-            // Its pooled q-value is good but its run q-value is not: no donor.
             with(1, 12.0, 90.0, 0.2, 0.0001),
         ]);
         let lib = build_library(
@@ -752,8 +621,6 @@ mod tests {
 
     #[test]
     fn an_identity_decoy_is_gated_like_a_target() {
-        // The same rule for a decoy PSM: its donors follow its run q-value,
-        // its best donor PSM carries the pooled q-value (`q` without one).
         let decoy = |run, rt, score, q, q_gate| PsmIn {
             q,
             q_gate,
@@ -767,8 +634,6 @@ mod tests {
         let lib = build_library(&pooled, meta(201), 2, 1.0, 0.01, None, &ap);
         let d = lib.entries.iter().find(|e| e.precursor == 200).unwrap();
         assert!(d.identity_decoy);
-        // The best-scoring PSM (run 0) is no donor, run 1's is: the donor
-        // PSM is the run-1 one, gated by its pooled q-value.
         assert_eq!(d.donors, vec![1]);
         assert_eq!(d.donor_psm.score, 990.0);
         assert_eq!(d.donor_psm.q, 0.02);
@@ -787,7 +652,6 @@ mod tests {
     #[test]
     fn entries_sorted_by_mz() {
         let mut m = meta(200);
-        // Reverse the m/z order relative to ids.
         for (i, x) in m.iter_mut().enumerate() {
             x.mz = 900.0 - i as f64;
         }
@@ -831,7 +695,6 @@ mod tests {
         let lib = build_library(&psms, meta(200), 2, 1.0, 1.0, None, &AlignParams::default());
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.faims_cv, Some(-65.0));
-        // A tie goes to the smallest value; no CV gives None.
         let mut psms2: Vec<PsmIn> = psms.iter().copied().filter(|p| p.precursor != 0).collect();
         psms2.extend([cv(0, 10.0, Some(-50.0)), cv(1, 10.0, Some(-65.0))]);
         let lib = build_library(
@@ -864,7 +727,6 @@ mod tests {
         let lib = build_library(&psms, meta(200), 3, 1.0, 1.0, None, &AlignParams::default());
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.donors, vec![0, 2]);
-        // Later PSM scores higher in run 0; equal scores take the earliest RT.
         assert_eq!(e0.best_rt, vec![(0, 12.5), (2, 20.0)]);
     }
 
@@ -879,10 +741,7 @@ mod tests {
             .into_iter()
             .filter(|p| p.precursor > 1)
             .collect();
-        // Precursor 0: confident in run 0; in run 1 only a PSM above the PSM
-        // threshold, which scores best of all and sits at another RT.
         psms.extend([psm(0, 0, 10.0, 90.0, false), weak(1, 0, 55.0, 500.0)]);
-        // Precursor 1: only PSMs above the PSM threshold.
         psms.extend([weak(0, 1, 11.0, 400.0), weak(1, 1, 11.0, 400.0)]);
         let lib = build_library(
             &psms,
@@ -896,7 +755,6 @@ mod tests {
         let e0 = lib.entries.iter().find(|e| e.precursor == 0).unwrap();
         assert_eq!(e0.donors, vec![0]);
         assert_eq!(e0.best_rt, vec![(0, 10.0)]);
-        // The entry gate still ranks by the best score of every PSM.
         let all = build_library(
             &psms,
             meta(200),
@@ -910,15 +768,12 @@ mod tests {
         assert_eq!(e0.q, a0.q);
         assert_eq!(a0.donors, vec![0, 1]);
         assert_eq!(a0.best_rt, vec![(0, 10.0), (1, 55.0)]);
-        // No donor PSM: no entry.
         assert!(lib.entries.iter().all(|e| e.precursor != 1));
         assert!(all.entries.iter().any(|e| e.precursor == 1));
     }
 
     #[test]
     fn donors_need_the_pep_cap_when_given() {
-        // Precursor 0: PEP 0.5 in run 0, PEP 0.001 in run 1; precursor 1:
-        // PEP 0.5 in both runs. Every PSM is at q = 0.
         let with_pep = |run, precursor, rt, pep| PsmIn {
             q_gate: f64::NAN,
             pep,
@@ -947,7 +802,6 @@ mod tests {
 
     #[test]
     fn best_psm_per_precursor_then_tdc() {
-        // p0 target scores 10 and 3 -> best 10; p1 decoy 9; p2 target 8; p3 target 1
         let rows = [
             (0, false, 10.0),
             (0, false, 3.0),
@@ -956,8 +810,6 @@ mod tests {
             (3, false, 1.0),
         ];
         let q = precursor_qvalues(&rows);
-        // raw (D+1)/T down the list: p0 1/1, p1 2/1 -> 1 (clamp), p2 2/2, p3 2/3;
-        // the running minimum from the bottom makes every one 2/3
         assert_eq!(q.len(), 4);
         for (i, qi) in q.iter().enumerate() {
             assert!((qi.unwrap() - 2.0 / 3.0).abs() < 1e-12, "{i}: {qi:?}");
@@ -983,9 +835,6 @@ mod tests {
 
     #[test]
     fn nan_scores_rank_worst_and_do_not_panic() {
-        // 100 strong targets, a decoy at 1.0, and a NaN-scored target. If NaN
-        // were ranked best the NaN target would get the low q of the strong
-        // targets; ranked worst it sits below the decoy.
         let mut rows: Vec<(u32, bool, f64)> =
             (0..100).map(|i| (i, false, 100.0 + i as f64)).collect();
         rows.push((100, true, 1.0));
@@ -994,15 +843,12 @@ mod tests {
         let (strong, decoy, nan) = (q[0].unwrap(), q[100].unwrap(), q[101].unwrap());
         assert!(nan >= decoy, "{nan} < {decoy}");
         assert!(nan > strong, "{nan} <= {strong}");
-        // A NaN in one PSM does not hide a finite score of the same precursor.
         let q = precursor_qvalues(&[(0, false, f64::NAN), (0, false, 4.0)]);
         assert_eq!(q[0], Some(1.0));
     }
 
     #[test]
     fn target_decoy_tie_is_conservative() {
-        // 9 strong targets, then a target and a decoy tied at 5.0. Decoy-first
-        // gives the tied target (D+1)/T = 2/10; target-first would give 1/10.
         let strong: Vec<(u32, bool, f64)> = (0..9).map(|i| (i, false, 100.0 + i as f64)).collect();
         let mut a = strong.clone();
         a.extend([(9, false, 5.0), (10, true, 5.0)]);
@@ -1024,8 +870,6 @@ mod tests {
 
     #[test]
     fn identity_label_is_the_lowest_runs_best_donor() {
-        // Precursor 0 mixes labels (a violated precondition, so release
-        // builds only): its label is that of run 0's best donor PSM.
         if cfg!(debug_assertions) {
             return;
         }
@@ -1038,7 +882,6 @@ mod tests {
         assert_eq!(lib.entries[0].best_rt, vec![(0, 11.0), (1, 12.0)]);
     }
 
-    /// The pre-streaming `build_library`, kept to check [`LibraryBuilder`].
     fn reference_library(
         psms: &[PsmIn],
         meta: Vec<PrecursorMeta>,
@@ -1059,7 +902,6 @@ mod tests {
             .collect();
         let qs = precursor_qvalues(&rows);
 
-        // Group the donor PSMs of confident precursors by precursor id.
         let mut by_prec: Vec<&PsmIn> = valid
             .iter()
             .copied()
@@ -1078,7 +920,6 @@ mod tests {
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut obs: Vec<Observation> = Vec::new();
         let mut decoy_obs: Vec<Observation> = Vec::new();
-        // NaN scores rank worst, as in the confidence gate.
         let score_of = |p: &PsmIn| {
             if p.score.is_nan() {
                 f64::NEG_INFINITY
@@ -1122,7 +963,6 @@ mod tests {
                     k += 1;
                 }
                 let b = best.expect("run group is non-empty");
-                // Runs ascend, so a tie on score and RT keeps the lowest run.
                 if best_psm.is_none_or(|a| {
                     score_of(b) > score_of(a) || (score_of(b) == score_of(a) && b.rt < a.rt)
                 }) {
@@ -1144,7 +984,6 @@ mod tests {
                 }
             }
 
-            // Majority CV over all PSMs of the precursor; smallest value on ties.
             let mut cvs: Vec<f32> = group.iter().filter_map(|p| p.faims_cv).collect();
             cvs.sort_by(f32::total_cmp);
             let mut faims_cv: Option<f32> = None;
@@ -1212,9 +1051,6 @@ mod tests {
 
     #[test]
     fn streaming_builder_matches_the_slice_build() {
-        // Deterministic pseudo-random PSMs over 5 runs: targets and decoys,
-        // tied scores and RTs, NaN scores, FAIMS voltages and PSMs above the
-        // donor thresholds.
         let mut x = 0x1234_5678_u64;
         let mut next = || {
             x = x
@@ -1249,8 +1085,6 @@ mod tests {
                 ion_mobility: None,
             });
         }
-        // Interleaved runs (build_library adds them in run order), and runs
-        // in order with the PSMs of one run in slice order (the stream order).
         let interleaved = psms.clone();
         psms.sort_by_key(|p| p.run);
         let ap = AlignParams {

@@ -10,7 +10,8 @@ name = "andes"
 path = "src/bin/andes.rs"
 
 [dependencies]
-andes-glyco = { path = "../andes-glyco" }
+andes-xl = { path = "../andes-xl" }
+glyco = { path = "../glyco" }
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }

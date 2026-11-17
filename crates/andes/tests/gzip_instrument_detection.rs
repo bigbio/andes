@@ -1,16 +1,3 @@
-//! A gzipped mzML must resolve to the SAME instrument and model as the plain file.
-//!
-//! `Path::extension()` returns `"gz"` for `run.mzML.gz`, so the `== "mzml"` guards on
-//! the metadata-detection helpers used to bail out before opening the file. Instrument
-//! detection returning `None` means the low-res default, so a gzipped high-res Orbitrap
-//! run was silently searched with `cid_lowres_tryp` -- with nothing in the output saying
-//! so. The guards sat one line above readers that are gz-capable (`open_buf_maybe_gz`),
-//! so the reader was never the limitation.
-//!
-//! The fixture is 120 Orbitrap Fusion Lumos FTMS scans. Note the assertion is on the
-//! MODEL rather than on identifications: this guards the detection path, and a wrong
-//! model is a silent correctness bug long before it is an ID count.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -58,8 +45,6 @@ fn gzipped_mzml_detects_the_same_high_res_model_as_plain() {
         )
     };
 
-    // Decompress to a sibling path so the ONLY difference between the two runs is the
-    // `.gz` extension -- same bytes, same spectra, same everything else.
     let plain = tmp.join("orbitrap_lumos_120.mzML");
     {
         use std::io::{Read, Write};
@@ -76,7 +61,6 @@ fn gzipped_mzml_detects_the_same_high_res_model_as_plain() {
     let log_plain = run(&plain, "plain");
     let log_gz = run(&gz, "gz");
 
-    // The fixture is Orbitrap FTMS, so both must land on the high-res model.
     assert!(
         log_plain.contains("hcd_qexactive_tryp"),
         "plain mzML did not select the high-res model; fixture or detection changed:\n{log_plain}"

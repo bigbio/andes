@@ -1,9 +1,3 @@
-//! Always-on API / schema contracts for future consumers (andes, quantms-rescoring).
-//!
-//! These tests do **not** require `--features tract` or ONNX Runtime. They freeze
-//! feature names, batching policy, PeptDeep I/O packing, and fixture manifests so
-//! later wiring (#92 PIN columns, quantms idparquet) cannot silently drift.
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,7 +15,6 @@ fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
 }
 
-/// #92 / quantms-rescoring short names — do not rename without a migration note.
 #[test]
 fn alphapeptdeep_core_feature_names_frozen() {
     assert_eq!(
@@ -87,7 +80,6 @@ fn rescoring_batch_column_order_matches_feature_names() {
     assert_eq!(batch.feature_names, names);
     assert_eq!(batch.features.shape, vec![1, 2]);
     assert_eq!(batch.features.data, vec![-1.5, 0.91]);
-    // A column the rows do not carry is an error, never a silent zero.
     assert!(
         RescoringBatch::from_rows(rows, &["spec_pearson_norm", "missing_col"], "features").is_err()
     );
@@ -114,11 +106,9 @@ fn peptdeep_packing_matches_reference_export_tensor_names() {
     assert_eq!(ms2.nce.name, "nce");
     assert_eq!(ms2.instrument_indices.name, "instrument_indices");
     assert_eq!(ms2.aa_indices.shape, vec![2, 22]);
-    // peptdeep scales charge by 0.1 and NCE by 0.01 before the network.
     assert!((ms2.charges.data[0] - 0.2).abs() < 1e-6 && (ms2.charges.data[1] - 0.3).abs() < 1e-6);
     assert!((ms2.nce.data[0] - NCE_DEFAULT * 0.01).abs() < 1e-6);
 
-    // ASCII indices (A=1 … Z=26) with a zero pad at each terminus.
     let idx = encode_aa_sequence("ACDEFGHIKLMNPQRSTVWY", 20).unwrap();
     assert_eq!(idx.len(), 22);
     assert_eq!((idx[0], idx[1], idx[2], idx[20], idx[21]), (0, 1, 3, 25, 0));
@@ -171,8 +161,6 @@ fn fixture_tasks_cover_rescoring_and_tree_ensemble() {
     assert_eq!(&bytes[4..8], &2u32.to_le_bytes());
 }
 
-/// Placeholder gate for a future PeptDeep ONNX drop under `models/peptdeep/`.
-/// Ignored in CI until weights are exported locally (see MODELS.md).
 #[test]
 #[ignore = "requires models/peptdeep/*.onnx — see crates/onnx-infer/MODELS.md"]
 fn peptdeep_onnx_present_when_exported() {

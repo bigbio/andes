@@ -262,8 +262,8 @@ leaderboard are in [ADDITIONAL_BENCHMARKS.md](ADDITIONAL_BENCHMARKS.md#proteoben
 Setup: eight sets with a known answer, quantified by andes, MaxQuant and FragPipe and read through
 one evaluation ([`quant-eval`](quant-eval/README.md); rules in section 4). andes `09e1c00d`
 defaults, run 2026-11-05 over the 2026-10-31 searches (`--predict rt,ms2 --chimeric --refine
---max-missed-cleavages 2`); `quant library` (`--mbr-library-fdr 0.01`), `quant extract`, `quant
-finalize` (`--mbr-fdr 0.01`), quant-model seeds 42, 1 and 7 (PXD030780: 42); tables show seed 42.
+--max-missed-cleavages 2`); `quant library` (`--mbr-donor-fdr 0.01`), `quant extract`, `quant
+finalize` (`--quant-fdr 0.01`), quant-model seeds 42, 1 and 7 (PXD030780: 42); tables show seed 42.
 Raw `quantity` column. MBR on = identified rows plus transfers with `transfer_q ≤ 0.01`; MBR off =
 identified rows. MaxQuant 2.7.0.0 (Standard DDA, LFQ on, 1% PSM and protein FDR, 2 missed
 cleavages, `Intensity` of the evidence table per precursor and run; MBR-off run re-run 2026-11-05,
@@ -590,7 +590,7 @@ cd docs/benchmarks/reproduce
 ./run.sh             "$DATA" astral tmt ups1  # search + Percolator; prints wall, PSMs, entrapment hits
 ```
 
-`run.sh` uses 8 threads and Percolator 3.7.1 `--seed 42 -Y` with the `configs/` mods files; UniProt is
+`run.sh` uses 8 threads and Percolator 3.7.1 `--seed 42 -Y` with the modification lists it names; UniProt is
 versioned and the original HYE FASTA is gone, so counts differ slightly (the scripts print a sha256
 for each input).
 
@@ -601,7 +601,8 @@ GLYCO=1 ./build_databases.sh "$DATA"          # also writes databases/mouse_entr
 ./fetch_spectra.sh "$DATA" phospho            # 3.7 GB
 andes --spectrum "$DATA"/phospho/20151014_QEp6_NaKr_SA_totalliver_control2_phospho.raw \
       --database "$DATA"/databases/mouse_entrap.fasta \
-      --mods ../configs/mods-phospho.txt --threads 8 \
+      --variable-mods "Oxidation (M), Acetyl (Protein N-term), Phospho (STY)" --max-mods 4 \
+      --threads 8 \
       --fragment-index-slice-da 80 --output-pin phospho.pin
 docker run --rm -v "$PWD":/r quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2 percolator \
       --seed 42 -Y --results-psms /r/phospho.t.psms --decoy-results-psms /r/phospho.d.psms /r/phospho.pin
@@ -653,9 +654,9 @@ andes quant library --quant-dir q/ --psms $R=$R.percolator.target.psms.txt \
       --decoy-psms $R=$R.percolator.decoy.psms.txt ...
 # 3. per run
 andes quant extract --quant-dir q/ --run $R
-# 4. once per transfer threshold (the default --mbr-fdr is 0.01)
+# 4. once per transfer threshold (the default --quant-fdr is 0.01)
 andes quant finalize --quant-dir q/ -o pb
-andes quant finalize --quant-dir q/ -o pb05 --mbr-fdr 0.05
+andes quant finalize --quant-dir q/ -o pb05 --quant-fdr 0.05
 # 5. ProteoBench "Custom" table (python3 + pyarrow); --module qe or astral
 python3 proteobench/andes_to_proteobench.py --mbr pb.mbr.parquet --quant-dir q/ \
       --module qe --column quantity_normalized -o custom_input.tsv
@@ -680,7 +681,7 @@ andes --spectrum $R.mzML --database db.fasta --output-pin $R.pin --quant-dir q/ 
       --predict rt,ms2 --chimeric --refine --max-missed-cleavages 2
 andes quant library  --quant-dir q/ --psms target.psms.tsv --decoy-psms decoy.psms.tsv
 andes quant extract  --quant-dir q/ --run $R
-andes quant finalize --quant-dir q/ -o set --mbr-fdr 0.01 --seed 42      # also --seed 1 and 7
+andes quant finalize --quant-dir q/ -o set --quant-fdr 0.01 --seed 42      # also --seed 1 and 7
 # masked copy of the library for the wrong-peak measurement: the same three stages on a
 # quant directory whose library lacks 5% of the identified pairs (mask_pairs.parquet)
 # MaxQuant 2.7.0.0: one parameter file per set; the MBR-off run changes only
@@ -700,24 +701,27 @@ PXD014750 hrMS2 (six files, TMT11 impurity sheet, human + yeast + entrapment dat
 differ by one flag, and the truth evaluation reads `run.tmt.parquet` as described in section 4.
 
 ```bash
-andes --spectrum f1.mzML ... --spectrum f6.mzML --database hy_entrap.fasta --mods mods_tmt11.txt \
-      --protocol TMT --rescore --fdr 0.01 --tmt tmt11 --tmt-level 2 --tmt-correction lot.txt \
+andes --spectrum f1.mzML ... --spectrum f6.mzML --database hy_entrap.fasta \
+      --fixed-mods "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)" \
+      --protocol TMT --rescore --psm-fdr 0.01 --tmt tmt11 --tmt-level 2 --tmt-correction lot.txt \
       --threads 16 --output-tsv run.tsv [--mbr]
 ```
 
 ### TMT knockout (commands, not a tested script)
 
-PXD017803 `Fig2_m23142_hrMS2.raw` and `Fig2_m23145_SPSms3.raw`, reviewed yeast proteins, and a mods
-file with Carbamidomethyl C and TMTpro (304.20715) on K and the peptide N-terminus fixed, plus
-Oxidation M variable; the measured runs read mzML (both files of each acquisition in one process, 16
+PXD017803 `Fig2_m23142_hrMS2.raw` and `Fig2_m23145_SPSms3.raw`, reviewed yeast proteins,
+Carbamidomethyl C and TMTpro (304.20715) on K and the peptide N-terminus fixed, plus Oxidation M
+variable; the measured runs read mzML (both files of each acquisition in one process, 16
 threads).
 
 ```bash
-andes --spectrum Fig2_m23142_hrMS2.raw  --database yeast.fasta --mods mods_tmtpro.txt \
-      --precursor-tol 20ppm --protocol TMT --rescore --fdr 0.01 \
+andes --spectrum Fig2_m23142_hrMS2.raw  --database yeast.fasta \
+      --fixed-mods "Carbamidomethyl (C), TMTpro (K), TMTpro (N-term)" --variable-mods "Oxidation (M)" \
+      --precursor-tol 20ppm --protocol TMT --rescore --psm-fdr 0.01 \
       --tmt tmt16 --tmt-level 2 --tmt-correction <kit impurity sheet> --output-tsv hr.tsv
-andes --spectrum Fig2_m23145_SPSms3.raw --database yeast.fasta --mods mods_tmtpro.txt \
-      --precursor-tol 20ppm --protocol TMT --rescore --fdr 0.01 \
+andes --spectrum Fig2_m23145_SPSms3.raw --database yeast.fasta \
+      --fixed-mods "Carbamidomethyl (C), TMTpro (K), TMTpro (N-term)" --variable-mods "Oxidation (M)" \
+      --precursor-tol 20ppm --protocol TMT --rescore --psm-fdr 0.01 \
       --tmt tmt16 --tmt-level 3 --tmt-correction <kit impurity sheet> --output-tsv sps.tsv
 ```
 
@@ -802,7 +806,7 @@ Channel layout and scoring are in section 4.
       ADDITIONAL_BENCHMARKS.md  supplementary tables (per-run, per-level, full leaderboards, andes-only diagnostics)
       reproduce/     database, download and run scripts (no hardcoded paths)
       glyco/         glyco harness: pooling, yield, entrapment, reference scoring
-      configs/       mods files and per-engine parameter files
+      configs/       per-engine parameter files
       proteobench/   andes MBR output -> ProteoBench "Custom" table (python3 + pyarrow)
       entrap_common.py  shared entrapment rules (ALL-ENTRAP_, I/L rescue, T/E)
       tests/         tests: python3 -I tests/test_entrap.py (stdlib), tests/test_proteobench_convert.py

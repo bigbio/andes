@@ -1,32 +1,16 @@
-//! Non-negative least squares (Lawson–Hanson active-set algorithm).
-//!
-//! Solves `min ‖A·x − b‖₂` subject to `x ≥ 0` for the small dense systems the
-//! isobaric impurity correction needs (one reporter channel per unknown, at
-//! most 18). The same solver OpenMS's `IsobaricIsotopeCorrector` uses
-//! (`NonNegativeLeastSquaresSolver`), so corrected channel intensities agree
-//! with IsobaricAnalyzer / IsobaricWorkflow for the same matrix.
-
-/// Solve `min ‖A·x − b‖` with `x ≥ 0`. `a` is row-major `m × n`.
-///
-/// Returns `x` (length `n`). A degenerate system (empty, mismatched sizes)
-/// returns all zeros. `max_iter` bounds the outer iterations (3·n is plenty for
-/// well-conditioned correction matrices; the caller passes a small multiple).
 pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f64> {
     let mut x = vec![0.0f64; n];
     if m == 0 || n == 0 || a.len() != m * n || b.len() != m {
         return x;
     }
-    // Tolerance on the dual variable: relative to the problem scale so a
-    // channel vector in the 1e6 range and one in the 1e2 range converge alike.
     let scale = b.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
     let tol = 1e-10 * scale;
 
-    let mut passive = vec![false; n]; // P: free (positive) set
+    let mut passive = vec![false; n];
     let mut w = vec![0.0f64; n];
     let mut s = vec![0.0f64; n];
 
     let residual_grad = |x: &[f64], w: &mut [f64]| {
-        // w = Aᵀ (b − A x)
         let mut r = vec![0.0f64; m];
         for i in 0..m {
             let mut acc = b[i];
@@ -51,7 +35,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
         if outer > max_iter {
             break;
         }
-        // Pick the most positive gradient among the active (zero) variables.
         let mut best: Option<(usize, f64)> = None;
         for j in 0..n {
             if !passive[j] && w[j] > tol && best.is_none_or(|(_, bw)| w[j] > bw) {
@@ -61,8 +44,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
         let Some((j_in, _)) = best else { break };
         passive[j_in] = true;
 
-        // Inner loop: unconstrained solve on the passive set, then step back
-        // toward the feasible region if any passive variable went negative.
         let mut inner = 0usize;
         loop {
             inner += 1;
@@ -70,7 +51,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
                 break;
             }
             if !solve_passive(a, m, n, b, &passive, &mut s) {
-                // Singular subsystem: drop the variable just added and stop.
                 passive[j_in] = false;
                 break;
             }
@@ -81,7 +61,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
                 }
                 break;
             }
-            // alpha = min over passive j with s_j <= 0 of x_j / (x_j − s_j)
             let mut alpha = f64::INFINITY;
             for j in 0..n {
                 if passive[j] && s[j] <= 0.0 {
@@ -110,8 +89,6 @@ pub fn nnls(a: &[f64], m: usize, n: usize, b: &[f64], max_iter: usize) -> Vec<f6
     x
 }
 
-/// Unconstrained least squares restricted to the passive columns, by the
-/// normal equations with partial pivoting. Returns false if singular.
 fn solve_passive(
     a: &[f64],
     m: usize,
@@ -128,8 +105,7 @@ fn solve_passive(
     if k == 0 {
         return true;
     }
-    // Normal equations: (AᵀA) y = Aᵀb over the passive columns.
-    let mut g = vec![0.0f64; k * (k + 1)]; // augmented [AᵀA | Aᵀb]
+    let mut g = vec![0.0f64; k * (k + 1)];
     for (ci, &cj) in cols.iter().enumerate() {
         for (ri, &rj) in cols.iter().enumerate() {
             let mut acc = 0.0;
@@ -144,7 +120,6 @@ fn solve_passive(
         }
         g[ci * (k + 1) + k] = acc;
     }
-    // Gaussian elimination with partial pivoting.
     for p in 0..k {
         let mut piv = p;
         for r in (p + 1)..k {
@@ -199,7 +174,6 @@ mod tests {
 
     #[test]
     fn recovers_true_intensities_through_impurity_matrix() {
-        // 3 channels, 5% spill-over to the next channel.
         let a = [0.95, 0.0, 0.0, 0.05, 0.95, 0.0, 0.0, 0.05, 1.0];
         let truth = [1000.0, 500.0, 2000.0];
         let b = mat_vec(&a, 3, 3, &truth);
@@ -211,7 +185,6 @@ mod tests {
 
     #[test]
     fn clamps_negative_naive_solution_to_zero() {
-        // A naive solve would need a negative x[1] to reproduce b exactly.
         let a = [1.0, 0.5, 0.0, 1.0];
         let b = [1.0, -0.4];
         let x = nnls(&a, 2, 2, &b, 20);

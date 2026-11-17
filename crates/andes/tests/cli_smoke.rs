@@ -1,11 +1,6 @@
-//! End-to-end smoke tests: invoke andes on various fixtures and verify
-//! the PIN and TSV outputs exist with sensible content.
-
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Resolve a path relative to the workspace root (three levels above the
-/// cli crate's manifest directory: cli → crates → rust → astral-speed).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -14,7 +9,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// Build a base Command with the mandatory arguments that every test requires.
 fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.arg("--spectrum")
@@ -25,8 +19,6 @@ fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
         .arg(pin);
     cmd
 }
-
-// ── BSA / MGF end-to-end test (original smoke test) ─────────────────────────
 
 #[test]
 fn cli_runs_end_to_end_on_bsa_test_mgf() {
@@ -50,7 +42,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     assert!(pin_path.exists(), "PIN output not written");
     assert!(tsv_path.exists(), "TSV output not written");
 
-    // Validate PIN header and content.
     let pin_content = std::fs::read_to_string(&pin_path).unwrap();
     assert!(
         pin_content.lines().count() > 1,
@@ -62,11 +53,9 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         "unexpected PIN header: {pin_header}"
     );
 
-    // Assert that at least one data row carries a real BSA accession (P02769)
-    // in the Proteins column — confirms real accessions are threaded through.
     let pin_has_bsa_accession = pin_content
         .lines()
-        .skip(1) // skip header
+        .skip(1)
         .any(|line| line.contains("P02769"));
     assert!(
         pin_has_bsa_accession,
@@ -74,7 +63,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
          in the Proteins column (got PROT_N placeholder instead?)"
     );
 
-    // Validate TSV header and content.
     let tsv_content = std::fs::read_to_string(&tsv_path).unwrap();
     assert!(
         tsv_content.lines().count() > 1,
@@ -86,7 +74,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         "unexpected TSV header: {tsv_header}"
     );
 
-    // Assert TSV also has a real BSA accession.
     let tsv_has_bsa_accession = tsv_content
         .lines()
         .skip(1)
@@ -98,11 +85,6 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     );
 }
 
-/// `--fdr` is a threshold, not a switch: andes does not compute FDR unless asked
-/// with `--rescore` / `--rescore-native`. That is deliberate, but for a long time
-/// the help text claimed the opposite and nothing was printed, so a user asking
-/// for 1% FDR got an ordinary search and no filtered output with no indication
-/// why. The behaviour stays; the silence does not.
 #[test]
 fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -113,16 +95,16 @@ fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--fdr")
+    .arg("--psm-fdr")
     .arg("0.01")
     .output()
     .expect("run andes");
 
-    assert!(out.status.success(), "--fdr alone should still exit 0");
+    assert!(out.status.success(), "--psm-fdr alone should still exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--fdr") && stderr.contains("--rescore"),
-        "expected a warning naming --fdr and --rescore; stderr was:\n{stderr}"
+        stderr.contains("--psm-fdr") && stderr.contains("--rescore"),
+        "expected a warning naming --psm-fdr and --rescore; stderr was:\n{stderr}"
     );
     let stray: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read tempdir")
@@ -135,8 +117,6 @@ fn fdr_without_a_rescorer_warns_and_writes_no_filtered_tsv() {
         "no filtered q-value TSV should be written without a rescorer, found: {stray:?}"
     );
 }
-
-// ── New flag smoke tests: verify the flags parse and the binary exits 0 ──────
 
 #[test]
 fn cli_accepts_max_missed_cleavages_flag() {
@@ -203,44 +183,26 @@ fn cli_accepts_min_length_max_length_flags() {
     );
 }
 
-// ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
-
-// ── New flag smoke tests: --mod, --fragmentation, --protocol ──────────────────
-
 #[test]
 fn cli_accepts_mod_fragmentation_protocol_flags() {
-    // Verify the TMT-CLI flags parse and the param resolver picks up a real
-    // bundled model. We use the existing BSA fixture (no actual TMT spectra)
-    // and pass a tiny TMT-style mods file — the binary should exit 0 because
-    // all flags are valid. (--instrument was removed: analyzer resolution is
-    // metadata-detected for mzML/.raw/.d and `--fragment-tol-*` for MGF.)
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
 
     let status = base_cmd(
         "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")
     .arg("TMT")
-    // Allow a wider tolerance — the TMT-labelled candidates differ in mass
-    // and we just want to confirm the binary exits cleanly, not assert
-    // recall on a non-TMT fixture.
     .arg("--precursor-tol")
     .arg("100ppm")
     .status()
@@ -248,15 +210,13 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
 
     assert!(
         status.success(),
-        "andes should exit 0 with --mods + TMT flags, got: {status}"
+        "andes should exit 0 with the TMT modification lists and flags, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should still be written");
 }
 
 #[test]
 fn cli_rejects_invalid_protocol_index() {
-    // Out-of-range --protocol must produce a non-zero exit with the
-    // helpful error message from `parse_protocol`.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -275,14 +235,6 @@ fn cli_rejects_invalid_protocol_index() {
 
 #[test]
 fn cli_runs_end_to_end_on_tiny_mzml() {
-    // tiny.pwiz.mzML is the standard fixture used by the mzML reader unit tests.
-    // It is a real mzML file with MS2 spectra.  Because there is no matched FASTA,
-    // we expect few or zero PSMs — but the binary must exit 0 and the PIN must be
-    // written (even if it contains only the header row).
-    //
-    // We use BSA.fasta as the target database: it is the only fixture available.
-    // The point of this test is NOT PSM recall but that the mzML code path runs
-    // end-to-end without a crash or panic.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("mzml_out.pin");
 
@@ -291,7 +243,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    // Lower min-peaks so we don't filter out the tiny fixture's sparse spectra.
     .arg("--min-peaks")
     .arg("1")
     .status()
@@ -306,7 +257,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         "PIN output should be written for mzML input"
     );
 
-    // The PIN must at least contain a header row.
     let pin_content = std::fs::read_to_string(&pin_path).unwrap();
     let first_line = pin_content.lines().next().unwrap_or("");
     assert!(
@@ -317,8 +267,6 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
 
 #[test]
 fn bench_mode_max_spectra_produces_nonempty_pin() {
-    // Regression for send_chunks bench-cap bug: --max-spectra 100 must not
-    // drop the entire final partial chunk.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("bench.pin");
 
@@ -420,27 +368,10 @@ fn cli_accepts_precursor_cal_off() {
     assert!(pin_path.exists());
 }
 
-/// Smoke guard for the canonical (named + merged-range) CLI surface that the
-/// quantms andes module passes: named `--fragmentation/--protocol`, the
-/// `--enzyme-specificity` name, the merged `--charge`/`--isotope-error` ranges,
-/// and the unit-bearing `--precursor-tol`. Legacy numeric forms and split-range
-/// flags were removed (andes is pre-release, no back-compat).
 #[test]
 fn cli_accepts_canonical_named_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
     let test_mgf = fixture("test-fixtures/test.mgf.gz");
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mods_path = dir.path().join("mods.txt");
-    std::fs::write(
-        &mods_path,
-        "NumMods=2\n\
-         229.162932,K,fix,any,TMT6plex\n\
-         229.162932,*,fix,N-term,TMT6plex\n\
-         57.021464,C,fix,any,Carbamidomethyl\n\
-         15.994915,M,opt,any,Oxidation\n",
-    )
-    .unwrap();
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let pin = tmp.path().join("named.pin");
@@ -450,8 +381,12 @@ fn cli_accepts_canonical_named_param_values() {
         bsa_fasta.to_str().unwrap(),
         &pin,
     )
-    .arg("--mods")
-    .arg(&mods_path)
+    .arg("--fixed-mods")
+    .arg("TMT6plex (K), TMT6plex (N-term), Carbamidomethyl (C)")
+    .arg("--variable-mods")
+    .arg("Oxidation (M)")
+    .arg("--max-mods")
+    .arg("2")
     .arg("--fragmentation")
     .arg("HCD")
     .arg("--protocol")
@@ -475,13 +410,8 @@ fn cli_accepts_canonical_named_param_values() {
     );
 }
 
-// ── MGF metadata-less model-selection routing tests ──────────────────────────
-
 #[test]
 fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
-    // MGF carries no analyzer metadata. With no --fragmentation/--fragment-tol
-    // flags, decision E applies: assume CID / low-res / 0.5 Da (cid_lowres_tryp)
-    // and emit a warning so the user knows a default was chosen.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -507,9 +437,6 @@ fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
 
 #[test]
 fn mgf_fragment_tol_ppm_selects_high_res_model() {
-    // --fragment-tol-ppm on MGF input declares high-resolution MS/MS, so the
-    // resolver selects a QExactive (high-res) model rather than the low-res
-    // default.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
@@ -530,8 +457,6 @@ fn mgf_fragment_tol_ppm_selects_high_res_model() {
     );
     assert!(err.to_lowercase().contains("qexactive"), "stderr: {err}");
 }
-
-// ── Fragment-tolerance CLI flag tests ─────────────────────────────────────────
 
 #[test]
 fn fragment_tol_flags_are_mutually_exclusive() {
@@ -558,7 +483,6 @@ fn fragment_tol_flags_are_mutually_exclusive() {
     );
 }
 
-/// Peptide whose 3+ ETD spectrum the c/z regression below searches.
 const ETD_PEPTIDE: &str = "FPEVQGELISLLEK";
 
 fn residue_mass(aa: u8) -> f64 {
@@ -576,8 +500,6 @@ fn residue_mass(aa: u8) -> f64 {
     }
 }
 
-/// A 3+ ETD spectrum of `ETD_PEPTIDE` holding only its singly charged c and z•
-/// ions (13 + 13 peaks) and no b/y ion.
 fn etd_cz_only_mgf() -> String {
     const PROTON: f64 = 1.007276;
     const H2O: f64 = 18.010565;
@@ -589,8 +511,8 @@ fn etd_cz_only_mgf() -> String {
     for i in 1..res.len() {
         let prefix: f64 = res[..i].iter().sum();
         let suffix: f64 = res[i..].iter().sum();
-        peaks.push(prefix + NH3 + PROTON); // c
-        peaks.push(suffix + H2O - NH3 + H + PROTON); // z•
+        peaks.push(prefix + NH3 + PROTON);
+        peaks.push(suffix + H2O - NH3 + H + PROTON);
     }
     peaks.sort_by(f64::total_cmp);
     let mut mgf = format!(
@@ -604,7 +526,6 @@ fn etd_cz_only_mgf() -> String {
     mgf
 }
 
-/// Each PIN row's `Label:Peptide`.
 fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
     let text = std::fs::read_to_string(pin).expect("read PIN");
     let mut lines = text.lines();
@@ -623,20 +544,12 @@ fn pin_peptides(pin: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-/// Low-resolution ETD under the default candidate index: the fragment-ion index
-/// holds only b/y ions, so a spectrum explained by c/z ions alone must not be
-/// retrieved through it. The ETD search keeps enumeration and scores the
-/// target. (Its peptide-level decoy has the same mass and also competes; on
-/// this synthetic spectrum of equal-intensity c/z peaks it can outrank the
-/// target, so the test asks for the target row, not for rank 1.)
 #[test]
 fn lowres_etd_cz_only_spectrum_is_identified_under_the_default_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mgf = dir.path().join("etd.mgf");
     let fasta = dir.path().join("etd.fasta");
     std::fs::write(&mgf, etd_cz_only_mgf()).unwrap();
-    // The peptide is the whole protein: the target and its decoy are the only
-    // candidates.
     std::fs::write(&fasta, format!(">sp|ETD1|ETD1_TEST\n{ETD_PEPTIDE}\n")).unwrap();
     for extra in [&[][..], &["--fragment-index", "off"][..]] {
         let pin = dir.path().join(format!("etd{}.pin", extra.len()));

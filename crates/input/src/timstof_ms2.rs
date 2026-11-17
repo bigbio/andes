@@ -1,30 +1,9 @@
-//! PASEF MS2 spectra of a Bruker timsTOF `.d`, built from the raw frames.
-//!
-//! In DDA-PASEF the quadrupole isolates a precursor during a slice of the
-//! mobility scans of an MS2 frame (`PasefFrameMsMsInfo`: frame, scan range,
-//! isolation window, collision energy, precursor id), and a precursor below
-//! its target intensity is selected again in later frames. One fragment
-//! spectrum per precursor (`Precursors` row) is the sum of all its selections:
-//! the TOF points of every selected scan of every frame are summed per TOF
-//! index and centroided like the MS1 survey frames (see
-//! [`crate::timstof_ms1::centroid_profile`]), then converted to m/z with the
-//! run's calibration (the TOF axis and its calibration are shared by MS1 and
-//! MS2 frames). Frames the TDF records with no peaks hold no data blob and are
-//! skipped.
-//!
-//! The precursor m/z is the vendor `MonoisotopicMz`; where the acquisition
-//! software did not determine the monoisotopic peak (and so no charge), the m/z
-//! of the largest isotope peak (`LargestPeakMz`) is used with an unknown
-//! charge, as mzML converters write it.
-
 use std::collections::HashMap;
 
 use crate::timstof_ms1::{
     centroid_profile, conditions, sum_over_mobility, FrameConditions, MzCalibration,
 };
 
-/// One quadrupole selection of a precursor: the scans `[scan_begin,
-/// scan_end)` of a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Selection {
     pub frame_id: usize,
@@ -32,35 +11,26 @@ pub(crate) struct Selection {
     pub scan_end: usize,
 }
 
-/// A DDA-PASEF precursor with every selection that fragmented it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PasefPrecursor {
     pub id: usize,
-    /// Monoisotopic m/z, else the largest isotope peak's m/z.
     pub mz: f64,
-    /// `None` when the acquisition software assigned no charge.
     pub charge: Option<i64>,
     pub intensity: Option<f64>,
-    /// Parent MS1 frame id.
     pub parent: Option<usize>,
-    /// Mobility scan at the precursor's apex (fractional).
     pub scan_number: Option<f64>,
     pub isolation_width: f64,
     pub collision_energy: f64,
     pub selections: Vec<Selection>,
 }
 
-/// The `Frames` columns the MS2 builder needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FrameRow {
-    /// Retention time, seconds.
     pub time: f64,
     pub num_peaks: u64,
-    /// `T1`, `T2` temperatures (0 when the schema lacks them).
     pub t: [f64; 2],
 }
 
-/// Read the `Frames` rows keyed by frame id.
 pub(crate) fn read_frame_rows(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<usize, FrameRow>, rusqlite::Error> {
@@ -92,9 +62,6 @@ pub(crate) fn read_frame_rows(
     Ok(out)
 }
 
-/// Read every DDA-PASEF precursor that has at least one selection, ordered by
-/// precursor id, its selections in frame order. A `.d` without the PASEF
-/// tables (not DDA-PASEF) has none.
 pub(crate) fn read_pasef_precursors(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<PasefPrecursor>, rusqlite::Error> {
@@ -186,9 +153,6 @@ pub(crate) fn read_pasef_precursors(
     Ok(out)
 }
 
-/// The TOF points of the scans `[begin, end)` of a decoded frame, appended to
-/// `tof` / `intensity`. `scan_offsets[k]` is the first point of scan `k`; scan
-/// indices past the frame's last scan are clipped.
 pub(crate) fn push_scans(
     scan_offsets: &[usize],
     frame_tof: &[u32],
@@ -214,11 +178,6 @@ pub(crate) fn push_scans(
     }
 }
 
-/// Centroided `(m/z, intensity)` peaks of a precursor's summed TOF points,
-/// m/z ascending. `frame` holds the mean conditions of the selected frames and
-/// `n_frames` their number: a centroid's m/z depends on the intensity its ions
-/// reach the detector with in one frame, so the calibration's intensity term
-/// is evaluated at the centroid's mean intensity per frame.
 pub(crate) fn ms2_peaks(
     tof: &[u32],
     intensity: &[u32],
@@ -287,7 +246,6 @@ mod tests {
             &["1, 0.1, 100, 25.0, 26.0", "2, 0.2, 0, 25.0, 26.0"],
         );
         let p = read_pasef_precursors(&conn).unwrap();
-        // Precursor 3 has no selection and gets no spectrum.
         assert_eq!(p.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(p[0].mz, 500.25);
         assert_eq!(p[0].charge, Some(2));
@@ -301,7 +259,6 @@ mod tests {
         );
         assert_eq!(p[0].selections[0].scan_begin, 690);
         assert_eq!(p[0].selections[0].scan_end, 715);
-        // No monoisotopic peak: largest peak, charge unknown.
         assert_eq!(p[1].mz, 600.31);
         assert_eq!(p[1].charge, None);
         assert_eq!(p[1].collision_energy, 30.0);
@@ -324,7 +281,6 @@ mod tests {
 
     #[test]
     fn push_scans_takes_the_selected_scan_range_only() {
-        // Three scans: [10, 11], [20], [30, 31, 32].
         let offsets = [0, 2, 3, 6];
         let tof = [10, 11, 20, 30, 31, 32];
         let intensity = [1, 2, 3, 4, 5, 6];
@@ -332,7 +288,6 @@ mod tests {
         push_scans(&offsets, &tof, &intensity, 1, 3, &mut t, &mut i);
         assert_eq!(t, vec![20, 30, 31, 32]);
         assert_eq!(i, vec![3, 4, 5, 6]);
-        // A range past the last scan is clipped to the frame.
         let (mut t, mut i) = (Vec::new(), Vec::new());
         push_scans(&offsets, &tof, &intensity, 2, 9, &mut t, &mut i);
         assert_eq!(t, vec![30, 31, 32]);
@@ -343,8 +298,6 @@ mod tests {
 
     #[test]
     fn selections_of_one_ion_merge_into_one_centroid() {
-        // The same fragment seen in two frames at slightly different TOF
-        // bins: one centroid at the intensity-weighted position.
         let tof = [1000, 1001, 1002, 1000, 1001, 1002, 5000];
         let intensity = [10, 40, 10, 10, 40, 10, 7];
         let cal = MzCalibration::linear(10.0, 1e-4, 1.0);

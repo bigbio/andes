@@ -1,9 +1,3 @@
-//! End-to-end integration test for own-derived geometry.
-//!
-//! Proves the full path: `derive_geometry` (corpus → partition/segment geometry)
-//! → `RankScorer` → `StatsAccumulator` → `Estimator` yields a scorable model
-//! whose geometry comes from the corpus, not from the seed template.
-
 use std::path::Path;
 
 use model::amino_acid::AminoAcid;
@@ -29,8 +23,6 @@ fn make_peptide(seq: &[u8]) -> Peptide {
     Peptide::new(residues, b'_', b'-')
 }
 
-/// Bundled hcd_qexactive_tryp — used only for its NON-geometry metadata
-/// (tolerance / activation / deconvolution); its geometry is what we replace.
 fn load_base() -> Param {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -46,8 +38,6 @@ fn load_base() -> Param {
 fn derived_geometry_trains_a_scorable_model_end_to_end() {
     let base = load_base();
 
-    // Own corpus of (charge, parent_mass): the partition tiers are derived from
-    // THIS, not inherited from the seed.
     let corpus: Vec<(i32, f32)> = vec![
         (2, 700.0),
         (2, 800.0),
@@ -56,7 +46,6 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         (3, 1200.0),
         (3, 1500.0),
     ];
-    // occupancy=1, max=2 → each charge gets min(n_masses, 2) = 2 tiers.
     let cfg = GeometryConfig {
         num_segments: 2,
         max_rank: 150,
@@ -66,12 +55,10 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     };
     let derived = derive_geometry(&corpus, &base, &cfg);
 
-    // Geometry is the derived one, not the seed's.
     assert_eq!(derived.num_segments, 2);
     assert_eq!(derived.max_rank, 150);
     assert_eq!(derived.min_charge, 2);
     assert_eq!(derived.max_charge, 3);
-    // 2 charges × 2 tiers × 2 segments = 8 partitions, each with a Noise entry.
     assert_eq!(derived.partitions.len(), 8);
     for part in &derived.partitions {
         let frags = derived
@@ -84,17 +71,13 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         );
     }
 
-    // (1) RankScorer accepts the geometry-only template (empty tables → no panic).
     let scorer = RankScorer::new(&derived);
 
-    // (2) Accumulate a spectrum for a charge-2 peptide into the DERIVED partitions.
     let seq = b"PEPTIDE";
     let peptide = make_peptide(seq);
     let charge = 2u8;
     let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
 
-    // Place peaks AT the peptide's own b/y ion m/z (charge 1) so the model's
-    // enumerated fragments actually match and record real ranks.
     let res: Vec<f64> = seq
         .iter()
         .map(|&r| AminoAcid::standard(r).unwrap().mass)
@@ -103,7 +86,7 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     let mut cum = 0.0;
     for (i, &m) in res.iter().take(res.len() - 1).enumerate() {
         cum += m;
-        peaks.push((cum + PROTON, (2000 - i as i32 * 120).max(100) as f32)); // b(i+1)+
+        peaks.push((cum + PROTON, (2000 - i as i32 * 120).max(100) as f32));
     }
     let mut cum_y = 0.0;
     for (i, &m) in res.iter().rev().take(res.len() - 1).enumerate() {
@@ -111,7 +94,7 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         peaks.push((
             cum_y + H2O + PROTON,
             (1900 - i as i32 * 120).max(100) as f32,
-        )); // y(i+1)+
+        ));
     }
     peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -131,21 +114,13 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     let mut stats = CountStats::default();
     StatsAccumulator::new(&scorer).accumulate(&mut stats, &spectrum, &peptide, charge);
 
-    // ★ THE BUG + FIX: a GEOMETRY-ONLY template (empty rank_dist_table) must still
-    // enumerate ion MEMBERSHIP from frag_off_table and record matched-fragment
-    // ranks. Pre-fix, the accumulator enumerated ions from the (empty) trained
-    // LLR cache → ZERO facts → uniform/flat tables → degenerate, slow scoring.
-    // Post-fix it enumerates membership → real ranks land in counts.rank.
     assert!(
         !stats.rank.is_empty(),
         "geometry-only accumulate recorded NO rank facts — trained tables would be flat (the bug)"
     );
 
-    // (3) Estimate fills the learned tables from the accumulated counts.
     let estimated = Estimator::new(EstimatorConfig::default()).estimate(&stats, &derived);
 
-    // (4) The trained own-geometry model is scorable: non-empty rank tables, every
-    //     slot strictly positive (Laplace floor), and RankScorer accepts it.
     assert!(
         !estimated.rank_dist_table.is_empty(),
         "trained model has rank tables"
@@ -159,7 +134,6 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         }
     }
     let _trained_scorer = RankScorer::new(&estimated);
-    // The trained model kept the derived geometry.
     assert_eq!(estimated.num_segments, 2);
     assert_eq!(estimated.max_rank, 150);
 }

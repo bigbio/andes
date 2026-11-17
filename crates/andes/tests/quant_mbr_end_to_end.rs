@@ -1,12 +1,3 @@
-//! End-to-end tests for match-between-runs: the `andes quant
-//! library|extract|finalize` stages and the in-process `andes search --lfq
-//! --mbr`, on the three synthetic runs of `scripts/make_quant_fixtures.py
-//! --mbr`.
-//!
-//! Rescoring uses a stand-in for the Percolator binary (a shell script passed
-//! as `--percolator-bin`) that copies each PIN row's `RawScore` into the
-//! `score` column and writes targets and decoys to the result files
-//! Percolator would write. The stages under test only read those files.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -18,10 +9,6 @@ use std::process::{Command, Output};
 use arrow::array::{Array, Int16Array, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-/// Designed quantity of HLVDEPQNLIK/2 (peptide 4): mono apex 8e5 times the
-/// summed first four isotope fractions over the mono's (2.06764, a coarse
-/// isotope pattern), times sigma (4 s) times sqrt(2 pi), over the share of
-/// the whole pattern that the formula gives the four isotopes (0.9887).
 const PEPTIDE4_QUANTITY: f64 = 16_584_995.85 / 0.9887;
 
 const RUNS: [&str; 3] = ["mbr_run1", "mbr_run2", "mbr_run3"];
@@ -84,7 +71,6 @@ fn fake_percolator(dir: &Path) -> PathBuf {
     fake_percolator_with_pep(dir, "0.001")
 }
 
-/// [`FAKE_PERCOLATOR`] writing `pep` as every PSM's PEP.
 fn fake_percolator_with_pep(dir: &Path, pep: &str) -> PathBuf {
     let path = dir.join(format!("percolator_pep{pep}"));
     let script = FAKE_PERCOLATOR.replace("\\t0.001\\t0.001\\t", &format!("\\t0.001\\t{pep}\\t"));
@@ -94,7 +80,6 @@ fn fake_percolator_with_pep(dir: &Path, pep: &str) -> PathBuf {
     path
 }
 
-/// `--spectrum` for the three runs, the database and two threads.
 fn search_args() -> Vec<String> {
     let mut v = Vec::new();
     for r in RUNS {
@@ -118,11 +103,8 @@ fn s(p: &Path) -> &str {
     p.to_str().unwrap()
 }
 
-/// mbr.parquet rows by `(precursor_key, run)`, as text cells (a null is
-/// `NA`).
 type MbrRows = HashMap<(String, String), Vec<String>>;
 
-/// The header and rows of an mbr.parquet.
 fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
     let mut header: Vec<String> = output::mbr_out::MBR_COLUMNS[..10]
         .iter()
@@ -157,7 +139,6 @@ fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
     (header, rows)
 }
 
-/// Whether two runs wrote the same MBR tables (`<a>`/`<b>` are output bases).
 fn same_mbr_tables(a: &Path, b: &Path) -> bool {
     let with = |p: &Path, s: &str| PathBuf::from(format!("{}{s}", p.display()));
     let rows = |p: &Path| output::mbr_out::read_mbr_parquet(&with(p, ".mbr.parquet")).unwrap();
@@ -167,8 +148,6 @@ fn same_mbr_tables(a: &Path, b: &Path) -> bool {
     rows(a) == rows(b) && val(a) == val(b)
 }
 
-/// The column-data bytes of a Parquet file: everything between the leading
-/// magic and the footer (the footer holds a per-write uuid and date).
 fn parquet_column_data(path: &Path) -> Vec<u8> {
     let b = std::fs::read(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
     let n = b.len();
@@ -176,8 +155,6 @@ fn parquet_column_data(path: &Path) -> Vec<u8> {
     b[4..n - 8 - footer].to_vec()
 }
 
-/// `(run_file_name, peptidoform, charge, evidence_type)` of every feature
-/// parquet row.
 fn feature_rows(path: &Path) -> Vec<(String, String, String, String)> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
     let mut out = Vec::new();
@@ -202,8 +179,6 @@ fn feature_rows(path: &Path) -> Vec<(String, String, String, String)> {
     out
 }
 
-/// The search for the stage path: per-run artifacts and the Percolator
-/// result files next to `<dir>/s.pin`.
 fn staged_search(dir: &Path, perc: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let q = dir.join("q");
@@ -225,9 +200,6 @@ fn staged_search(dir: &Path, perc: &Path) -> PathBuf {
     q
 }
 
-/// The text outputs of a run directory (the PIN, the Percolator result files
-/// and every `.tsv`), by file name and content. Parquet files carry a creation
-/// time and a UUID, so they are not compared here.
 fn text_outputs(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
@@ -250,10 +222,6 @@ fn text_outputs(dir: &Path) -> Vec<(String, Vec<u8>)> {
     v
 }
 
-/// Two identical runs write byte-identical text outputs. The stand-in
-/// Percolator gives every target the same q-value and PEP, so the filtered
-/// table's row order is decided by the tie-break alone, not by the iteration
-/// order of the result map.
 #[test]
 fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
     let tmp = tempfile::tempdir().unwrap();
@@ -275,8 +243,6 @@ fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
     for ((name, x), (_, y)) in ta.iter().zip(&tb) {
         assert!(x == y, "{name} differs between two identical runs");
     }
-    // The ties are real: more than one accepted row, all at the same q-value,
-    // listed in `psm_id` order.
     let filtered = String::from_utf8(
         ta.iter()
             .find(|(n, _)| n == "s.q0p01.tsv")
@@ -294,9 +260,6 @@ fn filtered_tsv_and_the_other_text_outputs_are_reproducible() {
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
 }
 
-/// `--mbr-fdr` of the transfer test. The fixture's transfer folds hold about
-/// 30 targets each, so with the K-decoy estimate's `+1` correction no transfer
-/// q-value can fall below about `1 / (2 * 30)`.
 const FIXTURE_MBR_FDR: &str = "0.05";
 
 #[test]
@@ -304,7 +267,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator(tmp.path());
 
-    // Stage path: search, library, one extract per run, finalize.
     let staged = tmp.path().join("staged");
     let q = staged_search(&staged, &perc);
     let targets = staged.join("s.percolator.target.psms.txt");
@@ -321,7 +283,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     ]);
     assert!(q.join("library.parquet").is_file());
     assert!(q.join("alignment.parquet").is_file());
-    // Extract in reverse order: the run index comes from the library.
     for r in RUNS.iter().rev() {
         run_andes(&["quant", "extract", "--quant-dir", s(&q), "--run", r]);
         assert!(q.join(format!("{r}.extract.parquet")).is_file());
@@ -343,15 +304,12 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         s(&targets),
         "--decoy-psms",
         s(&decoys),
-        "--mbr-fdr",
+        "--quant-fdr",
         FIXTURE_MBR_FDR,
-        "--quant-feature-fdr",
-        "0.05",
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
     assert!(qpx.join("quantms.pg.parquet").is_file());
 
-    // All-in-one path, with a temporary quant directory.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let pin = aio.join("a.pin");
@@ -368,10 +326,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
             "--rescore",
             "--percolator-bin",
             s(&perc),
-            "--mbr-fdr",
+            "--quant-fdr",
             FIXTURE_MBR_FDR,
-            "--quant-feature-fdr",
-            "0.05",
         ]
         .map(String::from),
     );
@@ -385,20 +341,17 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
         same_mbr_tables(&staged.join("out"), &aio.join("a")),
         "mbr.parquet or mbr_validation.parquet differs between the stage path and the all-in-one run"
     );
-    // The feature parquets hold the same column data.
     let staged_parquet = qpx.join("quantms.feature.parquet");
     assert!(
         parquet_column_data(&staged_parquet)
             == parquet_column_data(&aio_qpx.join("quantms.feature.parquet")),
         "quantms.feature.parquet differs between the stage path and the all-in-one run"
     );
-    // Both paths infer the same protein groups from the same PSMs.
     assert!(
         parquet_column_data(&qpx.join("quantms.pg.parquet"))
             == parquet_column_data(&aio_qpx.join("quantms.pg.parquet")),
         "quantms.pg.parquet differs between the stage path and the all-in-one run"
     );
-    // Every feature carries the one BSA group, which passes the protein cut.
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(File::open(&staged_parquet).unwrap()).unwrap();
     for b in builder.build().unwrap() {
@@ -425,8 +378,6 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let (ev, quantity) = (col("evidence_type"), col("quantity"));
     let row = |key: &str, run: &str| rows.get(&(key.to_string(), run.to_string()));
 
-    // Peptide 4 was never triggered in run 3: it is transferred there, with
-    // the designed quantity.
     let p4 = row("HLVDEPQNLIK/2", "mbr_run3").expect("peptide 4 in run 3");
     assert!(p4[ev].starts_with("transfer_ms"), "{p4:?}");
     let qv: f64 = p4[quantity].parse().unwrap();
@@ -437,29 +388,24 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     for run in ["mbr_run1", "mbr_run2"] {
         assert_eq!(row("HLVDEPQNLIK/2", run).unwrap()[ev], "identified");
     }
-    // Peptide 6 has no MS1 signal anywhere and is identified in run 1 only:
-    // its identified rows fail the identified quality q-value.
     for key in ["DAFLGSFLYEYSR/2", "DAFLGSFLYEYSR/3"] {
         let r1 = row(key, "mbr_run1").unwrap_or_else(|| panic!("{key} in run 1"));
-        assert_eq!(r1[ev], "identified_below_threshold", "{key}: {r1:?}");
+        assert_eq!(r1[ev], "identified", "{key}: {r1:?}");
         for run in ["mbr_run2", "mbr_run3"] {
             let r = row(key, run).unwrap_or_else(|| panic!("{key} in {run}"));
             assert!(!r[ev].starts_with("transfer_ms"), "{key} in {run}: {r:?}");
         }
     }
-    // Most untriggered precursors with signal are transferred.
     let transfers = rows
         .values()
         .filter(|r| r[ev].starts_with("transfer_ms"))
         .count();
     eprintln!(
-        "transfers at --mbr-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
+        "transfers at --quant-fdr {FIXTURE_MBR_FDR}: {transfers} of {} rows",
         rows.len()
     );
     assert!(transfers >= 50, "only {transfers} transfers");
 
-    // The feature parquet holds every mbr.parquet row except the below-threshold
-    // transfers and identified rows.
     let below: Vec<&Vec<String>> = rows
         .values()
         .filter(|r| r[ev] == "below_threshold" || r[ev] == "identified_below_threshold")
@@ -524,8 +470,6 @@ fn duplicate_run_stems_are_rejected_before_the_search() {
     }
 }
 
-/// Splits a merged Percolator result of a multi-input search (SpecIds
-/// `<file>/<id>`) into one file per run with the run's own SpecIds `<id>`.
 fn split_by_run(merged: &Path, out_dir: &Path, kind: &str) -> Vec<String> {
     let text = std::fs::read_to_string(merged).unwrap();
     let mut lines = text.lines();
@@ -533,8 +477,6 @@ fn split_by_run(merged: &Path, out_dir: &Path, kind: &str) -> Vec<String> {
     let mut per_run: HashMap<&str, String> =
         RUNS.iter().map(|r| (*r, format!("{header}\n"))).collect();
     for l in lines {
-        // The prefix is the input's file name without its last extension; a
-        // separate search of the same input writes the same SpecId.
         let (prefix, _) = l.split_once('/').expect("SpecId has a file prefix");
         let stem = prefix.split('.').next().unwrap();
         per_run
@@ -556,7 +498,6 @@ fn separate_searches_join_on_run_and_spec_id() {
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator(tmp.path());
 
-    // All-in-one over the three runs; its Percolator files give the scores.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let mut args = search_args();
@@ -576,9 +517,6 @@ fn separate_searches_join_on_run_and_spec_id() {
     );
     run_andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
 
-    // Each run searched on its own into one quant directory, with its own
-    // Percolator result. The runs share scan titles; the file stem in front of
-    // every SpecId keeps them apart.
     let sep = tmp.path().join("sep");
     let q = sep.join("q");
     std::fs::create_dir_all(&sep).unwrap();
@@ -613,8 +551,6 @@ fn separate_searches_join_on_run_and_spec_id() {
             .collect()
     };
 
-    // One merged pair over every run joins: what one Percolator run over the
-    // concatenated PINs of separate searches gives.
     let merged = |kind: &str| -> PathBuf {
         let path = sep.join(format!("merged.{kind}.psms.txt"));
         let mut text = String::new();
@@ -648,7 +584,6 @@ fn separate_searches_join_on_run_and_spec_id() {
     ]);
     assert!(q.join("library.parquet").is_file());
 
-    // Swapped per-run files hold the other run's SpecIds, so nothing joins.
     let mut swapped: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -670,7 +605,6 @@ fn separate_searches_join_on_run_and_spec_id() {
         "{err}"
     );
 
-    // Per-run results from the separate Percolator runs build a library.
     let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -680,7 +614,6 @@ fn separate_searches_join_on_run_and_spec_id() {
     run_andes(&lib_args.iter().map(String::as_str).collect::<Vec<_>>());
     assert!(q.join("library.parquet").is_file());
 
-    // The same per-PSM scores as the all-in-one run give its mbr.parquet exactly.
     let mut lib_args: Vec<String> = ["quant", "library", "--quant-dir", s(&q), "--psms"]
         .map(String::from)
         .to_vec();
@@ -714,9 +647,6 @@ fn separate_searches_join_on_run_and_spec_id() {
         read_mbr(&sep.join("out.mbr.parquet")).1 == read_mbr(&aio.join("a.mbr.parquet")).1,
         "mbr.parquet of the separate searches differs from the all-in-one run"
     );
-    // The default `--quant-feature-fdr off` keeps identified rows whose MS1
-    // feature fails its decoys (peptide 6 has no MS1 signal) as `identified`.
-    // With no signal its quantity is missing (NA), not 0.
     let (header, rows) = read_mbr(&sep.join("out.mbr.parquet"));
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
     let qty = header.iter().position(|h| h == "quantity").unwrap();
@@ -741,7 +671,6 @@ fn library_stage_errors_name_what_is_missing() {
     let targets = tmp.path().join("s.percolator.target.psms.txt");
     let decoys = tmp.path().join("s.percolator.decoy.psms.txt");
 
-    // A run without artifacts is named.
     let out = andes(&[
         "quant",
         "library",
@@ -760,7 +689,6 @@ fn library_stage_errors_name_what_is_missing() {
     assert!(err.contains("absent_run.quant.parquet"), "{err}");
     assert!(err.contains("absent_run.ms1.parquet"), "{err}");
 
-    // A Percolator file without the score column.
     let text = std::fs::read_to_string(&targets).unwrap();
     let score_col = text
         .lines()
@@ -796,7 +724,6 @@ fn library_stage_errors_name_what_is_missing() {
         "{err}"
     );
 
-    // Extract before the library exists.
     let out = andes(&[
         "quant",
         "extract",
@@ -808,7 +735,6 @@ fn library_stage_errors_name_what_is_missing() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("library.parquet"));
 
-    // Finalize checks every extract against the library and the tolerance.
     let library = |fdr: &str| {
         run_andes(&[
             "quant",
@@ -819,7 +745,7 @@ fn library_stage_errors_name_what_is_missing() {
             s(&targets),
             "--decoy-psms",
             s(&decoys),
-            "--mbr-library-fdr",
+            "--mbr-donor-fdr",
             fdr,
         ])
     };
@@ -861,7 +787,6 @@ fn library_stage_errors_name_what_is_missing() {
     );
 }
 
-/// `mbr.parquet` rows whose evidence type is `identified`.
 fn identified_rows(path: &Path) -> usize {
     let (header, rows) = read_mbr(path);
     let ev = header.iter().position(|h| h == "evidence_type").unwrap();
@@ -870,11 +795,9 @@ fn identified_rows(path: &Path) -> usize {
 
 #[test]
 fn mbr_donors_honour_the_pep_cap() {
-    // Every PSM at q = 0.001 with PEP = 0.5: `--pep 0.01` leaves no donor.
     let tmp = tempfile::tempdir().unwrap();
     let perc = fake_percolator_with_pep(tmp.path(), "0.5");
 
-    // All-in-one.
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();
     let mut args = search_args();
@@ -899,7 +822,6 @@ fn mbr_donors_honour_the_pep_cap() {
     eprintln!("all-in-one --pep 0.01: {n} identified rows");
     assert_eq!(n, 0, "identified rows from PSMs above the PEP cap");
 
-    // Stages: `quant library --pep`.
     let staged = tmp.path().join("staged");
     let q = staged_search(&staged, &perc);
     let library = |pep: Option<&str>| {

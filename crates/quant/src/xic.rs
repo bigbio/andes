@@ -1,9 +1,3 @@
-//! Chromatographic peak handling on extracted-ion chromatograms: smoothing,
-//! apex and boundary detection, integration, envelope similarity.
-
-/// Five-point quadratic Savitzky–Golay smoothing (`[-3, 12, 17, 12, -3] / 35`).
-/// The two values at either end are copied through; negative results are
-/// clamped to zero (intensities).
 pub fn savitzky_golay5(x: &[f32]) -> Vec<f32> {
     let n = x.len();
     if n < 5 {
@@ -19,10 +13,6 @@ pub fn savitzky_golay5(x: &[f32]) -> Vec<f32> {
     out
 }
 
-/// Gaussian smoothing in retention-time units. `width_s` spans eight sigma,
-/// following the common eight-sigma Gaussian-width convention. Trapezoidal sample weights
-/// keep densely sampled intervals from dominating an irregularly sampled XIC.
-/// Only peak detection uses this trace; areas are integrated from raw signal.
 pub fn gaussian_smooth(rt: &[f64], x: &[f32], width_s: f64) -> Vec<f32> {
     assert_eq!(rt.len(), x.len());
     if x.len() < 2 || !width_s.is_finite() || width_s <= 0.0 {
@@ -65,7 +55,6 @@ pub fn gaussian_smooth(rt: &[f64], x: &[f32], width_s: f64) -> Vec<f32> {
         .collect()
 }
 
-/// A chromatographic peak on a trace: apex scan and inclusive boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeakBounds {
     pub apex: usize,
@@ -73,34 +62,15 @@ pub struct PeakBounds {
     pub right: usize,
 }
 
-/// Boundaries sit this many half-widths at half maximum from the apex: ±2.35 σ
-/// of a Gaussian, 98 % of its area.
 const HALF_WIDTHS: f32 = 2.0;
-/// A boundary stops earlier at a deep valley: once the trace has fallen below
-/// [`DEEP_VALLEY`] of the apex, a rise by [`VALLEY_RISE`] over its running
-/// minimum is the next peak.
 const DEEP_VALLEY: f32 = 0.5;
 const VALLEY_RISE: f32 = 1.5;
 
-/// Locate the peak that contains `anchor`: climb from the anchor to the
-/// nearest local maximum (at most `max_climb` scans away), measure the
-/// half-width at half maximum on each side, and place each boundary
-/// [`HALF_WIDTHS`] half-widths from the apex, or at an earlier deep valley.
-/// `None` when the trace has no signal at the anchor's peak.
-///
-/// Width from the half maximum is what keeps areas reproducible: on
-/// ~1 s Orbitrap survey scans a boundary that stops at the first 10 % rise
-/// above the running minimum stops on noise, and on PXD001819 (UPS1 in yeast,
-/// three technical replicates) it gave the same peptide integration windows
-/// that differed by 2x or more for half of the yeast peptides and a 40 %
-/// area CV. Half-width boundaries bring the CV to 11 %, level with
-/// FeatureFinderIdentification on the same targets.
 pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakBounds> {
     let n = trace.len();
     if n == 0 || anchor >= n {
         return None;
     }
-    // Climb both ways; take the higher local maximum.
     let climb = |dir: isize| -> usize {
         let mut i = anchor;
         let mut steps = 0usize;
@@ -110,7 +80,6 @@ pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakB
                 break;
             }
             let next = next as usize;
-            // Allow stepping through a single zero scan to reach a higher value.
             let peek = (next as isize + dir).clamp(0, n as isize - 1) as usize;
             if trace[next] > trace[i]
                 || (trace[next] == 0.0 && trace[peek] > trace[i] && peek != next)
@@ -121,7 +90,6 @@ pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakB
                 break;
             }
         }
-        // If we stopped on a zero bridge, step back to the real maximum.
         if trace[i] == 0.0 {
             i = anchor;
         }
@@ -145,7 +113,7 @@ pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakB
             }
             let v = trace[next as usize];
             if running_min < DEEP_VALLEY * apex_int && v > VALLEY_RISE * running_min {
-                break; // the next peak starts: the valley was the previous scan
+                break;
             }
             running_min = running_min.min(v);
             i = next as usize;
@@ -157,10 +125,6 @@ pub fn find_peak(trace: &[f32], anchor: usize, max_climb: usize) -> Option<PeakB
     Some(PeakBounds { apex, left, right })
 }
 
-/// Half-width at half maximum of the peak at `apex` on one side (`dir` = ±1),
-/// in scans, with the half-maximum crossing interpolated between the two scans
-/// that bracket it. A trace that never falls to half before its end gives the
-/// distance to that end.
 fn half_width(trace: &[f32], apex: usize, dir: isize) -> f32 {
     let half = trace[apex] / 2.0;
     let mut i = apex;
@@ -178,8 +142,6 @@ fn half_width(trace: &[f32], apex: usize, dir: isize) -> f32 {
     }
 }
 
-/// Trapezoidal area of `trace` between `left..=right` over `rt` (seconds).
-/// A single-scan peak returns its height (as if one second wide).
 pub fn integrate(rt: &[f64], trace: &[f32], left: usize, right: usize) -> f64 {
     if trace.is_empty() || left > right || right >= trace.len() {
         return 0.0;
@@ -195,8 +157,6 @@ pub fn integrate(rt: &[f64], trace: &[f32], left: usize, right: usize) -> f64 {
     area
 }
 
-/// Cosine similarity of two non-negative vectors (0 when either is empty or
-/// all zero).
 pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
@@ -235,10 +195,8 @@ mod tests {
         assert!(flat.iter().all(|v| (*v - 5.0).abs() < 1e-6));
         let spike = gaussian_smooth(&rt, &[0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0], 8.0);
         assert!(spike[3] > spike[2] && spike[3] > spike[4]);
-        assert_eq!(spike[6], 0.0); // Outside the finite kernel support.
+        assert_eq!(spike[6], 0.0);
         assert_eq!(gaussian_smooth(&[1.0], &[9.0], 8.0), vec![9.0]);
-        // Densifying only the left side of a linear ramp must not pull the
-        // smoothed center toward that side (unweighted averaging gives 4.35).
         let rt: Vec<f64> = (0..100)
             .map(|i| i as f64 * 0.05)
             .chain((0..=10).map(|i| 5.0 + i as f64 * 0.5))
@@ -262,15 +220,11 @@ mod tests {
         let t = gaussian(41, 20.0, 3.0, 1000.0);
         let p = find_peak(&t, 17, 10).unwrap();
         assert_eq!(p.apex, 20);
-        // Half-width at half maximum is 1.177 sigma = 3.53 scans → ±7 scans.
         assert_eq!((p.left, p.right), (13, 27), "{p:?}");
     }
 
     #[test]
     fn boundaries_ignore_noise_on_a_broad_peak() {
-        // A broad Gaussian (sigma 12 scans) with ±15 % alternating noise. A
-        // valley rule that stops at the first 10 % rise ends after a scan or
-        // two; the half-width boundaries cover the peak.
         let t: Vec<f32> = gaussian(121, 60.0, 12.0, 1000.0)
             .into_iter()
             .enumerate()

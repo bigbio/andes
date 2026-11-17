@@ -1,8 +1,3 @@
-//! Peptide-conditioned per-fragment features for the intensity regressor.
-//! The SINGLE source of the feature vector — imported by both the trainer's
-//! frag-dataset builder and `intensity_signal` — so train/infer features match
-//! by construction (mirrors `PeakFeatureCtx::for_spectrum`).
-
 use model::peptide::Peptide;
 
 use crate::scoring::fragment_ions::IonKind;
@@ -17,7 +12,6 @@ pub const FEAT_PEP_LEN: usize = 6;
 pub const FEAT_NFLANK_MOD: usize = 7;
 pub const FEAT_CFLANK_MOD: usize = 8;
 pub const FEAT_NCE: usize = 9;
-// New features (appended; existing indices unchanged)
 pub const FEAT_N_BASIC: usize = 10;
 pub const FEAT_PROTON_MOBILITY: usize = 11;
 pub const FEAT_BASIC_NFLANK: usize = 12;
@@ -26,14 +20,9 @@ pub const FEAT_HYDRO_NFLANK: usize = 14;
 pub const FEAT_HYDRO_CFLANK: usize = 15;
 pub const FEAT_TOTAL_MODS: usize = 16;
 pub const FEAT_NEAREST_MOD_DIST: usize = 17;
-/// Fragment charge state (1+ vs 2+). 2+ fragments have distinct intensity
-/// behavior, so the model must be able to condition on it. MUST be computed
-/// identically in training (frag_dataset) and serving (strong_score).
 pub const FEAT_FRAG_CHARGE: usize = 18;
 pub const N_FRAG_FEATURES: usize = 19;
 
-/// Ordered feature names; index == the `FEAT_*` constant above. The blob of a
-/// fragment-intensity model carries these and they are checked at load.
 pub const FRAG_FEATURE_NAMES: [&str; N_FRAG_FEATURES] = [
     "ion_type",
     "precursor_charge",
@@ -56,17 +45,12 @@ pub const FRAG_FEATURE_NAMES: [&str; N_FRAG_FEATURES] = [
     "frag_charge",
 ];
 
-/// Resolve the (N-side index, C-side index) of the two residues flanking
-/// the cleavage site for a b/y ion at 1-based `position` in a peptide of
-/// length `n`. Returns `None` for terminal/degenerate positions.
 fn flank_indices(n: usize, kind: IonKind, position: u32) -> Option<(usize, usize)> {
     let i = position as usize;
     if i < 1 || i >= n {
         return None;
     }
     match kind {
-        // c-ions are N-terminal like b; z•-ions are C-terminal like y — they
-        // flank the same backbone bond, so map C→b-like and Z→y-like.
         IonKind::B | IonKind::C => Some((i - 1, i)),
         IonKind::Y | IonKind::Z => {
             let left = n - i;
@@ -75,31 +59,21 @@ fn flank_indices(n: usize, kind: IonKind, position: u32) -> Option<(usize, usize
     }
 }
 
-/// Map a residue byte to its 0-based integer index (`residue − b'A'`).
 #[inline]
 fn res_idx(b: u8) -> f32 {
     b.wrapping_sub(b'A') as f32
 }
 
-/// Return the modification mass delta (as f32) for residue at `idx`, or 0.0
-/// if the residue carries no modification.
 #[inline]
 fn mod_delta(p: &Peptide, idx: usize) -> f32 {
     p.residues[idx].mod_.as_ref().map_or(0.0, |m| m.mass_delta) as f32
 }
 
-/// Returns `true` if the residue byte is a basic residue (R, K, or H).
 #[inline]
 fn is_basic(b: u8) -> bool {
     matches!(b, b'R' | b'K' | b'H')
 }
 
-/// Kyte-Doolittle hydropathy for a single-letter residue byte.
-/// Unknown residues return 0.0.
-///
-/// Exposed (`pub`) as the single source of Kyte-Doolittle values so the
-/// engine-wide RT predictor (`rt_model`) reuses the exact same scale rather
-/// than duplicating the constants.
 pub fn hydropathy(b: u8) -> f32 {
     match b {
         b'A' => 1.8,
@@ -126,10 +100,6 @@ pub fn hydropathy(b: u8) -> f32 {
     }
 }
 
-/// Feature vector for one annotated b/y ion. `position` is 1-based,
-/// `precursor_charge` the PSM precursor charge (not the fragment charge),
-/// `nce` the parsed NCE (0.0 when unknown). Returns an all-zero vector for
-/// out-of-range positions (terminal/degenerate ions).
 pub fn extract_frag_features(
     p: &Peptide,
     kind: IonKind,
@@ -145,7 +115,6 @@ pub fn extract_frag_features(
         None => return f,
     };
 
-    // ---- Original features (indices 0-9, semantics unchanged) ----
     f[FEAT_ION_TYPE] = match kind {
         IonKind::B | IonKind::C => 0.0,
         IonKind::Y | IonKind::Z => 1.0,
@@ -164,14 +133,10 @@ pub fn extract_frag_features(
     f[FEAT_CFLANK_MOD] = mod_delta(p, ci);
     f[FEAT_NCE] = nce;
 
-    // ---- New features (indices 10-17) ----
-
-    // Proton mobility / basic-residue context (peptide-global)
     let n_basic = p.residues.iter().filter(|aa| is_basic(aa.residue)).count();
     f[FEAT_N_BASIC] = n_basic as f32;
     f[FEAT_PROTON_MOBILITY] = n_basic as f32 - precursor_charge as f32;
 
-    // Per-flank chemistry (N-side and C-side residue of the cleavage)
     let nr = p.residues[ni].residue;
     let cr = p.residues[ci].residue;
     f[FEAT_BASIC_NFLANK] = if is_basic(nr) { 1.0 } else { 0.0 };
@@ -179,12 +144,9 @@ pub fn extract_frag_features(
     f[FEAT_HYDRO_NFLANK] = hydropathy(nr);
     f[FEAT_HYDRO_CFLANK] = hydropathy(cr);
 
-    // PTM context
     let total_mods = p.residues.iter().filter(|aa| aa.mod_.is_some()).count();
     f[FEAT_TOTAL_MODS] = total_mods as f32;
 
-    // Distance from cleavage site (ni, the N-side index) to nearest modified residue.
-    // Sentinel = peptide length when there are no modified residues.
     let nearest_mod_dist = if total_mods == 0 {
         n as f32
     } else {
@@ -197,8 +159,6 @@ pub fn extract_frag_features(
     };
     f[FEAT_NEAREST_MOD_DIST] = nearest_mod_dist;
 
-    // Fragment charge state (1+ / 2+). Lets the model learn that 2+ fragments
-    // carry different relative intensity than their 1+ counterparts.
     f[FEAT_FRAG_CHARGE] = frag_charge as f32;
 
     f
@@ -264,7 +224,6 @@ mod tests {
 
     #[test]
     fn frag_features_stable_shape_and_context() {
-        // n=7; b2 cleaves after residue 2 (flanks E|P), P is C-flank of PEPTIDE.
         let p = pep("PEPTIDE");
         let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f.len(), N_FRAG_FEATURES);
@@ -284,24 +243,20 @@ mod tests {
 
     #[test]
     fn frag_features_chemistry_and_ptm() {
-        let p = pep("PEPTIDER"); // R is basic, at C-term
+        let p = pep("PEPTIDER");
         let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f[FEAT_PRECURSOR_CHARGE], 2.0);
-        assert_eq!(f[FEAT_N_BASIC], 1.0); // one R
-        assert!((f[FEAT_PROTON_MOBILITY] - (1.0 - 2.0)).abs() < 1e-6); // 1 basic - charge 2 = -1
-                                                                       // b2 flanks E|P (neither basic); hydropathy of E = -3.5, P = -1.6
+        assert_eq!(f[FEAT_N_BASIC], 1.0);
+        assert!((f[FEAT_PROTON_MOBILITY] - (1.0 - 2.0)).abs() < 1e-6);
         assert_eq!(f[FEAT_BASIC_NFLANK], 0.0);
         assert!((f[FEAT_HYDRO_NFLANK] - (-3.5)).abs() < 1e-6);
         assert!((f[FEAT_HYDRO_CFLANK] - (-1.6)).abs() < 1e-6);
-        // unmodified peptide → total mods 0, nearest-mod-dist = sentinel (len)
         assert_eq!(f[FEAT_TOTAL_MODS], 0.0);
         assert!((f[FEAT_NEAREST_MOD_DIST] - p.residues.len() as f32).abs() < 1e-6);
     }
 
     #[test]
     fn frag_features_ptm_distance() {
-        // Cam-C on residue 3 of "PEPCDEK": at b2 (cleavage index ni=1, 0-based),
-        // nearest mod is residue index 2 → distance 1; total mods 1.
         let p = pep_mod("PEPCDEK", 3, 57.02146);
         let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f[FEAT_TOTAL_MODS], 1.0);
@@ -310,13 +265,11 @@ mod tests {
 
     #[test]
     fn frag_charge_feature_distinguishes_1plus_from_2plus() {
-        // Same ion, different fragment charge → only FEAT_FRAG_CHARGE differs.
         let p = pep("PEPTIDE");
         let f1 = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         let f2 = extract_frag_features(&p, IonKind::B, 2, 2, 2, 0.0);
         assert_eq!(f1[FEAT_FRAG_CHARGE], 1.0);
         assert_eq!(f2[FEAT_FRAG_CHARGE], 2.0);
-        // Every OTHER feature must be identical (charge is the only difference).
         for i in 0..N_FRAG_FEATURES {
             if i != FEAT_FRAG_CHARGE {
                 assert_eq!(f1[i], f2[i], "feature {i} should not depend on frag charge");

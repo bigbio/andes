@@ -1,21 +1,3 @@
-//! The out-of-core candidate index against independent references.
-//!
-//! * Candidate lists: the index's full candidate list must equal
-//!   `enumerate_candidates` over the whole database with collision decoys
-//!   relabelled globally — same peptidoforms, flags and ORDER (the queue's
-//!   tie-breaks follow candidate order).
-//! * PSMs: small searches (real peaks + a small FASTA; a variable mod, a
-//!   semi-tryptic digest, an asymmetric precursor tolerance with a fixed mod,
-//!   and a palindromic collision decoy) must reproduce golden PSM lists:
-//!   peptide (residues + per-residue mod mass), charge, score, rank_score,
-//!   isotope offset, decoy flag and, for the bit-identity golden, the resolved
-//!   proteins (the PIN/TSV resolution of `candidate_idxs`).
-//!
-//! The PSM goldens were recorded on 2026-10-11 from the in-memory candidate list
-//! (whole-database enumeration + a mass-bucket lookup), the path these searches
-//! took before the out-of-core index became the only one; at that time the
-//! out-of-core path was asserted equal to it on every one of these fixtures.
-
 use std::collections::HashSet;
 
 use rustc_hash::FxHashMap;
@@ -33,10 +15,6 @@ use search::decoy::DecoyStrategy;
 use search::psm::TopNQueue;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
-/// The search index of `target` plus its whole-protein reversed decoys, given
-/// in the database (`--decoy-strategy none`). The PSM goldens below were
-/// recorded on that database; the fixtures test the candidate paths, not the
-/// decoy construction.
 fn with_reversed_decoys(target: &ProteinDb) -> SearchIndex {
     let mut db = target.clone();
     db.proteins.extend(target.proteins.iter().map(|p| Protein {
@@ -48,7 +26,6 @@ fn with_reversed_decoys(target: &ProteinDb) -> SearchIndex {
     SearchIndex::from_target_db_with_strategy(&db, "XXX", None, DecoyStrategy::None, 0)
 }
 
-/// Realistic-enough scorer so candidates score on placed b/y peaks.
 fn make_scorer(tol_da: f64) -> RankScorer {
     let part = Partition {
         charge: 2,
@@ -120,7 +97,6 @@ fn make_scorer(tol_da: f64) -> RankScorer {
     RankScorer::new(&param)
 }
 
-/// Build a peptide directly from residue bytes (no flanks of consequence here).
 fn residues(bytes: &[u8]) -> Vec<AminoAcid> {
     bytes
         .iter()
@@ -128,14 +104,13 @@ fn residues(bytes: &[u8]) -> Vec<AminoAcid> {
         .collect()
 }
 
-/// Place charge-1 b/y peaks for `pep` so the candidate scores; add background.
 fn peaks_for(pep: &Peptide) -> Vec<(f64, f32)> {
     let mut peaks: Vec<(f64, f32)> = predict_by_ions(pep, 1..=1)
         .iter()
         .enumerate()
         .map(|(i, p)| (p.mz, 100.0 - i as f32))
         .collect();
-    peaks.push((37.5, 3.0)); // background
+    peaks.push((37.5, 3.0));
     peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     peaks
 }
@@ -157,11 +132,7 @@ fn spectrum_for(pep: &Peptide, charge: u8, title: &str) -> Spectrum {
     }
 }
 
-/// Small search: two proteins; spectra targeting an unmodified peptide, an
-/// Oxidation-M modified peptide, and a peptide shared across both proteins.
 fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
-    // PEPTMIDEK contains an M (Ox-M), WVTFISLLR is a clean tryptic peptide,
-    // SHAREDPEPK appears in BOTH proteins (multi-protein aggregation).
     let target = ProteinDb {
         proteins: vec![
             Protein {
@@ -204,17 +175,13 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     params.top_n_psms_per_spectrum = 5;
     params.min_peaks = 0;
 
-    // Spectrum targeting the Ox-M modified PEPTMIDEK.
     let ox_residues = {
         let mut r = residues(b"PEPTMIDEK");
-        // place Ox on the M (index 4)
         r[4].mod_ = Some(model::modification::leak_mod(ox_m));
         r
     };
     let ox_pep = Peptide::new(ox_residues, b'K', b'W');
-    // Unmodified WVTFISLLR.
     let clean_pep = Peptide::new(residues(b"WVTFISLLR"), b'K', b'S');
-    // Shared peptide (both proteins).
     let shared_pep = Peptide::new(residues(b"SHAREDPEPK"), b'R', b'-');
 
     let spectra = vec![
@@ -225,28 +192,17 @@ fn small_search_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     (spectra, idx, params)
 }
 
-/// Asymmetric precursor tolerance (wide on the `left` = "peptide lighter than
-/// precursor" side, tight on the `right`) plus a FIXED carbamidomethyl-C and NO
-/// variable mods. Several near-isobaric tryptic peptides sit on the WIDE side of
-/// the precursor mass, where a symmetric `max(left,right)` window would admit a
-/// different candidate set than the directional `matches_precursor` gate.
 fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
-    // One protein with several tryptic peptides whose neutral masses are close
-    // together, so the asymmetric window's two sides admit different sets.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
             description: "cam-only asymmetric".into(),
-            // Tryptic peptides (cut after K/R): ELVISCLIVEK, SAMPLERPEPTIDEK,
-            // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
-            // fixed CAM mass shifts each, and several near-mass neighbours.
             sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK".to_vec(),
             annotation: None,
         }],
     };
     let idx = with_reversed_decoys(&target);
 
-    // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
     let cam = Modification {
         name: "Carbamidomethyl".to_string(),
         mass_delta: 57.02146,
@@ -267,26 +223,15 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
         .unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
     params.min_length = 3;
-    params.max_variable_mods_per_peptide = 0; // cam_only: no variable mods
+    params.max_variable_mods_per_peptide = 0;
     params.top_n_psms_per_spectrum = 10;
     params.min_peaks = 0;
-    // STRONGLY ASYMMETRIC precursor tolerance: wide left, tight right. Da units so
-    // the window is mass-independent and the directional asymmetry is stark. The
-    // wide left side reaches peptides up to ~0.6 Da LIGHTER than the precursor;
-    // the tight right side admits almost nothing heavier.
     params.precursor_tolerance =
         model::PrecursorTolerance::asymmetric(Tolerance::Da(0.6), Tolerance::Da(0.02));
-    // Multiple isotope offsets exercise the per-offset directional window.
     params.isotope_error_range = -1..=2;
 
-    // Build spectra: for EACH tryptic Cys-bearing peptide, place a precursor a
-    // little HEAVIER than the peptide so the peptide falls on the WIDE (left)
-    // side, and nearby lighter neighbours land in/out of the asymmetric window
-    // differently than a symmetric one would.
     let build_pep = |seq: &[u8], pre: u8, post: u8| -> Peptide {
         let mut r = residues(seq);
-        // Apply the fixed CAM to every C so the spectrum's precursor matches the
-        // CAM-modified candidate the search will score.
         let cam_mod = Modification {
             name: "Carbamidomethyl".to_string(),
             mass_delta: 57.02146,
@@ -317,8 +262,6 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     ];
     let mut spectra = Vec::new();
     for (i, pep) in peps.iter().enumerate() {
-        // Nudge the precursor +0.3 Da heavier (within wide left, outside tight
-        // right) so the matching peptide sits on the asymmetric WIDE side.
         let charge = 2u8;
         let mz = (pep.mass() + 0.3 + charge as f64 * PROTON) / charge as f64;
         let mut s = spectrum_for(pep, charge, &format!("scan=asym{i}"));
@@ -328,12 +271,7 @@ fn asymmetric_cam_only_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     (spectra, idx, params)
 }
 
-/// A palindromic protein: its tryptic peptide `MAEK` reverses to ITSELF, so the
-/// reversed decoy's bare sequence equals a real target's — a collision decoy that
-/// must be relabelled as target using the GLOBAL target set.
 fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
-    // Protein "MAEKKEAM" is a palindrome (reverse == itself), so its tryptic
-    // peptide "MAEK" (cut after K) collides with its own reverse-decoy "MAEK".
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
@@ -351,16 +289,11 @@ fn palindrome_fixture() -> (Vec<Spectrum>, SearchIndex, SearchParams) {
     params.top_n_psms_per_spectrum = 10;
     params.min_peaks = 0;
 
-    // Spectrum targeting MAEK (the collision peptide).
     let maek = Peptide::new(residues(b"MAEK"), b'_', b'K');
     let spectra = vec![spectrum_for(&maek, 2, "scan=collision")];
     (spectra, idx, params)
 }
 
-/// Search `spectra` on the out-of-core path with per-spectrum enumeration
-/// (`fragment_index_top_k` is 0 in these fixtures). Returns the per-scan queues
-/// PLUS the materialized candidates the PSM `candidate_idxs` resolve against
-/// (just like the binary holds `prepared.candidates`).
 fn run_search(
     idx: &SearchIndex,
     params: &SearchParams,
@@ -379,8 +312,6 @@ fn bare(c: &Candidate) -> Vec<u8> {
     c.peptide.residues.iter().map(|a| a.residue).collect()
 }
 
-/// The whole database's candidate list as `enumerate_candidates` yields it, with
-/// every decoy whose bare sequence is also a target's relabelled as target.
 fn enumeration_oracle(idx: &SearchIndex, params: &SearchParams) -> Vec<Candidate> {
     let mut all: Vec<Candidate> = enumerate_candidates(idx, params, "XXX").collect();
     let targets: HashSet<Vec<u8>> = all.iter().filter(|c| !c.is_decoy).map(bare).collect();
@@ -392,7 +323,6 @@ fn enumeration_oracle(idx: &SearchIndex, params: &SearchParams) -> Vec<Candidate
     all
 }
 
-/// Everything a candidate carries into scoring and the PIN.
 type CandSig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
 
 fn cand_sig(c: &Candidate) -> CandSig {
@@ -415,12 +345,6 @@ fn cand_sig(c: &Candidate) -> CandSig {
     )
 }
 
-/// The out-of-core index lists exactly the enumeration's candidates, with the
-/// same collision-decoy labels, on a variable-mod search with a shared peptide, a
-/// semi-tryptic digest, a fixed mod, and a palindrome whose reverse decoy
-/// collides with a target. The order matches too, except semi-tryptic: the
-/// enumeration lists a protein's strict spans before its semi-specific ones,
-/// the index lists spans by start and length.
 #[test]
 fn out_of_core_candidate_list_equals_the_enumeration() {
     let scorer = make_scorer(0.05);
@@ -469,8 +393,6 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
     assert!(relabelled > 0, "no fixture exercises the collision relabel");
 }
 
-/// Protein 0 starts with M; each of its peptides is enumerated once, so it is
-/// listed once in `prots`.
 const FIXTURE_SIGNATURE: &[&[&str]] = &[
     &[
         "pep=E[0]D[0]I[0]M[1599491]T[0]P[0]E[0]P[0]K[0] z=2 score=-87.000000 rank=-87.000000 iso=0 decoy=true prots=[2]",
@@ -536,8 +458,6 @@ fn assert_golden(label: &str, got: &[Vec<String>], golden: &[&[&str]]) {
     );
 }
 
-/// Variable mod + a peptide shared by two proteins: full PSM rows including the
-/// resolved proteins.
 #[test]
 fn psms_match_golden_with_variable_mod_and_shared_peptide() {
     let (spectra, idx, params) = small_search_fixture();
@@ -546,7 +466,6 @@ fn psms_match_golden_with_variable_mod_and_shared_peptide() {
     assert_golden("variable mod", &psm_signature(&q, &c), FIXTURE_SIGNATURE);
 }
 
-/// Semi-tryptic digest (`num_tolerable_termini = 1`).
 #[test]
 fn psms_match_golden_semitryptic() {
     let (spectra, idx, mut params) = small_search_fixture();
@@ -556,8 +475,6 @@ fn psms_match_golden_semitryptic() {
     assert_golden("semi-tryptic", &psm_result_set(&q, &c), SEMITRYPTIC);
 }
 
-/// Directional (asymmetric) precursor tolerance with a fixed mod: the scored
-/// set must follow `matches_precursor`'s sides.
 #[test]
 fn psms_match_golden_asymmetric_tol_cam_only() {
     let (spectra, idx, params) = asymmetric_cam_only_fixture();
@@ -570,7 +487,6 @@ fn psms_match_golden_asymmetric_tol_cam_only() {
     );
 }
 
-/// The palindrome's collision decoy is labelled as target in the PSMs.
 #[test]
 fn psms_match_golden_collision_decoy_relabel() {
     let (spectra, idx, params) = palindrome_fixture();
@@ -586,11 +502,6 @@ fn psms_match_golden_collision_decoy_relabel() {
     assert_golden("collision decoy", &got, COLLISION_DECOY_RELABEL);
 }
 
-/// Canonical, resolution-aware signature of every scan's top-N PSM list.
-/// Includes peptide string (residues + per-residue mod mass), charge, score,
-/// rank_score, isotope_offset, and the resolved protein accessions (the PIN/TSV
-/// `candidate_idxs` resolution). Sorted within scan so heap/order noise can't
-/// hide a real divergence — but the PSM SET and resolution must match.
 fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<String>> {
     queues
         .iter()
@@ -612,8 +523,6 @@ fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Stri
                             format!("{}[{}]", aa.residue as char, m)
                         })
                         .collect();
-                    // Resolve EVERY candidate_idx into a protein accession (the
-                    // PIN `Proteins` column), in the stored order.
                     let prots: Vec<String> = psm
                         .candidate_idxs
                         .iter()
@@ -636,15 +545,6 @@ fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Stri
         .collect()
 }
 
-/// Canonical, order-independent set of accepted PSMs per scan.
-///
-/// Unlike `psm_signature` (which compares sorted rows — still sensitive to ordering
-/// within the heap since `candidate_idxs` order affects the signature), this
-/// function builds a per-scan **multiset** of `(peptide-residues+mods, charge,
-/// score-rounded, rank-score-rounded, isotope_offset, is_decoy)` tuples and
-/// sorts them. The protein column is deliberately excluded: for semi-tryptic
-/// searches the multi-protein `Proteins` order depends on candidate visitation
-/// order (cosmetic, FDR-neutral), and these tests assert result identity.
 fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<String>> {
     queues
         .iter()
@@ -666,8 +566,6 @@ fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Str
                             format!("{}[{}]", aa.residue as char, m)
                         })
                         .collect();
-                    // Round scores to 4 decimal places to tolerate any
-                    // float-formatting noise while still catching real divergence.
                     format!(
                         "pep={pep} z={} score={:.4} rank={:.4} iso={} decoy={}",
                         psm.charge_used,
@@ -684,7 +582,6 @@ fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Str
         .collect()
 }
 
-/// A digest that builds no candidates is an error, not an empty search.
 #[test]
 fn prepare_mmap_rejects_a_digest_with_no_candidates() {
     let (_spectra, idx, mut params) = small_search_fixture();
@@ -702,8 +599,6 @@ fn prepare_mmap_rejects_a_digest_with_no_candidates() {
     );
 }
 
-/// Issue #76: on spectra built from a peptide's exact b/y ions, the per-chunk
-/// fragment-ion index must give that peptide the most votes and materialise it.
 #[test]
 fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
     use model::tolerance::Tolerance;
@@ -717,15 +612,12 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
     let records = mi.records();
     let fi = ChunkFragmentIndex::build(records, &idx, &params, Tolerance::Da(0.05), 0.0, 5000.0);
     assert!(fi.n_forms() > 0);
-    // Reference: what the enumeration path scores as top-1 for each spectrum.
     let (queues, cands) = run_search(&idx, &params, &spectra, &scorer);
     for (spec, q) in spectra.iter().zip(&queues) {
         let best = q
             .iter_psms()
             .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
             .expect("psm");
-        // Modification-aware signature (residue, mod delta): the oxidised
-        // PEPTMIDEK form must be distinguished from the unmodified one.
         let sig = |c: &Candidate| -> Vec<(u8, i64)> {
             c.peptide
                 .residues
@@ -751,8 +643,6 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
     }
 }
 
-/// Same as above with a tight mass window, so the bounded walk actually prunes
-/// and the pruned index `k` must still select the same form on both sides.
 #[test]
 fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
     use model::tolerance::Tolerance;
@@ -804,10 +694,6 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
     }
 }
 
-/// The single-shot out-of-core search returns one queue per input spectrum in
-/// input order, each PSM's `spectrum_idx` is its input position, and its top
-/// PSM is the one per-spectrum enumeration ranks first. The spectra are passed
-/// in descending precursor mass, so the search has to reorder them.
 #[test]
 fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit() {
     let (mut spectra, idx, params) = small_search_fixture();
@@ -859,18 +745,10 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
     }
 }
 
-/// The glyco candidate table built from the out-of-core index must be the
-/// whole database's enumeration restricted to N-X-S/T-bearing candidates: the same
-/// candidates (peptidoform, flanks, protein, offset, terminal and decoy flags),
-/// in the same relative order.
 #[test]
 fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     use search::candidate_gen::candidate_has_nxst_sequon;
     use search::glyco_search::GlycoCandidates;
-    // Internal sequons (NGS, NLT), a sequon completed by the next residue
-    // (...KAEN | TK: N-X at the peptide end, S/T after it), Met-initial proteins
-    // (two enumeration walks), an oxidisable M next to a sequon, and a shared
-    // peptide in two proteins.
     let target = ProteinDb {
         proteins: vec![
             Protein {
@@ -927,7 +805,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
     let table =
-        GlycoCandidates::from_out_of_core(&mmap, andes_glyco::glycan_first::GlycanCore::NGlycan);
+        GlycoCandidates::from_out_of_core(&mmap, glyco::glycan_first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {
@@ -952,17 +830,71 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let want: Vec<Sig> = expected.iter().map(|c| sig(c)).collect();
     let got: Vec<Sig> = table.candidates().iter().map(sig).collect();
 
-    // Not vacuous: targets and decoys, a modified form, a flank-completed sequon,
-    // and the Met-cleaved walk are all represented.
     assert!(want.iter().any(|s| s.5) && want.iter().any(|s| !s.5));
     assert!(want.iter().any(|s| s.2.iter().any(|&(_, d)| d != 0)));
     assert!(expected.iter().any(|c| {
         let r: Vec<u8> = c.peptide.residues.iter().map(|a| a.residue).collect();
-        !andes_glyco::sequon::has_nxst_sequon(&r)
+        !glyco::sequon::has_nxst_sequon(&r)
     }));
     assert!(expected
         .iter()
         .any(|c| c.is_protein_n_term && c.start_offset_in_protein == 1));
     assert!(want.len() < all.len());
     assert_eq!(got, want);
+}
+
+#[test]
+fn fragment_index_open_mass_query_ignores_the_precursor() {
+    use model::tolerance::Tolerance;
+    use search::fragment_index::ChunkFragmentIndex;
+    let (spectra, idx, params) = small_search_fixture();
+    let scorer = make_scorer(0.05);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let prepared = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
+        .expect("prepare_mmap");
+    let fi = ChunkFragmentIndex::build(
+        prepared.mmap_index.records(),
+        &idx,
+        &params,
+        Tolerance::Da(0.05),
+        0.0,
+        5000.0,
+    );
+    let (queues, cands) = run_search(&idx, &params, &spectra, &scorer);
+    for (spec, q) in spectra.iter().zip(&queues) {
+        let best = q
+            .iter_psms()
+            .max_by(|a, b| a.rank_score.partial_cmp(&b.rank_score).unwrap())
+            .expect("psm");
+        let truth = &cands[best.primary_candidate_idx() as usize].peptide;
+        let truth_seq: Vec<u8> = truth.residues.iter().map(|a| a.residue).collect();
+        let z = spec.precursor_charge.unwrap() as u8;
+        let mut moved = spec.clone();
+        moved.precursor_mz += 600.0 / z as f64;
+        let sel = fi.query_mass_range(&moved, 0.0, 5000.0, Tolerance::Da(0.05), 5, 3, 0);
+        let mats = fi.materialise(&sel, &idx, &params, None, &|_| {});
+        let seqs: Vec<Vec<u8>> = mats
+            .iter()
+            .map(|c| c.peptide.residues.iter().map(|a| a.residue).collect())
+            .collect();
+        assert!(
+            seqs.contains(&truth_seq),
+            "{}: truth not retrieved by the open-mass query",
+            spec.title
+        );
+        let windowed = fi.query(&moved, &[z], &params, Tolerance::Da(0.05), 5, 3, 0);
+        let mats = fi.materialise(&windowed, &idx, &params, None, &|_| {});
+        assert!(mats.iter().all(|c| c
+            .peptide
+            .residues
+            .iter()
+            .map(|a| a.residue)
+            .collect::<Vec<_>>()
+            != truth_seq));
+        let m = truth.mass();
+        let sel = fi.query_mass_range(&moved, m + 2.0, 5000.0, Tolerance::Da(0.05), 50, 1, 0);
+        for &(id, _) in &sel {
+            assert!(fi.form_mass(id) >= m + 2.0);
+        }
+    }
 }

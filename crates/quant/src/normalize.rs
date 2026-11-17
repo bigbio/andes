@@ -1,61 +1,18 @@
-//! Run normalisation of label-free MS1 quantities across runs.
-//!
-//! Each run gets a log2 offset `o_r(t)` at apex RT `t`, fitted on reference
-//! cells (one log2 quantity `l` per precursor and run, typically the
-//! identified features of high quality). A precursor enters the fit when it
-//! has a reference cell in at least [`NormParams::min_runs`] runs, counting
-//! only the active runs: those with at least [`NormParams::min_cells`] such
-//! cells. `min_runs` is capped at the number of active runs (and is at least
-//! 2). Runs that fall short leave one at a time, the one with the fewest
-//! cells first, and the counts are taken again, so a blank or near-empty run
-//! neither takes an offset nor keeps the other runs from being normalised.
-//!
-//! The offsets start at 0 and are refined for [`NormParams::rounds`] rounds:
-//!
-//! * the precursor's reference level is `ref_p = mean over its runs of
-//!   (l - o)`, and each of its cells gets `z = l - ref_p`;
-//! * a reference cell's offset becomes the median of the `z` of the
-//!   [`NormParams::half_window`] reference cells of its run just before it
-//!   and as many just after it in apex RT order, its own `z` left out.
-//!
-//! Any (precursor, run, RT) then gets the median of the last round's `z` of
-//! the `half_window` reference cells of the run before and after that RT
-//! (the reference cell itself left out when the precursor is one).
-//!
-//! The offset carries the run's level and its changes of ion signal along the
-//! gradient, which a single factor per run cannot follow (electrospray drifts
-//! of seconds to minutes). Measuring each run against the precursor's mean
-//! over all its runs, own run included, keeps a drift of one run out of the
-//! other runs' offsets. Like every normalisation, it assumes most precursors
-//! do not change between runs: the median sets the level.
-//!
-//! Runs below `min_cells`, and every run of a set with fewer than two such
-//! runs, get no offset.
-
 use std::collections::HashMap;
 
-/// One reference cell: precursor `precursor` measured in run `run`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NormCell {
     pub precursor: u32,
     pub run: u16,
-    /// log2 of the quantity; must be finite.
     pub log2_quantity: f64,
-    /// Apex RT in the run's own time, seconds; must be finite.
     pub rt: f64,
 }
 
-/// Parameters of [`fit`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormParams {
-    /// Fewest runs with a reference cell for a precursor to enter the fit
-    /// (capped at the number of runs, and at least 2).
     pub min_runs: usize,
-    /// Reference cells on each side of `t` in the RT-local median.
     pub half_window: usize,
-    /// Fewest reference cells for a run to be normalised.
     pub min_cells: usize,
-    /// Refinement rounds.
     pub rounds: usize,
 }
 
@@ -70,18 +27,14 @@ impl Default for NormParams {
     }
 }
 
-/// The reference cells of one run, in apex RT order, with their last `z`.
 #[derive(Debug, Clone, PartialEq)]
 struct RunCurve {
     rt: Vec<f64>,
     z: Vec<f64>,
-    /// Position in `rt` of each reference precursor of the run.
     position: HashMap<u32, usize>,
 }
 
 impl RunCurve {
-    /// Median of the `z` of the `h` cells before and after `rt`, without the
-    /// reference cell of `precursor` when it is one.
     fn at(&self, precursor: u32, rt: f64, h: usize) -> Option<f64> {
         let n = self.z.len();
         let mut w: Vec<f64> = match self.position.get(&precursor) {
@@ -99,17 +52,13 @@ impl RunCurve {
     }
 }
 
-/// Fitted offsets of every run (see the module docs).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunNormalization {
     curves: Vec<Option<RunCurve>>,
     half_window: usize,
-    /// Precursors that entered the fit.
     pub precursors: usize,
 }
 
-/// Median of `v` (mean of the two middle values for an even length); `None`
-/// when empty. Reorders `v`.
 fn median(v: &mut [f64]) -> Option<f64> {
     let n = v.len();
     if n == 0 {
@@ -124,9 +73,6 @@ fn median(v: &mut [f64]) -> Option<f64> {
     Some(0.5 * (lo + hi))
 }
 
-/// Fits the offsets of runs `0..n_runs` on `cells` (see the module docs).
-/// Cells with a non-finite value, a run out of range or a repeated
-/// (precursor, run) after the first are ignored.
 pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormalization {
     let none = |precursors| RunNormalization {
         curves: vec![None; n_runs],
@@ -142,10 +88,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
             }
         }
     }
-    // Shrink the active runs until each holds `min_cells` cells of precursors
-    // seen in `min_runs` active runs, `min_runs` capped at their number: one
-    // run at a time, the failing run with the fewest cells first, since
-    // dropping it lowers `min_runs` for the others.
     let mut total = vec![0usize; n_runs];
     for c in by_precursor.values().flatten() {
         total[c.run as usize] += 1;
@@ -176,7 +118,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
         }
     }
     let eligible = |v: &Vec<NormCell>| v.len() >= min_runs;
-    // Precursor groups over the active runs, in precursor order.
     let mut groups: Vec<Vec<NormCell>> = by_precursor
         .into_values()
         .map(|v| v.into_iter().filter(|c| active[c.run as usize]).collect())
@@ -184,7 +125,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
         .collect();
     groups.sort_by_key(|v| v[0].precursor);
 
-    // Per run, the (group, cell) indices of its reference cells in RT order.
     let mut order: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_runs];
     for (gi, v) in groups.iter().enumerate() {
         for (ci, c) in v.iter().enumerate() {
@@ -247,8 +187,6 @@ pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormali
 }
 
 impl RunNormalization {
-    /// The log2 offset of run `run` for precursor `precursor` at apex RT `rt`;
-    /// `None` for a run that is not normalised or a non-finite `rt`.
     pub fn offset(&self, run: u16, precursor: u32, rt: f64) -> Option<f64> {
         let c = self.curves.get(run as usize)?.as_ref()?;
         if !rt.is_finite() {
@@ -257,20 +195,15 @@ impl RunNormalization {
         c.at(precursor, rt, self.half_window)
     }
 
-    /// `quantity * 2^-offset`; `None` when the run is not normalised.
     pub fn normalize(&self, run: u16, precursor: u32, rt: f64, quantity: f64) -> Option<f64> {
         self.offset(run, precursor, rt)
             .map(|o| quantity * (-o).exp2())
     }
 
-    /// Whether run `run` is normalised.
     pub fn is_normalized(&self, run: u16) -> bool {
         matches!(self.curves.get(run as usize), Some(Some(_)))
     }
 
-    /// Median and standard deviation of run `run`'s offsets over its
-    /// reference cells, and their number; `None` for a run that is not
-    /// normalised.
     pub fn summary(&self, run: u16) -> Option<(f64, f64, usize)> {
         let c = self.curves.get(run as usize)?.as_ref()?;
         let mut v: Vec<f64> = c
@@ -289,7 +222,6 @@ impl RunNormalization {
 mod tests {
     use super::*;
 
-    /// Deterministic uniform numbers in [0, 1).
     struct Lcg(u64);
     impl Lcg {
         fn unit(&mut self) -> f64 {
@@ -305,8 +237,6 @@ mod tests {
         }
     }
 
-    /// `n` precursors eluting over 0..3000 s in `runs` runs, abundance
-    /// 20 + 5 * N(0,1) log2, plus `gain(run, rt)` and `noise` * N(0,1).
     fn cells(
         n: u32,
         runs: u16,
@@ -349,7 +279,6 @@ mod tests {
                 "run {r}: {o}"
             );
         }
-        // Each precursor reads the same in every run after normalisation.
         for c in cells.iter().filter(|c| c.precursor < 50) {
             let first = corrected(&norm, &cells[3 * c.precursor as usize]);
             assert!((corrected(&norm, c) - first).abs() < 0.3);
@@ -358,7 +287,6 @@ mod tests {
 
     #[test]
     fn rt_dependent_gain_is_followed() {
-        // Run 1 loses up to 0.8 log2 in the middle of the gradient.
         let gain = |r: u16, t: f64| {
             if r == 1 {
                 -0.8 * (std::f64::consts::PI * t / 3000.0).sin()
@@ -368,7 +296,6 @@ mod tests {
         };
         let (cells, _) = cells(6000, 3, 0.1, gain);
         let norm = fit(&cells, 3, &NormParams::default());
-        // Per precursor, the run-1 minus run-0 offset is the gain at its RT.
         let mut worst: f64 = 0.0;
         let mut total = 0.0;
         for c in cells.iter().filter(|c| c.run == 1) {
@@ -387,7 +314,6 @@ mod tests {
 
     #[test]
     fn a_minority_of_changed_precursors_does_not_move_the_level() {
-        // A fifth of the precursors are 4x up in run 2: the median ignores them.
         let (mut cells, _) = cells(3000, 3, 0.05, |_, _| 0.0);
         for c in cells
             .iter_mut()
@@ -396,8 +322,6 @@ mod tests {
             c.log2_quantity += 2.0;
         }
         let norm = fit(&cells, 3, &NormParams::default());
-        // A mean would put run 2 0.4 above runs 0 and 1 (0.2 * 2); the
-        // median keeps the runs within a small fraction of that.
         let o: Vec<f64> = (0..3u16)
             .map(|r| norm.offset(r, u32::MAX, 1500.0).unwrap())
             .collect();
@@ -408,7 +332,6 @@ mod tests {
 
     #[test]
     fn a_reference_cell_is_left_out_of_its_own_offset() {
-        // Five precursors in two runs, run 1 reads +1 except precursor 2 (+5).
         let mut cells = Vec::new();
         for p in 0..5u32 {
             for run in 0..2u16 {
@@ -434,8 +357,6 @@ mod tests {
             ..NormParams::default()
         };
         let norm = fit(&cells, 2, &params);
-        // The window covers the whole run: precursor 2's own +5 never enters
-        // its own offset, so it keeps its excess of 4 over the others.
         let d = |p: u32| {
             let c1 = cells[2 * p as usize + 1];
             let c0 = cells[2 * p as usize];
@@ -448,7 +369,6 @@ mod tests {
     #[test]
     fn runs_without_enough_cells_are_not_normalised() {
         let (mut cells, _) = cells(100, 3, 0.05, |_, _| 0.0);
-        // Run 2 keeps 10 cells: fewer than min_cells.
         cells.retain(|c| c.run != 2 || c.precursor < 10);
         let params = NormParams {
             min_runs: 2,
@@ -459,17 +379,13 @@ mod tests {
         assert!(!norm.is_normalized(2));
         assert_eq!(norm.normalize(2, 0, 10.0, 1e6), None);
         assert_eq!(norm.precursors, 100);
-        // With min_runs 3, run 2 (10 cells) leaves the active runs and
-        // min_runs falls to the two left, so runs 0 and 1 are still normalised.
         let norm = fit(&cells, 3, &NormParams::default());
         assert!(norm.is_normalized(0) && norm.is_normalized(1));
         assert!(!norm.is_normalized(2));
         assert_eq!(norm.precursors, 100);
-        // A blank third run (no cells at all) does the same.
         let two: Vec<NormCell> = cells.iter().filter(|c| c.run != 2).copied().collect();
         let norm = fit(&two, 3, &NormParams::default());
         assert!(norm.is_normalized(0) && norm.is_normalized(1) && !norm.is_normalized(2));
-        // A single run is never normalised.
         let one: Vec<NormCell> = cells.iter().filter(|c| c.run == 0).copied().collect();
         let norm = fit(&one, 1, &NormParams::default());
         assert!(!norm.is_normalized(0));

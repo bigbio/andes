@@ -1,57 +1,3 @@
-//! Match-between-runs outputs.
-//!
-//! `<base>.mbr.parquet`: long format, one row per (precursor, run) target that
-//! was identified in the run or transferred into it, every evidence type
-//! included:
-//!
-//! | column | content |
-//! |---|---|
-//! | `precursor_key` | `<peptidoform>/<charge>` of the precursor, a positional-isomer class, in the site form of its best PSM |
-//! | `run` | run stem |
-//! | `evidence_type` | `identified`, `identified_below_threshold` (identified, quality q-value above the identified threshold or missing), `transfer_ms2` (transfer q-value at or below the threshold, and an MS2 scan of the run supports the transfer), `transfer_ms1` (transfer q-value at or below the threshold, without that MS2 support), `shared_feature` (transfer q-value at or below the threshold, but the shipped classifier takes the row's MS1 feature for another compound's: a same-run claimant, MS2 evidence and the claim geometry; the quantity is kept, as for `below_threshold`) or `below_threshold` |
-//! | `quantity`, `quantity_se` | fitted MS1 quantity and its standard error: the area of the precursor's whole isotope pattern. The fit measures the first four isotopes, and the result is divided by the share of the pattern they hold (from the elemental formula; 0.995 at 1 kDa, 0.949 at 2 kDa, 0.871 at 3 kDa) |
-//! | `quantity_normalized` | `quantity` with the run's normalisation offset at the row's apex RT removed (a level per run and an RT-local term fitted across runs); null when the run is not normalised. `quantity` stays the measurement without the offset |
-//! | `transfer_q` | internal transfer quant-quality q-value (not an identification FDR); null for identified rows |
-//! | `quant_q` | the largest internal error estimate of the row (not an identification FDR): the identified-row quality q-value for identified rows; `transfer_q` for a transfer below the threshold; the larger of `transfer_q` and `measurement_q` for an accepted transfer. A cut at `t` keeps a row only when every estimate made for it is at or below `t`; `t` is not the error rate of the kept rows |
-//! | `apex_rt_s` | fitted apex, seconds |
-//! | `library_q` | internal library entry gate (not an identification FDR) |
-//! | `claimed_by` | transfer rows only: `precursor_key` of the best other target of the run on the same MS1 feature (same charge, neutral masses and apexes within the run's learned claim windows; the identified one first, then the nearest apex); null without a claimant and for identified rows. A statement about the run's probes: the row and its quantity are not changed by it (the shared-feature classifier may change the evidence type) |
-//! | `claim_dt_s` | apex of the claimant minus the row's apex, seconds |
-//! | `claim_identified`, `claim_co_apex` | the claimant is identified in the run; the apexes are closer than the sum of the two fitted widths (the two probes measure one feature, whose quantity is shared) |
-//! | `claim_n_co_apex`, `claim_n_identified_co_apex` | co-apex claimants of the row, and the identified ones among them; 0 for a transfer without any, null for identified rows |
-//! | `measurement_q` | accepted transfers only: the running mean, over the run's accepted transfers in ascending probability of a wrong measurement, of that probability (a model trained on the pseudo-transfers, where a measurement is wrong at the wrong peak or with a quantity off by more than a factor of 2); null for other rows |
-//!
-//! `claimed_by` is UTF-8 too; the two flags are boolean and the two counts
-//! uint32. The other columns are float64; missing or non-finite values are null (`library_q` is never null). A
-//! `below_threshold` or `identified_below_threshold` row keeps its quantity
-//! so a downstream tool can treat it as censored rather than missing.
-//!
-//! `<base>.mbr_validation.parquet`: one row with the pseudo-transfer
-//! validation (acceptance rate, wrong-peak rate, wrong-measurement rate) and the accepted
-//! transfer counts of the pooled and per-family decoy estimates, always at
-//! q <= 0.01 (columns ending `_q01`) and at the run's transfer q-value
-//! threshold (columns ending `_at_threshold`, equal to the `_q01` ones when the
-//! threshold is 0.01), then the identified quality threshold (null when none)
-//! and the identified row counts: all, with a quality q-value, at
-//! `quant_q <= 0.01`, and reported as `identified_below_threshold`; then the
-//! MS2 evidence of the transfer rows: per hypothesis (target, mass-shift
-//! decoy, RT-shift decoy) the rows with MS2 evidence and how many of them an
-//! MS2 scan supports, the pseudo-transfers likewise, and the accepted
-//! transfers reported as `transfer_ms2`. The last columns are the
-//! pseudo-transfers with a wrong measurement (at the wrong peak, or the
-//! fitted quantity off by more than a factor of 2 against the identified
-//! fit of the same cell; a pair without a positive quantity on both sides is
-//! judged on the peak alone) and their rate, over all pairs and over the
-//! accepted pairs at both thresholds.
-//!
-//! Counts are uint64, thresholds and rates float64 (null when undefined).
-//! It is a separate file because its one row of run-level counts shares no
-//! column with the per-(precursor, run) rows.
-//!
-//! Both files carry their schema version in the key-value metadata
-//! (`andes.mbr.schema`, `andes.mbr_validation.schema`; a reader rejects
-//! another major) and are written to `<path>.partial` and renamed into place.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -79,24 +25,17 @@ const VALIDATION_TABLE: TableVersion = TableVersion {
     what: "MBR validation table",
 };
 
-/// Why a quantity is reported for a (precursor, run).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceType {
     Identified,
-    /// Identified, with a quality q-value above the identified threshold (or
-    /// none).
     IdentifiedBelowThreshold,
-    /// An accepted transfer that an MS2 scan of the run supports.
     TransferMs2,
     TransferMs1,
-    /// An accepted transfer whose MS1 feature the shared-feature classifier
-    /// ([`quant::shared`]) takes for another compound's.
     SharedFeature,
     BelowThreshold,
 }
 
 impl EvidenceType {
-    /// A transfer row, accepted or not.
     pub fn is_transfer(self) -> bool {
         matches!(
             self,
@@ -119,7 +58,6 @@ impl EvidenceType {
     }
 }
 
-/// One row of `<base>.mbr.parquet`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrRow<'a> {
     pub precursor_key: &'a str,
@@ -132,20 +70,13 @@ pub struct MbrRow<'a> {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
-    /// The same-run claims on a transfer row; `None` for other rows.
     pub claim: Option<MbrClaim<'a>>,
-    /// The wrong-measurement q-value of an accepted transfer; `None` for
-    /// other rows.
     pub measurement_q: Option<f64>,
-    /// The posterior error probability of a transfer row (its local false
-    /// rate at its score); `None` for other rows.
     pub transfer_pep: Option<f64>,
 }
 
-/// The same-run claims on one transfer row of `<base>.mbr.parquet`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrClaim<'a> {
-    /// Key of the best claimant, when there is one.
     pub claimed_by: Option<&'a str>,
     pub dt_s: Option<f64>,
     pub identified: bool,
@@ -175,91 +106,46 @@ pub const MBR_COLUMNS: [&str; 18] = [
     "transfer_pep",
 ];
 
-/// The default transfer q-value threshold, at which the validation is
-/// always reported.
 pub const VALIDATION_Q: f64 = 0.01;
 
-/// Accepted counts at one transfer q-value threshold.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Accepted {
-    /// Pseudo-transfers at or below the threshold.
     pub pseudo: usize,
-    /// Accepted pseudo-transfers among `MbrValidation::wrong_peak_pairs`.
     pub pairs: usize,
-    /// Of those, at the wrong peak.
     pub wrong_peak: usize,
-    /// Of those, at the wrong peak or with the quantity off by more than a
-    /// factor of 2 (`MbrValidation::wrong_measurement`).
     pub wrong_measurement: usize,
-    /// Transfer targets at or below the threshold, both decoy families.
     pub pooled: usize,
-    /// Mass-shift decoys only.
     pub mass_only: usize,
-    /// RT-shift decoys only.
     pub rt_only: usize,
-    /// Transfer targets at or below the threshold by the wrong-peak decoy
-    /// families alone (without the identity decoys).
     pub wrong_peak_only: usize,
-    /// Decoy transfer rows at or below the threshold: mass-shift, RT-shift,
-    /// identity decoys.
     pub decoys: [usize; 3],
 }
 
-/// The pseudo-transfer validation and transfer counts of one finalize.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MbrValidation {
-    /// The run's transfer q-value threshold (`at_threshold`).
     pub q_threshold: f64,
-    /// Pseudo-transfer rows (identified pairs measured as transfers).
     pub pseudo_transfers: usize,
-    /// Pseudo-transfers with a q-value.
     pub pseudo_scored: usize,
-    /// Pseudo-transfers whose identified fit exists, with an apex in both
-    /// fits and an identified width.
     pub wrong_peak_pairs: usize,
-    /// Of those, apex further than the identified width from the identified apex.
     pub wrong_peak: usize,
-    /// Of those, at the wrong peak or with the fitted quantity off by more
-    /// than a factor of 2 against the identified fit's (the peak alone where
-    /// either fit has no positive quantity).
     pub wrong_measurement: usize,
-    /// Transfer targets.
     pub transfers: usize,
-    /// Transfer targets with a q-value.
     pub transfers_scored: usize,
-    /// Accepted at [`VALIDATION_Q`].
     pub at_q01: Accepted,
-    /// Accepted at `q_threshold`.
     pub at_threshold: Accepted,
-    /// The identified quality q-value threshold, when one is applied.
     pub quant_feature_threshold: Option<f64>,
-    /// Identified target rows.
     pub identified: usize,
-    /// Identified target rows with a quality q-value.
     pub identified_scored: usize,
-    /// Identified target rows with a quality q-value at or below
-    /// [`VALIDATION_Q`].
     pub identified_q01: usize,
-    /// Identified target rows reported as `identified_below_threshold`.
     pub identified_below_threshold: usize,
-    /// Transfer rows with MS2 evidence, per hypothesis: target, mass-shift
-    /// decoy, RT-shift decoy.
     pub ms2_rows: [usize; 3],
-    /// Of those, the rows an MS2 scan supports.
     pub ms2_supported: [usize; 3],
-    /// Pseudo-transfers with MS2 evidence.
     pub ms2_pseudo_rows: usize,
-    /// Of those, the ones an MS2 scan supports.
     pub ms2_pseudo_supported: usize,
-    /// Accepted transfers reported as `transfer_ms2`.
     pub transfer_ms2: usize,
-    /// Target and identity-decoy library entries.
     pub target_entries: usize,
     pub identity_entries: usize,
-    /// Decoy transfer rows with a q-value: mass-shift, RT-shift, identity
-    /// decoys.
     pub decoy_transfers: [usize; 3],
-    /// Accepted transfers reported as `shared_feature`.
     pub shared_feature: usize,
 }
 
@@ -270,7 +156,6 @@ fn add_counts<const N: usize>(a: &mut [usize; N], b: &[usize; N]) {
 }
 
 impl Accepted {
-    /// Adds the counts of `o` (of disjoint rows).
     pub fn add(&mut self, o: &Accepted) {
         let Accepted {
             pseudo,
@@ -296,8 +181,6 @@ impl Accepted {
 }
 
 impl MbrValidation {
-    /// Adds the row counts of `o` (of disjoint rows); the thresholds and the
-    /// library entry counts stay.
     pub fn add_counts(&mut self, o: &MbrValidation) {
         let MbrValidation {
             q_threshold: _,
@@ -348,8 +231,6 @@ impl MbrValidation {
     }
 }
 
-/// Columns of the decoy acceptance, each followed by `_q01` and by
-/// `_at_threshold`, after the MS2 columns.
 const DECOY_ACCEPTED_COLUMNS: [&str; 4] = [
     "accepted_wrong_peak_only",
     "accepted_mass_decoys",
@@ -357,15 +238,11 @@ const DECOY_ACCEPTED_COLUMNS: [&str; 4] = [
     "accepted_identity_decoys",
 ];
 
-/// Columns of the accepted wrong measurements, each followed by `_q01` and
-/// by `_at_threshold`, at the end of the table.
 const WRONG_MEASUREMENT_COLUMNS: [&str; 2] = [
     "accepted_wrong_measurement",
     "accepted_wrong_measurement_rate",
 ];
 
-/// Columns of the accepted counts, each followed by `_q01` and by
-/// `_at_threshold`.
 const ACCEPTED_COLUMNS: [&str; 8] = [
     "pseudo_accepted",
     "pseudo_acceptance",
@@ -377,7 +254,6 @@ const ACCEPTED_COLUMNS: [&str; 8] = [
     "accepted_rt_only",
 ];
 
-/// The columns of `<base>.mbr_validation.parquet`, in order.
 pub fn validation_columns() -> Vec<String> {
     let mut c: Vec<String> = [
         "q_threshold",
@@ -450,19 +326,13 @@ fn ratio(num: usize, den: usize) -> Option<f64> {
     (den > 0).then(|| num as f64 / den as f64)
 }
 
-/// One cell of the validation table.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ValidationCell {
-    /// A count (uint64).
     Count(u64),
-    /// A threshold or rate (float64, null when undefined).
     Value(Option<f64>),
 }
 
 impl MbrValidation {
-    /// Pseudo-transfers accepted in `a` over all pseudo-transfers. Optimistic
-    /// as a transfer sensitivity: the alignment map of a pseudo-transfer's
-    /// run was fitted with that pair as an anchor.
     pub fn pseudo_acceptance(&self, a: &Accepted) -> Option<f64> {
         ratio(a.pseudo, self.pseudo_transfers)
     }
@@ -475,7 +345,6 @@ impl MbrValidation {
         ratio(self.wrong_measurement, self.wrong_peak_pairs)
     }
 
-    /// The validation row, one cell per [`validation_columns`] entry.
     pub fn cells(&self) -> Vec<ValidationCell> {
         use ValidationCell::{Count, Value};
         let n = |v: usize| Count(v as u64);
@@ -580,7 +449,6 @@ fn mbr_schema() -> Schema {
     ])
 }
 
-/// The columns of `<base>.mbr.parquet` being filled row by row.
 struct MbrColumnsBuilder {
     key: StringBuilder,
     run: StringBuilder,
@@ -650,7 +518,6 @@ impl MbrColumnsBuilder {
         self.rows += 1;
     }
 
-    /// The batch of the rows pushed since the last call.
     fn batch(&mut self, schema: &Arc<Schema>) -> Result<RecordBatch, String> {
         self.rows = 0;
         let mut cols: Vec<ArrayRef> = vec![
@@ -684,8 +551,6 @@ fn mbr_batch(schema: &Arc<Schema>, rows: &[MbrRow<'_>]) -> Result<RecordBatch, S
     b.batch(schema)
 }
 
-/// `<base>.mbr.parquet` written row by row, in batches of the same size as
-/// [`write_mbr_parquet`]'s (the same rows give the same file).
 pub struct MbrParquetWriter {
     schema: Arc<Schema>,
     columns: MbrColumnsBuilder,
@@ -694,8 +559,6 @@ pub struct MbrParquetWriter {
 }
 
 impl MbrParquetWriter {
-    /// Creates `<path>.partial`; [`MbrParquetWriter::finish`] renames it into
-    /// place.
     pub fn create(path: &Path) -> Result<Self, String> {
         let schema = Arc::new(mbr_schema());
         let table = TableWriter::create(path, &MBR_TABLE, MBR_TABLE.version, schema.clone(), &[])?;
@@ -731,7 +594,6 @@ impl MbrParquetWriter {
     }
 }
 
-/// Writes `<base>.mbr.parquet` rows in the given order.
 pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String> {
     let schema = Arc::new(mbr_schema());
     let batches = rows.chunks(BATCH_ROWS).map(|c| mbr_batch(&schema, c));
@@ -745,12 +607,10 @@ pub fn write_mbr_parquet(path: &Path, rows: &[MbrRow<'_>]) -> Result<(), String>
     )
 }
 
-/// One row of `<base>.mbr.parquet` read back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MbrRecord {
     pub precursor_key: String,
     pub run: String,
-    /// One of the [`EvidenceType::as_str`] names.
     pub evidence_type: String,
     pub quantity: Option<f64>,
     pub quantity_se: Option<f64>,
@@ -759,18 +619,12 @@ pub struct MbrRecord {
     pub quant_q: Option<f64>,
     pub apex_rt_s: Option<f64>,
     pub library_q: f64,
-    /// `claimed_by` of a transfer row; `None` without a claimant, for other
-    /// rows and in a table written before schema 1.1.
     pub claimed_by: Option<String>,
     pub claim_co_apex: Option<bool>,
     pub claim_n_co_apex: Option<u32>,
-    /// `measurement_q` of an accepted transfer; `None` for other rows and in
-    /// a table written before schema 1.3.
     pub measurement_q: Option<f64>,
 }
 
-/// Reads `<base>.mbr.parquet`, in file order. Rejects another major schema
-/// version; every error names the file.
 pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
     let t = read_table(path, &MBR_TABLE)?;
     let mut out = Vec::new();
@@ -789,7 +643,6 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
         .map(float);
         let (q, se, norm, tq, qq, rt) = (q?, se?, norm?, tq?, qq?, rt?);
         let lib = float("library_q")?;
-        // Tables written before schema 1.1 have no claim columns.
         let claimed = b
             .column_by_name("claimed_by")
             .map(|_| text("claimed_by"))
@@ -802,7 +655,6 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
             .column_by_name("claim_n_co_apex")
             .map(|_| column::<UInt32Array>(b, "claim_n_co_apex", path))
             .transpose()?;
-        // Tables written before schema 1.3 have no measurement q-value.
         let mq = b
             .column_by_name("measurement_q")
             .map(|_| float("measurement_q"))
@@ -831,7 +683,6 @@ pub fn read_mbr_parquet(path: &Path) -> Result<Vec<MbrRecord>, String> {
     Ok(out)
 }
 
-/// Writes the one-row `<base>.mbr_validation.parquet`.
 pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String> {
     let names = validation_columns();
     let cells = v.cells();
@@ -862,9 +713,6 @@ pub fn write_mbr_validation(path: &Path, v: &MbrValidation) -> Result<(), String
     )
 }
 
-/// Reads `<base>.mbr_validation.parquet`: every column with its value, in
-/// file order. Rejects another major schema version; every error names the
-/// file.
 pub fn read_mbr_validation(path: &Path) -> Result<Vec<(String, ValidationCell)>, String> {
     let t = read_table(path, &VALIDATION_TABLE)?;
     let b = match t.batches.as_slice() {
@@ -902,7 +750,6 @@ mod tests {
     fn row_by_row_writer_gives_the_same_file() {
         let dir = tempfile::tempdir().unwrap();
         let base = rows();
-        // More than one batch, with a partial last one.
         let many: Vec<MbrRow<'static>> = (0..BATCH_ROWS + 1234)
             .map(|i| MbrRow {
                 quantity: Some(i as f64),
@@ -925,7 +772,6 @@ mod tests {
             );
             assert!(!dir.path().join("b.parquet.partial").exists());
         }
-        // Dropped unfinished, no file is left.
         let c = dir.path().join("c.parquet");
         drop(MbrParquetWriter::create(&c).unwrap());
         assert!(!c.exists() && !dir.path().join("c.parquet.partial").exists());
@@ -1028,7 +874,6 @@ mod tests {
         assert_eq!(back, want);
         assert_eq!(back[2].measurement_q, Some(0.006));
         assert_eq!(back[1].quantity, None);
-        // The column names and order are the documented ones.
         let t = read_table(&p, &MBR_TABLE).unwrap();
         let names: Vec<String> = t.batches[0]
             .schema()
@@ -1038,7 +883,6 @@ mod tests {
             .collect();
         assert_eq!(names, MBR_COLUMNS);
         assert_eq!(t.meta.get(MBR_TABLE.key).map(String::as_str), Some("1.3"));
-        // An empty table is still a valid file.
         write_mbr_parquet(&p, &[]).unwrap();
         assert!(read_mbr_parquet(&p).unwrap().is_empty());
     }

@@ -1,15 +1,3 @@
-//! Acceptance gate for incremental model updates.
-//!
-//! [`evaluate_candidate`] runs a TDC FDR search with both the *current* and the
-//! *candidate* model and returns a [`YieldDelta`] that the caller can use to
-//! decide whether to commit the update.
-//!
-//! # Reuse of search/FDR code
-//!
-//! The inner search-and-count logic lives in [`count_target_psms`]: the search
-//! and TDC steps of `bootstrap_labels` ([`crate::labeled`]), returning only the
-//! count of accepted TARGET PSMs instead of the full `LabeledMatch` list.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -23,54 +11,20 @@ use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
 use crate::labeled::BOOTSTRAP_DECOY_PREFIX;
 use crate::TrainError;
 
-/// The fragment-mass tolerance used when running the acceptance gate search.
-/// Matches the constant in [`crate::labeled`].
 const FRAGMENT_TOL_DA: f64 = 0.5;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Number of TARGET PSMs at the requested FDR for the current model and the
-/// candidate model.
-///
-/// A candidate is accepted when `candidate_count >= current_count`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YieldDelta {
-    /// Target PSMs at `fdr` for the current (stored) model.
     pub current_count: usize,
-    /// Target PSMs at `fdr` for the candidate model.
     pub candidate_count: usize,
 }
 
 impl YieldDelta {
-    /// Returns `true` iff the candidate model is at least as good as the
-    /// current model (i.e. `candidate_count >= current_count`).
     pub fn is_accepted(&self) -> bool {
         self.candidate_count >= self.current_count
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Evaluate a candidate model against a validation dataset using TDC FDR.
-///
-/// Runs two searches (one with `current`, one with `candidate`) over
-/// `spectra` against `database`, applies the same TDC FDR used in
-/// [`crate::labeled::bootstrap_labels`], and returns the target-PSM count at
-/// `fdr` for each scorer.
-///
-/// # Arguments
-///
-/// * `spectra`       — validation spectra (already loaded).
-/// * `database`      — path to the FASTA target database.
-/// * `current`       — the currently stored scoring model.
-/// * `candidate`     — the proposed replacement model.
-/// * `search_params` — search parameters (enzyme, mods, tolerances, …).
-/// * `fdr`           — q-value threshold for counting accepted PSMs.
-/// * `cache_dir`     — directory of the candidate-index cache (created if missing).
 pub fn evaluate_candidate(
     spectra: &[Spectrum],
     database: &Path,
@@ -80,7 +34,6 @@ pub fn evaluate_candidate(
     fdr: f64,
     cache_dir: &Path,
 ) -> Result<YieldDelta, TrainError> {
-    // Build the SearchIndex once (shared between both searches).
     let file = File::open(database)?;
     let target_db = FastaReader::load_all(BufReader::new(file))
         .map_err(|e| TrainError::Other(format!("FASTA parse error: {e}")))?;
@@ -103,15 +56,6 @@ pub fn evaluate_candidate(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Private helper: search + TDC FDR count
-// ---------------------------------------------------------------------------
-
-/// Run a single search and return the number of TARGET PSMs at `fdr`.
-///
-/// Steps 2-7 are those of [`crate::labeled::bootstrap_labels`], including the
-/// search on the out-of-core path with fragment-ion retrieval. Returns `usize`
-/// instead of `Vec<LabeledMatch>`.
 pub(crate) fn count_target_psms(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -120,9 +64,6 @@ pub(crate) fn count_target_psms(
     fdr: f64,
     cache_dir: &Path,
 ) -> Result<usize, TrainError> {
-    // Step 2: run the search on the out-of-core path with fragment-ion
-    // retrieval, the path `andes search` takes. Both models of a comparison go
-    // through the same retrieval.
     let (queues, candidates) = match_spectra_out_of_core(
         spectra,
         idx,
@@ -133,7 +74,6 @@ pub(crate) fn count_target_psms(
         cache_dir,
     )?;
 
-    // Step 3: collect best PSM per spectrum.
     struct BestPsm {
         score: f32,
         is_decoy: bool,
@@ -154,11 +94,8 @@ pub(crate) fn count_target_psms(
         }
     }
 
-    // Steps 4-6: target-decoy q-values, the walk `bootstrap_labels` uses, so the gate and
-    // the label path agree.
     let mono_q = crate::labeled::tdc_q_values(&mut best_psms, |p| p.score, |p| p.is_decoy);
 
-    // Step 7: count accepted targets.
     let count = best_psms
         .iter()
         .zip(mono_q.iter())

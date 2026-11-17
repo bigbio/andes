@@ -1,22 +1,12 @@
-//! `andes inference`: protein groups over the rescored PSMs of one or more
-//! runs, written as the QPX protein-group view.
-//!
-//! The database is loaded with the search's options, so protein families,
-//! knockoff entries and decoy pairs are the ones the PSMs were searched
-//! against. The class and knockoff q-values are applied as in a search, then
-//! [`output::infer_protein_groups`] runs once over every run's PSMs: one
-//! parsimony and one picked competition, so the q-values are dataset-level.
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use search::SearchIndex;
 
-use crate::cli::{InferenceArgs, ProteinArgs};
+use crate::cli::{DatabaseArgs, InferenceArgs, ProteinArgs};
 use crate::model_select::parse_enzymes;
 use crate::search::load_claim_database;
 
-/// A run name from a Percolator result file name.
 fn run_name(path: &Path) -> String {
     let name = path
         .file_name()
@@ -37,18 +27,6 @@ fn run_name(path: &Path) -> String {
     name
 }
 
-/// Every file's rows, each under a key of its own: the row's number among all
-/// rows read, in decimal.
-///
-/// Nothing downstream reads a key's text: the FDR stages and the inference
-/// use keys only to find and to tell rows apart, and none of their results
-/// depends on the keys (each sorts by rank and breaks ties as the map
-/// iterates, which is random either way). A dataset-level PSM file has tens
-/// of millions of rows, so keying by the `PSMId` itself (and keeping it again
-/// in `psm_id`, and the whole file as one string while parsing) would cost
-/// tens of gigabytes. Files are read one line at a time; `psm_id` is left
-/// empty. A `PSMId` repeated within a file is still an error, as in
-/// [`output::parse_psm_results`], found by a 128-bit hash of each id.
 fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>, String> {
     let mut all = HashMap::new();
     for p in paths {
@@ -81,8 +59,6 @@ fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>,
     Ok(all)
 }
 
-/// A 128-bit hash of a PSM id: two SipHash runs with different salts, so two
-/// distinct ids of one file collide with odds near 2^-128 per pair.
 fn id_hash(id: &str) -> u128 {
     use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
     let half = |salt: u8| {
@@ -94,20 +70,11 @@ fn id_hash(id: &str) -> u128 {
     (u128::from(half(0)) << 64) | u128::from(half(1))
 }
 
-/// Masses of the `sites=annotated` modifications in the search's `--mods`
-/// file; none without a file, as the built-in modifications have none.
-/// The `sites=annotated` masses and the fixed terminal mods of a mods file.
 type SiteMods = (Vec<f64>, Vec<(model::modification::ModLocation, f64)>);
 
-fn annotated_site_masses(mods: Option<&Path>) -> Result<SiteMods, Box<dyn std::error::Error>> {
-    let Some(path) = mods else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let aa = model::AminoAcidSetBuilder::new_standard()
-        .add_mods_from_file(path)
-        .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-        .build()
-        .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
+fn annotated_site_masses(db: &DatabaseArgs) -> Result<SiteMods, Box<dyn std::error::Error>> {
+    let aa = crate::model_select::search_aa_set(db, None)
+        .map_err(|e| format!("building the amino-acid set: {e}"))?;
     Ok((
         aa.distinct_mods()
             .iter()
@@ -117,8 +84,6 @@ fn annotated_site_masses(mods: Option<&Path>) -> Result<SiteMods, Box<dyn std::e
     ))
 }
 
-/// Protein groups over the rescored PSMs in `psms` and `decoy_psms` (as
-/// `andes inference`), from `database` read with the search's options.
 pub(crate) fn infer_from_files(
     database: &Path,
     a: &ProteinArgs,
@@ -133,42 +98,40 @@ pub(crate) fn infer_from_files(
         )
         .into());
     }
-    let (enzyme, _) = parse_enzymes(&a.enzyme)?;
-    let (restricted, fixed_terminal) = annotated_site_masses(a.mods.as_deref())?;
+    let (enzyme, _) = parse_enzymes(&a.db.enzyme)?;
+    let (restricted, fixed_terminal) = annotated_site_masses(&a.db)?;
     let opts = input::UniProtOptions {
-        variants: a.uniprot_variants,
-        isoforms: a.uniprot_isoforms,
-        chains: a.uniprot_chains,
-        evidence: a.uniprot_evidence,
+        variants: a.db.uniprot_variants,
+        isoforms: a.db.uniprot_isoforms,
+        chains: a.db.uniprot_chains,
+        evidence: a.db.uniprot_evidence,
         knockoffs: Some(input::KnockoffOptions {
-            per_variant: a.knockoffs,
+            per_variant: a.db.knockoffs,
             enzyme,
         }),
     };
-    let db = load_claim_database(database, &a.annotations, &opts)?
+    let db = load_claim_database(database, &a.db.annotations, &opts)?
         .loaded
         .db;
-    let mut idx = SearchIndex::from_target_db(&db, &a.decoy_prefix);
-    idx.decoy_suffix = a.decoy_suffix.clone();
+    let mut idx = SearchIndex::from_target_db(&db, &a.db.decoy_prefix);
+    idx.decoy_suffix = a.db.decoy_suffix.clone();
 
     let mut targets = read_all(psms)?;
     let decoys = read_all(decoy_psms)?;
-    let proteoform_fdr = a.proteoform_fdr.unwrap_or(a.fdr.max(0.05));
+    let proteoform_fdr = a.proteoform_fdr();
     if idx.has_alternative_entries {
-        output::share_isobaric_references(&mut targets, &idx, a.fdr.max(proteoform_fdr));
+        output::share_isobaric_references(&mut targets, &idx, a.psm_fdr.max(proteoform_fdr));
     }
     output::apply_class_fdr(&mut targets, &decoys, &idx);
     let mut knockoffs =
-        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.knockoffs > 0)
+        output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
-    // Placements of a `sites=annotated` modification on a knockoff site exist
-    // only for the site q-values. Only those modifications make such rows.
     if !restricted.is_empty() {
         knockoffs.extend(
             output::site_claims(
                 &mut targets,
                 &idx,
-                a.fdr,
+                a.psm_fdr,
                 proteoform_fdr,
                 &restricted,
                 None,
@@ -177,7 +140,7 @@ pub(crate) fn infer_from_files(
                 .knockoff_rows,
         );
     }
-    let cutoffs = output::Cutoffs::new(&targets, &idx, a.fdr, proteoform_fdr);
+    let cutoffs = output::Cutoffs::new(&targets, &idx, a.psm_fdr, proteoform_fdr);
     Ok(output::infer_protein_groups(
         &targets,
         &decoys,
@@ -277,12 +240,8 @@ mod tests {
         proteins: ProteinArgs,
     }
 
-    /// Peptides and PSMs counted for the group of a protein with one
-    /// annotated phosphosite (S15) and three knockoff sites (S5, S25, S35),
-    /// from three PSMs: phospho on the real site, phospho on a knockoff site,
-    /// and an unmodified peptide. `mods` is the content of the `--mods` file.
-    fn counted_with(mods: Option<&str>) -> (usize, usize) {
-        use clap::Parser;
+    fn counted_with(args: &[&str], config: Option<&str>) -> (usize, usize) {
+        use clap::{CommandFactory, FromArgMatches};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db.peff");
         std::fs::write(
@@ -307,13 +266,15 @@ mod tests {
             "d.txt",
             &["s_4_1\t-1.0\t0.5\t0.9\tK.GGPGSGGAGK.L\tXXX_sp:P1"],
         );
-        let mut argv = vec!["andes".to_string()];
-        if let Some(content) = mods {
-            let path = dir.path().join("mods.txt");
+        let mut argv: Vec<String> = ["andes"].iter().chain(args).map(|s| s.to_string()).collect();
+        if let Some(content) = config {
+            let path = dir.path().join("run.yaml");
             std::fs::write(&path, content).unwrap();
-            argv.extend(["--mods".to_string(), path.display().to_string()]);
+            argv.extend(["--config".to_string(), path.display().to_string()]);
         }
-        let a = ProteinWrap::try_parse_from(argv).unwrap().proteins;
+        let m = ProteinWrap::command().try_get_matches_from(argv).unwrap();
+        let mut a = ProteinWrap::from_arg_matches(&m).unwrap().proteins;
+        crate::config::apply_protein_config(&mut a, &m).unwrap();
         let inf = infer_from_files(&db, &a, &[targets], &[decoys]).unwrap();
         let group = inf
             .groups
@@ -325,17 +286,17 @@ mod tests {
 
     #[test]
     fn annotated_site_mods_on_knockoff_sites_count_for_no_group() {
+        let config = "search:\n  variable_mods:\n    - {name: Phospho, sites: S, restrict_to: annotated}\n";
+        assert_eq!(counted_with(&[], Some(config)), (2, 2));
         assert_eq!(
-            counted_with(Some("79.966331,S,opt,any,Phospho,sites=annotated\n")),
-            (2, 2)
+            counted_with(&["--variable-mods", "Phospho (S)"], Some(config)),
+            (3, 3)
         );
     }
 
     #[test]
     fn knockoff_site_placements_count_without_an_annotated_site_mod() {
-        // The same modification allowed on any S: a placement on a knockoff
-        // site is an ordinary identification.
-        assert_eq!(counted_with(Some("79.966331,S,opt,any,Phospho\n")), (3, 3));
-        assert_eq!(counted_with(None), (3, 3));
+        assert_eq!(counted_with(&["--variable-mods", "Phospho (S)"], None), (3, 3));
+        assert_eq!(counted_with(&[], None), (3, 3));
     }
 }

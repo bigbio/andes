@@ -1,27 +1,15 @@
-//! Modifications and the Mods.txt parser.
-
-/// Where a modification can attach within (or at the ends of) a peptide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModLocation {
-    /// Any internal or terminal position. Subsumes the four terminal
-    /// locations for matching purposes.
     Anywhere,
-    /// Peptide N-terminus (any residue), but not protein N-terminus.
     NTerm,
-    /// Peptide C-terminus (any residue), but not protein C-terminus.
     CTerm,
-    /// Protein N-terminus (only when the residue is the protein's first AA).
     ProtNTerm,
-    /// Protein C-terminus (only when the residue is the protein's last AA).
     ProtCTerm,
 }
 
-/// Which residues a modification is allowed to target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResidueSpec {
-    /// Exactly one residue (e.g. `b'C'` for Carbamidomethyl).
     Specific(u8),
-    /// Any residue (e.g. terminal-only mods like protein-N-term Acetyl).
     Wildcard,
 }
 
@@ -33,43 +21,38 @@ pub struct Modification {
     pub location: ModLocation,
     pub fixed: bool,
     pub accession: Option<String>,
-    /// User-declared neutral-loss masses (Da) for this mod's fragment ions.
-    /// Empty ⇒ no loss ions predicted (default; byte-identical to pre-feature).
     pub neutral_losses: Vec<f64>,
-    /// Loss-class pool id for this mod's neutral-loss ions: 0 = none/intact,
-    /// 1.. = a per-mod-class pool (glyco=1, phospho=2, sulfo=3, generic=255).
-    /// Loss ions of the same class share one trained distribution.
     pub loss_class: u8,
-    /// `Some(delta)` restricts a variable mod to the positions the protein
-    /// database annotates with a modification of mass `delta` (Mods.txt
-    /// `sites=annotated`; the annotations come from a UniProt XML database, see
-    /// [`crate::protein::ProteinAnnotation`]). `None` (the default) places the
-    /// mod wherever its residue and location allow. For a fixed-anywhere mod
-    /// stacked with a restricted terminal mod, `delta` is the restricted mod's
-    /// own mass, not the stacked sum.
     pub annotated_site_mass: Option<f64>,
-    /// The enzyme does not cut at a residue carrying this mod (Mods.txt
-    /// `cleavage=blocked`), so the mod never sits on the residue a peptide was
-    /// cleaved at: its C-terminal residue for an enzyme that cuts after it (its
-    /// N-terminal residue for one that cuts before), unless that residue is the
-    /// protein's own terminus. True of most lysine acylations, GlyGly and di-
-    /// and trimethylation under trypsin; not of labels added after digestion.
     pub blocks_cleavage: bool,
-    /// Singly charged ions this mod gives off when fragmented (Mods.txt
-    /// `diagnostic=`), such as the immonium ion of the modified residue.
-    /// Evidence for which modification a site carries; not used in scoring.
     pub diagnostic_ions: Vec<f64>,
-    /// For a record that stacks several declared modifications on one
-    /// residue (a terminal and a side-chain mod, see
-    /// [`crate::aa_set::AminoAcidSetBuilder::build`]), those modifications in
-    /// stacking order: the record itself has no accession, its parts do.
-    /// Empty for a single modification.
     pub parts: Vec<&'static Modification>,
 }
 
 impl Modification {
-    /// The single modifications this record stands for: its `parts` when it
-    /// is stacked, else itself.
+    pub fn new(
+        name: impl Into<String>,
+        mass_delta: f64,
+        residue: ResidueSpec,
+        location: ModLocation,
+        fixed: bool,
+    ) -> Self {
+        Modification {
+            name: name.into(),
+            mass_delta,
+            residue,
+            location,
+            fixed,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            diagnostic_ions: Vec::new(),
+            parts: Vec::new(),
+        }
+    }
+
     pub fn components(&self) -> Vec<&Modification> {
         if self.parts.is_empty() {
             vec![self]
@@ -80,10 +63,6 @@ impl Modification {
 }
 
 impl Modification {
-    /// Test whether this mod is allowed on `residue` at the given
-    /// `location`. `Anywhere`-targeting mods match any of the four
-    /// non-Anywhere locations; otherwise the mod's `location` must equal
-    /// the queried location exactly.
     pub fn applies_to(&self, residue: u8, location: ModLocation) -> bool {
         let residue_ok = match self.residue {
             ResidueSpec::Specific(r) => r == residue,
@@ -96,9 +75,6 @@ impl Modification {
         residue_ok && location_ok
     }
 
-    /// Whether this mod may sit at a position annotated with `sites`: always
-    /// for an unrestricted mod; for a `sites=annotated` mod only when one of
-    /// `sites` carries a modification of the same mass.
     pub fn allowed_at(&self, sites: &[crate::protein::ModSite], position: u32) -> bool {
         match self.annotated_site_mass {
             None => true,
@@ -107,60 +83,6 @@ impl Modification {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ModParseError {
-    #[error("expected at least 5 comma-separated fields, got {got}")]
-    WrongFieldCount { got: usize },
-    #[error("invalid mass delta {field:?}: {source}")]
-    BadMass {
-        field: String,
-        #[source]
-        source: std::num::ParseFloatError,
-    },
-    #[error("invalid residue spec {field:?} (expected single ASCII upper char or `*`)")]
-    BadResidue { field: String },
-    #[error("invalid location {field:?} (expected `any|N-term|C-term|Prot-N-term|Prot-C-term`)")]
-    BadLocation { field: String },
-    #[error("invalid fixed/variable flag {field:?} (expected `fix|opt`)")]
-    BadFixedFlag { field: String },
-    #[error("unknown mod attribute key {key:?} (expected loss|accession|class|sites)")]
-    UnknownModAttr { key: String },
-    #[error("malformed mod attribute {field:?} (expected key=value)")]
-    BadModAttr { field: String },
-    #[error("invalid neutral-loss value {value:?} (expected positive number < 5000)")]
-    BadNeutralLoss { value: String },
-    #[error("unknown loss class {name:?} (expected glyco|phospho|sulfo|generic)")]
-    UnknownLossClass { name: String },
-    #[error("invalid sites value {value:?} (expected annotated|any)")]
-    BadSites { value: String },
-    #[error("cleavage must be `blocked` or `kept`, got {value:?}")]
-    BadCleavage { value: String },
-    #[error("invalid diagnostic ion {value:?} (expected positive m/z < 5000)")]
-    BadDiagnosticIon { value: String },
-    #[error("sites=annotated needs a variable (`opt`) mod; a fixed mod applies everywhere")]
-    AnnotatedSitesOnFixedMod,
-    #[error("unknown Unimod accession {token:?}")]
-    UnknownUnimodAccession { token: String },
-    #[error("ambiguous modification name {token:?} (matches {accessions:?})")]
-    AmbiguousModName {
-        token: String,
-        accessions: Vec<String>,
-    },
-    #[error("mass field {token:?} is neither a number nor a known Unimod accession/name")]
-    UnresolvedMassField { token: String },
-}
-
-/// Return the stable loss-class id for a recognised class name, or `None`.
-///
-/// Loss ions are pooled within a class so that a shared trained distribution
-/// can be learned across mods of the same biochemical type.
-///
-/// | name      | id  |
-/// |-----------|-----|
-/// | `glyco`   |   1 |
-/// | `phospho` |   2 |
-/// | `sulfo`   |   3 |
-/// | `generic` | 255 |
 pub fn loss_class_id(name: &str) -> Option<u8> {
     match name.trim().to_ascii_lowercase().as_str() {
         "glyco" => Some(1),
@@ -171,282 +93,6 @@ pub fn loss_class_id(name: &str) -> Option<u8> {
     }
 }
 
-impl Modification {
-    /// Parse a single non-empty, non-comment line from a Mods.txt file.
-    /// Empty lines and `# ...` comment lines should be filtered by the
-    /// caller (see `aa_set::AminoAcidSetBuilder::add_mods_from_file`).
-    ///
-    /// # Format
-    ///
-    /// ```text
-    /// <mass>,<residue>,<fix|opt>,<location>,<name>[,<key>=<value>...]
-    /// ```
-    ///
-    /// The 5 positional core fields are:
-    /// 1. `mass`     — floating-point mass delta in Da (may be negative)
-    /// 2. `residue`  — single uppercase ASCII letter or `*` for wildcard
-    /// 3. `fix|opt`  — `fix` for a fixed mod, `opt` for a variable mod (case-insensitive)
-    /// 4. `location` — one of `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive)
-    /// 5. `name`     — human-readable mod name (**must not contain a comma**)
-    ///
-    /// Optional `key=value` attribute fields may follow, separated by commas:
-    /// - `loss=<m1;m2;…>` — semicolon-separated neutral-loss masses in Da (positive, < 5000;
-    ///   the upper bound admits full intact-glycan losses, e.g. A2G2S2 −2204.77).
-    ///   Multiple `loss=` attributes accumulate into a single list.
-    /// - `accession=<CURIE>` — ontology accession, e.g. `UNIMOD:393`.
-    ///   If repeated, the last value wins.
-    /// - `class=<glyco|phospho|sulfo|generic>` — loss-class pool for this mod's neutral-loss
-    ///   ions. Loss ions of the same class share one trained distribution. If `loss=` is
-    ///   present but `class=` is omitted, the class defaults to `generic` (id 255). If
-    ///   neither `loss=` nor `class=` is present, `loss_class` is 0 (no loss ions).
-    /// - `sites=<annotated|any>` — `annotated` restricts a variable mod to the
-    ///   positions a UniProt XML database annotates with a modification of the
-    ///   same mass (see [`Modification::annotated_site_mass`]); `any` (default)
-    ///   applies it to every matching residue.
-    /// - `cleavage=<blocked|kept>` — `blocked`: the enzyme does not cut at a
-    ///   residue carrying this mod (see [`Modification::blocks_cleavage`]);
-    ///   `kept` (default): it does.
-    /// - `diagnostic=<mz1;mz2;…>` — semicolon-separated m/z of singly charged
-    ///   ions the mod gives off (see [`Modification::diagnostic_ions`]).
-    ///
-    /// **Caveat:** the mod name must not contain a comma. A comma after the name
-    /// is parsed as the start of attribute fields; a token there that is not
-    /// `key=value` form is rejected as [`ModParseError::BadModAttr`].
-    pub fn from_mods_txt_line(line: &str) -> Result<Self, ModParseError> {
-        Self::from_mods_txt_line_with(line, crate::unimod::bundled())
-    }
-
-    /// Resolver-injected variant of [`Modification::from_mods_txt_line`].
-    ///
-    /// `resolver` supplies Unimod accession/name lookups so tests can stay
-    /// hermetic (pass a small in-memory [`crate::unimod::UnimodDb`]) and a
-    /// future `--no-unimod` escape hatch can pass an empty db.
-    ///
-    /// Behaviour for field 1:
-    /// - If it parses as `f64`, the *exact current behaviour* is preserved
-    ///   (back-compat: numeric masses never touch the resolver).
-    /// - Otherwise it is resolved as a `UNIMOD:NN` accession, then as a bare
-    ///   name. The resolved mono mass becomes `mass_delta`; `name`/`accession`
-    ///   are auto-filled when the corresponding fields are absent/empty.
-    /// - A non-numeric, unresolvable token is a hard error
-    ///   ([`ModParseError::UnknownUnimodAccession`] /
-    ///   [`ModParseError::AmbiguousModName`] /
-    ///   [`ModParseError::UnresolvedMassField`]) — no silent fallback.
-    pub fn from_mods_txt_line_with(
-        line: &str,
-        resolver: &crate::unimod::UnimodDb,
-    ) -> Result<Self, ModParseError> {
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 5 {
-            return Err(ModParseError::WrongFieldCount { got: parts.len() });
-        }
-        let (mass_s, residues_s, fixity_s, location_s, name_s) = (
-            parts[0].trim(),
-            parts[1].trim(),
-            parts[2].trim(),
-            parts[3].trim(),
-            parts[4].trim(),
-        );
-
-        // Field 1: a numeric delta keeps exact legacy behaviour. A non-numeric
-        // token is resolved against the Unimod loader (accession then name).
-        let mut resolved_name: Option<String> = None;
-        let mut resolved_accession: Option<String> = None;
-        let mass_delta: f64 = match mass_s.parse::<f64>() {
-            Ok(v) => v,
-            Err(_) => {
-                use crate::unimod::UnimodResolveError;
-                match resolver.resolve(mass_s) {
-                    Ok(Some(m)) => {
-                        resolved_name = Some(m.name.clone());
-                        resolved_accession = Some(m.accession.clone());
-                        m.mono_mass
-                    }
-                    Ok(None) => {
-                        return Err(ModParseError::UnresolvedMassField {
-                            token: mass_s.to_string(),
-                        })
-                    }
-                    Err(UnimodResolveError::UnknownUnimodAccession { token }) => {
-                        return Err(ModParseError::UnknownUnimodAccession { token })
-                    }
-                    Err(UnimodResolveError::AmbiguousModName { token, accessions }) => {
-                        return Err(ModParseError::AmbiguousModName { token, accessions })
-                    }
-                }
-            }
-        };
-
-        let residue = match residues_s {
-            "*" => ResidueSpec::Wildcard,
-            s if s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase() => {
-                ResidueSpec::Specific(s.as_bytes()[0])
-            }
-            _ => {
-                return Err(ModParseError::BadResidue {
-                    field: residues_s.to_string(),
-                })
-            }
-        };
-
-        let fixed = match fixity_s.to_ascii_lowercase().as_str() {
-            "fix" => true,
-            "opt" => false,
-            _ => {
-                return Err(ModParseError::BadFixedFlag {
-                    field: fixity_s.to_string(),
-                })
-            }
-        };
-
-        let location = match location_s.to_ascii_lowercase().as_str() {
-            "any" => ModLocation::Anywhere,
-            "n-term" => ModLocation::NTerm,
-            "c-term" => ModLocation::CTerm,
-            "prot-n-term" => ModLocation::ProtNTerm,
-            "prot-c-term" => ModLocation::ProtCTerm,
-            _ => {
-                return Err(ModParseError::BadLocation {
-                    field: location_s.to_string(),
-                })
-            }
-        };
-
-        let mut neutral_losses: Vec<f64> = Vec::new();
-        let mut accession: Option<String> = None;
-        let mut loss_class: u8 = 0;
-        let mut annotated_sites = false;
-        let mut blocks_cleavage = false;
-        let mut diagnostic_ions: Vec<f64> = Vec::new();
-        for attr in &parts[5..] {
-            let attr = attr.trim();
-            if attr.is_empty() {
-                continue;
-            }
-            let (key, value) = attr
-                .split_once('=')
-                .ok_or_else(|| ModParseError::BadModAttr {
-                    field: attr.to_string(),
-                })?;
-            match key.trim().to_ascii_lowercase().as_str() {
-                "loss" => {
-                    for tok in value.split(';') {
-                        let tok = tok.trim();
-                        if tok.is_empty() {
-                            continue;
-                        }
-                        let v: f64 = tok.parse().map_err(|_| ModParseError::BadNeutralLoss {
-                            value: tok.to_string(),
-                        })?;
-                        if !(v > 0.0 && v < 5000.0) {
-                            return Err(ModParseError::BadNeutralLoss {
-                                value: tok.to_string(),
-                            });
-                        }
-                        neutral_losses.push(v);
-                    }
-                }
-                "accession" => {
-                    // Treat an empty `accession=` as missing (mirrors the empty-name
-                    // handling) so it doesn't block the resolved fallback below.
-                    let a = value.trim();
-                    accession = if a.is_empty() {
-                        None
-                    } else {
-                        Some(a.to_string())
-                    };
-                }
-                "diagnostic" => {
-                    for tok in value.split(';').map(str::trim).filter(|t| !t.is_empty()) {
-                        let v: f64 = tok.parse().map_err(|_| ModParseError::BadDiagnosticIon {
-                            value: tok.to_string(),
-                        })?;
-                        if !(v > 0.0 && v < 5000.0) {
-                            return Err(ModParseError::BadDiagnosticIon {
-                                value: tok.to_string(),
-                            });
-                        }
-                        diagnostic_ions.push(v);
-                    }
-                }
-                "class" => {
-                    loss_class =
-                        loss_class_id(value).ok_or_else(|| ModParseError::UnknownLossClass {
-                            name: value.trim().to_string(),
-                        })?;
-                }
-                "cleavage" => {
-                    blocks_cleavage = match value.trim().to_ascii_lowercase().as_str() {
-                        "blocked" => true,
-                        "kept" => false,
-                        _ => {
-                            return Err(ModParseError::BadCleavage {
-                                value: value.trim().to_string(),
-                            })
-                        }
-                    };
-                }
-                "sites" => {
-                    annotated_sites = match value.trim().to_ascii_lowercase().as_str() {
-                        "annotated" => true,
-                        "any" => false,
-                        _ => {
-                            return Err(ModParseError::BadSites {
-                                value: value.trim().to_string(),
-                            })
-                        }
-                    };
-                }
-                other => {
-                    return Err(ModParseError::UnknownModAttr {
-                        key: other.to_string(),
-                    })
-                }
-            }
-        }
-        // If losses are declared but no explicit class, default to Generic (255).
-        if !neutral_losses.is_empty() && loss_class == 0 {
-            loss_class = 255;
-        }
-
-        // Auto-fill name/accession from the Unimod resolution when the
-        // positional/attribute fields didn't supply them. An explicit field
-        // always wins over the resolved value.
-        let name = if name_s.is_empty() {
-            resolved_name.unwrap_or_default()
-        } else {
-            name_s.to_string()
-        };
-        if accession.is_none() {
-            accession = resolved_accession;
-        }
-        if annotated_sites && fixed {
-            return Err(ModParseError::AnnotatedSitesOnFixedMod);
-        }
-
-        Ok(Modification {
-            name,
-            mass_delta,
-            residue,
-            location,
-            fixed,
-            accession,
-            neutral_losses,
-            loss_class,
-            annotated_site_mass: annotated_sites.then_some(mass_delta),
-            blocks_cleavage,
-            parts: Vec::new(),
-            diagnostic_ions,
-        })
-    }
-}
-
-/// Hand a `Modification` out as a `'static` reference by leaking it. The
-/// per-search modification table is a few dozen small records built once, so
-/// the leak is negligible; in exchange every `AminoAcid` clone during candidate
-/// enumeration copies a pointer instead of bumping a shared atomic refcount
-/// (which all worker threads contended on: 16 threads burned 4.7x the CPU of
-/// one thread for identical output on a phospho search).
 pub fn leak_mod(m: Modification) -> &'static Modification {
     Box::leak(Box::new(m))
 }
@@ -482,7 +128,7 @@ mod tests {
     fn applies_to_matching_residue_anywhere() {
         let m = carbamidomethyl_c();
         assert!(m.applies_to(b'C', ModLocation::Anywhere));
-        assert!(m.applies_to(b'C', ModLocation::NTerm)); // Anywhere subsumes
+        assert!(m.applies_to(b'C', ModLocation::NTerm));
         assert!(m.applies_to(b'C', ModLocation::CTerm));
     }
 
@@ -508,10 +154,8 @@ mod tests {
             parts: Vec::new(),
             diagnostic_ions: Vec::new(),
         };
-        // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
         assert!(m.applies_to(b'M', ModLocation::ProtNTerm));
-        // ...but not at other locations.
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
         assert!(!m.applies_to(b'A', ModLocation::NTerm));
     }
@@ -558,361 +202,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_carbamidomethyl_c() {
-        let line = "57.021464,C,fix,any,Carbamidomethyl";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert_eq!(m.name, "Carbamidomethyl");
-        assert_eq!(m.mass_delta, 57.021464);
-        assert_eq!(m.residue, ResidueSpec::Specific(b'C'));
-        assert_eq!(m.location, ModLocation::Anywhere);
-        assert!(m.fixed);
-    }
-
-    #[test]
-    fn parse_oxidation_m_variable() {
-        let line = "15.994915,M,opt,any,Oxidation";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert!(!m.fixed);
-        assert_eq!(m.mass_delta, 15.994915);
-    }
-
-    #[test]
-    fn parse_wildcard_nterm() {
-        let line = "229.162932,*,fix,N-term,TMT6plex";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert_eq!(m.residue, ResidueSpec::Wildcard);
-        assert_eq!(m.location, ModLocation::NTerm);
-    }
-
-    #[test]
-    fn parse_protein_nterm_acetyl() {
-        let line = "42.010565,*,opt,Prot-N-term,Acetyl";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert_eq!(m.location, ModLocation::ProtNTerm);
-    }
-
-    #[test]
-    fn parse_negative_mass_delta() {
-        let line = "-17.026549,Q,opt,N-term,Pyro-glu";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert_eq!(m.mass_delta, -17.026549);
-    }
-
-    #[test]
-    fn parse_wrong_field_count() {
-        let line = "57.021464,C,fix,any"; // 4 fields
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::WrongFieldCount { got: 4 }));
-    }
-
-    #[test]
-    fn parse_unresolvable_mass_field() {
-        // A non-numeric field 1 is now treated as a mod token (UNIMOD:NN or a
-        // name) and resolved; an unresolvable token like "abc" is reported as
-        // UnresolvedMassField. This contract does not depend on which tokens the
-        // bundled Unimod DB happens to resolve.
-        let line = "abc,C,fix,any,Bad";
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(
-            matches!(err, ModParseError::UnresolvedMassField { .. }),
-            "got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_bad_numeric_mass() {
-        // A token that looks numeric but fails to parse as f64 (e.g. "12.3.4")
-        // is not a numeric delta, so it is handed to the resolver as a token.
-        // Since it resolves to neither an accession nor a name, the contract is
-        // a single, DB-independent UnresolvedMassField — assert exactly that.
-        let line = "12.3.4,C,fix,any,Bad";
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(
-            matches!(err, ModParseError::UnresolvedMassField { .. }),
-            "got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_bad_residue() {
-        let line = "57.0,CC,fix,any,Bad";
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::BadResidue { .. }));
-    }
-
-    #[test]
-    fn parse_bad_location() {
-        let line = "57.0,C,fix,middle,Bad";
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::BadLocation { .. }));
-    }
-
-    #[test]
-    fn parse_bad_fixity() {
-        let line = "57.0,C,maybe,any,Bad";
-        let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::BadFixedFlag { .. }));
-    }
-
-    #[test]
-    fn parse_location_case_insensitive() {
-        let line = "229.162932,*,fix,n-term,TMT";
-        let m = Modification::from_mods_txt_line(line).unwrap();
-        assert_eq!(m.location, ModLocation::NTerm);
-    }
-
-    #[test]
-    fn parses_loss_and_accession_attributes() {
-        let m = Modification::from_mods_txt_line(
-            "340.100562,K,opt,any,Glucosylgalactosyl,loss=162.0528;324.1056,accession=UNIMOD:393",
-        )
-        .unwrap();
-        assert_eq!(m.residue, ResidueSpec::Specific(b'K'));
-        assert!(!m.fixed);
-        assert_eq!(m.neutral_losses, vec![162.0528, 324.1056]);
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:393"));
-    }
-
-    #[test]
-    fn five_field_line_has_no_losses_or_accession() {
-        let m = Modification::from_mods_txt_line("57.02146,C,fix,any,Carbamidomethyl").unwrap();
-        assert!(m.neutral_losses.is_empty());
-        assert_eq!(m.accession, None);
-    }
-
-    #[test]
-    fn rejects_unknown_attr_and_bad_loss() {
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,frobnicate=7"),
-            Err(ModParseError::UnknownModAttr { .. })
-        ));
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=abc"),
-            Err(ModParseError::BadNeutralLoss { .. })
-        ));
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,nokey"),
-            Err(ModParseError::BadModAttr { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_loss_boundary_values() {
-        // 0 and the 5000 upper bound are both excluded (strict); a full
-        // intact-glycan loss (e.g. 2204.77) is now within range.
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=0.0"),
-            Err(ModParseError::BadNeutralLoss { .. })
-        ));
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=5000.0"),
-            Err(ModParseError::BadNeutralLoss { .. })
-        ));
-        assert!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=2204.772446").is_ok());
-    }
-
-    #[test]
-    fn tolerates_whitespace_in_attributes() {
-        let m = Modification::from_mods_txt_line(
-            "1.0,K,opt,any,X, loss = 98.0 ; 18.0 , accession = UNIMOD:21 ",
-        )
-        .unwrap();
-        assert_eq!(m.neutral_losses, vec![98.0, 18.0]);
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:21"));
-    }
-
-    #[test]
-    fn parses_loss_class_attribute() {
-        let m =
-            Modification::from_mods_txt_line("340.1,K,opt,any,Glyco,loss=162.0;324.1,class=glyco")
-                .unwrap();
-        assert_eq!(m.loss_class, 1); // glyco = 1
-    }
-
-    #[test]
-    fn loss_without_class_defaults_generic() {
-        let m = Modification::from_mods_txt_line("98.0,S,opt,any,P,loss=98.0").unwrap();
-        assert_eq!(m.loss_class, 255); // Generic default when losses present but no class
-    }
-
-    #[test]
-    fn no_loss_no_class_is_zero() {
-        let m = Modification::from_mods_txt_line("57.0,C,fix,any,Cam").unwrap();
-        assert_eq!(m.loss_class, 0);
-    }
-
-    #[test]
-    fn rejects_unknown_loss_class() {
-        assert!(matches!(
-            Modification::from_mods_txt_line("1.0,K,opt,any,X,class=bogus"),
-            Err(ModParseError::UnknownLossClass { .. })
-        ));
-    }
-
-    // ---- Unimod-resolution (5.2), hermetic via an in-memory db ----
-
-    fn test_db() -> crate::unimod::UnimodDb {
-        crate::unimod::UnimodDb::parse_obo(
-            r#"
-[Term]
-id: UNIMOD:35
-name: Oxidation
-xref: delta_mono_mass "15.994915"
-xref: spec_1_site "M"
-
-[Term]
-id: UNIMOD:4
-name: Carbamidomethyl
-xref: delta_mono_mass "57.021464"
-xref: spec_1_site "C"
-"#,
-        )
-    }
-
-    #[test]
-    fn numeric_mass_never_consults_resolver() {
-        // An empty resolver must not affect a numeric field-1 line.
-        let empty = crate::unimod::UnimodDb::default();
-        let m =
-            Modification::from_mods_txt_line_with("57.021464,C,fix,any,Carbamidomethyl", &empty)
-                .unwrap();
-        assert_eq!(m.mass_delta, 57.021464);
-        assert_eq!(m.name, "Carbamidomethyl");
-        assert_eq!(m.accession, None);
-    }
-
-    #[test]
-    fn resolves_accession_in_mass_field() {
-        let db = test_db();
-        let m =
-            Modification::from_mods_txt_line_with("UNIMOD:35,M,opt,any,Oxidation", &db).unwrap();
-        assert!((m.mass_delta - 15.994915).abs() < 1e-9);
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:35"));
-        assert_eq!(m.name, "Oxidation");
-    }
-
-    #[test]
-    fn resolves_bare_name_in_mass_field() {
-        let db = test_db();
-        let m = Modification::from_mods_txt_line_with("Carbamidomethyl,C,fix,any,", &db).unwrap();
-        assert!((m.mass_delta - 57.021464).abs() < 1e-9);
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:4"));
-        // Name field empty → auto-filled from the resolved record.
-        assert_eq!(m.name, "Carbamidomethyl");
-    }
-
-    #[test]
-    fn explicit_name_field_wins_over_resolved() {
-        let db = test_db();
-        let m = Modification::from_mods_txt_line_with("UNIMOD:35,M,opt,any,MyOx", &db).unwrap();
-        assert_eq!(m.name, "MyOx");
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:35"));
-    }
-
-    #[test]
-    fn explicit_accession_attr_wins_over_resolved() {
-        let db = test_db();
-        let m = Modification::from_mods_txt_line_with(
-            "Oxidation,M,opt,any,Oxidation,accession=UNIMOD:999",
-            &db,
-        )
-        .unwrap();
-        assert_eq!(m.accession.as_deref(), Some("UNIMOD:999"));
-    }
-
-    #[test]
-    fn unknown_accession_errors() {
-        let db = test_db();
-        assert!(matches!(
-            Modification::from_mods_txt_line_with("UNIMOD:123456,M,opt,any,X", &db),
-            Err(ModParseError::UnknownUnimodAccession { .. })
-        ));
-    }
-
-    #[test]
-    fn unresolvable_name_errors() {
-        let db = test_db();
-        assert!(matches!(
-            Modification::from_mods_txt_line_with("Frobnicate,M,opt,any,X", &db),
-            Err(ModParseError::UnresolvedMassField { .. })
-        ));
-    }
-
-    #[test]
-    fn cleavage_attribute_parses() {
-        let m = Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=blocked")
-            .unwrap();
-        assert!(m.blocks_cleavage);
-        let m =
-            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=kept").unwrap();
-        assert!(!m.blocks_cleavage);
-        let m = Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl").unwrap();
-        assert!(!m.blocks_cleavage);
-        assert!(matches!(
-            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,cleavage=maybe"),
-            Err(ModParseError::BadCleavage { .. })
-        ));
-    }
-
-    #[test]
-    fn diagnostic_ions_parse() {
-        let m = Modification::from_mods_txt_line(
-            "42.04695,K,opt,any,Trimethyl,diagnostic=143.1543,loss=59.0735",
-        )
-        .unwrap();
-        assert_eq!(m.diagnostic_ions, vec![143.1543]);
-        assert_eq!(m.neutral_losses, vec![59.0735]);
-        let m = Modification::from_mods_txt_line(
-            "42.010565,K,opt,any,Acetyl,diagnostic=143.1179;126.0913",
-        )
-        .unwrap();
-        assert_eq!(m.diagnostic_ions, vec![143.1179, 126.0913]);
-        assert!(matches!(
-            Modification::from_mods_txt_line("42.010565,K,opt,any,Acetyl,diagnostic=-1"),
-            Err(ModParseError::BadDiagnosticIon { .. })
-        ));
-    }
-
-    #[test]
-    fn sites_annotated_restricts_to_the_mods_own_mass() {
-        let m = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=annotated")
-            .unwrap();
-        assert_eq!(m.annotated_site_mass, Some(79.966331));
-        let any =
-            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=any").unwrap();
-        assert_eq!(any.annotated_site_mass, None);
-        let default = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho").unwrap();
-        assert_eq!(default.annotated_site_mass, None);
-    }
-
-    #[test]
-    fn sites_annotated_works_with_a_resolved_unimod_mass() {
-        let m = Modification::from_mods_txt_line_with(
-            "Oxidation,M,opt,any,Oxidation,sites=Annotated",
-            &test_db(),
-        )
-        .unwrap();
-        assert_eq!(m.annotated_site_mass, Some(15.994915));
-    }
-
-    #[test]
-    fn sites_rejects_bad_values_and_fixed_mods() {
-        assert!(matches!(
-            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=some"),
-            Err(ModParseError::BadSites { .. })
-        ));
-        assert!(matches!(
-            Modification::from_mods_txt_line("57.021464,C,fix,any,CAM,sites=annotated"),
-            Err(ModParseError::AnnotatedSitesOnFixedMod)
-        ));
-    }
-
-    #[test]
     fn allowed_at_needs_an_annotated_site_of_the_same_mass() {
         use crate::protein::{ModSite, SiteAnchor};
-        let phospho =
-            Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho,sites=annotated")
-                .unwrap();
+        let free = Modification::new(
+            "Phospho",
+            79.966331,
+            ResidueSpec::Specific(b'S'),
+            ModLocation::Anywhere,
+            false,
+        );
+        let phospho = Modification {
+            annotated_site_mass: Some(79.966331),
+            ..free.clone()
+        };
         let sites = [
             ModSite {
                 position: 3,
@@ -921,7 +223,7 @@ xref: spec_1_site "C"
             },
             ModSite {
                 position: 7,
-                mass_delta: 79.956815, // sulfation: 9.5 mDa lighter
+                mass_delta: 79.956815,
                 anchor: SiteAnchor::Residue,
             },
         ];
@@ -932,8 +234,6 @@ xref: spec_1_site "C"
             "a sulfo site is not a phospho site"
         );
         assert!(!phospho.allowed_at(&[], 3), "no annotation, no site");
-        // An unrestricted mod is allowed anywhere.
-        let free = Modification::from_mods_txt_line("79.966331,S,opt,any,Phospho").unwrap();
         assert!(free.allowed_at(&[], 4));
     }
 }

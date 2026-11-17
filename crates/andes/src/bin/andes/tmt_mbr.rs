@@ -1,28 +1,3 @@
-//! Match-between-runs for isobaric (TMT) reporter ions: `andes search --tmt
-//! --mbr`. High-resolution MS2 reporters only.
-//!
-//! A donor is a precursor identified at the donor q-value in at least one
-//! run (the library of `--lfq --mbr`, built by the same code). In a run that
-//! lacks it, the candidates are the MS2 scans that carry no identification
-//! at the donor q-value, whose selected precursor m/z lies within the
-//! learned ppm window of the donor's theoretical m/z, with the donor's
-//! charge, inside the aligned retention-time window. The candidate whose
-//! fragments match the donor peptide's library spectrum best (spectral
-//! angle) is the transfer; a scan claimed by several donors goes to the best
-//! match. The transferred quantity is the candidate's impurity-corrected
-//! reporter vector.
-//!
-//! Window calibration: the m/z window and the retention-time multiplier come
-//! from the run's own identified pairs. Risk: three small logistic models
-//! (see [`quant::tmt_transfer`]) are fitted on the same data without the
-//! experimental design: the identified noise floor (an identified scan
-//! against another identified scan of its precursor), the value risk (a free
-//! sibling scan of an identified precursor against the identified scan, or an
-//! empty-channel level above the identified P99) and the identity risk
-//! (siblings against mass-shifted decoy scans). `quant_q` of a transfer is the
-//! running mean of the predicted excess error over the transfers at least as
-//! reliable.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -47,24 +22,18 @@ use crate::quant_cmd::{
     MS2_SUFFIX, TABLE_SUFFIX,
 };
 
-/// Index of the donor-run loading cosine within the transfer covariates.
 const BATCH_COS_AT: usize = 6;
 
-/// Settings of the transfer.
 pub(crate) struct Params<'a> {
     pub plex: Plex,
     pub correction: Option<&'a CorrectionMatrix>,
-    /// Library entry gate and donor PSM thresholds (as `--lfq --mbr`).
     pub library_fdr: f64,
     pub donor_q: f64,
     pub donor_pep: Option<f64>,
-    /// Transfers with `quant_q` at or below this are accepted.
     pub accept_q: f64,
-    /// RMS log2 profile deviation that defines a wrong value.
     pub wrong_log2: f64,
 }
 
-/// One transferred reporter row.
 #[derive(Debug, Clone)]
 pub(crate) struct TransferRow {
     pub run: String,
@@ -89,7 +58,6 @@ pub(crate) struct TransferRow {
     donor_pep: f64,
 }
 
-/// What a transfer run did.
 #[derive(Debug, Default)]
 pub(crate) struct Summary {
     pub candidates: usize,
@@ -97,7 +65,6 @@ pub(crate) struct Summary {
     pub model_fitted: bool,
 }
 
-/// A training row awaiting the cross-run covariate (donor-run loading cosine).
 struct TrainRow {
     x: Vec<f64>,
     y: f64,
@@ -121,7 +88,6 @@ struct RunOut {
     counts: Counts,
 }
 
-/// An identified PSM of a run joined to its rescoring result.
 struct IdRow {
     key: String,
     peptidoform: String,
@@ -181,7 +147,6 @@ fn corrected_of(p: &Params<'_>, raw: &[f32]) -> Vec<f32> {
     }
 }
 
-/// The scan number of a native id (`... scan=1234`), 0 when it has none.
 fn scan_number(native_id: &str) -> i32 {
     native_id
         .rsplit_once("scan=")
@@ -201,9 +166,6 @@ struct Found {
     ppm: f64,
 }
 
-/// The free scan best matching `spec` among those whose retention time is in
-/// `window`, whose selected m/z is within `ppm` of `mz` and whose charge is
-/// `charge` (or unrecorded), at the entry's FAIMS voltage.
 #[allow(clippy::too_many_arguments)]
 fn best_candidate(
     index: &Ms2RunIndex,
@@ -265,9 +227,7 @@ struct Ctx<'a> {
     scores: &'a ScoreSet,
     p: &'a Params<'a>,
     mods: HashMap<String, f64>,
-    /// Precursor key -> (score, run) of its best identified PSM.
     best_run: HashMap<String, (f64, u16)>,
-    /// Precursor key -> entry position in the library.
     key_entry: HashMap<&'a str, usize>,
     min_mz: f64,
 }
@@ -369,7 +329,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
     let profile = RunProfile::from_identified(&ident_vectors);
     drop(ident_vectors);
 
-    // Window calibration on the identified pairs.
     let ppm_errors: Vec<f64> = ids
         .iter()
         .zip(&id_pos)
@@ -411,13 +370,8 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         cands: Vec::new(),
         counts: Counts::default(),
     };
-    // A pair of scans deviates by the root of the sum of both scans' squared
-    // errors: against another noisy scan the wrong-value definition widens by
-    // the square root of two.
     let tau = ctx.p.wrong_log2 * std::f64::consts::SQRT_2;
 
-    // Floor rows: an identified scan against the nearest other identified
-    // scan of its precursor.
     for (key, positions) in &by_ident {
         if positions.len() < 2 {
             continue;
@@ -460,8 +414,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         }
     }
 
-    // Entries: masked attempts (identified here, spectrum from another run)
-    // train the models; the rest are transfers.
     let mut cands: Vec<TransferRow> = Vec::new();
     let mut half_windows: Vec<f64> = Vec::new();
     for e in &lib.entries {
@@ -552,8 +504,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
                 }
             }
         } else {
-            // Target and decoy attempts of one entry have the same breadth:
-            // together they train the identity model.
             if let Some(f) = &decoy {
                 let (sx, xx) = scan_x(f, &ppm);
                 let mut full = sx.to_vec();
@@ -632,7 +582,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         }
     }
 
-    // One precursor per scan: the best match keeps it.
     let mut winner: HashMap<&str, usize> = HashMap::new();
     let key_of = |c: &TransferRow| (c.info.angle, c.info.n_matched);
     for (i, c) in cands.iter().enumerate() {
@@ -670,9 +619,6 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
     Ok(out)
 }
 
-/// Library, candidates, risk model and `quant_q`. `make_scores` gives the
-/// rescoring result (called twice: the library takes one set, the identified
-/// scans are joined to the other).
 pub(crate) fn run(
     dir: &Path,
     stems: &[String],
@@ -736,7 +682,6 @@ pub(crate) fn run(
         outs.push(process_run(&ctx, r)?);
     }
 
-    // Cross-run covariate and training set.
     let profiles: Vec<RunProfile> = outs.iter().map(|o| o.profile.clone()).collect();
     let batch_cos = |run: u16, donors: &[u16]| -> f64 {
         donors
@@ -791,12 +736,8 @@ pub(crate) fn run(
             let mut parts = Vec::with_capacity(cands.len());
             for c in &cands {
                 let (p_scan, g, f) = risk.parts(&c.scan_features, &c.xfer);
-                // The donor's own identification can be false too.
                 let p_id = p_scan + (1.0 - p_scan) * c.donor_pep.clamp(0.0, 1.0);
                 pw.push(p_id + (1.0 - p_id) * g);
-                // Identified rows carry no identity error beyond their FDR, so
-                // the identity risk is all excess; the value risk is excess
-                // only above the identified noise floor.
                 fl.push(pw[pw.len() - 1] - (p_id + (1.0 - p_id) * (g - f).max(0.0)));
                 parts.push((p_id, g, f));
             }
@@ -937,13 +878,8 @@ mod tests {
             tol,
         )
         .unwrap();
-        // The scan at 102 s is 40 ppm away, 103 s has another charge, 160 s is
-        // outside the window; 100, 101, 104 (charge unrecorded) and 105 are
-        // eligible and the donor-like ones tie on angle, so the one closest in
-        // retention time wins.
         assert_eq!(index.scans()[found.pos].rt, 105.0);
         assert!(found.m.angle > 0.9 && found.rt_z.abs() < 1e-9);
-        // An identified scan is not a candidate.
         let taken = index.scans().iter().position(|s| s.rt == 105.0).unwrap();
         free[taken] = false;
         let next = best_candidate(
@@ -961,7 +897,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(index.scans()[next.pos].rt, 104.0);
-        // A window with nothing in it, and a donor m/z nothing matches.
         assert!(best_candidate(
             &index,
             &spec,
@@ -990,7 +925,6 @@ mod tests {
             tol
         )
         .is_none());
-        // A scan with a lone noise spectrum is still a candidate but a poor one.
         let only_noise = Ms2RunIndex::new(vec![scan(100.0, mz, 2, &noise)]);
         let weak = best_candidate(
             &only_noise,

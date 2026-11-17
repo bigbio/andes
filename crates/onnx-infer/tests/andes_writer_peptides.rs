@@ -1,26 +1,17 @@
-//! `RtPeptide::from_andes` on peptide strings produced by andes's own writer
-//! (`model::Peptide`'s `Display`, the PIN peptide column). The strings and
-//! their expected ProForma are kept in `fixtures/andes_writer_peptides.tsv`,
-//! which `scripts/student/test_rt_parsing.py` reads for the Python parser.
-
 use std::path::PathBuf;
 
-use model::{AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification, Peptide};
+use model::mod_spec::parse_mod_list;
+use model::{AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Peptide};
 use onnx_infer::rt_native::RtPeptide;
 
-fn aa_set(fixed: &[&str], variable: &[&str]) -> AminoAcidSet {
-    let mut b = AminoAcidSetBuilder::new_standard();
-    for line in fixed {
-        b = b.add_fixed_mod(Modification::from_mods_txt_line(line).unwrap());
-    }
-    for line in variable {
-        b = b.add_variable_mod(Modification::from_mods_txt_line(line).unwrap());
-    }
-    b.build().unwrap()
+fn aa_set(fixed: &str, variable: &str) -> AminoAcidSet {
+    AminoAcidSetBuilder::new_standard()
+        .add_mods(parse_mod_list(fixed, true).unwrap())
+        .add_mods(parse_mod_list(variable, false).unwrap())
+        .build()
+        .unwrap()
 }
 
-/// `seq` with residue 1 taken from the `first_loc` variants whose delta is
-/// `first_delta`, and every other residue in its fixed-mod (Anywhere) form.
 fn written(
     set: &AminoAcidSet,
     seq: &[u8],
@@ -48,14 +39,8 @@ fn written(
 }
 
 fn writer_cases() -> Vec<(String, &'static str)> {
-    let cam_acetyl = aa_set(
-        &["57.021464,C,fix,any,Carbamidomethyl"],
-        &["42.010565,*,opt,Prot-N-term,Acetyl"],
-    );
-    let tmtpro_acetyl = aa_set(
-        &["304.207146,K,fix,any,TMTpro"],
-        &["42.010565,*,opt,Prot-N-term,Acetyl"],
-    );
+    let cam_acetyl = aa_set("Carbamidomethyl (C)", "Acetyl (Protein N-term)");
+    let tmtpro_acetyl = aa_set("TMTpro (K)", "Acetyl (Protein N-term)");
     vec![
         (
             written(

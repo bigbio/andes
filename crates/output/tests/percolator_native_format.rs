@@ -1,5 +1,5 @@
 use output::percolator::{parse_psm_results, PsmResultReader};
-use percolator_native::{run, write_results, MemLimit, Results, RowMeta};
+use percolator_native::{read_pin, run, write_results, MemLimit, Results};
 use std::path::{Path, PathBuf};
 
 fn data(name: &str) -> PathBuf {
@@ -78,33 +78,37 @@ fn static_args(o: &Out, weights: &Path, tdc: bool, pin: &Path) -> Vec<String> {
     a
 }
 
-fn row(id: &str, label: i8, file: u32, scan: u64, proteins: &str) -> RowMeta {
-    RowMeta {
-        psm_id: id.to_string(),
-        label,
-        file,
-        scan,
-        exp_mass: 1000.0 + scan as f64,
-        peptide: format!("K.PEP{scan}K.R"),
-        proteins: proteins.to_string(),
-    }
+fn row(id: &str, label: i8, file: &str, scan: u64, proteins: &str) -> String {
+    format!(
+        "{id}\t{label}\t{scan}\t{}\t{file}\t0\tK.PEP{scan}K.R\t{proteins}\n",
+        1000.0 + scan as f64
+    )
 }
 
 #[test]
 fn results_parse_with_output_crate() {
-    let meta = [
-        row("a_1", 1, 0, 1, "P1\tP2"),
-        row("b_2", 1, 1, 2, "P3\t\tP4"),
-        row("a_3", -1, 0, 3, "decoy_P5"),
-        row("b_4", 1, 1, 4, ""),
-        row("a_5", -1, 0, 5, "decoy_P6\tdecoy_P7"),
+    let triples = [
+        ("a_1", 1, "run_a.mzML", 1, "P1\tP2"),
+        ("b_2", 1, "run_b.mzML", 2, "P3\t\tP4"),
+        ("a_3", -1, "run_a.mzML", 3, "decoy_P5"),
+        ("b_4", 1, "run_b.mzML", 4, ""),
+        ("a_5", -1, "run_a.mzML", 5, "decoy_P6\tdecoy_P7"),
     ];
-    let files = ["run_a.mzML".to_string(), "run_b.mzML".to_string()];
+    let dir = tempfile::tempdir().unwrap();
+    let pin_path = dir.path().join("rows.pin");
+    let mut pin_text =
+        String::from("SpecId\tLabel\tScanNr\tExpMass\tFileName\tf1\tPeptide\tProteins\n");
+    for &(id, label, file, scan, proteins) in &triples {
+        pin_text.push_str(&row(id, label, file, scan, proteins));
+    }
+    std::fs::write(&pin_path, pin_text).unwrap();
+    let pin = read_pin(&pin_path, limit(dir.path())).unwrap();
+    let (meta, files) = (&pin.meta, &pin.file_names);
+    assert_eq!(files, &["run_a.mzML", "run_b.mzML"]);
     let scores = [1.2345678, -0.000123456789, -2.5, 0.0, -1.0];
     let q = [0.0098039215686, 1.234567e-7, 0.5, 0.25, 1.0];
     let pep = [6.305116760146989e-16, 1.0, 0.75, 0.031, 1.0];
     let rows: Vec<usize> = (0..meta.len()).collect();
-    let dir = tempfile::tempdir().unwrap();
     let (t, d) = (dir.path().join("t.psms"), dir.path().join("d.psms"));
     let res = Results {
         rows: &rows,
@@ -112,7 +116,7 @@ fn results_parse_with_output_crate() {
         q: &q,
         pep: &pep,
     };
-    write_results(&t, &d, &meta, &files, &res).unwrap();
+    write_results(&t, &d, meta, &pin.texts, files, &res).unwrap();
     let text = std::fs::read_to_string(&t).unwrap();
     assert_eq!(
         text.lines().next().unwrap(),
@@ -130,30 +134,15 @@ fn results_parse_with_output_crate() {
     assert_eq!(ids, ["a_1", "b_4", "b_2"]);
     let parsed = parse_psm_results(&text).unwrap();
     assert_eq!(parsed.len(), 3);
-    for (i, m) in meta.iter().enumerate().filter(|(_, m)| m.label == 1) {
-        let p = &parsed[&m.psm_id];
+    for (i, _) in meta.iter().enumerate().filter(|(_, m)| m.label == 1) {
+        let id = triples[i].0;
+        let p = &parsed[id];
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-5 * b.abs().max(1e-300);
-        assert!(
-            close(p.q_value, q[i]),
-            "{} q {} vs {}",
-            m.psm_id,
-            p.q_value,
-            q[i]
-        );
-        assert!(
-            close(p.pep, pep[i]),
-            "{} pep {} vs {}",
-            m.psm_id,
-            p.pep,
-            pep[i]
-        );
+        assert!(close(p.q_value, q[i]), "{} q {} vs {}", id, p.q_value, q[i]);
+        assert!(close(p.pep, pep[i]), "{} pep {} vs {}", id, p.pep, pep[i]);
         let sc = p.score.unwrap();
-        assert!(
-            close(sc, scores[i]) || sc == scores[i],
-            "{} score {sc}",
-            m.psm_id
-        );
-        assert_eq!(p.peptide, m.peptide);
+        assert!(close(sc, scores[i]) || sc == scores[i], "{} score {sc}", id);
+        assert_eq!(p.peptide, format!("K.PEP{}K.R", triples[i].3));
     }
     assert_eq!(parsed["a_1"].proteins, "P1;P2");
     assert_eq!(parsed["b_2"].proteins, "P3;P4");

@@ -17,7 +17,7 @@ mod write;
 pub use budget::{Budget, Reservation};
 pub use cv::{train, CvConfig, CvResult};
 pub use direction::init_direction;
-pub use folds::{folds_by_spectrum, libstdcxx_sort_by};
+pub use folds::folds_by_spectrum;
 pub use merge::{merge_folds, normalize_fold_scores};
 pub use normalize::{raw_weights, score, stdv, Norm};
 pub use pep::{

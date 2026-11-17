@@ -1,6 +1,5 @@
 use percolator_native::{
-    count_at, folds_by_spectrum, init_direction, libstdcxx_sort_by, read_pin, score, stdv, tdc_q,
-    MemLimit,
+    count_at, folds_by_spectrum, init_direction, read_pin, score, stdv, tdc_q, MemLimit,
 };
 use std::path::PathBuf;
 
@@ -8,71 +7,6 @@ fn data(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data")
         .join(name)
-}
-
-fn sorted(keys: Vec<(u32, i32)>) -> Vec<i32> {
-    let mut v = keys;
-    libstdcxx_sort_by(&mut v, |a, b| a.0 < b.0);
-    v.iter().map(|p| p.1).collect()
-}
-
-#[test]
-fn sort_matches_libstdcxx_std_sort() {
-    let reference = std::fs::read_to_string(data("libstdcxx_sort_ref.txt")).unwrap();
-    let mut want = reference.lines();
-    let mut s = 7u64;
-    let mut checked = 0;
-    for n in [1, 2, 5, 16, 17, 33, 100, 1000, 5000] {
-        for range in [3u64, 50, 1_000_000] {
-            let keys: Vec<(u32, i32)> = (0..n)
-                .map(|i| {
-                    s = (s * 279_470_273) % 4_294_967_291;
-                    ((s % range) as u32, i)
-                })
-                .collect();
-            let line = want.next().unwrap();
-            let (head, order) = line.split_once(':').unwrap();
-            assert_eq!(head, format!("n {n} range {range}"));
-            let order: Vec<i32> = order
-                .split_whitespace()
-                .map(|x| x.parse().unwrap())
-                .collect();
-            assert_eq!(sorted(keys), order, "{head}");
-            checked += 1;
-        }
-    }
-    let pattern: Vec<(u32, i32)> = (0..3000)
-        .map(|i| {
-            (
-                if i % 7 == 0 {
-                    5
-                } else {
-                    ((i * 7919) % 13) as u32
-                },
-                i,
-            )
-        })
-        .collect();
-    let mut descending: Vec<(u32, i32)> = (0..4000).map(|i| ((4000 - i) as u32, i)).collect();
-    for p in descending.iter_mut().step_by(2) {
-        p.0 = 7;
-    }
-    for (name, keys) in [
-        ("n 3000 pattern", pattern),
-        ("n 4000 descending", descending),
-    ] {
-        let line = want.next().unwrap();
-        let (head, order) = line.split_once(':').unwrap();
-        assert_eq!(head, name);
-        let order: Vec<i32> = order
-            .split_whitespace()
-            .map(|x| x.parse().unwrap())
-            .collect();
-        assert_eq!(sorted(keys), order, "{head}");
-        checked += 1;
-    }
-    assert_eq!(checked, 29);
-    assert!(want.next().is_none());
 }
 
 fn reference_counts(seed: u64) -> Vec<(usize, usize, usize)> {

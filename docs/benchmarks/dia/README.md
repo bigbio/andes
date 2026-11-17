@@ -35,7 +35,7 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | andes `--dia` + summed-apex columns, `--trainFDR 0.05`, mean of 5 seeds | 1433 / 1589 | 0.004 / 0.007 | | 1634 / 1687 (1619–1646 / 1620–1725) | 1798 / 1819 |
 | andes `--dia --rescore` + two-pass RT refinement, 20 ppm fragments, mean of 5 seeds | 1432 / 1612 | 0.004 / 0.005 | 0.044 / 0.038 | 1666 / 1747 (1627–1688 / 1648–1792) | 1872 / 1884 |
 | andes `--dia --rescore` (+ 7 ppm fragments), mean of 5 seeds | 1589 / 1755 | 0.004 / 0.009 | 0.043 / 0.050 | 1801 / 1819 (1733–1828 / 1748–1882) | 1964 / 1962 |
-| andes `--dia --rescore`, current (main's UNIMOD masses), mean of 5 seeds | 1585 / 1719 | 0.003 / 0.007 | 0.042 / 0.044 | **1777 / 1797** (1720–1826 / 1771–1824) | 1886 / 1926 |
+| andes `--dia --rescore`, current (main's UNIMOD masses), mean of 5 seeds | 1606 / 1747 | 0.003 / 0.007 | 0.044 / 0.045 | **1800 / 1821** (1740–1838 / 1791–1853) | 1909 / 1953 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -43,7 +43,7 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 - **Error control**: at 20 ppm andes's q ≤ 0.01 measured 0.4–0.5 % true FDP (0.7–0.9 % averaged over
   seeds) and q ≤ 0.05 4.2–4.6 %. At 7 ppm with the old mod masses, q ≤ 0.01 averaged 0.4 % on raw01
   and 0.9 % on raw02 (0.6–1.3 %, above 1 % for seed 42). The current build measures 0.3 % / 0.7 %
-  (0.1–0.4 % / 0.5–0.9 % per seed) and q ≤ 0.05 4.2 / 4.4 %.
+  (0.1–0.5 % / 0.6–1.0 % per seed) and q ≤ 0.05 4.4 / 4.5 %.
 - **Percolator seed noise.** The andes PIN is deterministic (byte-identical across runs), but the
   Percolator seed alone moves N@FDP_c 1 % over a range of about 150 (seeds 42, 1, 2, 3, 7). Seed 42,
   used for the first row and the single-seed comparisons below, is at the top of that range on both
@@ -51,14 +51,15 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   with `--num-threads` 7 or 10 gave 1483 or 1559 on one raw01 PIN. Averaging the PSM scores of the
   five seeds before precursor competition gives 1482 / 1682, no steadier than one seed.
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
-  with seed 42, 72 % / 69 % on the seed mean, and 86 % / 78 % with `--trainFDR 0.05`, the
+  with seed 42, 72 % / 69 % on the seed mean, and 87 % / 79 % with `--trainFDR 0.05`, the
   summed-apex columns, the two-pass RT refinement and 7 ppm fragments; it is above OpenDIA arm E
-  (105 % / 110 %).
+  (106 % / 112 %).
 - **Modification masses.** main now reads modification masses from UNIMOD (Oxidation 15.994915,
   Carbamidomethyl 57.021464, against 15.99491 / 57.02146 in the `mods.txt` the earlier rows used).
-  On the slice, the old build with the UNIMOD masses writes a PIN byte-identical to the current
-  build, so the 1801 / 1819 → 1777 / 1797 change is that input, not the merge or the cleanup; the
-  difference is inside the seed range.
+  The PIN then writes oxidation as `+15.99492`, which `eval_dia.py` now maps to UniMod:35 as well
+  (before the fix, those precursors fell out as "not in library" and the current row read 1777 /
+  1797). On the slice, the old build with the UNIMOD masses writes a PIN byte-identical to the
+  current build, so the merge and cleanup do not change the search.
 - **Fragment tolerance.** andes measures each run's fragment mass error from 100 confident PSMs of a
   3,000-spectrum sample. A DIA scan's best candidate rarely reaches 1 % q (21 of 3,000 on raw01), so
   the measurement never fired and the search kept the 20 ppm default. Mean of 5 seeds, N@FDP_c 1 %

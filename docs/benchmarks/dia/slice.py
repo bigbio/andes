@@ -1,6 +1,6 @@
 import sys,re
 src,dst,lo,hi=sys.argv[1],sys.argv[2],float(sys.argv[3]),float(sys.argv[4])
-rt_re=re.compile(rb'name="scan start time" value="([\d.eE+-]+)"')
+rt_re=re.compile(rb'name="scan start time"[^>]*?\svalue="([\d.eE+-]+)"[^>]*?unitName="(\w+)"')
 with open(src,'rb') as f, open(dst,'wb') as o:
     head=True; buf=[]; n=0
     for line in f:
@@ -13,7 +13,7 @@ with open(src,'rb') as f, open(dst,'wb') as o:
             buf.append(line)
             if s.startswith(b'</spectrum>'):
                 blk=b''.join(buf); buf=[]
-                m=rt_re.search(blk); rt=float(m.group(1)) if m else -1
+                m=rt_re.search(blk); rt=float(m.group(1))*(60 if m.group(2)==b'minute' else 1) if m else -1
                 if lo<=rt<=hi: o.write(blk); n+=1
                 elif rt>hi: break
             continue

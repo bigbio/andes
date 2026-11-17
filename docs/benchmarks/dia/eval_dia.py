@@ -25,7 +25,7 @@ k = 1 + 1 / r
 
 def unimod(pep):
     core = pep[2:-2] if len(pep) > 4 and pep[1] == '.' and pep[-2] == '.' else pep
-    return core.replace('+57.02146', '(UniMod:4)').replace('+15.99491', '(UniMod:35)')
+    return re.sub(r'\+15\.9949[12]', '(UniMod:35)', core).replace('+57.02146', '(UniMod:4)')
 
 
 def n_at(e, t):

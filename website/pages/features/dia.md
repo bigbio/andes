@@ -43,7 +43,7 @@ not implemented.
 ## What it changes
 
 On the ProteoBench Astral entrapment set (two 15-min, 50 ng runs, 300 windows of 2 Th), andes
-reaches 86% / 78% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
+reaches 87% / 79% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
 the [DIA benchmark](../benchmarks/dia.md).
 
 ```bash

@@ -422,7 +422,7 @@ entrapment true FDP of 1% (precursors, mean of 5 Percolator seeds):
 
 | | raw01 | raw02 | wall time per run |
 |---|---:|---:|---|
-| andes `--dia --rescore --predict rt,ms2` | 1,777 | 1,797 | 5.7–6.8 min (14 threads) |
+| andes `--dia --rescore --predict rt,ms2` | 1,800 | 1,821 | 5.7–6.8 min (14 threads) |
 | DIA-NN 2.2, own decoys | 2,067 | 2,301 | 8.8–13.5 min (14 threads) |
 | OpenDIA arm E | 1,694 | 1,628 | |
 

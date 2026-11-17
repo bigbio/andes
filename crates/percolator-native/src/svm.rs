@@ -253,7 +253,11 @@ impl Rows {
                 let mut vals = vec![0.0f32; self.stride];
                 let mut cur = 0usize;
                 for (k, &i) in ids.iter().enumerate() {
-                    assert!(i >= cur, "Rows::scan: ids must increase");
+                    if i + 1 == cur {
+                        f(k, &vals);
+                        continue;
+                    }
+                    assert!(i >= cur, "Rows::scan: ids must not decrease");
                     if i > cur {
                         r.seek_relative(((i - cur) * width) as i64)
                             .expect("seek rows spill file");
@@ -1122,6 +1126,34 @@ pub(crate) fn mfn_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spilled_scan_repeats_a_row_as_the_ram_scan_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let unlimited = Budget::new(u64::MAX, dir.path());
+        let mut b = crate::store::StoreBuilder::new(3, &unlimited);
+        for r in 0..6 {
+            b.push_row(&[r as f32, 2.0 * r as f32, 0.5]).unwrap();
+        }
+        let store = b.finish().unwrap();
+        let norm = Norm {
+            mean: vec![0.0; 3],
+            inv_sd: vec![1.0; 3],
+        };
+        let all: Vec<usize> = (0..6).collect();
+        let ram = Rows::gather(&store, &norm, &all);
+        let spilled =
+            Rows::gather_within(&store, &norm, &all, &Budget::new(0, dir.path())).unwrap();
+        assert!(spilled.is_spilled());
+        let ids = [0, 0, 1, 3, 3, 3, 5];
+        let collect = |rows: &Rows| {
+            let mut v = Vec::new();
+            rows.scan(&ids, |k, row| v.push((k, row.to_vec())));
+            v
+        };
+        assert_eq!(collect(&spilled), collect(&ram));
+        assert_eq!(collect(&ram).len(), ids.len());
+    }
 
     #[test]
     fn gram_batch_holds_many_chunk_partials_within_the_workspace() {

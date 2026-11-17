@@ -116,6 +116,12 @@ enum Command {
     ///
     /// Writes the QPX protein-group view.
     Inference(Box<cli::InferenceArgs>),
+
+    #[command(
+        hide = true,
+        about = "Run the native Percolator engine on a Percolator 3.7.1 command line"
+    )]
+    Percolator(Box<cli::PercolatorArgs>),
 }
 
 const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
@@ -191,6 +197,7 @@ fn main() -> ExitCode {
             }
             inference_cmd::run_inference(*args)
         }
+        Some(Command::Percolator(args)) => run_native_percolator(*args),
         None => {
             // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;
@@ -276,6 +283,16 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn run_native_percolator(args: cli::PercolatorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cli::ensure_scratch_dir(&args.temp_dir)?;
+    let limit = output::MemLimit {
+        bytes: args.rescore_memory_gb.saturating_mul(1 << 30),
+        spill_dir: args.temp_dir,
+    };
+    output::run_native_percolator(&args.args, limit)?;
+    Ok(())
 }
 
 /// Make Thermo `.raw` reading work with zero setup when the runtime is bundled.

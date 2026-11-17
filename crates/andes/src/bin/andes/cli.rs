@@ -1225,6 +1225,23 @@ pub(crate) struct SearchArgs {
     pub(crate) quant_channel_fdr: Option<f64>,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct PercolatorArgs {
+    /// Memory of the engine in GB; PIN features beyond it spill to --temp-dir
+    #[arg(long, value_name = "GB", default_value_t = 16,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) rescore_memory_gb: u64,
+
+    /// Directory of the spilled PIN features, created if missing
+    #[arg(long, value_name = "DIR", required = true)]
+    pub(crate) temp_dir: PathBuf,
+
+    /// Percolator 3.7.1 arguments as given to the percolator binary, the PIN last
+    #[arg(value_name = "PERCOLATOR_ARGS", required = true, num_args = 1..,
+          trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
+}
+
 /// `andes inference`: protein groups over the rescored PSMs of one or more runs.
 #[derive(Args, Debug)]
 pub(crate) struct InferenceArgs {

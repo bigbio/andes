@@ -33,6 +33,10 @@ python3 run.py mytag /path/to/andes --threads 8     # andes built with --feature
 python3 compare.py reference mytag
 ```
 
+`XL_SITES=" (K, S, T, Y, Protein N-term)"` appends sites to every dataset's linker, and
+`XLBENCH_PAIR_TRUTH=1` scores the library datasets by peptide pair alone, without the link
+site, for searches that may place links on S, T or Y.
+
 `compare.py` prints, for every dataset:
 
 - `true@1%`: true CSMs at andes q ≤ 1 %;

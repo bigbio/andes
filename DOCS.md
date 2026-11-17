@@ -1095,6 +1095,8 @@ the fragments that do not carry the link, its partner by the remaining precursor
 link classes are scored by the pair score `min(alpha, beta)`; for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),
+a link on one of them costs 12 against a link on K, as xiSEARCH penalises these side reactions.
 q-values are computed per link
 class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
 `max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer

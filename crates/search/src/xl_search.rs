@@ -33,9 +33,12 @@ pub struct XlConfig {
     pub open_top_k: usize,
     pub open_min_votes: u16,
     pub stub_weight: f32,
+    pub secondary_site_penalty: f32,
 }
 
 pub const STUB_ION_WEIGHT: f32 = 3.0;
+
+pub const SECONDARY_SITE_PENALTY: f32 = 12.0;
 
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
@@ -51,6 +54,7 @@ impl XlConfig {
             open_top_k: 50,
             open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
             stub_weight: STUB_ION_WEIGHT,
+            secondary_site_penalty: SECONDARY_SITE_PENALTY,
         }
     }
 }
@@ -484,6 +488,25 @@ struct SpecCtx<'a> {
     peaks: &'a [(f64, f32)],
     stub_weight: f32,
     stub_tol_ppm: f64,
+    secondary_site_penalty: f32,
+}
+
+fn site_penalty(
+    penalty: f32,
+    p: &Peptide,
+    site: &LinkSite,
+    linker: &Crosslinker,
+    end: usize,
+) -> f32 {
+    let e = &linker.ends[end];
+    let selective_amine = e.reacts_with(b'K') && !e.reacts_with(b'G');
+    if penalty == 0.0 || site.n_term || site.c_term || !selective_amine {
+        return 0.0;
+    }
+    match p.residues.get(site.pos).map(|aa| aa.residue) {
+        Some(b'S' | b'T' | b'Y') => penalty,
+        _ => 0.0,
+    }
 }
 
 fn stub_bonus(ctx: &SpecCtx<'_>, mass: f64, linker: &Crosslinker) -> f32 {
@@ -527,7 +550,8 @@ fn score_peptide(
             };
             let scored = with_link_mass(&p.peptide, site.pos, form, delta, mods);
             let s = score_psm(&ctx.ss, &scored, ctx.scorer, ctx.z, ctx.frag_tol)
-                + psm_edge_score(&ctx.ss, &scored, ctx.scorer, ctx.z) as f32;
+                + psm_edge_score(&ctx.ss, &scored, ctx.scorer, ctx.z) as f32
+                - site_penalty(ctx.secondary_site_penalty, &p.peptide, &site, linker, end);
             let fi = form.index();
             if s > form_scores[fi] {
                 form_scores[fi] = s;
@@ -977,6 +1001,7 @@ fn search_spectrum_at(
         peaks: &peaks,
         stub_weight: cfg.stub_weight,
         stub_tol_ppm: cfg.doublet.tol_ppm,
+        secondary_site_penalty: cfg.secondary_site_penalty,
     };
 
     struct Cand {
@@ -1250,6 +1275,12 @@ pub fn xl_search_run(
 mod tests {
     use super::*;
 
+    pub(crate) fn linker(spec: &str) -> Crosslinker {
+        andes_xl::spec::XlDecl::parse(spec)
+            .and_then(|d| d.resolve(model::unimod::bundled()))
+            .unwrap()
+    }
+
     fn pep(seq: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = seq
             .iter()
@@ -1338,6 +1369,26 @@ mod tests {
         let cfg = XlConfig::new(Crosslinker::dsso());
         assert_eq!(cfg.isotope_offsets, 0..=2);
         assert_eq!(cfg.stub_weight, STUB_ION_WEIGHT);
+        assert_eq!(cfg.secondary_site_penalty, SECONDARY_SITE_PENALTY);
+    }
+
+    #[test]
+    fn s_t_y_sites_of_an_nhs_ester_pay_the_secondary_site_penalty() {
+        let x = crate::xl_search::tests::linker("DSSO (K, S, T, Y, Protein N-term)");
+        let p = pep(b"SAKTY");
+        let at = |pos: usize, n_term: bool| LinkSite {
+            pos,
+            n_term,
+            c_term: false,
+        };
+        assert_eq!(site_penalty(12.0, &p, &at(2, false), &x, 0), 0.0);
+        assert_eq!(site_penalty(12.0, &p, &at(0, false), &x, 0), 12.0);
+        assert_eq!(site_penalty(12.0, &p, &at(3, false), &x, 0), 12.0);
+        assert_eq!(site_penalty(12.0, &p, &at(0, true), &x, 0), 0.0);
+        assert_eq!(site_penalty(0.0, &p, &at(0, false), &x, 0), 0.0);
+        let sda = crate::xl_search::tests::linker("SDA");
+        let any_end = (0..2).find(|&e| sda.ends[e].reacts_with(b'G')).unwrap();
+        assert_eq!(site_penalty(12.0, &p, &at(0, false), &sda, any_end), 0.0);
     }
 
     #[test]

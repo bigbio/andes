@@ -20,7 +20,8 @@ for d in json.load(open(f'{HERE}/datasets.json')):
         continue
     out = f'{B}/results/{tag}/{d["name"]}'
     os.makedirs(out, exist_ok=True)
-    cmd = [binary, '--spectrum', raw, '--database', f'{B}/{d["fasta"]}', '--xl', d['xl'],
+    xl = d['xl'] + os.environ.get('XL_SITES', '')
+    cmd = [binary, '--spectrum', raw, '--database', f'{B}/{d["fasta"]}', '--xl', xl,
            '--output-pin', f'{out}/{d["name"]}.pin'] + d.get('args', []) + extra
     t = time.time()
     with open(f'{out}/log.txt', 'w') as log:

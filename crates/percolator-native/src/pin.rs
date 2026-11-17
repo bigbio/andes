@@ -259,6 +259,29 @@ fn read_chunk(r: &mut impl BufRead, path: &Path) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+type Batch = Vec<(Vec<u8>, usize, bool)>;
+
+fn read_batch(
+    r: &mut impl BufRead,
+    path: &Path,
+    batch: usize,
+    lineno: &mut usize,
+    first: &mut bool,
+) -> Result<Batch, String> {
+    let mut chunks: Batch = Vec::with_capacity(batch);
+    while chunks.len() < batch {
+        let c = read_chunk(r, path)?;
+        if c.is_empty() {
+            break;
+        }
+        let lines = c.iter().filter(|&&b| b == b'\n').count() + 1;
+        chunks.push((c, *lineno, *first));
+        *lineno += lines;
+        *first = false;
+    }
+    Ok(chunks)
+}
+
 pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut reader = BufReader::with_capacity(1 << 20, file);
@@ -293,57 +316,51 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let batch = rayon::current_num_threads().max(1) * 2;
     let mut lineno = 2usize;
     let mut first = true;
-    loop {
-        let mut chunks: Vec<(Vec<u8>, usize, bool)> = Vec::with_capacity(batch);
-        while chunks.len() < batch {
-            let c = read_chunk(&mut reader, path)?;
-            if c.is_empty() {
-                break;
-            }
-            let lines = c.iter().filter(|&&b| b == b'\n').count() + 1;
-            chunks.push((c, lineno, first));
-            lineno += lines;
-            first = false;
-        }
-        if chunks.is_empty() {
-            break;
-        }
-        let parsed: Vec<Result<Parsed, String>> = chunks
-            .par_iter()
-            .map(|(c, l, f)| parse_chunk(c, *l, *f, &layout))
-            .collect();
-        drop(chunks);
-        for p in parsed {
-            let p = p?;
-            if p.default_direction.is_some() {
-                default_direction = p.default_direction;
-            }
-            let map: Vec<u32> = p
-                .file_names
-                .into_iter()
-                .map(|name| match file_ids.get(&name) {
-                    Some(&g) => g,
-                    None => {
-                        let g = file_ids.len() as u32;
-                        file_ids.insert(name.clone(), g);
-                        file_names.push(name);
-                        g
+    let mut chunks = read_batch(&mut reader, path, batch, &mut lineno, &mut first)?;
+    while !chunks.is_empty() {
+        let (next, merged) = rayon::join(
+            || read_batch(&mut reader, path, batch, &mut lineno, &mut first),
+            || -> Result<(), String> {
+                let parsed: Vec<Result<Parsed, String>> = chunks
+                    .par_iter()
+                    .map(|(c, l, f)| parse_chunk(c, *l, *f, &layout))
+                    .collect();
+                for p in parsed {
+                    let p = p?;
+                    if p.default_direction.is_some() {
+                        default_direction = p.default_direction;
                     }
-                })
-                .collect();
-            let mut start = 0usize;
-            let rows = p.meta.len();
-            per_row.grow_up_to(&budget, rows as u64 * PER_ROW_BYTES);
-            for (i, mut m) in p.meta.into_iter().enumerate() {
-                if cols.file.is_some() {
-                    m.file = map[m.file as usize];
+                    let map: Vec<u32> = p
+                        .file_names
+                        .into_iter()
+                        .map(|name| match file_ids.get(&name) {
+                            Some(&g) => g,
+                            None => {
+                                let g = file_ids.len() as u32;
+                                file_ids.insert(name.clone(), g);
+                                file_names.push(name);
+                                g
+                            }
+                        })
+                        .collect();
+                    let mut start = 0usize;
+                    let rows = p.meta.len();
+                    per_row.grow_up_to(&budget, rows as u64 * PER_ROW_BYTES);
+                    for (i, mut m) in p.meta.into_iter().enumerate() {
+                        if cols.file.is_some() {
+                            m.file = map[m.file as usize];
+                        }
+                        texts.push_record(&p.texts[start..p.text_ends[i]])?;
+                        start = p.text_ends[i];
+                        meta.push(m);
+                    }
+                    builder.push_rows(rows, &p.feats)?;
                 }
-                texts.push_record(&p.texts[start..p.text_ends[i]])?;
-                start = p.text_ends[i];
-                meta.push(m);
-            }
-            builder.push_rows(rows, &p.feats)?;
-        }
+                Ok(())
+            },
+        );
+        merged?;
+        chunks = next?;
     }
     Ok(Pin {
         feature_names,

@@ -1,7 +1,9 @@
 # DIA (`--dia`) on the ProteoBench Astral entrapment set
 
-Experimental, Phase A: spectrum-centric direct search of each DIA scan across its isolation window, with
-co-elution, MS1 and neighbouring-cycle features rescored by Percolator (DOCS.md, "DIA"). This is the
+Spectrum-centric direct search of each DIA scan across its isolation window ("Phase A" below), with
+co-elution, MS1 and neighbouring-cycle features rescored by Percolator (DOCS.md, "DIA"). The rows of
+the results table are the steps that were kept, in order; the sections after it record every variant
+that was tested and dropped, with its numbers. This is the
 dataset and the evaluation OpenDIA uses, so the numbers below compare directly with OpenDIA's and DIA-NN's.
 
 ## Data
@@ -12,7 +14,7 @@ dataset and the evaluation OpenDIA uses, so the numbers below compare directly w
   `_p_target` entrapment pairs). Its library holds 302,480 target precursors, half of them entrapment (r = 1).
 - andes: `--dia --enzyme nocleavage --model hcd_astral_tryp --charge 1..5 --min-length 7 --max-length 35
   --predict rt,ms2`, Carbamidomethyl C fixed, Oxidation M variable (max 1), andes `XXX_` decoys
-  ([`run.sh`](run.sh), [`mods.txt`](mods.txt)). `nocleavage` searches each FASTA entry as one peptide, which is
+  ([`run.sh`](run.sh)). `nocleavage` searches each FASTA entry as one peptide, which is
   the library's search space. Percolator 3.7.1 `--seed 42 -Y`, 14 threads.
 - DIA-NN 2.2 with its own decoys on the PAIRLIB targets (`diann-pairlib-20261113`, `diann-decoys-20261114/own`).
 
@@ -23,7 +25,7 @@ scored by its best PSM. The q-value is precursor-level target-decoy competition 
 of the PAIRLIB library are counted. Entrapment FDP_c = E (1 + 1/r) / N. N@FDP_c 1 % is the number of IDs at a
 true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-values are calibrated.
 
-## Results (2026-11-15)
+## Results (2026-11-15 to 2026-11-16)
 
 | tool | q ≤ 0.01 N, raw01 / raw02 | FDP_c at q ≤ 0.01 | FDP_c at q ≤ 0.05 | N@FDP_c 1 % | N@FDP_c 2 % |
 |---|---|---|---|---|---|
@@ -118,10 +120,10 @@ Both losses come from searching one scan at a time. Closing them is Phase B: a p
 extracts each library precursor's fragment chromatograms across its elution window and scores the peak
 group (DIA-NN, AlphaDIA), instead of asking each spectrum which peptide it holds.
 
-## Peptide-centric pass (Phase B, `--dia-pc`, experimental, negative result)
+## Peptide-centric pass (Phase B, negative result, not in andes)
 
-`--dia-pc` (hidden, with `--dia`) adds a DIA-NN / OpenSWATH-style pass
-(`crates/andes/src/bin/andes/dia_pc.rs`) and writes a precursor-level PIN `<stem>.dia.pin`:
+A DIA-NN / OpenSWATH-style pass was built and measured, then removed; the code is on the
+`archive/dia-pc` branch. It wrote a precursor-level PIN from:
 
 - library: every target and decoy peptidoform of the database, at every charge whose m/z is in an
   isolation window (647,382 precursors);
@@ -168,7 +170,7 @@ Why, from the measurements:
 What would close the gap, from the same measurements: an empirical or fine-tuned fragment and RT
 library (AlphaDIA-style transfer learning on the run's own identifications), a DIA-NN-style nonlinear
 classifier trained per run, and interference handling between co-eluting precursors. Each is a larger
-project than this pass. The code is kept behind the hidden flag, with its tests, as the starting point.
+project than this pass. The archived code, with its tests, is the starting point.
 
 ## Rescoring and RT tested on the full raws (Phase A PIN)
 
@@ -237,13 +239,15 @@ deconvolving the apex scans or an empirical fragment library from the run.
 ## Reproduce
 
 ```bash
-# mzML (OpenMS FileConverter) of the two raws, then from this directory:
+# mzML (OpenMS FileConverter) of the two raws; B is the OpenDIA benchmark root (PAIRLIB FASTA and
+# lib_targets.tsv), ANDES the binary, PY a python with pandas.
+export B=/path/to/OpenMS-r1-benchmark ANDES=andes PY=python3
 ./run.sh full01 raw01.mzML --enzyme nocleavage --model hcd_astral_tryp --predict rt,ms2
 ./run.sh full02 raw02.mzML --enzyme nocleavage --model hcd_astral_tryp --predict rt,ms2
 # slice for iteration
 python3 slice.py raw01.mzML slice01.mzML 600 780   # then set spectrumList count to the printed number
 ```
 
-`run.sh` and `eval_dia.py` read the OpenDIA benchmark root
-`/home/singjc/Documents/github/OpenMS-r1-benchmark-20261107` (PAIRLIB FASTA and `lib_targets.tsv`); edit `B=` to
-move it.
+`run.sh` runs Percolator once at `--trainFDR 0.05`, as the first pass of `--dia --rescore`. The
+two-pass numbers in the table (RT refinement) are `andes --dia --rescore` itself: its
+`<stem>.pin` and Percolator output feed `eval_dia.py` the same way.

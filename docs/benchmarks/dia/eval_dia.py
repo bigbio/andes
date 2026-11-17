@@ -10,9 +10,9 @@ precursors from the decoy PSM file), (D + 1) / T, monotone.
 
 Usage: eval_dia.py <pin> <percolator.target.psms.txt> <percolator.decoy.psms.txt>
 """
-import sys, re, numpy as np, pandas as pd
+import os, sys, re, numpy as np, pandas as pd
 
-B = '/home/singjc/Documents/github/OpenMS-r1-benchmark-20261107'
+B = os.environ['B']
 lib = pd.read_csv(B + '/diann-pairlib-20261113/lib_targets.tsv', sep='\t',
                   usecols=['ModifiedPeptideSequence', 'PrecursorCharge', 'ProteinId'], dtype=str)
 lib = lib.drop_duplicates(['ModifiedPeptideSequence', 'PrecursorCharge'])

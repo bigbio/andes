@@ -1,6 +1,6 @@
-import pandas as pd, re, sys, numpy as np
+import os, pandas as pd, re, sys, numpy as np
 tag=sys.argv[1]
-B='/home/singjc/Documents/github/OpenMS-r1-benchmark-20261107'
+B=os.environ['B']
 r=pd.read_parquet(B+'/diann-pairlib-20261113/report_raw01.parquet',columns=['Modified.Sequence','Precursor.Charge','Q.Value','RT'])
 r=r[(r['Q.Value']<=0.01)&(r.RT>=10.1)&(r.RT<=12.9)]
 dk=set(r['Modified.Sequence']+'/'+r['Precursor.Charge'].astype(str))

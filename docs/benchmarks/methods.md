@@ -1,8 +1,34 @@
 # Benchmark methods
 
+## Verdicts
+
+Every compared measure carries a verdict for andes against each other tool, set by one rule. The
+ratio is the worse value over the better one, in the direction of the metric (more PSMs or
+precursors is better; less error, CV, false calls, time or memory is better).
+
+| verdict | ratio between andes and the other tool |
+|---|---|
+| 🟢 well ahead / 🔴 well behind | 1.5x or more |
+| 🟢 ahead / 🔴 behind | 1.1x up to 1.5x |
+| 🟡 on par | under 1.1x, or the other value lies inside andes's seed or draw range, or both are counts below 10 |
+| ⚪ not compared / not tested | no other tool measured, no common denominator, or no decision was made |
+
+- **Ranges and noise.** A range over seeds, draws, runs or sets is judged at its end nearest the
+  other tool, so a verdict holds for the whole range. A single run (marked ¹) has no measured
+  spread; the 1.1x floor is wider than the andes seed spread of PSM counts (under 1.2%), so a gap
+  under 10% is never called a lead or a loss.
+- **Shares of a reference** (glyco spectra confirmed): the ratio is 100% over the confirmed share.
+- **Rates with 95% intervals** (TMT match between runs): 🟡 on par when the intervals overlap,
+  otherwise ahead or behind; no "well".
+- **Error control** (entrapment true FDP at nominal 1%): 🟢 on target when every reading is at
+  or below 1.1%, 🟡 near nominal when the range crosses 1.1%, 🔴 above nominal when every reading
+  is above it. Natural entrapments with hits on conserved homologs are context (⚪), not a reading.
+- Several sets or tools in one row get one verdict each. Caveats (depth at which an error is
+  measured, opt-in modes, unmatched settings) go in the note and do not change the verdict.
+
 ## Measurement conditions
 
-Icons and size words are as in the [summary](README.md#summary). Identification rows were measured on 2026-10-23 at
+Identification rows were measured on 2026-10-23 at
 `2051616b`, except UPS1 and timsTOF (2026-11-07 and 2026-11-09 at `2ee76dd6`). Label-free
 quantification rows were measured on 2026-11-05 at `09e1c00d`, TMT rows at `0cfa03cc`. A row says
 so when it differs. PSM counts, wall time and memory of Astral, TMT and phospho come from

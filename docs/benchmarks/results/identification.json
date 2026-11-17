@@ -137,12 +137,14 @@
    "metric",
    "andes",
    "other tool",
-   "result"
+   "verdict",
+   "note"
   ],
   "align": [
    "left",
    "left",
    "right",
+   "left",
    "left",
    "left"
   ],
@@ -152,92 +154,106 @@
     "PSMs",
     "{{engines:andes.astral.psms}}",
     "Comet {{engines:comet.astral.psms}}",
-    "🟢 +66%"
+    "🟢 well ahead",
+    "+66%"
    ],
    [
     "Astral HCD",
     "wall time",
     "{{engines:andes.astral.wall}} s",
     "Comet {{engines:comet.astral.wall}} s",
-    "🟢 2x faster"
+    "🟢 well ahead",
+    "1.9x faster"
    ],
    [
     "Astral HCD",
     "true FDP at 1%",
     "0.89–1.08%",
     "—",
-    "🟢 on target"
+    "🟢 on target",
+    ""
    ],
    [
     "timsTOF DDA-PASEF, 4 runs",
     "PSMs",
     "15.6k–58.6k",
     "Comet 14.1k–50.8k",
-    "🟢 +11% to +17%"
+    "🟢 ahead",
+    "+11% to +17% per run"
    ],
    [
     "timsTOF DDA-PASEF",
     "PSMs at a true FDP of 1%",
     "15.9k–58.8k",
     "Comet 14.0k–49.5k",
-    "🟢 +14% to +21%"
+    "🟢 ahead",
+    "+14% to +21% per run"
    ],
    [
     "timsTOF DDA-PASEF",
     "true FDP at 1%",
     "0.79–0.91%",
     "Comet 1.14–1.31%",
-    "🟢 on target, Comet above"
+    "🟢 on target",
+    "Comet above nominal"
    ],
    [
     "timsTOF DDA-PASEF",
     "wall time",
     "54–62 s",
     "Comet 159–222 s",
-    "🟢 3x faster"
+    "🟢 well ahead",
+    "3x faster"
    ],
    [
     "TMT low-res, PXD007683",
     "PSMs",
     "{{engines:andes.tmt.psms}}",
     "Comet {{engines:comet.tmt.psms}}",
-    "🟢 +29%"
+    "🟢 ahead",
+    "+29%"
    ],
    [
     "Phospho, PXD007653",
     "PSMs",
     "38,596–38,629",
     "Comet 33,984 (at 1.77% true FDP)",
-    "🟢 +14%, at 0.80–0.99% FDP"
+    "🟢 ahead",
+    "+14%; andes at 0.80–0.99% true FDP"
    ],
    [
     "Low-res UPS1, PXD001819",
     "PSMs",
     "{{engines:andes.ups1.psms}}",
     "Java MS-GF+ {{engines:msgf.ups1.psms}}",
-    "🟡 +4% to +5%"
+    "🟡 on par",
+    "+4% to +5%"
    ],
    [
     "Low-res UPS1",
     "true FDP at 1%",
     "0.92–0.94%",
     "—",
-    "🟢 on target"
+    "🟢 on target",
+    ""
    ],
    [
     "TMT high-res, PXD017803",
     "PSMs",
     "6,628–6,686",
     "—",
-    "⚪"
+    "⚪ not compared",
+    "no other tool run"
    ],
    [
     "Glyco, PXD005553",
     "reference glycoPSMs confirmed",
     "79–90%",
     "pGlyco2, MSFragger-Glyco (references)",
-    "🔴 10–21% missed (moderate)"
+    "🔴 behind",
+    "10–21% of reference spectra missed"
    ]
-  ]
+  ],
+  "verdict_column": 4
  }
 }

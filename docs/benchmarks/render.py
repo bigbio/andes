@@ -75,8 +75,27 @@ def table(header, align, rows):
     return "\n".join(lines) + "\n"
 
 
+VERDICTS = {
+    "🟢": ("well ahead", "ahead", "on target"),
+    "🟡": ("on par", "near nominal"),
+    "🔴": ("well behind", "behind", "above nominal"),
+    "⚪": ("not compared", "not tested"),
+}
+
+
+def check_verdict(cell, where):
+    marks = re.findall(r"(🟢|🟡|🔴|⚪) ([a-z]+(?: [a-z]+)?)", cell)
+    if not marks or len(marks) != len(re.findall("🟢|🟡|🔴|⚪", cell)):
+        raise SystemExit(f"{where}: verdict '{cell}' needs an icon followed by a verdict word")
+    for icon, words in marks:
+        if not any(words == w or words.startswith(w + " ") for w in VERDICTS[icon]):
+            raise SystemExit(f"{where}: '{icon} {words}' is not one of {', '.join(VERDICTS[icon])}")
+
+
 def summary(data, name):
     s = data[name]["summary"]
+    for i, r in enumerate(s["rows"]):
+        check_verdict(r[s["verdict_column"]], f"results/{name}.json row {i + 1}")
     return table(s["header"], s["align"], [[resolve(c, data) for c in r] for r in s["rows"]])
 
 

@@ -5,9 +5,10 @@
    "data",
    "metric",
    "andes",
-   "MaxQuant 2.7",
+   "MaxQuant",
    "FragPipe",
-   "result"
+   "verdict",
+   "note"
   ],
   "align": [
    "left",
@@ -15,6 +16,7 @@
    "right",
    "right",
    "right",
+   "left",
    "left"
   ],
   "rows": [
@@ -24,7 +26,8 @@
     "{{pb:QExactive.andes.eps|.3f}}",
     "{{pb:QExactive.maxquant_most.eps|.3f}}",
     "{{pb:QExactive.fragpipe_most.eps|.3f}}",
-    "🟢 23% / 20% lower"
+    "🟢 ahead of both",
+    "23% / 20% lower"
    ],
    [
     "ProteoBench QE",
@@ -32,7 +35,8 @@
     "{{pb:QExactive.andes.precursors}}",
     "{{pb:QExactive.maxquant_most.precursors}}",
     "{{pb:QExactive.fragpipe_most.precursors}}",
-    "🟢 +44% / 🟡 same"
+    "🟢 ahead of MaxQuant · 🟡 on par with FragPipe",
+    "+44% / same"
    ],
    [
     "ProteoBench QE",
@@ -40,7 +44,8 @@
     "{{pb:QExactive.andes.cv|.3f}}",
     "{{pb:QExactive.maxquant_most.cv|.3f}}",
     "{{pb:QExactive.fragpipe_most.cv|.3f}}",
-    "🟢 47% / 25% lower"
+    "🟢 well ahead of MaxQuant · 🟢 ahead of FragPipe",
+    "47% / 25% lower"
    ],
    [
     "ProteoBench Astral",
@@ -48,7 +53,8 @@
     "{{pb:Astral.andes.eps|.3f}}",
     "{{pb:Astral.maxquant_most.eps|.3f}}",
     "{{pb:Astral.fragpipe_most.eps|.3f}}",
-    "🔴 1.16x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower"
+    "🔴 behind MaxQuant · 🟢 ahead of FragPipe",
+    "1.16x MaxQuant at 55% of andes' depth / 12% lower"
    ],
    [
     "ProteoBench Astral",
@@ -56,7 +62,8 @@
     "{{pb:Astral.andes.precursors}}",
     "{{pb:Astral.maxquant_most.precursors}}",
     "{{pb:Astral.fragpipe_most.precursors}}",
-    "🟢 +81% / 🟡 6% fewer"
+    "🟢 well ahead of MaxQuant · 🟡 on par with FragPipe",
+    "+81% / 6% fewer"
    ],
    [
     "ProteoBench Astral",
@@ -64,7 +71,8 @@
     "{{pb:Astral.andes.cv|.3f}}",
     "{{pb:Astral.maxquant_most.cv|.3f}}",
     "{{pb:Astral.fragpipe_most.cv|.3f}}",
-    "🔴 1.2x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower"
+    "🔴 behind MaxQuant · 🟢 ahead of FragPipe",
+    "1.2x MaxQuant at 55% of andes' depth / 12% lower"
    ],
    [
     "Truth designs, 8 sets",
@@ -72,7 +80,8 @@
     "10.7k–93.6k",
     "",
     "",
-    "🟢 +19% to +51% on 7 sets, 🟡 on 1"
+    "🟢 well ahead on 1 set · 🟢 ahead on 6 · 🟡 on par on 1",
+    "+19% to +51% over the best other tool"
    ],
    [
     "PXD009740 / PXD009815 / QE / Astral",
@@ -80,7 +89,8 @@
     "27,226 / 29,600 / 81,987 / 51,798",
     "29,293 / 27,459 / 51,609 / 24,745",
     "25,888 / 28,286 / 71,377 / 46,347",
-    "🟡 −7% / 🟡 +5% / 🟢 +15% / 🟢 +12% over the best other tool"
+    "🟡 on par / 🟡 on par / 🟢 ahead / 🟢 ahead",
+    "−7% / +5% / +15% / +12% over the best other tool"
    ],
    [
     "PXD009740 / PXD009815 / QE / Astral",
@@ -88,7 +98,8 @@
     "1,300 / 844 / 1,047 / 685",
     "1,304 / 844 / 857 / 650",
     "1,237 / 849 / 946 / 689",
-    "🟡 / 🟡 / 🟢 +22% / 🟡"
+    "🟡 on par / 🟡 on par / 🟢 ahead of both / 🟡 on par",
+    "QE +22% / +11%"
    ],
    [
     "PXD009740 / PXD009815 / QE / Astral",
@@ -96,7 +107,8 @@
     "305 / 153 / 110 / 296",
     "129 / 92 / 37 / 210",
     "302 / 301 / 43 / 389",
-    "🔴 1.4–3.0x MaxQuant (moderate); mostly real small shifts, see note"
+    "MaxQuant: 🔴 well behind / 🔴 well behind / 🔴 well behind / 🔴 behind · FragPipe: 🟡 on par / 🟢 well ahead / 🔴 well behind / 🟢 ahead",
+    "1.4–3.0x MaxQuant; mostly real small shifts, see note"
    ],
    [
     "PXD009740 / PXD009815 / QE",
@@ -104,7 +116,8 @@
     "167 / 39 / 11",
     "74 / 36 / 18",
     "259 / 102 / 20",
-    "🔴 2.3x / 🟡 / 🟢"
+    "MaxQuant: 🔴 well behind / 🟡 on par / 🟢 well ahead · FragPipe: 🟢 well ahead on all three",
+    "one andes seed"
    ],
    [
     "PXD009740 / PXD009815 / QE / Astral",
@@ -112,7 +125,8 @@
     "1,156 / 763 / 983 / 568; 272 / 151 / 105 / 297",
     "1,077 / 725 / 851 / 518; 131 / 62 / 42 / 154",
     "",
-    "🟢 +5% to +15% true positives; 🔴 1.9–2.5x false calls (moderate)"
+    "true positives: 🟡 on par / 🟡 on par / 🟢 ahead / 🟡 on par · false calls: 🔴 well behind on all four",
+    "+5% to +15% true positives; 1.9–2.5x false calls"
    ],
    [
     "PXD009740 / PXD009815 / QE / Astral",
@@ -120,7 +134,8 @@
     "1",
     "1.15 / 1.55 / 1.26 / —",
     "1.40 / 1.30 / 1.25 / —",
-    "🟢 tighter than both"
+    "MaxQuant: 🟢 ahead / 🟢 well ahead / 🟢 ahead · FragPipe: 🟢 ahead on all three",
+    "andes tighter than both"
    ],
    [
     "UPS1 lowest 3 levels, PXD009740 / PXD009815",
@@ -128,7 +143,8 @@
     "502 / 24",
     "417 / 23",
     "458 / 50",
-    "🟢 as reported, 🔴 at FragPipe's row count (437 against 458) / 🔴 2x fewer than FragPipe (minor)"
+    "PXD009740: 🟢 ahead of MaxQuant · 🟡 on par with FragPipe; PXD009815: 🟡 on par with MaxQuant · 🔴 well behind FragPipe",
+    "PXD009740 at FragPipe's row count: 437 against 458"
    ],
    [
     "Truth designs, all sets",
@@ -136,7 +152,8 @@
     "1.8–7.2%",
     "0.3–1.6%",
     "0.3–3.8%",
-    "🔴 3–17x MaxQuant per set (moderate)"
+    "MaxQuant: 🔴 well behind on all five sets · FragPipe: 🔴 well behind on five, 🟢 well ahead on PXD001819",
+    "3–17x MaxQuant per set"
    ],
    [
     "Truth designs, 6 sets",
@@ -144,7 +161,8 @@
     "4.4–10.1%",
     "7.0–11.6%",
     "4.9–13.5%",
-    "🟢 on 3 sets, 🔴 on 2 (minor)"
+    "MaxQuant: 🟢 ahead on four, 🟢 well ahead on PXD009815 · FragPipe: 🟢 well ahead on PXD009740, 🟢 ahead on two, 🟡 on par on two, 🔴 behind on Astral",
+    ""
    ],
    [
     "Known-absent yeast, PXD014415",
@@ -152,7 +170,8 @@
     "0.20% (0.08% at `quant_q ≤ 0.01`)",
     "",
     "0.09%",
-    "🔴 2x at default (minor)"
+    "🔴 well behind FragPipe at default · 🟡 on par at `quant_q ≤ 0.01`",
+    "2x at default"
    ],
    [
     "Blank run, PXD016921",
@@ -160,7 +179,8 @@
     "0 on main of 2026-11-09, after #333 `e841aae0` (85 at `09e1c00d`)",
     "20",
     "8",
-    "🟢 fewest"
+    "🟢 well ahead of MaxQuant · 🟡 on par with FragPipe",
+    "counts below 10 are on par; see the blank-run notes"
    ],
    [
     "Blank run, PXD016921",
@@ -168,7 +188,8 @@
     "0, not attempted",
     "85 unfiltered (9 at `Match q-value ≤ 0.01`)",
     "0, not scored",
-    "⚪ not tested: andes and FragPipe make no transfer decision"
+    "⚪ not tested",
+    "andes and FragPipe make no transfer decision"
    ],
    [
     "Glycopeptide LFQ, PXD005553 (5 fractions, `0f036477`)",
@@ -176,7 +197,8 @@
     "58.6% → 85.1% (held-out 10%: 83.7% → 84.7%; the MBR scorer is trained on these fractions)",
     "",
     "",
-    "⚪"
+    "⚪ not compared",
+    "no other tool run"
    ],
    [
     "TMT knockout, PXD017803 hrMS2",
@@ -184,7 +206,8 @@
     "0.192 (0.000 with `--tmt-unmix on`)",
     "0.156",
     "",
-    "🔴 default, 🟢 with the option"
+    "🔴 behind MaxQuant at default · 🟢 well ahead with `--tmt-unmix on`",
+    "1.23x MaxQuant"
    ],
    [
     "TMT known ratios, PXD007683",
@@ -192,7 +215,8 @@
     "149,121",
     "97,107",
     "",
-    "🟢 +54%"
+    "🟢 well ahead",
+    "+54%"
    ],
    [
     "TMT known ratios, PXD007683",
@@ -200,7 +224,8 @@
     "0.213",
     "0.159",
     "",
-    "🔴 1.3x (moderate)"
+    "🔴 behind",
+    "1.3x on A/C"
    ],
    [
     "TMT match between runs, PXD014750",
@@ -208,15 +233,17 @@
     "−0.05 points",
     "+1.53",
     "",
-    "🟢 (SIMSI-Transfer +0.40)"
+    "🟢 ahead of MaxQuant · 🟡 on par with SIMSI-Transfer",
+    "95% intervals: andes −0.56 to +0.51, MaxQuant +1.11 to +1.98, SIMSI-Transfer +0.40 (+0.18 to +0.64)"
    ],
    [
     "TMT match between runs",
     "cells transferred",
     "3,636",
+    "7,499",
     "",
-    "",
-    "🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in)"
+    "🔴 well behind MaxQuant and SIMSI-Transfer",
+    "SIMSI-Transfer 16,511; opt-in mode"
    ],
    [
     "Large study, PXD042233 (500 runs)",
@@ -224,8 +251,10 @@
     "243,895",
     "",
     "",
-    "⚪"
+    "⚪ not compared",
+    "no other tool run"
    ]
-  ]
+  ],
+  "verdict_column": 5
  }
 }

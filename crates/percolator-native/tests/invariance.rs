@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const ROWS_PER_FILE: usize = 1000;
-const FILES: usize = 25;
+const FILES: usize = 50;
 const NFEAT: usize = 100;
 
 struct Lcg(u64);

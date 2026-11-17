@@ -1343,17 +1343,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         match sample {
             Some(sample) => {
+                let optimize_dir = scratch_tempdir("andes-optimize-", &scratch_dir)?;
                 let rescorer = crate::optimize::SampleRescorer {
                     backend: output::PercolatorBackend::Native {
                         memory: output::MemLimit {
                             bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
-                            spill_dir: scratch_dir.clone(),
+                            spill_dir: optimize_dir.path().to_path_buf(),
                         },
                     },
                     args: output::percolator_args_with_threads(&[], cli.threads),
-                    dir: scratch_dir.join("optimize"),
+                    dir: optimize_dir.path().to_path_buf(),
                 };
-                crate::cli::ensure_scratch_dir(&rescorer.dir)?;
                 crate::optimize::optimize_parameters(
                     &idx,
                     &scorer,
@@ -1364,10 +1364,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &sample,
                     &rescorer,
                 );
-                if let Err(e) = std::fs::remove_dir_all(&rescorer.dir) {
+                drop(rescorer);
+                let optimize_path = optimize_dir.path().to_path_buf();
+                if let Err(e) = optimize_dir.close() {
                     eprintln!(
                         "WARN: optimize: could not remove {}: {e}",
-                        rescorer.dir.display()
+                        optimize_path.display()
                     );
                 }
             }

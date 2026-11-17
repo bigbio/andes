@@ -733,13 +733,17 @@ pub fn apply(
             for v in &s.xl {
                 let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
                     .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
-                if set.iter().any(|y| y.name == x.name) {
-                    return Err(format!(
-                        "--sdrf `{XL}`: {} appears with different settings in different rows",
-                        x.name
-                    ));
+                match set.iter().find(|y| y.name == x.name) {
+                    // The same definition written differently (fields in another order).
+                    Some(y) if *y == x => continue,
+                    Some(_) => {
+                        return Err(format!(
+                            "--sdrf `{XL}`: {} appears with different settings in different rows",
+                            x.name
+                        ))
+                    }
+                    None => set.push(x),
                 }
-                set.push(x);
             }
             let names: Vec<String> = set
                 .iter()
@@ -1074,5 +1078,35 @@ mod tests {
             run(&["--xl", "DSS"], cfg).xl.unwrap().0.remove(0).name,
             "DSS"
         );
+    }
+
+    #[test]
+    fn equal_sdrf_crosslinkers_written_differently_are_one_linker() {
+        use clap::{CommandFactory, FromArgMatches};
+        let apply_xl = |cells: &[&str]| -> Result<Vec<String>, String> {
+            let s = SdrfSettings {
+                xl: cells.iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            };
+            let base = [
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ];
+            let m = crate::TopCli::command().try_get_matches_from(base).unwrap();
+            let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
+            apply(&s, &mut a, &m, ConfigKeys::default())?;
+            Ok(a.xl.unwrap().0.into_iter().map(|x| x.name).collect())
+        };
+        assert_eq!(
+            apply_xl(&["NT=DSSO;AC=XLMOD:02126", "AC=XLMOD:02126;NT=DSSO"]).unwrap(),
+            vec!["DSSO"]
+        );
+        let e = apply_xl(&["NT=DSSO;TA=K", "NT=DSSO;TA=K,S"]).unwrap_err();
+        assert!(e.contains("different settings"), "{e}");
     }
 }

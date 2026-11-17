@@ -462,6 +462,7 @@ pub(crate) fn run_xl(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let linkers = cli.xl.clone().ok_or("--xl: no crosslinker")?.0;
+    let several = linkers.len() > 1;
     let spectra_for_xl: &[Spectrum] = if cli.max_spectra > 0 {
         &spectra[..spectra.len().min(cli.max_spectra)]
     } else {
@@ -487,6 +488,7 @@ pub(crate) fn run_xl(
         );
         let mut cfg = XlConfig::new(linker.clone());
         cfg.oracle_spectra = cli.xl_oracle;
+        cfg.charge_by_pair_score = several;
         if let Some((lo, hi)) = cli.isotope_error {
             cfg.isotope_offsets = lo..=hi;
         }
@@ -764,14 +766,36 @@ mod tests {
         let a = result(0, None, &[]);
         let b = result(1, Some(("AK", 90.0)), &[("AK", 90.0)]);
         assert_eq!(merged(vec![a, b]), (1, 90.0, None));
-        // ... and its runner-up still covers its pairs at other charges.
+        // ... and its runner-up, 50 at its chosen charge, becomes 110 from its other charge.
         let a = result(0, None, &[]);
-        let b = result(
+        let mut b = result(
             1,
             Some(("AK", 100.0)),
             &[("AK", 100.0), ("BK", 50.0), ("CK", 110.0)],
         );
+        b.csm.as_mut().unwrap().second_pair_score = Some(50.0);
         assert_eq!(merged(vec![a, b]), (1, 100.0, Some(110.0)));
+        // Without a precursor charge, linker A keeps 110 at charge 4 over 100 / 50 at charge
+        // 3 (best pair score), and beats linker B's 105; its runner-up is A's own 109.
+        let mut a = result(
+            0,
+            Some(("CK", 110.0)),
+            &[("AK", 100.0), ("BK", 50.0), ("CK", 110.0), ("DK", 109.0)],
+        );
+        a.charge = 4;
+        let b = result(1, Some(("EK", 105.0)), &[("EK", 105.0)]);
+        let mut acc = merge_linkers(vec![a], vec![b]);
+        settle_runner_ups(&mut acc);
+        let c = acc[0].csm.as_ref().unwrap();
+        assert_eq!(
+            (
+                acc[0].linker,
+                acc[0].charge,
+                c.pair_score,
+                c.second_pair_score
+            ),
+            (0, 4, 110.0, Some(109.0))
+        );
     }
 
     #[test]

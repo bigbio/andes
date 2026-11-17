@@ -73,12 +73,12 @@ pub fn run(args: &[String], limit: MemLimit) -> Result<(), String> {
         Mode::MixMax
     };
     let scores = if a.static_model {
-        static_scores(&pin, &a, &is_decoy)?
+        pool.install(|| static_scores(&pin, &a, &is_decoy))?
     } else {
         make_room(&mut pin)?;
-        trained_scores(&pin, &a, &is_decoy, &pool)?
+        pool.install(|| trained_scores(&pin, &a, &is_decoy, &pool))?
     };
-    finish(&pin, &a, &is_decoy, &scores, mode)
+    pool.install(|| finish(&pin, &a, &is_decoy, &scores, mode))
 }
 
 fn trained_scores(

@@ -1,5 +1,5 @@
 use crate::pin::RowMeta;
-use std::collections::HashMap;
+use rayon::prelude::*;
 
 pub(crate) fn order_key64(x: f64) -> u64 {
     let b = x.to_bits();
@@ -12,6 +12,16 @@ pub(crate) fn order_key64(x: f64) -> u64 {
 
 fn from_key64(k: u64) -> f64 {
     f64::from_bits(if k >> 63 == 1 { k & !(1 << 63) } else { !k })
+}
+
+pub(crate) fn descending_order(scores: &[f64]) -> Vec<usize> {
+    let mut keyed: Vec<(u64, usize)> = scores
+        .par_iter()
+        .enumerate()
+        .map(|(i, &s)| (!order_key64(s), i))
+        .collect();
+    keyed.par_sort_unstable();
+    keyed.into_par_iter().map(|(_, i)| i).collect()
 }
 
 pub(crate) fn radix_sort_u64(v: &mut Vec<u64>) {
@@ -108,8 +118,7 @@ pub(crate) fn tdc_cut(
 
 pub fn tdc_q(scores: &[f64], is_decoy: &[bool], skip_decoys_plus_one: bool) -> Vec<f64> {
     let n = scores.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+    let order = descending_order(scores);
     let mut fdr = vec![0.0f64; n];
     let mut decoys: u64 = if skip_decoys_plus_one { 0 } else { 1 };
     let mut targets: u64 = 0;
@@ -157,22 +166,29 @@ pub fn training_sets(q: &[f64], is_decoy: &[bool], fdr: f64) -> (Vec<usize>, Vec
 }
 
 pub fn tdc_winners(meta: &[RowMeta], scores: &[f64]) -> Vec<usize> {
-    let mut best: HashMap<(u32, u64, u64), usize> = HashMap::new();
-    for (i, m) in meta.iter().enumerate() {
-        let key = (m.file, m.scan, m.exp_mass.to_bits());
-        match best.get(&key) {
-            Some(&b)
-                if scores[b]
-                    .total_cmp(&scores[i])
-                    .then(meta[b].label.cmp(&m.label))
-                    .is_ge() => {}
-            _ => {
-                best.insert(key, i);
+    let mut keyed: Vec<(u32, u64, u64, usize)> = meta
+        .par_iter()
+        .enumerate()
+        .map(|(i, m)| (m.file, m.scan, m.exp_mass.to_bits(), i))
+        .collect();
+    keyed.par_sort_unstable();
+    let keeps = |b: usize, i: usize| {
+        scores[b]
+            .total_cmp(&scores[i])
+            .then(meta[b].label.cmp(&meta[i].label))
+            .is_ge()
+    };
+    let mut out = Vec::new();
+    for group in keyed.chunk_by(|a, b| (a.0, a.1, a.2) == (b.0, b.1, b.2)) {
+        let mut best = group[0].3;
+        for &(_, _, _, i) in &group[1..] {
+            if !keeps(best, i) {
+                best = i;
             }
         }
+        out.push(best);
     }
-    let mut out: Vec<usize> = best.into_values().collect();
-    out.sort_unstable();
+    out.par_sort_unstable();
     out
 }
 
@@ -181,8 +197,7 @@ pub fn mix_max_q(scores: &[f64], is_decoy: &[bool], pi0: f64) -> Vec<f64> {
         return tdc_q(scores, is_decoy, false);
     }
     let n = scores.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    let order = descending_order(scores);
     let combined: Vec<(f64, bool)> = order.iter().map(|&i| (scores[i], !is_decoy[i])).collect();
     let (h_w, h_z) = crate::pep::mix_max_counts(&combined);
     let mut q = vec![0.0f64; n];

@@ -1,4 +1,4 @@
-use crate::scores::tdc_q;
+use crate::scores::{descending_order, tdc_q};
 
 const NO_INTERVALS: usize = 500;
 const NUM_LAMBDA: usize = 100;
@@ -26,14 +26,8 @@ impl Lcg {
     }
 }
 
-fn descending(scores: &[f64]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..scores.len()).collect();
-    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
-    order
-}
-
 fn combined_desc(scores: &[f64], is_decoy: &[bool]) -> (Vec<usize>, Vec<(f64, bool)>) {
-    let order = descending(scores);
+    let order = descending_order(scores);
     let combined = order.iter().map(|&i| (scores[i], !is_decoy[i])).collect();
     (order, combined)
 }

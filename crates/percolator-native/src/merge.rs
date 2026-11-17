@@ -1,14 +1,14 @@
 use crate::cv::CvResult;
 use crate::pep::too_good_separation;
-use crate::scores::tdc_q;
+use crate::scores::{descending_order, tdc_q};
+use rayon::prelude::*;
 
 pub fn normalize_fold_scores(scores: &[f64], is_decoy: &[bool], fdr: f64) -> (f64, f64) {
     if scores.is_empty() {
         return (0.0, 0.0);
     }
     let q = tdc_q(scores, is_decoy, false);
-    let mut order: Vec<usize> = (0..scores.len()).collect();
-    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    let order = descending_order(scores);
     let median_index = is_decoy.iter().filter(|&&d| d).count() / 2;
     let mut fdr_score = scores[order[0]];
     let mut median_decoy = fdr_score + 1.0;
@@ -40,30 +40,47 @@ fn fmt_pct(v: f64) -> String {
     crate::write::fmt_g(v, 6)
 }
 
+fn fold_scale(
+    rows: &[usize],
+    scores: &[f64],
+    is_decoy: &[bool],
+    fdr: f64,
+) -> Result<(f64, f64), String> {
+    if rows.is_empty() {
+        return Err("Error: no scored PSMs were provided.".to_string());
+    }
+    let s: Vec<f64> = rows.iter().map(|&i| scores[i]).collect();
+    let d: Vec<bool> = rows.iter().map(|&i| is_decoy[i]).collect();
+    if too_good_separation(&s, &d) {
+        return Err(
+            "Error in the input data: too good separation between target and decoy PSMs.\nTerminating."
+                .to_string(),
+        );
+    }
+    let (sub, scale) = normalize_fold_scores(&s, &d, fdr);
+    if scale <= 0.0 {
+        return Err(format!(
+            "Error: median decoy score <= score at {}% FDR. Cannot rescale scores to merge cross validation bins, try lowering --trainFDR.",
+            fmt_pct(fdr * 100.0)
+        ));
+    }
+    Ok((sub, scale))
+}
+
 pub fn merge_folds(cv: &mut CvResult, is_decoy: &[bool], fdr: f64) -> Result<(), String> {
-    for f in 0..cv.w_norm.len() {
-        let rows: Vec<usize> = (0..cv.fold.len())
-            .filter(|&i| cv.fold[i] as usize == f)
-            .collect();
-        if rows.is_empty() {
-            return Err("Error: no scored PSMs were provided.".to_string());
-        }
-        let s: Vec<f64> = rows.iter().map(|&i| cv.test_scores[i]).collect();
-        let d: Vec<bool> = rows.iter().map(|&i| is_decoy[i]).collect();
-        if too_good_separation(&s, &d) {
-            return Err(
-                "Error in the input data: too good separation between target and decoy PSMs.\nTerminating."
-                    .to_string(),
-            );
-        }
-        let (sub, scale) = normalize_fold_scores(&s, &d, fdr);
-        if scale <= 0.0 {
-            return Err(format!(
-                "Error: median decoy score <= score at {}% FDR. Cannot rescale scores to merge cross validation bins, try lowering --trainFDR.",
-                fmt_pct(fdr * 100.0)
-            ));
-        }
-        for &i in &rows {
+    let fold = &cv.fold;
+    let rows_of: Vec<Vec<usize>> = (0..cv.w_norm.len())
+        .into_par_iter()
+        .map(|f| (0..fold.len()).filter(|&i| fold[i] as usize == f).collect())
+        .collect();
+    let scores = &cv.test_scores;
+    let fits: Vec<Result<(f64, f64), String>> = rows_of
+        .par_iter()
+        .map(|rows| fold_scale(rows, scores, is_decoy, fdr))
+        .collect();
+    for (f, (rows, fit)) in rows_of.iter().zip(fits).enumerate() {
+        let (sub, scale) = fit?;
+        for &i in rows {
             cv.test_scores[i] = (cv.test_scores[i] - sub) / scale;
         }
         rescale(&mut cv.w_norm[f], sub, scale);

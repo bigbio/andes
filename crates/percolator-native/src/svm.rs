@@ -1,6 +1,7 @@
 use crate::budget::{Budget, Reservation};
 use crate::normalize::Norm;
 use crate::store::Store;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -23,6 +24,8 @@ enum RowData {
 static ROWS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const LANES: usize = 8;
+
+const CHUNK: usize = 4096;
 
 pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
@@ -332,9 +335,38 @@ impl<'a> Train<'a> {
         self.rows.len()
     }
 
-    fn scan(&self, subset: &[usize], f: impl FnMut(usize, &[f32])) {
-        let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
-        self.x.scan(&ids, f);
+    fn pass<P, I, B>(&self, subset: &[usize], out: &mut [f64], init: I, body: B) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+    {
+        match &self.x.data {
+            RowData::Ram(_) => subset
+                .par_chunks(CHUNK)
+                .zip(out.par_chunks_mut(CHUNK))
+                .enumerate()
+                .map(|(c, (ids, outs))| {
+                    let mut part = init();
+                    for (j, (&i, o)) in ids.iter().zip(outs.iter_mut()).enumerate() {
+                        body(&mut part, c * CHUNK + j, self.x.row(self.rows[i]), o);
+                    }
+                    part
+                })
+                .collect(),
+            RowData::Spill(_) => {
+                let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
+                let mut parts: Vec<P> = Vec::with_capacity(subset.len().div_ceil(CHUNK));
+                self.x.scan(&ids, |k, row| {
+                    if k % CHUNK == 0 {
+                        parts.push(init());
+                    }
+                    let part = parts.last_mut().expect("chunk partial");
+                    body(part, k, row, &mut out[k]);
+                });
+                parts
+            }
+        }
     }
 
     fn y(&self, i: usize) -> f64 {
@@ -417,12 +449,23 @@ fn cgls(
     let u = &mut ws.u;
     let sv = &mut ws.s;
     let beta_old = &mut ws.beta_old;
+    let stride = u.len();
+    let parts = t.pass(
+        subset,
+        z,
+        || vec![0.0f64; stride],
+        |acc, k, row, zk| {
+            let ii = subset[k];
+            *zk = t.c(ii) * (t.y(ii) - o[ii]);
+            axpy_row(*zk, row, acc);
+        },
+    );
     u.fill(0.0);
-    t.scan(subset, |k, row| {
-        let ii = subset[k];
-        z[k] = t.c(ii) * (t.y(ii) - o[ii]);
-        axpy_row(z[k], row, u);
-    });
+    for part in &parts {
+        for (a, &b) in u.iter_mut().zip(part) {
+            *a += b;
+        }
+    }
     r.copy_from_slice(u);
     daxpy(-lambda, beta, r);
     p.copy_from_slice(r);
@@ -432,15 +475,27 @@ fn cgls(
     let mut cgiter = 0usize;
     while cgiter < cgitermax {
         cgiter += 1;
+        let pv: &[f64] = p;
+        let parts = t.pass(
+            subset,
+            q,
+            || (vec![0.0f64; stride], 0.0f64),
+            |acc, k, row, qk| {
+                let tk = dot_row(row, pv);
+                *qk = tk;
+                let ct = t.c(subset[k]) * tk;
+                acc.1 += ct * tk;
+                axpy_row(ct, row, &mut acc.0);
+            },
+        );
         sv.fill(0.0);
         let mut omega_q = 0.0;
-        t.scan(subset, |k, row| {
-            let tk = dot_row(row, p);
-            q[k] = tk;
-            let ct = t.c(subset[k]) * tk;
-            omega_q += ct * tk;
-            axpy_row(ct, row, sv);
-        });
+        for (part, oq) in &parts {
+            for (a, &b) in sv.iter_mut().zip(part) {
+                *a += b;
+            }
+            omega_q += oq;
+        }
         let gamma = omega1 / (lambda * omega_p + omega_q);
         let inv_omega2 = 1.0 / omega1;
         beta_old.copy_from_slice(beta);
@@ -563,7 +618,8 @@ pub(crate) fn mfn_from(
     if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
         let all: Vec<usize> = (0..m).collect();
-        t.scan(&all, |k, row| o[k] = dot_row(row, &w));
+        let wv: &[f64] = &w;
+        t.pass(&all, &mut o, || (), |_, _, row, ok| *ok = dot_row(row, wv));
     }
     let mut subset = vec![0usize; m];
     let (mut active, mut f) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
@@ -597,9 +653,17 @@ pub(crate) fn mfn_from(
         );
         let mut rest = subset[active..].to_vec();
         rest.sort_unstable();
-        t.scan(&rest, |k, row| {
-            o_bar[rest[k]] = dot_row(row, &w_bar);
-        });
+        let mut vals = vec![0.0f64; rest.len()];
+        let wb: &[f64] = &w_bar;
+        t.pass(
+            &rest,
+            &mut vals,
+            || (),
+            |_, _, row, v| *v = dot_row(row, wb),
+        );
+        for (&ii, &v) in rest.iter().zip(&vals) {
+            o_bar[ii] = v;
+        }
         if !ini {
             cgitermax = opts.cgitermax;
             ini = true;

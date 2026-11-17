@@ -352,6 +352,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    if cli.rescore_native {
+        let ignored: Vec<&str> = [
+            ("--percolator-bin", cli.percolator_bin.is_some()),
+            ("--percolator-docker", cli.percolator_docker),
+            (
+                "--percolator-image",
+                cli.percolator_image != output::DEFAULT_PERCOLATOR_IMAGE,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(flag, set)| set.then_some(flag))
+        .collect();
+        if !ignored.is_empty() {
+            return Err(format!(
+                "native rescoring runs no Percolator binary, so {} has no effect; drop it, or drop --rescore-native to run Percolator",
+                ignored.join(", ")
+            )
+            .into());
+        }
+    }
     let scratch_dir = crate::cli::dir_or_output_dir(
         cli.temp_dir.as_deref(),
         &output_base(

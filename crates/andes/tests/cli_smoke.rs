@@ -648,6 +648,36 @@ fn predict_rt_keeps_the_pin_well_formed() {
 }
 
 #[test]
+fn native_rejects_percolator_backend_flags() {
+    for flags in [
+        &["--percolator-bin", "/usr/bin/percolator"][..],
+        &["--percolator-docker"][..],
+        &["--percolator-image", "example/percolator:1"][..],
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = base_cmd(
+            "test-fixtures/test.mgf.gz",
+            "test-fixtures/BSA.fasta",
+            &dir.path().join("out.pin"),
+        )
+        .arg("--rescore-native")
+        .args(flags)
+        .output()
+        .expect("run andes");
+        assert!(!out.status.success(), "{flags:?} is refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "native rescoring runs no Percolator binary, so {} has no effect",
+                flags[0]
+            )),
+            "stderr: {stderr}"
+        );
+        assert!(!dir.path().join("out.pin").exists());
+    }
+}
+
+#[test]
 fn native_rejects_percolator_args() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = base_cmd(

@@ -173,3 +173,30 @@ mzML), not re-measured.
 - The open problem is selection, not generation: almost every reference spectrum yields a
   candidate row.
 - Reading the `.raw` natively, as the [reproduce commands](reproduce.md#glyco-commands-scripts-in-glyco) do, can give somewhat different counts.
+
+## Open (mass-offset) search, experimental (PXD005553, one fraction)
+
+`--open-search` takes the modification mass from the precursor offset instead of a declared
+variable mod. Full report: [`open_search/`](open_search/README.md). One mouse-liver fraction
+(PXD005553, `MouseLiver-Z-T-1`), `mouse_entrap.fasta` (T/E 0.965), Percolator 3.7.1 seed 42:
+
+| metric | truth (declared mods) | open search |
+|---|---:|---:|
+| PSMs at `q ≤ 0.01` | 2,660 | 5,213 |
+| true FDP at 1% | 0.66% | 0.79% (1.17% on `\|offset\| > 0.5` rows) |
+| oxidised-M PSMs recovered | — | 41 of 138 (30%), offset error 0.0019 Da, 21 of 22 called sites correct |
+
+The zero-offset rows read no error, but the offset rows read 1.17% at a nominal 1%: the
+shifted-ion shortlist (Yu et al., *Nat. Commun.* 2020) admits more offset candidates and lifts
+the truth-set recovery (32 to 41 of 138 over the development runs), with that error cost. On
+this file the form-based re-score alone did not raise the recovery — many of these PSMs score
+better unmodified, because the narrow search assigns the modification from the precursor mass,
+not the fragments — the shifted votes did. Stated in the report.
+
+The paper's own benchmark — a substituted database searched against unmodified spectra, where
+the offset is a known substitution — is in
+[`open_search/substitution/`](open_search/substitution/README.md): 8,555 single-substitution
+truth cases on one PXD001468 file, **48.3% recovered** with the offset within 0.02 Da, and
+**90.1% of the called sites are the substituted residue** (median offset error 0.7 mDa). With
+the reference search tuned by `--optimize` (50 ppm) the truth set grows to 8,870 and 46.8% are
+recovered.

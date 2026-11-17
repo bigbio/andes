@@ -11,7 +11,7 @@ leaderboard. Each page gives the date and the andes commit behind each row.
 | page | what it holds |
 |---|---|
 | this page | summary of every benchmark, opt-in modes |
-| [Identification](identification.md) | Astral, TMT (low- and high-res), UPS1, phospho, timsTOF, glyco PXD005553; cost on one host |
+| [Identification](identification.md) | Astral, TMT (low- and high-res), UPS1, phospho, timsTOF, glyco PXD005553, open search; cost on one host |
 | [Glycoproteomics, PXD065680](glyco/pxd065680.md) | five published glyco tools on one file |
 | [Label-free quantification](lfq.md) | ProteoBench, eight truth designs, a 500-run study |
 | [Glycopeptide LFQ, PXD005553](glyco/quant_mouse_liver/README.md) | label-free quantification and match between runs of glycopeptides |
@@ -113,6 +113,12 @@ Settings, error control and cost of every row: [Identification](identification.m
 
 ![Chimeric mode on Astral, PSMs at a true FDP of 1%](https://andes.quantms.org/figures/chimeric.svg)
 
+**Open (mass-offset) search** (`--open-search`, experimental): one mouse-liver fraction of
+PXD005553, with entrapment. It reaches 5,213 PSMs at `q ≤ 0.01` against the declared-mod search's
+2,660, at a true FDP of 0.79% (1.17% on rows with a non-zero offset); 41 of 138 oxidised-M PSMs
+are recovered. Report: [`open_search/`](open_search/README.md). Numbers and caveats are in
+[Identification](identification.md#open-mass-offset-search-experimental-pxd005553-one-fraction).
+
 Figures: drawn by the site from `website/benchmarks.json`, which `render.py` writes from
 [`results/`](results/).
 
@@ -129,6 +135,7 @@ Figures: drawn by the site from `website/benchmarks.json`, which `render.py` wri
       glyco/         glyco harness: pooling, yield, entrapment, reference scoring
       glyco/pxd065680.md  PXD065680 five-tool comparison (source of the site glyco page)
       glyco/quant_mouse_liver/  glycopeptide LFQ + MBR benchmark, PXD005553 (5 fractions)
+      open_search/   open (mass-offset) search benchmark: recovery of a declared mod, entrapment
       configs/       per-engine parameter files
       proteobench/   andes MBR output -> ProteoBench "Custom" table (python3 + pyarrow)
       entrap_common.py  shared entrapment rules (ALL-ENTRAP_, I/L rescue, T/E)

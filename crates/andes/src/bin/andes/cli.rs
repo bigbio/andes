@@ -661,7 +661,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) glyco: bool,
 
-    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO" (experimental)
+    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO"; several as "DSSO; DSBU" (experimental)
     ///
     /// The linker is written like a modification: a reagent name (DSSO, DSBU or BuUrBu,
     /// DSBSO, CDI; non-cleavable DSS or BS3, BS2G or DSG, EGS, DST, DSP or DTSSP, PhoX or

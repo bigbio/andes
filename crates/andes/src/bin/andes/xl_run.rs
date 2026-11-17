@@ -503,12 +503,12 @@ pub(crate) fn run_xl(
         for r in found.iter_mut() {
             r.linker = li;
         }
+        runs.push(XlRun { linker, table });
         if li == 0 {
             results = found;
         } else {
-            results = merge_linkers(results, found);
+            results = merge_linkers(results, found, &runs);
         }
-        runs.push(XlRun { linker, table });
     }
     if runs.len() > 1 {
         let mut by: Vec<usize> = vec![0; runs.len()];
@@ -607,10 +607,25 @@ pub(crate) fn run_xl(
     Ok(())
 }
 
+/// One result per spectrum: the CSM with the best peptide pair over the linkers. Its
+/// runner-up (the delta term of the CSM score) covers every linker: the other linker's best
+/// pair when it is a different peptide pair, else that linker's own runner-up.
 fn merge_linkers(
     into: Vec<XlSpectrumResult>,
     other: Vec<XlSpectrumResult>,
+    runs: &[XlRun],
 ) -> Vec<XlSpectrumResult> {
+    let seqs = |r: &XlSpectrumResult| {
+        r.csm.as_ref().map(|c| {
+            let peps = runs[r.linker].table.peptides();
+            let mut v = [
+                peps[c.alpha.pep as usize].bare(),
+                peps[c.beta.pep as usize].bare(),
+            ];
+            v.sort();
+            v
+        })
+    };
     let mut by_spec: std::collections::HashMap<usize, XlSpectrumResult> =
         other.into_iter().map(|r| (r.spec_idx, r)).collect();
     let mut out: Vec<XlSpectrumResult> = into
@@ -619,27 +634,40 @@ fn merge_linkers(
             let Some(o) = by_spec.remove(&r.spec_idx) else {
                 return r;
             };
-            let s = |x: &XlSpectrumResult| {
-                x.csm.as_ref().map(|c| {
-                    search::xl_search::combined_pair_score(c.pair_score, c.second_pair_score)
-                })
+            let (Some(a), Some(b)) = (&r.csm, &o.csm) else {
+                return if r.csm.is_some() || o.csm.is_none() { r } else { o };
             };
-            match (s(&r), s(&o)) {
-                (_, None) => r,
-                (None, Some(_)) => o,
-                (Some(a), Some(b)) => {
-                    if b > a {
-                        o
-                    } else {
-                        r
-                    }
-                }
-            }
+            let (mut win, lose) = if b.pair_score > a.pair_score {
+                (o, r)
+            } else {
+                (r, o)
+            };
+            let same_pair = seqs(&lose) == seqs(&win);
+            let l = lose.csm.as_ref().expect("both have a CSM");
+            let c = win.csm.as_mut().expect("both have a CSM");
+            c.second_pair_score =
+                runner_up(c.second_pair_score, l.pair_score, l.second_pair_score, same_pair);
+            win
         })
         .collect();
     out.extend(by_spec.into_values());
     out.sort_by_key(|r| r.spec_idx);
     out
+}
+
+/// The winner's runner-up after it beat another linker's CSM (`loser_pair`, its runner-up
+/// `loser_second`): the loser's pair competes unless it is the winner's peptide pair.
+fn runner_up(
+    own: Option<f32>,
+    loser_pair: f32,
+    loser_second: Option<f32>,
+    same_pair: bool,
+) -> Option<f32> {
+    let rival = if same_pair { loser_second } else { Some(loser_pair) };
+    match (own, rival) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, y) => x.or(y),
+    }
 }
 
 #[cfg(test)]
@@ -663,6 +691,17 @@ mod tests {
         assert_eq!(b[0].name, "DSBSO:water");
         assert!(water_monolink_mods(&linker("CDI")).is_empty());
         assert!(water_monolink_mods(&linker("DTBP")).is_empty());
+    }
+
+    #[test]
+    fn the_runner_up_covers_the_other_linkers_pairs() {
+        // A different pair of the other linker at 99 is the runner-up of a 100 / 50 CSM.
+        assert_eq!(runner_up(Some(50.0), 99.0, Some(10.0), false), Some(99.0));
+        // The same peptide pair does not compete with itself; its runner-up does.
+        assert_eq!(runner_up(Some(50.0), 99.0, Some(60.0), true), Some(60.0));
+        assert_eq!(runner_up(Some(50.0), 99.0, Some(10.0), true), Some(50.0));
+        assert_eq!(runner_up(None, 99.0, None, true), None);
+        assert_eq!(runner_up(None, 99.0, None, false), Some(99.0));
     }
 
     #[test]

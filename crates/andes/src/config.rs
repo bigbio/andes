@@ -740,7 +740,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
                     .collect::<Result<Vec<_>, _>>()?,
                 _ => vec![xl_linker("search.xl", v)?],
             };
-            args.xl = Some(crate::cli::XlSet(linkers));
+            args.xl = Some(crate::cli::XlSet::new("search.xl", linkers)?);
         }
     }
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
@@ -1377,6 +1377,11 @@ glyco:
         assert_eq!(x.ends[1].residues, b"D");
         for (bad, msg) in [
             ("search:\n  xl: DSOS\n", "did you mean DSSO"),
+            ("search:\n  xl: []\n", "search.xl: no crosslinker"),
+            (
+                "search:\n  xl: [DSSO, \"DSSO (K)\"]\n",
+                "search.xl: DSSO is given twice",
+            ),
             ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
             ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
             (

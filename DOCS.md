@@ -1208,7 +1208,8 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 
 Several crosslinkers are searched together as a `;`-separated list (`--xl "DSSO; DSBU"`), a
 YAML list under `search.xl`, or SDRF rows naming different reagents. Each linker is searched with
-its own candidates, each spectrum keeps its best CSM across them, and the q-values are computed
+its own candidates, each spectrum keeps the CSM with the best pair score across them (its
+`second` then also covers the other linkers' peptide pairs), and the q-values are computed
 over all of them; the CSM table then adds a `crosslinker` column. Every listed linker enlarges the
 target and decoy space: on the benchmark, DSSO data searched as `DSSO; DSBU` assigned 0–1.5 % of
 its accepted CSMs to DSBU and found 3 % fewer true CSMs, so list only the reagents in the samples.

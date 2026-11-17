@@ -273,6 +273,24 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
 #[derive(Debug, Clone)]
 pub(crate) struct XlSet(pub(crate) Vec<andes_xl::crosslinker::Crosslinker>);
 
+impl XlSet {
+    /// One or more crosslinkers with distinct names; `key` names the option in an error.
+    pub(crate) fn new(
+        key: &str,
+        linkers: Vec<andes_xl::crosslinker::Crosslinker>,
+    ) -> Result<Self, String> {
+        if linkers.is_empty() {
+            return Err(format!("{key}: no crosslinker"));
+        }
+        for (i, a) in linkers.iter().enumerate() {
+            if linkers[..i].iter().any(|b| b.name == a.name) {
+                return Err(format!("{key}: {} is given twice", a.name));
+            }
+        }
+        Ok(Self(linkers))
+    }
+}
+
 pub(crate) fn parse_xl_one(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
     andes_xl::spec::XlDecl::parse(s)
         .and_then(|d| d.resolve(model::unimod::bundled()))
@@ -286,15 +304,7 @@ pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
         .filter(|x| !x.is_empty())
         .map(parse_xl_one)
         .collect::<Result<Vec<_>, _>>()?;
-    if linkers.is_empty() {
-        return Err("--xl: no crosslinker".into());
-    }
-    for (i, a) in linkers.iter().enumerate() {
-        if linkers[..i].iter().any(|b| b.name == a.name) {
-            return Err(format!("--xl: {} is given twice", a.name));
-        }
-    }
-    Ok(XlSet(linkers))
+    XlSet::new("--xl", linkers)
 }
 
 /// The protein database options shared by the search, `andes inference` and

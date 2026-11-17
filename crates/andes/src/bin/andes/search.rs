@@ -1921,7 +1921,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
 
-            let mass_ordered = params.fragment_index_top_k > 0 && !standalone;
+            let mass_ordered = (params.fragment_index_top_k > 0 || cli.dia) && !standalone;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -1960,6 +1960,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return Err("parser thread panicked".into()),
             };
             if cli.dia && mass_ordered {
+                for s in &mut pending {
+                    s.precursor_charge = None;
+                }
                 prepared.set_dia_ms1(if quant.is_some() {
                     run_scans.ms1.clone()
                 } else {

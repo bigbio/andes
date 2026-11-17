@@ -79,7 +79,7 @@ fn synthetic_pin() -> String {
 struct Outputs {
     target: Vec<u8>,
     decoy: Vec<u8>,
-    weights: Vec<u8>,
+    weights: Option<Vec<u8>>,
 }
 
 fn p(path: &Path) -> String {
@@ -120,23 +120,28 @@ fn training(pin: &Path, dir: &Path, threads: usize, limit: u64) -> Outputs {
     Outputs {
         target: std::fs::read(&t).unwrap(),
         decoy: std::fs::read(&d).unwrap(),
-        weights: std::fs::read(&w).unwrap(),
+        weights: Some(std::fs::read(&w).unwrap()),
     }
 }
 
-fn static_pass(pin: &Path, init: &Path, dir: &Path, threads: usize, limit: u64) -> Outputs {
+fn static_pass(
+    pin: &Path,
+    init: &Path,
+    dir: &Path,
+    threads: usize,
+    limit: u64,
+    with_weights: bool,
+) -> Outputs {
     let t = dir.join("st.psms");
     let d = dir.join("sd.psms");
     let w = dir.join("sw.tsv");
-    let args = vec![
+    let mut args = vec![
         "--seed".to_string(),
         "42".to_string(),
         "--results-psms".to_string(),
         p(&t),
         "--decoy-results-psms".to_string(),
         p(&d),
-        "--weights".to_string(),
-        p(&w),
         "--only-psms".to_string(),
         "--static".to_string(),
         "--init-weights".to_string(),
@@ -147,6 +152,10 @@ fn static_pass(pin: &Path, init: &Path, dir: &Path, threads: usize, limit: u64) 
         threads.to_string(),
         p(pin),
     ];
+    if with_weights {
+        args.insert(6, "--weights".to_string());
+        args.insert(7, p(&w));
+    }
     run(
         &strs(&args),
         MemLimit {
@@ -158,7 +167,7 @@ fn static_pass(pin: &Path, init: &Path, dir: &Path, threads: usize, limit: u64) 
     Outputs {
         target: std::fs::read(&t).unwrap(),
         decoy: std::fs::read(&d).unwrap(),
-        weights: std::fs::read(&w).unwrap(),
+        weights: with_weights.then(|| std::fs::read(&w).unwrap()),
     }
 }
 
@@ -167,6 +176,7 @@ fn same(label: &str, a: &Outputs, b: &Outputs) {
     assert!(a.target == b.target, "{label}: target file differs");
     assert!(a.decoy == b.decoy, "{label}: decoy file differs");
     assert!(a.weights == b.weights, "{label}: weights file differs");
+    assert!(a.weights.is_some() || b.weights.is_none());
 }
 
 fn write_pin(dir: &Path) -> PathBuf {
@@ -199,14 +209,23 @@ fn output_identical_at_any_memory_limit() {
         same(&format!("training at {limit} bytes"), &runs[0].1, o);
     }
     let init = runs[0].0.join("w.tsv");
-    let mut statics = Vec::new();
-    for (i, limit) in [64u64 << 30, 1 << 20, 1].into_iter().enumerate() {
-        let sub = dir.path().join(format!("static{i}"));
-        std::fs::create_dir(&sub).unwrap();
-        statics.push((static_pass(&pin, &init, &sub, 3, limit), limit));
-    }
-    for (o, limit) in &statics[1..] {
-        same(&format!("static at {limit} bytes"), &statics[0].0, o);
+    for with_weights in [true, false] {
+        let mut statics = Vec::new();
+        for (i, limit) in [64u64 << 30, 1 << 20, 1].into_iter().enumerate() {
+            let sub = dir.path().join(format!("static{with_weights}{i}"));
+            std::fs::create_dir(&sub).unwrap();
+            statics.push((
+                static_pass(&pin, &init, &sub, 3, limit, with_weights),
+                limit,
+            ));
+        }
+        for (o, limit) in &statics[1..] {
+            same(
+                &format!("static (weights {with_weights}) at {limit} bytes"),
+                &statics[0].0,
+                o,
+            );
+        }
     }
 }
 
@@ -222,11 +241,24 @@ fn output_identical_at_1_and_16_threads() {
     }
     same("training at 16 threads", &runs[0].1, &runs[1].1);
     let init = runs[0].0.join("w.tsv");
-    let mut statics = Vec::new();
-    for (i, threads) in [1usize, 16].into_iter().enumerate() {
-        let sub = dir.path().join(format!("static{i}"));
-        std::fs::create_dir(&sub).unwrap();
-        statics.push(static_pass(&pin, &init, &sub, threads, 1 << 20));
+    for with_weights in [true, false] {
+        let mut statics = Vec::new();
+        for (i, threads) in [1usize, 16].into_iter().enumerate() {
+            let sub = dir.path().join(format!("static{with_weights}{i}"));
+            std::fs::create_dir(&sub).unwrap();
+            statics.push(static_pass(
+                &pin,
+                &init,
+                &sub,
+                threads,
+                1 << 20,
+                with_weights,
+            ));
+        }
+        same(
+            &format!("static (weights {with_weights}) at 16 threads"),
+            &statics[0],
+            &statics[1],
+        );
     }
-    same("static at 16 threads", &statics[0], &statics[1]);
 }

@@ -453,6 +453,10 @@ pub struct XlSpectrumResult {
     pub csm: Option<Csm>,
     pub oracle: Option<OracleResult>,
     pub linker: usize,
+    /// For a spectrum without a precursor charge: the best pair score found at the charges
+    /// not chosen (necessarily another peptide pair, as the precursor mass differs). Only the
+    /// merge of several linkers reads it.
+    pub other_charge_pair: Option<f32>,
 }
 
 struct StubMods {
@@ -948,6 +952,7 @@ fn search_spectrum(
             let range = &prepared.params.charge_range;
             let lo = (*range.start()).max(cfg.min_precursor_charge);
             let mut best: Option<XlSpectrumResult> = None;
+            let mut pairs: Vec<f32> = Vec::new();
             for z in lo..=*range.end() {
                 let Some(r) =
                     search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
@@ -968,8 +973,16 @@ fn search_spectrum(
                     },
                 };
                 if better {
+                    if let Some(c) = best.as_ref().and_then(|b| b.csm.as_ref()) {
+                        pairs.push(c.pair_score);
+                    }
                     best = Some(r);
+                } else if let Some(c) = &r.csm {
+                    pairs.push(c.pair_score);
                 }
+            }
+            if let Some(b) = best.as_mut() {
+                b.other_charge_pair = pairs.into_iter().max_by(f32::total_cmp);
             }
             best
         }
@@ -1020,6 +1033,7 @@ fn search_spectrum_at(
         csm: None,
         oracle: None,
         linker: 0,
+        other_charge_pair: None,
     };
     if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);
@@ -1362,7 +1376,10 @@ mod tests {
 
     #[test]
     fn a_half_pair_of_a_triply_charged_precursor_pays_a_penalty() {
-        assert_eq!(half_pair_penalty(PairKind::Half, 3), LOW_CHARGE_HALF_PAIR_PENALTY);
+        assert_eq!(
+            half_pair_penalty(PairKind::Half, 3),
+            LOW_CHARGE_HALF_PAIR_PENALTY
+        );
         assert_eq!(half_pair_penalty(PairKind::Half, 4), 0.0);
         assert_eq!(half_pair_penalty(PairKind::Full, 3), 0.0);
         assert_eq!(half_pair_penalty(PairKind::Open, 3), 0.0);

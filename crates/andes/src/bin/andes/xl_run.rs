@@ -609,7 +609,8 @@ pub(crate) fn run_xl(
 
 /// One result per spectrum: the CSM with the best peptide pair over the linkers. Its
 /// runner-up (the delta term of the CSM score) covers every linker: the other linker's best
-/// pair when it is a different peptide pair, else that linker's own runner-up.
+/// pair when it is a different peptide pair, else that linker's own runner-up, and for a
+/// spectrum without a precursor charge also the pairs that linker found at its other charges.
 fn merge_linkers(
     into: Vec<XlSpectrumResult>,
     other: Vec<XlSpectrumResult>,
@@ -635,7 +636,11 @@ fn merge_linkers(
                 return r;
             };
             let (Some(a), Some(b)) = (&r.csm, &o.csm) else {
-                return if r.csm.is_some() || o.csm.is_none() { r } else { o };
+                return if r.csm.is_some() || o.csm.is_none() {
+                    r
+                } else {
+                    o
+                };
             };
             let (mut win, lose) = if b.pair_score > a.pair_score {
                 (o, r)
@@ -645,8 +650,13 @@ fn merge_linkers(
             let same_pair = seqs(&lose) == seqs(&win);
             let l = lose.csm.as_ref().expect("both have a CSM");
             let c = win.csm.as_mut().expect("both have a CSM");
-            c.second_pair_score =
-                runner_up(c.second_pair_score, l.pair_score, l.second_pair_score, same_pair);
+            c.second_pair_score = runner_up(
+                c.second_pair_score,
+                l.pair_score,
+                l.second_pair_score,
+                same_pair,
+                lose.other_charge_pair,
+            );
             win
         })
         .collect();
@@ -656,18 +666,24 @@ fn merge_linkers(
 }
 
 /// The winner's runner-up after it beat another linker's CSM (`loser_pair`, its runner-up
-/// `loser_second`): the loser's pair competes unless it is the winner's peptide pair.
+/// `loser_second`, its best pair at the charges it did not choose `loser_other_charge`): the
+/// loser's pair competes unless it is the winner's peptide pair.
 fn runner_up(
     own: Option<f32>,
     loser_pair: f32,
     loser_second: Option<f32>,
     same_pair: bool,
+    loser_other_charge: Option<f32>,
 ) -> Option<f32> {
-    let rival = if same_pair { loser_second } else { Some(loser_pair) };
-    match (own, rival) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (x, y) => x.or(y),
-    }
+    let rival = if same_pair {
+        loser_second
+    } else {
+        Some(loser_pair)
+    };
+    [own, rival, loser_other_charge]
+        .into_iter()
+        .flatten()
+        .max_by(f32::total_cmp)
 }
 
 #[cfg(test)]
@@ -696,12 +712,27 @@ mod tests {
     #[test]
     fn the_runner_up_covers_the_other_linkers_pairs() {
         // A different pair of the other linker at 99 is the runner-up of a 100 / 50 CSM.
-        assert_eq!(runner_up(Some(50.0), 99.0, Some(10.0), false), Some(99.0));
+        assert_eq!(
+            runner_up(Some(50.0), 99.0, Some(10.0), false, None),
+            Some(99.0)
+        );
         // The same peptide pair does not compete with itself; its runner-up does.
-        assert_eq!(runner_up(Some(50.0), 99.0, Some(60.0), true), Some(60.0));
-        assert_eq!(runner_up(Some(50.0), 99.0, Some(10.0), true), Some(50.0));
-        assert_eq!(runner_up(None, 99.0, None, true), None);
-        assert_eq!(runner_up(None, 99.0, None, false), Some(99.0));
+        assert_eq!(
+            runner_up(Some(50.0), 99.0, Some(60.0), true, None),
+            Some(60.0)
+        );
+        assert_eq!(
+            runner_up(Some(50.0), 99.0, Some(10.0), true, None),
+            Some(50.0)
+        );
+        assert_eq!(runner_up(None, 99.0, None, true, None), None);
+        assert_eq!(runner_up(None, 99.0, None, false, None), Some(99.0));
+        // Without a precursor charge, linker A kept 100 / 50 at one charge over a pair at 110
+        // at another; linker B wins with 120 / 80 at that other charge: 110 is its runner-up.
+        assert_eq!(
+            runner_up(Some(80.0), 100.0, Some(50.0), false, Some(110.0)),
+            Some(110.0)
+        );
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use crate::budget::Reservation;
 use crate::direction::{init_directions, pin_direction};
 use crate::folds::folds_by_spectrum;
-use crate::normalize::{raw_weights, score, Norm};
+use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
-use crate::scores::{count_at, tdc_q, training_sets};
-use crate::svm::{fill, l2_svm_mfn, MfnOpts, Rows};
+use crate::scores::tdc_cut;
+use crate::svm::{l2_svm_mfn, MfnOpts, Rows};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 
@@ -59,12 +59,24 @@ struct TrainSet {
 }
 
 const TASK_BYTES_PER_EXAMPLE: u64 = 64;
-const TASK_BYTES_PER_ROW: u64 = 40;
 
-fn score_rows(pin: &Pin, norm: &Norm, rows: &[usize], w: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0f64; rows.len()];
-    fill(&pin.rows, norm, rows, |p, row| out[p] = dot(row, w));
-    out
+fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
+    let nf = pin.rows.nfeat();
+    if nf == 0 {
+        return ws.iter().map(|w| vec![w[0]; rows.len()]).collect();
+    }
+    per_row_sorted(&pin.rows, rows, ws.len(), |row, out, normed| {
+        normed.clear();
+        normed.extend(
+            row.iter()
+                .zip(&norm.mean)
+                .zip(&norm.inv_sd)
+                .map(|((&x, &m), &sd)| (f64::from(x) - m) * sd),
+        );
+        for (o, w) in out.iter_mut().zip(ws) {
+            *o = dot(normed, w);
+        }
+    })
 }
 
 fn dot(row: &[f64], w: &[f64]) -> f64 {
@@ -74,6 +86,37 @@ fn dot(row: &[f64], w: &[f64]) -> f64 {
         s += x * wj;
     }
     s
+}
+
+const SCORE_BYTES_PER_ROW: u64 = 8;
+
+fn fit_positives(
+    pin: &Pin,
+    norm: &Norm,
+    fold: &Fold,
+    fits: &[Option<Vec<f64>>],
+    fdr: f64,
+) -> Vec<Option<(usize, Vec<f64>)>> {
+    let present: Vec<usize> = (0..fits.len()).filter(|&k| fits[k].is_some()).collect();
+    let per_fit = (fold.train.len() as u64).max(1) * SCORE_BYTES_PER_ROW;
+    let group = ((pin.budget.available() / per_fit) as usize).clamp(1, present.len().max(1));
+    let mut out: Vec<Option<(usize, Vec<f64>)>> = (0..fits.len()).map(|_| None).collect();
+    for ks in present.chunks(group) {
+        let _held = Reservation::take(&pin.budget, ks.len() as u64 * per_fit);
+        let ws: Vec<&[f64]> = ks
+            .iter()
+            .map(|&k| fits[k].as_deref().expect("present fit"))
+            .collect();
+        let scores = score_fits(pin, norm, &fold.train, &ws);
+        let counted: Vec<(usize, Vec<f64>)> = scores
+            .into_par_iter()
+            .map(|s| (tdc_cut(&s, &fold.train_decoy, fdr, true).below, s))
+            .collect();
+        for (&k, c) in ks.iter().zip(counted) {
+            out[k] = Some(c);
+        }
+    }
+    out
 }
 
 fn descending(pin: &Pin, fold: &Fold, s: &[f64], a: usize, b: usize) -> Ordering {
@@ -86,8 +129,16 @@ fn descending(pin: &Pin, fold: &Fold, s: &[f64], a: usize, b: usize) -> Ordering
 }
 
 fn train_set(pin: &Pin, norm: &Norm, fold: &Fold, s: &[f64], fdr: f64) -> Result<TrainSet, String> {
-    let q = tdc_q(s, &fold.train_decoy, true);
-    let (mut pos, mut neg) = training_sets(&q, &fold.train_decoy, fdr);
+    let cut = tdc_cut(s, &fold.train_decoy, fdr, true).at_most;
+    let mut pos = Vec::new();
+    let mut neg = Vec::new();
+    for (i, (&v, &d)) in s.iter().zip(&fold.train_decoy).enumerate() {
+        if d {
+            neg.push(i);
+        } else if cut.is_some_and(|c| v >= c) {
+            pos.push(i);
+        }
+    }
     neg.sort_by(|&a, &b| descending(pin, fold, s, a, b));
     pos.sort_by(|&a, &b| descending(pin, fold, s, a, b));
     let global: Vec<usize> = neg.iter().chain(&pos).map(|&l| fold.train[l]).collect();
@@ -99,7 +150,7 @@ fn train_set(pin: &Pin, norm: &Norm, fold: &Fold, s: &[f64], fdr: f64) -> Result
 }
 
 fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) -> usize {
-    count_at(&tdc_q(s, decoy, skip_decoys_plus_one), decoy, fdr)
+    tdc_cut(s, decoy, fdr, skip_decoys_plus_one).below
 }
 
 pub fn train(
@@ -216,11 +267,10 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         let task_bytes: Vec<u64> = pairs
             .iter()
             .map(|&(f, _, _)| {
-                let m = (sets[f].idx_neg.len() + sets[f].idx_pos.len()) as u64;
-                m * TASK_BYTES_PER_EXAMPLE + folds[f].train.len() as u64 * TASK_BYTES_PER_ROW
+                (sets[f].idx_neg.len() + sets[f].idx_pos.len()) as u64 * TASK_BYTES_PER_EXAMPLE
             })
             .collect();
-        let mut fits: Vec<Option<(Vec<f64>, usize)>> = Vec::with_capacity(pairs.len());
+        let mut fits: Vec<Option<Vec<f64>>> = Vec::with_capacity(pairs.len());
         while fits.len() < pairs.len() {
             let start = fits.len();
             let mut held = Vec::new();
@@ -236,37 +286,50 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 if t.idx_neg.is_empty() && t.idx_pos.is_empty() {
                     return None;
                 }
-                let ww = l2_svm_mfn(&t.x, &t.idx_pos, &t.idx_neg, cpos, cfrac * cpos, &opts);
-                let s = score_rows(pin, norm, &folds[f].train, &ww);
-                let tp = positives(&s, &folds[f].train_decoy, cfg.test_fdr, true);
-                Some((ww, tp))
+                Some(l2_svm_mfn(
+                    &t.x,
+                    &t.idx_pos,
+                    &t.idx_neg,
+                    cpos,
+                    cfrac * cpos,
+                    &opts,
+                ))
             }));
         }
+        drop(sets);
         let mut estimated = 0usize;
-        for f in 0..sets.len() {
+        for f in 0..FOLDS {
+            let fold_fits = &fits[f * per_fold..(f + 1) * per_fold];
+            let tps = fit_positives(pin, norm, &folds[f], fold_fits, cfg.test_fdr);
             let mut best = 0usize;
             let mut chosen = None;
-            for (k, fit) in fits[f * per_fold..(f + 1) * per_fold].iter().enumerate() {
-                if let Some((ww, tp)) = fit {
-                    if *tp >= best {
-                        best = *tp;
+            for (k, tp) in tps.into_iter().enumerate() {
+                if let Some((tp, s)) = tp {
+                    if tp >= best {
+                        best = tp;
                         chosen = Some(k);
-                        w[f].clone_from(ww);
+                        train_scores[f] = s;
                     }
                 }
             }
             estimated += best;
-            if cfg.verbose > 2 {
-                if let Some(k) = chosen {
-                    let (_, cpos, cfrac) = pairs[f * per_fold + k];
-                    eprintln!(
-                        "Split {}: selected Cpos={cpos} Cneg={} with {best} training set positives",
-                        f + 1,
-                        cfrac * cpos
-                    );
+            match chosen {
+                Some(k) => {
+                    w[f].clone_from(fold_fits[k].as_ref().expect("chosen fit"));
+                    if cfg.verbose > 2 {
+                        let (_, cpos, cfrac) = pairs[f * per_fold + k];
+                        eprintln!(
+                            "Split {}: selected Cpos={cpos} Cneg={} with {best} training set positives",
+                            f + 1,
+                            cfrac * cpos
+                        );
+                    }
+                }
+                None => {
+                    train_scores[f] =
+                        score_fits(pin, norm, &folds[f].train, &[&w[f]]).swap_remove(0);
                 }
             }
-            train_scores[f] = score_rows(pin, norm, &folds[f].train, &w[f]);
         }
         if cfg.verbose > 1 {
             eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);

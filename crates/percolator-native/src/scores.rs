@@ -1,6 +1,111 @@
 use crate::pin::RowMeta;
 use std::collections::HashMap;
 
+pub(crate) fn order_key64(x: f64) -> u64 {
+    let b = x.to_bits();
+    if b >> 63 == 1 {
+        !b
+    } else {
+        b | (1 << 63)
+    }
+}
+
+fn from_key64(k: u64) -> f64 {
+    f64::from_bits(if k >> 63 == 1 { k & !(1 << 63) } else { !k })
+}
+
+pub(crate) fn radix_sort_u64(v: &mut Vec<u64>) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    let mut tmp = vec![0u64; n];
+    for shift in (0..64).step_by(8) {
+        let mut count = [0usize; 256];
+        for &x in v.iter() {
+            count[((x >> shift) & 0xff) as usize] += 1;
+        }
+        if count.contains(&n) {
+            continue;
+        }
+        let mut sum = 0usize;
+        for c in count.iter_mut() {
+            let t = *c;
+            *c = sum;
+            sum += t;
+        }
+        for &x in v.iter() {
+            let d = ((x >> shift) & 0xff) as usize;
+            tmp[count[d]] = x;
+            count[d] += 1;
+        }
+        std::mem::swap(v, &mut tmp);
+    }
+}
+
+pub(crate) struct TdcCut {
+    pub below: usize,
+    pub at_most: Option<f64>,
+}
+
+pub(crate) fn tdc_cut(
+    scores: &[f64],
+    is_decoy: &[bool],
+    fdr: f64,
+    skip_decoys_plus_one: bool,
+) -> TdcCut {
+    let mut t: Vec<u64> = Vec::new();
+    let mut d: Vec<u64> = Vec::new();
+    for (&s, &dd) in scores.iter().zip(is_decoy) {
+        if dd {
+            d.push(order_key64(s));
+        } else {
+            t.push(order_key64(s));
+        }
+    }
+    radix_sort_u64(&mut t);
+    radix_sort_u64(&mut d);
+    let mut decoys: u64 = if skip_decoys_plus_one { 0 } else { 1 };
+    let mut targets: u64 = 0;
+    let mut below = 0u64;
+    let mut at_most = None;
+    let (mut i, mut j) = (t.len(), d.len());
+    while i > 0 || j > 0 {
+        let from_t = j == 0 || (i > 0 && t[i - 1] >= d[j - 1]);
+        let v = if from_t {
+            from_key64(t[i - 1])
+        } else {
+            from_key64(d[j - 1])
+        };
+        if from_t {
+            targets += 1;
+            i -= 1;
+        } else {
+            decoys += 1;
+            j -= 1;
+        }
+        while i > 0 && from_key64(t[i - 1]) == v {
+            targets += 1;
+            i -= 1;
+        }
+        while j > 0 && from_key64(d[j - 1]) == v {
+            decoys += 1;
+            j -= 1;
+        }
+        let f = (decoys as f64 / targets.max(1) as f64).min(1.0);
+        if f < fdr {
+            below = targets;
+        }
+        if f <= fdr {
+            at_most = Some(v);
+        }
+    }
+    TdcCut {
+        below: below as usize,
+        at_most,
+    }
+}
+
 pub fn tdc_q(scores: &[f64], is_decoy: &[bool], skip_decoys_plus_one: bool) -> Vec<f64> {
     let n = scores.len();
     let mut order: Vec<usize> = (0..n).collect();

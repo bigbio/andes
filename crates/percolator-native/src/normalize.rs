@@ -1,5 +1,6 @@
 use crate::pin::Pin;
 use crate::store::Store;
+use std::sync::Mutex;
 
 pub struct Norm {
     pub mean: Vec<f64>,
@@ -57,38 +58,75 @@ pub fn raw_weights(norm: &Norm, w: &[f64]) -> Vec<f64> {
     out
 }
 
+pub(crate) fn per_row_sorted<F>(rows: &Store, idx: &[usize], k: usize, f: F) -> Vec<Vec<f64>>
+where
+    F: Fn(&[f32], &mut [f64], &mut Vec<f64>) + Sync,
+{
+    let n = idx.len();
+    let mut out: Vec<Vec<f64>> = (0..k).map(|_| vec![0.0f64; n]).collect();
+    let nf = rows.nfeat();
+    if n == 0 || rows.is_empty() || nf == 0 {
+        return out;
+    }
+    let br = rows.block_rows();
+    let nblocks = rows.len().div_ceil(br);
+    let bounds: Vec<usize> = (0..=nblocks)
+        .map(|b| idx.partition_point(|&r| r < b * br))
+        .collect();
+    let mut per_block: Vec<Vec<&mut [f64]>> = (0..nblocks).map(|_| Vec::with_capacity(k)).collect();
+    for o in out.iter_mut() {
+        let mut rest: &mut [f64] = o;
+        for (b, slot) in per_block.iter_mut().enumerate() {
+            let (head, tail) = rest.split_at_mut(bounds[b + 1] - bounds[b]);
+            slot.push(head);
+            rest = tail;
+        }
+    }
+    let per_block: Vec<Mutex<Vec<&mut [f64]>>> = per_block.into_iter().map(Mutex::new).collect();
+    rows.par_for_each_block(|start, block| {
+        let b = start / br;
+        let mut dst = per_block[b].lock().expect("score block lock");
+        let mut vals = vec![0.0f64; k];
+        let mut scratch = Vec::new();
+        for (p, &r) in idx[bounds[b]..bounds[b + 1]].iter().enumerate() {
+            let row = &block[(r - start) * nf..(r - start + 1) * nf];
+            f(row, &mut vals, &mut scratch);
+            for (o, &v) in dst.iter_mut().zip(&vals) {
+                o[p] = v;
+            }
+        }
+    });
+    out
+}
+
 pub fn score(rows: &Store, idx: &[usize], w: &[f64], norm: Option<&Norm>) -> Vec<f64> {
     let nf = rows.nfeat();
-    let mut out = vec![0.0f64; idx.len()];
-    if idx.is_empty() || rows.is_empty() {
-        return out;
+    let one = |row: &[f32], out: &mut [f64], _: &mut Vec<f64>| {
+        let mut s = w[nf];
+        match norm {
+            Some(nm) => {
+                for (((&x, &wj), &m), &sd) in row.iter().zip(w).zip(&nm.mean).zip(&nm.inv_sd) {
+                    s += wj * (f64::from(x) - m) * sd;
+                }
+            }
+            None => {
+                for (&x, &wj) in row.iter().zip(&w[..nf]).rev() {
+                    s += wj * f64::from(x);
+                }
+            }
+        }
+        out[0] = s;
+    };
+    if idx.windows(2).all(|p| p[0] <= p[1]) {
+        return per_row_sorted(rows, idx, 1, one).swap_remove(0);
     }
     let mut order: Vec<usize> = (0..idx.len()).collect();
     order.sort_by_key(|&p| idx[p]);
-    let mut next = 0usize;
-    rows.for_each_block(|start, block| {
-        let n = if nf == 0 { 0 } else { block.len() / nf };
-        let end = start + n;
-        while next < order.len() && idx[order[next]] < end {
-            let p = order[next];
-            let r = idx[p] - start;
-            let row = &block[r * nf..(r + 1) * nf];
-            let mut s = w[nf];
-            match norm {
-                Some(nm) => {
-                    for (((&x, &wj), &m), &sd) in row.iter().zip(w).zip(&nm.mean).zip(&nm.inv_sd) {
-                        s += wj * (f64::from(x) - m) * sd;
-                    }
-                }
-                None => {
-                    for (&x, &wj) in row.iter().zip(&w[..nf]).rev() {
-                        s += wj * f64::from(x);
-                    }
-                }
-            }
-            out[p] = s;
-            next += 1;
-        }
-    });
+    let sorted: Vec<usize> = order.iter().map(|&p| idx[p]).collect();
+    let got = per_row_sorted(rows, &sorted, 1, one).swap_remove(0);
+    let mut out = vec![0.0f64; idx.len()];
+    for (&p, v) in order.iter().zip(got) {
+        out[p] = v;
+    }
     out
 }

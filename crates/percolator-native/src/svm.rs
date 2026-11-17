@@ -373,13 +373,22 @@ impl Compact {
 impl Train<'_> {
     fn compact(&self, subset: &[usize]) -> Option<Compact> {
         let stride = self.x.stride;
-        if !matches!(self.x.data, RowData::Ram(_)) || subset.len() * stride * 4 > COMPACT_BYTES {
+        if subset.len() * stride * 4 > COMPACT_BYTES {
             return None;
         }
         let mut data = vec![0.0f32; subset.len() * stride];
-        data.par_chunks_mut(stride)
-            .zip(subset.par_iter())
-            .for_each(|(d, &i)| d.copy_from_slice(self.x.row(self.rows[i])));
+        match &self.x.data {
+            RowData::Ram(_) => data
+                .par_chunks_mut(stride)
+                .zip(subset.par_iter())
+                .for_each(|(d, &i)| d.copy_from_slice(self.x.row(self.rows[i]))),
+            RowData::Spill(_) => {
+                let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
+                self.x.scan(&ids, |k, row| {
+                    data[k * stride..(k + 1) * stride].copy_from_slice(row)
+                });
+            }
+        }
         Some(Compact { data, stride })
     }
 

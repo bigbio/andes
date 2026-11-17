@@ -1,5 +1,6 @@
 use crate::pin::RowMeta;
 use crate::text::Texts;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -53,6 +54,51 @@ fn io_err(path: &Path, e: std::io::Error) -> String {
     format!("write {}: {e}", path.display())
 }
 
+const LINES_PER_TASK: usize = 4096;
+
+const LINES_PER_WINDOW: usize = 16 * LINES_PER_TASK;
+
+struct Lines<'a> {
+    meta: &'a [RowMeta],
+    texts: &'a Texts,
+    file_names: &'a [String],
+    rows: &'a [usize],
+    cols: [&'a [f64]; 3],
+}
+
+impl Lines<'_> {
+    fn push(&self, k: usize, line: &mut String) -> Result<(), String> {
+        let m = &self.meta[self.rows[k]];
+        let t = self.texts.get(self.rows[k])?;
+        line.push_str(&t.psm_id);
+        line.push('\t');
+        if !self.file_names.is_empty() {
+            line.push_str(
+                self.file_names
+                    .get(m.file as usize)
+                    .map_or("", |s| s.as_str()),
+            );
+            line.push('\t');
+        }
+        for col in self.cols {
+            line.push_str(&fmt_g(col[k], 6));
+            line.push('\t');
+        }
+        line.push_str(&t.peptide);
+        line.push('\t');
+        let mut first = true;
+        for p in t.proteins.split('\t').filter(|p| !p.is_empty()) {
+            if !first {
+                line.push('\t');
+            }
+            line.push_str(p);
+            first = false;
+        }
+        line.push('\n');
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_one(
     path: &Path,
@@ -73,37 +119,30 @@ fn write_one(
     header.push_str("score\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n");
     out.write_all(header.as_bytes())
         .map_err(|e| io_err(path, e))?;
-    let mut line = String::new();
-    for &k in order {
-        let m = &meta[rows[k]];
-        if m.label != label {
-            continue;
+    let lines = Lines {
+        meta,
+        texts,
+        file_names,
+        rows,
+        cols,
+    };
+    for window in order.chunks(LINES_PER_WINDOW) {
+        let parts: Vec<Result<String, String>> = window
+            .par_chunks(LINES_PER_TASK)
+            .map(|ks| {
+                let mut buf = String::new();
+                for &k in ks {
+                    if meta[rows[k]].label == label {
+                        lines.push(k, &mut buf)?;
+                    }
+                }
+                Ok(buf)
+            })
+            .collect();
+        for part in parts {
+            out.write_all(part?.as_bytes())
+                .map_err(|e| io_err(path, e))?;
         }
-        let t = texts.get(rows[k])?;
-        line.clear();
-        line.push_str(&t.psm_id);
-        line.push('\t');
-        if !file_names.is_empty() {
-            line.push_str(file_names.get(m.file as usize).map_or("", |s| s.as_str()));
-            line.push('\t');
-        }
-        for col in cols {
-            line.push_str(&fmt_g(col[k], 6));
-            line.push('\t');
-        }
-        line.push_str(&t.peptide);
-        line.push('\t');
-        let mut first = true;
-        for p in t.proteins.split('\t').filter(|p| !p.is_empty()) {
-            if !first {
-                line.push('\t');
-            }
-            line.push_str(p);
-            first = false;
-        }
-        line.push('\n');
-        out.write_all(line.as_bytes())
-            .map_err(|e| io_err(path, e))?;
     }
     out.flush().map_err(|e| io_err(path, e))
 }
@@ -125,7 +164,7 @@ pub fn write_results(
 ) -> Result<(), String> {
     let (rows, scores) = (res.rows, res.scores);
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| {
+    order.par_sort_unstable_by(|&a, &b| {
         let (ma, mb) = (&meta[rows[a]], &meta[rows[b]]);
         scores[b]
             .total_cmp(&scores[a])

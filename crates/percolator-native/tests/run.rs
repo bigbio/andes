@@ -246,7 +246,6 @@ fn unknown_argument_is_an_error() {
         "--trainFDR",
         "-y",
         "--subset-max-train",
-        "-v",
         "--post-processing-mix-max",
     ] {
         let mut a = training_args(&o, "1", &data("svm_ref.pin"));
@@ -424,5 +423,38 @@ fn unreadable_init_weights_without_direction_aborts_even_with_override() {
         let err = run(&a, limit(dir.path())).unwrap_err();
         assert!(err.contains("cannot find an initial direction"), "{err}");
         assert!(!o.target.exists());
+    }
+}
+
+#[test]
+fn verbosity_changes_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = data("svm_ref.pin");
+    let quiet = outs(dir.path(), "q");
+    run(&training_args(&quiet, "2", &pin), limit(dir.path())).unwrap();
+    for level in ["0", "3", "5"] {
+        let o = outs(dir.path(), &format!("v{level}"));
+        let mut a = training_args(&o, "2", &pin);
+        a.splice(0..0, strs(&["-v", level]));
+        run(&a, limit(dir.path())).unwrap();
+        for (x, y) in [
+            (&quiet.target, &o.target),
+            (&quiet.decoy, &o.decoy),
+            (&quiet.weights, &o.weights),
+        ] {
+            assert_eq!(
+                std::fs::read(x).unwrap(),
+                std::fs::read(y).unwrap(),
+                "-v {level}"
+            );
+        }
+    }
+    for bad in ["6", "x"] {
+        let mut a = training_args(&quiet, "1", &pin);
+        a.splice(0..0, strs(&["-v", bad]));
+        assert!(
+            run(&a, limit(dir.path())).unwrap_err().contains("-v"),
+            "-v {bad}"
+        );
     }
 }

@@ -89,6 +89,7 @@ fn trained_scores(
     let cfg = CvConfig {
         seed: a.seed,
         overrule: a.overrule,
+        verbose: a.verbose,
         ..CvConfig::default()
     };
     let mut cv = train(pin, &norm, &cfg, pool)?;

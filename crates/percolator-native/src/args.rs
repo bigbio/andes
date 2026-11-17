@@ -10,10 +10,13 @@ pub struct Args {
     pub static_model: bool,
     pub init_weights: Option<PathBuf>,
     pub overrule: bool,
+    pub verbose: u32,
     pub pin: PathBuf,
 }
 
-const VALUE_FLAGS: [&str; 6] = [
+const VALUE_FLAGS: [&str; 8] = [
+    "-v",
+    "--verbose",
     "--seed",
     "--results-psms",
     "--decoy-results-psms",
@@ -49,6 +52,7 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
     let mut static_model = false;
     let mut init_weights = None;
     let mut overrule = false;
+    let mut verbose = 0u32;
     let mut pin = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -75,6 +79,7 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
                 "--results-psms" => target = Some(PathBuf::from(value)),
                 "--decoy-results-psms" => decoy = Some(PathBuf::from(value)),
                 "--weights" => weights = Some(PathBuf::from(value)),
+                "-v" | "--verbose" => verbose = bounded(flag, &value, 0, 5)? as u32,
                 _ => init_weights = Some(PathBuf::from(value)),
             }
         } else if SWITCHES.contains(&arg) {
@@ -113,6 +118,7 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
         static_model,
         init_weights,
         overrule,
+        verbose,
         pin: pin.ok_or("no PIN file given: the PIN path comes last")?,
     })
 }

@@ -17,6 +17,7 @@ pub struct CvConfig {
     pub cfrac: Vec<f64>,
     pub seed: u64,
     pub overrule: bool,
+    pub verbose: u32,
 }
 
 impl Default for CvConfig {
@@ -30,6 +31,7 @@ impl Default for CvConfig {
             cfrac: vec![1.0, 3.0, 10.0],
             seed: 1,
             overrule: false,
+            verbose: 0,
         }
     }
 }
@@ -217,6 +219,18 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             )
         })
         .collect::<Result<_, _>>()?;
+    if cfg.verbose > 1 && pin_direction(pin).is_none() {
+        for (f, (fd, w)) in folds.iter().zip(&init).enumerate() {
+            let s = score(&pin.rows, &fd.train, w, Some(norm));
+            let p = positives(&s, &fd.train_decoy, cfg.initial_selection_fdr, true);
+            let j = w[..nf].iter().position(|&v| v != 0.0).map_or(0, |j| j + 1);
+            eprintln!(
+                "Split {}:\tSelected feature {j} as initial direction. Could separate {p} training set positives with q<{} in that direction.",
+                f + 1,
+                cfg.initial_selection_fdr
+            );
+        }
+    }
     let init_positives: usize = folds
         .iter()
         .zip(&init)
@@ -225,6 +239,12 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             positives(&s, &fd.test_decoy, cfg.test_fdr, false)
         })
         .sum();
+    if cfg.verbose > 0 {
+        eprintln!(
+            "Found {init_positives} test set positives with q<{} in initial direction",
+            cfg.test_fdr
+        );
+    }
     let mut w = init.clone();
     let mut train_scores: Vec<Vec<f64>> = folds
         .iter()
@@ -243,6 +263,19 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             .zip(&train_scores)
             .map(|(fd, s)| train_set(pin, norm, fd, s, fdr))
             .collect();
+        if cfg.verbose > 1 {
+            eprintln!("Iteration {}:", it + 1);
+        }
+        if cfg.verbose > 2 {
+            for (f, t) in sets.iter().enumerate() {
+                eprintln!(
+                    "Split {}: Training with {} positives and {} negatives",
+                    f + 1,
+                    t.idx_pos.len(),
+                    t.idx_neg.len()
+                );
+            }
+        }
         let fits: Vec<Option<(Vec<f64>, usize)>> = pairs
             .par_iter()
             .map(|&(f, cpos, cfrac)| {
@@ -256,17 +289,36 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 Some((ww, tp))
             })
             .collect();
+        let mut estimated = 0usize;
         for (f, t) in sets.iter().enumerate() {
             let mut best = 0usize;
-            for (ww, tp) in fits[f * per_fold..(f + 1) * per_fold].iter().flatten() {
-                if *tp >= best {
-                    best = *tp;
-                    w[f].clone_from(ww);
+            let mut chosen = None;
+            for (k, fit) in fits[f * per_fold..(f + 1) * per_fold].iter().enumerate() {
+                if let Some((ww, tp)) = fit {
+                    if *tp >= best {
+                        best = *tp;
+                        chosen = Some(k);
+                        w[f].clone_from(ww);
+                    }
+                }
+            }
+            estimated += best;
+            if cfg.verbose > 2 {
+                if let Some(k) = chosen {
+                    let (_, cpos, cfrac) = pairs[f * per_fold + k];
+                    eprintln!(
+                        "Split {}: selected Cpos={cpos} Cneg={} with {best} training set positives",
+                        f + 1,
+                        cfrac * cpos
+                    );
                 }
             }
             for (r, &local) in t.perm.iter().enumerate() {
                 train_scores[f][local] = dot(t.x.row(r), &w[f]);
             }
+        }
+        if cfg.verbose > 1 {
+            eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);
         }
     }
 
@@ -280,6 +332,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         .zip(&test)
         .map(|(fd, s)| positives(s, &fd.test_decoy, cfg.test_fdr, false))
         .sum();
+    if cfg.verbose > 0 {
+        eprintln!("Found {found} test set PSMs with q<{}.", cfg.test_fdr);
+    }
     if found == 0 || init_positives > found {
         if !cfg.overrule {
             let from_pin = pin_direction(pin).is_some();

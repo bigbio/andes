@@ -63,6 +63,18 @@ fn stdv_zero_variance_feature_gives_finite_weights() {
 }
 
 #[test]
+fn constant_feature_normalises_to_zero() {
+    let rows: Vec<(i8, u32, u64, f64, [f32; 3])> = (0..7)
+        .map(|i| (if i % 2 == 0 { 1 } else { -1 }, 0, i, 1.0, [i as f32, 0.1, 0.0]))
+        .collect();
+    let (_d, pin) = pin_from(&rows);
+    let n = stdv(&pin);
+    assert_eq!(n.mean[1], f64::from(0.1f32));
+    let s = score(&pin.rows, &[0, 1, 2, 3, 4, 5, 6], &[0.0, 5.0, 0.0, 0.25], Some(&n));
+    assert!(s.iter().all(|&x| x == 0.25), "{s:?}");
+}
+
+#[test]
 fn raw_weights_roundtrip() {
     let (_d, pin) = matrix();
     let n = stdv(&pin);

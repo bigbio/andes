@@ -11,16 +11,25 @@ pub fn stdv(pin: &Pin) -> Norm {
     let nf = pin.rows.nfeat();
     let n = pin.rows.len() as f64;
     let mut mean = vec![0.0f64; nf];
+    let mut lo = vec![f32::INFINITY; nf];
+    let mut hi = vec![f32::NEG_INFINITY; nf];
     pin.rows.for_each_block(|_, block| {
         for row in block.chunks_exact(nf) {
-            for (m, &x) in mean.iter_mut().zip(row) {
+            for (((m, l), h), &x) in mean.iter_mut().zip(&mut lo).zip(&mut hi).zip(row) {
                 *m += f64::from(x);
+                *l = l.min(x);
+                *h = h.max(x);
             }
         }
     });
     if n > 0.0 {
         for m in mean.iter_mut() {
             *m /= n;
+        }
+    }
+    for ((m, &l), &h) in mean.iter_mut().zip(&lo).zip(&hi) {
+        if l == h {
+            *m = f64::from(l);
         }
     }
     let mut ss = vec![0.0f64; nf];

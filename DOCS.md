@@ -804,7 +804,10 @@ re-score is capped at 64 per spectrum.
       0.2 for an isotope error, and 0.05 for "unexplained".
     - An entry plus an isotope step takes the entry's prior × 0.1.
     - A pair takes 0.05 × the two entries' priors.
-    - The Gaussian's spread is the precision.
+    - The Gaussian's spread depends on how the PSM's offset was measured. For an offset measured
+      on the precursor it is the precision. For one refined from the fragment ions it is the median
+      width of the peaks with at least 20 PSMs that are mostly refined, and never less than the
+      precision.
     - The site support scores each localised PSM 1 when its residue, or peptide terminus, is a
       common specificity of the entry and 0.1 when it is only a rare one. The sum k is smoothed
       as (k + 0.5) / (n + 1), and the support is 1 when no PSM is localised.

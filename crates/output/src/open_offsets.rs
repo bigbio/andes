@@ -74,6 +74,7 @@ pub struct PsmAssignment {
 pub struct OffsetReport {
     pub ppm_shift: f64,
     pub precision: f64,
+    pub refined_precision: f64,
     pub peaks: Vec<OffsetPeak>,
     pub assignments: Vec<PsmAssignment>,
 }
@@ -512,12 +513,26 @@ pub fn build_report(
         let (dlo, dhi) = (lo - precision, hi + precision);
         decoy_deltas.partition_point(|d| *d <= dhi) - decoy_deltas.partition_point(|d| *d < dlo)
     };
+    let mut refined_widths: Vec<f64> = raw
+        .iter()
+        .filter(|p| {
+            p.members.len() >= PAIR_SOURCE_MIN_PSMS
+                && 2 * p.members.iter().filter(|&&i| targets[i].refined).count() >= p.members.len()
+        })
+        .map(|p| p.width)
+        .collect();
+    let refined_precision = if refined_widths.is_empty() {
+        precision
+    } else {
+        median(&mut refined_widths).max(precision)
+    };
     let explain_psm = |i: usize, pairs: &[Candidate]| -> Vec<Explanation> {
         let t = targets[i];
+        let s = if t.refined { refined_precision } else { precision };
         let localised: Vec<(String, bool, bool)> = site_label(&t.sequence, t.site)
             .map(|r| vec![(r, t.site == 1, t.site == t.sequence.len())])
             .unwrap_or_default();
-        explain(deltas[i], precision, span, &localised, &singles, pairs)
+        explain(deltas[i], s, span, &localised, &singles, pairs)
     };
     let explain_peak = |p: &RawPeak, pairs: &[Candidate]| -> (Vec<Explanation>, Vec<Explanation>) {
         let mut sums: HashMap<String, (f64, f64)> = HashMap::new();
@@ -643,6 +658,7 @@ pub fn build_report(
     OffsetReport {
         ppm_shift: ppm,
         precision,
+        refined_precision,
         peaks,
         assignments,
     }
@@ -898,11 +914,13 @@ mod tests {
         }));
         rows.extend((0..12).map(|i| row(&format!("b{i}"), false, 0.9870 + 0.0013 * i as f64, 0, "PEPTIDEK")));
         let r = report(&rows);
-        let peak = r
-            .peaks
+        let n0_peak = r
+            .assignments
             .iter()
-            .find(|p| p.mass > 0.9 && p.mass < 1.1 && p.psms >= 30)
-            .expect("the ~1 Da peak");
+            .find(|a| a.psm_id == "n0")
+            .and_then(|a| a.peak)
+            .expect("n0 is in a peak");
+        let peak = r.peaks.iter().find(|p| p.id == n0_peak).expect("its peak");
         let label_of = |e: &Explanation| e.label.clone();
         let labels: Vec<String> = peak.explanations.iter().map(label_of).collect();
         assert!(labels.iter().any(|l| l.starts_with("Deamidated (UNIMOD:7)")), "{:?}", peak.explanations);
@@ -912,6 +930,20 @@ mod tests {
             .filter(|a| a.psm_id.starts_with('n'))
             .collect();
         assert!(deamidated.iter().all(|a| a.explanation.starts_with("Deamidated (UNIMOD:7)")), "{deamidated:?}");
+    }
+
+    #[test]
+    fn refined_offsets_are_judged_by_the_spread_of_refined_peaks() {
+        let mut rows = zero_rows(30, 0.0);
+        rows.extend((0..40).map(|i| PinOffset {
+            refined: true,
+            ..row(&format!("p{i}"), false, 79.9663 + 0.0012 * ((i % 9) as f64 - 4.0), 2, "ASPEK")
+        }));
+        let r = report(&rows);
+        assert!(r.refined_precision > r.precision, "{} {}", r.refined_precision, r.precision);
+        let phospho = r.peaks.iter().find(|p| (p.mass - 79.966).abs() < 0.01).expect("phospho");
+        assert!(phospho.explanations[0].label.starts_with("Phospho (UNIMOD:21)"), "{:?}", phospho.explanations);
+        assert!(phospho.explanations[0].posterior > 0.8, "{:?}", phospho.explanations);
     }
 
     #[test]

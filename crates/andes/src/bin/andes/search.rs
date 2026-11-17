@@ -3382,10 +3382,12 @@ fn write_open_offsets(
         }
     }
     eprintln!(
-        "Open search: {} mass-offset peaks among the accepted PSMs (precision {:.4} Da); \
-         {} and {}",
+        "Open search: {} mass-offset peaks among the accepted PSMs (precursor calibration \
+         {:+.2} ppm; precision {:.4} Da, fragment-refined {:.4} Da); {} and {}",
         report.peaks.len(),
+        report.ppm_shift,
         report.precision,
+        report.refined_precision,
         peaks_path.display(),
         psms_path.display()
     );

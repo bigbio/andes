@@ -425,7 +425,6 @@ fn explain(
             .total_cmp(&a.posterior)
             .then_with(|| a.label.cmp(&b.label))
     });
-    out.truncate(TOP_EXPLANATIONS);
     out
 }
 
@@ -513,10 +512,42 @@ pub fn build_report(
         let (dlo, dhi) = (lo - precision, hi + precision);
         decoy_deltas.partition_point(|d| *d <= dhi) - decoy_deltas.partition_point(|d| *d < dlo)
     };
-    let explain_peak = |p: &RawPeak, pairs: &[Candidate]| {
+    let explain_psm = |i: usize, pairs: &[Candidate]| -> Vec<Explanation> {
+        let t = targets[i];
+        let localised: Vec<(String, bool, bool)> = site_label(&t.sequence, t.site)
+            .map(|r| vec![(r, t.site == 1, t.site == t.sequence.len())])
+            .unwrap_or_default();
+        explain(deltas[i], precision, span, &localised, &singles, pairs)
+    };
+    let explain_peak = |p: &RawPeak, pairs: &[Candidate]| -> (Vec<Explanation>, Vec<Explanation>) {
+        let mut sums: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut tops = Vec::with_capacity(p.members.len());
+        for &i in &p.members {
+            let ex = explain_psm(i, pairs);
+            if let Some(top) = ex.first() {
+                tops.push(top.clone());
+            }
+            for e in ex {
+                let entry = sums.entry(e.label).or_insert((e.mass, 0.0));
+                entry.1 += e.posterior;
+            }
+        }
         let n = p.members.len() as f64;
-        let s = (p.width * p.width / n + precision * precision).sqrt();
-        explain(p.mass, s, span, &p.localised, &singles, pairs)
+        let mut peak: Vec<Explanation> = sums
+            .into_iter()
+            .map(|(label, (mass, sum))| Explanation {
+                label,
+                mass,
+                posterior: sum / n,
+            })
+            .collect();
+        peak.sort_by(|a, b| {
+            b.posterior
+                .total_cmp(&a.posterior)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        peak.truncate(TOP_EXPLANATIONS);
+        (peak, tops)
     };
     let mut sources: Vec<&Candidate> = Vec::new();
     for p in &raw {
@@ -525,7 +556,7 @@ pub fn build_report(
         {
             continue;
         }
-        let Some(top) = explain_peak(p, &[]).into_iter().next() else {
+        let Some(top) = explain_peak(p, &[]).0.into_iter().next() else {
             continue;
         };
         if top.posterior < PAIR_SOURCE_POSTERIOR {
@@ -558,7 +589,7 @@ pub fn build_report(
     let mut assigned = vec![false; targets.len()];
     for (k, p) in raw.iter().enumerate() {
         let id = k + 1;
-        let explanations = explain_peak(p, &pairs);
+        let (explanations, tops) = explain_peak(p, &pairs);
         let peptides: HashSet<&str> = p
             .members
             .iter()
@@ -573,8 +604,7 @@ pub fn build_report(
             .map(|(r, n)| (r.to_string(), n))
             .collect();
         residues.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let top = explanations.first().cloned();
-        for &i in &p.members {
+        for (&i, top) in p.members.iter().zip(tops.iter()) {
             assigned[i] = true;
             let t = targets[i];
             assignments.push(PsmAssignment {
@@ -582,8 +612,8 @@ pub fn build_report(
                 delta: deltas[i],
                 peak: Some(id),
                 residue: site_label(&t.sequence, t.site).unwrap_or_default(),
-                explanation: top.as_ref().map_or_else(String::new, |e| e.label.clone()),
-                posterior: top.as_ref().map_or(0.0, |e| e.posterior),
+                explanation: top.label.clone(),
+                posterior: top.posterior,
             });
         }
         peaks.push(OffsetPeak {
@@ -855,6 +885,33 @@ mod tests {
         let centre = |g: &std::ops::Range<usize>| median(&mut sorted[g.clone()].to_vec());
         assert!((centre(big[0]) - 0.9840).abs() < 0.002);
         assert!((centre(big[1]) - 1.0034).abs() < 0.002);
+    }
+
+    #[test]
+    fn a_mixed_peak_reports_both_explanations_in_proportion() {
+        let mut rows = zero_rows(30, 0.0);
+        rows.extend((0..30).map(|i| {
+            row(&format!("n{i}"), false, 0.9840 + 0.0005 * (i % 5) as f64 - 0.001, 3, "PENTIDEK")
+        }));
+        rows.extend((0..20).map(|i| {
+            row(&format!("j{i}"), false, 1.0034 + 0.0005 * (i % 5) as f64 - 0.001, 0, "PEPTIDEK")
+        }));
+        rows.extend((0..12).map(|i| row(&format!("b{i}"), false, 0.9870 + 0.0013 * i as f64, 0, "PEPTIDEK")));
+        let r = report(&rows);
+        let peak = r
+            .peaks
+            .iter()
+            .find(|p| p.mass > 0.9 && p.mass < 1.1 && p.psms >= 30)
+            .expect("the ~1 Da peak");
+        let label_of = |e: &Explanation| e.label.clone();
+        let labels: Vec<String> = peak.explanations.iter().map(label_of).collect();
+        assert!(labels.iter().any(|l| l.starts_with("Deamidated (UNIMOD:7)")), "{:?}", peak.explanations);
+        let deamidated: Vec<&PsmAssignment> = r
+            .assignments
+            .iter()
+            .filter(|a| a.psm_id.starts_with('n'))
+            .collect();
+        assert!(deamidated.iter().all(|a| a.explanation.starts_with("Deamidated (UNIMOD:7)")), "{deamidated:?}");
     }
 
     #[test]

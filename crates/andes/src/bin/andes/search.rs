@@ -820,8 +820,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "candidate index: N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && has_ms1;
-    if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
+    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto
+        && (cli.glyco || cli.open_search)
+        && has_ms1;
+    if cli.precursor_mono == PrecursorMonoFlag::Auto
+        && (cli.glyco || cli.open_search)
+        && !mono_active
+    {
         eprintln!(
             "WARN: --precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
              Bruker .d); \
@@ -971,6 +976,65 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0
     };
+    // ── Open (mass-offset) search ────────────────────────────────────────────
+    // The delta window REPLACES the precursor tolerance, zeroes the isotope
+    // range (one isotope step is indistinguishable from a ~1 Da offset, and the
+    // offset absorbs it), and needs the database-wide fragment index because
+    // enumeration over hundreds of Da is infeasible.
+    if cli.open_search {
+        if cli.glyco {
+            return Err("--open-search is not supported with --glyco".into());
+        }
+        if cli.chimeric {
+            return Err("--open-search is not combined with --chimeric".into());
+        }
+        if cli.label.is_some() {
+            return Err("--open-search is not combined with --label".into());
+        }
+        if cli.tmt.is_some() {
+            return Err("--open-search is not combined with --tmt".into());
+        }
+        if cli.isotope_error.is_some() {
+            return Err(
+                "--open-search fixes the isotope range at 0..0 (an offset absorbs the \
+                 isotope); remove --isotope-error"
+                    .into(),
+            );
+        }
+        if !choice.use_index {
+            let why = retrieval_excluded.unwrap_or("it was disabled with --fragment-index off");
+            return Err(format!(
+                "--open-search needs the fragment-ion index (it cannot enumerate the wide \
+                 precursor window): {why}"
+            )
+            .into());
+        }
+        let (delta_min, delta_max) = cli.open_search_delta;
+        let top_k = cli.open_search_top_k.max(1);
+        params.open_search = Some(search::search_params::OpenSearch {
+            delta_min,
+            delta_max,
+            top_k,
+        });
+        // The offset is measured from the monoisotopic precursor, so a
+        // recorded M+1/M+2 peak must be tried as an isotope step (the search
+        // picks the offset whose shifted fragment ions fit; see the
+        // localization-aware re-score in match_engine).
+        params.isotope_error_range = 0..=2;
+        params.precursor_tolerance = PrecursorTolerance::asymmetric(
+            model::tolerance::Tolerance::Da(delta_min.abs().max(1e-6)),
+            model::tolerance::Tolerance::Da(delta_max.max(1e-6)),
+        );
+        params.fragment_index_top_k = top_k;
+        // Calibration learns a file-wide ppm shift from confident PSMs; under a
+        // wide window that shift is part of the offset being measured.
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+        eprintln!(
+            "open search: mass-offset window {delta_min:+}..{delta_max:+} Da, {top_k} candidates \
+             per spectrum (fragment-ion shortlist), isotope range 0..=2 (reported offset is \
+             isotope-corrected)"
+        );
+    }
     if let Some(refusal) = choice.refused_because {
         eprintln!(
             "WARN: the fragment-ion index cannot be used here ({refusal}); using enumeration."
@@ -1256,6 +1320,47 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if cli.optimize {
+        if cli.glyco {
+            return Err("--optimize is not supported with --glyco".into());
+        }
+        // A strided sample across the file is much more representative than
+        // the first N spectra; other formats fall back to those.
+        let sample = crate::spectra::sample_spectra_strided(
+            &spectrum_path,
+            is_mzml,
+            cli.ms_level as u32,
+            cli.optimize_sample,
+        )
+        .or_else(|| {
+            sample_spectra(
+                &spectrum_path,
+                is_mzml,
+                is_mgf,
+                is_raw,
+                cli.ms_level as u32,
+            )
+            .map(|v| v.into_iter().take(cli.optimize_sample).collect())
+        });
+        match sample {
+            Some(sample) => crate::optimize::optimize_parameters(
+                &idx,
+                &scorer,
+                fragment_tol_da,
+                &cli.db.decoy_prefix,
+                &index_path,
+                &mut params,
+                &sample,
+            ),
+            None => eprintln!(
+                "WARN: --optimize could not read a sample; keeping the resolved parameters"
+            ),
+        }
+    }
+
+    // Content-addressed cache path, so repeated searches over the same FASTA +
+    // params (and the calibration pre-pass just above) share one on-disk index
+    // without rebuilding.
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
@@ -2117,6 +2222,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
             spectra.len(),
             search_elapsed.as_secs_f64()
+        );
+    }
+    if cli.open_search {
+        let (attempts, wins) = prepared.open_search_stats();
+        eprintln!(
+            "open search: {attempts} modification-aware re-scores ({wins} improved the node \
+             score)"
         );
     }
 

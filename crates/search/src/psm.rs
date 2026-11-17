@@ -79,6 +79,20 @@ pub struct PsmFeatures {
     pub isotope_mimic: u32,
     pub predicted_rt_min: f32,
     pub isobaric_rt_margin: f32,
+    /// `--open-search`: 1-based residue carrying the mass offset, or 0 when no
+    /// position separates from the runner-up (see
+    /// [`crate::open_search::localize_offset`]). 0 on every other search.
+    pub open_site: u16,
+    /// `--open-search`: share of the spectrum's total peak intensity explained
+    /// by the winning site's b/y ions (0.0..=1.0).
+    pub open_loc_score: f32,
+    /// `--open-search`: `(best - second) / best` over the candidate positions.
+    /// Larger means the spectrum pins the offset to one residue.
+    pub open_loc_margin: f32,
+    /// `--open-search`: the offset re-centred on the shifted fragment ions
+    /// (Da, observed - peptide). 0.0 when no site was called; the raw
+    /// isotope-corrected mass difference is then the reported offset.
+    pub open_delta: f32,
 }
 
 pub const TAILOR_MIN_CANDIDATES: u32 = 100;

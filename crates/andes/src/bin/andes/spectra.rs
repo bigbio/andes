@@ -472,6 +472,35 @@ pub(crate) fn sample_spectra(
     Some(loaded.into_values().collect())
 }
 
+/// A representative sample of the run: every `stride`-th `ms_level` spectrum
+/// across the file, up to `want`, loaded by index. mzML only; other formats
+/// fall back to [`sample_spectra`] (the first spectra) at the call site.
+///
+/// The metadata scan is the calibration pre-pass's (one linear read); the
+/// load decodes only the chosen spectra.
+pub(crate) fn sample_spectra_strided(
+    path: &Path,
+    is_mzml: bool,
+    ms_level: u32,
+    want: usize,
+) -> Option<Vec<Spectrum>> {
+    if !is_mzml || want == 0 {
+        return None;
+    }
+    let meta = scan_spectrum_metadata(path, true, ms_level, usize::MAX).ok()?;
+    let n = meta.len();
+    if n == 0 {
+        return None;
+    }
+    let want = want.min(n);
+    let stride = (n / want).max(1);
+    let indices: HashSet<usize> = (0..n).step_by(stride).take(want).collect();
+    let loaded = load_spectra_by_index(path, true, ms_level, &indices, usize::MAX).ok()?;
+    let mut ordered: Vec<(usize, Spectrum)> = loaded.into_iter().collect();
+    ordered.sort_by_key(|(i, _)| *i);
+    Some(ordered.into_iter().map(|(_, s)| s).collect())
+}
+
 pub(crate) fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {
     match t {
         Tolerance::Ppm(v) => Some(v),

@@ -58,6 +58,16 @@ pub struct SearchCfg {
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
     pub index_cache_dir: Option<PathBuf>,
+    /// `--open-search`.
+    pub open_search: Option<bool>,
+    /// `MIN..MAX` Da, as `--open-search-delta`.
+    pub open_search_delta: Option<String>,
+    /// `--open-search-top-k`.
+    pub open_search_top_k: Option<u32>,
+    /// `--optimize`.
+    pub optimize: Option<bool>,
+    /// `--optimize-sample`.
+    pub optimize_sample: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -497,6 +507,20 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         index_cache_dir,
         cfg.search.index_cache_dir
     );
+    set!("open_search", open_search, cfg.search.open_search);
+    set_parsed!(
+        "open_search_delta",
+        open_search_delta,
+        cfg.search.open_search_delta,
+        crate::parse_open_search_delta
+    );
+    set!(
+        "open_search_top_k",
+        open_search_top_k,
+        cfg.search.open_search_top_k
+    );
+    set!("optimize", optimize, cfg.search.optimize);
+    set!("optimize_sample", optimize_sample, cfg.search.optimize_sample);
 
     set_parsed!(
         "score",
@@ -1360,6 +1384,18 @@ glyco:
             let e = applied(bad, &[]).unwrap_err();
             assert!(e.contains(msg), "{e}");
         }
+    }
+
+    #[test]
+    fn open_search_keys_apply() {
+        let a = applied(
+            "search:\n  open_search: true\n  open_search_delta: \"-50..200\"\n  open_search_top_k: 50\n",
+            &[],
+        )
+        .unwrap();
+        assert!(a.open_search);
+        assert_eq!(a.open_search_delta, (-50.0, 200.0));
+        assert_eq!(a.open_search_top_k, 50);
     }
 
     #[test]

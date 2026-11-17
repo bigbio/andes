@@ -158,11 +158,20 @@ pub struct PreparedSearch<'a> {
     pub mmap_index: MmapCandidateIndex,
     mmap_accum: Mutex<MmapAccumulator>,
     chunk_prep_nanos: AtomicU64,
-    pub aa_set_for_scoring: AminoAcidSet,
+    /// `--open-search`: modification-aware re-scores executed, and how many
+    /// improved the candidate's node score (summed over every spectrum).
+    open_rescore_attempts: AtomicUsize,
+    open_rescore_wins: AtomicUsize,    pub aa_set_for_scoring: AminoAcidSet,
     pub ms1_link: Option<Ms1Link>,
     target_bare_seqs: FxHashSet<Box<[u8]>>,
     candidate_filter: Option<CandidateFilter>,
-    per_scan: Option<PerScanScorers>,
+    /// Database-wide fragment-ion index for `--open-search`, built once at
+    /// prepare time. The open-search precursor window spans hundreds of Da, so
+    /// the per-chunk index (whose chunks are ~80 Da wide) cannot serve it;
+    /// this one covers every base record and each spectrum queries only its
+    /// own delta window. `None` on every other search, where the per-chunk
+    /// index is built as before.
+    open_index: Option<Box<ChunkFragmentIndex>>,    per_scan: Option<PerScanScorers>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -242,7 +251,12 @@ pub(crate) fn build_mass_order(candidates: &[Candidate]) -> Vec<u32> {
 
 const PREFETCH_STRUCT_AHEAD: usize = 16;
 const PREFETCH_RESIDUES_AHEAD: usize = 8;
-const PREFETCH_RESIDUE_LINES: usize = 8;
+
+/// Open search: full modification-aware re-scores allowed per spectrum. The
+/// cheap localisation runs for every shortlisted candidate and isotope offset;
+/// the full re-score follows whenever it finds a winning residue, and this
+/// bounds the worst case (a spectrum with many localisable candidates).
+const OPEN_RESCORE_CAP: usize = 64;const PREFETCH_RESIDUE_LINES: usize = 8;
 
 #[inline(always)]
 fn prefetch_window_candidates(cands: &[Candidate], window: &[usize], pos: usize) {
@@ -373,13 +387,15 @@ impl<'a> PreparedSearch<'a> {
                 index_path.display()
             );
         }
-        Ok(Self::over_index(
+        let mut prepared = Self::over_index(
             idx,
             params,
             scorer,
             fragment_tolerance_da,
             mmap_index,
-        ))
+        );
+        prepared.open_index = Self::build_open_index(idx, params, scorer, &prepared.mmap_index);
+        Ok(prepared)
     }
 
     pub fn prepare_in_memory(
@@ -390,13 +406,63 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
     ) -> std::io::Result<Self> {
         let mmap_index = MmapCandidateIndex::build_in_memory(idx, params, decoy_prefix)?;
-        Ok(Self::over_index(
+        let mut prepared = Self::over_index(
             idx,
             params,
             scorer,
             fragment_tolerance_da,
             mmap_index,
-        ))
+        );
+        prepared.open_index = Self::build_open_index(idx, params, scorer, &prepared.mmap_index);
+        Ok(prepared)
+    }
+
+    /// Build the database-wide fragment-ion index for `--open-search`, or
+    /// `None` when the search is not an open search.
+    ///
+    /// Records are the candidate index's base peptides (fixed mods folded in),
+    /// so the index holds one form per record unless the run declares variable
+    /// mods. The indexed mass range is the records' own range, padded by the
+    /// heaviest possible variable-mod stack so no form of a base record is
+    /// dropped.
+    fn build_open_index(
+        idx: &SearchIndex,
+        params: &SearchParams,
+        scorer: &RankScorer,
+        mmap_index: &MmapCandidateIndex,
+    ) -> Option<Box<ChunkFragmentIndex>> {
+        params.open_search?;
+        let t = std::time::Instant::now();
+        let records = mmap_index.records();
+        let (lo, hi) = match (records.first(), records.last()) {
+            (Some(a), Some(b)) => (a.mass_milli as f64 / 1000.0, b.mass_milli as f64 / 1000.0),
+            _ => return None,
+        };
+        let max_mod = params
+            .aa_set
+            .distinct_mods()
+            .iter()
+            .filter(|m| !m.fixed)
+            .map(|m| m.mass_delta.max(0.0))
+            .fold(0.0_f64, f64::max);
+        let max_sites = params.max_variable_mods_per_peptide + params.max_label_sites;
+        let hi = hi + max_mod * f64::from(max_sites) + 1.0;
+        let index = ChunkFragmentIndex::build(
+            records,
+            idx,
+            params,
+            scorer.feature_match_tolerance(),
+            lo,
+            hi,
+        );
+        eprintln!(
+            "open-search-index: {:.1}-{:.1} Da, {} forms, built in {:.1} s",
+            lo,
+            hi,
+            index.n_forms(),
+            t.elapsed().as_secs_f64()
+        );
+        Some(Box::new(index))
     }
 
     fn over_index(
@@ -420,10 +486,13 @@ impl<'a> PreparedSearch<'a> {
             mmap_index,
             mmap_accum: Mutex::new(MmapAccumulator::default()),
             chunk_prep_nanos: AtomicU64::new(0),
+            open_rescore_attempts: AtomicUsize::new(0),
+            open_rescore_wins: AtomicUsize::new(0),
             aa_set_for_scoring,
             ms1_link: None,
             target_bare_seqs,
             candidate_filter: None,
+            open_index: None,
             per_scan: None,
         }
     }
@@ -542,6 +611,14 @@ impl<'a> PreparedSearch<'a> {
         self.chunk_prep_nanos.load(Ordering::Relaxed) as f64 * 1e-9
     }
 
+    /// `--open-search`: (modification-aware re-scores executed, of which how
+    /// many improved the candidate's node score) over the run so far.
+    pub fn open_search_stats(&self) -> (usize, usize) {
+        (
+            self.open_rescore_attempts.load(Ordering::Relaxed),
+            self.open_rescore_wins.load(Ordering::Relaxed),
+        )
+    }
     pub fn sync_materialized_candidates(&mut self) {
         let mut accum = self.mmap_accum.lock().unwrap();
         let materialized = std::mem::take(&mut accum.candidates);
@@ -779,7 +856,11 @@ impl<'a> PreparedSearch<'a> {
         let aa_set_for_scoring = &self.aa_set_for_scoring;
 
         let t_chunk_prep = std::time::Instant::now();
-        let (record_cache, frag_index): (Option<MmapRecordCache>, Option<ChunkFragmentIndex>) = {
+        // The open-search index is database-wide and built once at prepare
+        // time (the window spans hundreds of Da, far beyond one chunk); when it
+        // is present it replaces the per-chunk build entirely.
+        let owned_index: Option<ChunkFragmentIndex>;
+        let (record_cache, frag_index): (Option<MmapRecordCache>, Option<&ChunkFragmentIndex>) = {
             let mi = &self.mmap_index;
             let mut windows: Vec<(i32, i32)> = spectra
                 .iter()
@@ -788,8 +869,21 @@ impl<'a> PreparedSearch<'a> {
                 .collect();
             windows.sort_unstable();
             windows.dedup();
-            if params.fragment_index_top_k > 0 {
-                let frag_index = {
+            // Fragment-ion index over the chunk's records (issue #76): the
+            // forms are enumerated once here, and each spectrum then scores
+            // only the forms its peaks vote for, instead of every form in its
+            // precursor windows. Index mode indexes every form in the chunk's
+            // whole mass interval and each spectrum queries only its own
+            // window, so one range scan over the union of the windows yields
+            // every record it can select.
+            if let Some(open) = self.open_index.as_deref() {
+                // The record cache serves the enumeration path only; index
+                // mode materialises through the bounded walk and never reads it.
+                (Some(MmapRecordCache::default()), Some(open))
+            } else if params.fragment_index_top_k > 0 {
+                owned_index = Some({
+                    // The chunk's precursor mass interval over every spectrum,
+                    // charge and isotope offset; only forms inside it are indexed.
                     let shift_ppm = params.precursor_mass_shift_ppm;
                     let (mut lo, mut hi) = (f64::MAX, f64::MIN);
                     for s in spectra
@@ -829,8 +923,10 @@ impl<'a> PreparedSearch<'a> {
                         lo,
                         hi,
                     )
-                };
-                (Some(MmapRecordCache::default()), Some(frag_index))
+                });
+                // The record cache serves the enumeration path only; index
+                // mode materialises through the bounded walk and never reads it.
+                (Some(MmapRecordCache::default()), owned_index.as_ref())
             } else {
                 let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
                     windows
@@ -937,6 +1033,15 @@ impl<'a> PreparedSearch<'a> {
                 let edge_enabled = edge_scoring_enabled(scorer);
 
                 let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
+                // Open search: the spectrum's peaks in m/z order, built once and
+                // reused by every candidate's offset localisation; and the
+                // per-spectrum budget of full modification-aware rescores.
+                let open_peaks: Option<Vec<(f64, f32)>> = params
+                    .open_search
+                    .map(|_| crate::open_search::sorted_peaks(&spec.peaks));
+                let mut open_rescores: usize = 0;
+                let mut open_attempts: usize = 0;
+                let mut open_wins: usize = 0;
 
                 for (pos, &cand_slot) in window_cand_indices.iter().enumerate() {
                     prefetch_window_candidates(cand_slice, &window_cand_indices, pos);
@@ -976,10 +1081,88 @@ impl<'a> PreparedSearch<'a> {
                             continue;
                         }
 
-                        let pin_score =
+                        let mut pin_score =
                             score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
 
+                        // ── Open search: localization-aware scoring ───────────
+                        // The candidate is the UNMODIFIED backbone, so its score
+                        // sees only the b/y ions that do not carry the offset.
+                        // Localise the offset, rebuild the shifted peptide and
+                        // re-score it; the better of the two is the PSM score
+                        // (Yu et al., Nat Commun 2020, localization-aware open
+                        // search). Bounded per spectrum: localisation is cheap,
+                        // a full re-score is not.
+                        let mut mod_pep: Option<Peptide> = None;
+                        let mut open_iso: Option<i8> = None;
+                        if let (Some(open), Some(peaks)) =
+                            (params.open_search, open_peaks.as_deref())
+                        {
+                            let zf = f64::from(z);
+                            let observed = adjusted_observed_neutral_mass(
+                                spec.precursor_mz * zf - zf * PROTON,
+                                params.precursor_mass_shift_ppm,
+                            );
+                            // Try each isotope offset: the offset is measured
+                            // from the MONOISOTOPIC precursor, so a recorded
+                            // M+1 peak must not be read as a ~1 Da modification.
+                            for off in params.isotope_error_range.clone() {
+                                if open_rescores >= OPEN_RESCORE_CAP {
+                                    break;
+                                }
+                                let corrected = observed
+                                    - f64::from(off) * model::mass::ISOTOPE;
+                                let delta = corrected - cand.peptide.mass();
+                                // Only offsets the user's window admits; an
+                                // isotope step can push a candidate outside it.
+                                if delta.abs() <= 0.5
+                                    || delta < open.delta_min
+                                    || delta > open.delta_max
+                                {
+                                    continue;
+                                }
+                                // The offset inherits the precursor's mass
+                                // error: re-centre it per residue with a coarse
+                                // window, then separate residues on the tight
+                                // (fragment) score.
+                                let loc_tol =
+                                    fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
+                                let Some(loc) = crate::open_search::localize_and_refine(
+                                    &cand.peptide,
+                                    peaks,
+                                    z,
+                                    delta,
+                                    loc_tol,
+                                    fragment_tolerance_da,
+                                ) else {
+                                    continue;
+                                };
+                                if loc.best_site == 0 {
+                                    continue;
+                                }
+                                open_rescores += 1;
+                                open_attempts += 1;
+                                let site0 = usize::from(loc.best_site - 1);
+                                let shifted = crate::open_search::shifted_peptide(
+                                    &cand.peptide,
+                                    site0,
+                                    loc.delta,
+                                );
+                                let s2 = score_psm(
+                                    scored_spec,
+                                    &shifted,
+                                    scorer,
+                                    z,
+                                    fragment_tolerance_da,
+                                ) + cleavage_credit;
+                                if s2 > pin_score {
+                                    pin_score = s2;
+                                    mod_pep = Some(shifted);
+                                    open_iso = Some(off);
+                                    open_wins += 1;
+                                }
+                            }
+                        }
                         {
                             let s = pin_score.round() as i32;
                             if track_ref
@@ -1024,18 +1207,50 @@ impl<'a> PreparedSearch<'a> {
                             continue;
                         }
 
-                        let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
+                        // Stage 2: compute edge_score ONCE (also iso-independent).
+                        // Open search: score the edge on the form whose node
+                        // score was kept (the shifted peptide when it won).
+                        let edge_i = psm_edge_score(
+                            scored_spec,
+                            mod_pep.as_ref().unwrap_or(&cand.peptide),
+                            scorer,
+                            z,
+                        );
                         let rank_score = pin_score + edge_i as f32;
 
-                        let err = iso_errs
-                            .into_iter()
-                            .min_by(|a, b| {
-                                a.mass_error_ppm
-                                    .abs()
-                                    .partial_cmp(&b.mass_error_ppm.abs())
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                            .unwrap();
+                        // Pick the iso-offset with the smallest |mass_error_ppm|
+                        // for the PIN row (preserves the tie-break where
+                        // the first-matched iso wins when scores are equal). Since
+                        // score is iso-independent, the iso choice only affects
+                        // the pin `isotope_error` / `dm` columns.
+                        // Open search: the re-score above picked the isotope
+                        // offset whose shifted fragments fit; report that one.
+                        let smaller_ppm = |a: &MassError, b: &MassError| {
+                            a.mass_error_ppm
+                                .abs()
+                                .partial_cmp(&b.mass_error_ppm.abs())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        };
+                        let err = match open_iso {
+                            Some(want) => iso_errs
+                                .iter()
+                                .copied()
+                                .find(|e| e.isotope_offset == want)
+                                .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+                            // Open search with no fragment evidence for an
+                            // isotope step: do not assume one. The reported
+                            // offset is then measured from the recorded
+                            // precursor, and `isotope_error` says so. (Min
+                            // |ppm| would bias every offset down by up to the
+                            // isotope spacing.)
+                            None if params.open_search.is_some() => iso_errs
+                                .iter()
+                                .copied()
+                                .find(|e| e.isotope_offset == 0)
+                                .or_else(|| iso_errs.iter().copied().min_by(smaller_ppm)),
+                            None => iso_errs.iter().copied().min_by(smaller_ppm),
+                        }
+                        .unwrap();
 
                         let features = PsmFeatures::default();
                         let psm = PsmMatch {
@@ -1100,9 +1315,60 @@ impl<'a> PreparedSearch<'a> {
                 let make_features = |psm: &PsmMatch, full: bool| -> PsmFeatures {
                     let ss = scored_spec_for_charge(psm.charge_used);
                     let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                    // Open search: localise the offset and, when a residue is
+                    // called, compute EVERY feature on the shifted peptide —
+                    // the same form the node score was taken on. On for both
+                    // feature passes (the strong score is asserted stable
+                    // across them, so they must see the same peptide). Emitted
+                    // rows only, never in the candidate loop.
+                    let mut open_loc: Option<crate::open_search::Localization> = None;
+                    let mut shifted_pep: Option<Peptide> = None;
+                    let mut open_delta_ref: Option<f64> = None;
+                    {
+                        if let (Some(_), Some(peaks)) =
+                            (params.open_search, open_peaks.as_deref())
+                        {
+                            let zf = f64::from(psm.charge_used);
+                            let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+                            // Modification mass: the isotope-corrected observed
+                            // precursor minus the peptide.
+                            let observed = adjusted_observed_neutral_mass(
+                                mz * zf - zf * PROTON,
+                                params.precursor_mass_shift_ppm,
+                            ) - f64::from(psm.isotope_offset) * model::mass::ISOTOPE;
+                            let delta = observed - cand.peptide.mass();
+                            if delta.abs() > 0.5 {
+                                let loc_tol =
+                                    fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
+                                if let Some(loc) = crate::open_search::localize_and_refine(
+                                    &cand.peptide,
+                                    peaks,
+                                    psm.charge_used,
+                                    delta,
+                                    loc_tol,
+                                    fragment_tolerance_da,
+                                ) {
+                                    if loc.best_site != 0 {
+                                        shifted_pep = Some(crate::open_search::shifted_peptide(
+                                            &cand.peptide,
+                                            usize::from(loc.best_site - 1),
+                                            loc.delta,
+                                        ));
+                                        open_delta_ref = Some(loc.delta);
+                                    }
+                                    open_loc = Some(crate::open_search::Localization {
+                                        site: loc.site,
+                                        score: loc.score,
+                                        margin: loc.margin,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    let pep = shifted_pep.as_ref().unwrap_or(&cand.peptide);
                     let mut features = compute_psm_features_with_edge(
                         ss,
-                        &cand.peptide,
+                        pep,
                         scorer,
                         psm.charge_used,
                         Some(psm.edge_score),
@@ -1121,13 +1387,9 @@ impl<'a> PreparedSearch<'a> {
                     features.candidate_rank_entropy = candidate_rank_entropy;
                     features.tailor_score = psm.score / tailor_denom;
                     let credit = cleavage_credit_for(cand, enz, aa_set_for_scoring) as f32;
-                    features.rank_score_float = score_psm_float(
-                        ss,
-                        &cand.peptide,
-                        scorer,
-                        psm.charge_used,
-                        fragment_tolerance_da,
-                    ) + credit;
+                    features.rank_score_float =
+                        score_psm_float(ss, pep, scorer, psm.charge_used, fragment_tolerance_da)
+                            + credit;
                     features.strong_score = fuse_strong_score(&StrongScoreInputs {
                         intensity_signal: features.intensity_signal,
                         chance_match_surprise: features.chance_match_surprise,
@@ -1135,6 +1397,12 @@ impl<'a> PreparedSearch<'a> {
                         candidate_rank_entropy: features.candidate_rank_entropy,
                         listwise_score_gap: features.listwise_score_gap,
                     });
+                    if let Some(loc) = open_loc {
+                        features.open_site = loc.site;
+                        features.open_loc_score = loc.score;
+                        features.open_loc_margin = loc.margin;
+                        features.open_delta = open_delta_ref.map_or(0.0, |d| d as f32);
+                    }
                     features
                 };
                 queue.fill_post_topn(|psm| {
@@ -1211,6 +1479,12 @@ impl<'a> PreparedSearch<'a> {
                     });
                 }
 
+                if params.open_search.is_some() {
+                    self.open_rescore_attempts
+                        .fetch_add(open_attempts, Ordering::Relaxed);
+                    self.open_rescore_wins
+                        .fetch_add(open_wins, Ordering::Relaxed);
+                }
                 queue
             })
             .collect();
@@ -2000,7 +2274,11 @@ pub(crate) fn compute_psm_features_with_edge(
         delta_ref_score: 0.0,
         isotope_mimic: 0,
         predicted_rt_min: 0.0,
-        isobaric_rt_margin: 0.0,
+        isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
+        open_site: 0,            // open search only; set in make_features
+        open_loc_score: 0.0,
+        open_loc_margin: 0.0,
+        open_delta: 0.0,
     }
 }
 

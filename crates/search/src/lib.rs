@@ -12,6 +12,7 @@ pub mod isomer;
 pub mod isotope_mimic;
 pub mod mass_calibrator;
 pub mod match_engine;
+pub mod open_search;
 pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod precursor_mono;

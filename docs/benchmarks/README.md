@@ -574,6 +574,32 @@ SIMSI-Transfer rows are an earlier analysis of the same files with the same trut
   contaminant hits are removed (isobaric MBR as in MaxQuant ≥ 1.6.12.0: `MULTI-MATCH-MSMS` rows); andes
   counts PSMs at `q ≤ 0.01`.
 
+### 2.6 Open (mass-offset) search, experimental
+
+`--open-search` takes the modification mass from the precursor offset instead of a declared
+variable mod. Full report: [`open_search/`](open_search/README.md). One mouse-liver fraction
+(PXD005553, `MouseLiver-Z-T-1`), `mouse_entrap.fasta` (T/E 0.965), Percolator 3.7.1 seed 42:
+
+| metric | truth (declared mods) | open search |
+|---|---:|---:|
+| PSMs at `q ≤ 0.01` | 2,652 | 4,260 |
+| true FDP at 1% | 0.96% | 0.83% (1.39% on `\|offset\| > 0.5` rows) |
+| oxidised-M PSMs recovered | — | 40 of 141 (28%), offset error 0.0019 Da, 20 of 21 called sites correct |
+
+The zero-offset rows read no error, but the offset rows read 1.39% at a nominal 1%: the
+shifted-ion shortlist (Yu et al., *Nat. Commun.* 2020) admits more offset candidates and lifts
+the truth-set recovery from 32 to 40 of 141, with that error cost. On this file the
+form-based re-score alone did not raise the recovery — many of these PSMs score better
+unmodified, because the narrow search assigns the modification from the precursor mass, not the
+fragments — the shifted votes did. Stated in the report.
+
+The paper's own benchmark — a substituted database searched against unmodified spectra, where
+the offset is a known substitution — is in
+[`open_search/substitution/`](open_search/substitution/README.md): 8,563 single-substitution
+truth cases on one PXD001468 file, **35.2% recovered** with the offset within 0.02 Da (29.4%
+without the shifted-ion shortlist), and **90.0% of the called sites are the substituted
+residue** (median offset error 0.8 mDa).
+
 ## 3. How to reproduce
 
 You need `andes` on `PATH`, Docker (for the pinned Percolator image), `curl` and `python3`. Build andes
@@ -806,6 +832,7 @@ Channel layout and scoring are in section 4.
       ADDITIONAL_BENCHMARKS.md  supplementary tables (per-run, per-level, full leaderboards, andes-only diagnostics)
       reproduce/     database, download and run scripts (no hardcoded paths)
       glyco/         glyco harness: pooling, yield, entrapment, reference scoring
+      open_search/   open (mass-offset) search benchmark: recovery of a declared mod, entrapment
       configs/       per-engine parameter files
       proteobench/   andes MBR output -> ProteoBench "Custom" table (python3 + pyarrow)
       entrap_common.py  shared entrapment rules (ALL-ENTRAP_, I/L rescue, T/E)

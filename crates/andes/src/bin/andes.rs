@@ -36,6 +36,8 @@ mod quant_run;
 mod rescore;
 #[path = "../sdrf.rs"]
 mod sdrf;
+#[path = "andes/optimize.rs"]
+mod optimize;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -54,7 +56,8 @@ mod xl_fdr;
 mod xl_run;
 
 use crate::cli::{
-    parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,
+    parse_charge_range, parse_isotope_error_range, parse_open_search_delta, parse_precursor_cal,
+    parse_precursor_tol,
     parse_uniprot_evidence, Cli, ScoreFlag, SearchArgs,
 };
 use crate::search::run;

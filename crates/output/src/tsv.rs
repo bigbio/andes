@@ -1,6 +1,7 @@
 use std::io::{self, BufWriter, Write};
 
 use crate::row_context::{emitted_rows, RowContext};
+use model::mass::{ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::protein::{EntryKind, EntryOrigin};
 use model::spectrum::Spectrum;
@@ -121,6 +122,12 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
     cols.push("RankScore");
     cols.push("Modifications");
     cols.extend_from_slice(&["ProteinFamily", "EntryKind", "FeatureIds"]);
+    // Open search: the neutral mass offset the match implies (Da) and where it
+    // was localised. Appended only in that mode, so every other run's TSV
+    // schema is unchanged.
+    if params.open_search.is_some() {
+        cols.extend_from_slice(&["DeltaMass", "OpenSite", "OpenLocScore", "OpenLocMargin"]);
+    }
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -129,6 +136,8 @@ struct RowCtx<'a> {
     spec_file_name: &'a str,
     is_mgf: bool,
     ppm_mode: bool,
+    /// `--open-search`: append the neutral mass offset (`DeltaMass`, Da).
+    open_search: bool,
 }
 
 #[allow(
@@ -151,6 +160,7 @@ fn write_spectrum_rows<W: Write>(
         spec_file_name,
         is_mgf,
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
+        open_search: params.open_search.is_some(),
     };
 
     for (_rank, psm) in emitted_rows(spec, &psms, candidates) {
@@ -240,10 +250,30 @@ fn write_psm_row<W: Write>(
         Some(o) => (&*o.family, o.kind.name(), &*o.feature),
         None => (protein.as_str(), EntryKind::Reference.name(), ""),
     };
+    let open_search_tail = if row_ctx.open_search {
+        // Modification mass: the offset re-centred on the shifted fragment ions
+        // when a site was called, else the isotope-corrected observed precursor
+        // minus the peptide (oxidation reads +15.9949). The site is 1-based, 0
+        // when the spectrum does not pin the offset to one residue.
+        let exp_mass = precursor_mz * f64::from(charge) - f64::from(charge) * PROTON
+            - f64::from(psm.isotope_offset) * ISOTOPE;
+        let f = &psm.features;
+        let delta = if f.open_delta != 0.0 {
+            f64::from(f.open_delta)
+        } else {
+            exp_mass - cand.peptide.mass()
+        };
+        format!(
+            "\t{:.4}\t{}\t{:.4}\t{:.4}",
+            delta, f.open_site, f.open_loc_score, f.open_loc_margin
+        )
+    } else {
+        String::new()
+    };
     writeln!(
         writer,
-        "{}\t{}\t{}\t{}\t{}\t{}",
-        lead, raw_score, mods, family, kind, feature
+        "{}\t{}\t{}\t{}\t{}\t{}{}",
+        lead, raw_score, mods, family, kind, feature, open_search_tail
     )
 }
 
@@ -351,6 +381,7 @@ mod tests {
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             require_nxst_sequon: false,
+            open_search: None,
         }
     }
 

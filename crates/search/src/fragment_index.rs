@@ -283,10 +283,14 @@ impl ChunkFragmentIndex {
         let mut lo = f64::MAX;
         let mut hi = f64::MIN;
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
+        // Neutral observed mass (charge-independent), used by the shifted-ion
+        // complement vote below.
+        let mut observed_neutral = 0.0_f64;
         for &z in charges {
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);
+            observed_neutral = obs;
             for o in params.isotope_error_range.clone() {
                 let c = obs - (o as f64) * ISOTOPE;
                 let (w_lo, w_hi) = (
@@ -304,7 +308,16 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
-        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        let mut sel = self.vote(
+            spec,
+            lo,
+            hi,
+            fragment_tol,
+            min_matched,
+            vote_peaks,
+            params.open_search.is_some(),
+            observed_neutral,
+        );
         select_top_k(&mut sel, top_k);
         sel.into_iter()
             .filter(|&(id, _, _)| {
@@ -329,7 +342,16 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
-        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        let mut sel = self.vote(
+            spec,
+            lo,
+            hi,
+            fragment_tol,
+            min_matched,
+            vote_peaks,
+            false,
+            0.0,
+        );
         select_top_k(&mut sel, top_k);
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
@@ -338,6 +360,7 @@ impl ChunkFragmentIndex {
         self.form_mass[id as usize]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn vote(
         &self,
         spec: &Spectrum,
@@ -346,6 +369,8 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         min_matched: u16,
         vote_peaks: usize,
+        complement: bool,
+        observed_neutral: f64,
     ) -> Vec<(u32, u16, f32)> {
         let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
         let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
@@ -365,12 +390,17 @@ impl ChunkFragmentIndex {
             }
             touched.clear();
             let floor = vote_intensity_floor(&spec.peaks, vote_peaks);
-            for &(mz, intensity) in &spec.peaks {
-                if intensity < floor {
-                    continue;
-                }
+            let vote = |mz: f64,
+                            intensity: f32,
+                            counts: &mut Vec<(u16, f32)>,
+                            touched: &mut Vec<u32>| {
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
+                if b >= n_bins {
+                    return;
+                }
+                // Bins are sized for the window at m/z 2500; above it a
+                // ppm window spans more than one bin on each side.
                 let span = ((tol_da / self.bin_width).ceil() as usize).max(1);
                 for bb in b.saturating_sub(span)..=(b + span).min(n_bins - 1) {
                     let base = self.bin_start[bb] as usize;
@@ -393,6 +423,30 @@ impl ChunkFragmentIndex {
                             slot.1 += intensity;
                         }
                     }
+                }
+            };
+            for &(mz, intensity) in &spec.peaks {
+                if intensity < floor {
+                    continue;
+                }
+                vote(mz, intensity, counts, touched);
+            }
+            // Shifted (complement) ions: for a singly charged b/y pair,
+            // b + y = peptide + 2 H+, so an observed fragment of a peptide that
+            // carries an offset δ has its complement at the UNMODIFIED
+            // peptide's complementary ion (P_obs cancels δ). Voting there lets
+            // the regular index reach modified peptides whose own ladder is
+            // shifted (Yu et al., Nat. Commun. 2020).
+            if complement {
+                for &(mz, intensity) in &spec.peaks {
+                    if intensity < floor {
+                        continue;
+                    }
+                    let q = observed_neutral + 2.0 * PROTON - mz;
+                    if q <= 0.0 {
+                        continue;
+                    }
+                    vote(q, intensity, counts, touched);
                 }
             }
             let mut sel = Vec::new();

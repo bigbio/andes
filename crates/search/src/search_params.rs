@@ -16,6 +16,18 @@ pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
 
 pub const MMAP_WINDOW_CACHE_MAX_CANDIDATES: usize = 4_000_000;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenSearch {
+    /// Smallest accepted `peptide_mass - observed_neutral_mass`, in Da
+    /// (negative: the observed precursor is heavier than the peptide).
+    pub delta_min: f64,
+    /// Largest accepted offset, in Da. Must exceed `delta_min`.
+    pub delta_max: f64,
+    /// Fragment-ion shortlist size per spectrum (best-voting forms first).
+    pub top_k: u32,
+}
+
+/// Primary ranking mode for candidate selection and PIN `RawScore` emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoreMode {
     #[default]
@@ -50,6 +62,13 @@ pub struct SearchParams {
     pub score_mode: ScoreMode,
     pub refine_select_psm_fdr: f64,
     pub require_nxst_sequon: bool,
+    /// Open (mass-offset) search. `None` (the default) is the narrow-window
+    /// search: the precursor tolerance above is the match window. `Some`
+    /// widens the window to `[observed + delta_min, observed + delta_max]`,
+    /// zeroes the isotope range (the offset carries the isotope ambiguity) and
+    /// makes the search use the database-wide fragment index. See
+    /// [`OpenSearch`].
+    pub open_search: Option<OpenSearch>,
 }
 
 impl SearchParams {
@@ -80,6 +99,7 @@ impl SearchParams {
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             require_nxst_sequon: false,
+            open_search: None,
         }
     }
 

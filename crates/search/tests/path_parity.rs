@@ -63,6 +63,14 @@ const EXCEPTIONS: &[(&str, &str)] = &[
          (documented in DOCS §1a).",
     ),
     ("ref_best_raw", "companion of ref_competitor, same reason."),
+    (
+        "open_site",
+        "`--open-search` is refused with `--glyco` (search.rs), so the glyco driver \
+         never sees an open-search PSM. The three Open* fields stay 0 there by design.",
+    ),
+    ("open_loc_score", "companion of open_site, same reason."),
+    ("open_loc_margin", "companion of open_site, same reason."),
+    ("open_delta", "companion of open_site, same reason."),
 ];
 
 #[test]

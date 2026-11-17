@@ -32,7 +32,10 @@ pub struct XlConfig {
     pub oracle_spectra: usize,
     pub open_top_k: usize,
     pub open_min_votes: u16,
+    pub stub_weight: f32,
 }
+
+pub const STUB_ION_WEIGHT: f32 = 3.0;
 
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
@@ -40,13 +43,14 @@ impl XlConfig {
             linker,
             doublet: DoubletParams::default(),
             doublet_mass_tol_ppm: 10.0,
-            isotope_offsets: 0..=1,
+            isotope_offsets: 0..=2,
             min_precursor_charge: 3,
             min_peptide_mass: 400.0,
             top_per_mass: 4,
             oracle_spectra: 0,
             open_top_k: 50,
             open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
+            stub_weight: STUB_ION_WEIGHT,
         }
     }
 }
@@ -385,6 +389,7 @@ pub struct Csm {
     pub iso: i8,
     pub class: PairClass,
     pub intra: bool,
+    pub homotypic: bool,
     pub precursor_err_ppm: f64,
     pub b_stub_ions: u8,
     pub n_mass_pairs: usize,
@@ -476,6 +481,29 @@ struct SpecCtx<'a> {
     scorer: &'a RankScorer,
     z: u8,
     frag_tol: f64,
+    peaks: &'a [(f64, f32)],
+    stub_weight: f32,
+    stub_tol_ppm: f64,
+}
+
+fn stub_bonus(ctx: &SpecCtx<'_>, mass: f64, linker: &Crosslinker) -> f32 {
+    if ctx.stub_weight == 0.0 {
+        return 0.0;
+    }
+    let Some(c) = linker.cleavage.as_ref() else {
+        return 0.0;
+    };
+    let n = stub_ions_present(
+        ctx.peaks,
+        mass,
+        c,
+        ctx.z.saturating_sub(1).max(1),
+        ctx.stub_tol_ppm,
+    )
+    .iter()
+    .filter(|&&v| v)
+    .count();
+    ctx.stub_weight * n as f32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,6 +538,7 @@ fn score_peptide(
         }
     }
     let (score, site, form) = best?;
+    let score = score + stub_bonus(ctx, p.peptide.mass(), linker);
     Some(PeptideHit {
         pep: pep_idx,
         site,
@@ -945,6 +974,9 @@ fn search_spectrum_at(
         scorer: prepared.scorer,
         z,
         frag_tol: prepared.fragment_tolerance_da,
+        peaks: &peaks,
+        stub_weight: cfg.stub_weight,
+        stub_tol_ppm: cfg.doublet.tol_ppm,
     };
 
     struct Cand {
@@ -1099,6 +1131,7 @@ fn search_spectrum_at(
             iso: c.pair.iso,
             class: PairClass::of(pa.is_decoy, pb.is_decoy),
             intra: is_intra(prepared, pa, pb),
+            homotypic: pa.bare() == pb.bare(),
             precursor_err_ppm: (precursor_mass - theo) / theo * 1e6,
             b_stub_ions: c.pair.b_stub_ions,
             n_mass_pairs: pairs.len() + open_rows.len(),
@@ -1298,6 +1331,13 @@ mod tests {
         let k = p.sites.iter().find(|s| !s.n_term).unwrap();
         assert_eq!(p.occurrences_at(n), &[(0, 0)]);
         assert_eq!(p.occurrences_at(k), &[(0, 0), (1, 7)]);
+    }
+
+    #[test]
+    fn defaults_search_two_missing_isotopes_and_credit_stub_ions() {
+        let cfg = XlConfig::new(Crosslinker::dsso());
+        assert_eq!(cfg.isotope_offsets, 0..=2);
+        assert_eq!(cfg.stub_weight, STUB_ION_WEIGHT);
     }
 
     #[test]

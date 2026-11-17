@@ -5,7 +5,7 @@ use crate::cli::Cli;
 use andes_xl::crosslinker::{LinkForm, MAX_STUBS};
 use andes_xl::decoy::PairClass;
 use andes_xl::fdr::ClassCounts;
-use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item};
+use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item, LinkClass};
 use model::Spectrum;
 use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
 use search::PreparedSearch;
@@ -331,7 +331,7 @@ pub(crate) fn roll_up(
             ),
             score: *s,
             class: c.class,
-            intra: c.intra,
+            link: LinkClass::of(c.intra, c.homotypic),
             n_csms: 1,
         });
         ppi_of_csm.push(pair_key(
@@ -347,7 +347,7 @@ pub(crate) fn roll_up(
             key: it.key.clone(),
             score: it.score,
             class: it.class,
-            intra: it.intra,
+            link: it.link,
             n_members: 1,
             n_csms: 1,
             best: i,
@@ -359,7 +359,7 @@ pub(crate) fn roll_up(
     let rp_q2 = split_q_values(&rp, |g| g.n_csms >= 2);
     let rp_items = as_items(&rp, |g| ppi_of_csm[g.best].clone());
     let ppi = group_by(&rp_items, |_, it| it.key.clone());
-    let ppi_q = split_q_values(&ppi, |g| !g.intra);
+    let ppi_q = split_q_values(&ppi, |g| g.link == LinkClass::Inter);
     Levels {
         csm_items,
         csm_rows,
@@ -372,14 +372,18 @@ pub(crate) fn roll_up(
     }
 }
 
-fn counts_line(classes: impl Iterator<Item = (PairClass, bool, Option<f64>)>) -> String {
-    let rows: Vec<(PairClass, bool, Option<f64>)> = classes.collect();
+fn counts_line(classes: impl Iterator<Item = (PairClass, LinkClass, Option<f64>)>) -> String {
+    let rows: Vec<(PairClass, LinkClass, Option<f64>)> = classes.collect();
     let mut parts = Vec::new();
-    for (label, intra) in [("intra", true), ("inter", false)] {
+    for link in LinkClass::ALL {
+        if !rows.iter().any(|r| r.1 == link) {
+            continue;
+        }
+        let label = link.name();
         for (cut_label, cut) in [("all", f64::INFINITY), ("q<=5%", 0.05), ("q<=1%", 0.01)] {
             let mut c = ClassCounts::default();
-            for (class, i, q) in &rows {
-                if *i == intra && (cut.is_infinite() || q.is_some_and(|v| v <= cut)) {
+            for (class, l, q) in &rows {
+                if *l == link && (cut.is_infinite() || q.is_some_and(|v| v <= cut)) {
                     c.add(*class);
                 }
             }
@@ -399,16 +403,12 @@ pub(crate) fn report_levels(l: &Levels) {
             l.csm_items
                 .iter()
                 .zip(&l.csm_q)
-                .map(|(it, q)| (it.class, it.intra, *q))
+                .map(|(it, q)| (it.class, it.link, *q))
         )
     );
     eprintln!(
         "[xl] residue pair: {}",
-        counts_line(
-            l.rp.iter()
-                .zip(&l.rp_q)
-                .map(|(g, q)| (g.class, g.intra, *q))
-        )
+        counts_line(l.rp.iter().zip(&l.rp_q).map(|(g, q)| (g.class, g.link, *q)))
     );
     eprintln!(
         "[xl] residue pair (>=2 CSMs): {}",
@@ -416,7 +416,7 @@ pub(crate) fn report_levels(l: &Levels) {
             l.rp.iter()
                 .zip(&l.rp_q2)
                 .filter(|(g, _)| g.n_csms >= 2)
-                .map(|(g, q)| (g.class, g.intra, *q))
+                .map(|(g, q)| (g.class, g.link, *q))
         )
     );
     eprintln!(
@@ -425,8 +425,8 @@ pub(crate) fn report_levels(l: &Levels) {
             l.ppi
                 .iter()
                 .zip(&l.ppi_q)
-                .filter(|(g, _)| !g.intra)
-                .map(|(g, q)| (g.class, g.intra, *q))
+                .filter(|(g, _)| g.link == LinkClass::Inter)
+                .map(|(g, q)| (g.class, g.link, *q))
         )
     );
 }
@@ -454,7 +454,7 @@ pub(crate) fn write_levels(
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
             g.key,
             g.class.name(),
-            if g.intra { "intra" } else { "inter" },
+            g.link.name(),
             g.score,
             fmt_q(*q),
             fmt_q(*q2),
@@ -475,7 +475,7 @@ pub(crate) fn write_levels(
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
             g.key,
             g.class.name(),
-            if g.intra { "intra" } else { "inter" },
+            g.link.name(),
             g.score,
             fmt_q(*q),
             g.n_members,

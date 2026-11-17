@@ -71,7 +71,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
 | `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | PSMs kept per spectrum (before positional isomers are collapsed in the output, see §3a). | Java `-n 10` |
-| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried. | Java `-ti -1,2` |
+| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried; `0..2` under `--glyco` and `--xl`. | Java `-ti -1,2` |
 | `--min-peaks` | u32 | `10` | Spectra with fewer MS2 peaks are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
@@ -1092,8 +1092,15 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
 stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
-link classes are scored by the pair score `min(alpha, beta)`; q-values are
-`max(TD - DD, 2) / TT` per link class (intra- and inter-protein).
+link classes are scored by the pair score `min(alpha, beta)`; for an MS-cleavable linker each
+peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
+a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+q-values are computed per link
+class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
+`max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer
+or one peptide paired with itself) takes `max(DD + TD + 1, 2) / TT`, because a random homotypic
+match pairs a peptide with itself and is TT or DD with equal odds but never TD. The ground-truth
+benchmark for these choices (eleven runs, four datasets) is in `docs/benchmarks/xl/`.
 
 ---
 

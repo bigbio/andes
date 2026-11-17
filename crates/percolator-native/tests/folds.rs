@@ -91,7 +91,7 @@ fn collision_reference() -> Vec<(String, Vec<Split>)> {
 }
 
 #[test]
-fn colliding_scan_hashes_split_as_percolator_at_one_thread() {
+fn colliding_scan_hashes_split_as_percolator_at_any_thread_count() {
     let d = tempfile::tempdir().unwrap();
     let pin = read_pin(
         &data("fold_collision.pin"),
@@ -115,7 +115,8 @@ fn colliding_scan_hashes_split_as_percolator_at_one_thread() {
         })
         .collect();
     let reference = collision_reference();
-    assert_eq!(reference[0].0, "threads 1");
-    assert_eq!(got, reference[0].1);
-    assert!(reference[1..].iter().any(|(_, r)| *r != got));
+    assert_eq!(reference.len(), 4);
+    for (threads, splits) in &reference {
+        assert_eq!(&got, splits, "{threads}");
+    }
 }

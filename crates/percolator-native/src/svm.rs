@@ -31,6 +31,10 @@ pub(crate) const GRAM_BYTES: usize = 64 << 20;
 
 const GROUP: usize = 4;
 
+const REACH: f64 = 2.0;
+
+const FRESH: u32 = u32::MAX;
+
 pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
 }
@@ -669,6 +673,144 @@ fn cgls(
     false
 }
 
+fn norm_up(row: &[f32]) -> f32 {
+    let s: f64 = row.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+    (s.sqrt() * (1.0 + 1e-6)) as f32
+}
+
+fn l2(a: &[f64]) -> f64 {
+    a.iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+fn dist(a: &[f64], b: &[f64]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f64>()
+        .sqrt()
+}
+
+struct Screen {
+    nrm: Vec<f32>,
+    since: Vec<u32>,
+    w_at: Vec<Vec<f64>>,
+    w_bar_at: Vec<Vec<f64>>,
+    delta_at: Vec<f64>,
+    reach: Vec<f64>,
+    slack: f64,
+}
+
+impl Screen {
+    fn new(nrm: Vec<f32>, w: &[f64]) -> Screen {
+        Screen {
+            since: vec![FRESH; nrm.len()],
+            nrm,
+            w_at: vec![w.to_vec()],
+            w_bar_at: Vec::new(),
+            delta_at: Vec::new(),
+            reach: Vec::new(),
+            slack: 0.0,
+        }
+    }
+
+    fn bound(&mut self, w_bar: &[f64]) {
+        let w = self.w_at.last().expect("current w");
+        let e: Vec<f64> = w
+            .iter()
+            .zip(w_bar)
+            .map(|(&a, &b)| a + REACH * (b - a))
+            .collect();
+        let big = self
+            .w_at
+            .iter()
+            .chain(&self.w_bar_at)
+            .map(|v| l2(v.as_slice()))
+            .fold(l2(w_bar).max(l2(&e)), f64::max);
+        self.reach = self
+            .w_at
+            .iter()
+            .map(|wr| dist(w, wr).max(dist(&e, wr)))
+            .collect();
+        self.slack = 1e-10 * big;
+    }
+
+    fn open_all(&mut self) {
+        self.reach.fill(f64::INFINITY);
+    }
+
+    fn stale(&self, i: usize) -> bool {
+        self.since[i] != FRESH
+    }
+
+    fn any_stale(&self) -> bool {
+        self.since.iter().any(|&s| s != FRESH)
+    }
+
+    fn record(&mut self, w_bar: &[f64], delta: f64, w: &[f64]) {
+        self.w_bar_at.push(w_bar.to_vec());
+        self.delta_at.push(delta);
+        self.w_at.push(w.to_vec());
+    }
+}
+
+fn screened_pass(
+    t: &Train,
+    sc: &mut Screen,
+    act: &[bool],
+    o: &mut [f64],
+    o_bar: &mut [f64],
+    w_bar: &[f64],
+    step: &[f64],
+) {
+    let u = sc.w_at.len() - 1;
+    let nrm: &[f32] = &sc.nrm;
+    let w_bar_at: &[Vec<f64>] = &sc.w_bar_at;
+    let delta_at: &[f64] = &sc.delta_at;
+    let reach: &[f64] = &sc.reach;
+    let slack = sc.slack;
+    let since = &mut sc.since;
+    o_bar
+        .par_chunks_mut(CHUNK)
+        .zip(o.par_chunks_mut(CHUNK))
+        .zip(since.par_chunks_mut(CHUNK))
+        .enumerate()
+        .for_each(|(c, ((obs, os), ss))| {
+            for (j, ((ob, oi), s)) in obs
+                .iter_mut()
+                .zip(os.iter_mut())
+                .zip(ss.iter_mut())
+                .enumerate()
+            {
+                let k = c * CHUNK + j;
+                let r = if *s == FRESH { u } else { *s as usize };
+                if !act[k] {
+                    let lim =
+                        1.0 + 1e-6 + 1e-10 * oi.abs() + f64::from(nrm[k]) * (reach[r] + slack);
+                    if t.y(k) * *oi > lim {
+                        if *s == FRESH {
+                            *s = u as u32;
+                        }
+                        continue;
+                    }
+                }
+                let row = t.x.row(t.rows[k]);
+                if *s != FRESH {
+                    for (wb, &d) in w_bar_at[r..u].iter().zip(&delta_at[r..u]) {
+                        let v = dot_row(row, wb);
+                        *oi += d * (v - *oi);
+                    }
+                    *s = FRESH;
+                }
+                *ob = if act[k] {
+                    *oi + dot_row(row, step)
+                } else {
+                    dot_row(row, w_bar)
+                };
+            }
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn line_search(
     t: &Train,
     w: &[f64],
@@ -677,7 +819,8 @@ fn line_search(
     o: &[f64],
     o_bar: &[f64],
     deltas: &mut Vec<(f64, usize, f64)>,
-) -> f64 {
+    sc: Option<&Screen>,
+) -> (f64, f64) {
     let mut omega_l = 0.0;
     let mut omega_r = 0.0;
     for i in (0..w.len()).rev() {
@@ -689,6 +832,9 @@ fn line_search(
     let mut r = lambda * omega_r;
     deltas.clear();
     for i in 0..t.len() {
+        if sc.is_some_and(|sc| sc.stale(i)) {
+            continue;
+        }
         let y = t.y(i);
         let diff = y * (o_bar[i] - o[i]);
         if y * o[i] < 1.0 {
@@ -703,24 +849,43 @@ fn line_search(
         }
     }
     deltas.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut stop = None;
     for &(delta, ii, s) in deltas.iter() {
         let delta_prime = l + delta * (r - l);
         if delta_prime >= 0.0 {
+            stop = Some(delta);
             break;
         }
         let diff = s * t.c(ii) * (o_bar[ii] - o[ii]);
         l += diff * (o[ii] - t.y(ii));
         r += diff * (o_bar[ii] - t.y(ii));
     }
-    -l / (r - l)
+    let step = -l / (r - l);
+    let reach = match stop {
+        Some(d) => d,
+        None if r - l > 0.0 => deltas.last().map_or(step, |d| d.0.max(step)),
+        None => f64::INFINITY,
+    };
+    (step, reach)
 }
 
-fn partition(t: &Train, o: &[f64], subset: &mut [usize], f_start: f64) -> (usize, f64) {
+fn partition(
+    t: &Train,
+    o: &[f64],
+    subset: &mut [usize],
+    f_start: f64,
+    sc: Option<&Screen>,
+) -> (usize, f64) {
     let m = t.len();
     let mut active = 0usize;
     let mut inactive = m;
     let mut f = f_start;
     for (i, &oi) in o.iter().enumerate() {
+        if sc.is_some_and(|sc| sc.stale(i)) {
+            inactive -= 1;
+            subset[inactive] = i;
+            continue;
+        }
         let diff = 1.0 - t.y(i) * oi;
         if diff > 0.0 {
             subset[active] = i;
@@ -776,15 +941,44 @@ pub(crate) fn mfn_from(
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
     let all: Vec<usize> = (0..m).collect();
+    let mut o_bar = vec![0.0f64; m];
+    let screen = !x.is_spilled() && m > 0;
+    let mut nrm = Vec::new();
     if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
         let wv: &[f64] = &w;
-        t.pass(&all, &mut o, || (), |_, _, row, ok| *ok = dot_row(row, wv));
+        let parts = t.pass(
+            &all,
+            &mut o,
+            || Vec::with_capacity(if screen { CHUNK } else { 0 }),
+            |p, _, row, ok| {
+                *ok = dot_row(row, wv);
+                if screen {
+                    p.push(norm_up(row));
+                }
+            },
+        );
+        nrm = parts.concat();
+    } else if screen {
+        nrm = t
+            .pass(
+                &all,
+                &mut o_bar,
+                || Vec::with_capacity(CHUNK),
+                |p, _, row, _| p.push(norm_up(row)),
+            )
+            .concat();
     }
+    let mut sc = screen.then(|| Screen::new(nrm, &w));
     let mut subset = vec![0usize; m];
-    let (mut active, mut f) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
+    let (mut active, mut f) = partition(
+        &t,
+        &o,
+        &mut subset,
+        0.5 * lambda * ddot(&w[..n], &w[..n]),
+        sc.as_ref(),
+    );
     let mut w_bar = vec![0.0f64; stride];
-    let mut o_bar = vec![0.0f64; m];
     let mut ws = CgWork {
         r: vec![0.0; stride],
         p: vec![0.0; stride],
@@ -806,7 +1000,9 @@ pub(crate) fn mfn_from(
     while iter < opts.mfnitermax {
         iter += 1;
         w_bar.copy_from_slice(&w);
-        o_bar.copy_from_slice(&o);
+        if sc.is_none() {
+            o_bar.copy_from_slice(&o);
+        }
         let opt = cgls(
             &t,
             lambda,
@@ -824,27 +1020,35 @@ pub(crate) fn mfn_from(
         for ((sk, &b), &a) in step.iter_mut().zip(&w_bar).zip(&w) {
             *sk = b - a;
         }
-        let wb: &[f64] = &w_bar;
-        let dv: &[f64] = &step;
-        let av: &[bool] = &act;
-        t.pass(
-            &all,
-            &mut o_bar,
-            || (),
-            |_, k, row, ob| {
-                if av[k] {
-                    *ob += dot_row(row, dv);
-                } else {
-                    *ob = dot_row(row, wb);
-                }
-            },
-        );
+        if let Some(sc) = sc.as_mut() {
+            sc.bound(&w_bar);
+            screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
+        } else {
+            let wb: &[f64] = &w_bar;
+            let dv: &[f64] = &step;
+            let av: &[bool] = &act;
+            t.pass(
+                &all,
+                &mut o_bar,
+                || (),
+                |_, k, row, ob| {
+                    if av[k] {
+                        *ob += dot_row(row, dv);
+                    } else {
+                        *ob = dot_row(row, wb);
+                    }
+                },
+            );
+        }
         if !ini {
             cgitermax = opts.cgitermax;
             ini = true;
         }
         let mut opt2 = true;
         for (k, &ii) in subset.iter().enumerate() {
+            if sc.as_ref().is_some_and(|sc| sc.stale(ii)) {
+                continue;
+            }
             let yo = t.y(ii) * o_bar[ii];
             opt2 = if k < active {
                 yo <= 1.0 + epsilon
@@ -863,14 +1067,41 @@ pub(crate) fn mfn_from(
             w_bar.truncate(n);
             return w_bar;
         }
-        let delta = line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas);
+        let (mut delta, reach) =
+            line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, sc.as_ref());
+        let within = reach <= REACH * (1.0 - 1e-6);
+        if let Some(sc) = sc.as_mut() {
+            if !within && sc.any_stale() {
+                sc.open_all();
+                screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
+                delta = line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, None).0;
+            }
+        }
         let f_old = f;
         dscal(1.0 - delta, &mut w);
         daxpy(delta, &w_bar, &mut w);
-        for (oi, &ob) in o.iter_mut().zip(&o_bar) {
-            *oi += delta * (ob - *oi);
+        match sc.as_mut() {
+            Some(sc) => {
+                for ((oi, &ob), &s) in o.iter_mut().zip(&o_bar).zip(&sc.since) {
+                    if s == FRESH {
+                        *oi += delta * (ob - *oi);
+                    }
+                }
+                sc.record(&w_bar, delta, &w);
+            }
+            None => {
+                for (oi, &ob) in o.iter_mut().zip(&o_bar) {
+                    *oi += delta * (ob - *oi);
+                }
+            }
         }
-        let (a, fl) = partition(&t, &o, &mut subset, 0.5 * lambda * ddot(&w[..n], &w[..n]));
+        let (a, fl) = partition(
+            &t,
+            &o,
+            &mut subset,
+            0.5 * lambda * ddot(&w[..n], &w[..n]),
+            sc.as_ref(),
+        );
         active = a;
         f = fl;
         if (f - f_old).abs() < opts.relative_stop_eps * f_old.abs() {

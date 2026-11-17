@@ -1,6 +1,7 @@
 mod args;
 mod budget;
 mod cv;
+mod direction;
 mod folds;
 mod merge;
 mod normalize;
@@ -14,7 +15,8 @@ mod text;
 mod write;
 
 pub use budget::{Budget, Reservation};
-pub use cv::{init_direction, train, CvConfig, CvResult};
+pub use cv::{train, CvConfig, CvResult};
+pub use direction::init_direction;
 pub use folds::{folds_by_spectrum, libstdcxx_sort_by};
 pub use merge::{merge_folds, normalize_fold_scores};
 pub use normalize::{raw_weights, score, stdv, Norm};

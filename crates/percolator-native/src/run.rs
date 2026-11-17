@@ -1,5 +1,6 @@
 use crate::args::{parse, Args};
-use crate::cv::{init_direction, train, CvConfig};
+use crate::cv::{train, CvConfig};
+use crate::direction::init_directions;
 use crate::folds::folds_by_spectrum;
 use crate::merge::merge_folds;
 use crate::normalize::{score, stdv, Norm};
@@ -154,14 +155,10 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
     let test: Vec<Vec<usize>> = (0..FOLDS)
         .map(|f| (0..n).filter(|&i| fold[i] as usize == f).collect())
         .collect();
-    let train: Vec<Vec<usize>> = (0..FOLDS)
-        .map(|f| (0..n).filter(|&i| fold[i] as usize != f).collect())
-        .collect();
+    let all_sets = (1u8 << FOLDS) - 1;
+    let mask: Vec<u8> = fold.iter().map(|&f| all_sets & !(1u8 << f)).collect();
     let default_direction = |overrule: bool| -> Result<Vec<Vec<f64>>, String> {
-        train
-            .iter()
-            .map(|rows| init_direction(pin, &norm, rows, 0.01, overrule))
-            .collect()
+        init_directions(pin, &norm, &mask, FOLDS, 0.01, overrule)
     };
     let path = a.init_weights.as_deref().unwrap_or(Path::new(""));
     let mut w: Vec<Vec<f64>> = match read_init_weights(path, nf) {

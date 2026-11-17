@@ -1,4 +1,5 @@
 use crate::budget::Reservation;
+use crate::direction::{init_directions, pin_direction};
 use crate::folds::folds_by_spectrum;
 use crate::normalize::{raw_weights, score, Norm};
 use crate::pin::Pin;
@@ -57,75 +58,6 @@ struct TrainSet {
     idx_pos: Vec<usize>,
 }
 
-fn pin_direction(pin: &Pin) -> Option<&[f64]> {
-    pin.default_direction
-        .as_deref()
-        .filter(|d| d.iter().any(|&v| v != 0.0))
-}
-
-const NO_DIRECTION: &str = "Error in the input data: cannot find an initial direction with positive training examples. Consider setting/raising the initial training FDR threshold (--train-fdr-initial). Terminating.";
-
-pub fn init_direction(
-    pin: &Pin,
-    norm: &Norm,
-    rows: &[usize],
-    fdr: f64,
-    overrule: bool,
-) -> Result<Vec<f64>, String> {
-    let nf = pin.rows.nfeat();
-    let mut w = vec![0.0f64; nf + 1];
-    if let Some(d) = pin_direction(pin) {
-        for (wi, &di) in w.iter_mut().zip(d) {
-            *wi = di;
-        }
-        return Ok(w);
-    }
-    if nf == 0 {
-        return Ok(w);
-    }
-    let decoy: Vec<bool> = rows.iter().map(|&i| pin.meta[i].label < 0).collect();
-    let per_feature = (rows.len() as u64).max(1) * COLUMN_BYTES_PER_ROW;
-    let chunk = ((pin.budget.available() / per_feature) as usize).clamp(1, nf);
-    let mut counts: Vec<[usize; 2]> = Vec::with_capacity(nf);
-    for j0 in (0..nf).step_by(chunk) {
-        let j1 = (j0 + chunk).min(nf);
-        let _held = Reservation::take(&pin.budget, (j1 - j0) as u64 * per_feature);
-        let mut cols = vec![vec![0.0f64; rows.len()]; j1 - j0];
-        fill(&pin.rows, norm, rows, |p, row| {
-            for (c, &v) in cols.iter_mut().zip(&row[j0..j1]) {
-                c[p] = v;
-            }
-        });
-        counts.par_extend(cols.into_par_iter().map(|high| {
-            let low: Vec<f64> = high.iter().map(|&v| -v).collect();
-            [
-                count_at(&tdc_q(&low, &decoy, true), &decoy, fdr),
-                count_at(&tdc_q(&high, &decoy, true), &decoy, fdr),
-            ]
-        }));
-    }
-    let mut best: Option<(usize, usize, bool)> = None;
-    for (j, c) in counts.iter().enumerate() {
-        for (i, &p) in c.iter().enumerate() {
-            let better = match best {
-                None => true,
-                Some((b, _, _)) => p > b,
-            };
-            if better {
-                best = Some((p, j, i == 0));
-            }
-        }
-    }
-    if let Some((p, j, low)) = best {
-        if p == 0 && !overrule {
-            return Err(NO_DIRECTION.to_string());
-        }
-        w[j] = if low { -1.0 } else { 1.0 };
-    }
-    Ok(w)
-}
-
-const COLUMN_BYTES_PER_ROW: u64 = 48;
 const TASK_BYTES_PER_EXAMPLE: u64 = 64;
 const TASK_BYTES_PER_ROW: u64 = 40;
 
@@ -214,18 +146,16 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let per_fold = cfg.cpos.len() * cfg.cfrac.len();
     let opts = MfnOpts::default();
 
-    let init: Vec<Vec<f64>> = folds
-        .iter()
-        .map(|fd| {
-            init_direction(
-                pin,
-                norm,
-                &fd.train,
-                cfg.initial_selection_fdr,
-                cfg.overrule,
-            )
-        })
-        .collect::<Result<_, _>>()?;
+    let all_sets = (1u8 << FOLDS) - 1;
+    let mask: Vec<u8> = fold.iter().map(|&f| all_sets & !(1u8 << f)).collect();
+    let init = init_directions(
+        pin,
+        norm,
+        &mask,
+        FOLDS,
+        cfg.initial_selection_fdr,
+        cfg.overrule,
+    )?;
     if cfg.verbose > 1 && pin_direction(pin).is_none() {
         for (f, (fd, w)) in folds.iter().zip(&init).enumerate() {
             let s = score(&pin.rows, &fd.train, w, Some(norm));

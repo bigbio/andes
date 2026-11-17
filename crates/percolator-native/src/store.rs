@@ -1,4 +1,5 @@
 use crate::budget::{Budget, Reservation};
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -33,6 +34,40 @@ impl Store {
 
     pub fn nfeat(&self) -> usize {
         self.nfeat
+    }
+
+    pub fn block_rows(&self) -> usize {
+        self.block_rows
+    }
+
+    pub fn par_for_each_block(&self, f: impl Fn(usize, &[f32]) + Sync) {
+        if self.nrows == 0 {
+            return;
+        }
+        match &self.data {
+            Data::Ram(v) => {
+                if self.nfeat == 0 {
+                    f(0, &[]);
+                    return;
+                }
+                let rows = self.block_rows;
+                v.par_chunks(rows * self.nfeat)
+                    .enumerate()
+                    .for_each(|(i, c)| f(i * rows, c));
+            }
+            Data::Spill(_) => {
+                let batch = rayon::current_num_threads().max(1);
+                let mut pending: Vec<(usize, Vec<f32>)> = Vec::with_capacity(batch);
+                self.for_each_block(|start, block| {
+                    pending.push((start, block.to_vec()));
+                    if pending.len() == batch {
+                        pending.par_iter().for_each(|(s, b)| f(*s, b));
+                        pending.clear();
+                    }
+                });
+                pending.par_iter().for_each(|(s, b)| f(*s, b));
+            }
+        }
     }
 
     pub fn for_each_block(&self, mut f: impl FnMut(usize, &[f32])) {

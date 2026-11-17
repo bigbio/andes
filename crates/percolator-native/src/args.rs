@@ -11,10 +11,13 @@ pub struct Args {
     pub init_weights: Option<PathBuf>,
     pub overrule: bool,
     pub verbose: u32,
+    pub test_fdr: f64,
+    pub selection_fdr: f64,
+    pub initial_selection_fdr: f64,
     pub pin: PathBuf,
 }
 
-const VALUE_FLAGS: [&str; 8] = [
+const VALUE_FLAGS: [&str; 13] = [
     "-v",
     "--verbose",
     "--seed",
@@ -23,6 +26,11 @@ const VALUE_FLAGS: [&str; 8] = [
     "--weights",
     "--num-threads",
     "--init-weights",
+    "-F",
+    "--trainFDR",
+    "-t",
+    "--testFDR",
+    "--train-fdr-initial",
 ];
 
 const SWITCHES: [&str; 5] = [
@@ -42,6 +50,15 @@ fn bounded(flag: &str, value: &str, min: u64, max: u64) -> Result<u64, String> {
     }
 }
 
+fn fraction(flag: &str, value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(v) if (0.0..=1.0).contains(&v) => Ok(v),
+        _ => Err(format!(
+            "{flag} must be a number from 0 to 1, got '{value}'"
+        )),
+    }
+}
+
 pub fn parse(args: &[String]) -> Result<Args, String> {
     let mut seed = 1u64;
     let mut target = None;
@@ -53,6 +70,9 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
     let mut init_weights = None;
     let mut overrule = false;
     let mut verbose = 0u32;
+    let mut test_fdr = 0.01f64;
+    let mut train_fdr = None;
+    let mut initial_fdr = None;
     let mut pin = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -80,6 +100,9 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
                 "--decoy-results-psms" => decoy = Some(PathBuf::from(value)),
                 "--weights" => weights = Some(PathBuf::from(value)),
                 "-v" | "--verbose" => verbose = bounded(flag, &value, 0, 5)? as u32,
+                "-F" | "--trainFDR" => train_fdr = Some(fraction(flag, &value)?),
+                "-t" | "--testFDR" => test_fdr = fraction(flag, &value)?,
+                "--train-fdr-initial" => initial_fdr = Some(fraction(flag, &value)?),
                 _ => init_weights = Some(PathBuf::from(value)),
             }
         } else if SWITCHES.contains(&arg) {
@@ -108,6 +131,14 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
     if !static_model && init_weights.is_some() {
         return Err("argument --init-weights is only supported with --static".to_string());
     }
+    let mut selection_fdr = train_fdr.unwrap_or(0.01);
+    let mut initial_selection_fdr = initial_fdr.or(train_fdr).unwrap_or(0.01);
+    if selection_fdr <= 0.0 {
+        selection_fdr = test_fdr;
+        if initial_selection_fdr <= 0.0 {
+            initial_selection_fdr = test_fdr;
+        }
+    }
     Ok(Args {
         seed,
         target: target.ok_or("argument --results-psms is required")?,
@@ -119,6 +150,9 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
         init_weights,
         overrule,
         verbose,
+        test_fdr,
+        selection_fdr,
+        initial_selection_fdr,
         pin: pin.ok_or("no PIN file given: the PIN path comes last")?,
     })
 }

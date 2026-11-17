@@ -92,6 +92,9 @@ fn trained_scores(
         seed: a.seed,
         overrule: a.overrule,
         verbose: a.verbose,
+        test_fdr: a.test_fdr,
+        selection_fdr: a.selection_fdr,
+        initial_selection_fdr: a.initial_selection_fdr,
         ..CvConfig::default()
     };
     let mut cv = train(pin, &norm, &cfg, pool)?;
@@ -215,7 +218,7 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
                 "WARNING: Could not find weights input file {}. Using default weights instead.",
                 path.display()
             );
-            init_directions(pin, &norm, &mask, FOLDS, 0.01, false)?
+            init_directions(pin, &norm, &mask, FOLDS, a.initial_selection_fdr, false)?
         }
     };
     let mut scores = vec![0.0f64; n];

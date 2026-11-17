@@ -234,16 +234,61 @@ fn static_run_without_targets_aborts_as_percolator() {
 }
 
 #[test]
+fn training_fdr_options_are_read_as_percolator_reads_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = data("svm_ref.pin");
+    let read = |o: &Out| {
+        [&o.target, &o.decoy, &o.weights]
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .concat()
+    };
+    let runs = [
+        ("long", vec!["--trainFDR", "0.05", "--testFDR", "0.05"]),
+        ("short", vec!["-F", "0.05", "-t", "0.05"]),
+        ("inline", vec!["--trainFDR=0.05", "--testFDR=0.05"]),
+        (
+            "initial",
+            vec![
+                "--trainFDR",
+                "0.05",
+                "--train-fdr-initial",
+                "0.05",
+                "-t",
+                "0.05",
+            ],
+        ),
+    ];
+    let mut outputs = Vec::new();
+    for (stem, flags) in runs {
+        let o = outs(dir.path(), stem);
+        let mut a = training_args(&o, "2", &pin);
+        for (k, f) in flags.iter().enumerate() {
+            a.insert(k, f.to_string());
+        }
+        run(&a, limit(dir.path())).unwrap();
+        outputs.push(read(&o));
+    }
+    assert!(outputs.windows(2).all(|w| w[0] == w[1]));
+    for bad in [
+        vec!["--trainFDR", "1.5"],
+        vec!["-t", "x"],
+        vec!["--train-fdr-initial", "-0.1"],
+    ] {
+        let o = outs(dir.path(), "bad");
+        let mut a = training_args(&o, "2", &pin);
+        a.insert(0, bad[1].to_string());
+        a.insert(0, bad[0].to_string());
+        let err = run(&a, limit(dir.path())).unwrap_err();
+        assert!(err.contains(bad[0]) && err.contains("from 0 to 1"), "{err}");
+    }
+}
+
+#[test]
 fn unknown_argument_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let o = outs(dir.path(), "u");
     let pin = p(&data("svm_ref.pin"));
-    for bad in [
-        "--trainFDR",
-        "-y",
-        "--subset-max-train",
-        "--post-processing-mix-max",
-    ] {
+    for bad in ["-y", "--subset-max-train", "--post-processing-mix-max"] {
         let mut a = training_args(&o, "1", &data("svm_ref.pin"));
         a.insert(0, bad.to_string());
         let err = run(&a, limit(dir.path())).unwrap_err();

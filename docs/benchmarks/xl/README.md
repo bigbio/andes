@@ -33,6 +33,10 @@ python3 run.py mytag /path/to/andes --threads 8     # andes built with --feature
 python3 compare.py reference mytag
 ```
 
+`XL_SITES=" (K, S, T, Y, Protein N-term)"` appends sites to every dataset's linker, and
+`XLBENCH_PAIR_TRUTH=1` scores the library datasets by peptide pair alone, without the link
+site, for searches that may place links on S, T or Y.
+
 `compare.py` prints, for every dataset:
 
 - `true@1%`: true CSMs at andes q ≤ 1 %;
@@ -48,15 +52,16 @@ xiSEARCH settings are from its DSSO template (`DSSO_largescale.conf`).
 
 | xiSEARCH | andes before | Status |
 |---|---|---|
-| Missing monoisotopic peak, up to 2 Da (`missing_isotope_peaks:2`) | 0..1 | **0..2** (this change) |
-| Crosslinker-stub peptide ions and doublets in the score (`CCPepStubCount`, `CCPepDoubletCount`) | used only to propose candidate pairs | **scored** (this change) |
-| xiFDR self/between split; TT/TD/DD ratio valid in every class | pooled homotypic and heterotypic intra links | **homotypic class** (this change) |
+| Missing monoisotopic peak, up to 2 Da (`missing_isotope_peaks:2`) | 0..1 | **0..2** |
+| Crosslinker-stub peptide ions and doublets in the score (`CCPepStubCount`, `CCPepDoubletCount`) | used only to propose candidate pairs | **scored** |
+| xiFDR self/between split; TT/TD/DD ratio valid in every class | pooled homotypic and heterotypic intra links | **homotypic class** |
 | Alpha candidates from the fragments for any linker | doublet-gated pairs for cleavable linkers | tried: open-index retrieval for cleavable linkers; rejected (below) |
 | A peak counts once across the two peptides | α and β scored independently on all peaks | tried: decoupled re-ranking; rejected (below) |
-| Linear and non-covalent matches compete (`EVALUATELINEARS`, `NonCovalent`) | not searched | open |
-| S/T/Y sites with a score penalty | K and protein N-terminus only; S/T/Y without penalty when given | open |
-| Hydrolysed and amidated monolinks | hydrolysed only | open |
-| Score is a weighted sum of fragment coverage, intensity and error terms of both peptides | `min(α, β)` of the rank-LLR scores | open |
+| Linear matches compete (`EVALUATELINEARS`), including loop-links | not searched | tried: neutral (below) |
+| Non-covalent pairs compete (`NonCovalent`) | not searched | open |
+| S/T/Y sites with a score penalty | K and protein N-terminus only; S/T/Y without penalty when given | **penalty 12 when S/T/Y are given**; default sites unchanged (below) |
+| Hydrolysed and amidated monolinks | hydrolysed only | tried: amidated by default loses (below) |
+| Score is a weighted sum of fragment coverage, intensity and error terms of both peptides, with the delta to the next match | `min(α, β)` of the rank-LLR scores | **delta added**: `min(α, β) + 0.3 × delta` (below); the remaining terms open |
 | xiFDR boost (pre-filters such as minimum fragments per peptide) | none | open |
 
 ## Results
@@ -104,6 +109,34 @@ Rejected (true CSMs at q ≤ 1 % / at actual 1 %, against the variant they were 
   13,834 → 6,890 at q ≤ 1 %. Removing peaks re-ranks the rest and deflates true heterotypic
   pairs more than false ones.
 - **10 ppm precursor tolerance**: 15,492 → 14,770.
+
+Measured after the first release (against the main branch, 15,492 / 14,829):
+
+- **Linear competition.** The linear search runs on every spectrum with a CSM, and the CSM is
+  dropped when the best linear peptide, rescored with the crosslink peptide scorer, reaches
+  max(α, β): 15,586 / 14,828. The bars α + β and min(α, β) give 15,492 / 14,829 and
+  15,584 / 14,827. The gain is one run's inter threshold moving (TD 11 → 15); every dropped CSM
+  was already below 1 %, because the doublet gate keeps linear spectra out.
+- **Loop-link competitors** (a peptide with two of its own sites plus the intact linker,
+  added to the linear competitors): identical accepted sets to linear competition alone on all
+  11 runs, including DSS.
+- **S/T/Y sites** (`XL_SITES`, both truths): without a penalty 13,694 site-strict (false
+  shares up to 24 %, links moved from K to a neighbouring S/T/Y) and 14,319 by peptide pair;
+  penalty 3, 6 and 12: 14,714, 15,338 and 15,452 site-strict. With penalty 12 the Clasen runs
+  gain 14 % and 20 % (real proteins carry S/T/Y links) and two lysine-only library runs lose
+  9 % and 12 %, so the sites stay opt-in and the penalty is the default when they are given.
+- **Amidated monolink** searched by default next to the hydrolysed one: 15,310 / 14,160.
+- **Delta to the next-best peptide pair** in the CSM score, `min(α, β) + 0.3 × (min(α, β) −
+  second)`, xiSEARCH's delta (adopted): 16,427 / 15,206. Every run gains (+2 % to +15 %) and
+  each run's false share stays within 0.2 points; Beveridge DSSO's `@act` falls (729 → 452)
+  as one false match moves up. Scored offline first on the saved results (q-values
+  reproduced to 5e-6): weights 0.1, 0.2, 0.3, 0.5, 0.75 and 1.0 all raise the Cas9, ribosome
+  and Clasen families, so the weight is not fitted to the set; 0.3 was taken as one that
+  raises all three. Other one-term changes to `min(α, β)` lost: + 0.1–0.3 × max(α, β), a bonus
+  for full pairs, a penalty per isotope offset.
+- **Separate FDR for half pairs** (one peptide by its doublet, the other by mass): the
+  false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
+  groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).
 
 `mat_dsbu` stays above target (2.8 % overall, 3.8 % inter). Most of its false inter matches are
 half pairs, one peptide with a doublet and the other by mass, and several repeat one

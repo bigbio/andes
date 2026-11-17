@@ -825,6 +825,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if chimeric_active {
             return Err("--dia and --chimeric cannot be combined: --dia searches every scan across its whole window".into());
         }
+        if cli.open_search {
+            return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
+        }
         params.dia = true;
     }
     if cli.glyco_index_sequon_only && !cli.glyco {
@@ -840,8 +843,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "candidate index: N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && has_ms1;
-    if cli.precursor_mono == PrecursorMonoFlag::Auto && cli.glyco && !mono_active {
+    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto
+        && (cli.glyco || cli.open_search)
+        && has_ms1;
+    if cli.precursor_mono == PrecursorMonoFlag::Auto
+        && (cli.glyco || cli.open_search)
+        && !mono_active
+    {
         eprintln!(
             "WARN: --precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
              Bruker .d); \
@@ -997,6 +1005,61 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0
     };
+    if cli.open_search {
+        if cli.glyco {
+            return Err("--open-search is not supported with --glyco".into());
+        }
+        if cli.chimeric {
+            return Err("--open-search is not combined with --chimeric".into());
+        }
+        if cli.label.is_some() {
+            return Err("--open-search is not combined with --label".into());
+        }
+        if cli.tmt.is_some() {
+            return Err("--open-search is not combined with --tmt".into());
+        }
+        if cli.lfq || cli.mbr {
+            return Err("--open-search is not combined with --lfq or --mbr".into());
+        }
+        if cli.refine {
+            return Err("--open-search is not combined with --refine".into());
+        }
+        if cli.xl.is_some() {
+            return Err("--open-search is not combined with --xl".into());
+        }
+        if cli.isotope_error.is_some() {
+            return Err(
+                "--open-search chooses the isotope offset from the fragments (range 0..=2); \
+                 remove --isotope-error"
+                    .into(),
+            );
+        }
+        if !choice.use_index {
+            let why = retrieval_excluded.unwrap_or("it was disabled with --fragment-index off");
+            return Err(format!(
+                "--open-search needs the fragment-ion index (it cannot enumerate the wide \
+                 precursor window): {why}"
+            )
+            .into());
+        }
+        let (delta_min, delta_max) = cli.open_search_delta;
+        let top_k = cli.open_search_top_k.max(1);
+        let open = search::search_params::OpenSearch {
+            delta_min,
+            delta_max,
+            top_k,
+        };
+        params.precursor_tolerance = open.precursor_tolerance();
+        params.open_search = Some(open);
+        params.isotope_error_range = 0..=2;
+        params.fragment_index_top_k = top_k;
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+        eprintln!(
+            "open search: mass-offset window {delta_min:+}..{delta_max:+} Da, {top_k} candidates \
+             per spectrum (fragment-ion shortlist), isotope range 0..=2 (reported offset is \
+             isotope-corrected)"
+        );
+    }
     if let Some(refusal) = choice.refused_because {
         eprintln!(
             "WARN: the fragment-ion index cannot be used here ({refusal}); using enumeration."
@@ -1279,6 +1342,42 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     right_after.unwrap_or(0.0),
                 );
             }
+        }
+    }
+
+    if cli.optimize {
+        if cli.glyco {
+            return Err("--optimize is not supported with --glyco".into());
+        }
+        let sample = crate::spectra::sample_spectra_strided(
+            &spectrum_path,
+            is_mzml,
+            cli.ms_level as u32,
+            cli.optimize_sample,
+        )
+        .or_else(|| {
+            sample_spectra(
+                &spectrum_path,
+                is_mzml,
+                is_mgf,
+                is_raw,
+                cli.ms_level as u32,
+            )
+            .map(|v| v.into_iter().take(cli.optimize_sample).collect())
+        });
+        match sample {
+            Some(sample) => crate::optimize::optimize_parameters(
+                &idx,
+                &scorer,
+                fragment_tol_da,
+                &cli.db.decoy_prefix,
+                &index_path,
+                &mut params,
+                &sample,
+            ),
+            None => eprintln!(
+                "WARN: --optimize could not read a sample; keeping the resolved parameters"
+            ),
         }
     }
 
@@ -2166,6 +2265,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
             spectra.len(),
             search_elapsed.as_secs_f64()
+        );
+    }
+    if cli.open_search {
+        let (attempts, wins) = prepared.open_search_stats();
+        eprintln!(
+            "open search: {attempts} modification-aware re-scores ({wins} improved the node \
+             score)"
         );
     }
 

@@ -280,7 +280,12 @@ pub fn write_pin_to<W: Write>(
         }
     }
 
-    write_header(writer, min_charge, max_charge)?;
+    write_header(
+        writer,
+        min_charge,
+        max_charge,
+        params.open_search.is_some(),
+    )?;
 
     let emitting: Vec<usize> = (0..queues.len())
         .filter(|&i| !queues[i].is_empty())
@@ -316,7 +321,12 @@ fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {
 
 const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
-fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io::Result<()> {
+fn write_header<W: Write>(
+    writer: &mut W,
+    min_charge: u8,
+    max_charge: u8,
+    open_search: bool,
+) -> io::Result<()> {
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
         "Label".to_string(),
@@ -403,8 +413,20 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "IsotopeErrorNeg".to_string(),
     ]);
 
-    cols.extend_from_slice(&["Peptide".to_string(), "Proteins".to_string()]);
+    if open_search {
+        cols.extend_from_slice(&[
+            "DeltaMass".to_string(),
+            "AbsDeltaMass".to_string(),
+            "OpenSite".to_string(),
+            "OpenLocScore".to_string(),
+            "OpenLocMargin".to_string(),
+        ]);
+    }
 
+    cols.extend_from_slice(&[
+        "Peptide".to_string(),
+        "Proteins".to_string(),
+    ]);
     writeln!(writer, "{}", cols.join("\t"))
 }
 
@@ -540,6 +562,24 @@ fn write_psm_row<W: Write>(
             FeatureFmt::Fixed6 => write!(writer, "{:.6}", value)?,
             FeatureFmt::Double => write_double(writer, value)?,
         }
+    }
+
+    if params.open_search.is_some() {
+        let f = &psm.features;
+        let delta = if f.open_delta != 0.0 {
+            f64::from(f.open_delta)
+        } else {
+            exp_mass - f64::from(psm.isotope_offset) * ISOTOPE - calc_mass
+        };
+        writer.write_all(b"\t")?;
+        write_double(writer, delta)?;
+        writer.write_all(b"\t")?;
+        write_double(writer, delta.abs())?;
+        write!(writer, "\t{}", f.open_site)?;
+        writer.write_all(b"\t")?;
+        write_double(writer, f64::from(f.open_loc_score))?;
+        writer.write_all(b"\t")?;
+        write_double(writer, f64::from(f.open_loc_margin))?;
     }
 
     write!(writer, "\t{}", cand.peptide)?;
@@ -837,6 +877,7 @@ mod tests {
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             require_nxst_sequon: false,
+            open_search: None,
         }
     }
 

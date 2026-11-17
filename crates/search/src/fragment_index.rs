@@ -344,7 +344,26 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
-        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        let complement_masses: Vec<f64> = match (params.open_search.is_some(), charges.len()) {
+            (true, 1) => {
+                let z = f64::from(charges[0]);
+                let obs = adjusted_observed_neutral_mass(
+                    spec.precursor_mz * z - z * PROTON,
+                    shift_ppm,
+                );
+                vec![obs]
+            }
+            _ => Vec::new(),
+        };
+        let mut sel = self.vote(
+            spec,
+            lo,
+            hi,
+            fragment_tol,
+            min_matched,
+            vote_peaks,
+            &complement_masses,
+        );
         sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
         select_top_k(&mut sel, top_k);
         sel.into_iter()
@@ -370,7 +389,15 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
-        let mut sel = self.vote(spec, lo, hi, fragment_tol, min_matched, vote_peaks);
+        let mut sel = self.vote(
+            spec,
+            lo,
+            hi,
+            fragment_tol,
+            min_matched,
+            vote_peaks,
+            &[],
+        );
         select_top_k(&mut sel, top_k);
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
     }
@@ -379,6 +406,7 @@ impl ChunkFragmentIndex {
         self.form_mass[id as usize]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn vote(
         &self,
         spec: &Spectrum,
@@ -387,6 +415,7 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         min_matched: u16,
         vote_peaks: usize,
+        complement_masses: &[f64],
     ) -> Vec<(u32, u16, f32)> {
         let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
         let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
@@ -406,12 +435,16 @@ impl ChunkFragmentIndex {
             }
             touched.clear();
             let floor = vote_intensity_floor(&spec.peaks, vote_peaks);
-            for &(mz, intensity) in &spec.peaks {
-                if intensity < floor {
-                    continue;
-                }
+            let vote = |mz: f64,
+                            intensity: f32,
+                            counts: &mut Vec<(u16, f32)>,
+                            touched: &mut Vec<u32>,
+                            clip: bool| {
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
+                if clip && b >= n_bins {
+                    return;
+                }
                 let span = ((tol_da / self.bin_width).ceil() as usize).max(1);
                 for bb in b.saturating_sub(span)..=(b + span).min(n_bins - 1) {
                     let base = self.bin_start[bb] as usize;
@@ -434,6 +467,24 @@ impl ChunkFragmentIndex {
                             slot.1 += intensity;
                         }
                     }
+                }
+            };
+            for &(mz, intensity) in &spec.peaks {
+                if intensity < floor {
+                    continue;
+                }
+                vote(mz, intensity, counts, touched, false);
+            }
+            for &base in complement_masses {
+                for &(mz, intensity) in &spec.peaks {
+                    if intensity < floor {
+                        continue;
+                    }
+                    let q = base + 2.0 * PROTON - mz;
+                    if q <= 0.0 {
+                        continue;
+                    }
+                    vote(q, intensity, counts, touched, true);
                 }
             }
             let mut sel = Vec::new();

@@ -478,6 +478,28 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_SEARCH)]
     pub(crate) isotope_error: Option<(i8, i8)>,
 
+    /// Open (mass-offset) search: any peptide within --open-search-delta of the precursor
+    #[arg(long, hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) open_search: bool,
+
+    /// Mass-offset window for --open-search, as MIN..MAX in Da [default: -100..300]
+    #[arg(long, value_name = "MIN..MAX", default_value = "-100..300", allow_hyphen_values = true,
+          value_parser = parse_open_search_delta, hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) open_search_delta: (f64, f64),
+
+    /// Candidates scored per spectrum under --open-search [default: 100]
+    #[arg(long, value_name = "N", default_value = "100", hide_short_help = true,
+          help_heading = H_SEARCH)]
+    pub(crate) open_search_top_k: u32,
+
+    /// Parameter search: grid precursor tolerance, top-N and charge on a sample, then run
+    #[arg(long, hide_short_help = true, help_heading = H_SEARCH)]
+    pub(crate) optimize: bool,
+
+    /// Spectra the --optimize grid scores [default: 5000]
+    #[arg(long, value_name = "N", default_value = "5000", hide = true)]
+    pub(crate) optimize_sample: usize,
+
     /// Missed cleavages per peptide (not applied to a non-specific digest)
     ///
     /// --glyco raises the value to 3 unless it is given on the command line or in --config.
@@ -1841,6 +1863,36 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     })
 }
 
+pub(crate) fn parse_open_search_delta(s: &str) -> Result<(f64, f64), String> {
+    let t = s.trim();
+    let (min_s, max_s) = t.split_once("..").ok_or_else(|| {
+        format!("invalid --open-search-delta `{s}`: expected MIN..MAX in Da, e.g. -100..300")
+    })?;
+    let parse = |v: &str| -> Result<f64, String> {
+        v.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("invalid --open-search-delta `{s}`: bad number `{}`", v.trim()))
+    };
+    let (lo, hi) = (parse(min_s)?, parse(max_s)?);
+    if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+        return Err(format!(
+            "invalid --open-search-delta `{s}`: need finite MIN < MAX (got {lo}..{hi})"
+        ));
+    }
+    if lo > 0.0 || hi < 0.0 {
+        return Err(format!(
+            "invalid --open-search-delta `{s}`: the window must contain 0 (got {lo}..{hi})"
+        ));
+    }
+    if hi - lo > 2000.0 {
+        return Err(format!(
+            "invalid --open-search-delta `{s}`: width {} Da exceeds the 2000 Da limit",
+            hi - lo
+        ));
+    }
+    Ok((lo, hi))
+}
+
 pub(crate) fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()
@@ -1953,6 +2005,24 @@ mod cli_domain_validator_tests {
             parse_charge_range("2..60").is_err(),
             "charge above bound must be rejected"
         );
+    }
+
+    #[test]
+    fn open_search_delta_parses_a_range() {
+        assert_eq!(parse_open_search_delta("-100..300"), Ok((-100.0, 300.0)));
+        assert_eq!(parse_open_search_delta(" -20.5..79.966 "), Ok((-20.5, 79.966)));
+        assert!(parse_open_search_delta("-100-300").is_err());
+    }
+
+    #[test]
+    fn open_search_delta_rejects_bad_windows() {
+        assert!(parse_open_search_delta("300..-100").is_err(), "min >= max");
+        assert!(parse_open_search_delta("10..300").is_err(), "0 not in window");
+        assert!(parse_open_search_delta("-300..-1").is_err(), "0 not in window");
+        assert!(parse_open_search_delta("0..0").is_err(), "empty window");
+        assert!(parse_open_search_delta("nan..300").is_err(), "non-finite");
+        assert!(parse_open_search_delta("-1200..1200").is_err(), "width cap");
+        assert!(parse_open_search_delta("abc").is_err(), "no separator");
     }
 
     #[test]
@@ -2513,6 +2583,7 @@ mod help_layout_tests {
         "xl_oracle",
         "xl_rescore_intra",
         "xl_rescore_inter",
+        "optimize_sample",
     ];
 
     #[test]

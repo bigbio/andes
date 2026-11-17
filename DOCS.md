@@ -104,6 +104,29 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 |---|---|---|---|---|
 | `--precursor-cal` | enum | `off` | `off`, `auto`, `on`. A pre-pass learns a ppm shift from confident PSMs and tightens the precursor tolerance; `auto` skips it on small samples. Off by default: on the benchmark sets the pre-pass took 9–17% of the run and never fired, and where it fired (UPS1, larger sample) the tightened window lost 7.6% of PSMs. Skipped (with a warning) on `.raw` and `.d`. | Java `-precursorCal auto\|on\|off` |
 
+### Parameter search (`--optimize`)
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native rescorer; the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
+| `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
+
+This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
+Commun.* 2020), scoped to the parameters andes does not derive from the data. The **fragment**
+tolerance is not searched: the per-run fragment-error calibration estimates it from the
+confident matches, and a grid ranked by PSM count would only widen it. The precursor ppm
+calibration above is a separate, optional step.
+
+Two details decide whether the grid is useful: the sample must span the file (the first 1,000
+spectra preferred 5 ppm where the rest of the file wants 50), and the ranking must use the
+native rescorer's features, not raw rank-score q-values. Measured on the PXD001468 reference
+search: a strided 5,000-spectrum sample chose 50 ppm (targets rising monotonically with the
+tolerance: 2,594 / 2,676 / 2,763 / 2,903), and the full Percolator run then had **24,261 PSMs
+at 1% against 23,053 at the 20 ppm default (+5.2%)**. 50 ppm is the edge of the grid, so the
+optimum may lie beyond it. The staged grid costs ~14 sample searches (2.5 minutes on that file,
+including the full search); with `--open-search` the top-N/charge stage still runs (about ten
+sample searches, each preparing the database-wide open index).
+
 **Candidate retrieval is automatic.** andes builds the candidate
 index out-of-core (cached as `andes-candidx-<hash>.bin` in `--index-cache-dir` (default: the directory of the output files), ~90–250 MB
 on the benchmark databases, reused by later runs on the same database and settings) and retrieves
@@ -682,7 +705,7 @@ Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks
 
 A second pass over confident proteins, on the spectra pass 1 missed, with a **fixed tier**:
 oxidation on M/P/K, deamidation on N/Q, the two pyro-Glu losses and protein N-terminal acetyl,
-at most two per peptide. It does **not** discover modifications; andes has no open search.
+at most two per peptide. It does **not** discover modifications; for that use `--open-search`.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -692,6 +715,81 @@ at most two per peptide. It does **not** discover modifications; andes has no op
 **FDR for refined PSMs.** Pass-2 rows (`IsRefinement = 1`) share the PIN. Under one merged 1%
 threshold they measured **~2.8% FDP** on Astral; thresholded on their own, 0.8–1.1%. Threshold
 them separately when you need 1% on modified PSMs.
+
+### Open search — mass-offset discovery (experimental)
+
+`--open-search` replaces the declared variable modifications with a **mass-offset** match: every
+database base peptide (fixed mods folded in) whose neutral mass lies within
+`--open-search-delta` of the observed precursor is scored, and the offset
+`observed_neutral − peptide_mass` (the modification mass: positive when the modification adds
+mass) is reported. The offset is not enumerated as a modification; it is localised to a residue
+from the shifted-fragment evidence below, as a heuristic (see the output table).
+
+The precursor window is wide (hundreds of Da), so per-spectrum enumeration is infeasible
+(~2,000 base peptides per Da on a mammalian database). The search therefore builds a
+**database-wide b/y fragment-ion index** once per run and each spectrum scores the
+`--open-search-top-k` best-voting peptides. The index holds every variable-mod form of every
+base peptide, so it scales with the declared mods: on a mouse-size database with the default
+oxidised-M variable mod it reported ~16 million forms (~7 GB resident, 30 s to build in a
+debug build; release is faster). Declaring fewer variable mods shrinks it proportionally.
+
+**Shifted-ion shortlist.** For a singly charged b/y pair, `b + y = peptide + 2 H+`, so an
+observed fragment of a peptide that carries an offset has its complement at the **unmodified**
+peptide's own ion. The shortlist votes on both the peaks and their complements, which reaches
+modified peptides whose ladder is shifted and that the regular vote alone can miss (Yu et al.,
+*Nat. Commun.* 2020). On the substitution benchmark the shifted shortlist recovers **48.3%** of
+the truth cases with the correct offset, and 90.1% of the called sites are the substituted
+residue. The regular-only arm was measured during development on the pre-review code; both arms
+are in the substitution report.
+
+**Localization-aware scoring.** A candidate is the unmodified backbone, so its plain score sees
+only the b/y ions that do not carry the offset. For every shortlisted candidate with a non-zero
+offset the search tries each isotope offset (`0..=2`) and each residue: it localises the offset,
+rebuilds the peptide with that mass on the winning residue, re-scores it, and keeps the best
+(offset, residue) and the better of the plain and shifted scores. All per-PSM features are then
+computed on the shifted form, and the winning isotope offset is reported in `isotope_error` and
+subtracted from `DeltaMass`. This is the localization-aware open search of Yu et al., *Nat.
+Commun.* 2020. Localisation itself is cheap (binary search into the sorted peak list); the full
+re-score is capped at 64 per spectrum.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--open-search` | flag | *(off)* | Enable the mass-offset search. Requires the fragment-ion index (refused with `--fragment-index off`). |
+| `--open-search-delta` | Da, `MIN..MAX` | `-100..300` | Accepted offset window; must contain 0 and be at most 2000 Da wide. |
+| `--open-search-top-k` | integer | `100` | Base peptides scored per spectrum, best fragment votes first. |
+
+Fixed behaviour in this mode: the isotope range is set internally to **0..=2** (an isotope step
+is indistinguishable from a ~1 Da offset, so the search tries each offset and keeps the one whose
+shifted fragments fit; an explicit `--isotope-error` is refused). `--precursor-mono auto` is
+active, and the reported offset is measured from the **monoisotopic** precursor, so an M+1 pick
+does not read as a +1.003 Da modification. `--precursor-tol` is ignored (the delta window defines
+the tolerance); precursor calibration is off; `--glyco`, `--chimeric`, `--label` and `--tmt` are
+refused.
+
+**Output.** The TSV gains four columns in this mode:
+
+| Column | Meaning |
+|---|---|
+| `DeltaMass` | Modification mass in Da, isotope-corrected `observed − peptide`; positive when the modification adds mass (oxidation reads `+15.9949`). |
+| `OpenSite` | 1-based residue carrying the offset; `0` when the spectrum does not pin it to one residue. |
+| `OpenLocScore` | Share of the spectrum's total peak intensity explained by the winning site's b/y ions (0–1). |
+| `OpenLocMargin` | `(best − second) / best` over the candidate residues; `≥ 0.02` is needed to call a site. |
+
+The localisation shifts one residue at a time and sums the intensity of the matched b/y ions
+(charges 1–2); it is a **heuristic**, not a probability: an adjacent residue matches every ion
+except the two that bracket the offset, so on a short peptide the margin between neighbouring
+positions is small by construction. N- and C-terminal modifications cannot be separated from a
+modification on the terminal residue by b/y ions alone, and the site is reported on the residue.
+
+The PIN appends five features in this mode — `DeltaMass` and `AbsDeltaMass` (neutral Da; the
+leading `dm`/`absdm` are m/z-space), `OpenSite`, `OpenLocScore`, `OpenLocMargin` — so a rescorer
+sees the offset in the unit it is defined in. Every other run's PIN header is unchanged.
+
+Percolator's q-values are not calibrated for a wide offset window (random mass matches inflate
+the target set), so treat the output as a **candidate list** and measure the error with
+entrapment or a delta-mass-conditioned FDR before reporting identifications. See
+[`docs/benchmarks/open_search/`](docs/benchmarks/open_search/README.md) for a measured example
+on a mouse-liver fraction.
 
 ### Rescoring & FDR filtering
 
@@ -1130,9 +1228,13 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
 stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
-link classes are scored by the pair score `min(alpha, beta)`; for an MS-cleavable linker each
+link classes are scored by the pair score `min(alpha, beta)`, and the q-values rank a CSM by
+`min(alpha, beta) + 0.3 × (min(alpha, beta) − second)`, where `second` is the best pair score of
+a different peptide pair for the spectrum (the `score` column); for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),
+a link on one of them costs 12 against a link on K, as xiSEARCH penalises these side reactions.
 q-values are computed per link
 class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
 `max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer

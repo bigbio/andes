@@ -57,16 +57,17 @@ def acc_of(token):
 class LibTruth:
     def __init__(self, name):
         self.groups = load_lib(name)
+        self.strict = os.environ.get('XLBENCH_PAIR_TRUTH') != '1'
 
     def groups_of(self, pep, pos, kind):
-        if kind not in ('K',):
+        if self.strict and kind not in ('K',):
             return set()
         out = set()
         for g, members in self.groups.items():
             for lib, idx in members:
                 o = lib.find(pep)
                 while o >= 0:
-                    if o + pos == idx:
+                    if not self.strict or o + pos == idx:
                         out.add(g)
                     o = lib.find(pep, o + 1)
         return out

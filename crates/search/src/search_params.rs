@@ -16,6 +16,22 @@ pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
 
 pub const MMAP_WINDOW_CACHE_MAX_CANDIDATES: usize = 4_000_000;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenSearch {
+    pub delta_min: f64,
+    pub delta_max: f64,
+    pub top_k: u32,
+}
+
+impl OpenSearch {
+    pub fn precursor_tolerance(&self) -> PrecursorTolerance {
+        PrecursorTolerance::asymmetric(
+            Tolerance::Da(self.delta_max.max(1e-6)),
+            Tolerance::Da(self.delta_min.abs().max(1e-6)),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoreMode {
     #[default]
@@ -51,6 +67,7 @@ pub struct SearchParams {
     pub score_mode: ScoreMode,
     pub refine_select_psm_fdr: f64,
     pub require_nxst_sequon: bool,
+    pub open_search: Option<OpenSearch>,
 }
 
 impl SearchParams {
@@ -82,6 +99,7 @@ impl SearchParams {
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             require_nxst_sequon: false,
+            open_search: None,
         }
     }
 
@@ -98,7 +116,11 @@ impl SearchParams {
 mod tests {
     use super::*;
     use crate::precursor_cal::PrecursorCalMode;
+    use crate::precursor_matching::matches_precursor;
     use model::aa_set::AminoAcidSetBuilder;
+    use model::mass::PROTON;
+    use model::peptide::Peptide;
+    use model::spectrum::Spectrum;
 
     #[test]
     fn hot_loop_retention_cap_widens_only_under_strong() {
@@ -142,5 +164,38 @@ mod tests {
         assert_eq!(params.chimeric_max_kl, 0.3);
         assert_eq!(params.score_mode, ScoreMode::Rank);
         assert_eq!(params.refine_select_psm_fdr, 0.01);
+    }
+
+    #[test]
+    fn open_search_tolerance_covers_the_requested_offsets() {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let pep = Peptide::from_str("K.PEPTIDEK.R", &aa_set).unwrap();
+        let mass = pep.mass();
+        let os = OpenSearch {
+            delta_min: -100.0,
+            delta_max: 300.0,
+            top_k: 100,
+        };
+        let tol = os.precursor_tolerance();
+        let spec_at = |delta: f64| {
+            let z = 2.0f64;
+            Spectrum {
+                precursor_mz: (mass + delta + z * PROTON) / z,
+                precursor_charge: Some(2),
+                ..Default::default()
+            }
+        };
+        for inside in [250.0, 50.0, -50.0, 0.0] {
+            assert!(
+                matches_precursor(&spec_at(inside), &pep, 2, 0, &tol, 0.0).is_some(),
+                "offset {inside} inside -100..300"
+            );
+        }
+        for outside in [350.0, -150.0] {
+            assert!(
+                matches_precursor(&spec_at(outside), &pep, 2, 0, &tol, 0.0).is_none(),
+                "offset {outside} outside -100..300"
+            );
+        }
     }
 }

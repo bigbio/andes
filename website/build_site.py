@@ -2,7 +2,7 @@
 """Assemble the MkDocs source tree for the andes site.
 
 The site has no copy of the documentation: pages are cut from README.md, DOCS.md and
-docs/benchmarks/README.md at build time, so they cannot drift from the repository. Hand-written
+the docs/benchmarks pages at build time, so they cannot drift from the repository. Hand-written
 pages and static assets live in website/pages and website/static.
 
 usage: build_site.py <out_docs_dir> <andes-help-dir>
@@ -18,6 +18,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SITE = Path(__file__).resolve().parent
 BLOB = "https://github.com/bigbio/andes/blob/main/"
 TREE = "https://github.com/bigbio/andes/tree/main/"
+BENCH_PAGES = {
+    "docs/benchmarks/README.md": "benchmarks/details.md",
+    "docs/benchmarks/identification.md": "benchmarks/identification.md",
+    "docs/benchmarks/lfq.md": "benchmarks/lfq.md",
+    "docs/benchmarks/tmt.md": "benchmarks/tmt.md",
+    "docs/benchmarks/methods.md": "benchmarks/methods.md",
+    "docs/benchmarks/gaps.md": "benchmarks/gaps.md",
+    "docs/benchmarks/reproduce.md": "benchmarks/reproduce.md",
+    "docs/benchmarks/ADDITIONAL_BENCHMARKS.md": "benchmarks/additional.md",
+    "docs/benchmarks/glyco/pxd065680.md": "benchmarks/glyco.md",
+}
+SITE_MAP = {"DOCS.md": "reference.md", "TRAIN.md": "training.md", **BENCH_PAGES}
 
 # generated page -> (source file, [H2 headings to take, in order])
 README_PAGES = {
@@ -56,24 +68,44 @@ def sections(text):
 
 def fix_links(text, page_dir):
     """Repo-relative links (README/DOCS style) become GitHub URLs; site-internal ones are mapped."""
-    site_map = {
-        "DOCS.md": "reference.md",
-        "TRAIN.md": "training.md",
-        "docs/benchmarks/README.md": "benchmarks/details.md",
-    }
-
     def repl(m):
         label, target = m.group(1), m.group(2)
         if re.match(r"^(https?:|mailto:|#)", target):
             return m.group(0)
         path, _, frag = target.partition("#")
         path = path.removeprefix("./")
-        if path in site_map:
-            dest = site_map[path]
+        if path in SITE_MAP:
+            dest = SITE_MAP[path]
             rel = Path(*([".."] * len(page_dir.parts))) / dest if page_dir.parts else Path(dest)
             return f"[{label}]({rel}{'#' + frag if frag else ''})"
         base = TREE if (ROOT / path).is_dir() else BLOB
         return f"[{label}]({base}{path}{'#' + frag if frag else ''})"
+
+    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", repl, text)
+
+
+def map_repo_links(text, src, rel):
+    slug_page = {}
+    for page, (_, heads) in README_PAGES.items():
+        seen = {}
+        for h in heads:
+            slug_page[gh_slug(h.replace("`", ""), seen)] = page
+
+    def repl(m):
+        label, target = m.group(1), m.group(2)
+        if re.match(r"^(https?:|mailto:|#)", target):
+            return m.group(0)
+        path, _, frag = target.partition("#")
+        src_dir = ROOT / Path(src).parent
+        repo = Path(os.path.relpath(src_dir / path, ROOT)).as_posix() if path else ""
+        if repo in SITE_MAP:
+            return f"[{label}]({_rel(rel, SITE_MAP[repo])}{'#' + frag if frag else ''})"
+        if repo == "README.md" and frag in slug_page:
+            return f"[{label}]({_rel(rel, slug_page[frag])}#{frag})"
+        if path and (ROOT / repo).exists():
+            base = TREE if (ROOT / repo).is_dir() else BLOB
+            return f"[{label}]({base}{repo}{'#' + frag if frag else ''})"
+        return m.group(0)
 
     return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", repl, text)
 
@@ -157,15 +189,10 @@ def main(out_dir, help_dir):
                 sys.exit("README 'How it works' has no mermaid block to replace")
         pages[rel] = anchor_headings(fix_links(page, Path(rel).parent))
 
-    # Full reference and training guide: whole files, with their own H1.
-    for src, rel in (("DOCS.md", "reference.md"), ("TRAIN.md", "training.md"), ("docs/benchmarks/README.md", "benchmarks/details.md")):
-        text = (ROOT / src).read_text(encoding="utf-8")
-        base_dir = ROOT / Path(src).parent
-        # benchmark doc links are relative to docs/benchmarks/
-        if src.startswith("docs/benchmarks"):
-            text = re.sub(r"\]\((?!https?:|#|mailto:)([^)\s]+)\)",
-                          lambda m: f"]({BLOB}docs/benchmarks/{m.group(1).removeprefix('./')})", text)
-        pages[rel] = anchor_headings(fix_links(text, Path(rel).parent))
+    for src, rel in (("DOCS.md", "reference.md"), ("TRAIN.md", "training.md")):
+        pages[rel] = anchor_headings(fix_links((ROOT / src).read_text(encoding="utf-8"), Path(rel).parent))
+    for src, rel in BENCH_PAGES.items():
+        pages[rel] = anchor_headings(map_repo_links((ROOT / src).read_text(encoding="utf-8"), src, rel))
     for rel, text in retarget_fragments(pages).items():
         write(out, rel, text)
 

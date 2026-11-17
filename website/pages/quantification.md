@@ -37,20 +37,42 @@ setting at transfer q 0.01 (2026-11-05, `09e1c00d`).
 
 ![Precursors quantified against median ratio error, every submission on two ProteoBench modules](figures/quant_accuracy.svg)
 
+The points of the figure:
+
+<!-- BEGIN generated: proteobench-plotted (docs/benchmarks/render.py) -->
+| module | submission | precursors in ≥ 3 runs | median \|ε\| | CV |
+|---|---|---:|---:|---:|
+| QExactive (PXD028735) | **andes** | 63,796 | 0.161 | 0.117 |
+| | FragPipe 23.0 (most) | 63,701 | 0.200 | 0.156 |
+| | FragPipe 23.0 (lowest ε) | 54,374 | 0.190 | 0.154 |
+| | MaxQuant 1.5.3 | 44,299 | 0.210 | 0.219 |
+| | MaxQuant 2.4.13 | 29,737 | 0.192 | 0.199 |
+| | i2MassChroQ 1.0.16 | 74,697 | 0.222 | 0.132 |
+| | i2MassChroQ 1.2.0 | 49,433 | 0.198 | 0.120 |
+| | AlphaPept 0.5.0 | 37,760 | 0.219 | 0.165 |
+| | AlphaPept 0.5.3 | 36,176 | 0.214 | 0.165 |
+| | Sage 0.15.0-beta.2 | 81,933 | 0.388 | 0.393 |
+| Astral (PXD070049) | **andes** | 36,675 | 0.186 | 0.112 |
+| | FragPipe 23.0 | 39,057 | 0.212 | 0.127 |
+| | FragPipe 22.1 | 29,105 | 0.181 | 0.078 |
+| | MaxQuant 2.6.7 | 20,283 | 0.160 | 0.092 |
+| | i2MassChroQ 1.2.6 | 36,469 | 0.197 | 0.095 |
+| | i2MassChroQ 1.2.9 | 24,803 | 0.178 | 0.077 |
+| | Sage 0.14.6 | 30,319 | 0.167 | 0.070 |
+| | DIA-NN 2.6.0 (most) | 93,237 | 0.277 | 0.159 |
+| | DIA-NN 2.6.0 (lowest ε) | 16,363 | 0.123 | 0.079 |
+<!-- END generated: proteobench-plotted -->
+
 Read the figure with its conditions:
 
-- **Q Exactive module** (PXD028735, 6 runs, human/yeast/*E. coli*): andes quantifies 63,796
-  precursors at median |ε| 0.161 and CV 0.117 (52,166 at 0.154 and 0.105 without transfers).
-  The listed submissions with the most precursors
-  have a higher median error: i2MassChroQ 1.0.16 (74,697, 0.222) and Sage 0.15.0-beta.2 (81,933,
-  0.388, transferred values not error-controlled).
-- **Astral module** (PXD070049, 6 runs): several submissions have a lower median error than
-  andes's 0.186 (36,675 precursors; 31,739 at the same 0.186 without transfers), mostly at fewer
-  precursors: DIA-NN 2.6.0 (16,363, 0.123), MaxQuant 2.6.7
-  (20,283, 0.160), Sage 0.14.6 (30,319, 0.167) and FragPipe 22.1 (29,105, 0.181). andes's CV (0.112)
-  is above most submissions.
+- **Q Exactive module** (6 runs, human/yeast/*E. coli*): without transfers andes has 52,166
+  precursors at 0.154 and CV 0.105. The submissions with more precursors than andes all have a
+  higher median error; Sage's transferred values are not error-controlled.
+- **Astral module** (6 runs): several submissions have a lower median error than andes, mostly at
+  fewer precursors; andes's CV is above most submissions. Without transfers andes has 31,739
+  precursors at the same median error.
 - Error control on transferred values differs between submissions; the
-  [benchmark report](benchmarks/details.md#2-the-benchmarks) lists what each one checks.
+  [benchmark report](benchmarks/additional.md#against-the-proteobench-leaderboard) lists what each one checks.
 - andes error control: PSM FDP 0.84–0.85% and entrapment-only quantified precursors 0.20–0.21% on
   the Q Exactive set; not measured on Astral.
 
@@ -74,7 +96,7 @@ PSM-level FDR, the other tools a protein-level 1% FDR, so depth is not settings-
 yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast (0.08% at `quant_q ≤ 0.01`) against
 0.09% for FragPipe; on yeast-enriched rows only it is 0.052% against 0.010%, and 0.052% against 0.072% when rows
 with no reference are counted. The tables, settings and rules are in
-the [benchmark report](benchmarks/details.md#2-the-benchmarks).
+the [benchmark report](benchmarks/lfq.md#truth-designs).
 
 ## TMT
 
@@ -94,5 +116,5 @@ the [benchmark report](benchmarks/details.md#2-the-benchmarks).
 
 A 500-run study (PXD042233: Q Exactive HF/HF-X and Exploris 480) gives 243,895 precursors in at
 least 3 runs and 9,208 protein groups at transfer, precursor and protein q ≤ 0.01, for 146 CPU-hours
-end to end. See the [benchmark report](benchmarks/details.md#1-summary) for the conditions, and
+end to end. See the [benchmark report](benchmarks/lfq.md#large-study-pxd042233-500-runs) for the conditions, and
 [§10 of the reference](reference.md#10-quantification) for every parameter.

@@ -10,7 +10,7 @@ on:
       - README.md
       - DOCS.md
       - TRAIN.md
-      - docs/benchmarks/README.md
+      - docs/benchmarks/**
       - docs/assets/**
       - website/**
       - mkdocs.yml
@@ -22,7 +22,7 @@ on:
       - README.md
       - DOCS.md
       - TRAIN.md
-      - docs/benchmarks/README.md
+      - docs/benchmarks/**
       - docs/assets/**
       - website/**
       - mkdocs.yml

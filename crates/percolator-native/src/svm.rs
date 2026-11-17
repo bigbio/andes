@@ -2,6 +2,7 @@ use crate::budget::{Budget, Reservation};
 use crate::normalize::Norm;
 use crate::store::Store;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -694,8 +695,8 @@ fn dist(a: &[f64], b: &[f64]) -> f64 {
         .sqrt()
 }
 
-struct Screen {
-    nrm: Vec<f32>,
+struct Screen<'a> {
+    nrm: Cow<'a, [f32]>,
     since: Vec<u32>,
     live: Vec<u32>,
     w_at: Vec<Vec<f64>>,
@@ -708,8 +709,8 @@ struct Screen {
     redo: bool,
 }
 
-impl Screen {
-    fn new(nrm: Vec<f32>, w: &[f64]) -> Screen {
+impl<'a> Screen<'a> {
+    fn new(nrm: Cow<'a, [f32]>, w: &[f64]) -> Screen<'a> {
         Screen {
             since: vec![FRESH; nrm.len()],
             live: (0..nrm.len() as u32).collect(),
@@ -764,7 +765,7 @@ impl Screen {
 
 fn screened_pass(
     t: &Train,
-    sc: &mut Screen,
+    sc: &mut Screen<'_>,
     act: &[bool],
     o: &mut [f64],
     o_bar: &mut [f64],
@@ -832,7 +833,7 @@ fn screened_pass(
     sc.live = parts.concat();
 }
 
-fn each_row(m: usize, sc: Option<&Screen>, mut f: impl FnMut(usize)) {
+fn each_row(m: usize, sc: Option<&Screen<'_>>, mut f: impl FnMut(usize)) {
     match sc {
         Some(sc) => sc.live.iter().for_each(|&i| f(i as usize)),
         None => (0..m).for_each(f),
@@ -848,7 +849,7 @@ fn line_search(
     o: &[f64],
     o_bar: &[f64],
     deltas: &mut Vec<(f64, usize, f64)>,
-    sc: Option<&Screen>,
+    sc: Option<&Screen<'_>>,
 ) -> (f64, f64) {
     let mut omega_l = 0.0;
     let mut omega_r = 0.0;
@@ -900,7 +901,7 @@ fn partition(
     o: &[f64],
     subset: &mut [usize],
     f_start: f64,
-    sc: Option<&Screen>,
+    sc: Option<&Screen<'_>>,
 ) -> (usize, f64) {
     let m = t.len();
     let mut active = 0usize;
@@ -935,7 +936,62 @@ pub fn l2_svm_mfn(
         cneg,
         opts,
         None,
+        None,
     )
+}
+
+fn padded(w0: &[f64], stride: usize) -> Vec<f64> {
+    let mut w = vec![0.0f64; stride];
+    w[..w0.len()].copy_from_slice(w0);
+    w
+}
+
+pub(crate) fn warm_scores(x: &Rows, ex: &Examples, starts: &[&[f64]]) -> (Vec<Vec<f64>>, Vec<f32>) {
+    let m = ex.rows.len();
+    let k = starts.len();
+    if k == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let n = x.ncols;
+    let ws: Vec<Vec<f64>> = starts.iter().map(|w0| padded(&w0[..n], x.stride)).collect();
+    let screen = !x.is_spilled();
+    let t = Train {
+        x,
+        rows: &ex.rows,
+        pos: &ex.pos,
+        cpos: 0.0,
+        cneg: 0.0,
+    };
+    let all: Vec<usize> = (0..m).collect();
+    let mut first = vec![0.0f64; m];
+    let parts = t.pass(
+        &all,
+        &mut first,
+        || (Vec::new(), Vec::new()),
+        |p: &mut (Vec<f64>, Vec<f32>), _, row, o0| {
+            *o0 = dot_row(row, &ws[0]);
+            for w in &ws[1..] {
+                p.0.push(dot_row(row, w));
+            }
+            if screen {
+                p.1.push(norm_up(row));
+            }
+        },
+    );
+    let mut os = vec![first];
+    for j in 1..k {
+        let mut o = Vec::with_capacity(m);
+        for p in &parts {
+            o.extend(p.0.iter().skip(j - 1).step_by(k - 1));
+        }
+        os.push(o);
+    }
+    let nrm = if screen {
+        parts.iter().flat_map(|p| p.1.iter().copied()).collect()
+    } else {
+        Vec::new()
+    };
+    (os, nrm)
 }
 
 pub(crate) fn mfn_from(
@@ -945,6 +1001,7 @@ pub(crate) fn mfn_from(
     cneg: f64,
     opts: &MfnOpts,
     start: Option<&[f64]>,
+    pre: Option<(Vec<f64>, &[f32])>,
 ) -> Vec<f64> {
     let t = Train {
         x,
@@ -964,8 +1021,12 @@ pub(crate) fn mfn_from(
     let all: Vec<usize> = (0..m).collect();
     let mut o_bar = vec![0.0f64; m];
     let screen = !x.is_spilled() && m > 0;
-    let mut nrm = Vec::new();
-    if let Some(w0) = start {
+    let mut nrm = Cow::Owned(Vec::new());
+    if let (Some(w0), Some((o0, n0))) = (start, pre) {
+        w[..n].copy_from_slice(&w0[..n]);
+        o = o0;
+        nrm = Cow::Borrowed(n0);
+    } else if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
         let wv: &[f64] = &w;
         let parts = t.pass(
@@ -979,16 +1040,17 @@ pub(crate) fn mfn_from(
                 }
             },
         );
-        nrm = parts.concat();
+        nrm = Cow::Owned(parts.concat());
     } else if screen {
-        nrm = t
-            .pass(
+        nrm = Cow::Owned(
+            t.pass(
                 &all,
                 &mut o_bar,
                 || Vec::with_capacity(CHUNK),
                 |p, _, row, _| p.push(norm_up(row)),
             )
-            .concat();
+            .concat(),
+        );
     }
     let mut sc = screen.then(|| Screen::new(nrm, &w));
     let mut subset = vec![0usize; m];

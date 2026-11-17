@@ -4,7 +4,7 @@ use crate::folds::folds_by_spectrum;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
-use crate::svm::{mfn_from, Examples, MfnOpts, Rows, GRAM_BYTES};
+use crate::svm::{mfn_from, warm_scores, Examples, MfnOpts, Rows, GRAM_BYTES};
 use rayon::prelude::*;
 
 const FOLDS: usize = 3;
@@ -311,13 +311,16 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             })
             .collect();
         let mut fits: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
-        let fit_one = |k: usize, start: Option<&[f64]>| -> Option<Vec<f64>> {
+        let fit_one = |k: usize,
+                       start: Option<&[f64]>,
+                       pre: Option<(Vec<f64>, &[f32])>|
+         -> Option<Vec<f64>> {
             let (f, cpos, cfrac) = pairs[k];
             let t = &sets[f];
             if t.ex.rows.is_empty() {
                 return None;
             }
-            Some(mfn_from(x, &t.ex, cpos, cfrac * cpos, &opts, start))
+            Some(mfn_from(x, &t.ex, cpos, cfrac * cpos, &opts, start, pre))
         };
         let phases: Vec<Vec<usize>> = if warm.iter().all(Option::is_none) {
             let seed = per_fold / 2;
@@ -339,15 +342,44 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     }
                 }
                 let end = (done + held.len()).max(done + 1);
-                let got: Vec<Option<Vec<f64>>> = ks[done..end]
-                    .par_iter()
+                let batch = &ks[done..end];
+                let starts: Vec<Option<&[f64]>> = batch
+                    .iter()
                     .map(|&k| {
-                        let start = if phase == 1 {
+                        if phase == 1 {
                             fits[(k / per_fold) * per_fold + per_fold / 2].as_deref()
                         } else {
                             warm[k].as_deref()
-                        };
-                        fit_one(k, start)
+                        }
+                    })
+                    .collect();
+                let mut pre: Vec<Option<Vec<f64>>> = batch.iter().map(|_| None).collect();
+                let mut norms: Vec<Vec<f32>> = vec![Vec::new(); FOLDS];
+                for (f, nf) in norms.iter_mut().enumerate() {
+                    if sets[f].ex.rows.is_empty() {
+                        continue;
+                    }
+                    let js: Vec<usize> = (0..batch.len())
+                        .filter(|&j| pairs[batch[j]].0 == f && starts[j].is_some())
+                        .collect();
+                    if js.is_empty() {
+                        continue;
+                    }
+                    let ws: Vec<&[f64]> = js.iter().filter_map(|&j| starts[j]).collect();
+                    let (os, nrm) = warm_scores(x, &sets[f].ex, &ws);
+                    for (&j, o) in js.iter().zip(os) {
+                        pre[j] = Some(o);
+                    }
+                    *nf = nrm;
+                }
+                let norms = &norms;
+                let got: Vec<Option<Vec<f64>>> = batch
+                    .par_iter()
+                    .zip(starts.par_iter())
+                    .zip(pre.into_par_iter())
+                    .map(|((&k, &start), o)| {
+                        let nrm = norms[pairs[k].0].as_slice();
+                        fit_one(k, start, o.map(|o| (o, nrm)))
                     })
                     .collect();
                 for (&k, g) in ks[done..end].iter().zip(got) {

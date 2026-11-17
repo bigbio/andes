@@ -310,32 +310,51 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 sets[f].ex.rows.len() as u64 * TASK_BYTES_PER_EXAMPLE + COMPACT_BYTES as u64
             })
             .collect();
-        let mut fits: Vec<Option<Vec<f64>>> = Vec::with_capacity(pairs.len());
-        while fits.len() < pairs.len() {
-            let start = fits.len();
-            let mut held = Vec::new();
-            while start + held.len() < pairs.len() {
-                match Reservation::take(&pin.budget, task_bytes[start + held.len()]) {
-                    Some(r) => held.push(r),
-                    None => break,
-                }
+        let mut fits: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
+        let fit_one = |k: usize, start: Option<&[f64]>| -> Option<Vec<f64>> {
+            let (f, cpos, cfrac) = pairs[k];
+            let t = &sets[f];
+            if t.ex.rows.is_empty() {
+                return None;
             }
-            let end = (start + held.len()).max(start + 1);
-            fits.par_extend((start..end).into_par_iter().map(|k| {
-                let (f, cpos, cfrac) = pairs[k];
-                let t = &sets[f];
-                if t.ex.rows.is_empty() {
-                    return None;
+            Some(mfn_from(x, &t.ex, cpos, cfrac * cpos, &opts, start))
+        };
+        let phases: Vec<Vec<usize>> = if warm.iter().all(Option::is_none) {
+            let seed = per_fold / 2;
+            vec![
+                (0..FOLDS).map(|f| f * per_fold + seed).collect(),
+                (0..pairs.len()).filter(|k| k % per_fold != seed).collect(),
+            ]
+        } else {
+            vec![(0..pairs.len()).collect()]
+        };
+        for (phase, ks) in phases.iter().enumerate() {
+            let mut done = 0usize;
+            while done < ks.len() {
+                let mut held = Vec::new();
+                while done + held.len() < ks.len() {
+                    match Reservation::take(&pin.budget, task_bytes[ks[done + held.len()]]) {
+                        Some(r) => held.push(r),
+                        None => break,
+                    }
                 }
-                Some(mfn_from(
-                    x,
-                    &t.ex,
-                    cpos,
-                    cfrac * cpos,
-                    &opts,
-                    warm[k].as_deref(),
-                ))
-            }));
+                let end = (done + held.len()).max(done + 1);
+                let got: Vec<Option<Vec<f64>>> = ks[done..end]
+                    .par_iter()
+                    .map(|&k| {
+                        let start = if phase == 1 {
+                            fits[(k / per_fold) * per_fold + per_fold / 2].as_deref()
+                        } else {
+                            warm[k].as_deref()
+                        };
+                        fit_one(k, start)
+                    })
+                    .collect();
+                for (&k, g) in ks[done..end].iter().zip(got) {
+                    fits[k] = g;
+                }
+                done = end;
+            }
         }
         for (wk, fit) in warm.iter_mut().zip(&fits) {
             if fit.is_some() {

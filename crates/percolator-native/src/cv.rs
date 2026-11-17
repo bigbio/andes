@@ -11,6 +11,8 @@ const FOLDS: usize = 3;
 
 const GRID_ITERATIONS: usize = 3;
 
+const MIN_GROWTH: f64 = 0.001;
+
 pub struct CvConfig {
     pub iterations: usize,
     pub test_fdr: f64,
@@ -271,6 +273,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let full = Rows::all_in_ram(&pin.rows, norm, &pin.budget, keep);
     let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
     let mut fixed: Option<[usize; FOLDS]> = None;
+    let (mut found_old_old, mut found_old) = (0i64, 0i64);
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
             cfg.initial_selection_fdr
@@ -440,6 +443,19 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         if cfg.verbose > 1 {
             eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);
         }
+        if estimated > 0
+            && found_old_old > 0
+            && ((estimated - found_old_old) as f64) <= found_old_old as f64 * MIN_GROWTH
+        {
+            if cfg.verbose > 0 {
+                eprintln!(
+                    "Performance increase over the last two iterations indicate that the algorithm has converged\n({estimated} vs {found_old_old})"
+                );
+            }
+            break;
+        }
+        found_old_old = found_old;
+        found_old = estimated;
     }
 
     let mut test: Vec<Vec<f64>> = folds

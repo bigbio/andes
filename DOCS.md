@@ -783,9 +783,11 @@ The run summary gives the precursor tolerance as the offset window.
 - **Calibration.** Precursor calibration is off in open search, so the offsets carry the
   instrument's mass error, which scales with peptide mass. The report measures it as the median
   ppm error of the accepted PSMs within 0.02 Da of zero offset whose offset was measured on the
-  precursor (when there are at least 20). It
-  subtracts that error, `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the
-  precursor, for targets and decoys alike.
+  precursor (when there are at least 20). It subtracts that error,
+  `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the precursor, for targets
+  and decoys alike.
+  - With several input files, each run (the PIN's `FileName`) is calibrated on its own zero-offset
+    PSMs before the runs are pooled. A run with fewer than 20 such PSMs uses the pooled shift.
   - An offset that localisation refined from the fragment ions keeps its value. The fragments are
     already recentred.
   - The PIN marks such a row by a `DeltaMass` that differs from
@@ -846,8 +848,12 @@ The run summary gives the precursor tolerance as the offset window.
       width of the peaks with at least 20 PSMs of which at least half are refined, and never less than the
       precision.
     - Site support for a Unimod entry is (k + 0.5) / (n + 1) over the n localised PSMs (one PSM in
-      the mixture). Each localised PSM adds 1 to k when its residue, or peptide terminus, is a
-      common specificity of the entry, and 0.1 when it is only a rare one.
+      the mixture). Each localised PSM adds 1 to k when its residue, or peptide terminus, matches
+      a common specificity of the entry, and 0.1 when it matches only a rare one.
+    - A specificity matches on its site and its Unimod position together. An `Any N-term` or
+      `Protein N-term` specificity needs the residue at the peptide N-terminus, and a C-term one at
+      the C-terminus. Gln→pyro-Glu therefore supports a Q at position 1, but not a Q inside the
+      peptide.
     - The hypotheses without a site (no modification, isotope errors, "unexplained") and entries
       with no listed site take a neutral 0.5. The support is 1 when no PSM is localised. A PSM on
       the right residue then favours the entry, and one on a wrong residue counts against it.

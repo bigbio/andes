@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, Float64Array, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use model::unimod::UnimodDb;
+use model::unimod::{Specificity, UnimodDb};
 
 use crate::percolator::PercolatorPsm;
 use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
@@ -51,6 +51,7 @@ pub struct PinOffset {
     pub refined: bool,
     pub site: usize,
     pub sequence: String,
+    pub run: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +86,7 @@ pub struct PsmAssignment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetReport {
     pub ppm_shift: f64,
+    pub run_ppm_shifts: Vec<(String, f64)>,
     pub precision: f64,
     pub refined_precision: f64,
     pub peaks: Vec<OffsetPeak>,
@@ -119,6 +121,7 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
         col("OpenSite")?,
         col("Peptide")?,
     );
+    let run_c = cols.iter().position(|c| *c == "FileName");
     let mut out = Vec::new();
     for line in lines {
         let line = line?;
@@ -153,6 +156,10 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
             refined: (delta - precursor_delta).abs() > REFINED_DA,
             site,
             sequence: stripped_sequence(get(pep_c)?),
+            run: match run_c {
+                Some(i) => get(i)?.to_string(),
+                None => String::new(),
+            },
         });
     }
     Ok(out)
@@ -196,16 +203,42 @@ fn mad(values: &[f64]) -> f64 {
     1.4826 * median(&mut dev)
 }
 
-pub fn ppm_shift(rows: &[&PinOffset]) -> f64 {
+fn shift_of(rows: &[&PinOffset]) -> Option<f64> {
     let mut ppm: Vec<f64> = rows
         .iter()
         .filter(|r| !r.refined && r.delta.abs() < ZERO_WINDOW_DA && r.calc_mass > 0.0)
         .map(|r| r.delta / r.calc_mass * 1e6)
         .collect();
-    if ppm.len() < MIN_CALIBRATION_PSMS {
-        return 0.0;
+    (ppm.len() >= MIN_CALIBRATION_PSMS).then(|| median(&mut ppm))
+}
+
+pub struct Calibration {
+    pub pooled: f64,
+    pub runs: Vec<(String, f64)>,
+}
+
+impl Calibration {
+    pub fn shift(&self, run: &str) -> f64 {
+        self.runs
+            .iter()
+            .find(|(r, _)| r == run)
+            .map_or(self.pooled, |(_, s)| *s)
     }
-    median(&mut ppm)
+}
+
+pub fn calibration(rows: &[&PinOffset]) -> Calibration {
+    let pooled = shift_of(rows).unwrap_or(0.0);
+    let mut names: Vec<&str> = rows.iter().map(|r| r.run.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let runs = names
+        .into_iter()
+        .map(|name| {
+            let own: Vec<&PinOffset> = rows.iter().copied().filter(|r| r.run == name).collect();
+            (name.to_string(), shift_of(&own).unwrap_or(pooled))
+        })
+        .collect();
+    Calibration { pooled, runs }
 }
 
 pub fn corrected_delta(row: &PinOffset, ppm: f64) -> f64 {
@@ -316,8 +349,7 @@ struct Candidate {
     label: String,
     mass: f64,
     prior: f64,
-    sites: Vec<String>,
-    common_sites: Vec<String>,
+    specificities: Vec<Specificity>,
 }
 
 fn gauss_log(x: f64, mu: f64, s: f64) -> f64 {
@@ -325,29 +357,30 @@ fn gauss_log(x: f64, mu: f64, s: f64) -> f64 {
     -0.5 * z * z - s.ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
 }
 
-fn site_matches(sites: &[String], (residue, n_term, c_term): &(String, bool, bool)) -> bool {
-    sites
-        .iter()
-        .any(|s| s == residue || (s == "N-term" && *n_term) || (s == "C-term" && *c_term))
+fn specificity_matches(spec: &Specificity, (residue, n_term, c_term): &(String, bool, bool)) -> bool {
+    let site_ok = spec.site == *residue
+        || (spec.site == "N-term" && *n_term)
+        || (spec.site == "C-term" && *c_term);
+    let position_ok = (!spec.position.needs_n_terminus() || *n_term)
+        && (!spec.position.needs_c_terminus() || *c_term);
+    site_ok && position_ok
 }
 
 fn site_support(c: &Candidate, localised: &[(String, bool, bool)]) -> f64 {
     if localised.is_empty() {
         return 1.0;
     }
-    if c.sites.is_empty() {
+    if c.specificities.is_empty() {
         return SITE_NEUTRAL;
     }
     let hits: f64 = localised
         .iter()
         .map(|l| {
-            if site_matches(&c.common_sites, l) {
-                1.0
-            } else if site_matches(&c.sites, l) {
-                RARE_SITE_WEIGHT
-            } else {
-                0.0
-            }
+            c.specificities
+                .iter()
+                .filter(|spec| specificity_matches(spec, l))
+                .map(|spec| if spec.hidden { RARE_SITE_WEIGHT } else { 1.0 })
+                .fold(0.0, f64::max)
         })
         .sum();
     (hits + 0.5) / (localised.len() as f64 + 1.0)
@@ -360,13 +393,12 @@ fn single_candidates(db: &UnimodDb) -> Vec<Candidate> {
         .map(|m| Candidate {
             label: format!("{} ({})", m.name, m.accession),
             mass: m.mono_mass,
-            prior: if m.common_sites.is_empty() || m.isotopic_label {
+            prior: if m.specificities.iter().all(|spec| spec.hidden) || m.isotopic_label {
                 PRIOR_RARE
             } else {
                 PRIOR_SINGLE
             },
-            sites: m.sites.clone(),
-            common_sites: m.common_sites.clone(),
+            specificities: m.specificities.clone(),
         })
         .collect();
     out.sort_by(|a, b| a.mass.total_cmp(&b.mass).then_with(|| a.label.cmp(&b.label)));
@@ -590,8 +622,11 @@ pub fn build_report(
         .iter()
         .filter(|r| !r.decoy && accepted.contains(&r.psm_id))
         .collect();
-    let ppm = ppm_shift(&targets);
-    let deltas: Vec<f64> = targets.iter().map(|r| corrected_delta(r, ppm)).collect();
+    let cal = calibration(&targets);
+    let deltas: Vec<f64> = targets
+        .iter()
+        .map(|r| corrected_delta(r, cal.shift(&r.run)))
+        .collect();
     let precision = measured_precision(&deltas);
     let span = pin
         .iter()
@@ -611,7 +646,7 @@ pub fn build_report(
                 .get(&r.psm_id)
                 .is_some_and(|s| threshold.is_finite() && *s >= threshold)
         })
-        .map(|r| corrected_delta(r, ppm))
+        .map(|r| corrected_delta(r, cal.shift(&r.run)))
         .collect();
     decoy_deltas.sort_by(|a, b| a.total_cmp(b));
 
@@ -735,15 +770,16 @@ pub fn build_report(
     let mut pairs: Vec<Candidate> = Vec::new();
     for (i, a) in sources.iter().enumerate() {
         for b in &sources[i..] {
-            let join = |x: &[String], y: &[String]| -> Vec<String> {
-                x.iter().chain(y.iter()).cloned().collect()
-            };
             pairs.push(Candidate {
                 label: format!("{} + {}", a.label, b.label),
                 mass: a.mass + b.mass,
                 prior: PRIOR_PAIR * a.prior * b.prior,
-                sites: join(&a.sites, &b.sites),
-                common_sites: join(&a.common_sites, &b.common_sites),
+                specificities: a
+                    .specificities
+                    .iter()
+                    .chain(b.specificities.iter())
+                    .cloned()
+                    .collect(),
             });
         }
     }
@@ -805,7 +841,8 @@ pub fn build_report(
     }
     assignments.sort_by(|a, b| a.psm_id.cmp(&b.psm_id));
     OffsetReport {
-        ppm_shift: ppm,
+        ppm_shift: cal.pooled,
+        run_ppm_shifts: cal.runs,
         precision,
         refined_precision,
         peaks,
@@ -854,12 +891,22 @@ const PSMS_TABLE: TableVersion = TableVersion {
     what: "open-search PSM offset table",
 };
 pub const PPM_SHIFT_KEY: &str = "andes.open_offsets.ppm_shift";
+pub const RUN_PPM_SHIFTS_KEY: &str = "andes.open_offsets.run_ppm_shifts";
 pub const PRECISION_KEY: &str = "andes.open_offsets.precision_da";
 pub const REFINED_PRECISION_KEY: &str = "andes.open_offsets.refined_precision_da";
 
 fn report_meta(report: &OffsetReport) -> Vec<(&'static str, String)> {
     vec![
         (PPM_SHIFT_KEY, report.ppm_shift.to_string()),
+        (
+            RUN_PPM_SHIFTS_KEY,
+            report
+                .run_ppm_shifts
+                .iter()
+                .map(|(run, shift)| format!("{run}\t{shift}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         (PRECISION_KEY, report.precision.to_string()),
         (REFINED_PRECISION_KEY, report.refined_precision.to_string()),
     ]
@@ -1057,13 +1104,28 @@ pub fn summary_block(report: &OffsetReport) -> String {
         .count();
     let line = |label: &str, value: String| format!("    {label:<29}: {value}\n");
     let mut s = String::from("  Open search (mass offsets of the identified PSMs):\n");
-    s.push_str(&line(
-        "Precursor calibration",
-        format!(
-            "{:+.2} ppm (measured on zero-offset PSMs, removed from precursor offsets)",
-            report.ppm_shift
-        ),
-    ));
+    if report.run_ppm_shifts.len() > 1 {
+        let shifts: Vec<f64> = report.run_ppm_shifts.iter().map(|(_, v)| *v).collect();
+        let lo = shifts.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = shifts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        s.push_str(&line(
+            "Precursor calibration",
+            format!(
+                "per run, {} runs, {:+.2} … {:+.2} ppm (measured on each run's zero-offset PSMs)",
+                report.run_ppm_shifts.len(),
+                lo,
+                hi
+            ),
+        ));
+    } else {
+        s.push_str(&line(
+            "Precursor calibration",
+            format!(
+                "{:+.2} ppm (measured on zero-offset PSMs, removed from precursor offsets)",
+                report.ppm_shift
+            ),
+        ));
+    }
     s.push_str(&line(
         "Offset precision",
         format!(
@@ -1150,6 +1212,7 @@ mod tests {
             refined: false,
             site,
             sequence: seq.to_string(),
+            run: "r1".to_string(),
         }
     }
 
@@ -1195,17 +1258,76 @@ mod tests {
     }
 
     #[test]
-    fn unimod_common_sites_leave_out_the_hidden_specificities() {
-        let ox = model::unimod::bundled()
-            .by_accession("UNIMOD:35")
-            .expect("Oxidation");
-        assert!(ox.common_sites.contains(&"M".to_string()), "{:?}", ox.common_sites);
-        assert!(ox.common_sites.len() < ox.sites.len(), "{:?}", ox.common_sites);
+    fn unimod_specificities_keep_hidden_flags_positions_and_label_classes() {
+        let db = model::unimod::bundled();
+        let ox = db.by_accession("UNIMOD:35").expect("Oxidation");
+        assert!(ox.specificities.iter().any(|s| s.site == "M" && !s.hidden), "{:?}", ox.specificities);
+        assert!(ox.specificities.iter().any(|s| s.hidden), "{:?}", ox.specificities);
         assert!(!ox.isotopic_label);
-        let n15 = model::unimod::bundled()
-            .by_accession("UNIMOD:994")
-            .expect("Label:15N(1)");
-        assert!(n15.isotopic_label);
+        let pyro = db.by_accession("UNIMOD:28").expect("Gln->pyro-Glu");
+        assert!(
+            pyro.specificities
+                .iter()
+                .any(|s| s.site == "Q" && s.position.needs_n_terminus()),
+            "{:?}",
+            pyro.specificities
+        );
+        assert!(db.by_accession("UNIMOD:994").expect("Label:15N(1)").isotopic_label);
+    }
+
+    #[test]
+    fn an_n_terminal_specificity_supports_only_an_n_terminal_residue() {
+        let pyro = single_candidates(model::unimod::bundled())
+            .into_iter()
+            .find(|c| c.label.starts_with("Gln->pyro-Glu (UNIMOD:28)"))
+            .expect("pyro-Glu candidate");
+        let first_q = site_support(&pyro, &[("Q".to_string(), true, false)]);
+        let middle_q = site_support(&pyro, &[("Q".to_string(), false, false)]);
+        assert!(first_q > middle_q, "{first_q} {middle_q}");
+        assert!((middle_q - 0.25).abs() < 1e-12, "{middle_q}");
+    }
+
+    #[test]
+    fn each_run_is_calibrated_on_its_own_zero_offset_psms() {
+        let true_delta = 79.96633;
+        let mut rows: Vec<PinOffset> = Vec::new();
+        for (run, ppm) in [("a", 5.0), ("b", -5.0)] {
+            for i in 0..30 {
+                let jitter = 0.0001 * (i % 5) as f64 - 0.0002;
+                rows.push(PinOffset {
+                    run: run.to_string(),
+                    calc_mass: 2000.0,
+                    ..row(&format!("{run}z{i}"), false, ppm * 1e-6 * 2000.0 + jitter, 0, "PEPTIDEK")
+                });
+            }
+            for i in 0..10 {
+                let observed = true_delta + ppm * 1e-6 * (2000.0 + true_delta) + 0.0001 * (i % 3) as f64;
+                rows.push(PinOffset {
+                    run: run.to_string(),
+                    calc_mass: 2000.0,
+                    ..row(&format!("{run}p{i}"), false, observed, 2, "ASPEK")
+                });
+            }
+        }
+        rows.push(PinOffset {
+            run: "b".to_string(),
+            refined: true,
+            ..row("bref", false, 15.9949, 3, "PEMTIDEK")
+        });
+        let r = report(&rows);
+        assert_eq!(r.run_ppm_shifts.len(), 2);
+        assert!((r.run_ppm_shifts[0].1 - 5.0).abs() < 0.2, "{:?}", r.run_ppm_shifts);
+        assert!((r.run_ppm_shifts[1].1 + 5.0).abs() < 0.2, "{:?}", r.run_ppm_shifts);
+        let phospho: Vec<&OffsetPeak> = r
+            .peaks
+            .iter()
+            .filter(|p| (p.mass - 79.966).abs() < 0.05)
+            .collect();
+        assert_eq!(phospho.len(), 1, "{:?}", r.peaks);
+        assert_eq!(phospho[0].psms, 20);
+        assert!((phospho[0].mass - true_delta).abs() < 0.001, "{}", phospho[0].mass);
+        let refined = r.assignments.iter().find(|a| a.psm_id == "bref").expect("refined row");
+        assert!((refined.delta - 15.9949).abs() < 1e-12, "{}", refined.delta);
     }
 
     #[test]

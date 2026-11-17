@@ -61,7 +61,7 @@ xiSEARCH settings are from its DSSO template (`DSSO_largescale.conf`).
 | Non-covalent pairs compete (`NonCovalent`) | not searched | open |
 | S/T/Y sites with a score penalty | K and protein N-terminus only; S/T/Y without penalty when given | **penalty 12 when S/T/Y are given**; default sites unchanged (below) |
 | Hydrolysed and amidated monolinks | hydrolysed only | tried: amidated by default loses (below) |
-| Score is a weighted sum of fragment coverage, intensity and error terms of both peptides | `min(α, β)` of the rank-LLR scores | open |
+| Score is a weighted sum of fragment coverage, intensity and error terms of both peptides, with the delta to the next match | `min(α, β)` of the rank-LLR scores | **delta added**: `min(α, β) + 0.3 × delta` (below); the remaining terms open |
 | xiFDR boost (pre-filters such as minimum fragments per peptide) | none | open |
 
 ## Results
@@ -126,6 +126,14 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   gain 14 % and 20 % (real proteins carry S/T/Y links) and two lysine-only library runs lose
   9 % and 12 %, so the sites stay opt-in and the penalty is the default when they are given.
 - **Amidated monolink** searched by default next to the hydrolysed one: 15,310 / 14,160.
+- **Delta to the next-best peptide pair** in the CSM score, `min(α, β) + 0.3 × (min(α, β) −
+  second)`, xiSEARCH's delta (adopted): 16,427 / 15,206. Every run gains (+2 % to +15 %) and
+  each run's false share stays within 0.2 points; Beveridge DSSO's `@act` falls (729 → 452)
+  as one false match moves up. Scored offline first on the saved results (q-values
+  reproduced to 5e-6): weights 0.1, 0.2, 0.3, 0.5, 0.75 and 1.0 all raise the Cas9, ribosome
+  and Clasen families, so the weight is not fitted to the set; 0.3 was taken as one that
+  raises all three. Other one-term changes to `min(α, β)` lost: + 0.1–0.3 × max(α, β), a bonus
+  for full pairs, a penalty per isotope offset.
 - **Separate FDR for half pairs** (one peptide by its doublet, the other by mass): the
   false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
   groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).

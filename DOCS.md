@@ -1092,7 +1092,9 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
 stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
-link classes are scored by the pair score `min(alpha, beta)`; for an MS-cleavable linker each
+link classes are scored by the pair score `min(alpha, beta)`, and the q-values rank a CSM by
+`min(alpha, beta) + 0.3 × (min(alpha, beta) − second)`, where `second` is the best pair score of
+a different peptide pair for the spectrum (the `score` column); for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
 When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),

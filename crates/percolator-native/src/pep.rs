@@ -257,7 +257,11 @@ fn solve_box_qp(g: &Dense, h: &[f64], lb: &[f64], ub: &[f64]) -> (Vec<f64>, usiz
             };
         }
         if let Some(b) = blocking {
-            x[b] = if x[b] - lb[b] < ub[b] - x[b] { lb[b] } else { ub[b] };
+            x[b] = if x[b] - lb[b] < ub[b] - x[b] {
+                lb[b]
+            } else {
+                ub[b]
+            };
             at_bound[b] = true;
             it += 1;
             continue;
@@ -517,7 +521,12 @@ fn interpolate(q: f64, q1: f64, q2: f64, pep1: f64, pep2: f64) -> f64 {
     (pep1 + (q - q1) * (pep2 - pep1) / (q2 - q1)).clamp(0.0, 1.0)
 }
 
-pub fn pep_from_q(order: &[usize], scores: &[f64], q: &[f64], is_decoy: &[bool]) -> Result<Vec<f64>, String> {
+pub fn pep_from_q(
+    order: &[usize],
+    scores: &[f64],
+    q: &[f64],
+    is_decoy: &[bool],
+) -> Result<Vec<f64>, String> {
     let targets: Vec<usize> = order.iter().copied().filter(|&k| !is_decoy[k]).collect();
     let mut target_q: Vec<f64> = targets.iter().map(|&k| q[k]).collect();
     let sc: Vec<f64> = targets.iter().map(|&k| scores[k]).collect();

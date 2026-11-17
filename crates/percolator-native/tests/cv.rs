@@ -181,7 +181,12 @@ fn pin_direction_has_priority_and_overrule_keeps_each_fold_trained() {
         assert!(wn.iter().all(|v| v.is_finite()));
     }
     for i in 0..pin.meta.len() {
-        let s = score(&pin.rows, &[i], &res.w_norm[res.fold[i] as usize], Some(&norm))[0];
+        let s = score(
+            &pin.rows,
+            &[i],
+            &res.w_norm[res.fold[i] as usize],
+            Some(&norm),
+        )[0];
         assert_eq!(res.test_scores[i].to_bits(), s.to_bits());
     }
 }

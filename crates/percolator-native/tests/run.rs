@@ -347,7 +347,12 @@ fn static_keeps_weights_that_separate_nothing() {
     let rows = pin_rows(&pin);
     let want: HashMap<&str, f64> = rows
         .iter()
-        .map(|r| (r.id.as_str(), dot(&r.features, &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.5])))
+        .map(|r| {
+            (
+                r.id.as_str(),
+                dot(&r.features, &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.5]),
+            )
+        })
         .collect();
     for (stem, overrule) in [("keep", true), ("kept", false)] {
         let o = outs(dir.path(), stem);
@@ -382,7 +387,10 @@ fn weights_file_is_checked_as_percolator_master() {
     let err = weights_error("names\n1\t2\n0\t0\t0\n");
     assert!(err.contains("has 1 columns, but the input has 6"), "{err}");
     let err = weights_error(&format!("{names}1\t2\n1\t0\t0\n"));
-    assert!(err.contains("Line 3 of the weights file") && err.contains("but holds 3."), "{err}");
+    assert!(
+        err.contains("Line 3 of the weights file") && err.contains("but holds 3."),
+        "{err}"
+    );
     let err = weights_error(&format!("{names}1\t2\n1\t0\tx\t0\t0\t0\n"));
     assert!(err.contains("not a finite number"), "{err}");
     let err = weights_error(&format!("{names}1\t2\n"));

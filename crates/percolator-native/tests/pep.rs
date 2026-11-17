@@ -59,9 +59,17 @@ fn compare(scores: &[f64], decoy: &[bool], q: &[f64], reference: &str) {
     let want = qvality(reference);
     assert_eq!(want.len(), scores.len());
     for (row, (&k, &(s, p, qv))) in o.iter().zip(&want).enumerate() {
-        assert!(printed(scores[k], s), "row {row}: score {} vs {s}", scores[k]);
+        assert!(
+            printed(scores[k], s),
+            "row {row}: score {} vs {s}",
+            scores[k]
+        );
         assert!(printed(q[k], qv), "row {row}: q {} vs {qv}", q[k]);
-        assert!(printed(pep[k], p), "row {row}: PEP {} vs qvality {p}", pep[k]);
+        assert!(
+            printed(pep[k], p),
+            "row {row}: PEP {} vs qvality {p}",
+            pep[k]
+        );
     }
 }
 
@@ -125,7 +133,12 @@ fn pep_monotone_and_bounded() {
         let o = order(&s, &d);
         let pep = pep_from_q(&o, &s, &q, &d).unwrap();
         for w in o.windows(2) {
-            assert!(pep[w[0]] <= pep[w[1]] + 1e-12, "{} above {}", pep[w[0]], pep[w[1]]);
+            assert!(
+                pep[w[0]] <= pep[w[1]] + 1e-12,
+                "{} above {}",
+                pep[w[0]],
+                pep[w[1]]
+            );
         }
         assert!(pep.iter().all(|p| (0.0..=1.0).contains(p)));
     }

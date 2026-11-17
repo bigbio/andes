@@ -135,7 +135,10 @@ fn read_init_weights(path: &Path, names: &[String]) -> Result<Option<Vec<f64>>, 
     };
     if !names_line.is_empty() {
         let mut got: Vec<&str> = names_line.split('\t').collect();
-        while got.last().is_some_and(|c| c.trim_matches([' ', '\r']).is_empty()) {
+        while got
+            .last()
+            .is_some_and(|c| c.trim_matches([' ', '\r']).is_empty())
+        {
             got.pop();
         }
         if let Some(last) = got.last_mut() {

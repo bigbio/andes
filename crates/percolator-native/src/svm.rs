@@ -1014,9 +1014,14 @@ pub(crate) fn mfn_from(
                 screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar);
             } else {
                 let wb: &[f64] = &w_bar;
-                t.pass(&all, &mut o_bar, || (), |_, _, row, ob| {
-                    *ob = dot_row(row, wb);
-                });
+                t.pass(
+                    &all,
+                    &mut o_bar,
+                    || (),
+                    |_, _, row, ob| {
+                        *ob = dot_row(row, wb);
+                    },
+                );
             }
         }
         recheck = false;

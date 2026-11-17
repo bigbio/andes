@@ -29,6 +29,10 @@ const PAIR_SOURCE_POSTERIOR: f64 = 0.5;
 const PAIR_SOURCE_MIN_PSMS: usize = 20;
 const PAIR_SOURCE_MAX_DECOY_RATIO: f64 = 0.01;
 const TOP_EXPLANATIONS: usize = 3;
+const EM_ITERATIONS: usize = 200;
+const EM_PSEUDOCOUNT: f64 = 1.0;
+const EM_TOLERANCE: f64 = 1e-6;
+const UNEXPLAINED: &str = "unexplained";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinOffset {
@@ -358,19 +362,31 @@ fn single_candidates(db: &UnimodDb) -> Vec<Candidate> {
     out
 }
 
-fn explain(
+struct Scored {
+    label: String,
     mass: f64,
+    prior: f64,
+    log_lik: f64,
+}
+
+fn scored_candidates(
+    delta: f64,
     s: f64,
     span: f64,
     localised: &[(String, bool, bool)],
     singles: &[Candidate],
     pairs: &[Candidate],
-) -> Vec<Explanation> {
+) -> Vec<Scored> {
     let reach = CANDIDATE_SIGMAS * s;
-    let mut scored: Vec<(String, f64, f64)> = Vec::new();
+    let mut out: Vec<Scored> = Vec::new();
     let mut push = |label: String, cmass: f64, prior: f64, support: f64| {
-        if (mass - cmass).abs() <= reach {
-            scored.push((label, cmass, prior.ln() + gauss_log(mass, cmass, s) + support.ln()));
+        if (delta - cmass).abs() <= reach {
+            out.push(Scored {
+                label,
+                mass: cmass,
+                prior,
+                log_lik: gauss_log(delta, cmass, s) + support.ln(),
+            });
         }
     };
     push("unmodified".to_string(), 0.0, PRIOR_SINGLE, 1.0);
@@ -382,9 +398,9 @@ fn explain(
             1.0,
         );
     }
-    let lo = singles.partition_point(|c| c.mass < mass - reach - 2.0 * ISOTOPE_DA);
+    let lo = singles.partition_point(|c| c.mass < delta - reach - 2.0 * ISOTOPE_DA);
     for c in &singles[lo..] {
-        if c.mass > mass + reach + 2.0 * ISOTOPE_DA {
+        if c.mass > delta + reach + 2.0 * ISOTOPE_DA {
             break;
         }
         let support = site_support(c, localised);
@@ -401,32 +417,106 @@ fn explain(
     for c in pairs {
         push(c.label.clone(), c.mass, c.prior, site_support(c, localised));
     }
-    let unexplained = PRIOR_UNEXPLAINED.ln() - span.max(1.0).ln();
-    let max = scored
-        .iter()
-        .map(|(_, _, l)| *l)
-        .fold(unexplained, f64::max);
-    let total: f64 = scored.iter().map(|(_, _, l)| (l - max).exp()).sum::<f64>()
-        + (unexplained - max).exp();
-    let mut out: Vec<Explanation> = scored
+    out.push(Scored {
+        label: UNEXPLAINED.to_string(),
+        mass: f64::NAN,
+        prior: PRIOR_UNEXPLAINED,
+        log_lik: -span.max(1.0).ln(),
+    });
+    out
+}
+
+struct Mixture {
+    peak: Vec<Explanation>,
+    psms: Vec<Explanation>,
+}
+
+fn fit_mixture(rows: Vec<Vec<Scored>>, peak_mass: f64) -> Mixture {
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut comps: Vec<(String, f64, f64)> = Vec::new();
+    let lik: Vec<Vec<(usize, f64)>> = rows
         .into_iter()
-        .map(|(label, cmass, l)| Explanation {
-            label,
-            mass: cmass,
-            posterior: (l - max).exp() / total,
+        .map(|r| {
+            r.into_iter()
+                .map(|c| {
+                    let k = *index.entry(c.label.clone()).or_insert_with(|| {
+                        let mass = if c.mass.is_nan() { peak_mass } else { c.mass };
+                        comps.push((c.label, mass, c.prior));
+                        comps.len() - 1
+                    });
+                    (k, c.log_lik)
+                })
+                .collect()
         })
         .collect();
-    out.push(Explanation {
-        label: "unexplained".to_string(),
-        mass,
-        posterior: (unexplained - max).exp() / total,
-    });
-    out.sort_by(|a, b| {
+    let total: f64 = comps.iter().map(|c| c.2).sum();
+    let prior: Vec<f64> = comps.iter().map(|c| c.2 / total).collect();
+    let n = lik.len() as f64;
+    let e_step = |pi: &[f64], acc: &mut [f64], tops: &mut Vec<(usize, f64)>| {
+        tops.clear();
+        for r in &lik {
+            let max = r
+                .iter()
+                .map(|&(k, ll)| pi[k].ln() + ll)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let sum: f64 = r.iter().map(|&(k, ll)| (pi[k].ln() + ll - max).exp()).sum();
+            let mut best = (0usize, -1.0f64);
+            for &(k, ll) in r {
+                let w = (pi[k].ln() + ll - max).exp() / sum;
+                acc[k] += w;
+                if w > best.1 || (w == best.1 && comps[k].0 < comps[best.0].0) {
+                    best = (k, w);
+                }
+            }
+            tops.push(best);
+        }
+    };
+    let mut pi = prior.clone();
+    let mut tops: Vec<(usize, f64)> = Vec::with_capacity(lik.len());
+    for _ in 0..EM_ITERATIONS {
+        let mut acc = vec![0.0f64; comps.len()];
+        e_step(&pi, &mut acc, &mut tops);
+        let next: Vec<f64> = acc
+            .iter()
+            .zip(&prior)
+            .map(|(a, p)| (a + EM_PSEUDOCOUNT * p) / (n + EM_PSEUDOCOUNT))
+            .collect();
+        let change = next
+            .iter()
+            .zip(&pi)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        pi = next;
+        if change < EM_TOLERANCE {
+            break;
+        }
+    }
+    let mut acc = vec![0.0f64; comps.len()];
+    e_step(&pi, &mut acc, &mut tops);
+    let mut peak: Vec<Explanation> = comps
+        .iter()
+        .zip(&pi)
+        .map(|((label, mass, _), p)| Explanation {
+            label: label.clone(),
+            mass: *mass,
+            posterior: *p,
+        })
+        .collect();
+    peak.sort_by(|a, b| {
         b.posterior
             .total_cmp(&a.posterior)
             .then_with(|| a.label.cmp(&b.label))
     });
-    out
+    peak.truncate(TOP_EXPLANATIONS);
+    let psms = tops
+        .iter()
+        .map(|&(k, w)| Explanation {
+            label: comps[k].0.clone(),
+            mass: comps[k].1,
+            posterior: w,
+        })
+        .collect();
+    Mixture { peak, psms }
 }
 
 struct RawPeak {
@@ -526,43 +616,21 @@ pub fn build_report(
     } else {
         median(&mut refined_widths).max(precision)
     };
-    let explain_psm = |i: usize, pairs: &[Candidate]| -> Vec<Explanation> {
-        let t = targets[i];
-        let s = if t.refined { refined_precision } else { precision };
-        let localised: Vec<(String, bool, bool)> = site_label(&t.sequence, t.site)
-            .map(|r| vec![(r, t.site == 1, t.site == t.sequence.len())])
-            .unwrap_or_default();
-        explain(deltas[i], s, span, &localised, &singles, pairs)
-    };
     let explain_peak = |p: &RawPeak, pairs: &[Candidate]| -> (Vec<Explanation>, Vec<Explanation>) {
-        let mut sums: HashMap<String, (f64, f64)> = HashMap::new();
-        let mut tops = Vec::with_capacity(p.members.len());
-        for &i in &p.members {
-            let ex = explain_psm(i, pairs);
-            if let Some(top) = ex.first() {
-                tops.push(top.clone());
-            }
-            for e in ex {
-                let entry = sums.entry(e.label).or_insert((e.mass, 0.0));
-                entry.1 += e.posterior;
-            }
-        }
-        let n = p.members.len() as f64;
-        let mut peak: Vec<Explanation> = sums
-            .into_iter()
-            .map(|(label, (mass, sum))| Explanation {
-                label,
-                mass,
-                posterior: sum / n,
+        let rows: Vec<Vec<Scored>> = p
+            .members
+            .iter()
+            .map(|&i| {
+                let t = targets[i];
+                let s = if t.refined { refined_precision } else { precision };
+                let localised: Vec<(String, bool, bool)> = site_label(&t.sequence, t.site)
+                    .map(|r| vec![(r, t.site == 1, t.site == t.sequence.len())])
+                    .unwrap_or_default();
+                scored_candidates(deltas[i], s, span, &localised, &singles, pairs)
             })
             .collect();
-        peak.sort_by(|a, b| {
-            b.posterior
-                .total_cmp(&a.posterior)
-                .then_with(|| a.label.cmp(&b.label))
-        });
-        peak.truncate(TOP_EXPLANATIONS);
-        (peak, tops)
+        let m = fit_mixture(rows, p.mass);
+        (m.peak, m.psms)
     };
     let mut sources: Vec<&Candidate> = Vec::new();
     for p in &raw {

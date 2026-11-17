@@ -784,20 +784,24 @@ re-score is capped at 64 per spectrum.
   - its localised residues (`residues`, the three most frequent with counts);
   - `decoys`: the decoy PSMs at or above the lowest accepted target score whose offsets fall in the
     peak. `decoys / psms` is a per-peak FDR estimate, independent of the run-wide q-value.
-- **Explanations.** Each accepted PSM gets a posterior over the candidates below, from its own
-  calibrated offset and its own localised residue. A peak lists the three explanations with the
-  highest mean posterior over its PSMs. A peak that mixes two species, such as deamidation and an
-  isotope pick, therefore shows both, in proportion.
+- **Explanations.** Each peak is fitted as a mixture of the candidates below.
+  - Every candidate keeps its fixed mass.
+  - A PSM's likelihood under a candidate is a Gaussian of its calibrated offset around the
+    candidate's mass × its site support.
+  - EM estimates each candidate's share of the peak's PSMs. It starts from the priors and adds them
+    as a Dirichlet pseudo-count of one PSM.
+  - A peak lists its three largest shares as `explanation_k` / `posterior_k`. A clean peak converges
+    to one candidate; a peak that mixes two species, such as deamidation and an isotope pick,
+    splits between them in proportion.
   - The candidates:
     - no modification;
     - an isotope error of ±1 or ±2;
     - every Unimod entry, alone or with one isotope step;
     - pairs of the Unimod entries that are the top explanation of another peak of the same run with
-      mean posterior ≥ 0.5,
+      a share ≥ 0.5,
       counting only peaks with at least 20 PSMs and decoys ≤ 1 % of their PSMs;
     - "unexplained", a flat density over the offset range.
-  - A candidate's weight is its prior × a Gaussian of the peak's distance from the candidate mass ×
-    its site support.
+  - The terms of the likelihood and the priors:
     - The priors are 1 for no modification or for a Unimod entry with at least one common
       specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare or
       that Unimod classifies only as an isotopic label (a label-free run carries no labels),
@@ -808,12 +812,13 @@ re-score is capped at 64 per spectrum.
       on the precursor it is the precision. For one refined from the fragment ions it is the median
       width of the peaks with at least 20 PSMs that are mostly refined, and never less than the
       precision.
-    - The site support scores each localised PSM 1 when its residue, or peptide terminus, is a
-      common specificity of the entry and 0.1 when it is only a rare one. The sum k is smoothed
-      as (k + 0.5) / (n + 1), and the support is 1 when no PSM is localised.
+    - A PSM's site support is (k + 0.5) / 2. k is 1 when its localised residue, or peptide
+      terminus, is a common specificity of the entry, 0.1 when it is only a rare one, and 0
+      otherwise. The support is 1 when the PSM is not localised.
   - Entries with the same mass and sites tie, and are reported as ties.
 - **Per-PSM file.** `<stem>.open_psms.tsv` gives each accepted PSM its peak (`NA` outside every
-  peak), its localised residue, and its own top explanation and posterior.
+  peak), its localised residue, and the candidate with its highest responsibility in the fitted
+  mixture, with that responsibility.
 
 Fixed behaviour in this mode: the isotope range is set internally to **0..=2** (an isotope step
 is indistinguishable from a ~1 Da offset, so the search tries each offset and keeps the one whose

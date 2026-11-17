@@ -507,7 +507,7 @@ pub(crate) fn run_xl(
         if li == 0 {
             results = found;
         } else {
-            results = merge_linkers(results, found, &runs);
+            results = merge_linkers(results, found);
         }
     }
     if runs.len() > 1 {
@@ -607,57 +607,20 @@ pub(crate) fn run_xl(
     Ok(())
 }
 
-/// One result per spectrum: the CSM with the best peptide pair over the linkers. Its
-/// runner-up (the delta term of the CSM score) covers every linker: the other linker's best
-/// pair when it is a different peptide pair, else that linker's own runner-up, and for a
-/// spectrum without a precursor charge also the pairs that linker found at its other charges.
+/// One result per spectrum: the CSM with the best pair score over the linkers. Its runner-up
+/// (the delta term of the CSM score) is the best other peptide pair found for the spectrum by
+/// any linker at any charge searched.
 fn merge_linkers(
     into: Vec<XlSpectrumResult>,
     other: Vec<XlSpectrumResult>,
-    runs: &[XlRun],
 ) -> Vec<XlSpectrumResult> {
-    let seqs = |r: &XlSpectrumResult| {
-        r.csm.as_ref().map(|c| {
-            let peps = runs[r.linker].table.peptides();
-            let mut v = [
-                peps[c.alpha.pep as usize].bare(),
-                peps[c.beta.pep as usize].bare(),
-            ];
-            v.sort();
-            v
-        })
-    };
     let mut by_spec: std::collections::HashMap<usize, XlSpectrumResult> =
         other.into_iter().map(|r| (r.spec_idx, r)).collect();
     let mut out: Vec<XlSpectrumResult> = into
         .into_iter()
-        .map(|r| {
-            let Some(o) = by_spec.remove(&r.spec_idx) else {
-                return r;
-            };
-            let (Some(a), Some(b)) = (&r.csm, &o.csm) else {
-                return if r.csm.is_some() || o.csm.is_none() {
-                    r
-                } else {
-                    o
-                };
-            };
-            let (mut win, lose) = if b.pair_score > a.pair_score {
-                (o, r)
-            } else {
-                (r, o)
-            };
-            let same_pair = seqs(&lose) == seqs(&win);
-            let l = lose.csm.as_ref().expect("both have a CSM");
-            let c = win.csm.as_mut().expect("both have a CSM");
-            c.second_pair_score = runner_up(
-                c.second_pair_score,
-                l.pair_score,
-                l.second_pair_score,
-                same_pair,
-                lose.other_charge_pair,
-            );
-            win
+        .map(|r| match by_spec.remove(&r.spec_idx) {
+            Some(o) => merge_one(r, o),
+            None => r,
         })
         .collect();
     out.extend(by_spec.into_values());
@@ -665,25 +628,23 @@ fn merge_linkers(
     out
 }
 
-/// The winner's runner-up after it beat another linker's CSM (`loser_pair`, its runner-up
-/// `loser_second`, its best pair at the charges it did not choose `loser_other_charge`): the
-/// loser's pair competes unless it is the winner's peptide pair.
-fn runner_up(
-    own: Option<f32>,
-    loser_pair: f32,
-    loser_second: Option<f32>,
-    same_pair: bool,
-    loser_other_charge: Option<f32>,
-) -> Option<f32> {
-    let rival = if same_pair {
-        loser_second
-    } else {
-        Some(loser_pair)
+fn merge_one(r: XlSpectrumResult, o: XlSpectrumResult) -> XlSpectrumResult {
+    let (Some(a), Some(b)) = (&r.csm, &o.csm) else {
+        return if r.csm.is_some() || o.csm.is_none() {
+            r
+        } else {
+            o
+        };
     };
-    [own, rival, loser_other_charge]
-        .into_iter()
-        .flatten()
-        .max_by(f32::total_cmp)
+    let (mut win, lose) = if b.pair_score > a.pair_score {
+        (o, r)
+    } else {
+        (r, o)
+    };
+    win.pairs.extend(lose.pairs);
+    let c = win.csm.as_mut().expect("both have a CSM");
+    c.second_pair_score = search::xl_search::runner_up(&win.pairs, &c.pair_key);
+    win
 }
 
 #[cfg(test)]
@@ -709,30 +670,90 @@ mod tests {
         assert!(water_monolink_mods(&linker("DTBP")).is_empty());
     }
 
+    fn result(linker: usize, csm: Option<(&str, f32)>, pairs: &[(&str, f32)]) -> XlSpectrumResult {
+        use andes_xl::crosslinker::LinkForm;
+        use andes_xl::sites::LinkSite;
+        use search::xl_search::{Csm, PeptideHit};
+        let key = |p: &str| [p.as_bytes().to_vec(), b"PEPTIDEK".to_vec()];
+        let hit = PeptideHit {
+            pep: 0,
+            site: LinkSite {
+                pos: 0,
+                n_term: false,
+                c_term: false,
+            },
+            form: LinkForm::Intact,
+            score: 0.0,
+            form_scores: Default::default(),
+            n_sites: 1,
+            gap_next: None,
+            mass_err_ppm: 0.0,
+        };
+        let pairs: Vec<_> = pairs.iter().map(|(p, s)| (key(p), *s)).collect();
+        XlSpectrumResult {
+            spec_idx: 7,
+            charge: 3,
+            precursor_mass: 0.0,
+            doublets: Default::default(),
+            csm: csm.map(|(p, score)| Csm {
+                alpha: hit,
+                beta: hit,
+                pair_key: key(p),
+                pair_score: score,
+                second_pair_score: search::xl_search::runner_up(&pairs, &key(p)),
+                kind: search::xl_search::PairKind::Full,
+                iso: 0,
+                class: andes_xl::decoy::PairClass::TT,
+                intra: true,
+                homotypic: false,
+                precursor_err_ppm: 0.0,
+                b_stub_ions: 0,
+                n_mass_pairs: 1,
+                alpha_doublet: None,
+                beta_doublet: None,
+                rescores: Default::default(),
+                charge: 3,
+            }),
+            oracle: None,
+            linker,
+            pairs,
+        }
+    }
+
+    fn merged(results: Vec<XlSpectrumResult>) -> (usize, f32, Option<f32>) {
+        let mut it = results.into_iter();
+        let mut acc = vec![it.next().unwrap()];
+        for r in it {
+            acc = merge_linkers(acc, vec![r]);
+        }
+        let c = acc[0].csm.as_ref().unwrap();
+        (acc[0].linker, c.pair_score, c.second_pair_score)
+    }
+
     #[test]
-    fn the_runner_up_covers_the_other_linkers_pairs() {
+    fn the_runner_up_covers_every_linker_and_charge() {
         // A different pair of the other linker at 99 is the runner-up of a 100 / 50 CSM.
-        assert_eq!(
-            runner_up(Some(50.0), 99.0, Some(10.0), false, None),
-            Some(99.0)
-        );
-        // The same peptide pair does not compete with itself; its runner-up does.
-        assert_eq!(
-            runner_up(Some(50.0), 99.0, Some(60.0), true, None),
-            Some(60.0)
-        );
-        assert_eq!(
-            runner_up(Some(50.0), 99.0, Some(10.0), true, None),
-            Some(50.0)
-        );
-        assert_eq!(runner_up(None, 99.0, None, true, None), None);
-        assert_eq!(runner_up(None, 99.0, None, false, None), Some(99.0));
-        // Without a precursor charge, linker A kept 100 / 50 at one charge over a pair at 110
-        // at another; linker B wins with 120 / 80 at that other charge: 110 is its runner-up.
-        assert_eq!(
-            runner_up(Some(80.0), 100.0, Some(50.0), false, Some(110.0)),
-            Some(110.0)
-        );
+        let a = result(0, Some(("AK", 100.0)), &[("AK", 100.0), ("BK", 50.0)]);
+        let b = result(1, Some(("CK", 99.0)), &[("CK", 99.0), ("DK", 10.0)]);
+        assert_eq!(merged(vec![a, b]), (0, 100.0, Some(99.0)));
+        // The same peptide pair found by the other linker does not compete with itself.
+        let a = result(0, Some(("AK", 100.0)), &[("AK", 100.0), ("BK", 50.0)]);
+        let b = result(1, Some(("AK", 99.0)), &[("AK", 99.0), ("DK", 60.0)]);
+        assert_eq!(merged(vec![a, b]), (0, 100.0, Some(60.0)));
+        // Three linkers: B's pair at another charge (110) survives when C wins later.
+        let a = result(0, Some(("AK", 105.0)), &[("AK", 105.0)]);
+        let b = result(1, Some(("BK", 100.0)), &[("BK", 100.0), ("EK", 110.0)]);
+        let c = result(2, Some(("CK", 120.0)), &[("CK", 120.0), ("DK", 80.0)]);
+        assert_eq!(merged(vec![a, b, c]), (2, 120.0, Some(110.0)));
+        // The winner's own pairs at other charges count; an alternative that is the
+        // winner's own pair does not.
+        let a = result(0, Some(("PK", 120.0)), &[("PK", 120.0), ("QK", 110.0)]);
+        let b = result(1, Some(("RK", 100.0)), &[("RK", 100.0), ("PK", 115.0)]);
+        assert_eq!(merged(vec![a, b]), (0, 120.0, Some(110.0)));
+        // A spectrum with no CSM in one linker keeps the other's.
+        let a = result(0, None, &[]);
+        let b = result(1, Some(("AK", 90.0)), &[("AK", 90.0)]);
+        assert_eq!(merged(vec![a, b]), (1, 90.0, None));
     }
 
     #[test]

@@ -391,6 +391,8 @@ pub const PROBE_NULL_SHIFTS: [f64; 2] = [-5.0, 5.0];
 pub struct Csm {
     pub alpha: PeptideHit,
     pub beta: PeptideHit,
+    /// The peptide pair as its two bare sequences, sorted.
+    pub pair_key: PairKey,
     pub pair_score: f32,
     pub second_pair_score: Option<f32>,
     pub kind: PairKind,
@@ -405,6 +407,19 @@ pub struct Csm {
     pub beta_doublet: Option<DoubletMass>,
     pub rescores: Rescores,
     pub charge: u8,
+}
+
+/// A peptide pair as its two bare sequences, sorted: pairs that differ only in
+/// modifications or link sites are the same pair.
+pub type PairKey = [Vec<u8>; 2];
+
+/// The best pair score among `pairs` of a peptide pair other than `winner`.
+pub fn runner_up(pairs: &[(PairKey, f32)], winner: &PairKey) -> Option<f32> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k != winner)
+        .map(|(_, s)| *s)
+        .max_by(f32::total_cmp)
 }
 
 pub fn combined_pair_score(pair: f32, second: Option<f32>) -> f32 {
@@ -453,10 +468,9 @@ pub struct XlSpectrumResult {
     pub csm: Option<Csm>,
     pub oracle: Option<OracleResult>,
     pub linker: usize,
-    /// For a spectrum without a precursor charge: the best pair score found at the charges
-    /// not chosen (necessarily another peptide pair, as the precursor mass differs). Only the
-    /// merge of several linkers reads it.
-    pub other_charge_pair: Option<f32>,
+    /// The best and the next-best peptide pair at every charge searched, with their pair
+    /// scores: the candidates of the CSM's runner-up across charges and linkers.
+    pub pairs: Vec<(PairKey, f32)>,
 }
 
 struct StubMods {
@@ -952,7 +966,7 @@ fn search_spectrum(
             let range = &prepared.params.charge_range;
             let lo = (*range.start()).max(cfg.min_precursor_charge);
             let mut best: Option<XlSpectrumResult> = None;
-            let mut pairs: Vec<f32> = Vec::new();
+            let mut pairs: Vec<(PairKey, f32)> = Vec::new();
             for z in lo..=*range.end() {
                 let Some(r) =
                     search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
@@ -972,17 +986,17 @@ fn search_spectrum(
                         _ => false,
                     },
                 };
+                pairs.extend(r.pairs.iter().cloned());
                 if better {
-                    if let Some(c) = best.as_ref().and_then(|b| b.csm.as_ref()) {
-                        pairs.push(c.pair_score);
-                    }
                     best = Some(r);
-                } else if let Some(c) = &r.csm {
-                    pairs.push(c.pair_score);
                 }
             }
+            // The runner-up is the best other peptide pair at any charge searched.
             if let Some(b) = best.as_mut() {
-                b.other_charge_pair = pairs.into_iter().max_by(f32::total_cmp);
+                if let Some(c) = b.csm.as_mut() {
+                    c.second_pair_score = runner_up(&pairs, &c.pair_key);
+                }
+                b.pairs = pairs;
             }
             best
         }
@@ -1033,7 +1047,7 @@ fn search_spectrum_at(
         csm: None,
         oracle: None,
         linker: 0,
-        other_charge_pair: None,
+        pairs: Vec::new(),
     };
     if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);
@@ -1179,8 +1193,13 @@ fn search_spectrum_at(
             .iter()
             .enumerate()
             .filter(|(i, o)| *i != bi && seq_pair(o) != best_seqs)
-            .map(|(_, o)| o.score)
-            .max_by(f32::total_cmp);
+            .map(|(_, o)| o)
+            .max_by(|x, y| x.score.total_cmp(&y.score));
+        result.pairs.push((best_seqs.clone(), c.score));
+        if let Some(o) = second {
+            result.pairs.push((seq_pair(o), o.score));
+        }
+        let second = second.map(|o| o.score);
         let (alpha, beta) = if c.a.score >= c.b.score {
             (c.a, c.b)
         } else {
@@ -1195,6 +1214,7 @@ fn search_spectrum_at(
         result.csm = Some(Csm {
             alpha,
             beta,
+            pair_key: best_seqs,
             pair_score: c.score,
             second_pair_score: second,
             kind: c.pair.kind,

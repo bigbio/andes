@@ -761,10 +761,19 @@ re-score is capped at 64 per spectrum.
 **Mass-offset report.** With `--rescore` or `--rescore-native`, an open search also writes
 `<stem>.open_offsets.tsv` and `<stem>.open_psms.tsv`, and prints the ten largest peaks.
 
-- **Peaks.** The offsets of the accepted target PSMs are grouped into peaks.
-  - The grouping uses the precursor precision measured on the PSMs near zero offset: 1.4826 × MAD,
-    at least 0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.
-  - A gap wider than four precisions starts a new peak, and a peak needs at least two PSMs.
+- **Calibration.** Precursor calibration is off in open search, so the offsets carry the
+  instrument's mass error, which scales with peptide mass. The report measures it as the median
+  ppm error of the accepted PSMs within 0.02 Da of zero offset (when there are at least 20) and
+  subtracts it from every offset, `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, for targets and decoys
+  alike.
+- **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
+  - The precision is 1.4826 × MAD of the calibrated offsets within 0.02 Da of zero, at least
+    0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.
+  - A gap wider than four precisions starts a new group.
+  - Inside a group, a Gaussian density with that precision as bandwidth is split at every valley
+    lower than half the smaller of its two neighbouring maxima. This separates neighbours such as
+    deamidation (+0.984) and an isotope pick (+1.003).
+  - A peak needs at least two PSMs.
 - **Columns per peak.** `<stem>.open_offsets.tsv` gives each peak's:
   - median offset (`mass_shift`) and width (`width_da`);
   - PSM and peptide counts;
@@ -776,16 +785,20 @@ re-score is capped at 64 per spectrum.
     - no modification;
     - an isotope error of ±1 or ±2;
     - every Unimod entry, alone or with one isotope step;
-    - pairs of the Unimod entries that explain another peak of the same run with posterior ≥ 0.5;
+    - pairs of the Unimod entries that explain another peak of the same run with posterior ≥ 0.5,
+      counting only peaks with at least 20 PSMs and decoys ≤ 1 % of their PSMs;
     - "unexplained", a flat density over the offset range.
   - A candidate's weight is its prior × a Gaussian of the peak's distance from the candidate mass ×
     its site support.
-    - The priors are 1 for a single entry or no modification, 0.2 for an isotope error, 0.1 for an
-      entry plus an isotope step, 0.05 for a pair and 0.05 for "unexplained".
+    - The priors are 1 for no modification or for a Unimod entry with at least one common
+      specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare,
+      0.2 for an isotope error, and 0.05 for "unexplained".
+    - An entry plus an isotope step takes the entry's prior × 0.1.
+    - A pair takes 0.05 × the two entries' priors.
     - The Gaussian's spread is √(width² / n + precision²).
-    - The site support is the share of the peak's localised PSMs whose residue, or peptide
-      terminus, Unimod lists for that entry. It is smoothed as (k + 0.5) / (n + 1) and is 1 when no
-      PSM is localised.
+    - The site support scores each localised PSM 1 when its residue, or peptide terminus, is a
+      common specificity of the entry and 0.1 when it is only a rare one. The sum k is smoothed
+      as (k + 0.5) / (n + 1), and the support is 1 when no PSM is localised.
   - Entries with the same mass and sites tie, and are reported as ties.
 - **Per-PSM file.** `<stem>.open_psms.tsv` gives each accepted PSM its peak (`NA` outside every
   peak), its localised residue, and its peak's top explanation and posterior.

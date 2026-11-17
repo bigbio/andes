@@ -11,14 +11,22 @@ const MIN_PEAK_PSMS: usize = 2;
 const DEFAULT_PRECISION_DA: f64 = 0.002;
 const MIN_PRECISION_DA: f64 = 0.0005;
 const ZERO_WINDOW_DA: f64 = 0.02;
+const MIN_CALIBRATION_PSMS: usize = 20;
 const SPLIT_SIGMAS: f64 = 4.0;
+const GRID_PER_SIGMA: f64 = 4.0;
+const KERNEL_SIGMAS: f64 = 4.0;
+const VALLEY_RATIO: f64 = 0.5;
 const CANDIDATE_SIGMAS: f64 = 6.0;
 const PRIOR_SINGLE: f64 = 1.0;
+const PRIOR_RARE: f64 = 0.1;
 const PRIOR_ISOTOPE: f64 = 0.2;
 const PRIOR_SINGLE_ISOTOPE: f64 = 0.1;
 const PRIOR_PAIR: f64 = 0.05;
 const PRIOR_UNEXPLAINED: f64 = 0.05;
+const RARE_SITE_WEIGHT: f64 = 0.1;
 const PAIR_SOURCE_POSTERIOR: f64 = 0.5;
+const PAIR_SOURCE_MIN_PSMS: usize = 20;
+const PAIR_SOURCE_MAX_DECOY_RATIO: f64 = 0.01;
 const TOP_EXPLANATIONS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +34,7 @@ pub struct PinOffset {
     pub psm_id: String,
     pub decoy: bool,
     pub delta: f64,
+    pub calc_mass: f64,
     pub site: usize,
     pub sequence: String,
 }
@@ -42,8 +51,6 @@ pub struct OffsetPeak {
     pub id: usize,
     pub mass: f64,
     pub width: f64,
-    pub lo: f64,
-    pub hi: f64,
     pub psms: usize,
     pub peptides: usize,
     pub decoys: usize,
@@ -63,6 +70,7 @@ pub struct PsmAssignment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetReport {
+    pub ppm_shift: f64,
     pub precision: f64,
     pub peaks: Vec<OffsetPeak>,
     pub assignments: Vec<PsmAssignment>,
@@ -86,9 +94,10 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
             .position(|c| *c == name)
             .ok_or_else(|| bad(format!("PIN has no {name} column")))
     };
-    let (id_c, label_c, delta_c, site_c, pep_c) = (
+    let (id_c, label_c, calc_c, delta_c, site_c, pep_c) = (
         col("SpecId")?,
         col("Label")?,
+        col("CalcMass")?,
         col("DeltaMass")?,
         col("OpenSite")?,
         col("Peptide")?,
@@ -109,16 +118,17 @@ pub fn parse_pin_offsets<R: BufRead>(reader: R) -> std::io::Result<Vec<PinOffset
         if label != "1" && label != "-1" {
             continue;
         }
-        let delta: f64 = get(delta_c)?
-            .parse()
-            .map_err(|e| bad(format!("DeltaMass: {e}")))?;
+        let num = |i: usize, name: &str| -> std::io::Result<f64> {
+            get(i)?.parse().map_err(|e| bad(format!("{name}: {e}")))
+        };
         let site: usize = get(site_c)?
             .parse()
             .map_err(|e| bad(format!("OpenSite: {e}")))?;
         out.push(PinOffset {
             psm_id: get(id_c)?.to_string(),
             decoy: label == "-1",
-            delta,
+            delta: num(delta_c, "DeltaMass")?,
+            calc_mass: num(calc_c, "CalcMass")?,
             site,
             sequence: stripped_sequence(get(pep_c)?),
         });
@@ -149,39 +159,139 @@ fn site_label(sequence: &str, site: usize) -> Option<String> {
     Some(c.to_string())
 }
 
-fn mad(values: &mut [f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    values.sort_by(|a, b| a.total_cmp(b));
-    let med = values[values.len() / 2];
-    let mut dev: Vec<f64> = values.iter().map(|v| (v - med).abs()).collect();
-    dev.sort_by(|a, b| a.total_cmp(b));
-    1.4826 * dev[dev.len() / 2]
-}
-
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.total_cmp(b));
     values[values.len() / 2]
 }
 
+fn mad(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut v = values.to_vec();
+    let med = median(&mut v);
+    let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
+    1.4826 * median(&mut dev)
+}
+
+pub fn ppm_shift(rows: &[&PinOffset]) -> f64 {
+    let mut ppm: Vec<f64> = rows
+        .iter()
+        .filter(|r| r.delta.abs() < ZERO_WINDOW_DA && r.calc_mass > 0.0)
+        .map(|r| r.delta / r.calc_mass * 1e6)
+        .collect();
+    if ppm.len() < MIN_CALIBRATION_PSMS {
+        return 0.0;
+    }
+    median(&mut ppm)
+}
+
+pub fn corrected_delta(row: &PinOffset, ppm: f64) -> f64 {
+    row.delta - ppm * 1e-6 * (row.calc_mass + row.delta)
+}
+
 pub fn measured_precision(deltas: &[f64]) -> f64 {
-    let mut near: Vec<f64> = deltas
+    let near: Vec<f64> = deltas
         .iter()
         .copied()
         .filter(|d| d.abs() < ZERO_WINDOW_DA)
         .collect();
-    if near.len() < 20 {
+    if near.len() < MIN_CALIBRATION_PSMS {
         return DEFAULT_PRECISION_DA;
     }
-    mad(&mut near).max(MIN_PRECISION_DA)
+    mad(&near).max(MIN_PRECISION_DA)
+}
+
+fn gap_groups(sorted: &[f64], precision: f64) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..=sorted.len() {
+        if i == sorted.len() || sorted[i] - sorted[i - 1] > SPLIT_SIGMAS * precision {
+            out.push(start..i);
+            start = i;
+        }
+    }
+    out
+}
+
+fn valley_splits(values: &[f64], precision: f64) -> Vec<f64> {
+    let (lo, hi) = (values[0], values[values.len() - 1]);
+    let step = precision / GRID_PER_SIGMA;
+    let n = ((hi - lo) / step).ceil() as usize + 1;
+    if n < 3 {
+        return Vec::new();
+    }
+    let mut counts = vec![0.0f64; n];
+    for v in values {
+        counts[(((v - lo) / step).round() as usize).min(n - 1)] += 1.0;
+    }
+    let radius = (KERNEL_SIGMAS * GRID_PER_SIGMA).ceil() as isize;
+    let kernel: Vec<f64> = (-radius..=radius)
+        .map(|k| (-0.5 * (k as f64 / GRID_PER_SIGMA).powi(2)).exp())
+        .collect();
+    let density: Vec<f64> = (0..n as isize)
+        .map(|i| {
+            (-radius..=radius)
+                .filter_map(|k| {
+                    let j = i + k;
+                    (0..n as isize)
+                        .contains(&j)
+                        .then(|| counts[j as usize] * kernel[(k + radius) as usize])
+                })
+                .sum()
+        })
+        .collect();
+    let mut maxima: Vec<usize> = (0..n)
+        .filter(|&i| {
+            (i == 0 || density[i] > density[i - 1]) && (i + 1 == n || density[i] >= density[i + 1])
+        })
+        .collect();
+    maxima.dedup();
+    let mut splits = Vec::new();
+    let mut left = match maxima.first() {
+        Some(&m) => m,
+        None => return splits,
+    };
+    for &right in &maxima[1..] {
+        let (valley, &vmin) = density[left..=right]
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, v)| (left + i, v))
+            .unwrap_or((left, &density[left]));
+        if vmin < VALLEY_RATIO * density[left].min(density[right]) {
+            splits.push(lo + valley as f64 * step);
+            left = right;
+        } else if density[right] > density[left] {
+            left = right;
+        }
+    }
+    splits
+}
+
+pub fn offset_peaks(sorted: &[f64], precision: f64) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    for g in gap_groups(sorted, precision) {
+        let values = &sorted[g.clone()];
+        let mut start = g.start;
+        for cut in valley_splits(values, precision) {
+            let end = g.start + values.partition_point(|v| *v < cut);
+            if end > start {
+                out.push(start..end);
+                start = end;
+            }
+        }
+        out.push(start..g.end);
+    }
+    out
 }
 
 struct Candidate {
     label: String,
     mass: f64,
     prior: f64,
-    sites: Option<Vec<String>>,
+    sites: Vec<String>,
+    common_sites: Vec<String>,
 }
 
 fn gauss_log(x: f64, mu: f64, s: f64) -> f64 {
@@ -189,19 +299,29 @@ fn gauss_log(x: f64, mu: f64, s: f64) -> f64 {
     -0.5 * z * z - s.ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
 }
 
-fn site_support(sites: &[String], localised: &[(String, bool, bool)]) -> f64 {
-    if localised.is_empty() {
+fn site_matches(sites: &[String], (residue, n_term, c_term): &(String, bool, bool)) -> bool {
+    sites
+        .iter()
+        .any(|s| s == residue || (s == "N-term" && *n_term) || (s == "C-term" && *c_term))
+}
+
+fn site_support(c: &Candidate, localised: &[(String, bool, bool)]) -> f64 {
+    if localised.is_empty() || c.sites.is_empty() {
         return 1.0;
     }
-    let allowed = localised
+    let hits: f64 = localised
         .iter()
-        .filter(|(residue, n_term, c_term)| {
-            sites.iter().any(|s| {
-                s == residue || (s == "N-term" && *n_term) || (s == "C-term" && *c_term)
-            })
+        .map(|l| {
+            if site_matches(&c.common_sites, l) {
+                1.0
+            } else if site_matches(&c.sites, l) {
+                RARE_SITE_WEIGHT
+            } else {
+                0.0
+            }
         })
-        .count();
-    (allowed as f64 + 0.5) / (localised.len() as f64 + 1.0)
+        .sum();
+    (hits + 0.5) / (localised.len() as f64 + 1.0)
 }
 
 fn single_candidates(db: &UnimodDb) -> Vec<Candidate> {
@@ -211,8 +331,13 @@ fn single_candidates(db: &UnimodDb) -> Vec<Candidate> {
         .map(|m| Candidate {
             label: format!("{} ({})", m.name, m.accession),
             mass: m.mono_mass,
-            prior: PRIOR_SINGLE,
-            sites: Some(m.sites.clone()),
+            prior: if m.common_sites.is_empty() {
+                PRIOR_RARE
+            } else {
+                PRIOR_SINGLE
+            },
+            sites: m.sites.clone(),
+            common_sites: m.common_sites.clone(),
         })
         .collect();
     out.sort_by(|a, b| a.mass.total_cmp(&b.mass).then_with(|| a.label.cmp(&b.label)));
@@ -248,26 +373,19 @@ fn explain(
         if c.mass > mass + reach + 2.0 * ISOTOPE_DA {
             break;
         }
-        let support = c
-            .sites
-            .as_deref()
-            .map_or(1.0, |sites| site_support(sites, localised));
+        let support = site_support(c, localised);
         push(c.label.clone(), c.mass, c.prior, support);
         for k in [-1i32, 1] {
             push(
                 format!("{} {k:+} isotope", c.label),
                 c.mass + f64::from(k) * ISOTOPE_DA,
-                PRIOR_SINGLE_ISOTOPE,
+                c.prior * PRIOR_SINGLE_ISOTOPE,
                 support,
             );
         }
     }
     for c in pairs {
-        let support = c
-            .sites
-            .as_deref()
-            .map_or(1.0, |sites| site_support(sites, localised));
-        push(c.label.clone(), c.mass, c.prior, support);
+        push(c.label.clone(), c.mass, c.prior, site_support(c, localised));
     }
     let unexplained = PRIOR_UNEXPLAINED.ln() - span.max(1.0).ln();
     let max = scored
@@ -298,36 +416,11 @@ fn explain(
     out
 }
 
-struct Cluster {
-    members: Vec<usize>,
-}
-
 struct RawPeak {
-    cluster: Cluster,
+    members: Vec<usize>,
     mass: f64,
     width: f64,
     localised: Vec<(String, bool, bool)>,
-}
-
-fn clusters(rows: &[&PinOffset], precision: f64) -> Vec<Cluster> {
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| rows[a].delta.total_cmp(&rows[b].delta));
-    let mut out: Vec<Cluster> = Vec::new();
-    let mut cur: Vec<usize> = Vec::new();
-    for i in order {
-        if let Some(&last) = cur.last() {
-            if rows[i].delta - rows[last].delta > SPLIT_SIGMAS * precision {
-                out.push(Cluster {
-                    members: std::mem::take(&mut cur),
-                });
-            }
-        }
-        cur.push(i);
-    }
-    if !cur.is_empty() {
-        out.push(Cluster { members: cur });
-    }
-    out
 }
 
 pub fn build_report(
@@ -341,7 +434,8 @@ pub fn build_report(
         .iter()
         .filter(|r| !r.decoy && accepted.contains(&r.psm_id))
         .collect();
-    let deltas: Vec<f64> = targets.iter().map(|r| r.delta).collect();
+    let ppm = ppm_shift(&targets);
+    let deltas: Vec<f64> = targets.iter().map(|r| corrected_delta(r, ppm)).collect();
     let precision = measured_precision(&deltas);
     let span = pin
         .iter()
@@ -361,29 +455,31 @@ pub fn build_report(
                 .get(&r.psm_id)
                 .is_some_and(|s| threshold.is_finite() && *s >= threshold)
         })
-        .map(|r| r.delta)
+        .map(|r| corrected_delta(r, ppm))
         .collect();
     decoy_deltas.sort_by(|a, b| a.total_cmp(b));
 
-    let singles = single_candidates(db);
-    let mut raw: Vec<RawPeak> = clusters(&targets, precision)
+    let mut order: Vec<usize> = (0..targets.len()).collect();
+    order.sort_by(|&a, &b| deltas[a].total_cmp(&deltas[b]));
+    let sorted: Vec<f64> = order.iter().map(|&i| deltas[i]).collect();
+    let mut raw: Vec<RawPeak> = offset_peaks(&sorted, precision)
         .into_iter()
-        .filter(|c| c.members.len() >= MIN_PEAK_PSMS)
-        .map(|c| {
-            let mut ds: Vec<f64> = c.members.iter().map(|&i| targets[i].delta).collect();
-            let width = mad(&mut ds.clone()).max(precision);
-            let mass = median(&mut ds);
-            let localised: Vec<(String, bool, bool)> = c
-                .members
+        .filter(|r| r.len() >= MIN_PEAK_PSMS)
+        .map(|r| {
+            let members: Vec<usize> = order[r.clone()].to_vec();
+            let values = &sorted[r];
+            let width = mad(values).max(precision);
+            let mass = median(&mut values.to_vec());
+            let localised: Vec<(String, bool, bool)> = members
                 .iter()
                 .filter_map(|&i| {
-                    let r = targets[i];
-                    let residue = site_label(&r.sequence, r.site)?;
-                    Some((residue, r.site == 1, r.site == r.sequence.len()))
+                    let t = targets[i];
+                    let residue = site_label(&t.sequence, t.site)?;
+                    Some((residue, t.site == 1, t.site == t.sequence.len()))
                 })
                 .collect();
             RawPeak {
-                cluster: c,
+                members,
                 mass,
                 width,
                 localised,
@@ -391,66 +487,72 @@ pub fn build_report(
         })
         .collect();
     raw.sort_by(|a, b| {
-        b.cluster
-            .members
+        b.members
             .len()
-            .cmp(&a.cluster.members.len())
+            .cmp(&a.members.len())
             .then_with(|| a.mass.total_cmp(&b.mass))
     });
 
-    let explain_peak = |mass: f64, width: f64, n: usize, localised: &[(String, bool, bool)], pairs: &[Candidate]| {
-        let s = (width * width / n as f64 + precision * precision).sqrt();
-        explain(mass, s, span, localised, &singles, pairs)
+    let singles = single_candidates(db);
+    let decoys_in = |p: &RawPeak| {
+        let lo = p.members.iter().map(|&i| deltas[i]).fold(f64::INFINITY, f64::min);
+        let hi = p.members.iter().map(|&i| deltas[i]).fold(f64::NEG_INFINITY, f64::max);
+        let (dlo, dhi) = (lo - precision, hi + precision);
+        decoy_deltas.partition_point(|d| *d <= dhi) - decoy_deltas.partition_point(|d| *d < dlo)
     };
-    let first: Vec<Vec<Explanation>> = raw
-        .iter()
-        .map(|p| explain_peak(p.mass, p.width, p.cluster.members.len(), &p.localised, &[]))
-        .collect();
+    let explain_peak = |p: &RawPeak, pairs: &[Candidate]| {
+        let n = p.members.len() as f64;
+        let s = (p.width * p.width / n + precision * precision).sqrt();
+        explain(p.mass, s, span, &p.localised, &singles, pairs)
+    };
     let mut sources: Vec<&Candidate> = Vec::new();
-    for ex in &first {
-        if let Some(top) = ex.first() {
-            if top.posterior >= PAIR_SOURCE_POSTERIOR {
-                if let Some(c) = singles.iter().find(|c| c.label == top.label) {
-                    if !sources.iter().any(|s| s.label == c.label) {
-                        sources.push(c);
-                    }
-                }
+    for p in &raw {
+        if p.members.len() < PAIR_SOURCE_MIN_PSMS
+            || decoys_in(p) as f64 > PAIR_SOURCE_MAX_DECOY_RATIO * p.members.len() as f64
+        {
+            continue;
+        }
+        let Some(top) = explain_peak(p, &[]).into_iter().next() else {
+            continue;
+        };
+        if top.posterior < PAIR_SOURCE_POSTERIOR {
+            continue;
+        }
+        if let Some(c) = singles.iter().find(|c| c.label == top.label) {
+            if !sources.iter().any(|s| s.label == c.label) {
+                sources.push(c);
             }
         }
     }
     let mut pairs: Vec<Candidate> = Vec::new();
     for (i, a) in sources.iter().enumerate() {
         for b in &sources[i..] {
-            let sites: Vec<String> = a
-                .sites
-                .iter()
-                .flatten()
-                .chain(b.sites.iter().flatten())
-                .cloned()
-                .collect();
+            let join = |x: &[String], y: &[String]| -> Vec<String> {
+                x.iter().chain(y.iter()).cloned().collect()
+            };
             pairs.push(Candidate {
                 label: format!("{} + {}", a.label, b.label),
                 mass: a.mass + b.mass,
-                prior: PRIOR_PAIR,
-                sites: Some(sites),
+                prior: PRIOR_PAIR * a.prior * b.prior,
+                sites: join(&a.sites, &b.sites),
+                common_sites: join(&a.common_sites, &b.common_sites),
             });
         }
     }
 
     let mut peaks = Vec::with_capacity(raw.len());
     let mut assignments = Vec::with_capacity(targets.len());
-    let mut assigned: HashSet<usize> = HashSet::new();
+    let mut assigned = vec![false; targets.len()];
     for (k, p) in raw.iter().enumerate() {
-        let (c, mass, width, localised) = (&p.cluster, &p.mass, &p.width, &p.localised);
         let id = k + 1;
-        let explanations = explain_peak(*mass, *width, c.members.len(), localised, &pairs);
-        let lo = c.members.iter().map(|&i| targets[i].delta).fold(f64::INFINITY, f64::min);
-        let hi = c.members.iter().map(|&i| targets[i].delta).fold(f64::NEG_INFINITY, f64::max);
-        let (dlo, dhi) = (lo - SPLIT_SIGMAS * precision / 2.0, hi + SPLIT_SIGMAS * precision / 2.0);
-        let decoys = decoy_deltas.partition_point(|d| *d <= dhi) - decoy_deltas.partition_point(|d| *d < dlo);
-        let peptides: HashSet<&str> = c.members.iter().map(|&i| targets[i].sequence.as_str()).collect();
+        let explanations = explain_peak(p, &pairs);
+        let peptides: HashSet<&str> = p
+            .members
+            .iter()
+            .map(|&i| targets[i].sequence.as_str())
+            .collect();
         let mut residue_counts: HashMap<&str, usize> = HashMap::new();
-        for (r, _, _) in localised {
+        for (r, _, _) in &p.localised {
             *residue_counts.entry(r.as_str()).or_default() += 1;
         }
         let mut residues: Vec<(String, usize)> = residue_counts
@@ -459,38 +561,36 @@ pub fn build_report(
             .collect();
         residues.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let top = explanations.first().cloned();
-        for &i in &c.members {
-            assigned.insert(i);
-            let r = targets[i];
+        for &i in &p.members {
+            assigned[i] = true;
+            let t = targets[i];
             assignments.push(PsmAssignment {
-                psm_id: r.psm_id.clone(),
-                delta: r.delta,
+                psm_id: t.psm_id.clone(),
+                delta: deltas[i],
                 peak: Some(id),
-                residue: site_label(&r.sequence, r.site).unwrap_or_default(),
-                explanation: top.as_ref().map_or_else(String::new, |t| t.label.clone()),
-                posterior: top.as_ref().map_or(0.0, |t| t.posterior),
+                residue: site_label(&t.sequence, t.site).unwrap_or_default(),
+                explanation: top.as_ref().map_or_else(String::new, |e| e.label.clone()),
+                posterior: top.as_ref().map_or(0.0, |e| e.posterior),
             });
         }
         peaks.push(OffsetPeak {
             id,
-            mass: *mass,
-            width: *width,
-            lo,
-            hi,
-            psms: c.members.len(),
+            mass: p.mass,
+            width: p.width,
+            psms: p.members.len(),
             peptides: peptides.len(),
-            decoys,
+            decoys: decoys_in(p),
             residues,
             explanations,
         });
     }
-    for (i, r) in targets.iter().enumerate() {
-        if !assigned.contains(&i) {
+    for (i, t) in targets.iter().enumerate() {
+        if !assigned[i] {
             assignments.push(PsmAssignment {
-                psm_id: r.psm_id.clone(),
-                delta: r.delta,
+                psm_id: t.psm_id.clone(),
+                delta: deltas[i],
                 peak: None,
-                residue: site_label(&r.sequence, r.site).unwrap_or_default(),
+                residue: site_label(&t.sequence, t.site).unwrap_or_default(),
                 explanation: String::new(),
                 posterior: 0.0,
             });
@@ -498,6 +598,7 @@ pub fn build_report(
     }
     assignments.sort_by(|a, b| a.psm_id.cmp(&b.psm_id));
     OffsetReport {
+        ppm_shift: ppm,
         precision,
         peaks,
         assignments,
@@ -610,13 +711,10 @@ mod tests {
             psm_id: id.to_string(),
             decoy,
             delta,
+            calc_mass: 1500.0,
             site,
             sequence: seq.to_string(),
         }
-    }
-
-    fn db() -> &'static UnimodDb {
-        model::unimod::bundled()
     }
 
     fn report(rows: &[PinOffset]) -> OffsetReport {
@@ -635,7 +733,22 @@ mod tests {
             .filter(|r| r.decoy)
             .map(|r| (r.psm_id.clone(), 2.0))
             .collect();
-        build_report(rows, &accepted, &target_scores, &decoy_scores, db())
+        build_report(
+            rows,
+            &accepted,
+            &target_scores,
+            &decoy_scores,
+            model::unimod::bundled(),
+        )
+    }
+
+    fn zero_rows(n: usize, ppm: f64) -> Vec<PinOffset> {
+        (0..n)
+            .map(|i| {
+                let jitter = 0.0001 * (i % 5) as f64 - 0.0002;
+                row(&format!("z{i}"), false, ppm * 1e-6 * 1500.0 + jitter, 0, "PEPTIDEK")
+            })
+            .collect()
     }
 
     #[test]
@@ -646,12 +759,19 @@ mod tests {
     }
 
     #[test]
+    fn unimod_common_sites_leave_out_the_hidden_specificities() {
+        let ox = model::unimod::bundled()
+            .by_accession("UNIMOD:35")
+            .expect("Oxidation");
+        assert!(ox.common_sites.contains(&"M".to_string()), "{:?}", ox.common_sites);
+        assert!(ox.common_sites.len() < ox.sites.len(), "{:?}", ox.common_sites);
+    }
+
+    #[test]
     fn methionine_peak_at_plus_16_is_oxidation() {
-        let mut rows: Vec<PinOffset> = (0..30)
-            .map(|i| row(&format!("z{i}"), false, 0.0001 * f64::from(i % 5) - 0.0002, 0, "PEPTIDEK"))
-            .collect();
+        let mut rows = zero_rows(30, 0.0);
         rows.extend((0..12).map(|i| {
-            row(&format!("o{i}"), false, 15.9949 + 0.0003 * f64::from(i % 3) - 0.0003, 3, "PEMTIDEK")
+            row(&format!("o{i}"), false, 15.9949 + 0.0003 * (i % 3) as f64 - 0.0003, 3, "PEMTIDEK")
         }));
         let r = report(&rows);
         let ox = r
@@ -669,9 +789,46 @@ mod tests {
     }
 
     #[test]
+    fn a_ppm_calibration_offset_is_removed_before_the_peaks_are_found() {
+        let ppm = 4.0;
+        let mut rows = zero_rows(40, ppm);
+        rows.extend((0..12).map(|i| {
+            let true_delta = 79.96633;
+            let observed = true_delta + ppm * 1e-6 * (1500.0 + true_delta) + 0.0001 * (i % 3) as f64;
+            row(&format!("p{i}"), false, observed, 2, "ASPEK")
+        }));
+        let r = report(&rows);
+        assert!((r.ppm_shift - ppm).abs() < 0.2, "{}", r.ppm_shift);
+        let zero = r.peaks.iter().find(|p| p.mass.abs() < 0.01).expect("zero peak");
+        assert!(zero.mass.abs() < 0.0005, "{}", zero.mass);
+        let phospho = r.peaks.iter().find(|p| (p.mass - 79.966).abs() < 0.01).expect("phospho");
+        assert!((phospho.mass - 79.96633).abs() < 0.001, "{}", phospho.mass);
+        assert!(phospho.explanations[0].label.starts_with("Phospho (UNIMOD:21)"), "{:?}", phospho.explanations);
+    }
+
+    #[test]
+    fn deamidation_and_an_isotope_step_split_at_the_density_valley() {
+        let mut sorted: Vec<f64> = Vec::new();
+        for i in 0..60 {
+            sorted.push(0.9840 + 0.0004 * ((i % 7) as f64 - 3.0));
+            sorted.push(1.0034 + 0.0004 * ((i % 7) as f64 - 3.0));
+        }
+        for i in 0..8 {
+            sorted.push(0.9900 + 0.0014 * i as f64);
+        }
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let groups = offset_peaks(&sorted, 0.002);
+        let big: Vec<_> = groups.iter().filter(|g| g.len() >= 40).collect();
+        assert_eq!(big.len(), 2, "{groups:?}");
+        let centre = |g: &std::ops::Range<usize>| median(&mut sorted[g.clone()].to_vec());
+        assert!((centre(big[0]) - 0.9840).abs() < 0.002);
+        assert!((centre(big[1]) - 1.0034).abs() < 0.002);
+    }
+
+    #[test]
     fn a_peak_one_neutron_up_is_an_isotope_error() {
         let rows: Vec<PinOffset> = (0..10)
-            .map(|i| row(&format!("i{i}"), false, 1.0034 + 0.0002 * f64::from(i % 2), 0, "PEPTIDEK"))
+            .map(|i| row(&format!("i{i}"), false, 1.0034 + 0.0002 * (i % 2) as f64, 0, "PEPTIDEK"))
             .collect();
         let r = report(&rows);
         assert_eq!(r.peaks.len(), 1);
@@ -711,12 +868,14 @@ mod tests {
 
     #[test]
     fn pin_columns_are_read_by_name() {
-        let text = "SpecId\tLabel\tScanNr\tDeltaMass\tAbsDeltaMass\tOpenSite\tPeptide\tProteins\n\
-                    s1\t1\t5\t15.9949\t15.9949\t3\tK.PEMTIDEK.R\tP1\n\
-                    s2\t-1\t6\t0.0010\t0.0010\t0\tK.KEDITMEP.R\tdecoy_P1\n";
+        let text = "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tDeltaMass\tAbsDeltaMass\tOpenSite\tPeptide\tProteins\n\
+                    s1\t1\t5\t1015.99\t1000.0\t15.9949\t15.9949\t3\tK.PEMTIDEK.R\tP1\n\
+                    s2\t-1\t6\t1000.0\t1000.0\t0.0010\t0.0010\t0\tK.KEDITMEP.R\tdecoy_P1\n";
         let rows = parse_pin_offsets(std::io::Cursor::new(text)).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], row("s1", false, 15.9949, 3, "PEMTIDEK"));
+        assert_eq!(rows[0].sequence, "PEMTIDEK");
+        assert_eq!(rows[0].site, 3);
+        assert_eq!(rows[0].calc_mass, 1000.0);
         assert!(rows[1].decoy);
     }
 }

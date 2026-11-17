@@ -8,6 +8,7 @@ pub struct UnimodMod {
     pub name: String,
     pub mono_mass: f64,
     pub sites: Vec<String>,
+    pub common_sites: Vec<String>,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
@@ -37,12 +38,23 @@ impl UnimodDb {
         let mut cur_name: Option<String> = None;
         let mut cur_mass: Option<f64> = None;
         let mut cur_sites: Vec<String> = Vec::new();
+        let mut cur_specs: HashMap<String, (Option<String>, Option<bool>)> = HashMap::new();
 
         let commit = |db: &mut UnimodDb,
                       id: &mut Option<String>,
                       name: &mut Option<String>,
                       mass: &mut Option<f64>,
-                      sites: &mut Vec<String>| {
+                      sites: &mut Vec<String>,
+                      specs: &mut HashMap<String, (Option<String>, Option<bool>)>| {
+            let mut common_sites: Vec<String> = Vec::new();
+            for (site, hidden) in specs.drain().map(|(_, v)| v) {
+                if let (Some(site), Some(false)) = (site, hidden) {
+                    if !common_sites.contains(&site) {
+                        common_sites.push(site);
+                    }
+                }
+            }
+            common_sites.sort();
             if let (Some(id_v), Some(name_v), Some(mass_v)) = (id.take(), name.take(), mass.take())
             {
                 let entry = UnimodMod {
@@ -50,6 +62,7 @@ impl UnimodDb {
                     name: name_v.clone(),
                     mono_mass: mass_v,
                     sites: std::mem::take(sites),
+                    common_sites,
                 };
                 db.by_name
                     .entry(name_v.to_ascii_lowercase())
@@ -70,6 +83,7 @@ impl UnimodDb {
                     &mut cur_name,
                     &mut cur_mass,
                     &mut cur_sites,
+                    &mut cur_specs,
                 );
                 in_term = true;
                 continue;
@@ -81,6 +95,7 @@ impl UnimodDb {
                     &mut cur_name,
                     &mut cur_mass,
                     &mut cur_sites,
+                    &mut cur_specs,
                 );
                 in_term = false;
                 continue;
@@ -103,9 +118,14 @@ impl UnimodDb {
                         cur_mass = Some(v);
                     }
                 } else if let Some(site) = parse_spec_site(rest) {
+                    if let Some(idx) = spec_index(rest) {
+                        cur_specs.entry(idx).or_default().0 = Some(site.clone());
+                    }
                     if !cur_sites.contains(&site) {
                         cur_sites.push(site);
                     }
+                } else if let Some((idx, hidden)) = parse_spec_hidden(rest) {
+                    cur_specs.entry(idx).or_default().1 = Some(hidden);
                 }
             }
         }
@@ -115,6 +135,7 @@ impl UnimodDb {
             &mut cur_name,
             &mut cur_mass,
             &mut cur_sites,
+            &mut cur_specs,
         );
 
         db
@@ -196,6 +217,21 @@ fn parse_quoted_f64(s: &str) -> Option<f64> {
     let start = s.find('"')? + 1;
     let end = s[start..].find('"')? + start;
     s[start..end].trim().parse().ok()
+}
+
+fn spec_index(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("spec_")?;
+    let underscore = rest.find('_')?;
+    Some(rest[..underscore].to_string())
+}
+
+fn parse_spec_hidden(s: &str) -> Option<(String, bool)> {
+    let idx = spec_index(s)?;
+    let rest = s.strip_prefix("spec_")?;
+    let val = rest[idx.len()..].strip_prefix("_hidden")?;
+    let start = val.find('"')? + 1;
+    let end = val[start..].find('"')? + start;
+    Some((idx, val[start..end].trim() == "1"))
 }
 
 fn parse_spec_site(s: &str) -> Option<String> {

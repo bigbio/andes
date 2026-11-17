@@ -322,16 +322,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             }
             Some(mfn_from(x, &t.ex, cpos, cfrac * cpos, &opts, start, pre))
         };
-        let phases: Vec<Vec<usize>> = if warm.iter().all(Option::is_none) {
-            let seed = per_fold / 2;
-            vec![
-                (0..FOLDS).map(|f| f * per_fold + seed).collect(),
-                (0..pairs.len()).filter(|k| k % per_fold != seed).collect(),
-            ]
-        } else {
-            vec![(0..pairs.len()).collect()]
-        };
-        for (phase, ks) in phases.iter().enumerate() {
+        let ks: Vec<usize> = (0..pairs.len()).collect();
+        {
             let mut done = 0usize;
             while done < ks.len() {
                 let mut held = Vec::new();
@@ -343,16 +335,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 }
                 let end = (done + held.len()).max(done + 1);
                 let batch = &ks[done..end];
-                let starts: Vec<Option<&[f64]>> = batch
-                    .iter()
-                    .map(|&k| {
-                        if phase == 1 {
-                            fits[(k / per_fold) * per_fold + per_fold / 2].as_deref()
-                        } else {
-                            warm[k].as_deref()
-                        }
-                    })
-                    .collect();
+                let starts: Vec<Option<&[f64]>> =
+                    batch.iter().map(|&k| warm[k].as_deref()).collect();
                 let mut pre: Vec<Option<Vec<f64>>> = batch.iter().map(|_| None).collect();
                 let mut norms: Vec<Vec<f32>> = vec![Vec::new(); FOLDS];
                 for (f, nf) in norms.iter_mut().enumerate() {

@@ -988,23 +988,153 @@ pub fn read_psms_table(path: &Path) -> Result<ReadTable, String> {
     read_table(path, &PSMS_TABLE)
 }
 
-pub fn summary_lines(report: &OffsetReport, n: usize) -> Vec<String> {
-    report
+const SUMMARY_PEAKS: usize = 10;
+const SUMMARY_MODS: usize = 10;
+const SUBSTANTIAL_PEAK_PSMS: usize = 20;
+const ISOTOPE_PICK: &str = "isotope pick, no modification";
+
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn share(n: usize, of: usize) -> String {
+    if of == 0 {
+        "-".to_string()
+    } else {
+        format!("{:.1} %", 100.0 * n as f64 / of as f64)
+    }
+}
+
+pub fn modification_of(label: &str) -> String {
+    if label.starts_with("isotope error") {
+        return ISOTOPE_PICK.to_string();
+    }
+    for suffix in [" +1 isotope", " -1 isotope"] {
+        if let Some(base) = label.strip_suffix(suffix) {
+            return base.to_string();
+        }
+    }
+    label.to_string()
+}
+
+pub fn summary_block(report: &OffsetReport) -> String {
+    let total = report.assignments.len();
+    let mut unmodified = 0usize;
+    let mut isotope = 0usize;
+    let mut unexplained = 0usize;
+    let mut outside = 0usize;
+    let mut by_mod: HashMap<String, usize> = HashMap::new();
+    for a in &report.assignments {
+        match a.peak {
+            None => outside += 1,
+            Some(_) if a.explanation == "unmodified" => unmodified += 1,
+            Some(_) if a.explanation == UNEXPLAINED => unexplained += 1,
+            Some(_) => {
+                let m = modification_of(&a.explanation);
+                if m == ISOTOPE_PICK {
+                    isotope += 1;
+                } else {
+                    *by_mod.entry(m).or_default() += 1;
+                }
+            }
+        }
+    }
+    let explained: usize = by_mod.values().sum();
+    let mut mods: Vec<(String, usize)> = by_mod.into_iter().collect();
+    mods.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let substantial = report
         .peaks
         .iter()
-        .take(n)
-        .map(|p| {
-            let top = p.explanations.first();
-            format!(
-                "  {:+10.4} Da  {:>6} PSMs  {:>5} decoys  {}  {}",
+        .filter(|p| p.psms >= SUBSTANTIAL_PEAK_PSMS)
+        .count();
+    let line = |label: &str, value: String| format!("    {label:<29}: {value}\n");
+    let mut s = String::from("  Open search (mass offsets of the identified PSMs):\n");
+    s.push_str(&line(
+        "Precursor calibration",
+        format!(
+            "{:+.2} ppm (measured on zero-offset PSMs, removed from precursor offsets)",
+            report.ppm_shift
+        ),
+    ));
+    s.push_str(&line(
+        "Offset precision",
+        format!(
+            "{:.4} Da precursor, {:.4} Da fragment-refined",
+            report.precision, report.refined_precision
+        ),
+    ));
+    s.push_str(&line("PSMs", thousands(total)));
+    for (label, n) in [
+        ("  unmodified (zero offset)", unmodified),
+        ("  explained offset", explained),
+        ("  isotope pick, no mod.", isotope),
+        ("  unexplained offset", unexplained),
+        ("  outside every peak", outside),
+    ] {
+        s.push_str(&line(label, format!("{}  ({})", thousands(n), share(n, total))));
+    }
+    s.push_str(&line(
+        "Offset peaks",
+        format!(
+            "{}  ({} with at least {SUBSTANTIAL_PEAK_PSMS} PSMs)",
+            thousands(report.peaks.len()),
+            thousands(substantial)
+        ),
+    ));
+    if !mods.is_empty() {
+        s.push_str("    By modification (PSMs; isotope picks counted with their modification):\n");
+        let w = mods
+            .iter()
+            .take(SUMMARY_MODS)
+            .map(|(m, _)| m.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (m, n) in mods.iter().take(SUMMARY_MODS) {
+            s.push_str(&format!(
+                "      {m:<w$}  {:>8}  ({})\n",
+                thousands(*n),
+                share(*n, total)
+            ));
+        }
+        if mods.len() > SUMMARY_MODS {
+            let rest: usize = mods.iter().skip(SUMMARY_MODS).map(|(_, n)| n).sum();
+            s.push_str(&format!(
+                "      {:<w$}  {:>8}  ({})\n",
+                format!("{} others", mods.len() - SUMMARY_MODS),
+                thousands(rest),
+                share(rest, total)
+            ));
+        }
+    }
+    if !report.peaks.is_empty() {
+        s.push_str(&format!(
+            "    Largest peaks:\n      {:>11}  {:>7}  {:>6}  {:<22}  top explanation (posterior)\n",
+            "offset (Da)", "PSMs", "decoys", "residues"
+        ));
+        for p in report.peaks.iter().take(SUMMARY_PEAKS) {
+            let top = p
+                .explanations
+                .first()
+                .map_or_else(String::new, |t| format!("{} ({:.2})", t.label, t.posterior));
+            s.push_str(&format!(
+                "      {:>+11.4}  {:>7}  {:>6}  {:<22}  {}\n",
                 p.mass,
-                p.psms,
-                p.decoys,
+                thousands(p.psms),
+                thousands(p.decoys),
                 residues_field(&p.residues),
-                top.map_or_else(String::new, |t| format!("{} ({:.2})", t.label, t.posterior))
-            )
-        })
-        .collect()
+                top
+            ));
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -1263,6 +1393,24 @@ mod tests {
         let n: usize = t.batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(n, r.assignments.len());
         assert!(read_peaks_table(&psms).is_err());
+    }
+
+    #[test]
+    fn summary_block_counts_each_psm_once_and_folds_isotope_picks() {
+        let mut rows = zero_rows(30, 0.0);
+        rows.extend((0..12).map(|i| {
+            row(&format!("o{i}"), false, 15.9949 + 0.0003 * (i % 3) as f64 - 0.0003, 3, "PEMTIDEK")
+        }));
+        rows.push(row("lone", false, 55.5, 0, "PEPTIDE"));
+        let r = report(&rows);
+        let s = summary_block(&r);
+        assert!(s.contains("PSMs                         : 43"), "{s}");
+        assert!(s.contains("unmodified (zero offset)   : 30"), "{s}");
+        assert!(s.contains("outside every peak         : 1"), "{s}");
+        assert!(s.contains("Oxidation (UNIMOD:35)"), "{s}");
+        assert!(s.contains("Largest peaks:"), "{s}");
+        assert_eq!(modification_of("Phospho (UNIMOD:21) +1 isotope"), "Phospho (UNIMOD:21)");
+        assert_eq!(modification_of("isotope error -1"), ISOTOPE_PICK);
     }
 
     #[test]

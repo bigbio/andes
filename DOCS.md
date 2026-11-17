@@ -766,6 +766,20 @@ two versioned Parquet tables, and prints the ten largest peaks:
 Both carry the run's calibration in their metadata: `andes.open_offsets.ppm_shift`,
 `andes.open_offsets.precision_da` and `andes.open_offsets.refined_precision_da`.
 
+**Summary for an open search.** The end-of-run identification summary and `<stem>.statistics.log`
+replace two parts that make no sense for an open search: the variable-modification breakdown
+(every PSM would read as unmodified) and the raw precursor mass error (every offset would count as
+an error). In their place is an open-search section:
+
+- the calibration and both precisions;
+- how the identified PSMs split: unmodified at zero offset, explained offset, isotope pick with no
+  modification, unexplained offset, and outside every peak;
+- the number of peaks, and how many have at least 20 PSMs;
+- the PSMs per modification, with isotope picks counted with their modification;
+- the ten largest peaks, with their decoys, residues and top explanation.
+
+The run summary gives the precursor tolerance as the offset window.
+
 - **Calibration.** Precursor calibration is off in open search, so the offsets carry the
   instrument's mass error, which scales with peptide mass. The report measures it as the median
   ppm error of the accepted PSMs within 0.02 Da of zero offset whose offset was measured on the

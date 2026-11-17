@@ -2786,6 +2786,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
     let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
+    let mut open_search_summary: Option<String> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
@@ -2832,7 +2833,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }
         if cli.open_search {
-            write_open_offsets(
+            open_search_summary = write_open_offsets(
                 &output_pin_path,
                 dir,
                 &stem,
@@ -2851,7 +2852,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &scorer.pin_match_tolerance(),
         &scorer.node_score_window(),
     );
-    let id_summary = identified.as_ref().map(|(accepted, cut_note)| {
+    let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
         let facts = output::psm_facts(
@@ -2905,6 +2906,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     });
+    if let Some(summary) = id_summary.as_mut() {
+        summary.open_search = open_search_summary.take();
+    }
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));
     let stats_path = {
         let stem = report_base
@@ -3352,7 +3356,7 @@ fn write_open_offsets(
     stem: &str,
     accepted: &[&output::PercolatorPsm],
     decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
-) {
+) -> Option<String> {
     let report = match output::open_offsets::report_from_results(
         pin,
         accepted,
@@ -3362,7 +3366,7 @@ fn write_open_offsets(
         Ok(r) => r,
         Err(e) => {
             eprintln!("WARN: open-search offset report not written: {e}");
-            return;
+            return None;
         }
     };
     let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
@@ -3382,21 +3386,16 @@ fn write_open_offsets(
             peaks_path.display(),
             psms_path.display()
         );
-        return;
+        return None;
     }
     eprintln!(
-        "Open search: {} mass-offset peaks among the accepted PSMs (precursor calibration \
-         {:+.2} ppm; precision {:.4} Da, fragment-refined {:.4} Da); {} and {}",
-        report.peaks.len(),
-        report.ppm_shift,
-        report.precision,
-        report.refined_precision,
+        "Wrote open-search report: {} ({} offset peaks) and {} ({} PSMs)",
         peaks_path.display(),
-        psms_path.display()
+        report.peaks.len(),
+        psms_path.display(),
+        report.assignments.len()
     );
-    for line in output::open_offsets::summary_lines(&report, 10) {
-        eprintln!("{line}");
-    }
+    Some(output::open_offsets::summary_block(&report))
 }
 
 pub(crate) fn write_filtered_tsv(

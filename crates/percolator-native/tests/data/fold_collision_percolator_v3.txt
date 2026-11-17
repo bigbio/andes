@@ -1,0 +1,5 @@
+Percolator 3.7.1 -v 3 --seed 42 -Y --only-psms on fold_collision.pin (100 pairs of spectra with equal OrderScanHash); per split: initial feature, initial positives, training negatives
+threads 1	1 10 1002	1 16 993	1 11 1005
+threads 2	1 12 1003	1 18 997	1 10 1000
+threads 4	1 12 1003	1 20 997	1 8 1000
+threads 16	1 12 997	1 18 1004	1 10 999

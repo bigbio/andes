@@ -134,3 +134,52 @@ fn folds_reproduce_percolator_training_sets() {
         assert_eq!(got, reference_counts(seed), "seed {seed}");
     }
 }
+
+fn collision_reference() -> Vec<(String, Vec<(usize, usize, usize)>)> {
+    std::fs::read_to_string(data("fold_collision_percolator_v3.txt"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let mut cells = l.split('\t');
+            let threads = cells.next().unwrap().to_string();
+            let splits = cells
+                .map(|c| {
+                    let v: Vec<usize> = c.split(' ').map(|x| x.parse().unwrap()).collect();
+                    (v[0], v[1], v[2])
+                })
+                .collect();
+            (threads, splits)
+        })
+        .collect()
+}
+
+#[test]
+fn colliding_scan_hashes_split_as_percolator_at_one_thread() {
+    let d = tempfile::tempdir().unwrap();
+    let pin = read_pin(
+        &data("fold_collision.pin"),
+        MemLimit {
+            bytes: u64::MAX,
+            spill_dir: d.path().to_path_buf(),
+        },
+    )
+    .unwrap();
+    let norm = stdv(&pin);
+    let fold = folds_by_spectrum(&pin.meta, 3, 42);
+    let got: Vec<(usize, usize, usize)> = (0..3u8)
+        .map(|f| {
+            let train: Vec<usize> = (0..pin.meta.len()).filter(|&i| fold[i] != f).collect();
+            let decoy: Vec<bool> = train.iter().map(|&i| pin.meta[i].label < 0).collect();
+            let w = init_direction(&pin, &norm, &train, 0.01, false).unwrap();
+            let feature = w.iter().position(|&v| v != 0.0).unwrap() + 1;
+            let s = score(&pin.rows, &train, &w, Some(&norm));
+            let p = count_at(&tdc_q(&s, &decoy, true), &decoy, 0.01);
+            (feature, p, decoy.iter().filter(|&&x| x).count())
+        })
+        .collect();
+    let reference = collision_reference();
+    assert_eq!(reference[0].0, "threads 1");
+    assert_eq!(got, reference[0].1);
+    assert!(reference[1..].iter().any(|(_, r)| *r != got));
+}

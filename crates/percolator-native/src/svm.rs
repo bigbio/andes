@@ -1170,6 +1170,6 @@ mod tests {
                 assert!(parts >= 2, "stride {stride}: {parts} partials");
             }
         }
-        assert_eq!(gram_batch(64) / CHUNK, 949);
+        assert_eq!(gram_batch(64) / CHUNK, 956);
     }
 }

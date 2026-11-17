@@ -1,0 +1,345 @@
+{
+ "_provenance": "ProteoBench 'Quant LFQ DDA ion' modules. Leaderboard last updated 2026-07-16, read 2026-10-21, scored by proteobench 0.17.0; andes 09e1c00d (2026-11-05), scored by proteobench 0.18.6. Precursors quantified in >= 3 of 6 runs; eps = log2 A/B error. Rows with 'plot' are drawn in website figure quant_accuracy.svg. Rendered by docs/benchmarks/render.py.",
+ "modules": {
+  "QExactive": {
+   "dataset": "PXD028735",
+   "rows": [
+    {
+     "id": "andes",
+     "submission": "andes, default",
+     "mbr": "yes",
+     "precursors": 63796,
+     "eps": 0.161,
+     "ecoli_eps": 0.263,
+     "cv": 0.117,
+     "transfer_control": "transfer q ≤ 0.01",
+     "plot": "andes",
+     "andes": true
+    },
+    {
+     "submission": "andes, transfer q ≤ 0.05",
+     "mbr": "yes",
+     "precursors": 71299,
+     "eps": 0.175,
+     "ecoli_eps": 0.441,
+     "cv": 0.132,
+     "transfer_control": "transfer q ≤ 0.05",
+     "andes": true
+    },
+    {
+     "submission": "andes, raw quantity",
+     "mbr": "yes",
+     "precursors": 63796,
+     "eps": 0.222,
+     "ecoli_eps": 0.309,
+     "cv": 0.245,
+     "transfer_control": "as default",
+     "andes": true
+    },
+    {
+     "submission": "andes, identified rows only",
+     "mbr": "no",
+     "precursors": 52166,
+     "eps": 0.154,
+     "ecoli_eps": 0.203,
+     "cv": 0.105,
+     "transfer_control": "none",
+     "andes": true
+    },
+    {
+     "id": "fragpipe_most",
+     "submission": "FragPipe 23.0, most precursors",
+     "mbr": "yes",
+     "precursors": 63701,
+     "eps": 0.2,
+     "ecoli_eps": 0.306,
+     "cv": 0.156,
+     "transfer_control": "IonQuant MBR ion FDR 0.01",
+     "plot": "FragPipe 23.0 (most)"
+    },
+    {
+     "submission": "FragPipe 23.0, lowest \\|ε\\|",
+     "mbr": "yes",
+     "precursors": 54374,
+     "eps": 0.19,
+     "ecoli_eps": 0.257,
+     "cv": 0.154,
+     "transfer_control": "as above",
+     "plot": "FragPipe 23.0 (lowest ε)"
+    },
+    {
+     "id": "maxquant_most",
+     "submission": "MaxQuant 1.5.3.30, most precursors",
+     "mbr": "yes",
+     "precursors": 44299,
+     "eps": 0.21,
+     "ecoli_eps": 0.386,
+     "cv": 0.219,
+     "transfer_control": "not checked",
+     "plot": "MaxQuant 1.5.3"
+    },
+    {
+     "submission": "MaxQuant 2.4.13.0, lowest \\|ε\\|",
+     "mbr": "no",
+     "precursors": 29737,
+     "eps": 0.192,
+     "ecoli_eps": 0.263,
+     "cv": 0.199,
+     "transfer_control": "none",
+     "plot": "MaxQuant 2.4.13"
+    },
+    {
+     "submission": "i2MassChroQ 1.0.16, most precursors",
+     "mbr": "yes",
+     "precursors": 74697,
+     "eps": 0.222,
+     "ecoli_eps": 0.46,
+     "cv": 0.132,
+     "transfer_control": "no transfer setting",
+     "plot": "i2MassChroQ 1.0.16"
+    },
+    {
+     "submission": "i2MassChroQ 1.2.0, lowest \\|ε\\|",
+     "mbr": "no",
+     "precursors": 49433,
+     "eps": 0.198,
+     "ecoli_eps": 0.263,
+     "cv": 0.12,
+     "transfer_control": "none",
+     "plot": "i2MassChroQ 1.2.0"
+    },
+    {
+     "submission": "AlphaPept 0.5.0, most precursors",
+     "mbr": "yes",
+     "precursors": 37760,
+     "eps": 0.219,
+     "ecoli_eps": 0.281,
+     "cv": 0.165,
+     "transfer_control": "not checked",
+     "plot": "AlphaPept 0.5.0"
+    },
+    {
+     "submission": "AlphaPept 0.5.3, lowest \\|ε\\|",
+     "mbr": "no",
+     "precursors": 36176,
+     "eps": 0.214,
+     "ecoli_eps": 0.255,
+     "cv": 0.165,
+     "transfer_control": "none",
+     "plot": "AlphaPept 0.5.3"
+    },
+    {
+     "submission": "Sage 0.15.0-beta.2",
+     "mbr": "yes",
+     "precursors": 81933,
+     "eps": 0.388,
+     "ecoli_eps": 0.877,
+     "cv": 0.393,
+     "transfer_control": "peptide q on IDs only; peak q not applied",
+     "plot": "Sage 0.15.0-beta.2"
+    },
+    {
+     "submission": "MSAngel 2.2.10",
+     "mbr": "yes",
+     "precursors": 60206,
+     "eps": 0.216,
+     "ecoli_eps": 0.514,
+     "cv": 0.227,
+     "transfer_control": "not checked"
+    },
+    {
+     "submission": "ProlineStudio 2.3.0-SNAPSHOT",
+     "mbr": "yes",
+     "precursors": 55639,
+     "eps": 0.21,
+     "ecoli_eps": 0.508,
+     "cv": 0.226,
+     "transfer_control": "not checked"
+    },
+    {
+     "submission": "WOMBAT 0.9.11, most precursors",
+     "mbr": "yes",
+     "precursors": 55943,
+     "eps": 0.211,
+     "ecoli_eps": 0.692,
+     "cv": 0.235,
+     "transfer_control": "not checked"
+    },
+    {
+     "submission": "WOMBAT 0.9.11, lowest \\|ε\\|",
+     "mbr": "yes",
+     "precursors": 41016,
+     "eps": 0.195,
+     "ecoli_eps": 0.394,
+     "cv": 0.213,
+     "transfer_control": "not checked"
+    },
+    {
+     "submission": "PEAKS 13",
+     "mbr": "no",
+     "precursors": 72741,
+     "eps": 0.289,
+     "ecoli_eps": 0.741,
+     "cv": 0.216,
+     "transfer_control": "none"
+    },
+    {
+     "submission": "quantms v1.3.1dev (OpenMS ProteomicsLFQ)",
+     "mbr": "no",
+     "precursors": 33040,
+     "eps": 0.209,
+     "ecoli_eps": 0.387,
+     "cv": 0.224,
+     "transfer_control": "none"
+    },
+    {
+     "submission": "quantms, our run 2026-10-17, default",
+     "mbr": "no",
+     "precursors": 34677,
+     "eps": 0.21,
+     "ecoli_eps": 0.401,
+     "cv": 0.225,
+     "transfer_control": "none"
+    },
+    {
+     "submission": "quantms, our run, feature-linking MBR",
+     "mbr": "yes",
+     "precursors": 39257,
+     "eps": 0.221,
+     "ecoli_eps": 0.563,
+     "cv": 0.234,
+     "transfer_control": "feature quality score"
+    }
+   ]
+  },
+  "Astral": {
+   "dataset": "PXD070049",
+   "rows": [
+    {
+     "id": "andes",
+     "submission": "andes, default",
+     "mbr": "yes",
+     "precursors": 36675,
+     "eps": 0.186,
+     "ecoli_eps": 0.252,
+     "cv": 0.112,
+     "transfer_control": "transfer q ≤ 0.01",
+     "plot": "andes",
+     "andes": true
+    },
+    {
+     "submission": "andes, transfer q ≤ 0.05",
+     "mbr": "yes",
+     "precursors": 43286,
+     "eps": 0.205,
+     "ecoli_eps": 0.349,
+     "cv": 0.127,
+     "transfer_control": "transfer q ≤ 0.05",
+     "andes": true
+    },
+    {
+     "submission": "andes, raw quantity",
+     "mbr": "yes",
+     "precursors": 36675,
+     "eps": 0.204,
+     "ecoli_eps": 0.254,
+     "cv": 0.113,
+     "transfer_control": "as default",
+     "andes": true
+    },
+    {
+     "submission": "andes, identified rows only",
+     "mbr": "no",
+     "precursors": 31739,
+     "eps": 0.186,
+     "ecoli_eps": 0.235,
+     "cv": 0.1,
+     "transfer_control": "none",
+     "andes": true
+    },
+    {
+     "id": "fragpipe_most",
+     "submission": "FragPipe 23.0, most precursors",
+     "mbr": "yes",
+     "precursors": 39057,
+     "eps": 0.212,
+     "ecoli_eps": 0.25,
+     "cv": 0.127,
+     "transfer_control": "not checked",
+     "plot": "FragPipe 23.0"
+    },
+    {
+     "submission": "FragPipe 22.1-build02, lowest \\|ε\\|",
+     "mbr": "yes",
+     "precursors": 29105,
+     "eps": 0.181,
+     "ecoli_eps": 0.405,
+     "cv": 0.078,
+     "transfer_control": "not checked",
+     "plot": "FragPipe 22.1"
+    },
+    {
+     "id": "maxquant_most",
+     "submission": "MaxQuant 2.6.7.0",
+     "mbr": "yes",
+     "precursors": 20283,
+     "eps": 0.16,
+     "ecoli_eps": 0.158,
+     "cv": 0.092,
+     "transfer_control": "within a condition only; not checked",
+     "plot": "MaxQuant 2.6.7"
+    },
+    {
+     "submission": "i2MassChroQ 1.2.6, most precursors",
+     "mbr": "yes",
+     "precursors": 36469,
+     "eps": 0.197,
+     "ecoli_eps": 0.417,
+     "cv": 0.095,
+     "transfer_control": "not checked",
+     "plot": "i2MassChroQ 1.2.6"
+    },
+    {
+     "submission": "i2MassChroQ 1.2.9, lowest \\|ε\\|",
+     "mbr": "no",
+     "precursors": 24803,
+     "eps": 0.178,
+     "ecoli_eps": 0.245,
+     "cv": 0.077,
+     "transfer_control": "none",
+     "plot": "i2MassChroQ 1.2.9"
+    },
+    {
+     "submission": "Sage 0.14.6",
+     "mbr": "yes",
+     "precursors": 30319,
+     "eps": 0.167,
+     "ecoli_eps": 0.338,
+     "cv": 0.07,
+     "transfer_control": "peptide q on IDs only; peak q not applied",
+     "plot": "Sage 0.14.6"
+    },
+    {
+     "submission": "DIA-NN 2.6.0, most precursors",
+     "mbr": "yes",
+     "precursors": 93237,
+     "eps": 0.277,
+     "ecoli_eps": 0.691,
+     "cv": 0.159,
+     "transfer_control": "run and global precursor q ≤ 0.01",
+     "plot": "DIA-NN 2.6.0 (most)"
+    },
+    {
+     "submission": "DIA-NN 2.6.0, lowest \\|ε\\|",
+     "mbr": "yes",
+     "precursors": 16363,
+     "eps": 0.123,
+     "ecoli_eps": 0.168,
+     "cv": 0.079,
+     "transfer_control": "as above plus MS1-level q ≤ 0.01",
+     "plot": "DIA-NN 2.6.0 (lowest ε)"
+    }
+   ]
+  }
+ }
+}

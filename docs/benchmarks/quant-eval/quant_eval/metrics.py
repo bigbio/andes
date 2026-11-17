@@ -123,7 +123,7 @@ def ups_rows(raw, design, sp, ref_skip=3):
     miss = U[~U.key.isin(a.index)]
     unscored = {str(L): int((miss.lev == float(L)).sum()) for L in design.levels}
     U = U[U.key.isin(a.index)].copy()
-    U["err"] = U.n - (U.key.map(a) + np.log2(U.lev))
+    U["err"] = U.n - (U.key.map(a).astype(float) + np.log2(U.lev))
     return U, unscored
 
 

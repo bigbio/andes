@@ -59,7 +59,7 @@ python3 eval_entrap.py pooled.pin out.psms             # false-discovery proport
 
 `--glyco` also needs `--glyco-species` or `--glyco-glycan-gdb`. The benchmark tiers use the
 peptide-level shuffled database of [`../build_shuffled_entrap.py`](../build_shuffled_entrap.py);
-see [`../README.md`](../README.md#3-how-to-reproduce).
+see [`../reproduce.md`](../reproduce.md#glyco-commands-scripts-in-glyco).
 
 ## Reading `eval_honest.py`
 

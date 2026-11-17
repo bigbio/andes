@@ -220,7 +220,7 @@ def recover_p(tr, col="quant_q"):
     n = (tr.groupby("run").cumcount().values + 1) + (step.cumcount(ascending=False).values)   # rows up to the end of the step
     m = n - step[col].transform("size").values                                             # rows before the step
     first = step.cumcount().values == 0
-    q_prev = pd.Series(np.where(first, np.r_[0.0, q[:-1]], np.nan)).ffill().values             # mean at the end of the previous step
+    q_prev = pd.Series(np.where(first, np.r_[0.0, q[:-1]], np.nan)).ffill().to_numpy(copy=True)            # mean at the end of the previous step
     q_prev[m == 0] = 0.0
     return pd.Series(np.clip((n * q - m * q_prev) / (n - m), 0.0, 1.0), index=tr.index).reindex(order)
 

@@ -1,7 +1,7 @@
 # Reproducing the benchmarks
 
-Three scripts with no hardcoded paths. You need `andes` on `PATH` (or `$ANDES`), Docker for
-Percolator, `curl` and `python3`.
+Five scripts with no hardcoded paths. You need `andes` on `PATH` (or `$ANDES`), Docker for
+Percolator, `curl` and `python3` (plus `pyarrow` for `run_proteobench.sh`).
 
 ```bash
 DATA=~/andes-bench                     # anywhere with ~200 GB free for the raw files
@@ -26,6 +26,14 @@ than `run.sh`: the deep tier pools the five fractions before Percolator, the qui
 - **`run.sh`** searches, rescores through the pinned Percolator container, and prints wall
   time, PSMs at `q ≤ 0.01`, entrapment hits and I/L-rescued PSMs, with a provenance line
   (binary, platform, threads, date).
+- **`run_proteobench.sh`** runs the ProteoBench label-free quantification pipeline (per-run
+  search and Percolator, library, extract, finalize at `--quant-fdr` 0.01 and 0.05) and writes
+  the ProteoBench "Custom" table; it needs python3 with `pyarrow` and prints the same
+  provenance line as `run.sh`.
+- **`versions.sh`** records the environment of a measurement batch: andes version and
+  checkout commit, the pinned Percolator image (digest when available locally), a sha256 per
+  FASTA file argument and the Python package versions. Paste its output alongside any number
+  you report.
 
 ## Read `.raw` natively — do not convert
 

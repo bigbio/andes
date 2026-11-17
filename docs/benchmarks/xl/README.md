@@ -150,10 +150,12 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   over score, precursor error and pair kind: 16,164–16,446 and +0.9 % (fitted to each run's
   decoys); not adopted.
 - **Several crosslinkers in one search** (adopted as an option, `--xl "DSSO; DSBU"`). With one
-  linker the 11 runs give byte-identical results. DSSO runs searched as `DSSO; DSBU` put 12 of
-  812 accepted CSMs on DSBU on Beveridge DSSO and none on the other six, and find 3 % fewer true
-  CSMs (11,041 → 10,715) as the decoy space doubles; DSBU runs searched as `DSBU; DSSO` put 2 of
-  2,086 on DSSO and find 9 % fewer.
+  linker the 11 runs give byte-identical results. A spectrum keeps the CSM with the best pair
+  score over the linkers, and its runner-up covers every linker's pairs. DSSO runs searched as
+  `DSSO; DSBU` put 12 of 804 accepted CSMs on DSBU on Beveridge DSSO and none on the other six,
+  and find 1.6 % fewer true CSMs (11,170 → 10,988) as the decoy space doubles; DSBU runs
+  searched as `DSBU; DSSO` put 2 of 2,389 on DSSO and find 2.5 % fewer (2,971 → 2,898). With
+  each linker's own runner-up only, the losses were 4 % and 11 %.
 - **MS1 monoisotope correction** (the glyco mode's envelope fit, run in crosslink mode):
   16,809 / 16,008 against 16,797 / 15,912, about 1 % of precursors moved; with a 0..1 isotope
   window instead of 0..2, 14,996 with the correction and 14,921 without, so 0..2 stays and

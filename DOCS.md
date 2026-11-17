@@ -1213,7 +1213,8 @@ its own candidates, each spectrum keeps the CSM with the best pair score across 
 precursor has none), and the q-values are computed
 over all of them; the CSM table then adds a `crosslinker` column. Every listed linker enlarges the
 target and decoy space: on the benchmark, DSSO data searched as `DSSO; DSBU` assigned 0–1.5 % of
-its accepted CSMs to DSBU and found 3 % fewer true CSMs, so list only the reagents in the samples.
+its accepted CSMs to DSBU and found 1.6 % fewer true CSMs (DSBU data as `DSBU; DSSO`: 2.5 %
+fewer), so list only the reagents in the samples.
 
 | Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
 |---|---|---|---|---|

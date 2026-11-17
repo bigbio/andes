@@ -240,6 +240,12 @@ const CHUNK_BYTES: usize = 4 << 20;
 
 const PER_ROW_BYTES: u64 = 160;
 
+const IN_FLIGHT_BYTES_PER_CHUNK: u64 = 4 * CHUNK_BYTES as u64;
+
+fn chunks_in_flight(available: u64, threads: usize) -> usize {
+    ((available / 4 / IN_FLIGHT_BYTES_PER_CHUNK) as usize).clamp(1, threads.max(1) * 2)
+}
+
 fn read_chunk(r: &mut impl BufRead, path: &Path) -> Result<Vec<u8>, String> {
     let mut buf = Vec::with_capacity(CHUNK_BYTES + 4096);
     let err = |e: std::io::Error| format!("read {}: {e}", path.display());
@@ -313,7 +319,9 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let mut file_names: Vec<String> = Vec::new();
     let mut default_direction = None;
     let mut per_row = Reservation::none();
-    let batch = rayon::current_num_threads().max(1) * 2;
+    let batch = chunks_in_flight(budget.available(), rayon::current_num_threads());
+    let mut in_flight = Reservation::none();
+    in_flight.grow_up_to(&budget, batch as u64 * IN_FLIGHT_BYTES_PER_CHUNK);
     let mut lineno = 2usize;
     let mut first = true;
     let mut chunks = read_batch(&mut reader, path, batch, &mut lineno, &mut first)?;
@@ -362,6 +370,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         merged?;
         chunks = next?;
     }
+    drop(in_flight);
     Ok(Pin {
         feature_names,
         file_names,
@@ -372,4 +381,25 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         budget,
         _per_row: per_row,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_in_flight_follow_the_budget() {
+        let chunk = IN_FLIGHT_BYTES_PER_CHUNK;
+        assert_eq!(chunks_in_flight(0, 128), 1);
+        assert_eq!(chunks_in_flight(1 << 30, 128), 16);
+        assert_eq!(chunks_in_flight(16 << 30, 16), 32);
+        assert_eq!(chunks_in_flight(u64::MAX, 4), 8);
+        for threads in [1, 16, 128] {
+            for gb in [1u64, 2, 8, 16, 64] {
+                let n = chunks_in_flight(gb << 30, threads) as u64;
+                assert!(n == 1 || n * chunk <= (gb << 30) / 4);
+                assert!(n <= threads as u64 * 2);
+            }
+        }
+    }
 }

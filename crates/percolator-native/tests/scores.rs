@@ -153,6 +153,10 @@ fn folds_keep_spectrum_together() {
     assert!(hi - lo <= 3, "{sizes:?}");
 }
 
+fn id(i: usize) -> Result<String, String> {
+    Ok(format!("r{i}"))
+}
+
 #[test]
 fn tdc_winner_per_file_scan_mass() {
     let m = vec![
@@ -164,11 +168,11 @@ fn tdc_winner_per_file_scan_mass() {
         meta(0, 2, 100.0),
     ];
     let s = [1.0, 3.0, 0.5, 0.1, 2.0, 2.0];
-    assert_eq!(tdc_winners(&m, &s), vec![1, 2, 3, 4]);
+    assert_eq!(tdc_winners(&m, &s, id).unwrap(), vec![1, 2, 3, 4]);
 }
 
 #[test]
-fn tdc_winner_tie_prefers_target() {
+fn tdc_winner_tie_prefers_decoy_then_smaller_id() {
     let mut m = vec![
         meta(0, 1, 100.0),
         meta(0, 1, 100.0),
@@ -178,5 +182,9 @@ fn tdc_winner_tie_prefers_target() {
     m[0].label = -1;
     m[3].label = -1;
     let s = [2.0, 2.0, 1.0, 1.0];
-    assert_eq!(tdc_winners(&m, &s), vec![1, 2]);
+    assert_eq!(tdc_winners(&m, &s, id).unwrap(), vec![0, 3]);
+    let m = vec![meta(0, 1, 100.0), meta(0, 1, 100.0), meta(0, 1, 100.0)];
+    let names = ["r2", "r10", "r10"];
+    let by_name = |i: usize| Ok(names[i].to_string());
+    assert_eq!(tdc_winners(&m, &[1.0, 1.0, 1.0], by_name).unwrap(), vec![1]);
 }

@@ -165,31 +165,88 @@ pub fn training_sets(q: &[f64], is_decoy: &[bool], fdr: f64) -> (Vec<usize>, Vec
     (positives, negatives)
 }
 
-pub fn tdc_winners(meta: &[RowMeta], scores: &[f64]) -> Vec<usize> {
-    let mut keyed: Vec<(u32, u64, u64, usize)> = meta
+pub fn tdc_winners<F>(meta: &[RowMeta], scores: &[f64], psm_id: F) -> Result<Vec<usize>, String>
+where
+    F: Fn(usize) -> Result<String, String>,
+{
+    let mut keyed: Vec<(u32, u32, u64, u64, i8, usize)> = meta
         .par_iter()
         .enumerate()
-        .map(|(i, m)| (m.file, m.scan, m.exp_mass.to_bits(), i))
+        .map(|(i, m)| {
+            (
+                m.file,
+                m.scan as u32,
+                order_key64(m.exp_mass + 0.0),
+                !order_key64(scores[i] + 0.0),
+                m.label,
+                i,
+            )
+        })
         .collect();
     keyed.par_sort_unstable();
-    let keeps = |b: usize, i: usize| {
-        scores[b]
-            .total_cmp(&scores[i])
-            .then(meta[b].label.cmp(&meta[i].label))
-            .is_ge()
-    };
     let mut out = Vec::new();
     for group in keyed.chunk_by(|a, b| (a.0, a.1, a.2) == (b.0, b.1, b.2)) {
-        let mut best = group[0].3;
-        for &(_, _, _, i) in &group[1..] {
-            if !keeps(best, i) {
-                best = i;
+        let tied = group
+            .iter()
+            .take_while(|k| (k.3, k.4) == (group[0].3, group[0].4))
+            .count();
+        let mut best = group[0].5;
+        if tied > 1 {
+            let mut best_id = psm_id(best)?;
+            for k in &group[1..tied] {
+                let id = psm_id(k.5)?;
+                if id < best_id {
+                    best = k.5;
+                    best_id = id;
+                }
             }
         }
         out.push(best);
     }
     out.par_sort_unstable();
-    out
+    Ok(out)
+}
+
+pub(crate) fn psm_order<F>(
+    meta: &[RowMeta],
+    rows: &[usize],
+    scores: &[f64],
+    psm_id: F,
+) -> Result<Vec<usize>, String>
+where
+    F: Fn(usize) -> Result<String, String>,
+{
+    let key = |k: usize| {
+        let m = &meta[rows[k]];
+        (
+            !order_key64(scores[k] + 0.0),
+            !(m.scan as u32),
+            !order_key64(m.exp_mass + 0.0),
+            -m.label,
+            !m.file,
+        )
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.par_sort_unstable_by(|&a, &b| key(a).cmp(&key(b)).then(rows[b].cmp(&rows[a])));
+    let mut start = 0usize;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && key(order[end]) == key(order[start]) {
+            end += 1;
+        }
+        if end - start > 1 {
+            let mut run: Vec<(String, usize)> = order[start..end]
+                .iter()
+                .map(|&k| psm_id(rows[k]).map(|id| (id, k)))
+                .collect::<Result<_, _>>()?;
+            run.sort_by(|a, b| b.0.cmp(&a.0).then(rows[b.1].cmp(&rows[a.1])));
+            for (slot, (_, k)) in order[start..end].iter_mut().zip(run) {
+                *slot = k;
+            }
+        }
+        start = end;
+    }
+    Ok(order)
 }
 
 pub fn mix_max_q(scores: &[f64], is_decoy: &[bool], pi0: f64) -> Vec<f64> {

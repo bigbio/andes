@@ -1,4 +1,5 @@
 use crate::pin::RowMeta;
+use crate::scores::psm_order;
 use crate::text::Texts;
 use rayon::prelude::*;
 use std::fs::File;
@@ -163,16 +164,7 @@ pub fn write_results(
     res: &Results,
 ) -> Result<(), String> {
     let (rows, scores) = (res.rows, res.scores);
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.par_sort_unstable_by(|&a, &b| {
-        let (ma, mb) = (&meta[rows[a]], &meta[rows[b]]);
-        scores[b]
-            .total_cmp(&scores[a])
-            .then(mb.scan.cmp(&ma.scan))
-            .then(mb.exp_mass.total_cmp(&ma.exp_mass))
-            .then(mb.label.cmp(&ma.label))
-            .then(rows[a].cmp(&rows[b]))
-    });
+    let order = psm_order(meta, rows, scores, |i| texts.get(i).map(|t| t.psm_id))?;
     let cols = [scores, res.q, res.pep];
     write_one(target, 1, meta, texts, file_names, &order, rows, cols)?;
     write_one(decoy, -1, meta, texts, file_names, &order, rows, cols)

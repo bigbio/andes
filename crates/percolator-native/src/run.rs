@@ -241,7 +241,7 @@ fn finish(
     mode: Mode,
 ) -> Result<(), String> {
     let rows: Vec<usize> = if mode == Mode::Tdc {
-        tdc_winners(&pin.meta, scores)
+        tdc_winners(&pin.meta, scores, |i| pin.text(i).map(|t| t.psm_id))?
     } else {
         (0..scores.len()).collect()
     };

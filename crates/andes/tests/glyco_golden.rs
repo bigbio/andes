@@ -1,108 +1,3 @@
-//! Golden test for the `--glyco` path.
-//!
-//! REGENERATED 2026-10-21 (single-cleavage Y-ions) when Y-ion generation was aligned
-//! with GlycoDecipher's B/Y convention: ONE Y ion per glycosidic bond (O(n)),
-//! replacing the combinatorial root-containing-subtree set that over-generated
-//! multi-cleavage fragments for branched glycans. Verified before copying: header
-//! identical, 120 -> 120 rows, 3 winner flips — all three on the SAME peptide
-//! (THRB_HUMAN R.SRYPHKPEINSTTHPGADLQENFCR.N@N10), where a core-fucosylated
-//! di-fucose glycan `(N(F)(N(H(H(N(F)(H)))(H(N(H))))))` re-ranks onto a mono-
-//! sialylated isomer `(N(N(H(H(N(A)(H)))(H(N(H))))))`. Same peptide/protein, so the
-//! flips are glycan-annotation changes, not peptide-identity changes. `YLadderScore`
-//! moved on 119 rows, `YHitFrac` on 116, `GlycanMass`/`SialicConsistency` on the 3
-//! flipped rows, and `DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm` on all 120 (winner flips
-//! shift the per-run RT-calibration anchors). The candidate-pool columns (`RawScore`,
-//! `TailorScore`, `CandidateRankEntropy`, `ListwiseScoreGap`, `DeltaRankScore`) are
-//! unchanged, so the peptide candidate pool is untouched — only the glycan axis moved.
-//!
-//! REGENERATED 2026-10-21 when the glycan tree topology was retained and Y-ions
-//! derived from it (previously the .gdb tree was dropped and fragment generation
-//! collapsed to composition counts + one core-fucose bit). Verified before copying:
-//! header identical, 120 -> 120 rows, 1 winner flip. The Peptide column gained the
-//! canonical tree suffix on all 120 rows (same composition, now topology-tagged).
-//! `YLadderScore`/`YHitFrac` moved on 105 rows and `DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm`
-//! on all 120 (the single winner flip shifts the per-run RT-calibration anchors).
-//! The one winner flip is scan 15797, VTNC_HUMAN -> YEDW_ECOLI: a weak winner
-//! re-ranked onto the E. coli background (CoreYHits 5 -> 1), the same signature the
-//! 2026-09-09 structure-aware Y-ion change produced. Both glycans are branched DB
-//! trees whose topology-derived ladder replaces the old composition-pinned ladder.
-//!
-//! REGENERATED 2026-10-14 when the glycosite tag began counting the boundary
-//! sequon (an N-X-S/T completed by the residue after the peptide). Verified before
-//! copying: header identical, 120 -> 120 rows, 0 winner changes; only the Peptide
-//! column moved, on 2 rows (scans 24129 and 24902, R.GTAGNALMDGASQLMGENR.T, whose
-//! only sequon is N18-R|T): `@N?` -> `@N18`.
-//!
-//! REGENERATED 2026-10-22 when decoys became peptide-level (`--decoy-strategy`
-//! default `shuffle`; regenerated on top of the glycan-topology change): 120 -> 120 rows,
-//! decoy winners 3 -> 10; the candidate-pool
-//! columns move with the new decoy candidates.
-//!
-//! REGENERATED 2026-11-02 when `enzN` began counting a Met-clipped protein
-//! N-terminal peptide as starting at a terminus (bigbio/andes#293). Only `enzN`
-//! moved, 0 -> 1, on the 2 rows of the Met-clipped decoy YGHO_ECOLI peptide
-//! `M.LWYQMMLLNIVSNQTM+15.99491GPVR.N` (scans 12256 and 12340, the latter with
-//! the protein N-terminal Acetyl); with `enzN` set back to 0 on them the PIN
-//! reproduces the previous golden row for row.
-//!
-//! WHY THIS EXISTS. Until this file was added, the ONLY golden in the repo covered
-//! the standard peptide path (`precursor_cal_bit_identical.rs`). Nothing pinned glyco
-//! output, and a commit labelled `fix(train)` consequently changed SERVE-TIME glyco
-//! scoring - widening the per-ion match window from 20 ppm to the model's `mme`
-//! (0.5 Da, ~36x at m/z 700) inside `ion_match_facts`, which feeds the glyco collapse
-//! selector through `hyperscore_psm_with_matches` - and survived 24 commits with a
-//! comment asserting "Serving is untouched".
-//!
-//! THE FIXTURE. 120 MS2 scans lifted from human plasma PXD030622 replicate R1, chosen
-//! because they produced accepted glyco PSMs, plus the 30 proteins those PSMs matched.
-//! Small enough to commit (187 KB gz + 28 KB), real enough to exercise oxonium gating,
-//! backbone generation, the fused selector and the collapse. A fixture with no
-//! oxonium-positive scans pins only the header and would not have caught the above.
-//!
-//! To regenerate after an INTENTIONAL glyco change:
-//!
-//! ```text
-//! cargo build --release -p andes
-//! ./target/release/andes \
-//!   --spectrum test-fixtures/glyco_fixture.mgf.gz \
-//!   --database test-fixtures/glyco_fixture.fasta \
-//!   --glyco --glyco-tol-ppm 20 --fragmentation HCD --fragment-tol-da 0.5 \
-//!   --glyco-glycan-gdb test-fixtures/glyco_fixture.gdb \
-//!   --output-pin /tmp/g.pin
-//! cp /tmp/g.glyco.pin test-fixtures/parity/goldens/glyco.pin
-//! ```
-//!
-//! `--glyco-glycan-gdb` is NOT optional: `--glyco` requires it now that the built-in
-//! composition enumerator is gone. The fixture `.gdb` is NeuGc-free (header `H,N,A,F`),
-//! which preserves the human behaviour the recipe used to get from `--glyco-taxon human`.
-//! Diff the regenerated file against the old golden column by column before copying it —
-//! a positional drift between the header list and the row writer shows up as several
-//! UNRELATED columns changing on every row, which is what caught exactly that mistake here.
-//!
-//! Regenerating is a deliberate act: diff the columns first and know which ones moved.
-//!
-//! REGENERATED 2026-10-14 when the N-terminal Met-cleaved walk began emitting
-//! only the peptides starting at the post-Met residue (it had enumerated every
-//! other span of an M-initial protein a second time) and side-chain mods began
-//! stacking with terminal mods. Against the previous binary: 120 rows, every
-//! SpecId, peptide and protein unchanged (0 winner flips); each spectrum's
-//! candidate pool changes, so
-//! `CandidateRankEntropy` and `RawScore` moved on all 120
-//! rows and `ListwiseScoreGap` on 53.
-//!
-//! COMBINED 2026-10-14 (review branch: input, glyco and candidate-generation
-//! changes together). Against each parent golden the only differences are the
-//! other branches' changes: `ScanNr`/`SpecId` on every row (MGF TITLE scan
-//! numbers), the boundary-sequon `@N18` tag on 2 peptides, and the
-//! candidate-pool columns (`RawScore`, `CandidateRankEntropy`,
-//! `ListwiseScoreGap`); 120 rows, proteins unchanged.
-//!
-//! REGENERATED 2026-11-14 when the built-in default modifications began using
-//! the UNIMOD masses (Oxidation 15.994915, Carbamidomethyl 57.021464). 120 rows,
-//! every SpecId and protein unchanged; on the 49 rows with a default mod
-//! `CalcMass`, `dm`, `absdm` and the fragment-error columns move by the mass
-//! difference, and 10 oxidised peptides now print `+15.99492`.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -122,22 +17,10 @@ fn read_sorted_rows(p: &std::path::Path) -> (String, Vec<String>) {
         .filter(|l| !l.trim().is_empty())
         .map(str::to_string)
         .collect();
-    // Sort on the SpecId column, not the whole line: a last-digit float
-    // difference in a later column would otherwise reorder rows and produce a
-    // spurious mismatch against the golden.
     rows.sort_by(|x, y| spec_id(x).cmp(spec_id(y)));
     (header, rows)
 }
 
-/// Compare one PIN row field-by-field.
-///
-/// Identity and integer fields must match EXACTLY; floating-point fields are
-/// compared with a relative tolerance. An optimised build vectorises differently
-/// on different targets (this golden passed on Linux and Windows and failed on
-/// macOS in release), so a last-digit difference in a derived score is a property
-/// of the host, not a regression. Anything a real change moves -- a different
-/// peptide, a different glycan, a different winner -- is either a non-numeric
-/// field or a numeric one that moves far more than 1e-6.
 fn row_diff(golden: &str, actual: &str) -> Option<String> {
     let g: Vec<&str> = golden.split('\t').collect();
     let a: Vec<&str> = actual.split('\t').collect();
@@ -150,10 +33,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
         }
         match (gf.parse::<f64>(), af.parse::<f64>()) {
             (Ok(gv), Ok(av)) => {
-                // `f64::from_str` accepts "NaN"/"inf", and every ordered comparison
-                // against NaN is false -- so a naive `(gv - av).abs() > tol` would
-                // report a NaN where a number belongs as EQUAL and wave a real
-                // regression through. Handle the non-finite cases explicitly.
                 if gv.is_nan() || av.is_nan() {
                     if gv.is_nan() != av.is_nan() {
                         return Some(format!("field {i}: {gf} vs {af} (NaN mismatch)"));
@@ -166,16 +45,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
                     }
                     continue;
                 }
-                // The PIN is TEXT with ~6 significant figures, so the comparison
-                // cannot be tighter than the print precision: two values that agree
-                // to within float noise still print differently when they straddle a
-                // rounding boundary (macOS CI produced `0.45316` vs `0.453159`, a
-                // relative difference of 2.2e-6, from arithmetic that is otherwise
-                // identical). 1e-5 relative clears that with room to spare and is
-                // still five orders of magnitude tighter than any real change --
-                // flipping a selector weight moves this same column from -2.02 to
-                // -3.40. The absolute floor keeps near-zero values from being held
-                // to denormal noise.
                 let tol = 1e-5 * gv.abs().max(av.abs()).max(1.0);
                 if (gv - av).abs() > tol {
                     return Some(format!("field {i}: {gf} vs {af}"));
@@ -187,9 +56,6 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
     None
 }
 
-/// Sort key for aligning rows: the SpecId column, which is scan-derived and
-/// stable. Sorting by the whole line would let a last-digit float difference
-/// reorder rows and produce a spurious mismatch.
 fn spec_id(row: &str) -> &str {
     row.split('\t').next().unwrap_or(row)
 }
@@ -216,24 +82,12 @@ fn glyco_pin_matches_golden_after_sort() {
         .arg("--glyco")
         .arg("--glyco-tol-ppm")
         .arg("20")
-        // NOTE ON COVERAGE. `--fragment-tol-da 0.5` pins the LOW-RES class (the
-        // fixture's peaks are Orbitrap peaks, which the metadata-less resolution
-        // inference would otherwise read as high resolution), so the golden pins
-        // `cid_lowres_tryp` and guards the LOW-RES glyco path: column set,
-        // row count, oxonium gating, backbone generation, the fused selector and the
-        // collapse. The high-res path is guarded by `glyco_golden_highres.rs`.
-        // `--model cid_lowres_tryp` keeps that model: ion-trap HCD otherwise routes to
-        // the ion-trap HCD model, which is trained on unenriched tryptic spectra.
         .arg("--fragmentation")
         .arg("HCD")
         .arg("--fragment-tol-da")
         .arg("0.5")
         .arg("--model")
         .arg("cid_lowres_tryp")
-        // The glycan source is a committed, NeuGc-free fixture .gdb (header `H,N,A,F`).
-        // `--glyco` no longer has a built-in enumerator or a `--glyco-taxon` species knob,
-        // so the human behaviour is pinned by the .gdb's own NeuGc-free content rather
-        // than by a flag.
         .arg("--glyco-glycan-gdb")
         .arg(&gdb)
         .arg("--output-pin")
@@ -242,7 +96,6 @@ fn glyco_pin_matches_golden_after_sort() {
         .expect("run andes");
     assert!(status.success(), "andes exited {status}");
 
-    // --glyco writes alongside --output-pin with a .glyco.pin suffix.
     let actual = outdir.path().join("actual.glyco.pin");
     assert!(
         actual.exists(),
@@ -268,9 +121,6 @@ fn glyco_pin_matches_golden_after_sort() {
     }
 }
 
-/// `--precursor-mono auto` needs MS1. On MGF there is none, so the flag must warn
-/// and write the same `.glyco.pin` as the flag being off (bigbio/andes#64:
-/// "byte-identical when no MS1 is available or the flag is off").
 #[test]
 fn glyco_precursor_mono_on_mgf_is_identical_to_off() {
     let root = workspace_root();

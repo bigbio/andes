@@ -1,8 +1,3 @@
-//! Scoring model and ion-type prediction.
-//!
-//! Contains the parameter model, rank-based node scoring, and fragment ion
-//! prediction. Depends only on the `model` crate.
-
 pub mod frag_features;
 pub mod gbdt_eval;
 pub mod ion_features;

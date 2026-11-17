@@ -1,16 +1,3 @@
-//! Parity and speed check for `ms2_native` against the PyTorch reference.
-//!
-//! ```text
-//! cargo run --release -p onnx-infer --example ms2_native_check -- \
-//!   --weights andes_ms2.ams2 --reference ms2_reference.tsv [--threads 8] [--repeat 5]
-//! ```
-//!
-//! The reference TSV (from `scripts/student/ms2/ms2_export.py`) has columns
-//! `format` (`proforma` | `andes`), `peptide`, `charge`, `nce` (`NA` = unknown),
-//! `activation`, `instrument`, `values` and `raw` (comma-separated, site-major).
-//! Prints the largest absolute and relative differences on both and the
-//! single-thread / multi-thread throughput.
-
 use std::time::Instant;
 
 use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch};

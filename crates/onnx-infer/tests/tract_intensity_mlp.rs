@@ -1,5 +1,3 @@
-//! Tract smoke for the toy intensity MLP fixture (MatMul+Add+ReLU).
-
 #![cfg(feature = "tract")]
 
 use onnx_infer::{BackendKind, NamedTensor, OnnxSession};
@@ -14,15 +12,10 @@ fn fixture(name: &str) -> std::path::PathBuf {
 fn intensity_mlp_relu_scores() {
     let mut session = OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Tract)
         .expect("load intensity_mlp");
-    // rows: [1,0,0,0] → 0.55; [0,0,1,0] → 0.80; [-1,-1,-1,-1] → 0 (ReLU)
     let input = NamedTensor::new(
         "features",
         vec![3, 4],
-        vec![
-            1., 0., 0., 0., //
-            0., 0., 1., 0., //
-            -1., -1., -1., -1.,
-        ],
+        vec![1., 0., 0., 0., 0., 0., 1., 0., -1., -1., -1., -1.],
     )
     .unwrap();
     let out = session.run_one(input).expect("infer");
@@ -32,8 +25,6 @@ fn intensity_mlp_relu_scores() {
     assert!(out.data[2].abs() < 1e-6, "got {}", out.data[2]);
 }
 
-/// Names are the ONNX tensor names, not the names of the nodes that produce them
-/// (the fixture's output `score` is produced by a node named `/Relu`).
 #[test]
 fn reports_onnx_tensor_names() {
     let mut session = OnnxSession::from_manifest(fixture("intensity_mlp.json"), BackendKind::Tract)

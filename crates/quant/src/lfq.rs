@@ -1,44 +1,18 @@
-//! Label-free MS1 quantification of one target in one run.
-//!
-//! A target is a (peptidoform, charge) with an anchor retention time (its
-//! best PSM) and a theoretical isotope envelope. Quantification extracts the
-//! first `n_isotopes` isotope chromatograms in an RT window around the anchor,
-//! finds the chromatographic peak that holds the anchor on the smoothed
-//! monoisotopic trace, integrates every isotope over the same boundaries and
-//! scores the envelope against theory. The same routine, run at a shifted m/z,
-//! produces the decoy twin for the feature q-value.
-
 use model::mass::ISOTOPE;
 use model::Tolerance;
 
 use crate::ms1_index::Ms1RunIndex;
 use crate::xic::{cosine, find_peak, gaussian_smooth, integrate, savitzky_golay5};
 
-/// Extraction settings.
 #[derive(Debug, Clone)]
 pub struct LfqParams {
-    /// MS1 m/z tolerance for every isotope trace.
     pub tol: Tolerance,
-    /// Half-width of the RT window around the anchor, seconds.
     pub rt_window_s: f64,
-    /// Optional Gaussian smoothing width in seconds (eight sigma). `None`
-    /// preserves five-scan Savitzky–Golay detection. Raw XICs supply areas.
     pub gaussian_width_s: Option<f64>,
-    /// Isotopes extracted (monoisotopic + n−1).
     pub n_isotopes: usize,
-    /// Minimum envelope cosine for target AND decoy eligibility in competition.
-    /// All target features are still returned for `lfq.parquet` diagnostics.
     pub min_cosine: f32,
-    /// m/z shift of the decoy twin (Th). This fixed-shift heuristic differs
-    /// from IonQuant's adaptive +11 * 1.0005 Th and Sage's +11.06 Th + RT shift.
     pub decoy_mz_shift: f64,
-    /// Scans the apex may be from the anchor scan.
     pub max_apex_climb: usize,
-    /// A feature whose monoisotopic area holds less than this fraction of its
-    /// theoretical share of the envelope is not the target ion: the M+1..
-    /// traces line up with a different, isotope-shifted species (on PXD001819
-    /// a deamidated N-G peptide integrated at ~100x the true value). Median
-    /// observed/theoretical share is 1.07 there; 0.9 % of features fall below 0.3.
     pub min_mono_share: f64,
 }
 
@@ -57,46 +31,29 @@ impl Default for LfqParams {
     }
 }
 
-/// One thing to quantify.
 #[derive(Debug, Clone)]
 pub struct LfqTarget {
-    /// Theoretical monoisotopic m/z of the precursor.
     pub mono_mz: f64,
     pub charge: u8,
-    /// Retention time of the identifying PSM, seconds.
     pub anchor_rt: f64,
-    /// Theoretical isotope envelope (first `n_isotopes`, sums to 1).
     pub envelope: Vec<f64>,
-    /// Share of the whole isotope pattern held by the isotopes of
-    /// `envelope`, in (0, 1].
     pub isotope_share: f64,
 }
 
-/// A quantified feature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureQuant {
     pub apex_rt: f64,
     pub rt_start: f64,
     pub rt_stop: f64,
-    /// Area of the whole isotope pattern (intensity · seconds): the summed
-    /// `isotope_areas` over the target's `isotope_share`.
     pub area: f64,
-    /// Monoisotopic trace height at the apex scan.
     pub apex_intensity: f32,
-    /// Area per isotope, monoisotopic first.
     pub isotope_areas: Vec<f64>,
-    /// Cosine similarity of the isotope areas to the theoretical envelope.
     pub cosine: f32,
-    /// Isotopes (from the monoisotope up, contiguous) with signal.
     pub n_isotopes_found: u32,
-    /// Apex RT minus anchor RT, seconds.
     pub rt_delta_s: f64,
-    /// Scans inside the boundaries.
     pub n_scans: u32,
 }
 
-/// Quantify `target` in `index`. `None` when no MS1 scan lies in the window or
-/// no monoisotopic signal surrounds the anchor.
 pub fn quantify(
     index: &Ms1RunIndex,
     target: &LfqTarget,
@@ -105,7 +62,6 @@ pub fn quantify(
     quantify_at(index, target, target.mono_mz, params)
 }
 
-/// The decoy twin: the same extraction at `mono_mz + decoy_mz_shift`.
 pub fn quantify_decoy(
     index: &Ms1RunIndex,
     target: &LfqTarget,
@@ -150,8 +106,6 @@ fn quantify_at(
         None => savitzky_golay5(&traces[0]),
     };
     let peak = find_peak(&smooth, anchor, params.max_apex_climb)?;
-    // The apex on the smoothed trace may sit on a zero of the raw trace (a
-    // missing scan); fall back to the highest raw value inside the bounds.
     let mut apex_intensity = traces[0][peak.apex];
     if apex_intensity <= 0.0 {
         apex_intensity = traces[0][peak.left..=peak.right]
@@ -202,11 +156,6 @@ fn quantify_at(
     })
 }
 
-/// Feature score for the target/decoy competition: envelope similarity
-/// cubed, proximity to the anchor, and relative height. Inspired by Sage's
-/// hybrid rule, which uses spectral angle rather than cosine.
-/// `max_apex` must include BOTH targets and decoys in the run so neither side
-/// is preferentially clipped by the height term.
 pub fn feature_score(fq: &FeatureQuant, rt_window_s: f64, max_apex: f32) -> f32 {
     let cos = fq.cosine.clamp(0.0, 1.0);
     let prox = (1.0 - (fq.rt_delta_s.abs() / rt_window_s.max(1e-9)).min(1.0)) as f32;
@@ -218,8 +167,6 @@ pub fn feature_score(fq: &FeatureQuant, rt_window_s: f64, max_apex: f32) -> f32 
     cos * cos * cos * prox.powf(1.0 / 3.0) * height
 }
 
-/// Score an eligible target or decoy. The same filter must be applied to both
-/// sides before computing q-values, rather than to targets after competition.
 pub fn competition_score(fq: &FeatureQuant, params: &LfqParams, max_apex: f32) -> Option<f32> {
     if !fq.cosine.is_finite() || fq.cosine < params.min_cosine {
         return None;
@@ -233,15 +180,12 @@ mod tests {
     use super::*;
     use crate::ms1_index::Ms1Scan;
 
-    /// A run with one peptide eluting as a Gaussian at 100 s (sigma 4 s),
-    /// charge 2, mono m/z 600.3, envelope [0.5, 0.3, 0.15, 0.05], plus noise
-    /// peaks far away.
     fn synthetic_run() -> (Ms1RunIndex, LfqTarget) {
         let env = [0.5, 0.3, 0.15, 0.05];
         let mono = 600.3;
         let scans = (0..200)
             .map(|i| {
-                let rt = i as f64; // 1 Hz
+                let rt = i as f64;
                 let g = (-0.5 * ((rt - 100.0) / 4.0).powi(2)).exp();
                 let mut peaks: Vec<(f64, f32)> = vec![(400.0, 50.0), (900.0, 50.0)];
                 for (k, e) in env.iter().enumerate() {
@@ -277,7 +221,6 @@ mod tests {
         assert!(fq.rt_start < 95.0 && fq.rt_stop > 105.0, "{fq:?}");
         assert!(fq.cosine > 0.99, "{fq:?}");
         assert_eq!(fq.n_isotopes_found, 4);
-        // Gaussian area = height · sigma · sqrt(2π) ≈ 0.5e6 · 4 · 2.5066 ≈ 5.01e6 for the mono.
         assert!(
             (fq.isotope_areas[0] - 5.01e6).abs() / 5.01e6 < 0.03,
             "{fq:?}"
@@ -299,8 +242,6 @@ mod tests {
         };
         let whole = quantify(&index, &partial, &params).expect("feature");
         assert_eq!(whole.area, four.area / share);
-        // Nothing else of the feature uses the share, nor does the decoy
-        // twin's eligibility.
         assert_eq!(
             FeatureQuant {
                 area: four.area,
@@ -348,8 +289,6 @@ mod tests {
             Some(feature.clone()),
             quantify_decoy(&index, &target, &params)
         );
-        // Analytic area is unchanged by detection smoothing: raw Gaussian
-        // height 1e6, sigma 4 s, summed envelope 1.
         let expected = 1e6 * 4.0 * (2.0 * std::f64::consts::PI).sqrt();
         assert!((feature.area / expected - 1.0).abs() < 0.01);
         assert_eq!(feature.apex_rt, 100.0);
@@ -395,9 +334,6 @@ mod tests {
 
     #[test]
     fn a_missing_monoisotope_is_not_the_target() {
-        // The species that elutes sits one isotope above the target (a
-        // deamidated form, say): the target's M+1.. traces hold its envelope
-        // and the target's monoisotopic trace only a trace of noise (1 %).
         let (real, _) = synthetic_run();
         let target = LfqTarget {
             mono_mz: 600.3 - ISOTOPE / 2.0,

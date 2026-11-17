@@ -1,6 +1,3 @@
-//! An input file with no MS2 spectra is a clear error naming the file, not a
-//! search of zero spectra on the default acquisition parameters.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -57,7 +54,6 @@ fn mzml_without_spectra_is_an_error_naming_the_file() {
     assert_clear_error(&search(&mzml, dir.path()), &mzml);
 }
 
-/// One empty file among several is not hidden by the spectra of the others.
 #[test]
 fn one_empty_file_among_several_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");

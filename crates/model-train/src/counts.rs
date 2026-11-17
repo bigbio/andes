@@ -1,10 +1,3 @@
-//! Sufficient statistics (raw histogram counts) accumulated from confident PSMs.
-//!
-//! [`CountStats`] accumulates all the raw counts needed to estimate a scoring
-//! model ([`scoring_crate::param_model::Param`]).  It supports exact `add`,
-//! `sub` (saturating), and `scale` so that per-source statistics can be
-//! combined or subtracted incrementally.
-
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{IonType, Partition};
 
@@ -33,10 +26,6 @@ fn vec_sub(dst: &mut Vec<u64>, src: &[u64]) {
     }
 }
 
-/// Multiply one count by `factor` (round half-away from zero).
-///
-/// The product is computed in `f64`, which represents every count below 2^53
-/// exactly, so a factor of 1.0 returns the count unchanged.
 #[inline]
 fn scale_count(c: u64, factor: f32) -> u64 {
     (c as f64 * f64::from(factor)).round() as u64
@@ -46,40 +35,25 @@ fn vec_scale(src: &[u64], factor: f32) -> Vec<u64> {
     src.iter().map(|&c| scale_count(c, factor)).collect()
 }
 
-/// Trim trailing zeros from `vec` so that `derive(PartialEq)` works correctly.
 fn trim_trailing_zeros(vec: &mut Vec<u64>) {
     while vec.last() == Some(&0) {
         vec.pop();
     }
 }
 
-/// Raw histogram counts (sufficient statistics) accumulated from confident PSMs.
-///
-/// All five maps are updated together by `add`/`sub`/`scaled`.  Two
-/// `CountStats` are equal if and only if every non-zero entry in each map
-/// matches; trailing zeros in Vec histograms do not affect equality because
-/// every mutating method trims them.
 #[derive(Clone, Default, Debug)]
 pub struct CountStats {
-    /// Per-rank histogram: `rank[( Partition, IonType )][rank_index]` = count.
     pub rank: FxHashMap<(Partition, IonType), Vec<u64>>,
-    /// Mass-error histogram: `error[Partition][bin_index]` = count.
     pub error: FxHashMap<Partition, Vec<u64>>,
-    /// Noise mass-error histogram (same structure as `error`).
     pub noise_error: FxHashMap<Partition, Vec<u64>>,
-    /// Ion-existence counts: `existence[( Partition, idx )]` = count.
     pub existence: FxHashMap<(Partition, u32), u64>,
-    /// Charge histogram: `charge[charge_value]` = count.
     pub charge: FxHashMap<i32, u64>,
 }
 
-/// Compare two `FxHashMap<K, Vec<u64>>` treating trailing zeros as
-/// insignificant (i.e. `[1, 0]` == `[1]`).
 fn map_vec_eq<K>(a: &FxHashMap<K, Vec<u64>>, b: &FxHashMap<K, Vec<u64>>) -> bool
 where
     K: Eq + std::hash::Hash,
 {
-    // All keys present in `a` must match in `b`.
     for (k, av) in a {
         let av = logical_slice(av);
         match b.get(k) {
@@ -95,7 +69,6 @@ where
             }
         }
     }
-    // Keys present in `b` but not `a` must be logically zero.
     for (k, bv) in b {
         if !a.contains_key(k) && !logical_slice(bv).is_empty() {
             return false;
@@ -104,7 +77,6 @@ where
     true
 }
 
-/// Slice of `vec` without trailing zeros.
 #[inline]
 fn logical_slice(vec: &[u64]) -> &[u64] {
     let end = vec.iter().rposition(|&x| x != 0).map_or(0, |i| i + 1);
@@ -217,8 +189,6 @@ impl CountStats {
         }
     }
 
-    /// Return a new `CountStats` with every count multiplied by `factor`
-    /// (rounded to nearest `u64`).
     pub fn scaled(&self, factor: f32) -> Self {
         let rank = self
             .rank
@@ -282,8 +252,8 @@ mod tests {
         let mut a = CountStats::new();
         a.bump_rank(p, ion, 3);
         let b = a.clone();
-        a.add(&b); // count = 2
-        a.sub(&b); // count = 1 again
+        a.add(&b);
+        a.sub(&b);
         assert_eq!(a, b);
     }
 
@@ -293,9 +263,9 @@ mod tests {
         let ion = test_prefix_ion();
         let mut a = CountStats::new();
         a.bump_rank(p, ion, 3);
-        a.bump_rank(p, ion, 3); // count = 2
+        a.bump_rank(p, ion, 3);
         let scaled = a.scaled(0.5);
-        assert_eq!(scaled.rank_count(&p, ion, 3), 1); // 2 * 0.5 = 1
+        assert_eq!(scaled.rank_count(&p, ion, 3), 1);
     }
 
     #[test]
@@ -303,13 +273,13 @@ mod tests {
         let p = test_partition();
         let ion = test_prefix_ion();
         let mut a = CountStats::new();
-        a.bump_rank(p, ion, 3); // 1
+        a.bump_rank(p, ion, 3);
 
         let mut big = CountStats::new();
         big.bump_rank(p, ion, 3);
-        big.bump_rank(p, ion, 3); // 2
+        big.bump_rank(p, ion, 3);
 
-        a.sub(&big); // 1 - 2 saturates to 0
+        a.sub(&big);
         assert_eq!(a.rank_count(&p, ion, 3), 0);
     }
 
@@ -377,7 +347,7 @@ mod tests {
         let p = test_partition();
         let ion = test_prefix_ion();
         let mut a = CountStats::new();
-        a.bump_rank(p, ion, 0); // vec = [1]
+        a.bump_rank(p, ion, 0);
 
         let mut b = CountStats::new();
         b.rank.insert((p, ion), vec![1, 0, 0]);
@@ -438,7 +408,6 @@ mod tests {
 
     #[test]
     fn scale_by_one_is_exact_above_f32_mantissa() {
-        // 2^24 + 1 is the first integer f32 cannot represent.
         let big = (1u64 << 24) + 1;
         let p = test_partition();
         let ion = test_prefix_ion();

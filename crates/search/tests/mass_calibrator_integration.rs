@@ -1,14 +1,3 @@
-//! Integration tests for the MassCalibrator pre-pass.
-//!
-//! Closes the "no isolated cal integration test" gap identified during the
-//! `--precursor-cal` ship review. (The design document this line used to cite was never
-//! committed to the repository, so the pointer is dropped rather than left dangling.)
-//!
-//! Asserts the contracts of each calibrator helper layer (threshold skip,
-//! mode-aware shift application, mass-correction round-trip, tightening
-//! bounds, SpecKey expansion). End-to-end benchmark validation remains the
-//! harness's responsibility.
-
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
@@ -93,7 +82,6 @@ fn tiny_scorer() -> RankScorer {
 
 #[test]
 fn threshold_skip_returns_empty_stats() {
-    // Fewer than MIN_SPECKEYS_FOR_PREPASS spec keys → stats unreliable.
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let params = SearchParams::default_tryptic(aa_set);
     let target = ProteinDb {

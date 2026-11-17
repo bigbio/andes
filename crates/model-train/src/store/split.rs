@@ -1,42 +1,3 @@
-//! Split a single-file model store into per-protocol Parquet partitions.
-//!
-//! Given a single-file model store (e.g. a freshly trained `--out-store`
-//! file), this module rewrites it as a Hive-style partitioned directory:
-//!
-//! ```text
-//! <dir>/protocol=Automatic/models.parquet
-//! <dir>/protocol=TMT/models.parquet
-//! <dir>/protocol=Phosphorylation/models.parquet
-//! ...
-//! ```
-//!
-//! Each model belongs to exactly one protocol (its manifest `protocol`
-//! column). Every row that references a model — manifest, table, source and
-//! stat rows — is routed into that model's protocol partition. The split is
-//! **lossless**: rows are copied verbatim (via the Arrow `filter` kernel) so
-//! the union of all partitions is row-for-row identical to the input file,
-//! and [`crate::store::ModelStore::open`] on the directory yields the same
-//! in-memory store as opening the single file.
-//!
-//! # On-disk size note — this is the DEV/PARITY splitter, not the shipping one
-//!
-//! The per-model GBDT blob columns (`rich_ion_model_bytes`,
-//! `frag_intensity_model_bytes`) are high-entropy and sparse (one blob per
-//! manifest row, NULL on every other row). The parquet-rs 53 writer encodes
-//! these columns several times larger than parquet-cpp (pyarrow) — even with
-//! ZSTD and dictionary disabled it produces a partition set of ~51 MB versus
-//! the ~13.6 MB single-file source. This is a writer-efficiency gap, not a data
-//! difference; the reader is codec/encoding-agnostic, so a pyarrow-written
-//! partition set loads byte-for-byte identically (proven by the
-//! `partition_parity` tests).
-//!
-//! Therefore the **shipped** `resources/models/protocol=<P>/models.parquet`
-//! files are written by `scripts/split_store_by_protocol.py` (pyarrow/zstd),
-//! which produces ~8.7 MB total (e.g. TMT ~2.1 MB, Automatic ~5.7 MB) — smaller
-//! than the single file AND per-protocol granular. This Rust function remains
-//! the dev/parity tool (it backs the parity test gate); do NOT use its output
-//! as the shipping bundle.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -49,11 +10,6 @@ use parquet::file::properties::WriterProperties;
 
 use crate::TrainError;
 
-/// Read the single-file store at `src` and write it as a per-protocol
-/// partitioned directory rooted at `dir` (created if absent).
-///
-/// Returns the list of `(protocol, partition_path)` written, sorted by
-/// protocol name.
 pub fn split_store_by_protocol(
     src: &Path,
     dir: &Path,
@@ -115,9 +71,6 @@ pub fn split_store_by_protocol(
         }
     }
 
-    // Prune any pre-existing `protocol=*` partitions first so a rerun against a
-    // smaller src can't leave stale partitions behind (mirrors the python
-    // splitter's rmtree-then-recreate).
     if dir.exists() {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -135,19 +88,6 @@ pub fn split_store_by_protocol(
         std::fs::create_dir_all(&part_dir)?;
         let part_path = part_dir.join("models.parquet");
 
-        // Storage tuning (the reader is codec/encoding-agnostic, so this only
-        // affects on-disk size):
-        //  * ZSTD compresses the large per-model GBDT blob columns
-        //    (rich_ion / frag_intensity model bytes) better than SNAPPY.
-        //  * Dictionary encoding is DISABLED: every model's GBDT blob is
-        //    distinct, so RLE_DICTIONARY only adds an index page on top of the
-        //    plain values.
-        //
-        // NOTE: parquet-rs encodes the high-entropy/sparse `Binary` blob
-        // columns several times larger than parquet-cpp, so this dev tool's
-        // output is NOT the shipping bundle — the shipped partitions are
-        // written by `scripts/split_store_by_protocol.py` (pyarrow). See the
-        // module docs.
         let props = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::ZSTD(
                 parquet::basic::ZstdLevel::default(),

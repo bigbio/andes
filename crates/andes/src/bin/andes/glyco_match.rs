@@ -1,30 +1,3 @@
-//! Cross-run match scoring for `--glyco --mbr` (a 10 → 64 → 32 → 8 → 2 MLP).
-//!
-//! MBR does not transfer a glycopeptide by trusting an RT prediction alone: it
-//! extracts the identifying run's isotope XIC (the "reference"), slides that
-//! window across the target run's predicted RT, and scores every candidate
-//! with a small MLP over ten similarity features. The best
-//! candidate's own bounds become the quantification window, and
-//! `0.85 · p + 0.15 · cosine` is the match score that separates true transfers
-//! from decoys. The method is the published one of Zeng et al., *Nat. Commun.*
-//! 2022; this module keeps its feature definitions, candidate enumeration and
-//! two-score combination, and re-trains the weights on andes benchmark data
-//! instead of the authors' private training set (the shipped weights carry
-//! their provenance in `resources/quant/glyco_mbr_model.txt`). The differences
-//! are adaptations to andes' data model, and each is deliberate:
-//!
-//! * **The reference is a fixed 1 s RT grid**, not a copy of the donor's scan
-//!   indices. The original compares equal-length slices of two runs whose scan
-//!   rates happen to agree; resampling both to seconds makes the features
-//!   independent of the instrument's scan rate.
-//! * **The candidate shift is measured from the RT-map prediction**, and the
-//!   search is bounded by the alignment uncertainty (60–120 s) instead of ±4
-//!   min from the raw seed RT. The RT map is a better prior than "same RT", and
-//!   the shift feature becomes the deviation from that prediction.
-//! * **Feature 3 repeats feature 2.** Both M+1 trace cosines are computed from
-//!   the same reference trace; the duplicate is kept so the retrained model
-//!   keeps the ten-feature input the method defines.
-
 use std::collections::HashMap;
 
 use model::mass::ISOTOPE;
@@ -34,14 +7,10 @@ use quant::xic::cosine;
 
 pub(crate) const N_FEATURES: usize = 10;
 
-/// Candidates the model scores per (donor, target) pair (the top 10).
 const TOP_CANDIDATES: usize = 10;
 
-/// RT grid every matrix is resampled to, seconds.
 const GRID_S: f64 = 1.0;
 
-/// The identifying run's match reference: the isotope XIC of one feature, on a
-/// uniform RT grid, plus the peak bounds the quantification found in it.
 #[derive(Debug, Clone)]
 pub(crate) struct Reference {
     mono_mz: f64,
@@ -54,23 +23,16 @@ pub(crate) struct Reference {
     anchor_offset_s: f64,
 }
 
-/// The window chosen in the target run, with its match score.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Match {
     pub(crate) start_rt: f64,
     pub(crate) stop_rt: f64,
-    /// Half-window for the re-extraction, seconds (`quantify` searches
-    /// around the window centre).
     pub(crate) window_s: f64,
-    /// The match score `0.85 · p + 0.15 · cosine`.
     pub(crate) score: f32,
     pub(crate) features: [f64; N_FEATURES],
 }
 
 impl Reference {
-    /// Build the reference of a quantified feature: its isotope XIC over the
-    /// extraction window (`anchor_rt ± rt_window_s`), resampled to [`GRID_S`],
-    /// with `peak_start_rt..=peak_stop_rt` as the peak window.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build(
         ms1: &Ms1RunIndex,
@@ -125,17 +87,11 @@ impl Reference {
         })
     }
 
-    /// The window start the donor's anchor maps to, given the target run's
-    /// predicted anchor RT.
     pub(crate) fn window_start(&self, predicted_anchor_rt: f64) -> f64 {
         predicted_anchor_rt - self.anchor_offset_s
     }
 }
 
-/// Score every candidate shift of `reference` in `ms1` and return the best by
-/// match score. `predicted_start_rt` is the target-run RT of the
-/// reference window's start (the donor's `window_start` mapped through the RT
-/// map); `search_s` bounds how far the window may slide.
 pub(crate) fn best_match(
     ms1: &Ms1RunIndex,
     reference: &Reference,
@@ -147,15 +103,11 @@ pub(crate) fn best_match(
     scored_top(&candidates).into_iter().next()
 }
 
-/// Every candidate's features, in RT order. Only the top [`TOP_CANDIDATES`]
-/// reach the model, but the training dump needs them all for labelling.
 pub(crate) struct CandidateSet {
     pub(crate) start_rt: Vec<f64>,
     pub(crate) stop_rt: Vec<f64>,
     pub(crate) features: Vec<[f64; N_FEATURES]>,
-    /// The peak-window half-width used for re-extraction, seconds.
     pub(crate) window_s: f64,
-    /// Peak-window length in grid points (the non-maximum suppression radius).
     peak_pts: usize,
 }
 
@@ -193,8 +145,6 @@ pub(crate) fn score_candidates(
     }
     let (p0, p1) = reference.peak;
     let peak_pts = p1 - p0;
-    // Candidate window starts: one per grid point within ±search of the
-    // prediction, while the whole reference window still fits the region.
     let first = 0usize;
     let last = (n_grid - n_win).min(((2.0 * search_s) / GRID_S).round() as usize);
     if last <= first {
@@ -226,14 +176,10 @@ pub(crate) fn score_candidates(
         let sam_peak_flat: Vec<f64> = sam_peak.iter().flatten().copied().collect();
         let mono = 0usize;
         let mut f = [0.0f64; N_FEATURES];
-        // [0] peak-window envelope cosine over all isotopes.
         f[0] = cosine(&sam_peak_flat, &ref_peak_flat);
-        // [1] monoisotopic trace, [2] and [3] the M+1 trace (COS_2 is
-        // computed from the M+1 trace as well).
         f[1] = trace_cosine(&sam_peak, mono, &reference.window, p0, p1);
         f[2] = trace_cosine(&sam_peak, mono + 1, &reference.window, p0, p1);
         f[3] = f[2];
-        // [4] and [5]: the candidate's own mono-vs-M+1/M+2 coherence.
         f[4] = if mono + 1 < sam_peak.len() {
             cosine(&sam_peak[mono], &sam_peak[mono + 1])
         } else {
@@ -244,16 +190,12 @@ pub(crate) fn score_candidates(
         } else {
             0.5
         };
-        // [6] the isotope-intensity distribution.
         f[6] = cosine(&sam_sums, &reference.peak_sums);
-        // [7] the shift from the RT-map prediction, in window widths.
         let shift = start - predicted_start_rt;
         f[7] = (shift.abs() / reference.width_s).min(1.0);
-        // [8] the monoisotopic intensity ratio (log10, quartered).
         let ratio = reference.peak_sums.first().copied().unwrap_or(0.0)
             / sam_sums.first().copied().unwrap_or(0.0).max(1.0);
         f[8] = ratio.clamp(0.001, 1000.0).log10().abs() / 4.0;
-        // [9] the extraction-window envelope cosine.
         f[9] = cosine(&sam_window, &ref_window_flat);
         set.start_rt.push(start + p0 as f64 * GRID_S);
         set.stop_rt.push(start + (p1 - 1) as f64 * GRID_S);
@@ -262,9 +204,6 @@ pub(crate) fn score_candidates(
     Some(set)
 }
 
-/// The candidates the model scores (top [`TOP_CANDIDATES`] by the screening
-/// score, non-maximum suppressed around the peak width) with their final score,
-/// best first.
 pub(crate) fn scored_top(candidates: &CandidateSet) -> Vec<Match> {
     let radius = (candidates.peak_pts / 2).max(1) as isize;
     let mut order: Vec<usize> = (0..candidates.features.len()).collect();
@@ -295,8 +234,6 @@ pub(crate) fn scored_top(candidates: &CandidateSet) -> Vec<Match> {
         let out = model.forward(&candidates.features[i]);
         logits.extend_from_slice(&out);
     }
-    // Softmax over candidates of the class-1 logit (the method's
-    // `torch.softmax(prediction, 0)`).
     let n = picked.len();
     let max_logit = (0..n)
         .map(|c| logits[c * dims + 1])
@@ -355,7 +292,6 @@ fn flatten_peak(traces: &[Vec<f32>], p0: usize, p1: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Linear resampling of one trace onto a uniform grid; 0 outside the raw range.
 fn resample(rt: &[f64], y: &[f32], grid: &[f64]) -> Vec<f32> {
     let mut out = Vec::with_capacity(grid.len());
     let mut j = 0usize;
@@ -400,8 +336,6 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    /// The model compiled into the binary. See
-    /// `resources/quant/glyco_mbr_model.txt` for the training provenance.
     pub(crate) fn shipped() -> &'static Model {
         static MODEL: std::sync::OnceLock<Model> = std::sync::OnceLock::new();
         MODEL.get_or_init(|| {
@@ -467,8 +401,6 @@ impl Model {
         Ok(model)
     }
 
-    /// My_NetNN.forward in eval mode: ReLU → BatchNorm(after the first layer),
-    /// ReLU on every later layer including the output.
     fn forward(&self, x: &[f64; N_FEATURES]) -> Vec<f64> {
         let h1 = self.b1.len();
         let mut a = vec![0.0f64; h1];
@@ -531,8 +463,6 @@ mod tests {
         (-0.5 * ((rt - centre) / sigma).powi(2)).exp() as f32
     }
 
-    /// A synthetic run: one 4-isotope envelope eluting at `centre`, sampled at
-    /// 0.5 s (finer than the 1 s grid, like a real QExactive survey).
     fn run(centre: f64) -> Ms1RunIndex {
         let scans = (0..601)
             .map(|i| {
@@ -586,7 +516,6 @@ mod tests {
         let target = run(150.0);
         let r = reference(&donor, MONO);
         let tol = Tolerance::Ppm(10.0);
-        // The target apex is 50 s later; the RT map predicts exactly that.
         let predicted = r.window_start(150.0);
         let m = best_match(&target, &r, predicted, 60.0, tol).expect("a scored window");
         let centre = 0.5 * (m.start_rt + m.stop_rt);
@@ -604,7 +533,7 @@ mod tests {
         let target = run(170.0);
         let r = reference(&donor, MONO);
         let tol = Tolerance::Ppm(10.0);
-        let predicted = r.window_start(150.0); // 20 s off
+        let predicted = r.window_start(150.0);
         let m = best_match(&target, &r, predicted, 60.0, tol).expect("a scored window");
         let centre = 0.5 * (m.start_rt + m.stop_rt);
         assert!(

@@ -1,30 +1,15 @@
-//! Crosslink FDR from target-target, target-decoy and decoy-decoy counts.
-//!
-//! Above a score threshold, TD matches estimate the TT matches with one false
-//! peptide plus those with two, and DD matches estimate those with two false
-//! peptides counted twice over in TD, so the false TT matches number
-//! `TD − DD` and `FDR = (TD − DD) / TT`. The estimate counts one TD more,
-//! `(TD + 1 − DD) / TT`, which removes most of the excess the monotone pass
-//! picks up from chance dips in mid-sized sets. It is made separately for
-//! each link class (intra- and inter-protein) by the caller.
-
 use crate::decoy::PairClass;
 
 pub const MIN_FALSE: f64 = 2.0;
 
-/// Counts of a set of CSMs by class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClassCounts {
-    /// Target-target matches.
     pub tt: usize,
-    /// Target-decoy matches.
     pub td: usize,
-    /// Decoy-decoy matches.
     pub dd: usize,
 }
 
 impl ClassCounts {
-    /// Add one CSM of class `c`.
     pub fn add(&mut self, c: PairClass) {
         match c {
             PairClass::TT => self.tt += 1,
@@ -41,9 +26,6 @@ impl ClassCounts {
         (false_tt / self.tt as f64).min(1.0)
     }
 
-    /// FDR of homotypic pairs, the same peptide sequence on both sides. A random match
-    /// pairs a random peptide with itself, so it is TT or DD with equal odds and
-    /// practically never TD: the false TT number about DD, not TD − DD.
     pub fn fdr_homotypic(&self) -> f64 {
         if self.tt == 0 {
             return 1.0;
@@ -53,14 +35,10 @@ impl ClassCounts {
     }
 }
 
-/// q-values of CSMs with scores `scores` (higher is better) and classes
-/// `classes`, by the floored `(TD − DD) / TT` estimate at each score threshold, made
-/// monotone from the bottom up. Ties share one threshold.
 pub fn q_values(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
     q_values_by(scores, classes, ClassCounts::fdr)
 }
 
-/// [`q_values`] for homotypic pairs ([`ClassCounts::fdr_homotypic`]).
 pub fn q_values_homotypic(scores: &[f64], classes: &[PairClass]) -> Vec<f64> {
     q_values_by(scores, classes, ClassCounts::fdr_homotypic)
 }
@@ -84,7 +62,6 @@ fn q_values_by(scores: &[f64], classes: &[PairClass], fdr: fn(&ClassCounts) -> f
         }
         k = end;
     }
-    // Monotone: q at a threshold is the lowest FDR at that threshold or below.
     let mut q = fdr_at.clone();
     let mut running = f64::INFINITY;
     for &i in order.iter().rev() {

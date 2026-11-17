@@ -1,27 +1,10 @@
-//! The run's acquisition context: how the spectra were acquired, read from the
-//! data and carried separately from the selected scoring model.
-//!
-//! Model routing sends some high-resolution acquisitions to a low-resolution
-//! model (ETD, CID and UVPD read in an Orbitrap, see `build_selection_key`), and
-//! a TOF run is served by an Orbitrap HCD model. Every decision that depends on
-//! the data itself (fragment tolerances, the fragment-index vote mode, score
-//! mode `auto`, the `--refine` high-resolution gate, isobaric-label detection,
-//! `--tmt-level` auto and the predictor's instrument and NCE) reads this
-//! context instead of the model's instrument.
-
 use model::{ActivationMethod, InstrumentType};
 
-/// Where the resolution class came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolutionSource {
-    /// The analyzer recorded in the file (mzML, `.raw`) or implied by the
-    /// format (`.d`).
     Metadata,
-    /// The unit of `--fragment-tol-ppm` / `--fragment-tol-da`.
     FragmentTolFlag,
-    /// Inferred from the peaks of a spectrum sample.
     Peaks,
-    /// Nothing decided; the low-resolution fallback.
     Default,
 }
 
@@ -36,28 +19,19 @@ impl ResolutionSource {
     }
 }
 
-/// NCE range accepted as a normalised collision energy for the predictor.
 const PREDICTOR_NCE_RANGE: (f64, f64) = (10.0, 60.0);
 
-/// The acquisition context of one run.
 #[derive(Debug, Clone)]
 pub(crate) struct Acquisition {
-    /// Dominant activation read from the file, when recorded.
     pub(crate) activation: Option<ActivationMethod>,
-    /// Analyzer read from the file metadata, when recorded.
     pub(crate) analyzer: Option<InstrumentType>,
     pub(crate) high_res: bool,
     pub(crate) resolution_source: ResolutionSource,
-    /// The peak evidence, when the class was inferred from the peaks.
     pub(crate) peak_evidence: Option<input::ResolutionEvidence>,
-    /// Collision energy, isolation width and FAIMS CV of the first MS2 scans.
     pub(crate) meta: input::Ms2MetaSample,
 }
 
 impl Acquisition {
-    /// Resolve the context. Precedence for the resolution class: the analyzer
-    /// in the metadata, then the `--fragment-tol-*` unit, then the peak
-    /// inference, then low resolution.
     pub(crate) fn resolve(
         activation: Option<ActivationMethod>,
         analyzer: Option<InstrumentType>,
@@ -88,14 +62,10 @@ impl Acquisition {
         }
     }
 
-    /// The resolution class read from the peaks, for model selection on
-    /// metadata-less input.
     pub(crate) fn inferred_high_res(&self) -> Option<bool> {
         self.peak_evidence.as_ref().and_then(|e| e.high_res)
     }
 
-    /// Whether the analyzer is a time-of-flight one. TOF instruments record the
-    /// collision energy in eV, not as a normalised collision energy.
     fn is_tof(&self) -> bool {
         matches!(
             self.analyzer,
@@ -103,9 +73,6 @@ impl Acquisition {
         )
     }
 
-    /// The normalised collision energy to give a fragment-intensity predictor:
-    /// the median recorded CE of an HCD run read outside a TOF, when it lies in
-    /// a plausible NCE range. `None` leaves the predictor default in place.
     pub(crate) fn predictor_nce(&self) -> Option<f64> {
         if self.activation != Some(ActivationMethod::HCD) || self.is_tof() {
             return None;
@@ -116,11 +83,6 @@ impl Acquisition {
             .then_some(nce)
     }
 
-    /// The activation name andes-ms2 is conditioned on: the dissociation and
-    /// the MS2 analyser (`HCD-FTMS`, `CID-ITMS`...). Without a
-    /// recorded activation, high-resolution runs are HCD and low-resolution
-    /// runs CID. Time-of-flight runs and activations outside the model's
-    /// vocabulary are "unknown".
     pub(crate) fn ms2_activation(&self) -> &'static str {
         if self.is_tof() {
             return "unknown";
@@ -140,10 +102,6 @@ impl Acquisition {
         }
     }
 
-    /// The instrument name andes-ms2 maps to its instrument family; empty
-    /// (unknown family) for instruments the model has no family for. The
-    /// training spectra hold no Astral run, so an Astral run takes the
-    /// Exploris family (orbitrap HCD) and the `HCD-FTMS` activation.
     pub(crate) fn ms2_instrument(&self) -> &'static str {
         match self.analyzer {
             Some(InstrumentType::QExactive) => "Q Exactive",
@@ -217,8 +175,6 @@ mod tests {
         }
     }
 
-    /// High-res ETD read in an Orbitrap is routed to a low-res model, yet the
-    /// acquisition stays high resolution.
     #[test]
     fn metadata_analyzer_decides_the_class_whatever_the_model() {
         let a = Acquisition::resolve(
@@ -242,7 +198,6 @@ mod tests {
         assert!(!a.high_res);
     }
 
-    /// The analyzer decides the class also when no scan names its activation.
     #[test]
     fn analyzer_without_activation_still_decides_the_class() {
         let a = Acquisition::resolve(
@@ -302,7 +257,6 @@ mod tests {
             orbi.predictor_instrument(InstrumentType::QExactive),
             InstrumentType::OrbitrapAstral
         );
-        // timsTOF records the collision energy in eV.
         let tims = Acquisition::resolve(
             Some(ActivationMethod::CID),
             Some(InstrumentType::TimsTOF),
@@ -316,7 +270,6 @@ mod tests {
             tims.predictor_instrument(InstrumentType::QExactive),
             InstrumentType::TimsTOF
         );
-        // An implausible value is not an NCE.
         let odd = Acquisition::resolve(
             Some(ActivationMethod::HCD),
             Some(InstrumentType::QExactive),
@@ -326,7 +279,6 @@ mod tests {
             meta(&[150.0]),
         );
         assert_eq!(odd.predictor_nce(), None);
-        // Ion-trap CID energies are not HCD NCEs.
         let cid = Acquisition::resolve(
             Some(ActivationMethod::CID),
             Some(InstrumentType::LowRes),
@@ -365,7 +317,6 @@ mod tests {
         let resolve = |act, analyzer, tol_da| {
             Acquisition::resolve(Some(act), analyzer, None, tol_da, None, meta(&[]))
         };
-        // Astral: orbitrap HCD, mapped to the Exploris family (no Astral training run).
         let astral = resolve(
             ActivationMethod::HCD,
             Some(InstrumentType::OrbitrapAstral),

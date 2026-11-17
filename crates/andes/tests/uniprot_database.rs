@@ -1,6 +1,3 @@
-//! End-to-end: a UniProt XML database (`--database *.xml.gz`) searches exactly
-//! like the equivalent UniProt FASTA, and its annotation options run through.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -80,25 +77,16 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         stderr.contains("14 annotated modification sites, 1 variant entries"),
         "{stderr}"
     );
-    // The mature chain after the propeptide (25-607) is a new N-terminus;
-    // BSA has no isoforms.
     assert!(
         stderr.contains("0 isoform entries (0 isoforms not rebuildable), 1 mature-chain entries"),
         "{stderr}"
     );
-    // Ten phosphosites on the canonical entry, inherited by the variant and
-    // the chain entry.
     assert!(
         stderr.contains("Annotated-site mod Phospho (+79.9663 Da): 30 sites on 3 target proteins"),
         "{stderr}"
     );
-    // Every PIN row names either the canonical entry or the variant entry.
     let pin_text = std::fs::read_to_string(&pin).unwrap();
     assert!(pin_text.lines().skip(1).all(|l| l.contains("P02769")));
-    // Provenance columns: a row is flagged when any protein it names is a
-    // variant or chain entry (a decoy peptide the canonical and the chain
-    // decoys share names both); only flagged rows carry a DeltaRefScore. The
-    // canonical BSA entry competes in most spectra.
     let header: Vec<&str> = pin_text.lines().next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
     let (var, chain, iso) = (col("IsVariant"), col("IsChain"), col("IsIsoform"));
@@ -128,7 +116,6 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         }
     }
 
-    // The same mods over FASTA: no annotation, so the restricted mods never apply.
     let out = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
@@ -147,8 +134,6 @@ fn annotated_site_mods_and_variants_run_end_to_end() {
         );
     }
 
-    // XML at the default (experimental) evidence keeps only BSA's glycation
-    // site: there is no phosphosite, which is reported, not counted as one.
     let out = search(
         "test-fixtures/BSA.xml.gz",
         &dir.path().join("exp.pin"),
@@ -222,8 +207,6 @@ fn rescoring_estimates_fdr_within_each_class() {
             "--uniprot-evidence",
             "curated",
             "--rescore-native",
-            // The fixture's few spectra pass no strict cutoff; keep every PSM
-            // so the table has rows to check.
             "--psm-fdr",
             "1",
         ],
@@ -233,8 +216,6 @@ fn rescoring_estimates_fdr_within_each_class() {
         stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
         "{stderr}"
     );
-    // The proteoform table: one row per family member with accepted evidence,
-    // the canonical entry first.
     let table = std::fs::read_to_string(dir.path().join("xml.proteoforms.tsv")).unwrap();
     let mut lines = table.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
@@ -249,7 +230,6 @@ fn rescoring_estimates_fdr_within_each_class() {
     );
     let q_value: f64 = first[4].parse().unwrap();
     assert!((0.0..=1.0).contains(&q_value), "{first:?}");
-    // One class (FASTA): the step reports nothing and changes nothing.
     let plain = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
@@ -271,8 +251,6 @@ fn knockoff_variants_are_searched_but_never_reported() {
             "--uniprot-evidence",
             "any",
             "--rescore-native",
-            // Keep every PSM, knockoff rows included, so their absence from
-            // the reports is what is checked.
             "--psm-fdr",
             "1",
         ],

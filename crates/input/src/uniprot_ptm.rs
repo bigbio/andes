@@ -1,23 +1,6 @@
-//! Mass of each UniProt modification name, for turning a UniProt XML
-//! `<feature type="modified residue">` (or lipidation / glycosylation site)
-//! into an annotated site with a mass.
-//!
-//! Generated from UniProt's PTM controlled vocabulary `ptmlist.txt` (release
-//! 2026_02, https://www.uniprot.org/docs/ptmlist; UniProt data is CC BY 4.0):
-//! every `MOD_RES`, `LIPID` and `CARBOHYD` entry with a monoisotopic mass
-//! difference (`MM`) and a single target residue (`TG`), keyed by its `ID`,
-//! which is the text UniProt writes as the feature description, with its
-//! position in the polypeptide (`PP`) as a [`SiteAnchor`]. Entries whose
-//! ID is a full glycan structure (over 80 characters) are left out. Sorted by
-//! name (byte order) for binary search; regenerate from a newer ptmlist.txt
-//! when UniProt adds modifications.
-
 use model::SiteAnchor;
 use model::SiteAnchor::{CTerminus as C, NTerminus as N, Residue as R};
 
-/// `(UniProt PTM name, target residue, monoisotopic mass difference in Da,
-/// anchor)`; the anchor is `N`/`C` for a modification UniProt places at the
-/// N-/C-terminus of the chain (`PP` line), `R` otherwise.
 #[rustfmt::skip]
 pub(crate) static PTM_MASSES: &[(&str, u8, f64, SiteAnchor)] = &[
     ("(2S)-4-hydroxyleucine", b'L', 15.994915, R),
@@ -432,16 +415,11 @@ pub(crate) static PTM_MASSES: &[(&str, u8, f64, SiteAnchor)] = &[
     ("Valine amide", b'V', -0.984016, C),
 ];
 
-/// the modified lysine after tryptic digestion. UniProt annotates them as an
-/// interchain `cross-link` with this description prefix and the modifier
-/// name in the closing parenthesis.
 pub(crate) const GLYGLY_CROSSLINK_PREFIX: &str =
     "Glycyl lysine isopeptide (Lys-Gly) (interchain with G-Cter in ";
 pub(crate) const GLYGLY_MODIFIERS: &[&str] = &["ubiquitin)", "NEDD8)", "ISG15)"];
 pub(crate) const GLYGLY_MASS: f64 = 114.042927;
 
-/// `(target residue, mass, anchor)` of the UniProt modification named `name`,
-/// after the cleanup UniProt descriptions need (see [`clean_description`]).
 pub(crate) fn ptm_mass(name: &str) -> Option<(u8, f64, SiteAnchor)> {
     PTM_MASSES
         .binary_search_by(|(n, _, _, _)| (*n).cmp(name))
@@ -449,10 +427,6 @@ pub(crate) fn ptm_mass(name: &str) -> Option<(u8, f64, SiteAnchor)> {
         .map(|i| (PTM_MASSES[i].1, PTM_MASSES[i].2, PTM_MASSES[i].3))
 }
 
-/// The modification name inside a UniProt feature description: drops a
-/// leading `(Microbial infection) ` and anything after the first `;`
-/// (`Phosphoserine; by PKA`, `N6-acetyllysine; alternate`), as OpenMS'
-/// UniPEFF does.
 pub(crate) fn clean_description(description: &str) -> &str {
     let d = description
         .strip_prefix("(Microbial infection) ")
@@ -483,7 +457,6 @@ mod tests {
             ptm_mass("N-linked (GlcNAc) asparagine"),
             Some((b'N', 203.079373, R))
         );
-        // A glycan of unknown composition has no single mass.
         assert_eq!(ptm_mass("N-linked (GlcNAc...) asparagine"), None);
     }
 

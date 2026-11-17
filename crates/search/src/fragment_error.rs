@@ -1,21 +1,3 @@
-//! Per-run fragment mass error, measured on confident PSMs of a sample of the
-//! run's spectra.
-//!
-//! A high-resolution analyzer's fragment error differs by instrument and by run:
-//! an Astral run measures about -2.5 ppm with a spread of under 2 ppm, an
-//! Orbitrap run can sit +4 ppm off, and TOF analyzers spread wider. The search
-//! scores a sample once, keeps the target PSMs at 1% target-decoy q-value,
-//! re-matches their most intense b/y ions in a wide window and takes a robust
-//! centre and spread of the errors. [`scoring_crate::scoring::FragmentErrorModel`]
-//! then sets the PIN feature tolerance and the ppm-Gaussian term from them.
-//!
-//! The same matched ions also give the error against the theoretical m/z the
-//! rank-table node scores use, which is rebuilt from the NOMINAL fragment mass
-//! (prefix `nominal_from(prefix)`, suffix `peptide nominal - prefix nominal`,
-//! as `psm_score` indexes the node-score cache). Its robust spread, in Da, is
-//! the rounding error of that mass on top of the instrument error, and sets
-//! the run's node-score window.
-
 use model::mass::{nominal_from, H2O, INTEGER_MASS_SCALER, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
@@ -25,17 +7,12 @@ use scoring_crate::scoring::FragmentErrorModel;
 use crate::match_engine::PreparedSearch;
 use crate::tdc::{confident_target_indices, ScoredLabel};
 
-/// Half-width of the window the sampled PSMs' ions are re-matched in (ppm).
-/// Wider than any supported analyzer's fragment error, so the measurement is
-/// not cut off by the default feature window.
 pub const MEASURE_WINDOW_PPM: f64 = 50.0;
 pub const TOP_IONS_PER_PSM: usize = 7;
 pub const MIN_CONFIDENT_PSMS: usize = 100;
 pub const MEASURE_Q: f64 = 0.01;
 pub const SAMPLE_SPECTRA: usize = 3000;
 
-/// Theoretical m/z of a charge-1 b/y ion rebuilt from its nominal fragment
-/// mass, the reference the node scores match against.
 fn nominal_reference_mz(ion: &PredictedIon, peptide: &Peptide) -> f64 {
     let scaler = INTEGER_MASS_SCALER as f64;
     match ion.kind {
@@ -48,10 +25,6 @@ fn nominal_reference_mz(ion: &PredictedIon, peptide: &Peptide) -> f64 {
     }
 }
 
-/// Errors of the `k` most intense b/y ions (charge 1) of `peptide` found
-/// within [`MEASURE_WINDOW_PPM`] in `spec` (peaks sorted by m/z): the signed
-/// ppm error against the exact m/z, and the signed Da error against the
-/// nominal-reference m/z.
 pub fn top_ion_errors(spec: &Spectrum, peptide: &Peptide, k: usize) -> Vec<(f64, f64)> {
     let peaks = &spec.peaks;
     let mut matched: Vec<(f32, (f64, f64))> = Vec::new();
@@ -82,7 +55,6 @@ fn median(v: &mut [f64]) -> f64 {
     }
 }
 
-/// Median and normal-consistent MAD of `errors`.
 fn centre_and_spread(errors: &[f64]) -> (f64, f64) {
     let mut v = errors.to_vec();
     let c = median(&mut v);
@@ -90,10 +62,6 @@ fn centre_and_spread(errors: &[f64]) -> (f64, f64) {
     (c, 1.4826 * median(&mut dev))
 }
 
-/// Robust centre and spread of pooled ion errors `(ppm, nominal-reference
-/// Da)`. One trimming pass at four ppm spreads drops chance matches from the
-/// wide window before the final estimate; the nominal-reference centre and
-/// spread are taken over the ions that pass.
 pub fn estimate(errors: &[(f64, f64)], psms: usize) -> Option<FragmentErrorModel> {
     if errors.len() < MIN_CONFIDENT_PSMS {
         return None;
@@ -119,12 +87,9 @@ pub fn estimate(errors: &[(f64, f64)], psms: usize) -> Option<FragmentErrorModel
     )
 }
 
-/// Why a measurement was not made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NotMeasured {
-    /// Fewer than [`MIN_CONFIDENT_PSMS`] target PSMs at [`MEASURE_Q`].
     TooFewPsms { confident: usize, scored: usize },
-    /// Too few matched ions survived the robust trim.
     TooFewIons { confident: usize },
 }
 
@@ -143,9 +108,6 @@ impl std::fmt::Display for NotMeasured {
     }
 }
 
-/// Score `sample`, keep the rank-1 target PSMs at [`MEASURE_Q`] and measure
-/// their fragment error. The sample must suit `prepared`'s retrieval (one
-/// fragment-index slice when the index is on).
 pub fn measure_on_queues(
     prepared: &PreparedSearch<'_>,
     sample: &[Spectrum],
@@ -197,8 +159,6 @@ mod tests {
         Peptide::new(aas, b'K', b'K')
     }
 
-    /// The most intense matched ions are taken, each at its signed ppm error;
-    /// ions outside the 50 ppm window are not matched.
     #[test]
     fn top_ion_errors_take_the_most_intense_matches() {
         let p = peptide(b"PEPTIDEK");
@@ -219,14 +179,10 @@ mod tests {
         assert!(errs.iter().all(|e| (e.0 - 3.0).abs() < 1e-6), "{errs:?}");
         let all = top_ion_errors(&spec, &p, 100);
         assert_eq!(all.len(), ions.len() - 1);
-        // The nominal-reference error is the exact error plus the rounding of
-        // the nominal fragment mass: well under the 0.5 Da bin, not the ppm error.
         assert!(all.iter().all(|e| e.1.abs() < 0.2), "{all:?}");
         assert!(all.iter().any(|e| e.1.abs() > 0.005), "{all:?}");
     }
 
-    /// Errors around -2.5 ppm (spread 1.6) with 10% chance matches spread over
-    /// the whole window: the trimmed estimate recovers the centre and spread.
     #[test]
     fn estimate_is_robust_to_chance_matches() {
         let mut state = 12345u64;
@@ -252,8 +208,6 @@ mod tests {
             .map(|(i, &e)| (e, (i % 21) as f64 * 0.01 - 0.1))
             .collect();
         let m = estimate(&pairs, 700).expect("estimate");
-        // Nominal-reference errors spread evenly over +-0.1 Da: centre near 0,
-        // normal-consistent MAD near 0.074 Da.
         let (nc, ns) = m.node_error_da.expect("nominal-reference error");
         assert!(nc.abs() < 0.011 && (ns - 0.074).abs() < 0.01, "{m:?}");
         let w = m.node_window_da().unwrap();

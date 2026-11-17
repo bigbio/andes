@@ -1,139 +1,26 @@
-//! Template-fit evidence for one (precursor, run) hypothesis.
-//!
-//! The hypothesis "the precursor elutes near `t_hat` with a Gaussian profile
-//! and its theoretical isotope ratios" is fitted directly to the MS1 data, and
-//! one log-likelihood ratio summarises the evidence. Identified pairs,
-//! transfers and decoys all go through [`fit`], so their statistics are the
-//! same kind of number.
-//!
-//! Data. With `W = 4 s + 4 w_prior`, the MS1 scans with RT in
-//! `[t_hat - W, t_hat + W]` give, for isotope `i`, the trace `y_i[j]`: the most
-//! intense centroid within `tol_ppm` of `mu + i * 1.003355 / z` (0 when none),
-//! and one more trace `y_m1` at `mu - 1.003355 / z`. The `4 w_prior` term keeps
-//! a stretch of baseline on both sides of the peak even when `s` is small.
-//!
-//! Model. `y_i[j] = b_i + A * pi_i * g(t_j; t0, w) + noise`, with
-//! `g = exp(-(t - t0)^2 / (2 w^2))`, where:
-//!
-//! * the background `b_i` is a nuisance parameter fitted jointly with `A`;
-//! * `sigma_i = 1.4826 * median|y_i[j+1] - y_i[j]| / sqrt(2)`, floored at
-//!   `0.5 * L`, where the detection limit `L` is the median over the
-//!   window's scans of each scan's own limit (the 5th percentile of its
-//!   centroid intensities, 1.0 for an empty scan; precomputed by
-//!   [`Ms1RunIndex`]). A missing centroid means "below detection", so a trace
-//!   with no centroids is uncertain to about `L`, not to 0;
-//! * `pi` is the envelope scaled to sum to 1 over its 4 entries.
-//!
-//! Fit. Over `t0` in the scan RTs inside `[t_hat - 3 s, t_hat + 3 s]` (the
-//! scan nearest `t_hat` when none) and `w` in `{0.7, 1.0, 1.4} * w_prior`, with
-//! the window means `ybar_i` and `gbar`, the weighted least-squares amplitude
-//! over the used isotopes, with each `b_i` profiled out, is
-//! `A = max(0, num / den)`, where
-//! `num = sum_i pi_i sum_j (y_i[j] - ybar_i) (g_j - gbar) / sigma_i^2` and
-//! `den = sum_i pi_i^2 sum_j (g_j - gbar)^2 / sigma_i^2`; then
-//! `b_i = ybar_i - A pi_i gbar`. The profile log-likelihood ratio against
-//! "background only" is `LLR = A num - A^2 den / 2`. The fit maximises
-//! `LLR - (t0 - t_hat)^2 / (2 s^2)`; the first maximum in (t0, w) order wins.
-//! A candidate whose `sum_j (g_j - gbar)^2` is below `1e-9` (a profile flat
-//! over the window) is skipped. The search sums each candidate's profile over
-//! the scans within `9 w` of `t0` only: beyond, `g_j < 3e-18` while the
-//! candidate's own apex scan has `g = 1`, so the terms left out can only move
-//! the objective by rounding. The reported fit (amplitude, LLR, features) is
-//! computed over the whole window.
-//!
-//! Interference. At the optimum, each isotope `i` in `{1, 2, 3}` gets its own
-//! amplitude `A_i = sum_j (y_i[j] - ybar_i) (g_j - gbar) / (pi_i S)` with
-//! standard error `se_i = sigma_i / (pi_i sqrt(S))`, where
-//! `S = sum_j (g_j - gbar)^2`, and is compared with `A_(-i)`, the joint
-//! amplitude fitted without it at the same `(t0, w)`, whose standard error is
-//! `se_(-i) = 1 / sqrt(den_(-i))`. If the largest
-//! `|A_i - A_(-i)| / sqrt(se_i^2 + se_(-i)^2)` exceeds 3, that one isotope is
-//! dropped and `A_(-i)` is the refitted amplitude. The test is two-sided: an
-//! interfered isotope deviates upwards, and a missing or below-detection one
-//! deviates downwards (with the detection-limit floor it can carry a large
-//! weight). Isotope 0 is never dropped. Target and decoy probes go through the
-//! same test.
-//!
-//! Refit. When an isotope is dropped, `(t0, w)` is searched again over the
-//! same grid and RT prior with the retained isotopes only, so that an
-//! interferer on one trace does not keep the apex at its own elution time.
-//! The test is then repeated at the new optimum over all isotopes. When it
-//! keeps every isotope or drops the same one, the refit without the dropped
-//! isotope stands; when it drops a different isotope, that one is dropped
-//! instead (the first is used again) and `(t0, w)` is searched once more,
-//! which is final. At most two refits, so at most three grid
-//! searches per probe. Every reported value (amplitude, LLR, features) is
-//! computed at the final `(t0, w)` and isotope set.
-//!
-//! Trace area. Next to the template quantity `A w sqrt(2 pi)`, every fit
-//! reports a template-free one, `trace_quantity`: each used isotope's trace,
-//! minus its baseline, integrated by the trapezoid rule over the scans in
-//! `[t0 - 3 w', t0 + 4 w']`, `w' = max(w, w_prior)` (longer after the apex,
-//! where peaks tail), and the per-isotope areas `a_i` combined with the
-//! fit's weights into the area of the fitted pattern (the first
-//! `n_isotopes`, as the template quantity),
-//! `sum_i pi_i a_i / sigma_i^2 / sum_i pi_i^2 / sigma_i^2` over the used
-//! isotopes (the template amplitude's estimator, applied to areas instead of
-//! heights). The baseline of a trace comes from the window's scans outside
-//! that range: the median of each side with at least 3 scans; with two such
-//! sides, the median of both pooled, unless the side medians differ by more
-//! than 3 standard errors (`sqrt(pi / 2) sigma_i / sqrt(n)` each), when the
-//! lower one is taken (the other side holds a tail or a neighbouring peak);
-//! with none, the fit's `b_i`. For a Gaussian peak the trace area equals the
-//! template quantity at the fitted width; for a tailing or otherwise
-//! non-Gaussian peak it follows the measured shape. Its standard error
-//! carries the trace noise `sigma_i` of every integrated scan and the
-//! baseline's over the integration span.
-//!
-//! The per-probe arithmetic, [`fit_traces`], takes the extracted traces as
-//! slices. [`fit_many`] extracts the traces of many probes in one RT sweep
-//! over the run and passes them to the same arithmetic, so it reproduces
-//! [`fit`] exactly.
-
 use model::mass::ISOTOPE;
 
 use crate::decoys::Probe;
 use crate::gaussian;
 use crate::ms1_index::{slice_value, MobilityGate, Ms1RunIndex};
 
-/// Isotopes the envelope carries (M+0 to M+3).
 pub const MAX_ISOTOPES: usize = 4;
-/// A window with fewer MS1 scans than this is not fitted.
 pub const MIN_SCANS: usize = 5;
-/// Width grid of [`fit`], as multiples of `w_prior`.
 pub const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
-/// Consistency factor of the median absolute deviation for a Gaussian.
 const MAD_SCALE: f64 = 1.4826;
-/// Detection limit used when the given one is not finite and positive.
 const DEFAULT_DETECTION_LIMIT: f64 = 1.0;
-/// Noise floor as a fraction of the detection limit.
 const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
-/// Smallest `sum_j (g_j - gbar)^2` a candidate profile may have; below it the
-/// profile is flat over the window and carries no amplitude information.
 const MIN_CENTRED_SGG: f64 = 1e-9;
-/// Two-sided z threshold of the isotope exclusion test.
 const EXCLUSION_Z: f64 = 3.0;
-/// Floor, seconds, on `s` and `w_prior` (a zero or non-finite value would
-/// divide by zero in the RT prior or the elution profile).
 const MIN_SCALE_S: f64 = 1e-3;
-/// Reach of the trace area's integration range before and after the apex,
-/// in multiples of `max(w, w_prior)` (a fit narrower than the run's usual
-/// peak does not cut off its flanks); longer after it, where peaks tail.
 const TRACE_WIDTHS_BEFORE: f64 = 3.0;
 const TRACE_WIDTHS_AFTER: f64 = 4.0;
-/// Fewest window scans on one side of the integration range that give a
-/// trace's baseline from that side.
 const MIN_BASELINE_SCANS: usize = 3;
-/// Difference, in standard errors, between the two sides' baseline medians
-/// above which the lower side alone gives the baseline.
 const BASELINE_SIDE_Z: f64 = 3.0;
 
-/// Extraction settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceParams {
-    /// Centroid tolerance: `|m/z - target| <= target * tol_ppm * 1e-6`.
     pub tol_ppm: f64,
-    /// Isotopes extracted and fitted, 1 to [`MAX_ISOTOPES`] (clamped).
     pub n_isotopes: usize,
 }
 
@@ -146,80 +33,29 @@ impl Default for EvidenceParams {
     }
 }
 
-/// The fitted hypothesis and its summary statistics. Every field is finite
-/// for finite input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Evidence {
-    /// `A`, the total amplitude of the isotope pattern at the apex.
     pub amplitude: f64,
-    /// `1 / sqrt(den)` over the used isotopes (background profiled out).
     pub amplitude_se: f64,
-    /// `A * w * sqrt(2 pi)`: the area under the fitted Gaussian profile of
-    /// the fitted isotopes (the first `n_isotopes`, at most
-    /// [`MAX_ISOTOPES`]; `pi` sums to 1 over them), above the fitted
-    /// background. Isotopes past the last fitted one are not part of it:
-    /// the MBR table reports it divided by the share of the whole pattern
-    /// those isotopes hold.
     pub quantity: f64,
-    /// `amplitude_se * w * sqrt(2 pi)`: the least-squares standard error of
-    /// the fitted amplitude at the fixed peak shape. It is the fit error of
-    /// the amplitude, not the cell's run-to-run uncertainty.
     pub quantity_se: f64,
-    /// Profile log-likelihood ratio against "background only" at the optimum
-    /// (0 when `A = 0`).
     pub llr: f64,
-    /// `(t0 - t_hat) / s`.
     pub rt_z: f64,
-    /// `w / w_prior`.
     pub width_ratio: f64,
-    /// Cosine between the per-isotope heights `A_i * pi_i` (each isotope's
-    /// own centred projection on `g`) and `pi` over the used isotopes; 1 when the
-    /// observed ratios match the theoretical ones, 0 when either vector is
-    /// zero.
     pub envelope_cos: f64,
-    /// Minimum, over the first two isotopes of the final fit, of the Pearson
-    /// correlation between the trace and `g` over `[t0 - 2w, t0 + 2w]`; 0 when
-    /// the fit uses fewer than two isotopes or that range holds fewer than 3
-    /// scans, and 0 for a constant trace.
     pub coherence: f64,
-    /// The M-1 trace's amplitude, fitted with its own background like `A_i`
-    /// (clamped at 0), divided by
-    /// `pi_0 * max(A, amplitude_se)`; near 0 when `mu` is monoisotopic. The
-    /// floor at one standard error keeps it finite when `A = 0`.
     pub m1_ratio: f64,
-    /// Intensity-weighted ppm error of the isotope-0 centroids over
-    /// `[t0 - w, t0 + w]` (0 when there are none).
     pub mass_err_ppm: f64,
-    /// Scans inside `[t0 - 2w, t0 + 2w]`.
     pub n_points: u32,
-    /// Bit `i` set when isotope `i` is in the final fit (at most one of
-    /// isotopes 1-3 is removed by the two-sided exclusion test).
     pub isotopes_used: u8,
-    /// Fitted apex, seconds.
     pub t0: f64,
-    /// Fitted Gaussian width (standard deviation), seconds.
     pub w: f64,
-    /// Per isotope `i`, its own fitted height `A_i * pi_i` (the trace's
-    /// centred projection on `g` over `S`) at the final `(t0, w)`, whether or
-    /// not the isotope is in the final fit; 0 beyond the extracted isotopes.
     pub iso_heights: [f64; MAX_ISOTOPES],
-    /// Asymmetry of the isotope-0 residual around the apex: over the scans
-    /// within `[t0 - 3w, t0 + 3w]`, `sum_j r_j sign(t_j - t0)` over
-    /// `sum_j A pi_0 g_j`, with `r_j` the trace minus its fitted background
-    /// and profile. Positive when the peak tails after the apex; 0 when
-    /// `A = 0`.
     pub tailing: f64,
-    /// The trace area of the module docs: the baseline-subtracted isotope
-    /// traces integrated over `[t0 - 3 w', t0 + 4 w']`, `w' = max(w,
-    /// w_prior)`, on the scale of `quantity` but without the Gaussian shape.
-    /// Not clamped (an absent analyte averages 0); 0 when that range holds
-    /// fewer than 2 scans.
     pub trace_quantity: f64,
-    /// Standard error of `trace_quantity` (0 when it is 0 for want of scans).
     pub trace_quantity_se: f64,
 }
 
-/// The RT prior of a probe, with the floors of [`fit`] applied.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prior {
     pub t_hat: f64,
@@ -228,7 +64,6 @@ pub struct Prior {
 }
 
 impl Prior {
-    /// `s` and `w_prior` floored at 1 ms (a NaN becomes the floor).
     pub fn of(probe: &Probe) -> Self {
         Self {
             t_hat: probe.t_hat,
@@ -237,14 +72,11 @@ impl Prior {
         }
     }
 
-    /// Half-width `W = 4 s + 4 w_prior` of the extraction window.
     pub fn half_window(&self) -> f64 {
         4.0 * self.s + 4.0 * self.w_prior
     }
 }
 
-/// Reusable buffers for [`fit_with`]: the extracted traces and the work space
-/// of [`fit_traces`].
 #[derive(Debug, Default)]
 pub struct FitScratch {
     rt: Vec<f64>,
@@ -255,9 +87,6 @@ pub struct FitScratch {
     work: Workspace,
 }
 
-/// Work space of [`fit_traces`]; contents are overwritten on every call,
-/// except the cached grid profiles, which only depend on the call's RTs,
-/// prior and width grid.
 #[derive(Debug, Default)]
 pub struct Workspace {
     sort: Vec<f32>,
@@ -266,20 +95,10 @@ pub struct Workspace {
     grids: GridCache,
 }
 
-/// Grid profiles kept per workspace: a refit, and a mass-shift decoy fitted
-/// next to its target, search the same grid as the fit before.
 const GRID_CACHE_ENTRIES: usize = 3;
-/// Largest grid, in stored profile values, that is cached; a larger one is
-/// computed in place.
 const GRID_CACHE_MAX_VALUES: usize = 1 << 21;
-/// `|t - t0| / w` beyond which the grid search and the width refinement
-/// leave a scan out of a profile's sums: there
-/// `exp(-(t - t0)^2 / (2 w^2)) < 3e-18`, against 1 at the candidate's apex.
 const PROFILE_REACH: f64 = 9.0;
 
-/// The scans of `rt` (ascending) within [`PROFILE_REACH`] widths of `t0`.
-/// Every scan when `rt` is not all finite (`finite`), or `t0` or the reach
-/// is not.
 fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> {
     let reach = PROFILE_REACH * w;
     if !(finite && t0.is_finite() && reach.is_finite()) {
@@ -290,13 +109,8 @@ fn support(rt: &[f64], finite: bool, t0: f64, w: f64) -> std::ops::Range<usize> 
     lo..hi.max(lo)
 }
 
-/// The spacing of the grid search's apex candidates, as a share of the
-/// smallest width searched: with MS1 scans denser than that, only some scans
-/// are tried as the apex, then every scan around the best of those.
 const APEX_SPACING_OF_WIDTH: f64 = 0.5;
 
-/// The apex candidates of a grid search: every `stride`-th scan of `range`
-/// (not empty) from its first, and its last.
 #[derive(Debug, Clone)]
 struct Apexes {
     range: std::ops::Range<usize>,
@@ -304,9 +118,6 @@ struct Apexes {
 }
 
 impl Apexes {
-    /// The largest stride, at least 1, whose candidates are at most
-    /// [`APEX_SPACING_OF_WIDTH`] of `w_min` (the smallest width searched)
-    /// apart, by the mean spacing of the scans of `range` in `rt`.
     fn of(rt: &[f64], range: std::ops::Range<usize>, w_min: f64) -> Self {
         let n = range.len();
         let mut stride = 1;
@@ -320,14 +131,12 @@ impl Apexes {
         Self { range, stride }
     }
 
-    /// The candidate scans, ascending.
     fn iter(&self) -> impl Iterator<Item = usize> + Clone + '_ {
         let last = self.range.end - 1;
         let tail = ((last - self.range.start) % self.stride != 0).then_some(last);
         self.range.clone().step_by(self.stride).chain(tail)
     }
 
-    /// The other scans of `range` less than a stride from the candidate `k`.
     fn around(&self, k: usize) -> impl Iterator<Item = usize> + '_ {
         let lo = k.saturating_sub(self.stride - 1).max(self.range.start);
         let hi = (k + self.stride).min(self.range.end);
@@ -335,9 +144,6 @@ impl Apexes {
     }
 }
 
-/// One cell `(t0, w)` of a grid: its support among the window's scans, the
-/// offset of its profile values in [`GridProfiles::g`], and
-/// `(sum_j g_j, sum_j g_j^2)`.
 #[derive(Debug, Clone)]
 struct Cell {
     scans: std::ops::Range<usize>,
@@ -346,10 +152,6 @@ struct Cell {
     sgg: f64,
 }
 
-/// The profile of every candidate `(t0, w)` of one grid search, t0 major,
-/// width minor: per cell, `g_j` over its support. The key is the window's
-/// RTs, the prior and the width grid, compared bit for bit, so a hit holds
-/// exactly the values a search would compute.
 #[derive(Debug, Default)]
 struct GridProfiles {
     rt: Vec<u64>,
@@ -373,18 +175,12 @@ impl GridProfiles {
     }
 }
 
-/// The most recently used grid profiles, most recent last.
 #[derive(Debug, Default)]
 struct GridCache {
     entries: Vec<GridProfiles>,
 }
 
 impl GridCache {
-    /// The profiles of the grid over `rt` (apexes `candidates`, widths
-    /// `widths * prior.w_prior`), computed unless cached; `None` when the
-    /// grid holds more than [`GRID_CACHE_MAX_VALUES`] values. The apexes are
-    /// determined by the key, as they follow from `rt`, the prior and the
-    /// widths.
     fn get(
         &mut self,
         rt: &[f64],
@@ -456,9 +252,6 @@ impl GridCache {
     }
 }
 
-/// Fit `probe` (monoisotopic m/z, charge `charge`, isotope fractions
-/// `envelope`) to `ms1`, which must hold one FAIMS compensation-voltage group.
-/// `None` only when the extraction window holds fewer than [`MIN_SCANS`] scans.
 pub fn fit(
     ms1: &Ms1RunIndex,
     probe: &Probe,
@@ -469,8 +262,6 @@ pub fn fit(
     fit_with(ms1, probe, charge, envelope, p, &mut FitScratch::default())
 }
 
-/// [`fit`] with caller-owned buffers, for fitting many probes without
-/// reallocating.
 pub fn fit_with(
     ms1: &Ms1RunIndex,
     probe: &Probe,
@@ -482,9 +273,6 @@ pub fn fit_with(
     fit_on_grid(ms1, probe, charge, envelope, p, &WIDTH_GRID, scratch)
 }
 
-/// [`fit_with`] over the width grid `widths` (multiples of `w_prior`,
-/// ascending, not empty) instead of [`WIDTH_GRID`]. The extraction window is
-/// unchanged.
 pub fn fit_on_grid(
     ms1: &Ms1RunIndex,
     probe: &Probe,
@@ -497,9 +285,6 @@ pub fn fit_on_grid(
     fit_on_grid_gated(ms1, probe, charge, envelope, p, widths, None, scratch)
 }
 
-/// [`fit_on_grid`] with every trace (isotopes and M-1) read within the
-/// mobility `gate` on mobility-resolved scans (see
-/// [`crate::ms1_index::slice_value`]).
 #[allow(clippy::too_many_arguments)]
 pub fn fit_on_grid_gated(
     ms1: &Ms1RunIndex,
@@ -557,8 +342,6 @@ pub fn fit_on_grid_gated(
     ))
 }
 
-/// The median of the per-scan detection limits over `scans` (non-empty), each
-/// the 5th percentile of that scan's centroid intensities.
 fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut Vec<f32>) -> f64 {
     buf.clear();
     buf.extend(scans.map(|j| ms1.detection_limit(j)));
@@ -566,9 +349,6 @@ fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut V
     median_sorted(buf)
 }
 
-/// Fill the scratch traces over `scans`: RT, the isotope traces 0..`n_iso`,
-/// the M-1 trace and the isotope-0 centroid m/z (0.0 when none). With a
-/// mobility `gate` on a mobility-resolved run, every trace is read within it.
 #[allow(clippy::too_many_arguments)]
 fn traces(
     ms1: &Ms1RunIndex,
@@ -583,8 +363,6 @@ fn traces(
     let slices = target_slices(mu, charge, n_iso, tol_ppm);
     out.rt.clear();
     out.rt.extend(scans.clone().map(|j| ms1.rt(j)));
-    // Without a gate `slice_in` is `apex_centroid` (or `(0, 0)`) and its
-    // value `max_in`, on plain and mobility-resolved scans alike.
     out.mz0.clear();
     out.y[0].clear();
     let (lo, hi) = slices[0];
@@ -603,11 +381,8 @@ fn traces(
         .extend(scans.map(|j| ms1.slice_in(j, lo, hi, gate).1));
 }
 
-/// Traces per probe: isotopes 0 to `n_iso - 1`, then M-1.
 const MAX_TRACES: usize = MAX_ISOTOPES + 1;
 
-/// The `[lo, hi]` m/z slices of a probe's traces: isotope `i` at index `i`
-/// for `i < n_iso`, the M-1 trace at index `n_iso`.
 fn target_slices(mu: f64, charge: u8, n_iso: usize, tol_ppm: f64) -> [(f64, f64); MAX_TRACES] {
     let step = ISOTOPE / charge as f64;
     let slice = |target: f64| {
@@ -623,37 +398,15 @@ fn target_slices(mu: f64, charge: u8, n_iso: usize, tol_ppm: f64) -> [(f64, f64)
     out
 }
 
-/// One probe of [`fit_many`]: the arguments of [`fit_on_grid`] that vary per
-/// probe.
 #[derive(Debug, Clone, Copy)]
 pub struct FitJob<'a> {
     pub probe: Probe,
     pub charge: u8,
     pub envelope: &'a [f32; 4],
-    /// Width grid, multiples of `w_prior` (not empty).
     pub widths: &'a [f64],
-    /// Mobility window every trace is read within on a mobility-resolved run
-    /// (see [`crate::ms1_index::slice_value`]); `None` reads whole slices.
     pub mobility: Option<MobilityGate>,
 }
 
-/// [`fit_on_grid`] for every job, in job order, with the same result for each
-/// job, extracted in one RT sweep over `ms1` instead of one search per scan
-/// and trace.
-///
-/// The jobs, sorted by the first scan of their extraction window, are cut
-/// into contiguous runs fitted in parallel. Each run sweeps the scans from its
-/// first window start to its last window end; a job becomes active at its
-/// first scan, and at every scan the m/z-ascending centroids are merge-joined
-/// with the active jobs' trace slices sorted by their lower bound, keeping
-/// per slice the value of [`crate::ms1_index::slice_value`] within the job's
-/// mobility window, as [`Ms1RunIndex::slice_in`] gives it. A job is fitted by [`fit_traces`] as
-/// soon as its window closes and its buffers are reused, so memory follows
-/// the active jobs. Every job is extracted and fitted by one sweep from its
-/// own traces only, so the cut does not change any result. A job whose slices
-/// are not finite is fitted by [`fit_on_grid`]; a scan whose centroids are
-/// not in ascending m/z order (a NaN m/z) is searched per slice as
-/// [`Ms1RunIndex::max_in`] does.
 pub fn fit_many(ms1: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> Vec<Option<Evidence>> {
     use rayon::prelude::*;
 
@@ -721,12 +474,9 @@ pub fn fit_many(ms1: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> Vec<O
     out
 }
 
-/// Fewest jobs per parallel sweep of [`fit_many`].
 const MIN_SWEEP_CHUNK: usize = 64;
-/// Parallel sweeps per worker thread in [`fit_many`], for load balance.
 const SWEEP_CHUNKS_PER_THREAD: usize = 32;
 
-/// A job of [`fit_many`] with its extraction window and trace slices.
 struct Planned {
     job: usize,
     prior: Prior,
@@ -734,27 +484,19 @@ struct Planned {
     slices: [(f64, f64); MAX_TRACES],
 }
 
-/// Whether the centroids are in ascending m/z order without a NaN, so the
-/// slice starts found by a forward merge equal [`Ms1RunIndex::max_in`]'s binary
-/// search.
 fn mz_ascending(peaks: &[(f64, f32)]) -> bool {
     peaks.iter().all(|p| !p.0.is_nan()) && peaks.windows(2).all(|w| w[0].0 <= w[1].0)
 }
 
-/// One trace slice of an active job in a sweep.
 #[derive(Debug, Clone, Copy)]
 struct Slice {
     lo: f64,
     hi: f64,
-    /// The job's buffer in the sweep.
     slot: usize,
-    /// Isotope `0..n_iso`, or `n_iso` for M-1.
     trace: usize,
-    /// The job's mobility window.
     gate: Option<MobilityGate>,
 }
 
-/// Trace buffers of one active job.
 #[derive(Debug, Default)]
 struct Buffers {
     planned: usize,
@@ -763,8 +505,6 @@ struct Buffers {
     mz0: Vec<f64>,
 }
 
-/// Extracts and fits the jobs of `planned` (sorted by window start) in one
-/// sweep over their scans; `ordered[j]` is [`mz_ascending`] of scan `j`.
 fn sweep(
     ms1: &Ms1RunIndex,
     jobs: &[FitJob],
@@ -904,15 +644,6 @@ fn sweep(
     out
 }
 
-/// The template fit on extracted traces.
-///
-/// `rt` is ascending and non-empty; `traces[i]` is isotope `i` (1 to
-/// [`MAX_ISOTOPES`] traces), `m1` the M-1 trace and `mz0` the isotope-0
-/// centroid m/z (0.0 when none), all of `rt`'s length. `mu` is the probe's
-/// monoisotopic m/z; `detection_limit` is `L` (see the module docs; a
-/// non-finite or non-positive value is replaced by 1.0). A degenerate envelope (non-finite entries, a
-/// non-positive sum or `pi_0 = 0`) is treated as `[1, 0, 0, 0]`; isotopes with
-/// `pi_i = 0` are not used.
 #[allow(clippy::too_many_arguments)]
 pub fn fit_traces(
     rt: &[f64],
@@ -939,7 +670,6 @@ pub fn fit_traces(
     )
 }
 
-/// [`fit_traces`] over the width grid `widths` (multiples of `w_prior`).
 #[allow(clippy::too_many_arguments)]
 fn fit_traces_on_grid(
     rt: &[f64],
@@ -1010,9 +740,6 @@ fn fit_traces_on_grid(
     )
 }
 
-/// Fills `g` with the profile at `(t0, w)` over `rt` and returns
-/// `sgg = sum_j (g_j - gbar)^2` (floored at [`MIN_CENTRED_SGG`]) and each
-/// trace's centred projection on it.
 fn profile(
     rt: &[f64],
     traces: &[&[f32]],
@@ -1036,8 +763,6 @@ fn profile(
     (sgg, proj)
 }
 
-/// `envelope / sum(envelope)`, or `[1, 0, 0, 0]` when that is not a valid
-/// distribution with `pi_0 > 0`.
 fn normalised(envelope: &[f32; 4]) -> [f64; MAX_ISOTOPES] {
     let e = envelope.map(|v| v as f64);
     let sum: f64 = e.iter().sum();
@@ -1047,8 +772,6 @@ fn normalised(envelope: &[f32; 4]) -> [f64; MAX_ISOTOPES] {
     e.map(|v| v / sum)
 }
 
-/// `sum_j (y_j - ybar) g_j`, which equals `sum_j (y_j - ybar) (g_j - gbar)`
-/// when `ybar` is the mean of `y`.
 fn project(y: &[f32], ybar: f64, g: &[f64]) -> f64 {
     y.iter()
         .zip(g)
@@ -1056,7 +779,6 @@ fn project(y: &[f32], ybar: f64, g: &[f64]) -> f64 {
         .sum()
 }
 
-/// Mean of the trace (0 when empty).
 fn mean(y: &[f32]) -> f64 {
     if y.is_empty() {
         0.0
@@ -1065,8 +787,6 @@ fn mean(y: &[f32]) -> f64 {
     }
 }
 
-/// The trace's noise, `1.4826 * median|successive difference| / sqrt(2)`,
-/// floored at `floor`.
 fn noise_sigma(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> f64 {
     sort.clear();
     sort.extend(y.windows(2).map(|w| (w[1] - w[0]).abs()));
@@ -1075,8 +795,6 @@ fn noise_sigma(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> f64 {
     (MAD_SCALE * mad / std::f64::consts::SQRT_2).max(floor)
 }
 
-/// Median of an ascending slice (mean of the middle two for an even
-/// length; 0 when empty).
 fn median_sorted(v: &[f32]) -> f64 {
     match v.len() {
         0 => 0.0,
@@ -1085,9 +803,6 @@ fn median_sorted(v: &[f32]) -> f64 {
     }
 }
 
-/// The (t0, w) maximising `LLR - (t0 - t_hat)^2 / (2 s^2)` over the scan RTs
-/// and `widths * w_prior`, with every isotope in `mask`, with `w` then
-/// refined continuously at that `t0` (see the module docs).
 #[allow(clippy::too_many_arguments)]
 fn best_alignment(
     rt: &[f64],
@@ -1100,8 +815,6 @@ fn best_alignment(
     widths: &[f64],
     work: &mut Workspace,
 ) -> (f64, f64) {
-    // z_j = sum_i pi_i (y_i[j] - ybar_i) / sigma_i^2 sums to 0 over j, so
-    // num = sum_j z_j g_j and den = d * (sum_j g_j^2 - (sum_j g_j)^2 / n).
     let z = &mut work.z;
     z.clear();
     z.resize(rt.len(), 0.0);
@@ -1127,9 +840,6 @@ fn best_alignment(
     };
     let apexes = Apexes::of(rt, range, widths[0] * prior.w_prior);
     let n = rt.len() as f64;
-    // The profile log-likelihood ratio from num = sum_j z_j g_j,
-    // sg = sum_j g_j and sgg = sum_j g_j^2; minus infinity for a profile
-    // flat over the window.
     let llr_of = |num: f64, sg: f64, sgg: f64| {
         let centred = sgg - sg * sg / n;
         if centred < MIN_CENTRED_SGG {
@@ -1175,8 +885,6 @@ fn best_alignment(
             }
         }
     }
-    // The scans between the apex candidates, around the best of them, at its
-    // width.
     if apexes.stride > 1 && best.2 != usize::MAX {
         let f = widths[best.2];
         for k in apexes.around(best.1) {
@@ -1204,14 +912,8 @@ fn best_alignment(
     (t0, w)
 }
 
-/// Golden-section steps of the width refinement; each shrinks the bracket
-/// by a factor 0.618.
 const WIDTH_REFINE_STEPS: usize = 16;
 
-/// The bracket, as multiples of `w_prior`, of the width refinement around
-/// `widths[i]`: its neighbours on the grid, or one grid step (as a ratio)
-/// beyond the grid's ends; `(f, f)` for a one-point grid. `widths` is
-/// ascending and positive.
 fn width_bracket(widths: &[f64], i: usize) -> (f64, f64) {
     let f = widths[i];
     match widths.len() {
@@ -1232,9 +934,6 @@ fn width_bracket(widths: &[f64], i: usize) -> (f64, f64) {
     }
 }
 
-/// The argument in `[lo, hi]` maximising `f` by golden-section search,
-/// starting from `x0` (inside the bracket) with `f(x0) = f0`; `x0` is kept
-/// unless a probe beats it, so the result is never worse than the start.
 fn golden_max<F: Fn(f64) -> f64>(f: F, mut lo: f64, mut hi: f64, x0: f64, f0: f64) -> f64 {
     const INV_PHI: f64 = 0.618_033_988_749_894_9;
     let (mut best_x, mut best_f) = (x0, f0);
@@ -1272,7 +971,6 @@ fn golden_max<F: Fn(f64) -> f64>(f: F, mut lo: f64, mut hi: f64, x0: f64, f0: f6
     best_x
 }
 
-/// Index of the RT nearest `t` (the earlier one on a tie); `rt` non-empty.
 fn nearest(rt: &[f64], t: f64) -> usize {
     let i = rt.partition_point(|&x| x < t);
     if i == 0 {
@@ -1284,9 +982,6 @@ fn nearest(rt: &[f64], t: f64) -> usize {
     }
 }
 
-/// `num` and `den` over the isotopes in `mask`, from the centred projections
-/// `proj[i] = sum_j (y_i[j] - ybar_i) (g_j - gbar)` and
-/// `sgg = sum_j (g_j - gbar)^2`.
 fn num_den(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
@@ -1305,11 +1000,6 @@ fn num_den(
     (num, den)
 }
 
-/// Drop the one isotope of {1, 2, 3} whose own amplitude deviates most, in
-/// either direction, from the joint amplitude fitted without it, if that
-/// deviation is more than [`EXCLUSION_Z`] combined standard errors. Comparing
-/// against the leave-one-out amplitude keeps a suspect isotope from pulling the
-/// reference it is tested against.
 fn exclude_interfered(
     proj: &[f64; MAX_ISOTOPES],
     sgg: f64,
@@ -1338,7 +1028,6 @@ fn exclude_interfered(
     }
 }
 
-/// The [`Evidence`] at the final (t0, w) and isotope set.
 #[allow(clippy::too_many_arguments)]
 fn features(
     rt: &[f64],
@@ -1442,10 +1131,6 @@ fn features(
     }
 }
 
-/// The trace area of the module docs and its standard error, over the scans
-/// of `rt` in `range` (from, to), with the fit's amplitude `a` and profile
-/// `g` (for the fit's background when neither side of the range has enough
-/// scans). `(0, 0)` when the range holds fewer than 2 scans.
 #[allow(clippy::too_many_arguments)]
 fn trace_area(
     rt: &[f64],
@@ -1482,7 +1167,6 @@ fn trace_area(
             continue;
         }
         let s2 = sigma[i] * sigma[i];
-        // Variance of the median of n scans of noise sigma_i.
         let median_var = |n: usize| std::f64::consts::FRAC_PI_2 * s2 / n as f64;
         let mut side = |part: &[f32]| {
             (part.len() >= MIN_BASELINE_SCANS).then(|| {
@@ -1522,8 +1206,6 @@ fn trace_area(
     }
 }
 
-/// Median of `v` (mean of the middle two for an even length; 0 when empty),
-/// reordering it.
 fn median_unsorted(v: &mut [f32]) -> f64 {
     let n = v.len();
     if n == 0 {
@@ -1539,8 +1221,6 @@ fn median_unsorted(v: &mut [f32]) -> f64 {
     }
 }
 
-/// The [`Evidence::tailing`] of trace `y` with profile `g` at `(t0, w)` and
-/// fitted isotope-0 height `h0`.
 fn tailing(rt: &[f64], y: &[f32], g: &[f64], h0: f64, t0: f64, w: f64) -> f64 {
     if h0.is_nan() || h0 <= 0.0 || g.is_empty() {
         return 0.0;
@@ -1567,7 +1247,6 @@ fn tailing(rt: &[f64], y: &[f32], g: &[f64], h0: f64, t0: f64, w: f64) -> f64 {
     }
 }
 
-/// Pearson correlation of `y` and `g`; 0 when either is constant.
 fn pearson(y: &[f32], g: &[f64]) -> f64 {
     let n = y.len() as f64;
     let my = y.iter().map(|&v| v as f64).sum::<f64>() / n;
@@ -1593,14 +1272,11 @@ mod tests {
     use crate::ms1_index::Ms1Scan;
     use model::mass::ISOTOPE;
 
-    /// (m/z, charge, isotope fractions, apex RT, Gaussian width, amplitude).
-    /// The amplitude is `A` of the model: isotope `i` peaks at `A * pi_i`.
     type Feature = (f64, u8, [f32; 4], f64, f64, f64);
 
     const ENV: [f32; 4] = [0.5, 0.3, 0.15, 0.05];
     const MZ: f64 = 650.3271;
     const AMP: f64 = 1.0e6;
-    /// 1% of the most intense isotope's apex (`AMP * ENV[0]`).
     const NOISE: f32 = 5.0e3;
 
     struct Rng(u64);
@@ -1624,17 +1300,8 @@ mod tests {
         }
     }
 
-    /// Unrelated centroids per scan, spread uniformly over m/z 300-1500.
     const DENSE_CENTROIDS: usize = 200;
 
-    /// MS1 scans every `scan_dt` seconds from 0 to past the last feature.
-    /// Every scan carries [`DENSE_CENTROIDS`] unrelated centroids at random
-    /// m/z with intensity `noise * (1 + Exp(1))`, a population cut off at a
-    /// centroiding threshold like real survey scans. Every feature puts a
-    /// centroid at its M-1 position and at each of its 4 isotopes in every
-    /// scan: a baseline of `5 * noise`, plus the Gaussian elution profile,
-    /// plus Gaussian noise of standard deviation `noise`. Non-positive
-    /// intensities are dropped, as centroiding would.
     fn synth_scans(features: &[Feature], noise: f32, scan_dt: f64, seed: u64) -> Vec<Ms1Scan> {
         let noise = noise as f64;
         let end = features
@@ -1725,13 +1392,11 @@ mod tests {
         let p = probe(MZ, apex, 6.0, 5.0);
         let clean = synth_run(&[(MZ, 2, ENV, apex, 5.0, AMP)], NOISE, 1.0);
         let e = fit(&clean, &p, 2, &ENV, &params()).unwrap();
-        // Each isotope's own height follows the envelope.
         let sum: f64 = e.iso_heights.iter().sum();
         for (h, &pi) in e.iso_heights.iter().zip(&ENV) {
             assert!((h / sum - pi as f64).abs() < 0.02, "{:?}", e.iso_heights);
         }
         assert!(e.tailing.abs() < 0.05, "symmetric peak: {}", e.tailing);
-        // A slower second component after the apex makes the peak tail.
         let tailed = synth_run(
             &[
                 (MZ, 2, ENV, apex, 5.0, AMP),
@@ -1747,7 +1412,6 @@ mod tests {
             t.tailing,
             e.tailing
         );
-        // A zero amplitude has no tailing.
         let rt = [0.0, 1.0, 2.0];
         assert_eq!(
             tailing(&rt, &[1.0, 5.0, 1.0], &[0.5, 1.0, 0.5], 0.0, 1.0, 1.0),
@@ -1781,16 +1445,10 @@ mod tests {
         assert!(e.envelope_cos > 0.99 && e.coherence > 0.9);
     }
 
-    /// Upper bound on the LLR of a noise-only window of the [`synth_scans`]
-    /// fixture (noise-only feature at `NOISE`, probe `s = 6`, `w_prior = 5`):
-    /// 1.5 times the largest null LLR over 100 noise seeds at 1 s and 2 s scan
-    /// spacing (7.23).
     const NULL_LLR_BOUND: f64 = 10.8;
 
     #[test]
     fn width_is_recovered_between_grid_points() {
-        // True widths between and beyond the grid widths {4.2, 6, 8.4} s of
-        // w_prior = 6 s.
         for (k, w_true) in [3.3, 5.0, 7.1, 10.5].into_iter().enumerate() {
             for noise in [0.0, NOISE] {
                 let run = Ms1RunIndex::new(synth_scans(
@@ -1816,7 +1474,6 @@ mod tests {
         let f = |x: f64| -(x - 0.3) * (x - 0.3);
         let x = golden_max(f, -1.0, 1.0, -1.0, f(-1.0));
         assert!((x - 0.3).abs() < 1e-3, "{x}");
-        // A start better than every probe is kept.
         assert_eq!(golden_max(f, -1.0, 1.0, 0.3, 1.0), 0.3);
         assert_eq!(golden_max(f, 0.5, 0.5, 0.5, f(0.5)), 0.5);
         assert_eq!(width_bracket(&WIDTH_GRID, 1), (0.7, 1.4));
@@ -1830,14 +1487,12 @@ mod tests {
     #[test]
     fn noise_estimator_scales_successive_differences() {
         let mut sort = Vec::new();
-        // |successive difference| = 10 everywhere.
         let y: Vec<f32> = (0..21)
             .map(|k| if k % 2 == 0 { 100.0 } else { 110.0 })
             .collect();
         let expected = 1.4826 * 10.0 / std::f64::consts::SQRT_2;
         assert!((noise_sigma(&y, 1.0, &mut sort) - expected).abs() < 1e-9);
         assert_eq!(noise_sigma(&y, 50.0, &mut sort), 50.0);
-        // A median over differences {1, 2, 3, 4} is 2.5.
         let y = [0.0f32, 1.0, 3.0, 6.0, 10.0];
         let expected = 1.4826 * 2.5 / std::f64::consts::SQRT_2;
         assert!((noise_sigma(&y, 0.0, &mut sort) - expected).abs() < 1e-9);
@@ -1880,11 +1535,9 @@ mod tests {
     #[test]
     fn apex_candidates_are_spaced_by_the_narrowest_width() {
         let rt = |dt: f64| (0..100).map(|k| k as f64 * dt).collect::<Vec<_>>();
-        // Scans a quarter of the narrowest width apart or wider: every scan.
         let a = Apexes::of(&rt(1.0), 10..60, 3.5);
         assert_eq!(a.stride, 1);
         assert_eq!(a.iter().collect::<Vec<_>>(), (10..60).collect::<Vec<_>>());
-        // Denser scans: every 8th, then the last.
         let a = Apexes::of(&rt(0.2), 10..60, 3.5);
         assert_eq!(a.stride, 8);
         let c: Vec<usize> = a.iter().collect();
@@ -1897,7 +1550,6 @@ mod tests {
             a.around(10).collect::<Vec<_>>(),
             (11..18).collect::<Vec<_>>()
         );
-        // A range of one or two scans, and a degenerate spacing, keep every scan.
         assert_eq!(Apexes::of(&rt(0.2), 5..6, 3.5).stride, 1);
         assert_eq!(Apexes::of(&rt(0.2), 5..7, 3.5).stride, 1);
         assert_eq!(Apexes::of(&[0.0; 100], 0..50, 3.5).stride, 1);
@@ -1905,8 +1557,6 @@ mod tests {
 
     #[test]
     fn dense_scans_fit_the_same_peak() {
-        // Scans a twentieth of the peak width apart are searched at every
-        // k-th scan, then around the best.
         let w = 6.0;
         let run = synth_run(&[(MZ, 2, ENV, 300.3, w, AMP)], NOISE, 0.3);
         let p = probe(MZ, 300.0, 8.0, w);
@@ -1975,9 +1625,6 @@ mod tests {
 
     #[test]
     fn apex_is_refitted_after_an_isotope_is_excluded() {
-        // The target elutes at 100 s; an interferer on its M+1 trace elutes at
-        // 114 s, inside the RT prior, and is strong enough to pull the joint
-        // fit towards it.
         let (w, dt) = (5.0, 1.0);
         let iso1 = MZ + ISOTOPE / 2.0;
         let truth = AMP * w * (2.0 * std::f64::consts::PI).sqrt();
@@ -2109,7 +1756,6 @@ mod tests {
                     .collect(),
             )
         };
-        // W = 4 * 0.25 + 4 * 0.25 = 2 s holds 4 scans at 1 s spacing.
         let pr = probe(MZ, 10.5, 0.25, 0.25);
         assert_eq!(fit(&scans(30, vec![]), &pr, 2, &ENV, &params()), None);
         let wide = probe(MZ, 10.0, 3.0, 2.0);
@@ -2193,8 +1839,6 @@ mod tests {
 
     #[test]
     fn cached_grid_profiles_are_the_direct_profiles() {
-        // Narrow widths: the far scans of each candidate are outside its
-        // support, where the direct profile is below 3e-18.
         let rt: Vec<f64> = (0..400)
             .map(|k| 100.0 + 0.7 * k as f64 + 0.01 * (k % 3) as f64)
             .collect();
@@ -2234,7 +1878,6 @@ mod tests {
         }
         assert!(cells.next().is_none());
         assert!(outside > 0, "the test exercises the support");
-        // Every 4th scan and the last: one cell per candidate and width.
         let apexes = Apexes {
             range: 150..250,
             stride: 4,
@@ -2311,9 +1954,6 @@ mod tests {
 
     #[test]
     fn fits_sharing_a_workspace_equal_fresh_fits() {
-        // Targets with an interfered isotope (refits) and their mass-shift
-        // decoys on the same window: every fit through one scratch equals
-        // the fit with a fresh one.
         let interferer = (
             MZ + 2.0 * ISOTOPE / 2.0,
             1,
@@ -2334,8 +1974,6 @@ mod tests {
         }
     }
 
-    /// Every job of `jobs` through [`fit_many`] and through [`fit_on_grid`]
-    /// one at a time, compared field by field; returns the fitted count.
     fn assert_fit_many_matches(run: &Ms1RunIndex, jobs: &[FitJob], p: &EvidenceParams) -> usize {
         let many = fit_many(run, jobs, p);
         assert_eq!(many.len(), jobs.len());
@@ -2351,8 +1989,6 @@ mod tests {
                 job.widths,
                 &mut scratch,
             );
-            // Debug prints every f64 exactly, so equal text is equal bits,
-            // NaN included (a non-finite probe m/z gives a NaN field).
             let same =
                 |a: &Option<Evidence>, b: &Option<Evidence>| format!("{a:?}") == format!("{b:?}");
             assert!(same(got, &want), "job {k}: {job:?}\n{got:?}\n{want:?}");
@@ -2447,16 +2083,12 @@ mod tests {
 
     #[test]
     fn fit_many_equals_fit_with_overlapping_windows_at_run_edges() {
-        // 40 scans with dense background; each scan also holds two equally
-        // intense centroids inside the isotope-0 tolerance of MZ (a tie the
-        // lowest m/z wins) and the isotope pattern of MZ.
         let mut scans = synth_scans(&[(MZ, 2, ENV, 20.0, 3.0, AMP)], NOISE, 1.0, 4);
         scans.truncate(40);
         for s in scans.iter_mut() {
             s.peaks.push((MZ * (1.0 - 4e-6), 7.0e5));
             s.peaks.push((MZ * (1.0 + 4e-6), 7.0e5));
         }
-        // One scan with a NaN m/z, whose centroid order is undefined.
         scans[25].peaks.push((f64::NAN, 1.0e6));
         let run = Ms1RunIndex::new(scans);
         let end = run.rt_range().unwrap().1;
@@ -2515,9 +2147,6 @@ mod tests {
         assert!(fit_many(&run, &[], &params()).is_empty());
     }
 
-    /// Wall time of 50k probes on a 3,000-scan run: one [`fit_with`] per
-    /// probe against [`fit_many`], each on one thread and on all threads.
-    /// Run with `--ignored --nocapture`.
     #[test]
     #[ignore = "timing"]
     fn timing_fit_many_50k_probes_on_3000_scan_run() {
@@ -2568,7 +2197,6 @@ mod tests {
             .num_threads(1)
             .build()
             .unwrap();
-        // Process CPU seconds (user + system) on Linux, NaN elsewhere.
         let cpu = || -> f64 {
             std::fs::read_to_string("/proc/self/stat")
                 .ok()
@@ -2655,9 +2283,6 @@ mod tests {
         assert_eq!(fitted, probes.len());
     }
 
-    /// A target at 1/K0 0.90 and an interferer five times as intense at the
-    /// same m/z (0.15 ppm apart) and retention time but 1/K0 1.05, each with
-    /// its own background centroids, merged into mobility-resolved scans.
     fn coeluting_by_mobility() -> (Vec<Ms1Scan>, Vec<Ms1Scan>) {
         let target: Feature = (MZ, 2, ENV, 300.0, 6.0, AMP);
         let other: Feature = (MZ + 1e-4, 2, ENV, 300.0, 6.0, 5.0 * AMP);
@@ -2792,13 +2417,9 @@ mod tests {
     #[test]
     fn trace_area_follows_a_tailing_peak() {
         let apex = 300.0;
-        // A slower second component after the apex: the Gaussian template
-        // misses part of the area, the integrated traces keep it.
         let parts = [(apex, 5.0, AMP), (apex + 9.0, 8.0, 0.35 * AMP)];
         let run = synth_run(&parts.map(|(t, w, a)| (MZ, 2, ENV, t, w, a)), NOISE, 1.0);
         let e = fit(&run, &probe(MZ, apex, 6.0, 5.0), 2, &ENV, &params()).unwrap();
-        // A trace keeps the most intense centroid of a scan, so the measured
-        // profile is the larger of the two components at each time.
         let step = 1e-3;
         let truth: f64 = (0..600_000)
             .map(|k| {
@@ -2846,8 +2467,6 @@ mod tests {
         eprintln!(
             "absent: trace z mean {mean:.3}, sd {sd:.3}; template in trace SEs {template:.3}"
         );
-        // Unbiased within the scatter of 60 draws; the clamped template
-        // reads above zero.
         assert!(mean.abs() < 0.5, "{mean}");
         assert!((0.5..2.0).contains(&sd), "{sd}");
         assert!(template > mean);
@@ -2876,8 +2495,6 @@ mod tests {
             ),
             (0.0, 0.0)
         );
-        // Two scans in range, too few outside for a median: the fit's
-        // background `mean - a * pi_0 * gbar` = 7/3 - 4 * 2/3 = -1/3.
         let (q, se) = trace_area(
             &rt,
             &traces,
@@ -2896,7 +2513,6 @@ mod tests {
 
     #[test]
     fn trace_baseline_comes_from_the_lower_side_when_the_sides_disagree() {
-        // Ten scans of baseline 1 before the range, a tail at 50 after it.
         let rt: Vec<f64> = (0..25).map(f64::from).collect();
         let mut y = vec![1.0f32; 25];
         for v in &mut y[10..15] {
@@ -2963,8 +2579,6 @@ mod tests {
             &g,
             &mut sort,
         );
-        // Medians 10 and 11 differ by less than 3 SE (about 1.68): the pooled
-        // median 10.5 applies (the lower side alone would give 364).
         assert!((q - 362.0).abs() < 1e-9, "{q}");
     }
 

@@ -1,10 +1,3 @@
-//! Display ↔ from_str round-trip stress test. Validates that for every
-//! constructible `Peptide` in our representative corpus,
-//! `Peptide::from_str(&p.to_string(), &aa_set) == Ok(p)` (structural).
-//!
-//! This is a structural-equality round trip, not a byte-parity gate.
-//! Byte-parity for the PIN/TSV peptide formats lives in the `output` crate.
-
 use model::{
     AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification, Peptide, ResidueSpec,
 };
@@ -98,8 +91,8 @@ fn round_trip_unmodified_corpus() {
         (b"GAVL", b'_', b'A'),
         (b"AAAAA", b'A', b'A'),
         (b"WYRFLMHK", b'R', b'P'),
-        (b"GG", b'_', b'-'), // shortest realistic
-        (b"M", b'_', b'-'),  // single residue
+        (b"GG", b'_', b'-'),
+        (b"M", b'_', b'-'),
     ];
     for &(seq, pre, post) in cases {
         let p = build_peptide(seq, pre, post, &[], &aa_set);
@@ -118,8 +111,6 @@ fn round_trip_unmodified_corpus() {
 #[test]
 fn round_trip_with_carbamidomethyl_c() {
     let aa_set = corpus_aa_set();
-    // Carbamidomethyl is a FIXED mod — every C in the AA set is already
-    // modified. The build_peptide helper picks up that variant.
     let p = build_peptide(b"PEC", b'K', b'R', &[(2, "Carbamidomethyl")], &aa_set);
     let serialized = p.to_string();
     assert_eq!(serialized, "K.PEC+57.02146.R");
@@ -163,11 +154,7 @@ fn round_trip_with_multi_mod() {
     assert_eq!(parsed.to_string(), serialized);
 }
 
-/// Build an AA set whose mods carry accessions and 6-dp deltas — exercises the
-/// `[UNIMOD:NN]` serialization and the accession-less tolerance path.
 fn accession_aa_set() -> AminoAcidSet {
-    // Carbamidomethyl WITH accession + full 6-dp delta → serializes as
-    // `[UNIMOD:4]`, round-trips losslessly by accession.
     let cam = Modification {
         name: "Carbamidomethyl".to_string(),
         mass_delta: 57.021464,
@@ -182,8 +169,6 @@ fn accession_aa_set() -> AminoAcidSet {
         parts: Vec::new(),
         diagnostic_ions: Vec::new(),
     };
-    // Oxidation WITHOUT accession + 6-dp delta → serializes as `+15.99492`
-    // (rounded), parses back via tolerance.
     let ox = Modification {
         name: "Oxidation".to_string(),
         mass_delta: 15.994915,
@@ -207,8 +192,6 @@ fn accession_aa_set() -> AminoAcidSet {
 
 #[test]
 fn accession_mod_round_trips_via_proforma_token() {
-    // 57.021464 rounds to +57.02146 under {:+.5}; with an accession the
-    // ProForma form emits `[UNIMOD:4]` and matches by accession — lossless.
     let aa_set = accession_aa_set();
     let p = build_peptide(b"PEC", b'K', b'R', &[(2, "Carbamidomethyl")], &aa_set);
     let serialized = p.to_proforma();
@@ -221,10 +204,6 @@ fn accession_mod_round_trips_via_proforma_token() {
 
 #[test]
 fn accessionless_6dp_mod_round_trips_via_tolerance() {
-    // Oxidation 15.994915 (6 dp, no accession) → +15.99492 (rounded under
-    // {:+.5}) → tolerance match restores the stored variant. The pre-fix
-    // bit-exact parser failed this exact case (Display rounds, from_str needed
-    // an exact bit match).
     let aa_set = accession_aa_set();
     let p = build_peptide(b"MEMD", b'_', b'-', &[(2, "Oxidation")], &aa_set);
     let serialized = p.to_string();

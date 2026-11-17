@@ -1,16 +1,3 @@
-//! Parity of onnx-infer predictions (tract or ONNX Runtime, `--backend`) with a
-//! model's reference Python implementation, from the TSV its
-//! `scripts/<model>_reference.py` writes.
-//!
-//! ```text
-//! cargo run --release -p onnx-infer --features tract --example model_parity -- \
-//!   --model ms2pip --reference ms2pip_reference.tsv --models DIR [--backend ort]
-//! ```
-//!
-//! Prints the largest absolute and relative deviation per model variant.
-//! `--model peptdeep` reads `peptdeep_reference.tsv` from
-//! `scripts/peptdeep_reference.py`.
-
 #[path = "common/models.rs"]
 mod models;
 
@@ -143,7 +130,6 @@ fn peptdeep_parity(a: &Args) {
     for l in lines {
         let x: Vec<&str> = l.split('\t').collect();
         let seq = x[col("sequence")];
-        // The andes spelling must parse to peptdeep's own mod names and sites.
         let andes = x[col("andes")];
         let (form, _) = parse_peptide(andes).unwrap_or_else(|| panic!("parse {andes}"));
         let got: Vec<(String, String)> = form
@@ -251,7 +237,6 @@ fn prosit_parity(a: &Args) {
             nce: x[col("nce")].parse().unwrap(),
         };
         let got = &pred.ms2(&mut s, &[(&form, z)]).unwrap()[0];
-        // Koina: 29 positions x (y+1..3, b+1..3), max-normalised, -1 = impossible.
         let koina = floats(x[col("intensities_koina")]);
         let len = form.seq.len();
         for site in 0..len - 1 {

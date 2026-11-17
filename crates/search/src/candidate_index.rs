@@ -1,31 +1,3 @@
-//! Out-of-core candidate index: binary flat-file of mass-sorted `IndexRecord`s.
-//!
-//! Each `IndexRecord` encodes a base peptide (no variable mods) compactly in 20
-//! bytes using manual little-endian serialisation (no repr(C), no padding).
-//!
-//! ## Layout (little-endian)
-//! ```text
-//! 0..8   mass_milli: u64   — neutral monoisotopic mass × 1000, rounded
-//! 8..12  protein_index: u32
-//! 12..16 start_offset: u32
-//! 16..18 length: u16
-//! 18..20 flags: u16        — bit0=is_decoy, bit1=is_protein_n_term, bit2=is_protein_c_term
-//! ```
-//!
-//! `build_base_peptide_index()` collects all base peptides from a `SearchIndex`,
-//! sorts them by `mass_milli`, and writes the packed binary file. The caller then
-//! uses it as an mmapped / seekable lookup for precursor-mass-windowed retrieval.
-//!
-//! ## Build-once cache
-//!
-//! [`index_cache_path`] derives a stable file path in a caller-chosen cache directory from a
-//! content-addressed key: the cache format and andes version, the database content
-//! (all accessions + sequences), the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
-//! pass this path to `prepare_mmap` (via [`MmapCandidateIndex::open_or_build`]);
-//! when the file already exists at the key path the build step is skipped entirely
-//! and the existing file is re-opened.  This makes repeated searches over the same
-//! database pay the build cost only once.
-
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -35,45 +7,25 @@ use crate::candidate_gen::enumerate_candidates;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 
-/// Serialised byte size of one `IndexRecord`.
 pub const INDEX_RECORD_SIZE: usize = 20;
 
-/// Magic bytes at the start of a candidate-index cache file. Lets the reader
-/// reject foreign / corrupt files instead of trusting any 20-byte-aligned blob.
 const INDEX_MAGIC: &[u8; 8] = b"ANDESCI\x00";
-/// On-disk format version. BUMP whenever `IndexRecord`'s layout or the file
-/// structure changes so a stale-format cache is rebuilt rather than misread.
 const INDEX_FORMAT_VERSION: u32 = 1;
-/// Revision of the base-peptide set [`base_peptide_records`] produces from a
-/// given FASTA and parameters, hashed into [`index_cache_path`]. BUMP whenever
-/// the digest emits different spans or folds a different fixed-mod mass into a
-/// span, so a cached index built by another rule is never reused.
 const CANDIDATE_SET_REVISION: u32 = 2;
-/// Header = 8 magic bytes + 4 version bytes (LE); records follow at this offset.
 const INDEX_HEADER_SIZE: usize = INDEX_MAGIC.len() + 4;
 
-/// Flags bits inside `IndexRecord::flags`.
 pub mod flags {
     pub const IS_DECOY: u16 = 1 << 0;
     pub const IS_PROTEIN_N_TERM: u16 = 1 << 1;
     pub const IS_PROTEIN_C_TERM: u16 = 1 << 2;
 }
 
-/// A single base-peptide entry in the flat binary index.
-///
-/// 20 bytes when serialised; sorted by `mass_milli` in the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRecord {
-    /// Neutral monoisotopic mass × 1000, rounded (u64 avoids floating-point
-    /// comparison issues in sort and range queries).
     pub mass_milli: u64,
-    /// Index into the combined target+decoy `ProteinDb`.
     pub protein_index: u32,
-    /// Byte offset of the peptide's first residue within the protein sequence.
     pub start_offset: u32,
-    /// Peptide length in residues.
     pub length: u16,
-    /// Packed flags: see [`flags`] constants.
     pub flags: u16,
 }
 
@@ -108,27 +60,6 @@ impl IndexRecord {
     }
 }
 
-/// Canonical base-peptide enumeration for the out-of-core index.
-///
-/// Clones `params` and forces `max_variable_mods_per_peptide = 0` so only the
-/// unmodified backbone is produced. Fixed mods in `aa_set` remain untouched —
-/// they fold into per-residue mass exactly as in the normal search path
-/// (e.g. carbamidomethyl-C is always present when configured as a fixed mod).
-///
-/// **Equivalence invariant**: the set of `(residues, base_mass)` pairs
-/// produced here must equal the set of unmodified candidates (those whose
-/// every residue carries no variable mod) produced by
-/// [`enumerate_candidates`] with the original `params`.  This invariant
-/// is guarded by `base_peptide_records_matches_unmodified_enumerate_candidates`
-/// in the test suite — any future divergence in digestion logic will
-/// fail that test.
-///
-/// The `decoy_prefix` is forwarded verbatim to [`enumerate_candidates`] for
-/// decoy-membership detection (e.g. `"XXX"` when the index was built with that
-/// prefix; `decoy_accession_needle` appends the `_` internally).
-///
-/// Collects into a `Vec` to satisfy lifetime requirements before converting
-/// to `IndexRecord`s.
 pub fn base_peptide_records(
     idx: &SearchIndex,
     params: &SearchParams,
@@ -140,12 +71,6 @@ pub fn base_peptide_records(
         ..params.clone()
     };
 
-    // Stream the candidate iterator straight into compact 20-byte IndexRecords —
-    // do NOT `.collect()` the full `Vec<Candidate>` first. Each `Candidate` carries
-    // a heap peptide (~100 B); for an expanded digest (semi-tryptic / non-specific)
-    // there can be hundreds of millions of them, so materializing the Candidate Vec
-    // OOMs (tens of GB) where the compacted records (20 B each) fit. `base_params`
-    // outlives the statement, so the borrow is fine without the intermediate Vec.
     enumerate_candidates(idx, &base_params, decoy_prefix)
         .map(|c| {
             let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
@@ -178,30 +103,6 @@ pub fn base_peptide_records(
         .collect()
 }
 
-/// Canonical builder: enumerate base peptides and write a mass-sorted binary
-/// index to `out`.
-///
-/// This is the canonical entry point for creating the out-of-core index file.
-/// It delegates to [`base_peptide_records`] (the canonical base-peptide
-/// enumeration), which sets `max_variable_mods_per_peptide = 0` so that only
-/// unmodified backbones are written — fixed mods (e.g. CAM on C, TMT on K)
-/// are still folded into each residue's mass as configured.
-///
-/// Steps:
-/// 1. Enumerate all base peptides (no variable mods) via [`base_peptide_records`].
-/// 2. Sort by `mass_milli` ascending.
-/// 3. Write each record as 20 packed little-endian bytes.
-///
-/// **Equivalence caveat**: `base_peptide_records` must stay equivalent to
-/// `enumerate_candidates`'s digestion logic. This is enforced by the test
-/// `base_peptide_records_matches_unmodified_enumerate_candidates` — any
-/// divergence in enzyme/length/termini handling will fail that test.
-///
-/// The `decoy_prefix` must match the prefix used when building the
-/// `SearchIndex` (e.g. `"XXX"` — the `_` delimiter is appended internally by
-/// `decoy_accession_needle`).
-///
-/// Returns the number of records written.
 pub fn build_base_peptide_index<W: Write>(
     idx: &SearchIndex,
     params: &SearchParams,
@@ -211,8 +112,6 @@ pub fn build_base_peptide_index<W: Write>(
     let mut records = base_peptide_records(idx, params, decoy_prefix);
     records.sort_by_key(|r| r.mass_milli);
 
-    // Header: magic + format version, so a reader can reject a foreign/corrupt or
-    // stale-format file (see `MmapCandidateIndex::open`).
     out.write_all(INDEX_MAGIC)?;
     out.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
 
@@ -223,10 +122,6 @@ pub fn build_base_peptide_index<W: Write>(
     Ok(n)
 }
 
-/// Streaming SHA-256 over an explicit, platform-independent encoding of the
-/// cache-key inputs: integers as fixed-width little endian, byte strings
-/// length-prefixed. Nothing here depends on `std::hash`, whose output Rust does
-/// not guarantee across releases or targets.
 struct KeyHasher(Sha256);
 
 impl KeyHasher {
@@ -243,7 +138,6 @@ impl KeyHasher {
         self.bytes(s.as_bytes());
     }
 
-    /// First 128 bits of the digest, as 32 hex characters.
     fn finish_hex(self) -> String {
         use std::fmt::Write;
         let digest = self.0.finalize();
@@ -255,33 +149,6 @@ impl KeyHasher {
     }
 }
 
-/// Derive a stable, content-addressed cache path for the base-peptide index.
-///
-/// The path is placed in `cache_dir` and named `andes-candidx-<hex32>.bin`,
-/// where `<hex32>` is the first 128 bits of a SHA-256 over:
-///
-/// 1. The cache format: [`INDEX_FORMAT_VERSION`], [`CANDIDATE_SET_REVISION`] and
-///    the andes version, so a file written by another build is never reused.
-/// 2. Every protein's accession and sequence (targets and decoys, in database
-///    order), a variant entry's variant region and a mature-chain entry's new
-///    termini. Decoys are hashed directly, which captures the decoy strategy
-///    and shuffle seed.
-/// 3. The decoy prefix and suffix, the fixed modifications (location-aware
-///    fingerprint) and the search parameters that affect which base peptides
-///    are produced: `enzyme`, `extra_enzymes`, `max_missed_cleavages`,
-///    `min_length`, `max_length`, `num_tolerable_termini` and
-///    `require_nxst_sequon`.
-///
-/// The key is the same on every machine and toolchain for the same inputs, so
-/// a cache directory on a shared filesystem can serve several nodes. It is a
-/// truncated hash, not a security boundary.
-///
-/// # When to pass this path to `PreparedSearch::prepare_mmap`
-///
-/// Always.  `prepare_mmap` calls [`MmapCandidateIndex::open_or_build`], which
-/// skips the (potentially slow) build step when the cache file already exists
-/// and re-opens it directly.  The first call builds and caches; every
-/// subsequent call with the same parameters opens the cached file.
 pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Path) -> PathBuf {
     let mut h = KeyHasher(Sha256::new());
 
@@ -292,15 +159,12 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Pa
     for protein in &idx.db.proteins {
         h.str(&protein.accession);
         h.bytes(protein.sequence.as_ref());
-        // A variant entry only yields the spans covering its variant, so the
-        // region shapes the records too (absent for every FASTA protein).
         let variants = protein.variant_parts();
         h.u64(variants.len() as u64);
         for v in variants {
             h.u64(u64::from(v.start));
             h.u64(u64::from(v.end));
         }
-        // Likewise a mature-chain entry yields only its new-terminus spans.
         match protein.chain_ends() {
             Some(c) => {
                 h.u64(1 + u64::from(c.n_term) + 2 * u64::from(c.c_term));
@@ -308,12 +172,6 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Pa
             None => h.u64(0),
         }
     }
-    // The affix test decides each record's IS_DECOY flag (`SearchIndex::
-    // is_decoy_accession`): an accession is a decoy if it carries the prefix
-    // needle OR ends with the decoy suffix. Both are part of the key, so adding
-    // `--decoy-suffix` to an external target/decoy FASTA rebuilds the index
-    // rather than reusing one whose suffixed decoys are flagged as targets. An
-    // empty suffix matches nothing and keys like no suffix.
     h.str(&idx.decoy_prefix);
     h.str(
         idx.decoy_suffix
@@ -322,16 +180,6 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Pa
             .unwrap_or(""),
     );
 
-    // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
-    // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
-    // different fixed-mod set (e.g. label-free vs +TMT) MUST get different cache
-    // keys — otherwise the second run reuses the first run's mass-shifted index and
-    // silently loses IDs. Use the LOCATION-AWARE fingerprint, not `fixed_mod_deltas`
-    // (residue+delta only): a fixed `*` +229 at N-term vs Anywhere fold different
-    // base masses but share the same (residue, delta) set, so a delta-only key would
-    // collide and reuse a stale index. (Variable mods are applied lazily at serve
-    // time and do NOT affect the cached base index, so they are excluded.) The
-    // fingerprint is already sorted + deduped → deterministic key.
     let fixed = params.aa_set.fixed_mod_fingerprint();
     h.u64(fixed.len() as u64);
     for (res, loc_rank, delta_bits) in fixed {
@@ -340,9 +188,6 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Pa
         h.u64(delta_bits);
     }
 
-    // Every search parameter that affects base-peptide enumeration. Enzymes are
-    // keyed by name: the key already carries the andes version, so a renamed
-    // variant cannot meet an older file.
     h.str(&format!("{:?}", params.enzyme));
     h.u64(params.extra_enzymes.len() as u64);
     for extra in &params.extra_enzymes {
@@ -352,15 +197,11 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams, cache_dir: &Pa
     h.u64(u64::from(params.min_length));
     h.u64(u64::from(params.max_length));
     h.u64(u64::from(params.num_tolerable_termini));
-    // `--glyco-index-sequon-only` drops every span without a sequon from the
-    // index; such an index must never be reused by a search that needs them.
     h.u64(u64::from(params.require_nxst_sequon));
 
     cache_dir.join(format!("andes-candidx-{}.bin", h.finish_hex()))
 }
 
-/// The error for a cache directory that cannot be created or written; names
-/// the flag that chooses the directory.
 fn cache_write_error(dir: &Path, e: io::Error) -> io::Error {
     io::Error::new(
         e.kind(),
@@ -372,36 +213,24 @@ fn cache_write_error(dir: &Path, e: io::Error) -> io::Error {
     )
 }
 
-/// Lock file next to a cache file: `<cache file>.lock`.
 fn lock_path_for(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
 }
 
-/// How often the holder of a [`BuildLock`] refreshes the lock file's
-/// modification time.
 const LOCK_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
-/// A lock whose modification time a waiter has seen unchanged for this long is
-/// taken to belong to a dead builder.
 const LOCK_STALE: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
-/// How often a waiter looks at the cache file and the lock.
 const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Held by the one process that is building a cache file. The file is created
-/// exclusively, a thread refreshes its modification time while the build runs
-/// (so waiters can tell a live build from a dead one without comparing clocks
-/// across machines), and dropping the lock removes it.
 struct BuildLock {
     path: PathBuf,
-    /// Dropping the sender stops the heartbeat thread.
     stop: Option<std::sync::mpsc::Sender<()>>,
     beat: Option<std::thread::JoinHandle<()>>,
 }
 
 impl BuildLock {
-    /// `Ok(None)` when another process holds the lock.
     fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
         let file = match std::fs::OpenOptions::new()
             .write(true)
@@ -438,10 +267,6 @@ impl Drop for BuildLock {
     }
 }
 
-/// Wait while another process builds `path`. Returns the opened index once the
-/// cache file is usable, or `None` when the lock has gone away (the builder
-/// finished or failed without leaving a usable file) or has not changed for
-/// [`LOCK_STALE`] (the builder died; its lock is removed).
 fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex> {
     eprintln!(
         "candidate-index: another process is building {}; waiting for it",
@@ -473,36 +298,13 @@ fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex>
     }
 }
 
-/// Memory-mapped reader for the flat binary candidate index produced by
-/// [`build_base_peptide_index`].
-///
-/// The file is a sequence of 20-byte little-endian [`IndexRecord`]s sorted
-/// ascending by `mass_milli`.  Records are decoded on read via
-/// [`IndexRecord::from_bytes`] — this avoids any `repr(C)` / alignment
-/// requirements on the 20-byte format.
-///
-/// # Mass-window lookup
-///
-/// [`MmapCandidateIndex::mass_window`] uses two `partition_point` binary
-/// searches over the sorted `mass_milli` key to find the half-open bounds
-/// `[lo_idx, hi_idx)` and returns a `Vec` of the decoded records in that
-/// range.  The overall complexity is O(log n) probes + O(k) decode where k
-/// is the number of returned records.
 pub struct MmapCandidateIndex {
     mmap: memmap2::Mmap,
     len: usize,
-    /// Built in anonymous memory because the cache file could not be written.
     in_memory: bool,
 }
 
 impl MmapCandidateIndex {
-    /// Open a binary index file and memory-map it.
-    ///
-    /// Validates the magic + format-version header and that the remaining bytes
-    /// are a whole multiple of [`INDEX_RECORD_SIZE`]. Returns an error (treated
-    /// upstream as a cache miss → rebuild) for a missing/foreign/truncated file
-    /// or a format-version mismatch, rather than trusting any 20-byte-aligned
-    /// blob as a valid index.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let byte_len = file.metadata()?.len() as usize;
@@ -513,13 +315,10 @@ impl MmapCandidateIndex {
             ));
         }
         // SAFETY: The file is opened read-only and its contents are valid for
-        // the lifetime of `mmap`.  No other process is expected to modify the
-        // file while the search is running.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         Self::from_mmap(mmap, false)
     }
 
-    /// Validate an index image (magic, format version, payload alignment).
     fn from_mmap(mmap: memmap2::Mmap, in_memory: bool) -> io::Result<Self> {
         let byte_len = mmap.len();
         if byte_len < INDEX_HEADER_SIZE {
@@ -562,9 +361,6 @@ impl MmapCandidateIndex {
         })
     }
 
-    /// Build the index in anonymous memory instead of a cache file. The image
-    /// is byte-for-byte the one `open_or_build` would write, so a search over it
-    /// is identical; it is simply not reused by later runs.
     pub fn build_in_memory(
         idx: &SearchIndex,
         params: &SearchParams,
@@ -578,49 +374,22 @@ impl MmapCandidateIndex {
         Self::from_mmap(anon.make_read_only()?, true)
     }
 
-    /// Whether the index lives in anonymous memory rather than a cache file.
     pub fn is_in_memory(&self) -> bool {
         self.in_memory
     }
 
-    /// Open the index from `path` if it already exists, or build it and then
-    /// open it.
-    ///
-    /// This is the build-once-cache entry point.  Pass the path returned by
-    /// [`index_cache_path`] to skip the build step on repeated invocations with
-    /// the same parameters:
-    ///
-    /// - **Cache hit** (`path` exists and has a valid size): opens and mmaps
-    ///   the existing file.  The build step is skipped entirely.
-    /// - **Cache miss** (`path` does not exist): builds the index via
-    ///   [`build_base_peptide_index`] and then opens the resulting file.
-    ///
-    /// Returns `(mmap_index, was_built)` where `was_built` is `true` when the
-    /// index was freshly constructed and `false` when the existing cache was
-    /// reused.  Callers may use `was_built` for diagnostic logging.
     pub fn open_or_build(
         path: &Path,
         idx: &SearchIndex,
         params: &SearchParams,
         decoy_prefix: &str,
     ) -> io::Result<(Self, bool)> {
-        // Cache hit iff the file opens AND passes full validation (magic +
-        // format version + payload alignment) — not just "exists and is
-        // 20-byte-aligned". A foreign/corrupt/stale-format file fails `open` and
-        // falls through to a rebuild rather than being trusted as an index.
         if let Ok(mmap_index) = Self::open(path) {
             return Ok((mmap_index, false));
         }
 
-        // Build the index to a temp file alongside the target path, then rename
-        // atomically so a partial write never leaves a corrupt cache entry.
-        // The temp file lives in the same directory as `path` so the rename is
-        // always within the same filesystem (avoiding cross-device link errors).
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent).map_err(|e| cache_write_error(parent, e))?;
-        // One builder per cache file: the process that finds the file missing
-        // takes `<path>.lock` and builds; every other process waits for the
-        // file instead of repeating the build and the write.
         let lock_path = lock_path_for(path);
         let _lock = loop {
             match BuildLock::try_acquire(&lock_path) {
@@ -629,21 +398,13 @@ impl MmapCandidateIndex {
                     if let Some(mmap_index) = wait_for_builder(path, &lock_path) {
                         return Ok((mmap_index, false));
                     }
-                    // The lock went away without a usable file (the builder
-                    // failed or died): take over.
                 }
                 Err(e) => return Err(cache_write_error(parent, e)),
             }
         };
-        // A holder may have finished between the open above and the lock.
         if let Ok(mmap_index) = Self::open(path) {
             return Ok((mmap_index, false));
         }
-        // Unique temp name per call: PID alone collides when several searches (or
-        // tests) build distinct indexes concurrently in the SAME directory,
-        // racing on one tmp path and corrupting each other's partial writes.
-        // Append a process-global atomic counter so concurrent builds never
-        // share a tmp file.
         static BUILD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_path = parent.join(format!(
@@ -666,20 +427,14 @@ impl MmapCandidateIndex {
         Ok((mmap_index, true))
     }
 
-    /// Number of records in the index.
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Returns `true` if the index contains no records.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Decode and return the record at position `i`.
-    ///
-    /// # Panics
-    /// Panics if `i >= self.len()`.
     pub fn record_at(&self, i: usize) -> IndexRecord {
         assert!(
             i < self.len,
@@ -693,35 +448,19 @@ impl MmapCandidateIndex {
         IndexRecord::from_bytes(chunk)
     }
 
-    /// Return all decoded records.
-    ///
-    /// Allocates a `Vec` of length `self.len()`.  For large indexes, prefer
-    /// [`mass_window`](Self::mass_window) to avoid decoding the entire file.
     pub fn records(&self) -> Vec<IndexRecord> {
         (0..self.len).map(|i| self.record_at(i)).collect()
     }
 
-    /// Return all records whose `mass_milli` lies in the inclusive range
-    /// `[lo_milli, hi_milli]`.
-    ///
-    /// Uses two `partition_point` binary searches (O(log n)) over the
-    /// mass-sorted index, then decodes the matching slice (O(k)).
     pub fn mass_window(&self, lo_milli: u64, hi_milli: u64) -> Vec<IndexRecord> {
         if self.len == 0 || lo_milli > hi_milli {
             return Vec::new();
         }
-        // Lower bound: first index where mass_milli >= lo_milli.
         let lo_idx = self.partition_point(|mass| mass < lo_milli);
-        // Upper bound: first index where mass_milli > hi_milli.
         let hi_idx = self.partition_point(|mass| mass <= hi_milli);
         (lo_idx..hi_idx).map(|i| self.record_at(i)).collect()
     }
 
-    /// Binary search helper: returns the first index `i` in `[0, self.len]`
-    /// where `predicate(mass_milli_at(i))` is `false`.
-    ///
-    /// Equivalent to `slice::partition_point` but decodes only the `mass_milli`
-    /// field of each probed record.
     fn partition_point<F>(&self, predicate: F) -> usize
     where
         F: Fn(u64) -> bool,
@@ -740,7 +479,6 @@ impl MmapCandidateIndex {
         lo
     }
 
-    /// Decode only the `mass_milli` field (first 8 bytes) of record `i`.
     fn mass_milli_at(&self, i: usize) -> u64 {
         let start = INDEX_HEADER_SIZE + i * INDEX_RECORD_SIZE;
         u64::from_le_bytes(
@@ -761,8 +499,6 @@ mod tests {
     use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::protein::{Protein, ProteinDb};
 
-    /// Build a fixture index file containing base peptides from the toy protein.
-    /// Returns the path wrapped in a `tempfile::NamedTempFile` (dropped = deleted).
     fn build_fixture_index() -> tempfile::NamedTempFile {
         use std::io::BufWriter;
         let idx = make_toy_index();
@@ -784,28 +520,23 @@ mod tests {
         let tmp = build_fixture_index();
         let mi = MmapCandidateIndex::open(tmp.path()).unwrap();
         let all = mi.records();
-        // Pick the median record's mass as a stable target.
         let target = all[all.len() / 2].mass_milli;
         let win = mi.mass_window(target - 5, target + 5);
-        // Every returned record must lie within [target-5, target+5].
         assert!(
             win.iter()
                 .all(|r| r.mass_milli >= target - 5 && r.mass_milli <= target + 5),
             "mass_window returned out-of-range records"
         );
-        // At least one record must have exactly the target mass.
         assert!(
             win.iter().any(|r| r.mass_milli == target),
             "target mass not found in window"
         );
-        // A window entirely below the minimum mass must be empty.
         assert!(
             mi.mass_window(0, all[0].mass_milli - 1).is_empty(),
             "expected empty window below minimum mass"
         );
     }
 
-    /// Read all records back from a binary blob.
     fn read_records(data: &[u8]) -> Vec<IndexRecord> {
         assert!(
             data.len() >= INDEX_HEADER_SIZE && &data[..INDEX_MAGIC.len()] == INDEX_MAGIC,
@@ -826,13 +557,6 @@ mod tests {
             .collect()
     }
 
-    /// Small toy database: MKWVRPK contains tryptic peptides WVR (len=3),
-    /// MK (len=2), PK (len=2), plus missed-cleavage combinations. With
-    /// min_length=3, WVR is the shortest included peptide.
-    ///
-    /// `SearchIndex::from_target_db` with prefix `"XXX"` builds decoys as
-    /// `"XXX_<orig>"`, so we pass `"XXX"` to enumerate_candidates (it
-    /// appends `"_"` internally via `decoy_accession_needle`).
     fn make_toy_index() -> SearchIndex {
         let target = ProteinDb {
             proteins: vec![Protein {
@@ -850,7 +574,6 @@ mod tests {
         let idx = make_toy_index();
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
-        // Lower min_length so WVR (len=3) is included alongside longer peptides.
         params.min_length = 3;
 
         let mut buf: Vec<u8> = Vec::new();
@@ -866,7 +589,6 @@ mod tests {
         let records = read_records(&buf);
         assert_eq!(records.len(), n);
 
-        // Records must be sorted by mass_milli (ascending).
         for window in records.windows(2) {
             assert!(
                 window[0].mass_milli <= window[1].mass_milli,
@@ -876,19 +598,16 @@ mod tests {
             );
         }
 
-        // At least one non-decoy record must exist (targets are generated).
         assert!(
             records.iter().any(|r| !r.is_decoy()),
             "no target records found"
         );
 
-        // At least one decoy record must exist (reversed decoys are generated by default).
         assert!(
             records.iter().any(|r| r.is_decoy()),
             "no decoy records found"
         );
 
-        // There should be a record with length 3 (WVR from MKWVRPK).
         assert!(
             records.iter().any(|r| r.length == 3),
             "expected at least one length-3 record (WVR from MKWVRPK)"
@@ -913,39 +632,18 @@ mod tests {
 
     #[test]
     fn base_params_forces_zero_variable_mods() {
-        // Verify that base_peptide_records does not blow up with max_variable_mods=0
-        // and that it actually produces records.
         let idx = make_toy_index();
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
-        // Even when caller sets 3 mods, base index should produce only base peptides.
         params.max_variable_mods_per_peptide = 3;
 
         let records = base_peptide_records(&idx, &params, "XXX");
         assert!(!records.is_empty(), "base records should not be empty");
     }
 
-    /// Equivalence guard: the set of base peptides produced by
-    /// `base_peptide_records` (which forces `max_variable_mods_per_peptide=0`)
-    /// must exactly match the set of UNMODIFIED candidates produced by
-    /// `enumerate_candidates` with the full variable-mod params, filtered to
-    /// those whose every residue carries no variable mod.
-    ///
-    /// "Unmodified" is defined by backbone + base mass: a candidate is
-    /// unmodified when none of its residues carry a variable (non-fixed) mod.
-    /// Fixed mods are always present on both sides (they're folded in by the
-    /// `AminoAcidSet`), so the two sides should produce exactly the same
-    /// (residue_bytes, mass_milli) pairs.
-    ///
-    /// This test locks the digestion equivalence so that any future divergence
-    /// between `base_peptide_records` and `enumerate_candidates` (e.g. a new
-    /// ntt/enzyme path) is caught immediately.
     #[test]
     fn base_peptide_records_matches_unmodified_enumerate_candidates() {
-        // Build an index with a protein that contains M (for Ox-M to apply) and
-        // is long enough to produce multiple tryptic peptides.
-        // WMKDALER: tryptic peptides include WMK (Ox-M variant), DALER, etc.
         let target = ProteinDb {
             proteins: vec![Protein {
                 accession: "P2".into(),
@@ -956,8 +654,6 @@ mod tests {
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
 
-        // Build params with Oxidation-M (variable mod) so enumerate_candidates
-        // produces both unmodified and Ox-M variants.
         let ox_m = Modification {
             name: "Oxidation".to_string(),
             mass_delta: 15.99491,
@@ -980,9 +676,6 @@ mod tests {
         params.min_length = 3;
         params.max_variable_mods_per_peptide = 1;
 
-        // --- LHS: base_peptide_records (forces NumMods=0) ---
-        // Represent each base peptide as (residue_bytes, mass_milli) so the
-        // comparison is independent of protein_index / start_offset ordering.
         let base_records = base_peptide_records(&idx, &params, "XXX");
         let base_params = SearchParams {
             max_variable_mods_per_peptide: 0,
@@ -1006,19 +699,14 @@ mod tests {
             .collect();
         lhs.sort_unstable();
 
-        // --- RHS: enumerate_candidates with full mods, filter to unmodified ---
-        // A candidate is "unmodified" when none of its residues carries a
-        // variable (non-fixed) mod.
         let all_candidates: Vec<_> = enumerate_candidates(&idx, &params, "XXX").collect();
         let mut rhs: Vec<(Vec<u8>, u64)> = all_candidates
             .iter()
             .filter(|c| {
-                c.peptide.residues.iter().all(|aa| {
-                    aa.mod_
-                        .as_ref()
-                        .map(|m| m.fixed) // fixed mods are OK; variable are not
-                        .unwrap_or(true) // no mod at all = unmodified
-                })
+                c.peptide
+                    .residues
+                    .iter()
+                    .all(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(true))
             })
             .map(|c| {
                 let bytes: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
@@ -1033,10 +721,8 @@ mod tests {
             "base_peptide_records must produce exactly the unmodified subset of enumerate_candidates"
         );
 
-        // Sanity: both sides must be non-empty (the protein has tryptic peptides).
         assert!(!lhs.is_empty(), "expected at least one base peptide");
 
-        // Sanity: the full run with Ox-M must be strictly larger (Ox-M adds variants).
         let full_count = all_candidates.len();
         let base_count = lhs.len();
         assert!(
@@ -1045,8 +731,6 @@ mod tests {
         );
     }
 
-    /// A cache directory that cannot be created or written is an error that
-    /// names the flag; nothing falls back to another directory or to memory.
     #[test]
     fn unwritable_cache_dir_is_an_error_naming_the_flag() {
         let idx = make_toy_index();
@@ -1055,7 +739,6 @@ mod tests {
         params.min_length = 3;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        // The cache directory is a regular file, so it cannot be created.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
         let path = blocker.join("sub").join("cache.idx");
@@ -1070,7 +753,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// A missing cache directory is created.
     #[test]
     fn missing_cache_dir_is_created() {
         let idx = make_toy_index();
@@ -1085,7 +767,6 @@ mod tests {
         assert!(path.is_file());
     }
 
-    /// The cache file is named inside the directory that was passed.
     #[test]
     fn index_cache_path_is_in_the_given_dir() {
         let idx = make_toy_index();
@@ -1105,8 +786,6 @@ mod tests {
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
 
-        // Use a fresh named temp file as the cache path.  We keep the handle so
-        // the file is not deleted between calls.
         let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
         let cache_path = tmp.path();
 
@@ -1120,12 +799,10 @@ mod tests {
             .modified()
             .expect("mtime after build");
 
-        // Second call with identical inputs: cache hit — must NOT rebuild.
         let (mi2, was_built2) = MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
             .expect("second open_or_build failed");
         assert!(!was_built2, "second call must reuse the cache (cache hit)");
 
-        // File must not have been rewritten (mtime unchanged).
         let mtime_after_reuse = std::fs::metadata(cache_path)
             .expect("metadata after reuse")
             .modified()
@@ -1135,7 +812,6 @@ mod tests {
             "cache file mtime changed on reuse — index was rebuilt unnecessarily"
         );
 
-        // Record set must be byte-identical between build and reuse.
         let records1 = mi1.records();
         let records2 = mi2.records();
         assert_eq!(
@@ -1144,9 +820,6 @@ mod tests {
         );
     }
 
-    /// A foreign / header-less file (even one that is 20-byte-aligned) must be
-    /// REJECTED by `open` and treated as a cache miss by `open_or_build`, not
-    /// trusted as a valid index.
     #[test]
     fn open_rejects_header_less_file_and_rebuilds() {
         use std::io::Write;
@@ -1155,30 +828,22 @@ mod tests {
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
 
-        // A 40-byte blob (two 20-byte "records") with NO magic header.
         let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
         tmp.as_file()
             .write_all(&[0u8; 2 * INDEX_RECORD_SIZE])
             .unwrap();
         tmp.as_file().sync_all().unwrap();
 
-        // `open` rejects it outright.
         assert!(
             MmapCandidateIndex::open(tmp.path()).is_err(),
             "open must reject a file with no magic header"
         );
-        // `open_or_build` treats it as a miss and rebuilds a valid index.
         let (mi, was_built) = MmapCandidateIndex::open_or_build(tmp.path(), &idx, &params, "XXX")
             .expect("open_or_build");
         assert!(was_built, "header-less file must force a rebuild");
         assert!(!mi.is_empty(), "rebuilt index must be non-empty");
     }
 
-    /// `index_cache_path` returns distinct paths for different parameter sets.
-    ///
-    /// Two parameter sets that differ in a meaningful way (here: min_length)
-    /// must produce different cache paths so a cached index built with the
-    /// narrower set is not mistakenly reused for the wider set.
     #[test]
     fn index_cache_path_distinguishes_different_params() {
         let idx = make_toy_index();
@@ -1189,7 +854,7 @@ mod tests {
         params_a.min_length = 3;
 
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
-        params_b.min_length = 6; // different min_length
+        params_b.min_length = 6;
 
         let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
         let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
@@ -1203,10 +868,6 @@ mod tests {
         );
     }
 
-    /// `index_cache_path` distinguishes different FIXED-mod sets. Base masses fold
-    /// fixed mods in, so a label-free vs +CAM-C run on the same FASTA/enzyme must
-    /// NOT collide on one cache file (else the second run reuses a mass-shifted
-    /// index and silently loses IDs).
     #[test]
     fn index_cache_path_distinguishes_fixed_mods() {
         let idx = make_toy_index();
@@ -1226,11 +887,6 @@ mod tests {
         );
     }
 
-    /// The decoy suffix decides which proteins are decoys, so an index built
-    /// without it must not be reused once it is given: for an external
-    /// target/decoy FASTA (`--decoy-strategy none`), adding `--decoy-suffix _rev`
-    /// has to turn `P1_rev` into a decoy rather than reuse the cached index in
-    /// which every record is a target.
     #[test]
     fn index_cache_path_keys_on_the_decoy_suffix() {
         let db = ProteinDb {
@@ -1276,7 +932,6 @@ mod tests {
         );
     }
 
-    /// `index_cache_path` returns the same path when params are identical.
     #[test]
     fn index_cache_path_is_stable_for_identical_params() {
         let idx = make_toy_index();
@@ -1286,7 +941,7 @@ mod tests {
         let mut params_a = SearchParams::default_tryptic(aa_set_a);
         params_a.min_length = 4;
         let mut params_b = SearchParams::default_tryptic(aa_set_b);
-        params_b.min_length = 4; // same
+        params_b.min_length = 4;
 
         let path_a = index_cache_path(&idx, &params_a, Path::new("cache"));
         let path_b = index_cache_path(&idx, &params_b, Path::new("cache"));
@@ -1297,10 +952,6 @@ mod tests {
         );
     }
 
-    /// The key is a fixed function of its inputs: this pins the file name for
-    /// the toy database, so a change to the key encoding (which would orphan
-    /// every shared cache) is a deliberate edit of this value, and the name is
-    /// the same on every toolchain and target.
     #[test]
     fn index_cache_key_is_pinned() {
         let idx = make_toy_index();
@@ -1321,8 +972,6 @@ mod tests {
         params
     }
 
-    /// Several processes starting together on a cold cache: exactly one builds,
-    /// the others open its file.
     #[test]
     fn concurrent_open_or_build_builds_once() {
         let idx = make_toy_index();
@@ -1345,7 +994,6 @@ mod tests {
         assert!(!lock_path_for(&path).exists(), "lock must be released");
     }
 
-    /// A task that finds the lock held waits, and opens the finished file.
     #[test]
     fn waiter_opens_the_file_the_lock_holder_builds() {
         let idx = make_toy_index();
@@ -1370,7 +1018,6 @@ mod tests {
         });
     }
 
-    /// A lock nobody refreshes (dead builder) is taken over.
     #[test]
     fn stale_lock_is_taken_over() {
         let idx = make_toy_index();

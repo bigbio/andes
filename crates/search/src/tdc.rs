@@ -1,23 +1,9 @@
-//! Target-decoy competition q-values over scored PSMs. Single source of truth
-//! for the calibration pre-pass and the refinement confident-protein gate.
-//!
-//! The PSM q-value is decoys / targets without the `+1` of the finite-sample
-//! correction, deliberately: it is the estimate Percolator reports, so the two
-//! rescoring backends and the internal gates agree.
-
-/// Per-item input to the TDC q-walk: a discriminating score (higher = better)
-/// and whether the item is a decoy.
 #[derive(Debug, Clone, Copy)]
 pub struct ScoredLabel {
     pub score: f32,
     pub is_decoy: bool,
 }
 
-/// Return the indices (into `items`, original order) of TARGET items whose
-/// monotone TDC q-value is <= `q_threshold`. The walk: sort by score desc,
-/// q = decoys/max(targets,1), monotone-from-bottom, conservative ties (every
-/// item in an equal-score bucket takes the worst q in the bucket). Empty input
-/// -> empty output.
 pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<usize> {
     if items.is_empty() {
         return Vec::new();
@@ -76,13 +62,6 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
         .collect()
 }
 
-/// Per-item monotone TDC q-value, returned in the SAME order as `items`
-/// (`out[i]` is the q-value of `items[i]`). Same walk as
-/// [`confident_target_indices`] (sort by score desc, q = decoys/max(targets,1),
-/// monotone-from-bottom, conservative equal-score ties). Empty input -> empty.
-///
-/// Used by the native rescorer to report a q-value per PSM (not just the
-/// confident set). Decoys get a q-value too (callers filter by `is_decoy`).
 pub fn qvalues(items: &[ScoredLabel]) -> Vec<f64> {
     let n = items.len();
     if n == 0 {
@@ -158,7 +137,7 @@ mod tests {
         let mut items: Vec<_> = (0..200)
             .map(|i| sl(30.0 - i as f32 * 0.05, false))
             .collect();
-        items.push(sl(1.0, true)); // lone tail decoy
+        items.push(sl(1.0, true));
         let conf = confident_target_indices(&items, 0.01);
         assert!(!conf.is_empty());
         assert!(conf.iter().all(|&i| !items[i].is_decoy));

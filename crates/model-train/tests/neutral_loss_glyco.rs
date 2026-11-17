@@ -1,21 +1,3 @@
-//! SP4 mechanism proof (synthetic): the full neutral-loss train→score round-trip.
-//!
-//! With no real glyco corpus available, this exercises the machinery end-to-end
-//! on a synthetic spectrum whose fragments spanning a loss-bearing residue carry
-//! loss-shifted peaks:
-//!
-//!   1. SP3: accumulate confident glyco PSMs → the estimator learns a per-class
-//!      neutral-loss rank table (a `loss_class != 0` IonType key).
-//!   2. Task 7: scoring a glyco peptide against that model adds positive
-//!      loss-ion node score, so its RawScore exceeds the same peptide scored
-//!      with its losses NOT declared (the loss peaks then go unprobed).
-//!
-//! The mod's `mass_delta` is 0 here so the with/without-losses peptides share
-//! identical residue masses (hence identical intact ions) — this isolates the
-//! loss machinery, which is what the test validates. The real biochemistry
-//! (Unimod 393 Hex/Hex2 on a glyco residue) is exercised by the real-corpus
-//! benchmark, not this mechanism test.
-
 use model::amino_acid::AminoAcid;
 use model::mass::nominal_from;
 use model::modification::{ModLocation, Modification, ResidueSpec};
@@ -40,13 +22,9 @@ use model_train::store::{write_models, ModelStore};
 
 use rustc_hash::FxHashMap;
 
-const HEX_LOSS: f64 = 162.0528; // Unimod 393 -Hex
+const HEX_LOSS: f64 = 162.0528;
 const PROTON: f64 = 1.007_276_49;
 
-/// CID / low-res seed template with a single intact b-ion type (charge 1,
-/// proton offset). `parent_mass = 0.0` so the partition floor-matches any
-/// peptide. CID predicts neutral losses, so the training matcher emits loss
-/// facts for loss-bearing peptides.
 fn seed_template() -> Param {
     let part = Partition {
         charge: 2,
@@ -66,10 +44,6 @@ fn seed_template() -> Param {
             frequency: 0.9,
         }],
     );
-    // Seed rank tables for the b-ion + Noise so the seed scorer's
-    // partition_ion_logs is non-empty (the training matcher iterates that intact
-    // vocabulary to derive loss variants). Values are placeholders — the real
-    // tables are re-estimated from the accumulated counts.
     let max_rank = 10usize;
     let n_slots = max_rank + 1;
     let bion_freqs: Vec<f32> = (0..n_slots)
@@ -116,9 +90,6 @@ fn seed_template() -> Param {
     p
 }
 
-/// `AAAT*AAA` with a Hex neutral-loss (class 1, mass_delta 0) on the T at index
-/// 3. If `declare_losses` is false the same residues are built without the loss
-/// attributes (identical masses, no loss ions).
 fn glyco_peptide(declare_losses: bool) -> Peptide {
     let m = Modification {
         name: "Glyco".into(),
@@ -154,9 +125,6 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
     Peptide::new(residues, b'_', b'-')
 }
 
-/// Synthetic spectrum: a b-ion peak at every prefix split, plus a loss-shifted
-/// (-Hex) peak for every prefix that spans the loss residue (index 3). Peaks
-/// are intensity-ordered so split-1 ions rank high.
 fn glyco_spectrum(peptide: &Peptide, charge: u8) -> Spectrum {
     let bion = IonType::Prefix {
         charge: 1,
@@ -169,7 +137,7 @@ fn glyco_spectrum(peptide: &Peptide, charge: u8) -> Spectrum {
     let mut prefix_acc = 0.0_f64;
     let mut intensity = 100_000.0_f32;
     for s in 1..n {
-        prefix_acc += peptide.residues[s - 1].mass; // mass_delta is 0
+        prefix_acc += peptide.residues[s - 1].mass;
         let prefix_nominal = nominal_from(prefix_acc);
         let intact_mz = bion.mz(prefix_nominal as f64);
         peaks.push((intact_mz, intensity));
@@ -230,9 +198,6 @@ fn glyco_loss_table_is_learned_and_lifts_the_score() {
         "trained model must expose loss tables to the scorer"
     );
 
-    // ── Task 7: the loss ions lift the RawScore ──────────────────────────────
-    // Same spectrum + same trained scorer; the only difference is whether the
-    // peptide declares its losses (and is thus probed for loss ions).
     let ss = ScoredSpectrum::new(&spec, &trained_scorer, charge);
     let with_losses = score_psm(&ss, &glyco_peptide(true), &trained_scorer, charge, 0.5);
     let without_losses = score_psm(&ss, &glyco_peptide(false), &trained_scorer, charge, 0.5);
@@ -242,8 +207,6 @@ fn glyco_loss_table_is_learned_and_lifts_the_score() {
         "loss ions must lift the RawScore: with={with_losses} without={without_losses}"
     );
 
-    // ── SP4: the learned loss table survives a parquet store round-trip ──────
-    // (Closes the full pipeline: train → serialize → load → score.)
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("glyco_models.parquet");
     write_models(&path, &[("glyco".to_string(), &trained)]).unwrap();

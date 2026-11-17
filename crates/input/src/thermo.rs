@@ -1,14 +1,3 @@
-//! Native Thermo `.raw` reader (`feature = "thermo"`).
-//!
-//! Wraps Thermo's official RawFileReader (hosted .NET runtime) via the
-//! [`thermorawfilereader`] crate and yields the same [`Spectrum`] model as the
-//! mzML/MGF readers, so the search path is format-agnostic.
-//!
-//! Built only under `--features thermo`. The build needs no .NET SDK (the
-//! RawFileReader assemblies are vendored in the dependency); opening a `.raw`
-//! at runtime requires the .NET 8 runtime, auto-discovered via hostfxr
-//! (`DOTNET_ROOT` or a system install). mzML/MGF reading never loads .NET.
-
 use std::path::Path;
 
 use std::collections::HashMap;
@@ -21,7 +10,6 @@ use model::{ActivationMethod, InstrumentType};
 
 use crate::{Ms1Link, Spectrum};
 
-/// Error opening a Thermo `.raw` file.
 #[derive(Debug, thiserror::Error)]
 pub enum ThermoParseError {
     #[error("failed to open Thermo .raw '{path}': {source}{}", runtime_hint(.source))]
@@ -31,10 +19,6 @@ pub enum ThermoParseError {
     },
 }
 
-/// Appended to an open failure that is not a missing or malformed file: the
-/// RawFileReader needs the .NET 8 runtime, and its hosting layer reports a
-/// missing runtime only as a generic error ("One of the dependent libraries
-/// is missing").
 fn runtime_hint(source: &std::io::Error) -> &'static str {
     match source.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData => "",
@@ -45,38 +29,21 @@ fn runtime_hint(source: &std::io::Error) -> &'static str {
     }
 }
 
-/// Reader over a Thermo `.raw`, yielding [`Spectrum`] values.
-///
-/// Iterates by index through the underlying `RawFileReader::get`, so it owns
-/// the file handle without a self-referential borrow. By default only MS2
-/// scans are emitted (the search path); call [`with_all_ms_levels`] to include
-/// MS1 as well (required by the chimeric cascade's MS1 gating).
-///
-/// [`with_all_ms_levels`]: ThermoRawReader::with_all_ms_levels
 pub struct ThermoRawReader {
     handle: RawFileReader,
     next: usize,
     len: usize,
-    /// `Some(level)` emits only that MS level; `None` emits all levels.
     ms_level_filter: Option<u8>,
-    /// Quantification capture (see the mzML reader): every MS1 scan with its
-    /// retention time, and MS3+ scans with their master (parent) scan id.
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
     capture_product_scans: bool,
     product_scans: Vec<ProductScan>,
-    /// The acquisition context of every emitted MS2 (master scan, acquired m/z
-    /// range, FAIMS voltage).
     capture_scan_context: bool,
     scan_contexts: Vec<ScanContext>,
-    /// Read the per-centroid noise of captured product scans and scan
-    /// contexts (reporter signal-to-noise).
     capture_noise: bool,
 }
 
 impl ThermoRawReader {
-    /// Open a `.raw`. Requests centroided peaks, matching the centroid data the
-    /// mzML path feeds the scorer.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ThermoParseError> {
         let p = path.as_ref();
         let mut handle = RawFileReader::open(p).map_err(|source| ThermoParseError::Open {
@@ -100,37 +67,26 @@ impl ThermoRawReader {
         })
     }
 
-    /// Keep every MS1 scan (RT + centroids) seen by the iterator for label-free
-    /// quantification; take them with [`Self::take_run_ms1`].
     pub fn with_run_ms1_capture(mut self, capture: bool) -> Self {
         self.capture_run_ms1 = capture;
         self
     }
 
-    /// Keep MS3+ scans (with the native id of their master scan) seen by the
-    /// iterator for reporter-ion quantification; they are never emitted.
     pub fn with_product_scan_capture(mut self, capture: bool) -> Self {
         self.capture_product_scans = capture;
         self
     }
 
-    /// Record the acquisition context of every emitted MS2 (see the mzML reader);
-    /// take them with [`Self::take_scan_contexts`].
     pub fn with_scan_context_capture(mut self, capture: bool) -> Self {
         self.capture_scan_context = capture;
         self
     }
 
-    /// Read the reporter-region noise (the Orbitrap noise of each centroid)
-    /// of captured product scans and scan contexts, for reporter
-    /// signal-to-noise. Ion-trap scans carry none.
     pub fn with_noise_capture(mut self, capture: bool) -> Self {
         self.capture_noise = capture;
         self
     }
 
-    /// The reporter-region noise of scan `index`, when noise capture is on
-    /// and the scan has centroid noise values.
     fn noise_of(&self, index: usize) -> Option<NoiseProfile> {
         if !self.capture_noise {
             return None;
@@ -150,26 +106,18 @@ impl ThermoRawReader {
         std::mem::take(&mut self.product_scans)
     }
 
-    /// Emit all MS levels (MS1 + MS2) instead of MS2-only. Needed for `--chimeric`.
     pub fn with_all_ms_levels(mut self) -> Self {
         self.ms_level_filter = None;
         self
     }
 
-    /// Restrict to a single MS level, or `None` for all levels.
     pub fn with_ms_level(mut self, level: Option<u8>) -> Self {
         self.ms_level_filter = level;
         self
     }
 
-    /// The centroided peaks of up to `n` scans at MS level `level`, spread
-    /// over the whole run (the first scans of a gradient carry little
-    /// signal), as spectra with no precursor. For sampling reporter ions:
-    /// unlike the search path, a scan is kept whether or not it records a
-    /// precursor m/z (SPS-MS3 scans need not).
     pub fn sample_level(&mut self, level: u8, n: usize) -> Vec<Spectrum> {
         let stride = (self.len / n.max(1) / 4).max(1);
-        // The levels are read without the peaks; only the kept scans load theirs.
         self.handle.set_signal_loading(false);
         let kept: Vec<usize> = (0..self.len)
             .step_by(stride)
@@ -207,16 +155,11 @@ impl ThermoRawReader {
         self.len == 0
     }
 
-    /// Convert one MS2 `RawSpectrum` to a [`Spectrum`], or `None` if the scan
-    /// has no usable precursor m/z — matching the mzML reader, which skips
-    /// precursor-less MS2 rather than forwarding a `precursor_mz = 0.0` spectrum
-    /// that would search against a nonsense mass window.
     fn convert(raw: &RawSpectrum, handle: &RawFileReader) -> Option<Spectrum> {
         let scan_number = raw.index() as i32 + 1;
 
         let p = raw.precursor()?;
         let precursor_mz = p.mz();
-        // `<= 0.0` alone would let a NaN m/z through.
         if precursor_mz.is_nan() || precursor_mz <= 0.0 {
             return None;
         }
@@ -224,10 +167,6 @@ impl ThermoRawReader {
         let inten = p.intensity();
         let precursor_intensity = if inten > 0.0 { Some(inten) } else { None };
 
-        // Isolation window: RawFileReader gives absolute m/z bounds
-        // (lower, target, upper); the model stores the target and the offsets
-        // from it, matching mzML's `isolation window target m/z` and
-        // `lower/upper offset`. Skip a degenerate/absent window.
         let w = p.isolation_window();
         let (lo, tg) = (w.lower(), w.target());
         let (lo, up) = full_width_isolation_bounds(
@@ -243,20 +182,13 @@ impl ThermoRawReader {
             };
 
         Some(Spectrum {
-            // The Thermo controller native id (e.g.
-            // `controllerType=0 controllerNumber=1 scan=N`), matching the
-            // `<spectrum id=...>` an mzML produced from the same `.raw` carries,
-            // so the PIN `SpecID` column lines up across the two input formats.
             title: raw.native_id(),
             precursor_mz,
             precursor_intensity,
             precursor_charge,
-            // RawFileReader retention time is in minutes; the model uses seconds.
             rt_seconds: Some(raw.time() * 60.0),
             scan: Some(scan_number),
             peaks: extract_peaks(raw),
-            // Real activation from the .raw, used by the param auto-router so a
-            // CID/ETD .raw is not silently scored with the HCD model.
             activation_method: scan_activation(raw),
             isolation_lower_offset,
             isolation_upper_offset,
@@ -264,19 +196,6 @@ impl ThermoRawReader {
         })
     }
 
-    /// Stream MS2 in `chunk_size` batches, each paired with a bounded
-    /// [`Ms1Link`] (the MS1 scans seen in that chunk plus a per-MS2 link to the
-    /// most-recent preceding MS1). Mirrors `MzMLReader::read_with_ms1_chunked`
-    /// so the chimeric cascade consumes `.raw` exactly like mzML. The last MS1
-    /// of a chunk is carried into the next chunk (index 0) so the first MS2 of
-    /// a chunk still links to its true preceding MS1 across the boundary.
-    ///
-    /// Returns `(error_count, sample_errors)` for API symmetry; `.raw` reads do
-    /// not surface per-scan parse errors, so these are always `(0, vec![])`.
-    ///
-    /// The quantification captures ([`Self::with_run_ms1_capture`],
-    /// [`Self::with_scan_context_capture`]) work on this path too: take them
-    /// from the reader once it returns.
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -317,16 +236,10 @@ impl ThermoRawReader {
                     ms1_peaks.push(peaks);
                     current_ms1 = Some(idx);
                 }
-                // MS3+ scans (e.g. TMT SPS-MS3 reporter-quant scans) are NOT
-                // identification spectra — only MS2 is searched and only MS1
-                // links it, in chimeric OR normal mode. Skipping them here keeps
-                // the cascade from ever scoring an MS3 in TMT-MS3 acquisitions.
                 level if level >= 3 => {
                     skipped_higher_ms += 1;
                 }
                 2 => {
-                    // Skip MS2 with no usable precursor (mirrors mzML); such a
-                    // scan must not consume a chunk slot or an Ms1Link entry.
                     let spec = match Self::convert(&raw, &self.handle) {
                         Some(spec) => spec,
                         None => continue,
@@ -346,8 +259,6 @@ impl ThermoRawReader {
                     ms2_to_ms1.push(current_ms1);
                     emitted_ms2 += 1;
                     if chunk.len() >= chunk_size {
-                        // Carry the current MS1's peaks into the next chunk so
-                        // its first MS2 still links across the boundary.
                         let carry = current_ms1.map(|idx| ms1_peaks[idx].clone());
                         let link = Ms1Link {
                             ms1_peaks: std::mem::take(&mut ms1_peaks),
@@ -383,9 +294,6 @@ impl ThermoRawReader {
     }
 }
 
-/// The 1-based `Master Scan Number` trailer of the scan at `index`: the scan an
-/// MSn (n ≥ 3) scan was triggered from. `None` when the file carries no such
-/// trailer or its value is not a positive scan number.
 fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
     let trailers = handle.get_raw_trailers_for(index)?;
     let value = trailers
@@ -394,8 +302,6 @@ fn master_scan_number(handle: &RawFileReader, index: usize) -> Option<usize> {
     value.parse::<usize>().ok().filter(|&scan| scan > 0)
 }
 
-/// The `MSn Isolation Width` trailer of the scan at `index`: the FULL width of
-/// the isolation window in m/z, when the file records it.
 fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -> Option<f64> {
     if ms_level < 2 {
         return None;
@@ -411,12 +317,6 @@ fn isolation_width_trailer(handle: &RawFileReader, index: usize, ms_level: u8) -
         .filter(|w| w.is_finite() && *w > 0.0)
 }
 
-/// Isolation bounds with the window `full_width` wide. RawFileReader builds the
-/// window as `center ± width` from the `MSn Isolation Width` trailer, which
-/// holds the full width, so such a window is twice the isolated range. When the
-/// bounds match that construction they are rebuilt as `center ± width / 2`;
-/// otherwise (no trailer, or the reader fell back to the filter's width, which
-/// it halves) they are returned unchanged.
 fn full_width_isolation_bounds(lower: f64, upper: f64, full_width: Option<f64>) -> (f64, f64) {
     match full_width {
         Some(w) if ((upper - lower) - 2.0 * w).abs() <= 1e-6 => {
@@ -427,22 +327,18 @@ fn full_width_isolation_bounds(lower: f64, upper: f64, full_width: Option<f64>) 
     }
 }
 
-/// Acquired m/z range of a scan, when the acquisition block records one.
 fn scan_window(raw: &RawSpectrum) -> Option<(f64, f64)> {
     let a = raw.acquisition()?;
     let (lo, hi) = (a.low_mz(), a.high_mz());
     (lo.is_finite() && hi > lo).then_some((lo, hi))
 }
 
-/// FAIMS compensation voltage of a scan, when the run used FAIMS.
 fn faims_cv(raw: &RawSpectrum) -> Option<f32> {
     raw.acquisition()?
         .compensation_voltages()
         .and_then(|v| v.iter().next())
 }
 
-/// Trailer labels come as `Master Scan Number` or `Master Scan Number:`
-/// depending on the instrument software.
 fn is_master_scan_label(label: &str) -> bool {
     label
         .trim()
@@ -451,8 +347,6 @@ fn is_master_scan_label(label: &str) -> bool {
         .eq_ignore_ascii_case("Master Scan Number")
 }
 
-/// The native id of scan `scan` in the same file as `native_id`
-/// (`controllerType=0 controllerNumber=1 scan=N` with N replaced).
 fn with_scan_number(native_id: &str, scan: usize) -> String {
     match native_id.rfind("scan=") {
         Some(pos) => {
@@ -464,10 +358,6 @@ fn with_scan_number(native_id: &str, scan: usize) -> String {
     }
 }
 
-/// The reporter-region noise of scan `index` from its centroid (label) data:
-/// RawFileReader's advanced packet holds each centroid's mass and noise, so
-/// the pairs need no alignment with the peak list. `None` for scans without
-/// centroid noise (ion-trap scans).
 fn reporter_noise(handle: &RawFileReader, index: usize) -> Option<NoiseProfile> {
     let data = handle.get_extended_spectrum_data(index, false)?;
     let view = data.view();
@@ -476,13 +366,6 @@ fn reporter_noise(handle: &RawFileReader, index: usize) -> Option<NoiseProfile> 
     NoiseProfile::reporter_region((0..n).map(|j| (mass.get(j), noise.get(j))))
 }
 
-/// Extract centroided peaks `(m/z, intensity)` from a raw spectrum, ascending
-/// by m/z. The FlatBuffers vectors yield owned scalars, so no `.copied()`.
-///
-/// Downstream consumers require m/z-ascending peaks: the chimeric co-isolation
-/// detection binary-searches the list (`partition_point`), and the scorer/`Spectrum`
-/// contract documents the invariant. RawFileReader centroid streams are normally
-/// already sorted, so the list is only sorted when an inversion is present.
 fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
     let (mz, intensity) = match raw.data_raw() {
         Some(data) => match (data.mz(), data.intensity()) {
@@ -506,9 +389,6 @@ fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
     sanitize_thermo_peaks(raw_pairs)
 }
 
-/// Drop non-finite / non-positive m/z and non-finite / negative intensities,
-/// then enforce the m/z-ascending invariant downstream consumers require.
-/// Mirrors the mzML / timsTOF peak filter (finding 4.3).
 fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
     let mut peaks: Vec<(f64, f32)> = pairs
         .into_iter()
@@ -520,11 +400,6 @@ fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
     peaks
 }
 
-/// The activation of an MSn scan. RawFileReader reports only the primary
-/// activation of the last stage, so an EThcD/ETciD scan arrives as plain ETD
-/// (or ECD); the supplemental collision is read from the filter string's
-/// activation chain (see [`crate::mzml::filter_has_supplemental_collision`])
-/// and the scan is then mapped like the combined method.
 fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
     let d = raw.precursor()?.activation().dissociation_method();
     let electron = matches!(d.0, 4 | 8 | 16);
@@ -538,21 +413,11 @@ fn scan_activation(raw: &RawSpectrum) -> Option<ActivationMethod> {
     map_dissociation(d)
 }
 
-/// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
-/// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
-/// activation methods (ETciD/EThcD/ECciD/EChcD) map to `EThcD`: the spectrum
-/// carries the c/z• series of electron transfer and the b/y series of the
-/// collisional supplement. This mirrors the mzML reader's EThcD detection,
-/// including `--ethcd-activation etd`. Unknown methods return `None`.
 fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
     match d.0 {
         1 => Some(ActivationMethod::CID),
         2 => Some(ActivationMethod::HCD),
-        // Pure electron transfer/capture: ETD, ECD, NETD → c/z model.
         4 | 8 | 16 => Some(ActivationMethod::ETD),
-        // Supplemental activation (EThcD/ETciD/EChcD/ECciD): electron + beam/
-        // resonant collision in one step. Labelled like the mzML reader, under
-        // the same `--ethcd-activation` policy.
         5 | 6 | 9 | 10 => {
             crate::mzml::log_ethcd_once();
             if crate::mzml::ethcd_as_etd_policy() {
@@ -565,27 +430,16 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
     }
 }
 
-/// Map a Thermo `MassAnalyzer` to the model's [`InstrumentType`]. FTMS
-/// (Orbitrap) maps to `QExactive`; ASTMS (Astral) maps to the explicit
-/// `OrbitrapAstral` class; TOFMS is `TOF`; ITMS (ion trap) is `LowRes`.
-/// Others return `None`.
 fn map_analyzer(a: MassAnalyzer) -> Option<InstrumentType> {
     match a.0 {
-        1 => Some(InstrumentType::LowRes),         // ITMS (ion trap)
-        4 => Some(InstrumentType::TOF),            // TOFMS
-        5 => Some(InstrumentType::QExactive),      // FTMS (Orbitrap)
-        7 => Some(InstrumentType::OrbitrapAstral), // ASTMS (Astral)
+        1 => Some(InstrumentType::LowRes),
+        4 => Some(InstrumentType::TOF),
+        5 => Some(InstrumentType::QExactive),
+        7 => Some(InstrumentType::OrbitrapAstral),
         _ => None,
     }
 }
 
-/// Peek the first `peek_n` MS2 scans of a `.raw` and return the dominant
-/// activation and the dominant analyzer for param auto-routing, mirroring the
-/// mzML `detect_dominant_activation` / `detect_instrument_type_for_path`
-/// helpers so a CID/ETD/ion-trap `.raw` is not silently scored with the
-/// HCD/QExactive model. Each is read on its own: scans that name no known
-/// activation still give the analyzer. `(None, None)` if the file can't be
-/// opened.
 pub fn detect_activation_instrument<P: AsRef<Path>>(
     path: P,
     peek_n: usize,
@@ -593,7 +447,6 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     let Ok(mut reader) = RawFileReader::open(path.as_ref()) else {
         return (None, None);
     };
-    // Activation and analyzer are scan metadata: the peaks are not read.
     reader.set_signal_loading(false);
     let mut act: HashMap<u8, usize> = HashMap::new();
     let mut inst: HashMap<u8, usize> = HashMap::new();
@@ -623,15 +476,12 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     dominant_acquisition(act, inst)
 }
 
-/// The most frequent activation and the most frequent analyzer of two tallies
-/// keyed by enum discriminant. An empty tally gives `None` for its side only.
 fn dominant_acquisition(
     act: HashMap<u8, usize>,
     inst: HashMap<u8, usize>,
 ) -> (Option<ActivationMethod>, Option<InstrumentType>) {
     let activation = act
         .into_iter()
-        // Deterministic tie-break (HashMap order is randomised per process).
         .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)))
         .map(|(k, _)| match k {
             x if x == ActivationMethod::CID as u8 => ActivationMethod::CID,
@@ -640,14 +490,10 @@ fn dominant_acquisition(
             x if x == ActivationMethod::PQD as u8 => ActivationMethod::PQD,
             x if x == ActivationMethod::UVPD as u8 => ActivationMethod::UVPD,
             x if x == ActivationMethod::EThcD as u8 => ActivationMethod::EThcD,
-            // The key always round-trips a known ActivationMethod; a future
-            // variant added to map_dissociation falls back to HCD (the common
-            // case) rather than silently mislabeling it as UVPD.
             _ => ActivationMethod::HCD,
         });
     let instrument = inst
         .into_iter()
-        // Deterministic tie-break (HashMap order is randomised per process).
         .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)))
         .map(|(k, _)| match k {
             x if x == InstrumentType::LowRes as u8 => InstrumentType::LowRes,
@@ -660,9 +506,6 @@ fn dominant_acquisition(
     (activation, instrument)
 }
 
-/// Warn when a run interleaves pure ETD scans with EThcD/ETciD scans (a decision-tree
-/// acquisition does this per precursor charge). One model scores the whole run, chosen
-/// by the dominant activation, so the minority scans are scored off their activation.
 fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
     let n = |m: ActivationMethod| act.get(&(m as u8)).copied().unwrap_or(0);
     let (etd, ethcd) = (n(ActivationMethod::ETD), n(ActivationMethod::EThcD));
@@ -676,11 +519,8 @@ fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
     }
 }
 
-/// Read collision energy, isolation width and FAIMS CV from the first `n` MS2
-/// scans of a `.raw`. `None` when the file cannot be opened.
 pub fn sample_ms2_meta<P: AsRef<Path>>(path: P, n: usize) -> Option<crate::Ms2MetaSample> {
     let mut reader = RawFileReader::open(path.as_ref()).ok()?;
-    // Precursor, isolation and FAIMS values are scan metadata: the peaks are not read.
     reader.set_signal_loading(false);
     let mut out = crate::Ms2MetaSample::default();
     for i in 0..reader.len() {
@@ -738,12 +578,6 @@ impl Iterator for ThermoRawReader {
                 });
             }
             if level >= 3 && self.capture_product_scans {
-                // The MS2 an SPS-MS3 belongs to is the scan's `Master Scan
-                // Number` trailer. The precursor's `parent_index` is not: on a
-                // Lumos SPS-MS3 run it matched the master scan for 15% of the
-                // MS3 scans and otherwise named the MS3 itself or whichever MS2
-                // came last, which hands one peptide's reporter ions to
-                // another. Without the trailer the scan stays unlinked.
                 let parent_id = master_scan_number(&self.handle, i)
                     .map(|scan| with_scan_number(&raw.native_id(), scan));
                 self.product_scans.push(ProductScan {
@@ -765,11 +599,8 @@ impl Iterator for ThermoRawReader {
                 }
             }
             match Self::convert(&raw, &self.handle) {
-                // Skip MS2 scans with no usable precursor (mirrors mzML).
                 Some(spec) => {
                     if self.capture_scan_context {
-                        // The survey scan of an MS2 is its `Master Scan Number`
-                        // trailer, as for SPS-MS3 above.
                         self.scan_contexts.push(ScanContext {
                             id: spec.title.clone(),
                             parent_id: master_scan_number(&self.handle, i)
@@ -873,14 +704,14 @@ mod tests {
     fn sanitize_thermo_peaks_filters_and_sorts() {
         let pairs = vec![
             (300.0, 1000.0f32),
-            (f64::NAN, 500.0),      // bad m/z
-            (0.0, 100.0),           // non-positive m/z
-            (-5.0, 100.0),          // negative m/z
-            (150.0, 2000.0),        // valid, out of order
-            (400.0, f32::NAN),      // bad intensity
-            (450.0, f32::INFINITY), // bad intensity
-            (500.0, -1.0),          // negative intensity
-            (250.0, 0.0),           // valid (zero intensity allowed)
+            (f64::NAN, 500.0),
+            (0.0, 100.0),
+            (-5.0, 100.0),
+            (150.0, 2000.0),
+            (400.0, f32::NAN),
+            (450.0, f32::INFINITY),
+            (500.0, -1.0),
+            (250.0, 0.0),
         ];
         let out = super::sanitize_thermo_peaks(pairs);
         assert_eq!(out, vec![(150.0, 2000.0), (250.0, 0.0), (300.0, 1000.0)]);
@@ -896,39 +727,33 @@ mod tests {
             map_dissociation(DissociationMethod(2)),
             Some(ActivationMethod::HCD)
         );
-        // Pure electron transfer/capture (ETD=4, ECD=8, NETD=16) → ETD.
         for v in [4u8, 8, 16] {
             assert_eq!(
                 map_dissociation(DissociationMethod(v)),
                 Some(ActivationMethod::ETD)
             );
         }
-        // Supplemental activation (ETciD=5, EThcD=6, ECciD=9, EChcD=10) → EThcD:
-        // the spectrum carries both the c/z• and the b/y series.
         for v in [5u8, 6, 9, 10] {
             assert_eq!(
                 map_dissociation(DissociationMethod(v)),
                 Some(ActivationMethod::EThcD)
             );
         }
-        assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
+        assert_eq!(map_dissociation(DissociationMethod(0)), None);
     }
 
     #[test]
     fn trailer_isolation_width_is_the_full_width() {
-        // Trailer 1.6 used as the half-width: 500 ± 1.6 → 500 ± 0.8.
         let (lo, up) = full_width_isolation_bounds(498.4, 501.6, Some(1.6));
         assert!(
             (lo - 499.2).abs() < 1e-9 && (up - 500.8).abs() < 1e-9,
             "{lo} {up}"
         );
-        // An offset window keeps its center.
         let (lo, up) = full_width_isolation_bounds(498.6, 501.8, Some(1.6));
         assert!(
             (lo - 499.4).abs() < 1e-9 && (up - 501.0).abs() < 1e-9,
             "{lo} {up}"
         );
-        // Filter fallback (already halved) and no trailer: unchanged.
         assert_eq!(
             full_width_isolation_bounds(499.2, 500.8, Some(1.6)),
             (499.2, 500.8)
@@ -941,16 +766,16 @@ mod tests {
 
     #[test]
     fn analyzer_maps_to_instrument() {
-        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes)); // ITMS
-        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF)); // TOFMS
+        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes));
+        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF));
         assert_eq!(
             map_analyzer(MassAnalyzer(5)),
             Some(InstrumentType::QExactive)
-        ); // FTMS (Orbitrap)
+        );
         assert_eq!(
             map_analyzer(MassAnalyzer(7)),
             Some(InstrumentType::OrbitrapAstral)
-        ); // ASTMS (Astral)
-        assert_eq!(map_analyzer(MassAnalyzer(0)), None); // Unknown
+        );
+        assert_eq!(map_analyzer(MassAnalyzer(0)), None);
     }
 }

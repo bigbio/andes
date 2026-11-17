@@ -25,53 +25,23 @@ use crate::select::{parse_experiment_class, SelectionEntry};
 use crate::store::write::SourceLedger;
 use crate::TrainError;
 
-/// A handle to a Parquet model store.  Created by [`ModelStore::open`].
 pub struct ModelStore {
-    /// One or more Parquet part files that make up this store.
-    ///
-    /// - Single-file store: a one-element vector holding the file path.
-    /// - Partitioned store (a directory of `protocol=<P>/models.parquet`
-    ///   partitions): one entry per partition file, sorted for determinism.
-    ///
-    /// All read operations scan every part and union the results, so a
-    /// partitioned store is indistinguishable from the equivalent single file.
     parts: Vec<PathBuf>,
-    /// Full manifest rows read at open time (union across all parts).
     manifest: Vec<RawManifestEntry>,
 }
 
-/// Raw manifest entry as stored in the Parquet file (before type conversion).
 #[derive(Debug, Clone)]
 pub struct RawManifestEntry {
-    /// Lowercased model identifier, e.g. `"hcd_qexactive_tryp"`.
     pub model_id: String,
-    /// Activation method string as stored, e.g. `"HCD"`, `"CID"`.
     pub activation: String,
-    /// Instrument string as stored, e.g. `"QExactive"`, `"LowRes"`.
     pub instrument: String,
-    /// Enzyme string as stored, e.g. `"Trypsin"`, `"ArgC"`.
     pub enzyme: String,
-    /// Protocol string as stored, e.g. `"Automatic"`, `"TMT"`, `"Phosphorylation"`.
     pub protocol: String,
 }
 
 impl ModelStore {
-    /// Open the store and read the manifest.
-    ///
-    /// `path` may be either:
-    /// - a single Parquet file (the historical single-file layout), or
-    /// - a **directory** of per-protocol Parquet partitions written in the
-    ///   Hive-style layout `protocol=<Protocol>/models.parquet` (or, more
-    ///   generally, any tree of `*.parquet` files). Every partition is read and
-    ///   the manifests/tables are unioned into one in-memory store, exactly as
-    ///   if they had been written to a single file.
     pub fn open(path: &Path) -> Result<Self, TrainError> {
         let parts = resolve_parts(path)?;
-        // Build a model_id → part index as we read manifests (finding 3.7). In a
-        // partitioned store every model must live in exactly one part; a
-        // duplicate `model_id` across parts (e.g. a stale temp partition left
-        // behind) otherwise makes `load_param` path-order-dependent — it stops at
-        // the first part that contains the id. Reject the ambiguity up front.
         let mut manifest: Vec<RawManifestEntry> = Vec::new();
         let mut owner: FxHashMap<String, PathBuf> = FxHashMap::default();
         for part in &parts {
@@ -96,27 +66,14 @@ impl ModelStore {
         Ok(Self { parts, manifest })
     }
 
-    /// List all model IDs in the store.
     pub fn model_ids(&self) -> Vec<String> {
         self.manifest.iter().map(|e| e.model_id.clone()).collect()
     }
 
-    /// Return the raw manifest entries (one per model).
     pub fn manifest_entries(&self) -> &[RawManifestEntry] {
         &self.manifest
     }
 
-    /// Convert each manifest entry to a [`SelectionEntry`] for use with
-    /// [`crate::select::select`].
-    ///
-    /// The mapping from the parquet `protocol` column to `experiment_class` is:
-    /// - `"Automatic"` or `"Standard"` → empty set
-    /// - `"TMT"` → `{"tmt"}`
-    /// - `"Phosphorylation"` → `{"phospho"}`
-    /// - `"iTRAQ"` → `{"itraq"}`
-    /// - `"iTRAQPhospho"` → `{"itraq", "phospho"}`
-    ///
-    /// Any unrecognised protocol falls back to empty set (same as "standard").
     pub fn selection_entries(&self) -> Vec<SelectionEntry> {
         self.manifest
             .iter()
@@ -130,18 +87,10 @@ impl ModelStore {
             .collect()
     }
 
-    /// Load and reconstruct a [`Param`] for the given `model_id`.
-    ///
-    /// In a partitioned store, each model lives in exactly one partition; the
-    /// reconstructor scans every part and stops once it has assembled the model.
     pub fn load_param(&self, model_id: &str) -> Result<Param, TrainError> {
         reconstruct_param(&self.parts, model_id)
     }
 
-    /// Return the source ledger entries for the given `model_id`.
-    ///
-    /// Returns an empty `Vec` if the store contains no `"source"` rows for
-    /// this model (e.g. stores written by the legacy [`super::write_models`]).
     pub fn load_sources(&self, model_id: &str) -> Result<Vec<SourceLedger>, TrainError> {
         let mut ledgers: Vec<SourceLedger> = Vec::new();
         for part in &self.parts {
@@ -150,20 +99,11 @@ impl ModelStore {
         Ok(ledgers)
     }
 
-    /// Reconstruct the [`CountStats`] for `(model_id, source_id)` from the
-    /// `"stat"` rows in the store.
-    ///
-    /// Returns [`TrainError::NoModel`] if no stat rows are found for the
-    /// given `(model_id, source_id)` pair.
     pub fn load_source_stats(
         &self,
         model_id: &str,
         source_id: &str,
     ) -> Result<CountStats, TrainError> {
-        // A model's stat rows live in exactly one partition. Scan parts and
-        // return the first part that actually contains stats for this pair.
-        // Only a `NoModel` miss is a reason to keep probing the next partition;
-        // any other error (Parquet/schema) is real and must surface immediately.
         for part in &self.parts {
             match read_source_stats(part, model_id, source_id) {
                 Ok(stats) => return Ok(stats),
@@ -177,12 +117,6 @@ impl ModelStore {
     }
 }
 
-/// Resolve `path` to the list of Parquet part files that constitute the store.
-///
-/// - A regular file ⇒ a single-element list (single-file store).
-/// - A directory ⇒ every `*.parquet` file found beneath it (recursively),
-///   sorted for deterministic iteration order. This covers the Hive-style
-///   `protocol=<P>/models.parquet` partition layout.
 fn resolve_parts(path: &Path) -> Result<Vec<PathBuf>, TrainError> {
     if path.is_dir() {
         let mut parts: Vec<PathBuf> = Vec::new();
@@ -200,21 +134,12 @@ fn resolve_parts(path: &Path) -> Result<Vec<PathBuf>, TrainError> {
     }
 }
 
-/// Recursively collect `*.parquet` files under `dir` into `out`.
-///
-/// Temporary / in-flight artifacts are ignored (finding 3.7) so a partial write
-/// left behind by an interrupted store update doesn't shadow or duplicate a real
-/// partition: files whose name starts with `.` (hidden / atomic-write temp) or
-/// ends with `.tmp.parquet`, and any `.crc`-style sidecars (non-`.parquet`
-/// extension) are skipped.
 fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), TrainError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if p.is_dir() {
-            // Skip hidden / temp staging dirs (e.g. `.tmp`, `_temporary`) before
-            // descending so a stale partial write never contributes parquet files.
             if name.starts_with('.') || name.starts_with('_') {
                 continue;
             }
@@ -224,9 +149,6 @@ fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Train
         if p.extension().and_then(|e| e.to_str()) != Some("parquet") {
             continue;
         }
-        // Skip hidden/temp partition files (e.g. `.models.parquet.tmp.parquet`,
-        // `.~tmp.parquet`, or any dotfile) so a stale temp doesn't become a
-        // phantom duplicate partition.
         if name.starts_with('.') || name.ends_with(".tmp.parquet") {
             continue;
         }
@@ -235,26 +157,12 @@ fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Train
     Ok(())
 }
 
-/// Convert the parquet `protocol` column value to a `BTreeSet<String>` experiment class.
-///
-/// Maps the stored `protocol` column naming to the lowercase slug-set used by
-/// [`crate::select`].
-///
-/// `iTRAQPhospho` is intentionally mapped to the single slug `"itraqphospho"`
-/// (not `{"itraq","phospho"}`) so that:
-/// - exact-match (step 1) in [`crate::select::select`] finds combo models
-///   like `hcd_qexactive_tryp_itraqphospho` when a `SelectionKey` with
-///   `{"itraqphospho"}` is used, and
-/// - when no iTRAQPhospho-specific model is bundled, select() falls through
-///   to the empty-class fallback (the protocol-less model) rather than
-///   spuriously matching a `{"phospho"}` subset entry.
 pub fn protocol_to_experiment_class(protocol: &str) -> std::collections::BTreeSet<String> {
     match protocol {
         "Automatic" | "Standard" => std::collections::BTreeSet::new(),
         "TMT" => parse_experiment_class("tmt"),
         "Phosphorylation" => parse_experiment_class("phospho"),
         "iTRAQ" => parse_experiment_class("itraq"),
-        // Keep as a single opaque slug — do NOT split into {"itraq","phospho"}.
         "iTRAQPhospho" => {
             let mut s = std::collections::BTreeSet::new();
             s.insert("itraqphospho".to_string());
@@ -359,21 +267,12 @@ struct ManifestRow {
     max_charge: i32,
     num_precursor_off: i32,
     charge_hist: Vec<(i32, i32)>,
-    /// Serialized GBDT blob, if present. `None` for models written before this
-    /// column was added (backward-compatible: column absent ⇒ `gbdt_peak_model = None`).
     gbdt_bytes: Option<Vec<u8>>,
-    /// Serialized fragment-intensity GBDT blob, if present. `None` for models
-    /// written before this column existed (backward-compatible: column absent ⇒
-    /// `frag_intensity_model = None`).
     frag_intensity_bytes: Option<Vec<u8>>,
-    /// Serialized rich-ion GBDT blob, if present. `None` for models
-    /// written before this column existed (backward-compatible: column absent ⇒
-    /// `rich_ion_model = None`).
     rich_ion_bytes: Option<Vec<u8>>,
 }
 
 fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainError> {
-
     let mut manifest_opt: Option<ManifestRow> = None;
     let mut partitions: Vec<Partition> = Vec::new();
     let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
@@ -386,8 +285,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     let mut ion_existence_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
 
     for path in parts {
-        // A model lives in exactly one partition; once we've assembled it from
-        // a part (manifest found), no later part can contribute more rows.
         if manifest_opt.is_some() {
             break;
         }
@@ -564,8 +461,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
                                     )));
                                 }
 
-                                // Read the parallel frag_off_loss_classes column if present.
-                                // Old stores (without this column) yield all loss_class=0.
                                 let loss_classes_vec: Vec<i32> = match batch
                                     .column_by_name("frag_off_loss_classes")
                                 {
@@ -599,12 +494,8 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
                                     let is_prefix_f = flat.value(j);
                                     let ion_charge = flat.value(j + 1) as i32;
                                     let offset_bits_f = flat.value(j + 2);
-                                    // Use to_bits() to recover the exact u32 bit pattern;
-                                    // the writer stored f32::from_bits(offset_bits) so this
-                                    // round-trips without precision loss.
                                     let offset_bits = offset_bits_f.to_bits();
                                     let frequency = flat.value(j + 3);
-                                    // Read per-entry loss_class from parallel column; default 0.
                                     let lc: u8 = loss_classes_vec
                                         .get(entry_idx)
                                         .map(|&v| v.clamp(0, 255) as u8)
@@ -650,7 +541,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
                                 let kind = ik_col.value(i);
                                 let ic = ic_col.value(i);
                                 let iob = iob_col.value(i) as u32;
-                                // Read ion_loss_class; default 0 for old stores (column absent).
                                 let lc: u8 = match batch.column_by_name("ion_loss_class") {
                                     Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
                                         Some(arr) if !arr.is_null(i) => {
@@ -713,14 +603,14 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
                                     _ => {}
                                 }
                             }
-                            _ => {} // unknown table_kind: skip
+                            _ => {}
                         }
                     }
-                    _ => {} // unknown record_kind: skip
+                    _ => {}
                 }
             }
         }
-    } // end per-part loop
+    }
 
     let manifest = manifest_opt.ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
 
@@ -780,10 +670,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     };
     param.rebuild_cache();
 
-    // Decode and attach the GBDT signal/noise model if a blob was stored.
-    // Enforce the feature-contract at load (finding 3.1): a blob whose declared
-    // feature count doesn't match the in-process per-peak extractor would
-    // otherwise mis-score via NaN→default_left traversal rather than erroring.
     if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
         let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}"))
@@ -794,7 +680,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
         param.gbdt_peak_model = Some(model);
     }
 
-    // Decode and attach the fragment-intensity regressor if a blob was stored.
     if let Some(bytes) = manifest.frag_intensity_bytes.as_ref() {
         let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!(
@@ -812,7 +697,6 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
         param.frag_intensity_model = Some(std::sync::Arc::new(model));
     }
 
-    // Decode and attach the rich-ion classifier if a blob was stored.
     if let Some(bytes) = manifest.rich_ion_bytes.as_ref() {
         let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
             TrainError::Other(format!("decode rich_ion_model_bytes for '{model_id}': {e}"))
@@ -890,10 +774,8 @@ fn parse_manifest_row(
         }
     }
 
-    // Read the optional GBDT blob. Column absent (old store) → None (backward-compat).
-    // Column present but wrong type → hard error (schema corruption).
     let gbdt_bytes: Option<Vec<u8>> = match batch.column_by_name("gbdt_model_bytes") {
-        None => None, // backward-compat: old store without the column
+        None => None,
         Some(col) => {
             let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
                 TrainError::Other("gbdt_model_bytes column is not BinaryArray".into())
@@ -906,10 +788,9 @@ fn parse_manifest_row(
         }
     };
 
-    // Read the optional fragment-intensity model blob (backward-compatible: column absent → None).
     let frag_intensity_bytes: Option<Vec<u8>> =
         match batch.column_by_name("frag_intensity_model_bytes") {
-            None => None, // backward-compat: old store without the column
+            None => None,
             Some(col) => {
                 let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
                     TrainError::Other("frag_intensity_model_bytes column is not BinaryArray".into())
@@ -922,9 +803,8 @@ fn parse_manifest_row(
             }
         };
 
-    // Read the optional rich-ion model blob (backward-compatible: column absent → None).
     let rich_ion_bytes: Option<Vec<u8>> = match batch.column_by_name("rich_ion_model_bytes") {
-        None => None, // backward-compat: old store without the column
+        None => None,
         Some(col) => {
             let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
                 TrainError::Other("rich_ion_model_bytes column is not BinaryArray".into())
@@ -960,10 +840,6 @@ fn parse_manifest_row(
     })
 }
 
-/// Reconstruct an [`IonType`] from the stored kind/charge/offset_bits/loss_class fields.
-///
-/// `loss_class` defaults to `0` for stores written before the `ion_loss_class` column
-/// was added (backward-compatible: old files simply omit the column).
 fn decode_ion_type(
     kind: &str,
     charge: i32,
@@ -1122,7 +998,6 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
                 0.01
             };
 
-            // Null or absent ⇒ no decay recorded for this source.
             let decay_half_life_days = f32_col(&batch, "decay_half_life_days")
                 .ok()
                 .filter(|col| !col.is_null(i))
@@ -1260,7 +1135,6 @@ fn read_source_stats(
                     stats.noise_error.insert(part, counts);
                 }
                 "existence" => {
-                    // counts[idx] = count for existence key (partition, idx).
                     let part = read_partition(&batch, i)?;
                     if counts_list.is_null(i) {
                         continue;
@@ -1278,7 +1152,6 @@ fn read_source_stats(
                     }
                 }
                 "charge" => {
-                    // counts parallel to charge_keys.
                     let charge_keys_col = list_col(&batch, "charge_keys")?;
                     if counts_list.is_null(i) || charge_keys_col.is_null(i) {
                         continue;
@@ -1302,7 +1175,7 @@ fn read_source_stats(
                         }
                     }
                 }
-                _ => {} // unknown stat table_kind: skip
+                _ => {}
             }
         }
     }
@@ -1340,7 +1213,6 @@ fn read_ion_type(
     let kind = ik_col.value(i);
     let ic = ic_col.value(i);
     let iob = iob_col.value(i) as u32;
-    // Read ion_loss_class if present; default to 0 for old stores that lack this column.
     let loss_class: u8 = match batch.column_by_name("ion_loss_class") {
         Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
             Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
@@ -1359,9 +1231,6 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
     }
 
-    /// One real partition file of the bundled store (the `Automatic` protocol,
-    /// which carries `hcd_qexactive_tryp`), for tests that need a single
-    /// Parquet file to copy around.
     fn bundled_partition_file() -> std::path::PathBuf {
         bundled_store_path().join("protocol=Automatic/models.parquet")
     }
@@ -1410,8 +1279,6 @@ mod tests {
         let src = bundled_partition_file();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::copy(&src, dir.path().join("models.parquet")).expect("copy real");
-        // A leftover temp copy of the same data — would otherwise trip the
-        // duplicate-id guard if it weren't ignored.
         std::fs::copy(&src, dir.path().join(".models.parquet.tmp.parquet")).expect("copy temp");
         std::fs::copy(&src, dir.path().join("models.tmp.parquet")).expect("copy temp2");
         let store = ModelStore::open(dir.path()).expect("temp partitions must be ignored");

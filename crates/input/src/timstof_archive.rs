@@ -1,19 +1,7 @@
-//! Archived Bruker `.d` run folders (`feature = "timstof"`).
-//!
-//! Repositories ship timsTOF runs as archives of the `.d` folder: `X.d.zip`,
-//! `X.d.tar`, `X.d.tar.gz` / `X.d.tgz`, and `X.d.gz` (a gzipped tar). The
-//! reader needs the TDF database and its binary blob as files it can open and
-//! memory-map, so an archive is unpacked into a directory the caller chooses
-//! (the run's temporary directory), its run folder is located (the folder
-//! holding `analysis.tdf` and `analysis.tdf_bin`, at the archive root or
-//! nested up to eight folders deep), and that folder is moved to `<dir>/<X>.d` so the run
-//! keeps the archive's name.
-
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// Error unpacking an archived `.d`.
 #[derive(Debug, thiserror::Error)]
 pub enum DArchiveError {
     #[error("cannot read the archive '{path}': {message}")]
@@ -35,17 +23,13 @@ pub enum DArchiveError {
     SeveralRuns { path: String, count: usize },
 }
 
-/// Archive layouts of a `.d` folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DArchiveKind {
     Zip,
     Tar,
-    /// A gzipped tar (`.d.tar.gz`, `.d.tgz`, `.d.gz`).
     TarGz,
 }
 
-/// File-name suffixes of archived `.d` folders, longest first, and the run
-/// name each leaves when stripped.
 const SUFFIXES: [(&str, DArchiveKind); 5] = [
     (".d.tar.gz", DArchiveKind::TarGz),
     (".d.zip", DArchiveKind::Zip),
@@ -54,14 +38,9 @@ const SUFFIXES: [(&str, DArchiveKind); 5] = [
     (".d.gz", DArchiveKind::TarGz),
 ];
 
-/// The archive kind and run name (`X` of `X.d.zip`) of an archived `.d`,
-/// from its file name (case-insensitive), or `None` for any other path.
 pub fn d_archive_kind(path: &Path) -> Option<(DArchiveKind, String)> {
     let name = path.file_name()?.to_str()?;
     let lower = name.to_ascii_lowercase();
-    // The suffixes are ASCII and `to_ascii_lowercase` keeps every byte
-    // offset, so once `lower` ends with a suffix, cutting `name` there lands
-    // on a char boundary.
     SUFFIXES.iter().find_map(|(suffix, kind)| {
         if !lower.ends_with(suffix) {
             return None;
@@ -71,9 +50,6 @@ pub fn d_archive_kind(path: &Path) -> Option<(DArchiveKind, String)> {
     })
 }
 
-/// Unpack the archived `.d` at `archive` under `dir` and return the run
-/// folder, `<dir>/<X>.d`. `dir` must exist; the archive is unpacked into a
-/// fresh sub-folder of it first.
 pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveError> {
     let corrupt = |message: String| DArchiveError::Corrupt {
         path: archive.display().to_string(),
@@ -142,9 +118,6 @@ pub fn unpack_d_archive(archive: &Path, dir: &Path) -> Result<PathBuf, DArchiveE
     Ok(target)
 }
 
-/// Unpack a tar stream into `dir`. Entries that would land outside `dir` are
-/// refused, and so are symbolic links: a link could point outside `dir` and
-/// the run-folder search follows links.
 fn unpack_tar<R: Read>(reader: R, dir: &Path, archive: &Path) -> Result<(), DArchiveError> {
     let corrupt = |e: std::io::Error| DArchiveError::Corrupt {
         path: archive.display().to_string(),
@@ -167,15 +140,12 @@ fn unpack_tar<R: Read>(reader: R, dir: &Path, archive: &Path) -> Result<(), DArc
     Ok(())
 }
 
-/// Deepest nesting searched for the run folder below the unpack root.
 const MAX_DEPTH: usize = 8;
 
 fn is_run_folder(dir: &Path) -> bool {
     dir.join("analysis.tdf").is_file() && dir.join("analysis.tdf_bin").is_file()
 }
 
-/// Collect the run folders at or below `dir` (not below a run folder, and
-/// skipping the `__MACOSX` resource-fork folders some zip tools add).
 fn find_run_folders(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if is_run_folder(dir) {
         out.push(dir.to_path_buf());

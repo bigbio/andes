@@ -1,14 +1,3 @@
-//! `.pin` schema test for Andes's output.
-//!
-//! Asserts the schema invariant:
-//!   - `RawScore` is present and is the sole score column.
-//!   - `DeNovoScore`, `lnSpecEValue`, `lnEValue`, and `lnDeltaSpecEValue` are
-//!     absent.
-//!   - The additive feature columns (`EdgeScore`, `PrecursorIsotopeKL`,
-//!     `PrecursorSNR`, `DeltaRawScore`) are present, between `matchedIonRatio`
-//!     and `Peptide`.
-//!   - Every data row has at least as many columns as the header.
-
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -45,7 +34,6 @@ const GF_COLUMNS: [&str; 4] = [
     "lnDeltaSpecEValue",
 ];
 
-/// Additive feature columns Andes emits between matchedIonRatio and Peptide.
 const ADDITIVE_COLUMNS: [&str; 4] = [
     "EdgeScore",
     "PrecursorIsotopeKL",
@@ -102,7 +90,6 @@ fn rust_pin_header_is_gf_free_schema() {
         );
     }
 
-    // Proteins must be the very last column (after Peptide).
     let proteins_pos = cols
         .iter()
         .rposition(|c| *c == "Proteins")
@@ -121,10 +108,6 @@ fn rust_pin_header_is_gf_free_schema() {
 
 #[test]
 fn rust_pin_rows_have_at_least_header_column_count() {
-    // Run a real search and assert each data row has at least as many columns
-    // as the header (trailing Proteins columns may add more). Schema-only; no
-    // value comparison against any external reference fixture.
-
     let target_db = FastaReader::load_all(BufReader::new(
         File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
     ))

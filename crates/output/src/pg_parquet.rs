@@ -1,10 +1,3 @@
-//! The QPX protein-group view (`<prefix>.pg.parquet`) from protein inference.
-//!
-//! One row per group at or below the protein q-value cut, targets and the
-//! decoy groups that won their family's competition (`is_decoy`), so a reader
-//! can check the protein FDR. `label` and `intensity` are null: protein
-//! quantities are computed downstream from the feature view.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,16 +19,13 @@ use crate::protein_inference::{Inference, ProteinGroup};
 
 const CONTAMINANT_PREFIX: &str = "CONTAMINANT_";
 
-/// Features of one group: of its unique peptides, and all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FeatureCounts {
     pub unique: usize,
     pub total: usize,
 }
 
-/// QPX version of the pg view written here.
 const PG_QPX_VERSION: &str = "1.1";
-/// The columns a reader re-derives a group's identity from.
 const PG_IDENTITY_COMPOSITE: &str = "pg_accessions,grouped_runs,label";
 
 fn peptide_per_protein_fields() -> Fields {
@@ -289,12 +279,6 @@ fn build_batch(
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Write `inf`'s groups at protein q-value `max_q` or below as the QPX pg
-/// view. `runs` are the run names the groups were inferred over
-/// (`grouped_runs`). `global_qvalue` is the group's q-value; `pg_qvalue` (run
-/// level) is set only when `run_level`, i.e. when the inference covered one
-/// run. `features`, by group id, fills `feature_counts`; without it the
-/// column is null.
 pub fn write_pg_parquet(
     path: &Path,
     inf: &Inference,

@@ -1,14 +1,7 @@
-//! Atomic output files: a writer writes `<path>.partial` and renames it to
-//! `path` once complete, so a failed or interrupted run never leaves a
-//! truncated file under the final name.
-
 use std::path::Path;
 
 pub(crate) use crate::ms1_table::partial_path as partial;
 
-/// Run `write` on `<path>.partial` and rename that file to `path` when it
-/// succeeds; on an error the partial file is removed. `write` must flush what
-/// it buffers before it returns.
 pub fn write_atomic<T>(
     path: &Path,
     write: impl FnOnce(&Path) -> std::io::Result<T>,

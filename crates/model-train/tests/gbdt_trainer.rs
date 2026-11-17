@@ -1,12 +1,6 @@
-//! determinism, blob round-trip at the real 18-feature width, and signal/noise
-//! separation. The GBDT is trained in Rust and emitted directly as the SoA
-//! `GbdtPeakModel` the scoring walker consumes — this locks the trainer→walker
-//! contract.
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
-/// Deterministic separable dataset at the production feature width (18).
-/// feature 0 drives the label; the rest are seeded noise. No `rand` crate.
 fn separable_18(n: usize, seed: u64) -> Dataset {
     const NF: usize = 18;
     let mut s = seed;
@@ -62,8 +56,6 @@ fn trained_model_roundtrips_through_blob_and_separates() {
     assert_eq!(model.n_features, 18);
     assert!(model.apply_sigmoid);
 
-    // Round-trip through the AGBD blob (the exact bytes the store holds and the
-    // walker decodes) — must decode and be structurally identical.
     let back = GbdtPeakModel::from_bytes(&model.to_bytes()).expect("blob must decode");
     assert_eq!(
         back, model,
@@ -84,8 +76,6 @@ fn trained_model_roundtrips_through_blob_and_separates() {
 
 #[test]
 fn different_seeds_can_differ_but_both_separate() {
-    // Sanity: two different seeds both yield separating models (not a determinism
-    // contradiction — just that training is robust, not seed-fragile).
     let ds = separable_18(3000, 5);
     for seed in [1u64, 2, 999] {
         let m =

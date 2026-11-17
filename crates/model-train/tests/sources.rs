@@ -4,7 +4,6 @@ use scoring_crate::param_model::{IonType, Param, Partition};
 use std::path::Path;
 
 fn fixture_param() -> Param {
-    // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
@@ -161,13 +160,11 @@ fn per_source_stats_round_trip_and_sum() {
         "CountStats for s1 did not round-trip exactly"
     );
 
-    // and load_param still works (search path unaffected)
     assert!(
         store.load_param("m").is_ok(),
         "load_param failed on store with source/stat rows"
     );
 
-    // sum of sources == an aggregate you can recompute
     let mut agg = s0.clone();
     agg.add(&s1);
     let mut from_store = store.load_source_stats("m", "s0").unwrap();
@@ -198,7 +195,6 @@ fn load_param_ignores_source_stat_rows() {
 
 #[test]
 fn write_models_still_works_without_sources() {
-    // The legacy write_models function must continue to work.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.parquet");
     let param = fixture_param();

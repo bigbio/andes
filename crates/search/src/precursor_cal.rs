@@ -1,22 +1,7 @@
-//! Two-pass precursor mass calibration.
-//!
-//! The pre-pass calibrator learns a file-wide ppm shift; the main pass
-//! applies it to observed neutral masses without mutating
-//! [`model::Spectrum`] objects.
-
-/// Precursor calibration modes (`auto`, `on`, `off`).
-///
-/// `Default` is `Off` (opt-in) — matches the CLI default
-/// and `SearchParams::default_tryptic`, so library consumers that derive
-/// `Default` on a struct containing this field cannot silently enable the
-/// pre-pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrecursorCalMode {
-    /// Run pre-pass; apply shift only when ≥200 confident PSMs yield non-zero median.
     Auto,
-    /// Run pre-pass; always store learned shift (still no-op when shift is 0.0).
     On,
-    /// Skip pre-pass; `precursor_mass_shift_ppm` stays 0.0 (bit-identical baseline).
     #[default]
     Off,
 }
@@ -42,7 +27,6 @@ pub fn residual_ppm(observed_mass: f64, theoretical_mass: f64) -> f64 {
     (observed_mass - theoretical_mass) / theoretical_mass * 1e6
 }
 
-/// Median of `values`. Empty input returns 0.0 (no-shift contract).
 pub fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -57,10 +41,6 @@ pub fn median(values: &[f64]) -> f64 {
     }
 }
 
-/// Apply learned calibration to an observed neutral peptide mass.
-///
-/// When `shift_ppm == 0.0`, returns `raw_neutral` unchanged — the mandatory
-/// fast path for `-precursorCal off` and the pre-calibration baseline.
 pub fn adjusted_observed_neutral_mass(raw_neutral: f64, shift_ppm: f64) -> f64 {
     if shift_ppm == 0.0 {
         raw_neutral
@@ -69,24 +49,13 @@ pub fn adjusted_observed_neutral_mass(raw_neutral: f64, shift_ppm: f64) -> f64 {
     }
 }
 
-/// Pre-pass tuning constants.
 pub mod constants {
     pub const SAMPLING_STRIDE: usize = 10;
     pub const MAX_SAMPLED: usize = 500;
-    /// Upper bound on the number of best-residual PSMs fed to the median
-    /// shift estimate (top 200). Decoupled from
-    /// the firing minimum below so high-yield datasets (Astral/TMT) keep using a
-    /// full 200-residual estimate unchanged.
     pub const RESIDUAL_CAP: usize = 200;
-    /// Minimum confident residuals required to TRUST the learned shift. Set to
-    /// 150 because low-res-MS2 datasets (e.g. PXD001819 ion-trap CID) yield only
-    /// ~193 sub-1e-6 SpecEValue PSMs from the 500-spectrum sample; a higher
-    /// threshold would skip calibration on them, while 150 is still a robust
-    /// sample size for a median (the cap above keeps high-yield datasets identical).
     pub const MIN_CONFIDENT_PSMS: usize = 150;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;
 
-    /// Post-cal main-pass tolerance tightening defaults.
     pub const TIGHTENED_WINDOW_FLOOR_PPM: f64 = 2.0;
     pub const TIGHTENED_WINDOW_MARGIN_PPM: f64 = 0.5;
     pub const TIGHTENED_WINDOW_SIGMA_MULTIPLIER: f64 = 3.0;
@@ -105,7 +74,6 @@ pub fn robust_sigma_ppm(residuals: &[f64], center: f64) -> f64 {
     constants::MAD_TO_SIGMA_SCALE * median_absolute_deviation(residuals, center)
 }
 
-/// Conservative tightened ppm half-window for a calibrated main pass.
 pub fn tightened_tolerance_ppm(
     user_ppm: f64,
     robust_sigma_ppm: f64,

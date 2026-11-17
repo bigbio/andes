@@ -1,19 +1,3 @@
-//! Helpers for andes PIN peptide strings (`K.M+15.99491PEPTIDEK.R`).
-//!
-//! andes prints at most one mass delta per residue (`Peptide`'s `Display`).
-//! When a terminal modification and a residue modification sit on the same
-//! residue, the printed delta is their sum: fixed carbamidomethyl-C under a
-//! variable protein N-terminal acetyl is written `C+99.03203`. N-terminal
-//! deltas are printed after the first residue.
-
-/// Split a delta printed after the first residue into an N-terminal and a
-/// residue modification whose masses sum to it.
-///
-/// `nterm` and `residue` are the `(key, monoisotopic mass)` candidates allowed
-/// at the N-terminus and on the first residue. Returns the pair with the
-/// smallest mass error within `tol` Da; an exact tie keeps the first pair in
-/// candidate order (N-terminal candidates outer, residue candidates inner), so
-/// callers that want a deterministic tie-break pass candidates in that order.
 pub fn split_nterm_residue_delta<K: Copy>(
     delta: f64,
     tol: f64,

@@ -1,19 +1,3 @@
-//! The proteoform table: per protein family, the canonical entry and each
-//! isoform, variant and chain entry with accepted evidence, its q-value and
-//! its quantity.
-//!
-//! A peptide is *specific* to a member when no other entry explains it, in
-//! its family or in another; otherwise it is *shared*. A variant peptide that
-//! another family's canonical protein also contains (a paralog, or an equal
-//! sequence once I and L are taken as equal) is therefore shared: it shows the
-//! other protein as well as it shows the variant. An isoform, variant or chain
-//! entry is listed only with specific evidence. A member's q-value is that of
-//! its best specific PSM (the class-aware q-value of [`crate::class_fdr`]), or
-//! of its best shared PSM when it has no specific one (then `evidence` is
-//! `shared`): the error rate of the PSM set down to that PSM, not the
-//! probability that the member is absent. Its quantity is the summed abundance
-//! of its specific peptides in each run or channel.
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use model::{EntryKind, Protein};
@@ -22,16 +6,12 @@ use search::SearchIndex;
 use crate::class_fdr::Cutoffs;
 use crate::percolator::PercolatorPsm;
 
-/// Quantities of identified peptides, from the quantification step.
 #[derive(Debug, Clone, Default)]
 pub struct QuantSummary {
-    /// Run names (label-free) or channel names (isobaric), in column order.
     pub columns: Vec<String>,
-    /// (bare peptide sequence, its proteins, column, abundance).
     pub values: Vec<(String, Vec<String>, usize, f64)>,
 }
 
-/// One family member of the proteoform table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProteoformRow {
     pub family: String,
@@ -41,21 +21,12 @@ pub struct ProteoformRow {
     pub specific_peptides: usize,
     pub shared_peptides: usize,
     pub psms: usize,
-    /// `specific` or `shared`: which PSMs the q-value comes from.
     pub evidence: &'static str,
     pub best_psm: String,
     pub q_value: f64,
-    /// For a variant: its substitution's mass coincidence with a common
-    /// modification, and whether the canonical counterpart peptide was
-    /// identified. Empty otherwise.
     pub alternative: String,
-    /// The database the member's claim comes from (empty for a FASTA entry).
     pub source: String,
-    /// How likely claims like the member's are to be real (empty for a
-    /// FASTA entry).
     pub tier: &'static str,
-    /// Summed abundance of the member's specific peptides, per quant column;
-    /// NaN (written `NA`) where none was measured.
     pub quantity: Vec<f64>,
 }
 
@@ -67,8 +38,6 @@ pub fn bare_sequence(peptide: &str) -> String {
     core.chars().filter(|c| c.is_ascii_uppercase()).collect()
 }
 
-/// A substitution mass that equals a common modification on the canonical
-/// residue, so the variant could be the canonical peptide modified.
 pub fn mass_coincidence(delta_da: f64) -> Option<&'static str> {
     [
         ("deamidation", 0.984016),
@@ -138,7 +107,6 @@ pub fn proteoform_table(
             }
         }
     }
-    // Peptides each family's canonical and isoform entries were identified by.
     let mut non_variant: HashMap<String, BTreeSet<String>> = HashMap::new();
     for ((family, acc), a) in &members {
         if proteins[acc.as_str()].entry_kind() != EntryKind::Variant {
@@ -149,8 +117,6 @@ pub fn proteoform_table(
     }
     let mut rows: Vec<ProteoformRow> = members
         .iter()
-        // A non-canonical member is listed only with a peptide no other member
-        // of its family explains; shared peptides show the family, not it.
         .filter(|((_, acc), a)| {
             proteins[acc.as_str()].entry_kind() == EntryKind::Reference || !a.specific.is_empty()
         })
@@ -168,8 +134,6 @@ pub fn proteoform_table(
                 _ => String::new(),
             };
             let quantity = quant.map_or_else(Vec::new, |qs| {
-                // NaN where no specific peptide was measured in that column:
-                // missing, written as NA, not a measured 0.
                 let mut v = vec![f64::NAN; qs.columns.len()];
                 for (seq, prots, col, value) in &qs.values {
                     if a.specific.contains(seq) && prots.iter().any(|x| x == acc) {
@@ -219,9 +183,6 @@ pub fn proteoform_table(
     rows
 }
 
-/// Why a variant's best specific peptide may be the canonical peptide after
-/// all: its substitution weighs the same as a common modification, and/or the
-/// canonical counterpart peptide (the substitutions reverted) was identified.
 fn variant_alternative(p: &Protein, seq: &str, identified: Option<&BTreeSet<String>>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(name) = p
@@ -330,8 +291,6 @@ mod tests {
         }
     }
 
-    /// Canonical P1, isoform P1-2 (shares AAAK, has its own CCCK), and
-    /// variant N10D of P1 (VLDGSTR from canonical VLNGSTR).
     fn index() -> SearchIndex {
         index_with(Vec::new())
     }
@@ -427,8 +386,6 @@ mod tests {
 
     #[test]
     fn an_alternative_member_needs_specific_evidence() {
-        // Only the shared peptide AAAK is accepted: the family is present,
-        // shown through its canonical entry, but nothing supports the isoform.
         let only_shared: HashMap<_, _> = [psm("s1", 0.001, "AAAK", "sp|P1|A;sp|P1-2|A")]
             .into_iter()
             .collect();
@@ -440,8 +397,6 @@ mod tests {
 
     #[test]
     fn a_variant_peptide_another_family_contains_is_not_specific() {
-        // P9 (another family) holds VLDGSTR as reference sequence: the variant
-        // of P1 is not listed on it, and P9 shows it as shared.
         let paralog = Protein {
             accession: "sp|P9|B".into(),
             description: String::new(),

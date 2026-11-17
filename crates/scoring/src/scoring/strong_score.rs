@@ -1,36 +1,9 @@
-//! Strong-score signal (S1) and null/competition denominator terms (S2).
-//!
-//! S1: context-intensity spectral similarity (`intensity_signal`).
-//! S2: mass-competition evidence, listwise score gap, and candidate rank entropy.
-//! Per-peak chance-match surprise lives in `match_engine::compute_psm_features`
-//! as `ChanceMatchSurprise` (reused as the first null term).
-
 use model::peptide::Peptide;
 
-/// Half-width (Da) for `local_peak_density` in chance-match and competition terms.
 pub const DENSITY_HW: f64 = 50.0;
 
-/// Finite clamp (finding 3.4) for a GBDT regressor's predicted log-relative
-/// fragment intensity before `exp`. The frag-intensity model emits a *log*
-/// relative intensity; a corrupt/degenerate tree (extreme leaf values) can
-/// return a magnitude large enough that `exp` overflows to `+inf`, which then
-/// poisons every downstream sum (`sum_p`, `explained`, the chance LLR). Real
-/// calibrated outputs sit within a few units of zero, so this bound is never
-/// engaged on the happy path — `exp(±50)` (≈5e21 / ≈2e-22) is already far past
-/// any physical relative intensity. Clamping keeps the derived features finite
-/// instead of `inf`/`NaN`.
 const LOG_INTENSITY_CLAMP: f64 = 50.0;
 
-/// Predict the linear relative intensity of every `predict_by_ions(peptide, 1..=2)`
-/// fragment ONCE, in that iteration order.
-///
-/// `intensity_signal` and `frag_llr_battery` are called back-to-back on the same
-/// `(peptide, precursor_charge, frag_model)` and each used to walk the identical ion
-/// list, extract byte-identical features, and run the identical 300-tree GBDT — so the
-/// single most expensive thing in the search (`Tree::eval`, ~50% of wall) was being done
-/// twice per candidate for the same numbers. Callers compute this once and hand the slice
-/// to both. Values are positionally aligned with `predict_by_ions(peptide, 1..=2)`; a
-/// caller passing a slice built any other way will silently mis-attribute intensities.
 pub fn predict_frag_intensities(
     frag_model: &GbdtPeakModel,
     peptide: &Peptide,
@@ -62,29 +35,15 @@ pub fn predict_frag_intensities(
         .collect()
 }
 
-/// Feature row bits, the memo key for [`predict_frag_values_memo`].
 type FragRowKey = [u32; crate::frag_features::N_FRAG_FEATURES];
 
-/// Per-thread cap on memoised fragment rows; the memo is cleared when it fills.
 const FRAG_MEMO_CAP: usize = 1 << 17;
 
 thread_local! {
-    /// (model identity, row bits) -> raw GBDT value.
     static FRAG_MEMO: std::cell::RefCell<(usize, rustc_hash::FxHashMap<FragRowKey, f32>)> =
         std::cell::RefCell::new((0, rustc_hash::FxHashMap::default()));
 }
 
-/// Raw fragment-model values for `feats`, memoised per thread.
-///
-/// The 19 fragment features describe the ion and the peptide, never the spectrum,
-/// so identical rows recur across candidates and spectra (about 2x on small runs,
-/// more on large ones). Hits return the stored value; misses go through
-/// `predict_value_batch` together. The value of a row does not depend on the other
-/// rows in the batch, so the output is bit-identical to an unmemoised call.
-///
-/// The memo is keyed to the model by the address of its tree storage and cleared
-/// when another model is seen, so one model's values are never served for another
-/// while it is alive.
 fn predict_frag_values_memo(
     frag_model: &GbdtPeakModel,
     feats: &[[f32; crate::frag_features::N_FRAG_FEATURES]],
@@ -139,8 +98,6 @@ use crate::ion_features::extract_ion_features;
 use crate::scoring::fragment_ions::predict_by_ions;
 use crate::scoring::ScoredSpectrum;
 
-/// Cosine similarity between two non-negative vectors (spectral-angle form).
-/// Returns 0..=1; higher = better agreement. Empty or zero-norm → 0.
 pub fn spectral_cosine_similarity(pred: &[f64], obs: &[f64]) -> f64 {
     if pred.is_empty() || pred.len() != obs.len() {
         return 0.0;
@@ -154,11 +111,6 @@ pub fn spectral_cosine_similarity(pred: &[f64], obs: &[f64]) -> f64 {
     (dot / (norm_p * norm_o)).clamp(0.0, 1.0)
 }
 
-/// Signal numerator: spectral cosine between predicted and observed relative
-/// intensities over b/y ions.
-///
-/// `frag_model` drives the predicted intensities (nce=0.0 to match training in
-/// `frag_dataset.rs`). Returns 0.0 when `frag_model` is `None` (no predictor).
 pub fn intensity_signal(
     frag_model: Option<&GbdtPeakModel>,
     scored_spec: &ScoredSpectrum<'_>,
@@ -166,8 +118,6 @@ pub fn intensity_signal(
     precursor_charge: u8,
     feature_tol: f64,
     feature_tol_is_ppm: bool,
-    // Predictions from `predict_frag_intensities`, positionally aligned with
-    // `predict_by_ions(peptide, 1..=2)`. `None` recomputes them inline.
     precomputed: Option<&[f64]>,
 ) -> f32 {
     let Some(g) = frag_model else {
@@ -183,9 +133,6 @@ pub fn intensity_signal(
         return 0.0;
     }
 
-    // Predict 1+ AND 2+ fragments: high-charge precursors put real signal in 2+
-    // ions, which a 1+-only prediction is blind to. Training (frag_dataset) uses
-    // the SAME 1..=2 range and the same frag-charge feature.
     let predicted = predict_by_ions(peptide, 1..=2);
     let mut pred_vec = Vec::with_capacity(predicted.len());
     let mut obs_vec = Vec::with_capacity(predicted.len());
@@ -222,26 +169,6 @@ pub fn intensity_signal(
     spectral_cosine_similarity(&pred_vec, &obs_vec) as f32
 }
 
-/// Frag-intensity LLR battery: three additive discriminative PIN features
-/// derived from the frag-intensity GBDT's per-fragment predicted intensity,
-/// deployed as likelihood-ratio signals instead of a single cosine (the cosine
-/// normalizes both vectors and smears target/decoy separation, so a more
-/// accurate intensity model gives no PSM lift — confirmed 3× on Astral).
-///
-/// Returns `(explained, chance_llr, topk_observed)`:
-/// - `explained` = `Σ(matched·pred) / Σpred` — of the intensity the model
-///   predicts, the fraction actually observed. Asymmetric (NOT normalized by the
-///   observed vector like cosine) → true peptides explain their predicted-bright
-///   ions; decoys don't.
-/// - `chance_llr` = `Σ matched·pred·max(0, −ln p_chance)` — predicted-intensity-
-///   weighted chance-match surprise. Fuses the prediction with the local-noise
-///   denominator (rewards a predicted-bright match in a sparse region); the
-///   cosine ignores chance entirely.
-/// - `topk_observed` = fraction of the top-`FRAG_TOPK` predicted-most-intense
-///   ions that are observed — rank-based, intensity-scale-free, robust.
-///
-/// All `0.0` when `frag_model` is `None` (neutral additive features). Enumerates
-/// `1..=2` to match the serve cosine + the trainer.
 pub fn frag_llr_battery(
     frag_model: Option<&GbdtPeakModel>,
     scored_spec: &ScoredSpectrum<'_>,
@@ -249,8 +176,6 @@ pub fn frag_llr_battery(
     precursor_charge: u8,
     feature_tol: f64,
     feature_tol_is_ppm: bool,
-    // Predictions from `predict_frag_intensities`, positionally aligned with
-    // `predict_by_ions(peptide, 1..=2)`. `None` recomputes them inline.
     precomputed: Option<&[f64]>,
 ) -> (f32, f32, f32) {
     const FRAG_TOPK: usize = 6;
@@ -265,7 +190,6 @@ pub fn frag_llr_battery(
     let mut sum_p = 0.0f64;
     let mut sum_matched_p = 0.0f64;
     let mut sum_chance_llr = 0.0f64;
-    // (predicted intensity, matched?) for the top-K observed-fraction feature.
     let mut pred_matched: Vec<(f64, bool)> = Vec::with_capacity(predicted.len());
 
     for (ion_idx, ion) in predicted.iter().enumerate() {
@@ -293,7 +217,6 @@ pub fn frag_llr_battery(
         if matched {
             sum_matched_p += p;
             let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
-            // p_chance = probability of a random peak in the match window.
             let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
             let surprise = (-p_chance.ln()).max(0.0);
             sum_chance_llr += p * surprise;
@@ -318,12 +241,8 @@ pub fn frag_llr_battery(
     (explained, sum_chance_llr as f32, topk_observed)
 }
 
-/// Matched-ion tuple: (intensity, observed_mz, predicted_mz, is_b_ion).
 pub type MatchedIon = (f32, f64, f64, bool);
 
-/// S2 null term 2: `Σ 1/(1+competition)` over matched charge-1 ions.
-/// `competition` = within-peptide alternative-mass ambiguity + local peak
-/// density (peaks/Da) as a cheap global mass-crowding proxy.
 pub fn mass_competition_evidence(
     scored_spec: &ScoredSpectrum<'_>,
     matched_ions: &[MatchedIon],
@@ -350,8 +269,6 @@ pub fn mass_competition_evidence(
         .sum::<f64>() as f32
 }
 
-/// S2 listwise term: RawScore gap between the top two retained candidates.
-/// `scores_best_first` must be sorted descending.
 pub fn listwise_score_gap(scores_best_first: &[f32]) -> f32 {
     if scores_best_first.len() < 2 {
         return 0.0;
@@ -359,8 +276,6 @@ pub fn listwise_score_gap(scores_best_first: &[f32]) -> f32 {
     (scores_best_first[0] - scores_best_first[1]).max(0.0)
 }
 
-/// S2 listwise term: Shannon entropy of a softmax over retained candidate RawScores.
-/// Higher = more ambiguous top-K field. Returns 0 when fewer than two scores.
 pub fn candidate_rank_entropy(scores: &[f32]) -> f32 {
     if scores.len() < 2 {
         return 0.0;
@@ -384,7 +299,6 @@ pub fn candidate_rank_entropy(scores: &[f32]) -> f32 {
         .sum::<f64>() as f32
 }
 
-/// Inputs for [`fuse_strong_score`] (mirrors the S1/S2 PIN feature columns).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StrongScoreInputs {
     pub intensity_signal: f32,
@@ -394,22 +308,14 @@ pub struct StrongScoreInputs {
     pub listwise_score_gap: f32,
 }
 
-/// Fuse S1 signal with S2 null terms: `strong = signal − null`.
-///
-/// Null is the log-domain coincidental-match cost (higher ⇒ more coincidental):
-/// - chance: `−chance_match_surprise` (high surprise ⇒ low coincidence cost)
-/// - competition: `−mass_competition_evidence`
-/// - listwise: `candidate_rank_entropy − listwise_score_gap`
 pub fn fuse_strong_score(f: &StrongScoreInputs) -> f32 {
     let null = -f.chance_match_surprise - f.mass_competition_evidence + f.candidate_rank_entropy
         - f.listwise_score_gap;
     f.intensity_signal - null
 }
 
-/// Minimum scored candidates before per-spectrum z-score calibration (mirrors Tailor).
 pub const STRONG_CAL_MIN_CANDIDATES: u32 = 100;
 
-/// Welford online mean/variance for per-spectrum null statistics.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OnlineStats {
     n: u64,
@@ -443,8 +349,6 @@ impl OnlineStats {
     }
 }
 
-/// Z-score `score` against a per-spectrum null pool; returns `score` uncalibrated
-/// when `n < STRONG_CAL_MIN_CANDIDATES`.
 pub fn strong_score_zscore(score: f32, null: &OnlineStats) -> f32 {
     if null.n < STRONG_CAL_MIN_CANDIDATES as u64 {
         return score;
@@ -452,8 +356,6 @@ pub fn strong_score_zscore(score: f32, null: &OnlineStats) -> f32 {
     ((f64::from(score) - null.mean()) / null.population_stdev()) as f32
 }
 
-/// Leave-one-out z-score of `this` against other retained `strong_score` values.
-/// Used when top-N retains multiple candidates; falls back to `this` when alone.
 pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     if retained_strong.len() < 2 {
         return this;
@@ -461,8 +363,6 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     let n = retained_strong.len();
     let this_d = f64::from(this);
     let sum: f64 = retained_strong.iter().map(|&s| f64::from(s)).sum();
-    // Leave exactly ONE copy of `this` out, so mean and variance are over the
-    // same subset.
     let n_others = (n - 1) as f64;
     let mean_others = (sum - this_d) / n_others;
     let mut ss = 0.0f64;
@@ -485,8 +385,6 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     ((this_d - mean_others) / sigma) as f32
 }
 
-/// S4 calibration: prefer LOO among retained strong scores when top-N ≥ 2; otherwise
-/// z-score against the per-spectrum scored-candidate null (`pin_score` pool).
 pub fn strong_score_calibrated(
     strong: f32,
     retained_strong: &[f32],
@@ -499,14 +397,6 @@ pub fn strong_score_calibrated(
     }
 }
 
-/// Decoy-aware rich-ion LLR: `Σ` over matched b/y ions of the per-ion
-/// `predict_logit(P(signal | features))` from the rich-ion GBDT. The model is
-/// trained on target-matched (positive) vs decoy-matched (negative) ions, so a
-/// true peptide's matched ions score high and a decoy's chance-matched ions
-/// score low — the SUM separates target from decoy (assignment-aware, NOT the
-/// isotropic per-peak quality that sank the intensity cosine). Returns 0.0 when
-/// no rich-ion model is loaded (neutral additive feature; RankScore untouched).
-/// Enumerates `1..=2` to match the trainer (`ion_dataset`).
 pub fn rich_ion_llr(
     model: Option<&GbdtPeakModel>,
     scored_spec: &ScoredSpectrum<'_>,
@@ -633,7 +523,6 @@ mod tests {
         for v in [10.0_f32, 12.0, 11.0, 13.0] {
             null.push(v);
         }
-        // Below minimum candidate count → passthrough.
         assert_eq!(strong_score_zscore(5.0, &null), 5.0);
         for _ in 0..100 {
             null.push(10.0);
@@ -675,9 +564,6 @@ mod tests {
         assert_eq!(listwise_score_gap(&[5.0]), 0.0);
     }
 
-    /// Build a constant-leaf GbdtPeakModel (apply_sigmoid=false) that returns
-    /// `leaf_value` for every input. Uses the public struct fields + `to_bytes`
-    /// / `from_bytes` round-trip to honour the validation path.
     fn const_leaf_gbdt(leaf_value: f32) -> crate::gbdt_eval::GbdtPeakModel {
         use crate::gbdt_eval::{GbdtPeakModel, Tree};
         let m = GbdtPeakModel {
@@ -688,7 +574,7 @@ mod tests {
             ),
             apply_sigmoid: false,
             trees: vec![Tree {
-                feature: vec![-1], // single leaf node
+                feature: vec![-1],
                 threshold: vec![0.0],
                 left: vec![-1],
                 right: vec![-1],
@@ -703,7 +589,6 @@ mod tests {
 
     #[test]
     fn predicted_linear_intensity_is_finite_for_extreme_leaf() {
-        // An extreme positive leaf would `exp` to +inf without the clamp.
         let g_big = const_leaf_gbdt(1.0e6);
         let v = super::predicted_linear_intensity(
             &g_big,
@@ -711,14 +596,12 @@ mod tests {
         );
         assert!(v.is_finite(), "clamped exp must be finite, got {v}");
         assert!(v > 0.0);
-        // An extreme negative leaf clamps toward 0, still finite.
         let g_small = const_leaf_gbdt(-1.0e6);
         let v2 = super::predicted_linear_intensity(
             &g_small,
             &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
         );
         assert!(v2.is_finite() && v2 >= 0.0, "got {v2}");
-        // A normal leaf (0.0) is unchanged: exp(0) == 1.
         let g0 = const_leaf_gbdt(0.0);
         let v3 = super::predicted_linear_intensity(
             &g0,
@@ -729,7 +612,6 @@ mod tests {
 
     #[test]
     fn frag_llr_battery_finite_with_extreme_model() {
-        // A frag model with an extreme leaf must not produce NaN/inf features.
         let g = const_leaf_gbdt(1.0e6);
         let peptide = pep(b"ARCDE");
         let spec = Spectrum {
@@ -746,7 +628,7 @@ mod tests {
 
     #[test]
     fn intensity_signal_uses_frag_model_when_present() {
-        let g = const_leaf_gbdt(0.0); // predict_value returns 0.0 => exp(0) = 1.0
+        let g = const_leaf_gbdt(0.0);
 
         let peptide = pep(b"ARCDE");
         let predicted = predict_by_ions(&peptide, 1..=1);
@@ -766,7 +648,6 @@ mod tests {
 
     #[test]
     fn rich_ion_llr_zero_without_model() {
-        // No rich-ion model loaded ⇒ neutral additive feature (0.0), RankScore untouched.
         let peptide = pep(b"ARCDE");
         let predicted = predict_by_ions(&peptide, 1..=1);
         let y3 = predicted

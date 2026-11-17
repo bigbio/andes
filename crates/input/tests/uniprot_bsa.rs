@@ -1,7 +1,3 @@
-//! Load `test-fixtures/BSA.xml.gz` — the UniProt XML entry of the protein in
-//! `BSA.fasta` (P02769, gzipped as UniProt distributes it) — and check that a
-//! UniProt XML database reads like the equivalent FASTA, plus its annotation.
-
 use std::path::PathBuf;
 
 use input::{load_protein_database, DatabaseFormat, EvidenceLevel, UniProtOptions};
@@ -46,8 +42,6 @@ fn bsa_sites_and_variant_follow_the_evidence_level() {
         )
         .unwrap()
     };
-    // Experimental evidence: the in-vitro glycation of K151 only; the
-    // phosphosites are all "by similarity".
     let exp = load(EvidenceLevel::Experimental, false);
     let sites = exp.db.proteins[0].mod_sites();
     assert_eq!(sites.len(), 1);
@@ -73,7 +67,6 @@ fn bsa_sites_and_variant_follow_the_evidence_level() {
             p.sequence[s.position as usize] as char
         );
     }
-    // The A214T variant (experimental evidence, no feature id).
     assert_eq!(curated.db.len(), 2);
     let v = &curated.db.proteins[1];
     assert_eq!(v.accession, "sp|P02769_VAR_A214T|ALBU_BOVIN");

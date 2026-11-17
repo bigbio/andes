@@ -1,14 +1,3 @@
-//! Decoy-aware training dataset for the rich-ion-LLR classifier.
-//!
-//! Positives: b/y ions of the GOLD peptide that match a peak. Negatives: b/y
-//! ions of a DECOY peptide (the gold peptide reversed — an MVP proxy for the
-//! search's reverse/shuffle decoys) that match a peak in the SAME spectrum.
-//! Training on this boundary — true-fragment vs chance-coincidence matches —
-//! is what makes the score discriminative, unlike a signal-vs-junk peak model.
-//!
-//! Features come from the SINGLE source [`scoring_crate::ion_features`] so train
-//! and serve features match by construction.
-
 use model::peptide::Peptide;
 use scoring_crate::ion_features::{extract_ion_features, ION_FEATURE_NAMES, N_ION_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
@@ -18,20 +7,12 @@ use scoring_crate::RankScorer;
 use crate::gbdt::dataset::{group_id, PsmRow};
 use crate::gbdt::train::Dataset;
 
-/// Reverse a peptide's residues (mods ride along on their residues), reusing the
-/// flanks. MVP proxy for the search's reverse-decoy: same precursor mass,
-/// different b/y m/z, so its matches against the spectrum are chance
-/// coincidences — exactly the negatives the model must learn to reject.
 fn reverse_peptide(p: &Peptide) -> Peptide {
     let mut residues = p.residues.clone();
     residues.reverse();
     Peptide::new(residues, p.pre, p.post)
 }
 
-/// Build a decoy-aware classifier [`Dataset`] from gold PSMs. One row per matched
-/// b/y ion: label `1` for the gold (target) peptide's matches, `0` for the
-/// reversed (decoy) peptide's matches. Grouped by (unmodified seq, charge) so the
-/// train/val split stays peptide-disjoint.
 pub fn build_ion_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
     let n_features = N_ION_FEATURES;
     let mut x: Vec<f32> = Vec::new();
@@ -139,9 +120,6 @@ mod tests {
         let scorer = make_scorer();
         let p = pep("PEPTIDEK");
         let decoy = reverse_peptide(&p);
-        // Place peaks at every 1+ b/y ion of BOTH the gold and the reversed
-        // peptide, so the dataset yields target-matched (positive) and
-        // decoy-matched (negative) rows.
         let mut peaks: Vec<(f64, f32)> = Vec::new();
         for ion in predict_by_ions(&p, 1..=1) {
             peaks.push((ion.mz, 1000.0));
@@ -149,7 +127,7 @@ mod tests {
         for ion in predict_by_ions(&decoy, 1..=1) {
             peaks.push((ion.mz, 500.0));
         }
-        peaks.push((50.0, 5.0)); // junk
+        peaks.push((50.0, 5.0));
         let spec = spectrum(peaks, 500.0, 2);
         let row = PsmRow {
             spectrum: &spec,

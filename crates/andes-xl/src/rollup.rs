@@ -1,26 +1,12 @@
-//! Roll-up of crosslink-spectrum matches to residue pairs and protein pairs,
-//! with a class-split `(TD − DD) / TT` FDR at each level.
-//!
-//! A level groups the items of the level below by a key and keeps the best
-//! score of each group. Targets and decoys are grouped by the same rule (the
-//! key holds the decoy accessions of decoy peptides, so a group never mixes
-//! classes), and q-values are computed separately for intra-protein, homotypic and
-//! inter-protein groups.
-
 use std::collections::BTreeMap;
 
 use crate::decoy::PairClass;
 use crate::fdr::{q_values, q_values_homotypic};
 
-/// Link class of a crosslink, the unit the q-values are computed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkClass {
-    /// Two different peptide sequences of one protein (family).
     Intra,
-    /// The same peptide sequence on both sides: a homodimer or a random peptide paired
-    /// with itself, whose false matches are TT or DD but never TD.
     Homotypic,
-    /// Peptides of different proteins.
     Inter,
 }
 
@@ -39,7 +25,6 @@ impl LinkClass {
         self != LinkClass::Inter
     }
 
-    /// Output label.
     pub fn name(self) -> &'static str {
         match self {
             LinkClass::Intra => "intra",
@@ -49,37 +34,26 @@ impl LinkClass {
     }
 }
 
-/// One item of a level: a CSM, a residue pair or a protein pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
-    /// Group key at this level.
     pub key: String,
-    /// Score (higher is better).
     pub score: f64,
     pub class: PairClass,
     pub link: LinkClass,
-    /// Number of CSMs behind the item (1 for a CSM).
     pub n_csms: usize,
 }
 
-/// A group of items with its best score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
     pub key: String,
-    /// Best member score.
     pub score: f64,
     pub class: PairClass,
     pub link: LinkClass,
-    /// Members (items of the level below).
     pub n_members: usize,
-    /// CSMs behind the members.
     pub n_csms: usize,
-    /// Index of the best member in the input.
     pub best: usize,
 }
 
-/// Group `items` by `key_of(item)`; each group takes its best member's score,
-/// class and link class. Groups come out sorted by key.
 pub fn group_by<F: Fn(usize, &Item) -> String>(items: &[Item], key_of: F) -> Vec<Group> {
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -105,9 +79,6 @@ pub fn group_by<F: Fn(usize, &Item) -> String>(items: &[Item], key_of: F) -> Vec
     groups.into_values().collect()
 }
 
-/// Class-split q-values of `groups`: computed separately among the intra, the
-/// homotypic and the inter groups, over the groups that `eligible` accepts (`None`
-/// for the others).
 pub fn split_q_values<F: Fn(&Group) -> bool>(groups: &[Group], eligible: F) -> Vec<Option<f64>> {
     let mut q = vec![None; groups.len()];
     for link in LinkClass::ALL {
@@ -128,7 +99,6 @@ pub fn split_q_values<F: Fn(&Group) -> bool>(groups: &[Group], eligible: F) -> V
     q
 }
 
-/// The groups as items of the next level up.
 pub fn as_items(groups: &[Group], key_of: impl Fn(&Group) -> String) -> Vec<Item> {
     groups
         .iter()
@@ -193,9 +163,7 @@ mod tests {
         let g = group_by(&items, |_, it| it.key.clone());
         let q = split_q_values(&g, |_| true);
         let q_of = |k: &str| q[g.iter().position(|g| g.key == k).unwrap()].unwrap();
-        // A homotypic DD stands for a false homotypic TT ...
         assert!((q_of("h299") - 6.0 / 300.0).abs() < 1e-12);
-        // ... while among the other intra links it offsets a TD counted twice.
         assert!((q_of("i299") - 2.0 / 300.0).abs() < 1e-12);
         assert_eq!(LinkClass::of(true, true).name(), "homotypic");
         assert!(LinkClass::Homotypic.is_intra() && !LinkClass::Inter.is_intra());

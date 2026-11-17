@@ -1,5 +1,3 @@
-//! Precursor-mass tolerance tests.
-
 use model::{AminoAcid, Peptide, PrecursorTolerance, Spectrum, Tolerance, PROTON};
 use search::matches_precursor;
 
@@ -86,11 +84,9 @@ fn asymmetric_tolerance_rejects_excessive_negative_drift() {
     let mass = peptide.mass();
     let charge = 2u8;
     let drift = mass * 15e-6;
-    // spectrum implies a NEUTRAL mass of `mass + drift`. peptide_mass < spectrum mass.
     let spec_neutral = mass + drift;
     let mz_drifted = (spec_neutral + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz_drifted, Some(charge as i32));
-    // Asymmetric: 5 ppm left (negative), 20 ppm right (positive). 15 ppm > 5 → reject.
     let tol = PrecursorTolerance::asymmetric(Tolerance::Ppm(5.0), Tolerance::Ppm(20.0));
     let result = matches_precursor(&spec, &peptide, charge, 0, &tol, 0.0);
     assert!(

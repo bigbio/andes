@@ -1,6 +1,3 @@
-//! ONNX Runtime backend on the fixture graphs. Needs the runtime library at
-//! test time (`ORT_DYLIB_PATH`, or `libonnxruntime` on the loader path).
-
 #![cfg(feature = "ort")]
 
 use std::path::PathBuf;
@@ -73,7 +70,6 @@ fn intensity_mlp_relu_scores() {
     assert!(out.data[2].abs() < 1e-6, "got {}", out.data[2]);
 }
 
-/// `ai.onnx.ml` TreeEnsembleRegressor: feature0 <= 0.5 → 1.0 else 3.0.
 #[test]
 fn tree_ensemble_regressor() {
     let mut s = OnnxSession::from_manifest(fixture("tree_leq.json"), BackendKind::Ort)
@@ -100,8 +96,6 @@ fn tree_ensemble_regressor() {
     assert!(out.data.iter().all(|v| v.is_finite()));
 }
 
-/// Shared handles run the same session concurrently and agree with a
-/// single-threaded run.
 #[test]
 fn shared_handles_run_concurrently() {
     let master =
@@ -131,8 +125,6 @@ fn shared_handles_run_concurrently() {
     });
 }
 
-/// The same graph gives the same numbers on both engines (tract has no
-/// `ai.onnx.ml` tree ensembles, so only the dense fixtures are compared).
 #[cfg(feature = "tract")]
 #[test]
 fn matches_tract() {
@@ -155,8 +147,6 @@ fn matches_tract() {
     }
 }
 
-/// A graph without nodes whose input `x` is also its output: the output
-/// ONNX Runtime returns aliases the input buffer.
 #[test]
 fn output_aliasing_an_input() {
     let mut s = OnnxSession::from_onnx(fixture("identity.onnx"), BackendKind::Ort).expect("load");

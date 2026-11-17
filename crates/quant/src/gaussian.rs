@@ -1,33 +1,10 @@
-//! The Gaussian profile `g(t) = exp(-(t - t0)^2 / (2 w^2))` of the evidence
-//! fit, evaluated in bulk.
-//!
-//! The grid search of [`crate::evidence`] evaluates the profile of every
-//! candidate apex and width over the scans around it, tens of thousands of
-//! exponentials per probe. [`exp`] is a double-precision exponential written
-//! so that the compiler vectorises a loop over it: every operation is an
-//! IEEE add, multiply or compare-and-select on one lane (no fused multiply-add,
-//! no lookup table), so the result of an element does not depend on the
-//! vector width, on the CPU's instruction set or on the element's position in
-//! a slice. A target with AVX2 runs the same loop four lanes wide.
-//!
-//! The result is within 1e-15 (relative) of the C library's `exp` on the
-//! domain the fit uses (`x <= 0`), not bit for bit the same.
-
-/// `ln 2` split in a high part with 21 trailing zero bits (so `k * LN2_HI`
-/// is exact for `|k| < 2^21`) and the remainder.
 const LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
 const LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
 const LOG2_E: f64 = std::f64::consts::LOG2_E;
-/// `1.5 * 2^52`: adding it rounds a value below `2^51` to an integer, which
-/// then sits in the low mantissa bits.
 const ROUND: f64 = 6_755_399_441_055_744.0;
-/// Below this `exp` is 0 here (the C library's is subnormal or 0).
 const UNDERFLOW: f64 = -708.0;
-/// Above this `exp` is infinite here.
 const OVERFLOW: f64 = 709.0;
 
-/// `1 / k!` for `k = 0..=13`: with `|r| <= ln(2) / 2` the Taylor remainder
-/// is below `5e-18`.
 const COEFF: [f64; 14] = [
     1.0,
     1.0,
@@ -45,17 +22,12 @@ const COEFF: [f64; 14] = [
     1.0 / 6_227_020_800.0,
 ];
 
-/// `exp(x)`; NaN for a NaN, 0 below [`UNDERFLOW`], infinity above
-/// [`OVERFLOW`].
 #[inline(always)]
 pub fn exp(x: f64) -> f64 {
-    // The argument is clamped for the reduction; the ends are put back below.
     let c = x.clamp(UNDERFLOW, OVERFLOW);
-    // k = round(c / ln 2) as an integer in the low bits of `kf`.
     let kf = c * LOG2_E + ROUND;
     let k = kf - ROUND;
     let r = (c - k * LN2_HI) - k * LN2_LO;
-    // Estrin evaluation: independent chains for the vector units.
     let r2 = r * r;
     let r4 = r2 * r2;
     let r8 = r4 * r4;
@@ -70,7 +42,6 @@ pub fn exp(x: f64) -> f64 {
     let p4567 = p45 + p67 * r2;
     let p89ab = p89 + pab * r2;
     let p = (p0123 + p4567 * r4) + (p89ab + pcd * r4) * r8;
-    // 2^k from the exponent field: the low 12 bits of `kf` are k mod 4096.
     let scale = f64::from_bits((kf.to_bits() << 52).wrapping_add(0x3ff0_0000_0000_0000));
     let y = p * scale;
     if x < UNDERFLOW {
@@ -120,8 +91,6 @@ pub fn extend(out: &mut Vec<f64>, ts: &[f64], t0: f64, w: f64) {
 
 const BLOCK: usize = 64;
 
-/// `(sum z_j g_j, sum g_j, sum g_j^2)` over `g_j = gaussian(ts[j], t0, w)`,
-/// each sum in the order of `ts`; `z` has the length of `ts`.
 pub fn sums(ts: &[f64], z: &[f64], t0: f64, w: f64) -> (f64, f64, f64) {
     assert_eq!(ts.len(), z.len());
     let (mut num, mut sg, mut sgg) = (0.0, 0.0, 0.0);
@@ -178,7 +147,6 @@ mod tests {
         for (&t, &g) in ts.iter().zip(&out) {
             assert_eq!(g.to_bits(), gaussian(t, t0, w).to_bits());
         }
-        // A sub-slice shifts every element's lane.
         let mut sub = vec![0.0; 150];
         gaussians(&ts[3..153], t0, w, &mut sub);
         assert!(sub

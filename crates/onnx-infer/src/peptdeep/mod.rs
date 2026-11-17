@@ -1,19 +1,3 @@
-//! AlphaPeptDeep / PeptDeep ONNX I/O contracts.
-//!
-//! Tensor names and shapes match OpenMS
-//! [`export_peptdeep_models_to_onnx.py`](https://github.com/OpenMS/OpenMS/blob/develop/tools/scripts/export_peptdeep_models_to_onnx.py)
-//! and the local copy under `scripts/export_peptdeep_to_onnx.py`:
-//!
-//! | Task | Inputs | Output |
-//! |---|---|---|
-//! | RT | `input_sequences` [B,L+2] i64, `mod_x` [B,L+2,M] f32 | `rt_pred` [B] |
-//! | MS2 | `aa_indices`, `mod_x`, `charges`, `nce`, `instrument_indices` | `ms2_intensities` [B,L-1,8] |
-//! | CCS | `aa_indices`, `mod_x`, `charges` | `ccs_pred` |
-//!
-//! Encoding helpers here prepare tensors for [`crate::OnnxSession`]; they do
-//! not download weights. Full PeptDeep AA/mod vocab tables live in model
-//! `extras` / sidecar JSON once an export is run.
-
 mod encode;
 mod tensors;
 

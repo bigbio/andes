@@ -1,5 +1,3 @@
-//! Search parameters consumed by candidate enumeration + scoring.
-
 use std::ops::RangeInclusive;
 
 use model::aa_set::AminoAcidSet;
@@ -8,47 +6,20 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 
 use crate::precursor_cal::PrecursorCalMode;
 
-/// Rank-score pool retained in the hot loop when `--score strong` and user
-/// `top_n` is smaller. Runners-up survive to `fill_post_topn` / strong re-rank.
-///
-/// Widened 10 -> 25 after the Phase-V gate: strong improved FDP but lost
-/// PSMs@1%, and with K=10 a true peptide that rank-scores outside the top-10
-/// can never be promoted by the strong re-rank (the pool is rank-gated). 25
-/// gives the strong score a larger pool to recover those top-1 flips. Strong
-/// mode only — default `rank` retention is unchanged. Re-run the Astral/TMT
-/// A/B after changing this; raise further if it keeps recovering PSMs.
 pub const STRONG_SCORE_RETENTION_K: u32 = 25;
 
-/// Fragment-index mode: peptidoforms scored per spectrum (best fragment votes
-/// first). Measured 50–1000 within seed noise on phospho.
 pub const FRAGMENT_INDEX_TOP_K: u32 = 100;
 
-/// Fragment-index mode: minimum singly-charged b/y ions a peptidoform must match
-/// to be scored at all.
 pub const FRAGMENT_INDEX_MIN_MATCHED: u16 = 3;
 
-/// How many of a spectrum's most intense peaks vote in the fragment-ion index at
-/// a low-resolution fragment tolerance (high resolution: every peak). Measured on
-/// the low-res TMT set out-of-core: all peaks voting 4,368 PSMs @1%; 50, 100 and
-/// 150 peaks 12,285, 12,276 and 12,347; exhaustive enumeration 12,281.
 pub const FRAGMENT_INDEX_LOWRES_VOTE_PEAKS: usize = 150;
 
-/// Out-of-core (`mmap`) mode only: upper bound on the TOTAL number of candidates
-/// held in the per-chunk base-record expansion cache (~1 GiB). The cache is a pure
-/// memo (output is identical with or without it); records past the bound are
-/// expanded per spectrum instead. Without this bound a PTM-rich search (phospho on
-/// S/T/Y, four variable mods) cached tens of thousands of peptidoforms per window
-/// for thousands of windows and was OOM-killed at 64 GiB before the first chunk
-/// finished.
 pub const MMAP_WINDOW_CACHE_MAX_CANDIDATES: usize = 4_000_000;
 
-/// Primary ranking mode for candidate selection and PIN `RawScore` emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoreMode {
-    /// Rank by inherited `node + cleavage + edge` (`rank_score`). Default; byte-identical path.
     #[default]
     Rank,
-    /// Rank by fused `strong_score` and emit it as PIN `RawScore`.
     Strong,
 }
 
@@ -56,111 +27,32 @@ pub enum ScoreMode {
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
     pub enzyme: Enzyme,
-    /// Additional proteases for a multi-protease digest (default empty). A
-    /// span is accepted as a cleavage site if `enzyme` OR any of these cut
-    /// there — the union of all configured proteases' rules. `enzyme` remains
-    /// the primary (drives model selection and the cleavage-credit PIN
-    /// feature); these only widen candidate enumeration. Empty ⇒ behaviour is
-    /// bit-identical to the single-enzyme path.
     pub extra_enzymes: Vec<Enzyme>,
     pub min_length: u32,
     pub max_length: u32,
     pub max_missed_cleavages: u32,
     pub max_variable_mods_per_peptide: u32,
-    /// Most channel-label sites (`--label`) a peptide may carry. They count
-    /// apart from `max_variable_mods_per_peptide`, so the labels never use up
-    /// the other modifications' allowance. 0 without `--label`.
     pub max_label_sites: u32,
-    /// Precursor mass tolerance (default 20 ppm symmetric).
     pub precursor_tolerance: PrecursorTolerance,
-    /// Charges to try for spectra without explicit charge (default 2..=3).
     pub charge_range: RangeInclusive<u8>,
-    /// Isotope offsets to try when matching the precursor mass (default
-    /// -1..=2). Each offset is a unit of `ISOTOPE` (~1.00335 Da) subtracted
-    /// from the spectrum's observed neutral mass before comparison.
     pub isotope_error_range: RangeInclusive<i8>,
-    /// Top-N PSMs to keep per spectrum (default 10).
     pub top_n_psms_per_spectrum: u32,
-    /// Number of Tolerable Termini.
-    ///
-    /// Controls how strictly enzymatic cleavage is enforced at the span boundaries:
-    /// - `2` (default): both termini must be enzyme-cleavage sites (strict / fully tryptic).
-    /// - `1`: at least one terminus must be a cleavage site (semi-specific). Generates
-    ///   semi-tryptic peptides arising from non-canonical proteolysis (e.g., chymotrypsin
-    ///   contamination, in-source fragmentation, signal-peptide cleavage).
-    /// - `0`: neither terminus needs to be a cleavage site (non-specific). Equivalent to
-    ///   using `Enzyme::NonSpecific` — all subsequences within length bounds are emitted.
-    ///
-    /// Values > 2 are treated identically to 2. Supported values: 0, 1, 2.
     pub num_tolerable_termini: u8,
-    /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
-    ///
-    /// Spectra with fewer peaks than this threshold are skipped entirely.
-    /// Default 10.
     pub min_peaks: u32,
-    /// Precursor mass calibration mode (`auto`, `on`, `off`). Default `Off`
-    /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
-    /// Minimum number of SpecKeys before the precursor-calibration pre-pass
-    /// runs. Below this, calibration is skipped (a small/targeted run can't
-    /// learn a robust file-wide shift). Default
-    /// [`crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS`] (10_000);
-    /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
-    /// calibrating with fewer spectra.
     pub cal_min_spec_keys: usize,
-    /// Out-of-core (`mmap`) mode only: when > 0, score each spectrum against at
-    /// most this many peptidoforms chosen by a per-chunk fragment-ion index
-    /// (issue #76) instead of every peptidoform in its precursor windows.
-    /// 0 (default) = off, byte-identical enumeration path.
     pub fragment_index_top_k: u32,
-    /// Learned file-wide ppm shift applied to observed neutral masses in the
-    /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
-    /// Full-isolation-window chimeric search (MSFragger DDA+ style). Default false.
     pub chimeric: bool,
-    /// Fallback isolation half-width (Da) used when the mzML lacks
-    /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
-    /// Max co-isolated SECONDARY peptides to search per chimeric spectrum
-    /// (the chimeric-N lever). The proven default is 2 (one secondary, the
-    /// +101%-Astral setting); higher N searches deeper co-fragments on the
-    /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
-    /// `chimeric` is true.
     pub chimeric_max_coisolated: usize,
-    /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
-    /// secondary precursor — lower = stricter/cleaner → fewer spurious
-    /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
     pub chimeric_max_kl: f32,
-    /// Ranking / RawScore source: `Rank` (default) or `Strong` (S3 fused score).
     pub score_mode: ScoreMode,
-    /// Refinement-cascade selection FDR (SCOPING only, NOT a reported FDR):
-    /// proteins with a Pass-1 target PSM at internal-TDC-q <= this are refined.
-    /// Default 0.01 (same internal TDC q as calibration/report). A looser gate
-    /// leaks low-confidence anchors into the entrapment-FDP. Only consulted when
-    /// `--refine` is set.
     pub refine_select_psm_fdr: f64,
-    /// Enumerate only peptides carrying an N-X-S/T sequon (internal, or completed
-    /// by the following residue) into the candidate index. `--glyco` scoring
-    /// never consults any other candidate (its candidate table holds only these),
-    /// so on the glyco path this only shrinks the out-of-core index the table is
-    /// built from. Collision decoys are then relabelled against sequon-bearing
-    /// targets only. Off by default; `--glyco-index-sequon-only`.
-    /// Not for the standard peptide search, whose scoring reads every candidate.
     pub require_nxst_sequon: bool,
 }
 
 impl SearchParams {
-    /// Defaults for a standard tryptic search (Kim et al., Nat Commun 5:5277, 2014):
-    /// - enzyme: Trypsin
-    /// - length: 6-50
-    /// - missed cleavages: 1
-    /// - variable mods per peptide: 3
-    /// - precursor tolerance: 20 ppm symmetric
-    /// - charge range: 2..=3
-    /// - isotope error range: -1..=2
-    /// - top-N PSMs: 10
-    /// - num_tolerable_termini: 2 (strict tryptic)
-    /// - min_peaks: 10
     pub fn default_tryptic(aa_set: AminoAcidSet) -> Self {
         Self {
             aa_set,
@@ -191,10 +83,6 @@ impl SearchParams {
         }
     }
 
-    /// Top-N cap for `TopNQueue` retention in the candidate hot loop.
-    /// Under `Strong`, widens to at least [`STRONG_SCORE_RETENTION_K`] so the
-    /// post-loop strong re-rank can promote runners-up; PIN emission still
-    /// trims to `top_n_psms_per_spectrum` afterward.
     pub fn hot_loop_retention_cap(&self) -> u32 {
         if self.score_mode == ScoreMode::Strong {
             self.top_n_psms_per_spectrum.max(STRONG_SCORE_RETENTION_K)
@@ -218,7 +106,6 @@ mod tests {
         assert_eq!(params.hot_loop_retention_cap(), 1);
         params.score_mode = ScoreMode::Strong;
         assert_eq!(params.hot_loop_retention_cap(), STRONG_SCORE_RETENTION_K);
-        // User top_n larger than K → user value wins.
         params.top_n_psms_per_spectrum = STRONG_SCORE_RETENTION_K + 5;
         assert_eq!(
             params.hot_loop_retention_cap(),

@@ -1,6 +1,3 @@
-//! Input readers: MGF, mzML, FASTA, UniProt XML, and (optional) Thermo `.raw` /
-//! Bruker timsTOF `.d`.
-
 pub mod acq_meta;
 pub mod annotation;
 pub mod annotations_file;
@@ -50,14 +47,6 @@ pub use uniprot::{
     UniProtXmlReader,
 };
 
-/// Open a spectrum/FASTA file for buffered reading, **transparently
-/// gzip-decompressing** when the path ends in `.gz` (case-insensitive).
-///
-/// Returns a boxed `BufRead + Send` so the generic MGF / mzML / FASTA readers —
-/// and the streaming parser thread — consume gzipped and plain inputs uniformly.
-/// Callers that dispatch on file extension should strip a trailing `.gz` first to
-/// detect the underlying format (e.g. `spectra.mgf.gz` → MGF). Every gzip member
-/// is read, so concatenated (`cat a.gz b.gz`) and bgzip files decode in full.
 pub fn open_buf_maybe_gz(
     path: &std::path::Path,
 ) -> std::io::Result<Box<dyn std::io::BufRead + Send>> {

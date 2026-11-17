@@ -1,11 +1,3 @@
-//! Per-run PSM table `<stem>.quant.parquet`: every rank-1 PSM of one run
-//! (targets and decoys) with the fields the multi-run quantification stage
-//! needs. The file carries a schema version in its key-value metadata; a
-//! reader rejects a different major version. The metadata also maps each
-//! modification accession used in the peptidoforms to its mass delta
-//! (`andes.run_quant.mods`, `<accession>=<delta>` joined by `;`), so a
-//! peptidoform's fragment masses can be computed from the table alone.
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
@@ -23,43 +15,29 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 
-/// Major version of the table layout. A reader rejects any other major.
 pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 2;
 
 const SCHEMA_KEY: &str = "andes.run_quant.schema";
 const RUN_KEY: &str = "andes.run_quant.run";
 const MODS_KEY: &str = "andes.run_quant.mods";
 const SCHEMA_VERSION: &str = "2.0";
-/// Schema version of a table with the `ion_mobility` column, which is
-/// written only when some PSM records a precursor 1/K0.
 const SCHEMA_VERSION_MOBILITY: &str = "2.1";
 const BATCH_ROWS: usize = 65_536;
 
-/// One rank-1 PSM of a run, target or decoy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunPsmRow {
     pub spec_id: String,
-    /// MS2 retention time, seconds.
     pub rt_s: f64,
-    /// `"<peptidoform>/<charge>"`.
     pub precursor_key: String,
     pub peptidoform: String,
     pub charge: u8,
-    /// Theoretical monoisotopic m/z.
     pub mz: f64,
     pub is_decoy: bool,
-    /// andes RawScore of the rank-1 match.
     pub search_score: f32,
     pub faims_cv: Option<f32>,
-    /// Theoretical isotope fractions (sum 1).
     pub envelope: Vec<f32>,
-    /// `;`-joined accessions.
     pub proteins: String,
-    /// Share of the whole theoretical isotope pattern that the isotopes of
-    /// `envelope` hold, in (0, 1].
     pub isotope_share: f32,
-    /// Precursor 1/K0 of the spectrum, when the source records it (Bruker
-    /// timsTOF `.d`).
     pub ion_mobility: Option<f32>,
 }
 
@@ -204,8 +182,6 @@ fn write_versioned(
     .map_err(|e| err(&e))
 }
 
-/// Write the per-run PSM table for run `run_stem`, with the mass delta of
-/// every modification accession its peptidoforms use.
 pub fn write_run_quant_table(
     path: &Path,
     run_stem: &str,
@@ -225,9 +201,6 @@ pub(crate) fn write_with_schema_version(
     write_versioned(path, run_stem, rows, &[], version)
 }
 
-/// The modification accessions of a per-run PSM table and their mass deltas
-/// (empty for a table written before they were recorded). Every error names
-/// `path`.
 pub fn read_run_quant_mods(path: &Path) -> Result<HashMap<String, f64>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = File::open(path).map_err(|e| err(&e))?;
@@ -263,10 +236,6 @@ fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&
     })
 }
 
-/// The columns of a per-run PSM table, in file order. The last,
-/// `ion_mobility`, is present only in tables where some PSM records a
-/// precursor 1/K0; a table without it reads `None`. `isotope_share` is the
-/// share of the whole isotope pattern held by the isotopes of `envelope`.
 pub const RUN_QUANT_COLUMNS: [&str; 13] = [
     "spec_id",
     "rt_s",
@@ -283,9 +252,6 @@ pub const RUN_QUANT_COLUMNS: [&str; 13] = [
     "ion_mobility",
 ];
 
-/// A per-run PSM table opened for reading one record batch at a time, with
-/// only the requested columns decoded. A column left out reads as its empty
-/// value (empty string or list, 0, `false`, `None`).
 pub struct RunQuantBatches {
     path: std::path::PathBuf,
     run: String,
@@ -293,9 +259,6 @@ pub struct RunQuantBatches {
     reader: parquet::arrow::arrow_reader::ParquetRecordBatchReader,
 }
 
-/// Opens a per-run PSM table for [`RunQuantBatches`], decoding only
-/// `columns` (names of [`RUN_QUANT_COLUMNS`]; all of them when empty). Every
-/// error names `path`.
 pub fn open_run_quant_table(path: &Path, columns: &[&str]) -> Result<RunQuantBatches, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     if let Some(c) = columns.iter().find(|c| !RUN_QUANT_COLUMNS.contains(c)) {
@@ -371,7 +334,6 @@ impl RunQuantBatches {
     fn rows(&self, b: &RecordBatch) -> Result<Vec<RunPsmRow>, String> {
         let path = self.path.as_path();
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        // Projected batches hold the wanted columns in file order.
         let mut at = [usize::MAX; RUN_QUANT_COLUMNS.len()];
         let mut k = 0;
         for (i, w) in self.wanted.iter().enumerate() {
@@ -467,8 +429,6 @@ impl Iterator for RunQuantBatches {
     }
 }
 
-/// Read a per-run PSM table; returns `(run_stem, rows)`. Every error names
-/// `path`.
 pub fn read_run_quant_table(path: &Path) -> Result<(String, Vec<RunPsmRow>), String> {
     let mut batches = open_run_quant_table(path, &[])?;
     let run = batches.run().to_string();

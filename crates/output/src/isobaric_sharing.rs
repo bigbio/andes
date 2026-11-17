@@ -1,11 +1,3 @@
-//! Variant peptides that a reference protein holds once I and L are taken as
-//! equal. I and L have the same mass and fragment the same, so such a peptide
-//! is as much an identification of the reference protein as of the variant,
-//! yet the search groups proteins by exact sequence and reports it as
-//! variant-specific (a variant V→L can spell a paralog's `…VIDEVR` as
-//! `…VLDEVR`). [`share_isobaric_references`] adds those references to the
-//! row, so it counts as the identification it is.
-
 use std::collections::HashMap;
 
 use model::EntryKind;
@@ -15,14 +7,8 @@ use search::SearchIndex;
 use crate::percolator::PercolatorPsm;
 use crate::proteoform_table::bare_sequence;
 
-/// References a variant-class row names at most, besides its variants.
 const MAX_ADDED: usize = 8;
 
-/// For every target row at q ≤ `q_max` whose proteins are all variant entries
-/// (real or knockoff, so both are treated alike), add the target Reference
-/// proteins whose sequence holds its peptide with I and L taken as equal.
-/// Rows above `q_max` are left alone: they are never reported. Returns how
-/// many rows gained a reference.
 pub fn share_isobaric_references(
     targets: &mut HashMap<String, PercolatorPsm>,
     idx: &SearchIndex,

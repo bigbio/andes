@@ -1,41 +1,15 @@
-//! Glyco RT extension: per-monosaccharide additive offset to the *backbone*
-//! RT index produced by the engine-wide predictor (`scoring::rt_model`).
-//!
-//! `index_glyco = index_backbone + Σ (per-monosaccharide coefficient · count)`
-//! (Krokhin / Klein & Zaia 2019, R²=0.995 for the additive model).
-//!
-//! CRITICAL sign caveat (reversed phase): glycans make the glycopeptide elute
-//! EARLIER (hydrophilic) — so neutral sugars (HexNAc/Hex/Fuc) get NEGATIVE
-//! coefficients — *except sialic acid* (NeuAc, and NeuGc), whose carboxylate
-//! ion-pairing retains the glycopeptide LATER, so NeuAc gets its OWN POSITIVE
-//! coefficient. Do NOT lump sialic acids with the neutral hexoses.
-//!
-//! ⚠️ The seed magnitudes below are literature priors (RP-specific,
-//! single-group). They MUST be re-fit on andes's own PRIDE data before any
-//! production claim — only the *signs* are asserted here; the magnitudes are
-//! placeholders. On HILIC the signs flip entirely.
-
 use crate::glycan_db::GlycanComp;
 
-/// Per-monosaccharide RT-index coefficients (dimensionless, same scale as the
-/// backbone index). Fittable/passed-in — the [`Default`] impl provides seed
-/// signs only; magnitudes are NOT final.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlycanRtCoeffs {
     pub hexnac: f64,
     pub hex: f64,
     pub fuc: f64,
-    /// NeuAc (N-acetylneuraminic / sialic acid) — POSITIVE on RP (its own sign).
     pub neuac: f64,
-    /// NeuGc (N-glycolylneuraminic acid) — sialic, POSITIVE on RP.
     pub neugc: f64,
 }
 
 impl Default for GlycanRtCoeffs {
-    /// Seed signs per Krokhin/Klein & Zaia (RP): neutral sugars negative,
-    /// sialic acids positive. Magnitudes are placeholder priors scaled to the
-    /// ~[-1.9%, +1.9%] ACN gradient-fraction shifts reported for asialo→tri
-    /// glycans — **re-fit on andes data; do not treat as final.**
     fn default() -> Self {
         Self {
             hexnac: -0.30,
@@ -47,10 +21,6 @@ impl Default for GlycanRtCoeffs {
     }
 }
 
-/// Compute the additive glycan RT-index offset for a composition.
-///
-/// Returns `Σ coefᵢ·countᵢ`. Zero for an empty composition, so the same code
-/// path serves regular (non-glyco) peptides — they simply add 0.
 pub fn glycan_index_offset(comp: &GlycanComp, coeffs: &GlycanRtCoeffs) -> f64 {
     comp.hexnac as f64 * coeffs.hexnac
         + comp.hex as f64 * coeffs.hex
@@ -88,8 +58,6 @@ mod tests {
             "neutral offset {neutral_offset} should be negative"
         );
 
-        // Adding NeuAc must push the index UP relative to the same glycan
-        // without NeuAc (opposite sign contribution).
         let with_sialic = comp(2, 3, 1, 2, 0);
         let sialic_offset = glycan_index_offset(&with_sialic, &coeffs);
         assert!(

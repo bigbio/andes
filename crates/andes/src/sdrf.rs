@@ -625,6 +625,23 @@ impl ConfigKeys {
     }
 }
 
+/// Two crosslinker definitions that link the same way: equal once each end's residues are
+/// taken as a set (`TA=K,S` and `TA=S,K`).
+fn same_linker(
+    a: &andes_xl::crosslinker::Crosslinker,
+    b: &andes_xl::crosslinker::Crosslinker,
+) -> bool {
+    let canonical = |x: &andes_xl::crosslinker::Crosslinker| {
+        let mut x = x.clone();
+        for e in x.ends.iter_mut() {
+            e.residues.sort_unstable();
+            e.residues.dedup();
+        }
+        x
+    };
+    canonical(a) == canonical(b)
+}
+
 pub fn apply(
     s: &SdrfSettings,
     args: &mut crate::SearchArgs,
@@ -734,8 +751,9 @@ pub fn apply(
                 let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
                     .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
                 match set.iter().find(|y| y.name == x.name) {
-                    // The same definition written differently (fields in another order).
-                    Some(y) if *y == x => continue,
+                    // The same definition written differently (fields or sites in another
+                    // order).
+                    Some(y) if same_linker(y, &x) => continue,
                     Some(_) => {
                         return Err(format!(
                             "--sdrf `{XL}`: {} appears with different settings in different rows",
@@ -1104,6 +1122,10 @@ mod tests {
         };
         assert_eq!(
             apply_xl(&["NT=DSSO;AC=XLMOD:02126", "AC=XLMOD:02126;NT=DSSO"]).unwrap(),
+            vec!["DSSO"]
+        );
+        assert_eq!(
+            apply_xl(&["NT=DSSO;TA=K,S", "NT=DSSO;TA=S,K"]).unwrap(),
             vec!["DSSO"]
         );
         let e = apply_xl(&["NT=DSSO;TA=K", "NT=DSSO;TA=K,S"]).unwrap_err();

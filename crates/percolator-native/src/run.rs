@@ -53,7 +53,7 @@ pub fn run(args: &[String], limit: MemLimit) -> Result<(), String> {
         .num_threads(a.threads)
         .build()
         .map_err(|e| format!("thread pool: {e}"))?;
-    let pin = read_pin(&a.pin, limit)?;
+    let pin = pool.install(|| read_pin(&a.pin, limit))?;
     if pin.meta.is_empty() {
         return Err("ERROR: Reading tab file, could not find any PSMs.".to_string());
     }

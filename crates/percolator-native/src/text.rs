@@ -7,6 +7,14 @@ use std::sync::{Arc, Mutex};
 
 static TEXT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn append_record(out: &mut Vec<u8>, psm_id: &str, peptide: &str, proteins: &str) {
+    out.extend_from_slice(psm_id.as_bytes());
+    out.push(b'\t');
+    out.extend_from_slice(peptide.as_bytes());
+    out.push(b'\t');
+    out.extend_from_slice(proteins.as_bytes());
+}
+
 pub struct RowText {
     pub psm_id: String,
     pub peptide: String,
@@ -90,25 +98,11 @@ impl TextsBuilder {
         }
     }
 
-    pub(crate) fn push(
-        &mut self,
-        psm_id: &str,
-        peptide: &str,
-        proteins: &str,
-    ) -> Result<(), String> {
-        let record = [
-            psm_id.as_bytes(),
-            b"\t",
-            peptide.as_bytes(),
-            b"\t",
-            proteins.as_bytes(),
-        ];
-        let n: u64 = record.iter().map(|p| p.len() as u64).sum();
+    pub(crate) fn push_record(&mut self, record: &[u8]) -> Result<(), String> {
+        let n = record.len() as u64;
         if let Sink::Ram(v) = &mut self.sink {
             if self.ram.grow(&self.budget, n, self.budget.total() / 2) {
-                for p in record {
-                    v.extend_from_slice(p);
-                }
+                v.extend_from_slice(record);
             } else {
                 let k = TEXT_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = self.budget.spill_dir().join(format!(
@@ -126,10 +120,8 @@ impl TextsBuilder {
             }
         }
         if let Sink::Spill(path, w) = &mut self.sink {
-            for p in record {
-                w.write_all(p)
-                    .map_err(|e| format!("write spill file {}: {e}", path.display()))?;
-            }
+            w.write_all(record)
+                .map_err(|e| format!("write spill file {}: {e}", path.display()))?;
         }
         self.len += n;
         self.offsets.push(self.len);

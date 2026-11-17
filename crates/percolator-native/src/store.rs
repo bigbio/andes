@@ -112,6 +112,14 @@ impl StoreBuilder {
         self
     }
 
+    pub(crate) fn push_rows(&mut self, n: usize, data: &[f32]) -> Result<(), String> {
+        let nf = self.nfeat;
+        for i in 0..n {
+            self.push_row(&data[i * nf..(i + 1) * nf])?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn push_row(&mut self, row: &[f32]) -> Result<(), String> {
         self.nrows += 1;
         match &mut self.sink {

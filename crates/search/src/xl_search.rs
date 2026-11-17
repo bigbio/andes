@@ -42,6 +42,8 @@ pub const SECONDARY_SITE_PENALTY: f32 = 12.0;
 
 pub const PAIR_DELTA_WEIGHT: f32 = 0.3;
 
+pub const LOW_CHARGE_HALF_PAIR_PENALTY: f32 = 15.0;
+
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
         XlConfig {
@@ -402,6 +404,7 @@ pub struct Csm {
     pub alpha_doublet: Option<DoubletMass>,
     pub beta_doublet: Option<DoubletMass>,
     pub rescores: Rescores,
+    pub charge: u8,
 }
 
 pub fn combined_pair_score(pair: f32, second: Option<f32>) -> f32 {
@@ -409,9 +412,18 @@ pub fn combined_pair_score(pair: f32, second: Option<f32>) -> f32 {
     pair + PAIR_DELTA_WEIGHT * delta
 }
 
+pub fn half_pair_penalty(kind: PairKind, charge: u8) -> f32 {
+    if kind == PairKind::Half && charge <= 3 {
+        LOW_CHARGE_HALF_PAIR_PENALTY
+    } else {
+        0.0
+    }
+}
+
 impl Csm {
     pub fn score(&self) -> f32 {
         combined_pair_score(self.pair_score, self.second_pair_score)
+            - half_pair_penalty(self.kind, self.charge)
     }
 }
 
@@ -1176,6 +1188,7 @@ fn search_spectrum_at(
             alpha_doublet: doublet_at(&result.doublets.masses, pa.peptide.mass(), cfg),
             beta_doublet: doublet_at(&result.doublets.masses, pb.peptide.mass(), cfg),
             rescores: rescores(spec, prepared, z, table, &alpha, &beta, linker, mods),
+            charge: z,
         });
     }
 
@@ -1339,6 +1352,14 @@ mod tests {
         );
         assert_eq!(combined_pair_score(40.0, Some(45.0)), 40.0);
         assert!(combined_pair_score(40.0, Some(10.0)) > combined_pair_score(40.0, Some(39.0)));
+    }
+
+    #[test]
+    fn a_half_pair_of_a_triply_charged_precursor_pays_a_penalty() {
+        assert_eq!(half_pair_penalty(PairKind::Half, 3), LOW_CHARGE_HALF_PAIR_PENALTY);
+        assert_eq!(half_pair_penalty(PairKind::Half, 4), 0.0);
+        assert_eq!(half_pair_penalty(PairKind::Full, 3), 0.0);
+        assert_eq!(half_pair_penalty(PairKind::Open, 3), 0.0);
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary}
 pub mod glyco_rt;
 pub use glyco_rt::populate_glyco_rt_features;
 
+pub mod open_offsets;
 pub mod percolator;
 pub use percolator::{
     apply_per_run_q, decoy_results_path, parse_psm_results, pep_is_degenerate,

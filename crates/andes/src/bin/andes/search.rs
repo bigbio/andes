@@ -2831,6 +2831,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }
+        if cli.open_search {
+            write_open_offsets(
+                &output_pin_path,
+                dir,
+                &stem,
+                &accepted,
+                &rescore_decoy_psms,
+            );
+        }
         identified = Some((accepted, pep_note));
     }
 
@@ -3335,6 +3344,54 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
 
 fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
     std::mem::forget(candidates);
+}
+
+fn write_open_offsets(
+    pin: &Path,
+    dir: &Path,
+    stem: &str,
+    accepted: &[&output::PercolatorPsm],
+    decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
+) {
+    let report = match output::open_offsets::report_from_results(
+        pin,
+        accepted,
+        decoys,
+        model::unimod::bundled(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("WARN: open-search offset report not written: {e}");
+            return;
+        }
+    };
+    let peaks_path = dir.join(format!("{stem}.open_offsets.tsv"));
+    let psms_path = dir.join(format!("{stem}.open_psms.tsv"));
+    for (path, peaks) in [(&peaks_path, true), (&psms_path, false)] {
+        let written = output::write_atomic(path, |path| {
+            let mut w = std::io::BufWriter::new(File::create(path)?);
+            if peaks {
+                output::open_offsets::write_peaks(&mut w, &report)?;
+            } else {
+                output::open_offsets::write_assignments(&mut w, &report)?;
+            }
+            std::io::Write::flush(&mut w)
+        });
+        if let Err(e) = written {
+            eprintln!("WARN: could not write {}: {e}", path.display());
+        }
+    }
+    eprintln!(
+        "Open search: {} mass-offset peaks among the accepted PSMs (precision {:.4} Da); \
+         {} and {}",
+        report.peaks.len(),
+        report.precision,
+        peaks_path.display(),
+        psms_path.display()
+    );
+    for line in output::open_offsets::summary_lines(&report, 10) {
+        eprintln!("{line}");
+    }
 }
 
 pub(crate) fn write_filtered_tsv(

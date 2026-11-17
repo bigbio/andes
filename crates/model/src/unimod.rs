@@ -168,6 +168,10 @@ impl UnimodDb {
             .and_then(|(_, accession)| self.by_accession.get(accession))
     }
 
+    pub fn mods(&self) -> impl Iterator<Item = &UnimodMod> {
+        self.by_accession.values()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.by_accession
             .values()

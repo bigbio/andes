@@ -1,10 +1,19 @@
 use crate::pin::RowMeta;
 
+const PARK_MILLER_MODULUS: u64 = 4_294_967_291;
+
 struct ParkMiller(u64);
 
 impl ParkMiller {
+    fn new(seed: u64) -> ParkMiller {
+        match seed % PARK_MILLER_MODULUS {
+            0 => ParkMiller(1),
+            s => ParkMiller(s),
+        }
+    }
+
     fn next(&mut self) -> u64 {
-        self.0 = (self.0 * 279_470_273) % 4_294_967_291;
+        self.0 = (self.0 * 279_470_273) % PARK_MILLER_MODULUS;
         self.0
     }
 }
@@ -42,7 +51,7 @@ pub fn folds_by_spectrum(meta: &[RowMeta], k: usize, seed: u64) -> Vec<u8> {
     let mut spectra_left = 1 + order.windows(2).filter(|p| p[0].2 != p[1].2).count();
     let mut empty = vec![true; k];
     let mut empty_folds = k;
-    let mut rng = ParkMiller(seed);
+    let mut rng = ParkMiller::new(seed);
     let mut previous = order[0].2;
     let mut chosen = (rng.next() % k as u64) as usize;
     for (pos, &(_, _, current, _, i)) in order.iter().enumerate() {

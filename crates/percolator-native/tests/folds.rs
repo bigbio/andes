@@ -120,3 +120,29 @@ fn colliding_scan_hashes_split_as_percolator_at_any_thread_count() {
         assert_eq!(&got, splits, "{threads}");
     }
 }
+
+#[test]
+fn seeds_reduce_modulo_the_generator_and_zero_acts_as_one() {
+    let d = tempfile::tempdir().unwrap();
+    let pin = read_pin(
+        &data("folds_ref.pin"),
+        MemLimit {
+            bytes: u64::MAX,
+            spill_dir: d.path().to_path_buf(),
+        },
+    )
+    .unwrap();
+    let one = folds_by_spectrum(&pin.meta, 3, 1);
+    let m = 4_294_967_291u64;
+    for seed in [0, m, 2 * m, m + 1, u64::MAX - u64::MAX % m] {
+        assert_eq!(folds_by_spectrum(&pin.meta, 3, seed), one, "seed {seed}");
+    }
+    assert_eq!(
+        folds_by_spectrum(&pin.meta, 3, m + 42),
+        folds_by_spectrum(&pin.meta, 3, 42)
+    );
+    assert_eq!(
+        folds_by_spectrum(&pin.meta, 3, u64::MAX),
+        folds_by_spectrum(&pin.meta, 3, u64::MAX % m)
+    );
+}

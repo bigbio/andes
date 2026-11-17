@@ -915,15 +915,18 @@ fn peaks_batch(schema: &Arc<Schema>, peaks: &[OffsetPeak]) -> Result<RecordBatch
         )),
     ];
     for k in 0..TOP_EXPLANATIONS {
-        let e = |p: &OffsetPeak| p.explanations.get(k);
         cols.push(Arc::new(StringArray::from_iter(
-            peaks.iter().map(|p| e(p).map(|x| x.label.clone())),
+            peaks
+                .iter()
+                .map(|p| p.explanations.get(k).map(|x| x.label.clone())),
         )));
         cols.push(Arc::new(Float64Array::from_iter(
-            peaks.iter().map(|p| e(p).map(|x| x.mass)),
+            peaks.iter().map(|p| p.explanations.get(k).map(|x| x.mass)),
         )));
         cols.push(Arc::new(Float64Array::from_iter(
-            peaks.iter().map(|p| e(p).map(|x| x.posterior)),
+            peaks
+                .iter()
+                .map(|p| p.explanations.get(k).map(|x| x.posterior)),
         )));
     }
     RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())

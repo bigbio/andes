@@ -392,6 +392,9 @@ struct CgWork {
     q: Vec<f64>,
     r: Vec<f64>,
     p: Vec<f64>,
+    u: Vec<f64>,
+    s: Vec<f64>,
+    beta_old: Vec<f64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,17 +409,21 @@ fn cgls(
     ws: &mut CgWork,
 ) -> bool {
     let active = subset.len();
+    let n = t.x.ncols;
     let z = &mut ws.z[..active];
     let q = &mut ws.q[..active];
-    let n = t.x.ncols;
     let r = &mut ws.r;
     let p = &mut ws.p;
-    r.fill(0.0);
+    let u = &mut ws.u;
+    let sv = &mut ws.s;
+    let beta_old = &mut ws.beta_old;
+    u.fill(0.0);
     t.scan(subset, |k, row| {
         let ii = subset[k];
         z[k] = t.c(ii) * (t.y(ii) - o[ii]);
-        axpy_row(z[k], row, r);
+        axpy_row(z[k], row, u);
     });
+    r.copy_from_slice(u);
     daxpy(-lambda, beta, r);
     p.copy_from_slice(r);
     let mut omega1 = ddot(&r[..n], &r[..n]);
@@ -425,23 +432,27 @@ fn cgls(
     let mut cgiter = 0usize;
     while cgiter < cgitermax {
         cgiter += 1;
+        sv.fill(0.0);
         let mut omega_q = 0.0;
         t.scan(subset, |k, row| {
-            q[k] = dot_row(row, p);
-            omega_q += t.c(subset[k]) * q[k] * q[k];
+            let tk = dot_row(row, p);
+            q[k] = tk;
+            let ct = t.c(subset[k]) * tk;
+            omega_q += ct * tk;
+            axpy_row(ct, row, sv);
         });
         let gamma = omega1 / (lambda * omega_p + omega_q);
         let inv_omega2 = 1.0 / omega1;
-        r.copy_from_slice(beta);
-        dscal(-lambda, r);
+        beta_old.copy_from_slice(beta);
         daxpy(gamma, p, beta);
-        dscal(gamma, q);
-        t.scan(subset, |k, row| {
-            let ii = subset[k];
-            o[ii] += q[k];
-            z[k] -= t.c(ii) * q[k];
-            axpy_row(z[k], row, r);
-        });
+        for (k, &ii) in subset.iter().enumerate() {
+            let g = gamma * q[k];
+            o[ii] += g;
+            z[k] -= t.c(ii) * g;
+        }
+        daxpy(-gamma, sv, u);
+        r.copy_from_slice(u);
+        daxpy(-lambda, beta_old, r);
         let omega_z = ddot(z, z);
         omega1 = ddot(&r[..n], &r[..n]);
         if omega1 < epsilon2 * omega_z {
@@ -546,6 +557,9 @@ pub fn l2_svm_mfn(
         q: vec![0.0; m],
         r: vec![0.0; stride],
         p: vec![0.0; stride],
+        u: vec![0.0; stride],
+        s: vec![0.0; stride],
+        beta_old: vec![0.0; stride],
     };
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
     let mut ini = false;

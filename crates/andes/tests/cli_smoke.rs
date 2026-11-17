@@ -646,3 +646,32 @@ fn predict_rt_keeps_the_pin_well_formed() {
         assert!(l.split('\t').count() >= pep + 2, "short row: {l}");
     }
 }
+
+#[test]
+fn dia_refuses_the_searches_without_its_window_and_ms1_gate() {
+    let gdb = fixture("test-fixtures/glyco_fixture.gdb");
+    let gdb = gdb.to_str().expect("utf-8 fixture path");
+    for (extra, message) in [
+        (vec!["--refine"], "--dia and --refine cannot be combined"),
+        (
+            vec!["--glyco", "--glyco-glycan-gdb", gdb],
+            "--dia and --glyco cannot be combined",
+        ),
+        (vec!["--xl", "DSSO"], "--dia and --xl cannot be combined"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pin_path = dir.path().join("out.pin");
+        let out = base_cmd(
+            "test-fixtures/astral_pxd070049_slice.mzML.gz",
+            "test-fixtures/BSA.fasta",
+            &pin_path,
+        )
+        .arg("--dia")
+        .args(&extra)
+        .output()
+        .expect("run andes --dia");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{extra:?} with --dia must fail");
+        assert!(stderr.contains(message), "{extra:?}: {stderr}");
+    }
+}

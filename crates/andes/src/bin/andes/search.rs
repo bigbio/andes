@@ -828,6 +828,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.open_search {
             return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
         }
+        if cli.refine {
+            return Err("--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into());
+        }
+        if cli.glyco {
+            return Err("--dia and --glyco cannot be combined: the glycopeptide search has no isolation-window or MS1 gate".into());
+        }
+        if cli.xl.is_some() {
+            return Err("--dia and --xl cannot be combined: the cross-link search has no isolation-window or MS1 gate".into());
+        }
         params.dia = true;
     }
     if cli.glyco_index_sequon_only && !cli.glyco {
@@ -2059,6 +2068,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return Err("parser thread panicked".into()),
             };
             if cli.dia && mass_ordered {
+                if run_scans.ms1.is_empty() {
+                    return Err(format!(
+                        "--dia needs MS1 survey scans, and {} has none",
+                        input_path.display()
+                    )
+                    .into());
+                }
                 for s in &mut pending {
                     s.precursor_charge = None;
                 }

@@ -301,10 +301,8 @@ pub(crate) fn axpy_row(a: f64, x: &[f32], r: &mut [f64]) {
 pub struct MfnOpts {
     pub lambda: f64,
     pub epsilon: f64,
-    pub cgitermax: usize,
     pub mfnitermax: usize,
     pub big_epsilon: f64,
-    pub small_cgitermax: usize,
     pub relative_stop_eps: f64,
 }
 
@@ -313,10 +311,8 @@ impl Default for MfnOpts {
         MfnOpts {
             lambda: 1.0,
             epsilon: 1e-7,
-            cgitermax: 10000,
             mfnitermax: 50,
             big_epsilon: 0.01,
-            small_cgitermax: 10,
             relative_stop_eps: 1e-9,
         }
     }
@@ -453,27 +449,16 @@ fn dscal(a: f64, x: &mut [f64]) {
     }
 }
 
-struct CgWork {
-    r: Vec<f64>,
-    p: Vec<f64>,
-    u: Vec<f64>,
-    s: Vec<f64>,
-    v: Vec<f64>,
-    hd: Vec<f64>,
-    d: Vec<f64>,
-    beta0: Vec<f64>,
-    beta_old: Vec<f64>,
+struct Solve {
+    b: Vec<f64>,
     g: Vec<f64>,
-    h: Vec<f64>,
 }
 
 struct GramPart {
     g: [Vec<f64>; 2],
     buf: [Vec<f64>; 2],
     fill: [usize; 2],
-    u: Vec<f64>,
-    v: Vec<f64>,
-    zz: f64,
+    b: Vec<f64>,
 }
 
 impl GramPart {
@@ -482,9 +467,7 @@ impl GramPart {
             g: [vec![0.0; stride * stride], vec![0.0; stride * stride]],
             buf: [vec![0.0; GROUP * stride], vec![0.0; GROUP * stride]],
             fill: [0, 0],
-            u: vec![0.0; stride],
-            v: vec![0.0; stride],
-            zz: 0.0,
+            b: vec![0.0; stride],
         }
     }
 
@@ -538,35 +521,13 @@ fn syrk(g: &mut [f64], buf: &[f64], rows: usize, stride: usize, ncols: usize) {
     }
 }
 
-fn symv(g: &[f64], x: &[f64], out: &mut [f64], ncols: usize) {
-    let stride = x.len();
-    for (j, oj) in out.iter_mut().enumerate() {
-        *oj = if j < ncols {
-            let mut acc = [0.0f64; LANES];
-            for (gc, xc) in g[j * stride..(j + 1) * stride]
-                .chunks_exact(LANES)
-                .zip(x.chunks_exact(LANES))
-            {
-                for l in 0..LANES {
-                    acc[l] += gc[l] * xc[l];
-                }
-            }
-            ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
-        } else {
-            0.0
-        };
-    }
-}
-
-fn gram(t: &Train, subset: &[usize], o: &[f64], ws: &mut CgWork) -> f64 {
+fn gram(t: &Train, subset: &[usize], ws: &mut Solve) {
     let stride = t.x.stride;
     let ncols = t.x.ncols;
-    let part_bytes = (2 * stride * stride + 2 * GROUP * stride + 2 * stride) * 8;
+    let part_bytes = (2 * stride * stride + 2 * GROUP * stride + stride) * 8;
     let batch = (GRAM_BYTES / part_bytes / CHUNK).max(1) * CHUNK;
     let mut gs = [vec![0.0f64; stride * stride], vec![0.0f64; stride * stride]];
-    ws.u.fill(0.0);
-    ws.v.fill(0.0);
-    let mut zz = 0.0;
+    ws.b.fill(0.0);
     let mut scratch = vec![0.0f64; batch.min(subset.len())];
     for sub in subset.chunks(batch) {
         let parts = t.pass(
@@ -575,11 +536,7 @@ fn gram(t: &Train, subset: &[usize], o: &[f64], ws: &mut CgWork) -> f64 {
             || GramPart::new(stride),
             |acc, k, row, _| {
                 let ii = sub[k];
-                let c = t.c(ii);
-                let zk = c * (t.y(ii) - o[ii]);
-                axpy_row(zk, row, &mut acc.u);
-                axpy_row(c * zk, row, &mut acc.v);
-                acc.zz += zk * zk;
+                axpy_row(t.c(ii) * t.y(ii), row, &mut acc.b);
                 acc.push(usize::from(t.pos[ii]), row, stride, ncols);
             },
         );
@@ -592,90 +549,63 @@ fn gram(t: &Train, subset: &[usize], o: &[f64], ws: &mut CgWork) -> f64 {
                     *a += b;
                 }
             }
-            for (a, &b) in ws.u.iter_mut().zip(&part.u) {
+            for (a, &b) in ws.b.iter_mut().zip(&part.b) {
                 *a += b;
-            }
-            for (a, &b) in ws.v.iter_mut().zip(&part.v) {
-                *a += b;
-            }
-            zz += part.zz;
-        }
-    }
-    for j in 0..ncols {
-        for k in j + 1..ncols {
-            for gc in gs.iter_mut() {
-                gc[k * stride + j] = gc[j * stride + k];
             }
         }
     }
     let (cn, cp) = (t.cneg, t.cpos);
-    for (((g, h), &n), &p) in ws.g.iter_mut().zip(ws.h.iter_mut()).zip(&gs[0]).zip(&gs[1]) {
-        *g = cn * n + cp * p;
-        *h = (cn * cn) * n + (cp * cp) * p;
+    for j in 0..ncols {
+        for k in j..ncols {
+            let v = cn * gs[0][j * stride + k] + cp * gs[1][j * stride + k];
+            ws.g[j * stride + k] = v;
+            ws.g[k * stride + j] = v;
+        }
     }
-    zz
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cgls(
-    t: &Train,
-    lambda: f64,
-    cgitermax: usize,
-    epsilon: f64,
-    subset: &[usize],
-    beta: &mut [f64],
-    o: &[f64],
-    ws: &mut CgWork,
-) -> bool {
+fn direct(t: &Train, lambda: f64, subset: &[usize], beta: &mut [f64], ws: &mut Solve) -> bool {
     let n = t.x.ncols;
-    let zz0 = gram(t, subset, o, ws);
-    let CgWork {
-        r,
-        p,
-        u,
-        s: sv,
-        v,
-        hd,
-        d,
-        beta0,
-        beta_old,
-        g,
-        h,
-    } = ws;
-    beta0.copy_from_slice(beta);
-    r.copy_from_slice(u);
-    daxpy(-lambda, beta, r);
-    p.copy_from_slice(r);
-    let mut omega1 = ddot(&r[..n], &r[..n]);
-    let mut omega_p = omega1;
-    let epsilon2 = epsilon * epsilon;
-    let mut cgiter = 0usize;
-    while cgiter < cgitermax {
-        cgiter += 1;
-        symv(g, p, sv, n);
-        let omega_q = ddot(&p[..n], &sv[..n]);
-        let gamma = omega1 / (lambda * omega_p + omega_q);
-        let inv_omega2 = 1.0 / omega1;
-        beta_old.copy_from_slice(beta);
-        daxpy(gamma, p, beta);
-        daxpy(-gamma, sv, u);
-        r.copy_from_slice(u);
-        daxpy(-lambda, beta_old, r);
-        for ((dk, &b), &b0) in d.iter_mut().zip(beta.iter()).zip(beta0.iter()) {
-            *dk = b - b0;
-        }
-        symv(h, d, hd, n);
-        let omega_z = zz0 - 2.0 * ddot(&d[..n], &v[..n]) + ddot(&d[..n], &hd[..n]);
-        omega1 = ddot(&r[..n], &r[..n]);
-        if omega1 < epsilon2 * omega_z {
-            return true;
-        }
-        let scale = omega1 * inv_omega2;
-        dscal(scale, p);
-        daxpy(1.0, r, p);
-        omega_p = ddot(&p[..n], &p[..n]);
+    let stride = t.x.stride;
+    gram(t, subset, ws);
+    let g = &mut ws.g;
+    for j in 0..n {
+        g[j * stride + j] += lambda;
     }
-    false
+    for j in 0..n {
+        let mut s = g[j * stride + j];
+        for k in 0..j {
+            s -= g[j * stride + k] * g[j * stride + k];
+        }
+        if s.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return false;
+        }
+        let ljj = s.sqrt();
+        g[j * stride + j] = ljj;
+        for i in j + 1..n {
+            let mut v = g[i * stride + j];
+            for k in 0..j {
+                v -= g[i * stride + k] * g[j * stride + k];
+            }
+            g[i * stride + j] = v / ljj;
+        }
+    }
+    for i in 0..n {
+        let mut v = ws.b[i];
+        for k in 0..i {
+            v -= g[i * stride + k] * beta[k];
+        }
+        beta[i] = v / g[i * stride + i];
+    }
+    for i in (0..n).rev() {
+        let mut v = beta[i];
+        for k in i + 1..n {
+            v -= g[k * stride + i] * beta[k];
+        }
+        beta[i] = v / g[i * stride + i];
+    }
+    beta[n..].fill(0.0);
+    true
 }
 
 fn norm_up(row: &[f32]) -> f32 {
@@ -770,7 +700,6 @@ fn screened_pass(
     o: &mut [f64],
     o_bar: &mut [f64],
     w_bar: &[f64],
-    step: &[f64],
 ) {
     let u = sc.w_at.len() - 1;
     let nrm: &[f32] = &sc.nrm;
@@ -802,11 +731,7 @@ fn screened_pass(
             }
             *s = FRESH;
         }
-        *ob = if act[k] {
-            *oi + dot_row(row, step)
-        } else {
-            dot_row(row, w_bar)
-        };
+        *ob = dot_row(row, w_bar);
     };
     let parts: Vec<Vec<u32>> = o_bar
         .par_chunks_mut(CHUNK)
@@ -1015,7 +940,6 @@ pub(crate) fn mfn_from(
     let m = t.len();
     let lambda = opts.lambda;
     let mut epsilon = opts.big_epsilon;
-    let mut cgitermax = opts.small_cgitermax;
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
     let all: Vec<usize> = (0..m).collect();
@@ -1062,73 +986,40 @@ pub(crate) fn mfn_from(
         sc.as_ref(),
     );
     let mut w_bar = vec![0.0f64; stride];
-    let mut ws = CgWork {
-        r: vec![0.0; stride],
-        p: vec![0.0; stride],
-        u: vec![0.0; stride],
-        s: vec![0.0; stride],
-        v: vec![0.0; stride],
-        hd: vec![0.0; stride],
-        d: vec![0.0; stride],
-        beta0: vec![0.0; stride],
-        beta_old: vec![0.0; stride],
+    let mut ws = Solve {
+        b: vec![0.0; stride],
         g: vec![0.0; stride * stride],
-        h: vec![0.0; stride * stride],
     };
     let mut act = vec![false; m];
-    let mut step = vec![0.0f64; stride];
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
-    let mut ini = false;
     let mut iter = 0usize;
+    let mut opt = false;
+    let mut recheck = false;
     while iter < opts.mfnitermax {
         iter += 1;
-        w_bar.copy_from_slice(&w);
-        if sc.is_none() {
-            o_bar.copy_from_slice(&o);
+        if !recheck {
+            w_bar.copy_from_slice(&w);
+            opt = direct(&t, lambda, &subset[..active], &mut w_bar, &mut ws);
+            if !opt {
+                w_bar.copy_from_slice(&w);
+            }
+            act.fill(false);
+            for &ii in &subset[..active] {
+                act[ii] = true;
+            }
+            if let Some(sc) = sc.as_mut() {
+                sc.lim = (1.25 * sc.last).clamp(REACH_MIN, REACH_MAX);
+                sc.redo = false;
+                sc.bound(&w_bar);
+                screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar);
+            } else {
+                let wb: &[f64] = &w_bar;
+                t.pass(&all, &mut o_bar, || (), |_, _, row, ob| {
+                    *ob = dot_row(row, wb);
+                });
+            }
         }
-        let opt = cgls(
-            &t,
-            lambda,
-            cgitermax,
-            epsilon,
-            &subset[..active],
-            &mut w_bar,
-            &o,
-            &mut ws,
-        );
-        act.fill(false);
-        for &ii in &subset[..active] {
-            act[ii] = true;
-        }
-        for ((sk, &b), &a) in step.iter_mut().zip(&w_bar).zip(&w) {
-            *sk = b - a;
-        }
-        if let Some(sc) = sc.as_mut() {
-            sc.lim = (1.25 * sc.last).clamp(REACH_MIN, REACH_MAX);
-            sc.redo = false;
-            sc.bound(&w_bar);
-            screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
-        } else {
-            let wb: &[f64] = &w_bar;
-            let dv: &[f64] = &step;
-            let av: &[bool] = &act;
-            t.pass(
-                &all,
-                &mut o_bar,
-                || (),
-                |_, k, row, ob| {
-                    if av[k] {
-                        *ob += dot_row(row, dv);
-                    } else {
-                        *ob = dot_row(row, wb);
-                    }
-                },
-            );
-        }
-        if !ini {
-            cgitermax = opts.cgitermax;
-            ini = true;
-        }
+        recheck = false;
         let mut opt2 = true;
         match sc.as_ref() {
             Some(sc) => {
@@ -1157,6 +1048,7 @@ pub(crate) fn mfn_from(
         if opt && opt2 {
             if epsilon == opts.big_epsilon {
                 epsilon = opts.epsilon;
+                recheck = true;
                 continue;
             }
             w_bar.truncate(n);
@@ -1177,7 +1069,7 @@ pub(crate) fn mfn_from(
                 };
                 sc.redo = true;
                 sc.bound(&w_bar);
-                screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar, &step);
+                screened_pass(&t, sc, &act, &mut o, &mut o_bar, &w_bar);
                 (delta, need) =
                     line_search(&t, &w, &w_bar, lambda, &o, &o_bar, &mut deltas, Some(&*sc));
             }

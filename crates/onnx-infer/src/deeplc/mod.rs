@@ -1,42 +1,14 @@
-//! DeepLC input encoding for the exported default RT model.
-//!
-//! Mirrors `deeplc._features.encode_peptidoform` / `deeplc._batch_features`
-//! (deeplc ≥ 4.1, feature spec `global67_terminal`, corrected positional
-//! deltas, no rolling sum) for peptides of 4..=60 residues:
-//!
-//! - `x_atom` [60, 6]: per-position atom counts (C, H, N, O, S, P) of the
-//!   residue plus its modifications; zero rows past the peptide.
-//! - `x_one_hot` [60, 20]: one-hot residue in DeepLC's order
-//!   `KRPTNAQVSGILCMHFYWED`; zero rows past the peptide.
-//! - `x_global` [67]: summed atom counts (6), length (1), the atom counts of
-//!   positions 0..=3 and −4..=−1 laid out by `sorted(positions)` (8 × 6), and
-//!   the N- and C-terminal modification compositions (2 × 6).
-//!
-//! A terminal modification is added to the first (N) or last (C) residue's
-//! rows as well as to the terminal block, as DeepLC does. Atom counts of
-//! heavy-isotope labels (TMT) count as their element. Peptides outside
-//! 4..=60 residues or with residues outside the alphabet are errors: DeepLC
-//! truncates long peptides and wraps positional indices for short ones, which
-//! this encoder does not reproduce.
-
 use crate::error::{Error, Result};
 use crate::tensor::NamedTensor;
 
-/// Positions per peptide in the model's window.
 pub const PADDING_LENGTH: usize = 60;
-/// Shortest peptide encoded.
 pub const MIN_LENGTH: usize = 4;
-/// Atom columns (C, H, N, O, S, P).
 pub const N_ATOMS: usize = 6;
-/// Residue alphabet size.
 pub const N_RESIDUES: usize = 20;
-/// Global feature vector length.
 pub const GLOBAL_DIM: usize = 67;
 
-/// DeepLC one-hot order.
 const RESIDUES: &str = "KRPTNAQVSGILCMHFYWED";
 
-/// Residue (not amino-acid) compositions, `pyteomics.mass.std_aa_comp`.
 fn residue_composition(c: char) -> Option<[i32; N_ATOMS]> {
     Some(match c {
         'A' => [3, 5, 1, 1, 0, 0],
@@ -62,35 +34,25 @@ fn residue_composition(c: char) -> Option<[i32; N_ATOMS]> {
     })
 }
 
-/// One peptide: plain residues plus modification compositions per site
-/// (0 = N-terminus, `1..=n` = residue, `n + 1` = C-terminus).
 #[derive(Debug, Clone, Default)]
 pub struct DeepLcPeptide<'a> {
-    /// Residues, upper-case one-letter codes.
     pub sequence: &'a str,
-    /// `(site, atom delta C H N O S P)` pairs.
     pub mods: Vec<(usize, [i32; N_ATOMS])>,
 }
 
-/// Encoded model inputs for one peptide.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeepLcFeatures {
-    /// [60 × 6] row-major.
     pub x_atom: Vec<f32>,
-    /// [67].
     pub x_global: Vec<f32>,
-    /// [60 × 20] row-major.
     pub x_one_hot: Vec<f32>,
 }
 
-/// Positional-block rows a residue at 0-based index `i` occupies.
 fn positional_rows(i: usize, n: usize) -> impl Iterator<Item = usize> {
     let pos = (i <= 3).then_some(i + 4);
     let neg = (n - i <= 4).then(|| 4 - (n - i));
     pos.into_iter().chain(neg)
 }
 
-/// Encode one peptide.
 pub fn encode(p: &DeepLcPeptide<'_>) -> Result<DeepLcFeatures> {
     let seq: Vec<char> = p.sequence.chars().collect();
     let n = seq.len();
@@ -163,7 +125,6 @@ pub fn encode(p: &DeepLcPeptide<'_>) -> Result<DeepLcFeatures> {
     })
 }
 
-/// Batched graph inputs (`x_atom`, `x_global`, `x_one_hot`).
 pub fn pack_batch(peptides: &[DeepLcPeptide<'_>]) -> Result<[NamedTensor; 3]> {
     if peptides.is_empty() {
         return Err(Error::InvalidArg("empty peptide batch".into()));
@@ -198,7 +159,6 @@ mod tests {
     fn global_layout_for_unmodified_peptide() {
         let f = encode(&pep("PEPTIDEK")).unwrap();
         assert_eq!(&f.x_global[..7], &[40.0, 63.0, 9.0, 15.0, 0.0, 0.0, 8.0]);
-        // row 0 = position −4 (I), row 4 = position 0 (P), row 7 = position 3 (T)
         assert_eq!(&f.x_global[7..13], &[6.0, 11.0, 1.0, 1.0, 0.0, 0.0]);
         assert_eq!(&f.x_global[7 + 24..7 + 30], &[5.0, 7.0, 1.0, 1.0, 0.0, 0.0]);
         assert_eq!(&f.x_global[7 + 42..7 + 48], &[4.0, 7.0, 1.0, 2.0, 0.0, 0.0]);
@@ -217,14 +177,12 @@ mod tests {
         let f = encode(&p).unwrap();
         let base = encode(&pep("SAEDK")).unwrap();
         assert_eq!(f.x_atom[0] - base.x_atom[0], 2.0);
-        // position 0 (row 4) and, in a 5-mer, position −5 is not a row; so only row 4
         assert_eq!(f.x_global[7 + 24] - base.x_global[7 + 24], 2.0);
         assert_eq!(&f.x_global[55..61], &[2.0, 2.0, 0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]
     fn short_peptide_residue_fills_both_rows() {
-        // In a 4-mer, index 0 is position 0 and position −4.
         let ox = [0, 0, 0, 1, 0, 0];
         let p = DeepLcPeptide {
             sequence: "MEEK",

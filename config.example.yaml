@@ -36,6 +36,15 @@ search:
   #   - {name: GlyGly, sites: K, cleavage: blocked, diagnostic_ions: [215.1502, 198.1237]}
   #   - {name: Phospho, sites: Y, restrict_to: annotated}   # only at sites a UniProt XML database annotates
   #   - {name: MyTag, mass: 123.4567, sites: N-term}         # a custom mass, no UNIMOD lookup
+  # xl: DSSO (K, Protein N-term)   # --xl (experimental crosslink search): reagent name, XLMOD accession or UNIMOD Xlink record, then sites
+  # A reagent the table (resources/crosslinkers.yaml) lacks is an entry of that file's schema (example):
+  # xl:
+  #   name: MyLinker
+  #   sites: K, Protein N-term       # one end, or "end / end" for a heterobifunctional linker
+  #   intact: {mass: 158.003765}     # or {composition: "H(6) C(6) O(3) S"} or {unimod: "Xlink:DSSO[158]"}
+  #   stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]   # MS-cleavage stubs
+  #   doublets: [[alkene, thiol]]    # reporter doublets, [light, heavy] stub names
+  #   monolinks: [{name: water, mass: 176.01433}]
   charge: "2..5"                   # --charge (advanced): charges tried when the spectrum has none
   enzyme_specificity: fully        # --enzyme-specificity (advanced): fully | semi | non-specific
   min_length: 6                    # --min-length (advanced): shortest peptide

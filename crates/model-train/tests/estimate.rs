@@ -1,11 +1,3 @@
-//! TDD tests for [`model_train::estimate::Estimator`].
-//!
-//! The three tests correspond directly to the specification:
-//! 1. An estimated `Param` from real counts is scorable (finite node scores, no panic).
-//! 2. A partition with counts below `min_count` backs off rather than producing
-//!    all-zero / -inf entries.
-//! 3. Dense counts recover the empirical rank-1 fraction within tolerance.
-
 use std::path::Path;
 
 use model::amino_acid::AminoAcid;
@@ -26,8 +18,6 @@ use model::tolerance::Tolerance;
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
 
-/// Minimal single-partition template with a configurable `max_rank` and one
-/// prefix ion, used to probe rank-distribution smoothing in isolation.
 fn one_partition_template(max_rank: i32) -> Param {
     let part = Partition {
         charge: 2,
@@ -81,11 +71,6 @@ fn one_partition_template(max_rank: i32) -> Param {
     p
 }
 
-/// Estimator-dilution regression: a strongly-peaked empirical NOISE rank
-/// distribution must NOT be flattened by Laplace smoothing. With `max_rank=150`
-/// (151 slots) the legacy add-1 over noise collapsed the peak to ~0.67, which
-/// inflated `noise_freq[r]` at signal ranks and compressed `ln(ion/noise)`
-/// node scores (the diagnosed −4.3% dilution). The noise model must stay sharp.
 #[test]
 fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     let max_rank = 150;
@@ -104,7 +89,7 @@ fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     let mut counts = CountStats::new();
     for _ in 0..300 {
         counts.bump_rank(part, prefix1, 0);
-        counts.bump_rank(part, IonType::Noise, 0); // all noise mass on slot 0
+        counts.bump_rank(part, IonType::Noise, 0);
     }
 
     let param = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
@@ -137,9 +122,6 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
     (param, scorer)
 }
 
-/// Build a synthetic spectrum with peaks at every theoretical ion position for
-/// `peptide`, with strictly decreasing intensities so that split-1 ions get
-/// rank 1.
 fn build_synthetic_spectrum(
     peptide: &Peptide,
     scorer: &RankScorer,
@@ -166,7 +148,7 @@ fn build_synthetic_spectrum(
     let mut all_ions: Vec<(f64, f32)> = Vec::new();
     let mut global_index = 0usize;
 
-    #[allow(clippy::needless_range_loop)] // `split` indexes parallel arrays
+    #[allow(clippy::needless_range_loop)]
     for split in 1..n {
         let prefix_nom = prefix_nominals[split] as f64;
         let suffix_nom = (peptide_nominal - prefix_nominals[split]) as f64;
@@ -186,7 +168,7 @@ fn build_synthetic_spectrum(
                     if theo_mz <= 0.0 {
                         continue;
                     }
-                    let _ = part; // partition is used implicitly via param lookups
+                    let _ = part;
                     let intensity = 100_000.0_f32 / (1.0 + global_index as f32);
                     all_ions.push((theo_mz, intensity));
                     global_index += 1;
@@ -214,7 +196,6 @@ fn build_synthetic_spectrum(
     }
 }
 
-/// Accumulate N identical PSMs into a `CountStats` using the real HCD scorer.
 fn accumulate_n(n: usize) -> (CountStats, Param) {
     let (template, scorer) = load_hcd_scorer();
     let peptide = make_peptide(b"PEPTIDE");
@@ -233,7 +214,6 @@ fn accumulate_n(n: usize) -> (CountStats, Param) {
 
 #[test]
 fn estimated_param_is_scorable_and_finite() {
-    // Accumulate 200 identical synthetic PSMs so every partition sees counts.
     let (counts, template) = accumulate_n(200);
 
     let estimator = Estimator::new(EstimatorConfig::default());
@@ -241,9 +221,6 @@ fn estimated_param_is_scorable_and_finite() {
 
     let scorer = RankScorer::new(&param);
 
-    // For every populated partition × ion, node_score at rank 1 must be finite
-    // (not NaN or +/-inf).  The binary template has a rich ion set; the estimated
-    // param should cover at least the partitions we observed.
     let mut checked = 0usize;
     for (&part, ion_table) in &param.rank_dist_table {
         for &ion in ion_table.keys() {
@@ -281,9 +258,6 @@ fn empty_partition_backs_off_not_zero() {
     let estimator = Estimator::new(EstimatorConfig::default());
     let param = estimator.estimate(&empty_counts, &template);
 
-    // Even with zero observed counts, every rank_dist_table entry must be
-    // populated (Laplace + global-pool backoff) and the resulting log scores
-    // must be finite.
     let scorer = RankScorer::new(&param);
 
     let mut checked = 0usize;
@@ -294,7 +268,6 @@ fn empty_partition_backs_off_not_zero() {
             part
         );
         for (&ion, freqs) in ion_table {
-            // Every frequency must be positive (no zeros — Laplace guarantees this).
             for (i, &f) in freqs.iter().enumerate() {
                 assert!(
                     f > 0.0,
@@ -324,10 +297,6 @@ fn empty_partition_backs_off_not_zero() {
 
 #[test]
 fn dense_counts_recover_empirical_within_tolerance() {
-    // With a very small pseudo (effectively zero relative to many counts) and
-    // many PSMs, the normalised rank-1 frequency for the most-observed
-    // (partition, ion) should be close to the empirical fraction.
-
     let (template, scorer_seed) = load_hcd_scorer();
     let peptide = make_peptide(b"PEPTIDE");
     let charge: u8 = 2;
@@ -335,24 +304,22 @@ fn dense_counts_recover_empirical_within_tolerance() {
     let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
     let spectrum = build_synthetic_spectrum(&peptide, &scorer_seed, precursor_mz, charge);
 
-    // 2000 PSMs: Laplace pseudo (1.0) is negligible relative to counts.
     let acc = StatsAccumulator::new(&scorer_seed);
     let mut counts = CountStats::new();
     for _ in 0..2000 {
         acc.accumulate(&mut counts, &spectrum, &peptide, charge);
     }
 
-    // Estimator with tiny pseudo to minimise smoothing bias.
     let cfg = EstimatorConfig {
         pseudo: 0.001,
-        min_count: 1, // disable backoff (all partitions will exceed 1 count)
+        min_count: 1,
         backoff_weight: 0.0,
         ..Default::default()
     };
     let estimator = Estimator::new(cfg);
     let param = estimator.estimate(&counts, &template);
 
-    let mut best: Option<(Partition, IonType, u64, u64)> = None; // (part, ion, rank0, total)
+    let mut best: Option<(Partition, IonType, u64, u64)> = None;
     for (&(part, ion), v) in &counts.rank {
         if ion.is_noise() {
             continue;
@@ -375,8 +342,6 @@ fn dense_counts_recover_empirical_within_tolerance() {
         .and_then(|v| v.first().copied())
         .expect("rank_dist_table entry missing for best (partition, ion)");
 
-    // With pseudo=0.001 and n=2000, the smoothed value should be within 1%
-    // of the empirical fraction.
     let tol = 0.01_f32;
     assert!(
         (estimated - empirical).abs() <= tol,
@@ -386,9 +351,6 @@ fn dense_counts_recover_empirical_within_tolerance() {
     );
 }
 
-/// The independent prior must also drive the existence-table backoff for a
-/// sparse partition. The prior puts existence mass on index 3; the (empty)
-/// corpus would otherwise back off to a flat/global existence shape.
 #[test]
 fn sparse_existence_shrinks_toward_independent_prior() {
     let template = one_partition_template(150);
@@ -401,9 +363,8 @@ fn sparse_existence_shrinks_toward_independent_prior() {
     let mut prior = one_partition_template(150);
     prior
         .ion_existence_table
-        .insert(part, vec![0.0, 0.0, 0.0, 1.0]); // mass on idx 3
+        .insert(part, vec![0.0, 0.0, 0.0, 1.0]);
 
-    // No existence counts at all → n=0 < min_count → must use the prior.
     let counts = CountStats::new();
     let est = Estimator::new(EstimatorConfig::default());
     let with_prior = est.estimate_with_prior(&counts, &template, Some(&prior));
@@ -415,10 +376,6 @@ fn sparse_existence_shrinks_toward_independent_prior() {
     );
 }
 
-/// A sparse partition (n < min_count) must shrink toward the INDEPENDENT PRIOR's
-/// distribution, not the corpus-internal pool. Here the corpus empirical mass is
-/// all on slot 0, but the prior is peaked on slot 5; the blended result must
-/// carry materially more mass on slot 5 than the no-prior estimate does.
 #[test]
 fn sparse_partition_shrinks_toward_independent_prior() {
     let max_rank = 150;
@@ -463,9 +420,6 @@ fn sparse_partition_shrinks_toward_independent_prior() {
     );
 }
 
-/// Widening rank-window smoothing must (a) leave ranks 1-3 (indices 0..3) and the
-/// missing-ion sentinel (last index) untouched, (b) smooth the tail (reduce a lone
-/// spike at a high rank by averaging neighbors), and (c) renormalize to sum 1.
 #[test]
 fn rank_window_smoothing_preserves_head_smooths_tail() {
     let max_rank = 150usize;
@@ -495,9 +449,6 @@ fn rank_window_smoothing_preserves_head_smooths_tail() {
     );
 }
 
-/// With rank_smoothing enabled, a signal ion's trained rank distribution is
-/// smoother (lower peak) than with it disabled; the NOISE distribution is
-/// unchanged (smoothing must not touch noise).
 #[test]
 fn rank_smoothing_softens_signal_not_noise() {
     let max_rank = 150;
@@ -541,9 +492,6 @@ fn rank_smoothing_softens_signal_not_noise() {
     );
 }
 
-/// Coverage for the error-table prior path: with a non-zero `error_scaling_factor`
-/// (so `build_error_tables` actually runs) and an empty corpus, a sparse partition's
-/// ion-error distribution must follow the independent prior, not the global pool.
 #[test]
 fn sparse_error_table_shrinks_toward_independent_prior() {
     let part = Partition {
@@ -552,15 +500,14 @@ fn sparse_error_table_shrinks_toward_independent_prior() {
         seg_num: 0,
     };
     let mut template = one_partition_template(150);
-    template.error_scaling_factor = 2; // dist_len = 2*2 + 1 = 5
+    template.error_scaling_factor = 2;
 
     let mut prior = one_partition_template(150);
     prior.error_scaling_factor = 2;
     prior
         .ion_err_dist_table
-        .insert(part, vec![0.0, 0.0, 0.0, 0.0, 1.0]); // mass on last bin
+        .insert(part, vec![0.0, 0.0, 0.0, 0.0, 1.0]);
 
-    // No error counts → n = 0 < min_count → blend collapses to the prior.
     let counts = CountStats::new();
     let est = Estimator::new(EstimatorConfig::default());
     let trained = est.estimate_with_prior(&counts, &template, Some(&prior));

@@ -1,9 +1,3 @@
-//! The committed AGBD fixtures load with andes's native decoder
-//! (`scoring::gbdt_eval::GbdtPeakModel`) and score the rows in
-//! `fixtures/parity/agbd.json` to the expected values. `scripts/test_fixtures.py`
-//! checks ONNX Runtime against the same table, so the Python parser and the
-//! exported ONNX are both tied to the native format rather than to each other.
-
 use std::path::PathBuf;
 
 use scoring::gbdt_eval::GbdtPeakModel;
@@ -70,9 +64,6 @@ fn agbd_fixtures_score_parity_rows_natively() {
     }
 }
 
-/// `peak_gbdt_calibrated.agbd` is exactly what the native serializer writes
-/// for the peak_gbdt trees with a 3-point calibration map, so the Python
-/// parser tests on it exercise a natively serialized calibrated model.
 #[test]
 fn calibrated_fixture_is_the_native_serialization() {
     let (_, mut model) = load_native("peak_gbdt.agbd");

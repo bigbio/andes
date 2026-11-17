@@ -1,14 +1,6 @@
-//! A run's measured fragment mass error and the tolerances derived from it.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const TOL_SIGMAS: f64 = 4.0;
-/// Spreads of the nominal-reference error in the node-score window. The
-/// window has to hold nearly every real fragment's nominal-mass rounding
-/// error, whose tail grows with fragment mass. Measured at entrapment FDP 1%
-/// on five high-resolution sets, fixed windows of 0.15-0.25 Da are the
-/// plateau where none loses PSMs, and the runs' measured spreads are about
-/// 0.035-0.05 Da; six spreads places the learned window in that plateau.
 pub const NODE_WINDOW_SIGMAS: f64 = 6.0;
 pub const MIN_FEATURE_TOL_PPM: f64 = 5.0;
 pub const MAX_FEATURE_TOL_PPM: f64 = 40.0;
@@ -16,21 +8,12 @@ pub const GAUSSIAN_SIGMA_SCALE: f64 = 1.5;
 pub const DEFAULT_GAUSSIAN_SIGMA_PPM: f64 = 7.0;
 pub const MIN_GAUSSIAN_SIGMA_PPM: f64 = 1.0;
 
-/// Fragment mass error of a run, measured on its confident PSMs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FragmentErrorModel {
-    /// Median signed error (observed - theoretical), ppm.
     pub offset_ppm: f64,
-    /// Robust spread (normal-consistent MAD) of the errors, ppm.
     pub sigma_ppm: f64,
-    /// Ions the estimate rests on.
     pub ions: usize,
-    /// Confident PSMs the ions came from.
     pub psms: usize,
-    /// Robust centre and spread (Da) of the same ions' errors against the
-    /// theoretical m/z rebuilt from their NOMINAL fragment mass, the reference
-    /// the rank-table node scores match against. It holds the nominal-mass
-    /// rounding error on top of the instrument error.
     pub node_error_da: Option<(f64, f64)>,
 }
 
@@ -50,17 +33,12 @@ impl FragmentErrorModel {
         self
     }
 
-    /// Node-score window learned from the run: the nominal-reference error's
-    /// `|centre| + 6 spreads` ([`NODE_WINDOW_SIGMAS`]), `None` without a
-    /// nominal-reference measurement.
     pub fn node_window_da(&self) -> Option<f64> {
         self.node_error_da
             .map(|(c, s)| c.abs() + NODE_WINDOW_SIGMAS * s)
             .filter(|w| w.is_finite() && *w > 0.0)
     }
 
-    /// Symmetric feature tolerance around the recentred peaks:
-    /// `4 sigma`, clamped to 5-40 ppm.
     pub fn feature_tolerance_ppm(&self) -> f64 {
         (TOL_SIGMAS * self.sigma_ppm).clamp(MIN_FEATURE_TOL_PPM, MAX_FEATURE_TOL_PPM)
     }
@@ -70,8 +48,6 @@ impl FragmentErrorModel {
     }
 }
 
-/// A [`FragmentErrorModel`] shared by the scoring threads: set between files,
-/// read per PSM without locking. Only the offset and spread are kept.
 #[derive(Debug)]
 pub(crate) struct SharedFragmentError {
     offset_bits: AtomicU64,
@@ -131,11 +107,9 @@ mod tests {
 
     #[test]
     fn tolerance_is_four_spreads_within_bounds() {
-        // Astral-like: -2.5 ppm, spread 1.6 ppm.
         let astral = FragmentErrorModel::new(-2.5, 1.6, 5000, 800);
         assert!((astral.feature_tolerance_ppm() - 6.4).abs() < 1e-9);
         assert!((astral.gaussian_sigma_ppm() - 2.4).abs() < 1e-9);
-        // Very tight data is floored, very loose data capped.
         assert_eq!(
             FragmentErrorModel::new(0.1, 0.3, 1, 1).feature_tolerance_ppm(),
             MIN_FEATURE_TOL_PPM

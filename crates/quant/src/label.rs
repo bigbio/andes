@@ -1,74 +1,18 @@
-//! MS1 labelled-pair quantification (SILAC, reductive dimethyl).
-//!
-//! A *label group* is one peptide identity (the peptidoform without its
-//! channel labels) at one charge, measured in every channel of the label
-//! specification at once. The channels of a group co-elute (13C/15N labels) or
-//! elute with a small, learned offset (deuterium labels), so they are fitted
-//! jointly: one Gaussian elution profile (apex `t0`, width `w`) shared by all
-//! channels, one amplitude per channel.
-//!
-//! Model. For every isotope trace `t` read for the group (isotopes −1..3 of
-//! every channel, merged when two read the same centroid):
-//!
-//! `y_t[j] = b_t + Σ_c M[t][c] · A_c · g(t_j; t0 + δ_c, w)`
-//!
-//! where `M[t][c]` is the part of channel `c`'s isotope pattern that falls on
-//! trace `t` (see [`ChannelEnvelope`]): its own isotopes, its lower
-//! isotopologues from incomplete label enrichment, and the isotopes of
-//! *another* channel that land on the trace (the light M+4 lies about 9 ppm
-//! below a Lys4 or Dimethyl4 channel's monoisotope, so the two are one
-//! centroid). Interference from the group's own channels is therefore part of
-//! the model, never a reason to drop a channel. With the backgrounds `b_t`
-//! profiled out and each trace weighted by its noise `1 / σ_t²`, the
-//! amplitudes for a fixed `(t0, w)` solve a small non-negative least-squares
-//! problem, solved exactly over the subsets of free channels. The profile
-//! log-likelihood ratio against "background only" is `LLR = A·b / 2` at the
-//! optimum. `(t0, w)` maximise `LLR − (t0 − t_hat)² / (2 s²)` over the scan
-//! RTs within `t_hat ± 3 s` and the widths `{0.7, 1, 1.4} · w_prior`, as in
-//! [`crate::evidence`], then refined between scans (the vertex of the
-//! parabola through the best apex and its neighbours). The noise `σ_t` of a trace is `1.4826 · median|Δy| /
-//! √2` over the window's scans away from the expected peak (beyond
-//! `3 · max(s, w)` of `t_hat`), floored at half the median detection limit.
-//!
-//! Per channel at the optimum: its amplitude and standard error, its own
-//! likelihood ratio (the LLR lost when the channel is forced to 0), the
-//! cosine between its isotope heights (other channels' modelled parts
-//! removed) and its pattern, the coherence of its monoisotopic trace with the
-//! profile, and the residual at its M−1 position (after its own lower
-//! isotopologue is accounted for) relative to its monoisotope.
-//!
-//! Match between channels. A channel without an identification is measured
-//! at its exact m/z with the identified channels anchoring the profile; its
-//! decoys are the same fit with the channel moved by non-label mass shifts
-//! ([`decoy_shifts`]), and target/decoy competition of the channel
-//! scores ([`channel_score`]) gives the channel's quality q-value
-//! ([`channel_qvalues`]). [`classify_channel`] turns the fit into a status.
-
 use model::mass::ISOTOPE;
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
-/// Mass difference of deuterium and protium (2H − 1H), Da.
 pub const D_H: f64 = 2.014_101_778 - 1.007_825_032;
-/// Isotope offsets of [`ChannelEnvelope`]: `LOWEST_OFFSET ..= HIGHEST_OFFSET`
-/// relative to the channel's monoisotope.
 pub const LOWEST_OFFSET: i32 = -2;
 pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
 const READ_OFFSETS: [i32; 5] = [-1, 0, 1, 2, 3];
 pub const MAX_CHANNELS: usize = 5;
-/// Most components one fit takes: every channel and at most one satellite
-/// per channel (the heavy-proline form of `--label-arg-pro`). Up to
-/// [`MAX_CHANNELS`] components the fit enumerates the subsets of the free
-/// ones; beyond, it solves by active set (see `nn_quadratic`).
 pub const MAX_COMPONENTS: usize = 2 * MAX_CHANNELS;
 
-/// Where a label sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Site {
-    /// The side chain of a residue (one-letter code).
     Residue(u8),
-    /// The peptide N-terminal amine (any residue).
     NTerm,
 }
 
@@ -81,86 +25,53 @@ impl Site {
     }
 }
 
-/// One label of a channel: where it sits, its mass and its isotope
-/// composition (for the enrichment model of [`ChannelEnvelope`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelSite {
     pub site: Site,
-    /// Mass added by the label, Da.
     pub delta: f64,
-    /// Number of 2H atoms of the label.
     pub deuterium: u32,
-    /// Number of 13C and 15N atoms of the label.
     pub heavy_atoms: u32,
-    /// Of those, the 13C atoms (the rest are 15N).
     pub carbon13: u32,
-    /// C and H atoms the label adds to the peptide, its own 13C and 2H
-    /// included (a chemical label adds atoms, 2 C and 4 H per dimethyl site;
-    /// a metabolic one substitutes them and adds none). The envelope's
-    /// natural part is the peptide's atoms plus these, minus the label's 13C,
-    /// 15N and 2H.
     pub natural_c: i32,
     pub natural_h: i32,
-    /// Unimod name (the modification name the search uses).
     pub name: String,
     pub unimod: Option<u32>,
-    /// A chemical label (dimethyl, ICPL) rather than a metabolic one (SILAC):
-    /// selects the 2H enrichment.
     pub chemical: bool,
 }
 
-/// One channel: its labels (none for the unlabelled SILAC light channel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
-    /// Short name (`light`, `Lys8+Arg10`, `Dimethyl4`).
     pub name: String,
-    /// The SDRF/QPX label (`SILAC heavy`, `DIMETHYL4`); `None` when the
-    /// channel is outside that vocabulary.
     pub qpx_label: Option<String>,
     pub sites: Vec<LabelSite>,
 }
 
 impl Channel {
-    /// The label of `site` in this channel, if any.
     pub fn label_at(&self, site: Site) -> Option<&LabelSite> {
         self.sites.iter().find(|l| l.site == site)
     }
 }
 
-/// A label specification: the channels in increasing mass order, the
-/// reference channel of the ratios and the label enrichments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelSpec {
     pub channels: Vec<Channel>,
-    /// Index of the reference channel of the ratios.
     pub reference: usize,
-    /// 2H enrichment of metabolic labels (Lys4, Leu3). OpenMS measured 0.96
-    /// for Lys4 on PXD003327.
     pub enrichment_2h_metabolic: f64,
-    /// 2H enrichment of chemical labels (dimethyl). 0.993–0.999 measured for
-    /// the dimethyl channels of PXD000714; 0.99 by default.
     pub enrichment_2h_chemical: f64,
-    /// 13C / 15N enrichment of heavy labels, per atom (99 % for the common
-    /// SILAC amino acids).
     pub enrichment_heavy: f64,
 }
 
-/// The label atoms of one channel of one peptide ([`LabelSpec::channel_atoms`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LabelAtoms {
     pub deuterium: u32,
-    /// 2H enrichment that applies to them.
     pub p_2h: f64,
     pub carbon13: u32,
     pub nitrogen15: u32,
-    /// 13C / 15N enrichment.
     pub p_heavy: f64,
-    /// Natural C and H atoms added (see [`LabelSite::natural_c`]).
     pub natural_c: i32,
     pub natural_h: i32,
 }
 
-/// A label the specification syntax knows by name.
 struct NamedLabel {
     token: &'static str,
     sites: &'static [Site],
@@ -313,7 +224,6 @@ const NAMED_LABELS: &[NamedLabel] = &[
     },
 ];
 
-/// The presets of `--label`.
 pub const PRESETS: &[(&str, &str)] = &[
     ("silac2", "[][Lys8,Arg10]"),
     ("silac3", "[][Lys4,Arg6][Lys8,Arg10]"),
@@ -322,16 +232,6 @@ pub const PRESETS: &[(&str, &str)] = &[
 ];
 
 impl LabelSpec {
-    /// Parses a preset (`silac2`, `silac3`, `dimethyl2`, `dimethyl3`) or a
-    /// channel list in the syntax of OpenMS FeatureFinderMultiplex: one
-    /// bracket per channel, in increasing mass order, each holding
-    /// comma-separated labels, e.g. `[][Lys8,Arg10]`. A label is a known name
-    /// (`Lys4`, `Lys6`, `Lys8`, `Arg6`, `Arg10`, `Leu3`, `Dimethyl0`,
-    /// `Dimethyl4`, `Dimethyl6`, `Dimethyl8`) or a custom `<site>+<mass>`
-    /// with an optional isotope annotation for the envelope model: its 13C,
-    /// 15N and 2H atoms (`K+8.014199:6C2N`), with `chem` first for a chemical
-    /// label that adds atoms (`Nterm+32.056407:chem4D`). A custom label
-    /// without one is a chemical shift of natural atoms (`Nterm+28.0313`).
     pub fn parse(text: &str) -> Result<Self, String> {
         let t = text.trim();
         let body = PRESETS
@@ -372,7 +272,6 @@ impl LabelSpec {
                 channels.len()
             ));
         }
-        // Every channel labels the same sites (or none: the unlabelled one).
         let site_set = |c: &[LabelSite]| {
             let mut s: Vec<Site> = c.iter().map(|l| l.site).collect();
             s.sort_by_key(|s| match s {
@@ -400,12 +299,10 @@ impl LabelSpec {
         if channels.iter().skip(1).any(|c| c.is_empty()) {
             return Err("only the first channel may be unlabelled".into());
         }
-        // Increasing mass for one of each site.
         let mass = |c: &[LabelSite]| c.iter().map(|l| l.delta).sum::<f64>();
         if channels.windows(2).any(|w| mass(&w[1]) <= mass(&w[0])) {
             return Err("channels must be given in increasing mass order".into());
         }
-        // One modification name names one (site, channel).
         for (i, a) in channels.iter().enumerate() {
             for (j, b) in channels.iter().enumerate().skip(i + 1) {
                 for la in a {
@@ -457,8 +354,6 @@ impl LabelSpec {
                     }
                     names.join("+")
                 };
-                // SDRF names light, medium and heavy only: beyond three
-                // channels they would repeat, and QPX keys intensities by them.
                 let qpx_label = if all_silac && n <= 3 {
                     Some(
                         match (n, i) {
@@ -503,7 +398,6 @@ impl LabelSpec {
         self.channels.is_empty()
     }
 
-    /// Every site some channel labels.
     pub fn sites(&self) -> Vec<Site> {
         let mut out: Vec<Site> = Vec::new();
         for l in self.channels.iter().flatten_sites() {
@@ -514,9 +408,6 @@ impl LabelSpec {
         out
     }
 
-    /// The labels as variable modifications of the search: `(channel index,
-    /// label)` for every label of every channel. The unlabelled channel has
-    /// none: it is the search's light form.
     pub fn search_labels(&self) -> Vec<(usize, &LabelSite)> {
         self.channels
             .iter()
@@ -525,20 +416,16 @@ impl LabelSpec {
             .collect()
     }
 
-    /// The channel whose label at `site` has modification name `name`.
     pub fn channel_of_label(&self, site: Site, name: &str) -> Option<usize> {
         self.channels
             .iter()
             .position(|c| c.label_at(site).is_some_and(|l| l.name == name))
     }
 
-    /// Whether the first channel is the unlabelled one (SILAC): a labelable
-    /// site without a label is then that channel's.
     pub fn has_unlabelled_channel(&self) -> bool {
         self.channels[0].sites.is_empty()
     }
 
-    /// Whether some channel carries deuterium (its RT may shift).
     pub fn has_deuterium(&self) -> bool {
         self.channels
             .iter()
@@ -546,8 +433,6 @@ impl LabelSpec {
             .any(|l| l.deuterium > 0)
     }
 
-    /// Mass added to the unlabelled peptide by channel `c`, for `counts[k]`
-    /// labelled positions of site `sites[k]` (see [`Self::sites`]).
     pub fn channel_delta(&self, c: usize, sites: &[Site], counts: &[u32]) -> f64 {
         sites
             .iter()
@@ -556,8 +441,6 @@ impl LabelSpec {
             .sum()
     }
 
-    /// The label atoms channel `c` puts on a peptide with `counts[k]`
-    /// labelled positions of site `sites[k]`.
     pub fn channel_atoms(&self, c: usize, sites: &[Site], counts: &[u32]) -> LabelAtoms {
         let mut a = LabelAtoms {
             deuterium: 0,
@@ -585,12 +468,6 @@ impl LabelSpec {
         a
     }
 
-    /// The isotope pattern of channel `c` of a peptide whose unlabelled
-    /// formula is `light`: the natural envelope of the atoms the labels do
-    /// not fix (a Lys8 fixes 6 C and 2 N as 13C/15N, which then take no part
-    /// in the natural 13C/15N distribution) plus the natural atoms a chemical
-    /// label adds (two C per dimethyl site), shifted by the label, with the
-    /// lower isotopologues of incomplete enrichment.
     pub fn channel_envelope(
         &self,
         c: usize,
@@ -689,7 +566,6 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
             ))
         }
     };
-    // Without an annotation the label is a chemical shift of natural atoms.
     let comp = comp.unwrap_or(Composition {
         chemical: true,
         c13: 0,
@@ -698,9 +574,6 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
     });
     let shift = comp.c13 as f64 * C13_C12 + comp.n15 as f64 * N15_N14 + comp.d as f64 * D_H;
     let (natural_c, natural_h) = if comp.chemical {
-        // The added atoms, estimated as CH2 units of the label's mass with
-        // its heavy isotopes made light (C2H4 for dimethyl); they include the
-        // label's own 13C and 2H, which the envelope then takes out again.
         let light = delta - shift;
         if light < 0.5 * CH2 {
             return Err(format!(
@@ -709,8 +582,6 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
             ));
         }
         let c = (light / CH2).round() as i32;
-        // 2H may exceed the added H: it can also replace the peptide's own
-        // (Dimethyl8, 2 × 13CD3 for 2 H, has 6 2H and adds 4 H).
         if comp.c13 as i32 > c {
             return Err(format!(
                 "label {token:?}: {} 13C, but the label adds about {c} C",
@@ -719,7 +590,6 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
         }
         (c, 2 * c)
     } else {
-        // A metabolic label substitutes atoms: its mass is its heavy isotopes.
         if (shift - delta).abs() > 0.01 {
             return Err(format!(
                 "label {token:?}: {}C {}N {}D add {shift:.4} Da, not {delta} (for a chemical \
@@ -743,15 +613,10 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
     }])
 }
 
-/// 13C − 12C, Da.
 const C13_C12: f64 = 13.003_354_835 - 12.0;
-/// 15N − 14N, Da.
 const N15_N14: f64 = 15.000_108_899 - 14.003_074_004;
-/// CH2, Da.
 const CH2: f64 = 12.0 + 2.0 * 1.007_825_032;
 
-/// The isotope annotation of a custom label: `[chem]` then any of `<n>C`,
-/// `<n>N`, `<n>D` (13C, 15N and 2H atoms).
 #[derive(Debug, Clone, Copy)]
 struct Composition {
     chemical: bool,
@@ -808,24 +673,10 @@ fn parse_composition(token: &str, text: &str) -> Result<Composition, String> {
     Ok(comp)
 }
 
-/// The isotope pattern of one channel of a peptide, relative to the
-/// channel's monoisotopic m/z, offsets [`LOWEST_OFFSET`]..=[`HIGHEST_OFFSET`]
-/// (index 0 is M−2), summing to 1.
-///
-/// It is the unlabelled peptide's natural envelope shifted by the label, not
-/// an averagine of the labelled mass: a 13C/15N/2H label moves the pattern
-/// without widening it. Incomplete enrichment adds lower isotopologues: each
-/// of the `n` label atoms at enrichment `p` is light with probability `1 − p`,
-/// which moves the molecule one isotope down (by `D_H` for 2H, about
-/// `ISOTOPE` for 13C, within any MS1 tolerance of it). With two 2H-labelled
-/// Lys4 at p = 0.96, the M−1 peak is about 0.3 of the monoisotope.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelEnvelope(pub [f64; N_OFFSETS]);
 
 impl ChannelEnvelope {
-    /// `light`: the unlabelled peptide's envelope from its monoisotope (any
-    /// length; entries beyond M+5 are ignored). `deuterium` 2H atoms at
-    /// enrichment `p_2h`, `heavy` 13C/15N atoms at `p_heavy`.
     pub fn new(light: &[f64], deuterium: u32, p_2h: f64, heavy: u32, p_heavy: f64) -> Self {
         let lower = |n: u32, p: f64| -> [f64; 3] {
             if n == 0 || p >= 1.0 {
@@ -877,38 +728,23 @@ impl ChannelEnvelope {
     }
 }
 
-/// One group hypothesis to fit.
 #[derive(Debug, Clone)]
 pub struct GroupProbe {
     pub charge: u8,
-    /// Monoisotopic m/z of every channel.
     pub channel_mz: Vec<f64>,
     pub envelopes: Vec<ChannelEnvelope>,
-    /// Expected apex (seconds) of the reference profile and its prior width.
     pub t_hat: f64,
     pub s: f64,
-    /// Expected elution width (Gaussian sigma), seconds.
     pub w_prior: f64,
-    /// RT offset of each channel's elution from the shared profile, seconds
-    /// (0 for 13C/15N labels; see [`learn_rt_shifts`]).
     pub rt_shift: Vec<f64>,
-    /// Channels whose amplitude is fitted; the others are held at 0 (used to
-    /// measure one channel alone).
     pub free: Vec<bool>,
     pub mobility: Option<MobilityGate>,
-    /// Measure at the given profile (apex `t_hat`, width `w_prior`) instead
-    /// of searching for it: a group's unidentified channels and their decoys,
-    /// read at the identified channels' elution so that none of them moves it
-    /// onto another species.
     pub pinned: bool,
 }
 
-/// Fit settings.
 #[derive(Debug, Clone, Copy)]
 pub struct FitParams {
-    /// MS1 tolerance of the traces, ppm.
     pub tol_ppm: f64,
-    /// Width grid, multiples of `w_prior`.
     pub widths: &'static [f64],
 }
 
@@ -924,63 +760,34 @@ impl Default for FitParams {
     }
 }
 
-/// One channel at the optimum of [`fit_group`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChannelFit {
-    /// Amplitude of the whole isotope pattern at the apex.
     pub amplitude: f64,
     pub amplitude_se: f64,
-    /// `amplitude · w · √(2π)`: the area of the fitted profile.
     pub quantity: f64,
     pub quantity_se: f64,
-    /// Log-likelihood ratio lost when the channel is held at 0.
     pub llr: f64,
-    /// Cosine between the channel's own isotope heights (other channels'
-    /// modelled parts removed) and its pattern; 0 when either is zero.
     pub envelope_cos: f64,
-    /// Pearson correlation of the channel's monoisotopic trace (others'
-    /// modelled parts removed) with its profile over `t0 ± 2w`.
     pub coherence: f64,
-    /// Residual at the channel's M−1 (after every modelled part, its own
-    /// lower isotopologues included) over `π_0 · max(A, se)`.
     pub m1_ratio: f64,
-    /// Intensity-weighted ppm error of the monoisotopic centroids within
-    /// `w` of the channel's apex; `None` when no centroid fell within the
-    /// tolerance there (nothing was measured at the channel's m/z).
     pub mass_err_ppm: Option<f64>,
-    /// Elution centroid of the channel's own signal (monoisotope and M+1,
-    /// the other channels' modelled parts removed, positive values over
-    /// `t0 ± 2w` of the channel's profile) minus the profile's apex, seconds;
-    /// 0 when it has no signal there. A real channel elutes with its partner
-    /// channels; another species' envelope at its position, at a random
-    /// offset.
     pub apex_offset: f64,
-    /// Shape-free quantity: the channel's own isotope traces (M..M+3, the
-    /// other channels' modelled parts and the fitted background removed)
-    /// integrated over `t0 − 3w … t0 + 4w` (trapezoids), divided by the
-    /// pattern share they hold. Not clamped (an absent channel averages 0).
     pub trace_quantity: f64,
 }
 
-/// The joint fit of a group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupFit {
     pub t0: f64,
     pub w: f64,
-    /// Total log-likelihood ratio of the channels against background only.
     pub llr: f64,
-    /// `(t0 − t_hat) / s`.
     pub rt_z: f64,
     pub n_points: u32,
     pub channels: Vec<ChannelFit>,
 }
 
-/// The traces of one group: unique m/z values and the mixing matrix.
 struct Traces {
     mz: Vec<f64>,
-    /// `mix[t * n_ch + c]`.
     mix: Vec<f64>,
-    /// Per channel, the trace of each read offset (`READ_OFFSETS`).
     own: Vec<[usize; READ_OFFSETS.len()]>,
 }
 
@@ -1018,13 +825,6 @@ fn build_traces(probe: &GroupProbe, tol_ppm: f64) -> Traces {
     Traces { mz, mix, own }
 }
 
-/// Solves `max_A A·b − AᵀHA/2` over `A ≥ 0` with `A_c = 0` where `!free[c]`,
-/// exactly. Returns `(A, LLR, passive set)`. Up to [`MAX_CHANNELS`]
-/// components it enumerates the free subsets; beyond (channels with Arg→Pro
-/// satellites, up to [`MAX_COMPONENTS`]) the 2^n subsets would cost too much
-/// inside the apex and width search, so the active-set method of Lawson and
-/// Hanson finds the same optimum, falling back to the enumeration when a
-/// passive block is singular.
 fn nn_quadratic(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64, Vec<bool>) {
     if n > MAX_CHANNELS {
         if let Some(r) = nn_active_set(h, b, n, free) {
@@ -1034,10 +834,6 @@ fn nn_quadratic(h: &[f64], b: &[f64], n: usize, free: &[bool]) -> (Vec<f64>, f64
     nn_enumerate(h, b, n, free)
 }
 
-/// [`nn_quadratic`] by the Lawson–Hanson active-set method: grow the passive
-/// set by the free component of largest gradient `b − HA`, solve on it, and
-/// step back to the feasible boundary when a component would turn negative.
-/// `None` when a passive block is singular or the iterations do not settle.
 fn nn_active_set(
     h: &[f64],
     b: &[f64],
@@ -1051,9 +847,6 @@ fn nn_active_set(
     let tol = 1e-12 * scale;
     let mut a = vec![0.0; n];
     let mut passive = vec![false; n];
-    // A component whose own solve came out non-positive the moment it entered
-    // (rounding on a nearly collinear column) would re-enter at once with the
-    // same gradient: it is held out until the passive set changes otherwise.
     let mut held = vec![false; n];
     let solve_on = |p: &[bool]| -> Option<Vec<f64>> {
         let idx: Vec<usize> = (0..n).filter(|&c| p[c]).collect();
@@ -1099,12 +892,10 @@ fn nn_active_set(
                 break;
             }
             if inner == 1 && z[j] <= 0.0 {
-                // The entering component itself is rejected: hold it out.
                 passive[j] = false;
                 held[j] = true;
                 break;
             }
-            // Step from A toward z until the first passive component hits 0.
             let alpha = (0..n)
                 .filter(|&c| passive[c] && z[c] <= 0.0)
                 .map(|c| a[c] / (a[c] - z[c]))
@@ -1114,7 +905,6 @@ fn nn_active_set(
                     a[c] += alpha * (z[c] - a[c]);
                 }
             }
-            // The components the step brought to zero (up to rounding) leave.
             let amax = a.iter().fold(0.0f64, |m, &x| m.max(x.abs()));
             for c in 0..n {
                 if passive[c] && a[c] <= 1e-12 * amax {
@@ -1224,7 +1014,6 @@ fn robust_sigma(y: &[f64], floor: f64) -> f64 {
         .max(1e-9)
 }
 
-/// Fits `probe` on `ms1`. `None` when the window holds fewer than 3 scans.
 pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> Option<GroupFit> {
     let n_ch = probe.channel_mz.len();
     if n_ch == 0 || n_ch > MAX_COMPONENTS {
@@ -1235,7 +1024,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
     let widths: &[f64] = if probe.pinned { &[1.0] } else { params.widths };
     let max_shift = probe.rt_shift.iter().fold(0.0f64, |a, &d| a.max(d.abs()));
     let w_max = w_prior * widths.iter().fold(1.0f64, |a, &b| a.max(b));
-    // Enough baseline on both sides for the noise estimate whatever `s`.
     let half = (4.0 * s + 4.0 * w_max).max(8.0 * w_max) + max_shift;
     let window = ms1.scan_window(probe.t_hat - half, probe.t_hat + half);
     if window.len() < 3 {
@@ -1258,8 +1046,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .collect();
     let mid = limits.len() / 2;
     let limit = *limits.select_nth_unstable_by(mid, f64::total_cmp).1;
-    // Noise from the scans away from the expected peak (all of them when
-    // too few are), so that the peak's own slopes do not inflate it.
     let away: Vec<bool> = rt
         .iter()
         .map(|&t| (t - probe.t_hat).abs() > 3.0 * s.max(w_max) + max_shift)
@@ -1282,9 +1068,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         })
         .collect();
     let w_inv: Vec<f64> = sigma.iter().map(|s| 1.0 / (s * s)).collect();
-    // The amplitudes are fitted over the peak's own neighbourhood only
-    // (`t_hat ± (3 s + 3 w)`): the wide window serves the noise estimate, and
-    // other species eluting in it would otherwise pull on the background.
     let reach = 3.0 * s + 3.0 * w_max + max_shift;
     let j0 = rt.partition_point(|&t| t < probe.t_hat - reach);
     let j1 = rt.partition_point(|&t| t <= probe.t_hat + reach);
@@ -1308,7 +1091,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .map(|(t, m)| t.iter().map(|v| v - m).collect())
         .collect();
 
-    // Per (t0, w): centred profiles per channel and the normal equations.
     let profiles = |t0: f64, w: f64| -> Vec<Vec<f64>> {
         (0..n_ch)
             .map(|c| {
@@ -1376,11 +1158,8 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             .map(|x| x.0)?;
         t0s.push(rt[k]);
     }
-    // The apex and width that maximise the likelihood ratio under the trace
-    // weights `wt` (with the RT prior), refined to a sub-scan apex by the
-    // vertex of the parabola through the best grid apex and its neighbours.
     let search_apex = |wt: &[f64]| -> Option<(f64, f64)> {
-        let mut best: Option<(f64, f64, f64)> = None; // (objective, t0, w)
+        let mut best: Option<(f64, f64, f64)> = None;
         for &t0 in &t0s {
             for &wm in widths {
                 let w = wm * w_prior;
@@ -1427,13 +1206,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         Some((t0, w))
     };
     let (mut t0, mut w) = search_apex(&w_inv)?;
-    // Interference: a trace whose residual at the optimum is far above its
-    // noise carries another species (an interfered isotope of one channel);
-    // its weight is divided by its excess (robust reweighting, twice), so
-    // the amplitudes rest on the traces that follow the model. An interferer
-    // strong enough to have pulled the apex to itself loses its weight here,
-    // so the apex is searched again under the robust weights (and the weights
-    // re-derived there), until the apex stays put.
     let mut w_fit = w_inv.clone();
     let mut gc = profiles(t0, w);
     let (mut h, mut b, mut proj, mut sgg) = normal(&gc, &w_fit);
@@ -1489,7 +1261,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             break;
         }
         (t0, w) = (t1, w1);
-        // Weights are re-derived at the new apex, from the noise alone.
         w_fit.clone_from(&w_inv);
         gc = profiles(t0, w);
         (h, b, proj, sgg) = normal(&gc, &w_fit);
@@ -1542,8 +1313,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                 exp.push(traces.mix[t * n_ch + c]);
             }
             let envelope_cos = cosine(&obs, &exp);
-            // Coherence of the monoisotopic trace with the profile, around
-            // the channel's own (shifted) apex.
             let t_ch = t0 + probe.rt_shift.get(c).copied().unwrap_or(0.0);
             let mono = traces.own[c][1];
             let mut xs = Vec::new();
@@ -1566,7 +1335,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
             } else {
                 0.0
             };
-            // Residual at M−1 after every modelled part.
             let m1 = traces.own[c][0];
             let mut r = proj[m1][c];
             for c2 in 0..n_ch {
@@ -1595,7 +1363,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                 }
             }
             let apex_offset = if sy > 0.0 { syt / sy } else { 0.0 };
-            // Shape-free quantity over t0 - 3w .. t0 + 4w.
             let trace_quantity = {
                 let (lo, hi) = (tc - 3.0 * w, tc + 4.0 * w);
                 let mut area = 0.0;
@@ -1618,7 +1385,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                             x
                         })
                         .collect();
-                    // Background: the trace's mean outside the window.
                     let out: Vec<f64> = (0..rt.len())
                         .filter(|&j| rt[j] < lo || rt[j] > hi)
                         .map(|j| v[j])
@@ -1634,8 +1400,6 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
                         }
                     }
                 }
-                // The traces hold `share` of the channel's pattern; scale to
-                // the whole pattern.
                 if share > 0.0 {
                     area / share
                 } else {
@@ -1708,21 +1472,10 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-/// Nominal decoy shifts (Da) tried by [`decoy_shifts`], scaled by
-/// [`crate::decoys::PEPTIDE_MASS_SLOPE`] to stay in the peptide mass-defect
-/// band.
 const DECOY_UNITS: [f64; 12] = [
     7.0, -7.0, 11.0, -11.0, 13.0, -13.0, 17.0, -17.0, 19.0, -19.0, 23.0, -23.0,
 ];
 
-/// Neutral mass shifts (Da, before division by the charge) of the decoys of a
-/// group whose channels `moved` are moved, for channel masses `deltas`
-/// (relative to the first channel). A shift is admissible when no moved
-/// channel lands within `min_sep` Da of an isotope (M−3..M+6) of any channel
-/// at its true position: a decoy must not read the group's own signal (a
-/// heavy channel moved by −7 Da sits on the light M+1 of a Lys8 pair within
-/// a few ppm). `seed` rotates the admissible shifts; the first `n` are
-/// returned (fewer when fewer are admissible).
 pub fn decoy_shifts(
     moved: &[usize],
     deltas: &[f64],
@@ -1747,20 +1500,11 @@ pub fn decoy_shifts(
         .collect()
 }
 
-/// The decoy separation of [`decoy_shifts`] for a peptide of neutral mass
-/// `mass` at an MS1 tolerance of `tol_ppm`: three tolerances.
 pub fn decoy_min_sep(mass: f64, tol_ppm: f64) -> f64 {
     3.0 * tol_ppm * 1e-6 * mass
 }
 
-/// The mass-accuracy factor of a measured channel: `exp(−½ (Δ / σ)²)` for a
-/// mass error `err_ppm` `Δ` away from where the channel is expected
-/// (`expected_ppm`, the run's calibration or the group's identified
-/// channels), at the run's mass-error spread `sigma_ppm`. A decoy that lands
-/// on another species' envelope sits anywhere in the tolerance window; a real
-/// channel sits where its identified channels do.
 pub fn mass_factor(err_ppm: Option<f64>, expected_ppm: f64, sigma_ppm: f64) -> f64 {
-    // No centroid at the channel's m/z near its apex: no evidence for it.
     let Some(err_ppm) = err_ppm else {
         return 0.0;
     };
@@ -1768,27 +1512,15 @@ pub fn mass_factor(err_ppm: Option<f64>, expected_ppm: f64, sigma_ppm: f64) -> f
     (-0.5 * d * d).exp()
 }
 
-/// The co-elution factor of a measured channel: `exp(−½ (offset / σ)²)` for
-/// its [`ChannelFit::apex_offset`] against the run's spread `sigma_s` of the
-/// identified channels' offsets.
 pub fn coelution_factor(offset: f64, sigma_s: f64) -> f64 {
     let d = offset / sigma_s.max(1e-3);
     (-0.5 * d * d).exp()
 }
 
-/// The competition score of a channel (or a group's strongest channel):
-/// `√(2·LLR)` scaled by its envelope cosine and its coherence (both clamped
-/// at 0), so that a decoy that lands on another species' isotope, with the
-/// wrong pattern or elution, scores low whatever its intensity.
 pub fn channel_score(fit: &ChannelFit) -> f64 {
     (2.0 * fit.llr.max(0.0)).sqrt() * fit.envelope_cos.max(0.0) * fit.coherence.max(0.0)
 }
 
-/// Target/decoy q-values of scores: `rows` are `(score, is_decoy)`, higher is
-/// better, with `decoys_per_target` decoys drawn for every target. The
-/// q-value of each row, in input order, is the running minimum from the worst
-/// rank of `((D + 1) / k) / max(T, 1)`, clamped to 1; decoys get theirs too.
-/// Ties rank decoys first.
 pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f64> {
     let k = decoys_per_target.max(1) as f64;
     let mut order: Vec<usize> = (0..rows.len()).collect();
@@ -1817,13 +1549,6 @@ pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f6
     q
 }
 
-/// Target/decoy q-values when targets have different numbers of decoys:
-/// `rows` are `(score, decoy_weight)`, a target with weight 0 and each of a
-/// target's `k` decoys with weight `1 / k`, so the weighted decoy count above
-/// a score estimates the false targets there. The q-value of each row, in
-/// input order, is the running minimum from the worst rank of `(D_w + w̄) /
-/// max(T, 1)` (`w̄` the mean decoy weight: the "+1" of one decoy), clamped to
-/// 1. Ties rank decoys first.
 pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
     let decoys: Vec<f64> = rows.iter().filter(|r| r.1 > 0.0).map(|r| r.1).collect();
     let w_bar = if decoys.is_empty() {
@@ -1857,23 +1582,12 @@ pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
     q
 }
 
-/// What a channel of a group reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
-    /// A PSM of the run identifies the group in this channel.
     Identified,
-    /// Not identified, measured at its position (match between channels or
-    /// a transfer between runs) at the quality q-value cut.
     Matched,
-    /// The group was not identified in this run; it was transferred from
-    /// another run (match between runs) at the transfer q-value cut and this
-    /// channel shows its pattern there.
     Transferred,
-    /// No signal: the quantity is an upper bound, not a measurement.
     BelowDetection,
-    /// Something is there that is not this channel (another identified
-    /// peptide, a signal that does not co-elute or does not show the
-    /// channel's pattern, or a quality q-value above the cut).
     NotQuantifiable,
 }
 
@@ -1888,7 +1602,6 @@ impl ChannelStatus {
         }
     }
 
-    /// Whether the quantity is a measurement of this channel.
     pub fn is_quantified(self) -> bool {
         matches!(
             self,
@@ -1897,21 +1610,13 @@ impl ChannelStatus {
     }
 }
 
-/// Status thresholds of [`classify_channel`].
 #[derive(Debug, Clone, Copy)]
 pub struct ClassifyParams {
-    /// Quality q-value cut of a matched channel.
     pub fdr: f64,
-    /// Per-channel LLR below which a channel shows no signal.
     pub min_signal_llr: f64,
-    /// Minimum envelope cosine of a matched channel.
     pub min_cosine: f64,
-    /// A channel weaker than this fraction of the strongest identified one…
     pub weak_fraction: f64,
-    /// …must correlate with its profile by at least this much.
     pub min_weak_coherence: f64,
-    /// Residual M−1 above this fraction of the monoisotope marks another
-    /// envelope (one isotope lower) under the channel.
     pub max_m1_ratio: f64,
 }
 
@@ -1928,10 +1633,6 @@ impl Default for ClassifyParams {
     }
 }
 
-/// The status of a channel without an identification. `q` is its quality
-/// q-value ([`channel_qvalues`]), `anchor_amplitude` the largest amplitude of
-/// the group's identified channels, `claimed` whether another identified
-/// peptide of the run sits on the channel's position.
 pub fn classify_channel(
     fit: &ChannelFit,
     q: f64,
@@ -1956,10 +1657,6 @@ pub fn classify_channel(
     ChannelStatus::Matched
 }
 
-/// The status of an identified channel: identified, unless its own pattern
-/// fails the quality checks of [`classify_channel`] (envelope cosine, a
-/// strong residual M−1 of another envelope), when its quantity is not this
-/// channel's alone and it is not quantifiable. Its identification stays.
 pub fn classify_identified(fit: &ChannelFit, p: &ClassifyParams) -> ChannelStatus {
     if fit.amplitude > 0.0 && (fit.envelope_cos < p.min_cosine || fit.m1_ratio > p.max_m1_ratio) {
         ChannelStatus::NotQuantifiable
@@ -1968,10 +1665,6 @@ pub fn classify_identified(fit: &ChannelFit, p: &ClassifyParams) -> ChannelStatu
     }
 }
 
-/// The status of a channel of a group transferred from another run (its
-/// transfer accepted): [`ChannelStatus::Transferred`] when the channel shows
-/// its signal and pattern, else below detection or not quantifiable as in
-/// [`classify_channel`].
 pub fn classify_transferred(fit: &ChannelFit, strongest: f64, p: &ClassifyParams) -> ChannelStatus {
     match classify_channel(fit, 0.0, strongest, false, p) {
         ChannelStatus::Matched => ChannelStatus::Transferred,
@@ -1979,8 +1672,6 @@ pub fn classify_transferred(fit: &ChannelFit, strongest: f64, p: &ClassifyParams
     }
 }
 
-/// `log2(A_c / A_ref)` with its standard error by the delta method; `None`
-/// when either amplitude is not positive.
 pub fn log2_ratio(c: &ChannelFit, reference: &ChannelFit) -> Option<(f64, f64)> {
     if c.amplitude <= 0.0 || reference.amplitude <= 0.0 {
         return None;
@@ -1991,10 +1682,6 @@ pub fn log2_ratio(c: &ChannelFit, reference: &ChannelFit) -> Option<(f64, f64)> 
     Some((r, rel.sqrt() / std::f64::consts::LN_2))
 }
 
-/// Per-channel RT offsets (seconds) of a run from `pairs`, each `(channel,
-/// apex of the channel fitted alone − apex of the reference fitted alone)`
-/// for groups where both are strong: the median per channel when it has at
-/// least `min_pairs`, else 0. The reference's offset is 0.
 pub fn learn_rt_shifts(pairs: &[(usize, f64)], n_channels: usize, min_pairs: usize) -> Vec<f64> {
     (0..n_channels)
         .map(|c| {
@@ -2017,7 +1704,6 @@ pub fn learn_rt_shifts(pairs: &[(usize, f64)], n_channels: usize, min_pairs: usi
         .collect()
 }
 
-/// The median of `v` (NaN when empty).
 pub fn median(mut v: Vec<f64>) -> f64 {
     v.retain(|x| x.is_finite());
     if v.is_empty() {
@@ -2047,7 +1733,6 @@ mod tests {
         let s = LabelSpec::parse("silac3").unwrap();
         assert_eq!(s.channels[1].qpx_label.as_deref(), Some("SILAC medium"));
         assert!(s.has_deuterium());
-        // Beyond three SILAC channels the SDRF names would repeat.
         let s = LabelSpec::parse("[][Lys4][Lys6][Lys8]").unwrap();
         assert!(s.channels.iter().all(|c| c.qpx_label.is_none()));
         let s = LabelSpec::parse("dimethyl3").unwrap();
@@ -2061,8 +1746,6 @@ mod tests {
         assert_eq!(s.channels[1].sites[0].carbon13, 6);
         assert!(!s.channels[1].sites[0].chemical);
         assert!(s.channels[1].qpx_label.is_some());
-        // A stacked mod's name joins its parts with '+': a custom label's
-        // own name must not contain it, or the label is lost when split.
         for l in &s.channels[1].sites {
             assert!(!l.name.contains('+'), "{}", l.name);
             assert_eq!(s.channel_of_label(l.site, &l.name), Some(1));
@@ -2076,7 +1759,6 @@ mod tests {
         assert!(LabelSpec::parse("[][Lys8][Arg10]").is_err());
         assert!(LabelSpec::parse("[][Lys8,Arg10][Lys4,Arg6]").is_err());
         assert!(LabelSpec::parse("[][Foo]").is_err());
-        // An annotation whose isotopes do not make up the mass.
         assert!(LabelSpec::parse("[][K+8.014199:8C]").is_err());
         assert!(LabelSpec::parse("[Nterm+28.0313][Nterm+32.056407:4D]").is_err());
         assert!(LabelSpec::parse("[][K+8.014199:6X]").is_err());
@@ -2085,7 +1767,6 @@ mod tests {
 
     #[test]
     fn custom_labels_carry_their_composition() {
-        // The custom forms of the dimethyl presets model the same atoms.
         let custom =
             LabelSpec::parse("[Nterm+28.0313][Nterm+32.056407:chem4D][Nterm+36.07567:chem2C6D]")
                 .unwrap();
@@ -2113,8 +1794,6 @@ mod tests {
                 c.name
             );
         }
-        // An unannotated custom label is a chemical shift of natural atoms:
-        // no heavy isotopes, so no lower isotopologues in its envelope.
         let s = LabelSpec::parse("[][K+8.014199]").unwrap();
         let l = &s.channels[1].sites[0];
         assert!(l.chemical);
@@ -2139,7 +1818,6 @@ mod tests {
     fn deuterium_enrichment_gives_an_m_minus_1() {
         let light = [0.6, 0.3, 0.08, 0.02];
         let e = ChannelEnvelope::new(&light, 8, 0.96, 0, 1.0);
-        // 8 x 0.04 / 0.96 ≈ 0.33 of the monoisotope one isotope down.
         let r = e.at(-1) / e.at(0);
         assert!(r > 0.2 && r < 0.6, "{r}");
         let total: f64 = e.0.iter().sum();
@@ -2149,8 +1827,6 @@ mod tests {
         assert!((plain.at(0) - 0.6).abs() < 1e-12);
     }
 
-    /// A synthetic run: Gaussian peaks of the given (m/z, envelope, amplitude,
-    /// apex) channels at charge 2, 1 s scans, plus a flat noise floor.
     pub(crate) fn synthetic_run(
         species: &[(f64, ChannelEnvelope, f64, f64)],
         w: f64,
@@ -2173,7 +1849,6 @@ mod tests {
                     peaks.push((300.0 + k as f64 * 17.3, noise));
                 }
                 peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-                // Peaks closer than the resolution are one centroid (summed).
                 let mut merged: Vec<(f64, f32)> = Vec::new();
                 for p in peaks {
                     match merged.last_mut() {
@@ -2207,10 +1882,6 @@ mod tests {
         }
     }
 
-    /// Lawson–Hanson and the subset enumeration find the same optimum, on
-    /// random positive definite problems up to [`MAX_COMPONENTS`] with fixed
-    /// components and on nearly collinear columns (a satellite on another
-    /// channel's isotope).
     #[test]
     fn active_set_matches_the_subset_enumeration() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -2223,7 +1894,6 @@ mod tests {
         let mut settled = 0;
         for trial in 0..400 {
             let n = 1 + trial % MAX_COMPONENTS;
-            // H = XᵀX of a random design, nearly collinear in some trials.
             let rows = n + 3;
             let mut x: Vec<f64> = (0..rows * n).map(|_| rnd()).collect();
             if trial % 4 == 0 && n >= 2 {
@@ -2248,9 +1918,6 @@ mod tests {
                 (llr_e - llr_s).abs() <= 1e-9 * llr_e.abs().max(1.0),
                 "trial {trial} n {n}: {llr_e} vs {llr_s}"
             );
-            // Optimality (KKT) on every trial, collinear ones included: the
-            // gradient b − HA vanishes on the passive set and is not positive
-            // on the other free components.
             let scale = b.iter().chain(&h).fold(0.0f64, |m, &x| m.max(x.abs()));
             for c in 0..n {
                 let g = b[c] - (0..n).map(|k| h[c * n + k] * a_s[k]).sum::<f64>();
@@ -2273,11 +1940,9 @@ mod tests {
                 }
             }
         }
-        // The fallback to the enumeration is for singular blocks only.
         assert_eq!(settled, 400, "active set settled on {settled} of 400");
     }
 
-    /// A probe of [`MAX_COMPONENTS`] components is fitted; one more is refused.
     #[test]
     fn fit_takes_at_most_max_components() {
         let light = [0.55, 0.3, 0.11, 0.04];
@@ -2302,9 +1967,6 @@ mod tests {
         assert!(fit_group(&run, &probe(&mzs, &envs, 121.0), &FitParams::default()).is_none());
     }
 
-    /// A pinned probe reads its channels at the given profile: a strong
-    /// species at one channel's mass 8 s from the group's apex pulls a free
-    /// fit's profile onto it, but not a pinned one's.
     #[test]
     fn pinned_probe_keeps_the_profile() {
         let light = [0.55, 0.3, 0.11, 0.04];
@@ -2325,7 +1987,6 @@ mod tests {
             pinned.channels[1].llr,
             free.channels[1].llr
         );
-        // The light channel keeps its quantity at its own apex.
         let (r, _) = log2_ratio(&pinned.channels[0], &free.channels[0]).unwrap();
         assert!(r > 0.5, "{r}");
     }
@@ -2386,11 +2047,8 @@ mod tests {
         assert_eq!(status, ChannelStatus::BelowDetection);
     }
 
-    // Lys4 medium: the light M+4 is ~9 ppm below the medium monoisotope, so
-    // the two share a centroid. The joint fit attributes it to both.
     #[test]
     fn overlapping_lys4_channel_is_unmixed() {
-        // A large peptide, so that the light M+4 is substantial.
         let light = [0.25, 0.30, 0.22, 0.12, 0.07, 0.04];
         let el = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
         let em = ChannelEnvelope::new(&light, 4, 0.96, 0, 1.0);
@@ -2411,8 +2069,6 @@ mod tests {
             .unwrap();
             let (r, _) = log2_ratio(&fit.channels[1], &fit.channels[0]).unwrap();
             assert!((r - ratio.log2()).abs() < 0.05, "ratio {ratio}: {r}");
-            // The medium's own 2H lower isotopologue (and the light M+3) at
-            // its M−1 are modelled, not taken for another envelope.
             assert!(
                 fit.channels[1].m1_ratio < 0.3,
                 "{}",
@@ -2444,9 +2100,6 @@ mod tests {
         assert!((r + 1.0).abs() < 0.1, "{r}");
     }
 
-    /// A single-trace interferer strong enough to win the unweighted apex
-    /// search inside the search range: the robust weights take it out and
-    /// the apex is searched again, back at the peptide.
     #[test]
     fn single_trace_interferer_does_not_move_the_apex() {
         let light = [0.55, 0.3, 0.11, 0.04];
@@ -2455,7 +2108,6 @@ mod tests {
         let lone = ChannelEnvelope::new(&[1.0], 0, 1.0, 0, 1.0);
         let ml = 600.3;
         let mh = ml + 8.014199 / 2.0;
-        // On the heavy channel's M+2 only, 7 s from the peptide's apex.
         let other = mh + 2.0 * ISOTOPE / 2.0;
         let run = synthetic_run(
             &[
@@ -2477,8 +2129,6 @@ mod tests {
         assert!(r.abs() < 0.15, "{r}");
     }
 
-    /// A channel with no centroid at its m/z near its apex has no mass
-    /// evidence: it earns no mass credit, unlike a measured one at 0 ppm.
     #[test]
     fn unmeasured_channel_earns_no_mass_credit() {
         assert_eq!(mass_factor(None, 0.0, 2.0), 0.0);
@@ -2492,7 +2142,6 @@ mod tests {
         let el = ChannelEnvelope::new(&light, 0, 1.0, 0, 1.0);
         let ml = 600.3;
         let mh = ml + 8.014199 / 2.0;
-        // Another species one isotope below the heavy, eluting elsewhere.
         let other = mh - ISOTOPE / 2.0;
         let run = synthetic_run(&[(ml, el, 1e6, 120.0), (other, el, 2e6, 121.0)], 4.0, 50.0);
         let fit = fit_group(
@@ -2502,8 +2151,6 @@ mod tests {
         )
         .unwrap();
         let h = &fit.channels[1];
-        // The other species' M+1 sits on the heavy monoisotope; its own
-        // monoisotope sits on the heavy M−1.
         let status = classify_channel(
             h,
             0.0,
@@ -2541,8 +2188,6 @@ mod tests {
 
     #[test]
     fn decoy_shifts_avoid_every_isotope() {
-        // SILAC Lys8: the heavy channel moved by -7 Da would sit on the
-        // light M+1 (8.0142 - 7.0035 = 1.0107 vs 1.0034).
         let deltas = [0.0, 8.014199];
         let min_sep = decoy_min_sep(1200.0, 10.0);
         let all = decoy_shifts(&[0, 1], &deltas, min_sep, 0, 12);

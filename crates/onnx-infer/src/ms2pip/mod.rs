@@ -1,41 +1,16 @@
-//! MS²PIP feature encoding for the exported XGBoost → ONNX tree ensembles.
-//!
-//! MS²PIP predicts each ion series with one XGBoost regressor applied to a
-//! 139-value feature vector per cleavage site. This module computes those
-//! vectors exactly as `ms2rescore_rs.ms2pip_compute_features` (ms2pip ≥ 4.2)
-//! does, including the quirks the published models were trained with:
-//!
-//! - Modifications are ignored: a modified residue encodes as its base residue,
-//!   and I / L share one index. Only fragment *masses* see the modifications;
-//!   the intensity models never do.
-//! - Positional feature `pi` at the first cleavage site reads the properties of
-//!   residue index 0 (Ala), not of the first residue.
-//! - Quartile indices use `floor(q * denom)` with `denom` = n − 1 for the
-//!   peptide and the N-terminal ion but n for the C-terminal ion.
-//!
-//! Graph contract (`scripts/export_ms2pip_to_onnx.py`): input `features`
-//! [rows, 139] f32, output `log2_intensity` [rows] = `log2(intensity + 0.001)`. One graph per ion series (`b`, `y`); row `i` of a
-//! peptide is the cleavage after residue `i + 1`, i.e. b(i+1) and y(n−1−i).
-
 use crate::error::{Error, Result};
 use crate::tensor::NamedTensor;
 
-/// Features per cleavage site.
 pub const N_FEATURES: usize = 139;
 
-/// Residue alphabet size (I and L share one index).
 const N_AA: usize = 19;
 
-/// Shortest peptide ms2pip predicts (`ms2pip._utils.psm_input`).
 pub const MIN_LENGTH: usize = 4;
 
-/// Longest peptide ms2pip predicts.
 pub const MAX_LENGTH: usize = 100;
 
-/// Lowest log2 prediction ms2pip keeps (`log2(0.001)`).
 pub const LOG2_FLOOR: f32 = -9.965_784;
 
-/// Basicity, helicity, hydrophobicity and pI per residue index.
 const AA_PROPERTIES: [[u32; N_AA]; 4] = [
     [
         37, 35, 59, 129, 94, 0, 210, 81, 191, 106, 101, 117, 115, 343, 49, 90, 60, 134, 104,
@@ -51,7 +26,6 @@ const AA_PROPERTIES: [[u32; N_AA]; 4] = [
     ],
 ];
 
-/// MS²PIP residue index (`ACDEFGHIKMNPQRSTVWY`, L → I); `None` outside it.
 pub fn aa_index(c: char) -> Option<usize> {
     Some(match c.to_ascii_uppercase() {
         'A' => 0,
@@ -86,12 +60,6 @@ fn quartiles(sorted: &[u32], denom: usize) -> [u32; 5] {
     [sorted[0], at(0.25), at(0.5), at(0.75), sorted[n - 1]]
 }
 
-/// Feature rows for one peptide: `(len − 1) × 139` values, row-major.
-///
-/// `sequence` is the plain residue string (no modification text). A residue
-/// outside the MS²PIP alphabet, a length outside
-/// [`MIN_LENGTH`]`..=`[`MAX_LENGTH`] (ms2pip skips those peptides), or a
-/// charge of 0 is an error.
 pub fn compute_features(sequence: &str, charge: u8) -> Result<Vec<f32>> {
     let aa: Vec<usize> = sequence
         .chars()
@@ -117,7 +85,6 @@ pub fn compute_features(sequence: &str, charge: u8) -> Result<Vec<f32>> {
         .iter()
         .map(|&a| std::array::from_fn(|p| AA_PROPERTIES[p][a]))
         .collect();
-    // 1-based buffer whose slot 0 holds residue index 0's properties.
     let buf: Vec<[u32; 4]> = std::iter::once(std::array::from_fn(|p| AA_PROPERTIES[p][0]))
         .chain(props.iter().copied())
         .collect();
@@ -183,17 +150,12 @@ pub fn compute_features(sequence: &str, charge: u8) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-/// A packed MS²PIP batch: all cleavage sites of all peptides as one matrix.
 #[derive(Debug, Clone)]
 pub struct Ms2pipBatch {
-    /// `features` — [rows, 139] f32.
     pub features: NamedTensor,
-    /// Row offset of each peptide; peptide `k` owns rows
-    /// `offsets[k]..offsets[k + 1]` (`len − 1` rows).
     pub offsets: Vec<usize>,
 }
 
-/// Pack `(sequence, charge)` pairs into one feature matrix.
 pub fn pack_batch(peptides: &[(&str, u8)]) -> Result<Ms2pipBatch> {
     if peptides.is_empty() {
         return Err(Error::InvalidArg("empty peptide batch".into()));
@@ -211,8 +173,6 @@ pub fn pack_batch(peptides: &[(&str, u8)]) -> Result<Ms2pipBatch> {
     })
 }
 
-/// The graph's `log2_intensity` output (`[rows]`), clipped at
-/// [`LOG2_FLOOR`] as ms2pip does.
 pub fn log2_predictions(out: &NamedTensor) -> Result<Vec<f32>> {
     if out.shape.len() != 1 {
         return Err(Error::InvalidArg(format!(
@@ -223,7 +183,6 @@ pub fn log2_predictions(out: &NamedTensor) -> Result<Vec<f32>> {
     Ok(out.data.iter().map(|v| v.max(LOG2_FLOOR)).collect())
 }
 
-/// ms2pip's linear intensity from a log2 prediction: `2^x − 0.001`, ≥ 0.
 pub fn to_linear(log2: f32) -> f32 {
     (log2.exp2() - 0.001).max(0.0)
 }
@@ -232,7 +191,6 @@ pub fn to_linear(log2: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// First cleavage site of `ACDE/2`, from the ms2rescore-rs C-reference test.
     #[rustfmt::skip]
     const ACDE_ION0: [u32; N_FEATURES] = [
         4, 2, 0, 1, 0, 0, 0, 35, 35, 37, 59, 129, 23, 23, 29, 33, 68, 25, 25,

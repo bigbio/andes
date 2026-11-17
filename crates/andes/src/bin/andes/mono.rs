@@ -1,8 +1,3 @@
-//! `--precursor-mono`: apply the MS1 isotope-envelope precursor correction to
-//! a streamed chunk of MS2 spectra, and keep the per-scan record the glyco PIN
-//! and the diagnostic dump read. The decision itself lives in
-//! `search::precursor_mono`; this is the driver-side plumbing.
-
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::ops::RangeInclusive;
@@ -14,24 +9,6 @@ use search::precursor_mono::{
     correct_precursor, median_nonzero_intensity, MonoCorrection, MonoParams,
 };
 
-/// The isotope-error window to search once `--precursor-mono auto` has corrected
-/// precursors. With corrected precursors the `+2` step of the sweep only carries
-/// the (k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) composition degeneracy: on pGlyco2
-/// liver T-1 the `0..1` window confirmed 59 of the 62 firmware-mispicked +4
-/// reference scans against 55 with `0..2`, at 96.9% vs 96.8% peptidoform
-/// agreement and 0.98% vs 0.91% entrapment FDP, and the `+2` tier went from 402
-/// accepted PSMs to 21; the same held on all five liver fractions, heart and
-/// lung (bigbio/andes#64, arm F). So `auto` narrows the window to `0..=1` —
-/// but only when the correction actually fitted something (`mono_fitted`), so
-/// MGF and MS1-less mzML stay byte-identical to `off`, and never over an
-/// explicit `--isotope-error`.
-///
-/// The window is applied per spectrum by the glyco driver: only spectra with a
-/// verified monoisotope (`MonoCorrection::verified_within` the narrowed window)
-/// take it, the rest keep the configured window
-/// (`search::glyco_search::isotope_window_for`).
-///
-/// Returns the window to search and whether it was narrowed.
 pub(crate) fn coupled_isotope_window(
     mono_fitted: bool,
     explicit: Option<(i8, i8)>,
@@ -122,8 +99,6 @@ pub(crate) fn correct_chunk(
     if stats.by_shift.len() <= params.max_shift as usize {
         stats.by_shift.resize(params.max_shift as usize + 1, 0);
     }
-    // The MS1 median noise is a property of the MS1 scan, shared by every MS2
-    // it precedes: compute it once per MS1, lazily.
     let mut medians: Vec<Option<Option<f32>>> = vec![None; link.ms1_peaks.len()];
     let mut dump = dump;
     for (i, spec) in chunk.iter_mut().enumerate() {
@@ -162,11 +137,8 @@ mod tests {
 
     #[test]
     fn coupled_window_narrows_only_when_fitted_and_unset() {
-        // Fitted, nothing explicit: the glyco default 0..=2 becomes 0..=1.
         assert_eq!(coupled_isotope_window(true, None, 0..=2), (0..=1, true));
-        // Nothing fitted (MGF, MS1-less mzML): untouched, byte-identical to `off`.
         assert_eq!(coupled_isotope_window(false, None, 0..=2), (0..=2, false));
-        // An explicit --isotope-error is honoured verbatim, whatever it is.
         assert_eq!(
             coupled_isotope_window(true, Some((0, 2)), 0..=2),
             (0..=2, false)
@@ -190,8 +162,6 @@ mod tests {
         }
     }
 
-    /// One MS1 carrying a 3 kDa z=2 glycopeptide envelope with its monoisotope
-    /// at `mono`.
     fn ms1(mono: f64) -> Vec<(f64, f32)> {
         let env = glycopeptide_isotope_envelope((mono - PROTON) * 2.0, 8);
         let mut p: Vec<(f64, f32)> = (0..30)
@@ -211,8 +181,6 @@ mod tests {
         let mono = 1500.25;
         let link = Ms1Link {
             ms1_peaks: vec![ms1(mono)],
-            // scan 1: linked, recorded on M+4; scan 2: linked, on the mono;
-            // scan 3: no MS1 link; scan 4: linked but no charge.
             ms2_to_ms1: vec![Some(0), Some(0), None, Some(0)],
         };
         let m4 = mono + 4.0 * ISOTOPE / 2.0;
@@ -234,7 +202,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(table.len(), 4, "one table entry per spectrum");
-        // Default back-off: M+4 is searched from M+1 (shift 3).
         let c1 = table[0].as_ref().expect("linked scan is fitted");
         assert_eq!(c1.shift, 3);
         assert!((chunk[0].precursor_mz - (mono + ISOTOPE / 2.0)).abs() < 1e-9);

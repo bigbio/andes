@@ -1,6 +1,3 @@
-//! Load `astral-speed/test-fixtures/iprg-2013/F13.mgf` (1,406
-//! spectra) and assert count + wall-time budget.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;

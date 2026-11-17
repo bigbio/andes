@@ -1,0 +1,32 @@
+{
+  "_doc": "CI benchmark datasets (run_ci.py). Key = name on the CI page. fetch = dataset of ../reproduce/fetch_spectra.sh (spectra land in <data>/<fetch>/), database = file in <data>/databases/ (../reproduce/build_databases.sh). entrapment: report the true FDP. quant: design + amounts (as in ../quant-eval) for the ratio accuracy of an --lfq --mbr run.",
+  "PXD007683": {
+    "description": "TMT10, ion-trap CID (a05058)",
+    "fetch": "tmt",
+    "database": "tmt_db.fasta",
+    "args": ["--fixed-mods", "Carbamidomethyl (C), TMT6plex (K), TMT6plex (N-term)", "--max-mods", "2"]
+  },
+  "PXD001819": {
+    "description": "Low-res LFQ, yeast + natural E. coli entrapment (UPS1)",
+    "fetch": "ups1",
+    "database": "yeast_entrap.fasta",
+    "args": [],
+    "entrapment": true
+  },
+  "PXD070049": {
+    "description": "Astral HCD, Human/Yeast/E. coli, one run",
+    "fetch": "astral",
+    "database": "hye.fasta",
+    "args": ["--precursor-tol", "10ppm"]
+  },
+  "proteobench-astral": {
+    "description": "Astral LFQ + MBR, Human/Yeast/E. coli, 6 runs",
+    "fetch": "astral-lfq",
+    "database": "hye.fasta",
+    "args": ["--precursor-tol", "10ppm", "--lfq", "--mbr"],
+    "quant": {
+      "design": "../quant-eval/examples/proteobench_astral/design.tsv",
+      "amounts": "../quant-eval/examples/proteobench_astral/amounts.tsv"
+    }
+  }
+}

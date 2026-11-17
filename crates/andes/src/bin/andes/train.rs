@@ -1,5 +1,3 @@
-//! Search-based model training, MSNet parquet training and model-store updates.
-
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -30,11 +28,6 @@ use model_train::{
 use scoring_crate::{Param, RankScorer};
 use search::SearchParams;
 
-/// A freshly estimated model carries rank tables only. Give it the seed's
-/// fragment-intensity and rich-ion GBDTs: the search scores those features on
-/// every PSM, and a model without them loses 5-8% of the PSMs at true FDP 1% on
-/// high-resolution data (`andes train-intensity-gbdt` and
-/// `andes train-rich-ion-llr` replace them with ones fitted on the corpus).
 fn inherit_seed_gbdts(trained: &mut Param, seed: &Param) {
     trained.frag_intensity_model = seed.frag_intensity_model.clone();
     trained.rich_ion_model = seed.rich_ion_model.clone();
@@ -164,7 +157,6 @@ pub(crate) struct TrainFromSearchArgs {
     #[arg(long = "fragment-tol-da")]
     pub(crate) fragment_tol_da: Option<f64>,
 
-    // ── Update mode ──────────────────────────────────────────────────────────
     /// Switch to incremental update mode for this model ID.
     /// When set, one of `--add`, `--remove-source`, `--reweight`, or `--decay`
     /// must be provided.
@@ -328,8 +320,6 @@ pub(crate) struct TrainArgs {
     pub(crate) allow_degenerate_model: bool,
 }
 
-/// Load all MS2 spectra from a path using the same format-dispatch logic as
-/// the search path (mzML by extension, otherwise MGF).
 pub(crate) fn load_spectra_for_train(
     path: &Path,
 ) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
@@ -354,8 +344,6 @@ pub(crate) fn load_spectra_for_train(
                 );
             }
         }
-        // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search
-        // path. Requires building with `--features thermo`.
         Some("raw") => {
             #[cfg(feature = "thermo")]
             {
@@ -379,7 +367,6 @@ pub(crate) fn load_spectra_for_train(
                 .into());
             }
         }
-        // Native Bruker timsTOF `.d` (a directory). Requires `--features timstof`.
         Some("d") => {
             #[cfg(feature = "timstof")]
             {
@@ -402,7 +389,6 @@ pub(crate) fn load_spectra_for_train(
                 .into());
             }
         }
-        // MGF (default reader).
         _ => {
             let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
             for item in reader {
@@ -416,12 +402,6 @@ pub(crate) fn load_spectra_for_train(
     Ok(spectra)
 }
 
-/// Build the `SearchParams` used by every training mode (initial bootstrap,
-/// `--add`, and the acceptance gate) in one place, so they stay consistent with
-/// each other and with the production search:
-///   - charge span `2..=5` (the search binary's default; `default_tryptic` alone
-///     is the narrow `2..=3`, which drops z=4/5 labels common on Astral/timsTOF),
-///   - the modification lists `--fixed-mods` / `--variable-mods`.
 pub(crate) fn build_train_search_params(
     args: &TrainFromSearchArgs,
 ) -> Result<SearchParams, Box<dyn std::error::Error>> {
@@ -431,9 +411,6 @@ pub(crate) fn build_train_search_params(
     Ok(params)
 }
 
-/// First N-X-S/T sequon position (0-based index of the N; X != P), or None.
-/// Used to place the glycan mass for training an ETD c/z model: the glycan rides
-/// on glycosite-spanning c/z fragments, so it must be baked onto the sequon N.
 pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
     (0..seq.len()).find(|&i| {
         seq[i] == b'N'
@@ -443,12 +420,6 @@ pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
     })
 }
 
-/// Load external training labels from a `scan\tpeptide\tcharge` TSV (SP-B glyco
-/// training). Column order is discovered from the header (case-insensitive), so
-/// extra columns are ignored. The peptide is parsed with `aa_set` (Cam-C + any
-/// `--fixed-mods` / `--variable-mods` applied). Rows with an unknown scan or an unparseable peptide/charge
-/// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
-/// by the external engine; the value is unused by the accumulator).
 pub(crate) fn load_labels_from_tsv(
     path: &std::path::Path,
     spectra: &[model::spectrum::Spectrum],
@@ -479,25 +450,10 @@ pub(crate) fn load_labels_from_tsv(
     let pep_c = col(&["peptide", "backbone", "sequence", "peptide_sequence"])
         .ok_or("labels: no peptide column")?;
     let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
-    // Optional glyco columns: when present, the glycan mass is baked onto the
-    // glycosite N so glycosite-spanning c/z fragments carry the intact glycan
-    // (required to train a correct ETD c/z model — without it the model learns
-    // that glycosite c/z ions are "usually missing", which is false).
     let gly_c = col(&["glycan_mass", "glycan", "glycan_neutral"]);
     let site_c = col(&["glycosite", "site", "glyco_site"]);
     let max_c = scan_c.max(pep_c).max(chg_c);
 
-    // Fixed-mod deltas (e.g. Cam-C 57.02146) from the aa_set: the label peptides
-    // are BARE sequences, so we annotate each fixed-mod residue with `+delta` and
-    // wrap in `-.SEQ.-` flanking so `Peptide::from_str` mass-matches the fixed
-    // variant (a bare `C` would otherwise parse as UNMODIFIED — wrong b/y masses).
-    // Variable mods (Ox-M) are left off: the label doesn't say which are modified,
-    // and the unmodified form is the correct default for the rank corpus.
-    // Fixed mods at any position decorate each of their residues; fixed
-    // peptide-terminal mods (an N-terminal label) only the first or last
-    // residue, where they add to the residue's own fixed mod (the stacked
-    // form of the set). Protein-terminal fixed mods are left off: the label
-    // file gives no protein position.
     let anywhere: std::collections::HashMap<u8, f64> =
         aa_set.fixed_anywhere_deltas().into_iter().collect();
     let terminal = aa_set.fixed_terminal_deltas();
@@ -530,11 +486,6 @@ pub(crate) fn load_labels_from_tsv(
     };
 
     let mut labels = Vec::new();
-    // ONE label per spectrum: the accumulator must not tally the same spectrum
-    // multiple times (it would over-weight that spectrum's rank/edge/charge
-    // histograms). External glyco exports can carry rank alternatives or
-    // glycoform/site alternatives for one scan, so reject duplicate scans loudly
-    // rather than silently double-counting (Codex adversarial-review finding).
     let mut seen_scans: std::collections::HashSet<i32> = std::collections::HashSet::new();
     let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
     let (mut dup_scan, mut charge_mismatch) = (0usize, 0usize);
@@ -565,13 +516,7 @@ pub(crate) fn load_labels_from_tsv(
                 continue;
             }
         };
-        // Parse the peptide BEFORE the dedup guard: an unparseable/rank-alternative
-        // row must not "claim" the scan and cause a later VALID row for the same
-        // scan to be dropped as a duplicate (Codex + code-review finding — external
-        // exports can order a weaker alternative first).
         let seq = f[pep_c].trim();
-        // Resolve the glycan placement (if this is a glyco corpus): glycan mass
-        // from the column, glycosite from an explicit column or the first sequon.
         let glyco: Option<(usize, f64)> = gly_c.and_then(|gc| {
             let gmass: f64 = f.get(gc)?.trim().parse().ok()?;
             if gmass <= 0.0 {
@@ -589,11 +534,6 @@ pub(crate) fn load_labels_from_tsv(
                 continue;
             }
         };
-        // Bake the glycan directly onto the glycosite residue. We do NOT put it in
-        // the peptide string: Peptide::from_str only accepts `+delta` mods that
-        // match a REGISTERED variant, and per-PSM glycan masses aren't registered
-        // (that dropped ~96% of glyco labels as "unparseable"). The glycan delta on
-        // the N flows into every glycosite-spanning c/z fragment mass generically.
         if let Some((site, gmass)) = glyco {
             if let Some(res) = peptide.residues.get_mut(site) {
                 let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
@@ -613,8 +553,6 @@ pub(crate) fn load_labels_from_tsv(
                         diagnostic_ions: Vec::new(),
                     },
                 ));
-                // Rebuild, so the cached masses include the glycan: scoring
-                // takes each suffix mass as the cached total minus the prefix.
                 let charge = peptide.charge;
                 let residues = std::mem::take(&mut peptide.residues);
                 peptide = Peptide::new(residues, peptide.pre, peptide.post);
@@ -622,14 +560,9 @@ pub(crate) fn load_labels_from_tsv(
             }
         }
         if !seen_scans.insert(scan) {
-            // A second VALID row for a scan already labeled: skip (keep the first).
             dup_scan += 1;
             continue;
         }
-        // Charge cross-check: a label charge that disagrees with the spectrum's
-        // own precursor charge signals a stale annotation or a scan-mapping error
-        // — count it for visibility (the label charge is used for scoring, so a
-        // systematic mismatch means the corpus is built on the wrong spectra).
         if let Some(spec_z) = spectra[idx].precursor_charge {
             if spec_z != charge as i32 {
                 charge_mismatch += 1;
@@ -663,20 +596,14 @@ pub(crate) fn load_labels_from_tsv(
     Ok(labels)
 }
 
-/// One training run of `train-from-search`: its labels and only the spectra
-/// they point at (`labels[i].spectrum_index` indexes `spectra`).
 struct TrainRun {
-    /// File name recorded as the ledger `dataset`.
     dataset: String,
-    /// File stem, the ledger `source_id` when several runs are trained.
     stem: String,
     spectra: Vec<Spectrum>,
     labels: Vec<model_train::labeled::LabeledMatch>,
 }
 
 impl TrainRun {
-    /// Keep the labelled spectra of a run and drop the rest, re-pointing each
-    /// label at its spectrum in the reduced list.
     fn keep_labelled(
         path: &Path,
         spectra: Vec<Spectrum>,
@@ -705,7 +632,6 @@ impl TrainRun {
     }
 }
 
-/// File name without its spectrum extensions (`a.mzML.gz` → `a`, `b.d` → `b`).
 fn run_stem(path: &Path) -> String {
     let mut name = path
         .file_name()
@@ -761,9 +687,6 @@ pub(crate) fn run_train_from_search(
         })
         .transpose()?;
 
-    // ── 4-5. Labels per run: external TSV (SP-B) OR a seed search (bootstrap) ──
-    // Each run is labelled on its own and keeps only its labelled spectra, so
-    // memory holds one full run at a time.
     let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
     for (i, spectra_path) in args.spectra.iter().enumerate() {
         eprintln!("train: loading spectra from {} ...", spectra_path.display());
@@ -779,8 +702,6 @@ pub(crate) fn run_train_from_search(
             );
         }
         let labels = if let Some(labels_path) = args.labels.get(i) {
-            // SP-B glyco path: labels come from an external engine's backbone IDs.
-            // No seed search / database needed — the peptides are given directly.
             let aa_set = build_aa_set(args.fixed_mods.as_ref(), args.variable_mods.as_ref())?;
             load_labels_from_tsv(labels_path, &spectra, &aa_set)?
         } else {
@@ -824,13 +745,6 @@ pub(crate) fn run_train_from_search(
         .into());
     }
 
-    // ── 5b. Geometry template: own-derived (DEFAULT) or seed (opt-out) ─────────
-    // andes derives the partition/segment geometry from THIS corpus by default
-    // (own geometry — no MS-GF+ partition structure); the seed supplies only
-    // non-geometry metadata. Opt out with --seed-geometry to reuse the
-    // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
-    // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
-    // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
     let use_seed_geometry = args.seed_geometry;
     let mut template: Param = if !use_seed_geometry {
         eprintln!(
@@ -841,7 +755,6 @@ pub(crate) fn run_train_from_search(
             .flat_map(|r| corpus_charge_masses(&r.labels))
             .collect();
         let geo_cfg = GeometryArgs::default().to_config();
-        // The trained model's activation picks the geometry's ion series.
         let mut base = seed_param.clone();
         if let Some(act) = activation {
             base.data_type.activation = act;
@@ -851,8 +764,6 @@ pub(crate) fn run_train_from_search(
         eprintln!("train: --seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
     };
-    // The tolerance switch changes the training window (and the stored `mme`)
-    // only; the labels above come from the unchanged seed search.
     if let Some(ppm) = args.fragment_tol_ppm {
         template.mme = Tolerance::Ppm(ppm);
         eprintln!("train: training fragment tolerance overridden to {ppm} ppm");
@@ -890,9 +801,6 @@ pub(crate) fn run_train_from_search(
     if let Some(act) = activation {
         trained_param.data_type.activation = act;
     }
-    // The instrument is a selection-key column: without this the model would
-    // keep the seed's instrument and searches on `--instrument` data would
-    // never select it.
     let instrument = match &args.instrument {
         Some(name) => {
             trained_param.data_type.instrument =
@@ -961,8 +869,6 @@ pub(crate) fn run_train_from_search(
         .collect::<Vec<_>>()
         .join(", ");
 
-    // ── 10. Write to store with source tracking ────────────────────────────────
-    // Read existing OTHER models from the store (preserve them on append).
     let store_path = &args.out_store;
     let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
     if store_path.exists() {
@@ -1017,36 +923,12 @@ pub(crate) fn run_train_from_search(
     Ok(())
 }
 
-/// One confident, externally-labeled PSM read from a flat training parquet.
-///
-/// This is the in-memory form of one parquet row (see the column contract in
-/// the `train-from-msnet` CLI docs). The peaks are stored already sorted
-/// ascending by m/z (the parquet stores acquisition order; the reader sorts).
 pub(crate) struct MsnetPsm {
     pub(crate) spectrum: Spectrum,
     pub(crate) peptide: model::peptide::Peptide,
     pub(crate) charge: u8,
 }
 
-/// Build a [`model::peptide::Peptide`] from a bare uppercase sequence plus
-/// resolved modification mass-deltas.
-///
-/// Modifications are applied two ways, matching how the scoring code computes
-/// peptide mass (`Peptide::new` sums `aa.mass + mod_.mass_delta` per residue):
-///
-/// - **Residue mods** (`res_mod_pos` / `res_mod_delta`, 1-based positions):
-///   attached to the residue at that position via `AminoAcid::with_mod` with a
-///   `ModLocation::Anywhere`, `ResidueSpec::Specific(residue)` modification.
-/// - **Terminal mods** (`nterm_delta` / `cterm_delta`): folded onto the first /
-///   last residue's mass-delta. Because `Peptide::new` only sums per-residue
-///   `mod_.mass_delta`, a terminal delta must be carried by a residue's `mod_`
-///   to be counted. If a residue already carries a residue mod, the terminal
-///   delta is *added* to that residue's existing delta (a single combined
-///   `Modification`); otherwise a fresh terminal `Modification` is attached.
-///   This keeps `peptide.mass()` correct regardless of overlap.
-///
-/// Returns an error if `seq` contains a non-standard residue or the mod arrays
-/// are misaligned.
 pub(crate) fn build_msnet_peptide(
     seq: &str,
     res_mod_pos: &[i32],
@@ -1068,8 +950,6 @@ pub(crate) fn build_msnet_peptide(
     }
     let n = bytes.len();
 
-    // Accumulate the total mod delta to apply to each residue (1-based -> 0-based).
-    // Residue mods first, then terminal deltas folded onto the end residues.
     let mut residue_delta = vec![0.0f64; n];
     let mut residue_modded = vec![false; n];
     for (&pos1, &delta) in res_mod_pos.iter().zip(res_mod_delta.iter()) {
@@ -1116,16 +996,9 @@ pub(crate) fn build_msnet_peptide(
         }
     }
 
-    // Flanking residues per the spec: pre=`_`, post=`-`.
     Ok(model::peptide::Peptide::new(residues, b'_', b'-'))
 }
 
-/// Read one flat training parquet into a vector of [`MsnetPsm`].
-///
-/// Reads via the workspace `parquet`/`arrow` crates in record-batch chunks.
-/// List columns (`res_mod_pos`, `res_mod_delta`, `mz`, `intensity`) are
-/// decoded per-row from their `ListArray` offsets. Peaks are sorted ascending
-/// by m/z (the parquet stores acquisition order).
 pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn std::error::Error>> {
     use arrow::array::{Array, Float32Array, Float64Array, Int32Array, ListArray, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -1249,7 +1122,6 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
                 .zip(ints.iter())
                 .map(|(&m, &it)| (m as f64, it))
                 .collect();
-            // Input is acquisition order; the scoring path requires ascending m/z.
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
             let spectrum = Spectrum {
@@ -1276,9 +1148,6 @@ pub(crate) fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn s
     Ok(out)
 }
 
-/// `andes train`: train a scoring model directly from externally-labeled PSM
-/// parquets, reusing the existing accumulate → estimate → store machinery but
-/// bypassing the bootstrap search.
 pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
 
@@ -1322,13 +1191,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
     }
 
-    // ── 3b. Geometry template: own-derived (DEFAULT) or seed (opt-out) ─────────
-    // andes derives the partition/segment geometry from THIS corpus by default
-    // (own geometry — no MS-GF+ partition structure); the seed supplies only
-    // non-geometry metadata. Opt out with --seed-geometry to reuse the
-    // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
-    // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
-    // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
     let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
         eprintln!(
@@ -1375,26 +1237,17 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     );
     let estimator = Estimator::new(cfg);
 
-    // Optional independent prior: sparse partitions shrink toward this model
-    // (Level 0 of the backoff hierarchy) instead of the corpus-internal pool.
-    // When `--prior-model` is omitted, default to the trained model id. The
-    // selection columns passed to `load_param_from_store` are inert here because
-    // `model_id_override` is `Some` (it loads that exact id).
     let prior_param: Option<Param> = match &args.prior_model_store {
         Some(store_path) => {
             let prior_id = args
                 .prior_model
                 .clone()
                 .unwrap_or_else(|| args.model_id.clone());
-            // `load_param_from_store`'s activation/instrument/protocol are only
-            // consulted for automatic selection; passing an explicit
-            // `model_id_override` makes them inert, so `Protocol::Auto` (the CLI
-            // enum the signature expects) is a harmless placeholder.
             let (_pid, p) = load_param_from_store(
                 seed_param.data_type.activation,
                 Some(seed_param.data_type.instrument),
                 Protocol::Auto,
-                model::enzyme::Enzyme::Trypsin, // inert (model_id_override below makes selection columns unused)
+                model::enzyme::Enzyme::Trypsin,
                 Some(store_path.as_path()),
                 Some(&prior_id),
             )
@@ -1413,11 +1266,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {n_partitions} partitions");
 
-    // ── 5b. Override the selection-relevant data_type from flags ──────────────
-    // The trained model inherits the seed's data_type; minting a NEW slug whose
-    // (activation, instrument, enzyme, protocol) differs from the seed requires
-    // overriding those columns explicitly, otherwise model selection (which keys
-    // on these columns, not the model_id string) would never route to it.
     if let Some(act) = &args.activation {
         trained_param.data_type.activation = ActivationMethod::from_name(act).ok_or_else(|| {
             format!("unknown --activation '{act}' (expected CID/HCD/ETD/UVPD/PQD)")
@@ -1458,7 +1306,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         n_psms: psms.len() as i64,
         date: format_today_iso8601(),
         weight: 1.0,
-        train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        train_fdr: 1.0,
         decay_half_life_days: None,
         instrument: trained_param.data_type.instrument.name().to_string(),
         experiment_class: trained_param.data_type.protocol.name().to_string(),
@@ -1472,8 +1320,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         let gbdt_rows: Vec<PsmRow<'_>> = psms
             .iter()
             .map(|psm| {
-                // Pass the full mod-carrying peptide: labels are mod-aware so b/y
-                // ions over Cam-C/TMT/Ox-M land at the correct (shifted) m/z.
                 PsmRow {
                     spectrum: &psm.spectrum,
                     peptide: &psm.peptide,
@@ -1493,8 +1339,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
             allow_degenerate: args.allow_degenerate_model,
             ..TrainParams::default()
         };
-        // Hard-error on quality-gate failure (finding 3.6) instead of writing a
-        // degenerate model into the store (unless opted out).
         let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42)?;
         eprintln!("train: GBDT trained: {} trees", trained_gbdt.trees.len(),);
         Some(trained_gbdt.to_bytes())
@@ -1502,12 +1346,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         None
     };
 
-    // ── 7. Write to store, preserving any other existing models ───────────────
-    // Unified path: ALWAYS reads existing models from the store, builds the
-    // combined entries list (new model + existing others), and writes once via
-    // write_all_models_with_sources_and_gbdt_pub.  The GBDT blob (Some or None)
-    // flows through for the new model; existing models' blobs are re-serialised
-    // from their loaded gbdt_peak_model so no blob is ever lost on re-write.
     let store_path = &args.out_store;
     let model_id = args.model_id.clone();
 
@@ -1569,8 +1407,6 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
-/// `--add`, `--remove-source`, `--reweight`, `--decay`.
 pub(crate) fn run_train_update(
     args: TrainFromSearchArgs,
     model_id: &str,
@@ -1585,7 +1421,6 @@ pub(crate) fn run_train_update(
     }
     let store_path = &args.out_store;
     let cfg = EstimatorConfig::default();
-    // Fail before the seed search / acceptance gate, not at commit time.
     ensure_single_file_store(store_path)?;
 
     let (candidate, new_sources) = if args.add {
@@ -1747,8 +1582,6 @@ pub(crate) fn run_train_update(
         if args.force {
             eprintln!("train update: --force set, committing unconditionally");
         }
-        // Without --validate, commit unless user explicitly uses --force to control.
-        // Default: commit (no gate run = no evidence of regression).
         true
     };
 
@@ -1765,7 +1598,6 @@ pub(crate) fn run_train_update(
     Ok(())
 }
 
-/// Parse `"source-id=weight"` from a `--reweight` argument.
 pub(crate) fn parse_reweight_spec(spec: &str) -> Result<(String, f32), Box<dyn std::error::Error>> {
     let pos = spec
         .rfind('=')
@@ -1777,7 +1609,6 @@ pub(crate) fn parse_reweight_spec(spec: &str) -> Result<(String, f32), Box<dyn s
     Ok((sid, weight))
 }
 
-/// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.
 pub(crate) fn format_today_iso8601() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1788,8 +1619,6 @@ pub(crate) fn format_today_iso8601() -> String {
 }
 
 pub(crate) fn unix_days_to_iso8601(days: u64) -> String {
-    // Algorithm: Gregorian calendar from Julian Day Number.
-    // JDN for 1970-01-01 = 2440588.
     let jdn = days as i64 + 2_440_588;
     let a = jdn + 32044;
     let b = (4 * a + 3) / 146097;
@@ -1818,7 +1647,6 @@ mod train_from_msnet_tests {
         assert_eq!(run_stem(Path::new(".d")), ".d");
     }
 
-    /// Reference: unmodified peptide mass = sum of residue masses + H2O.
     fn unmod_mass(seq: &[u8]) -> f64 {
         let rsum: f64 = seq
             .iter()
@@ -1835,15 +1663,11 @@ mod train_from_msnet_tests {
         assert!(p.residues.iter().all(|aa| !aa.is_modified()));
     }
 
-    /// Oxidation on residue 1 of "MPEPTIDE" must add exactly +15.994915 Da to
-    /// the unmodified mass — verifying mods are actually applied, not dropped.
     #[test]
     fn residue_mod_mass_is_correct() {
         const OX: f64 = 15.994915;
         let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], 0.0, 0.0).unwrap();
         let expected = unmod_mass(b"MPEPTIDE") + OX;
-        // Exact: Peptide::new sums aa.mass + mod_.mass_delta, so the delta is
-        // added with the same arithmetic as the reference.
         assert_eq!(p.mass().to_bits(), expected.to_bits());
         assert!(
             p.residues[0].is_modified(),
@@ -1852,7 +1676,6 @@ mod train_from_msnet_tests {
         assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX);
     }
 
-    /// N-terminal Acetyl folds onto the first residue's mass-delta.
     #[test]
     fn nterm_mod_mass_is_correct() {
         const ACETYL: f64 = 42.010565;
@@ -1862,13 +1685,10 @@ mod train_from_msnet_tests {
         assert!(p.residues[0].is_modified());
     }
 
-    /// A residue mod and a terminal mod on the SAME residue must sum (not
-    /// clobber) so the total mass stays correct.
     #[test]
     fn overlapping_residue_and_nterm_mods_sum() {
         const OX: f64 = 15.994915;
         const ACETYL: f64 = 42.010565;
-        // Oxidation on residue 1 (M) AND N-term acetyl on the same first residue.
         let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], ACETYL, 0.0).unwrap();
         let expected = unmod_mass(b"MPEPTIDE") + OX + ACETYL;
         assert_eq!(p.mass().to_bits(), expected.to_bits());

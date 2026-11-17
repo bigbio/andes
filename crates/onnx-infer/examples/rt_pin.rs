@@ -1,15 +1,3 @@
-//! andes-rt retention index for every row of a Percolator PIN.
-//!
-//! ```text
-//! cargo run --release -p onnx-infer --example rt_pin -- \
-//!   --pin search.pin --mzml run.mzML --weights andes_rt.artn --out rt.tsv [--threads 8]
-//! ```
-//!
-//! Writes `SpecId, observed_retention_time (min), andes_rt, rt_missing, proforma`
-//! per PIN row (targets and decoys alike). `proforma` (Unimod accessions) lets
-//! other predictors score the same peptidoforms. Calibration to minutes happens
-//! downstream (`scripts/rt_calibration.py`).
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};

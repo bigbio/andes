@@ -1,75 +1,43 @@
-//! Pack PeptDeep RT / MS2 input tensors for [`crate::OnnxSession`].
-//!
-//! The exported graphs take the network inputs exactly as peptdeep feeds them
-//! after its own preprocessing, so the packers apply that preprocessing here:
-//! ASCII residue indices with terminal pads (see [`encode_aa_sequence`]),
-//! modification element vectors per site, charge × [`CHARGE_FACTOR`] and
-//! NCE × [`NCE_FACTOR`].
-
 use crate::error::{Error, Result};
 use crate::peptdeep::encode::{encode_aa_sequence, MOD_ELEMENT_COUNT};
 use crate::tensor::{checked_element_count, NamedTensor};
 
-/// Default NCE when the search engine does not supply one (PeptDeep generic).
 pub const NCE_DEFAULT: f32 = 30.0;
 
-/// Default instrument index (0 = `QE` in PeptDeep `model_const["instruments"]`).
 pub const INSTRUMENT_DEFAULT: i64 = 0;
 
-/// peptdeep multiplies the precursor charge by this before the network.
 pub const CHARGE_FACTOR: f32 = 0.1;
 
-/// peptdeep multiplies the NCE by this before the network.
 pub const NCE_FACTOR: f32 = 0.01;
 
-/// One peptide for PeptDeep: plain residues plus per-site modification features.
-///
-/// `mods` holds `(site, features)` pairs with peptdeep's site convention:
-/// 0 = peptide N-terminus, `1..=n` = residue, `n + 1` = C-terminus. `features`
-/// is the alphabase `MOD_TO_FEATURE` vector (length = the model's mod dim).
-/// Several modifications on one site are summed, as peptdeep does.
 #[derive(Debug, Clone, Default)]
 pub struct PeptDeepPeptide<'a> {
-    /// Unmodified residues, `A..=Z`.
     pub sequence: &'a str,
-    /// `(site, mod feature vector)` pairs.
     pub mods: Vec<(usize, &'a [f32])>,
 }
 
-/// One RT prediction batch (OpenMS export names).
 #[derive(Debug, Clone)]
 pub struct PeptDeepRtBatch {
-    /// `input_sequences` — [B, L+2] integer indices carried as f32; the backend
-    /// casts to the graph's declared integer type.
     pub input_sequences: NamedTensor,
-    /// `mod_x` — [B, L+2, M] f32.
     pub mod_x: NamedTensor,
 }
 
-/// One MS2 intensity batch (OpenMS export names).
 #[derive(Debug, Clone)]
 pub struct PeptDeepMs2Batch {
-    /// `aa_indices` — [B, L+2] integer indices carried as f32.
     pub aa_indices: NamedTensor,
-    /// `mod_x` — [B, L+2, M] f32.
     pub mod_x: NamedTensor,
-    /// `charges` — [B, 1] f32, already × [`CHARGE_FACTOR`].
     pub charges: NamedTensor,
-    /// `nce` — [B, 1] f32, already × [`NCE_FACTOR`].
     pub nce: NamedTensor,
-    /// `instrument_indices` — [B] integer indices carried as f32.
     pub instrument_indices: NamedTensor,
 }
 
 impl PeptDeepRtBatch {
-    /// Flatten to the slice expected by [`crate::OnnxSession::run`].
     pub fn as_inputs(&self) -> [NamedTensor; 2] {
         [self.input_sequences.clone(), self.mod_x.clone()]
     }
 }
 
 impl PeptDeepMs2Batch {
-    /// Flatten to session inputs (owned clones).
     pub fn as_inputs(&self) -> [NamedTensor; 5] {
         [
             self.aa_indices.clone(),
@@ -122,12 +90,10 @@ fn pack_sequences(
     Ok((aa, mod_x))
 }
 
-/// Pack plain peptide sequences into an RT batch (no modifications).
 pub fn pack_rt_inputs(peptides: &[&str], seq_len: usize) -> Result<PeptDeepRtBatch> {
     pack_rt_inputs_with_mod_dim(peptides, seq_len, MOD_ELEMENT_COUNT)
 }
 
-/// Pack RT inputs with an explicit mod channel count (no modifications).
 pub fn pack_rt_inputs_with_mod_dim(
     peptides: &[&str],
     seq_len: usize,
@@ -143,7 +109,6 @@ pub fn pack_rt_inputs_with_mod_dim(
     pack_rt_batch(&peps, seq_len, mod_dim)
 }
 
-/// Pack modified peptides into an RT batch of width `seq_len + 2`.
 pub fn pack_rt_batch(
     peptides: &[PeptDeepPeptide<'_>],
     seq_len: usize,
@@ -157,7 +122,6 @@ pub fn pack_rt_batch(
     })
 }
 
-/// Pack MS2 inputs (no modifications, shared NCE / instrument).
 pub fn pack_ms2_inputs(
     peptides: &[&str],
     charges: &[u8],
@@ -175,7 +139,6 @@ pub fn pack_ms2_inputs(
     )
 }
 
-/// Pack MS2 inputs with explicit mod channel count (no modifications).
 pub fn pack_ms2_inputs_with_mod_dim(
     peptides: &[&str],
     charges: &[u8],
@@ -194,11 +157,6 @@ pub fn pack_ms2_inputs_with_mod_dim(
     pack_ms2_batch(&peps, charges, seq_len, mod_dim, nce, instrument)
 }
 
-/// Pack modified peptides into an MS2 batch of width `seq_len + 2`.
-///
-/// `charges` are raw precursor charges and `nce` the raw NCE (e.g. 30.0); the
-/// peptdeep scaling is applied here. The output has `seq_len + 2 - 3` rows per
-/// peptide (one per cleavage site when `seq_len` equals the peptide length).
 pub fn pack_ms2_batch(
     peptides: &[PeptDeepPeptide<'_>],
     charges: &[u8],
@@ -256,8 +214,8 @@ mod tests {
         };
         let batch = pack_rt_batch(&[pep], 3, 3).unwrap();
         let m = &batch.mod_x.data;
-        assert_eq!(&m[0..3], &[1.0, 2.0, 0.0]); // N-term pad slot
-        assert_eq!(&m[6..9], &[2.0, 4.0, 0.0]); // residue 2 (C), two mods summed
+        assert_eq!(&m[0..3], &[1.0, 2.0, 0.0]);
+        assert_eq!(&m[6..9], &[2.0, 4.0, 0.0]);
         assert!(m[3..6].iter().chain(&m[9..]).all(|&v| v == 0.0));
     }
 

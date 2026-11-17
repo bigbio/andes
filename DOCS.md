@@ -71,7 +71,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--min-length` | u32 | `6` | Minimum peptide length. | Java `-minLength 6` |
 | `--max-length` | u32 | `50` | Maximum peptide length. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | PSMs kept per spectrum (before positional isomers are collapsed in the output, see §3a). | Java `-n 10` |
-| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried. | Java `-ti -1,2` |
+| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offsets tried; `0..2` under `--glyco` and `--xl`. | Java `-ti -1,2` |
 | `--min-peaks` | u32 | `10` | Spectra with fewer MS2 peaks are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
@@ -1051,6 +1051,56 @@ the restricted mods are never placed and andes warns.
 `--glyco` takes the glycans from its glycan database (`--glyco-species`, `--glyco-glycan-gdb`),
 not from these lists; the lists set the modifications of the peptide backbone, as in any
 search (e.g. `--glyco --glyco-species human --variable-mods "Oxidation (M)"`).
+
+### Crosslinkers (`--xl`, experimental)
+
+The crosslinker is written like a modification, `Name (sites)`: a reagent name or alias, or
+the UNIMOD name or accession of its intact cross-link, then optional sites
+(`--xl "DSSO (K, S, T, Y, Protein N-term)"`). Without sites the reagent's usual ones apply.
+`N-term` is every peptide N-terminus (synthetic peptide libraries); a heterobifunctional
+reagent separates its ends with `/`. The reagents are the entries of
+`resources/crosslinkers.yaml` (name, aliases, XLMOD accessions, default sites, and masses as
+UNIMOD records or compositions with their source); a reagent can also be named by its XLMOD
+accession (`--xl XLMOD:02126`). The config key is `search.xl`: the same string, or an entry of
+that file's schema for a reagent the table lacks (see `config.example.yaml`). An SDRF
+`comment[cross-linker]` cell (`NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98`)
+sets the crosslinker below the command line and the config file: the reagent by `AC`, then
+`NT`; `TA` replaces the sites (`nterm` is the protein N-terminus); `CL`, `MH` and `ML` are
+checked against the reagent. Monolinks are variable modifications, by UNIMOD record or as
+`reagent:quencher`, e.g. `--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"`.
+
+| Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
+|---|---|---|---|---|
+| DSSO | 158.0038 | alkene 54.0106, thiol 85.9826, sulfenic 103.9932 | K, Protein N-term | UNIMOD |
+| DSBU (BuUrBu) | 196.0848 | Bu 85.0528, BuUr 111.0320 | K, Protein N-term | UNIMOD |
+| DSBSO (Azide-A-DSBSO) | 308.0388 | alkene 54.0106, thiol 236.0177, sulfenic 254.0283 | K, Protein N-term | Kaake et al. 2014; Matzinger et al. 2020 |
+| CDI | 25.9793 | amine 0, isocyanate 25.9793 | K, S, T, Y, Protein N-term | Hage et al. 2017 |
+| DSS (BS3) | 138.0681 | | K, Protein N-term | UNIMOD |
+| BS2G (DSG) | 96.0211 | | K, Protein N-term | UNIMOD |
+| EGS (sulfo-EGS) | 226.0477 | | K, Protein N-term | UNIMOD |
+| DST (sulfo-DST) | 113.9953 | | K, Protein N-term | UNIMOD |
+| DSP (DTSSP) | 173.9809 | | K, Protein N-term | UNIMOD |
+| PhoX (DSPP) | 209.9718 | | K, Protein N-term | Steigenberger et al. 2019 |
+| DMP | 122.0844 | | K, Protein N-term | UNIMOD |
+| DTBP | 172.0129 | | K, Protein N-term | UNIMOD |
+| DFDNB | 163.9858 | | K, Protein N-term | UNIMOD |
+| BMOE | 220.0484 | | C | UNIMOD |
+| SMCC (sulfo-SMCC) | 219.0895 | | K, Protein N-term / C | UNIMOD |
+| SDA (sulfo-SDA) | 82.0419 | | K, S, T, Y, Protein N-term / any residue | Belsom et al. 2016 |
+| EDC (DMTMM) | -18.0106 | | K, Protein N-term / D, E, Protein C-term | Leitner et al. 2014 |
+
+MS-cleavable linkers take their candidate pairs from the reporter doublets of the cleavage
+stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index (one peptide by
+the fragments that do not carry the link, its partner by the remaining precursor mass). Both
+link classes are scored by the pair score `min(alpha, beta)`; for an MS-cleavable linker each
+peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
+a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+q-values are computed per link
+class (the `link` column): `intra` (two peptide sequences of one protein) and `inter` take
+`max(TD + 1 - DD, 2) / TT`; `homotypic` (the same peptide sequence on both sides, a homodimer
+or one peptide paired with itself) takes `max(DD + TD + 1, 2) / TT`, because a random homotypic
+match pairs a peptide with itself and is TT or DD with equal odds but never TD. The ground-truth
+benchmark for these choices (eleven runs, four datasets) is in `docs/benchmarks/xl/`.
 
 ---
 

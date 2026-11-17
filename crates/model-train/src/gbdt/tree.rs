@@ -1,26 +1,13 @@
-//! Histogram regression tree — the weak learner for one GBDT boosting round.
-//!
-//! Fits one depth-limited regression tree to per-row (gradient, hessian) pairs
-//! using pre-binned integer features (0..n_bins). Emits a
-//! `scoring_crate::gbdt_eval::Tree` in pre-order layout so that every child
-//! index is strictly greater than its parent index — the invariant required by
-//! `gbdt_eval::Tree::validate`.
-
 use scoring_crate::gbdt_eval::Tree;
 
-/// Hyper-parameters for one tree fit.
 pub struct TreeParams {
     pub max_depth: u32,
-    /// Number of bins per feature (bins are 0-indexed: 0..n_bins).
     pub n_bins: usize,
-    /// L2 regularisation on leaf weights (λ in the XGBoost gain formula).
     pub lambda: f32,
-    /// Minimum summed hessian required in each child after a split.
     pub min_hessian: f32,
     pub n_features: usize,
 }
 
-/// Per-bin sums of (gradient, hessian) for a single feature.
 #[derive(Clone)]
 struct BinHist {
     g: Vec<f32>,
@@ -44,7 +31,7 @@ impl BinHist {
 
 struct Builder<'a> {
     params: &'a TreeParams,
-    binned: &'a [u8], // row-major [row * n_features + feat]
+    binned: &'a [u8],
     grad: &'a [f32],
     hess: &'a [f32],
     bin_uppers: &'a [Vec<f32>],
@@ -54,7 +41,6 @@ struct Builder<'a> {
     right: Vec<i32>,
     value: Vec<f32>,
     default_left: Vec<u8>,
-    /// The leaf node that each training row reaches (index into the SoA vecs).
     leaf_of: Vec<u32>,
 }
 
@@ -66,7 +52,7 @@ impl<'a> Builder<'a> {
         hess: &'a [f32],
         bin_uppers: &'a [Vec<f32>],
     ) -> Self {
-        let capacity = 1 << (params.max_depth.min(20) + 1); // rough upper bound
+        let capacity = 1 << (params.max_depth.min(20) + 1);
         Self {
             params,
             binned,
@@ -135,7 +121,6 @@ impl<'a> Builder<'a> {
         let h_total: f32 = rows.iter().map(|&r| self.hess[r]).sum();
         let leaf_weight = -g_total / (h_total + lambda);
 
-        // Reserve the slot now so this node's index is lower than its children.
         let node_idx = self.reserve_node();
 
         if depth >= self.params.max_depth || rows.len() < 2 {
@@ -154,7 +139,6 @@ impl<'a> Builder<'a> {
             }
         }
 
-        // Find best split using prefix scan (gain = GL²/(HL+λ) + GR²/(HR+λ) − G²/(H+λ)).
         let base_score = g_total * g_total / (h_total + lambda);
         let mut best_gain = 0.0_f32;
         let mut best_feat: Option<usize> = None;
@@ -163,7 +147,6 @@ impl<'a> Builder<'a> {
         for (feat, hist) in hists.iter().enumerate() {
             let mut gl = 0.0_f32;
             let mut hl = 0.0_f32;
-            // Scan bins 0..nb-1 (split after bin b means left = bins 0..=b, right = b+1..nb-1).
             for bin in 0..(nb - 1) {
                 gl += hist.g[bin];
                 hl += hist.h[bin];
@@ -173,9 +156,6 @@ impl<'a> Builder<'a> {
                     continue;
                 }
                 let gain = gl * gl / (hl + lambda) + gr * gr / (hr + lambda) - base_score;
-                // Deterministic tie-break: prefer lower (feat, bin) — since we
-                // iterate feat then bin in ascending order, strictly-greater
-                // comparison keeps the first best found.
                 if gain > best_gain {
                     best_gain = gain;
                     best_feat = Some(feat);
@@ -194,7 +174,6 @@ impl<'a> Builder<'a> {
                     .iter()
                     .partition(|&&r| (self.binned[r * nf + feat] as usize) <= best_bin);
 
-                // Recurse — children are appended AFTER node_idx (pre-order).
                 let left_idx = self.build(&left_rows, depth + 1);
                 let right_idx = self.build(&right_rows, depth + 1);
 
@@ -207,18 +186,6 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// Fit one regression tree to the given per-row gradients/hessians using
-/// pre-binned features.
-///
-/// `binned` is row-major: `binned[row * n_features + feat]` holds the bin
-/// index (0..n_bins) for that (row, feature) pair.
-///
-/// `bin_uppers[feat][bin]` is the continuous upper edge of `bin` for `feat`;
-/// the emitted tree stores it as the split threshold so `x <= threshold`
-/// reproduces the histogram split when the walker sees continuous features.
-///
-/// The returned `Tree` satisfies `gbdt_eval::Tree::validate` (pre-order,
-/// strictly-increasing child indices, all SoA vecs share the same length).
 pub fn fit_tree(
     binned: &[u8],
     grad: &[f32],
@@ -229,14 +196,6 @@ pub fn fit_tree(
     fit_tree_with_leaves(binned, grad, hess, params, bin_uppers).0
 }
 
-/// [`fit_tree`], plus the leaf node index that each training row reaches.
-///
-/// A row's leaf is the one `Tree::eval` reaches on that row's continuous
-/// features: a split stores `threshold = bin_uppers[feat][bin]` and routes
-/// `x <= threshold` left, which is exactly `bin_of(x) <= bin` (a NaN feature
-/// bins to 0 and goes left, as `default_left = 1` sends it in `eval`). The
-/// trainer reads the training rows' increments from it instead of walking the
-/// tree again.
 pub fn fit_tree_with_leaves(
     binned: &[u8],
     grad: &[f32],
@@ -273,10 +232,6 @@ mod tests {
     use super::*;
     use scoring_crate::gbdt_eval::Tree;
 
-    /// The leaf the builder assigns each training row is the leaf that
-    /// `Tree::eval` reaches on that row's continuous features, values on the
-    /// bin edges and NaN included, so the trainer can read the increments
-    /// from the partition.
     #[test]
     fn leaves_match_eval_on_continuous_features() {
         let (n, nf, nb) = (500usize, 3usize, 8usize);
@@ -295,7 +250,7 @@ mod tests {
             for f in 0..nf {
                 let v = match next() % 10 {
                     0 => f32::NAN,
-                    1 => uppers[f][(next() as usize) % nb], // exactly on an edge
+                    1 => uppers[f][(next() as usize) % nb],
                     _ => (next() % 1000) as f32 / 100.0 - 1.0,
                 };
                 x[r * nf + f] = v;
@@ -332,9 +287,9 @@ mod tests {
         let hess = vec![1.0_f32; n];
         for r in 0..n {
             let hi = r % 2 == 0;
-            binned[r * n_features] = if hi { 3 } else { 0 }; // feature 0 separates
-            binned[r * n_features + 1] = (r % n_bins) as u8; // feature 1 noise
-            grad[r] = if hi { -1.0 } else { 1.0 }; // opposite gradients
+            binned[r * n_features] = if hi { 3 } else { 0 };
+            binned[r * n_features + 1] = (r % n_bins) as u8;
+            grad[r] = if hi { -1.0 } else { 1.0 };
         }
         let params = TreeParams {
             max_depth: 2,
@@ -355,8 +310,6 @@ mod tests {
 
     #[test]
     fn emitted_tree_passes_walker_decode() {
-        // Round-trip the tree through the AGBD blob to assert it satisfies
-        // gbdt_eval's structural validation (pre-order, in-range children).
         use scoring_crate::gbdt_eval::GbdtPeakModel;
         let n = 60usize;
         let nf = 1usize;
@@ -397,11 +350,10 @@ mod tests {
 
     #[test]
     fn single_leaf_when_no_gain() {
-        // All gradients equal → no split improves → a single leaf with weight −G/(H+λ).
         let n = 20usize;
         let nf = 1usize;
         let nb = 2usize;
-        let binned = vec![0u8; n * nf]; // all same bin → no split possible anyway
+        let binned = vec![0u8; n * nf];
         let grad = vec![0.5_f32; n];
         let hess = vec![1.0_f32; n];
         let params = TreeParams {

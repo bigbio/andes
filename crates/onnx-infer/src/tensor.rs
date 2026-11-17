@@ -1,22 +1,13 @@
-//! Named dense `f32` tensors exchanged with ONNX models.
-
 use crate::error::{Error, Result};
 
-/// A named, row-major `f32` tensor.
-///
-/// Shape uses ONNX convention: leftmost axis is typically the batch dimension.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedTensor {
-    /// ONNX graph input/output name.
     pub name: String,
-    /// Dimension sizes (row-major).
     pub shape: Vec<usize>,
-    /// Contiguous `f32` payload; `len == shape.product()`.
     pub data: Vec<f32>,
 }
 
 impl NamedTensor {
-    /// Build a tensor; `data.len()` must equal the product of `shape`.
     pub fn new(name: impl Into<String>, shape: Vec<usize>, data: Vec<f32>) -> Result<Self> {
         let name = name.into();
         let expected = element_count(&shape).ok_or_else(|| {
@@ -33,25 +24,18 @@ impl NamedTensor {
         Ok(Self { name, shape, data })
     }
 
-    /// Number of elements.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
-    /// True when there are no elements.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
-    /// Batch size when the leading axis is the batch (empty shape → 1).
     pub fn batch_size(&self) -> usize {
         self.shape.first().copied().unwrap_or(1)
     }
 
-    /// Split a batched tensor into per-row views (`shape[0]` rows).
-    ///
-    /// Useful when a search engine scores top-N PSMs as one batch then wants
-    /// per-PSM feature columns.
     pub fn rows(&self) -> Result<Vec<NamedTensor>> {
         if self.shape.is_empty() {
             return Ok(vec![self.clone()]);
@@ -80,13 +64,10 @@ impl NamedTensor {
     }
 }
 
-/// Number of elements of a row-major tensor of shape `dims` (1 for an empty
-/// shape), or `None` when the product overflows `usize`.
 pub fn element_count(dims: &[usize]) -> Option<usize> {
     dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))
 }
 
-/// [`element_count`] as a `Result`, naming `what` in the overflow error.
 pub(crate) fn checked_element_count(dims: &[usize], what: &str) -> Result<usize> {
     element_count(dims)
         .ok_or_else(|| Error::InvalidArg(format!("{what}: shape {dims:?} overflows usize")))

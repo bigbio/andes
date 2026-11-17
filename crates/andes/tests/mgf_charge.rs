@@ -1,7 +1,3 @@
-//! `CHARGE=` values of an MGF: a list of several charge states leaves the
-//! charge unknown, so the configured charge range is searched, and a negative
-//! charge stops the search.
-
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -14,8 +10,6 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
-/// The first `n` spectra of the MGF fixture with every `CHARGE=` value
-/// replaced by `charge`.
 fn mgf_with_charge(n: usize, charge: &str) -> String {
     let gz = std::fs::File::open(fixture("test-fixtures/test.mgf.gz")).expect("gz");
     let mut text = String::new();

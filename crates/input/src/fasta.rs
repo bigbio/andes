@@ -1,7 +1,3 @@
-//! Streaming FASTA reader. Sync I/O — FASTA is line-oriented text, no
-//! async benefit. Handcrafted parser (no regex) — FASTA is simple
-//! enough that hand-rolling is clearer than pulling in a dep.
-
 use std::io::BufRead;
 
 use model::{Protein, ProteinDb};
@@ -10,8 +6,6 @@ pub struct FastaReader<R: BufRead> {
     reader: R,
     line_no: usize,
     buf: String,
-    /// Lookahead — when we read a `>` line that starts the NEXT protein
-    /// while finishing the current one, stash it here.
     pending_header: Option<String>,
 }
 
@@ -107,9 +101,6 @@ impl<R: BufRead> Iterator for FastaReader<R> {
                 }
             }
         }
-        // A trailing `*` is the translation-stop marker written by ORF and
-        // six-frame translators, not a residue: kept, it would make every span
-        // reaching the protein C-terminus contain a non-residue.
         while sequence.last() == Some(&b'*') {
             sequence.pop();
         }
@@ -178,7 +169,6 @@ mod tests {
         let fasta = b">orf1\nMKTAYR\nPEPTIDE*\n>orf2\nMK*AYR**\n>plain\nMKR\n" as &[u8];
         let db = FastaReader::load_all(fasta).unwrap();
         assert_eq!(db.proteins[0].sequence, b"MKTAYRPEPTIDE");
-        // Only the trailing markers go; an internal stop stays a non-residue.
         assert_eq!(db.proteins[1].sequence, b"MK*AYR");
         assert_eq!(db.proteins[2].sequence, b"MKR");
     }

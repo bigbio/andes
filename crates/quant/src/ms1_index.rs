@@ -1,17 +1,8 @@
-//! A run's MS1 survey scans, indexed for extracted-ion chromatograms.
-//!
-//! Scans are kept whole (RT plus their m/z-sorted centroids) and ordered by
-//! retention time. An XIC over an RT window is one binary search per scan,
-//! which is cheap enough that no m/z binning is needed: a ±60 s window on an
-//! Orbitrap run is ~100 scans, and a 10 ppm slice of each touches a handful
-//! of centroids.
-
 use std::collections::HashMap;
 
 use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
 
-/// A window of inverse reduced ion mobility (1/K0, V·s/cm²), inclusive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobilityGate {
     pub lo: f32,
@@ -24,17 +15,6 @@ impl MobilityGate {
     }
 }
 
-/// The value of the m/z slice of a scan whose centroids `peaks[start..]`
-/// begin at its lower bound and end at the last centroid with m/z at most
-/// `hi`: `(m/z of the most intense qualifying centroid, value)`, `(0.0,
-/// 0.0)` when none qualifies; only positive intensities count (a NaN never
-/// does) and the lowest m/z wins a tie.
-///
-/// Without `mobility` (empty) the value is the most intense centroid's
-/// intensity and `gate` is ignored. With `mobility` (parallel to `peaks`) the
-/// centroids of the slice are the ion-mobility components of the
-/// time-of-flight peak(s) at that m/z, and the value is the summed intensity
-/// of those whose 1/K0 lies in `gate` (all of them without a gate).
 pub fn slice_value(
     peaks: &[(f64, f32)],
     mobility: &[f32],
@@ -72,23 +52,16 @@ pub fn slice_value(
     (best_mz, sum)
 }
 
-/// All MS1 scans of one run in RT order.
 #[derive(Debug, Default)]
 pub struct Ms1RunIndex {
     scans: Vec<Ms1Scan>,
     by_id: HashMap<String, usize>,
-    /// Per scan, the 5th percentile of its centroid intensities (1.0 when it
-    /// has none); see [`Ms1RunIndex::detection_limit`].
     detection: Vec<f32>,
 }
 
-/// Quantile of a scan's centroid intensities taken as its detection limit.
 const DETECTION_QUANTILE: f64 = 0.05;
-/// Detection limit of a scan without centroids, intensity units.
 const EMPTY_SCAN_DETECTION_LIMIT: f32 = 1.0;
 
-/// The 5th percentile (nearest rank) of the scan's centroid intensities, or
-/// 1.0 when it has none.
 fn scan_detection_limit(peaks: &[(f64, f32)], buf: &mut Vec<f32>) -> f32 {
     if peaks.is_empty() {
         return EMPTY_SCAN_DETECTION_LIMIT;
@@ -101,8 +74,6 @@ fn scan_detection_limit(peaks: &[(f64, f32)], buf: &mut Vec<f32>) -> f32 {
 
 impl Ms1RunIndex {
     pub fn new(mut scans: Vec<Ms1Scan>) -> Self {
-        // A scan without a finite retention time has no place in the RT order
-        // (and breaks the sort comparator and the binary searches).
         scans.retain(|s| s.rt.is_finite());
         for s in scans.iter_mut() {
             if !s.peaks.windows(2).all(|w| w[0].0 <= w[1].0) {
@@ -134,8 +105,6 @@ impl Ms1RunIndex {
         Self::assemble(scans, detection)
     }
 
-    /// Index over scans already in RT order with m/z-sorted peaks, and their
-    /// per-scan detection limits.
     fn assemble(scans: Vec<Ms1Scan>, detection: Vec<f32>) -> Self {
         debug_assert_eq!(scans.len(), detection.len());
         let by_id = scans
@@ -159,8 +128,6 @@ impl Ms1RunIndex {
         &self.scans[idx]
     }
 
-    /// The distinct FAIMS compensation voltages of the run's scans, ascending
-    /// (empty for a run without FAIMS).
     pub fn faims_voltages(&self) -> Vec<f32> {
         let mut cvs: Vec<f32> = self.scans.iter().filter_map(|s| s.faims_cv).collect();
         cvs.sort_by(f32::total_cmp);
@@ -168,9 +135,6 @@ impl Ms1RunIndex {
         cvs
     }
 
-    /// Split the run into one index per FAIMS compensation voltage. Survey scans
-    /// at different voltages transmit different ions, so a chromatogram must
-    /// stay within one voltage. Scans without a voltage are dropped.
     pub fn split_by_faims(self) -> Vec<(f32, Ms1RunIndex)> {
         let cvs = self.faims_voltages();
         let mut groups: Vec<(Vec<Ms1Scan>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); cvs.len()];
@@ -209,20 +173,14 @@ impl Ms1RunIndex {
         &self.scans[idx].peaks
     }
 
-    /// The 1/K0 of each centroid of scan `idx` (parallel to
-    /// [`Self::peaks`]); empty when the scan is not mobility-resolved.
     pub fn mobility(&self, idx: usize) -> &[f32] {
         &self.scans[idx].mobility
     }
 
-    /// Whether any scan is mobility-resolved (see [`Ms1Scan::mobility`]).
     pub fn has_mobility(&self) -> bool {
         self.scans.iter().any(|s| !s.mobility.is_empty())
     }
 
-    /// Detection limit of scan `idx`: the 5th percentile (nearest rank) of its
-    /// centroid intensities, 1.0 when it has none. Computed once when the
-    /// index is built.
     pub fn detection_limit(&self, idx: usize) -> f32 {
         self.detection[idx]
     }
@@ -231,11 +189,6 @@ impl Ms1RunIndex {
         Some((self.scans.first()?.rt, self.scans.last()?.rt))
     }
 
-    /// Median spacing in seconds between consecutive scans of the same FAIMS
-    /// compensation voltage (all scans when there is none): the time between
-    /// two MS1 points of one precursor. The upper of the two middle gaps for
-    /// an even count, as `output::ms1_table::read_ms1_scan_spacing` reads
-    /// it. `None` with fewer than two scans of any voltage.
     pub fn median_scan_spacing(&self) -> Option<f64> {
         let mut last: HashMap<Option<u32>, f64> = HashMap::new();
         let mut gaps: Vec<f64> = Vec::new();
@@ -273,16 +226,11 @@ impl Ms1RunIndex {
         })
     }
 
-    /// Index of the last scan at or before `rt` (the survey scan an MS2 at
-    /// `rt` was triggered from).
     pub fn scan_at_or_before(&self, rt: f64) -> Option<usize> {
         let i = self.scans.partition_point(|s| s.rt <= rt);
         i.checked_sub(1)
     }
 
-    /// Most intense centroid in `[lo, hi]` of scan `idx`, 0.0 when none. On a
-    /// mobility-resolved scan, the summed intensity of the centroids in
-    /// `[lo, hi]` (see [`slice_value`]).
     pub fn max_in(&self, idx: usize, lo: f64, hi: f64) -> f32 {
         let s = &self.scans[idx];
         let peaks = &s.peaks;
@@ -302,21 +250,12 @@ impl Ms1RunIndex {
         best
     }
 
-    /// The value of the m/z slice `[lo, hi]` of scan `idx` within the
-    /// mobility `gate` (see [`slice_value`]): `(m/z of the most intense
-    /// centroid, value)`, `(0.0, 0.0)` when none qualifies. A scan that is
-    /// not mobility-resolved ignores the gate and gives
-    /// [`Self::apex_centroid`].
     pub fn slice_in(&self, idx: usize, lo: f64, hi: f64, gate: Option<MobilityGate>) -> (f64, f32) {
         let s = &self.scans[idx];
         let start = s.peaks.partition_point(|&(mz, _)| mz < lo);
         slice_value(&s.peaks, &s.mobility, start, hi, gate)
     }
 
-    /// The most intense centroid in `[lo, hi]` of scan `idx`, as (m/z,
-    /// intensity), with the semantics of [`Self::max_in`]: only positive
-    /// intensities count (a NaN never does) and the lowest m/z wins a tie.
-    /// `None` when no centroid qualifies.
     pub fn apex_centroid(&self, idx: usize, lo: f64, hi: f64) -> Option<(f64, f32)> {
         let s = &self.scans[idx];
         let peaks = &s.peaks;
@@ -337,11 +276,6 @@ impl Ms1RunIndex {
         best
     }
 
-    /// Share of the most intense centroids that have an isotope partner
-    /// (`+ISOTOPE/z`, z = 1..4) within `tol_ppm`, over an even sample of the
-    /// run's scans. Orbitrap/TOF survey scans score 0.7–0.95 at 10 ppm; ion-trap
-    /// survey scans, whose centroids are off by tenths of a Th, score far
-    /// lower. `None` for an empty run.
     pub fn isotope_partner_fraction(&self, tol_ppm: f64) -> Option<f64> {
         const SAMPLE_SCANS: usize = 200;
         const TOP_PEAKS: usize = 30;
@@ -415,7 +349,6 @@ mod tests {
 
     #[test]
     fn isotope_partners_separate_high_and_low_resolution_survey_scans() {
-        // High resolution: z=2 envelopes with exact isotope spacing.
         let hi = Ms1RunIndex::new(
             (0..20)
                 .map(|i| {
@@ -435,7 +368,6 @@ mod tests {
                 .collect(),
         );
         assert!(hi.isotope_partner_fraction(10.0).unwrap() > 0.6);
-        // Ion-trap-like: the same peaks with a tenth-of-a-Th centroid error.
         let lo = Ms1RunIndex::new(
             (0..20)
                 .map(|i| Ms1Scan {
@@ -506,7 +438,6 @@ mod tests {
             },
         ];
         let idx = Ms1RunIndex::new(scans);
-        // rank round(0.05 * 20) = 1: the second-smallest of 10..210.
         assert_eq!(idx.detection_limit(1), 20.0);
         assert_eq!(idx.detection_limit(0), 1.0);
         let split = idx.split_by_faims();
@@ -519,7 +450,7 @@ mod tests {
         let idx = index();
         assert_eq!(idx.scan_window(3.0, 9.0), 2..5);
         assert_eq!(idx.scan_window(100.0, 200.0), 10..10);
-        assert_eq!(idx.nearest_scan(5.1), Some(3)); // rt 6 is nearer than 4
+        assert_eq!(idx.nearest_scan(5.1), Some(3));
         assert_eq!(idx.nearest_scan(4.9), Some(2));
         assert_eq!(idx.scan_at_or_before(5.0), Some(2));
         assert_eq!(idx.scan_at_or_before(-1.0), None);
@@ -531,7 +462,6 @@ mod tests {
         let x = idx.xic(500.0, 0.02, 0..10);
         assert_eq!(x.len(), 10);
         assert_eq!(x[3], 30.0);
-        // 500.009 at scan 9 is inside ±0.02 → found; outside a 0.005 window → 0.
         assert_eq!(x[9], 90.0);
         let tight = idx.xic(500.0, 0.005, 8..10);
         assert_eq!(tight, vec![0.0, 0.0]);
@@ -567,7 +497,6 @@ mod tests {
             faims_cv: cv,
             ..Ms1Scan::default()
         };
-        // Alternating voltages every second: 2 s between scans of one voltage.
         let alternating: Vec<Ms1Scan> = (0..8)
             .map(|i| scan(i as f64, Some(if i % 2 == 0 { -40.0 } else { -60.0 })))
             .collect();

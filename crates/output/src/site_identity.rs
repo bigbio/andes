@@ -1,20 +1,3 @@
-//! Which explanation of a spectrum is right, after rescoring: a posterior
-//! over every row of the spectrum (targets and decoys), so a spectrum's
-//! explanations compete with each other.
-//!
-//! A row's logit combines its rescored score, its precursor isotope offset,
-//! its fragment evidence and the signatures of its modifications
-//! ([`search::site_evidence`]). The weights of the first three are fixed; they
-//! were fitted on synthetic peptides of known modification. How much a
-//! diagnostic ion or a neutral loss says is learned from the run itself: among
-//! the rows the other evidence already makes confident, how often the
-//! signature is present when the row carries the modification and when a
-//! competing row of the same spectrum carries it instead.
-//!
-//! The site tables sum these posteriors per site: the share of the posterior
-//! on a site's peptides that places a modification there (occupancy) and,
-//! given a modification, the share of each one (identity).
-
 use std::collections::HashMap;
 
 use search::site_evidence::SiteEvidence;
@@ -30,13 +13,11 @@ const CONFIDENT: f64 = 0.9;
 
 #[derive(Debug, Clone)]
 pub struct RowEvidence {
-    /// Spectrum index: rows of one spectrum compete.
     pub spectrum: u32,
     pub isotope_offset: i8,
     pub evidence: Option<Box<SiteEvidence>>,
 }
 
-/// A modification signature: (mod name, mass bits, diagnostic or loss).
 type Signature = (String, u64, bool);
 
 #[derive(Debug, Clone, Copy)]
@@ -102,12 +83,6 @@ fn signatures(e: &SiteEvidence) -> impl Iterator<Item = (Signature, bool)> + '_ 
     })
 }
 
-/// Each target row's posterior among its spectrum's rows. `targets` and
-/// `decoys` hold the rescored score of every row, not only the winner of each
-/// target-decoy competition group (see [`crate::percolator::score_all_rows`]):
-/// with winners only, a spectrum has one row and every posterior is 1. Rows
-/// the search kept no evidence for (spectra without a variable modification)
-/// are left out.
 pub fn row_posteriors(
     targets: &HashMap<String, f64>,
     decoys: &HashMap<String, f64>,
@@ -127,16 +102,12 @@ pub fn row_posteriors(
             });
         }
     }
-    // A fixed row order per spectrum keeps the result independent of hashing.
     let mut spectra: Vec<(u32, Vec<Row<'_>>)> = spectra.into_iter().collect();
     spectra.sort_unstable_by_key(|(s, _)| *s);
     for (_, rows) in &mut spectra {
         rows.sort_unstable_by(|a, b| a.id.cmp(b.id));
     }
 
-    // Signature likelihoods from the confident target rows: P(present | the
-    // row carries the mod) and P(present | another row of the spectrum
-    // carries it).
     let mut carried: HashMap<Signature, Rate> = HashMap::new();
     let mut other: HashMap<Signature, Rate> = HashMap::new();
     for (_, rows) in &spectra {
@@ -244,8 +215,6 @@ mod tests {
         };
         let ac = k("Acetyl", 42.010565, 143.1179);
         let me3 = k("Trimethyl", 42.04695, 143.1543);
-        // 200 spectra teach the likelihoods: a clear acetyl row whose ion is
-        // present, against a weak trimethyl row whose ion is absent.
         let mut targets = HashMap::new();
         let mut rows = HashMap::new();
         for s in 0..200u32 {
@@ -254,14 +223,11 @@ mod tests {
             rows.insert(a, ev(s, ac, true));
             rows.insert(t, ev(s, me3, false));
         }
-        // The spectrum under test: equal scores, the acetyl ion present.
         targets.extend([psm("a", 1.0), psm("t", 1.0)]);
         rows.insert("a".into(), ev(999, ac, true));
         rows.insert("t".into(), ev(999, me3, false));
         let post = row_posteriors(&targets, &HashMap::new(), &rows);
         assert!((post["a"] + post["t"] - 1.0).abs() < 1e-9);
-        // Present when carried in all 200, never shown by a confident rival:
-        // ln(201/202 / 0.5) each way, so P(acetyl) = 1 / (1 + e^-1.38) ≈ 0.80.
         assert!((post["a"] - 0.799).abs() < 0.01, "{}", post["a"]);
         for r in rows.values_mut() {
             r.evidence.as_mut().unwrap().marks.clear();

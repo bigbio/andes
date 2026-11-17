@@ -1,41 +1,3 @@
-//! Decoy database generation.
-//!
-//! Decoys are peptide-level. Each target protein is cut into the segments
-//! between the cleavage sites of the search's proteases (a missed-cleavage
-//! peptide is a run of consecutive segments), and the residues of each
-//! segment are permuted among themselves while three kinds of residue stay in
-//! place: every residue that makes a cut (K and R for trypsin), the residue on
-//! the segment's cleavage side (its last residue for an enzyme that cuts after
-//! its residue, its first for AspN and LysN), and an initiator Met. Every
-//! enzymatic peptide of a target therefore has a decoy peptide at the same
-//! coordinates with the same composition, mass, length, cleavage-side residue
-//! and missed cleavages, the way a peptide from a random wrong sequence of
-//! the same digest would look. A segment's decoy depends only on its residues
-//! (and on whether it starts with an initiator Met), so a peptide shared by
-//! several entries has one decoy, and the decoys of overlapping
-//! missed-cleavage spans agree with each other. Modification sites keep their
-//! counts per peptide because residues only move within a peptide.
-//!
-//! A segment whose permutation reads as a target segment after folding I and
-//! L (a palindrome, or a permutation that spells another protein's segment)
-//! is redrawn with a shuffle seeded by its residues; a segment too short to
-//! change keeps the target's residues, and candidate generation relabels such
-//! a decoy peptide as a target.
-//!
-//! A non-specific search (protease `nonspecific`, or enzyme specificity
-//! `non-specific`) treats every span as a peptide, so there are no segments
-//! to permute within; its decoys are whole-sequence permutations.
-//!
-//! A target's database annotation (UniProt XML: annotated modification sites,
-//! sequence-variant parts, mature-chain termini) is carried onto its decoy
-//! through the same permutation that builds the decoy sequence
-//! ([`decoy_annotation`]), so the decoy offers site-restricted modifications
-//! on the same residues and, for a variant entry, variant parts of the same
-//! shape. For an annotated target that permutation is first fitted
-//! ([`fit_permutation`]): a terminal site keeps its residue at the decoy's
-//! terminus, and a mature chain keeps its cleavage sites. The decoy side thus
-//! mirrors the search space the annotation adds on the target side.
-
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
@@ -46,30 +8,20 @@ use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor,
 use crate::candidate_gen::{compute_cleavage_positions, has_met_cleaved_walk};
 use crate::search_params::SearchParams;
 
-/// Default decoy accession prefix.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
 
-/// Default seed of the shuffles (the shuffle strategy, and the redraw of a
-/// segment whose decoy reads as a target segment).
 pub const DEFAULT_DECOY_SEED: u64 = 42;
 
-/// Seeded redraws tried for a segment whose decoy reads as a target segment.
 const MAX_REDRAWS: u64 = 20;
 
-/// The digest of a search, which decides the segments a decoy permutes
-/// within.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proteases {
     pub primary: Enzyme,
     pub extra: Vec<Enzyme>,
-    /// Termini of a span that must be cleavage sites: 2 fully specific, 1
-    /// semi-specific, 0 non-specific (as
-    /// [`SearchParams::num_tolerable_termini`]).
     pub num_tolerable_termini: u8,
 }
 
 impl Default for Proteases {
-    /// Fully specific trypsin, the default search digest.
     fn default() -> Self {
         Self {
             primary: Enzyme::Trypsin,
@@ -92,43 +44,22 @@ impl Proteases {
         std::iter::once(self.primary).chain(self.extra.iter().copied())
     }
 
-    /// Whether every span is a peptide: a non-specific protease, or a search
-    /// that requires no cleavage terminus.
     pub fn is_non_specific(&self) -> bool {
         self.num_tolerable_termini == 0 || self.all().any(|e| e == Enzyme::NonSpecific)
     }
 
-    /// Whether residue `r` makes a cut under any of the proteases.
     fn makes_cut(&self, r: u8) -> bool {
         self.all()
             .any(|e| e.is_cleavable_after(r) || e.is_cleavable_before(r))
     }
 }
 
-/// How decoy proteins are generated for the target+decoy search database.
-/// Each strategy permutes within cleavage segments (see the module
-/// documentation), or the whole sequence for a non-specific search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecoyStrategy {
-    /// Shuffle each segment's movable residues with a shuffle seeded by the
-    /// segment's residues and the decoy seed. Default.
     #[default]
     Shuffle,
-    /// Reverse each segment's movable residues (the pseudo-reversed peptide:
-    /// `PEPTIDEK` → `EDITPEPK`). A pseudo-reversed peptide ending in K shares
-    /// c/z fragments with its target wherever the target has I or L: the
-    /// decoy's z ion i+1 carries the target's first i residues plus the K,
-    /// which weighs as much as the target's c ion i+1 when residue i+1 is I or
-    /// L (K + H2O − NH3 − NH2 = 113.060 Da, L = 113.084 Da). On ETD spectra
-    /// such decoys score on the target's own spectrum.
     Reverse,
-    /// [`Self::Shuffle`], then swaps among the movable residues that raise
-    /// the segment's N-X-S/T sequon count toward (never above) the target
-    /// segment's, so the glyco sequon gate admits decoys at the target rate.
     Sequon,
-    /// Generate no decoys: the search database is the input FASTA verbatim. For
-    /// inputs that already contain decoys (accessions carrying the decoy prefix)
-    /// or when FDR is computed externally downstream.
     None,
 }
 
@@ -144,10 +75,6 @@ impl DecoyStrategy {
     }
 }
 
-/// The decoy proteins of `target` under `strategy` for a search with
-/// `proteases`, in target order, each accession `<prefix>_<target
-/// accession>` (`prefix` normalized by [`normalize_decoy_prefix`]). Empty for
-/// [`DecoyStrategy::None`]. `seed` drives the shuffles.
 pub fn decoy_db(
     target: &ProteinDb,
     prefix: &str,
@@ -166,9 +93,6 @@ pub fn decoy_db(
     ProteinDb { proteins }
 }
 
-/// Decoys that permute each target sequence as a whole: reversal, a shuffle
-/// seeded per protein, or a sequon-preserving reversal. The decoys of a
-/// non-specific search, and of sequences that are a single peptide each.
 pub(crate) fn whole_sequence_decoy_db(
     target: &ProteinDb,
     prefix: &str,
@@ -183,8 +107,6 @@ pub(crate) fn whole_sequence_decoy_db(
     ProteinDb { proteins }
 }
 
-/// The decoy of `p` built by the permutation `source` (`source[i]`: the
-/// target position decoy residue `i` comes from).
 fn decoy_protein(p: &Protein, prefix: &str, source: Vec<u32>, proteases: &Proteases) -> Protein {
     let accession = format!("{}_{}", prefix, p.accession);
     if p.annotation.is_some() {
@@ -231,8 +153,6 @@ fn whole_sequence_decoys(
             let n = p.sequence.len() as u32;
             let source: Vec<u32> = match strategy {
                 DecoyStrategy::Shuffle | DecoyStrategy::Sequon => {
-                    // Per-protein stream: the seed mixed with the index, so
-                    // identical sequences do not shuffle alike.
                     let mut source: Vec<u32> = (0..n).collect();
                     shuffle_in_place(
                         &mut source,
@@ -250,8 +170,6 @@ fn whole_sequence_decoys(
         .collect()
 }
 
-/// The peptide-level permutation of target `p`: each cleavage segment
-/// permuted by [`segment_permutation`].
 fn peptide_level_permutation(
     p: &Protein,
     strategy: DecoyStrategy,
@@ -280,12 +198,6 @@ fn peptide_level_permutation(
     source
 }
 
-/// The decoy of cleavage segment `seg` as a permutation of its positions
-/// (`local[i]`: the position decoy residue `i` comes from). `lead_met`: the
-/// segment starts with an initiator Met, which stays. The residues that make
-/// a cut and the cleavage-side residue stay too; the others are reversed
-/// (or shuffled), redrawn by seeded shuffles while the result reads as a
-/// target segment.
 fn segment_permutation(
     seg: &[u8],
     lead_met: bool,
@@ -337,9 +249,6 @@ fn segment_permutation(
         .unwrap_or(first)
 }
 
-/// Sorted hashes of every cleavage segment of the targets with I and L
-/// folded, and of each initiator-Met segment without its Met: the residue
-/// strings a decoy segment must not spell.
 struct TargetSegments(Vec<u64>);
 
 impl TargetSegments {
@@ -371,15 +280,12 @@ impl TargetSegments {
         self.0.binary_search(&folded_hash(residues)).is_ok()
     }
 
-    /// Whether the decoy `local` makes of `seg` reads as a target segment,
-    /// also after removing a leading initiator Met.
     fn collides(&self, seg: &[u8], local: &[u32], lead_met: bool) -> bool {
         let residues = || local.iter().map(|&i| seg[i as usize]);
         self.contains(residues()) || (lead_met && self.contains(residues().skip(1)))
     }
 }
 
-/// FNV-1a hash of `residues` with I read as L.
 fn folded_hash(residues: impl Iterator<Item = u8>) -> u64 {
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     for r in residues {
@@ -396,8 +302,6 @@ fn splitmix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// Shuffle seed of draw `k` of segment `seg`: depends only on the residues,
-/// so identical segments shuffle alike wherever they occur.
 fn segment_seed(seed: u64, seg: &[u8], lead_met: bool, k: u64) -> u64 {
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     for &r in seg {
@@ -407,8 +311,6 @@ fn segment_seed(seed: u64, seg: &[u8], lead_met: bool, k: u64) -> u64 {
     splitmix64(h ^ splitmix64(seed ^ splitmix64(k.wrapping_mul(2) | u64::from(lead_met))))
 }
 
-/// Fisher-Yates from the back, drawing each index from a xorshift64 stream
-/// started at `state` (never zero, where xorshift would stick).
 fn shuffle_in_place<T>(v: &mut [T], mut state: u64) {
     if state == 0 {
         state = 0xD1B5_4A32_D192_ED03;
@@ -422,9 +324,6 @@ fn shuffle_in_place<T>(v: &mut [T], mut state: u64) {
     }
 }
 
-/// The decoy of the annotated target `p` under the strategy's permutation
-/// `source` (`source[i]`: the target position decoy residue `i` comes from),
-/// fitted to the annotation first ([`fit_permutation`]).
 fn annotated_decoy(
     p: &Protein,
     accession: String,
@@ -440,24 +339,6 @@ fn annotated_decoy(
     }
 }
 
-/// Fit the strategy's permutation `source` of an annotated target so that its
-/// decoy offers the search space the annotation adds:
-///
-/// - A mature-chain entry yields only its terminal spans, so its decoy keeps
-///   their cleavage structure. Residues are permuted only within the
-///   cleavage segments of `proteases`, in the order the strategy gave them
-///   (reversed where that is no change), and every residue that makes a cut
-///   stays in place. Cleavage rules look only at the residues around a cut,
-///   so the decoy has the same cut sites, and each terminal span of the
-///   target has a decoy span with the same length, mass and missed
-///   cleavages. A peptide-level permutation already has that form and is
-///   kept. A non-specific digest cuts everywhere, so any permutation keeps
-///   that.
-/// - A residue carrying a site tied to the protein terminus where the target
-///   has it (the first residue; the second after an initiator Met, which then
-///   stays too; the last residue) stays at the decoy's terminus. A
-///   residue-specific terminal mod restricted to annotated sites (pyro-Glu on
-///   Q) can then be placed on the decoy as on the target.
 fn fit_permutation(target: &Protein, source: &mut [u32], proteases: &Proteases) {
     let seq = &target.sequence;
     let n = seq.len();
@@ -480,8 +361,6 @@ fn fit_permutation(target: &Protein, source: &mut [u32], proteases: &Proteases) 
                 .collect();
             let mut order = free.clone();
             order.sort_by_key(|&i| image[i as usize]);
-            // A shuffle can leave a short segment as it was, which would make
-            // the decoy peptide the target's; reverse it then.
             if order == free {
                 order.reverse();
             }
@@ -490,8 +369,6 @@ fn fit_permutation(target: &Protein, source: &mut [u32], proteases: &Proteases) 
             }
         }
     }
-    // Keep target residue `q` at decoy position `q`. Within a chain both
-    // positions lie in the first or last segment, so the cuts stay too.
     let pin = |source: &mut [u32], q: usize| {
         if let Some(i) = source.iter().position(|&from| from as usize == q) {
             source.swap(i, q);
@@ -518,22 +395,6 @@ fn fit_permutation(target: &Protein, source: &mut [u32], proteases: &Proteases) 
     }
 }
 
-/// The annotation of the decoy built from `target` by a permutation of its
-/// residues: `source[i]` is the target position decoy residue `i` came from.
-///
-/// Modification sites follow their residue; a mature chain keeps its
-/// new-terminus flags. Builders fit the permutation first
-/// ([`fit_permutation`]), so a terminal site's residue is already at the
-/// decoy's terminus and a chain's terminal spans keep their cleavage sites.
-///
-/// Each variant part maps to its image when that is contiguous (always,
-/// under reversal); otherwise (shuffling scatters it) to a part of the same
-/// length at the image of its first residue, moved back from the end if
-/// needed. The same holds for the stretch a deletion junction or an indel in
-/// a repeat requires a span to hold (see [`VariantRegion`]). Either way the
-/// decoy yields variant spans of the same shape as the target, which is what
-/// keeps the two sides' search spaces matched. `None` when the target has no
-/// annotation.
 pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinAnnotation>> {
     let ann = target.annotation.as_deref()?;
     let n = source.len();
@@ -570,8 +431,6 @@ pub fn decoy_annotation(target: &Protein, source: &[u32]) -> Option<Arc<ProteinA
     ))
 }
 
-/// The decoy image of variant part `v` under the permutation whose inverse
-/// is `image` (see [`decoy_annotation`]).
 fn map_region(v: VariantRegion, image: &[u32]) -> VariantRegion {
     let n = image.len();
     let (a, b) = (v.start as usize, v.end as usize);
@@ -592,10 +451,6 @@ fn map_region(v: VariantRegion, image: &[u32]) -> VariantRegion {
             }
         }
     } else if a >= b && b >= 1 && a < n {
-        // A covering span holds all of [b - 1, a]: the two residues of a
-        // deletion junction (a == b) or a repeat stretch (a > b). Keep that
-        // requirement on the image, or on a stretch of the same length at
-        // the image of its first residue when shuffling scattered it.
         let (lo, hi) = (b - 1, a);
         let width = (hi - lo) as u32;
         let min = image[lo..=hi].iter().copied().min().unwrap_or(0);
@@ -620,20 +475,6 @@ fn count_sequon_starts(s: &[u8]) -> usize {
         .count()
 }
 
-/// Raise the N-X-S/T sequon count of the decoy that `source` makes of `orig`
-/// (`source[i]`: the position of `orig` decoy residue `i` comes from) toward,
-/// never above, the count in `orig`. Only positions with `movable` set take
-/// part in a swap.
-///
-/// Reversal does not drive the sequon count to zero: on a human proteome it
-/// leaves a different set of sequons at ~87% of the target's density, a
-/// deficit that makes the glyco sequon gate admit decoys slightly less often
-/// than targets. Restoring every original sequon on top of that set
-/// over-corrects (~160%). This closes only the deficit: scanning windows in
-/// order, it pulls a later S/T into the third slot of an `N-X-·` window. A
-/// swap can also break or create a sequon at the donor's window, so each swap
-/// is kept only if the recounted total rises and stays within the target's.
-/// The result is still a permutation of `orig`. Deterministic.
 fn restore_sequons(orig: &[u8], source: &mut [u32], movable: &[bool]) {
     let n = orig.len();
     if n < 3 {
@@ -644,15 +485,12 @@ fn restore_sequons(orig: &[u8], source: &mut [u32], movable: &[bool]) {
     let mut cur = count_sequon_starts(&r);
     let mut i = 0usize;
     while cur < target && i + 2 < n {
-        // A window that is one S/T away from being a sequon: N, X≠P, non-S/T.
         if movable[i + 2]
             && r[i] == b'N'
             && r[i + 1] != b'P'
             && r[i + 2] != b'S'
             && r[i + 2] != b'T'
         {
-            // Donor: a later movable S/T that is not the third residue of a
-            // sequon (moving it would break that sequon, a net-zero swap).
             if let Some(j) = (i + 3..n).find(|&j| {
                 movable[j]
                     && (r[j] == b'S' || r[j] == b'T')
@@ -672,10 +510,6 @@ fn restore_sequons(orig: &[u8], source: &mut [u32], movable: &[bool]) {
     }
 }
 
-/// The searched database: `target` followed by its decoys ([`decoy_db`]) for
-/// a fully specific trypsin search; the target alone for
-/// [`DecoyStrategy::None`]. Decoy membership downstream is decided by the
-/// accession prefix, not the position.
 pub fn build_search_db(
     target: &ProteinDb,
     prefix: &str,
@@ -685,8 +519,6 @@ pub fn build_search_db(
     build_search_db_for(target, prefix, strategy, seed, &Proteases::default())
 }
 
-/// [`build_search_db`] for a search with `proteases`, whose cleavage
-/// segments the decoys permute within.
 pub fn build_search_db_for(
     target: &ProteinDb,
     prefix: &str,
@@ -700,8 +532,6 @@ pub fn build_search_db_for(
     ProteinDb { proteins }
 }
 
-/// Normalize a user-supplied decoy accession prefix: trim whitespace,
-/// strip trailing `_`, and fall back to [`DEFAULT_DECOY_PREFIX`] when empty.
 pub fn normalize_decoy_prefix(prefix: &str) -> String {
     let trimmed = prefix.trim().trim_end_matches('_');
     if trimmed.is_empty() {
@@ -711,51 +541,23 @@ pub fn normalize_decoy_prefix(prefix: &str) -> String {
     }
 }
 
-/// The decoy-membership needle for `prefix`: `"<normalized_prefix>_"`.
-///
-/// SINGLE SOURCE OF TRUTH for target/decoy membership. Decoy accessions are
-/// built as `"<prefix>_<orig>"` (see [`decoy_db`]), so a protein
-/// is a decoy iff its accession starts with this needle. Both candidate
-/// generation and [`crate::SearchIndex`] MUST use this helper so the two paths
-/// can never diverge: a target accession that merely starts with the BARE prefix
-/// (e.g. a real protein named `"XXXfoo"`, or any accession under a short custom
-/// prefix like `rev`) is NOT a decoy — the `_` delimiter is required.
 pub fn decoy_accession_needle(prefix: &str) -> String {
     format!("{}_", normalize_decoy_prefix(prefix))
 }
 
-/// Returns `true` iff `accession` is a decoy accession under `prefix`
-/// (i.e. starts with [`decoy_accession_needle`]).
 pub fn is_decoy_accession(accession: &str, prefix: &str) -> bool {
     accession.starts_with(&decoy_accession_needle(prefix))
 }
 
-/// Returns `true` iff `accession` is a decoy under the AFFIX convention: it
-/// starts with the prefix needle `"<prefix>_"` (andes' native decoy naming) OR
-/// — when `suffix` is set and non-empty — ends with `suffix`.
-///
-/// The suffix form lets andes recognize decoys produced by an external pipeline
-/// whose pre-built target+decoy DB tags decoys with an accession SUFFIX (e.g.
-/// quantms: `<orig>_rev`) rather than andes' prefix. Used
-/// with `--decoy-strategy none` so andes consumes the shared decoy DB verbatim
-/// instead of generating its own (which would double-decoy and bias FDR).
 pub fn is_decoy_accession_affix(accession: &str, prefix: &str, suffix: Option<&str>) -> bool {
     accession.starts_with(&decoy_accession_needle(prefix))
         || suffix.is_some_and(|s| !s.is_empty() && accession.ends_with(s))
 }
 
-/// Tags other tools write in front of (`rev_<accession>`) or behind
-/// (`<accession>_rev`) a target accession to name its decoy.
 const FOREIGN_DECOY_TAGS: [&str; 8] = [
     "rev", "reverse", "reversed", "decoy", "xxx", "shuffle", "shuffled", "random",
 ];
 
-/// The accession left when `accession` is read as `<tag>_<rest>` or
-/// `<rest>_<tag>` for one of [`FOREIGN_DECOY_TAGS`] (case-insensitive), with
-/// any further `_` between the two dropped (`REV__<rest>`).
-///
-/// The tag must be the whole text before the first `_` (or after the last), so
-/// a UniProt accession such as `sp|P04618|REV_HV1H2` is not read as a decoy.
 fn strip_foreign_decoy_tag(accession: &str) -> Option<&str> {
     let is_tag = |t: &str| FOREIGN_DECOY_TAGS.iter().any(|k| t.eq_ignore_ascii_case(k));
     if let Some(i) = accession.find('_') {
@@ -773,32 +575,16 @@ fn strip_foreign_decoy_tag(accession: &str) -> Option<&str> {
     None
 }
 
-/// Records of a database that look like decoys of other records, whatever
-/// affix they carry. Counted before andes generates its own decoys: such
-/// records would be searched as targets, and andes' decoys added on top.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForeignDecoys {
     pub n_records: usize,
-    /// Records whose sequence is the exact reverse of another record's. A
-    /// sequence that reads the same both ways does not count, nor does one
-    /// short enough to meet its reverse by chance.
     pub n_reversed: usize,
-    /// Records named as the decoy of another record of the database:
-    /// `<tag>_<accession>` or `<accession>_<tag>`.
     pub n_named_paired: usize,
-    /// Records carrying a decoy tag whose remainder is no other record's
-    /// accession.
     pub n_named_unpaired: usize,
-    /// One accession of each kind, for the message.
     pub example_reversed: Option<String>,
     pub example_named: Option<String>,
 }
 
-/// Shortest sequence whose reverse counts as evidence in a database of
-/// `n_records`: the first length at which the 20^length possible sequences
-/// outnumber the record pairs, so that a reversed pair is not expected by
-/// chance. Shorter records (signal peptides, receptor D segments of two or
-/// three residues) meet their reverse in any large database.
 fn min_reversible_len(n_records: usize) -> usize {
     let pairs = (n_records as f64) * (n_records as f64);
     let mut len = 1;
@@ -811,7 +597,6 @@ fn min_reversible_len(n_records: usize) -> usize {
 }
 
 impl ForeignDecoys {
-    /// Scan `db` for reversed sequences and decoy-tagged accessions.
     pub fn scan(db: &ProteinDb) -> Self {
         let min_len = min_reversible_len(db.proteins.len());
         let sequences: FxHashSet<&[u8]> = db.proteins.iter().map(|p| &p.sequence[..]).collect();
@@ -820,8 +605,6 @@ impl ForeignDecoys {
             n_records: db.proteins.len(),
             ..Default::default()
         };
-        // The later record of a reversed pair is the better example: decoys
-        // follow their targets in a concatenated database.
         let mut last_reversed: Option<&Protein> = None;
         let mut reversed: Vec<u8> = Vec::new();
         for p in &db.proteins {
@@ -850,14 +633,6 @@ impl ForeignDecoys {
         found
     }
 
-    /// What to do before generating decoys for this database.
-    ///
-    /// `Err` when it already is a target-decoy database: a record is named as
-    /// the decoy of another record, or at least half of the records are exact
-    /// reverses of another record (in a target-plus-reversed concatenation
-    /// every record is one; half leaves room for entries added afterwards).
-    /// `Ok(Some(_))` is a warning for weaker evidence: a few reversed records,
-    /// or decoy-tagged accessions with no matching target.
     pub fn verdict(&self) -> Result<Option<String>, String> {
         const FIX: &str = "andes would search them as targets and add its own decoys, which \
                            underestimates the FDR. Pass a target-only FASTA, or declare them: \
@@ -928,7 +703,6 @@ mod tests {
         assert_eq!(strip_foreign_decoy_tag("REV__P1"), Some("P1"));
         assert_eq!(strip_foreign_decoy_tag("DECOY_P1"), Some("P1"));
         assert_eq!(strip_foreign_decoy_tag("P1_rev"), Some("P1"));
-        // A UniProt entry name that happens to start with REV.
         assert_eq!(strip_foreign_decoy_tag("sp|P04618|REV_HV1H2"), None);
         assert_eq!(strip_foreign_decoy_tag("sp|Q9UBZ9|REV1_HUMAN"), None);
         assert_eq!(strip_foreign_decoy_tag("rev_"), None);
@@ -940,7 +714,6 @@ mod tests {
         let db = make_db(&[
             ("sp|P1|A_HUMAN", b"MKTAYIAKQR"),
             ("sp|P2|B_HUMAN", b"MSEQNNTEMTFQIQR"),
-            // Reads the same both ways: not the reverse of another record.
             ("sp|P3|C_HUMAN", b"MKAKM"),
         ]);
         let found = ForeignDecoys::scan(&db);
@@ -973,8 +746,6 @@ mod tests {
         assert_eq!(min_reversible_len(4), 1);
         assert_eq!(min_reversible_len(20), 3);
         assert_eq!(min_reversible_len(63_778), 8);
-        // 22 records: a two-residue record and its reverse are expected by
-        // chance, a ten-residue pair is not.
         let filler: Vec<(String, Vec<u8>)> = (0..18u8)
             .map(|i| (format!("p{i}"), vec![b'M', b'A' + i, b'G', b'K', b'W']))
             .collect();
@@ -991,7 +762,6 @@ mod tests {
 
     #[test]
     fn a_record_named_as_the_decoy_of_another_is_an_error() {
-        // Shuffled, so the sequences are not reverses of each other.
         let db = make_db(&[
             ("sp|P1|A_HUMAN", b"MKTAYIAKQR"),
             ("sp|P2|B_HUMAN", b"MSEQNNTEMTFQIQR"),
@@ -1010,8 +780,6 @@ mod tests {
 
     #[test]
     fn weaker_evidence_is_a_warning() {
-        // One chance reverse pair among many records, and one tagged accession
-        // with no matching target.
         let db = make_db(&[
             ("p1", b"MKTAYIAKQR"),
             ("p2", b"AKM"),
@@ -1068,7 +836,6 @@ mod tests {
 
     #[test]
     fn n_terminal_enzyme_keeps_the_first_residue_of_each_segment() {
-        // AspN cuts before D: segments DAAGLK and DPEW keep their D.
         let db = make_db(&[("P1", b"DAAGLKDPEW")]);
         let d = decoys(&db, DecoyStrategy::Reverse, &enzyme(Enzyme::AspN));
         assert_eq!(d, [b"DKLGAADWEP".to_vec()]);
@@ -1087,7 +854,6 @@ mod tests {
             ..Proteases::default()
         };
         assert_eq!(decoys(&db, DecoyStrategy::Reverse, &ntt0), want);
-        // Semi-specific searches keep the segments.
         let semi = Proteases {
             num_tolerable_termini: 1,
             ..Proteases::default()
@@ -1100,7 +866,6 @@ mod tests {
 
     #[test]
     fn a_segment_has_one_decoy_wherever_it_occurs() {
-        // LLSAGNDK in two contexts, once inside a missed-cleavage stretch.
         let db = make_db(&[("P1", b"GGHWKLLSAGNDKPPR"), ("P2", b"LLSAGNDKAEFRLLSAGNDK")]);
         for strategy in [
             DecoyStrategy::Reverse,
@@ -1124,15 +889,12 @@ mod tests {
         let mut seg = d[0..4].to_vec();
         seg.sort_unstable();
         assert_eq!(seg, b"AADK");
-        // GLVLG is a palindrome too; the redraw keeps the R.
         assert_ne!(&d[4..10], b"GLVLGR");
         assert_eq!(d[9], b'R');
     }
 
     #[test]
     fn decoy_segment_never_spells_another_target_segment() {
-        // Reversing GASV gives VSAG, P2's segment; I/L folded: LIAGK reversed
-        // is GAILK, which reads as P3's GALLK.
         let db = make_db(&[
             ("P1", b"GASVK"),
             ("P2", b"VSAGK"),
@@ -1164,7 +926,6 @@ mod tests {
         }
     }
 
-    /// Random proteins over the 20 residues (deterministic xorshift).
     fn random_db(count: usize) -> ProteinDb {
         let aa = b"ACDEFGHIKLMNPQRSTVWY";
         let mut state = 0x1234_5678_9ABC_DEF1u64;
@@ -1245,7 +1006,6 @@ mod tests {
                         assert_eq!(s[0], b'M');
                     }
                 }
-                // Short segments cannot change; most others do.
                 assert!(
                     changed * 2 > segments,
                     "{proteases:?} {strategy:?} {changed}/{segments}"
@@ -1360,28 +1120,23 @@ mod tests {
 
     #[test]
     fn decoy_accession_needle_requires_underscore_delimiter() {
-        // Decoys are built as "<prefix>_<orig>", so detection requires the "_".
         assert_eq!(decoy_accession_needle("XXX"), "XXX_");
-        assert_eq!(decoy_accession_needle("XXX_"), "XXX_"); // normalize is idempotent
-        assert_eq!(decoy_accession_needle(""), "XXX_"); // empty → default prefix
+        assert_eq!(decoy_accession_needle("XXX_"), "XXX_");
+        assert_eq!(decoy_accession_needle(""), "XXX_");
         assert!(is_decoy_accession("XXX_P12345", "XXX"));
         assert!(
             !is_decoy_accession("XXXP12345", "XXX"),
             "no '_' delimiter ⇒ target, not decoy"
         );
         assert!(!is_decoy_accession("P12345", "XXX"));
-        // Short custom prefix: a real "rev..." target must NOT be misread as decoy.
         assert!(is_decoy_accession("rev_sp|P1", "rev"));
         assert!(!is_decoy_accession("reverse_kinase", "rev"));
     }
 
     #[test]
     fn affix_matches_prefix_or_suffix() {
-        // Prefix (andes-native) still works with no suffix configured.
         assert!(is_decoy_accession_affix("XXX_P12345", "XXX", None));
         assert!(!is_decoy_accession_affix("P12345", "XXX", None));
-        // Suffix form recognizes quantms "<orig>_rev" decoys that the
-        // prefix test alone misses.
         assert!(is_decoy_accession_affix(
             "sp|P02769|ALBU_BOVIN_rev",
             "XXX",
@@ -1392,7 +1147,6 @@ mod tests {
             "XXX",
             Some("rev")
         ));
-        // Either affix qualifies; an empty suffix is ignored (no spurious match).
         assert!(is_decoy_accession_affix("XXX_P1", "XXX", Some("rev")));
         assert!(!is_decoy_accession_affix("P1", "XXX", Some("")));
     }

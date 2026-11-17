@@ -1,52 +1,23 @@
-//! Evidence on which modification a residue carries, taken from the spectrum
-//! while its peaks are at hand.
-//!
-//! Near-isobaric modifications (acetyl and trimethyl differ by 0.036 Da) or
-//! modifications that sum to another (two methyls and one dimethyl) give PSMs
-//! whose scores barely differ. Three kinds of evidence separate them:
-//! - the fragment ions of a form that no other form of the same peptide among
-//!   the spectrum's candidates has (the site-determining ions);
-//! - the diagnostic ions a modification declares (config `diagnostic_ions`),
-//!   such as the immonium ion of the modified residue;
-//! - the neutral losses it declares (config `neutral_loss`), from the precursor or
-//!   from the fragments that hold the modified residue.
-//!
-//! Rows are compared after rescoring (see `output::site_identity`); nothing
-//! here changes a score.
-
 use model::mass::{H2O, PROTON};
 use model::modification::Modification;
 use model::peptide::Peptide;
 use model::tolerance::Tolerance;
 
-/// One declared signature of a row's modification and whether the spectrum
-/// shows it.
 #[derive(Debug, Clone)]
 pub struct ModMark {
     pub modification: &'static Modification,
-    /// One of its diagnostic ions is present; `None` when it declares none.
     pub diagnostic: Option<bool>,
-    /// One of its neutral losses is present; `None` when it declares none.
     pub loss: Option<bool>,
 }
 
-/// A row's evidence. Every row of a spectrum gets one when any of its rows
-/// carries a variable modification, so the unmodified forms compete too.
 #[derive(Debug, Clone, Default)]
 pub struct SiteEvidence {
-    /// Fragment ions of this form that no other form of the same peptide
-    /// among the spectrum's rows has, matched and not matched.
     pub unique_hit: u16,
     pub unique_miss: u16,
-    /// Share of this form's fragment ions that are matched.
     pub hit_fraction: f32,
-    /// One mark per carried modification that declares diagnostic ions or
-    /// neutral losses, in residue order.
     pub marks: Vec<ModMark>,
 }
 
-/// b and y ions at charge 1, and at charge 2 for a precursor of charge 3 or
-/// more.
 fn fragment_mzs(peptide: &Peptide, charge: u8) -> Vec<f64> {
     let masses: Vec<f64> = peptide
         .residues
@@ -78,21 +49,13 @@ fn near(ions: &[f64], mz: f64, tol: f64) -> bool {
     i < ions.len() && ions[i] <= mz + tol
 }
 
-/// One candidate row of a spectrum.
 pub struct Row<'a> {
     pub peptide: &'a Peptide,
     pub is_decoy: bool,
     pub charge: u8,
-    /// Neutral precursor mass the row was matched at.
     pub precursor_mass: f64,
 }
 
-/// The evidence of every row of one spectrum; all `None` when no row carries
-/// a variable modification. `tol` is the run's fragment tolerance (ppm on
-/// high-resolution data), so near-isobaric ions such as the acetyl-lysine
-/// immonium ion (126.091), TMT126 (126.128) and the HexNAc oxonium fragment
-/// (126.055) are told apart; an ion is unique when no other form has one
-/// within twice that tolerance.
 pub fn spectrum_evidence(
     peaks: &[(f64, f32)],
     rows: &[Row<'_>],
@@ -173,8 +136,6 @@ pub fn spectrum_evidence(
         .collect()
 }
 
-/// A neutral loss from the precursor (any charge up to the row's) or from a
-/// singly charged b or y ion that holds residue `at`.
 fn loss_present(
     peaks: &[(f64, f32)],
     row: &Row<'_>,
@@ -249,8 +210,6 @@ mod tests {
         let a = peptide(b"PEPKTIDER", 3, ac);
         let t = peptide(b"PEPKTIDER", 3, me3);
         let mass = t.mass();
-        // The acetyl immonium ion and a b4 ion of the acetyl form, nothing of
-        // trimethyl (no 143.1543, no loss).
         let b4: f64 = a.residues[..4]
             .iter()
             .map(|x| x.mass + x.mod_.map_or(0.0, |m| m.mass_delta))
@@ -277,12 +236,9 @@ mod tests {
         assert_eq!(ea.marks[0].loss, None);
         assert_eq!(et.marks[0].diagnostic, Some(false));
         assert_eq!(et.marks[0].loss, Some(false));
-        // b4..b8 differ by 0.036 Da (> 2 × 0.01): unique to each form; b4 of
-        // the acetyl form is matched.
         assert_eq!((ea.unique_hit, et.unique_hit), (1, 0));
         assert!(ea.unique_miss >= 4 && et.unique_miss >= 5);
 
-        // The precursor minus trimethylamine marks the loss.
         let peaks = vec![((mass - 59.0735 + 2.0 * PROTON) / 2.0, 1.0)];
         let ev = spectrum_evidence(&peaks, &rows, Tolerance::Da(0.01));
         assert_eq!(ev[1].as_ref().unwrap().marks[0].loss, Some(true));
@@ -307,9 +263,6 @@ mod tests {
         assert!(spectrum_evidence(&[], &rows, Tolerance::Da(0.01))[0].is_none());
     }
 
-    /// At 0.5 Da the TMT126 reporter (126.128) counts as the acetyl-lysine
-    /// immonium ion (126.091) and the near-isobaric acetyl / trimethyl forms
-    /// share every ion; at 20 ppm neither happens.
     #[test]
     fn a_ppm_tolerance_separates_near_isobaric_ions() {
         let ac = lys("Acetyl", 42.010565, &[126.0913], &[]);

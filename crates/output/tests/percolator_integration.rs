@@ -1,12 +1,3 @@
-//! End-to-end Percolator runner test.
-//!
-//! GRACEFUL SKIP: this test needs a real Percolator. It probes, in order,
-//! `$ANDES_TEST_PERCOLATOR_BIN`, `percolator` on `$PATH`, then the docker
-//! fallback. If NONE is available it prints a skip notice and returns (it does
-//! NOT fail) so the suite stays green in environments without Percolator. The
-//! parser, backend resolution, and the QPX/PIN SpecId join are covered by unit
-//! tests + `qpx_rescore_join.rs` regardless.
-
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -25,8 +16,6 @@ fn test_backend() -> Option<PercolatorBackend> {
     resolve_backend(None, false, DEFAULT_PERCOLATOR_IMAGE).ok()
 }
 
-/// A tiny but separable synthetic PIN: a handful of high-scoring targets and a
-/// few low-scoring decoys, with the andes column layout Percolator expects.
 fn write_synthetic_pin(path: &std::path::Path) {
     let mut w = std::fs::File::create(path).unwrap();
     writeln!(w, "SpecId\tLabel\tScanNr\tRawScore\tdm\tPeptide\tProteins").unwrap();
@@ -67,8 +56,6 @@ fn percolator_end_to_end_or_skip() {
     let map = match run_percolator(&backend, &pin, &[]) {
         Ok(m) => m,
         Err(e) => {
-            // A real backend that fails on this synthetic input is informative
-            // but should not red the suite in CI without a vetted percolator.
             eprintln!("SKIP percolator_end_to_end_or_skip: run failed: {e}");
             return;
         }
@@ -92,11 +79,6 @@ fn percolator_end_to_end_or_skip() {
     );
 }
 
-/// Two runs' PINs pooled by concatenation, every target sharing its `ScanNr`
-/// and `ExpMass` with the other run's target. Percolator's target-decoy
-/// competition (`-Y`) keeps one PSM per file, scan and `ExpMass`: with the
-/// `FileName` column both runs' PSMs survive; without it the rows of the
-/// better-scoring run wins each group and the other run's row is dropped.
 fn write_pooled_pin(path: &std::path::Path, with_file_name: bool) {
     let mut w = std::fs::File::create(path).unwrap();
     let file_col = if with_file_name { "\tFileName" } else { "" };
@@ -179,13 +161,6 @@ fn pooled_runs_compete_per_file_or_skip() {
     );
 }
 
-/// A PIN with one decoy far above every other decoy. Percolator's `-Y` PEP fit
-/// can return PEP = 1 for every PSM on high-resolution TMT data with such a
-/// decoy (depending on the cross-validation split) while the q-values stay
-/// valid; the runner must hand back a PEP that is below 1 for the accepted
-/// PSMs whichever way the fit goes. This synthetic PIN does not always
-/// provoke the failure; `degenerate_pep_is_re_estimated_with_the_run_s_weights`
-/// covers the repair with a stand-in Percolator that always fails.
 fn write_top_decoy_pin(path: &std::path::Path) {
     let mut w = std::fs::File::create(path).unwrap();
     writeln!(
@@ -193,7 +168,6 @@ fn write_top_decoy_pin(path: &std::path::Path) {
         "SpecId\tLabel\tScanNr\tExpMass\tFileName\tf1\tf2\tf3\tPeptide\tProteins"
     )
     .unwrap();
-    // A fixed pseudo-random stream (xorshift), so the PIN is the same every run.
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     let mut gauss = move || {
         let mut next = || {
@@ -244,9 +218,6 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("top_decoy.pin");
     write_top_decoy_pin(&pin);
-    // The runner trains with a fixed seed, so the failure shows or not by the
-    // PIN; a later `--seed` among the extra arguments takes over and gives
-    // the same PIN several random splits.
     for seed in 1..=8 {
         let mut args = percolator_args_with_threads(&[], 1);
         args.extend(["--seed".to_string(), seed.to_string()]);
@@ -266,7 +237,6 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
             "seed {seed}: every accepted PSM has PEP = 1"
         );
     }
-    // The repair pass leaves no scratch files next to the PIN.
     let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -275,13 +245,6 @@ fn pep_of_accepted_psms_is_below_one_or_skip() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
-/// A stand-in `percolator` script: with `-Y` it writes `y_pep` for every PSM
-/// (1 is the failed fit); with `--static` (the repair pass) it writes
-/// `static_pep`. Every call's arguments are appended to `calls.log` next to
-/// the script.
-///
-/// The script is executable once the function returns (see
-/// [`write_executable`]).
 #[cfg(unix)]
 fn write_fake_percolator(
     dir: &std::path::Path,
@@ -316,12 +279,6 @@ printf 'PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n' > "$
     script
 }
 
-/// Writes `body` to `script`, marks it executable and returns once it can be
-/// run: while another test thread forks, its child briefly holds the script's
-/// write descriptor and exec fails with `ExecutableFileBusy`, so the script is
-/// run with `--probe` (which it must answer with exit 0 and no side effect)
-/// until no such descriptor remains. No descriptor can appear after the write
-/// has closed.
 #[cfg(unix)]
 fn write_executable(script: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -344,9 +301,6 @@ fn write_executable(script: &std::path::Path, body: &str) {
 #[test]
 fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
     let _guard = serial();
-    // The first call (target-decoy competition) returns PEP = 1 for every
-    // accepted PSM; the repair call must be static, take the first call's
-    // weights, drop `-Y`, and its PEP replaces the failed one. q-values stay.
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("run.pin");
     std::fs::write(&pin, "SpecId\tLabel\n").unwrap();
@@ -378,7 +332,6 @@ fn degenerate_pep_is_re_estimated_with_the_run_s_weights() {
         .filter(|e| e.file_name().to_string_lossy().contains(".pep."))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    // A single-run PIN keeps the main run's result file as Percolator wrote it.
     let target =
         std::fs::read_to_string(tmp.path().join("run.percolator.target.psms.txt")).unwrap();
     assert_eq!(
@@ -415,7 +368,6 @@ fn a_repair_that_fails_or_stays_degenerate_keeps_the_run() {
 #[test]
 fn a_working_pep_is_not_touched() {
     let _guard = serial();
-    // A stand-in whose `-Y` output is fine: one call, no repair.
     let tmp = tempfile::tempdir().unwrap();
     let pin = tmp.path().join("run.pin");
     std::fs::write(&pin, "SpecId\tLabel\n").unwrap();
@@ -427,9 +379,6 @@ fn a_working_pep_is_not_touched() {
     assert_eq!(log.lines().count(), 1);
 }
 
-/// The tests that write and run a stand-in `percolator` take this lock: a
-/// script that was just written can fail to execute ("text file busy") while a
-/// concurrent test forks.
 #[cfg(unix)]
 static STAND_IN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -438,19 +387,9 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     STAND_IN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Result files as Percolator 3.7.1 writes them: a `filename` column after
-/// `PSMId`.
 const RESULT_HEADER: &str =
     "PSMId\tfilename\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds";
 
-/// A stand-in `percolator` that reads the PIN it is given (`SpecId`, `Label`,
-/// `FileName` columns) and writes result files with Percolator 3.7.1's
-/// columns. The pooled call gives every PSM a q-value of 0.001 and PEP 0.01.
-/// A `--static` call gives the PSMs of run `run_a` a q-value of 0.002, `run_b`
-/// 0.5, `run_e` 0.003 and fails for `run_d`; a PSM named `lost*` goes to the
-/// decoy file (it lost the competition in the run), a PSM named `none*` is in
-/// neither file. Every call's arguments are appended to `calls.log`; it is
-/// executable once the function returns (see [`write_executable`]).
 #[cfg(unix)]
 fn write_stand_in(dir: &std::path::Path) -> PathBuf {
     let script = dir.join("percolator");
@@ -488,9 +427,6 @@ tail -n +2 "$pin" | awk -F'\t' -v q="$q" -v st="$static" -v t="$t" -v d="$d" '
     script
 }
 
-/// Five runs. `run_a`: a scan group of three PSMs (`a1` kept, `lost1` lost
-/// the competition in the run, `none1` has no verdict), a decoy. `run_b`:
-/// ordinary. `run_c`: targets only. `run_d`: its pass fails. `run_e`: 12 PSMs.
 #[cfg(unix)]
 fn write_five_run_pin(path: &std::path::Path) {
     let mut s = String::from("SpecId\tLabel\tFileName\tScanNr\tRawScore\n");
@@ -533,23 +469,16 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     for i in 1..=8 {
         assert_eq!(targets[&format!("e{i}")].q_value, 0.003, "the 12-PSM run");
     }
-    // A target that lost the competition in its run (it is in the run's decoy
-    // file) and one without a result: not accepted, in a scan group with a
-    // kept PSM.
     assert_eq!(targets["lost1"].q_value, 1.0);
     assert_eq!(targets["none1"].q_value, 1.0);
-    // A run without decoys cannot be scored: no verdict, q = 1.
     assert_eq!(targets["c1"].q_value, 1.0);
     assert_eq!(targets["c2"].q_value, 1.0);
-    // A run whose pass fails keeps the pooled q-value.
     assert_eq!(targets["d1"].q_value, 0.001);
     assert_eq!(targets["d1"].pooled_q_value, None);
     assert_eq!(targets["a1"].pooled_q_value, Some(0.001));
     assert_eq!(targets["lost1"].pooled_q_value, Some(0.001));
     assert_eq!(targets["b1"].pep, 0.01);
     assert!(decoys.contains("ad1") && decoys.contains("bd1"));
-    // The result file carries the same values, the pooled column, and parses
-    // with Percolator 3.7.1's `filename` column.
     let text = std::fs::read_to_string(tmp.path().join("set.percolator.target.psms.txt")).unwrap();
     let header = text.lines().next().unwrap();
     assert_eq!(
@@ -563,9 +492,6 @@ fn per_run_q_values_replace_the_pooled_ones_and_leave_no_scratch() {
     assert_eq!(file["d1"].q_value, 0.001);
     assert_eq!(file["b1"].pooled_q_value, Some(0.001));
     assert_eq!(file["a1"].proteins, "sp|P1");
-    // One pooled call, then one static call per run that can be scored
-    // (a, b, d, e; not c) with the pooled weights and target-decoy
-    // competition; the scratch PINs are gone.
     let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
     let calls: Vec<&str> = log.lines().collect();
     assert_eq!(calls.len(), 5, "{calls:?}");
@@ -604,8 +530,6 @@ fn a_pin_of_one_run_or_without_run_names_is_left_pooled_byte_for_byte() {
         assert_eq!(targets["a1"].pooled_q_value, None);
         let log = std::fs::read_to_string(tmp.path().join("calls.log")).unwrap();
         assert_eq!(log.lines().count(), 1, "{log}");
-        // The result files are what the one call wrote, byte for byte: no
-        // pooled column, no rewrite.
         let target =
             std::fs::read_to_string(tmp.path().join("one.percolator.target.psms.txt")).unwrap();
         assert_eq!(
@@ -625,8 +549,6 @@ fn a_pin_of_one_run_or_without_run_names_is_left_pooled_byte_for_byte() {
 #[test]
 fn an_unreadable_pin_leaves_the_q_values_pooled() {
     let _guard = serial();
-    // A PIN that cannot be read for the per-run pass is a warning, not an
-    // error: nothing changes.
     let tmp = tempfile::tempdir().unwrap();
     let backend = PercolatorBackend::Binary(write_stand_in(tmp.path()));
     let mut targets = std::collections::HashMap::new();

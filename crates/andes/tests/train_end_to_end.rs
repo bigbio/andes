@@ -1,18 +1,8 @@
-//! End-to-end test for `andes train` and the resulting model store.
-//!
-//! Verifies:
-//! 1. `andes train` exits 0 and writes a Parquet store.
-//! 2. The store contains the trained model ID.
-//! 3. A subsequent `andes --spectrum ... --model-store ... --model ...`
-//!    search using that model exits 0 and produces a non-empty PIN file.
-
 use std::path::PathBuf;
 use std::process::Command;
 
 use model_train::ModelStore;
 
-/// Resolve a path relative to the workspace root (two levels above the crate
-/// manifest dir: crates/andes → workspace root).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -38,7 +28,6 @@ fn train_writes_model_and_search_uses_it() {
         .arg(&bsa_fasta)
         .arg("--out-store")
         .arg(&store_path)
-        // Use a lenient FDR so the small BSA fixture yields confident labels.
         .arg("--train-fdr")
         .arg("0.9")
         .arg("--model-id")
@@ -65,8 +54,6 @@ fn train_writes_model_and_search_uses_it() {
         !param.partitions.is_empty(),
         "trained param should have at least one partition"
     );
-    // The seed's fragment-intensity and rich-ion GBDTs come along: the search
-    // scores them on every PSM.
     assert!(
         param.frag_intensity_model.is_some() && param.rich_ion_model.is_some(),
         "a trained model keeps the seed's fragment-intensity and rich-ion models"
@@ -92,7 +79,6 @@ fn train_writes_model_and_search_uses_it() {
     );
     assert!(pin_path.exists(), "PIN file should be written");
 
-    // The run summary is written next to the PIN as `<stem>.statistics.log`.
     let stats_path = dir.path().join("out.statistics.log");
     assert!(
         stats_path.exists(),
@@ -124,7 +110,6 @@ fn train_from_several_runs_records_one_source_per_run() {
     let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // The same file twice: two runs with colliding stems, identical labels.
     let status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train-from-search")
         .arg("--spectra")
@@ -164,8 +149,6 @@ fn train_from_several_runs_records_one_source_per_run() {
     assert!(sources.iter().all(|l| l.dataset == "test.mgf.gz"));
     assert!(sources.iter().all(|l| l.instrument == "TimsTOF"));
 
-    // --instrument is part of the selection key; the seed's activation and
-    // enzyme are kept; --fragment-tol-da is stored as the model tolerance.
     let param = store.load_param("bsa_two_runs").expect("load param");
     assert_eq!(param.data_type.instrument.name(), "TimsTOF");
     assert_eq!(param.data_type.activation.name(), "HCD");

@@ -1,7 +1,3 @@
-//! Pin `ActivationMethod` variants to PSI-MS activation method terms
-//! (MS:1000133 CID, MS:1000599 ETD, MS:1000422 HCD, MS:1000598 PQD,
-//! MS:1000776 UVPD, MS:1002631 EThcD).
-
 use model::ActivationMethod;
 
 #[test]

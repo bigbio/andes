@@ -1,5 +1,3 @@
-//! BSA + Tryp_Pig_Bov candidate-enumeration sanity tests.
-
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;

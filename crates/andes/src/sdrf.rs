@@ -1,63 +1,27 @@
-//! SDRF input (`--sdrf design.sdrf.tsv`): the search settings an SDRF-Proteomics
-//! file records, applied below the command line and the `--config` file.
-//!
-//! Read from the SDRF:
-//! - `comment[data file]`: the spectrum files, looked up next to the SDRF (the
-//!   CLI or config `spectrum` replaces them).
-//! - `comment[cleavage agent details]` (every such column): the protease list.
-//! - `comment[modification parameters]` (every such column): fixed and
-//!   variable modifications, written as the `Name (sites)` lists of
-//!   `--fixed-mods` / `--variable-mods` (the UNIMOD accession when given).
-//! - `comment[precursor mass tolerance]`.
-//! - `comment[label]`: the quantification. Every row `label free sample` is
-//!   `--lfq`; TMT / iTRAQ labels give the smallest plex holding them
-//!   (`--tmt`); SILAC light / medium / heavy give the `--label` channels from
-//!   the `Label:` modifications; DIMETHYL0/4/8 give `dimethyl2` / `dimethyl3`.
-//! - `comment[dissociation method]`: checked against what the files record.
-//!
-//! Not applied: `comment[fragment mass tolerance]` (andes measures each run's
-//! fragment error; `--fragment-tol-*` fixes one), and the sample and factor
-//! columns, which describe the samples, not the search.
-//!
-//! One andes run searches every input with one setting, so the rows must
-//! agree on the protease, modifications, tolerance and label kind; rows that
-//! disagree are an error that names the column and two files.
-//!
-//! Precedence: a value given on the command line or in the `--config` file
-//! wins over the SDRF, which wins over the built-in default.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use model::activation::ActivationMethod;
 
-/// The quantification an SDRF's labels name.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Quant {
     Lfq,
-    /// `--tmt` plex name (`tmt10`, `itraq4`).
     Isobaric(String),
-    /// `--label` spec (`[][Lys8,Arg10]`, `dimethyl2`).
     Label(String),
 }
 
-/// The settings read from one SDRF.
 #[derive(Debug, Clone, Default)]
 pub struct SdrfSettings {
     pub path: PathBuf,
-    /// Spectrum files, in order of first appearance, resolved next to the SDRF.
     pub data_files: Vec<PathBuf>,
-    /// Protease list as `--enzyme` takes it (`trypsin`, `trypsin+lysc`).
     pub enzyme: Option<String>,
-    /// `--precursor-tol` value (`10ppm`).
     pub precursor_tol: Option<String>,
-    /// The fragment tolerance as written, reported but not applied.
     pub fragment_tol: Option<String>,
-    /// `Name (sites)` items; `None` when the SDRF has no modification column.
     pub fixed_mods: Option<Vec<String>>,
     pub variable_mods: Option<Vec<String>>,
     pub quant: Option<Quant>,
     pub dissociation: Option<ActivationMethod>,
+    pub xl: Option<String>,
 }
 
 const DATA_FILE: &str = "comment[data file]";
@@ -67,8 +31,8 @@ const PRECURSOR_TOL: &str = "comment[precursor mass tolerance]";
 const FRAGMENT_TOL: &str = "comment[fragment mass tolerance]";
 const LABEL: &str = "comment[label]";
 const DISSOCIATION: &str = "comment[dissociation method]";
+const XL: &str = "comment[cross-linker]";
 
-/// Read and check an SDRF file.
 pub fn read(path: &Path) -> Result<SdrfSettings, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("--sdrf: cannot read {}: {e}", path.display()))?;
@@ -81,7 +45,6 @@ pub fn read(path: &Path) -> Result<SdrfSettings, String> {
         .map_err(|e| format!("--sdrf {}: {e}", path.display()))
 }
 
-/// Parse SDRF text; data files resolve against `dir`.
 pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header: Vec<String> = lines
@@ -104,6 +67,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     let (cleave, mods) = (cols(CLEAVAGE), cols(MODS));
     let (ptol, ftol) = (cols(PRECURSOR_TOL), cols(FRAGMENT_TOL));
     let (label_col, diss) = (cols(LABEL), cols(DISSOCIATION));
+    let xl_col = cols(XL);
 
     let mut rows: Vec<RowSettings> = Vec::new();
     for (n, line) in lines.enumerate() {
@@ -145,6 +109,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
             fragment_tol: ftol.first().and_then(|&i| cell(i)),
             label: label_col.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
             dissociation: diss.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
+            xl: xl_col.first().and_then(|&i| cell(i)),
         });
     }
     if rows.is_empty() {
@@ -166,6 +131,11 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     agree(&rows, LABEL, |r| {
         r.label.as_deref().map(label_kind).unwrap_or("").to_string()
     })?;
+    agree(&rows, XL, |r| r.xl.clone().unwrap_or_default())?;
+    if let Some(v) = &rows[0].xl {
+        andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+            .map_err(|e| format!("`{XL}`: {e}"))?;
+    }
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
@@ -177,7 +147,6 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     }
     let labels: BTreeSet<String> = rows.iter().filter_map(|r| r.label.clone()).collect();
     let quant = quant_of(&labels, &first.mods)?;
-    // Labels the quantification searches itself leave the modification lists.
     let searched = |m: &&ModParam| match &quant {
         Some(Quant::Label(_)) => !m.is_label_channel(),
         _ => true,
@@ -206,16 +175,12 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         variable_mods,
         quant,
         dissociation: first.dissociation.as_deref().and_then(dissociation_of),
+        xl: first.xl.clone(),
     })
 }
 
-/// Spectrum formats andes reads, tried in this order when the SDRF's file is
-/// not there under its own name (an SDRF names the vendor files; pipelines often
-/// convert them).
 const SPECTRUM_EXTENSIONS: &[&str] = &["mzML", "mzml", "raw", "d", "mgf"];
 
-/// `file` in `dir`, or the same stem with another spectrum extension when only
-/// that exists; the SDRF's own name when neither does (reported as missing).
 fn resolve_data_file(dir: &Path, file: &str) -> PathBuf {
     let p = dir.join(file);
     if p.exists() {
@@ -236,9 +201,9 @@ struct RowSettings {
     fragment_tol: Option<String>,
     label: Option<String>,
     dissociation: Option<String>,
+    xl: Option<String>,
 }
 
-/// Every row must give the same `key` for `column`.
 fn agree(
     rows: &[RowSettings],
     column: &str,
@@ -281,7 +246,6 @@ fn value(cell: &str) -> Option<String> {
     }
 }
 
-/// `NT=a;AC=b` -> {NT: a, AC: b}; a cell without `=` is its own NT.
 fn key_values(v: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for part in v.split(';') {
@@ -305,7 +269,6 @@ fn nt(v: &str) -> String {
         .unwrap_or_else(|| v.trim().to_string())
 }
 
-/// The andes protease of an SDRF cleavage agent.
 fn enzyme_of(v: &str) -> Result<String, String> {
     let name = nt(v).to_ascii_lowercase();
     let andes = match name.as_str() {
@@ -329,7 +292,6 @@ fn enzyme_of(v: &str) -> Result<String, String> {
     Ok(andes.to_string())
 }
 
-/// `10 ppm`, `0.02 Da`, `20 mmu` -> the `--precursor-tol` form.
 fn tolerance(v: &str) -> Result<String, String> {
     let lower = v.trim().to_ascii_lowercase();
     for (unit, scale, out) in [("ppm", 1.0, "ppm"), ("mmu", 0.001, "da"), ("da", 1.0, "da")] {
@@ -346,15 +308,10 @@ fn tolerance(v: &str) -> Result<String, String> {
     ))
 }
 
-/// One `comment[modification parameters]` cell.
 #[derive(Debug, Clone, PartialEq)]
 struct ModParam {
-    /// The name (`NT=`), then the UNIMOD accession (`AC=`) when given: the
-    /// first that the UNIMOD table resolves is used, so a wrong accession next
-    /// to a right name (or the reverse) still reads.
     names: Vec<String>,
     fixed: bool,
-    /// `Anywhere`, `Protein N-term`, `Protein C-term`, `N-term`, `C-term`.
     position: String,
     residues: String,
 }
@@ -439,18 +396,15 @@ impl ModParam {
         )
     }
 
-    /// A SILAC or dimethyl channel label, which `--label` searches itself.
     fn is_label_channel(&self) -> bool {
         self.silac_token(&self.residues).is_some() || self.names.iter().any(|n| dimethyl_name(n))
     }
 
-    /// The SILAC `--label` token of this mod on `residues`, by any of its names.
     fn silac_token(&self, residues: &str) -> Option<(&'static str, f64)> {
         self.names.iter().find_map(|n| silac_token(n, residues))
     }
 }
 
-/// The andes `--label` token of a SILAC label modification on one residue.
 fn silac_token(name: &str, residues: &str) -> Option<(&'static str, f64)> {
     let n = name.to_ascii_lowercase();
     let r = residues;
@@ -471,7 +425,6 @@ fn dimethyl_name(name: &str) -> bool {
     n.starts_with("dimethyl") || matches!(n.as_str(), "unimod:36" | "unimod:199" | "unimod:510")
 }
 
-/// `lfq`, `tmt`, `itraq`, `silac`, `dimethyl` or the label itself.
 fn label_kind(label: &str) -> &str {
     let l = label.to_ascii_lowercase();
     if l == "label free sample" {
@@ -489,7 +442,6 @@ fn label_kind(label: &str) -> &str {
     }
 }
 
-/// Channels of each isobaric plex, smallest first.
 const ISOBARIC: &[(&str, &[&str])] = &[
     ("tmt6", &["126", "127", "128", "129", "130", "131"]),
     (
@@ -525,7 +477,6 @@ const ISOBARIC: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The channel of an isobaric label: `TMT127N` -> `127N`, `iTRAQ4plex-114` -> `114`.
 fn isobaric_channel(label: &str) -> String {
     let l = label.to_ascii_uppercase();
     let tail = l.rsplit(['-', ' ']).next().unwrap_or(&l);
@@ -549,7 +500,6 @@ fn quant_of(labels: &BTreeSet<String>, mods: &[ModParam]) -> Result<Option<Quant
                 .iter()
                 .filter(|(p, _)| p.starts_with(kind.as_str()))
             {
-                // A channel without N/C matches its N form when the plex has no bare one.
                 let fits = channels
                     .iter()
                     .all(|c| set.contains(&c.as_str()) || set.contains(&format!("{c}N").as_str()));
@@ -568,7 +518,6 @@ fn quant_of(labels: &BTreeSet<String>, mods: &[ModParam]) -> Result<Option<Quant
             if !(2..=3).contains(&n) {
                 return Err(format!("`{LABEL}`: {n} SILAC channels; andes takes 2 or 3"));
             }
-            // Per residue, the label tokens by mass: heavy is the heaviest.
             let mut per_residue: BTreeMap<String, Vec<(&str, f64)>> = BTreeMap::new();
             for m in mods {
                 for r in m.residues.chars() {
@@ -650,6 +599,7 @@ pub struct ConfigKeys {
     variable_mods: bool,
     precursor_tol: bool,
     quant: bool,
+    xl: bool,
 }
 
 impl ConfigKeys {
@@ -661,12 +611,11 @@ impl ConfigKeys {
             variable_mods: cfg.search.variable_mods.is_some(),
             precursor_tol: cfg.search.precursor_tol.is_some(),
             quant: cfg.quant.tmt.is_some() || cfg.quant.lfq.is_some() || cfg.quant.label.is_some(),
+            xl: cfg.search.xl.is_some(),
         }
     }
 }
 
-/// Apply `s` to the search arguments where neither the command line nor the
-/// config set the value. Returns the summary lines to print.
 pub fn apply(
     s: &SdrfSettings,
     args: &mut crate::SearchArgs,
@@ -685,7 +634,6 @@ pub fn apply(
     };
 
     if cli("spectrum") || cfg.spectrum {
-        // By stem: a converted file (x.mzML for the SDRF's x.raw) is the same run.
         let sdrf_stems: BTreeSet<_> = s.data_files.iter().filter_map(|p| p.file_stem()).collect();
         let extra: Vec<String> = args
             .spectrum
@@ -766,6 +714,20 @@ pub fn apply(
                     applied.push(format!("--label {spec}"));
                 }
             }
+        }
+    }
+    if let Some(v) = &s.xl {
+        if cli("xl") || cfg.xl {
+            kept.push("xl");
+        } else {
+            let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+                .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
+            applied.push(format!(
+                "crosslink search --xl {} ({})",
+                x.name,
+                x.describe_sites()
+            ));
+            args.xl = Some(x);
         }
     }
     args.sdrf_dissociation = s.dissociation;
@@ -958,8 +920,6 @@ mod tests {
         );
     }
 
-    /// Real SDRFs carry wrong accessions next to right names (PXD014415:
-    /// Acetyl with UNIMOD:67) and the reverse; the first that resolves wins.
     #[test]
     fn the_name_or_the_accession_whichever_resolves() {
         let item = |v: &str| ModParam::parse(v).unwrap().item();
@@ -982,7 +942,6 @@ mod tests {
             resolve_data_file(dir.path(), "run1.raw"),
             dir.path().join("run1.mzML")
         );
-        // Missing under every extension: the SDRF's own name, reported later.
         assert_eq!(
             resolve_data_file(dir.path(), "run2.raw"),
             dir.path().join("run2.raw")
@@ -1013,5 +972,73 @@ mod tests {
         assert_eq!(tolerance("20 mmu").unwrap(), "0.02da");
         assert_eq!(norm_header("Comment [ Data File ]"), "comment[data file]");
         assert!(enzyme_of("NT=Pepsin").is_err());
+    }
+
+    const HX: &[&str] = &[
+        "source name",
+        "comment[data file]",
+        "comment[label]",
+        "comment[cross-linker]",
+    ];
+
+    #[test]
+    fn the_crosslinker_is_read_checked_and_must_agree() {
+        let row = |f: &'static str, x: &'static str| -> Vec<&'static str> {
+            vec!["s", f, "label free sample", x]
+        };
+        let dsso = "NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98";
+        let t = sdrf(HX, &[&row("a.raw", dsso), &row("b.raw", dsso)]);
+        let s = parse(&t, Path::new(".")).unwrap();
+        assert_eq!(s.xl.as_deref(), Some(dsso));
+        let t = sdrf(
+            HX,
+            &[&row("a.raw", dsso), &row("b.raw", "NT=DSS;AC=XLMOD:02001")],
+        );
+        let e = parse(&t, Path::new(".")).unwrap_err();
+        assert!(e.contains("cross-linker") && e.contains("differs"), "{e}");
+        let t = sdrf(HX, &[&row("a.raw", "NT=DSS;CL=yes")]);
+        let e = parse(&t, Path::new(".")).unwrap_err();
+        assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
+        let t = sdrf(HX, &[&row("a.raw", "not applicable")]);
+        assert_eq!(parse(&t, Path::new(".")).unwrap().xl, None);
+    }
+
+    #[test]
+    fn the_sdrf_crosslinker_applies_below_the_command_line_and_the_config() {
+        use clap::{CommandFactory, FromArgMatches};
+        let s = SdrfSettings {
+            xl: Some("NT=DSBU;AC=XLMOD:02120;TA=K,nterm".into()),
+            ..Default::default()
+        };
+        let run = |extra: &[&str], yaml: Option<&str>| -> crate::SearchArgs {
+            let base = [
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ];
+            let m = crate::TopCli::command()
+                .try_get_matches_from(base.iter().chain(extra))
+                .unwrap();
+            let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
+            let mut keys = ConfigKeys::default();
+            if let Some(y) = yaml {
+                let c = crate::config::RunConfig::from_yaml_str(y).unwrap();
+                keys = ConfigKeys::of(&c);
+                crate::config::apply(c, &mut a, &m).unwrap();
+            }
+            apply(&s, &mut a, &m, keys).unwrap();
+            a
+        };
+        let x = run(&[], None).xl.unwrap();
+        assert_eq!(x.name, "DSBU");
+        assert_eq!(x.describe_sites(), "K, Protein N-term");
+        assert_eq!(run(&["--xl", "DSS"], None).xl.unwrap().name, "DSS");
+        let cfg = Some("search:\n  xl: DSSO\n");
+        assert_eq!(run(&[], cfg).xl.unwrap().name, "DSSO");
+        assert_eq!(run(&["--xl", "DSS"], cfg).xl.unwrap().name, "DSS");
     }
 }

@@ -1,51 +1,33 @@
-//! Backend-agnostic ONNX session API.
-
 use std::path::Path;
 
 use crate::error::{BackendKind, Error, Result};
 use crate::manifest::ModelManifest;
 use crate::tensor::NamedTensor;
 
-/// Runs one ONNX model. Implementations are behind cargo features (`tract`, …).
 pub trait InferenceBackend: Send {
-    /// Engine kind.
     fn kind(&self) -> BackendKind;
 
-    /// Graph input names in model order.
     fn input_names(&self) -> &[String];
 
-    /// Graph output names in model order.
     fn output_names(&self) -> &[String];
 
-    /// Declared shapes of the graph inputs, parallel to [`Self::input_names`]:
-    /// `None` when the rank is unknown, else one entry per axis with `None`
-    /// for a dynamic axis. Empty when the engine does not expose shapes.
     fn input_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
         Vec::new()
     }
 
-    /// Declared shapes of the graph outputs, as [`Self::input_shapes`].
     fn output_shapes(&self) -> Vec<Option<Vec<Option<usize>>>> {
         Vec::new()
     }
 
-    /// A second handle on the same loaded model (weights shared, not copied),
-    /// for running one model from several threads. `None` when unsupported.
     fn share(&self) -> Option<Box<dyn InferenceBackend>> {
         None
     }
 
-    /// Execute the model. `inputs` are matched by [`NamedTensor::name`].
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>>;
 }
 
-/// Engine settings applied when a model is loaded.
 #[derive(Clone, Debug)]
 pub struct BackendOptions {
-    /// Operator threads inside one `run` call. tract always runs on the
-    /// calling thread and ignores this; ONNX Runtime uses it as the session's
-    /// intra-op pool size (inter-op is fixed at 1). The default, 1, suits
-    /// callers that parallelise across batches with [`OnnxSession::share`].
     pub intra_threads: usize,
 }
 
@@ -55,19 +37,16 @@ impl Default for BackendOptions {
     }
 }
 
-/// A loaded model: optional sidecar manifest + live backend.
 pub struct OnnxSession {
     manifest: Option<ModelManifest>,
     backend: Box<dyn InferenceBackend>,
 }
 
 impl OnnxSession {
-    /// Load weights from `onnx_path` with the given backend.
     pub fn from_onnx(onnx_path: impl AsRef<Path>, backend: BackendKind) -> Result<Self> {
         Self::from_onnx_with(onnx_path, backend, &BackendOptions::default())
     }
 
-    /// [`Self::from_onnx`] with explicit engine settings.
     pub fn from_onnx_with(
         onnx_path: impl AsRef<Path>,
         backend: BackendKind,
@@ -80,12 +59,10 @@ impl OnnxSession {
         })
     }
 
-    /// Load from a JSON manifest (resolves the ONNX path, keeps provenance).
     pub fn from_manifest(manifest_path: impl AsRef<Path>, backend: BackendKind) -> Result<Self> {
         Self::from_manifest_with(manifest_path, backend, &BackendOptions::default())
     }
 
-    /// [`Self::from_manifest`] with explicit engine settings.
     pub fn from_manifest_with(
         manifest_path: impl AsRef<Path>,
         backend: BackendKind,
@@ -111,8 +88,6 @@ impl OnnxSession {
         })
     }
 
-    /// Another session on the same loaded weights (no reload, no copy), so
-    /// worker threads can share one large model.
     pub fn share(&self) -> Result<Self> {
         let backend = self.backend.share().ok_or_else(|| {
             Error::Inference(format!(
@@ -126,32 +101,26 @@ impl OnnxSession {
         })
     }
 
-    /// Sidecar metadata, if loaded via [`Self::from_manifest`].
     pub fn manifest(&self) -> Option<&ModelManifest> {
         self.manifest.as_ref()
     }
 
-    /// Which engine is running.
     pub fn backend_kind(&self) -> BackendKind {
         self.backend.kind()
     }
 
-    /// Graph input names.
     pub fn input_names(&self) -> &[String] {
         self.backend.input_names()
     }
 
-    /// Graph output names.
     pub fn output_names(&self) -> &[String] {
         self.backend.output_names()
     }
 
-    /// Run inference (batched when the leading axis is batch).
     pub fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {
         self.backend.run(inputs)
     }
 
-    /// Convenience: single named input → first output tensor.
     pub fn run_one(&mut self, input: NamedTensor) -> Result<NamedTensor> {
         let outs = self.run(std::slice::from_ref(&input))?;
         outs.into_iter()
@@ -166,11 +135,6 @@ enum Side {
     Output,
 }
 
-/// Check one side of a manifest against the loaded graph. An empty list in the
-/// manifest declares nothing and is not checked. Otherwise the declared names
-/// must be exactly the graph's names (order free), and where both the manifest
-/// and the graph state a shape, the ranks must agree and so must every axis
-/// both fix. A dynamic axis on either side matches any size.
 fn check_manifest_io(
     manifest: &ModelManifest,
     side: Side,
@@ -232,7 +196,6 @@ fn check_manifest_io(
     Ok(())
 }
 
-/// `[?, ?, 8]`: one entry per axis, `?` for a dynamic one.
 fn fmt_shape(shape: &[Option<usize>]) -> String {
     let axes: Vec<String> = shape
         .iter()
@@ -300,9 +263,7 @@ mod tests {
         assert!(err.to_string().contains("nce_"), "{err}");
         let partial = manifest(vec![spec("x", None)]);
         assert!(check_manifest_io(&partial, Side::Input, &graph, &[]).is_err());
-        // Nothing declared: nothing to check.
         assert!(check_manifest_io(&manifest(Vec::new()), Side::Input, &graph, &[]).is_ok());
-        // The output side reads the manifest's outputs, which are empty here.
         assert!(check_manifest_io(&typo, Side::Output, &graph, &[]).is_ok());
     }
 
@@ -322,12 +283,9 @@ mod tests {
             check_manifest_io(&m(Some(vec![None, Some(5)])), Side::Input, &graph, &shapes).is_err()
         );
         assert!(check_manifest_io(&m(Some(vec![None])), Side::Input, &graph, &shapes).is_err());
-        // Unknown graph rank: names are still checked, shapes are not.
         assert!(check_manifest_io(&m(Some(vec![None])), Side::Input, &graph, &[None]).is_ok());
     }
 
-    /// The MS2 output an AlphaPeptDeep export produces: `[batch, sites, 8]`
-    /// with the first two axes dynamic.
     #[test]
     fn dynamic_axes_match_any_size_on_either_side() {
         let graph = ["ms2_intensities".to_string()];
@@ -339,17 +297,13 @@ mod tests {
             check_manifest_io(&m, Side::Output, &graph, &[Some(graph_shape)])
         };
         let ms2 = vec![None, None, Some(8)];
-        // Dynamic in the manifest, static in the graph.
         assert!(check(vec![None, None, None], ms2.clone()).is_ok());
         assert!(check(vec![None, None, Some(8)], ms2.clone()).is_ok());
-        // Static in the manifest, dynamic in the graph.
         assert!(check(vec![Some(4), Some(29), Some(8)], ms2.clone()).is_ok());
-        // Rank mismatch: the shape the export once wrote.
         let err = check(vec![None, None], ms2.clone()).unwrap_err();
         assert!(err.to_string().contains("[?, ?]"), "{err}");
         assert!(err.to_string().contains("[?, ?, 8]"), "{err}");
         assert!(check(vec![None, None, Some(8), None], ms2.clone()).is_err());
-        // Two static axes that differ.
         assert!(check(vec![None, None, Some(4)], ms2).is_err());
     }
 

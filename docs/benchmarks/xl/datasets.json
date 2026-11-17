@@ -1,0 +1,90 @@
+[
+ {
+  "name": "bev_dsso_qe",
+  "raw": "XLpeplib_Beveridge_QEx-HFX_DSSO_stHCD.raw",
+  "fasta": "db/re-analysis_PXD014337.fasta",
+  "xl": "DSSO",
+  "truth": "lib:peplib_Cas9_Beveridge",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2020/07/PXD014337/XLpeplib_Beveridge_QEx-HFX_DSSO_stHCD.raw"
+ },
+ {
+  "name": "bev_dsbu_qe",
+  "raw": "XLpeplib_Beveridge_QEx-HFX_DSBU_stHCD.raw",
+  "fasta": "db/re-analysis_PXD014337.fasta",
+  "xl": "DSBU",
+  "truth": "lib:peplib_Cas9_Beveridge",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2020/07/PXD014337/XLpeplib_Beveridge_QEx-HFX_DSBU_stHCD.raw"
+ },
+ {
+  "name": "mat_dsso",
+  "raw": "20210203_QExHFX3_RSLC10_DSSO_mainlib_rep1.raw",
+  "fasta": "db/peplib.fasta",
+  "xl": "DSSO",
+  "truth": "lib:main_library",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2022/05/PXD029252/20210203_QExHFX3_RSLC10_DSSO_mainlib_rep1.raw"
+ },
+ {
+  "name": "cla_b1",
+  "raw": "L1_20210806_MxR_FDR_firstbatch_DSSOplate_D4.raw",
+  "fasta": "db/all_320_proteins_from_first_second_third_fourth_fifth_batch.fasta",
+  "xl": "DSSO",
+  "truth": "clasen:batch1",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2024/08/PXD042173/L1_20210806_MxR_FDR_firstbatch_DSSOplate_D4.raw"
+ },
+ {
+  "name": "mat_dsbu",
+  "raw": "20210122_QExHFX2_RSLC3_DSBU_mainlib_rep1.raw",
+  "fasta": "db/peplib.fasta",
+  "xl": "DSBU",
+  "truth": "lib:main_library",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2022/05/PXD029252/20210122_QExHFX2_RSLC3_DSBU_mainlib_rep1.raw"
+ },
+ {
+  "name": "mat_dsbso",
+  "raw": "20210409_QExHFX2_RSLC3_DSBSO_enrichable-lib_rep1.raw",
+  "fasta": "db/peplib.fasta",
+  "xl": "DSBSO",
+  "truth": "lib:enrichable_library",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2022/05/PXD029252/20210409_QExHFX2_RSLC3_DSBSO_enrichable-lib_rep1.raw"
+ },
+ {
+  "name": "mat_dsso_hek",
+  "raw": "20210203_QExHFX3_RSLC10__DSSO_mainlib_1_5HEK_ctrl.raw",
+  "fasta": "db/Ribosome_EColi_SG_AND_human_abundant500excl-ribosomal_671sequences.fasta",
+  "xl": "DSSO",
+  "truth": "lib:main_library",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2022/05/PXD029252/20210203_QExHFX3_RSLC10__DSSO_mainlib_1_5HEK_ctrl.raw"
+ },
+ {
+  "name": "bev_dsso_lumos",
+  "raw": "XLpeplib_Beveridge_Lumos_DSSO_stHCD-MS2.raw",
+  "fasta": "db/re-analysis_PXD014337.fasta",
+  "xl": "DSSO",
+  "truth": "lib:peplib_Cas9_Beveridge",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2020/07/PXD014337/XLpeplib_Beveridge_Lumos_DSSO_stHCD-MS2.raw"
+ },
+ {
+  "name": "cla_b4",
+  "raw": "L1_20220110_MxR_FDR_fourthbatch_DSSOplate_D5_D6.raw",
+  "fasta": "db/all_320_proteins_from_first_second_third_fourth_fifth_batch.fasta",
+  "xl": "DSSO",
+  "truth": "clasen:batch4",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2024/08/PXD052022/L1_20220110_MxR_FDR_fourthbatch_DSSOplate_D5_D6.raw"
+ },
+ {
+  "name": "mat_dsso_eclipse",
+  "raw": "20220215_Eclipse_LC6_PepMap50cm-cartridge_mainlib_DSSO_3CV_stepHCD_OT_001.raw",
+  "fasta": "db/peplib.fasta",
+  "xl": "DSSO",
+  "truth": "lib:main_library",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2022/05/PXD029252/20220215_Eclipse_LC6_PepMap50cm-cartridge_mainlib_DSSO_3CV_stepHCD_OT_001.raw"
+ },
+ {
+  "name": "bev_dss_qe",
+  "raw": "XLpeplib_Beveridge_QEx-HFX_DSS_R1.raw",
+  "fasta": "db/re-analysis_PXD014337.fasta",
+  "xl": "DSS",
+  "truth": "lib:peplib_Cas9_Beveridge",
+  "url": "https://ftp.ebi.ac.uk/pride/data/archive/2020/07/PXD014337/XLpeplib_Beveridge_QEx-HFX_DSS_R1.raw"
+ }
+]

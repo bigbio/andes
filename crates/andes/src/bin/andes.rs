@@ -1,13 +1,3 @@
-//! andes: end-to-end peptide-spectrum database search.
-//!
-//! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
-//! tryptic database search and writes output
-//! in Percolator `.pin` format (and optionally `.tsv` format).
-//!
-//! Format dispatch by `--spectrum` extension: `.mzML`/`.mzml` → `MzMLReader`;
-//! `.d` → `TimsTofReader` (native Bruker timsTOF, only under `--features
-//! timstof`); otherwise `MgfReader` (default reader).
-
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -56,6 +46,10 @@ mod train;
 mod train_intensity;
 #[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
+#[path = "andes/xl_fdr.rs"]
+mod xl_fdr;
+#[path = "andes/xl_run.rs"]
+mod xl_run;
 
 use crate::cli::{
     parse_charge_range, parse_isotope_error_range, parse_precursor_cal, parse_precursor_tol,
@@ -67,10 +61,6 @@ use crate::train_intensity::{
     run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
-/// Emit a one-line search-progress update after each scored chunk: cumulative
-/// spectra scored, throughput, and elapsed time. The streaming search has no
-/// upfront total for mzML/MGF, so this reports a running count + rate rather than
-/// a percentage (use it to see the search is live and how fast it is going).
 fn report_search_progress(scored: usize, start: std::time::Instant) {
     let secs = start.elapsed().as_secs_f64();
     let rate = if secs > 0.0 {
@@ -81,7 +71,6 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
     eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
 }
 
-// The variants are boxed to keep `Command` compact (clippy `large_enum_variant`).
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Train a scoring model from externally labelled, high-confidence PSMs
@@ -137,12 +126,9 @@ const AFTER_LONG_HELP: &str = "Example:
 
 The full reference is DOCS.md.";
 
-// Top-level CLI. Without a subcommand, the flattened `SearchArgs` drive the
-// search.
 #[derive(Parser, Debug)]
 #[command(
     name = "andes",
-    // `--version` / `-V`: the build that produced a result.
     version = env!("CARGO_PKG_VERSION"),
     about = "andes: peptide identification and quantification from MS/MS spectra \
              (database search, rescoring, protein groups, TMT, label-free, SILAC)",
@@ -162,8 +148,6 @@ struct TopCli {
 fn main() -> ExitCode {
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
-    // Parse via get_matches so we can query each flag's ValueSource (for the
-    // --config merge: an explicit CLI flag must override the YAML value).
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top =
         <TopCli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
@@ -173,7 +157,6 @@ fn main() -> ExitCode {
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         Some(Command::Quant(mut cmd)) => {
-            // `quant finalize --config`: the search's database keys.
             if let cli::QuantCommand::Finalize(a) = &mut cmd {
                 let sub = matches
                     .subcommand_matches("quant")
@@ -187,7 +170,6 @@ fn main() -> ExitCode {
             quant_cmd::run_quant_command(cmd)
         }
         Some(Command::Inference(mut args)) => {
-            // `inference --config`: the search's database keys.
             if let Some(Err(e)) = matches
                 .subcommand_matches("inference")
                 .map(|m| config::apply_protein_config(&mut args.proteins, m))
@@ -199,7 +181,6 @@ fn main() -> ExitCode {
         }
         Some(Command::Percolator(args)) => run_native_percolator(*args),
         None => {
-            // --config: fill any parameter the user did not type on the CLI.
             let mut cfg_missed_cleavages = false;
             let mut cfg_keys = sdrf::ConfigKeys::default();
             if let Some(cfg_path) = top.search.config.clone() {
@@ -212,7 +193,6 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
-            // --sdrf: fill what neither the command line nor --config set.
             if let Some(sdrf_path) = top.search.sdrf.clone() {
                 match sdrf::read(&sdrf_path)
                     .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
@@ -228,12 +208,6 @@ fn main() -> ExitCode {
                 eprintln!("error: {e}");
                 return ExitCode::from(2);
             }
-            // Record whether the user set max missed cleavages, on the CLI or in
-            // the --config file. `--glyco` raises the floor to 3, which costs real
-            // memory (measured +4.4 GB on a 20k-protein human FASTA), so an
-            // explicit lower value must be allowed to win. The default (2) is
-            // itself a plausible explicit value, so comparing against it cannot
-            // distinguish the cases — only the ValueSource and the config can.
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
                 matches.value_source("max_missed_cleavages"),
                 cfg_missed_cleavages,
@@ -250,16 +224,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // --output-pin is required UNLESS rescoring is set: rescore derives
-            // the PIN path from the report base (or a temporary PIN under
-            // --keep-pin false), so a PIN path is not mandatory in that mode.
             if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
-            // --psm-fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
-            // start one on their own. Warn (don't silently launch a backend) if set
-            // without an explicit --rescore / --rescore-native.
             if (search.psm_fdr.is_some() || search.pep.is_some())
                 && !search.rescore
                 && !search.rescore_native
@@ -295,12 +263,6 @@ fn run_native_percolator(args: cli::PercolatorArgs) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-/// Make Thermo `.raw` reading work with zero setup when the runtime is bundled.
-///
-/// If a .NET runtime ships next to the executable (`<exe_dir>/dotnet`, as the
-/// release archives do), point `DOTNET_ROOT` at it so opening a `.raw` "just
-/// works". An existing `DOTNET_ROOT` or a system-wide .NET install is left
-/// untouched (it takes precedence). No effect on mzML/MGF, which never load .NET.
 #[cfg(feature = "thermo")]
 fn configure_bundled_dotnet() {
     if std::env::var_os("DOTNET_ROOT").is_some() {
@@ -320,19 +282,12 @@ fn configure_bundled_dotnet() {
     }
 }
 
-/// True when `flag` appears literally in the process arguments. Used to tell a
-/// user-supplied value from a clap default.
 fn arg_present(flag: &str) -> bool {
     std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
-/// Set in `main`: did the user set max missed cleavages themselves, with
-/// `--max-missed-cleavages` or `search.max_missed_cleavages` in `--config`?
-/// See the glyco floor in `search::run`.
 static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// A typed CLI value or a config-file value counts as explicit; clap's
-/// default does not.
 fn missed_cleavages_explicit(
     cli_source: Option<clap::parser::ValueSource>,
     in_config: bool,

@@ -1,33 +1,13 @@
-//! How much memory this process may actually use.
-//!
-//! `MemAvailable` in `/proc/meminfo` is a NODE-wide figure. Under SLURM, Docker,
-//! Kubernetes or a systemd slice the process sees the whole host while a cgroup
-//! caps what it is allowed to touch, so planning against `MemAvailable` there
-//! plans against memory that is not ours: a `--mem=240G` SLURM job on a 641 GiB
-//! node budgeted 384 GiB of candidate memory and was OOM-killed.
-//!
-//! The effective figure is therefore `min(MemAvailable, applicable cgroup limit)`,
-//! and the budget records which of the two it came from.
-
 use std::path::Path;
 
-/// A cgroup limit at or above this is treated as "no limit": cgroup v1 writes a
-/// page-aligned `LONG_MAX` sentinel (commonly 9223372036854771712) for unlimited,
-/// and no real allowance is a petabyte.
-const UNLIMITED_MIN_BYTES: u64 = 1 << 50; // 1 PiB
+const UNLIMITED_MIN_BYTES: u64 = 1 << 50;
 
-/// Where a memory budget came from, so a cluster log distinguishes the node's
-/// free memory from this job's allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemorySource {
-    /// `MemAvailable` in `/proc/meminfo` — the whole node.
     NodeAvailable,
-    /// A cgroup memory limit (v2 `memory.max`/`memory.high`, or v1
-    /// `memory.limit_in_bytes`) that is lower than the node figure.
     CgroupLimit,
 }
 
-/// The memory this process may plan against, and where the number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemoryBudget {
     pub(crate) bytes: u64,
@@ -49,10 +29,6 @@ fn parse_meminfo_available(meminfo: &str) -> Option<u64> {
     None
 }
 
-/// The memory limit of the cgroup this process belongs to, in bytes.
-///
-/// `None` on non-Linux, when the cgroup files cannot be read, or when nothing in
-/// the cgroup chain sets a limit.
 pub(crate) fn cgroup_memory_limit() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -65,18 +41,6 @@ pub(crate) fn cgroup_memory_limit() -> Option<u64> {
     }
 }
 
-/// Resolve the cgroup memory limit from the contents of `/proc/self/cgroup` and a
-/// file reader, so it can be unit-tested without a real cgroup.
-///
-/// `proc_self_cgroup` lines are `hierarchy:controllers:path`. An empty controller
-/// list marks the cgroup v2 unified line (`0::/some/path`), read under
-/// `/sys/fs/cgroup`; a list containing `memory` marks the v1 memory controller
-/// (`7:memory:/some/path`), read under `/sys/fs/cgroup/memory`.
-///
-/// A cgroup's effective limit is the tightest one along its chain of ancestors —
-/// SLURM commonly sets the limit on a parent scope and leaves the leaf unlimited —
-/// so every level from the leaf up to the mount root is read and the minimum of
-/// everything found is returned.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn cgroup_memory_limit_from(
     proc_self_cgroup: &str,
@@ -136,8 +100,6 @@ fn min_limit_over_chain<F: Fn(&Path) -> Option<String>>(
     best
 }
 
-/// Parse one cgroup limit file. `None` for unlimited (`max`, the v1 sentinel, or
-/// anything implausibly large), for zero, and for anything unparseable.
 fn parse_limit_value(raw: &str) -> Option<u64> {
     let text = raw.trim();
     if text.is_empty() || text == "max" {
@@ -150,11 +112,6 @@ fn parse_limit_value(raw: &str) -> Option<u64> {
     Some(bytes)
 }
 
-/// The memory this process may plan against: the node's `MemAvailable` capped by
-/// any cgroup limit that applies to it.
-///
-/// `None` when neither figure is available (non-Linux, restricted sandbox);
-/// callers should then keep their conservative default.
 pub(crate) fn available_memory_budget() -> Option<MemoryBudget> {
     budget_from(meminfo_available_bytes(), cgroup_memory_limit())
 }
@@ -189,8 +146,6 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
-        // `Path::join` uses the platform separator, so normalise to `/`
-        // before the lookup; the keys above are written Linux-style.
         move |p: &Path| map.get(&p.to_str()?.replace('\\', "/")).cloned()
     }
 
@@ -271,7 +226,6 @@ mod tests {
 
     #[test]
     fn limit_on_a_parent_cgroup_is_found_when_the_leaf_has_none() {
-        // SLURM sets --mem on the job scope; the step leaf is left unlimited.
         let limit = cgroup_memory_limit_from(
             "0::/slurm/uid_1000/job_42/step_0\n",
             fake_fs(&[
@@ -290,12 +244,10 @@ mod tests {
 
     #[test]
     fn budget_is_the_minimum_of_node_memory_and_the_cgroup_limit() {
-        // The reported SLURM failure: 641 GiB node, 240 GiB allowance.
         let budget = budget_from(Some(641 * GIB), Some(240 * GIB)).unwrap();
         assert_eq!(budget.bytes, 240 * GIB);
         assert_eq!(budget.source, MemorySource::CgroupLimit);
 
-        // A cgroup limit above the node figure never inflates the budget.
         let budget = budget_from(Some(8 * GIB), Some(64 * GIB)).unwrap();
         assert_eq!(budget.bytes, 8 * GIB);
         assert_eq!(budget.source, MemorySource::NodeAvailable);

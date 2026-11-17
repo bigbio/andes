@@ -38,11 +38,9 @@ def grouped(ax, data, datasets, ylabel, fmt, log=False):
     width = 0.8 / len(engines)
     for i, eng in enumerate(engines):
         xs = [j + (i - (len(engines) - 1) / 2) * width for j in range(len(datasets))]
-        vals = [v if v is not None else 0 for v in data[eng]]
-        bars = ax.bar(xs, vals, width * 0.92, label=eng, color=COLOURS[eng])
-        for bar, v in zip(bars, data[eng]):
-            if v is None:
-                continue
+        pts = [(x, v) for x, v in zip(xs, data[eng]) if v is not None]
+        bars = ax.bar([x for x, _ in pts], [v for _, v in pts], width * 0.92, label=eng, color=COLOURS[eng])
+        for bar, (_, v) in zip(bars, pts):
             ax.annotate(fmt(v), (bar.get_x() + bar.get_width() / 2, bar.get_height()),
                         ha="center", va="bottom", fontsize=7.5, color=INK,
                         xytext=(0, 2), textcoords="offset points")
@@ -105,11 +103,13 @@ def main(src, out_dir):
     save(fig, out, "cost.svg")
 
     # The same measurements relative to Comet (= 100%), same machine and rescoring.
-    names = [x.split("\n")[0] for x in ds]
+    keep = [i for i in range(len(ds)) if all(d[k]["andes"][i] is not None and d[k]["Comet 2025.01"][i] is not None
+                                             for k in ("wall_s", "cpu_s", "peak_gb"))]
+    names = [ds[i].split("\n")[0] for i in keep]
     panels = (("wall_s", "Wall time", True), ("cpu_s", "CPU time", True), ("peak_gb", "Peak memory", False))
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.4), sharey=True)
     for ax, (key, title, show_x) in zip(axes, panels):
-        pct = [100 * a / c for a, c in zip(d[key]["andes"], d[key]["Comet 2025.01"])]
+        pct = [100 * d[key]["andes"][i] / d[key]["Comet 2025.01"][i] for i in keep]
         ys = range(len(names))
         ax.barh(ys, pct, color=COLOURS["andes"], height=0.62, zorder=3)
         ax.axvline(100, color=COLOURS["Comet 2025.01"], lw=2, zorder=4)

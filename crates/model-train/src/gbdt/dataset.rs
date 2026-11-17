@@ -1,13 +1,3 @@
-//! One-pass GBDT training dataset builder.
-//!
-//! Given a list of high-confidence PSMs (each carrying a reference spectrum,
-//! peptide sequence string, and charge), build a row-major feature matrix, a
-//! binary label vector, and a group-id vector suitable for [`super::train::Dataset`].
-//!
-//! No peptide identity is ever consulted during feature extraction — features
-//! are spectrum-only.  The peptide sequence is only used for theoretical-ion
-//! labeling (signal vs. noise ground truth).
-
 use crate::gbdt::labels::label_peaks;
 use crate::gbdt::train::Dataset;
 use model::peptide::Peptide;
@@ -18,12 +8,8 @@ use scoring_crate::peak_features::{
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
 
-/// One input PSM row for dataset building.
 pub struct PsmRow<'a> {
     pub spectrum: &'a Spectrum,
-    /// The identified peptide, INCLUDING modifications. The mods are used only
-    /// for mod-aware theoretical-ion labeling (signal vs. noise ground truth);
-    /// feature extraction stays peptide-agnostic.
     pub peptide: &'a Peptide,
     pub charge: u8,
 }
@@ -37,13 +23,6 @@ fn fnv1a_32(data: &[u8]) -> u32 {
     h
 }
 
-/// Compute a stable group id from a stripped peptide sequence.
-///
-/// Every row of the same backbone shares one group id regardless of charge
-/// state or modifications, and I/L are treated as the same residue (they are
-/// isobaric, so `PEPTIDE` and `PEPTLDE` are the same spectral evidence). This
-/// keeps the group-disjoint train/validation split in
-/// [`super::train::train_gbdt`] peptide-disjoint.
 pub(crate) fn group_id(peptide_seq: &str) -> u32 {
     let buf: Vec<u8> = peptide_seq
         .bytes()
@@ -52,14 +31,6 @@ pub(crate) fn group_id(peptide_seq: &str) -> u32 {
     fnv1a_32(&buf)
 }
 
-/// Build a GBDT [`Dataset`] from `rows` using `scorer` to rank peaks.
-///
-/// For each PSM:
-/// 1. Build a [`ScoredSpectrum`] to get the ranked, filtered peak list.
-/// 2. Compute per-spectrum feature context via [`PeakFeatureCtx::for_spectrum`].
-/// 3. Extract per-peak features via [`extract_peak_features`].
-/// 4. Label peaks as signal (1) or noise (0) via theoretical-ion matching.
-/// 5. Accumulate into the flat `x`, `y`, `groups` vectors.
 pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
     let n_features = N_FEATURES;
 
@@ -88,12 +59,8 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         );
 
         let features = extract_peak_features(active_peaks, active_ranks, &ctx);
-        // Mod-aware labels at the SAME fragment tolerance the matcher uses
-        // (param.mme), not the old hardcoded 0.5 Da.
         let labels = label_peaks(active_peaks, &[row.peptide], row.charge, &param.mme);
 
-        // Group by unmodified sequence (prevents train/val leakage of the same
-        // backbone across charge states and peptidoforms).
         let seq: String = row
             .peptide
             .residues
@@ -242,9 +209,6 @@ mod tests {
 
     #[test]
     fn build_dataset_groups_one_peptide_across_charge_states() {
-        // The same backbone observed at 2+ and 3+ must share one group id so
-        // the group-disjoint train/validation split cannot place it on both
-        // sides.
         let scorer = make_scorer();
         let peaks = vec![
             (200.0_f64, 100.0_f32),

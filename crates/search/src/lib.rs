@@ -1,10 +1,3 @@
-//! Peptide database search engine: candidate enumeration, precursor matching,
-//! scoring, and PSM aggregation.
-//!
-//! Contains candidate generation, search index, precursor matching, PSM
-//! structures, and the match engine.
-//! Depends on `model` and `scoring` crates.
-
 pub mod candidate_gen;
 pub mod candidate_index;
 mod chimeric_features;
@@ -29,6 +22,7 @@ pub mod search_index;
 pub mod search_params;
 pub mod site_evidence;
 pub mod tdc;
+pub mod xl_search;
 
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{decoy_db, normalize_decoy_prefix, DEFAULT_DECOY_PREFIX};

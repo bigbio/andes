@@ -1,7 +1,3 @@
-//! Pin commonly-used modification monoisotopic mass deltas, as the bundled
-//! UNIMOD table gives them to a modification list, to UniMod
-//! (https://www.unimod.org) reference values.
-
 use model::mod_spec::parse_mod_list;
 use model::modification::{ModLocation, ResidueSpec};
 

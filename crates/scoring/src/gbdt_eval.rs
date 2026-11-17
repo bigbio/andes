@@ -1,11 +1,3 @@
-//! Hand-rolled struct-of-arrays GBDT evaluator (zero native deps).
-//!
-//! Decodes the `AGBD` v2 blob (produced offline by `training/gbdt/transcode.py`
-//! from a LightGBM binary classifier + scikit-learn IsotonicRegression) and
-//! evaluates it on a peptide-AGNOSTIC per-peak feature vector
-//! (`crate::peak_features`). Output is `log(s/(1-s))`, the additive LLR term the
-//! rank scorer folds in (`scored_spectrum`).
-
 use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -15,11 +7,8 @@ use thiserror::Error;
 const MAGIC: &[u8; 4] = b"AGBD";
 const FORMAT_VERSION: u32 = 2;
 const FLAG_SIGMOID: u32 = 1;
-/// Upper bounds on the feature-name trailer, checked before allocating.
 const MAX_FEATURES: u32 = 100_000;
 const MAX_NAME_LEN: u32 = 1024;
-/// Clamp for the calibrated probability before taking the logit, so the LLR
-/// term stays finite (a degenerate 0 or 1 would give ±inf).
 const PROB_EPS: f32 = 1e-6;
 
 #[derive(Debug, Error)]
@@ -47,9 +36,6 @@ pub enum GbdtError {
     },
 }
 
-/// Reject implausibly large counts from a corrupt/version-skewed blob before
-/// allocating, so decoding fails cleanly instead of OOM-aborting. Generous
-/// bounds — a real per-peak GBDT is far smaller.
 fn checked_count(n: u32, what: &str, max: u32) -> Result<usize, GbdtError> {
     if n > max {
         return Err(GbdtError::Malformed(format!(
@@ -59,25 +45,18 @@ fn checked_count(n: u32, what: &str, max: u32) -> Result<usize, GbdtError> {
     Ok(n as usize)
 }
 
-/// One regression tree in struct-of-arrays layout. All vecs have length
-/// `n_nodes`; node 0 is the root.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
-    pub feature: Vec<i32>, // -1 => leaf
+    pub feature: Vec<i32>,
     pub threshold: Vec<f32>,
     pub left: Vec<i32>,
     pub right: Vec<i32>,
-    pub value: Vec<f32>,       // leaf output
-    pub default_left: Vec<u8>, // 1 => NaN feature descends left
+    pub value: Vec<f32>,
+    pub default_left: Vec<u8>,
 }
 
 impl Tree {
     pub fn eval(&self, x: &[f32]) -> f32 {
-        // Assumes a structurally-validated tree (see `Tree::validate`, enforced
-        // by `from_bytes`): feature/child arrays are consistent and internal
-        // children are valid in-range indices, so direct indexing cannot panic
-        // and traversal terminates. Models built in-process by the trainer
-        // satisfy this by construction.
         let mut node = 0usize;
         loop {
             let feat = self.feature[node];
@@ -98,11 +77,6 @@ impl Tree {
         }
     }
 
-    /// Validate structural invariants so `eval` can index children without
-    /// bounds checks: all SoA vecs share one length n>=1; every node is either
-    /// a leaf (feature < 0) or an internal node whose left/right children are
-    /// valid indices in [0, n). (Leaf child links are not followed by `eval`,
-    /// so they are unconstrained.)
     fn validate(&self) -> Result<(), GbdtError> {
         let n = self.feature.len();
         if n == 0 {
@@ -118,11 +92,9 @@ impl Tree {
                 "tree SoA arrays have mismatched lengths".into(),
             ));
         }
-        #[allow(clippy::needless_range_loop)] // indexing multiple parallel arrays by node index
+        #[allow(clippy::needless_range_loop)]
         for node in 0..n {
             if self.feature[node] >= 0 {
-                // internal node: children must be valid indices and strictly
-                // greater (guarantees acyclicity for pre-order/DFS layout)
                 for child in [self.left[node], self.right[node]] {
                     if child < 0 || (child as usize) >= n {
                         return Err(GbdtError::Malformed(format!(
@@ -144,25 +116,18 @@ impl Tree {
 #[derive(Debug, Clone)]
 pub struct GbdtPeakModel {
     pub n_features: u32,
-    /// Ordered feature names, one per feature (`feature_names.len() == n_features`);
-    /// index `i` is the feature the tree splits call `i`. Written in the blob's
-    /// trailer and checked against the extractor by [`Self::validate_features`].
     pub feature_names: Vec<String>,
     pub apply_sigmoid: bool,
     pub trees: Vec<Tree>,
     pub iso_x: Vec<f32>,
     pub iso_y: Vec<f32>,
-    /// `trees` repacked for evaluation, built on first use. Derived from `trees`;
-    /// construct with `Default::default()`.
     pub packed: std::sync::OnceLock<PackedTrees>,
 }
 
-/// Placeholder names `f0..f{n-1}` for a model that is not bound to an extractor.
 pub fn indexed_feature_names(n: u32) -> Vec<String> {
     (0..n).map(|i| format!("f{i}")).collect()
 }
 
-/// Equality is over the model itself, not whether its evaluation cache is built.
 impl PartialEq for GbdtPeakModel {
     fn eq(&self, other: &Self) -> bool {
         self.n_features == other.n_features
@@ -174,12 +139,8 @@ impl PartialEq for GbdtPeakModel {
     }
 }
 
-/// High bit of [`PackedNode::right`]: a NaN feature value descends left.
 const DEFAULT_LEFT_BIT: u32 = 1 << 31;
 
-/// One tree node in 16 bytes, so a node visit touches one cache line instead of
-/// the five arrays of [`Tree`]. `value` is the threshold of an internal node and
-/// the output of a leaf (`feature < 0`).
 #[derive(Debug, Clone, Copy)]
 struct PackedNode {
     feature: i32,
@@ -188,14 +149,10 @@ struct PackedNode {
     right: u32,
 }
 
-/// Every tree of a model as packed nodes; see [`GbdtPeakModel::packed`].
 #[derive(Debug, Clone, Default)]
 pub struct PackedTrees {
     trees: Vec<Box<[PackedNode]>>,
-    /// The same trees in [`PerfectTree`] layout for the batched walk; `None` for a
-    /// tree deeper than [`PERFECT_MAX_DEPTH`], which keeps the node walk.
     perfect: Vec<Option<PerfectTree>>,
-    /// One more than the largest feature index any tree splits on (1 when none).
     n_features: usize,
 }
 
@@ -242,15 +199,10 @@ impl PackedTrees {
     }
 }
 
-/// Deepest tree given the [`PerfectTree`] layout (4096 leaves); deeper trees keep
-/// the node walk.
 const PERFECT_MAX_DEPTH: u32 = 12;
 
-/// Rows walked through a [`PerfectTree`] together.
 const PERFECT_LANES: usize = 4;
 
-/// One internal node of a [`PerfectTree`]: the split threshold and the feature
-/// index, whose high bit ([`DEFAULT_LEFT_BIT`]) sends a NaN value left.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct PerfectNode {
@@ -259,7 +211,6 @@ struct PerfectNode {
 }
 
 impl PerfectNode {
-    /// The comparison [`eval_packed`] makes at this node.
     #[inline(always)]
     fn goes_left(self, x: &[f32]) -> bool {
         let v = x
@@ -270,11 +221,6 @@ impl PerfectNode {
     }
 }
 
-/// A tree re-laid out as a complete binary tree of its maximum depth, internal
-/// nodes in breadth-first order (children of `k` at `2k+1` and `2k+2`), so a walk
-/// is `depth` index updates with no data-dependent branch. A leaf above the
-/// bottom level is pushed down: every node below it returns its value whichever
-/// way it compares, so each row still lands on the value [`eval_packed`] returns.
 #[derive(Debug, Clone)]
 struct PerfectTree {
     depth: u32,
@@ -293,8 +239,6 @@ impl PerfectTree {
                     .max(depth(nodes, (n.right & !DEFAULT_LEFT_BIT) as usize))
             }
         }
-        // Fill the subtree at `slot` (level `level`) from packed node `node`; a
-        // leaf reached above the bottom level fills its whole subtree.
         fn fill(t: &mut PerfectTree, nodes: &[PackedNode], slot: usize, node: usize, level: u32) {
             let n = nodes[node];
             if level == t.depth {
@@ -338,11 +282,6 @@ impl PerfectTree {
         Some(t)
     }
 
-    /// Add this tree's leaf value to `out[r]` for every row `r`.
-    ///
-    /// [`PERFECT_LANES`] rows walk the tree together, one level per step, so their
-    /// independent loads and comparisons overlap. The last group repeats the last
-    /// row to fill its lanes and keeps only the real rows' results.
     fn add_to(&self, rows: &[&[f32]], out: &mut [f32]) {
         let n = rows.len();
         let first_leaf = self.nodes.len() as u32;
@@ -363,34 +302,17 @@ impl PerfectTree {
     }
 }
 
-/// The batched walk of [`PerfectTree`]s on AVX2: eight rows per vector, the
-/// node and feature loads as gathers. The rows of a block are copied into a
-/// feature-major table first, so a feature value of a row is one gather of
-/// `feature * rows + row`. Every row still adds its leaf value to its sum in
-/// tree order, so the sums are bit-identical to the scalar walk.
 #[cfg(target_arch = "x86_64")]
 mod simd {
     use super::{eval_packed, PackedTrees, PerfectTree, DEFAULT_LEFT_BIT};
     use std::arch::x86_64::*;
 
-    /// Rows per block: the block's feature table (about 17 KB for 17
-    /// features) and one tree stay in the L1 cache while the block's rows
-    /// walk the tree.
     const BLOCK: usize = 256;
-    /// Row vectors walked together, so their gathers overlap.
     const GROUPS: usize = 4;
-    /// Rows per step.
     const STEP: usize = 8 * GROUPS;
 
-    /// Adds every tree's value for every row to `out` (zeros on entry), in
-    /// tree order.
-    ///
-    /// # Safety
-    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn add_all(packed: &PackedTrees, rows: &[&[f32]], out: &mut [f32]) {
-        // The feature table is rebuilt for every block; its buffer is kept per
-        // thread so the hot path allocates once, not on every call.
         // SAFETY: the caller guarantees AVX2, as `add_all_with` requires.
         TABLE.with(|t| unsafe { add_all_with(packed, rows, out, &mut t.borrow_mut()) })
     }
@@ -399,10 +321,6 @@ mod simd {
         static TABLE: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    /// [`add_all`] with the feature-table buffer passed in.
-    ///
-    /// # Safety
-    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     unsafe fn add_all_with(
         packed: &PackedTrees,
@@ -442,8 +360,6 @@ mod simd {
         }
     }
 
-    /// Walks rows `row0..row0 + STEP` of the feature table `xs` (`n_pad` rows
-    /// per feature) down `p` and adds the leaf values to `acc[row0..]`.
     #[inline]
     #[target_feature(enable = "avx2")]
     unsafe fn walk(p: &PerfectTree, xs: *const f32, n_pad: i32, row0: usize, acc: *mut f32) {
@@ -459,7 +375,6 @@ mod simd {
         }
         for _ in 0..p.depth {
             for g in 0..GROUPS {
-                // A node is `{ threshold: f32, feature: u32 }`: 8 bytes.
                 let threshold = _mm256_i32gather_ps::<8>(nodes as *const f32, idx[g]);
                 let feature = _mm256_i32gather_epi32::<8>(nodes.add(1), idx[g]);
                 let at = _mm256_add_epi32(
@@ -472,7 +387,6 @@ mod simd {
                 let nan_left =
                     _mm256_and_ps(nan, _mm256_castsi256_ps(_mm256_srai_epi32::<31>(feature)));
                 let left = _mm256_castps_si256(_mm256_or_ps(le, nan_left));
-                // 2 * idx + 2 - 1 for a left child (the mask is -1), 2 * idx + 2 otherwise.
                 idx[g] = _mm256_add_epi32(
                     _mm256_add_epi32(idx[g], idx[g]),
                     _mm256_add_epi32(two, left),
@@ -488,8 +402,6 @@ mod simd {
     }
 }
 
-/// [`Tree::eval`] on packed nodes: the same comparisons in the same order, so the
-/// result is bit-identical.
 #[inline]
 fn eval_packed(nodes: &[PackedNode], x: &[f32]) -> f32 {
     let mut i = 0usize;
@@ -622,17 +534,6 @@ impl GbdtPeakModel {
         b
     }
 
-    /// Enforce the feature contract: the blob's ordered feature names must equal
-    /// the names of the in-process extractor for this model role, position by
-    /// position. A skewed or reordered blob otherwise scores plausibly: `eval`
-    /// reads a missing feature slot as `NaN` and a permuted feature as a
-    /// different quantity, yielding a finite but meaningless score with no
-    /// error. Call this once at load (see `model-train`'s store reader).
-    ///
-    /// A count difference is reported as [`GbdtError::FeatureCountMismatch`],
-    /// otherwise the first differing position as
-    /// [`GbdtError::FeatureNameMismatch`]. `kind` is a short role label used
-    /// only in the error message (`"peak"`, `"frag-intensity"`, `"rich-ion"`).
     pub fn validate_features(
         &self,
         expected: &[&str],
@@ -659,13 +560,6 @@ impl GbdtPeakModel {
         Ok(())
     }
 
-    /// Raw regression output: sum of all tree leaf values, with NO sigmoid
-    /// activation and NO isotonic calibration applied.
-    ///
-    /// Use this when the model was trained as a pure regressor (e.g. for
-    /// fragment intensity prediction) and the caller wants the uncalibrated
-    /// score directly. For the classifier path (signal/noise scoring) use
-    /// [`predict_logit`] or [`predict_proba`] instead.
     fn packed(&self) -> &PackedTrees {
         self.packed
             .get_or_init(|| PackedTrees::from_trees(&self.trees))
@@ -675,18 +569,6 @@ impl GbdtPeakModel {
         self.packed().trees.iter().map(|t| eval_packed(t, x)).sum()
     }
 
-    /// Batched `predict_value`: trees OUTER, rows INNER.
-    ///
-    /// The per-row loop re-streams the entire ensemble for every row, so a 300-tree
-    /// ~790 KB model is pulled through L2/L3 once per fragment ion (~52 per PSM).
-    /// Walking trees on the outside instead pulls each ~2.6 KB tree into L1 once and
-    /// reuses it across every row, cutting cache traffic by roughly the row count.
-    /// The K-sweep evidence says this walk is memory-residency-bound, not ALU-bound:
-    /// dropping 300 -> 100 trees is a 3x work reduction but bought -41% wall.
-    ///
-    /// BIT-IDENTICAL to calling `predict_value` per row: `sum()` over f32 folds left
-    /// from 0.0 in tree order, and accumulating `out[r] += tree.eval(row_r)` visits
-    /// the trees in that same order, so every partial sum matches exactly.
     pub fn predict_value_batch(&self, rows: &[&[f32]], out: &mut [f32]) {
         assert_eq!(
             rows.len(),
@@ -713,8 +595,6 @@ impl GbdtPeakModel {
         }
     }
 
-    /// Batched [`predict_logit`]; see [`Self::predict_value_batch`] for why this is
-    /// faster and why it is bit-identical.
     pub fn predict_logit_batch(&self, rows: &[&[f32]], out: &mut [f32]) {
         self.predict_value_batch(rows, out);
         for o in out.iter_mut() {
@@ -729,7 +609,6 @@ impl GbdtPeakModel {
         }
     }
 
-    /// Calibrated P(signal) in [0,1].
     pub fn predict_proba(&self, x: &[f32]) -> f32 {
         let raw: f32 = self.trees.iter().map(|t| t.eval(x)).sum();
         let p = if self.apply_sigmoid {
@@ -740,13 +619,11 @@ impl GbdtPeakModel {
         self.isotonic(p)
     }
 
-    /// The additive LLR term `log(s/(1-s))` with s clamped to (eps, 1-eps).
     pub fn predict_logit(&self, x: &[f32]) -> f32 {
         let s = self.predict_proba(x).clamp(PROB_EPS, 1.0 - PROB_EPS);
         (s / (1.0 - s)).ln()
     }
 
-    /// Piecewise-linear interpolation of the isotonic map. Empty map => identity.
     fn isotonic(&self, p: f32) -> f32 {
         let n = self.iso_x.len();
         if n == 0 {
@@ -806,9 +683,6 @@ fn write_f32_vec(b: &mut Vec<u8>, v: &[f32]) {
 mod tests {
     use super::*;
 
-    /// One tree, one split on feature 0 at threshold 0.5:
-    ///   x0 <= 0.5 -> leaf value -1.0 ; else leaf value +2.0
-    /// flags: sigmoid ON. isotonic: identity over [0,1] (two breakpoints).
     fn toy_model() -> GbdtPeakModel {
         GbdtPeakModel {
             packed: Default::default(),
@@ -830,8 +704,6 @@ mod tests {
 
     #[test]
     fn packed_evaluation_is_bit_identical_to_tree_eval() {
-        // Two-level trees over 3 features with both NaN directions, plus a leaf-only
-        // tree; inputs cover each branch, NaN and a short row (missing feature).
         let mk = |f0: i32, t0: f32, f1: i32, t1: f32, dl: u8| Tree {
             feature: vec![f0, f1, -1, -1, -1],
             threshold: vec![t0, t1, 0.0, 0.0, 0.0],
@@ -879,9 +751,6 @@ mod tests {
             let reference: f32 = m.trees.iter().map(|t| t.eval(x)).sum();
             assert_eq!(o.to_bits(), reference.to_bits(), "batch row {x:?}");
         }
-        // Enough rows to fill several lane groups plus a partial one, covering both
-        // NaN directions and a short row; the batched walk must match the
-        // single-row walk exactly.
         let vals = [0.1f32, 0.9, f32::NAN, 0.5, -2.0, 1e-3, 4.0, -3.0];
         let wide: Vec<Vec<f32>> = (0..19)
             .map(|i| {
@@ -902,14 +771,11 @@ mod tests {
             let reference: f32 = m.trees.iter().map(|t| t.eval(x)).sum();
             assert_eq!(o.to_bits(), reference.to_bits(), "batch row {x:?}");
         }
-        // An evaluated model still equals an unevaluated copy.
         let mut fresh = m.clone();
         fresh.packed = Default::default();
         assert_eq!(m, fresh);
     }
 
-    /// A random tree of depth up to `depth` over `nf` features, as the
-    /// trainer would write it: leaves may sit above the bottom level.
     fn random_tree(rng: &mut u64, depth: u32, nf: i32) -> Tree {
         let mut next = |m: u64| {
             *rng = rng
@@ -960,7 +826,6 @@ mod tests {
         let mut trees: Vec<Tree> = (0..120)
             .map(|i| random_tree(&mut rng, 1 + (i % 8) as u32, nf))
             .collect();
-        // A tree deeper than the perfect-tree limit keeps the node walk.
         trees.push(random_tree(&mut rng, 14, nf));
         trees.push(random_tree(&mut rng, 6, nf));
         let m = GbdtPeakModel {
@@ -978,8 +843,6 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             (rng >> 33) as f32 / (1u64 << 31) as f32
         };
-        // Row counts around the block (256) and step (16) sizes; some rows are
-        // short or hold NaNs.
         for n in [1usize, 7, 8, 15, 16, 17, 255, 256, 257, 700] {
             let rows: Vec<Vec<f32>> = (0..n)
                 .map(|i| {
@@ -1063,10 +926,8 @@ mod tests {
     #[test]
     fn predict_matches_manual() {
         let m = toy_model();
-        // x0 = 0.0 -> leaf -1.0 -> raw=-1.0 -> sigmoid(-1)=0.26894 -> iso identity
         let s_lo = m.predict_proba(&[0.0]);
         assert!((s_lo - 0.2689414).abs() < 1e-5, "got {s_lo}");
-        // x0 = 1.0 -> leaf +2.0 -> sigmoid(2)=0.880797
         let s_hi = m.predict_proba(&[1.0]);
         assert!((s_hi - 0.8807971).abs() < 1e-5, "got {s_hi}");
         let lg = m.predict_logit(&[1.0]);
@@ -1084,8 +945,6 @@ mod tests {
 
     #[test]
     fn predict_value_returns_raw_tree_sum() {
-        // toy_model: x0 <= 0.5 → leaf -1.0; else → leaf +2.0
-        // predict_value must return the raw tree sum without sigmoid or isotonic.
         let m = toy_model();
         let v_lo = m.predict_value(&[0.0]);
         assert!(
@@ -1101,12 +960,10 @@ mod tests {
 
     #[test]
     fn predict_value_ignores_sigmoid_flag() {
-        // Even when apply_sigmoid=false, predict_value must still return raw sum (not apply isotonic).
         let mut m = toy_model();
         m.apply_sigmoid = false;
-        // Set a non-identity isotonic map so we can verify it's NOT applied.
         m.iso_x = vec![0.0, 1.0];
-        m.iso_y = vec![0.5, 0.5]; // constant 0.5 — if applied, predict_value would be 0.5
+        m.iso_y = vec![0.5, 0.5];
         let v = m.predict_value(&[1.0]);
         assert!(
             (v - 2.0).abs() < 1e-6,
@@ -1150,7 +1007,6 @@ mod tests {
 
     #[test]
     fn validate_features_names_the_first_differing_position() {
-        // Positions 1 and 2 are swapped; the first one is reported.
         let m = named(&["a", "c", "b"]);
         match m.validate_features(&["a", "b", "c"], "frag-intensity") {
             Err(GbdtError::FeatureNameMismatch {
@@ -1186,8 +1042,6 @@ mod tests {
     fn blob_without_the_name_trailer_is_rejected() {
         let m = toy_model();
         let mut bytes = m.to_bytes();
-        // Drop the trailer (u32 count + one length-prefixed name): the blob now
-        // ends after the calibration footer, as a version-1 blob would.
         let trailer = 4 + 4 + m.feature_names[0].len();
         bytes.truncate(bytes.len() - trailer);
         assert!(matches!(
@@ -1228,16 +1082,15 @@ mod tests {
 
     #[test]
     fn malformed_child_index_is_rejected() {
-        // An internal node (feature 0) whose left child points out of range.
         let bad = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
             feature_names: indexed_feature_names(1),
             apply_sigmoid: true,
             trees: vec![Tree {
-                feature: vec![0, -1], // node 0 internal, node 1 leaf
+                feature: vec![0, -1],
                 threshold: vec![0.5, 0.0],
-                left: vec![99, -1], // 99 is out of range (n=2)
+                left: vec![99, -1],
                 right: vec![1, -1],
                 value: vec![0.0, 1.0],
                 default_left: vec![1, 1],

@@ -1,6 +1,3 @@
-//! A spectrum title is the `SpecId` of the PIN: a tab in a title must not add
-//! a column to the row.
-
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Command;
@@ -70,7 +67,6 @@ fn a_tab_in_a_title_does_not_shift_the_pin_columns() {
             .unwrap_or_else(|| panic!("no {name} column"))
     };
     let (spec_id, label, scan) = (column("SpecId"), column("Label"), column("ScanNr"));
-    // `Proteins` is the last column and holds one field per protein.
     assert_eq!(column("Proteins"), header.len() - 1);
     let mut rows = 0;
     for line in lines {

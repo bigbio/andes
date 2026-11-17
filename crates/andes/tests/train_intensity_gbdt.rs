@@ -1,9 +1,3 @@
-//! Integration test for `andes train-intensity-gbdt`.
-//!
-//! Verifies the round-trip: build a tiny synthetic flat parquet → run
-//! `train-intensity-gbdt` → reload the produced store → assert
-//! `param.frag_intensity_model.is_some()` and `predict_value` is finite.
-
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -17,7 +11,6 @@ use parquet::arrow::ArrowWriter;
 
 use model_train::ModelStore;
 
-/// One synthetic PSM row (same schema as the train-from-msnet parquet).
 struct Row {
     seq: &'static str,
     charge: i32,
@@ -132,14 +125,13 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     writer.close().expect("close writer");
 }
 
-/// A handful of fake peaks at plausible b/y-ion m/z values for PEPTIDEK.
 fn fake_peaks() -> Vec<(f32, f32)> {
     vec![
-        (98.06, 1000.0),  // b1 (P)
-        (227.10, 2000.0), // b2 (PE)
-        (324.15, 3000.0), // b3 (PEP)
-        (147.11, 1500.0), // y1 (K)
-        (276.15, 2500.0), // y2 (EK)
+        (98.06, 1000.0),
+        (227.10, 2000.0),
+        (324.15, 3000.0),
+        (147.11, 1500.0),
+        (276.15, 2500.0),
         (500.30, 500.0),
         (600.35, 800.0),
         (700.40, 700.0),
@@ -199,9 +191,6 @@ fn train_intensity_gbdt_roundtrip() {
         .arg("test_frag")
         .arg("--threads")
         .arg("1")
-        // The synthetic fixture is tiny (a few PSMs) and intentionally below the
-        // GBDT quality gate (finding 3.6); opt into the degenerate fallback so
-        // this round-trip test still produces a model to inspect.
         .arg("--allow-degenerate-model")
         .status()
         .expect("run andes train-intensity-gbdt");
@@ -236,8 +225,6 @@ fn train_intensity_gbdt_roundtrip() {
     );
 }
 
-/// A second model pre-existing in the store must be preserved after
-/// `train-intensity-gbdt` writes the new frag model.
 #[test]
 fn train_intensity_gbdt_preserves_existing_models() {
     let dir = tempfile::tempdir().expect("tempdir");

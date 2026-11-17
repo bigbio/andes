@@ -1,27 +1,3 @@
-//! Engine-wide retention-time (RT) PIN-feature wiring.
-//!
-//! This is the *wiring* layer for the pure, tested RT-prediction core in
-//! `scoring::rt_model`. It runs ONCE per search, after all PSMs are scored and
-//! before the PIN/QPX writers, and populates the additive RT feature fields on
-//! each PSM (`PsmFeatures::{delta_rt, abs_delta_rt, delta_rt_norm,
-//! predicted_rt_min}`) so the SHARED `pin::psm_feature_values` vector — the
-//! single source of truth for both the PIN and the QPX `.idparquet` — can emit
-//! them without any extra plumbing.
-//!
-//! # Baseline safety (non-negotiable)
-//! When observed RT is unavailable (`Spectrum.rt_seconds` is `None`) or the
-//! per-run calibration cannot be fit (fewer than
-//! [`MIN_CALIBRATION_ANCHORS`](scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS)
-//! anchors (the rank-1 target PSM of each spectrum, at any score), or
-//! degenerate indices), the three PIN features stay at
-//! their `Default` `0.0` — the NEUTRAL value — so the PIN is byte-identical to
-//! the pre-RT baseline on these columns.
-//!
-//! # Determinism (sacred in this codebase)
-//! Anchors are gathered by iterating `spectra`/`queues` in index order and, per
-//! spectrum, the queue's rank-sorted PSM order — no `HashMap`/`HashSet` on any
-//! path that feeds the calibration or the emitted feature values.
-
 use model::spectrum::Spectrum;
 use scoring_crate::rt_model::{calibrate, RtIndexModel};
 use search::candidate_gen::Candidate;
@@ -29,14 +5,8 @@ use search::psm::TopNQueue;
 
 use crate::row_context::iter_ranked_by_rank_score;
 
-/// Seconds-per-minute conversion for `rt_seconds` → minutes (features are in
-/// minutes, keeping f64 precision until the final `f32` store).
 const SECONDS_PER_MINUTE: f64 = 60.0;
 
-/// [`populate_rt_features`] on each input file of a search: `run_ends[r]` is
-/// the exclusive end index in `spectra` of input `r` (spectra are concatenated
-/// in input order). Each file gets its own calibration line and gradient span,
-/// so runs with different gradients do not share one line.
 pub fn populate_rt_features_per_run(
     spectra: &[Spectrum],
     queues: &mut [TopNQueue],
@@ -54,34 +24,11 @@ pub fn populate_rt_features_per_run(
     }
 }
 
-/// Populate the engine-wide RT PIN features on every PSM in `queues`, with one
-/// calibration over all of `spectra` (one run; see
-/// [`populate_rt_features_per_run`] for a search over several files).
-///
-/// Steps (design "Commit 1"):
-/// 1. Collect calibration anchors `(predicted_index, observed_rt_min)` from all
-///    RANK-1 TARGET PSMs, in a stable (spectrum-index, then rank-sorted) order.
-/// 2. Fit the per-run line `rt_obs = slope·index + intercept` via
-///    [`calibrate`]. On failure (too few anchors / degenerate), leave every RT
-///    feature at the neutral `0.0` and return.
-/// 3. Compute the run's gradient span = max−min observed RT (minutes) over all
-///    emitting spectra with an RT.
-/// 4. For each PSM: predict its index, map to `predicted_rt_min` via the
-///    calibration, and set `delta_rt = obs − pred`, `abs_delta_rt`,
-///    `delta_rt_norm = delta_rt / span` (0.0 when span ≤ 0). PSMs on spectra
-///    without an observed RT keep the neutral `0.0`.
-///
-/// `spectra` and `queues` are parallel slices (`queues[i]` holds the top-N PSMs
-/// for `spectra[i]`); `candidates` is the pool the PSMs' `primary_candidate_idx`
-/// resolves against (used for the peptide and the target/decoy label).
 pub fn populate_rt_features(
     spectra: &[Spectrum],
     queues: &mut [TopNQueue],
     candidates: &[Candidate],
 ) {
-    // The seed RT-index model (Kyte-Doolittle prior). The calibration line
-    // absorbs the arbitrary index scale, so the seed is sufficient for a
-    // per-run relative RT ordering; a fitted/GBDT model can drop in later.
     let model = RtIndexModel::seed();
 
     let mut anchors: Vec<(f64, f64)> = Vec::new();
@@ -91,36 +38,26 @@ pub fn populate_rt_features(
         }
         let obs_rt_min = match spectra[spec_idx].rt_seconds {
             Some(s) => s / SECONDS_PER_MINUTE,
-            None => continue, // no observed RT ⇒ can't anchor on this spectrum
+            None => continue,
         };
         let sorted = queue.clone().into_rank_sorted_vec();
         for (rank, psm) in iter_ranked_by_rank_score(&sorted) {
             if rank != 1 {
-                break; // only the rank-1 row anchors; queue is rank-sorted
+                break;
             }
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             if cand.is_decoy {
-                continue; // skip a decoy rank-1, try the next rank-1 target
+                continue;
             }
             let index = model.predict_peptide(&cand.peptide);
             anchors.push((index, obs_rt_min));
-            // ONE anchor per spectrum: tied rank-1 targets (equal rank_score,
-            // distinct peptides) would otherwise inject several points sharing a
-            // single observed RT — a vertical cluster that biases the OLS slope
-            // toward 0 for that RT (review finding). The first rank-1 target is
-            // the representative anchor.
             break;
         }
     }
 
-    // ── Step 2: per-run calibration. `calibrate` is unit-agnostic — it fits
-    // `y = slope·x + intercept` on whatever `y` it is given. We pass `y` in
-    // MINUTES (not the seconds `scoring::rt_model::predicted_rt` assumes), so
-    // the fitted line yields minutes directly and we map with `slope·index +
-    // intercept` below (no /60). ─────────────────────────────────────────────
     let (slope, intercept) = match calibrate(&anchors) {
         Some(si) => si,
-        None => return, // too few anchors / degenerate ⇒ leave neutral 0.0
+        None => return,
     };
 
     let mut min_rt = f64::INFINITY;
@@ -137,14 +74,12 @@ pub fn populate_rt_features(
             }
         }
     }
-    let span = max_rt - min_rt; // may be ≤ 0 (single RT / none) ⇒ norm = 0.0
+    let span = max_rt - min_rt;
 
     for (spec_idx, queue) in queues.iter_mut().enumerate() {
         if queue.is_empty() {
             continue;
         }
-        // Only a FINITE observed RT anchors a feature; a non-finite `rt_seconds`
-        // leaves the row neutral (0.0) rather than writing inf/NaN into the PIN.
         let obs_rt_min = spectra[spec_idx]
             .rt_seconds
             .filter(|s| s.is_finite())
@@ -152,13 +87,12 @@ pub fn populate_rt_features(
         queue.fill_post_topn(|psm| {
             let obs = match obs_rt_min {
                 Some(o) => o,
-                None => return, // no / non-finite observed RT ⇒ leave neutral 0.0
+                None => return,
             };
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let index = model.predict_peptide(&cand.peptide);
             let pred = slope * index + intercept;
             let delta = obs - pred;
-            // Belt-and-braces: never emit a non-finite RT feature (leave neutral).
             if !pred.is_finite() || !delta.is_finite() {
                 return;
             }
@@ -240,17 +174,12 @@ mod tests {
         q
     }
 
-    /// Build `n` distinct target candidates whose predicted indices span a range,
-    /// plus spectra whose observed RT is an exact linear function of that index —
-    /// so the calibration recovers a known (slope, intercept) and DeltaRT is
-    /// computable in closed form.
     fn linear_fixture(
         n: usize,
         slope: f64,
         intercept: f64,
     ) -> (Vec<Spectrum>, Vec<TopNQueue>, Vec<Candidate>, RtIndexModel) {
         let model = RtIndexModel::seed();
-        // A set of chemically-distinct peptides to spread indices apart.
         let seqs: Vec<&[u8]> = vec![
             b"LLIIVV", b"PEPTIDE", b"AAAAAA", b"WFWFWF", b"DEKRDE", b"GGGGGG", b"STSTST",
             b"MMMMMM", b"YYYYYY", b"NQNQNQ",
@@ -271,21 +200,14 @@ mod tests {
 
     #[test]
     fn emits_delta_abs_norm_with_known_calibration() {
-        // Observed RT = 2.0·index + 10.0 (minutes) exactly for every spectrum,
-        // so a perfect fit ⇒ DeltaRT ≈ 0 on the anchors themselves. To get a
-        // NON-zero, checkable DeltaRT, offset ONE spectrum's observed RT.
         let (mut spectra, mut queues, candidates, model) = linear_fixture(8, 2.0, 10.0);
 
-        // Perturb spectrum 0's observed RT by +5 min so its DeltaRT is known.
-        // (One perturbed point barely moves the trimmed fit.)
         let idx0 = model.predict_peptide(&candidates[0].peptide);
         let perturbed_rt_min = 2.0 * idx0 + 10.0 + 5.0;
         spectra[0].rt_seconds = Some(perturbed_rt_min * SECONDS_PER_MINUTE);
 
         populate_rt_features(&spectra, &mut queues, &candidates);
 
-        // The calibration should recover ~ (slope=2, intercept=10). PSM 0's
-        // predicted RT ≈ 2·idx0 + 10, observed = that + 5 ⇒ DeltaRT ≈ +5.
         let f = queues[0]
             .iter_psms()
             .next()
@@ -302,7 +224,6 @@ mod tests {
             "abs_delta_rt {} must equal |delta_rt|",
             f.abs_delta_rt
         );
-        // DeltaRTNorm = DeltaRT / gradient span. Span = max−min observed RT.
         let mins: Vec<f64> = spectra
             .iter()
             .map(|s| s.rt_seconds.unwrap() / 60.0)
@@ -320,7 +241,6 @@ mod tests {
 
     #[test]
     fn each_run_gets_its_own_calibration() {
-        // Two runs whose RT follows the predicted index with different lines.
         let (mut spectra, mut queues, mut candidates, _) = linear_fixture(8, 1.5, 20.0);
         let (s2, q2, c2, _) = linear_fixture(8, 4.0, 2.0);
         let shift = candidates.len() as u32;
@@ -339,7 +259,6 @@ mod tests {
         let mut per_run = queues.clone();
         populate_rt_features_per_run(&spectra, &mut per_run, &candidates, &[8, 16]);
         assert!(worst(&per_run) < 0.5, "per-run DeltaRT {}", worst(&per_run));
-        // One line over both runs cannot follow either.
         let mut pooled = queues.clone();
         populate_rt_features(&spectra, &mut pooled, &candidates);
         assert!(worst(&pooled) > 1.0, "pooled DeltaRT {}", worst(&pooled));
@@ -347,8 +266,6 @@ mod tests {
 
     #[test]
     fn delta_rt_equals_obs_minus_pred_exactly() {
-        // Exact-fit fixture: DeltaRT on each anchor should be ≈ 0 because
-        // observed RT is an exact linear function of the predicted index.
         let (spectra, mut queues, candidates, _model) = linear_fixture(8, 1.5, 20.0);
         populate_rt_features(&spectra, &mut queues, &candidates);
         for q in &queues {
@@ -358,21 +275,18 @@ mod tests {
                 "exact-fit DeltaRT should be ≈ 0, got {}",
                 f.delta_rt
             );
-            // predicted_rt_min must be populated (non-zero for a real fit).
             assert!(f.predicted_rt_min != 0.0, "predicted_rt_min should be set");
         }
     }
 
     #[test]
     fn neutral_when_rt_unavailable() {
-        // No spectrum has an observed RT ⇒ calibration cannot run ⇒ all three
-        // features stay at the neutral 0.0 (baseline-identical).
         let mut candidates = Vec::new();
         let mut spectra = Vec::new();
         let mut queues = Vec::new();
         for i in 0..8 {
             candidates.push(cand(pep(b"PEPTIDE"), false));
-            spectra.push(spec(i, None)); // rt_seconds = None
+            spectra.push(spec(i, None));
             queues.push(queue_with(vec![psm(i as u32, 100.0)]));
         }
         populate_rt_features(&spectra, &mut queues, &candidates);
@@ -387,15 +301,10 @@ mod tests {
 
     #[test]
     fn non_finite_rt_never_writes_inf_or_nan() {
-        // A run with enough FINITE anchors to calibrate, PLUS spectra whose
-        // rt_seconds is inf / NaN. The fit succeeds on the finite anchors, but the
-        // bad-RT rows must stay neutral 0.0 — a non-finite rt_seconds must NEVER
-        // leak into DeltaRT/AbsDeltaRT/DeltaRTNorm/predicted_rt (Codex review).
         let mut candidates = Vec::new();
         let mut spectra = Vec::new();
         let mut queues = Vec::new();
         for i in 0..8 {
-            // Distinct peptides → non-degenerate calibration.
             let mut seq = b"PEPTIDE".to_vec();
             seq.push(b"ACDEFGHIKLMNPQRSTVWY"[i % 20]);
             candidates.push(cand(pep(&seq), false));
@@ -412,7 +321,6 @@ mod tests {
 
         populate_rt_features(&spectra, &mut queues, &candidates);
 
-        // No feature anywhere may be inf/NaN.
         for q in &queues {
             let f = q.iter_psms().next().unwrap().features.clone();
             assert!(
@@ -429,7 +337,6 @@ mod tests {
                 )
             );
         }
-        // The two bad-RT rows are exactly neutral.
         for qi in [8usize, 9] {
             let f = queues[qi].iter_psms().next().unwrap().features.clone();
             assert_eq!(f.delta_rt, 0.0);
@@ -441,8 +348,6 @@ mod tests {
 
     #[test]
     fn neutral_when_too_few_anchors() {
-        // Fewer than MIN_CALIBRATION_ANCHORS target anchors ⇒ calibrate returns
-        // None ⇒ neutral 0.0 everywhere, no crash.
         let n = MIN_CALIBRATION_ANCHORS - 1;
         let (spectra, mut queues, candidates, _m) = linear_fixture(n, 2.0, 10.0);
         populate_rt_features(&spectra, &mut queues, &candidates);
@@ -456,9 +361,6 @@ mod tests {
 
     #[test]
     fn decoy_rank1_psms_are_not_anchors() {
-        // Two runs, identical except one uses decoy candidates for the SAME
-        // peptides. The decoy run has zero valid anchors ⇒ calibration fails ⇒
-        // neutral, proving decoys are excluded from the anchor set.
         let (spectra, mut q_dec, mut candidates, _m) = linear_fixture(8, 2.0, 10.0);
         for c in &mut candidates {
             c.is_decoy = true;
@@ -472,7 +374,6 @@ mod tests {
 
     #[test]
     fn anchor_gathering_is_deterministic() {
-        // Same PSMs in ⇒ identical emitted features across repeated runs.
         let (spectra, mut a, candidates, _m) = linear_fixture(8, 2.0, 10.0);
         let (_s2, mut b, _c2, _m2) = linear_fixture(8, 2.0, 10.0);
         populate_rt_features(&spectra, &mut a, &candidates);

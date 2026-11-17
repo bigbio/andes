@@ -1,305 +1,90 @@
-//! PSM (peptide-spectrum match) data + top-N ranking queue.
-
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// Per-PSM fragment-ion feature columns computed from the scoring machinery
-/// and emitted into the Percolator `.pin` file.
-///
-/// Filled by `compute_psm_features` in `match_engine.rs` after `score_psm`.
-/// Fields use `Default` (all zero) as the safe sentinel before computation.
 #[derive(Debug, Clone, Default)]
 pub struct PsmFeatures {
-    /// Number of unique fragment positions where a b- or y-ion at charge 1
-    /// matched a peak within the fragment tolerance. Each position counts
-    /// at most once per ion series, but can contribute 1 from b AND 1 from y.
     pub num_matched_main_ions: u32,
-    /// Length of the longest contiguous run of matched b-ions
-    /// (b1, b2, … must all match to form the run).
     pub longest_b: u32,
-    /// Length of the longest contiguous run of matched y-ions.
     pub longest_y: u32,
-    /// `longest_y as f32 / peptide.length() as f32` — fraction in 0.0..=1.0.
     pub longest_y_pct: f32,
-    /// `num_matched_main_ions as f32 / peptide.length() as f32` — fraction
-    /// of peptide positions covered by matched b/y ions.
     pub matched_ion_ratio: f32,
 
-    // ── Ion-current ratios ─────────────────────────────────────────────────
-    /// `n_term_ion_current_ratio + c_term_ion_current_ratio`.
     pub explained_ion_current_ratio: f32,
-    /// Sum of matched b-ion intensities divided by total MS2 ion current.
     pub n_term_ion_current_ratio: f32,
-    /// Sum of matched y-ion intensities divided by total MS2 ion current.
     pub c_term_ion_current_ratio: f32,
-    /// Raw sum of all peak intensities in the MS2 spectrum (no log10).
     pub ms2_ion_current: f32,
-    /// Isolation-window efficiency. Not available from the Spectrum object;
-    /// always emitted as 0.0.
     pub isolation_window_efficiency: f32,
 
-    // ── Top-7 mass-error statistics ────────────────────────────────────────
-    /// Mean of absolute Da errors for the top-7 most-intense matched ions.
     pub mean_error_top7: f32,
-    /// Population standard deviation of absolute Da errors for top-7 ions
-    /// (formula: `sqrt(E[x²] - mean²)`).
     pub stdev_error_top7: f32,
-    /// Mean of signed relative errors (ppm) for the top-7 most-intense matched ions.
     pub mean_rel_error_top7: f32,
-    /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
     pub stdev_rel_error_top7: f32,
 
-    // ── Additive Percolator features ──────────────────────────────────────
-    /// Per-bond edge score sum (IES + error_score per bond; Kim et al.,
-    /// Nat Commun 5:5277, 2014). Emitted as the `EdgeScore` PIN column alongside the unchanged `RawScore`, so Percolator can
-    /// learn weights without disrupting the existing RawScore distribution.
-    /// Kept separate from `RawScore` rather than blended into it.
-    /// Computed via `psm_edge_score` in `score_psm.rs`.
     pub edge_score: i32,
 
-    // ── Chimeric MS1 precursor-envelope features ───────────────────────────
-    /// KL-divergence between the observed precursor isotope envelope (from the
-    /// linked MS1) and the averagine theoretical envelope. Higher = poorer match
-    /// = likely spurious co-isolation. 0.0 when MS1/feature unavailable.
     pub precursor_isotope_kl: f32,
-    /// Observed monoisotopic precursor intensity / median MS1 intensity (SNR
-    /// proxy). 0.0 when unavailable.
     pub precursor_snr: f32,
 
-    /// Top-1 RawScore dominance: `RawScore(best) − RawScore(2nd-best distinct
-    /// peptide)` for this spectrum, a positive "lead over the runner-up"
-    /// confidence signal. Emitted as the additive `DeltaRawScore` PIN column on
-    /// the rank-1 row only (0.0 elsewhere). Captured during candidate scoring
-    /// (NOT from the retained queue), so it is populated even at `top_n = 1`
-    /// where the runner-up is otherwise evicted — and without perturbing any
-    /// emitted PSM's score (purely additive).
     pub delta_raw_score: f32,
 
-    /// Tailor per-spectrum score calibration (Yang et al., JPR 2020):
-    /// `RawScore / denom`, where `denom` is this spectrum's RawScore at the
-    /// top-1% quantile of its candidate-score distribution (the score at rank
-    /// `ceil(0.01 * N)` from the top). Dividing each PSM's RawScore by its own
-    /// spectrum's high-quantile score makes RawScores comparable across spectra
-    /// (per-spectrum calibration). Emitted as the
-    /// additive `TailorScore` PIN column. Falls back to `denom = 1.0`
-    /// (TailorScore = RawScore) when the spectrum has too few candidates
-    /// (< 100) or the quantile score is `<= 0`, so it never divides by zero or
-    /// amplifies noise on tiny candidate sets. Purely additive: the histogram
-    /// it is computed from never alters which candidates are scored or kept.
     pub tailor_score: f32,
 
-    /// Float-precision rank score: the prefix+suffix b/y node-score sum
-    /// accumulated WITHOUT the per-split `round() as i32` that compresses score
-    /// separation on short / low-evidence peptides (most acute at low
-    /// resolution). For standard peptides this is the unrounded equivalent of the
-    /// integer `RawScore`; for loss-bearing peptides it intentionally EXCLUDES
-    /// the neutral-loss term `RawScore` adds (b/y-only — see
-    /// [`scoring_crate::scoring::score_psm_float`]). Computed for emitted PSMs
-    /// only. Emitted as the additive `RankScoreFloat` PIN column alongside the
-    /// unchanged integer `RankScore`, so Percolator can recover the lost
-    /// discrimination without disrupting the existing ranking.
     pub rank_score_float: f32,
 
-    // ── Strong-score Stage-1 additive bolt-ons (new PIN columns) ───────────
-    /// `Σ exp(-½ (ppmᵢ/σ)²)` over all matched b/y ions (σ = 7 ppm). A
-    /// Gaussian-kernel "tight-match evidence" sum: a fragment matched at a few
-    /// ppm contributes ~1, one scattered near the tolerance edge contributes
-    /// ~0. Turns fragment mass accuracy into evidence (the rank model discards
-    /// it), so a real high-res PSM whose ions cluster at low ppm scores far
-    /// above a coincidental match whose ions scatter. ~0 for all low-res PSMs
-    /// (every ppm is huge), so Percolator simply down-weights it there.
     pub ppm_gaussian_score: f32,
-    /// Longest consecutive run of complementary cleavage sites (both `b_i`
-    /// and `y_{n-i}` matched). A contiguous ladder is stronger evidence than
-    /// scattered complementary pairs.
     pub longest_complementary_ladder: u32,
-    /// ADDITIVE: complementary-ion intensity-rank BALANCE. Σ over cleavage bonds
-    /// where both the charge-1 prefix `b_i` and complementary suffix `y_{n-i}`
-    /// matched, weighted by their intensity-rank agreement `1/(1+|rank_b−rank_y|)`.
-    /// Orthogonal to `longest_complementary_ladder` (run length, no intensity)
-    /// and `num_matched_main_ions` (no pairing): a true peptide produces both
-    /// halves of a bond at correlated ranks; a decoy matching a few peaks on one
-    /// series does not. Targets low-res CID/TMT discrimination. 0.0 when no
-    /// complementary pair matched.
     pub complementary_ion_balance: f32,
-    /// Count of matched b/y ions that also have a neutral-loss partner peak at
-    /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
-    /// Strong CID/TMT signal that the intensity-rank model underuses.
     pub neutral_loss_ion_count: u32,
-    /// Mean intensity-rank of matched b/y ions (rank 1 = most intense peak).
-    /// Real PSMs match dominant peaks; coincidental matches hit weak peaks.
     pub mean_matched_intensity_rank: f32,
-    /// Count of matched charge-2 b/y fragment ions (high-charge precursors
-    /// produce +2 fragments the charge-1 path ignores).
     pub doubly_charged_matched_ion_count: u32,
 
-    // ── Strong-score Stage-2: competition/null denominator (the moat) ──────
-    /// `Σ max(0, -ln(ρᵢ·Δᵢ))` over matched ions — the per-peak Poisson
-    /// chance-match "surprise". `ρᵢ` = local peak density (peaks/Da) around the
-    /// matched peak, `Δᵢ` = the match window (Da). A match in a sparse region at
-    /// tight tolerance is improbable by chance (large surprise = strong
-    /// evidence); a match in a crowded region within a wide window is nearly
-    /// free (≈0). This is the deterministic null no ML rescorer computes — it
-    /// weighs each match by how *non-coincidental* it is.
     pub chance_match_surprise: f32,
-    /// Within-peptide alternative-mass competition: mean per-ion
-    /// `1/(1+ambiguity)` over matched charge-1 ions, where `ambiguity` counts
-    /// how many OTHER theoretical ions (b/y + neutral-loss offsets) also claim
-    /// the same peak. 1.0 = every matched peak uniquely explained; lower =
-    /// contested/coincidental matches.
     pub unique_match_fraction: f32,
 
-    // ── Strong-score S1: intensity-model signal numerator ───────────────────
-    /// Cosine similarity between frag-intensity-model-predicted and observed
-    /// relative intensities over b/y ions. 0.0 when the model carries none.
     pub intensity_signal: f32,
 
-    // ── Strong-score S1b: frag-intensity LLR battery (additive PIN columns) ──
-    // Discriminative likelihood-ratio features from the v3 frag-intensity GBDT,
-    // deployed instead of a cosine (the cosine normalizes both vectors and smears
-    // target/decoy separation). All 0.0 when no frag-intensity model is loaded.
-    /// Predicted-intensity-weighted explained fraction: `Σ(matched·pred)/Σpred`.
     pub frag_pred_explained: f32,
-    /// Predicted-intensity-weighted chance-match surprise:
-    /// `Σ matched·pred·max(0,−ln p_chance)` — fuses prediction with the noise denom.
     pub frag_pred_chance_llr: f32,
-    /// Fraction of the top-K predicted-most-intense ions that are observed.
     pub frag_topk_observed: f32,
 
-    /// Decoy-aware rich-ion LLR: Σ over matched b/y ions of the per-ion
-    /// `predict_logit(P(signal))` from the rich-ion GBDT (chemistry + complement
-    /// coherence features; trained target-matched vs decoy-matched). Additive PIN
-    /// column; 0.0 when no rich-ion model is loaded. RankScore is unaffected.
     pub rich_ion_llr: f32,
 
-    /// Refinement-cascade tags (additive PIN columns). All 0 on the default
-    /// (non-`--refine`) path. 1 if this PSM came from the Pass-2 refinement search.
     pub is_refinement: u32,
-    /// Count of variable modifications on the matched peptide (0 = unmodified).
     pub num_mods: u32,
-    /// Mod-class id for subgroup-FDR grouping: 0=none, 1=oxidation, 2=deamidation,
-    /// 3=nterm_acetyl, 4=nterm_loss(pyro-Glu), 5=alkyl, 99=other.
     pub refine_mod_class: u32,
 
-    // ── Mod-localization site-determining-ion features (additive PIN columns) ──
-    // All 0.0 for an unmodified peptide. Orthogonal to RankScore: they measure
-    // whether the spectrum LOCALIZES a variable mod via its site-determining
-    // (b/y mass-shift-bracketing) ions. Computed by `mod_site_features` in the
-    // scoring crate. See `crates/scoring/src/mod_site_features.rs`.
-    /// Count of matched SHIFTED b/y ions (fragments carrying the mod's mass
-    /// shift) — confirms the mod is present.
     pub mod_site_shifted_matched: f32,
-    /// Matched shifted ions / total theoretical shifted ions.
     pub mod_site_shifted_frac: f32,
-    /// Summed intensity of matched shifted ions / summed intensity of ALL
-    /// matched ions (0.0 if none matched).
     pub mod_site_intens_frac: f32,
-    /// 1.0 if ANY mod site has a matched bracketing (site-determining) ion pair
-    /// that localizes the mod (e.g. `b_{p-1}` + `b_p` both matched), else 0.0.
     pub mod_site_localized: f32,
-    /// Number of bracketing (site-determining) matched ions summed over mod sites.
     pub mod_site_det_count: f32,
 
-    // ── Strong-score S2: null denominator terms (additive PIN columns) ────
-    /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
-    /// alternative-mass ambiguity + local peak density (S2 term 2).
     pub mass_competition_evidence: f32,
-    /// Shannon entropy of a softmax over retained top-K candidate RawScores
-    /// (S2 listwise term; spectrum-level, identical on all retained rows).
     pub candidate_rank_entropy: f32,
-    /// RawScore gap between the top two retained candidates in the queue
-    /// (S2 listwise term; distinct from `delta_raw_score` which uses all scored
-    /// distinct peptides, not only the retained top-K).
     pub listwise_score_gap: f32,
 
-    // ── Strong-score S3: fused signal − null ────────────────────────────────
-    /// `intensity_signal − null` where `null` combines chance-match surprise,
-    /// mass-competition penalty, and listwise ambiguity. Always computed and
-    /// emitted as the `RawScore` PIN column (the headline/fused score). Under
-    /// `ScoreMode::Strong` it ALSO drives ranking — top-1 selection via
-    /// `rank_score` — but `psm.score` (the `RankScore` column) stays the
-    /// rank-LLR in BOTH modes, so `RankScore` always reports the b/y-ion-rank
-    /// model score.
     pub strong_score: f32,
 
-    // ── Strong-score S4: per-spectrum significance calibration ──────────────
-    /// Z-scored `strong_score` for cross-spectrum comparability: leave-one-out
-    /// among retained top-N strong scores when N ≥ 2, else z-score against the
-    /// per-spectrum scored-candidate null pool. Uncalibrated `strong_score` when
-    /// the spectrum has too few scored candidates.
     pub strong_score_cal: f32,
 
-    // ── Engine-wide retention-time features (additive PIN columns) ──────────
-    // Populated post-search by `output::rt_wiring::populate_rt_features` after
-    // per-run calibration. ALL default to 0.0 (Default), which is the NEUTRAL
-    // value: a run without observed RT, or one where calibration failed, leaves
-    // these at 0.0 so the PIN is byte-identical to the pre-RT baseline on these
-    // columns.
-    /// Signed retention-time delta in minutes: `observed_rt_min − predicted_rt_min`.
     pub delta_rt: f32,
-    /// Absolute retention-time delta in minutes: `|delta_rt|`.
     pub abs_delta_rt: f32,
-    /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
-    /// minutes); 0.0 when the span is non-positive. Transfers across runs.
     pub delta_rt_norm: f32,
-    /// 1 when a candidate from a Reference entry (canonical or FASTA protein)
-    /// with a peptidoform other than this row's was scored for the spectrum.
-    /// Only tracked when the database holds isoform, variant or chain entries.
     pub ref_competitor: u32,
-    /// The best rounded RawScore among those Reference candidates; 0.0 when
-    /// `ref_competitor` is 0.
     pub ref_best_raw: f32,
-    /// 1 when any protein of the row's peptide is an entry of that kind,
-    /// including a peptide it shares with a Reference entry. Set by
-    /// `output::populate_provenance_features`.
     pub is_variant: u32,
     pub is_isoform: u32,
     pub is_chain: u32,
-    /// For a row with any isoform, variant or chain protein and
-    /// `ref_competitor` = 1: its rounded RawScore minus `ref_best_raw`. 0.0
-    /// otherwise.
     pub delta_ref_score: f32,
-    /// 1 when the precursor fits better if the row's isotope-like deltas
-    /// (variable mods, and a variant's substitution) are whole isotope steps.
     pub isotope_mimic: u32,
-    /// Calibrated predicted retention time in minutes for this PSM's peptide, or
-    /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
-    /// surfaced only into the QPX `.idparquet` `predicted_rt` field.
     pub predicted_rt_min: f32,
-    /// GLYCO-only: RT-based isobaric-glycan disambiguation margin (a published glyco engine,
-    /// prior work). `min_{G'} |obs − pred(bb, G')| − |obs − pred(bb, G)|`
-    /// over near-isobaric alternative glycan compositions `G'` (same backbone,
-    /// mass within a small window of the assigned `G`, different composition).
-    /// POSITIVE ⇒ the assigned composition fits the observed RT BETTER than any
-    /// isobaric alternative (evidence the composition — e.g. Hex+NeuAc vs
-    /// Fuc+NeuGc — is right), which fragmentation alone cannot separate. 0.0 when
-    /// RT is unavailable, no isobaric alternative exists, or for non-glyco PSMs.
-    /// Emitted only in the glyco PIN (`IsobaricRTMargin`), never the shared header.
     pub isobaric_rt_margin: f32,
 }
 
-/// Number of candidates below which Tailor calibration is skipped (denom = 1.0).
-/// On tiny candidate sets the top-1% quantile is noisy / undefined, so we fall
-/// back to the uncalibrated RawScore rather than amplify noise.
 pub const TAILOR_MIN_CANDIDATES: u32 = 100;
 
-/// Tailor top-quantile fraction (q): the denominator is the RawScore at the
-/// top `q` of the candidate-score distribution (Yang et al. use q = 0.01).
 pub const TAILOR_QUANTILE: f64 = 0.01;
 
-/// Compute the Tailor calibration denominator for one spectrum from a histogram
-/// of its candidate RawScores.
-///
-/// `hist` maps a (rounded, integer) RawScore to the number of candidates that
-/// achieved it; `total` is the total candidate count (== sum of histogram
-/// counts). Returns the RawScore `s` at the top-`TAILOR_QUANTILE` of the
-/// distribution: the smallest `s` such that
-/// `count(candidates with RawScore >= s) <= ceil(q * total)` — i.e. the score
-/// at rank `ceil(q * total)` counting from the highest score down.
-///
-/// Returns the fallback `1.0` (no calibration) when `total < TAILOR_MIN_CANDIDATES`
-/// or when the resolved quantile score is `<= 0`, so `RawScore / denom` never
-/// divides by zero and never amplifies noise on tiny candidate sets.
 pub fn tailor_denominator<S: std::hash::BuildHasher>(
     hist: &std::collections::HashMap<i32, u32, S>,
     total: u32,
@@ -307,16 +92,11 @@ pub fn tailor_denominator<S: std::hash::BuildHasher>(
     if total < TAILOR_MIN_CANDIDATES {
         return 1.0;
     }
-    // Number of candidates that define the "top" tail. ceil(q * total), at least 1.
     let top_k = (TAILOR_QUANTILE * total as f64).ceil() as u64;
     let top_k = top_k.max(1);
 
-    // Walk scores from highest to lowest, accumulating counts. The quantile
-    // score is the lowest score still inside the top-`top_k` candidates: the
-    // first score at which the running count (candidates with RawScore >= s)
-    // reaches/exceeds `top_k`.
     let mut scores: Vec<i32> = hist.keys().copied().collect();
-    scores.sort_unstable_by(|a, b| b.cmp(a)); // descending
+    scores.sort_unstable_by(|a, b| b.cmp(a));
     let mut cum: u64 = 0;
     let mut quantile_score: Option<i32> = None;
     for s in scores {
@@ -328,92 +108,31 @@ pub fn tailor_denominator<S: std::hash::BuildHasher>(
     }
     match quantile_score {
         Some(s) if s > 0 => s as f64,
-        _ => 1.0, // <= 0 quantile score → fall back (avoids div-by-zero / sign flip)
+        _ => 1.0,
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PsmMatch {
     pub spectrum_idx: usize,
-    /// Indices into the `&[Candidate]` slice owned by `PreparedSearch.candidates`.
-    /// Length is always ≥ 1. The first index (`candidate_idxs[0]`) is the
-    /// "primary" candidate — used by callers that need a single Candidate
-    /// (most do; see `primary_candidate_idx()`). Multiple indices accumulate
-    /// when the pepSeq+score dedup pass merges multiple Candidates that
-    /// share the same peptide sequence and rounded score (typically the same
-    /// peptide matched against multiple proteins, e.g. shared tryptic
-    /// peptides in target+decoy concat). The PIN writer iterates this Vec to
-    /// emit one tab-separated `Proteins` column per row for multi-protein
-    /// shared peptides in the PIN output.
-    ///
-    /// Every real PSM has length ≥ 1 with valid indices into
-    /// `PreparedSearch.candidates`. Test fixtures that don't need to resolve
-    /// back use `vec![0]` as a placeholder and avoid touching the candidates
-    /// slice from inside the test.
     pub candidate_idxs: Vec<u32>,
     pub charge_used: u8,
-    /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
-    /// Pin RawScore = `node_score + cleavage_credit`. Higher is better.
-    /// This is what gets emitted in the `RawScore` PIN column. Used by
-    /// Percolator as one of many features.
     pub score: f32,
-    /// Queue-ordering score = `node + cleavage + edge` (Kim et al., Nat Commun
-    /// 5:5277, 2014). Pin RawScore stays at `node + cleavage` for Percolator
-    /// distribution stability; the separate `EdgeScore` PIN column carries
-    /// the edge contribution. `rank_score` is the queue-ordering key without
-    /// changing the pin RawScore distribution.
-    ///
-    /// **No automatic default**: PsmMatch does not implement `Default`, and
-    /// callers MUST set `rank_score` explicitly. Test fixtures that build
-    /// PsmMatch literals should set `rank_score = score` for behavior with
-    /// no edge contribution to ranking. The `match_engine.rs`
-    /// candidate loop computes `rank_score = score + edge_score as f32`.
     pub rank_score: f32,
-    /// Per-PSM edge_score = `psm_edge_score(...)` for this candidate.
-    /// Computed at queue-insertion time in `match_engine.rs` and reused by
-    /// `compute_psm_features` to populate the `EdgeScore` PIN column
-    /// (avoids the recompute). Default 0 — features extraction will compute
-    /// it on the fly if it remains 0 (e.g. for test fixtures).
     pub edge_score: i32,
-    /// Activation method captured from `param.data_type.activation` at scoring
-    /// time. `None` if unknown or not yet set.
     pub activation_method: Option<model::activation::ActivationMethod>,
-    /// Fragment-ion feature columns computed after `score_psm`.
-    /// Defaults to all-zero until `compute_psm_features` runs.
     pub features: PsmFeatures,
-    /// The isotope offset that produced the precursor match: 0 = monoisotopic,
-    /// +N = spectrum precursor was N C13 peaks above the true monoisotopic.
-    /// Default range −1..=2. Threaded from `MassError::isotope_offset`
-    /// (precursor_matching.rs) via match_engine.rs. Written as the PIN
-    /// `isotope_error` column.
     pub isotope_offset: i8,
-    /// Chimeric Pass-2 secondaries only: the co-isolated precursor m/z this PSM was
-    /// scored at. `Some(mz)` makes the PIN/TSV writers compute ExpMass / dm / absdm
-    /// from the secondary's own precursor mass; `None` (every ordinary PSM) falls
-    /// back to the spectrum's `precursor_mz`.
     pub precursor_mz_override: Option<f64>,
-    /// Evidence on which modification each residue carries, for rows with a
-    /// variable modification (see [`crate::site_evidence`]). `None` for other
-    /// rows and for rows scored without their spectrum's other candidates.
     pub site_evidence: Option<Box<crate::site_evidence::SiteEvidence>>,
-    /// Content identity of the candidate, used only to break exact `rank_score`
-    /// ties: [`tie_key_of`] of the primary candidate. It depends on the peptide
-    /// alone, never on where or when the candidate was enumerated, so every
-    /// retrieval path and thread count breaks a tie the same way. Test fixtures
-    /// that do not care set 0.
     pub tie_key: u64,
 }
 
-/// Tie-break key of a candidate: a hash of its residues and per-residue
-/// modification deltas (1e-5 Da units, as [`crate::match_engine::peptidoform_key`])
-/// with the target/decoy flag in the lowest bit.
 pub fn tie_key_of(cand: &crate::candidate_gen::Candidate) -> u64 {
     (crate::match_engine::peptidoform_key(&cand.peptide) << 1) | u64::from(cand.is_decoy)
 }
 
-/// A score as an ordering key: NaN ranks below every number and `-0.0` equals
-/// `0.0`, so `f32::total_cmp` on the result orders like `<` on real scores.
 #[inline]
 fn score_key(x: f32) -> f32 {
     if x.is_nan() {
@@ -424,8 +143,6 @@ fn score_key(x: f32) -> f32 {
 }
 
 impl PsmMatch {
-    /// Compare on `rank_score` alone (NaN worst). Equal here means tied for
-    /// retention: [`TopNQueue::push`] keeps such ties past capacity.
     pub fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
         score_key(self.rank_score).total_cmp(&score_key(other.rank_score))
     }
@@ -437,8 +154,6 @@ impl PsmMatch {
 
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
-        // Delegates to `cmp` so equality and ordering agree (a == b exactly when
-        // a.cmp(b) is Equal), NaN scores included.
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
@@ -451,20 +166,6 @@ impl PartialOrd for PsmMatch {
     }
 }
 
-/// A TOTAL order, "greater" = better PSM.
-///
-/// 1. `rank_score` (= `node + cleavage + edge`, Kim et al., Nat Commun 5:5277,
-///    2014), the ranking signal; NaN is worst.
-/// 2. `score` (the PIN RawScore, `node + cleavage`), larger first.
-/// 3. Then, so that exact ties never depend on the order PSMs were pushed (which
-///    follows candidate enumeration, retrieval path and thread scheduling):
-///    smaller `tie_key` (peptide content), smaller charge, smaller |isotope
-///    offset|, smaller |mass error|, the spectrum, the co-isolated precursor and
-///    finally the candidate indices.
-///
-/// `TopNQueue` keeps its min-heap on this order (via `Reverse<PsmMatch>`), so the
-/// worst PSM is evicted first; ties for retention are decided by
-/// [`PsmMatch::rank_cmp`] alone.
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.rank_cmp(other)
@@ -491,8 +192,6 @@ impl Ord for PsmMatch {
     }
 }
 
-/// Best-first comparator for sorting a `Vec<PsmMatch>`: the [`PsmMatch`] total
-/// order, descending.
 fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
     b.cmp(a)
 }
@@ -500,8 +199,6 @@ fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
 #[derive(Debug, Clone)]
 pub struct TopNQueue {
     capacity: u32,
-    /// Min-heap (via Reverse): smallest score sits at top, easy to pop
-    /// when over capacity.
     heap: BinaryHeap<Reverse<PsmMatch>>,
 }
 
@@ -513,26 +210,12 @@ impl TopNQueue {
         }
     }
 
-    /// Insert a PSM. The queue keeps **at least** `capacity` of the *best*
-    /// PSMs, plus any additional PSMs tied with the current worst.
-    ///
-    /// "Best" = largest `rank_score` first. The min-heap (via
-    /// `Reverse<PsmMatch>`) puts the *worst* PSM at the top so it can be
-    /// evicted when a strictly-better PSM arrives.
-    ///
-    /// Tie handling: when at capacity and a new PSM ties the worst retained PSM
-    /// on `rank_score` ([`PsmMatch::rank_cmp`]), insert without evicting (Kim et al., Nat Commun 5:5277,
-    /// 2014: `size < n OR score == worst → add`).
-    /// As a result, the queue can grow beyond `capacity` when ties exist;
-    /// `capacity` becomes a *minimum* top-N, not a hard cap.
     pub fn push(&mut self, m: PsmMatch) {
         if self.heap.len() < self.capacity as usize {
             self.heap.push(Reverse(m));
         } else if let Some(Reverse(top)) = self.heap.peek() {
             match m.rank_cmp(top) {
                 std::cmp::Ordering::Greater => {
-                    // m is strictly better than the worst retained PSM: evict
-                    // the worst, insert m.
                     self.heap.pop();
                     self.heap.push(Reverse(m));
                 }
@@ -540,16 +223,11 @@ impl TopNQueue {
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Less => {
-                    // m is strictly worse than the worst retained PSM: drop.
                 }
             }
         }
     }
 
-    /// Add a PSM unconditionally, bypassing the capacity/eviction logic of `push`.
-    /// Used for chimeric Pass-2 secondary peptides, which are legitimate extra
-    /// emissions (a distinct co-isolated peptide on the same scan), NOT competitors
-    /// for the primary's top-N slot.
     pub fn force_push(&mut self, m: PsmMatch) {
         self.heap.push(Reverse(m));
     }
@@ -561,46 +239,22 @@ impl TopNQueue {
         self.heap.is_empty()
     }
 
-    /// Return the `rank_score` of the queue's WORST retained PSM in O(1).
-    ///
-    /// The min-heap stores `Reverse<PsmMatch>` so `heap.peek()` returns the
-    /// PSM with the LOWEST `Ord` value — the candidate that would be
-    /// evicted first if a strictly better PSM arrived. Returns `None` if
-    /// the queue is empty.
-    ///
-    /// Used by the per-candidate two-stage gating in
-    /// `match_engine.rs` — candidates whose `pin_score + max_edge_bonus`
-    /// cannot exceed the worst retained `rank_score` skip the expensive
-    /// `psm_edge_score` computation entirely.
     pub fn worst_rank_score(&self) -> Option<f32> {
         self.heap.peek().map(|std::cmp::Reverse(m)| m.rank_score)
     }
 
-    /// Queue capacity (the top-N target). Used by callers that need to
-    /// distinguish "queue has spare capacity, accept everything" from
-    /// "queue at capacity, must beat worst".
     pub fn capacity(&self) -> u32 {
         self.capacity
     }
 
-    /// Iterate over all PSMs in the queue (order not guaranteed).
     pub fn iter_psms(&self) -> impl Iterator<Item = &PsmMatch> {
         self.heap.iter().map(|Reverse(m)| m)
     }
 
-    /// Drain all PSMs from the queue, returning them in an unordered Vec.
-    /// Leaves the queue empty after the call. The returned Vec preserves no
-    /// particular order — callers that need ordering should sort the result.
-    ///
-    /// Cost: O(N) drain + Vec collection. Cheap for small N (top-N typically ≤ 10).
     pub fn drain_into_vec(&mut self) -> Vec<PsmMatch> {
         self.heap.drain().map(|Reverse(m)| m).collect()
     }
 
-    /// Apply `f` to every retained PSM in place (e.g. to fill post-finalization
-    /// fields such as `features`). The heap is rebuilt afterwards, so `f` may
-    /// change any field; output order comes from the [`PsmMatch`] total order,
-    /// never from the heap layout.
     pub fn update_in_place<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut v = std::mem::take(&mut self.heap).into_vec();
         for Reverse(m) in &mut v {
@@ -619,12 +273,6 @@ impl TopNQueue {
         }
     }
 
-    /// Rewrite every retained PSM's `candidate_idxs` through `remap`, preserving
-    /// per-PSM order. Used by the out-of-core (`Mmap`) candidate backing to turn
-    /// per-spectrum LOCAL candidate-slot indices into the GLOBAL indices the
-    /// PIN/TSV writers resolve against the materialized `candidates` slice. The
-    /// candidate indices are only the last tie-break of the [`PsmMatch`] order,
-    /// after the content key, so this reorders nothing but exact duplicates.
     pub fn remap_candidate_idxs<F: FnMut(u32) -> u32>(&mut self, mut remap: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -637,19 +285,10 @@ impl TopNQueue {
         }
     }
 
-    /// Re-rank retained PSMs by `features.strong_score` and mirror it into
-    /// `score` / `rank_score` for queue ordering and PIN `RawScore` emission.
-    /// Called only under `ScoreMode::Strong` after `fill_post_topn`.
     pub fn reorder_by_strong_score(&mut self) {
         let cap = self.capacity as usize;
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
-            // Re-rank / select top-1 by the fused strong score, but DO NOT touch
-            // `psm.score`: it stays the rank-LLR so the `RankScore` PIN column
-            // always reports the b/y-ion-rank-model score (the fused score is
-            // emitted separately as the `RawScore` column = features.strong_score).
-            // The queue Ord ranks by `rank_score` alone, so setting only it
-            // reorders the queue without losing the rank-LLR.
             psm.rank_score = psm.features.strong_score;
         }
         psms.sort_by(rank_score_desc);
@@ -659,9 +298,6 @@ impl TopNQueue {
         }
     }
 
-    /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
-    /// (same tie-retention rule as `TopNQueue::push`).
-    /// `cap == 0` keeps nothing.
     fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
         if psms.len() <= cap {
             return;
@@ -674,8 +310,6 @@ impl TopNQueue {
         psms.retain(|p| p.rank_cmp(&cutoff) != std::cmp::Ordering::Less);
     }
 
-    /// Trim to at most `cap` best PSMs (plus ties at the cutoff). Used after
-    /// strong re-rank to restore user `top_n` PIN row count.
     pub fn trim_to_capacity(&mut self, cap: u32) {
         let cap = cap as usize;
         if self.heap.len() <= cap {
@@ -689,27 +323,16 @@ impl TopNQueue {
         }
     }
 
-    /// Return the best PSM (the maximum of the [`PsmMatch`] total order) without removing it.
-    /// Returns `None` if the queue is empty.
-    ///
-    /// The heap is a min-heap on `Reverse<PsmMatch>` so the *worst* entry sits
-    /// at the top (for cheap eviction). To find the *best* entry we iterate
-    /// all elements and take the max in natural `PsmMatch` ordering.
-    /// Cost is O(N) — acceptable for the small top-N queues used in practice.
     pub fn peek_top(&self) -> Option<&PsmMatch> {
         self.heap.iter().map(|Reverse(m)| m).max_by(|a, b| a.cmp(b))
     }
 
-    /// Drain into a Vec sorted best-first (largest `rank_score`).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(rank_score_desc);
         v
     }
 
-    /// Drain into a Vec sorted best-first in the [`PsmMatch`] total order
-    /// (`rank_score`, then `score`, then the content tie-break). This is the
-    /// canonical output ordering: the PIN winner is the first element.
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
         self.into_sorted_vec()
     }
@@ -720,16 +343,13 @@ mod tests {
     use super::*;
 
     fn make_match(spectrum_idx: usize, score: f32) -> PsmMatch {
-        // Test-only PSM: candidate_idxs[0] = 0 is a sentinel for queue-ordering tests
-        // that never resolve back to a real Candidate. Tests that need to read
-        // peptide / protein metadata must build their own &[Candidate] alongside.
         PsmMatch {
             spectrum_idx,
             candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
-            rank_score: score, // fixture default: rank_score = score
+            rank_score: score,
             edge_score: 0,
             activation_method: None,
             features: PsmFeatures::default(),
@@ -742,9 +362,6 @@ mod tests {
 
     #[test]
     fn update_in_place_keeps_the_output_order_of_ties() {
-        // Many PSMs tied on rank_score and score: their output order comes from the
-        // last tie-break (candidate indices), so an in-place update of a field
-        // outside the order must not move anything.
         let mut q = TopNQueue::new(32);
         for i in 0..20usize {
             let mut m = make_match(i, (i % 3) as f32);
@@ -764,7 +381,6 @@ mod tests {
         assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
     }
 
-    /// Build a fixture PSM whose `rank_score` is set independently of `score`.
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
         m.rank_score = rank_score;
@@ -786,7 +402,6 @@ mod tests {
         }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // rank_score = score (fixture default) → sort by score descending.
         assert_eq!(
             sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
             vec![3.0, 2.0, 1.0]
@@ -801,7 +416,6 @@ mod tests {
         }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // rank_score = score → keeps top-3 by score.
         assert_eq!(
             sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
             vec![5.0, 4.0, 3.0]
@@ -824,8 +438,6 @@ mod tests {
 
     #[test]
     fn topn_queue_keeps_ties_at_capacity() {
-        // Kim et al. (Nat Commun 5:5277, 2014): keep tied PSMs at capacity.
-        // Strict-greater eviction would drop score ties that should be retained.
         let mut q = TopNQueue::new(1);
         q.push(make_match(0, 100.0));
         q.push(make_match(0, 100.0));
@@ -839,14 +451,10 @@ mod tests {
 
     #[test]
     fn force_push_bypasses_capacity_eviction() {
-        // Chimeric Pass-2: a capacity-1 queue holds the primary (Pass 1, top-1).
-        // A Pass-2 secondary is a distinct co-isolated peptide, NOT a competitor
-        // for the primary's slot — force_push must ADD it without eviction.
         let mut q = TopNQueue::new(1);
-        // Primary: best score. Secondary: strictly worse — `push` would drop it.
         q.push(make_match(0, 100.0));
         let mut secondary = make_match(0, 50.0);
-        secondary.candidate_idxs = vec![1]; // distinct peptide
+        secondary.candidate_idxs = vec![1];
         q.force_push(secondary);
         let drained = q.drain_into_vec();
         assert_eq!(
@@ -858,9 +466,7 @@ mod tests {
 
     #[test]
     fn dedup_pepseq_score_aggregates_candidate_idxs() {
-
         let mut q = TopNQueue::new(10);
-        // Three PSMs: two share (peptide=0, score=50), one is distinct (peptide=1, score=40)
         let mut a = make_match(0, 50.0);
         a.candidate_idxs = vec![10];
         let mut b = make_match(0, 50.0);
@@ -878,7 +484,6 @@ mod tests {
 
         let deduped = simple_dedup_by_score_for_test(drained);
 
-        // Expect: 2 groups — score=50 with idxs [10,20], score=40 with [30]
         assert_eq!(deduped.len(), 2, "should collapse to 2 unique-score groups");
 
         let mut score_50 = deduped
@@ -902,8 +507,6 @@ mod tests {
         assert_eq!(*score_40, vec![30]);
     }
 
-    /// Test-only dedup that groups by score alone (real production
-    /// dedup_pepseq_score in match_engine.rs uses peptide_residue + score).
     fn simple_dedup_by_score_for_test(psms: Vec<PsmMatch>) -> Vec<PsmMatch> {
         use std::collections::HashMap;
         let mut groups: HashMap<i32, PsmMatch> = HashMap::new();
@@ -932,8 +535,6 @@ mod tests {
 
     #[test]
     fn psm_match_orders_by_rank_score_descending() {
-        // Higher rank_score means "better" → Ord-greater so the min-heap can
-        // evict the worst.
         let better = make_match_with_rank(0, 5.0, 10.0);
         let worse = make_match_with_rank(0, 5.0, 1.0);
         assert!(
@@ -944,12 +545,10 @@ mod tests {
 
     #[test]
     fn queue_keeps_best_rank_score_psms_when_full() {
-        // Three PSMs with same score but different rank_scores; capacity = 2.
         let mut q = TopNQueue::new(2);
-        q.push(make_match_with_rank(0, 5.0, 1.0)); // worst
-        q.push(make_match_with_rank(0, 5.0, 100.0)); // best
+        q.push(make_match_with_rank(0, 5.0, 1.0));
+        q.push(make_match_with_rank(0, 5.0, 100.0));
         assert_eq!(q.len(), 2);
-        // Push a medium one; it should evict the worst (rank 1.0).
         q.push(make_match_with_rank(0, 5.0, 50.0));
         assert_eq!(q.len(), 2);
         let sorted = q.into_sorted_vec();
@@ -1055,10 +654,7 @@ mod tests {
         q.reorder_by_strong_score();
         let top = q.peek_top().unwrap();
         assert!((top.features.strong_score - 5.0).abs() < f32::EPSILON);
-        // psm.score stays the rank-LLR (NOT clobbered with the strong score), so
-        // the RankScore column always reports the b/y-ion-rank-model score.
         assert!((top.score - 100.0).abs() < f32::EPSILON);
-        // rank_score IS set to the strong score so top-1 selection ranks by it.
         assert!((top.rank_score - 5.0).abs() < f32::EPSILON);
     }
 
@@ -1125,8 +721,6 @@ mod tests {
 
     #[test]
     fn psm_match_with_nan_rank_score_orders_as_worst() {
-        // NaN rank_score should sort as WORSE than any finite value.
-        // "Better" = greater in natural Ord (used by the min-heap via Reverse).
         let nan_rank = make_match_with_rank(0, 5.0, f32::NAN);
         let finite = make_match_with_rank(0, 0.0, 1.0);
         assert_eq!(
@@ -1138,7 +732,6 @@ mod tests {
 
     use std::collections::HashMap;
 
-    /// Build a histogram with `score` repeated `count` times, summing total.
     fn hist_from(pairs: &[(i32, u32)]) -> (HashMap<i32, u32>, u32) {
         let mut h = HashMap::new();
         let mut total = 0u32;
@@ -1151,21 +744,14 @@ mod tests {
 
     #[test]
     fn tailor_denom_top1pct_quantile_basic() {
-        // 1000 candidates: 990 at score 5, 10 at score 50 (the top 1%).
-        // top_k = ceil(0.01 * 1000) = 10. Walking from highest: 10 candidates
-        // at score 50 reach top_k exactly → quantile score = 50.
         let (h, total) = hist_from(&[(5, 990), (50, 10)]);
         assert_eq!(total, 1000);
         assert_eq!(tailor_denominator(&h, total), 50.0);
-        // TailorScore for a RawScore-50 PSM = 50 / 50 = 1.0.
         assert!(((50.0f64 / tailor_denominator(&h, total)) - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn tailor_denom_ceil_rounds_up() {
-        // 150 candidates → ceil(0.01 * 150) = ceil(1.5) = 2 candidates in the
-        // top tail. 1 candidate at 100, 1 at 90, rest at 10. Walking down:
-        // 100 (cum 1) < 2, then 90 (cum 2) >= 2 → quantile score = 90.
         let (h, total) = hist_from(&[(100, 1), (90, 1), (10, 148)]);
         assert_eq!(total, 150);
         assert_eq!(tailor_denominator(&h, total), 90.0);
@@ -1173,8 +759,6 @@ mod tests {
 
     #[test]
     fn tailor_denom_small_n_falls_back_to_one() {
-        // < TAILOR_MIN_CANDIDATES (100): no calibration → denom 1.0, so
-        // TailorScore == RawScore.
         let (h, total) = hist_from(&[(5, 50), (50, 5)]);
         assert_eq!(total, 55);
         assert!(total < TAILOR_MIN_CANDIDATES);
@@ -1183,8 +767,6 @@ mod tests {
 
     #[test]
     fn tailor_denom_nonpositive_quantile_falls_back_to_one() {
-        // Enough candidates but the top-1% quantile score is <= 0 (all negative
-        // RawScores). Must fall back to 1.0 to avoid div-by-zero / sign flip.
         let (h, total) = hist_from(&[(-10, 990), (-1, 10)]);
         assert_eq!(total, 1000);
         assert_eq!(tailor_denominator(&h, total), 1.0);
@@ -1192,7 +774,6 @@ mod tests {
 
     #[test]
     fn tailor_denom_exactly_min_candidates_calibrates() {
-        // 100 candidates, top_k = ceil(0.01*100) = 1. Highest score = 40.
         let (h, total) = hist_from(&[(10, 99), (40, 1)]);
         assert_eq!(total, 100);
         assert_eq!(tailor_denominator(&h, total), 40.0);
@@ -1222,8 +803,6 @@ mod tests {
 
     #[test]
     fn exact_ties_order_by_content_not_by_push_order() {
-        // Candidate indices deliberately disagree with the content order: the
-        // candidate store numbers candidates in completion order.
         let psms: Vec<PsmMatch> = [(30, 0), (10, 2), (20, 1), (40, 3)]
             .into_iter()
             .map(|(k, c)| tied(k, c))
@@ -1252,8 +831,6 @@ mod tests {
         let mut better = tied(3, 2);
         better.rank_score = 11.0;
         q.push(better);
-        // The strictly better PSM evicts the worst in the total order (key 2),
-        // whichever order the ties came in.
         assert_eq!(keys(&q.into_rank_sorted_vec()), vec![3, 1]);
     }
 

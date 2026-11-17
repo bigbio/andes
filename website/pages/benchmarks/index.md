@@ -7,16 +7,16 @@ holds. Comparison engines are named with their version, and their numbers come f
 same machine with the same rescoring, or from a public leaderboard.
 
 This page is a visual summary. Dates, commits, database definitions and every row are in the
-[full benchmark report](details.md); [how to reproduce](details.md#3-how-to-reproduce) lists
-the commands.
+[full benchmark report](details.md); [how to reproduce](reproduce.md) lists the commands.
 
 ## Identifications
 
 ![PSMs at q ≤ 0.01](../figures/psms.svg)
 
-Java MS-GF+ was not re-run for this comparison: its counts are from an earlier session, so it
-is shown only where one exists. The phospho set is searched against mouse proteins with a
-whole-protein shuffled entrapment, the database both engines used.
+Java MS-GF+ was measured on UPS1 only, in an earlier session, and not re-run. UPS1 andes is the
+`2ee76dd6` run of the report (2026-11-07, entrapment database, another host; bar at the midpoint
+of its range). The phospho set is searched against mouse proteins with a whole-protein shuffled
+entrapment, the database both engines used.
 
 ## Time, CPU and memory
 
@@ -26,18 +26,19 @@ The same measurements in absolute terms:
 
 ![Wall time, CPU time and peak memory](../figures/cost.svg)
 
-Wall times vary 5–15% between sessions; CPU time is steadier. Wall bars for andes are the
-midpoint of the reported range.
+Wall times vary 5–15% between sessions; CPU time is steadier. Bars for andes are the midpoint
+of the reported range. UPS1 is left out: its andes run was on another host.
 
 ## Error control: does the nominal 1% hold?
 
 ![True FDP at nominal 1%](../figures/true_fdp.svg)
 
 Each bar spans the entrapment-estimated true FDP over Percolator seeds and database
-realisations. The peptide-level shuffle is the primary design; the foreign (*Arabidopsis*) and
-natural (*E. coli*, yeast) entrapments are cross-checks. On UPS1 the two designs disagree, and
-the natural *E. coli* entrapment is the established reference there, which reads about 2.1%.
-Read the [method notes](details.md#4-method-notes) before comparing across rows.
+realisations (timsTOF: per-run means over six shuffle draws). The peptide-level shuffle is the
+primary design; the foreign (*Arabidopsis*) and natural (*E. coli*, yeast) entrapments are
+cross-checks. On UPS1 the two designs disagree: the natural *E. coli* entrapment reads 1.95–2.07%,
+about half of it on conserved proteins that may really be in the sample.
+Read the [method notes](methods.md#method-notes) before comparing across rows.
 
 ## Optional modes
 
@@ -52,4 +53,4 @@ FDP of 1% on Astral, measured on an earlier build.
   [glyco benchmark](glyco.md).
 - **Quantification** (label-free with match between runs against the ProteoBench leaderboard, TMT
   reporter-ion accuracy): [quantification](../quantification.md).
-- timsTOF DDA-PASEF and the mouse-liver glyco set are in the [full report](details.md#1-summary).
+- timsTOF DDA-PASEF and the mouse-liver glyco set are in the [identification report](identification.md).

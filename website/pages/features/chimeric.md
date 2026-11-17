@@ -31,7 +31,7 @@ extra PSMs are second peptides of spectra whose first peptide was already known:
 mainly **depth**, with some new coverage. The comparison is made at an equal *true* FDP of 1%,
 because `--chimeric` rows carry a slightly higher true FDP at the same nominal q-value. On UPS1,
 PSMs at q ≤ 0.01 rose 8.0% with entrapment hits flat. Measured on earlier builds
-(2026-10-05 to 2026-10-13); the [benchmark report](../benchmarks/details.md#1-summary) has the
+(2026-10-05 to 2026-10-13); the [benchmark report](../benchmarks/details.md#summary) has the
 conditions.
 
 Needs mzML or Thermo `.raw`; timsTOF `.d` falls back to a normal search.

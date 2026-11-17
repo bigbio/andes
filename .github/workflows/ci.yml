@@ -73,3 +73,42 @@ jobs:
 
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  benchmarks:
+    name: Benchmarks (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: python3 -m pip install numpy pandas scipy pyarrow
+
+      - name: Benchmark tables match docs/benchmarks/results
+        run: python3 -I docs/benchmarks/render.py --check
+
+      - name: Benchmark page links and anchors
+        run: python3 -I docs/benchmarks/check_links.py
+
+      - name: Entrapment rules
+        run: python3 -I docs/benchmarks/tests/test_entrap.py
+
+      - name: ProteoBench converter
+        run: python3 -I docs/benchmarks/tests/test_proteobench_convert.py
+
+      - name: Truth-design smoke
+        run: python3 tests/test_smoke.py
+        working-directory: docs/benchmarks/quant-eval
+
+      - name: Board metrics
+        run: python3 tests/test_board_metrics.py
+        working-directory: docs/benchmarks/quant-eval
+
+      - name: Comparison
+        run: python3 tests/test_compare.py
+        working-directory: docs/benchmarks/quant-eval

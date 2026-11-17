@@ -302,6 +302,27 @@ def main(src, out_dir):
     ax.margins(y=0.15)
     save(fig, out, "chimeric.svg")
 
+    g = d["dia_astral"]
+    fig, ax = plt.subplots(figsize=(6, 3.4))
+    width = 0.26
+    colours = [COLOURS["andes"], "#009E73", COLOURS["Java MS-GF+ v20240326"]]
+    for k, (label, vals) in enumerate(zip(g["labels"], g["n_at_1pct"])):
+        xs = [i + (k - 1) * width for i in range(len(g["runs"]))]
+        yerr = None
+        if k == 0:
+            yerr = [[v - lo for v, lo in zip(vals, g["andes_lo"])],
+                    [hi - v for v, hi in zip(vals, g["andes_hi"])]]
+        bars = ax.bar(xs, vals, width, label=label, color=colours[k], yerr=yerr, capsize=3)
+        for bar, v in zip(bars, vals):
+            ax.annotate(f"{v:,}", (bar.get_x() + bar.get_width() / 2, v), ha="center",
+                        xytext=(0, 4 if k else 12), textcoords="offset points", fontsize=7, color=INK)
+    ax.set_xticks(range(len(g["runs"])), g["runs"])
+    ax.set_ylabel("precursors at a true FDP of 1%")
+    ax.set_title("DIA, ProteoBench Astral (OpenDIA's set)", loc="left", fontsize=11, color=INK)
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.margins(y=0.2)
+    save(fig, out, "dia_astral.svg")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:

@@ -471,5 +471,13 @@
     0
    ]
   ]
+ },
+ "dia_astral": {
+  "_note": "ProteoBench LFQ_Astral_DIA_15min_50ng raw01/raw02 with OpenDIA's PAIRLIB entrapment library and metric. Precursors at an entrapment true FDP of 1%. andes --dia --rescore --predict rt,ms2: mean of Percolator 3.7.1 seeds 42, 1, 2, 3, 7 (lo/hi: seed range), 2026-11-16. DIA-NN 2.2 (own decoys) and OpenDIA arm E from OpenDIA's RESULT.md.",
+  "labels": ["andes --dia", "DIA-NN 2.2", "OpenDIA arm E"],
+  "runs": ["raw01", "raw02"],
+  "n_at_1pct": [[1801, 1819], [2067, 2301], [1694, 1628]],
+  "andes_lo": [1733, 1748],
+  "andes_hi": [1828, 1882]
  }
 }

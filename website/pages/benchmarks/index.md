@@ -46,6 +46,11 @@ Read the [method notes](details.md#4-method-notes) before comparing across rows.
 `--chimeric` reports second and later peptides per spectrum. Counts are at an entrapment true
 FDP of 1% on Astral, measured on an earlier build.
 
+![DIA on the ProteoBench Astral set](../figures/dia_astral.svg)
+
+`--dia` on the DIA set and metric OpenDIA uses: precursors at an entrapment true FDP of 1%,
+andes as the mean of five Percolator seeds. Details on the [DIA benchmark page](dia.md).
+
 ## Also benchmarked
 
 - **Glycoproteomics** against five published tools on PXD065680:

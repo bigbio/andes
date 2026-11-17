@@ -672,9 +672,11 @@ minutes, out of fold by peptidoform) and Percolator runs a second time (+32 / +6
 1 % true FDP on the Astral benchmark). It needs `--predict rt`. On Orbitrap Astral MS2, `--dia`
 searches and scores fragments at 7 ppm unless `--fragment-tol-*` is set: the per-run fragment
 error measurement needs 100 confident PSMs, which a DIA sample rarely yields (+135 / +72 precursors
-at 1 % true FDP against 20 ppm on the Astral benchmark). The PIN is PSM-level; precursor-level FDR is the best PSM per (peptidoform, charge)
-after target-decoy competition, as in `docs/benchmarks/dia/eval_dia.py`. Measured results and the
-gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
+at 1 % true FDP against 20 ppm on the Astral benchmark). The PIN is PSM-level; precursor-level FDR
+is the best PSM per (peptidoform, charge) after target-decoy competition, as in
+`docs/benchmarks/dia/eval_dia.py`. On the ProteoBench Astral entrapment set, andes reaches 1,801 /
+1,819 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
+Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 
 ### Refine — secondary chemistry cascade
 

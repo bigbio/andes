@@ -29,6 +29,7 @@ README_PAGES = {
         "Optional modes",
         [
             "Chimeric / co-isolated peptides (`--chimeric`, experimental)",
+            "Data-independent acquisition (`--dia`, experimental)",
             "Secondary modifications (`--refine`, experimental)",
             "Variant calls checked against knockoffs (`--knockoffs`, `--proteoform-fdr`)",
             "Intact N-glycopeptide search (`--glyco`, experimental)",

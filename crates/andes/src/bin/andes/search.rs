@@ -874,6 +874,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
     params.top_n_psms_per_spectrum = cli.top_n;
+    if cli.dia && cli.predict.contains(&crate::cli::PredictFeature::Ms2) {
+        params.top_n_psms_per_spectrum = cli.top_n.max(crate::dia::RERANK_POOL);
+    }
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -2400,6 +2403,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
+    }
+    if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
+        crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
     }
     if cli.dia {
         crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;

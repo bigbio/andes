@@ -39,6 +39,93 @@ const FRAG_PPM: f64 = 20.0;
 const SUM_PPM: f64 = 10.0;
 const MS1_PPM: f64 = 10.0;
 pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
+pub(crate) const RERANK_POOL: u32 = 50;
+const RERANK_FEATURE: &str = "andesms2_spectral_angle";
+
+pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
+    let t0 = Instant::now();
+    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    let mut lines = text.lines();
+    let header = lines.next().unwrap_or_default();
+    let h: Vec<&str> = header.split('\t').collect();
+    let at = |n: &str| h.iter().position(|c| *c == n);
+    let (Some(c_scan), Some(c_raw), Some(c_ms2)) =
+        (at("ScanNr"), at("RawScore"), at(RERANK_FEATURE))
+    else {
+        return Ok(false);
+    };
+    let need = c_scan.max(c_raw).max(c_ms2) + 1;
+    let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
+    let mut file = Vec::with_capacity(rows.len());
+    let mut scan = Vec::with_capacity(rows.len());
+    let mut raw = Vec::with_capacity(rows.len());
+    let mut ms2 = Vec::with_capacity(rows.len());
+    for l in &rows {
+        let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
+        if x.len() < need {
+            return Err(format!("{}: short row while re-ranking", pin.display()));
+        }
+        let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
+        file.push(x[0].split('/').next().unwrap_or(""));
+        scan.push(x[c_scan]);
+        raw.push(r.unwrap_or(f64::NAN));
+        ms2.push(m.unwrap_or(f64::NAN));
+    }
+    let z = |v: &[f64]| -> Vec<f64> {
+        let f: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+        let n = f.len().max(1) as f64;
+        let mean = f.iter().sum::<f64>() / n;
+        let sd = (f.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+        v.iter()
+            .map(|x| {
+                if x.is_finite() && sd > 0.0 {
+                    (x - mean) / sd
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    let (zr, zm) = (z(&raw), z(&ms2));
+    let score: Vec<f64> = zr.iter().zip(&zm).map(|(a, b)| a + b).collect();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        (file[a], scan[a])
+            .cmp(&(file[b], scan[b]))
+            .then(score[b].total_cmp(&score[a]))
+    });
+    let mut keep_row = vec![false; rows.len()];
+    let mut i = 0;
+    while i < order.len() {
+        let mut j = i;
+        while j < order.len()
+            && (file[order[j]], scan[order[j]]) == (file[order[i]], scan[order[i]])
+        {
+            if j - i < keep {
+                keep_row[order[j]] = true;
+            }
+            j += 1;
+        }
+        i = j;
+    }
+    let kept = keep_row.iter().filter(|k| **k).count();
+    let mut out = String::with_capacity(text.len());
+    out.push_str(header);
+    out.push('\n');
+    for (l, k) in rows.iter().zip(&keep_row) {
+        if *k {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    std::fs::write(pin, out).map_err(|e| format!("{}: {e}", pin.display()))?;
+    eprintln!(
+        "DIA: kept {kept} of {} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
+        rows.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(true)
+}
 
 pub(crate) fn add_to_pin(
     pin: &Path,
@@ -678,5 +765,30 @@ mod tests {
             default_train_fdr(&mut b);
             assert_eq!(b, set);
         }
+    }
+
+    #[test]
+    fn rerank_keeps_top_rows_per_scan_by_score_and_angle() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("x.pin");
+        let rows = [
+            ("r/1/a", 1, 10.0, 0.1),
+            ("r/1/b", 1, 9.0, 0.9),
+            ("r/1/c", 1, 8.0, 0.2),
+            ("r/2/d", 2, 1.0, 0.1),
+        ];
+        let mut s = String::from("SpecId\tLabel\tScanNr\tRawScore\tandesms2_spectral_angle\n");
+        for (id, scan, raw, ms2) in rows {
+            s.push_str(&format!("{id}\t1\t{scan}\t{raw}\t{ms2}\n"));
+        }
+        std::fs::write(&pin, s).unwrap();
+        assert!(rerank_pin(&pin, 1).unwrap());
+        let ids: Vec<String> = std::fs::read_to_string(&pin)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').next().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["r/1/b", "r/2/d"]);
     }
 }

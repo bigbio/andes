@@ -467,7 +467,7 @@ pub(crate) fn run_xl(
     eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
     let mut score: Vec<Option<f64>> = results
         .iter()
-        .map(|r| r.csm.as_ref().map(|c| c.pair_score as f64))
+        .map(|r| r.csm.as_ref().map(|c| c.score() as f64))
         .collect();
     let mut rescore_class = |intra: bool, suffix: &str| -> Result<(), Box<dyn std::error::Error>> {
         let path = sibling(report_base, suffix);

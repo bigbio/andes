@@ -40,6 +40,8 @@ pub const STUB_ION_WEIGHT: f32 = 3.0;
 
 pub const SECONDARY_SITE_PENALTY: f32 = 12.0;
 
+pub const PAIR_DELTA_WEIGHT: f32 = 0.3;
+
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
         XlConfig {
@@ -400,6 +402,17 @@ pub struct Csm {
     pub alpha_doublet: Option<DoubletMass>,
     pub beta_doublet: Option<DoubletMass>,
     pub rescores: Rescores,
+}
+
+pub fn combined_pair_score(pair: f32, second: Option<f32>) -> f32 {
+    let delta = second.map_or(0.0, |s| (pair - s).max(0.0));
+    pair + PAIR_DELTA_WEIGHT * delta
+}
+
+impl Csm {
+    pub fn score(&self) -> f32 {
+        combined_pair_score(self.pair_score, self.second_pair_score)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -928,7 +941,7 @@ fn search_spectrum(
                 else {
                     continue;
                 };
-                let score = |r: &XlSpectrumResult| r.csm.as_ref().map(|c| c.pair_score);
+                let score = |r: &XlSpectrumResult| r.csm.as_ref().map(Csm::score);
                 let better = match &best {
                     None => true,
                     Some(b) => match (score(&r), score(b)) {
@@ -1315,6 +1328,17 @@ mod tests {
         };
         let kept = without_peaks(&spec, &ions, 0.01);
         assert_eq!(kept.peaks, vec![(500.0, 2.0)]);
+    }
+
+    #[test]
+    fn the_csm_score_adds_a_share_of_the_gap_to_the_next_pair() {
+        assert_eq!(combined_pair_score(40.0, None), 40.0);
+        assert!(
+            (combined_pair_score(40.0, Some(30.0)) - (40.0 + PAIR_DELTA_WEIGHT * 10.0)).abs()
+                < 1e-6
+        );
+        assert_eq!(combined_pair_score(40.0, Some(45.0)), 40.0);
+        assert!(combined_pair_score(40.0, Some(10.0)) > combined_pair_score(40.0, Some(39.0)));
     }
 
     #[test]

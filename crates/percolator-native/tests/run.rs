@@ -443,6 +443,38 @@ fn weights_file_is_checked_as_percolator_master() {
 }
 
 #[test]
+fn weights_names_line_may_start_with_a_digit_or_minus() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin_text = std::fs::read_to_string(data("svm_ref.pin")).unwrap();
+    let weights_text = std::fs::read_to_string(data("svm_ref_perc.weights")).unwrap();
+    let base = outs(dir.path(), "base");
+    run(
+        &static_args(
+            &base,
+            &data("svm_ref_perc.weights"),
+            true,
+            &data("svm_ref.pin"),
+        ),
+        limit(dir.path()),
+    )
+    .unwrap();
+    for name in ["2sep", "-sep"] {
+        let pin = dir.path().join(format!("{name}.pin"));
+        std::fs::write(
+            &pin,
+            pin_text.replacen("\tsep\t", &format!("\t{name}\t"), 1),
+        )
+        .unwrap();
+        let w = dir.path().join(format!("{name}.weights"));
+        std::fs::write(&w, weights_text.replace("sep\tf2", &format!("{name}\tf2"))).unwrap();
+        let o = outs(dir.path(), name);
+        run(&static_args(&o, &w, true, &pin), limit(dir.path())).unwrap();
+        assert_eq!(scores(&o.target), scores(&base.target), "{name}");
+        assert_eq!(scores(&o.decoy), scores(&base.decoy), "{name}");
+    }
+}
+
+#[test]
 fn training_without_tdc_is_an_error_on_concatenated_input() {
     let dir = tempfile::tempdir().unwrap();
     let o = outs(dir.path(), "plain");

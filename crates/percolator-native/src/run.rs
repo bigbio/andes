@@ -120,7 +120,11 @@ fn read_init_weights(path: &Path, names: &[String]) -> Result<Option<Vec<f64>>, 
     for line in lines.by_ref() {
         line_nr += 1;
         let first = line.as_bytes().first().copied().unwrap_or(0);
-        if first == b'-' || first.is_ascii_digit() {
+        if (first == b'-' || first.is_ascii_digit())
+            && line
+                .split_ascii_whitespace()
+                .all(|t| t.parse::<f64>().is_ok())
+        {
             found = true;
             break;
         }

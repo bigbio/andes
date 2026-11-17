@@ -79,6 +79,11 @@ pub struct PsmFeatures {
     pub isotope_mimic: u32,
     pub predicted_rt_min: f32,
     pub isobaric_rt_margin: f32,
+    pub open_site: u16,
+    pub open_loc_score: f32,
+    pub open_loc_margin: f32,
+    pub open_delta: f32,
+    pub open_used_shift: bool,
 }
 
 pub const TAILOR_MIN_CANDIDATES: u32 = 100;

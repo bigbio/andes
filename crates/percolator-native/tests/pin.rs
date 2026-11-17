@@ -84,6 +84,27 @@ fn filename_is_metadata() {
 }
 
 #[test]
+fn rejects_a_header_without_features() {
+    let d = tempfile::tempdir().unwrap();
+    let text = "SpecId\tLabel\tScanNr\tExpMass\tPeptide\tProteins\ns1\t1\t1\t1000\tK.A.R\tP1\n";
+    let p = write(d.path(), "x.pin", text);
+    let err = read_pin(&p, ram(d.path())).err().unwrap();
+    assert!(err.contains("no feature columns"), "{err}");
+}
+
+#[test]
+fn a_row_without_its_label_cell_is_an_error_not_a_panic() {
+    let d = tempfile::tempdir().unwrap();
+    let text = "SpecId\tf1\tPeptide\tLabel\ns1\t0.5\tK.A.R\t1\ns2\t0.7\tK.B.R\n";
+    let p = write(d.path(), "x.pin", text);
+    let err = read_pin(&p, ram(d.path())).err().unwrap();
+    assert!(
+        err.contains("line 3") && err.contains("Label column is 4"),
+        "{err}"
+    );
+}
+
+#[test]
 fn rejects_bad_label() {
     let d = tempfile::tempdir().unwrap();
     let bad = PIN.replace("a/2\t-1", "a/2\t2");

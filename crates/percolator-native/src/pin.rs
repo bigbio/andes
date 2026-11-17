@@ -75,6 +75,9 @@ fn parse_header(cells: &[&str]) -> Result<(Cols, Vec<String>), String> {
     if c.peptide.is_none() {
         return Err("PIN header has no Peptide column".into());
     }
+    if c.features.is_empty() {
+        return Err("PIN header has no feature columns".into());
+    }
     Ok((c, names))
 }
 
@@ -157,7 +160,14 @@ fn parse_chunk(
                 peptide_col + 1
             ));
         }
-        let label = match cells[label_col].trim() {
+        let Some(label_cell) = cells.get(label_col) else {
+            return Err(format!(
+                "line {lineno}: {} cells, Label column is {}",
+                cells.len(),
+                label_col + 1
+            ));
+        };
+        let label = match label_cell.trim() {
             "1" | "+1" => 1i8,
             "-1" => -1i8,
             other => return Err(format!("line {lineno}: bad Label '{other}'")),

@@ -1,10 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::Path;
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, Float64Array, StringArray, UInt32Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 
 use model::unimod::UnimodDb;
 
 use crate::percolator::PercolatorPsm;
+use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
 const ISOTOPE_DA: f64 = 1.003_355;
 const REFINED_DA: f64 = 0.0005;
@@ -835,54 +841,148 @@ fn residues_field(residues: &[(String, usize)]) -> String {
         .join(";")
 }
 
-pub fn write_peaks<W: Write>(w: &mut W, report: &OffsetReport) -> std::io::Result<()> {
-    write!(
-        w,
-        "peak\tmass_shift\twidth_da\tpsms\tpeptides\tdecoys\tdecoy_ratio\tresidues"
-    )?;
-    for k in 1..=TOP_EXPLANATIONS {
-        write!(w, "\texplanation_{k}\tmass_{k}\tposterior_{k}")?;
-    }
-    writeln!(w)?;
-    for p in &report.peaks {
-        write!(
-            w,
-            "{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{}",
-            p.id,
-            p.mass,
-            p.width,
-            p.psms,
-            p.peptides,
-            p.decoys,
-            p.decoys as f64 / p.psms as f64,
-            residues_field(&p.residues)
-        )?;
-        for k in 0..TOP_EXPLANATIONS {
-            match p.explanations.get(k) {
-                Some(e) => write!(w, "\t{}\t{:.4}\t{:.3}", e.label, e.mass, e.posterior)?,
-                None => write!(w, "\t\t\t")?,
-            }
-        }
-        writeln!(w)?;
-    }
-    Ok(())
+const PEAKS_TABLE: TableVersion = TableVersion {
+    key: "andes.open_offsets.schema",
+    version: "1.0",
+    major: 1,
+    what: "open-search mass-offset table",
+};
+const PSMS_TABLE: TableVersion = TableVersion {
+    key: "andes.open_psms.schema",
+    version: "1.0",
+    major: 1,
+    what: "open-search PSM offset table",
+};
+pub const PPM_SHIFT_KEY: &str = "andes.open_offsets.ppm_shift";
+pub const PRECISION_KEY: &str = "andes.open_offsets.precision_da";
+pub const REFINED_PRECISION_KEY: &str = "andes.open_offsets.refined_precision_da";
+
+fn report_meta(report: &OffsetReport) -> Vec<(&'static str, String)> {
+    vec![
+        (PPM_SHIFT_KEY, report.ppm_shift.to_string()),
+        (PRECISION_KEY, report.precision.to_string()),
+        (REFINED_PRECISION_KEY, report.refined_precision.to_string()),
+    ]
 }
 
-pub fn write_assignments<W: Write>(w: &mut W, report: &OffsetReport) -> std::io::Result<()> {
-    writeln!(w, "PSMId\tDeltaMass\tpeak\tresidue\texplanation\tposterior")?;
-    for a in &report.assignments {
-        writeln!(
-            w,
-            "{}\t{:.4}\t{}\t{}\t{}\t{:.3}",
-            a.psm_id,
-            a.delta,
-            a.peak.map_or_else(|| "NA".to_string(), |p| p.to_string()),
-            a.residue,
-            a.explanation,
-            a.posterior
-        )?;
+fn peaks_schema() -> Schema {
+    let mut fields = vec![
+        Field::new("peak", DataType::UInt32, false),
+        Field::new("mass_shift", DataType::Float64, false),
+        Field::new("width_da", DataType::Float64, false),
+        Field::new("psms", DataType::UInt32, false),
+        Field::new("peptides", DataType::UInt32, false),
+        Field::new("decoys", DataType::UInt32, false),
+        Field::new("decoy_ratio", DataType::Float64, false),
+        Field::new("residues", DataType::Utf8, false),
+    ];
+    for k in 1..=TOP_EXPLANATIONS {
+        fields.push(Field::new(format!("explanation_{k}"), DataType::Utf8, true));
+        fields.push(Field::new(format!("mass_{k}"), DataType::Float64, true));
+        fields.push(Field::new(format!("posterior_{k}"), DataType::Float64, true));
     }
-    Ok(())
+    Schema::new(fields)
+}
+
+fn psms_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("psm_id", DataType::Utf8, false),
+        Field::new("delta_mass", DataType::Float64, false),
+        Field::new("peak", DataType::UInt32, true),
+        Field::new("residue", DataType::Utf8, true),
+        Field::new("explanation", DataType::Utf8, true),
+        Field::new("posterior", DataType::Float64, true),
+    ])
+}
+
+fn peaks_batch(schema: &Arc<Schema>, peaks: &[OffsetPeak]) -> Result<RecordBatch, String> {
+    let u32s = |f: &dyn Fn(&OffsetPeak) -> usize| -> ArrayRef {
+        Arc::new(UInt32Array::from_iter_values(peaks.iter().map(|p| f(p) as u32)))
+    };
+    let f64s = |f: &dyn Fn(&OffsetPeak) -> f64| -> ArrayRef {
+        Arc::new(Float64Array::from_iter_values(peaks.iter().map(f)))
+    };
+    let mut cols: Vec<ArrayRef> = vec![
+        u32s(&|p| p.id),
+        f64s(&|p| p.mass),
+        f64s(&|p| p.width),
+        u32s(&|p| p.psms),
+        u32s(&|p| p.peptides),
+        u32s(&|p| p.decoys),
+        f64s(&|p| p.decoys as f64 / p.psms as f64),
+        Arc::new(StringArray::from_iter_values(
+            peaks.iter().map(|p| residues_field(&p.residues)),
+        )),
+    ];
+    for k in 0..TOP_EXPLANATIONS {
+        let e = |p: &OffsetPeak| p.explanations.get(k);
+        cols.push(Arc::new(StringArray::from_iter(
+            peaks.iter().map(|p| e(p).map(|x| x.label.clone())),
+        )));
+        cols.push(Arc::new(Float64Array::from_iter(
+            peaks.iter().map(|p| e(p).map(|x| x.mass)),
+        )));
+        cols.push(Arc::new(Float64Array::from_iter(
+            peaks.iter().map(|p| e(p).map(|x| x.posterior)),
+        )));
+    }
+    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+}
+
+fn psms_batch(schema: &Arc<Schema>, rows: &[PsmAssignment]) -> Result<RecordBatch, String> {
+    let text = |v: &str| (!v.is_empty()).then(|| v.to_string());
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(rows.iter().map(|a| a.psm_id.as_str()))),
+        Arc::new(Float64Array::from_iter_values(rows.iter().map(|a| a.delta))),
+        Arc::new(UInt32Array::from_iter(rows.iter().map(|a| a.peak.map(|p| p as u32)))),
+        Arc::new(StringArray::from_iter(rows.iter().map(|a| text(&a.residue)))),
+        Arc::new(StringArray::from_iter(rows.iter().map(|a| text(&a.explanation)))),
+        Arc::new(Float64Array::from_iter(
+            rows.iter()
+                .map(|a| a.peak.map(|_| a.posterior)),
+        )),
+    ];
+    RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())
+}
+
+pub fn write_peaks_table(path: &Path, report: &OffsetReport) -> Result<(), String> {
+    let schema = Arc::new(peaks_schema());
+    let batches = report
+        .peaks
+        .chunks(BATCH_ROWS)
+        .map(|c| peaks_batch(&schema, c));
+    write_table(
+        path,
+        &PEAKS_TABLE,
+        PEAKS_TABLE.version,
+        schema.clone(),
+        batches,
+        &report_meta(report),
+    )
+}
+
+pub fn write_psms_table(path: &Path, report: &OffsetReport) -> Result<(), String> {
+    let schema = Arc::new(psms_schema());
+    let batches = report
+        .assignments
+        .chunks(BATCH_ROWS)
+        .map(|c| psms_batch(&schema, c));
+    write_table(
+        path,
+        &PSMS_TABLE,
+        PSMS_TABLE.version,
+        schema.clone(),
+        batches,
+        &report_meta(report),
+    )
+}
+
+pub fn read_peaks_table(path: &Path) -> Result<ReadTable, String> {
+    read_table(path, &PEAKS_TABLE)
+}
+
+pub fn read_psms_table(path: &Path) -> Result<ReadTable, String> {
+    read_table(path, &PSMS_TABLE)
 }
 
 pub fn summary_lines(report: &OffsetReport, n: usize) -> Vec<String> {
@@ -1137,6 +1237,29 @@ mod tests {
         assert!(r.peaks.is_empty());
         assert_eq!(r.assignments.len(), 2);
         assert!(r.assignments.iter().all(|a| a.peak.is_none()));
+    }
+
+    #[test]
+    fn report_tables_round_trip_through_parquet() {
+        let mut rows = zero_rows(30, 0.0);
+        rows.extend((0..12).map(|i| {
+            row(&format!("o{i}"), false, 15.9949 + 0.0003 * (i % 3) as f64 - 0.0003, 3, "PEMTIDEK")
+        }));
+        rows.push(row("lone", false, 55.5, 0, "PEPTIDE"));
+        let r = report(&rows);
+        let dir = tempfile::tempdir().unwrap();
+        let peaks = dir.path().join("x.open_offsets.parquet");
+        let psms = dir.path().join("x.open_psms.parquet");
+        write_peaks_table(&peaks, &r).unwrap();
+        write_psms_table(&psms, &r).unwrap();
+        let t = read_peaks_table(&peaks).unwrap();
+        let n: usize = t.batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(n, r.peaks.len());
+        assert_eq!(t.meta.get(PRECISION_KEY).map(String::as_str), Some(r.precision.to_string().as_str()));
+        let t = read_psms_table(&psms).unwrap();
+        let n: usize = t.batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(n, r.assignments.len());
+        assert!(read_peaks_table(&psms).is_err());
     }
 
     #[test]

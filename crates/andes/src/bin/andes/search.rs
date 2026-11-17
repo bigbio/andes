@@ -3365,34 +3365,24 @@ fn write_open_offsets(
             return;
         }
     };
-    let peaks_path = dir.join(format!("{stem}.open_offsets.tsv"));
-    let psms_path = dir.join(format!("{stem}.open_psms.tsv"));
-    for (path, peaks) in [(&peaks_path, true), (&psms_path, false)] {
-        let written = output::write_atomic(path, |path| {
-            let mut w = std::io::BufWriter::new(File::create(path)?);
-            if peaks {
-                output::open_offsets::write_peaks(&mut w, &report)?;
-            } else {
-                output::open_offsets::write_assignments(&mut w, &report)?;
-            }
-            std::io::Write::flush(&mut w)
-        });
-        if let Err(e) = written {
-            for stale in [&peaks_path, &psms_path] {
-                if let Err(r) = std::fs::remove_file(stale) {
-                    if r.kind() != std::io::ErrorKind::NotFound {
-                        eprintln!("WARN: could not remove {}: {r}", stale.display());
-                    }
+    let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
+    let psms_path = dir.join(format!("{stem}.open_psms.parquet"));
+    let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
+        .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
+    if let Err(e) = written {
+        for stale in [&peaks_path, &psms_path] {
+            if let Err(r) = std::fs::remove_file(stale) {
+                if r.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("WARN: could not remove {}: {r}", stale.display());
                 }
             }
-            eprintln!(
-                "WARN: could not write {}: {e}; the open-search report pair {} / {} is not written",
-                path.display(),
-                peaks_path.display(),
-                psms_path.display()
-            );
-            return;
         }
+        eprintln!(
+            "WARN: open-search report not written ({e}); neither {} nor {} is left",
+            peaks_path.display(),
+            psms_path.display()
+        );
+        return;
     }
     eprintln!(
         "Open search: {} mass-offset peaks among the accepted PSMs (precursor calibration \

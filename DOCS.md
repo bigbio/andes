@@ -759,7 +759,12 @@ re-score is capped at 64 per spectrum.
 | `--open-search-top-k` | integer | `100` | Base peptides scored per spectrum, best fragment votes first. |
 
 **Mass-offset report.** With `--rescore` or `--rescore-native`, an open search also writes
-`<stem>.open_offsets.tsv` and `<stem>.open_psms.tsv`, and prints the ten largest peaks.
+two versioned Parquet tables, and prints the ten largest peaks:
+- `<stem>.open_offsets.parquet` (schema key `andes.open_offsets.schema`);
+- `<stem>.open_psms.parquet` (schema key `andes.open_psms.schema`).
+
+Both carry the run's calibration in their metadata: `andes.open_offsets.ppm_shift`,
+`andes.open_offsets.precision_da` and `andes.open_offsets.refined_precision_da`.
 
 - **Calibration.** Precursor calibration is off in open search, so the offsets carry the
   instrument's mass error, which scales with peptide mass. The report measures it as the median
@@ -779,7 +784,9 @@ re-score is capped at 64 per spectrum.
     lower than half the smaller of its two neighbouring maxima. This separates neighbours such as
     deamidation (+0.984) and an isotope pick (+1.003).
   - A peak needs at least two PSMs.
-- **Columns per peak.** `<stem>.open_offsets.tsv` gives each peak's:
+- **Columns per peak.** `<stem>.open_offsets.parquet` has one row per peak:
+  `peak`, `mass_shift`, `width_da`, `psms`, `peptides`, `decoys`, `decoy_ratio`, `residues`, and
+  `explanation_k` / `mass_k` / `posterior_k` for k = 1..3. Each peak's:
   - median offset (`mass_shift`) and width (`width_da`);
   - PSM and peptide counts;
   - its localised residues (`residues`, the three most frequent with counts);
@@ -831,9 +838,11 @@ re-score is capped at 64 per spectrum.
       with no listed site take a neutral 0.5. The support is 1 when no PSM is localised. A PSM on
       the right residue then favours the entry, and one on a wrong residue counts against it.
   - Entries with the same mass and sites tie, and are reported as ties.
-- **Per-PSM file.** `<stem>.open_psms.tsv` gives each accepted PSM its peak (`NA` outside every
-  peak), its localised residue, and the candidate with its highest responsibility in the fitted
-  mixture, with that responsibility.
+- **Per-PSM file.** `<stem>.open_psms.parquet` has one row per accepted PSM: `psm_id`,
+  `delta_mass` (calibrated), `peak` (null outside every peak), `residue`, and `explanation` /
+  `posterior`.
+  - In a single-species peak, the explanation is the peak's top explanation.
+  - In a mixed peak, it is the candidate with the PSM's highest responsibility.
 
 Fixed behaviour in this mode: the isotope range is set internally to **0..=2** (an isotope step
 is indistinguishable from a ~1 Da offset, so the search tries each offset and keeps the one whose

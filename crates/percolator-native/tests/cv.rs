@@ -39,13 +39,21 @@ fn pin_text(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> String {
 }
 
 fn load(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> (tempfile::TempDir, Pin) {
+    load_within(rows, default, u64::MAX)
+}
+
+fn load_within(
+    rows: &[(i8, u64, Vec<f64>)],
+    default: Option<&[f64]>,
+    bytes: u64,
+) -> (tempfile::TempDir, Pin) {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("x.pin");
     std::fs::write(&p, pin_text(rows, default)).unwrap();
     let pin = read_pin(
         &p,
         MemLimit {
-            bytes: u64::MAX,
+            bytes,
             spill_dir: d.path().to_path_buf(),
         },
     )
@@ -133,6 +141,31 @@ fn cv_grid_tie_picks_later_pair() {
         assert_ne!(bits(&early.w_norm[f]), bits(&late.w_norm[f]));
         assert_eq!(bits(&both.w_norm[f]), bits(&late.w_norm[f]));
     }
+}
+
+#[test]
+fn cv_grid_with_no_budget_equals_unlimited() {
+    let rows = synthetic(900, &[0.9, 0.6, 0.0, 0.3], 17);
+    let (_a, big) = load(&rows, None);
+    let (_b, small) = load_within(&rows, None, 1);
+    assert!(small.rows.is_spilled());
+    let cfg = CvConfig {
+        iterations: 4,
+        ..CvConfig::default()
+    };
+    let p = pool(8);
+    let a = train(&big, &stdv(&big), &cfg, &p).unwrap();
+    let b = train(&small, &stdv(&small), &cfg, &p).unwrap();
+    assert_eq!(a.fold, b.fold);
+    for (x, y) in a
+        .w_norm
+        .iter()
+        .chain(&a.w_raw)
+        .zip(b.w_norm.iter().chain(&b.w_raw))
+    {
+        assert_eq!(bits(x), bits(y));
+    }
+    assert_eq!(bits(&a.test_scores), bits(&b.test_scores));
 }
 
 fn twins(n: usize) -> Vec<(i8, u64, Vec<f64>)> {

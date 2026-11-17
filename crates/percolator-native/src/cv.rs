@@ -98,11 +98,12 @@ fn fit_positives(
     fold: &Fold,
     fits: &[Option<Vec<f64>>],
     fdr: f64,
-) -> Vec<Option<(usize, Vec<f64>)>> {
+) -> Option<(usize, usize, Vec<f64>)> {
     let present: Vec<usize> = (0..fits.len()).filter(|&k| fits[k].is_some()).collect();
     let per_fit = (fold.train.len() as u64).max(1) * SCORE_BYTES_PER_ROW;
+    let _best_held = Reservation::take(&pin.budget, per_fit);
     let group = ((pin.budget.available() / per_fit) as usize).clamp(1, present.len().max(1));
-    let mut out: Vec<Option<(usize, Vec<f64>)>> = (0..fits.len()).map(|_| None).collect();
+    let mut best: Option<(usize, usize, Vec<f64>)> = None;
     for ks in present.chunks(group) {
         let _held = Reservation::take(&pin.budget, ks.len() as u64 * per_fit);
         let ws: Vec<&[f64]> = ks
@@ -114,11 +115,13 @@ fn fit_positives(
             .into_par_iter()
             .map(|s| (tdc_cut(&s, &fold.train_decoy, fdr, true).below, s))
             .collect();
-        for (&k, c) in ks.iter().zip(counted) {
-            out[k] = Some(c);
+        for (&k, (tp, s)) in ks.iter().zip(counted) {
+            if best.as_ref().is_none_or(|b| tp >= b.1) {
+                best = Some((k, tp, s));
+            }
         }
     }
-    out
+    best
 }
 
 fn train_set(fold: &Fold, s: &[f64], fdr: f64) -> TrainSet {
@@ -390,20 +393,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         let mut picked = [0usize; FOLDS];
         for f in 0..FOLDS {
             let fold_fits = &fits[f * per_fold..(f + 1) * per_fold];
-            let tps = fit_positives(pin, norm, &folds[f], fold_fits, cfg.test_fdr);
-            let mut best = 0usize;
-            let mut chosen = None;
-            for (k, tp) in tps.into_iter().enumerate() {
-                if let Some((tp, s)) = tp {
-                    if tp >= best {
-                        best = tp;
-                        chosen = Some(k);
-                        train_scores[f] = s;
-                    }
-                }
-            }
-            match chosen {
-                Some(k) => {
+            match fit_positives(pin, norm, &folds[f], fold_fits, cfg.test_fdr) {
+                Some((k, best, s)) => {
+                    train_scores[f] = s;
                     picked[f] = k;
                     w[f].clone_from(fold_fits[k].as_ref().expect("chosen fit"));
                     if cfg.verbose > 2 {

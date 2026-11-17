@@ -27,7 +27,9 @@ pub(crate) const LANES: usize = 8;
 
 const CHUNK: usize = 4096;
 
-pub(crate) const COMPACT_BYTES: usize = 64 << 20;
+pub(crate) const GRAM_BYTES: usize = 64 << 20;
+
+const GROUP: usize = 4;
 
 pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
@@ -359,58 +361,7 @@ where
         .collect()
 }
 
-struct Compact {
-    data: Vec<f32>,
-    stride: usize,
-}
-
-impl Compact {
-    fn row(&self, k: usize) -> &[f32] {
-        &self.data[k * self.stride..(k + 1) * self.stride]
-    }
-}
-
 impl Train<'_> {
-    fn compact(&self, subset: &[usize]) -> Option<Compact> {
-        let stride = self.x.stride;
-        if subset.len() * stride * 4 > COMPACT_BYTES {
-            return None;
-        }
-        let mut data = vec![0.0f32; subset.len() * stride];
-        match &self.x.data {
-            RowData::Ram(_) => data
-                .par_chunks_mut(stride)
-                .zip(subset.par_iter())
-                .for_each(|(d, &i)| d.copy_from_slice(self.x.row(self.rows[i]))),
-            RowData::Spill(_) => {
-                let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
-                self.x.scan(&ids, |k, row| {
-                    data[k * stride..(k + 1) * stride].copy_from_slice(row)
-                });
-            }
-        }
-        Some(Compact { data, stride })
-    }
-
-    fn pass_on<P, I, B>(
-        &self,
-        compact: Option<&Compact>,
-        subset: &[usize],
-        out: &mut [f64],
-        init: I,
-        body: B,
-    ) -> Vec<P>
-    where
-        P: Send,
-        I: Fn() -> P + Sync,
-        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
-    {
-        match compact {
-            Some(c) => pass_ram(|k| c.row(k), &mut out[..subset.len()], init, body),
-            None => self.pass(subset, out, init, body),
-        }
-    }
-
     fn len(&self) -> usize {
         self.rows.len()
     }
@@ -494,13 +445,166 @@ fn dscal(a: f64, x: &mut [f64]) {
 }
 
 struct CgWork {
-    z: Vec<f64>,
-    q: Vec<f64>,
     r: Vec<f64>,
     p: Vec<f64>,
     u: Vec<f64>,
     s: Vec<f64>,
+    v: Vec<f64>,
+    hd: Vec<f64>,
+    d: Vec<f64>,
+    beta0: Vec<f64>,
     beta_old: Vec<f64>,
+    g: Vec<f64>,
+    h: Vec<f64>,
+}
+
+struct GramPart {
+    g: [Vec<f64>; 2],
+    buf: [Vec<f64>; 2],
+    fill: [usize; 2],
+    u: Vec<f64>,
+    v: Vec<f64>,
+    zz: f64,
+}
+
+impl GramPart {
+    fn new(stride: usize) -> GramPart {
+        GramPart {
+            g: [vec![0.0; stride * stride], vec![0.0; stride * stride]],
+            buf: [vec![0.0; GROUP * stride], vec![0.0; GROUP * stride]],
+            fill: [0, 0],
+            u: vec![0.0; stride],
+            v: vec![0.0; stride],
+            zz: 0.0,
+        }
+    }
+
+    fn push(&mut self, class: usize, row: &[f32], stride: usize, ncols: usize) {
+        let k = self.fill[class];
+        for (d, &x) in self.buf[class][k * stride..(k + 1) * stride]
+            .iter_mut()
+            .zip(row)
+        {
+            *d = f64::from(x);
+        }
+        self.fill[class] = k + 1;
+        if k + 1 == GROUP {
+            self.flush(class, stride, ncols);
+        }
+    }
+
+    fn flush(&mut self, class: usize, stride: usize, ncols: usize) {
+        let rows = self.fill[class];
+        syrk(&mut self.g[class], &self.buf[class], rows, stride, ncols);
+        self.fill[class] = 0;
+    }
+}
+
+fn syrk(g: &mut [f64], buf: &[f64], rows: usize, stride: usize, ncols: usize) {
+    for j in 0..ncols {
+        let k0 = j / LANES * LANES;
+        let gj = &mut g[j * stride + k0..(j + 1) * stride];
+        if rows == GROUP {
+            let (a0, a1, a2, a3) = (
+                buf[j],
+                buf[stride + j],
+                buf[2 * stride + j],
+                buf[3 * stride + j],
+            );
+            let x0 = &buf[k0..stride];
+            let x1 = &buf[stride + k0..2 * stride];
+            let x2 = &buf[2 * stride + k0..3 * stride];
+            let x3 = &buf[3 * stride + k0..4 * stride];
+            for ((((gv, &b0), &b1), &b2), &b3) in gj.iter_mut().zip(x0).zip(x1).zip(x2).zip(x3) {
+                *gv += (a0 * b0 + a1 * b1) + (a2 * b2 + a3 * b3);
+            }
+        } else {
+            for r in 0..rows {
+                let a = buf[r * stride + j];
+                for (gv, &b) in gj.iter_mut().zip(&buf[r * stride + k0..(r + 1) * stride]) {
+                    *gv += a * b;
+                }
+            }
+        }
+    }
+}
+
+fn symv(g: &[f64], x: &[f64], out: &mut [f64], ncols: usize) {
+    let stride = x.len();
+    for (j, oj) in out.iter_mut().enumerate() {
+        *oj = if j < ncols {
+            let mut acc = [0.0f64; LANES];
+            for (gc, xc) in g[j * stride..(j + 1) * stride]
+                .chunks_exact(LANES)
+                .zip(x.chunks_exact(LANES))
+            {
+                for l in 0..LANES {
+                    acc[l] += gc[l] * xc[l];
+                }
+            }
+            ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]))
+        } else {
+            0.0
+        };
+    }
+}
+
+fn gram(t: &Train, subset: &[usize], o: &[f64], ws: &mut CgWork) -> f64 {
+    let stride = t.x.stride;
+    let ncols = t.x.ncols;
+    let part_bytes = (2 * stride * stride + 2 * GROUP * stride + 2 * stride) * 8;
+    let batch = (GRAM_BYTES / part_bytes / CHUNK).max(1) * CHUNK;
+    let mut gs = [vec![0.0f64; stride * stride], vec![0.0f64; stride * stride]];
+    ws.u.fill(0.0);
+    ws.v.fill(0.0);
+    let mut zz = 0.0;
+    let mut scratch = vec![0.0f64; batch.min(subset.len())];
+    for sub in subset.chunks(batch) {
+        let parts = t.pass(
+            sub,
+            &mut scratch,
+            || GramPart::new(stride),
+            |acc, k, row, _| {
+                let ii = sub[k];
+                let c = t.c(ii);
+                let zk = c * (t.y(ii) - o[ii]);
+                axpy_row(zk, row, &mut acc.u);
+                axpy_row(c * zk, row, &mut acc.v);
+                acc.zz += zk * zk;
+                acc.push(usize::from(t.pos[ii]), row, stride, ncols);
+            },
+        );
+        for mut part in parts {
+            for (class, gc) in gs.iter_mut().enumerate() {
+                if part.fill[class] > 0 {
+                    part.flush(class, stride, ncols);
+                }
+                for (a, &b) in gc.iter_mut().zip(&part.g[class]) {
+                    *a += b;
+                }
+            }
+            for (a, &b) in ws.u.iter_mut().zip(&part.u) {
+                *a += b;
+            }
+            for (a, &b) in ws.v.iter_mut().zip(&part.v) {
+                *a += b;
+            }
+            zz += part.zz;
+        }
+    }
+    for j in 0..ncols {
+        for k in j + 1..ncols {
+            for gc in gs.iter_mut() {
+                gc[k * stride + j] = gc[j * stride + k];
+            }
+        }
+    }
+    let (cn, cp) = (t.cneg, t.cpos);
+    for (((g, h), &n), &p) in ws.g.iter_mut().zip(ws.h.iter_mut()).zip(&gs[0]).zip(&gs[1]) {
+        *g = cn * n + cp * p;
+        *h = (cn * cn) * n + (cp * cp) * p;
+    }
+    zz
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,37 +615,25 @@ fn cgls(
     epsilon: f64,
     subset: &[usize],
     beta: &mut [f64],
-    o: &mut [f64],
+    o: &[f64],
     ws: &mut CgWork,
 ) -> bool {
-    let active = subset.len();
     let n = t.x.ncols;
-    let z = &mut ws.z[..active];
-    let q = &mut ws.q[..active];
-    let r = &mut ws.r;
-    let p = &mut ws.p;
-    let u = &mut ws.u;
-    let sv = &mut ws.s;
-    let beta_old = &mut ws.beta_old;
-    let stride = u.len();
-    let compact = t.compact(subset);
-    let parts = t.pass_on(
-        compact.as_ref(),
-        subset,
-        z,
-        || vec![0.0f64; stride],
-        |acc, k, row, zk| {
-            let ii = subset[k];
-            *zk = t.c(ii) * (t.y(ii) - o[ii]);
-            axpy_row(*zk, row, acc);
-        },
-    );
-    u.fill(0.0);
-    for part in &parts {
-        for (a, &b) in u.iter_mut().zip(part) {
-            *a += b;
-        }
-    }
+    let zz0 = gram(t, subset, o, ws);
+    let CgWork {
+        r,
+        p,
+        u,
+        s: sv,
+        v,
+        hd,
+        d,
+        beta0,
+        beta_old,
+        g,
+        h,
+    } = ws;
+    beta0.copy_from_slice(beta);
     r.copy_from_slice(u);
     daxpy(-lambda, beta, r);
     p.copy_from_slice(r);
@@ -551,41 +643,20 @@ fn cgls(
     let mut cgiter = 0usize;
     while cgiter < cgitermax {
         cgiter += 1;
-        let pv: &[f64] = p;
-        let parts = t.pass_on(
-            compact.as_ref(),
-            subset,
-            q,
-            || (vec![0.0f64; stride], 0.0f64),
-            |acc, k, row, qk| {
-                let tk = dot_row(row, pv);
-                *qk = tk;
-                let ct = t.c(subset[k]) * tk;
-                acc.1 += ct * tk;
-                axpy_row(ct, row, &mut acc.0);
-            },
-        );
-        sv.fill(0.0);
-        let mut omega_q = 0.0;
-        for (part, oq) in &parts {
-            for (a, &b) in sv.iter_mut().zip(part) {
-                *a += b;
-            }
-            omega_q += oq;
-        }
+        symv(g, p, sv, n);
+        let omega_q = ddot(&p[..n], &sv[..n]);
         let gamma = omega1 / (lambda * omega_p + omega_q);
         let inv_omega2 = 1.0 / omega1;
         beta_old.copy_from_slice(beta);
         daxpy(gamma, p, beta);
-        for (k, &ii) in subset.iter().enumerate() {
-            let g = gamma * q[k];
-            o[ii] += g;
-            z[k] -= t.c(ii) * g;
-        }
         daxpy(-gamma, sv, u);
         r.copy_from_slice(u);
         daxpy(-lambda, beta_old, r);
-        let omega_z = ddot(z, z);
+        for ((dk, &b), &b0) in d.iter_mut().zip(beta.iter()).zip(beta0.iter()) {
+            *dk = b - b0;
+        }
+        symv(h, d, hd, n);
+        let omega_z = zz0 - 2.0 * ddot(&d[..n], &v[..n]) + ddot(&d[..n], &hd[..n]);
         omega1 = ddot(&r[..n], &r[..n]);
         if omega1 < epsilon2 * omega_z {
             return true;
@@ -704,9 +775,9 @@ pub(crate) fn mfn_from(
     let mut cgitermax = opts.small_cgitermax;
     let mut w = vec![0.0f64; stride];
     let mut o = vec![0.0f64; m];
+    let all: Vec<usize> = (0..m).collect();
     if let Some(w0) = start {
         w[..n].copy_from_slice(&w0[..n]);
-        let all: Vec<usize> = (0..m).collect();
         let wv: &[f64] = &w;
         t.pass(&all, &mut o, || (), |_, _, row, ok| *ok = dot_row(row, wv));
     }
@@ -715,14 +786,20 @@ pub(crate) fn mfn_from(
     let mut w_bar = vec![0.0f64; stride];
     let mut o_bar = vec![0.0f64; m];
     let mut ws = CgWork {
-        z: vec![0.0; m],
-        q: vec![0.0; m],
         r: vec![0.0; stride],
         p: vec![0.0; stride],
         u: vec![0.0; stride],
         s: vec![0.0; stride],
+        v: vec![0.0; stride],
+        hd: vec![0.0; stride],
+        d: vec![0.0; stride],
+        beta0: vec![0.0; stride],
         beta_old: vec![0.0; stride],
+        g: vec![0.0; stride * stride],
+        h: vec![0.0; stride * stride],
     };
+    let mut act = vec![false; m];
+    let mut step = vec![0.0f64; stride];
     let mut deltas: Vec<(f64, usize, f64)> = Vec::with_capacity(m);
     let mut ini = false;
     let mut iter = 0usize;
@@ -737,22 +814,31 @@ pub(crate) fn mfn_from(
             epsilon,
             &subset[..active],
             &mut w_bar,
-            &mut o_bar,
+            &o,
             &mut ws,
         );
-        let mut rest = subset[active..].to_vec();
-        rest.sort_unstable();
-        let mut vals = vec![0.0f64; rest.len()];
-        let wb: &[f64] = &w_bar;
-        t.pass(
-            &rest,
-            &mut vals,
-            || (),
-            |_, _, row, v| *v = dot_row(row, wb),
-        );
-        for (&ii, &v) in rest.iter().zip(&vals) {
-            o_bar[ii] = v;
+        act.fill(false);
+        for &ii in &subset[..active] {
+            act[ii] = true;
         }
+        for ((sk, &b), &a) in step.iter_mut().zip(&w_bar).zip(&w) {
+            *sk = b - a;
+        }
+        let wb: &[f64] = &w_bar;
+        let dv: &[f64] = &step;
+        let av: &[bool] = &act;
+        t.pass(
+            &all,
+            &mut o_bar,
+            || (),
+            |_, k, row, ob| {
+                if av[k] {
+                    *ob += dot_row(row, dv);
+                } else {
+                    *ob = dot_row(row, wb);
+                }
+            },
+        );
         if !ini {
             cgitermax = opts.cgitermax;
             ini = true;

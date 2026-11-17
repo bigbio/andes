@@ -283,14 +283,10 @@ impl ChunkFragmentIndex {
         let mut lo = f64::MAX;
         let mut hi = f64::MIN;
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
-        // Neutral observed mass (charge-independent), used by the shifted-ion
-        // complement vote below.
-        let mut observed_neutral = 0.0_f64;
         for &z in charges {
             let zf = z as f64;
             let obs =
                 adjusted_observed_neutral_mass(spec.precursor_mz * zf - zf * PROTON, shift_ppm);
-            observed_neutral = obs;
             for o in params.isotope_error_range.clone() {
                 let c = obs - (o as f64) * ISOTOPE;
                 let (w_lo, w_hi) = (
@@ -308,6 +304,17 @@ impl ChunkFragmentIndex {
         if lo > hi {
             return Vec::new();
         }
+        let complement_masses: Vec<f64> = match (params.open_search.is_some(), charges.len()) {
+            (true, 1) => {
+                let z = f64::from(charges[0]);
+                let obs = adjusted_observed_neutral_mass(
+                    spec.precursor_mz * z - z * PROTON,
+                    shift_ppm,
+                );
+                vec![obs]
+            }
+            _ => Vec::new(),
+        };
         let mut sel = self.vote(
             spec,
             lo,
@@ -315,8 +322,7 @@ impl ChunkFragmentIndex {
             fragment_tol,
             min_matched,
             vote_peaks,
-            params.open_search.is_some(),
-            observed_neutral,
+            &complement_masses,
         );
         select_top_k(&mut sel, top_k);
         sel.into_iter()
@@ -349,8 +355,7 @@ impl ChunkFragmentIndex {
             fragment_tol,
             min_matched,
             vote_peaks,
-            false,
-            0.0,
+            &[],
         );
         select_top_k(&mut sel, top_k);
         sel.into_iter().map(|(id, v, _)| (id, v)).collect()
@@ -369,8 +374,7 @@ impl ChunkFragmentIndex {
         fragment_tol: Tolerance,
         min_matched: u16,
         vote_peaks: usize,
-        complement: bool,
-        observed_neutral: f64,
+        complement_masses: &[f64],
     ) -> Vec<(u32, u16, f32)> {
         let id_lo = self.form_mass.partition_point(|&m| m < lo) as u32;
         let id_hi = self.form_mass.partition_point(|&m| m <= hi) as u32;
@@ -393,14 +397,13 @@ impl ChunkFragmentIndex {
             let vote = |mz: f64,
                             intensity: f32,
                             counts: &mut Vec<(u16, f32)>,
-                            touched: &mut Vec<u32>| {
+                            touched: &mut Vec<u32>,
+                            clip: bool| {
                 let tol_da = fragment_tol.as_da(mz);
                 let b = (mz / self.bin_width) as usize;
-                if b >= n_bins {
+                if clip && b >= n_bins {
                     return;
                 }
-                // Bins are sized for the window at m/z 2500; above it a
-                // ppm window spans more than one bin on each side.
                 let span = ((tol_da / self.bin_width).ceil() as usize).max(1);
                 for bb in b.saturating_sub(span)..=(b + span).min(n_bins - 1) {
                     let base = self.bin_start[bb] as usize;
@@ -429,24 +432,18 @@ impl ChunkFragmentIndex {
                 if intensity < floor {
                     continue;
                 }
-                vote(mz, intensity, counts, touched);
+                vote(mz, intensity, counts, touched, false);
             }
-            // Shifted (complement) ions: for a singly charged b/y pair,
-            // b + y = peptide + 2 H+, so an observed fragment of a peptide that
-            // carries an offset δ has its complement at the UNMODIFIED
-            // peptide's complementary ion (P_obs cancels δ). Voting there lets
-            // the regular index reach modified peptides whose own ladder is
-            // shifted (Yu et al., Nat. Commun. 2020).
-            if complement {
+            for &base in complement_masses {
                 for &(mz, intensity) in &spec.peaks {
                     if intensity < floor {
                         continue;
                     }
-                    let q = observed_neutral + 2.0 * PROTON - mz;
+                    let q = base + 2.0 * PROTON - mz;
                     if q <= 0.0 {
                         continue;
                     }
-                    vote(q, intensity, counts, touched);
+                    vote(q, intensity, counts, touched, true);
                 }
             }
             let mut sel = Vec::new();

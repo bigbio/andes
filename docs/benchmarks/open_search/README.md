@@ -16,17 +16,17 @@ more truth peptides than the regular vote alone.
 |---|---|
 | Spectra | `MouseLiver-Z-T-1.raw` (PXD005553), 45,905 MS2 scans, read natively |
 | Database | `mouse_entrap.fasta` (mouse reviewed + peptide-level shuffled entrapment), T/E = 0.965 |
-| andes | 0.4.0, branch `feat/open-search` (`7e6d71d4`, `d303e538`, `532064ab`, and the P4 changes in this commit) |
+| andes | 0.4.0, branch `feat/open-search` (pull request #397) |
 | Percolator | 3.7.1, `--seed 42 -Y --only-psms=false` |
-| Host | 112 threads; searches 35 s (narrow) and 53 s (open, re-scores included), index build included |
+| Host | 112 threads; searches 39 s (narrow) and 84 s (open, re-scores included), index build included |
 
 Two searches of the same spectra and database:
 
 - **truth** — the defaults: Carbamidomethyl-C fixed, Oxidation-M and protein-N-term-acetyl
   variable. Its oxidised-M PSMs are the ground truth.
-- **open** — fixed mods only (`--mods` with Carbamidomethyl-C) plus `--open-search` with the
-  default `-100..300` Da window and `--open-search-top-k 100`. Oxidation is then an unknown
-  offset.
+- **open** — fixed mods only (`--fixed-mods "Carbamidomethyl (C)" --variable-mods ""`) plus
+  `--open-search` with the default `-100..300` Da window and `--open-search-top-k 100`.
+  Oxidation is then an unknown offset.
 
 Both runs are scored by Percolator at `q ≤ 0.01`; the true FDP is the entrapment estimate with
 the database's T/E factor (`(entrapment hits / accepted) × (1 + T/E)`).
@@ -35,12 +35,13 @@ the database's T/E factor (`(entrapment hits / accepted) × (1 + T/E)`).
 
 | metric | truth (declared mods) | open (mass offset) |
 |---|---:|---:|
-| spectra with a PSM (pre-FDR) | 33,744 | 44,241 |
-| PSMs at `q ≤ 0.01` | 2,652 | 4,260 |
-| true FDP at `q ≤ 0.01` (entrapment) | 0.96% | 0.83% |
-| of which, `\|offset\| ≤ 0.5 Da` | — | 1,714 rows, **0.00%** FDP |
-| of which, `\|offset\| > 0.5 Da` | — | 2,546 rows, **1.39%** FDP |
-| rows with a localised offset | — | 427 (10.0%) |
+| spectra with a PSM (pre-FDR) | 33,745 | 44,415 |
+| PSMs at `q ≤ 0.01` | 2,660 | 5,213 |
+| true FDP at `q ≤ 0.01` (entrapment) | 0.66% | 0.79% |
+| of which, `\|offset\| ≤ 0.5 Da` | — | 1,683 rows, **0.00%** FDP |
+| of which, `\|offset\| > 0.5 Da` | — | 3,530 rows, **1.17%** FDP |
+| rows with a localised offset | — | 569 (10.9%) |
+| true FDP, zero-offset rows / offset rows | — | 0.00% / **1.17%** |
 
 The open run finds more PSMs than the narrow one because its candidate set is one form per
 peptide instead of every variable-mod combination; the truth run pays for oxidation and
@@ -53,24 +54,24 @@ features are then computed on the shifted form. The inferred offset carries the 
 error, so it is first re-centred on the shifted fragment ions (a coarse window per residue, then
 the residues are separated on the tight fragment score). The shortlist itself votes on the
 complement (shifted) ions as well as the regular ones. This is the localization-aware open
-search of Yu et al., *Nat. Commun.* 2020. On this file the pass ran **2,987,845 re-scores and
-improved the node score 1,070,077 times (36%)**.
+search of Yu et al., *Nat. Commun.* 2020. On this file the pass ran **12,931,409 re-scores and
+improved the node score 4,168,971 times (32%)**.
 
-**Error control.** The zero-offset rows read none, but the offset-bearing rows now read **1.39%
-true FDP at a nominal 1%** — above nominal. Measured on the same file with the regular shortlist
-only, they read 0.72%: the shifted votes admit more offset candidates and lift the recovery of
-the truth set (32 → 40 of 141, below), so this file shows the sensitivity/error trade-off of
-admitting shifted evidence. 18 entrapment hits among 2,546 offset rows is about 1.5σ above the
-nominal expectation, so read it as a direction, not a calibration. Open-search FDR is still not
+**Error control.** The zero-offset rows read none, but the offset-bearing rows read **1.17%
+true FDP at a nominal 1%** — above nominal. A development run with the regular shortlist only
+read 0.72% on this file, so the shifted votes admit more offset candidates and lift the recovery
+of the truth set (below); this file shows the sensitivity/error trade-off of admitting shifted
+evidence. 21 entrapment hits among 3,530 offset rows is about 1σ above the nominal expectation,
+so read it as a direction, not a calibration. Open-search FDR is still not
 *conditioned* on the offset by the engine — treat this as a measured example, not a guarantee.
 
-**Recovery of a declared modification.** Of the 141 oxidised-M PSMs the narrow search finds at
-1%, the open search reports **40 (28%)** with the same scan and bare peptide and an offset
-within 0.02 Da of +15.9949; the median absolute offset error is **0.0019 Da**. 21 of the 40
-carry a localised site and **20 are the truth's M**.
+**Recovery of a declared modification.** Of the 138 oxidised-M PSMs the narrow search finds at
+1%, the open search reports **41 (30%)** with the same scan and bare peptide and an offset
+within 0.02 Da of +15.9949; the median absolute offset error is **0.0019 Da**. 22 of the 41
+carry a localised site and **21 are the truth's M**.
 
-The form-based re-score alone (without the shifted votes) did not raise this number — 32 of 141
-— and the reason is visible in the data: on many of these PSMs the **unmodified** form scores
+The form-based re-score alone (without the shifted votes, on the pre-review code) did not raise
+this number — 32 of 141 — and the reason is visible in the data: on many of these PSMs the **unmodified** form scores
 higher on the fragments than the modified form (74 vs 69 node score on the scan inspected in the
 run log), so the re-score correctly declines to replace it. The narrow search assigns the
 modification from the precursor mass; the fragments alone do not prefer it. The shifted-ion
@@ -89,12 +90,13 @@ biasing the reported mass down by one isotope.
 
 | offset (Da) | rows | likely origin |
 |---:|---:|---|
-| 0 | 1,714 | unmodified |
-| +1 | 399 | deamidation (+0.984) and noise |
-| +17 / −17 | 125 / 79 | ammonia (+17.027) / loss |
-| +53 | 87 | — |
-| +16 | 63 | oxidation (+15.995) |
-| +80 | 60 | phosphorylation (+79.966) |
+| 0 | 1,683 | unmodified |
+| +1 | 347 | deamidation (+0.984) and noise |
+| +17 / −17 | 129 / 87 | ammonia (+17.027) / loss |
+| +53 | 92 | — |
+| +257 | 77 | — |
+| −1 | 72 | deamidation (+0.984) / noise |
+| +16 | 64 | oxidation (+15.995) |
 
 ## Reproduce
 
@@ -113,9 +115,9 @@ export DOTNET_ROOT=~/.dotnet
 
 ## Limits
 
-- One file, one Percolator seed; the oxidised-M ground truth is 141 PSMs.
+- One file, one Percolator seed; the oxidised-M ground truth is 138 PSMs.
 - The sample is glycopeptide-enriched, so the peptide yield is low for both runs.
 - The offset is not localised for most rows; localisation is a b/y heuristic (see `DOCS.md`).
-- A declared modification is recovered only partly (23% here). The re-score does not raise it
+- A declared modification is recovered only partly (30% here). The re-score alone does not raise it
   because the modified form is not fragment-supported on many of these PSMs; a precursor-δ
   prior or MS1-calibrated mono masses would be needed to prefer it.

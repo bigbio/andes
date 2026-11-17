@@ -1,63 +1,17 @@
-//! Localisation of an open-search mass offset to a residue (`--open-search`).
-//!
-//! An open-search match says *how much* mass is unaccounted for, not *where* it
-//! sits. This module assigns the offset to one residue: for every candidate
-//! position it shifts that residue's mass by the offset, generates the b/y ions
-//! of the resulting form, and sums the intensity of the spectrum's matched
-//! peaks. The best position wins; the margin over the runner-up is the
-//! confidence.
-//!
-//! The machinery mirrors the site-determining-ion idea of
-//! [`crate::site_evidence`] and [`scoring_crate::mod_site_features`], but it
-//! works from the bare peptide + an external delta instead of a peptide that
-//! already carries a declared modification.
-//!
-//! The offset inferred from the precursor carries that precursor's mass error
-//! (tens of mDa on a long peptide), which is large against a ppm fragment
-//! window. [`refine_offset`] re-centres it on the shifted ions of one residue,
-//! and [`localize_and_refine`] uses that per residue: a coarse window to find
-//! the shifted ions, then the tight fragment window to separate residues. The
-//! open-search driver re-scores the shifted form at the winning residue
-//! (localization-aware scoring, Yu et al., *Nat. Commun.* 2020).
-//!
-//! Cost is O(sites x ions x log peaks) per candidate (binary search into the
-//! sorted peak list), so the driver bounds how many re-scores it runs per
-//! spectrum.
-
 use model::mass::{H2O, PROTON};
 use model::peptide::Peptide;
 
-/// One localisation result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Localization {
-    /// 1-based residue carrying the offset; 0 when no position separates from
-    /// the runner-up (or no ions match at all).
     pub site: u16,
-    /// Share of the spectrum's total peak intensity explained by the winning
-    /// site's matched b/y ions (0.0..=1.0).
     pub score: f32,
-    /// `(best - second) / best` over the candidate positions (0.0..=1.0).
-    /// Larger means the spectrum pins the offset to one residue.
     pub margin: f32,
 }
 
-/// Below this margin the best position is not called and `site` stays 0.
-/// 2% of the winning site's intensity is about the noise between two positions
-/// that differ by one weak fragment.
 pub const MIN_LOCALIZATION_MARGIN: f32 = 0.02;
 
-/// Largest offset correction (Da) `refine_offset` will apply. The correction
-/// exists to remove the precursor's own mass error, which is tens of mDa; a
-/// larger one is a wrong-site artefact, not calibration.
 pub const MAX_REFINE_DA: f64 = 0.1;
 
-/// The peptide with `delta` added to residue `site0` (0-based), rebuilt so the
-/// scorer predicts the **shifted** fragment ions (Yu et al., *Nat. Commun.*
-/// 2020, localization-aware open search).
-///
-/// The offset is carried in the residue mass, not in a `Modification` handle:
-/// it is a runtime value with no declared record, and this form is used for
-/// scoring only — it is never printed.
 pub fn shifted_peptide(peptide: &Peptide, site0: usize, delta: f64) -> Peptide {
     let mut residues = peptide.residues.clone();
     if let Some(aa) = residues.get_mut(site0) {
@@ -66,7 +20,6 @@ pub fn shifted_peptide(peptide: &Peptide, site0: usize, delta: f64) -> Peptide {
     Peptide::new(residues, peptide.pre, peptide.post)
 }
 
-/// Nearest peak to `mz` within `tol_da`, from a list sorted by m/z.
 fn nearest_peak(peaks: &[(f64, f32)], mz: f64, tol_da: f64) -> Option<usize> {
     let i = peaks.partition_point(|p| p.0 < mz);
     [i.saturating_sub(1), i]
@@ -74,15 +27,6 @@ fn nearest_peak(peaks: &[(f64, f32)], mz: f64, tol_da: f64) -> Option<usize> {
         .find(|&j| j < peaks.len() && (peaks[j].0 - mz).abs() <= tol_da)
 }
 
-/// Re-centre `delta` on the fragments that carry it: the median signed
-/// `theoretical - observed` m/z over the shifted b/y ions of `site0`, converted
-/// to neutral mass.
-///
-/// The offset inferred from the precursor carries that precursor's measurement
-/// error (tens of mDa on a long peptide), which is large against a ppm fragment
-/// window; the shifted ions of the true form would then miss by more than the
-/// scorer's tolerance. This is the mass-calibration step of the method. Returns
-/// `delta` unchanged when fewer than two shifted ions match.
 pub fn refine_offset(
     peptide: &Peptide,
     site0: usize,
@@ -100,7 +44,6 @@ pub fn refine_offset(
         .map(|a| a.mass + a.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
         .collect();
     let mut diffs: Vec<f64> = Vec::new();
-    // b_{i+1} covers residues 0..=i and carries the offset iff i >= site0.
     let mut prefix = 0.0;
     for (i, &m) in base.iter().enumerate().take(n - 1) {
         prefix += m + if i == site0 { delta } else { 0.0 };
@@ -115,7 +58,6 @@ pub fn refine_offset(
             }
         }
     }
-    // y over residues i..=n-1 carries the offset iff i <= site0.
     let mut suffix = 0.0;
     for i in (1..n).rev() {
         suffix += base[i] + if i == site0 { delta } else { 0.0 };
@@ -140,37 +82,21 @@ pub fn refine_offset(
     } else {
         0.5 * (diffs[mid - 1] + diffs[mid])
     };
-    // theoretical - observed = delta_inferred - delta_true. A correction beyond
-    // the precursor's own accuracy is a wrong-site artefact: keep the inferred
-    // offset instead.
     if median.abs() > MAX_REFINE_DA {
         return delta;
     }
     delta - median
 }
 
-/// A localisation whose offset was re-centred on the winning site's ions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RefinedLocalization {
-    /// The called site (1-based), 0 when the margin is below the reporting
-    /// threshold. Used for output only.
     pub site: u16,
-    /// The highest-scoring site (1-based), always set. The re-score uses this
-    /// one: whether a site is *reportable* is a separate, stricter decision
-    /// than which form scores best.
     pub best_site: u16,
-    /// The offset re-centred on the winning site (Da, observed - peptide).
     pub delta: f64,
     pub score: f32,
     pub margin: f32,
 }
 
-/// Two-stage localisation for an offset that carries the precursor's mass
-/// error: for every residue, re-centre the offset on that residue's shifted
-/// ions with the coarse window, then score the re-centred form with the tight
-/// (fragment) window. The coarse pass alone cannot separate residues — a wide
-/// window matches at every site and collapses the margin — so the winner is
-/// chosen on the tight score.
 pub fn localize_and_refine(
     peptide: &Peptide,
     peaks: &[(f64, f32)],
@@ -200,7 +126,9 @@ pub fn localize_and_refine(
     for site in 0..n {
         let d = refine_offset(peptide, site, delta, peaks, coarse_tol);
         generation = generation.wrapping_add(1);
-        let s = site_score(&base, site, d, peaks, fine_tol, max_z, &mut used, generation);
+        let s = site_score(
+            &base, site, d, peaks, fine_tol, max_z, &mut used, generation,
+        );
         if s > best.1 {
             second = best.1;
             best = (site, s, d);
@@ -225,9 +153,6 @@ pub fn localize_and_refine(
     })
 }
 
-/// Localise `delta` (Da, added to one residue) on `peptide` from `peaks`
-/// (m/z, intensity). `tol_da` is the fragment match window in Da; `charge` is
-/// the PSM's charge, which caps the fragment charge at 2.
 pub fn localize_offset(
     peptide: &Peptide,
     peaks: &[(f64, f32)],
@@ -242,9 +167,6 @@ pub fn localize_offset(
     localize_offset_sorted(peptide, &sorted, charge, delta, tol_da)
 }
 
-/// The peaks of one spectrum in m/z order, with non-positive / non-finite
-/// entries dropped. Build once per spectrum and reuse for every candidate: the
-/// per-candidate localisation re-sorts otherwise.
 pub fn sorted_peaks(peaks: &[(f64, f32)]) -> Vec<(f64, f32)> {
     let mut sorted: Vec<(f64, f32)> = peaks
         .iter()
@@ -255,7 +177,6 @@ pub fn sorted_peaks(peaks: &[(f64, f32)]) -> Vec<(f64, f32)> {
     sorted
 }
 
-/// [`localize_offset`] over an already-sorted peak list (see [`sorted_peaks`]).
 pub fn localize_offset_sorted(
     peptide: &Peptide,
     sorted: &[(f64, f32)],
@@ -275,8 +196,6 @@ pub fn localize_offset_sorted(
         return None;
     }
 
-    // Residue masses of the unmodified-offset form; `delta` is added to the
-    // candidate site only.
     let base: Vec<f64> = peptide
         .residues
         .iter()
@@ -284,8 +203,6 @@ pub fn localize_offset_sorted(
         .collect();
     let max_z = charge.clamp(1, 2);
 
-    // Dedup peaks per site: a peak explains the site once, even when two ions
-    // of the same site fall in the same window.
     let mut used = vec![0u32; sorted.len()];
     let mut generation: u32 = 0;
 
@@ -318,8 +235,6 @@ pub fn localize_offset_sorted(
     })
 }
 
-/// Summed intensity of the peaks matched by the b/y ions of `base` with
-/// `delta` added to residue index `site`.
 #[allow(clippy::too_many_arguments)]
 fn site_score(
     base: &[f64],
@@ -337,8 +252,6 @@ fn site_score(
         if !mz.is_finite() || mz <= 0.0 {
             return;
         }
-        // Nearest peak to `mz`; sorted, so a binary search lands on the first
-        // peak >= mz and the match is at `i` or `i - 1`.
         let i = peaks.partition_point(|p| p.0 < mz);
         for j in [i.saturating_sub(1), i] {
             if j >= peaks.len() {
@@ -354,7 +267,6 @@ fn site_score(
         }
     };
 
-    // b ions: residues 0..=i, i < n-1 (b_n is the precursor).
     let mut prefix = 0.0;
     for (i, &m) in base.iter().enumerate().take(n - 1) {
         prefix += m + if i == site { delta } else { 0.0 };
@@ -363,7 +275,6 @@ fn site_score(
             add((prefix + zf * PROTON) / zf, &mut sum);
         }
     }
-    // y ions: residues i..n-1, i > 0.
     let mut suffix = 0.0;
     for i in (1..n).rev() {
         suffix += base[i] + if i == site { delta } else { 0.0 };
@@ -385,8 +296,6 @@ mod tests {
         Peptide::from_str(&format!("K.{seq}.R"), &aa).expect("valid peptide")
     }
 
-    /// b/y ions (charges 1 and 2) of `seq` with `delta` on residue `site`,
-    /// as a synthetic spectrum.
     fn spectrum(seq: &str, site: usize, delta: f64) -> Vec<(f64, f32)> {
         let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
         let pep = Peptide::from_str(&format!("K.{seq}.R"), &aa).unwrap();
@@ -410,12 +319,10 @@ mod tests {
     fn localizes_an_offset_to_the_shifted_residue() {
         let seq = "PEPTIDEK";
         let pep = peptide(seq);
-        let delta = 79.96633; // phosphorylation mass, as an unknown offset
+        let delta = 79.96633;
         let peaks = spectrum(seq, 4, delta);
         let loc = localize_offset(&pep, &peaks, 2, delta, 0.02).expect("localised");
         assert_eq!(loc.site, 5, "1-based position of residue 4");
-        // An adjacent site matches every ion except the two that bracket the
-        // offset, so the honest margin on an 8-residue peptide is ~1/7.
         assert!(loc.margin > 0.1, "margin {}", loc.margin);
         assert!(loc.score > 0.5, "score {}", loc.score);
     }
@@ -424,7 +331,6 @@ mod tests {
     fn an_unshifted_form_has_no_winning_site() {
         let seq = "PEPTIDEK";
         let pep = peptide(seq);
-        // delta 0 shifts no ion, so every site scores the same.
         let peaks = spectrum(seq, 4, 0.0);
         let loc = localize_offset(&pep, &peaks, 2, 0.0, 0.02).expect("scores exist");
         assert_eq!(loc.site, 0, "no position separates from the runner-up");
@@ -453,10 +359,9 @@ mod tests {
         let seq = "PEPTIDEK";
         let pep = peptide(seq);
         let true_delta = 79.96633;
-        let inferred = true_delta + 0.025; // 25 mDa precursor measurement error
+        let inferred = true_delta + 0.025;
         let peaks = sorted_peaks(&spectrum(seq, 4, true_delta));
-        let loc = localize_and_refine(&pep, &peaks, 2, inferred, 0.06, 0.02)
-            .expect("localised");
+        let loc = localize_and_refine(&pep, &peaks, 2, inferred, 0.06, 0.02).expect("localised");
         assert_eq!(loc.site, 5);
         assert!(
             (loc.delta - true_delta).abs() < 0.005,
@@ -471,7 +376,6 @@ mod tests {
         let seq = "PEPTIDEK";
         let pep = peptide(seq);
         let true_delta = 15.99491;
-        // The precursor-derived offset carries a 25 mDa measurement error.
         let inferred = true_delta + 0.025;
         let peaks = sorted_peaks(&spectrum(seq, 4, true_delta));
         let refined = refine_offset(&pep, 4, inferred, &peaks, 0.06);

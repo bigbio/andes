@@ -472,12 +472,6 @@ pub(crate) fn sample_spectra(
     Some(loaded.into_values().collect())
 }
 
-/// A representative sample of the run: every `stride`-th `ms_level` spectrum
-/// across the file, up to `want`, loaded by index. mzML only; other formats
-/// fall back to [`sample_spectra`] (the first spectra) at the call site.
-///
-/// The metadata scan is the calibration pre-pass's (one linear read); the
-/// load decodes only the chosen spectra.
 pub(crate) fn sample_spectra_strided(
     path: &Path,
     is_mzml: bool,

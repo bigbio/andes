@@ -58,15 +58,10 @@ pub struct SearchCfg {
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
     pub index_cache_dir: Option<PathBuf>,
-    /// `--open-search`.
     pub open_search: Option<bool>,
-    /// `MIN..MAX` Da, as `--open-search-delta`.
     pub open_search_delta: Option<String>,
-    /// `--open-search-top-k`.
     pub open_search_top_k: Option<u32>,
-    /// `--optimize`.
     pub optimize: Option<bool>,
-    /// `--optimize-sample`.
     pub optimize_sample: Option<usize>,
 }
 

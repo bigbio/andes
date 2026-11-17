@@ -1850,23 +1850,11 @@ pub(crate) fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     })
 }
 
-/// Parse `--open-search-delta MIN..MAX` (also `MIN-MAX`) into a mass-offset
-/// window in Da. Negatives are allowed, so the `-` separator is only looked for
-/// after the first character; `..` is preferred and unambiguous.
 pub(crate) fn parse_open_search_delta(s: &str) -> Result<(f64, f64), String> {
     let t = s.trim();
-    let (min_s, max_s) = if let Some((a, b)) = t.split_once("..") {
-        (a, b)
-    } else {
-        match t.char_indices().skip(1).find(|&(_, c)| c == '-') {
-            Some((i, _)) => (&t[..i], &t[i + 1..]),
-            None => {
-                return Err(format!(
-                    "invalid --open-search-delta `{s}`: expected MIN..MAX in Da, e.g. -100..300"
-                ))
-            }
-        }
-    };
+    let (min_s, max_s) = t.split_once("..").ok_or_else(|| {
+        format!("invalid --open-search-delta `{s}`: expected MIN..MAX in Da, e.g. -100..300")
+    })?;
     let parse = |v: &str| -> Result<f64, String> {
         v.trim()
             .parse::<f64>()
@@ -1878,16 +1866,11 @@ pub(crate) fn parse_open_search_delta(s: &str) -> Result<(f64, f64), String> {
             "invalid --open-search-delta `{s}`: need finite MIN < MAX (got {lo}..{hi})"
         ));
     }
-    // The offset is measured from the unmodified peptide, so 0 must be in the
-    // window; the asymmetric precursor tolerance cannot express a window that
-    // lies entirely on one side of the observed mass.
     if lo > 0.0 || hi < 0.0 {
         return Err(format!(
             "invalid --open-search-delta `{s}`: the window must contain 0 (got {lo}..{hi})"
         ));
     }
-    // The window sets the per-spectrum vote buffer, so a runaway range is a
-    // memory error rather than a search parameter.
     if hi - lo > 2000.0 {
         return Err(format!(
             "invalid --open-search-delta `{s}`: width {} Da exceeds the 2000 Da limit",
@@ -2012,10 +1995,10 @@ mod cli_domain_validator_tests {
     }
 
     #[test]
-    fn open_search_delta_parses_both_separators() {
+    fn open_search_delta_parses_a_range() {
         assert_eq!(parse_open_search_delta("-100..300"), Ok((-100.0, 300.0)));
-        assert_eq!(parse_open_search_delta("-100-300"), Ok((-100.0, 300.0)));
         assert_eq!(parse_open_search_delta(" -20.5..79.966 "), Ok((-20.5, 79.966)));
+        assert!(parse_open_search_delta("-100-300").is_err());
     }
 
     #[test]

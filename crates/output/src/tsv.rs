@@ -122,9 +122,6 @@ fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -
     cols.push("RankScore");
     cols.push("Modifications");
     cols.extend_from_slice(&["ProteinFamily", "EntryKind", "FeatureIds"]);
-    // Open search: the neutral mass offset the match implies (Da) and where it
-    // was localised. Appended only in that mode, so every other run's TSV
-    // schema is unchanged.
     if params.open_search.is_some() {
         cols.extend_from_slice(&["DeltaMass", "OpenSite", "OpenLocScore", "OpenLocMargin"]);
     }
@@ -136,7 +133,6 @@ struct RowCtx<'a> {
     spec_file_name: &'a str,
     is_mgf: bool,
     ppm_mode: bool,
-    /// `--open-search`: append the neutral mass offset (`DeltaMass`, Da).
     open_search: bool,
 }
 
@@ -251,10 +247,6 @@ fn write_psm_row<W: Write>(
         None => (protein.as_str(), EntryKind::Reference.name(), ""),
     };
     let open_search_tail = if row_ctx.open_search {
-        // Modification mass: the offset re-centred on the shifted fragment ions
-        // when a site was called, else the isotope-corrected observed precursor
-        // minus the peptide (oxidation reads +15.9949). The site is 1-based, 0
-        // when the spectrum does not pin the offset to one residue.
         let exp_mass = precursor_mz * f64::from(charge) - f64::from(charge) * PROTON
             - f64::from(psm.isotope_offset) * ISOTOPE;
         let f = &psm.features;

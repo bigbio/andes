@@ -424,7 +424,6 @@ fn write_header<W: Write>(
     }
 
     cols.extend_from_slice(&[
-        // Peptide / Proteins
         "Peptide".to_string(),
         "Proteins".to_string(),
     ]);
@@ -566,10 +565,6 @@ fn write_psm_row<W: Write>(
     }
 
     if params.open_search.is_some() {
-        // Modification mass: the offset re-centred on the shifted fragment ions
-        // when a site was called (it removes the precursor's mass error), else
-        // the isotope-corrected observed precursor minus the peptide. `dm`/
-        // `absdm` above stay m/z-space mass error.
         let f = &psm.features;
         let delta = if f.open_delta != 0.0 {
             f64::from(f.open_delta)
@@ -587,11 +582,6 @@ fn write_psm_row<W: Write>(
         write_double(writer, f64::from(f.open_loc_margin))?;
     }
 
-    // Peptide column (always one).
-    // Proteins column(s): one tab-separated accession per candidate_idx.
-    // After pepSeq+score dedup, a PSM that matches the same peptide across
-    // multiple proteins keeps all protein indices in candidate_idxs, and the
-    // PIN row emits one accession per index for multi-protein shared peptides.
     write!(writer, "\t{}", cand.peptide)?;
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];

@@ -1,12 +1,3 @@
-//! End-to-end `--open-search`: the wide precursor window replaces the declared
-//! variable mods, every accepted candidate carries a mass offset, and the TSV
-//! gains a `DeltaMass` column that the narrow search does not have.
-//!
-//! Fixture: the 120-scan high-res Lumos file and its glyco fixture database.
-//! The absolute counts are not asserted (they depend on the bundled models);
-//! the invariants are that the run completes, finds matches, reports every
-//! offset inside the requested window, and leaves the narrow TSV schema alone.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -88,17 +79,12 @@ fn open_search_reports_the_offset_inside_the_window() {
     for line in lines.filter(|l| !l.is_empty()) {
         let fields: Vec<&str> = line.split('\t').collect();
         let delta: f64 = fields[delta_col].parse().expect("numeric DeltaMass");
-        // The reported offset is re-centred on the shifted fragment ions (up to
-        // `MAX_REFINE_DA`), so it can sit just outside the precursor window it
-        // matched in.
         assert!(
             delta.abs() <= 1.12,
             "offset {delta} outside the requested -1..1 window (+ refinement)"
         );
         let site: u16 = fields[site_col].parse().expect("integer OpenSite");
         let margin: f64 = fields[margin_col].parse().expect("numeric OpenLocMargin");
-        // 0 means "not pinned to one residue"; any called site is a real
-        // 1-based position and carries the threshold margin.
         if site != 0 {
             assert!((1..=60).contains(&site), "site {site} out of range");
             assert!(margin >= 0.02, "called site with margin {margin}");
@@ -109,8 +95,12 @@ fn open_search_reports_the_offset_inside_the_window() {
     assert!(rows > 0, "the open search found no PSM at all");
     assert!(localized > 0, "no PSM localised its offset");
 
-    // The PIN carries the same quantities as Percolator features, in neutral Da.
-    let pin_header: Vec<&str> = pin.lines().next().expect("pin header").split('\t').collect();
+    let pin_header: Vec<&str> = pin
+        .lines()
+        .next()
+        .expect("pin header")
+        .split('\t')
+        .collect();
     for name in [
         "DeltaMass",
         "AbsDeltaMass",
@@ -149,8 +139,6 @@ fn optimize_runs_and_keeps_the_open_search_window() {
         &["--open-search", "--optimize", "--optimize-sample", "60"],
     );
     assert!(log.contains("optimize: chosen"), "the grid runs: {log}");
-    // Under --open-search the precursor tolerance IS the offset window, so the
-    // tolerance stage is skipped and the window is not gridded.
     assert!(
         log.contains("chosen --precursor-tol resolved"),
         "the offset window is not searched: {log}"
@@ -199,7 +187,7 @@ fn open_search_rejects_incompatible_flags() {
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("--open-search fixes the isotope range"),
+        err.contains("chooses the isotope offset"),
         "the message explains why: {err}"
     );
 }

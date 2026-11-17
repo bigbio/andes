@@ -976,11 +976,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0
     };
-    // ── Open (mass-offset) search ────────────────────────────────────────────
-    // The delta window REPLACES the precursor tolerance, zeroes the isotope
-    // range (one isotope step is indistinguishable from a ~1 Da offset, and the
-    // offset absorbs it), and needs the database-wide fragment index because
-    // enumeration over hundreds of Da is infeasible.
     if cli.open_search {
         if cli.glyco {
             return Err("--open-search is not supported with --glyco".into());
@@ -994,10 +989,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.tmt.is_some() {
             return Err("--open-search is not combined with --tmt".into());
         }
+        if cli.lfq || cli.mbr {
+            return Err("--open-search is not combined with --lfq or --mbr".into());
+        }
+        if cli.refine {
+            return Err("--open-search is not combined with --refine".into());
+        }
+        if cli.xl.is_some() {
+            return Err("--open-search is not combined with --xl".into());
+        }
         if cli.isotope_error.is_some() {
             return Err(
-                "--open-search fixes the isotope range at 0..0 (an offset absorbs the \
-                 isotope); remove --isotope-error"
+                "--open-search chooses the isotope offset from the fragments (range 0..=2); \
+                 remove --isotope-error"
                     .into(),
             );
         }
@@ -1011,23 +1015,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         let (delta_min, delta_max) = cli.open_search_delta;
         let top_k = cli.open_search_top_k.max(1);
-        params.open_search = Some(search::search_params::OpenSearch {
+        let open = search::search_params::OpenSearch {
             delta_min,
             delta_max,
             top_k,
-        });
-        // The offset is measured from the monoisotopic precursor, so a
-        // recorded M+1/M+2 peak must be tried as an isotope step (the search
-        // picks the offset whose shifted fragment ions fit; see the
-        // localization-aware re-score in match_engine).
+        };
+        params.precursor_tolerance = open.precursor_tolerance();
+        params.open_search = Some(open);
         params.isotope_error_range = 0..=2;
-        params.precursor_tolerance = PrecursorTolerance::asymmetric(
-            model::tolerance::Tolerance::Da(delta_min.abs().max(1e-6)),
-            model::tolerance::Tolerance::Da(delta_max.max(1e-6)),
-        );
         params.fragment_index_top_k = top_k;
-        // Calibration learns a file-wide ppm shift from confident PSMs; under a
-        // wide window that shift is part of the offset being measured.
         params.precursor_cal_mode = PrecursorCalMode::Off;
         eprintln!(
             "open search: mass-offset window {delta_min:+}..{delta_max:+} Da, {top_k} candidates \
@@ -1324,8 +1320,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.glyco {
             return Err("--optimize is not supported with --glyco".into());
         }
-        // A strided sample across the file is much more representative than
-        // the first N spectra; other formats fall back to those.
         let sample = crate::spectra::sample_spectra_strided(
             &spectrum_path,
             is_mzml,
@@ -1358,9 +1352,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Content-addressed cache path, so repeated searches over the same FASTA +
-    // params (and the calibration pre-pass just above) share one on-disk index
-    // without rebuilding.
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,

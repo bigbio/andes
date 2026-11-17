@@ -25,7 +25,6 @@ PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$OUT"
-printf '57.021464,C,fix,any,Carbamidomethyl\n' > "$OUT/fixed.mods"
 
 run_andes() {  # $1 = name, rest = extra flags
   local name="$1"; shift
@@ -36,7 +35,7 @@ run_andes() {  # $1 = name, rest = extra flags
 }
 
 run_andes truth
-run_andes open --mods "$OUT/fixed.mods" --open-search
+run_andes open --fixed-mods "Carbamidomethyl (C)" --variable-mods "" --open-search
 
 for name in truth open; do
   echo "percolator: $name"

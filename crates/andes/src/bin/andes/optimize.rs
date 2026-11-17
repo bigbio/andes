@@ -1,29 +1,3 @@
-//! Parameter grid search (`--optimize`).
-//!
-//! Scores a representative sample of the run under a grid of search parameters
-//! (precursor tolerance x top-N x charge range), rescores each grid's PIN with
-//! the native (Percolator-free) rescorer, keeps the combination with the most
-//! target PSMs at `q <= 0.01`, and applies it to the whole run. This is the
-//! parameter-optimization step of MSFragger's open search pipeline
-//! (Yu et al., *Nat. Commun.* 2020), scoped to the parameters andes does not
-//! derive from the data:
-//!
-//! * the **fragment** tolerance is not searched: the per-run fragment-error
-//!   calibration estimates it from the confident matches, and a count-ranked
-//!   grid would only push it wider;
-//! * the precursor ppm calibration (`--precursor-cal`) is a separate, optional
-//!   step and is not part of the grid.
-//!
-//! The grid is **staged**: the tolerance first (at the resolved top-N and
-//! charge range), then top-N and charge range at the chosen tolerance. That
-//! keeps the sample searches to ~14 instead of the full cross product, which
-//! matters because a sample large enough to rank tolerances reliably (thousands
-//! of spectra across the file) makes each search expensive.
-//!
-//! The ranking uses the native rescorer, not raw target-decoy counts: it sees
-//! the same PIN features and competition groups as Percolator. On a tie the
-//! resolved value wins, so the grid never changes a setting it cannot separate.
-
 use std::ops::RangeInclusive;
 use std::path::Path;
 
@@ -32,19 +6,11 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 use scoring_crate::RankScorer;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
-/// Precursor tolerances scored, in ppm (symmetric). Only used when the
-/// resolved tolerance is in ppm; a Da tolerance is kept as is.
 const TOLERANCES_PPM: [f64; 4] = [5.0, 10.0, 20.0, 50.0];
-/// Top-N PSMs per spectrum scored. The resolved value joins the list so a tie
-/// never changes it.
 const TOP_NS: [u32; 4] = [1, 2, 3, 5];
-/// Target q the grid counts identifications at.
 const OPTIMIZE_Q: f64 = 0.01;
-/// The native rescorer's seed, fixed so the grid is reproducible.
 const OPTIMIZE_SEED: u64 = 42;
 
-/// Run the grid on `sample` and overwrite the grid dimensions of `params` with
-/// the best combination. Prints the whole grid and the choice.
 pub(crate) fn optimize_parameters(
     idx: &SearchIndex,
     scorer: &RankScorer,
@@ -100,10 +66,6 @@ pub(crate) fn optimize_parameters(
         top_n: u32,
         range: RangeInclusive<u8>,
     }
-    // ── Stage 1: precursor tolerance at the resolved top-N / charge range ──
-    // Skipped under --open-search, where the precursor tolerance IS the mass
-    // offset window the user asked for; and for a Da tolerance, which a ppm
-    // grid cannot express.
     let mut best_tol: Option<BestTol> = None;
     if base.open_search.is_none()
         && matches!(base.precursor_tolerance.left, Tolerance::Ppm(_))
@@ -115,10 +77,20 @@ pub(crate) fn optimize_parameters(
             let Some(targets) = evaluate(&mut prepared, sample, idx, &p) else {
                 continue;
             };
-            rows.push(Row { stage: "tol", tol: Some(tol), top_n: resolved_top_n, range: resolved_range.clone(), targets });
+            rows.push(Row {
+                stage: "tol",
+                tol: Some(tol),
+                top_n: resolved_top_n,
+                range: resolved_range.clone(),
+                targets,
+            });
             let key = (targets, p.precursor_tolerance == base.precursor_tolerance);
             if best_tol.as_ref().is_none_or(|b| key > b.key) {
-                best_tol = Some(BestTol { key, params: p, tol });
+                best_tol = Some(BestTol {
+                    key,
+                    params: p,
+                    tol,
+                });
             }
         }
     }
@@ -127,7 +99,6 @@ pub(crate) fn optimize_parameters(
         None => (f64::NAN, base.clone()),
     };
 
-    // ── Stage 2: top-N x charge range at the chosen tolerance ──
     let mut top_ns: Vec<u32> = TOP_NS.to_vec();
     if !top_ns.contains(&resolved_top_n) {
         top_ns.push(resolved_top_n);
@@ -145,7 +116,13 @@ pub(crate) fn optimize_parameters(
             let Some(targets) = evaluate(&mut prepared, sample, idx, &p) else {
                 continue;
             };
-            rows.push(Row { stage: "topN", tol: None, top_n, range: range.clone(), targets });
+            rows.push(Row {
+                stage: "topN",
+                tol: None,
+                top_n,
+                range: range.clone(),
+                targets,
+            });
             let key = (
                 targets,
                 top_n == resolved_top_n,
@@ -205,8 +182,6 @@ pub(crate) fn optimize_parameters(
     *params = chosen;
 }
 
-/// Target PSMs at `q <= OPTIMIZE_Q` for one grid point: write the sample's PIN
-/// and run the native rescorer over it.
 fn evaluate(
     prepared: &mut PreparedSearch,
     sample: &[Spectrum],
@@ -214,19 +189,9 @@ fn evaluate(
     params: &SearchParams,
 ) -> Option<usize> {
     let queues = prepared.run_chunk_with_params(sample, 0, params);
-    // Resolve this run's candidate indices before the next one replaces the
-    // materialized list.
     prepared.sync_materialized_candidates();
     let mut buf: Vec<u8> = Vec::new();
-    output::write_pin_to(
-        &mut buf,
-        sample,
-        &queues,
-        &prepared.candidates,
-        params,
-        idx,
-    )
-    .ok()?;
+    output::write_pin_to(&mut buf, sample, &queues, &prepared.candidates, params, idx).ok()?;
     let text = String::from_utf8_lossy(&buf);
     let rescored = crate::rescore::native_rescore_pin_all(&text, OPTIMIZE_SEED).ok()?;
     Some(

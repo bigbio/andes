@@ -71,6 +71,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("open_loc_score", "companion of open_site, same reason."),
     ("open_loc_margin", "companion of open_site, same reason."),
     ("open_delta", "companion of open_site, same reason."),
+    ("open_used_shift", "companion of open_site, same reason."),
 ];
 
 #[test]

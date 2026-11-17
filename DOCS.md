@@ -108,7 +108,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native rescorer; the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. Skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; refused with `--glyco`. |
+| `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native rescorer; the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
 | `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
 
 This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
@@ -121,9 +121,11 @@ Two details decide whether the grid is useful: the sample must span the file (th
 spectra preferred 5 ppm where the rest of the file wants 50), and the ranking must use the
 native rescorer's features, not raw rank-score q-values. Measured on the PXD001468 reference
 search: a strided 5,000-spectrum sample chose 50 ppm (targets rising monotonically with the
-tolerance: 2,594 / 2,676 / 2,763 / 2,903), and the full Percolator run then had **24,244 PSMs
-at 1% against 23,076 at the 20 ppm default (+5.1%)**. The staged grid costs ~14 sample searches
-(2.5 minutes on that file, including the full search).
+tolerance: 2,594 / 2,676 / 2,763 / 2,903), and the full Percolator run then had **24,261 PSMs
+at 1% against 23,053 at the 20 ppm default (+5.2%)**. 50 ppm is the edge of the grid, so the
+optimum may lie beyond it. The staged grid costs ~14 sample searches (2.5 minutes on that file,
+including the full search); with `--open-search` the top-N/charge stage still runs (about ten
+sample searches, each preparing the database-wide open index).
 
 **Candidate retrieval is automatic.** andes builds the candidate
 index out-of-core (cached as `andes-candidx-<hash>.bin` in `--index-cache-dir` (default: the directory of the output files), ~90–250 MB
@@ -681,9 +683,9 @@ them separately when you need 1% on modified PSMs.
 `--open-search` replaces the declared variable modifications with a **mass-offset** match: every
 database base peptide (fixed mods folded in) whose neutral mass lies within
 `--open-search-delta` of the observed precursor is scored, and the offset
-`peptide_mass − observed_neutral` is reported as the unknown modification. The offset is **not**
-enumerated as a modification and is **not localised** to a residue; that is the declared
-limitation of this mode.
+`observed_neutral − peptide_mass` (the modification mass: positive when the modification adds
+mass) is reported. The offset is not enumerated as a modification; it is localised to a residue
+from the shifted-fragment evidence below, as a heuristic (see the output table).
 
 The precursor window is wide (hundreds of Da), so per-spectrum enumeration is infeasible
 (~2,000 base peptides per Da on a mammalian database). The search therefore builds a
@@ -697,10 +699,10 @@ debug build; release is faster). Declaring fewer variable mods shrinks it propor
 observed fragment of a peptide that carries an offset has its complement at the **unmodified**
 peptide's own ion. The shortlist votes on both the peaks and their complements, which reaches
 modified peptides whose ladder is shifted and that the regular vote alone can miss (Yu et al.,
-*Nat. Commun.* 2020). On the substitution benchmark this raised the share of truth peptides
-recovered with the correct offset from 29.4% to **35.2%**, at +36% search wall time; the called
-sites' accuracy moved from 91.1% to 90.0%. The regular-only arm was measured during development
-with a flag that has since been removed: open search always votes with the shifted ions now.
+*Nat. Commun.* 2020). On the substitution benchmark the shifted shortlist recovers **48.3%** of
+the truth cases with the correct offset, and 90.1% of the called sites are the substituted
+residue. The regular-only arm was measured during development on the pre-review code; both arms
+are in the substitution report.
 
 **Localization-aware scoring.** A candidate is the unmodified backbone, so its plain score sees
 only the b/y ions that do not carry the offset. For every shortlisted candidate with a non-zero

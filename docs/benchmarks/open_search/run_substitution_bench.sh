@@ -33,7 +33,6 @@ PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$OUT"
-printf '57.021464,C,fix,any,Carbamidomethyl\n' > "$OUT/fixed.mods"
 
 search() {  # $1 = name, $2 = database, rest = extra flags
   local name="$1" db="$2"; shift 2
@@ -44,7 +43,8 @@ search() {  # $1 = name, $2 = database, rest = extra flags
 }
 
 search reference "$PLAIN"
-search open "$MUT" --mods "$OUT/fixed.mods" --open-search --open-search-delta=-150..150
+search open "$MUT" --fixed-mods "Carbamidomethyl (C)" --variable-mods "" \
+  --open-search --open-search-delta=-150..150
 
 for name in reference open; do
   echo "percolator: $name"

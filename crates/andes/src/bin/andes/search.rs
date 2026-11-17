@@ -1342,15 +1342,35 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| v.into_iter().take(cli.optimize_sample).collect())
         });
         match sample {
-            Some(sample) => crate::optimize::optimize_parameters(
-                &idx,
-                &scorer,
-                fragment_tol_da,
-                &cli.db.decoy_prefix,
-                &index_path,
-                &mut params,
-                &sample,
-            ),
+            Some(sample) => {
+                let rescorer = crate::optimize::SampleRescorer {
+                    backend: output::PercolatorBackend::Native {
+                        memory: output::MemLimit {
+                            bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
+                            spill_dir: scratch_dir.clone(),
+                        },
+                    },
+                    args: output::percolator_args_with_threads(&[], cli.threads),
+                    dir: scratch_dir.join("optimize"),
+                };
+                crate::cli::ensure_scratch_dir(&rescorer.dir)?;
+                crate::optimize::optimize_parameters(
+                    &idx,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.db.decoy_prefix,
+                    &index_path,
+                    &mut params,
+                    &sample,
+                    &rescorer,
+                );
+                if let Err(e) = std::fs::remove_dir_all(&rescorer.dir) {
+                    eprintln!(
+                        "WARN: optimize: could not remove {}: {e}",
+                        rescorer.dir.display()
+                    );
+                }
+            }
             None => eprintln!(
                 "WARN: --optimize could not read a sample; keeping the resolved parameters"
             ),

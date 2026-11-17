@@ -108,7 +108,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native rescorer; the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
+| `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native Percolator engine (in `--temp-dir`, removed afterwards); the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
 | `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
 
 This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
@@ -119,8 +119,8 @@ calibration above is a separate, optional step.
 
 Two details decide whether the grid is useful: the sample must span the file (the first 1,000
 spectra preferred 5 ppm where the rest of the file wants 50), and the ranking must use the
-native rescorer's features, not raw rank-score q-values. Measured on the PXD001468 reference
-search: a strided 5,000-spectrum sample chose 50 ppm (targets rising monotonically with the
+rescorer's features, not raw rank-score q-values. Measured on the PXD001468 reference
+search, with the built-in rescorer `--optimize` used before 2026-11-16: a strided 5,000-spectrum sample chose 50 ppm (targets rising monotonically with the
 tolerance: 2,594 / 2,676 / 2,763 / 2,903), and the full Percolator run then had **24,261 PSMs
 at 1% against 23,053 at the 20 ppm default (+5.2%)**. 50 ppm is the edge of the grid, so the
 optimum may lie beyond it. The staged grid costs ~14 sample searches (2.5 minutes on that file,

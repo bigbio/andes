@@ -123,9 +123,10 @@ Tested and rejected on the full raws or the slice:
 Slice probes (N@FDP_c 1 %): baseline 264; predicted MS2 features (`--predict rt,ms2`) 275; `--top-n 20` 232;
 the neighbouring-cycle support columns had no measurable effect.
 
-Both losses come from searching one scan at a time. Closing them is Phase B: a peptide-centric pass that
+Both losses come from searching one scan at a time. The natural remedy is a peptide-centric pass that
 extracts each library precursor's fragment chromatograms across its elution window and scores the peak
-group (DIA-NN, AlphaDIA), instead of asking each spectrum which peptide it holds.
+group (DIA-NN, AlphaDIA), instead of asking each spectrum which peptide it holds. That was tried next
+and did not close them on this data (below).
 
 ## Peptide-centric pass (Phase B, negative result, not in andes)
 

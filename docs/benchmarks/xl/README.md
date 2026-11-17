@@ -134,8 +134,8 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   and Clasen families, so the weight is not fitted to the set; 0.3 was taken as one that
   raises all three. Other one-term changes to `min(α, β)` lost: + 0.1–0.3 × max(α, β), a bonus
   for full pairs, a penalty per isotope offset.
-- **3+ half pairs pay 15 in the CSM score** (adopted). A half pair takes its second peptide by
-  mass alone; pooled over the 11 runs, accepted half pairs are 15 % false at charge 3 against
+- **Half pairs of triply charged precursors pay 15 in the CSM score** (adopted). A half
+  pair takes its second peptide by mass alone; pooled over the 11 runs, accepted half pairs are 15 % false at charge 3 against
   2.9 % at 4 and 0.9 % at 5, at any peptide length, and the false ones mostly pair a library
   peptide with a random one that fits the mass. Against the delta score: 16,797 / 15,912
   (from 16,427 / 15,206); the ribosome DSBU run's actual false share 3.0 % → 2.4 % (worst

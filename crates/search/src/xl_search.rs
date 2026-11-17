@@ -953,7 +953,11 @@ fn search_spectrum(
                 else {
                     continue;
                 };
-                let score = |r: &XlSpectrumResult| r.csm.as_ref().map(Csm::score);
+                let score = |r: &XlSpectrumResult| {
+                    r.csm
+                        .as_ref()
+                        .map(|c| combined_pair_score(c.pair_score, c.second_pair_score))
+                };
                 let better = match &best {
                     None => true,
                     Some(b) => match (score(&r), score(b)) {

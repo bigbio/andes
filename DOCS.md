@@ -1095,7 +1095,7 @@ the fragments that do not carry the link, its partner by the remaining precursor
 link classes are scored by the pair score `min(alpha, beta)`, and the q-values rank a CSM by
 `min(alpha, beta) + 0.3 × (min(alpha, beta) − second)`, where `second` is the best pair score of
 a different peptide pair for the spectrum (the `score` column), less 15 for a half pair (one
-peptide by its doublet, the other by mass) of a 3+ precursor; for an MS-cleavable linker each
+peptide by its doublet, the other by mass) of a triply charged precursor; for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
 When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),

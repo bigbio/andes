@@ -33,6 +33,8 @@ const EM_ITERATIONS: usize = 200;
 const EM_PSEUDOCOUNT: f64 = 1.0;
 const EM_TOLERANCE: f64 = 1e-6;
 const UNEXPLAINED: &str = "unexplained";
+const SITE_NEUTRAL: f64 = 0.5;
+const MIXTURE_WIDTH: f64 = 2.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinOffset {
@@ -324,8 +326,11 @@ fn site_matches(sites: &[String], (residue, n_term, c_term): &(String, bool, boo
 }
 
 fn site_support(c: &Candidate, localised: &[(String, bool, bool)]) -> f64 {
-    if localised.is_empty() || c.sites.is_empty() {
+    if localised.is_empty() {
         return 1.0;
+    }
+    if c.sites.is_empty() {
+        return SITE_NEUTRAL;
     }
     let hits: f64 = localised
         .iter()
@@ -378,6 +383,7 @@ fn scored_candidates(
     pairs: &[Candidate],
 ) -> Vec<Scored> {
     let reach = CANDIDATE_SIGMAS * s;
+    let neutral = if localised.is_empty() { 1.0 } else { SITE_NEUTRAL };
     let mut out: Vec<Scored> = Vec::new();
     let mut push = |label: String, cmass: f64, prior: f64, support: f64| {
         if (delta - cmass).abs() <= reach {
@@ -389,13 +395,13 @@ fn scored_candidates(
             });
         }
     };
-    push("unmodified".to_string(), 0.0, PRIOR_SINGLE, 1.0);
+    push("unmodified".to_string(), 0.0, PRIOR_SINGLE, neutral);
     for k in [-2i32, -1, 1, 2] {
         push(
             format!("isotope error {k:+}"),
             f64::from(k) * ISOTOPE_DA,
             PRIOR_ISOTOPE,
-            1.0,
+            neutral,
         );
     }
     let lo = singles.partition_point(|c| c.mass < delta - reach - 2.0 * ISOTOPE_DA);
@@ -421,8 +427,30 @@ fn scored_candidates(
         label: UNEXPLAINED.to_string(),
         mass: f64::NAN,
         prior: PRIOR_UNEXPLAINED,
-        log_lik: -span.max(1.0).ln(),
+        log_lik: neutral.ln() - span.max(1.0).ln(),
     });
+    out
+}
+
+fn single_species(scored: Vec<Scored>, peak_mass: f64) -> Vec<Explanation> {
+    let scores: Vec<f64> = scored.iter().map(|c| c.prior.ln() + c.log_lik).collect();
+    let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let total: f64 = scores.iter().map(|v| (v - max).exp()).sum();
+    let mut out: Vec<Explanation> = scored
+        .into_iter()
+        .zip(scores)
+        .map(|(c, v)| Explanation {
+            label: c.label,
+            mass: if c.mass.is_nan() { peak_mass } else { c.mass },
+            posterior: (v - max).exp() / total,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.posterior
+            .total_cmp(&a.posterior)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    out.truncate(TOP_EXPLANATIONS);
     out
 }
 
@@ -519,6 +547,25 @@ fn fit_mixture(rows: Vec<Vec<Scored>>, peak_mass: f64) -> Mixture {
     Mixture { peak, psms }
 }
 
+pub fn decoy_windows(bounds: &[(f64, f64)], precision: f64) -> Vec<(f64, f64)> {
+    let mut order: Vec<usize> = (0..bounds.len()).collect();
+    order.sort_by(|&a, &b| bounds[a].0.total_cmp(&bounds[b].0));
+    let mut windows = vec![(0.0, 0.0); bounds.len()];
+    for (j, &k) in order.iter().enumerate() {
+        let (lo, hi) = bounds[k];
+        let mut wlo = lo - precision;
+        let mut whi = hi + precision;
+        if j > 0 {
+            wlo = wlo.max((bounds[order[j - 1]].1 + lo) / 2.0);
+        }
+        if let Some(&next) = order.get(j + 1) {
+            whi = whi.min((hi + bounds[next].0) / 2.0);
+        }
+        windows[k] = (wlo, whi);
+    }
+    windows
+}
+
 struct RawPeak {
     members: Vec<usize>,
     mass: f64,
@@ -597,11 +644,19 @@ pub fn build_report(
     });
 
     let singles = single_candidates(db);
-    let decoys_in = |p: &RawPeak| {
-        let lo = p.members.iter().map(|&i| deltas[i]).fold(f64::INFINITY, f64::min);
-        let hi = p.members.iter().map(|&i| deltas[i]).fold(f64::NEG_INFINITY, f64::max);
-        let (dlo, dhi) = (lo - precision, hi + precision);
-        decoy_deltas.partition_point(|d| *d <= dhi) - decoy_deltas.partition_point(|d| *d < dlo)
+    let bounds: Vec<(f64, f64)> = raw
+        .iter()
+        .map(|p| {
+            p.members.iter().map(|&i| deltas[i]).fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lo, hi), d| (lo.min(d), hi.max(d)),
+            )
+        })
+        .collect();
+    let windows = decoy_windows(&bounds, precision);
+    let decoys_in = |k: usize| {
+        let (dlo, dhi) = windows[k];
+        decoy_deltas.partition_point(|d| *d < dhi) - decoy_deltas.partition_point(|d| *d < dlo)
     };
     let mut refined_widths: Vec<f64> = raw
         .iter()
@@ -617,6 +672,26 @@ pub fn build_report(
         median(&mut refined_widths).max(precision)
     };
     let explain_peak = |p: &RawPeak, pairs: &[Candidate]| -> (Vec<Explanation>, Vec<Explanation>) {
+        let refined = p.members.iter().filter(|&&i| targets[i].refined).count();
+        let expected = if 2 * refined >= p.members.len() {
+            refined_precision
+        } else {
+            precision
+        };
+        if p.width <= MIXTURE_WIDTH * expected {
+            let n = p.members.len() as f64;
+            let s = (p.width * p.width / n + expected * expected).sqrt();
+            let peak = single_species(
+                scored_candidates(p.mass, s, span, &p.localised, &singles, pairs),
+                p.mass,
+            );
+            let top = peak.first().cloned().unwrap_or(Explanation {
+                label: UNEXPLAINED.to_string(),
+                mass: p.mass,
+                posterior: 1.0,
+            });
+            return (peak, vec![top; p.members.len()]);
+        }
         let rows: Vec<Vec<Scored>> = p
             .members
             .iter()
@@ -633,9 +708,9 @@ pub fn build_report(
         (m.peak, m.psms)
     };
     let mut sources: Vec<&Candidate> = Vec::new();
-    for p in &raw {
+    for (k, p) in raw.iter().enumerate() {
         if p.members.len() < PAIR_SOURCE_MIN_PSMS
-            || decoys_in(p) as f64 > PAIR_SOURCE_MAX_DECOY_RATIO * p.members.len() as f64
+            || decoys_in(k) as f64 > PAIR_SOURCE_MAX_DECOY_RATIO * p.members.len() as f64
         {
             continue;
         }
@@ -705,7 +780,7 @@ pub fn build_report(
             width: p.width,
             psms: p.members.len(),
             peptides: peptides.len(),
-            decoys: decoys_in(p),
+            decoys: decoys_in(k),
             residues,
             explanations,
         });
@@ -1041,6 +1116,15 @@ mod tests {
         let r = report(&rows);
         assert_eq!(r.peaks.len(), 1);
         assert_eq!(r.peaks[0].decoys, 1);
+    }
+
+    #[test]
+    fn neighbouring_decoy_windows_do_not_overlap() {
+        let windows = decoy_windows(&[(10.0, 10.0055), (10.0065, 10.012)], 0.002);
+        assert!(windows[0].1 <= windows[1].0, "{windows:?}");
+        assert!((windows[0].1 - 10.006).abs() < 1e-9, "{windows:?}");
+        assert!((windows[0].0 - 9.998).abs() < 1e-9, "{windows:?}");
+        assert!((windows[1].1 - 10.014).abs() < 1e-9, "{windows:?}");
     }
 
     #[test]

@@ -3378,7 +3378,20 @@ fn write_open_offsets(
             std::io::Write::flush(&mut w)
         });
         if let Err(e) = written {
-            eprintln!("WARN: could not write {}: {e}", path.display());
+            for stale in [&peaks_path, &psms_path] {
+                if let Err(r) = std::fs::remove_file(stale) {
+                    if r.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("WARN: could not remove {}: {r}", stale.display());
+                    }
+                }
+            }
+            eprintln!(
+                "WARN: could not write {}: {e}; the open-search report pair {} / {} is not written",
+                path.display(),
+                peaks_path.display(),
+                psms_path.display()
+            );
+            return;
         }
     }
     eprintln!(

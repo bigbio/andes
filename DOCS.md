@@ -763,13 +763,14 @@ re-score is capped at 64 per spectrum.
 
 - **Calibration.** Precursor calibration is off in open search, so the offsets carry the
   instrument's mass error, which scales with peptide mass. The report measures it as the median
-  ppm error of the accepted PSMs within 0.02 Da of zero offset (when there are at least 20). It
+  ppm error of the accepted PSMs within 0.02 Da of zero offset whose offset was measured on the
+  precursor (when there are at least 20). It
   subtracts that error, `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the
   precursor, for targets and decoys alike.
   - An offset that localisation refined from the fragment ions keeps its value. The fragments are
     already recentred.
   - The PIN marks such a row by a `DeltaMass` that differs from
-    `ExpMass − isotope_error × 1.00336 − CalcMass` by more than 0.0005 Da.
+    `ExpMass − isotope_error × 1.003355 − CalcMass` by more than 0.0005 Da.
 - **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
   - The precision is 1.4826 × MAD of the calibrated offsets within 0.02 Da of zero, at least
     0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.
@@ -782,17 +783,28 @@ re-score is capped at 64 per spectrum.
   - median offset (`mass_shift`) and width (`width_da`);
   - PSM and peptide counts;
   - its localised residues (`residues`, the three most frequent with counts);
-  - `decoys`: the decoy PSMs at or above the lowest accepted target score whose offsets fall in the
-    peak. `decoys / psms` is a per-peak FDR estimate, independent of the run-wide q-value.
-- **Explanations.** Each peak is fitted as a mixture of the candidates below.
+  - `decoys`: the decoy PSMs at or above the lowest accepted target score whose calibrated offsets
+    fall in the peak's window. The window is the peak's range widened by one precision on each side,
+    and cut at the midpoint to a neighbouring peak, so each decoy counts in at most one peak.
+    `decoys / psms` is a per-peak FDR estimate, independent of the run-wide q-value.
+- **Explanations.** A peak no wider than twice the expected spread is treated as one species. The
+  expected spread is the refined spread when at least half of its PSMs are refined, otherwise the
+  precision.
+  - Its candidates are scored on the peak's median, with a Gaussian whose spread is
+    √(width² / n + expected²). The spread is the standard error of the centre plus the measurement
+    precision.
+  - A peak that sits consistently off every candidate is therefore called "unexplained".
+  - Its PSMs all take the peak's top explanation.
+- **Wider peaks.** A wider peak can hold several species, such as deamidation and an isotope pick.
+  It is fitted as a mixture of the candidates:
   - Every candidate keeps its fixed mass.
-  - A PSM's likelihood under a candidate is a Gaussian of its calibrated offset around the
-    candidate's mass × its site support.
+  - A PSM's likelihood under a candidate is a Gaussian of its calibrated offset, with the precision
+    or the refined spread, × its site support.
   - EM estimates each candidate's share of the peak's PSMs. It starts from the priors and adds them
     as a Dirichlet pseudo-count of one PSM.
-  - A peak lists its three largest shares as `explanation_k` / `posterior_k`. A clean peak converges
-    to one candidate; a peak that mixes two species, such as deamidation and an isotope pick,
-    splits between them in proportion.
+  - Each PSM takes the candidate with its highest responsibility.
+- **Reported explanations.** A peak lists its three largest posteriors or shares as
+  `explanation_k` / `posterior_k`.
   - The candidates:
     - no modification;
     - an isotope error of ±1 or ±2;
@@ -810,11 +822,14 @@ re-score is capped at 64 per spectrum.
     - A pair takes 0.05 × the two entries' priors.
     - The Gaussian's spread depends on how the PSM's offset was measured. For an offset measured
       on the precursor it is the precision. For one refined from the fragment ions it is the median
-      width of the peaks with at least 20 PSMs that are mostly refined, and never less than the
+      width of the peaks with at least 20 PSMs of which at least half are refined, and never less than the
       precision.
-    - A PSM's site support is (k + 0.5) / 2. k is 1 when its localised residue, or peptide
-      terminus, is a common specificity of the entry, 0.1 when it is only a rare one, and 0
-      otherwise. The support is 1 when the PSM is not localised.
+    - Site support for a Unimod entry is (k + 0.5) / (n + 1) over the n localised PSMs (one PSM in
+      the mixture). Each localised PSM adds 1 to k when its residue, or peptide terminus, is a
+      common specificity of the entry, and 0.1 when it is only a rare one.
+    - The hypotheses without a site (no modification, isotope errors, "unexplained") and entries
+      with no listed site take a neutral 0.5. The support is 1 when no PSM is localised. A PSM on
+      the right residue then favours the entry, and one on a wrong residue counts against it.
   - Entries with the same mass and sites tie, and are reported as ties.
 - **Per-PSM file.** `<stem>.open_psms.tsv` gives each accepted PSM its peak (`NA` outside every
   peak), its localised residue, and the candidate with its highest responsibility in the fitted

@@ -313,9 +313,10 @@ impl ResultPaths {
 }
 
 /// The user's extra Percolator arguments with `--num-threads <threads>` added
-/// in front, unless they already set it. Percolator trains one SVM per
-/// cross-validation fold and by default uses three threads; on more cores it
-/// runs about twice as fast with the same result (measured on a 1M-row PIN).
+/// in front (clamped to 1..=128, the range Percolator accepts), unless they
+/// already set it. Percolator trains one SVM per cross-validation fold and by
+/// default uses three threads; on more cores it runs about twice as fast with
+/// the same result (measured on a 1M-row PIN).
 pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<String> {
     if extra
         .iter()
@@ -323,7 +324,10 @@ pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<Str
     {
         return extra.to_vec();
     }
-    let mut args = vec!["--num-threads".to_string(), threads.max(1).to_string()];
+    let mut args = vec![
+        "--num-threads".to_string(),
+        threads.clamp(1, 128).to_string(),
+    ];
     args.extend(extra.iter().cloned());
     args
 }
@@ -1461,6 +1465,29 @@ mod tests {
         let set_eq = vec!["--num-threads=4".to_string()];
         assert_eq!(percolator_args_with_threads(&set_eq, 16), set_eq);
         assert_eq!(percolator_args_with_threads(&[], 0), ["--num-threads", "1"]);
+    }
+
+    #[test]
+    fn percolator_threads_clamped_to_percolator_range() {
+        assert_eq!(
+            percolator_args_with_threads(&[], 192),
+            ["--num-threads", "128"]
+        );
+        assert_eq!(
+            percolator_args_with_threads(&[], 128),
+            ["--num-threads", "128"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let native = PercolatorBackend::Native {
+            memory: percolator_native::MemLimit {
+                bytes: 1 << 30,
+                spill_dir: dir.path().to_path_buf(),
+            },
+        };
+        let pin = native_fixture_pin(dir.path());
+        let targets =
+            run_percolator_pooled(&native, &pin, &percolator_args_with_threads(&[], 500)).unwrap();
+        assert!(!targets.is_empty());
     }
 
     #[test]

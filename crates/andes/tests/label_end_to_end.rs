@@ -7,8 +7,11 @@
 //! monoisotopes; the molar ratio andes reports is 0.10-0.33 log2 lower,
 //! since a heavy peptide's natural envelope is narrower), every tenth has no
 //! heavy channel, and each channel is triggered for MS2 with probability 0.6,
-//! so many groups are identified in one channel or one run only. The labels
-//! are fully enriched, so the test sets `--label-heavy-enrichment 1`.
+//! so many groups are identified in one channel or one run only. Each run
+//! also has poor MS2 scans (four fragment ions of a species triggered in that
+//! run among random peaks), whose targets score like decoys, so rescoring sees
+//! the target-decoy overlap of real data. The labels are
+//! fully enriched, so the test sets `--label-heavy-enrichment 1`.
 
 use std::collections::HashMap;
 use std::fs::File;

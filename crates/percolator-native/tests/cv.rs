@@ -276,11 +276,7 @@ fn mfn_finite_with_one_class() {
         data.push(noise(&mut s));
         data.push(1.0);
     }
-    let x = Rows {
-        data,
-        nrows: 40,
-        ncols: 3,
-    };
+    let x = Rows::from_dense(data, 40, 3);
     let all: Vec<usize> = (0..40).collect();
     let neg_only = l2_svm_mfn(&x, &[], &all, 1.0, 1.0, &MfnOpts::default());
     let pos_only = l2_svm_mfn(&x, &all, &[], 1.0, 1.0, &MfnOpts::default());

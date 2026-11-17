@@ -1,8 +1,11 @@
+use crate::budget::Budget;
 use crate::store::{Store, StoreBuilder};
+use crate::text::{RowText, Texts, TextsBuilder};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLimit {
@@ -11,13 +14,10 @@ pub struct MemLimit {
 }
 
 pub struct RowMeta {
-    pub psm_id: String,
     pub label: i8,
     pub file: u32,
     pub scan: u64,
     pub exp_mass: f64,
-    pub peptide: String,
-    pub proteins: String,
 }
 
 pub struct Pin {
@@ -26,6 +26,14 @@ pub struct Pin {
     pub default_direction: Option<Vec<f64>>,
     pub rows: Store,
     pub meta: Vec<RowMeta>,
+    pub texts: Texts,
+    pub budget: Arc<Budget>,
+}
+
+impl Pin {
+    pub fn text(&self, i: usize) -> Result<RowText, String> {
+        self.texts.get(i)
+    }
 }
 
 #[derive(Default)]
@@ -81,7 +89,9 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
     let peptide_col = cols.peptide.unwrap_or(0);
     let label_col = cols.label.unwrap_or(0);
     let mut default_direction = None;
-    let mut builder = StoreBuilder::new(nfeat, limit.bytes, &limit.spill_dir);
+    let budget = Budget::new(limit.bytes, &limit.spill_dir);
+    let mut builder = StoreBuilder::new(nfeat, &budget);
+    let mut texts = TextsBuilder::new(&budget);
     let mut meta: Vec<RowMeta> = Vec::new();
     let mut file_ids: HashMap<String, u32> = HashMap::new();
     let mut file_names: Vec<String> = Vec::new();
@@ -174,18 +184,17 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
             Some(i) if i < cells.len() => cells[i..].join("\t"),
             _ => String::new(),
         };
+        let psm_id = cols
+            .spec_id
+            .and_then(|i| cells.get(i))
+            .copied()
+            .unwrap_or("");
+        texts.push(psm_id, cells[peptide_col], &proteins)?;
         meta.push(RowMeta {
-            psm_id: cols
-                .spec_id
-                .and_then(|i| cells.get(i))
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
             label,
             file: file_idx,
             scan,
             exp_mass,
-            peptide: cells[peptide_col].to_string(),
-            proteins,
         });
         builder.push_row(&row)?;
     }
@@ -195,5 +204,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         default_direction,
         rows: builder.finish()?,
         meta,
+        texts: texts.finish()?,
+        budget,
     })
 }

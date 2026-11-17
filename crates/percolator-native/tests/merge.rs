@@ -1,6 +1,6 @@
 use percolator_native::{
     fmt_fixed, fmt_g, merge_folds, normalize_fold_scores, read_pin, write_results, write_weights,
-    CvResult, MemLimit, Results, RowMeta,
+    CvResult, MemLimit, Pin, Results,
 };
 use std::path::PathBuf;
 
@@ -121,7 +121,7 @@ fn merge_aborts_when_median_decoy_is_accepted() {
     );
 }
 
-fn svm_ref_rows() -> (Vec<RowMeta>, Vec<String>) {
+fn svm_ref_rows() -> (tempfile::TempDir, Pin) {
     let dir = tempfile::tempdir().unwrap();
     let pin = read_pin(
         &data("svm_ref.pin"),
@@ -131,12 +131,13 @@ fn svm_ref_rows() -> (Vec<RowMeta>, Vec<String>) {
         },
     )
     .unwrap();
-    (pin.meta, pin.file_names)
+    (dir, pin)
 }
 
 #[test]
 fn results_byte_identical_to_percolator() {
-    let (meta, file_names) = svm_ref_rows();
+    let (_dir, pin) = svm_ref_rows();
+    let meta = &pin.meta;
     let mut by_id = std::collections::HashMap::new();
     for name in ["svm_ref_perc.target.psms", "svm_ref_perc.decoy.psms"] {
         for l in std::fs::read_to_string(data(name)).unwrap().lines().skip(1) {
@@ -146,7 +147,11 @@ fn results_byte_identical_to_percolator() {
         }
     }
     let rows: Vec<usize> = (0..meta.len()).collect();
-    let col = |k: usize| -> Vec<f64> { meta.iter().map(|m| by_id[&m.psm_id][k]).collect() };
+    let col = |k: usize| -> Vec<f64> {
+        (0..meta.len())
+            .map(|i| by_id[&pin.text(i).unwrap().psm_id][k])
+            .collect()
+    };
     let (scores, q, pep) = (col(0), col(1), col(2));
     let dir = tempfile::tempdir().unwrap();
     let (t, d) = (dir.path().join("t.psms"), dir.path().join("d.psms"));
@@ -156,7 +161,7 @@ fn results_byte_identical_to_percolator() {
         q: &q,
         pep: &pep,
     };
-    write_results(&t, &d, &meta, &file_names, &res).unwrap();
+    write_results(&t, &d, meta, &pin.texts, &pin.file_names, &res).unwrap();
     for (ours, theirs) in [
         (&t, "svm_ref_perc.target.psms"),
         (&d, "svm_ref_perc.decoy.psms"),

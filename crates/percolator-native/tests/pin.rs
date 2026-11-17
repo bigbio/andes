@@ -44,13 +44,13 @@ fn reads_andes_pin_header_and_rows() {
     assert_eq!(labels, vec![1, -1, 1, 1, -1, 1]);
     let files: Vec<u32> = pin.meta.iter().map(|m| m.file).collect();
     assert_eq!(files, vec![0, 0, 0, 1, 1, 1]);
-    assert_eq!(pin.meta[0].psm_id, "a/1");
+    assert_eq!(pin.text(0).unwrap().psm_id, "a/1");
     assert_eq!(pin.meta[0].scan, 1);
     assert_eq!(pin.meta[0].exp_mass, 1000.5);
-    assert_eq!(pin.meta[0].peptide, "K.AAA.R");
-    assert_eq!(pin.meta[0].proteins, "P1\tP2");
-    assert_eq!(pin.meta[3].proteins, "P5\tP6\tP7");
-    assert_eq!(pin.meta[4].proteins, "decoy_P8");
+    assert_eq!(pin.text(0).unwrap().peptide, "K.AAA.R");
+    assert_eq!(pin.text(0).unwrap().proteins, "P1\tP2");
+    assert_eq!(pin.text(3).unwrap().proteins, "P5\tP6\tP7");
+    assert_eq!(pin.text(4).unwrap().proteins, "decoy_P8");
     let b = blocks(&pin.rows);
     assert_eq!(b.len(), 1);
     assert_eq!(b[0].0, 0);
@@ -107,7 +107,14 @@ fn spilled_store_equals_ram_store() {
     .unwrap();
     assert_eq!(blocks(&a.rows), blocks(&b.rows));
     assert_eq!(blocks(&b.rows), blocks(&b.rows));
-    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 1);
+    for i in 0..a.meta.len() {
+        let (x, y) = (a.text(i).unwrap(), b.text(i).unwrap());
+        assert_eq!(
+            (x.psm_id, x.peptide, x.proteins),
+            (y.psm_id, y.peptide, y.proteins)
+        );
+    }
+    assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 2);
     drop(b);
     assert_eq!(std::fs::read_dir(spill.path()).unwrap().count(), 0);
 }

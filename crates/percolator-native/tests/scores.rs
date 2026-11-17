@@ -120,13 +120,10 @@ fn training_sets_select_targets_at_q_and_all_decoys() {
 
 fn meta(file: u32, scan: u64, mass: f64) -> RowMeta {
     RowMeta {
-        psm_id: String::new(),
         label: 1,
         file,
         scan,
         exp_mass: mass,
-        peptide: String::new(),
-        proteins: String::new(),
     }
 }
 

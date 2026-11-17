@@ -1,8 +1,9 @@
+use crate::budget::Reservation;
 use crate::folds::folds_by_spectrum;
 use crate::normalize::{raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::{count_at, tdc_q, training_sets};
-use crate::svm::{l2_svm_mfn, MfnOpts, Rows};
+use crate::svm::{fill, l2_svm_mfn, MfnOpts, Rows};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 
@@ -52,8 +53,6 @@ struct Fold {
 
 struct TrainSet {
     x: Rows,
-    perm: Vec<usize>,
-    decoy: Vec<bool>,
     idx_neg: Vec<usize>,
     idx_pos: Vec<usize>,
 }
@@ -84,19 +83,27 @@ pub fn init_direction(
     if nf == 0 {
         return Ok(w);
     }
-    let x = Rows::gather(&pin.rows, norm, rows);
     let decoy: Vec<bool> = rows.iter().map(|&i| pin.meta[i].label < 0).collect();
-    let counts: Vec<[usize; 2]> = (0..nf)
-        .into_par_iter()
-        .map(|j| {
-            let high: Vec<f64> = (0..x.nrows).map(|r| x.row(r)[j]).collect();
+    let per_feature = (rows.len() as u64).max(1) * COLUMN_BYTES_PER_ROW;
+    let chunk = ((pin.budget.available() / per_feature) as usize).clamp(1, nf);
+    let mut counts: Vec<[usize; 2]> = Vec::with_capacity(nf);
+    for j0 in (0..nf).step_by(chunk) {
+        let j1 = (j0 + chunk).min(nf);
+        let _held = Reservation::take(&pin.budget, (j1 - j0) as u64 * per_feature);
+        let mut cols = vec![vec![0.0f64; rows.len()]; j1 - j0];
+        fill(&pin.rows, norm, rows, |p, row| {
+            for (c, &v) in cols.iter_mut().zip(&row[j0..j1]) {
+                c[p] = v;
+            }
+        });
+        counts.par_extend(cols.into_par_iter().map(|high| {
             let low: Vec<f64> = high.iter().map(|&v| -v).collect();
             [
                 count_at(&tdc_q(&low, &decoy, true), &decoy, fdr),
                 count_at(&tdc_q(&high, &decoy, true), &decoy, fdr),
             ]
-        })
-        .collect();
+        }));
+    }
     let mut best: Option<(usize, usize, bool)> = None;
     for (j, c) in counts.iter().enumerate() {
         for (i, &p) in c.iter().enumerate() {
@@ -118,6 +125,16 @@ pub fn init_direction(
     Ok(w)
 }
 
+const COLUMN_BYTES_PER_ROW: u64 = 48;
+const TASK_BYTES_PER_EXAMPLE: u64 = 64;
+const TASK_BYTES_PER_ROW: u64 = 40;
+
+fn score_rows(pin: &Pin, norm: &Norm, rows: &[usize], w: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0f64; rows.len()];
+    fill(&pin.rows, norm, rows, |p, row| out[p] = dot(row, w));
+    out
+}
+
 fn dot(row: &[f64], w: &[f64]) -> f64 {
     let nf = w.len() - 1;
     let mut s = w[nf];
@@ -136,27 +153,17 @@ fn descending(pin: &Pin, fold: &Fold, s: &[f64], a: usize, b: usize) -> Ordering
         .then(a.cmp(&b))
 }
 
-fn train_set(pin: &Pin, norm: &Norm, fold: &Fold, s: &[f64], fdr: f64) -> TrainSet {
+fn train_set(pin: &Pin, norm: &Norm, fold: &Fold, s: &[f64], fdr: f64) -> Result<TrainSet, String> {
     let q = tdc_q(s, &fold.train_decoy, true);
     let (mut pos, mut neg) = training_sets(&q, &fold.train_decoy, fdr);
     neg.sort_by(|&a, &b| descending(pin, fold, s, a, b));
     pos.sort_by(|&a, &b| descending(pin, fold, s, a, b));
-    let mut used = vec![false; s.len()];
-    for &i in neg.iter().chain(&pos) {
-        used[i] = true;
-    }
-    let mut perm = Vec::with_capacity(s.len());
-    perm.extend_from_slice(&neg);
-    perm.extend_from_slice(&pos);
-    perm.extend((0..s.len()).filter(|&i| !used[i]));
-    let global: Vec<usize> = perm.iter().map(|&l| fold.train[l]).collect();
-    TrainSet {
-        x: Rows::gather(&pin.rows, norm, &global),
-        decoy: perm.iter().map(|&l| fold.train_decoy[l]).collect(),
+    let global: Vec<usize> = neg.iter().chain(&pos).map(|&l| fold.train[l]).collect();
+    Ok(TrainSet {
+        x: Rows::gather_within(&pin.rows, norm, &global, &pin.budget)?,
         idx_neg: (0..neg.len()).collect(),
         idx_pos: (neg.len()..neg.len() + pos.len()).collect(),
-        perm,
-    }
+    })
 }
 
 fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) -> usize {
@@ -262,7 +269,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             .iter()
             .zip(&train_scores)
             .map(|(fd, s)| train_set(pin, norm, fd, s, fdr))
-            .collect();
+            .collect::<Result<_, _>>()?;
         if cfg.verbose > 1 {
             eprintln!("Iteration {}:", it + 1);
         }
@@ -276,21 +283,37 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                 );
             }
         }
-        let fits: Vec<Option<(Vec<f64>, usize)>> = pairs
-            .par_iter()
-            .map(|&(f, cpos, cfrac)| {
+        let task_bytes: Vec<u64> = pairs
+            .iter()
+            .map(|&(f, _, _)| {
+                let m = (sets[f].idx_neg.len() + sets[f].idx_pos.len()) as u64;
+                m * TASK_BYTES_PER_EXAMPLE + folds[f].train.len() as u64 * TASK_BYTES_PER_ROW
+            })
+            .collect();
+        let mut fits: Vec<Option<(Vec<f64>, usize)>> = Vec::with_capacity(pairs.len());
+        while fits.len() < pairs.len() {
+            let start = fits.len();
+            let mut held = Vec::new();
+            while start + held.len() < pairs.len() {
+                match Reservation::take(&pin.budget, task_bytes[start + held.len()]) {
+                    Some(r) => held.push(r),
+                    None => break,
+                }
+            }
+            let end = (start + held.len()).max(start + 1);
+            fits.par_extend(pairs[start..end].par_iter().map(|&(f, cpos, cfrac)| {
                 let t = &sets[f];
                 if t.idx_neg.is_empty() && t.idx_pos.is_empty() {
                     return None;
                 }
                 let ww = l2_svm_mfn(&t.x, &t.idx_pos, &t.idx_neg, cpos, cfrac * cpos, &opts);
-                let s: Vec<f64> = (0..t.x.nrows).map(|r| dot(t.x.row(r), &ww)).collect();
-                let tp = positives(&s, &t.decoy, cfg.test_fdr, true);
+                let s = score_rows(pin, norm, &folds[f].train, &ww);
+                let tp = positives(&s, &folds[f].train_decoy, cfg.test_fdr, true);
                 Some((ww, tp))
-            })
-            .collect();
+            }));
+        }
         let mut estimated = 0usize;
-        for (f, t) in sets.iter().enumerate() {
+        for f in 0..sets.len() {
             let mut best = 0usize;
             let mut chosen = None;
             for (k, fit) in fits[f * per_fold..(f + 1) * per_fold].iter().enumerate() {
@@ -313,9 +336,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     );
                 }
             }
-            for (r, &local) in t.perm.iter().enumerate() {
-                train_scores[f][local] = dot(t.x.row(r), &w[f]);
-            }
+            train_scores[f] = score_rows(pin, norm, &folds[f].train, &w[f]);
         }
         if cfg.verbose > 1 {
             eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);

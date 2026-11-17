@@ -1,4 +1,5 @@
 mod args;
+mod budget;
 mod cv;
 mod folds;
 mod merge;
@@ -9,8 +10,10 @@ mod run;
 mod scores;
 mod store;
 mod svm;
+mod text;
 mod write;
 
+pub use budget::{Budget, Reservation};
 pub use cv::{init_direction, train, CvConfig, CvResult};
 pub use folds::{folds_by_spectrum, libstdcxx_sort_by};
 pub use merge::{merge_folds, normalize_fold_scores};
@@ -23,4 +26,5 @@ pub use run::run;
 pub use scores::{count_at, mix_max_q, tdc_q, tdc_winners, training_sets};
 pub use store::Store;
 pub use svm::{l2_svm_mfn, MfnOpts, Rows};
+pub use text::{RowText, Texts};
 pub use write::{fmt_fixed, fmt_g, write_results, write_weights, Results};

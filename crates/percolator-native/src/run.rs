@@ -246,5 +246,12 @@ fn finish(
         q: &q,
         pep: &pep,
     };
-    write_results(&a.target, &a.decoy, &pin.meta, &pin.file_names, &res)
+    write_results(
+        &a.target,
+        &a.decoy,
+        &pin.meta,
+        &pin.texts,
+        &pin.file_names,
+        &res,
+    )
 }

@@ -30,15 +30,7 @@ fn separable() -> (Rows, Vec<usize>, Vec<usize>) {
             neg.push(i);
         }
     }
-    (
-        Rows {
-            data,
-            nrows: 60,
-            ncols: 4,
-        },
-        pos,
-        neg,
-    )
+    (Rows::from_dense(data, 60, 4), pos, neg)
 }
 
 fn gradient(x: &Rows, pos: &[usize], neg: &[usize], cpos: f64, cneg: f64, w: &[f64]) -> f64 {

@@ -1,4 +1,5 @@
 use crate::pin::RowMeta;
+use crate::text::Texts;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -52,10 +53,12 @@ fn io_err(path: &Path, e: std::io::Error) -> String {
     format!("write {}: {e}", path.display())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_one(
     path: &Path,
     label: i8,
     meta: &[RowMeta],
+    texts: &Texts,
     file_names: &[String],
     order: &[usize],
     rows: &[usize],
@@ -76,8 +79,9 @@ fn write_one(
         if m.label != label {
             continue;
         }
+        let t = texts.get(rows[k])?;
         line.clear();
-        line.push_str(&m.psm_id);
+        line.push_str(&t.psm_id);
         line.push('\t');
         if !file_names.is_empty() {
             line.push_str(file_names.get(m.file as usize).map_or("", |s| s.as_str()));
@@ -87,10 +91,10 @@ fn write_one(
             line.push_str(&fmt_g(col[k], 6));
             line.push('\t');
         }
-        line.push_str(&m.peptide);
+        line.push_str(&t.peptide);
         line.push('\t');
         let mut first = true;
-        for p in m.proteins.split('\t').filter(|p| !p.is_empty()) {
+        for p in t.proteins.split('\t').filter(|p| !p.is_empty()) {
             if !first {
                 line.push('\t');
             }
@@ -115,6 +119,7 @@ pub fn write_results(
     target: &Path,
     decoy: &Path,
     meta: &[RowMeta],
+    texts: &Texts,
     file_names: &[String],
     res: &Results,
 ) -> Result<(), String> {
@@ -130,8 +135,8 @@ pub fn write_results(
             .then(rows[a].cmp(&rows[b]))
     });
     let cols = [scores, res.q, res.pep];
-    write_one(target, 1, meta, file_names, &order, rows, cols)?;
-    write_one(decoy, -1, meta, file_names, &order, rows, cols)
+    write_one(target, 1, meta, texts, file_names, &order, rows, cols)?;
+    write_one(decoy, -1, meta, texts, file_names, &order, rows, cols)
 }
 
 pub fn write_weights(

@@ -1,57 +1,195 @@
+use crate::budget::{Budget, Reservation};
 use crate::normalize::Norm;
 use crate::store::Store;
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 pub struct Rows {
-    pub data: Vec<f64>,
+    data: RowData,
     pub nrows: usize,
     pub ncols: usize,
+    _ram: Reservation,
+}
+
+enum RowData {
+    Ram(Vec<f64>),
+    Spill(PathBuf),
+}
+
+static ROWS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn fill(store: &Store, norm: &Norm, idx: &[usize], mut put: impl FnMut(usize, &[f64])) {
+    let nf = store.nfeat();
+    let ncols = nf + 1;
+    let mut buf = vec![0.0f64; ncols];
+    buf[nf] = 1.0;
+    if idx.is_empty() {
+        return;
+    }
+    if nf == 0 {
+        for p in 0..idx.len() {
+            put(p, &buf);
+        }
+        return;
+    }
+    let mut order: Vec<usize> = (0..idx.len()).collect();
+    order.sort_by_key(|&p| idx[p]);
+    let mut next = 0usize;
+    store.for_each_block(|start, block| {
+        let end = start + block.len() / nf;
+        while next < order.len() && idx[order[next]] < end {
+            let p = order[next];
+            let r = idx[p] - start;
+            let src = &block[r * nf..(r + 1) * nf];
+            for (((d, &x), &m), &sd) in buf[..nf]
+                .iter_mut()
+                .zip(src)
+                .zip(&norm.mean)
+                .zip(&norm.inv_sd)
+            {
+                *d = (f64::from(x) - m) * sd;
+            }
+            put(p, &buf);
+            next += 1;
+        }
+    });
+    assert_eq!(
+        next,
+        order.len(),
+        "Rows::gather: row {} not in a store of {} rows",
+        idx[order[next.min(order.len() - 1)]],
+        store.len()
+    );
 }
 
 impl Rows {
     pub fn gather(store: &Store, norm: &Norm, idx: &[usize]) -> Rows {
-        let nf = store.nfeat();
-        let ncols = nf + 1;
+        let ncols = store.nfeat() + 1;
         let mut data = vec![0.0f64; idx.len() * ncols];
-        for r in 0..idx.len() {
-            data[r * ncols + nf] = 1.0;
-        }
-        if !idx.is_empty() && nf > 0 {
-            let mut order: Vec<usize> = (0..idx.len()).collect();
-            order.sort_by_key(|&p| idx[p]);
-            let mut next = 0usize;
-            store.for_each_block(|start, block| {
-                let n = if nf == 0 { 0 } else { block.len() / nf };
-                let end = start + n;
-                while next < order.len() && idx[order[next]] < end {
-                    let p = order[next];
-                    let r = idx[p] - start;
-                    let src = &block[r * nf..(r + 1) * nf];
-                    let dst = &mut data[p * ncols..p * ncols + nf];
-                    for (((d, &x), &m), &sd) in
-                        dst.iter_mut().zip(src).zip(&norm.mean).zip(&norm.inv_sd)
-                    {
-                        *d = (f64::from(x) - m) * sd;
-                    }
-                    next += 1;
-                }
-            });
-            assert_eq!(
-                next,
-                order.len(),
-                "Rows::gather: row {} not in a store of {} rows",
-                idx[order[next.min(order.len() - 1)]],
-                store.len()
-            );
-        }
+        fill(store, norm, idx, |p, row| {
+            data[p * ncols..(p + 1) * ncols].copy_from_slice(row)
+        });
         Rows {
-            data,
+            data: RowData::Ram(data),
             nrows: idx.len(),
             ncols,
+            _ram: Reservation::none(),
         }
     }
 
+    pub fn gather_within(
+        store: &Store,
+        norm: &Norm,
+        idx: &[usize],
+        budget: &Arc<Budget>,
+    ) -> Result<Rows, String> {
+        let ncols = store.nfeat() + 1;
+        let bytes = (idx.len() * ncols * 8) as u64;
+        if let Some(ram) = Reservation::take(budget, bytes) {
+            let mut rows = Rows::gather(store, norm, idx);
+            rows._ram = ram;
+            return Ok(rows);
+        }
+        let k = ROWS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = budget.spill_dir().join(format!(
+            "percolator-native-{}-{}.rows",
+            std::process::id(),
+            k
+        ));
+        let rows = Rows {
+            data: RowData::Spill(path.clone()),
+            nrows: idx.len(),
+            ncols,
+            _ram: Reservation::none(),
+        };
+        let file = File::create(&path)
+            .map_err(|e| format!("create spill file {}: {e}", path.display()))?;
+        file.set_len(bytes)
+            .map_err(|e| format!("size spill file {}: {e}", path.display()))?;
+        let mut file = file;
+        let mut bytes_row = vec![0u8; ncols * 8];
+        let mut failed = None;
+        fill(store, norm, idx, |p, row| {
+            if failed.is_some() {
+                return;
+            }
+            for (c, v) in bytes_row.chunks_exact_mut(8).zip(row) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+            let res = file
+                .seek(SeekFrom::Start((p * ncols * 8) as u64))
+                .and_then(|_| file.write_all(&bytes_row));
+            if let Err(e) = res {
+                failed = Some(e);
+            }
+        });
+        if let Some(e) = failed {
+            return Err(format!("write spill file {}: {e}", path.display()));
+        }
+        Ok(rows)
+    }
+
+    pub fn from_dense(data: Vec<f64>, nrows: usize, ncols: usize) -> Rows {
+        assert_eq!(data.len(), nrows * ncols);
+        Rows {
+            data: RowData::Ram(data),
+            nrows,
+            ncols,
+            _ram: Reservation::none(),
+        }
+    }
+
+    pub fn is_spilled(&self) -> bool {
+        matches!(self.data, RowData::Spill(_))
+    }
+
     pub fn row(&self, i: usize) -> &[f64] {
-        &self.data[i * self.ncols..(i + 1) * self.ncols]
+        match &self.data {
+            RowData::Ram(v) => &v[i * self.ncols..(i + 1) * self.ncols],
+            RowData::Spill(_) => panic!("Rows::row: the rows are spilled to disk; use a scan"),
+        }
+    }
+
+    pub(crate) fn scan(&self, ids: &[usize], mut f: impl FnMut(usize, &[f64])) {
+        match &self.data {
+            RowData::Ram(_) => {
+                for (k, &i) in ids.iter().enumerate() {
+                    f(k, self.row(i));
+                }
+            }
+            RowData::Spill(path) => {
+                let file = File::open(path).expect("open rows spill file");
+                let mut r = BufReader::with_capacity(8 << 20, file);
+                let width = self.ncols * 8;
+                let mut bytes = vec![0u8; width];
+                let mut vals = vec![0.0f64; self.ncols];
+                let mut cur = 0usize;
+                for (k, &i) in ids.iter().enumerate() {
+                    assert!(i >= cur, "Rows::scan: ids must increase");
+                    if i > cur {
+                        r.seek_relative(((i - cur) * width) as i64)
+                            .expect("seek rows spill file");
+                    }
+                    r.read_exact(&mut bytes).expect("read rows spill file");
+                    for (v, c) in vals.iter_mut().zip(bytes.chunks_exact(8)) {
+                        *v = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                    }
+                    f(k, &vals);
+                    cur = i + 1;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Rows {
+    fn drop(&mut self) {
+        if let RowData::Spill(p) = &self.data {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -92,13 +230,18 @@ impl Train<'_> {
         self.idx_neg.len() + self.idx_pos.len()
     }
 
-    fn row(&self, i: usize) -> &[f64] {
+    fn x_row(&self, i: usize) -> usize {
         let n = self.idx_neg.len();
         if i < n {
-            self.x.row(self.idx_neg[i])
+            self.idx_neg[i]
         } else {
-            self.x.row(self.idx_pos[i - n])
+            self.idx_pos[i - n]
         }
+    }
+
+    fn scan(&self, subset: &[usize], f: impl FnMut(usize, &[f64])) {
+        let ids: Vec<usize> = subset.iter().map(|&i| self.x_row(i)).collect();
+        self.x.scan(&ids, f);
     }
 
     fn y(&self, i: usize) -> f64 {
@@ -183,10 +326,11 @@ fn cgls(
     let r = &mut ws.r;
     let p = &mut ws.p;
     r.fill(0.0);
-    for (zi, &ii) in z.iter_mut().zip(subset) {
-        *zi = t.c(ii) * (t.y(ii) - o[ii]);
-        daxpy(*zi, t.row(ii), r);
-    }
+    t.scan(subset, |k, row| {
+        let ii = subset[k];
+        z[k] = t.c(ii) * (t.y(ii) - o[ii]);
+        daxpy(z[k], row, r);
+    });
     daxpy(-lambda, beta, r);
     p.copy_from_slice(r);
     let mut omega1 = ddot(r, r);
@@ -196,21 +340,22 @@ fn cgls(
     while cgiter < cgitermax {
         cgiter += 1;
         let mut omega_q = 0.0;
-        for (qi, &ii) in q.iter_mut().zip(subset) {
-            *qi = gemv_t(t.row(ii), p);
-            omega_q += t.c(ii) * *qi * *qi;
-        }
+        t.scan(subset, |k, row| {
+            q[k] = gemv_t(row, p);
+            omega_q += t.c(subset[k]) * q[k] * q[k];
+        });
         let gamma = omega1 / (lambda * omega_p + omega_q);
         let inv_omega2 = 1.0 / omega1;
         r.copy_from_slice(beta);
         dscal(-lambda, r);
         daxpy(gamma, p, beta);
         dscal(gamma, q);
-        for ((zi, &qi), &ii) in z.iter_mut().zip(q.iter()).zip(subset) {
-            o[ii] += qi;
-            *zi -= t.c(ii) * qi;
-            daxpy(*zi, t.row(ii), r);
-        }
+        t.scan(subset, |k, row| {
+            let ii = subset[k];
+            o[ii] += q[k];
+            z[k] -= t.c(ii) * q[k];
+            daxpy(z[k], row, r);
+        });
         let omega_z = ddot(z, z);
         omega1 = ddot(r, r);
         if omega1 < epsilon2 * omega_z {
@@ -339,9 +484,11 @@ pub fn l2_svm_mfn(
             &mut o_bar,
             &mut ws,
         );
-        for &ii in &subset[active..] {
-            o_bar[ii] = ddot(&t.row(ii)[..n0], &w_bar[..n0]) + w_bar[n0];
-        }
+        let mut rest = subset[active..].to_vec();
+        rest.sort_unstable();
+        t.scan(&rest, |k, row| {
+            o_bar[rest[k]] = ddot(&row[..n0], &w_bar[..n0]) + w_bar[n0];
+        });
         if !ini {
             cgitermax = opts.cgitermax;
             ini = true;

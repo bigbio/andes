@@ -1,7 +1,9 @@
+use crate::budget::{Budget, Reservation};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const BLOCK_BYTES: usize = 8 << 20;
 
@@ -17,6 +19,7 @@ pub struct Store {
     nrows: usize,
     block_rows: usize,
     data: Data,
+    _ram: Reservation,
 }
 
 impl Store {
@@ -86,19 +89,19 @@ pub(crate) struct StoreBuilder {
     nfeat: usize,
     block_rows: usize,
     nrows: usize,
-    limit_bytes: u64,
-    spill_dir: PathBuf,
+    budget: Arc<Budget>,
+    ram: Reservation,
     sink: Sink,
 }
 
 impl StoreBuilder {
-    pub(crate) fn new(nfeat: usize, limit_bytes: u64, spill_dir: &Path) -> Self {
+    pub(crate) fn new(nfeat: usize, budget: &Arc<Budget>) -> Self {
         StoreBuilder {
             nfeat,
             block_rows: (BLOCK_BYTES / (4 * nfeat.max(1))).max(1),
             nrows: 0,
-            limit_bytes,
-            spill_dir: spill_dir.to_path_buf(),
+            budget: budget.clone(),
+            ram: Reservation::none(),
             sink: Sink::Ram(Vec::new()),
         }
     }
@@ -113,10 +116,12 @@ impl StoreBuilder {
         self.nrows += 1;
         match &mut self.sink {
             Sink::Ram(v) => {
-                v.extend_from_slice(row);
-                if (v.len() as u64) * 4 > self.limit_bytes {
+                let keep = self.budget.total() / 2;
+                if self.ram.grow(&self.budget, row.len() as u64 * 4, keep) {
+                    v.extend_from_slice(row);
+                } else {
                     let n = SPILL_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    let path = self.spill_dir.join(format!(
+                    let path = self.budget.spill_dir().join(format!(
                         "percolator-native-{}-{}.f32",
                         std::process::id(),
                         n
@@ -124,8 +129,9 @@ impl StoreBuilder {
                     let file = File::create(&path)
                         .map_err(|e| format!("create spill file {}: {e}", path.display()))?;
                     let mut w = BufWriter::with_capacity(1 << 20, file);
-                    let res = write_f32(&mut w, v);
+                    let res = write_f32(&mut w, v).and_then(|()| write_f32(&mut w, row));
                     self.sink = Sink::Spill(path.clone(), w);
+                    self.ram = Reservation::none();
                     res.map_err(|e| format!("write spill file {}: {e}", path.display()))?;
                 }
             }
@@ -149,6 +155,7 @@ impl StoreBuilder {
                     nrows: self.nrows,
                     block_rows: self.block_rows,
                     data: Data::Spill(path.clone()),
+                    _ram: Reservation::none(),
                 };
                 flushed.map_err(|e| format!("flush spill file {}: {e}", path.display()))?;
                 return Ok(store);
@@ -159,6 +166,7 @@ impl StoreBuilder {
             nrows: self.nrows,
             block_rows: self.block_rows,
             data,
+            _ram: std::mem::replace(&mut self.ram, Reservation::none()),
         })
     }
 }
@@ -181,9 +189,10 @@ fn write_f32(w: &mut impl Write, v: &[f32]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn build(limit: u64, dir: &Path, nrows: usize, nfeat: usize) -> Store {
-        let mut b = StoreBuilder::new(nfeat, limit, dir).with_block_rows(3);
+        let mut b = StoreBuilder::new(nfeat, &Budget::new(limit, dir)).with_block_rows(3);
         for r in 0..nrows {
             let row: Vec<f32> = (0..nfeat).map(|c| (r * 100 + c) as f32 + 0.5).collect();
             b.push_row(&row).unwrap();

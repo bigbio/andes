@@ -619,7 +619,11 @@ fn merge_linkers(
             let Some(o) = by_spec.remove(&r.spec_idx) else {
                 return r;
             };
-            let s = |x: &XlSpectrumResult| x.csm.as_ref().map(|c| c.score());
+            let s = |x: &XlSpectrumResult| {
+                x.csm.as_ref().map(|c| {
+                    search::xl_search::combined_pair_score(c.pair_score, c.second_pair_score)
+                })
+            };
             match (s(&r), s(&o)) {
                 (_, None) => r,
                 (None, Some(_)) => o,

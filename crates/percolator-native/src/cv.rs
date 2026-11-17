@@ -4,7 +4,7 @@ use crate::folds::folds_by_spectrum;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
-use crate::svm::{mfn_from, Examples, MfnOpts, Rows};
+use crate::svm::{mfn_from, Examples, MfnOpts, Rows, COMPACT_BYTES};
 use rayon::prelude::*;
 
 const FOLDS: usize = 3;
@@ -306,7 +306,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         }
         let task_bytes: Vec<u64> = pairs
             .iter()
-            .map(|&(f, _, _)| sets[f].ex.rows.len() as u64 * TASK_BYTES_PER_EXAMPLE)
+            .map(|&(f, _, _)| {
+                sets[f].ex.rows.len() as u64 * TASK_BYTES_PER_EXAMPLE + COMPACT_BYTES as u64
+            })
             .collect();
         let mut fits: Vec<Option<Vec<f64>>> = Vec::with_capacity(pairs.len());
         while fits.len() < pairs.len() {

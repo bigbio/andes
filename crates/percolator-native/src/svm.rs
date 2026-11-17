@@ -27,6 +27,8 @@ pub(crate) const LANES: usize = 8;
 
 const CHUNK: usize = 4096;
 
+pub(crate) const COMPACT_BYTES: usize = 64 << 20;
+
 pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
 }
@@ -337,7 +339,69 @@ struct Train<'a> {
     cneg: f64,
 }
 
+fn pass_ram<'r, P, I, B, R>(row: R, out: &mut [f64], init: I, body: B) -> Vec<P>
+where
+    P: Send,
+    I: Fn() -> P + Sync,
+    B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+    R: Fn(usize) -> &'r [f32] + Sync,
+{
+    out.par_chunks_mut(CHUNK)
+        .enumerate()
+        .map(|(c, outs)| {
+            let mut part = init();
+            for (j, o) in outs.iter_mut().enumerate() {
+                let k = c * CHUNK + j;
+                body(&mut part, k, row(k), o);
+            }
+            part
+        })
+        .collect()
+}
+
+struct Compact {
+    data: Vec<f32>,
+    stride: usize,
+}
+
+impl Compact {
+    fn row(&self, k: usize) -> &[f32] {
+        &self.data[k * self.stride..(k + 1) * self.stride]
+    }
+}
+
 impl Train<'_> {
+    fn compact(&self, subset: &[usize]) -> Option<Compact> {
+        let stride = self.x.stride;
+        if !matches!(self.x.data, RowData::Ram(_)) || subset.len() * stride * 4 > COMPACT_BYTES {
+            return None;
+        }
+        let mut data = vec![0.0f32; subset.len() * stride];
+        data.par_chunks_mut(stride)
+            .zip(subset.par_iter())
+            .for_each(|(d, &i)| d.copy_from_slice(self.x.row(self.rows[i])));
+        Some(Compact { data, stride })
+    }
+
+    fn pass_on<P, I, B>(
+        &self,
+        compact: Option<&Compact>,
+        subset: &[usize],
+        out: &mut [f64],
+        init: I,
+        body: B,
+    ) -> Vec<P>
+    where
+        P: Send,
+        I: Fn() -> P + Sync,
+        B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
+    {
+        match compact {
+            Some(c) => pass_ram(|k| c.row(k), &mut out[..subset.len()], init, body),
+            None => self.pass(subset, out, init, body),
+        }
+    }
+
     fn len(&self) -> usize {
         self.rows.len()
     }
@@ -349,18 +413,12 @@ impl Train<'_> {
         B: Fn(&mut P, usize, &[f32], &mut f64) + Sync,
     {
         match &self.x.data {
-            RowData::Ram(_) => subset
-                .par_chunks(CHUNK)
-                .zip(out.par_chunks_mut(CHUNK))
-                .enumerate()
-                .map(|(c, (ids, outs))| {
-                    let mut part = init();
-                    for (j, (&i, o)) in ids.iter().zip(outs.iter_mut()).enumerate() {
-                        body(&mut part, c * CHUNK + j, self.x.row(self.rows[i]), o);
-                    }
-                    part
-                })
-                .collect(),
+            RowData::Ram(_) => pass_ram(
+                |k| self.x.row(self.rows[subset[k]]),
+                &mut out[..subset.len()],
+                init,
+                body,
+            ),
             RowData::Spill(_) => {
                 let ids: Vec<usize> = subset.iter().map(|&i| self.rows[i]).collect();
                 let mut parts: Vec<P> = Vec::with_capacity(subset.len().div_ceil(CHUNK));
@@ -457,7 +515,9 @@ fn cgls(
     let sv = &mut ws.s;
     let beta_old = &mut ws.beta_old;
     let stride = u.len();
-    let parts = t.pass(
+    let compact = t.compact(subset);
+    let parts = t.pass_on(
+        compact.as_ref(),
         subset,
         z,
         || vec![0.0f64; stride],
@@ -483,7 +543,8 @@ fn cgls(
     while cgiter < cgitermax {
         cgiter += 1;
         let pv: &[f64] = p;
-        let parts = t.pass(
+        let parts = t.pass_on(
+            compact.as_ref(),
             subset,
             q,
             || (vec![0.0f64; stride], 0.0f64),

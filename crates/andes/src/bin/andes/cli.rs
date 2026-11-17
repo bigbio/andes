@@ -2490,6 +2490,7 @@ mod help_layout_tests {
         "--quant-fdr",
         "--rescore",
         "--chimeric",
+        "--dia",
         "--refine",
         "--glyco",
         "--glyco-species",

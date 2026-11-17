@@ -22,7 +22,7 @@ impl Lcg {
         for _ in 0..6 {
             s += self.next();
         }
-        (s - 3.0) * 1.4142135623730951
+        (s - 3.0) * std::f64::consts::SQRT_2
     }
 }
 

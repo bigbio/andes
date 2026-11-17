@@ -786,7 +786,8 @@ pub(crate) struct SearchArgs {
     /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
     /// repair and the scores of every PIN row) runs in process with the algorithm of
     /// upstream Percolator master (commit a9783ee8) and Percolator's output files; no
-    /// Percolator binary or Docker is needed. Takes no --percolator-args.
+    /// Percolator binary or Docker is needed. Takes no --percolator-args, --percolator-bin,
+    /// --percolator-docker or --percolator-image.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) rescore_native: bool,
 

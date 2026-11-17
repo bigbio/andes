@@ -1,12 +1,12 @@
 # andes benchmarks: supplementary tables
 
-Tables behind the rows of [README.md](README.md) that most readers do not need: per-run and per-level
+Tables behind the rows of the [benchmark pages](README.md) that most readers do not need: per-run and per-level
 breakdowns, the full ProteoBench leaderboard, and diagnostics that only andes exposes. Builds,
-settings and verdicts are those of the matching README section.
+settings and verdicts are those of the matching section.
 
 ## timsTOF per run
 
-From README section 2.1, timsTOF DDA-PASEF.
+From [Identification, timsTOF DDA-PASEF](identification.md#timstof-dda-pasef-4-runs).
 
 Per run (mean over six draws):
 
@@ -33,7 +33,7 @@ hits on yeast proteins with a human homolog at 40% identity over 60% length, 907
 
 ## ProteoBench
 
-From README section 2.2.
+From [Label-free quantification, ProteoBench](lfq.md#proteobench).
 
 ### andes on the two ProteoBench modules
 
@@ -152,7 +152,7 @@ On the precursors andes shares with a submission (default, transfer q 0.01; medi
 
 ## UPS1 per level
 
-From README section 2.3, UPS1 detection at the lowest three levels.
+From [Label-free quantification, UPS1 detection at the lowest three levels](lfq.md#ups1-detection-at-the-lowest-three-levels).
 
 Per level, MBR on (rows; within 2x; share within 2x; median |log2 error|):
 
@@ -167,7 +167,7 @@ Per level, MBR on (rows; within 2x; share within 2x; median |log2 error|):
 
 ## Masked wrong-peak rate (andes only)
 
-From README section 2.3.
+From [Label-free quantification, truth designs](lfq.md#truth-designs).
 
 At `quant_q ≤ 0.01`, pooled over runs; 5% of identified precursor-run pairs are masked from the
 library, re-quantified as transfers, and counted when the apex lies further from the identified apex

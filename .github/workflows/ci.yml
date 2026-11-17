@@ -92,6 +92,9 @@ jobs:
       - name: Benchmark tables match docs/benchmarks/results
         run: python3 -I docs/benchmarks/render.py --check
 
+      - name: Benchmark page links and anchors
+        run: python3 -I docs/benchmarks/check_links.py
+
       - name: Entrapment rules
         run: python3 -I docs/benchmarks/tests/test_entrap.py
 

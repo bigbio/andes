@@ -7,8 +7,7 @@ holds. Comparison engines are named with their version, and their numbers come f
 same machine with the same rescoring, or from a public leaderboard.
 
 This page is a visual summary. Dates, commits, database definitions and every row are in the
-[full benchmark report](details.md); [how to reproduce](details.md#3-how-to-reproduce) lists
-the commands.
+[full benchmark report](details.md); [how to reproduce](reproduce.md) lists the commands.
 
 ## Identifications
 
@@ -39,7 +38,7 @@ realisations (timsTOF: per-run means over six shuffle draws). The peptide-level 
 primary design; the foreign (*Arabidopsis*) and natural (*E. coli*, yeast) entrapments are
 cross-checks. On UPS1 the two designs disagree: the natural *E. coli* entrapment reads 1.95–2.07%,
 about half of it on conserved proteins that may really be in the sample.
-Read the [method notes](details.md#4-method-notes) before comparing across rows.
+Read the [method notes](methods.md#method-notes) before comparing across rows.
 
 ## Optional modes
 
@@ -54,4 +53,4 @@ FDP of 1% on Astral, measured on an earlier build.
   [glyco benchmark](glyco.md).
 - **Quantification** (label-free with match between runs against the ProteoBench leaderboard, TMT
   reporter-ion accuracy): [quantification](../quantification.md).
-- timsTOF DDA-PASEF and the mouse-liver glyco set are in the [full report](details.md#1-summary).
+- timsTOF DDA-PASEF and the mouse-liver glyco set are in the [identification report](identification.md).

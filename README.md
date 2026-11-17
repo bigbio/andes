@@ -73,7 +73,7 @@ read through one evaluation for every tool (raw precursor intensities, the same 
 roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03cc` (TMT),
 2026-11-05; MaxQuant 2.7.0.0, FragPipe 21.1 / IonQuant 1.10.12 (normalisation off). Full tables,
 settings and the cases where other tools do better:
-[`docs/benchmarks/`](docs/benchmarks/README.md#1-summary).
+[`docs/benchmarks/`](docs/benchmarks/README.md#summary).
 
 One row per metric. 🟢 andes better · 🟡 similar · 🔴 andes worse, with how much: **minor** (usable
 as is), **moderate** (usable with care), **major** (results hurt). ⚪ no other tool measured. DE counts
@@ -329,7 +329,7 @@ transferred quantities. On Astral (PXD070049) andes quantified 36,675 at |ε| 0.
 0.14.6 30,319 at 0.167 / 0.070 and DIA-NN 2.6.0 93,237 at 0.277 / 0.159. Leaderboard snapshot
 2026-07-16, one andes seed. On a 500-run study (PXD042233, measured 2026-10-23 at `2051616b`) the
 per-run pipeline took 146 CPU hours end to end and quantified 243,895 precursors in at least 3
-runs ([benchmarks](docs/benchmarks/README.md#2-the-benchmarks)). Quantification against truth
+runs ([benchmarks](docs/benchmarks/lfq.md#large-study-pxd042233-500-runs)). Quantification against truth
 designs, with and without match between runs and next to MaxQuant and FragPipe, and the TMT
 comparisons are in the same report.
 
@@ -555,7 +555,7 @@ andes --spectrum sample.mzML \
 On one mouse-liver fraction (PXD005553) andes reports 6,992–7,072 glycoPSMs at 1% at
 0.61–1.35% true FDP (three peptide-level entrapment databases × three seeds, 2026-10-23),
 confirming 88.2–88.4% of the depositors' (pGlyco2) and 89.3–89.7% of a reanalysis's
-(MSFragger-Glyco) identifications, in about 6 minutes and 5.6 GB on 8 threads ([`docs/benchmarks/`](docs/benchmarks/README.md)).
+(MSFragger-Glyco) identifications, in about 6 minutes and 5.6 GB on 8 threads ([`docs/benchmarks/`](docs/benchmarks/identification.md#glyco-mouse-liver-pxd005553)).
 `--glyco-peptide-first` finds ~2% more at ~13x the run time.
 
 Memory: `--glyco` runs on the out-of-core candidate index and holds in memory only the

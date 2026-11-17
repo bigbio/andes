@@ -16,12 +16,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 RESULTS = HERE / "results"
 SITE_JSON = ROOT / "website" / "benchmarks.json"
-PAGES = [
-    ROOT / "README.md",
-    HERE / "README.md",
-    HERE / "ADDITIONAL_BENCHMARKS.md",
-    ROOT / "website" / "pages" / "quantification.md",
-]
+PAGES = [ROOT / "README.md", ROOT / "website" / "pages" / "quantification.md", *sorted(HERE.glob("*.md"))]
 BLOCK = re.compile(
     r"(<!-- BEGIN generated: (?P<id>[\w-]+) \(docs/benchmarks/render\.py\) -->\n)"
     r"(?P<body>.*?)"

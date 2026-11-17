@@ -3,7 +3,7 @@
 Source for <https://andes.quantms.org> (GitHub Pages, built by `.github/workflows/pages.yml`).
 
 The site holds no second copy of the documentation. `build_site.py` cuts pages out of
-`README.md`, `DOCS.md`, `TRAIN.md` and `docs/benchmarks/README.md` at build time and stamps
+`README.md`, `DOCS.md`, `TRAIN.md` and the Markdown pages of `docs/benchmarks/` at build time and stamps
 GitHub-style heading ids so the links written for GitHub keep working. The parameters page is
 the binary's own `--help`.
 

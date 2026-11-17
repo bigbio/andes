@@ -71,8 +71,15 @@ nav:
       - Full reference: reference.md
   - Benchmarks:
       - Overview: benchmarks/index.md
+      - Report summary: benchmarks/details.md
+      - Identification: benchmarks/identification.md
       - Glycoproteomics (PXD065680): benchmarks/glyco.md
-      - Full report: benchmarks/details.md
+      - Label-free quantification: benchmarks/lfq.md
+      - TMT quantification: benchmarks/tmt.md
+      - Methods: benchmarks/methods.md
+      - Known gaps: benchmarks/gaps.md
+      - How to reproduce: benchmarks/reproduce.md
+      - Supplementary tables: benchmarks/additional.md
       - CI / benchmarks: ci.md
   - Ecosystem: ecosystem.md
   - About: about.md

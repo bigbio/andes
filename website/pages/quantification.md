@@ -72,7 +72,7 @@ Read the figure with its conditions:
   fewer precursors; andes's CV is above most submissions. Without transfers andes has 31,739
   precursors at the same median error.
 - Error control on transferred values differs between submissions; the
-  [benchmark report](benchmarks/details.md#2-the-benchmarks) lists what each one checks.
+  [benchmark report](benchmarks/additional.md#against-the-proteobench-leaderboard) lists what each one checks.
 - andes error control: PSM FDP 0.84–0.85% and entrapment-only quantified precursors 0.20–0.21% on
   the Q Exactive set; not measured on Astral.
 
@@ -96,7 +96,7 @@ PSM-level FDR, the other tools a protein-level 1% FDR, so depth is not settings-
 yeast is absent from 20 runs, 0.20% of andes's transferred rows are yeast (0.08% at `quant_q ≤ 0.01`) against
 0.09% for FragPipe; on yeast-enriched rows only it is 0.052% against 0.010%, and 0.052% against 0.072% when rows
 with no reference are counted. The tables, settings and rules are in
-the [benchmark report](benchmarks/details.md#2-the-benchmarks).
+the [benchmark report](benchmarks/lfq.md#truth-designs).
 
 ## TMT
 
@@ -116,5 +116,5 @@ the [benchmark report](benchmarks/details.md#2-the-benchmarks).
 
 A 500-run study (PXD042233: Q Exactive HF/HF-X and Exploris 480) gives 243,895 precursors in at
 least 3 runs and 9,208 protein groups at transfer, precursor and protein q ≤ 0.01, for 146 CPU-hours
-end to end. See the [benchmark report](benchmarks/details.md#1-summary) for the conditions, and
+end to end. See the [benchmark report](benchmarks/lfq.md#large-study-pxd042233-500-runs) for the conditions, and
 [§10 of the reference](reference.md#10-quantification) for every parameter.

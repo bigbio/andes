@@ -20,6 +20,7 @@ Numbers are andes against each tool on the same data; details and settings in se
 
 **Identification** (PSMs at Percolator `q ≤ 0.01`, 8 threads)
 
+<!-- BEGIN generated: identification-summary (docs/benchmarks/render.py) -->
 | data | metric | andes | other tool | result |
 |---|---|---:|---|---|
 | Astral HCD, PXD070049 | PSMs | 52,169 | Comet 31,435 | 🟢 +66% |
@@ -35,10 +36,12 @@ Numbers are andes against each tool on the same data; details and settings in se
 | Low-res UPS1 | true FDP at 1% | 0.92–0.94% | — | 🟢 on target |
 | TMT high-res, PXD017803 | PSMs | 6,628–6,686 | — | ⚪ |
 | Glyco, PXD005553 | reference glycoPSMs confirmed | 79–90% | pGlyco2, MSFragger-Glyco (references) | 🔴 10–21% missed (moderate) |
+<!-- END generated: identification-summary -->
 
 **Quantification** (label-free at `09e1c00d`, TMT at `0cfa03cc`; DE counts are the common-tested
 family, sign-aware, MBR on)
 
+<!-- BEGIN generated: quantification-summary (docs/benchmarks/render.py) -->
 | data | metric | andes | MaxQuant 2.7 | FragPipe | result |
 |---|---|---:|---:|---:|---|
 | ProteoBench QE | median \|ε\| (lower is better) | 0.161 | 0.210 | 0.200 | 🟢 23% / 20% lower |
@@ -67,6 +70,7 @@ family, sign-aware, MBR on)
 | TMT match between runs, PXD014750 | excess wrong-value rate of transfers | −0.05 points | +1.53 | | 🟢 (SIMSI-Transfer +0.40) |
 | TMT match between runs | cells transferred | 3,636 | | | 🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in) |
 | Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | | | ⚪ |
+<!-- END generated: quantification-summary -->
 
 ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the most precursors
 (MaxQuant 1.5.3.30 on QE, 2.6.7.0 on Astral; FragPipe 23.0); every other submission is in section 2.2.
@@ -82,17 +86,19 @@ Settings, error control and cost of every row: section 2.
 **Opt-in modes** (Astral, PSMs / distinct peptides, Percolator seeds 42, 1 and 2; measured
 2026-10-05 to 2026-10-13 on earlier builds and not re-measured at `2051616b`):
 
+<!-- BEGIN generated: opt-in (docs/benchmarks/render.py) -->
 | mode | andes | without the mode |
 |---|---|---|
 | `--chimeric` (second and later peptides per spectrum), at an entrapment true FDP of 1% | 66,377–66,424 / 29,384–29,400 | 43,076–43,145 / 26,723–26,746 |
 | `--refine` (PTM discovery, high-res only) | 48,312 PSMs, 28,728 peptides at `q ≤ 0.01`; its second-pass PSMs at ~1.2–1.8% FDP | 47,080 / 28,932 |
+<!-- END generated: opt-in -->
 
 ## 2. The benchmarks
 
 Icons and size words are as in section 1. Identification rows were measured on 2026-10-23 at
 `2051616b`, except UPS1 and timsTOF (2026-11-07 and 2026-11-09 at `2ee76dd6`). Label-free
 quantification rows were measured on 2026-11-05 at `09e1c00d`, TMT rows at `0cfa03cc`. A row says
-so when it differs. PSM counts, wall time and memory of Astral, TMT, UPS1 and phospho come from
+so when it differs. PSM counts, wall time and memory of Astral, TMT and phospho come from
 the benchmark VM (8 threads) on the plain databases the Comet rows used. True FDP and all other
 rows come from a cluster node (8 threads) with an entrapment component added to the database
 (rules in section 4). Percolator 3.7.1 `-Y --num-threads 8`, seeds 42, 1 and 2 unless a setup
@@ -100,6 +106,23 @@ line says otherwise. "At a true FDP of 1%" means the deepest score-sorted list w
 entrapment-estimated FDP stays at or below 1%.
 
 ### 2.1 Identification
+
+Engines on the benchmark VM (8 threads, `/usr/bin/time`, plain databases, Percolator seed 42): andes
+`2051616b` (2026-10-23), Comet 2025.01 (2026-10-05; phospho 2026-10-06). **‡** UPS1 andes is the
+`2ee76dd6` run below (cluster node, entrapment database), so its cost does not compare with Comet's.
+
+<!-- BEGIN generated: engines-cost (docs/benchmarks/render.py) -->
+| dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
+|---|---|---:|---:|---:|---:|
+| Astral | andes | 52,169 | 114–117 s | 569–636 s | 4.8 GB |
+| | Comet 2025.01 | 31,435 | 217 s | 1,594 s | 8.1 GB |
+| TMT a05058 | andes | 13,516 | 40–47 s | 200–216 s | 1.7 GB |
+| | Comet 2025.01 | 10,504 | 77 s | 568 s | 2.9 GB |
+| UPS1 | andes | 16,567–16,675 ‡ | 13–15 s ‡ | 71–79 s ‡ | 1.4 GB ‡ |
+| | Comet 2025.01 | 14,734 | 42 s | 309 s | 2.9 GB |
+| Phospho (PXD007653) | andes | 38,623 | 337 s | 2,160 s | 7.9 GB |
+| | Comet 2025.01 | 33,984 | 1,096 s | 8,399 s | 6.0 GB |
+<!-- END generated: engines-cost -->
 
 #### Astral HCD (PXD070049)
 
@@ -127,7 +150,7 @@ sequences); andes `2051616b`; Comet 2025.01 as above.
 | peptides at `q ≤ 0.01` | 11,852–11,922 | — | ⚪ |
 | true FDP, peptide-level entrapment (T/E 1.073) | 0.67–0.76% (13,325–13,371 PSMs at 1%) | — | 🟢 on target |
 | true FDP, *Arabidopsis* entrapment (T/E 2.021) | 0.83–1.05% (13,161–13,388 PSMs at 1%) | — | 🟢 on target |
-| wall time; CPU time; memory | 40–47 s; 200–216 CPU-s; 1.7 GB | — | ⚪ |
+| wall time; CPU time; memory | 40–47 s; 200–216 CPU-s; 1.7 GB | 77 s; 568 CPU-s; 2.9 GB | 🟢 1.6–1.9x faster |
 
 #### TMT-labelled, high-res (PXD017803, TKO hrMS2)
 

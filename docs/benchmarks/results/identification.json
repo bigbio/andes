@@ -1,0 +1,243 @@
+{
+ "_provenance": "Headline identification numbers. Rendered by docs/benchmarks/render.py into docs/benchmarks/README.md, README.md and website/benchmarks.json; edit here, then run render.py. PSMs at Percolator q <= 0.01, 8 threads.",
+ "engines": {
+  "_note": "Engines on one host: andes 2051616b (2026-10-23) and Comet 2025.01 (2026-10-05, phospho 2026-10-06) on the benchmark VM, plain databases (phospho: whole-protein shuffled entrapment), Percolator 3.7.1 --seed 42 -Y. andes UPS1 is the 2ee76dd6 run of 2026-11-07 on a cluster node with an entrapment database (range over two databases and three seeds), so its cost does not compare with Comet's. Java MS-GF+ v20240326: UPS1 count from an earlier session, not re-run; not measured on the other sets.",
+  "datasets": [
+   {
+    "id": "astral",
+    "name": "Astral",
+    "long": "Astral (high-res HCD)",
+    "chart": "Astral\n(high-res HCD)"
+   },
+   {
+    "id": "tmt",
+    "name": "TMT a05058",
+    "long": "TMT a05058 (low-res CID)",
+    "chart": "TMT a05058\n(low-res CID)"
+   },
+   {
+    "id": "ups1",
+    "name": "UPS1",
+    "long": "UPS1 (low-res LFQ)",
+    "chart": "UPS1\n(low-res LFQ)"
+   },
+   {
+    "id": "phospho",
+    "name": "Phospho (PXD007653)",
+    "long": "Phospho (PXD007653)",
+    "chart": "Phospho\n(PXD007653)"
+   }
+  ],
+  "tools": [
+   {
+    "id": "andes",
+    "name": "andes",
+    "build": "2051616b",
+    "date": "2026-10-23",
+    "host": "vm",
+    "values": {
+     "astral": {
+      "psms": 52169,
+      "wall": [
+       114,
+       117
+      ],
+      "cpu": [
+       569,
+       636
+      ],
+      "mem": 4.8
+     },
+     "tmt": {
+      "psms": 13516,
+      "wall": [
+       40,
+       47
+      ],
+      "cpu": [
+       200,
+       216
+      ],
+      "mem": 1.7
+     },
+     "ups1": {
+      "psms": [
+       16567,
+       16675
+      ],
+      "wall": [
+       13,
+       15
+      ],
+      "cpu": [
+       71,
+       79
+      ],
+      "mem": 1.4,
+      "build": "2ee76dd6",
+      "date": "2026-11-07",
+      "host": "cluster"
+     },
+     "phospho": {
+      "psms": 38623,
+      "wall": 337,
+      "cpu": 2160,
+      "mem": 7.9
+     }
+    }
+   },
+   {
+    "id": "comet",
+    "name": "Comet 2025.01",
+    "date": "2026-10-05",
+    "host": "vm",
+    "values": {
+     "astral": {
+      "psms": 31435,
+      "wall": 217,
+      "cpu": 1594,
+      "mem": 8.1
+     },
+     "tmt": {
+      "psms": 10504,
+      "wall": 77,
+      "cpu": 568,
+      "mem": 2.9
+     },
+     "ups1": {
+      "psms": 14734,
+      "wall": 42,
+      "cpu": 309,
+      "mem": 2.9
+     },
+     "phospho": {
+      "psms": 33984,
+      "wall": 1096,
+      "cpu": 8399,
+      "mem": 6.0,
+      "date": "2026-10-06"
+     }
+    }
+   },
+   {
+    "id": "msgf",
+    "name": "Java MS-GF+ v20240326",
+    "host": "earlier session",
+    "values": {
+     "ups1": {
+      "psms": 15904
+     }
+    }
+   }
+  ]
+ },
+ "summary": {
+  "header": [
+   "data",
+   "metric",
+   "andes",
+   "other tool",
+   "result"
+  ],
+  "align": [
+   "left",
+   "left",
+   "right",
+   "left",
+   "left"
+  ],
+  "rows": [
+   [
+    "Astral HCD, PXD070049",
+    "PSMs",
+    "{{engines:andes.astral.psms}}",
+    "Comet {{engines:comet.astral.psms}}",
+    "🟢 +66%"
+   ],
+   [
+    "Astral HCD",
+    "wall time",
+    "{{engines:andes.astral.wall}} s",
+    "Comet {{engines:comet.astral.wall}} s",
+    "🟢 2x faster"
+   ],
+   [
+    "Astral HCD",
+    "true FDP at 1%",
+    "0.89–1.08%",
+    "—",
+    "🟢 on target"
+   ],
+   [
+    "timsTOF DDA-PASEF, 4 runs",
+    "PSMs",
+    "15.6k–58.6k",
+    "Comet 14.1k–50.8k",
+    "🟢 +11% to +17%"
+   ],
+   [
+    "timsTOF DDA-PASEF",
+    "PSMs at a true FDP of 1%",
+    "15.9k–58.8k",
+    "Comet 14.0k–49.5k",
+    "🟢 +14% to +21%"
+   ],
+   [
+    "timsTOF DDA-PASEF",
+    "true FDP at 1%",
+    "0.79–0.91%",
+    "Comet 1.14–1.31%",
+    "🟢 on target, Comet above"
+   ],
+   [
+    "timsTOF DDA-PASEF",
+    "wall time",
+    "54–62 s",
+    "Comet 159–222 s",
+    "🟢 3x faster"
+   ],
+   [
+    "TMT low-res, PXD007683",
+    "PSMs",
+    "{{engines:andes.tmt.psms}}",
+    "Comet {{engines:comet.tmt.psms}}",
+    "🟢 +29%"
+   ],
+   [
+    "Phospho, PXD007653",
+    "PSMs",
+    "38,596–38,629",
+    "Comet 33,984 (at 1.77% true FDP)",
+    "🟢 +14%, at 0.80–0.99% FDP"
+   ],
+   [
+    "Low-res UPS1, PXD001819",
+    "PSMs",
+    "{{engines:andes.ups1.psms}}",
+    "Java MS-GF+ {{engines:msgf.ups1.psms}}",
+    "🟡 +4% to +5%"
+   ],
+   [
+    "Low-res UPS1",
+    "true FDP at 1%",
+    "0.92–0.94%",
+    "—",
+    "🟢 on target"
+   ],
+   [
+    "TMT high-res, PXD017803",
+    "PSMs",
+    "6,628–6,686",
+    "—",
+    "⚪"
+   ],
+   [
+    "Glyco, PXD005553",
+    "reference glycoPSMs confirmed",
+    "79–90%",
+    "pGlyco2, MSFragger-Glyco (references)",
+    "🔴 10–21% missed (moderate)"
+   ]
+  ]
+ }
+}

@@ -1,0 +1,231 @@
+{
+ "_provenance": "Headline quantification numbers. Rendered by docs/benchmarks/render.py into docs/benchmarks/README.md and README.md; ProteoBench cells read results/proteobench.json. Label-free at 09e1c00d (2026-11-05), glycopeptide LFQ at 0f036477 (2026-11-11), TMT at 0cfa03cc (2026-11-05).",
+ "summary": {
+  "header": [
+   "data",
+   "metric",
+   "andes",
+   "MaxQuant 2.7",
+   "FragPipe",
+   "result"
+  ],
+  "align": [
+   "left",
+   "left",
+   "right",
+   "right",
+   "right",
+   "left"
+  ],
+  "rows": [
+   [
+    "ProteoBench QE",
+    "median \\|ε\\| (lower is better)",
+    "{{pb:QExactive.andes.eps|.3f}}",
+    "{{pb:QExactive.maxquant_most.eps|.3f}}",
+    "{{pb:QExactive.fragpipe_most.eps|.3f}}",
+    "🟢 23% / 20% lower"
+   ],
+   [
+    "ProteoBench QE",
+    "precursors in ≥ 3 runs",
+    "{{pb:QExactive.andes.precursors}}",
+    "{{pb:QExactive.maxquant_most.precursors}}",
+    "{{pb:QExactive.fragpipe_most.precursors}}",
+    "🟢 +44% / 🟡 same"
+   ],
+   [
+    "ProteoBench QE",
+    "CV",
+    "{{pb:QExactive.andes.cv|.3f}}",
+    "{{pb:QExactive.maxquant_most.cv|.3f}}",
+    "{{pb:QExactive.fragpipe_most.cv|.3f}}",
+    "🟢 47% / 25% lower"
+   ],
+   [
+    "ProteoBench Astral",
+    "median \\|ε\\|",
+    "{{pb:Astral.andes.eps|.3f}}",
+    "{{pb:Astral.maxquant_most.eps|.3f}}",
+    "{{pb:Astral.fragpipe_most.eps|.3f}}",
+    "🔴 1.16x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower"
+   ],
+   [
+    "ProteoBench Astral",
+    "precursors in ≥ 3 runs",
+    "{{pb:Astral.andes.precursors}}",
+    "{{pb:Astral.maxquant_most.precursors}}",
+    "{{pb:Astral.fragpipe_most.precursors}}",
+    "🟢 +81% / 🟡 6% fewer"
+   ],
+   [
+    "ProteoBench Astral",
+    "CV",
+    "{{pb:Astral.andes.cv|.3f}}",
+    "{{pb:Astral.maxquant_most.cv|.3f}}",
+    "{{pb:Astral.fragpipe_most.cv|.3f}}",
+    "🔴 1.2x MaxQuant at 55% of andes' depth (minor) / 🟢 12% lower"
+   ],
+   [
+    "Truth designs, 8 sets",
+    "precursors quantified, each tool at its own search settings",
+    "10.7k–93.6k",
+    "",
+    "",
+    "🟢 +19% to +51% on 7 sets, 🟡 on 1"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE / Astral",
+    "precursors quantified, andes at matched search settings (no `--chimeric`, no `--refine`)",
+    "27,226 / 29,600 / 81,987 / 51,798",
+    "29,293 / 27,459 / 51,609 / 24,745",
+    "25,888 / 28,286 / 71,377 / 46,347",
+    "🟡 −7% / 🟡 +5% / 🟢 +15% / 🟢 +12% over the best other tool"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE / Astral",
+    "DE true positives",
+    "1,300 / 844 / 1,047 / 685",
+    "1,304 / 844 / 857 / 650",
+    "1,237 / 849 / 946 / 689",
+    "🟡 / 🟡 / 🟢 +22% / 🟡"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE / Astral",
+    "DE false calls, no fold-change cut",
+    "305 / 153 / 110 / 296",
+    "129 / 92 / 37 / 210",
+    "302 / 301 / 43 / 389",
+    "🔴 1.4–3.0x MaxQuant (moderate); mostly real small shifts, see note"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE",
+    "DE false calls at \\|log2 FC\\| ≥ 0.5 (seed 42)",
+    "167 / 39 / 11",
+    "74 / 36 / 18",
+    "259 / 102 / 20",
+    "🔴 2.3x / 🟡 / 🟢"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE / Astral",
+    "DE true positives / false calls, MaxQuant matches filtered at q ≤ 0.01",
+    "1,156 / 763 / 983 / 568; 272 / 151 / 105 / 297",
+    "1,077 / 725 / 851 / 518; 131 / 62 / 42 / 154",
+    "",
+    "🟢 +5% to +15% true positives; 🔴 1.9–2.5x false calls (moderate)"
+   ],
+   [
+    "PXD009740 / PXD009815 / QE / Astral",
+    "precision of unchanged proteins (within-condition spread, tool ÷ andes)",
+    "1",
+    "1.15 / 1.55 / 1.26 / —",
+    "1.40 / 1.30 / 1.25 / —",
+    "🟢 tighter than both"
+   ],
+   [
+    "UPS1 lowest 3 levels, PXD009740 / PXD009815",
+    "precursors within 2x of truth",
+    "502 / 24",
+    "417 / 23",
+    "458 / 50",
+    "🟢 as reported, 🔴 at FragPipe's row count (437 against 458) / 🔴 2x fewer than FragPipe (minor)"
+   ],
+   [
+    "Truth designs, all sets",
+    "bright identified cells off by > 2x",
+    "1.8–7.2%",
+    "0.3–1.6%",
+    "0.3–3.8%",
+    "🔴 3–17x MaxQuant per set (moderate)"
+   ],
+   [
+    "Truth designs, 6 sets",
+    "protein CV",
+    "4.4–10.1%",
+    "7.0–11.6%",
+    "4.9–13.5%",
+    "🟢 on 3 sets, 🔴 on 2 (minor)"
+   ],
+   [
+    "Known-absent yeast, PXD014415",
+    "false-transfer rate",
+    "0.20% (0.08% at `quant_q ≤ 0.01`)",
+    "",
+    "0.09%",
+    "🔴 2x at default (minor)"
+   ],
+   [
+    "Blank run, PXD016921",
+    "rows identified in the blank",
+    "0 on main of 2026-11-09, after #333 `e841aae0` (85 at `09e1c00d`)",
+    "20",
+    "8",
+    "🟢 fewest"
+   ],
+   [
+    "Blank run, PXD016921",
+    "rows transferred into the blank",
+    "0, not attempted",
+    "85 unfiltered (9 at `Match q-value ≤ 0.01`)",
+    "0, not scored",
+    "⚪ not tested: andes and FragPipe make no transfer decision"
+   ],
+   [
+    "Glycopeptide LFQ, PXD005553 (5 fractions, `0f036477`)",
+    "matrix fill, identified-only → +MBR",
+    "58.6% → 85.1% (held-out 10%: 83.7% → 84.7%; the MBR scorer is trained on these fractions)",
+    "",
+    "",
+    "⚪"
+   ],
+   [
+    "TMT knockout, PXD017803 hrMS2",
+    "interference (lower is better)",
+    "0.192 (0.000 with `--tmt-unmix on`)",
+    "0.156",
+    "",
+    "🔴 default, 🟢 with the option"
+   ],
+   [
+    "TMT known ratios, PXD007683",
+    "PSMs",
+    "149,121",
+    "97,107",
+    "",
+    "🟢 +54%"
+   ],
+   [
+    "TMT known ratios, PXD007683",
+    "protein ratio error",
+    "0.213",
+    "0.159",
+    "",
+    "🔴 1.3x (moderate)"
+   ],
+   [
+    "TMT match between runs, PXD014750",
+    "excess wrong-value rate of transfers",
+    "−0.05 points",
+    "+1.53",
+    "",
+    "🟢 (SIMSI-Transfer +0.40)"
+   ],
+   [
+    "TMT match between runs",
+    "cells transferred",
+    "3,636",
+    "",
+    "",
+    "🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in)"
+   ],
+   [
+    "Large study, PXD042233 (500 runs)",
+    "precursors in ≥ 3 runs",
+    "243,895",
+    "",
+    "",
+    "⚪"
+   ]
+  ]
+ }
+}

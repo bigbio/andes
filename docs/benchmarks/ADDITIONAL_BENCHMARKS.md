@@ -81,6 +81,7 @@ checked" means the parameter file could not be retrieved.
 
 QExactive:
 
+<!-- BEGIN generated: proteobench-qexactive (docs/benchmarks/render.py) -->
 | tool (submission) | MBR | precursors | median \|ε\| | E. coli \|ε\| | CV | transfer control |
 |---|---|---:|---:|---:|---:|---|
 | andes, default | yes | 63,796 | 0.161 | 0.263 | 0.117 | transfer q ≤ 0.01 |
@@ -104,9 +105,11 @@ QExactive:
 | quantms v1.3.1dev (OpenMS ProteomicsLFQ) | no | 33,040 | 0.209 | 0.387 | 0.224 | none |
 | quantms, our run 2026-10-17, default | no | 34,677 | 0.210 | 0.401 | 0.225 | none |
 | quantms, our run, feature-linking MBR | yes | 39,257 | 0.221 | 0.563 | 0.234 | feature quality score |
+<!-- END generated: proteobench-qexactive -->
 
 Astral:
 
+<!-- BEGIN generated: proteobench-astral (docs/benchmarks/render.py) -->
 | tool (submission) | MBR | precursors | median \|ε\| | E. coli \|ε\| | CV | transfer control |
 |---|---|---:|---:|---:|---:|---|
 | andes, default | yes | 36,675 | 0.186 | 0.252 | 0.112 | transfer q ≤ 0.01 |
@@ -121,6 +124,7 @@ Astral:
 | Sage 0.14.6 | yes | 30,319 | 0.167 | 0.338 | 0.070 | peptide q on IDs only; peak q not applied |
 | DIA-NN 2.6.0, most precursors | yes | 93,237 | 0.277 | 0.691 | 0.159 | run and global precursor q ≤ 0.01 |
 | DIA-NN 2.6.0, lowest \|ε\| | yes | 16,363 | 0.123 | 0.168 | 0.079 | as above plus MS1-level q ≤ 0.01 |
+<!-- END generated: proteobench-astral -->
 
 On the precursors andes shares with a submission (default, transfer q 0.01; median |ε| / E. coli |ε|
 / CV; QExactive only, Astral per-submission tables could not be retrieved):

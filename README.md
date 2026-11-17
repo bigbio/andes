@@ -18,22 +18,25 @@ and built end-to-end with AI coding agents, under human direction.
 ## Identification benchmarks
 
 PSMs on three public reference datasets for andes, Comet 2025.01 and Java MS-GF+ v20240326,
-all rescored the same way. On low-res LFQ (UPS1), Java MS-GF+ reported 15,904 PSMs in an
-earlier session.
+all rescored the same way. Java MS-GF+ was measured on UPS1 only, in an earlier session (—: not
+measured).
 
+<!-- BEGIN generated: engines-psms (docs/benchmarks/render.py) -->
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| andes `2051616b` (2026-10-23) | 52,169 | 13,516 | 16,225 |
+| andes `2051616b` (2026-10-23) | 52,169 | 13,516 | 16,567–16,675 ‡ |
 | Comet 2025.01 (2026-10-05) | 31,435 | 10,504 | 14,734 |
-| Java MS-GF+ v20240326 † | 26,542 | 10,651 | 15,904 |
-| *andes wall time* | *114–117 s* | *40–47 s* | *30–48 s* |
+| Java MS-GF+ v20240326 † | — | — | 15,904 |
+| *andes wall time* | *114–117 s* | *40–47 s* | *13–15 s ‡* |
 | *Comet wall time* | *217 s* | *77 s* | *42 s* |
+<!-- END generated: engines-psms -->
 
 <sub>**Metric and provenance.** PSMs at Percolator `q ≤ 0.01`, one method for every row (plain
 FASTA, andes `XXX_` decoys, Percolator 3.7.1 `--seed 42 -Y`, same 8-core VM, 8 threads); seeds 1
-and 2 give andes counts within 1.2% of seed 42. With the current defaults (2 missed cleavages) and
-an entrapment database, UPS1 reads 16,567–16,675 PSMs at `2ee76dd6` (2026-11-07); the benchmark
-page reports that run. **†** Java MS-GF+ was not re-run; its counts are from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/E measured per
+and 2 give andes counts within 1.2% of seed 42. **‡** UPS1 andes is the run the benchmark page
+reports: `2ee76dd6` (2026-11-07), current defaults (2 missed cleavages), an entrapment database, two
+databases × three Percolator seeds, on a cluster node, so its wall time does not compare with
+Comet's. **†** Java MS-GF+ was not re-run; its UPS1 count is from an earlier session. **Error rates** (entrapment, three Percolator seeds; T/E measured per
 database): andes's nominal 1% is 0.89–1.08% true FDP on Astral (peptide-level shuffled
 entrapment), 0.67–0.76% on TMT a05058, 0.80–0.99% on phospho, and 0.92–0.94% on UPS1 against a
 peptide-level shuffle (1.95–2.07% against the natural *E. coli* entrapment, of which about half
@@ -42,23 +45,26 @@ glyco and the full quantification results:
 [`docs/benchmarks/`](docs/benchmarks/README.md); quantification summary below.</sub>
 
 **Time, CPU and memory** (same VM, 8 threads, `/usr/bin/time`; andes 2026-10-23 at `2051616b`,
-two runs on the standard sets, one on phospho; Comet 2026-10-06, one run, same rescoring).
+two runs on the standard sets, one on phospho; Comet 2026-10-06, one run, same rescoring; **‡** UPS1
+andes as above, another host).
 
+<!-- BEGIN generated: engines-cost (docs/benchmarks/render.py) -->
 | dataset | engine | PSMs @ q≤0.01 | wall | CPU time | peak memory |
 |---|---|---:|---:|---:|---:|
 | Astral | andes | 52,169 | 114–117 s | 569–636 s | 4.8 GB |
 | | Comet 2025.01 | 31,435 | 217 s | 1,594 s | 8.1 GB |
 | TMT a05058 | andes | 13,516 | 40–47 s | 200–216 s | 1.7 GB |
 | | Comet 2025.01 | 10,504 | 77 s | 568 s | 2.9 GB |
-| UPS1 | andes | 16,225 | 30–48 s | 162–166 s | 1.3 GB |
+| UPS1 | andes | 16,567–16,675 ‡ | 13–15 s ‡ | 71–79 s ‡ | 1.4 GB ‡ |
 | | Comet 2025.01 | 14,734 | 42 s | 309 s | 2.9 GB |
 | Phospho (PXD007653) | andes | 38,623 | 337 s | 2,160 s | 7.9 GB |
 | | Comet 2025.01 | 33,984 | 1,096 s | 8,399 s | 6.0 GB |
+<!-- END generated: engines-cost -->
 
 <sub>Phospho is searched against mouse proteins with a whole-protein shuffled entrapment, the
 database both rows used; Comet's count read 1.77% true FDP on that design, and andes's reads
-0.80–0.99% on the peptide-level design that replaced it. Wall times vary 5–15% between sessions
-(UPS1 30 and 48 s in two runs); CPU time is steadier.</sub>
+0.80–0.99% on the peptide-level design that replaced it. Wall times vary 5–15% between sessions;
+CPU time is steadier.</sub>
 
 ## Quantification benchmarks
 
@@ -67,12 +73,13 @@ read through one evaluation for every tool (raw precursor intensities, the same 
 roll-up and test for all). andes defaults at `09e1c00d` (label-free) and `0cfa03cc` (TMT),
 2026-11-05; MaxQuant 2.7.0.0, FragPipe 21.1 / IonQuant 1.10.12 (normalisation off). Full tables,
 settings and the cases where other tools do better:
-[`docs/benchmarks/`](docs/benchmarks/README.md#quantification-truth-designs-match-between-runs-on-and-off).
+[`docs/benchmarks/`](docs/benchmarks/README.md#1-summary).
 
 One row per metric. 🟢 andes better · 🟡 similar · 🔴 andes worse, with how much: **minor** (usable
 as is), **moderate** (usable with care), **major** (results hurt). ⚪ no other tool measured. DE counts
 are the common-tested family, sign-aware, MBR on.
 
+<!-- BEGIN generated: quantification-summary (docs/benchmarks/render.py) -->
 | data | metric | andes | MaxQuant 2.7 | FragPipe | result |
 |---|---|---:|---:|---:|---|
 | ProteoBench QE | median \|ε\| (lower is better) | 0.161 | 0.210 | 0.200 | 🟢 23% / 20% lower |
@@ -92,14 +99,16 @@ are the common-tested family, sign-aware, MBR on.
 | Truth designs, all sets | bright identified cells off by > 2x | 1.8–7.2% | 0.3–1.6% | 0.3–3.8% | 🔴 3–17x MaxQuant per set (moderate) |
 | Truth designs, 6 sets | protein CV | 4.4–10.1% | 7.0–11.6% | 4.9–13.5% | 🟢 on 3 sets, 🔴 on 2 (minor) |
 | Known-absent yeast, PXD014415 | false-transfer rate | 0.20% (0.08% at `quant_q ≤ 0.01`) | | 0.09% | 🔴 2x at default (minor) |
-| Blank run, PXD016921 | rows identified in the blank | 0 on current main (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
+| Blank run, PXD016921 | rows identified in the blank | 0 on main of 2026-11-09, after #333 `e841aae0` (85 at `09e1c00d`) | 20 | 8 | 🟢 fewest |
 | Blank run, PXD016921 | rows transferred into the blank | 0, not attempted | 85 unfiltered (9 at `Match q-value ≤ 0.01`) | 0, not scored | ⚪ not tested: andes and FragPipe make no transfer decision |
+| Glycopeptide LFQ, PXD005553 (5 fractions, `0f036477`) | matrix fill, identified-only → +MBR | 58.6% → 85.1% (held-out 10%: 83.7% → 84.7%; the MBR scorer is trained on these fractions) | | | ⚪ |
 | TMT knockout, PXD017803 hrMS2 | interference (lower is better) | 0.192 (0.000 with `--tmt-unmix on`) | 0.156 | | 🔴 default, 🟢 with the option |
 | TMT known ratios, PXD007683 | PSMs | 149,121 | 97,107 | | 🟢 +54% |
 | TMT known ratios, PXD007683 | protein ratio error | 0.213 | 0.159 | | 🔴 1.3x (moderate) |
 | TMT match between runs, PXD014750 | excess wrong-value rate of transfers | −0.05 points | +1.53 | | 🟢 (SIMSI-Transfer +0.40) |
 | TMT match between runs | cells transferred | 3,636 | | | 🔴 4.5x fewer than SIMSI-Transfer (minor, opt-in) |
 | Large study, PXD042233 (500 runs) | precursors in ≥ 3 runs | 243,895 | | | ⚪ |
+<!-- END generated: quantification-summary -->
 
 ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the most precursors
 (MaxQuant 1.5.3.30 on QE, 2.6.7.0 on Astral; FragPipe 23.0); every other submission is on the
@@ -107,7 +116,7 @@ ProteoBench rows use the MaxQuant and FragPipe leaderboard submissions with the 
 
 Note on DE false calls: andes' protein values are tighter than the other tools', so small real
 shifts of the "unchanged" species reach significance. On PXD009740, 296 of 320 false calls (seed
-42 on current main; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
+42 on main of 2026-11-09, after #333 `e841aae0`; 305 in the table, mean over seeds at `09e1c00d`) are against its highest UPS1
 level; without that level andes has 955 true positives and 24 false calls
 against MaxQuant's 953 and 31. Analysis on the [benchmark page](docs/benchmarks/README.md).
 

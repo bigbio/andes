@@ -12,7 +12,7 @@ mod svm;
 mod write;
 
 pub use cv::{init_direction, train, CvConfig, CvResult};
-pub use folds::folds_by_spectrum;
+pub use folds::{folds_by_spectrum, libstdcxx_sort_by};
 pub use merge::{merge_folds, normalize_fold_scores};
 pub use normalize::{raw_weights, score, stdv, Norm};
 pub use pep::{

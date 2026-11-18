@@ -459,8 +459,9 @@ pub fn run_refinement(
     seed: u64,
 ) -> Option<RefinementOutput> {
     if !refinement_supported(decoy_strategy) {
-        eprintln!(
-            "[refine] skipped: --refine needs generated decoys for valid Pass-2 FDR, but \
+        log::warn!(
+            target: "refine",
+            "skipped: --refine needs generated decoys for valid Pass-2 FDR, but \
              --decoy-strategy none was set (a target-only Pass-2 index would bias FDR). \
              Re-run with --decoy-strategy reverse|shuffle to enable refinement."
         );
@@ -496,8 +497,9 @@ pub fn run_refinement(
         let (ent_seqs, ent_accs, ent_sources) = entrapment_anchors(&base_seqs, &base_accs, seed);
         let ent_nterm: Vec<bool> = ent_sources.iter().map(|&i| anchor_nterm[i]).collect();
         anchor_nterm.extend(ent_nterm);
-        eprintln!(
-            "[refine]   entrapment: {} shuffled anchors added ({} anchors had no distinct shuffle)",
+        log::info!(
+            target: "refine",
+            "entrapment: {} shuffled anchors added ({} anchors had no distinct shuffle)",
             ent_seqs.len(),
             base_seqs.len() - ent_seqs.len()
         );
@@ -525,16 +527,17 @@ pub fn run_refinement(
         .filter(|m| !high_res && m.class == "deamidation")
         .map(&fmt_mod)
         .collect();
-    eprintln!(
-        "[refine] Starting PTM-refinement search over {} confident-protein anchor peptides \
+    log::info!(
+        target: "refine",
+        "Starting PTM-refinement search over {} confident-protein anchor peptides \
          ({} unidentified spectra, max {} mods/peptide)",
         base_seqs.len(),
         unident.len(),
         cfg.max_mods,
     );
-    eprintln!("[refine]   discovery mods: {}", active.join(", "));
+    log::info!(target: "refine", "discovery mods: {}", active.join(", "));
     if !skipped.is_empty() {
-        eprintln!("[refine]   skipped (low-res): {}", skipped.join(", "));
+        log::info!(target: "refine", "skipped (low-res): {}", skipped.join(", "));
     }
 
     let refine_idx = build_peptide_anchored_index(
@@ -548,8 +551,9 @@ pub fn run_refinement(
 
     const MAX_REFINE_MODS_PER_PEPTIDE: u32 = 5;
     let capped_max_mods = if cfg.max_mods > MAX_REFINE_MODS_PER_PEPTIDE {
-        eprintln!(
-            "WARN: --refine-max-mods {} exceeds the safe ceiling {}; clamping (combinatorial blowup guard).",
+        log::warn!(
+            target: "refine",
+            "--refine-max-mods {} exceeds the safe ceiling {}; clamping (combinatorial blowup guard).",
             cfg.max_mods, MAX_REFINE_MODS_PER_PEPTIDE
         );
         MAX_REFINE_MODS_PER_PEPTIDE
@@ -560,7 +564,7 @@ pub fn run_refinement(
     refine_params.aa_set = match refinement_aa_set(&base_params.aa_set, cfg, high_res) {
         Ok(set) => set,
         Err(e) => {
-            eprintln!("WARN: --refine could not build the Pass-2 modification set ({e}); skipping refinement for this run.");
+            log::warn!(target: "refine", "--refine could not build the Pass-2 modification set ({e}); skipping refinement for this run.");
             return None;
         }
     };
@@ -580,8 +584,9 @@ pub fn run_refinement(
         ) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!(
-                    "WARN: --refine could not build the Pass-2 candidate index ({e}); \
+                log::warn!(
+                    target: "refine",
+                    "--refine could not build the Pass-2 candidate index ({e}); \
                      skipping refinement for this run."
                 );
                 return None;
@@ -652,8 +657,9 @@ pub fn run_refinement(
     }
     drop(refine_candidates);
 
-    eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_base_peptides={} pass2_candidates_retained={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
+    log::debug!(
+        target: "refine",
+        "anchors={} unident={}/{} pass2_base_peptides={} pass2_candidates_retained={} (targets={} decoys={}) (pruned to {} winners; {} dropped as isotope mimics)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),

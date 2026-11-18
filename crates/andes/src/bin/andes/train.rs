@@ -320,11 +320,40 @@ pub(crate) struct TrainArgs {
     pub(crate) allow_degenerate_model: bool,
 }
 
+/// Spectra a reader returned as errors: how many, and the first error text.
+#[derive(Default)]
+struct ParseFailures {
+    count: usize,
+    first: Option<String>,
+}
+
+impl ParseFailures {
+    fn add(&mut self, e: impl std::fmt::Display) {
+        self.count += 1;
+        if self.first.is_none() {
+            self.first = Some(e.to_string());
+        }
+    }
+
+    /// One warning for all failed spectra of `path`, none when every spectrum parsed.
+    fn report(&self, path: &Path) {
+        if let Some(first) = &self.first {
+            log::warn!(
+                target: "train",
+                "{} spectra of {} could not be parsed and were skipped (first: {first})",
+                self.count,
+                path.display()
+            );
+        }
+    }
+}
+
 pub(crate) fn load_spectra_for_train(
     path: &Path,
 ) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
     let ext_lower = spectrum_ext_lower(path);
     let mut spectra = Vec::new();
+    let mut failed = ParseFailures::default();
     match ext_lower.as_deref() {
         Some("mzml") => {
             let mut reader =
@@ -332,12 +361,13 @@ pub(crate) fn load_spectra_for_train(
             for item in reader.by_ref() {
                 match item {
                     Ok(s) => spectra.push(s),
-                    Err(e) => eprintln!("WARN: mzML parse: {e}"),
+                    Err(e) => failed.add(e),
                 }
             }
             if reader.skipped_count() > 0 {
-                eprintln!(
-                    "WARN: {} spectra of {} failed to parse and were skipped (first: {})",
+                log::warn!(
+                    target: "train",
+                    "{} spectra of {} failed to parse and were skipped (first: {})",
                     reader.skipped_count(),
                     path.display(),
                     reader.skipped_errors().join("; ")
@@ -353,7 +383,7 @@ pub(crate) fn load_spectra_for_train(
                 for item in reader {
                     match item {
                         Ok(s) => spectra.push(s),
-                        Err(e) => eprintln!("WARN: .raw parse: {e}"),
+                        Err(e) => failed.add(e),
                     }
                 }
             }
@@ -375,7 +405,7 @@ pub(crate) fn load_spectra_for_train(
                 for item in reader {
                     match item {
                         Ok(s) => spectra.push(s),
-                        Err(e) => eprintln!("WARN: .d parse: {e}"),
+                        Err(e) => failed.add(e),
                     }
                 }
             }
@@ -394,11 +424,12 @@ pub(crate) fn load_spectra_for_train(
             for item in reader {
                 match item {
                     Ok(s) => spectra.push(s),
-                    Err(e) => eprintln!("WARN: MGF parse: {e}"),
+                    Err(e) => failed.add(e),
                 }
             }
         }
     }
+    failed.report(path);
     Ok(spectra)
 }
 
@@ -575,8 +606,8 @@ pub(crate) fn load_labels_from_tsv(
             confidence: 0.0,
         });
     }
-    eprintln!(
-        "train: loaded {} labels from {} ({} skipped: {} scan-not-found, {} dup-scan, {} unparseable-peptide, {} malformed; {} charge-mismatch vs mzML)",
+    log::info!(
+        "loaded {} labels from {} ({} skipped: {} scan-not-found, {} dup-scan, {} unparseable-peptide, {} malformed; {} charge-mismatch vs mzML)",
         labels.len(),
         path.display(),
         miss_scan + dup_scan + miss_pep + miss_other,
@@ -587,8 +618,8 @@ pub(crate) fn load_labels_from_tsv(
         charge_mismatch,
     );
     if charge_mismatch * 5 > labels.len().max(1) {
-        eprintln!(
-            "train: WARNING — {charge_mismatch} labels ({}%) disagree with the mzML precursor \
+        log::warn!(
+            "{charge_mismatch} labels ({}%) disagree with the mzML precursor \
              charge; the scan->spectrum mapping or the label charges may be wrong.",
             charge_mismatch * 100 / labels.len().max(1),
         );
@@ -675,7 +706,7 @@ pub(crate) fn run_train_from_search(
     }
 
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
-    eprintln!("train: seed model = {seed_model_id}");
+    log::info!("seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
     let activation: Option<ActivationMethod> = args
         .activation
@@ -689,14 +720,14 @@ pub(crate) fn run_train_from_search(
 
     let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
     for (i, spectra_path) in args.spectra.iter().enumerate() {
-        eprintln!("train: loading spectra from {} ...", spectra_path.display());
+        log::info!("loading spectra from {} ...", spectra_path.display());
         let mut spectra = load_spectra_for_train(spectra_path)?;
-        eprintln!("train: loaded {} spectra", spectra.len());
+        log::info!("loaded {} spectra", spectra.len());
         if let Some(act) = activation {
             let n = spectra.len();
             spectra.retain(|s| s.activation_method.is_none_or(|a| a == act));
-            eprintln!(
-                "train: kept {} of {n} spectra with activation {} (or none recorded)",
+            log::info!(
+                "kept {} of {n} spectra with activation {} (or none recorded)",
                 spectra.len(),
                 act.name()
             );
@@ -710,8 +741,8 @@ pub(crate) fn run_train_from_search(
                 .clone()
                 .ok_or("--database is required for initial training (or pass --labels)")?;
             let search_params = build_train_search_params(&args)?;
-            eprintln!(
-                "train: running seed search (train-fdr = {}) ...",
+            log::info!(
+                "running seed search (train-fdr = {}) ...",
                 args.train_fdr
             );
             bootstrap_labels(
@@ -724,16 +755,16 @@ pub(crate) fn run_train_from_search(
             )
             .map_err(|e| format!("bootstrap_labels: {e}"))?
         };
-        eprintln!(
-            "train: {} confident labels from {}",
+        log::info!(
+            "{} confident labels from {}",
             labels.len(),
             spectra_path.display()
         );
         runs.push(TrainRun::keep_labelled(spectra_path, spectra, labels));
     }
     let n_labels: usize = runs.iter().map(|r| r.labels.len()).sum();
-    eprintln!(
-        "train: {n_labels} confident labels from {} run(s)",
+    log::info!(
+        "{n_labels} confident labels from {} run(s)",
         runs.len()
     );
 
@@ -747,8 +778,8 @@ pub(crate) fn run_train_from_search(
 
     let use_seed_geometry = args.seed_geometry;
     let mut template: Param = if !use_seed_geometry {
-        eprintln!(
-            "train: deriving own partition geometry from {n_labels} PSMs (pass --seed-geometry to reuse the seed geometry)"
+        log::info!(
+            "deriving own partition geometry from {n_labels} PSMs (pass --seed-geometry to reuse the seed geometry)"
         );
         let corpus: Vec<(i32, f32)> = runs
             .iter()
@@ -761,24 +792,24 @@ pub(crate) fn run_train_from_search(
         }
         derive_geometry(&corpus, &base, &geo_cfg)
     } else {
-        eprintln!("train: --seed-geometry set — reusing seed partition geometry");
+        log::info!("--seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
     };
     if let Some(ppm) = args.fragment_tol_ppm {
         template.mme = Tolerance::Ppm(ppm);
-        eprintln!("train: training fragment tolerance overridden to {ppm} ppm");
+        log::info!("training fragment tolerance overridden to {ppm} ppm");
     } else if let Some(da) = args.fragment_tol_da {
         template.mme = Tolerance::Da(da);
-        eprintln!("train: training fragment tolerance overridden to {da} Da");
+        log::info!("training fragment tolerance overridden to {da} Da");
     } else {
-        eprintln!(
-            "train: training at the seed fragment tolerance {:?}",
+        log::info!(
+            "training at the seed fragment tolerance {:?}",
             template.mme
         );
     }
     let accum_scorer = RankScorer::new(&template);
 
-    eprintln!("train: accumulating ion-match statistics ...");
+    log::info!("accumulating ion-match statistics ...");
     let accumulator = StatsAccumulator::new(&accum_scorer);
     let run_stats: Vec<CountStats> = runs
         .iter()
@@ -793,7 +824,7 @@ pub(crate) fn run_train_from_search(
         .collect();
     let stats = merge(run_stats.clone());
 
-    eprintln!("train: estimating model parameters ...");
+    log::info!("estimating model parameters ...");
     let cfg = EstimatorConfig::default();
     let estimator = Estimator::new(cfg);
     let mut trained_param = estimator.estimate(&stats, &template);
@@ -814,8 +845,8 @@ pub(crate) fn run_train_from_search(
         }
         None => trained_param.data_type.instrument.name().to_string(),
     };
-    eprintln!(
-        "train: model key = ({}, {}, {}, {})",
+    log::info!(
+        "model key = ({}, {}, {}, {})",
         trained_param.data_type.activation.name(),
         trained_param.data_type.instrument.name(),
         trained_param
@@ -826,13 +857,13 @@ pub(crate) fn run_train_from_search(
         trained_param.data_type.protocol.name(),
     );
     let n_partitions = trained_param.partitions.len();
-    eprintln!("train: trained model has {} partitions", n_partitions);
+    log::info!("trained model has {} partitions", n_partitions);
 
     let model_id = args
         .model_id
         .clone()
         .unwrap_or_else(|| format!("trained_{}_{}", instrument, args.protocol));
-    eprintln!("train: model ID = {model_id}");
+    log::info!("model ID = {model_id}");
 
     let date_str = args.date.clone().unwrap_or_else(|| {
         format_today_iso8601()
@@ -876,7 +907,7 @@ pub(crate) fn run_train_from_search(
             .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
         for id in store.model_ids() {
             if id == model_id {
-                eprintln!("train: overwriting existing model '{id}' in store");
+                log::info!("overwriting existing model '{id}' in store");
                 continue;
             }
             let p = store
@@ -908,13 +939,13 @@ pub(crate) fn run_train_from_search(
     )
     .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
 
-    eprintln!(
-        "train: wrote model '{model_id}' to {} (sources: {source_list}) [{:.2}s]",
+    log::info!(
+        "wrote model '{model_id}' to {} (sources: {source_list}) [{:.2}s]",
         store_path.display(),
         t0.elapsed().as_secs_f64(),
     );
-    eprintln!(
-        "train: summary — labels={}, partitions={}, store={}",
+    log::info!(
+        "summary — labels={}, partitions={}, store={}",
         n_labels,
         n_partitions,
         store_path.display(),
@@ -1164,37 +1195,37 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     let mut psms: Vec<MsnetPsm> = Vec::new();
     let mut rows_read = 0usize;
     for input in &args.inputs {
-        eprintln!("train: reading {} ...", input.display());
+        log::info!("reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
         rows_read += part.len();
-        eprintln!("train:   {} PSM rows", part.len());
+        log::info!("{} PSM rows", part.len());
         psms.extend(part);
     }
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
-    eprintln!(
-        "train: {rows_read} total PSM rows across {} file(s)",
+    log::info!(
+        "{rows_read} total PSM rows across {} file(s)",
         args.inputs.len()
     );
 
     let (seed_model_id, mut seed_param): (String, Param) =
         load_seed_param(&Some(args.seed_model.clone()))?;
-    eprintln!("train: seed model = {seed_model_id}");
+    log::info!("seed model = {seed_model_id}");
     if let Some(ppm) = args.fragment_tol_ppm {
         seed_param.mme = Tolerance::Ppm(ppm);
-        eprintln!("train: fragment tolerance overridden to {ppm} ppm");
+        log::info!("fragment tolerance overridden to {ppm} ppm");
     } else if let Some(da) = args.fragment_tol_da {
         seed_param.mme = Tolerance::Da(da);
-        eprintln!("train: fragment tolerance overridden to {da} Da");
+        log::info!("fragment tolerance overridden to {da} Da");
     } else {
-        eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
+        log::info!("using seed fragment tolerance {:?}", seed_param.mme);
     }
 
     let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
-        eprintln!(
-            "train: deriving own partition geometry from {} PSMs (pass --seed-geometry to reuse the seed geometry)",
+        log::info!(
+            "deriving own partition geometry from {} PSMs (pass --seed-geometry to reuse the seed geometry)",
             psms.len()
         );
         let corpus: Vec<(i32, f32)> = psms
@@ -1204,13 +1235,13 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
-        eprintln!("train: --seed-geometry set — reusing seed partition geometry");
+        log::info!("--seed-geometry set — reusing seed partition geometry");
         seed_param.clone()
     };
 
     let seed_scorer = RankScorer::new(&template);
 
-    eprintln!("train: accumulating ion-match statistics ...");
+    log::info!("accumulating ion-match statistics ...");
     let stats = psms
         .par_iter()
         .fold(CountStats::new, |mut acc, psm| {
@@ -1220,9 +1251,9 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         })
         .collect::<Vec<_>>();
     let stats = merge(stats);
-    eprintln!("train: accumulated {} PSMs", psms.len());
+    log::info!("accumulated {} PSMs", psms.len());
 
-    eprintln!("train: estimating model parameters ...");
+    log::info!("estimating model parameters ...");
     let cfg = EstimatorConfig {
         pseudo: args.train_pseudo,
         noise_pseudo: args.train_noise_pseudo,
@@ -1231,8 +1262,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         error_scaling_factor_override: None,
         rank_smoothing: args.rank_smoothing,
     };
-    eprintln!(
-        "train: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
+    log::info!(
+        "estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
         cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
     );
     let estimator = Estimator::new(cfg);
@@ -1252,8 +1283,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
                 Some(&prior_id),
             )
             .map_err(|e| format!("loading --prior-model '{prior_id}': {e}"))?;
-            eprintln!(
-                "train: prior model = {prior_id} (from {})",
+            log::info!(
+                "prior model = {prior_id} (from {})",
                 store_path.display()
             );
             Some(p)
@@ -1264,7 +1295,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
     let mut trained_param = estimator.estimate_with_prior(&stats, &template, prior_param.as_ref());
     inherit_seed_gbdts(&mut trained_param, &seed_param);
     let n_partitions = trained_param.partitions.len();
-    eprintln!("train: trained model has {n_partitions} partitions");
+    log::info!("trained model has {n_partitions} partitions");
 
     if let Some(act) = &args.activation {
         trained_param.data_type.activation = ActivationMethod::from_name(act).ok_or_else(|| {
@@ -1286,8 +1317,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         trained_param.data_type.protocol = model::protocol::Protocol::from_name(prot)
             .ok_or_else(|| format!("unknown --protocol '{prot}' (expected Automatic/TMT/iTRAQ/iTRAQPhospho/Phosphorylation/Standard)"))?;
     }
-    eprintln!(
-        "train: model data_type = {:?}/{:?}/{:?}/{:?}",
+    log::info!(
+        "model data_type = {:?}/{:?}/{:?}/{:?}",
         trained_param.data_type.activation,
         trained_param.data_type.instrument,
         trained_param.data_type.enzyme,
@@ -1316,7 +1347,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         use model_train::gbdt::dataset::{build_dataset, PsmRow};
         use model_train::gbdt::train::{train_gbdt, TrainParams};
 
-        eprintln!("train: building GBDT dataset from {} PSMs ...", psms.len());
+        log::info!("building GBDT dataset from {} PSMs ...", psms.len());
         let gbdt_rows: Vec<PsmRow<'_>> = psms
             .iter()
             .map(|psm| {
@@ -1329,8 +1360,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
             .collect();
 
         let gbdt_dataset = build_dataset(&gbdt_rows, &seed_scorer);
-        eprintln!(
-            "train: GBDT dataset: {} peak rows, {} positives",
+        log::info!(
+            "GBDT dataset: {} peak rows, {} positives",
             gbdt_dataset.y.len(),
             gbdt_dataset.y.iter().filter(|&&l| l == 1).count(),
         );
@@ -1340,7 +1371,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
             ..TrainParams::default()
         };
         let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42)?;
-        eprintln!("train: GBDT trained: {} trees", trained_gbdt.trees.len(),);
+        log::info!("GBDT trained: {} trees", trained_gbdt.trees.len(),);
         Some(trained_gbdt.to_bytes())
     } else {
         None
@@ -1357,7 +1388,7 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
                 .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
             for id in store.model_ids() {
                 if id == model_id {
-                    eprintln!("train: overwriting existing model '{id}' in store");
+                    log::info!("overwriting existing model '{id}' in store");
                     continue;
                 }
                 let p = store
@@ -1396,8 +1427,8 @@ pub(crate) fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error
         .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
     }
 
-    eprintln!(
-        "train: wrote model '{model_id}' to {} (source '{}', {} PSMs, {n_partitions} partitions) [{:.2}s]",
+    log::info!(
+        "wrote model '{model_id}' to {} (source '{}', {} PSMs, {n_partitions} partitions) [{:.2}s]",
         store_path.display(),
         args.source,
         psms.len(),
@@ -1438,12 +1469,13 @@ pub(crate) fn run_train_update(
             .clone()
             .ok_or("--source-id is required with --add")?;
 
-        eprintln!(
-            "train update: loading spectra from {} ...",
+        log::info!(
+            target: "train-update",
+            "loading spectra from {} ...",
             spectra_path.display()
         );
         let spectra = load_spectra_for_train(&spectra_path)?;
-        eprintln!("train update: loaded {} spectra", spectra.len());
+        log::info!(target: "train-update", "loaded {} spectra", spectra.len());
 
         let store = ModelStore::open(store_path)
             .map_err(|e| format!("opening store {}: {e}", store_path.display()))?;
@@ -1454,8 +1486,9 @@ pub(crate) fn run_train_update(
 
         let search_params = build_train_search_params(&args)?;
 
-        eprintln!(
-            "train update: running seed search (train-fdr={}) ...",
+        log::info!(
+            target: "train-update",
+            "running seed search (train-fdr={}) ...",
             args.train_fdr
         );
         let labels = bootstrap_labels(
@@ -1467,7 +1500,7 @@ pub(crate) fn run_train_update(
             &crate::cli::dir_or_output_dir(args.index_cache_dir.as_deref(), &args.out_store),
         )
         .map_err(|e| format!("bootstrap_labels: {e}"))?;
-        eprintln!("train update: {} confident labels", labels.len());
+        log::info!(target: "train-update", "{} confident labels", labels.len());
 
         if labels.is_empty() {
             return Err(format!(
@@ -1532,8 +1565,9 @@ pub(crate) fn run_train_update(
             .clone()
             .ok_or("--database is required with --validate")?;
 
-        eprintln!(
-            "train update: running acceptance gate on {} ...",
+        log::info!(
+            target: "train-update",
+            "running acceptance gate on {} ...",
             validate_path.display()
         );
         let val_spectra = load_spectra_for_train(validate_path)?;
@@ -1559,28 +1593,29 @@ pub(crate) fn run_train_update(
         )
         .map_err(|e| format!("evaluate_candidate: {e}"))?;
 
-        eprintln!(
-            "train update: gate — current={} PSMs, candidate={} PSMs at FDR={}",
+        log::info!(
+            target: "train-update",
+            "gate — current={} PSMs, candidate={} PSMs at FDR={}",
             delta.current_count, delta.candidate_count, args.train_fdr
         );
 
         if delta.is_accepted() {
-            eprintln!("train update: ACCEPTED (candidate >= current)");
+            log::info!(target: "train-update", "ACCEPTED (candidate >= current)");
             true
         } else {
-            eprintln!("train update: REJECTED (candidate < current)");
+            log::warn!(target: "train-update", "REJECTED (candidate < current)");
             if args.force {
-                eprintln!("train update: --force set, committing anyway");
+                log::info!(target: "train-update", "--force set, committing anyway");
                 true
             } else {
-                eprintln!("train update: skipping commit (use --force to override)");
+                log::info!(target: "train-update", "skipping commit (use --force to override)");
                 false
             }
         }
     } else {
-        eprintln!("train update: no --validate dataset; skipping acceptance gate");
+        log::info!(target: "train-update", "no --validate dataset; skipping acceptance gate");
         if args.force {
-            eprintln!("train update: --force set, committing unconditionally");
+            log::info!(target: "train-update", "--force set, committing unconditionally");
         }
         true
     };
@@ -1588,8 +1623,9 @@ pub(crate) fn run_train_update(
     if commit {
         commit_update(store_path, model_id, &candidate, &new_sources)
             .map_err(|e| format!("commit_update: {e}"))?;
-        eprintln!(
-            "train update: committed model '{model_id}' to {} [{:.2}s]",
+        log::info!(
+            target: "train-update",
+            "committed model '{model_id}' to {} [{:.2}s]",
             store_path.display(),
             t0.elapsed().as_secs_f64(),
         );

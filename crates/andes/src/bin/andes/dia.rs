@@ -134,8 +134,8 @@ pub(crate) fn rerank_pin(
         }
     }
     std::fs::write(pin, out).map_err(|e| format!("{}: {e}", pin.display()))?;
-    eprintln!(
-        "DIA: kept {kept} of {} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
+    log::info!(
+        "kept {kept} of {} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
         rows.len(),
         t0.elapsed().as_secs_f64()
     );
@@ -259,8 +259,8 @@ pub(crate) fn add_to_pin(
         .map(|c| feats.iter().map(|f| f[c]).collect())
         .collect();
     write_pin(pin, &table, &cols, &values)?;
-    eprintln!(
-        "DIA: added {} co-elution columns to {} PIN rows ({} isolation windows, {n_ms1} MS1 scans) [PHASE dia_features: {:.2}s]",
+    log::info!(
+        "added {} co-elution columns to {} PIN rows ({} isolation windows, {n_ms1} MS1 scans) in {:.2} s",
         COLUMNS.len(),
         table.rows.len(),
         windows.len(),
@@ -611,7 +611,7 @@ pub(crate) fn refine_rt(
         ));
     }
     if err.iter().all(|e| !e.is_finite()) {
-        eprintln!("DIA RT refinement: {}", report.join("; "));
+        log::info!(target: "dia-rt", "{}", report.join("; "));
         return Ok(false);
     }
     let mut fin: Vec<f64> = err.iter().copied().filter(|e| e.is_finite()).collect();
@@ -623,8 +623,9 @@ pub(crate) fn refine_rt(
         }
     }
     write_pin(pin, &table, &[RT_REFINED.to_string()], &[err])?;
-    eprintln!(
-        "DIA RT refinement: {} [{:.2}s]",
+    log::info!(
+        target: "dia-rt",
+        "{} [{:.2}s]",
         report.join("; "),
         t0.elapsed().as_secs_f64()
     );

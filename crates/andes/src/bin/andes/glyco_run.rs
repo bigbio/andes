@@ -72,7 +72,8 @@ pub(crate) fn run_glyco(
         )
         .into());
     }
-    eprintln!(
+    log::info!(
+        target: "glyco",
         "glycan list: {} compositions loaded from {} (structure preserved; NeuGc content used as-is)",
         glycan_list.len(),
         source_desc
@@ -83,14 +84,16 @@ pub(crate) fn run_glyco(
         acquisition_high_res,
     );
     if glyco_tol_ppm != cli.glyco_tol_ppm {
-        eprintln!(
-            "glyco fragment tolerance: {glyco_tol_ppm} ppm for low-resolution MS2 \
+        log::info!(
+            target: "glyco",
+            "fragment tolerance: {glyco_tol_ppm} ppm for low-resolution MS2 \
              (--glyco-tol-ppm sets it)"
         );
     }
     if glyco_tol_ppm < DEFAULT_GLYCO_TOL_PPM {
-        eprintln!(
-            "warning: --glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
+        log::warn!(
+            target: "glyco",
+            "--glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
              glyco defaults were validated at; oxonium, core-Y and c/z matching may \
              under-fire"
         );
@@ -104,16 +107,18 @@ pub(crate) fn run_glyco(
         .glyco_retrieval_tol_ppm
         .or_else(|| acquisition_high_res.then_some(glyco_tol_ppm));
     match retrieval_ppm {
-        Some(ppm) => eprintln!(
-            "glyco retrieval window: {ppm} ppm ({})",
+        Some(ppm) => log::info!(
+            target: "glyco",
+            "retrieval window: {ppm} ppm ({})",
             if cli.glyco_retrieval_tol_ppm.is_some() {
                 "--glyco-retrieval-tol-ppm"
             } else {
                 "high-resolution acquisition"
             }
         ),
-        None => eprintln!(
-            "glyco retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
+        None => log::info!(
+            target: "glyco",
+            "retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
         ),
     }
     let glyco_cfg = search::glyco_search::GlycoConfig {
@@ -133,8 +138,9 @@ pub(crate) fn run_glyco(
     let t_table = std::time::Instant::now();
     let table =
         search::glyco_search::GlycoCandidates::from_out_of_core(prepared, cli.glyco_core.into());
-    eprintln!(
-        "[glyco] candidate table: {} {}-bearing candidates from the out-of-core index \
+    log::info!(
+        target: "glyco",
+        "candidate table: {} {}-bearing candidates from the out-of-core index \
          ({} base peptides) [{:.2}s]",
         table.candidates().len(),
         match cli.glyco_core {
@@ -153,8 +159,9 @@ pub(crate) fn run_glyco(
         glyco_cfg,
     );
     let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
-    eprintln!(
-        "[glyco] scored {} spectra → {} glyco-PSM rows [{:.2}s]",
+    log::info!(
+        target: "glyco",
+        "scored {} spectra → {} glyco-PSM rows [{:.2}s]",
         pass1.len(),
         total_pass1_rows,
         t_glyco.elapsed().as_secs_f64()
@@ -172,7 +179,7 @@ pub(crate) fn run_glyco(
         s.push(".glyco.pin");
         std::path::PathBuf::from(s)
     };
-    eprintln!("Glyco PIN will be written to: {}", glyco_pin_path.display());
+    log::info!(target: "glyco", "PIN will be written to: {}", glyco_pin_path.display());
     let mut glyco_results = pass1;
 
     let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
@@ -194,8 +201,9 @@ pub(crate) fn run_glyco(
         mono,
         cli.glyco_core.into(),
     )?;
-    eprintln!(
-        "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",
+    log::info!(
+        target: "glyco",
+        "wrote glyco PIN {} ({} PSM rows); total {:.2} s",
         glyco_pin_path.display(),
         total_glyco_rows,
         t_total.elapsed().as_secs_f64()

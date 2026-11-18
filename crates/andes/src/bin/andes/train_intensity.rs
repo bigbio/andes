@@ -111,7 +111,7 @@ pub(crate) fn run_train_intensity_gbdt(
     let model_id = args.model_id.clone();
     let seed = args.seed_model.clone();
     let t = args.threads;
-    eprintln!("train-intensity-gbdt: in={n_files} model_id={model_id} seed={seed} threads={t}");
+    log::info!(target: "train-intensity-gbdt", "in={n_files} model_id={model_id} seed={seed} threads={t}");
     ensure_single_file_store(&args.out_store)?;
 
     let t0 = std::time::Instant::now();
@@ -126,26 +126,28 @@ pub(crate) fn run_train_intensity_gbdt(
 
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
-        eprintln!("train-intensity-gbdt: reading {} ...", input.display());
+        log::info!(target: "train-intensity-gbdt", "reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
-        eprintln!("train-intensity-gbdt:   {} PSM rows", part.len());
+        log::info!(target: "train-intensity-gbdt", "{} PSM rows", part.len());
         psms.extend(part);
     }
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
-    eprintln!(
-        "train-intensity-gbdt: {} total PSM rows across {} file(s)",
+    log::info!(
+        target: "train-intensity-gbdt",
+        "{} total PSM rows across {} file(s)",
         psms.len(),
         args.inputs.len()
     );
 
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
-    eprintln!("train-intensity-gbdt: seed model = {seed_model_id}");
+    log::info!(target: "train-intensity-gbdt", "seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    eprintln!(
-        "train-intensity-gbdt: building frag dataset from {} PSMs ...",
+    log::info!(
+        target: "train-intensity-gbdt",
+        "building frag dataset from {} PSMs ...",
         psms.len()
     );
     let rows: Vec<PsmRow<'_>> = psms
@@ -157,8 +159,9 @@ pub(crate) fn run_train_intensity_gbdt(
         })
         .collect();
     let ds = build_frag_dataset(&rows, &seed_scorer);
-    eprintln!(
-        "train-intensity-gbdt: dataset: {} ion rows, {} features",
+    log::info!(
+        target: "train-intensity-gbdt",
+        "dataset: {} ion rows, {} features",
         ds.y.len(),
         ds.n_features,
     );
@@ -168,8 +171,9 @@ pub(crate) fn run_train_intensity_gbdt(
         ..TrainParams::default()
     };
     let trained_frag = train_gbdt_regression(&ds, &train_params, 42)?;
-    eprintln!(
-        "train-intensity-gbdt: trained frag model: {} trees",
+    log::info!(
+        target: "train-intensity-gbdt",
+        "trained frag model: {} trees",
         trained_frag.trees.len()
     );
 
@@ -179,11 +183,12 @@ pub(crate) fn run_train_intensity_gbdt(
     })
     .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
     if existed {
-        eprintln!("train-intensity-gbdt: replaced the frag model of existing '{model_id}'");
+        log::info!(target: "train-intensity-gbdt", "replaced the frag model of existing '{model_id}'");
     }
 
-    eprintln!(
-        "train-intensity-gbdt: wrote model '{model_id}' to {} [{:.2}s]",
+    log::info!(
+        target: "train-intensity-gbdt",
+        "wrote model '{model_id}' to {} [{:.2}s]",
         store_path.display(),
         t0.elapsed().as_secs_f64(),
     );
@@ -203,7 +208,7 @@ pub(crate) fn run_train_rich_ion_llr(
     let model_id = args.model_id.clone();
     let seed = args.seed_model.clone();
     let t = args.threads;
-    eprintln!("train-rich-ion-llr: in={n_files} model_id={model_id} seed={seed} threads={t}");
+    log::info!(target: "train-rich-ion-llr", "in={n_files} model_id={model_id} seed={seed} threads={t}");
     ensure_single_file_store(&args.out_store)?;
 
     let t0 = std::time::Instant::now();
@@ -218,26 +223,28 @@ pub(crate) fn run_train_rich_ion_llr(
 
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
-        eprintln!("train-rich-ion-llr: reading {} ...", input.display());
+        log::info!(target: "train-rich-ion-llr", "reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
-        eprintln!("train-rich-ion-llr:   {} PSM rows", part.len());
+        log::info!(target: "train-rich-ion-llr", "{} PSM rows", part.len());
         psms.extend(part);
     }
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
-    eprintln!(
-        "train-rich-ion-llr: {} total PSM rows across {} file(s)",
+    log::info!(
+        target: "train-rich-ion-llr",
+        "{} total PSM rows across {} file(s)",
         psms.len(),
         args.inputs.len()
     );
 
     let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
-    eprintln!("train-rich-ion-llr: seed model = {seed_model_id}");
+    log::info!(target: "train-rich-ion-llr", "seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    eprintln!(
-        "train-rich-ion-llr: building ion dataset from {} PSMs ...",
+    log::info!(
+        target: "train-rich-ion-llr",
+        "building ion dataset from {} PSMs ...",
         psms.len()
     );
     let rows: Vec<PsmRow<'_>> = psms
@@ -249,8 +256,9 @@ pub(crate) fn run_train_rich_ion_llr(
         })
         .collect();
     let ds = build_ion_dataset(&rows, &seed_scorer);
-    eprintln!(
-        "train-rich-ion-llr: dataset: {} ion rows, {} features",
+    log::info!(
+        target: "train-rich-ion-llr",
+        "dataset: {} ion rows, {} features",
         ds.y.len(),
         ds.n_features,
     );
@@ -260,8 +268,9 @@ pub(crate) fn run_train_rich_ion_llr(
         ..TrainParams::default()
     };
     let trained_rich_ion = train_gbdt(&ds, &train_params, 42)?;
-    eprintln!(
-        "train-rich-ion-llr: trained rich-ion model: {} trees",
+    log::info!(
+        target: "train-rich-ion-llr",
+        "trained rich-ion model: {} trees",
         trained_rich_ion.trees.len()
     );
 
@@ -271,11 +280,12 @@ pub(crate) fn run_train_rich_ion_llr(
     })
     .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
     if existed {
-        eprintln!("train-rich-ion-llr: replaced the rich-ion model of existing '{model_id}'");
+        log::info!(target: "train-rich-ion-llr", "replaced the rich-ion model of existing '{model_id}'");
     }
 
-    eprintln!(
-        "train-rich-ion-llr: wrote model '{model_id}' to {} [{:.2}s]",
+    log::info!(
+        target: "train-rich-ion-llr",
+        "wrote model '{model_id}' to {} [{:.2}s]",
         store_path.display(),
         t0.elapsed().as_secs_f64(),
     );

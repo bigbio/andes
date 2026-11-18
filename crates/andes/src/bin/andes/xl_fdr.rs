@@ -266,8 +266,9 @@ pub(crate) fn percolator_scores(
             row.score
         })
         .collect();
-    eprintln!(
-        "[xl] Percolator ({}): {} target and {} decoy rows scored, {missing} CSMs without a score \
+    log::info!(
+        target: "xl",
+        "Percolator ({}): {} target and {} decoy rows scored, {missing} CSMs without a score \
          [{:.2}s]",
         backend.describe(),
         targets.len(),
@@ -405,8 +406,9 @@ fn counts_line(classes: impl Iterator<Item = (PairClass, LinkClass, Option<f64>)
 }
 
 pub(crate) fn report_levels(l: &Levels) {
-    eprintln!(
-        "[xl] CSM: {}",
+    log::info!(
+        target: "xl",
+        "CSM: {}",
         counts_line(
             l.csm_items
                 .iter()
@@ -414,12 +416,14 @@ pub(crate) fn report_levels(l: &Levels) {
                 .map(|(it, q)| (it.class, it.link, *q))
         )
     );
-    eprintln!(
-        "[xl] residue pair: {}",
+    log::info!(
+        target: "xl",
+        "residue pair: {}",
         counts_line(l.rp.iter().zip(&l.rp_q).map(|(g, q)| (g.class, g.link, *q)))
     );
-    eprintln!(
-        "[xl] residue pair (>=2 CSMs): {}",
+    log::info!(
+        target: "xl",
+        "residue pair (>=2 CSMs): {}",
         counts_line(
             l.rp.iter()
                 .zip(&l.rp_q2)
@@ -427,8 +431,9 @@ pub(crate) fn report_levels(l: &Levels) {
                 .map(|(g, q)| (g.class, g.link, *q))
         )
     );
-    eprintln!(
-        "[xl] protein pair (inter only): {}",
+    log::info!(
+        target: "xl",
+        "protein pair (inter only): {}",
         counts_line(
             l.ppi
                 .iter()

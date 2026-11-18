@@ -154,8 +154,9 @@ pub(crate) fn warn_if_universal_protease_combo(
         .chain(extras.iter().copied())
         .collect();
     if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
-        eprintln!(
-            "WARN: --enzyme combines a universal protease (NonSpecific) with specific \
+        log::warn!(
+            target: "model",
+            "--enzyme combines a universal protease (NonSpecific) with specific \
              one(s); their union cleaves at EVERY position, so this is effectively a \
              non-specific digest (much larger search space). Drop the universal protease to \
              keep the specific cleavage rules."
@@ -190,8 +191,9 @@ pub(crate) fn resolve_metadataless_selection(
     };
     if let (Some(e), Some(d)) = (explicit, detected_activation) {
         if e != d {
-            eprintln!(
-                "Param resolver: auto-detected activation = {}, OVERRIDDEN by --fragmentation {}",
+            log::info!(
+                target: "model",
+                "auto-detected activation = {}, OVERRIDDEN by --fragmentation {}",
                 d.name(),
                 e.name()
             );
@@ -199,8 +201,9 @@ pub(crate) fn resolve_metadataless_selection(
     }
     let activation = explicit.or(detected_activation).unwrap_or(class_default);
     if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
-        eprintln!(
-            "WARN: no analyzer metadata, no --fragmentation/--fragment-tol, and the peaks \
+        log::warn!(
+            target: "model",
+            "no analyzer metadata, no --fragmentation/--fragment-tol, and the peaks \
              do not settle the fragment resolution; assuming CID / low-res / 0.5 Da. Pass \
              --fragmentation and --fragment-tol-ppm/-da to override."
         );
@@ -464,7 +467,7 @@ pub(crate) fn untrained_route_warning(
     let requested = describe_cell(act, analyser, enzyme, &class);
     let Some(e) = entries.iter().find(|e| e.model_id == model_id) else {
         return Some(format!(
-            "WARN: model routing: no model in the store is trained for {requested}; \
+            "no model in the store is trained for {requested}; \
              scoring with '{model_id}'. Scores may be mis-calibrated; pass --model to \
              choose explicitly."
         ));
@@ -484,7 +487,7 @@ pub(crate) fn untrained_route_warning(
         &e.experiment_class,
     );
     Some(format!(
-        "WARN: model routing: no model in the store is trained for {requested}; scoring \
+        "no model in the store is trained for {requested}; scoring \
          with '{model_id}', trained on {trained}. Scores may be mis-calibrated; pass \
          --model to choose explicitly."
     ))
@@ -590,7 +593,7 @@ pub(crate) fn load_param_from_store(
         let entries = store.selection_entries();
         let choice = choose_model(&entries, activation, instrument, protocol, enzyme);
         if let Some(w) = &choice.warning {
-            eprintln!("{w}");
+            log::warn!(target: "model-routing", "{w}");
         }
         choice.model_id
     };
@@ -625,7 +628,7 @@ pub(crate) fn load_activation_route(
         return Ok(None);
     }
     if let Some(w) = &choice.warning {
-        eprintln!("{w}");
+        log::warn!(target: "model-routing", "{w}");
     }
     Ok(Some((choice.model_id, param)))
 }

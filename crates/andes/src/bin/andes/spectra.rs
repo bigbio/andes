@@ -382,7 +382,7 @@ pub(crate) fn detect_isobaric_sampled(
     let ms3 = sample_spectra(path, is_mzml, is_mgf, is_raw, 3)?;
     let label = input::detect_isobaric(&ms3, true);
     if label.is_some() {
-        eprintln!("Protocol resolver: isobaric reporters found in the MS3 scans (SPS-MS3)");
+        log::info!(target: "protocol", "isobaric reporters found in the MS3 scans (SPS-MS3)");
     }
     label
 }
@@ -396,8 +396,9 @@ pub(crate) fn ms3_carries_reporters(path: &Path, is_mzml: bool, is_raw: bool) ->
     };
     let found = input::detect_isobaric(&ms3, true).is_some();
     if !found {
-        eprintln!(
-            "Protocol resolver: no isobaric reporters in a sample of {} MS3 scans",
+        log::info!(
+            target: "protocol",
+            "no isobaric reporters in a sample of {} MS3 scans",
             ms3.len()
         );
     }
@@ -520,8 +521,9 @@ pub(crate) fn run_precursor_calibration(
         build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
 
     if spec_keys.len() < params.cal_min_spec_keys {
-        eprintln!(
-            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
+        log::info!(
+            target: "calibration",
+            "calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
              The sample is too small for a reliable calibration pre-pass.",
             spec_keys.len(),
             params.cal_min_spec_keys,
@@ -541,16 +543,18 @@ pub(crate) fn run_precursor_calibration(
     let stats = learn_calibration_stats(&spec_keys, &originals, prepared, params);
 
     if stats.has_reliable_stats() {
-        eprintln!(
-            "Precursor mass shift learned: {:.3} ppm from {} confident PSMs (robust sigma {:.3} ppm; elapsed: {:.2}s)",
+        log::info!(
+            target: "calibration",
+            "shift learned: {:.3} ppm from {} confident PSMs (robust sigma {:.3} ppm; elapsed: {:.2}s)",
             stats.shift_ppm,
             stats.confident_psm_count,
             stats.robust_sigma_ppm,
             t_cal.elapsed().as_secs_f64()
         );
     } else {
-        eprintln!(
-            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
+        log::info!(
+            target: "calibration",
+            "calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
             stats.queues_with_psm,
             stats.rejected_low_score,
             stats.rejected_residual,
@@ -603,8 +607,9 @@ pub(crate) fn detect_dominant_activation(
         other_pairs.sort_by(|a, b| b.1.cmp(&a.1));
         let total: usize = counts.values().sum();
         let dominant_count = counts[&dominant];
-        eprintln!(
-            "Param resolver: mixed activation methods in input ({} different methods \
+        log::warn!(
+            target: "model",
+            "mixed activation methods in input ({} different methods \
              across {} peeked MS2 spectra). The run is routed by the dominant = {} ({}/{}); \
              each scan is scored with the model of its own activation (not with --model or \
              --fragmentation). Other methods present: {}",

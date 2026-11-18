@@ -311,14 +311,14 @@ fn build_targets(
         }
     }
     if no_rt > 0 {
-        log::info!(
+        log::warn!(
             target: "glyco-quant",
             "{no_rt} spectra have no retention time and are not quantified \
              (their XIC anchor would be undefined)"
         );
     }
     if no_glycan > 0 {
-        log::info!(
+        log::warn!(
             target: "glyco-quant",
             "{no_glycan} emitted hits carry no enumerated glycan composition \
              and are not quantified (their intact precursor mass is unknown)"

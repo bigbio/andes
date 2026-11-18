@@ -1756,6 +1756,9 @@ pub(crate) fn finalize_stream(
         100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
         w_models.failed_folds.len()
     );
+    for f in &w_models.failed_folds {
+        log::warn!(target: "mbr", "wrong-peak model fold without a model: {f}");
+    }
     drop(w_rows);
     log::debug!(
         target: "finalize",

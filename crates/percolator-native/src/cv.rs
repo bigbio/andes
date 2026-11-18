@@ -200,6 +200,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
     let fold = folds_by_spectrum(&pin.meta, FOLDS, cfg.seed);
     let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
     let folds: Vec<Fold> = (0..FOLDS)
+        .into_par_iter()
         .map(|f| {
             let (test, train): (Vec<usize>, Vec<usize>) =
                 (0..n).partition(|&i| fold[i] as usize == f);
@@ -286,7 +287,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             cfg.selection_fdr
         };
         let mut sets: Vec<TrainSet> = folds
-            .iter()
+            .par_iter()
             .zip(&train_scores)
             .map(|(fd, s)| train_set(fd, s, fdr))
             .collect();
@@ -432,7 +433,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             }
         }
         let found: usize = folds
-            .iter()
+            .par_iter()
             .zip(&train_scores)
             .map(|(fd, s)| positives(s, &fd.train_decoy, cfg.test_fdr, false))
             .sum();

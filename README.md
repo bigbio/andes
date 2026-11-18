@@ -417,18 +417,19 @@ summed apex, support across cycles). With `--rescore`, Percolator trains at `--t
 andes refines each run's predicted RT on the first pass's confident targets, and Percolator runs
 again. On Orbitrap Astral the fragment tolerance is 7 ppm unless `--fragment-tol-*` is set. With
 `--predict ms2`, the search keeps 50 rows per scan and trims them to `--top-n` by RawScore plus the
-andes-ms2 spectral angle (both z-scored) before the DIA columns.
+andes-ms2 spectral angle (both z-scored) before the DIA columns, and adds summed-spectrum and
+elution-profile columns that score each candidate's predicted fragments over neighbouring cycles.
 
 On the ProteoBench Astral entrapment set OpenDIA uses (two 15-min, 2 Th window runs), at an
 entrapment true FDP of 1% (precursors, mean of 5 Percolator seeds):
 
 | | raw01 | raw02 | wall time per run |
 |---|---:|---:|---|
-| andes `--dia --rescore --predict rt,ms2` | 1,825 | 1,907 | 6.7–7.5 min (14 threads) |
+| andes `--dia --rescore --predict rt,ms2` | 1,928 | 2,050 | 6.7–8.0 min (14 threads) |
 | DIA-NN 2.2, own decoys | 2,067 | 2,301 | 8.8–13.5 min (14 threads) |
 | OpenDIA arm E | 1,694 | 1,628 | |
 
-andes's nominal q ≤ 0.01 measures 0.3% / 0.6% true FDP. The two tools' wall times come from
+andes's nominal q ≤ 0.01 measures 1.1% / 0.8% true FDP. The two tools' wall times come from
 different machines. Commands, every tested variant and the remaining gap to DIA-NN are in
 [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 

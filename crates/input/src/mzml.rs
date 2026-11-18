@@ -522,214 +522,242 @@ impl<R: BufRead> MzMLReader<R> {
     }
 
     fn apply_cv_param(&mut self, cv: CvParamInfo) {
+        let (state, first_ion) = (self.state, self.in_first_selected_ion());
+        let (in_scan, activation) = (
+            matches!(state, State::Scan | State::Spectrum),
+            state == State::Activation,
+        );
+        let (sb, ctx) = (self.current.as_mut(), self.binary_ctx.as_mut());
+        let value = cv.value.as_str();
         match cv.accession.as_str() {
             CV_MS_LEVEL => {
-                if let Ok(lvl) = cv.value.parse::<u32>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.ms_level = Some(lvl);
-                    }
+                if let (Ok(lvl), Some(sb)) = (value.parse::<u32>(), sb) {
+                    sb.ms_level = Some(lvl);
                 }
             }
 
             CV_PROFILE => {
-                if let Some(sb) = self.current.as_mut() {
+                if let Some(sb) = sb {
                     sb.is_profile = true;
                 }
             }
 
-            CV_SCAN_TIME if matches!(self.state, State::Scan | State::Spectrum) => {
-                if let Ok(t) = cv.value.parse::<f64>() {
-                    let secs = if is_minute_unit(&cv.unit_accession, &cv.unit_name) {
-                        t * 60.0
-                    } else {
-                        t
-                    };
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.rt_seconds = Some(secs);
-                    }
+            CV_SCAN_TIME if in_scan => {
+                if let (Ok(t), Some(sb)) = (value.parse::<f64>(), sb) {
+                    let minutes = is_minute_unit(&cv.unit_accession, &cv.unit_name);
+                    sb.rt_seconds = Some(if minutes { t * 60.0 } else { t });
                 }
             }
 
-            CV_SELECTED_ION_MZ if self.in_first_selected_ion() => {
-                if let Ok(mz) = cv.value.parse::<f64>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.precursor_mz = Some(mz);
-                    }
+            CV_SELECTED_ION_MZ if first_ion => {
+                if let (Ok(mz), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.precursor_mz = Some(mz);
                 }
             }
 
-            CV_MZ_PLAIN if self.in_first_selected_ion() => {
-                if let Ok(mz) = cv.value.parse::<f64>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        if sb.precursor_mz.is_none() {
-                            sb.precursor_mz = Some(mz);
+            CV_MZ_PLAIN if first_ion => {
+                if let (Ok(mz), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.precursor_mz.get_or_insert(mz);
+                }
+            }
+
+            CV_CHARGE_STATE if first_ion => {
+                if let (Ok(z), Some(sb)) = (value.parse::<i32>(), sb) {
+                    sb.precursor_charge = model::spectrum::known_precursor_charge(i64::from(z));
+                }
+            }
+
+            CV_PEAK_INTENSITY if first_ion => {
+                if let (Ok(inten), Some(sb)) = (value.parse::<f32>(), sb) {
+                    sb.precursor_intensity = Some(inten);
+                }
+            }
+
+            CV_ISOLATION_LOWER_OFFSET if state == State::IsolationWindow => {
+                if let (Ok(off), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.isolation_lower_offset = Some(off);
+                }
+            }
+            CV_ISOLATION_UPPER_OFFSET if state == State::IsolationWindow => {
+                if let (Ok(off), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.isolation_upper_offset = Some(off);
+                }
+            }
+            CV_ISOLATION_TARGET_MZ if state == State::IsolationWindow => {
+                if let (Ok(mz), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.isolation_target_mz = (mz.is_finite() && mz > 0.0).then_some(mz);
+                }
+            }
+
+            CV_SCAN_WINDOW_LOWER if state == State::Scan => {
+                if let (Ok(v), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.scan_window_lower.get_or_insert(v);
+                }
+            }
+            CV_SCAN_WINDOW_UPPER if state == State::Scan => {
+                if let (Ok(v), Some(sb)) = (value.parse::<f64>(), sb) {
+                    sb.scan_window_upper.get_or_insert(v);
+                }
+            }
+            CV_FILTER_STRING if in_scan => {
+                if let Some(sb) = sb {
+                    sb.filter_supplemental = filter_has_supplemental_collision(value);
+                }
+            }
+            CV_FAIMS_CV if in_scan => {
+                if let (Ok(v), Some(sb)) = (value.parse::<f32>(), sb) {
+                    sb.faims_cv.get_or_insert(v);
+                }
+            }
+
+            CV_CID | CV_TRAP_CID if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_collisional = true;
+                    sb.activation_method.get_or_insert(ActivationMethod::CID);
+                }
+            }
+            CV_HCD | CV_HIGH_ENERGY_BEAM_CID if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_collisional = true;
+                    sb.activation_method.get_or_insert(ActivationMethod::HCD);
+                }
+            }
+            CV_ETD if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_electron = true;
+                    sb.activation_method = Some(ActivationMethod::ETD);
+                }
+            }
+            CV_SUPPLEMENTAL_HCD | CV_SUPPLEMENTAL_CID if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_collisional = true;
+                }
+            }
+            CV_ETHCD | CV_ETCID if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_electron = true;
+                    sb.act_saw_collisional = true;
+                    sb.activation_method = Some(ActivationMethod::ETD);
+                }
+            }
+            CV_ECD if activation => {
+                if let Some(sb) = sb {
+                    sb.act_saw_electron = true;
+                    sb.activation_method.get_or_insert(ActivationMethod::ETD);
+                }
+            }
+            CV_PQD if activation => {
+                if let Some(sb) = sb {
+                    sb.activation_method.get_or_insert(ActivationMethod::PQD);
+                }
+            }
+            CV_UVPD | CV_UVPD_CHILD if activation => {
+                if let Some(sb) = sb {
+                    sb.activation_method.get_or_insert(ActivationMethod::UVPD);
+                }
+            }
+
+            acc if state == State::BinaryDataArray => {
+                let Some(ctx) = ctx else { return };
+                match acc {
+                    CV_MZ_ARRAY => ctx.is_mz = true,
+                    CV_INTENSITY_ARRAY => ctx.is_intensity = true,
+                    CV_NOISE_MZ_ARRAY => ctx.is_noise_mz = true,
+                    CV_NOISE_ARRAY => ctx.is_noise = true,
+                    CV_64BIT => ctx.precision_bits = 64,
+                    CV_32BIT => ctx.precision_bits = 32,
+                    CV_ZLIB | CV_TRUNCATION_ZLIB => ctx.zlib = true,
+                    _ => {
+                        if let Some(&known) =
+                            UNSUPPORTED_COMPRESSION.iter().find(|(a, _)| *a == acc)
+                        {
+                            ctx.unsupported = Some(known);
                         }
                     }
                 }
             }
 
-            CV_CHARGE_STATE if self.in_first_selected_ion() => {
-                if let Ok(z) = cv.value.parse::<i32>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.precursor_charge = model::spectrum::known_precursor_charge(i64::from(z));
-                    }
-                }
-            }
-
-            CV_PEAK_INTENSITY if self.in_first_selected_ion() => {
-                if let Ok(inten) = cv.value.parse::<f32>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.precursor_intensity = Some(inten);
-                    }
-                }
-            }
-
-            CV_ISOLATION_LOWER_OFFSET if self.state == State::IsolationWindow => {
-                if let Ok(off) = cv.value.parse::<f64>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.isolation_lower_offset = Some(off);
-                    }
-                }
-            }
-            CV_ISOLATION_UPPER_OFFSET if self.state == State::IsolationWindow => {
-                if let Ok(off) = cv.value.parse::<f64>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.isolation_upper_offset = Some(off);
-                    }
-                }
-            }
-            CV_ISOLATION_TARGET_MZ if self.state == State::IsolationWindow => {
-                if let Ok(mz) = cv.value.parse::<f64>() {
-                    if let Some(sb) = self.current.as_mut() {
-                        sb.isolation_target_mz = (mz.is_finite() && mz > 0.0).then_some(mz);
-                    }
-                }
-            }
-
-            CV_SCAN_WINDOW_LOWER if self.state == State::Scan => {
-                if let (Ok(v), Some(sb)) = (cv.value.parse::<f64>(), self.current.as_mut()) {
-                    sb.scan_window_lower.get_or_insert(v);
-                }
-            }
-            CV_SCAN_WINDOW_UPPER if self.state == State::Scan => {
-                if let (Ok(v), Some(sb)) = (cv.value.parse::<f64>(), self.current.as_mut()) {
-                    sb.scan_window_upper.get_or_insert(v);
-                }
-            }
-            CV_FILTER_STRING if matches!(self.state, State::Scan | State::Spectrum) => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.filter_supplemental = filter_has_supplemental_collision(&cv.value);
-                }
-            }
-            CV_FAIMS_CV if matches!(self.state, State::Scan | State::Spectrum) => {
-                if let (Ok(v), Some(sb)) = (cv.value.parse::<f32>(), self.current.as_mut()) {
-                    sb.faims_cv.get_or_insert(v);
-                }
-            }
-
-            CV_CID | CV_TRAP_CID if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_collisional = true;
-                    if sb.activation_method.is_none() {
-                        sb.activation_method = Some(ActivationMethod::CID);
-                    }
-                }
-            }
-            CV_HCD | CV_HIGH_ENERGY_BEAM_CID if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_collisional = true;
-                    if sb.activation_method.is_none() {
-                        sb.activation_method = Some(ActivationMethod::HCD);
-                    }
-                }
-            }
-            CV_ETD if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_electron = true;
-                    sb.activation_method = Some(ActivationMethod::ETD);
-                }
-            }
-            CV_SUPPLEMENTAL_HCD | CV_SUPPLEMENTAL_CID if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_collisional = true;
-                }
-            }
-            CV_ETHCD | CV_ETCID if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_electron = true;
-                    sb.act_saw_collisional = true;
-                    sb.activation_method = Some(ActivationMethod::ETD);
-                }
-            }
-            CV_ECD if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    sb.act_saw_electron = true;
-                    if sb.activation_method.is_none() {
-                        sb.activation_method = Some(ActivationMethod::ETD);
-                    }
-                }
-            }
-            CV_PQD if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    if sb.activation_method.is_none() {
-                        sb.activation_method = Some(ActivationMethod::PQD);
-                    }
-                }
-            }
-            CV_UVPD | CV_UVPD_CHILD if self.state == State::Activation => {
-                if let Some(sb) = self.current.as_mut() {
-                    if sb.activation_method.is_none() {
-                        sb.activation_method = Some(ActivationMethod::UVPD);
-                    }
-                }
-            }
-
-            CV_MZ_ARRAY if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.is_mz = true;
-                }
-            }
-            CV_INTENSITY_ARRAY if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.is_intensity = true;
-                }
-            }
-            CV_NOISE_MZ_ARRAY if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.is_noise_mz = true;
-                }
-            }
-            CV_NOISE_ARRAY if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.is_noise = true;
-                }
-            }
-            CV_64BIT if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.precision_bits = 64;
-                }
-            }
-            CV_32BIT if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.precision_bits = 32;
-                }
-            }
-            CV_ZLIB | CV_TRUNCATION_ZLIB if self.state == State::BinaryDataArray => {
-                if let Some(ctx) = self.binary_ctx.as_mut() {
-                    ctx.zlib = true;
-                }
-            }
-            acc if self.state == State::BinaryDataArray => {
-                if let (Some(&known), Some(ctx)) = (
-                    UNSUPPORTED_COMPRESSION.iter().find(|(a, _)| *a == acc),
-                    self.binary_ctx.as_mut(),
-                ) {
-                    ctx.unsupported = Some(known);
-                }
-            }
-
             _ => {}
         }
+    }
+
+    fn end_spectrum(&mut self) -> Result<Option<Spectrum>, MzMLParseError> {
+        self.state = State::Outside;
+        let Some(mut sb) = self.current.take() else {
+            return Ok(None);
+        };
+        if self.capture_run_ms1 && sb.ms_level == Some(1) {
+            let emits_ms1 = self.ms_level_min <= 1 && !self.capture_ms1;
+            let (mz, inten) = if emits_ms1 {
+                (sb.mz_array.clone(), sb.intensity_array.clone())
+            } else {
+                (sb.mz_array.take(), sb.intensity_array.take())
+            };
+            let peaks = Self::build_peaks(mz, inten, sb.is_profile)?;
+            self.run_ms1.push(Ms1Scan {
+                rt: sb.rt_seconds.unwrap_or(0.0),
+                peaks,
+                id: sb.id.clone(),
+                faims_cv: sb.faims_cv,
+                mobility: Vec::new(),
+            });
+            if !emits_ms1 && !self.capture_ms1 {
+                return Ok(None);
+            }
+            if self.capture_ms1 {
+                let last = self.run_ms1.last().expect("just pushed");
+                self.captured_ms1.push(last.peaks.clone());
+                self.ms1_tracker
+                    .push(self.captured_ms1.len() - 1, sb.faims_cv);
+                return Ok(None);
+            }
+        }
+        if self.capture_product_scans && sb.ms_level.unwrap_or(0) >= 3 {
+            let level = sb.ms_level.unwrap_or(3) as u8;
+            let noise = sb.take_noise();
+            let peaks =
+                Self::build_peaks(sb.mz_array.take(), sb.intensity_array.take(), sb.is_profile)?;
+            self.product_scans.push(ProductScan {
+                scan: scan_number(&sb.id, sb.index),
+                id: sb.id,
+                rt_seconds: sb.rt_seconds,
+                ms_level: level,
+                parent_id: sb.parent_ref,
+                precursor_mz: sb
+                    .monoisotopic_mz_override
+                    .or(sb.precursor_mz)
+                    .unwrap_or(0.0),
+                scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
+                peaks,
+                noise,
+            });
+            return Ok(None);
+        }
+        if self.capture_ms1 && sb.ms_level == Some(1) {
+            let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
+            self.captured_ms1.push(peaks);
+            self.ms1_tracker
+                .push(self.captured_ms1.len() - 1, sb.faims_cv);
+            return Ok(None);
+        }
+        let noise = sb.take_noise();
+        let context = self.capture_scan_context.then(|| ScanContext {
+            id: sb.id.clone(),
+            parent_id: sb.parent_ref.clone(),
+            scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
+            faims_cv: sb.faims_cv,
+            noise,
+            ion_mobility: None,
+        });
+        let faims_cv = sb.faims_cv;
+        if let Some(s) = self.finish_spectrum(sb)? {
+            self.last_faims_cv = faims_cv;
+            if let Some(c) = context {
+                self.scan_contexts.push(c);
+            }
+            return Ok(Some(s));
+        }
+        Ok(None)
     }
 
     fn pump(&mut self) -> Result<Option<Spectrum>, MzMLParseError> {
@@ -856,87 +884,8 @@ impl<R: BufRead> MzMLReader<R> {
                     let tag = e.local_name().as_ref().to_owned();
                     match tag.as_slice() {
                         b"spectrum" => {
-                            let sb = self.current.take();
-                            self.state = State::Outside;
-                            if let Some(mut sb) = sb {
-                                if self.capture_run_ms1 && sb.ms_level == Some(1) {
-                                    let emits_ms1 = self.ms_level_min <= 1 && !self.capture_ms1;
-                                    let (mz, inten) = if emits_ms1 {
-                                        (sb.mz_array.clone(), sb.intensity_array.clone())
-                                    } else {
-                                        (sb.mz_array.take(), sb.intensity_array.take())
-                                    };
-                                    let peaks = Self::build_peaks(mz, inten, sb.is_profile)?;
-                                    self.run_ms1.push(Ms1Scan {
-                                        rt: sb.rt_seconds.unwrap_or(0.0),
-                                        peaks,
-                                        id: sb.id.clone(),
-                                        faims_cv: sb.faims_cv,
-                                        mobility: Vec::new(),
-                                    });
-                                    if !emits_ms1 && !self.capture_ms1 {
-                                        continue;
-                                    }
-                                    if self.capture_ms1 {
-                                        let last = self.run_ms1.last().expect("just pushed");
-                                        self.captured_ms1.push(last.peaks.clone());
-                                        self.ms1_tracker
-                                            .push(self.captured_ms1.len() - 1, sb.faims_cv);
-                                        continue;
-                                    }
-                                }
-                                if self.capture_product_scans && sb.ms_level.unwrap_or(0) >= 3 {
-                                    let level = sb.ms_level.unwrap_or(3) as u8;
-                                    let noise = sb.take_noise();
-                                    let peaks = Self::build_peaks(
-                                        sb.mz_array.take(),
-                                        sb.intensity_array.take(),
-                                        sb.is_profile,
-                                    )?;
-                                    self.product_scans.push(ProductScan {
-                                        scan: scan_number(&sb.id, sb.index),
-                                        id: sb.id,
-                                        rt_seconds: sb.rt_seconds,
-                                        ms_level: level,
-                                        parent_id: sb.parent_ref,
-                                        precursor_mz: sb
-                                            .monoisotopic_mz_override
-                                            .or(sb.precursor_mz)
-                                            .unwrap_or(0.0),
-                                        scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
-                                        peaks,
-                                        noise,
-                                    });
-                                    continue;
-                                }
-                                if self.capture_ms1 && sb.ms_level == Some(1) {
-                                    let peaks = Self::build_peaks(
-                                        sb.mz_array,
-                                        sb.intensity_array,
-                                        sb.is_profile,
-                                    )?;
-                                    self.captured_ms1.push(peaks);
-                                    self.ms1_tracker
-                                        .push(self.captured_ms1.len() - 1, sb.faims_cv);
-                                    continue;
-                                }
-                                let noise = sb.take_noise();
-                                let context = self.capture_scan_context.then(|| ScanContext {
-                                    id: sb.id.clone(),
-                                    parent_id: sb.parent_ref.clone(),
-                                    scan_window: sb.scan_window_lower.zip(sb.scan_window_upper),
-                                    faims_cv: sb.faims_cv,
-                                    noise,
-                                    ion_mobility: None,
-                                });
-                                let faims_cv = sb.faims_cv;
-                                if let Some(s) = self.finish_spectrum(sb)? {
-                                    self.last_faims_cv = faims_cv;
-                                    if let Some(c) = context {
-                                        self.scan_contexts.push(c);
-                                    }
-                                    return Ok(Some(s));
-                                }
+                            if let Some(s) = self.end_spectrum()? {
+                                return Ok(Some(s));
                             }
                         }
                         b"scan" if self.state == State::Scan => {
@@ -1636,11 +1585,7 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         S::Spectrum => {
                             if acc == CV_MS_LEVEL {
                                 let val = attr_str(e, b"value").unwrap_or_default();
-                                if val == "2" {
-                                    current_spec_is_ms2 = Some(true);
-                                } else {
-                                    current_spec_is_ms2 = Some(false);
-                                }
+                                current_spec_is_ms2 = Some(val == "2");
                             }
                         }
                         _ => {}

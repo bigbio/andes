@@ -10,5 +10,6 @@
 ## Task guides
 
 Detailed guides for bug prevention, logging, command-line reports, performance, open-data
-models, citations, FDR validation, benchmarks and mass-spectrometry correctness are in
+models, citations, FDR validation, benchmarks, mass-spectrometry correctness, parameters
+and constants, and CLI flags instead of environment variables are in
 `.claude/skills/<name>/SKILL.md`. Read the relevant one before starting a task.

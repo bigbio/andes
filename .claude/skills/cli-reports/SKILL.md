@@ -43,8 +43,9 @@ Output     run1.pin
 - Do not print raw-score statistics a user cannot act on; keep those in statistics.log.
 - A mode (open search, DIA, glyco, xl, quant) adds its own section; it does not change the
   shape of the shared sections.
-- Machine-readable output belongs in files (PIN, QPX, parquet, TSV), never parsed from the
-  log. If a script needs a number, write it to a file.
+- Machine-readable output belongs in files, never parsed from the log. If a script needs a
+  number, write it to a file. A new output or intermediate file is versioned Parquet, not
+  TSV; PIN and Percolator files keep their formats.
 
 ## --help
 

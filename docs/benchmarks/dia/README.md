@@ -37,7 +37,7 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 | andes `--dia --rescore` (+ 7 ppm fragments), mean of 5 seeds | 1589 / 1755 | 0.004 / 0.009 | 0.043 / 0.050 | 1801 / 1819 (1733–1828 / 1748–1882) | 1964 / 1962 |
 | andes `--dia --rescore`, current (main's UNIMOD masses), mean of 5 seeds | 1606 / 1747 | 0.003 / 0.007 | 0.044 / 0.045 | 1800 / 1821 (1740–1838 / 1791–1853) | 1909 / 1953 |
 | andes `--dia --rescore`, + 50-row pool re-ranked by RawScore + andes-ms2 angle, mean of 5 seeds | 1510 / 1791 | 0.003 / 0.006 | 0.047 / 0.046 | 1825 / 1907 (1753–1870 / 1888–1938) | 2029 / 2051 |
-| andes `--dia --rescore`, + summed-spectrum and interference-aware columns, mean of 5 seeds | 1945 / 2033 | 0.010 / 0.007 | 0.053 / 0.050 | **1948 / 2084** (1901–1969 / 2067–2096) | 2099 / 2241 |
+| andes `--dia --rescore`, + summed-spectrum and interference-aware columns, mean of 5 seeds | 1939 / 2000 | 0.011 / 0.008 | 0.048 / 0.049 | **1928 / 2050** (1898–1953 / 2018–2088) | 2096 / 2238 |
 | andes `--dia`, no MS1 gate | 1425 / 1465 | 0.008 / 0.004 | 0.032 / 0.040 | 1489 / 1569 | 1662 / 1731 |
 | DIA-NN 2.2, own decoys | 2361 / 2322 | 0.014 / 0.010 | 0.060 / 0.060 | 2067 / 2301 | 2522 / 2543 |
 | OpenDIA arm E (from its RESULT.md) | 1667 / 1457 | 0.010 / 0.007 | | 1694 / 1628 | 1908 / 1903 |
@@ -55,8 +55,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
 - **Ranking**: at a matched true FDP of 1 %, andes reaches 75 % (raw01) and 72 % (raw02) of DIA-NN
   with seed 42, 72 % / 69 % on the seed mean, and 87 % / 79 % with `--trainFDR 0.05`, the
   summed-apex columns, the two-pass RT refinement and 7 ppm fragments, and 88 % / 83 % with per-scan
-  re-ranking, and 94 % / 91 % with the summed-spectrum and interference-aware columns; it is above
-  OpenDIA arm E (115 % / 128 %).
+  re-ranking, and 93 % / 89 % with the summed-spectrum and interference-aware columns; it is above
+  OpenDIA arm E (114 % / 126 %).
 - **Modification masses.** main now reads modification masses from UNIMOD (Oxidation 15.994915,
   Carbamidomethyl 57.021464, against 15.99491 / 57.02146 in the `mods.txt` the earlier rows used).
   The PIN then writes oxidation as `+15.99492`, which `eval_dia.py` now maps to UniMod:35 as well
@@ -116,8 +116,10 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   profile, the share that correlates at ≥ 0.6, and the spectral angle of each fragment's
   baseline-corrected projection on that profile (`dia_pf_corr`, `dia_pf_clean`, `dia_proj_angle`),
   which discounts a fragment whose trace is flat background or does not follow the peak. Mean of 5
-  seeds, N@FDP_c 1 %: 1948 / 2084 against 1825 / 1907, higher on every seed (+46 to +186 / +129 to
-  +208). q ≤ 0.01 measures 0.8–1.2 % / 0.7–0.8 % true FDP (seed 42 on raw01 at 1.2 %). Separately:
+  seeds, N@FDP_c 1 %: 1928 / 2050 against 1825 / 1907, higher on every seed (+43 to +183 / +121 to
+  +189). q ≤ 0.01 measures 0.9–1.2 % / 0.7–1.0 % true FDP (seed 42 on raw01 at 1.2 %). The first
+  version, which centred the sum on the row's scan and took the upper middle value as the median of
+  an even number of fragments, gave 1948 / 2084. Separately (first version):
   the summed-spectrum pair alone 1872 / 2062, the profile trio alone 1942 / 2040. Per raw file at
   14 threads, the prediction stage goes from 22 to 27–30 s; search, prediction, PIN and DIA columns
   together stay at about 2 min of a 6.7–8.0 min wall time; peak memory 16 GB.

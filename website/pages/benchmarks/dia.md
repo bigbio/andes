@@ -23,12 +23,12 @@ tool calibrates its q-values. The andes bars are the mean of five Percolator see
 
 | | raw01 | raw02 | at 2% true FDP | nominal q ≤ 0.01 | its true FDP |
 |---|---:|---:|---:|---:|---:|
-| andes `--dia` | 1,948 | 2,084 | 2,099 / 2,241 | 1,945 / 2,033 | 1.0% / 0.7% |
+| andes `--dia` | 1,928 | 2,050 | 2,096 / 2,238 | 1,939 / 2,000 | 1.1% / 0.8% |
 | DIA-NN 2.2 | 2,067 | 2,301 | 2,522 / 2,543 | 2,361 / 2,322 | 1.4% / 1.0% |
 | OpenDIA arm E | 1,694 | 1,628 | 1,908 / 1,903 | 1,667 / 1,457 | 1.0% / 0.7% |
 
-andes reaches 94% / 91% of DIA-NN and 115% / 128% of OpenDIA arm E. Its nominal 1% holds on
-average (0.8–1.2% and 0.7–0.8% over the seeds).
+andes reaches 93% / 89% of DIA-NN and 114% / 126% of OpenDIA arm E. Its nominal 1% holds on
+average (0.9–1.2% and 0.7–1.0% over the seeds).
 
 ## Time
 

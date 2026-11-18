@@ -425,11 +425,11 @@ entrapment true FDP of 1% (precursors, mean of 5 Percolator seeds):
 
 | | raw01 | raw02 | wall time per run |
 |---|---:|---:|---|
-| andes `--dia --rescore --predict rt,ms2` | 1,948 | 2,084 | 6.7–8.0 min (14 threads) |
+| andes `--dia --rescore --predict rt,ms2` | 1,928 | 2,050 | 6.7–8.0 min (14 threads) |
 | DIA-NN 2.2, own decoys | 2,067 | 2,301 | 8.8–13.5 min (14 threads) |
 | OpenDIA arm E | 1,694 | 1,628 | |
 
-andes's nominal q ≤ 0.01 measures 1.0% / 0.7% true FDP. The two tools' wall times come from
+andes's nominal q ≤ 0.01 measures 1.1% / 0.8% true FDP. The two tools' wall times come from
 different machines. Commands, every tested variant and the remaining gap to DIA-NN are in
 [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 

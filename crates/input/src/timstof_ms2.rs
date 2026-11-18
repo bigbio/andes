@@ -22,6 +22,7 @@ pub(crate) struct PasefPrecursor {
     pub isolation_width: f64,
     pub collision_energy: f64,
     pub selections: Vec<Selection>,
+    pub dia: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,18 +63,97 @@ pub(crate) fn read_frame_rows(
     Ok(out)
 }
 
+fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+}
+
+type DiaWindow = (usize, usize, f64, f64, f64);
+
+pub(crate) fn read_dia_windows(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<PasefPrecursor>, rusqlite::Error> {
+    if !has_table(conn, "DiaFrameMsMsInfo")? || !has_table(conn, "DiaFrameMsMsWindows")? {
+        return Ok(Vec::new());
+    }
+    let mut groups: HashMap<i64, Vec<DiaWindow>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT WindowGroup, ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth, \
+         CollisionEnergy FROM DiaFrameMsMsWindows ORDER BY WindowGroup, ScanNumBegin",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Option<f64>>(3)?,
+            r.get::<_, Option<f64>>(4)?,
+            r.get::<_, Option<f64>>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (group, begin, end, mz, width, energy) = row?;
+        let mz = mz.filter(|m| m.is_finite() && *m > 0.0);
+        if let (Some(mz), true) = (mz, begin >= 0 && end > begin) {
+            groups.entry(group).or_default().push((
+                begin as usize,
+                end as usize,
+                mz,
+                width.unwrap_or(0.0),
+                energy.unwrap_or(0.0),
+            ));
+        }
+    }
+    let mut parent_of: HashMap<i64, usize> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT Id, MsMsType FROM Frames ORDER BY Id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut last_ms1: Option<usize> = None;
+    for row in rows {
+        let (id, kind) = row?;
+        if kind == Some(0) {
+            last_ms1 = Some(id as usize);
+        } else if let Some(p) = last_ms1 {
+            parent_of.insert(id, p);
+        }
+    }
+    let mut out = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT Frame, WindowGroup FROM DiaFrameMsMsInfo ORDER BY Frame")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (frame, group) = row?;
+        for &(begin, end, mz, width, energy) in groups.get(&group).into_iter().flatten() {
+            out.push(PasefPrecursor {
+                id: out.len() + 1,
+                mz,
+                charge: None,
+                intensity: None,
+                parent: parent_of.get(&frame).copied(),
+                scan_number: Some((begin + end) as f64 / 2.0),
+                isolation_width: width,
+                collision_energy: energy,
+                selections: vec![Selection {
+                    frame_id: frame as usize,
+                    scan_begin: begin,
+                    scan_end: end,
+                }],
+                dia: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn read_pasef_precursors(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<PasefPrecursor>, rusqlite::Error> {
-    let has_table = |name: &str| -> Result<bool, rusqlite::Error> {
-        conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-    };
-    if !has_table("Precursors")? || !has_table("PasefFrameMsMsInfo")? {
+    if !has_table(conn, "Precursors")? || !has_table(conn, "PasefFrameMsMsInfo")? {
         return Ok(Vec::new());
     }
     let mut by_id: HashMap<usize, PasefPrecursor> = HashMap::new();
@@ -112,6 +192,7 @@ pub(crate) fn read_pasef_precursors(
                 isolation_width: 0.0,
                 collision_energy: 0.0,
                 selections: Vec::new(),
+                dia: false,
             },
         );
     }
@@ -273,6 +354,51 @@ mod tests {
         assert!(read_pasef_precursors(&conn).unwrap().is_empty());
         let frames = read_frame_rows(&conn).unwrap();
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn dia_windows_expand_to_one_precursor_per_frame_and_window() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Frames (Id INTEGER, Time REAL, NumPeaks INTEGER, MsMsType INTEGER);
+             INSERT INTO Frames VALUES (1, 0.1, 10, 0), (2, 0.2, 10, 9), (3, 0.3, 10, 9),
+               (4, 0.4, 10, 0), (5, 0.5, 10, 9);
+             CREATE TABLE DiaFrameMsMsInfo (Frame INTEGER, WindowGroup INTEGER);
+             INSERT INTO DiaFrameMsMsInfo VALUES (2, 1), (3, 2), (5, 1);
+             CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, \
+               ScanNumEnd INTEGER, IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL);
+             INSERT INTO DiaFrameMsMsWindows VALUES (1, 400, 600, 745.0, 45.0, 40.0),
+               (1, 100, 300, 417.0, 35.0, 25.0), (2, 100, 300, 452.0, 37.0, 26.0);",
+        )
+        .unwrap();
+        assert!(read_pasef_precursors(&conn).unwrap().is_empty());
+        let w = read_dia_windows(&conn).unwrap();
+        let got: Vec<(usize, f64, Option<usize>, usize)> = w
+            .iter()
+            .map(|p| {
+                (
+                    p.selections[0].frame_id,
+                    p.mz,
+                    p.parent,
+                    p.selections[0].scan_begin,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (2, 417.0, Some(1), 100),
+                (2, 745.0, Some(1), 400),
+                (3, 452.0, Some(1), 100),
+                (5, 417.0, Some(4), 100),
+                (5, 745.0, Some(4), 400),
+            ]
+        );
+        assert!(w.iter().all(|p| p.dia && p.charge.is_none()));
+        assert_eq!(w[1].isolation_width, 45.0);
+        assert_eq!(w[1].collision_energy, 40.0);
+        let ids: Vec<usize> = w.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]

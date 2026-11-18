@@ -788,8 +788,11 @@ pub(super) fn resolve_search_params(
     }
     params.chimeric = chimeric_active;
     if cli.dia {
-        if !(is_mzml || is_raw) {
-            return Err("--dia needs mzML or Thermo .raw input (isolation windows and MS1)".into());
+        if !(is_mzml || is_raw || is_d) {
+            return Err(
+                "--dia needs mzML, Thermo .raw or Bruker .d input (isolation windows and MS1)"
+                    .into(),
+            );
         }
         params.dia = true;
     }

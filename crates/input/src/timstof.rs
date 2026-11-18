@@ -15,7 +15,8 @@ use crate::timstof_ms1::{
     WIDE_WINDOW_PPM,
 };
 use crate::timstof_ms2::{
-    ms2_peaks, push_scans, read_frame_rows, read_pasef_precursors, FrameRow, PasefPrecursor,
+    ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors, FrameRow,
+    PasefPrecursor,
 };
 use crate::{Ms1Link, Spectrum};
 
@@ -118,7 +119,13 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         }
     }
     let mut precursor_peaks: HashMap<usize, Vec<f64>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
+    let Ok(mut stmt) = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")
+    else {
+        return Ok(TdfTables {
+            temperatures,
+            precursor_peaks,
+        });
+    };
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, Option<i64>>(0)?,
@@ -422,7 +429,10 @@ impl Ms2Source {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(tables_err)?;
-        let precursors = read_pasef_precursors(&conn).map_err(tables_err)?;
+        let mut precursors = read_pasef_precursors(&conn).map_err(tables_err)?;
+        if precursors.is_empty() {
+            precursors = read_dia_windows(&conn).map_err(tables_err)?;
+        }
         let rows = read_frame_rows(&conn).map_err(tables_err)?;
         let mut positions = HashMap::with_capacity(frames.len());
         for pos in 0..frames.len() {
@@ -517,6 +527,7 @@ impl Ms2Source {
         }
         let parent_rt = p
             .parent
+            .filter(|_| !p.dia)
             .and_then(|id| self.rows.get(&id))
             .map(|r| r.time)
             .filter(|t| t.is_finite());
@@ -574,7 +585,7 @@ fn to_spectrum(
         activation_method: None,
         isolation_lower_offset,
         isolation_upper_offset,
-        isolation_target_mz: None,
+        isolation_target_mz: p.dia.then_some(p.mz),
     })
 }
 
@@ -897,6 +908,7 @@ mod tests {
                 scan_begin: 690,
                 scan_end: 715,
             }],
+            dia: false,
         }
     }
 

@@ -2,12 +2,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
+use andes_xl::crosslinker::Crosslinker;
 use andes_xl::crosslinker::{LinkForm, MAX_STUBS};
 use andes_xl::decoy::PairClass;
 use andes_xl::fdr::ClassCounts;
 use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item, LinkClass};
 use model::Spectrum;
 use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
+
+pub(crate) struct XlRun {
+    pub linker: Crosslinker,
+    pub table: XlCandidates,
+}
 use search::PreparedSearch;
 
 const FEATURES: [&str; 46] = [
@@ -168,11 +174,10 @@ pub(crate) fn write_xl_pin(
     path: &Path,
     spectra: &[Spectrum],
     results: &[XlSpectrumResult],
-    table: &XlCandidates,
+    runs: &[XlRun],
     prepared: &PreparedSearch,
     run_of: &dyn Fn(usize) -> String,
     intra: Option<bool>,
-    linker_mass: f64,
 ) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut head: Vec<&str> = vec![
@@ -188,10 +193,12 @@ pub(crate) fn write_xl_pin(
             continue;
         }
         let spec = &spectra[r.spec_idx];
+        let run = &runs[r.linker];
+        let table = &run.table;
         let pa = &table.peptides()[c.alpha.pep as usize];
         let pb = &table.peptides()[c.beta.pep as usize];
         let label = if c.class == PairClass::TT { 1 } else { -1 };
-        let calc = pa.peptide.mass() + pb.peptide.mass() + linker_mass;
+        let calc = pa.peptide.mass() + pb.peptide.mass() + run.linker.intact;
         let f = features(r, c, table);
         debug_assert_eq!(f.len(), FEATURES.len());
         let bare = |p: &XlPeptide| String::from_utf8_lossy(&p.bare()).into_owned();
@@ -314,7 +321,7 @@ pub(crate) struct Levels {
 pub(crate) fn roll_up(
     results: &[XlSpectrumResult],
     score: &[Option<f64>],
-    table: &XlCandidates,
+    runs: &[XlRun],
     prepared: &PreparedSearch,
 ) -> Levels {
     let mut csm_items = Vec::new();
@@ -324,6 +331,7 @@ pub(crate) fn roll_up(
         let (Some(c), Some(s)) = (&r.csm, s) else {
             continue;
         };
+        let table = &runs[r.linker].table;
         csm_items.push(Item {
             key: pair_key(
                 rp_side(&c.alpha, table, prepared),

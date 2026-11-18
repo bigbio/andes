@@ -336,7 +336,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut cli = cli;
     if let Some(x) = &cli.xl {
-        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), x) {
+        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0) {
             cli.db.variable_mods = Some(v);
         }
     }
@@ -779,9 +779,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut scorer = RankScorer::new(&param);
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
+    let dia_tol_default = cli.dia
+        && acquisition.analyzer == Some(InstrumentType::OrbitrapAstral)
+        && cli.fragment_tol_ppm.is_none()
+        && cli.fragment_tol_da.is_none();
+    if dia_tol_default {
+        cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
+        eprintln!(
+            "--dia: fragment tolerance {} ppm (Orbitrap Astral MS2)",
+            crate::dia::FRAGMENT_TOL_PPM
+        );
+    }
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
-        if instrument_was_detected {
+        if instrument_was_detected && !dia_tol_default {
             eprintln!(
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())
@@ -832,6 +843,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
+    if cli.dia {
+        if !(is_mzml || is_raw) {
+            return Err("--dia needs mzML or Thermo .raw input (isolation windows and MS1)".into());
+        }
+        if chimeric_active {
+            return Err("--dia and --chimeric cannot be combined: --dia searches every scan across its whole window".into());
+        }
+        if cli.open_search {
+            return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
+        }
+        if cli.refine {
+            return Err("--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into());
+        }
+        if cli.glyco {
+            return Err("--dia and --glyco cannot be combined: the glycopeptide search has no isolation-window or MS1 gate".into());
+        }
+        if cli.xl.is_some() {
+            return Err("--dia and --xl cannot be combined: the cross-link search has no isolation-window or MS1 gate".into());
+        }
+        params.dia = true;
+    }
     if cli.glyco_index_sequon_only && !cli.glyco {
         return Err(
             "--glyco-index-sequon-only requires --glyco (the standard peptide \
@@ -876,6 +908,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
     params.top_n_psms_per_spectrum = cli.top_n;
+    if cli.dia && cli.predict.contains(&crate::cli::PredictFeature::Ms2) {
+        params.top_n_psms_per_spectrum = cli.top_n.max(crate::dia::RERANK_POOL);
+    }
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -956,6 +991,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
+        eprintln!(
+            "WARN: --precursor-cal is ignored under --dia (a DIA scan has no selected precursor)"
+        );
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+    }
     if let Some(n) = cli.cal_min_spec_keys {
         params.cal_min_spec_keys = n;
     }
@@ -1575,11 +1616,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Predict: {}", p.describe());
     }
     let keep_peaks = cli.refine
+        || cli.dia
         || cli.localize.is_some()
         || predictors.as_ref().is_some_and(|p| p.needs_peaks());
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
+    let mut dia_ms1: Vec<Vec<model::scan::Ms1Scan>> = Vec::new();
 
     let t_search_start = std::time::Instant::now();
 
@@ -1595,6 +1638,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted;
 
+    let mut xl_snapped = 0usize;
+    let mut xl_snap_files = 0usize;
     let ms1_input = chimeric_active || mono_active;
     let mut parse_stats = ParseStats::default();
     let mut mono_table: Vec<Option<MonoCorrection>> = Vec::new();
@@ -1646,7 +1691,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if ms1_input && !(file_is_mzml || file_is_raw || file_is_d) {
+        let file_ms1 = file_is_mzml || file_is_raw || file_is_d;
+        let file_snap =
+            xl_precursor_snap(cli.xl.is_some(), cli.ms_level, file_is_mzml, file_is_raw);
+        xl_snap_files += usize::from(file_snap);
+        // This file reads its MS1 scans with its MS2 scans.
+        let file_linked = (ms1_input && file_ms1) || file_snap;
+        if (chimeric_active || mono_active) && !file_ms1 {
             return Err(format!(
                 "{} only supports mzML/.raw/.d inputs, got {}",
                 if chimeric_active {
@@ -1661,7 +1712,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let spectra_before = all_spectra.len();
         let mut run_scans = RunScans::default();
-        let file_stats = if ms1_input {
+        let file_stats = if file_linked {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
             let cap = remaining_cap;
@@ -1782,6 +1833,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk_spectra, prefix);
+                }
+                if file_snap {
+                    for (i, spec) in chunk_spectra.iter_mut().enumerate() {
+                        let ms1 = chunk_link
+                            .ms2_to_ms1
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .and_then(|m| chunk_link.ms1_peaks.get(m));
+                        if let Some(mz) = ms1.and_then(|p| {
+                            search::precursor_mono::snap_precursor_mz(
+                                p,
+                                spec.precursor_mz,
+                                search::xl_search::PRECURSOR_SNAP_PPM,
+                                search::xl_search::PRECURSOR_SNAP_RATIO,
+                            )
+                        }) {
+                            spec.precursor_mz = mz;
+                            xl_snapped += 1;
+                        }
+                    }
                 }
                 if mono_active {
                     correct_chunk(
@@ -1915,6 +1987,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if params.fragment_index_top_k > 0
             && !standalone
+            && !cli.dia
             && file_is_mzml
             && !is_gzip_path(input_path)
             && !quant
@@ -1946,7 +2019,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
-            let capture_ms1 = quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
+            let capture_ms1 = cli.dia || quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
             let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
@@ -2034,7 +2107,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
 
-            let mass_ordered = params.fragment_index_top_k > 0 && !standalone;
+            let mass_ordered = (params.fragment_index_top_k > 0 || cli.dia) && !standalone;
             let mut pending: Vec<Spectrum> = Vec::new();
             for mut chunk in rx {
                 if chunk.is_empty() {
@@ -2064,6 +2137,31 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 report_search_progress(all_spectra.len(), t_search_start);
             }
+            let stats = match parser_handle.join() {
+                Ok(Ok((stats, scans))) => {
+                    run_scans = scans;
+                    stats
+                }
+                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+                Err(_) => return Err("parser thread panicked".into()),
+            };
+            if cli.dia && mass_ordered {
+                if run_scans.ms1.is_empty() {
+                    return Err(format!(
+                        "--dia needs MS1 survey scans, and {} has none",
+                        input_path.display()
+                    )
+                    .into());
+                }
+                for s in &mut pending {
+                    s.precursor_charge = None;
+                }
+                prepared.set_dia_ms1(if quant.is_some() {
+                    run_scans.ms1.clone()
+                } else {
+                    std::mem::take(&mut run_scans.ms1)
+                });
+            }
             if mass_ordered {
                 score_mass_ordered(
                     &prepared,
@@ -2077,23 +2175,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &mut measurer,
                 );
             }
-
-            match parser_handle.join() {
-                Ok(Ok((stats, scans))) => {
-                    run_scans = scans;
-                    stats
-                }
-                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-                Err(_) => return Err("parser thread panicked".into()),
-            }
+            stats
         };
         require_spectra(
             input_path,
-            if ms1_input { 2 } else { cli.ms_level },
+            if file_linked { 2 } else { cli.ms_level },
             all_spectra.len() - spectra_before,
         )
         .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
         merge_parse_stats(&mut parse_stats, file_stats);
+        if cli.dia {
+            let gated = prepared.take_dia_ms1();
+            dia_ms1.push(if !gated.is_empty() {
+                gated
+            } else if quant.is_some() {
+                run_scans.ms1.clone()
+            } else {
+                std::mem::take(&mut run_scans.ms1)
+            });
+        }
         if let Some(q) = quant.as_mut() {
             q.finish_file(
                 input_path,
@@ -2270,6 +2370,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.xl.is_some() {
+        if xl_snap_files > 0 {
+            eprintln!(
+                "[xl] {xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
+                search::xl_search::PRECURSOR_SNAP_PPM
+            );
+        }
         crate::xl_run::run_xl(
             &cli,
             &spectra,
@@ -2395,6 +2501,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
+    let mut rerank_dropped = std::collections::HashSet::new();
+    if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
+        rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+    }
+    if cli.dia {
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+    }
     if cli.refine {
         if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
@@ -2451,16 +2564,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("{e}"))?
             };
             eprintln!("Rescore: Percolator backend = {}", backend.describe());
-            let user_args: Vec<String> = cli
+            let mut user_args: Vec<String> = cli
                 .percolator_args
                 .split_whitespace()
                 .map(|s| s.to_string())
                 .collect();
+            if cli.dia {
+                crate::dia::default_train_fdr(&mut user_args);
+            }
             let extra = output::percolator_args_with_threads(&user_args, cli.threads);
             let t_resc = std::time::Instant::now();
-            let (map, decoys) =
+            let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
+            if cli.dia
+                && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
+                    map.get(id).is_some_and(|p| p.q_value <= 0.01)
+                })?
+            {
+                (map, decoys) =
+                    output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("{e}"))?;
+            }
             rescore_decoys = Some(decoys);
             eprintln!(
                 "Rescore: Percolator produced {} target PSMs [{:.2}s]",
@@ -2474,8 +2599,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if has_site_claims {
                 row_scores = Some(
-                    output::score_all_rows(&backend, &output_pin_path, &extra)
-                        .map_err(|e| format!("scoring every PIN row for the site posteriors: {e}"))?,
+                    output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {
+                        format!("scoring every PIN row for the site posteriors: {e}")
+                    })?,
                 );
             }
             if cli.mbr {
@@ -2733,6 +2859,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
     let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
+    let mut open_search_summary: Option<String> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
@@ -2778,6 +2905,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }
+        if cli.open_search {
+            open_search_summary = write_open_offsets(
+                &output_pin_path,
+                dir,
+                &stem,
+                &accepted,
+                &rescore_decoy_psms,
+            );
+        }
         identified = Some((accepted, pep_note));
     }
 
@@ -2789,7 +2925,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &scorer.pin_match_tolerance(),
         &scorer.node_score_window(),
     );
-    let id_summary = identified.as_ref().map(|(accepted, cut_note)| {
+    let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
         let facts = output::psm_facts(
@@ -2843,6 +2979,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     });
+    if let Some(summary) = id_summary.as_mut() {
+        summary.open_search = open_search_summary.take();
+    }
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));
     let stats_path = {
         let stem = report_base
@@ -2857,6 +2996,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
+    knockoff_rows.extend(rerank_dropped);
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()
@@ -2893,17 +3033,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let omitted_psms = match (&quant, rescore_map.as_ref()) {
-        (Some(_), Some(map)) => output::omitted_psm_rows(
+    let omitted_psms = match &quant {
+        Some(_) => output::omitted_psm_rows(
             &spectra,
             &queues,
             &pin_candidates,
-            Some(map),
+            rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
         )
         .map_err(|e| format!("quant: {e}"))?,
-        _ => std::collections::HashSet::new(),
+        None => std::collections::HashSet::new(),
     };
     if let Some(ref mut map) = rescore_map {
         map.retain(|id, _| !knockoff_rows.contains(id));
@@ -3284,6 +3424,54 @@ fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
     std::mem::forget(candidates);
 }
 
+fn write_open_offsets(
+    pin: &Path,
+    dir: &Path,
+    stem: &str,
+    accepted: &[&output::PercolatorPsm],
+    decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
+) -> Option<String> {
+    let report = match output::open_offsets::report_from_results(
+        pin,
+        accepted,
+        decoys,
+        model::unimod::bundled(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("WARN: open-search offset report not written: {e}");
+            return None;
+        }
+    };
+    let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
+    let psms_path = dir.join(format!("{stem}.open_psms.parquet"));
+    let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
+        .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
+    if let Err(e) = written {
+        for stale in [&peaks_path, &psms_path] {
+            if let Err(r) = std::fs::remove_file(stale) {
+                if r.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("WARN: could not remove {}: {r}", stale.display());
+                }
+            }
+        }
+        eprintln!(
+            "WARN: open-search report not written ({e}); neither {} nor {} is left",
+            peaks_path.display(),
+            psms_path.display()
+        );
+        return None;
+    }
+    eprintln!(
+        "Wrote open-search report: {} ({} offset peaks) and {} ({} PSMs)",
+        peaks_path.display(),
+        report.peaks.len(),
+        psms_path.display(),
+        report.assignments.len()
+    );
+    Some(output::open_offsets::summary_block(&report))
+}
+
 pub(crate) fn write_filtered_tsv(
     path: &Path,
     psms: &[&output::PercolatorPsm],
@@ -3345,6 +3533,43 @@ fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
         }
         quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
+    }
+}
+
+/// Whether a crosslink search moves this file's precursor m/z values to the dominant MS1 peak
+/// (`search::xl_search::PRECURSOR_SNAP_PPM`): an MS2 search of a file that carries its MS1
+/// scans (mzML, Thermo `.raw`). Decided per file, so the order of the inputs does not matter.
+pub(crate) fn xl_precursor_snap(
+    xl: bool,
+    ms_level: u8,
+    file_is_mzml: bool,
+    file_is_raw: bool,
+) -> bool {
+    xl && ms_level == 2 && (file_is_mzml || file_is_raw)
+}
+
+#[cfg(test)]
+mod xl_snap_tests {
+    use super::xl_precursor_snap;
+
+    #[test]
+    fn the_precursor_snap_is_decided_per_file_for_ms2_crosslink_searches() {
+        // An MGF next to an mzML: each file decides alone, whatever the input order.
+        let files = [(false, false), (true, false), (false, true)];
+        let got: Vec<bool> = files
+            .iter()
+            .map(|&(m, r)| xl_precursor_snap(true, 2, m, r))
+            .collect();
+        assert_eq!(got, [false, true, true]);
+        let reversed: Vec<bool> = files
+            .iter()
+            .rev()
+            .map(|&(m, r)| xl_precursor_snap(true, 2, m, r))
+            .collect();
+        assert_eq!(reversed, [true, true, false]);
+        // An MS3 search keeps its own reader; no crosslink search, no snap.
+        assert!(!xl_precursor_snap(true, 3, true, false));
+        assert!(!xl_precursor_snap(false, 2, true, false));
     }
 }
 

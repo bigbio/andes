@@ -208,7 +208,7 @@ impl ThermoRawReader {
         let mut chunk: Vec<Spectrum> = Vec::new();
         let mut ms1_peaks: Vec<Vec<(f64, f32)>> = Vec::new();
         let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
-        let mut current_ms1: Option<usize> = None;
+        let mut tracker = crate::ms1_link::Ms1Tracker::default();
         let mut emitted_ms2 = 0usize;
         let mut skipped_higher_ms = 0usize;
 
@@ -234,7 +234,7 @@ impl ThermoRawReader {
                         });
                     }
                     ms1_peaks.push(peaks);
-                    current_ms1 = Some(idx);
+                    tracker.push(idx, faims_cv(&raw));
                 }
                 level if level >= 3 => {
                     skipped_higher_ms += 1;
@@ -256,19 +256,22 @@ impl ThermoRawReader {
                         });
                     }
                     chunk.push(spec);
-                    ms2_to_ms1.push(current_ms1);
+                    ms2_to_ms1.push(tracker.link(faims_cv(&raw)));
                     emitted_ms2 += 1;
                     if chunk.len() >= chunk_size {
-                        let carry = current_ms1.map(|idx| ms1_peaks[idx].clone());
+                        // Carry the MS1 scans later MS2 scans can still link to.
+                        let carried: Vec<Vec<(f64, f32)>> = tracker
+                            .live()
+                            .iter()
+                            .map(|&j| ms1_peaks[j].clone())
+                            .collect();
                         let link = Ms1Link {
                             ms1_peaks: std::mem::take(&mut ms1_peaks),
                             ms2_to_ms1: std::mem::take(&mut ms2_to_ms1),
                         };
                         on_chunk(std::mem::take(&mut chunk), link);
-                        current_ms1 = carry.map(|p| {
-                            ms1_peaks.push(p);
-                            0
-                        });
+                        ms1_peaks = carried;
+                        tracker.renumber_to_live();
                     }
                 }
                 _ => {}

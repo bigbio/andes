@@ -33,6 +33,7 @@ flowchart LR
 | [Knockoff variant FDR](knockoffs.md) | Is this variant real, or a modification or isotope error that looks like one? | `--knockoffs`, `--proteoform-fdr` |
 | [Site claims and identity](sites.md) | Is this residue modified, and which modification is it? | `restrict_to: annotated` mods |
 | [Chimeric cascade](chimeric.md) | What is the second peptide in this spectrum? | `--chimeric` |
+| [DIA search](dia.md) | Which peptides are in a DIA run, searched from a FASTA alone? | `--dia` |
 | [Retrieval and model choice](retrieval.md) | How do you search deeply without scoring every candidate? | automatic |
 | [Protein inference](proteins.md) | Which proteins are present, at what error rate? | `--protein-fdr` |
 | [Match between runs with error control](mbr.md) | Can a transferred quantity be trusted? | `--lfq --mbr` |

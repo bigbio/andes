@@ -11,8 +11,8 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 andes is a peptide database search engine for shotgun proteomics. Spectra (mzML, MGF, native
 Thermo `.raw`, Bruker timsTOF `.d`) and a FASTA go in; a Percolator-ready `.pin` comes out. The
 scoring model is picked per file from its metadata. Opt-in modes recover co-isolated peptides
-(`--chimeric`), search secondary modifications (`--refine`) and identify intact
-N-glycopeptides (`--glyco`). To our knowledge it is the first proteomics search engine designed
+(`--chimeric`), search data-independent acquisition runs (`--dia`), search secondary
+modifications (`--refine`) and identify intact N-glycopeptides (`--glyco`). To our knowledge it is the first proteomics search engine designed
 and built end-to-end with AI coding agents, under human direction.
 
 ## Identification benchmarks
@@ -156,7 +156,7 @@ flowchart TD
    score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
    whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:
    164 s instead of 99 minutes).
-4. **Optional passes** `--chimeric`, `--refine` and the separate `--glyco` pipeline (below).
+4. **Optional passes** `--chimeric`, `--dia`, `--refine` and the separate `--glyco` pipeline (below).
 5. **Rescore** with Percolator, run by you or by `--rescore`. andes computes no production FDR.
 6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`) or MS1 features (`--lfq`).
 
@@ -406,6 +406,32 @@ equal 1% true FDP, it gives 66,377–66,424 PSMs against 43,076–43,145 without
 2026-10-13 on earlier builds. The true FDP at nominal q ≤ 0.01 was measured only with one
 candidate kept per scan in pass 1 (1.18%, against 1.05% without `--chimeric`), not with the
 alternatives kept.
+
+## Data-independent acquisition (`--dia`, experimental)
+
+`--dia` (mzML or Thermo `.raw`) searches each MS2 scan against every peptide whose precursor m/z
+lies in its isolation window and has an MS1 peak within 5 ppm in the nearest survey scan or one
+either side. This is a spectrum-centric search, as in MSFragger-DIA, not a peptide-centric
+peak-group search as in OpenSWATH or DIA-NN; it needs a FASTA and no spectral library. The PIN
+gets 16 columns from the neighbouring cycles of the same window (fragment and MS1 co-elution,
+summed apex, support across cycles). With `--rescore`, Percolator trains at `--trainFDR 0.05`,
+andes refines each run's predicted RT on the first pass's confident targets, and Percolator runs
+again. On Orbitrap Astral the fragment tolerance is 7 ppm unless `--fragment-tol-*` is set. With
+`--predict ms2`, the search keeps 50 rows per scan and trims them to `--top-n` by RawScore plus the
+andes-ms2 spectral angle (both z-scored) before the DIA columns.
+
+On the ProteoBench Astral entrapment set OpenDIA uses (two 15-min, 2 Th window runs), at an
+entrapment true FDP of 1% (precursors, mean of 5 Percolator seeds):
+
+| | raw01 | raw02 | wall time per run |
+|---|---:|---:|---|
+| andes `--dia --rescore --predict rt,ms2` | 1,825 | 1,907 | 6.7–7.5 min (14 threads) |
+| DIA-NN 2.2, own decoys | 2,067 | 2,301 | 8.8–13.5 min (14 threads) |
+| OpenDIA arm E | 1,694 | 1,628 | |
+
+andes's nominal q ≤ 0.01 measures 0.3% / 0.6% true FDP. The two tools' wall times come from
+different machines. Commands, every tested variant and the remaining gap to DIA-NN are in
+[`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 
 ## Secondary modifications (`--refine`, experimental)
 

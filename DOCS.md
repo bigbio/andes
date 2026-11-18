@@ -663,6 +663,45 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
 
+### DIA (`--dia`, experimental)
+
+Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans; a run without MS1
+scans is an error. Cannot be combined with `--chimeric`, `--open-search`, `--refine`, `--glyco` or
+`--xl`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. A candidate is scored only when its monoisotopic m/z has an MS1 peak within 5 ppm in the survey scan nearest the scan or one either side (the MS1 gate; on the Astral benchmark it keeps 93 % of DIA-NN's precursors and 13 % of random candidates). Co-elution columns are then added to the PIN. Config key `search.dia`. |
+
+The added PIN columns (`crates/andes/src/bin/andes/dia.rs`), for every row, targets and decoys
+alike:
+
+| Column | Meaning |
+|---|---|
+| `dia_frag_corr`, `dia_frag_coelute` | The scan's 6 most intense matched b/y ions (length ≥ 3) traced over the same isolation window ±5 cycles: mean Pearson correlation of each trace with the sum of the others, and how many correlate ≥ 0.6. |
+| `dia_apex_offset`, `dia_apex_frac` | Cycles from the scan to the apex of the summed fragment trace; the scan's share of the apex. |
+| `dia_ms1_corr` | Correlation of the monoisotopic MS1 trace (nearest survey scan per cycle, 10 ppm) with the summed fragment trace. |
+| `dia_ms1_found`, `dia_ms1_abs_ppm`, `dia_ms1_log_int`, `dia_ms1_iso_cos` | Monoisotopic MS1 peak in the nearest survey scan: present, \|ppm\| error, log10 intensity, cosine of the first three isotopes against averagine. |
+| `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
+| `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
+| `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
+
+Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
+intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
+`--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP
+against the default 0.01, error control unchanged). With `--dia --rescore` andes then refines RT
+per run: a gradient-boosted model of the andes-rt residual, fitted on the first Percolator pass's
+targets at q ≤ 1 % (at least 300 per run), adds `dia_rt_refined_err` (|observed − refined RT|,
+minutes, out of fold by peptidoform) and Percolator runs a second time (+32 / +60 precursors at
+1 % true FDP on the Astral benchmark). It needs `--predict rt`. On Orbitrap Astral MS2, `--dia`
+searches and scores fragments at 7 ppm unless `--fragment-tol-*` is set: the per-run fragment
+error measurement needs 100 confident PSMs, which a DIA sample rarely yields (+135 / +72 precursors
+at 1 % true FDP against 20 ppm on the Astral benchmark). The PIN is PSM-level; precursor-level FDR
+is the best PSM per (peptidoform, charge) after target-decoy competition, as in
+`docs/benchmarks/dia/eval_dia.py`. On the ProteoBench Astral entrapment set, andes reaches 1,800 /
+1,821 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
+Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
+
 ### Refine — secondary chemistry cascade
 
 A second pass over confident proteins, on the spectra pass 1 missed, with a **fixed tier**:
@@ -719,6 +758,112 @@ re-score is capped at 64 per spectrum.
 | `--open-search` | flag | *(off)* | Enable the mass-offset search. Requires the fragment-ion index (refused with `--fragment-index off`). |
 | `--open-search-delta` | Da, `MIN..MAX` | `-100..300` | Accepted offset window; must contain 0 and be at most 2000 Da wide. |
 | `--open-search-top-k` | integer | `100` | Base peptides scored per spectrum, best fragment votes first. |
+
+**Mass-offset report.** With `--rescore` or `--rescore-native`, an open search also writes
+two versioned Parquet tables, and prints the ten largest peaks:
+- `<stem>.open_offsets.parquet` (schema key `andes.open_offsets.schema`);
+- `<stem>.open_psms.parquet` (schema key `andes.open_psms.schema`).
+
+Both carry the run's calibration in their metadata: `andes.open_offsets.ppm_shift`,
+`andes.open_offsets.precision_da` and `andes.open_offsets.refined_precision_da`.
+
+**Summary for an open search.** The end-of-run identification summary and `<stem>.statistics.log`
+replace two parts that make no sense for an open search: the variable-modification breakdown
+(every PSM would read as unmodified) and the raw precursor mass error (every offset would count as
+an error). In their place is an open-search section:
+
+- the calibration and both precisions;
+- how the identified PSMs split: unmodified at zero offset, explained offset, isotope pick with no
+  modification, unexplained offset, and outside every peak;
+- the number of peaks, and how many have at least 20 PSMs;
+- the PSMs per modification, with isotope picks counted with their modification;
+- the ten largest peaks, with their decoys, residues and top explanation.
+
+The run summary gives the precursor tolerance as the offset window.
+
+- **Calibration.** Precursor calibration is off in open search, so the offsets carry the
+  instrument's mass error, which scales with peptide mass. The report measures it as the median
+  ppm error of the accepted PSMs within 0.02 Da of zero offset whose offset was measured on the
+  precursor (when there are at least 20). It subtracts that error,
+  `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the precursor, for targets
+  and decoys alike.
+  - With several input files, each run (the PIN's `FileName`) is calibrated on its own zero-offset
+    PSMs before the runs are pooled. A run with fewer than 20 such PSMs uses the pooled shift.
+  - An offset that localisation refined from the fragment ions keeps its value. The fragments are
+    already recentred.
+  - The PIN marks such a row by a `DeltaMass` that differs from
+    `ExpMass − isotope_error × 1.003355 − CalcMass` by more than 0.0005 Da.
+- **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
+  - The precision is 1.4826 × MAD of the calibrated offsets within 0.02 Da of zero, at least
+    0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.
+  - A gap wider than four precisions starts a new group.
+  - Inside a group, a Gaussian density with that precision as bandwidth is split at every valley
+    lower than half the smaller of its two neighbouring maxima. This separates neighbours such as
+    deamidation (+0.984) and an isotope pick (+1.003).
+  - A peak needs at least two PSMs.
+- **Columns per peak.** `<stem>.open_offsets.parquet` has one row per peak:
+  `peak`, `mass_shift`, `width_da`, `psms`, `peptides`, `decoys`, `decoy_ratio`, `residues`, and
+  `explanation_k` / `mass_k` / `posterior_k` for k = 1..3. Each peak's:
+  - median offset (`mass_shift`) and width (`width_da`);
+  - PSM and peptide counts;
+  - its localised residues (`residues`, the three most frequent with counts);
+  - `decoys`: the decoy PSMs at or above the lowest accepted target score whose calibrated offsets
+    fall in the peak's window. The window is the peak's range widened by one precision on each side,
+    and cut at the midpoint to a neighbouring peak, so each decoy counts in at most one peak.
+    `decoys / psms` is a per-peak FDR estimate, independent of the run-wide q-value.
+- **Explanations.** A peak no wider than twice the expected spread is treated as one species. The
+  expected spread is the refined spread when at least half of its PSMs are refined, otherwise the
+  precision.
+  - Its candidates are scored on the peak's median, with a Gaussian whose spread is
+    √(width² / n + expected²). The spread is the standard error of the centre plus the measurement
+    precision.
+  - A peak that sits consistently off every candidate is therefore called "unexplained".
+  - Its PSMs all take the peak's top explanation.
+- **Wider peaks.** A wider peak can hold several species, such as deamidation and an isotope pick.
+  It is fitted as a mixture of the candidates:
+  - Every candidate keeps its fixed mass.
+  - A PSM's likelihood under a candidate is a Gaussian of its calibrated offset, with the precision
+    or the refined spread, × its site support.
+  - EM estimates each candidate's share of the peak's PSMs. It starts from the priors and adds them
+    as a Dirichlet pseudo-count of one PSM.
+  - Each PSM takes the candidate with its highest responsibility.
+- **Reported explanations.** A peak lists its three largest posteriors or shares as
+  `explanation_k` / `posterior_k`.
+  - The candidates:
+    - no modification;
+    - an isotope error of ±1 or ±2;
+    - every Unimod entry, alone or with one isotope step;
+    - pairs of the Unimod entries that are the top explanation of another peak of the same run with
+      a share ≥ 0.5,
+      counting only peaks with at least 20 PSMs and decoys ≤ 1 % of their PSMs;
+    - "unexplained", a flat density over the offset range.
+  - The terms of the likelihood and the priors:
+    - The priors are 1 for no modification or for a Unimod entry with at least one common
+      specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare or
+      that Unimod classifies only as an isotopic label (a label-free run carries no labels),
+      0.2 for an isotope error, and 0.05 for "unexplained".
+    - An entry plus an isotope step takes the entry's prior × 0.1.
+    - A pair takes 0.05 × the two entries' priors.
+    - The Gaussian's spread depends on how the PSM's offset was measured. For an offset measured
+      on the precursor it is the precision. For one refined from the fragment ions it is the median
+      width of the peaks with at least 20 PSMs of which at least half are refined, and never less than the
+      precision.
+    - Site support for a Unimod entry is (k + 0.5) / (n + 1) over the n localised PSMs (one PSM in
+      the mixture). Each localised PSM adds 1 to k when its residue, or peptide terminus, matches
+      a common specificity of the entry, and 0.1 when it matches only a rare one.
+    - A specificity matches on its site and its Unimod position together. An `Any N-term` or
+      `Protein N-term` specificity needs the residue at the peptide N-terminus, and a C-term one at
+      the C-terminus. Gln→pyro-Glu therefore supports a Q at position 1, but not a Q inside the
+      peptide.
+    - The hypotheses without a site (no modification, isotope errors, "unexplained") and entries
+      with no listed site take a neutral 0.5. The support is 1 when no PSM is localised. A PSM on
+      the right residue then favours the entry, and one on a wrong residue counts against it.
+  - Entries with the same mass and sites tie, and are reported as ties.
+- **Per-PSM file.** `<stem>.open_psms.parquet` has one row per accepted PSM: `psm_id`,
+  `delta_mass` (calibrated), `peak` (null outside every peak), `residue`, and `explanation` /
+  `posterior`.
+  - In a single-species peak, the explanation is the peak's top explanation.
+  - In a mixed peak, it is the candidate with the PSM's highest responsibility.
 
 Fixed behaviour in this mode: the isotope range is set internally to **0..=2** (an isotope step
 is indistinguishable from a ~1 Da offset, so the search tries each offset and keeps the one whose
@@ -1167,6 +1312,17 @@ sets the crosslinker below the command line and the config file: the reagent by 
 checked against the reagent. Monolinks are variable modifications, by UNIMOD record or as
 `reagent:quencher`, e.g. `--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"`.
 
+Several crosslinkers are searched together as a `;`-separated list (`--xl "DSSO; DSBU"`), a
+YAML list under `search.xl`, or SDRF rows naming different reagents. Each linker is searched with
+its own candidates, each spectrum keeps the CSM with the best pair score across them (its
+`second` then also covers the other linkers' peptide pairs; a precursor without a charge keeps
+the charge of its best pair score, and its `second` covers every charge tried), and the q-values
+are computed
+over all of them; the CSM table then adds a `crosslinker` column. Every listed linker enlarges the
+target and decoy space: on the benchmark, DSSO data searched as `DSSO; DSBU` assigned 0–1.5 % of
+its accepted CSMs to DSBU and found 1.6 % fewer true CSMs (DSBU data as `DSBU; DSSO`: 2.5 %
+fewer), so list only the reagents in the samples.
+
 | Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
 |---|---|---|---|---|
 | DSSO | 158.0038 | alkene 54.0106, thiol 85.9826, sulfenic 103.9932 | K, Protein N-term | UNIMOD |
@@ -1192,9 +1348,14 @@ stubs; non-cleavable linkers from open-mass retrieval on the fragment-ion index 
 the fragments that do not carry the link, its partner by the remaining precursor mass). Both
 link classes are scored by the pair score `min(alpha, beta)`, and the q-values rank a CSM by
 `min(alpha, beta) + 0.3 × (min(alpha, beta) − second)`, where `second` is the best pair score of
-a different peptide pair for the spectrum (the `score` column); for an MS-cleavable linker each
+a different peptide pair for the spectrum (the `score` column), less 15 for a half pair (one
+peptide by its doublet, the other by mass) of a triply charged precursor; for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+In an MS2 search of files with MS1 scans (mzML, Thermo `.raw`), a precursor m/z moves to the most intense MS1 peak within
+25 ppm when that peak is at least 3 times the reported one: an Orbitrap at times reports a weak
+side peak about 20 ppm off an intense ion as the precursor. With several FAIMS compensation
+voltages, each MS2 scan reads the latest MS1 scan at its own voltage.
 When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),
 a link on one of them costs 12 against a link on K, as xiSEARCH penalises these side reactions.
 q-values are computed per link

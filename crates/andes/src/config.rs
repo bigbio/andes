@@ -58,6 +58,7 @@ pub struct SearchCfg {
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
     pub index_cache_dir: Option<PathBuf>,
+    pub dia: Option<bool>,
     pub open_search: Option<bool>,
     pub open_search_delta: Option<String>,
     pub open_search_top_k: Option<u32>,
@@ -481,6 +482,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("max_mods", max_mods, cfg.search.max_mods);
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
+    set!("dia", dia, cfg.search.dia);
     if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
         if v != "ipf" {
             return Err(format!("search.localize: '{v}' is not one of: ipf"));
@@ -737,7 +739,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco", glyco, cfg.glyco.enabled);
     if let Some(v) = &cfg.search.xl {
         if !cli_set(m, "xl") {
-            args.xl = Some(xl_linker("search.xl", v)?);
+            let linkers = match v {
+                serde_yaml::Value::Sequence(items) => items
+                    .iter()
+                    .map(|i| xl_linker("search.xl", i))
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => vec![xl_linker("search.xl", v)?],
+            };
+            args.xl = Some(crate::cli::XlSet::new("search.xl", linkers)?);
         }
     }
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
@@ -1345,16 +1354,16 @@ glyco:
     #[test]
     fn crosslinker_applies_with_cli_precedence() {
         let a = applied("search:\n  xl: DSSO (K, S, T, Y, Protein N-term)\n", &[]).unwrap();
-        let x = a.xl.unwrap();
+        let x = a.xl.unwrap().0.remove(0);
         assert_eq!(x.name, "DSSO");
         assert_eq!(x.ends[0].residues, b"KSTY");
         let a = applied("search:\n  xl: DSSO (K)\n", &["--xl", "DSBU"]).unwrap();
-        assert_eq!(a.xl.unwrap().name, "DSBU");
+        assert_eq!(a.xl.unwrap().0.remove(0).name, "DSBU");
         let yaml = "search:\n  xl:\n    name: MyLinker\n    sites: K, Protein N-term\n    \
                     intact: {mass: 158.003765}\n    \
                     stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]\n    \
                     doublets: [[alkene, thiol]]\n    monolinks: [{name: water, mass: 176.01433}]\n";
-        let x = applied(yaml, &[]).unwrap().xl.unwrap();
+        let x = applied(yaml, &[]).unwrap().xl.unwrap().0.remove(0);
         assert_eq!(x.name, "MyLinker");
         let c = x.cleavage.unwrap();
         assert_eq!(c.stubs.len(), 2);
@@ -1363,16 +1372,25 @@ glyco:
         let x = applied("search:\n  xl: {name: \"BS3 (K)\"}\n", &[])
             .unwrap()
             .xl
-            .unwrap();
+            .unwrap()
+            .0
+            .remove(0);
         assert_eq!(x.name, "DSS");
         assert!(!x.ends[0].protein_n_term);
         let x = applied("search:\n  xl: {name: EDC, sites: K / D}\n", &[])
             .unwrap()
             .xl
-            .unwrap();
+            .unwrap()
+            .0
+            .remove(0);
         assert_eq!(x.ends[1].residues, b"D");
         for (bad, msg) in [
             ("search:\n  xl: DSOS\n", "did you mean DSSO"),
+            ("search:\n  xl: []\n", "search.xl: no crosslinker"),
+            (
+                "search:\n  xl: [DSSO, \"DSSO (K)\"]\n",
+                "search.xl: DSSO is given twice",
+            ),
             ("search:\n  xl: {name: X, intact: {mass: 100.0}}\n", "needs `sites`"),
             ("search:\n  xl: {name: X, sites: K, intact: {}}\n", "needs a `unimod`"),
             (

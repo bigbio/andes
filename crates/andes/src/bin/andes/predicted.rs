@@ -505,19 +505,19 @@ impl Predictors {
     }
 }
 
-const NONE: u32 = u32::MAX;
+pub(crate) const NONE: u32 = u32::MAX;
 
-struct PinRow {
-    spec: u32,
-    form: u32,
-    charge: u8,
-    decoy: bool,
-    score: f64,
+pub(crate) struct PinRow {
+    pub(crate) spec: u32,
+    pub(crate) form: u32,
+    pub(crate) charge: u8,
+    pub(crate) decoy: bool,
+    pub(crate) score: f64,
 }
 
-struct PinTable {
-    rows: Vec<PinRow>,
-    forms: Vec<(Form, Mass)>,
+pub(crate) struct PinTable {
+    pub(crate) rows: Vec<PinRow>,
+    pub(crate) forms: Vec<(Form, Mass)>,
     peptide_col: usize,
 }
 
@@ -582,7 +582,11 @@ fn row_charge(
     }
 }
 
-fn read_pin(pin: &Path, spectra: &[Spectrum], new_cols: &[String]) -> Result<PinTable, String> {
+pub(crate) fn read_pin(
+    pin: &Path,
+    spectra: &[Spectrum],
+    new_cols: &[String],
+) -> Result<PinTable, String> {
     let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = BufReader::new(f).lines();
     let header = lines
@@ -759,7 +763,7 @@ fn impute_median(col: &mut [f64], miss: &[f64]) {
     }
 }
 
-fn write_pin(
+pub(crate) fn write_pin(
     pin: &Path,
     table: &PinTable,
     cols: &[String],

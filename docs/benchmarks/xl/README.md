@@ -134,9 +134,62 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   and Clasen families, so the weight is not fitted to the set; 0.3 was taken as one that
   raises all three. Other one-term changes to `min(α, β)` lost: + 0.1–0.3 × max(α, β), a bonus
   for full pairs, a penalty per isotope offset.
+- **Half pairs of triply charged precursors pay 15 in the CSM score** (adopted). A half
+  pair takes its second peptide by mass alone; pooled over the 11 runs, accepted half pairs are 15 % false at charge 3 against
+  2.9 % at 4 and 0.9 % at 5, at any peptide length, and the false ones mostly pair a library
+  peptide with a random one that fits the mass. Against the delta score: 16,797 / 15,912
+  (from 16,427 / 15,206); the ribosome DSBU run's actual false share 3.0 % → 2.4 % (worst
+  class 3.7 % → 2.9 %); Beveridge DSBU loses 9 %, its 3+ half pairs being mostly right.
+  Penalties 5–30 all raise the total (16,607–16,797); dropping these pairs gives 16,746.
+  Held out (never used for tuning): ribosome DSBU replicate 2 rises 2,399 → 2,453 at a false
+  share of 2.1 % → 1.8 %; Beveridge DSS R2 is unchanged (no half pairs).
+- **Non-covalent pairs** (two unlinked peptides whose masses sum to the precursor, as
+  competitor): identical on three runs, −6 % on Clasen batch 1, and 25 min of pair search
+  there; stopped.
+- **Minimum matched fragments per peptide** (2–6, xiFDR's boost filter) and a per-run boost
+  over score, precursor error and pair kind: 16,164–16,446 and +0.9 % (fitted to each run's
+  decoys); not adopted.
+- **Several crosslinkers in one search** (adopted as an option, `--xl "DSSO; DSBU"`). With one
+  linker the 11 runs give byte-identical results. A spectrum keeps the CSM with the best pair
+  score over the linkers, and its runner-up covers every linker's pairs. DSSO runs searched as
+  `DSSO; DSBU` put 12 of 804 accepted CSMs on DSBU on Beveridge DSSO and none on the other six,
+  and find 1.6 % fewer true CSMs (11,170 → 10,988) as the decoy space doubles; DSBU runs
+  searched as `DSBU; DSSO` put 2 of 2,389 on DSSO and find 2.5 % fewer (2,971 → 2,898). With
+  each linker's own runner-up only, the losses were 4 % and 11 %.
+- **MS1 monoisotope correction** (the glyco mode's envelope fit, run in crosslink mode):
+  16,809 / 16,008 against 16,797 / 15,912, about 1 % of precursors moved; with a 0..1 isotope
+  window instead of 0..2, 14,996 with the correction and 14,921 without, so 0..2 stays and
+  the correction stays off.
+- **Fragment coverage in the CSM score** (xiSEARCH's coverage terms: matched fragments of the
+  weaker peptide, raw or per residue): the ribosome runs gain up to 9 % while Clasen and part
+  of the Cas9 runs lose; three to seven runs go down at every weight, so not adopted.
 - **Separate FDR for half pairs** (one peptide by its doublet, the other by mass): the
   false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
   groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).
+
+- **Precursor m/z on the dominant MS1 peak** (adopted). On the Clasen runs 6 % of the accepted
+  CSMs had a precursor error near −20 ppm, a separate group from the rest (97 between 15 and
+  25 ppm against 3 between 10 and 15 ppm on batch 4), while both peptide masses from their
+  doublets were within 2 ppm. The MS1 scans show why: the instrument reported a side peak at a
+  ninth of the intensity, about 20 ppm below the real ion (619.8634 beside 619.8765 at 5+).
+  The precursor m/z now moves to the most intense MS1 peak within 25 ppm when that peak is at
+  least 3 times the reported one. The Clasen and Eclipse runs are FAIMS runs with three
+  compensation voltages, and the MS1 scan just before an MS2 scan is usually at another
+  voltage; MS2 scans now read the latest MS1 scan at their own voltage (in the Thermo and mzML
+  readers alike, so the monoisotope correction and the chimeric search read the right MS1
+  scan too). With the reader fix and ratio 3: 16,797 → 17,079 true CSMs at 1 %; Clasen
+  batch 1 1,300 → 1,417 and batch 4 1,685 → 1,835, the eight non-FAIMS runs within ±1 %, the
+  Eclipse run 2,816 → 2,797 (19 of its 26 lost CSMs a tie group at the 1 % edge). Without
+  the reader fix the snap gave 16,813, as most precursors were looked for in the wrong scan.
+  Ratio 10 gives 17,099. Held out: Clasen batch 1 well E5 2,000 → 2,190 (ratio 10: 2,134), a
+  Clasen batch 2 run 363 → 380 true CSMs at actual 1 % (none accepted at 1 % either way),
+  Eclipse replicate 2 3,044 → 3,054, ribosome DSBU replicate 2 2,453 → 2,441 (1.8 % → 1.9 %
+  false), Beveridge DSS R2 unchanged.
+- **Precursor error in the CSM score** (−w × |error − the run's median error|, measured
+  offline on saved results): +1.2 % at w = 0.25 and +1.8 % at 0.5, but Clasen batch 4 loses at
+  every weight because of the −20 ppm group above; with the m/z on the dominant peak it still
+  loses at 0.5 and batch 1 loses at 0.25. A Gaussian log-likelihood term loses more. Not
+  adopted.
 
 `mat_dsbu` stays above target (2.8 % overall, 3.8 % inter). Most of its false inter matches are
 half pairs, one peptide with a doublet and the other by mass, and several repeat one

@@ -29,6 +29,7 @@ const OWN_CRATES: &[&str] = &[
     "model_train",
     "onnx_infer",
     "output",
+    "percolator_native",
     "quant",
     "scoring",
     "search",

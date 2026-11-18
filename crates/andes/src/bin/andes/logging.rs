@@ -17,6 +17,23 @@ use std::time::Instant;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
+/// The crates of this workspace, by the first segment of their module path. Other crates
+/// (tract, rustls, ureq, ...) log their own internals at info level, so only their
+/// warnings and errors reach the andes log.
+const OWN_CRATES: &[&str] = &[
+    "andes",
+    "andes_xl",
+    "glyco",
+    "input",
+    "model",
+    "model_train",
+    "onnx_infer",
+    "output",
+    "quant",
+    "scoring",
+    "search",
+];
+
 static START: OnceLock<Instant> = OnceLock::new();
 static LOGGER: StderrLogger = StderrLogger;
 
@@ -28,7 +45,9 @@ impl Log for StderrLogger {
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
+        if !self.enabled(record.metadata())
+            || (record.level() > Level::Warn && !from_own_crate(record.module_path()))
+        {
             return;
         }
         let secs = START.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
@@ -42,6 +61,12 @@ impl Log for StderrLogger {
     }
 
     fn flush(&self) {}
+}
+
+/// Whether a record was logged by a crate of this workspace; a record without a module
+/// path counts as one.
+fn from_own_crate(module_path: Option<&str>) -> bool {
+    module_path.is_none_or(|m| OWN_CRATES.contains(&m.split("::").next().unwrap_or(m)))
 }
 
 /// The stage name of a log target: an explicit target as given, a module path by its last
@@ -127,6 +152,36 @@ mod tests {
     fn a_module_path_target_is_named_by_its_last_segment() {
         assert_eq!(stage_of("search::refinement"), "refinement");
         assert_eq!(stage_of("calibration"), "calibration");
+    }
+
+    #[test]
+    fn only_warnings_and_errors_of_other_crates_are_logged() {
+        assert!(from_own_crate(Some("search::refinement")));
+        assert!(from_own_crate(Some("andes")));
+        assert!(from_own_crate(None));
+        assert!(!from_own_crate(Some("tract_linalg::x86_64_fma::mmm")));
+    }
+
+    #[test]
+    fn every_workspace_crate_is_an_own_crate() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&crates).expect("read crates/") {
+            let manifest = entry.expect("crate dir").path().join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            let name = text
+                .lines()
+                .find_map(|l| l.strip_prefix("name = \""))
+                .and_then(|l| l.strip_suffix('"'))
+                .expect("package name");
+            names.push(name.replace('-', "_"));
+        }
+        names.sort();
+        let mut own: Vec<String> = OWN_CRATES.iter().map(|s| s.to_string()).collect();
+        own.sort();
+        assert_eq!(names, own);
     }
 
     #[test]

@@ -63,13 +63,14 @@ impl Store {
             Data::Spill(_) => {
                 let block = (self.block_rows * self.nfeat * 4) as u64;
                 let threads = rayon::current_num_threads().max(1) as u64;
+                let reader = 2 * block;
                 let batch = if block == 0 {
                     0
                 } else {
-                    (self.budget.available() / block).min(threads)
+                    (self.budget.available().saturating_sub(reader) / block).min(threads)
                 };
                 let held = if batch >= 2 {
-                    Reservation::take(&self.budget, batch * block)
+                    Reservation::take(&self.budget, reader + batch * block)
                 } else {
                     None
                 };
@@ -309,7 +310,7 @@ mod tests {
                     let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
                     if spilled && now > 1 {
-                        assert!(budget.total() - budget.available() >= now * block);
+                        assert!(budget.total() - budget.available() >= (now + 2) * block);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                     let mut acc = 0.0f64;
@@ -332,7 +333,12 @@ mod tests {
         let ram_dir = tempfile::tempdir().unwrap();
         let ram = build(u64::MAX, ram_dir.path(), nrows, nfeat);
         let reference = block_sums(&ram, 16, &AtomicU64::new(0), &AtomicU64::new(0));
-        for (limit, most) in [(1, 1), (block + block / 2, 1), (3 * block + block / 2, 3)] {
+        for (limit, most) in [
+            (1, 1),
+            (block + block / 2, 1),
+            (3 * block + block / 2, 1),
+            (5 * block + block / 2, 3),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let spill = build(limit, dir.path(), nrows, nfeat);
             assert!(spill.is_spilled());

@@ -118,10 +118,11 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   which discounts a fragment whose trace is flat background or does not follow the peak. Mean of 5
   seeds, N@FDP_c 1 %: 1948 / 2084 against 1825 / 1907, higher on every seed (+46 to +186 / +129 to
   +208). q ≤ 0.01 measures 0.8–1.2 % / 0.7–0.8 % true FDP (seed 42 on raw01 at 1.2 %). Separately:
-  the summed-spectrum pair alone 1872 / 2062, the profile trio alone 1942 / 2040. Search plus
-  prediction step 22 → 27–30 s, search plus PIN plus columns still about 2 min, peak memory 16 GB
-  per run.
-- **Cost per run**: andes search 6–7 min (wall, 14 threads) plus 12–15 min of Percolator; DIA-NN 8.8–21 min
+  the summed-spectrum pair alone 1872 / 2062, the profile trio alone 1942 / 2040. Per raw file at
+  14 threads, the prediction stage goes from 22 to 27–30 s; search, prediction, PIN and DIA columns
+  together stay at about 2 min of a 6.7–8.0 min wall time; peak memory 16 GB.
+- **Cost per run** (as of the 2026-11-16 build, one raw file, 14 threads): andes search 6–7 min wall
+  plus 12–15 min of Percolator; DIA-NN 8.8–21 min
   (`diann-decoys-20261114/RESULT.md`).
 
 ## Where the gap is

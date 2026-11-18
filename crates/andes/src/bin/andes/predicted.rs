@@ -472,10 +472,6 @@ impl Predictors {
         let predict_s = t.elapsed().as_secs_f64();
         let tol = self.tol;
         let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
-        let tol_ppm = match tol {
-            FragmentTolerance::Ppm(p) => p,
-            FragmentTolerance::Da(_) => 20.0,
-        };
         let width = MS2_FEATURES.len()
             + if dia.is_some() {
                 crate::dia::EVIDENCE_COLUMNS.len()
@@ -508,7 +504,7 @@ impl Predictors {
                         r.charge,
                         &scans,
                         center,
-                        tol_ppm,
+                        tol,
                     ));
                 }
                 Some(v)

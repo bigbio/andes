@@ -7,6 +7,7 @@ use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
+use onnx_infer::predictors::spectral::FragmentTolerance;
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
@@ -324,7 +325,7 @@ pub(crate) fn evidence(
     charge: u8,
     scans: &[&[(f64, f32)]],
     center: usize,
-    tol_ppm: f64,
+    tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
@@ -342,15 +343,32 @@ pub(crate) fn evidence(
         }
     }
     let trace = |mz: f64| -> Vec<f64> {
+        let w = tol.window(mz);
         scans
             .iter()
-            .map(|s| best_peak(s, mz, tol_ppm).map_or(0.0, |p| p.1 as f64))
+            .map(|s| {
+                let lo = s.partition_point(|p| p.0 < mz - w);
+                s[lo..]
+                    .iter()
+                    .take_while(|p| p.0 <= mz + w)
+                    .fold(0.0, |m, p| f64::max(m, p.1 as f64))
+            })
             .collect()
     };
     let traces: Vec<Vec<f64>> = frags.iter().map(|f| trace(f.0)).collect();
-    let (a, b) = (center.saturating_sub(1), (center + 2).min(scans.len()));
-    let sum3: Vec<f64> = traces.iter().map(|t| t[a..b].iter().sum()).collect();
     let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
+    let lo = center.saturating_sub(1);
+    let hi = (center + 2).min(scans.len());
+    let apex = (lo..hi)
+        .max_by(|&x, &y| {
+            let at = |s: usize| traces.iter().zip(&p).map(|(t, w)| t[s] * w).sum::<f64>();
+            at(x)
+                .total_cmp(&at(y))
+                .then(y.abs_diff(center).cmp(&x.abs_diff(center)))
+        })
+        .unwrap_or(center);
+    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(scans.len()));
+    let sum3: Vec<f64> = traces.iter().map(|t| t[a..b].iter().sum()).collect();
     let sp: f64 = p.iter().sum();
     let sum3_angle = angle(&p, &sum3);
     let sum3_explained = if sp > 0.0 {
@@ -381,7 +399,11 @@ pub(crate) fn evidence(
         .map(|s| {
             let mut v: Vec<f64> = norm.iter().map(|t| t[s]).collect();
             v.sort_by(f64::total_cmp);
-            v.get(v.len() / 2).copied().unwrap_or(0.0)
+            match v.len() {
+                0 => 0.0,
+                n if n % 2 == 1 => v[n / 2],
+                n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+            }
         })
         .collect();
     let pn = profile.len().max(1) as f64;
@@ -1014,10 +1036,25 @@ mod tests {
         };
         let score = |s: &Vec<Vec<(f64, f32)>>| {
             let v: Vec<&[(f64, f32)]> = s.iter().map(|x| x.as_slice()).collect();
-            evidence(&pred, &ions, &mass, 2, &v, 3, 7.0)
+            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))
         };
         let clean = score(&build(0));
         assert!(clean[0] > 0.99 && clean[4] > 0.99, "{clean:?}");
+        let off = build(0);
+        let v: Vec<&[(f64, f32)]> = off[1..].iter().map(|x| x.as_slice()).collect();
+        let from_side = evidence(&pred, &ions, &mass, 2, &v, 1, FragmentTolerance::Ppm(7.0));
+        let at_apex = evidence(&pred, &ions, &mass, 2, &v, 2, FragmentTolerance::Ppm(7.0));
+        assert_eq!(from_side[0], at_apex[0], "the sum is centred on the apex");
+        let shifted: Vec<Vec<(f64, f32)>> = off
+            .iter()
+            .map(|s| s.iter().map(|&(mz, i)| (mz + 0.02, i)).collect())
+            .collect();
+        let v: Vec<&[(f64, f32)]> = shifted.iter().map(|x| x.as_slice()).collect();
+        assert_eq!(
+            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))[0],
+            0.0
+        );
+        assert!(evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Da(0.05))[0] > 0.99);
         let flat = score(&build(1));
         assert!(
             flat[0] < 0.95,

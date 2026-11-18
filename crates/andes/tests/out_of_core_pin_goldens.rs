@@ -123,11 +123,12 @@ fn read_pin(path: &Path) -> (String, Vec<String>) {
 fn calibration_outcome(stderr: &str) -> Option<String> {
     stderr
         .lines()
-        .find(|l| {
-            l.starts_with("Precursor mass shift learned")
-                || l.starts_with("Precursor mass calibration skipped (insufficient")
+        .filter_map(|l| l.split_once(" calibration: ").map(|(_, m)| m))
+        .find(|m| {
+            m.starts_with("Precursor mass shift learned")
+                || m.starts_with("Precursor mass calibration skipped (insufficient")
         })
-        .map(|l| l.split("; elapsed").next().unwrap_or(l).to_string())
+        .map(|m| m.split("; elapsed").next().unwrap_or(m).to_string())
 }
 
 fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {

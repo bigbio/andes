@@ -70,14 +70,35 @@ use crate::train_intensity::{
     run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
+/// Seconds between two progress lines at the default level; every chunk's line is a
+/// debug line.
+const PROGRESS_INTERVAL_SECS: u64 = 10;
+
+static LAST_PROGRESS_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn report_search_progress(scored: usize, start: std::time::Instant) {
+    use std::sync::atomic::Ordering;
     let secs = start.elapsed().as_secs_f64();
     let rate = if secs > 0.0 {
         scored as f64 / secs
     } else {
         0.0
     };
-    log::info!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
+    let whole = PROCESS_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs();
+    let last = LAST_PROGRESS_SECS.load(Ordering::Relaxed);
+    let due = whole >= last + PROGRESS_INTERVAL_SECS
+        && LAST_PROGRESS_SECS
+            .compare_exchange(last, whole, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+    if due {
+        log::info!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
+    } else {
+        log::debug!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -157,6 +178,7 @@ struct TopCli {
 }
 
 fn main() -> ExitCode {
+    PROCESS_START.get_or_init(std::time::Instant::now);
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();

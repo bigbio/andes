@@ -523,7 +523,7 @@ pub(crate) fn run_precursor_calibration(
     if spec_keys.len() < params.cal_min_spec_keys {
         log::info!(
             target: "calibration",
-            "calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
+            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
              The sample is too small for a reliable calibration pre-pass.",
             spec_keys.len(),
             params.cal_min_spec_keys,
@@ -545,7 +545,7 @@ pub(crate) fn run_precursor_calibration(
     if stats.has_reliable_stats() {
         log::info!(
             target: "calibration",
-            "shift learned: {:.3} ppm from {} confident PSMs (robust sigma {:.3} ppm; elapsed: {:.2}s)",
+            "Precursor mass shift learned: {:.3} ppm from {} confident PSMs (robust sigma {:.3} ppm; elapsed: {:.2}s)",
             stats.shift_ppm,
             stats.confident_psm_count,
             stats.robust_sigma_ppm,
@@ -554,7 +554,7 @@ pub(crate) fn run_precursor_calibration(
     } else {
         log::info!(
             target: "calibration",
-            "calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
             stats.queues_with_psm,
             stats.rejected_low_score,
             stats.rejected_residual,

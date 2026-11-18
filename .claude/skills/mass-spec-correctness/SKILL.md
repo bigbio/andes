@@ -8,7 +8,7 @@ description: Domain checks for mass spectrometry and proteomics code in andes - 
 ## Constants and masses
 
 - Use the constants in `crates/model/src/mass.rs` (proton, water, element and residue
-  masses); never retype a mass literal. `crates/model/tests/chemistry_constants.rs` guards
+  masses); never retype a mass literal (see `parameters-and-constants`). `crates/model/tests/chemistry_constants.rs` guards
   them.
 - Distinguish monoisotopic and average mass, neutral mass and m/z, `[M+H]+` and `M`.
   Name variables accordingly (`neutral_mass`, `mz`, `mh`).

@@ -7,7 +7,7 @@ use model::peptide::Peptide;
 use model::protocol::Protocol;
 use model::spectrum::Spectrum;
 
-const PROTON: f64 = 1.007_276_49;
+const PROTON: f64 = model::mass::PROTON;
 
 pub(crate) type SegmentPartitionCache = Vec<(Partition, Vec<(IonType, Vec<f32>)>)>;
 pub(crate) type SegmentPartitionSlice<'a> = &'a [(Partition, Vec<(IonType, Vec<f32>)>)];
@@ -1477,7 +1477,7 @@ fn deconvolute_spectrum(
     precursor_charge: u8,
     tol: f64,
 ) -> (Vec<(f64, f32)>, Vec<u32>) {
-    const ISOTOPE: f64 = 1.003_354_83;
+    const ISOTOPE: f64 = model::mass::ISOTOPE;
     const C14_MINUS_C13: f64 = 0.999_886_17;
 
     let n = peaks.len();

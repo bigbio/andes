@@ -1,7 +1,7 @@
 use crate::rt_native::{self, RtPeptide};
 
-pub const PROTON: f64 = 1.007_276_466_8;
-pub const H2O: f64 = 18.010_564_684;
+pub const PROTON: f64 = model::mass::PROTON;
+pub const H2O: f64 = model::mass::H2O;
 
 pub fn residue_mass(c: char) -> Option<f64> {
     Some(match c {

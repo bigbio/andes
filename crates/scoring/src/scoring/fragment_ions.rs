@@ -173,7 +173,7 @@ pub fn predict_by_ions_with_losses(
     out
 }
 
-pub const NH3: f64 = 17.026549;
+pub const NH3: f64 = model::mass::NH3;
 pub const Z_DOT_OFFSET: f64 = -16.018724;
 
 fn cz_remnant_enabled() -> bool {

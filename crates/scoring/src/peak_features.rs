@@ -28,8 +28,7 @@ pub const FEATURE_WINDOW_DA: f64 = 50.0;
 use model::mass::{ISOTOPE, PROTON};
 use model::tolerance::Tolerance;
 
-const H2O: f64 = 18.010565;
-const NH3: f64 = 17.026549;
+use model::mass::{H2O, NH3};
 
 pub struct PeakFeatureCtx {
     pub precursor_mz: f64,

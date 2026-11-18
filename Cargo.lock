@@ -68,6 +68,7 @@ dependencies = [
  "glyco",
  "input",
  "libc",
+ "log",
  "model",
  "model-train",
  "num_cpus",
@@ -1180,6 +1181,9 @@ dependencies = [
 [[package]]
 name = "glyco"
 version = "0.4.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "half"
@@ -1454,6 +1458,7 @@ dependencies = [
  "base64",
  "byteorder",
  "flate2",
+ "log",
  "md-5",
  "model",
  "parquet",
@@ -1846,6 +1851,7 @@ version = "0.4.0"
 dependencies = [
  "arrow",
  "input",
+ "log",
  "model",
  "parquet",
  "rustc-hash",
@@ -2094,6 +2100,7 @@ dependencies = [
  "chrono",
  "glyco",
  "input",
+ "log",
  "memchr",
  "model",
  "model-train",
@@ -2349,6 +2356,7 @@ dependencies = [
 name = "quant"
 version = "0.4.0"
 dependencies = [
+ "log",
  "model",
  "rayon",
  "rustc-hash",
@@ -2636,6 +2644,7 @@ version = "0.4.0"
 dependencies = [
  "byteorder",
  "input",
+ "log",
  "model",
  "rustc-hash",
  "thiserror 2.0.18",
@@ -2648,6 +2657,7 @@ dependencies = [
  "andes-xl",
  "glyco",
  "input",
+ "log",
  "memmap2",
  "model",
  "rayon",

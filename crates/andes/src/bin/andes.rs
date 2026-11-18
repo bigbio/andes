@@ -18,6 +18,8 @@ mod glyco_quant;
 mod glyco_run;
 #[path = "andes/inference_cmd.rs"]
 mod inference_cmd;
+#[path = "andes/logging.rs"]
+mod logging;
 #[path = "andes/memlimit.rs"]
 mod memlimit;
 #[path = "andes/model_select.rs"]
@@ -75,7 +77,7 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
     } else {
         0.0
     };
-    eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
+    log::info!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
 }
 
 #[derive(Subcommand, Debug)]
@@ -142,6 +144,14 @@ struct TopCli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Print only warnings and errors to stderr
+    #[arg(long, global = true)]
+    quiet: bool,
+
+    /// Also print debug lines to stderr
+    #[arg(long, global = true)]
+    verbose: bool,
+
     #[command(flatten)]
     search: SearchArgs,
 }
@@ -152,6 +162,7 @@ fn main() -> ExitCode {
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top =
         <TopCli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    logging::init(logging::level_from_flags(top.quiet, top.verbose));
     let result = match top.command.take() {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
@@ -164,7 +175,7 @@ fn main() -> ExitCode {
                     .and_then(|q| q.subcommand_matches("finalize"));
                 if let Some(Err(e)) = sub.map(|m| config::apply_protein_config(&mut a.proteins, m))
                 {
-                    eprintln!("error: {e}");
+                    log::error!("{e}");
                     return ExitCode::from(2);
                 }
             }
@@ -175,7 +186,7 @@ fn main() -> ExitCode {
                 .subcommand_matches("inference")
                 .map(|m| config::apply_protein_config(&mut args.proteins, m))
             {
-                eprintln!("error: {e}");
+                log::error!("{e}");
                 return ExitCode::from(2);
             }
             inference_cmd::run_inference(*args)
@@ -189,7 +200,7 @@ fn main() -> ExitCode {
                     cfg_keys = sdrf::ConfigKeys::of(&c);
                     config::apply(c, &mut top.search, &matches)
                 }) {
-                    eprintln!("error: {e}");
+                    log::error!("{e}");
                     return ExitCode::from(2);
                 }
             }
@@ -197,15 +208,15 @@ fn main() -> ExitCode {
                 match sdrf::read(&sdrf_path)
                     .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
                 {
-                    Ok(lines) => lines.iter().for_each(|l| eprintln!("{l}")),
+                    Ok(lines) => lines.iter().for_each(|l| log::info!(target: "sdrf", "{l}")),
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        log::error!("{e}");
                         return ExitCode::from(2);
                     }
                 }
             }
             if let Err(e) = config::check_resolved(&top.search) {
-                eprintln!("error: {e}");
+                log::error!("{e}");
                 return ExitCode::from(2);
             }
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
@@ -214,26 +225,26 @@ fn main() -> ExitCode {
             ));
             let search = top.search;
             if search.spectrum.is_empty() {
-                eprintln!("error: --spectrum is required for search (or use `andes train`)");
+                log::error!("--spectrum is required for search (or use `andes train`)");
                 return ExitCode::from(2);
             }
             let database = match search.database {
                 Some(p) => p,
                 None => {
-                    eprintln!("error: --database is required for search");
+                    log::error!("--database is required for search");
                     return ExitCode::from(2);
                 }
             };
             if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
-                eprintln!("error: --output-pin is required for search (or use --rescore)");
+                log::error!("--output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
             if (search.psm_fdr.is_some() || search.pep.is_some())
                 && !search.rescore
                 && !search.rescore_native
             {
-                eprintln!(
-                    "warning: --psm-fdr/--pep set without --rescore or --rescore-native; \
+                log::warn!(
+                    "--psm-fdr/--pep set without --rescore or --rescore-native; \
                      they are ignored (add --rescore to run Percolator, or feed the PIN \
                      to Percolator yourself)."
                 );
@@ -247,7 +258,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("andes: {e}");
+            log::error!("{e}");
             ExitCode::from(1)
         }
     }

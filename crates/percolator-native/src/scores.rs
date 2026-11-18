@@ -169,13 +169,13 @@ pub fn tdc_winners<F>(meta: &[RowMeta], scores: &[f64], psm_id: F) -> Result<Vec
 where
     F: Fn(usize) -> Result<String, String>,
 {
-    let mut keyed: Vec<(u32, u32, u64, u64, i8, usize)> = meta
+    let mut keyed: Vec<(u32, u64, u64, u64, i8, usize)> = meta
         .par_iter()
         .enumerate()
         .map(|(i, m)| {
             (
                 m.file,
-                m.scan as u32,
+                m.scan,
                 order_key64(m.exp_mass + 0.0),
                 !order_key64(scores[i] + 0.0),
                 m.label,
@@ -220,7 +220,7 @@ where
         let m = &meta[rows[k]];
         (
             !order_key64(scores[k] + 0.0),
-            !(m.scan as u32),
+            !m.scan,
             !order_key64(m.exp_mass + 0.0),
             -m.label,
             !m.file,

@@ -197,6 +197,12 @@ fn tdc_winner_per_file_scan_mass() {
 }
 
 #[test]
+fn tdc_winner_keeps_scans_that_differ_above_32_bits() {
+    let m = vec![meta(0, 1, 100.0), meta(0, (1u64 << 32) + 1, 100.0)];
+    assert_eq!(tdc_winners(&m, &[1.0, 2.0], id).unwrap(), vec![0, 1]);
+}
+
+#[test]
 fn tdc_winner_tie_prefers_decoy_then_smaller_id() {
     let mut m = vec![
         meta(0, 1, 100.0),

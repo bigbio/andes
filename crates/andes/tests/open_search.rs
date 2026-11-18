@@ -51,7 +51,7 @@ fn open_search_reports_the_offset_inside_the_window() {
     let (log, tsv, pin) = run(tmp.path(), &["--open-search", "--open-search-delta=-1..1"]);
 
     assert!(
-        log.contains("open search: mass-offset window -1..+1 Da"),
+        log.contains("open-search: mass-offset window -1..+1 Da"),
         "the run line names the window: {log}"
     );
     assert!(

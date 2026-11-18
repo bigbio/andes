@@ -1,6 +1,6 @@
 use model::Peptide;
 
-pub const ISOTOPE_STEP_DA: f64 = 1.003_355;
+pub const ISOTOPE_STEP_DA: f64 = model::mass::ISOTOPE;
 pub const ISOTOPE_MIMIC_TOL_DA: f64 = 0.05;
 
 pub fn isotope_gap_da(delta_da: f64) -> f64 {

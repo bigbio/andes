@@ -29,7 +29,7 @@ pub(crate) fn optimize_parameters(
     rescorer: &SampleRescorer,
 ) {
     if sample.is_empty() {
-        eprintln!("optimize: the sample is empty; keeping the resolved parameters");
+        log::warn!("the sample is empty; keeping the resolved parameters");
         return;
     }
     let base = params.clone();
@@ -45,13 +45,13 @@ pub(crate) fn optimize_parameters(
     ) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "optimize: cannot prepare the sample search: {e}; keeping the resolved parameters"
+            log::warn!(
+                "cannot prepare the sample search: {e}; keeping the resolved parameters"
             );
             return;
         }
     };
-    eprintln!("optimize: {} spectra sampled from the run", sample.len());
+    log::info!("{} spectra sampled from the run", sample.len());
 
     struct Row {
         stage: &'static str,
@@ -148,9 +148,9 @@ pub(crate) fn optimize_parameters(
         }
     }
 
-    eprintln!("  stage  tol(ppm) topN charge   targets");
+    log::info!("  stage  tol(ppm) topN charge   targets");
     for row in &rows {
-        eprintln!(
+        log::info!(
             "  {:>5} {:>8} {:>4} {:>2}..={:<2} {:>8}",
             row.stage,
             row.tol.map_or("-".to_string(), |t| format!("{t:.0}")),
@@ -168,11 +168,11 @@ pub(crate) fn optimize_parameters(
         ..
     }) = best
     else {
-        eprintln!("optimize: no combination could be scored; keeping the resolved parameters");
+        log::warn!("no combination could be scored; keeping the resolved parameters");
         return;
     };
-    eprintln!(
-        "optimize: chosen --precursor-tol {}{} --top-n {top_n} --charge {}..={} \
+    log::info!(
+        "chosen --precursor-tol {}{} --top-n {top_n} --charge {}..={} \
          ({targets} targets at q <= {OPTIMIZE_Q})",
         if tol_label.is_nan() {
             "resolved".to_string()

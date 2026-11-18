@@ -209,7 +209,7 @@ fn silac_duplex_quantifies_matches_and_transfers() {
         let count: usize = f[7].parse().unwrap();
         assert!(count >= 50, "{l}");
     }
-    assert!(log.contains("quant: label: match between runs:"), "{log}");
+    assert!(log.contains("INFO  label: match between runs:"), "{log}");
 }
 
 #[test]

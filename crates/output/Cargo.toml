@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+log = { workspace = true }
 glyco = { path = "../glyco" }
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }

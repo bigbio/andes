@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+log = { workspace = true }
 rayon = "1.10"
 
 [dev-dependencies]

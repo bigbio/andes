@@ -184,13 +184,13 @@ pub(crate) fn log_ethcd_once() {
         .is_ok()
     {
         if ethcd_as_etd() {
-            eprintln!(
-                "INFO: EThcD/ETciD detected; --ethcd-activation etd is set, so these spectra \
+            log::info!(
+                "EThcD/ETciD detected; --ethcd-activation etd is set, so these spectra \
                  stay classified as ETD (c/z stack active)."
             );
         } else {
-            eprintln!(
-                "INFO: EThcD/ETciD detected (electron transfer + supplemental collisional \
+            log::info!(
+                "EThcD/ETciD detected (electron transfer + supplemental collisional \
                  activation); these spectra are labelled EThcD and scored with b/y and c/z \
                  ions. IN --glyco the c/z stack (c/z generation and scoring, the c/z \
                  truncation gate, the ETD DB fallback, --glyco-hcd-pair) runs only on ETD \
@@ -207,8 +207,8 @@ fn log_profile_centroid_once() {
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        eprintln!(
-            "INFO: profile-mode spectra detected (MS:1000128) — centroiding peaks on the fly \
+        log::info!(
+            "profile-mode spectra detected (MS:1000128) — centroiding peaks on the fly \
              (local-max + intensity-weighted m/z). For best results pre-centroid during \
              conversion (e.g. the converter's peak-picking option)."
         );

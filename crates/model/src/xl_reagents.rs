@@ -177,12 +177,12 @@ fn monolink_in(table: &ReagentTable, db: &UnimodDb, token: &str) -> Option<Unimo
 }
 
 const ELEMENTS: &[(&str, f64)] = &[
-    ("H", 1.007_825_032),
-    ("C", 12.0),
-    ("N", 14.003_074_004),
-    ("O", 15.994_914_620),
-    ("S", 31.972_071_174),
-    ("P", 30.973_761_998),
+    ("H", crate::mass::H),
+    ("C", crate::mass::C),
+    ("N", crate::mass::N),
+    ("O", crate::mass::O),
+    ("S", crate::mass::S),
+    ("P", crate::mass::P),
 ];
 
 pub fn composition_mass(composition: &str) -> Option<f64> {

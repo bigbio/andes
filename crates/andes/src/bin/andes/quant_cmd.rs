@@ -468,11 +468,13 @@ fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
                 .flatten();
             let floor = spacing.map_or(ap.min_spacing_s, |s| s / 2.0);
             match spacing {
-                Some(s) => eprintln!(
-                    "[mbr] run {stem}: MS1 scan spacing {s:.2} s, RT residual-width floor {floor:.2} s"
+                Some(s) => log::debug!(
+                    target: "mbr",
+                    "run {stem}: MS1 scan spacing {s:.2} s, RT residual-width floor {floor:.2} s"
                 ),
-                None => eprintln!(
-                    "[mbr] run {stem}: MS1 scan spacing unknown, RT residual-width floor {floor:.2} s"
+                None => log::debug!(
+                    target: "mbr",
+                    "run {stem}: MS1 scan spacing unknown, RT residual-width floor {floor:.2} s"
                 ),
             }
             floor
@@ -486,8 +488,9 @@ fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
         let Some(knots) = knots else { continue };
         let floor = ap.floor_s(r);
         let at_floor = knots.iter().filter(|k| k.1 <= floor * (1.0 + 1e-9)).count();
-        eprintln!(
-            "[mbr] run {}: {at_floor} of {} RT residual-width knots at the {floor:.2} s floor",
+        log::debug!(
+            target: "mbr",
+            "run {}: {at_floor} of {} RT residual-width knots at the {floor:.2} s floor",
             stems.get(r).map_or("?", String::as_str),
             knots.len()
         );
@@ -805,8 +808,9 @@ pub(crate) fn build_and_write_library(
     }
     drop(forms);
     drop(site_keys);
-    eprintln!(
-        "[mbr] positional isomers: {} target precursors hold {n_forms} site forms; {multi} precursors join several site forms and are keyed by the site form of their best PSM",
+    log::info!(
+        target: "mbr",
+        "positional isomers: {} target precursors hold {n_forms} site forms; {multi} precursors join several site forms and are keyed by the site form of their best PSM",
         target_key.iter().filter(|&&t| t).count()
     );
     let donor_gate = match donor_pep {
@@ -820,17 +824,20 @@ pub(crate) fn build_and_write_library(
     let align_s = aligning.elapsed().as_secs_f64();
     let spectra_started = std::time::Instant::now();
     let (spectra, donor_scans, sc) = donors.finish(dir, stems, &library)?;
-    eprintln!(
-        "[mbr] library: run tables and scores {joined_s:.1} s, alignment {align_s:.1} s, spectra {:.1} s",
+    log::debug!(
+        target: "library",
+        "run tables and scores {joined_s:.1} s, alignment {align_s:.1} s, spectra {:.1} s",
         spectra_started.elapsed().as_secs_f64()
     );
-    eprintln!(
-        "[mbr] library: join check: {mismatched} of {n_joined} PSMs joined on SpecId ({:.4}%) disagree with the rescoring result on the peptide's residues, modification masses or target/decoy label (a run fails above {}%)",
+    log::info!(
+        target: "library",
+        "join check: {mismatched} of {n_joined} PSMs joined on SpecId ({:.4}%) disagree with the rescoring result on the peptide's residues, modification masses or target/decoy label (a run fails above {}%)",
         100.0 * mismatched as f64 / n_joined.max(1) as f64,
         100.0 * MAX_JOIN_MISMATCH
     );
-    eprintln!(
-        "[mbr] library: {} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide, modification composition or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",
+    log::info!(
+        target: "library",
+        "{} runs, {} PSMs scored, {donor_psms} target PSMs at {donor_gate} identify their precursor in their run; skipped: {} PSMs whose SpecId joins a rescoring PSM of another peptide, modification composition or target/decoy label, {} target and {} decoy PSMs without a rescoring score, {} decoy PSMs sharing a target's key; {} precursors, {} entries at the internal entry gate q<={max_q} (precursor-level, not an identification FDR) with a PSM at {donor_gate}, {} of them identity decoys (decoy precursors with decoy PSMs at {donor_gate}, measured as targets and never reported)",
         stems.len(),
         n_psms,
         mismatched,
@@ -841,8 +848,9 @@ pub(crate) fn build_and_write_library(
         library.entries.len(),
         library.entries.iter().filter(|e| e.identity_decoy).count()
     );
-    eprintln!(
-        "[mbr] library: fragment spectra (best donor PSM, at most {} b/y fragments of {}+ residues matched on its scan) for {} of {} entries; none for {} whose scan is not in the MS2 table, {} without fragment masses, {} with fewer than {} matched fragments",
+    log::info!(
+        target: "library",
+        "fragment spectra (best donor PSM, at most {} b/y fragments of {}+ residues matched on its scan) for {} of {} entries; none for {} whose scan is not in the MS2 table, {} without fragment masses, {} with fewer than {} matched fragments",
         quant::ms2::LIBRARY_FRAGMENTS,
         quant::ms2::MIN_ION_LENGTH,
         sc.with_spectrum,
@@ -859,8 +867,9 @@ pub(crate) fn build_and_write_library(
         .filter(|e| !e.consensus_rt.is_finite())
         .count();
     if no_consensus > 0 {
-        eprintln!(
-            "[mbr] library: {no_consensus} entries have no consensus RT (no observation in an aligned run) and are not transferred"
+        log::info!(
+            target: "library",
+            "{no_consensus} entries have no consensus RT (no observation in an aligned run) and are not transferred"
         );
     }
     if a.n_components() > 1 {
@@ -870,8 +879,9 @@ pub(crate) fn build_and_write_library(
                 groups[c as usize].push(stem);
             }
         }
-        eprintln!(
-            "[mbr] alignment: the aligned runs form {} components (runs joined when they share at least {} precursors); transfers stay inside a component: {}",
+        log::info!(
+            target: "alignment",
+            "the aligned runs form {} components (runs joined when they share at least {} precursors); transfers stay inside a component: {}",
             groups.len(),
             ap.min_shared,
             groups
@@ -885,8 +895,9 @@ pub(crate) fn build_and_write_library(
     for (r, stem) in stems.iter().enumerate() {
         if a.maps[r].is_none() {
             let isolated = a.anchors[r] >= ap.min_anchors && a.coverage[r] >= ap.min_coverage;
-            eprintln!(
-                "[mbr] run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range{}): it neither gives nor receives transfers and keeps its identified quantities",
+            log::warn!(
+                target: "mbr",
+                "run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range{}): it neither gives nor receives transfers and keeps its identified quantities",
                 a.anchors[r],
                 a.coverage[r],
                 if isolated {
@@ -911,8 +922,9 @@ pub(crate) fn build_and_write_library(
         donor_scans,
     };
     write_library(dir, &stored)?;
-    eprintln!(
-        "[mbr] wrote {} and {}",
+    log::info!(
+        target: "mbr",
+        "wrote {} and {}",
         dir.join(output::library_table::LIBRARY_FILE).display(),
         dir.join(output::library_table::ALIGNMENT_FILE).display()
     );
@@ -1123,8 +1135,9 @@ impl DonorPsms {
 }
 
 fn log_extract(stem: &str, rows: usize, c: &ExtractCounts) {
-    eprintln!(
-        "[mbr] extract {stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; {} identified pairs and {} of their decoy rows measured on the larger peak at the position the other runs predict; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
+    log::info!(
+        target: "extract",
+        "{stem}: {rows} rows{}; skipped: {} entries at a FAIMS voltage the run lacks, {} identified pairs with a non-finite best PSM RT, {} identified pairs without a prediction from other runs (no pseudo-transfer), {} transfers without a prediction, {} pseudo-transfers and {} transfers whose donor runs are all in other alignment components, {} transfers left out by the transfer selection; {} identified pairs and {} of their decoy rows measured on the larger peak at the position the other runs predict; MS1 scan spacing {}, width scale {:.3} s ({} fits, {} rounds{}); width prior from {} fits{}",
         if c.unaligned {
             " (unaligned run: identified rows only)"
         } else {
@@ -1177,8 +1190,9 @@ fn log_ms2(stem: &str, c: &Ms2Counts, secs: f64) {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    eprintln!(
-        "[mbr] extract {stem}: MS2 evidence ({secs:.1} s): transfers: {}; pseudo-transfers: {}; {} rows of entries without a library spectrum",
+    log::debug!(
+        target: "extract",
+        "{stem}: MS2 evidence ({secs:.1} s): transfers: {}; pseudo-transfers: {}; {} rows of entries without a library spectrum",
         part(0),
         part(1),
         c.no_spectrum
@@ -1229,8 +1243,9 @@ pub(crate) fn extract_and_write(
             &index,
             tol,
         );
-        eprintln!(
-            "[mbr] extract {stem}: shared-feature evidence ({:.1} s): {} transfers with a claimant, {} with a covering scan, {} scored against a claimant's distinguishing ions",
+        log::debug!(
+            target: "extract",
+            "{stem}: shared-feature evidence ({:.1} s): {} transfers with a claimant, {} with a covering scan, {} scored against a claimant's distinguishing ions",
             t.elapsed().as_secs_f64(),
             sc.claimed,
             sc.with_scan,
@@ -1361,8 +1376,9 @@ impl GroupTally {
             .iter()
             .filter(|g| g.q_value <= pg.max_q)
             .count();
-        eprintln!(
-            "[proteins] wrote {} ({} target groups at protein q<={} over {} run(s), {} with features; {} decoy groups at the cut); features left out: {} of peptides in no protein group, {} of groups above the cut",
+        log::info!(
+            target: "proteins",
+            "wrote {} ({} target groups at protein q<={} over {} run(s), {} with features; {} decoy groups at the cut); features left out: {} of peptides in no protein group, {} of groups above the cut",
             path.display(),
             kept.count(),
             pg.max_q,
@@ -1495,8 +1511,9 @@ pub(crate) fn finalize_and_write(
         }
         Ok(())
     })?;
-    eprintln!(
-        "[mbr] wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
+    log::info!(
+        target: "mbr",
+        "wrote {} ({} rows; transfer_q and quant_q are internal quant-quality q-values, not identification FDR) and {}",
         table.display(),
         summary.rows_written,
         validation.display()
@@ -1504,8 +1521,9 @@ pub(crate) fn finalize_and_write(
     if let Some((w, path, n)) = feature_out {
         w.finish()
             .map_err(|e| format!("write {}: {e}", path.display()))?;
-        eprintln!(
-            "[mbr] wrote {} ({n} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
+        log::info!(
+            target: "mbr",
+            "wrote {} ({n} feature rows with evidence type; below-threshold transfers and identified rows are in the mbr.parquet only)",
             path.display(),
         );
     }
@@ -1567,7 +1585,7 @@ pub(crate) fn run_in_process(
         parquet_dir,
         groups,
     )?;
-    eprintln!("[PHASE mbr: {:.2}s]", t0.elapsed().as_secs_f64());
+    log::info!(target: "mbr", "done in {:.2} s", t0.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1656,7 +1674,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
             _ => {}
         }
         if let Some(scales) = get(RUN_SCALES_KEY) {
-            eprintln!("[mbr] run {stem}: {scales}");
+            log::debug!(target: "mbr", "run {stem}: {scales}");
         }
         paths.push(path);
     }

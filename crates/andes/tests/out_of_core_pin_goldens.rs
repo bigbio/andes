@@ -123,11 +123,12 @@ fn read_pin(path: &Path) -> (String, Vec<String>) {
 fn calibration_outcome(stderr: &str) -> Option<String> {
     stderr
         .lines()
-        .find(|l| {
-            l.starts_with("Precursor mass shift learned")
-                || l.starts_with("Precursor mass calibration skipped (insufficient")
+        .filter_map(|l| l.split_once(" calibration: ").map(|(_, m)| m))
+        .find(|m| {
+            m.starts_with("Precursor mass shift learned")
+                || m.starts_with("Precursor mass calibration skipped (insufficient")
         })
-        .map(|l| l.split("; elapsed").next().unwrap_or(l).to_string())
+        .map(|m| m.split("; elapsed").next().unwrap_or(m).to_string())
 }
 
 fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
@@ -147,7 +148,7 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
         args.join(" ")
     );
     assert!(
-        stderr.contains("out-of-core candidate-index: mmap"),
+        stderr.contains("candidate-index: out-of-core mmap"),
         "the run did not report the out-of-core index:\n{stderr}"
     );
     let (header, rows) = read_pin(out);
@@ -335,7 +336,7 @@ fn chimeric_fragment_index_runs_with_unique_specids() {
     let dups = duplicate_identifications(&idx_header, &idx_rows);
     assert!(dups.is_empty(), "repeated identifications: {dups:?}");
     assert!(
-        idx_err.contains("candidate retrieval: fragment-ion index"),
+        idx_err.contains("candidate-retrieval: fragment-ion index"),
         "the fragment-ion index did not run:\n{idx_err}"
     );
     let ids: std::collections::HashSet<&str> = idx_rows
@@ -401,7 +402,7 @@ fn refine_on_the_fragment_index_writes_a_well_formed_pin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (header, rows, err) = run_refine("auto", &dir.path().join("idx.pin"));
     assert!(
-        err.contains("candidate retrieval: fragment-ion index"),
+        err.contains("candidate-retrieval: fragment-ion index"),
         "--refine did not take the fragment-ion index:\n{err}"
     );
     assert!(

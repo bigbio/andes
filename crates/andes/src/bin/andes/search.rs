@@ -120,8 +120,9 @@ fn score_mass_ordered(
 ) {
     measurer.measure(prepared, pending.iter(), Some(span_da));
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
-    eprintln!(
-        "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
+    log::info!(
+        target: "fragment-index",
+        "{} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
         pending.len(),
         INDEX_CHUNK_SIZE,
         span_da
@@ -196,8 +197,9 @@ impl FragmentErrorMeasurer {
                 if let Some(last) = self.per_file.last_mut() {
                     *last = Some(m);
                 }
-                eprintln!(
-                    "Fragment error: offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
+                log::info!(
+                    target: "fragment-error",
+                    "offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
                      at 1% q in {} sampled spectra -> fragment peaks recentred by {:+.2} ppm, \
                      PIN feature tolerance {:.1} ppm, ppm-Gaussian width {:.2} ppm, \
                      node-score window {:?} ({:.1}s)",
@@ -213,8 +215,9 @@ impl FragmentErrorMeasurer {
                     t.elapsed().as_secs_f64()
                 );
             }
-            Err(why) => eprintln!(
-                "Fragment error: not measured ({why}); the PIN features keep {:?} ({:.1}s)",
+            Err(why) => log::info!(
+                target: "fragment-error",
+                "not measured ({why}); the PIN features keep {:?} ({:.1}s)",
                 prepared.scorer.feature_match_tolerance(),
                 t.elapsed().as_secs_f64()
             ),
@@ -302,7 +305,7 @@ fn unpack_d_archives(
         {
             let t = std::time::Instant::now();
             let run = input::unpack_d_archive(p, dir.path())?;
-            eprintln!(
+            log::info!(
                 "Bruker .d archive {}: unpacked to {} ({:.1}s)",
                 p.display(),
                 run.display(),
@@ -336,7 +339,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut cli = cli;
     if let Some(x) = &cli.xl {
-        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0) {
+        if let Some(v) =
+            crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0)
+        {
             cli.db.variable_mods = Some(v);
         }
     }
@@ -399,7 +404,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     QuantSettings::check_args(&cli)?;
     if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
-        eprintln!("{warning}");
+        log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
     }
     let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.db.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
@@ -416,7 +421,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &mut _rescore_tmp,
     )?;
     if spectrum_paths.len() > 1 {
-        eprintln!(
+        log::info!(
             "Multi-spectrum search: {} inputs → one PIN",
             spectrum_paths.len()
         );
@@ -443,10 +448,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
         if peff.sites_without_mass + peff.processing_not_chain > 0 {
-            eprintln!(
+            log::info!(
                 "PEFF: {} entries; left out {} sites with no known mass and {} processed spans \
                  that are not mature chains",
-                peff.entries, peff.sites_without_mass, peff.processing_not_chain
+                peff.entries,
+                peff.sites_without_mass,
+                peff.processing_not_chain
             );
         }
     }
@@ -454,14 +461,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         log_claims("Annotations", stats);
     }
     if site_knockoffs.knockoffs > 0 {
-        eprintln!(
-            "Site claims: {} annotated sites, {} knockoff sites ({} sites with no position for \
+        log::info!(
+            target: "site-claims",
+            "{} annotated sites, {} knockoff sites ({} sites with no position for \
              one)",
             site_knockoffs.sites, site_knockoffs.knockoffs, site_knockoffs.untested
         );
     }
-    eprintln!(
-        "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
+    log::info!(
+        target: "database",
+        "Loaded {} target proteins from {} in {:.2} s",
         target_db.proteins.len(),
         database_path.display(),
         t_phase.elapsed().as_secs_f64()
@@ -475,8 +484,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 (cli.db.uniprot_chains, "--uniprot-chains"),
             ] {
                 if set {
-                    eprintln!(
-                        "WARN: {flag} needs a UniProt XML database (*.xml[.gz]); {} is FASTA, \
+                    log::warn!(
+                        "{flag} needs a UniProt XML database (*.xml[.gz]); {} is FASTA, \
                          so it does nothing.",
                         database_path.display()
                     );
@@ -514,7 +523,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
-            eprintln!("{warning}");
+            log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
         }
     }
     let t_phase = std::time::Instant::now();
@@ -526,8 +535,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.decoy_seed,
         &proteases,
     );
-    eprintln!(
-        "[PHASE search_index_build: {:.2}s]",
+    log::info!(
+        target: "search_index_build",
+        "done in {:.2} s",
         t_phase.elapsed().as_secs_f64()
     );
 
@@ -557,7 +567,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             other_path,
             other,
         )? {
-            eprintln!("{warning}");
+            log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
         }
     }
 
@@ -568,8 +578,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let ev = sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
             .map(|sample| input::infer_fragment_resolution(&sample));
         if let Some(e) = &ev {
-            eprintln!(
-                "Acquisition: no analyzer metadata; fragment resolution from the peaks: {} -> {}",
+            log::info!(
+                target: "acquisition",
+                "no analyzer metadata; fragment resolution from the peaks: {} -> {}",
                 e.describe(),
                 match e.high_res {
                     Some(true) => "high resolution (HCD high-res model)",
@@ -592,8 +603,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     if let (Some(said), Some(read)) = (cli.sdrf_dissociation, acquisition.activation) {
         if said != read {
-            eprintln!(
-                "WARN: the SDRF dissociation method is {} but {} records {}; andes follows the file",
+            log::warn!(
+                "the SDRF dissociation method is {} but {} records {}; andes follows the file",
                 said.name(),
                 spectrum_path.display(),
                 read.name()
@@ -640,14 +651,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         Fragmentation::Uvpd => ActivationMethod::UVPD,
                     };
                     if chosen != method {
-                        eprintln!(
-                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}, \
+                        log::info!(
+                            target: "model",
+                            "auto-detected activation = {} (instrument = {}) from {}, \
                              OVERRIDDEN by --fragmentation {}",
                             method.name(), inst.name(), spectrum_path.display(), chosen.name()
                         );
                     } else {
-                        eprintln!(
-                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                        log::info!(
+                            target: "model",
+                            "auto-detected activation = {} (instrument = {}) from {}",
                             method.name(), inst.name(), spectrum_path.display()
                         );
                     }
@@ -660,8 +673,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         ActivationMethod::CID
                     });
-                    eprintln!(
-                        "Param resolver: instrument = {} from {}, no activation recorded; \
+                    log::info!(
+                        target: "model",
+                        "instrument = {} from {}, no activation recorded; \
                          activation = {} [{}]",
                         inst.name(),
                         spectrum_path.display(),
@@ -691,7 +705,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.model_store.as_deref(),
             cli.model_id_override.as_deref(),
         )?;
-        eprintln!("Param model: {model_id} (from store)");
+        log::info!(target: "model", "{model_id} (from store)");
         (p, activation, instrument_opt, model_id)
     };
     let gbdt_k = cli.gbdt_max_trees.unwrap_or(if cli.glyco {
@@ -709,7 +723,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let mut t = (**g).clone();
                     t.trees.truncate(k);
                     *slot = Some(Arc::new(t));
-                    eprintln!(
+                    log::info!(
                         "--gbdt-max-trees {k}: {name} ensemble {before} -> {k} trees \
                          (changes predictions; not byte-identical)"
                     );
@@ -727,8 +741,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Protocol::Auto => match label {
             Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
-                eprintln!(
-                    "Protocol resolver: {} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
+                log::info!(
+                    target: "protocol",
+                    "{} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
@@ -738,8 +753,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 param.data_type.protocol = model::protocol::Protocol::TMT;
             }
             Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
-                eprintln!(
-                    "Protocol resolver: {} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
+                log::info!(
+                    target: "protocol",
+                    "{} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
                     if cli.tmt.is_some() {
                         "--tmt"
                     } else {
@@ -771,8 +787,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
         if let Some((name, mass)) = tag {
             aa = search_aa_set(&cli.db, Some((name, mass)))?;
-            eprintln!(
-                "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
+            log::info!(
+                target: "protocol",
+                "injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
                  into the candidate set (no --fixed-mods given)"
             );
         }
@@ -785,7 +802,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         && cli.fragment_tol_da.is_none();
     if dia_tol_default {
         cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
-        eprintln!(
+        log::info!(
             "--dia: fragment tolerance {} ppm (Orbitrap Astral MS2)",
             crate::dia::FRAGMENT_TOL_PPM
         );
@@ -793,15 +810,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
         if instrument_was_detected && !dia_tol_default {
-            eprintln!(
+            log::info!(
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())
             );
         }
         scorer.set_fragment_tol_override(frag_tol_override);
     }
-    eprintln!(
-        "[PHASE param_and_scorer: {:.2}s]",
+    log::info!(
+        target: "param_and_scorer",
+        "done in {:.2} s",
         t_phase.elapsed().as_secs_f64()
     );
 
@@ -831,14 +849,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let has_ms1 = is_mzml || is_raw || is_d;
     let chimeric_active = cli.chimeric && has_ms1;
     if cli.chimeric && !has_ms1 {
-        eprintln!(
-            "WARN: --chimeric requires MS1 data (mzML, Thermo .raw or Bruker .d); the input \
+        log::warn!(
+            "--chimeric requires MS1 data (mzML, Thermo .raw or Bruker .d); the input \
              is MGF, so the co-isolation cascade is disabled and the search runs normally."
         );
     }
     if chimeric_active && cli.ms_level != 2 {
-        eprintln!(
-            "WARN: --ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
+        log::warn!(
+            "--ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
             cli.ms_level
         );
     }
@@ -854,7 +872,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
         }
         if cli.refine {
-            return Err("--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into());
+            return Err(
+                "--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into(),
+            );
         }
         if cli.glyco {
             return Err("--dia and --glyco cannot be combined: the glycopeptide search has no isolation-window or MS1 gate".into());
@@ -873,19 +893,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.require_nxst_sequon = cli.glyco && cli.glyco_index_sequon_only;
     if params.require_nxst_sequon {
-        eprintln!(
-            "candidate index: N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
+        log::info!(
+            target: "candidate-index",
+            "N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto
-        && (cli.glyco || cli.open_search)
-        && has_ms1;
+    let mono_active =
+        cli.precursor_mono == PrecursorMonoFlag::Auto && (cli.glyco || cli.open_search) && has_ms1;
     if cli.precursor_mono == PrecursorMonoFlag::Auto
         && (cli.glyco || cli.open_search)
         && !mono_active
     {
-        eprintln!(
-            "WARN: --precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
+        log::warn!(
+            "--precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
              Bruker .d); \
              {} has none — precursors are left as recorded.",
             spectrum_path.display()
@@ -893,8 +913,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mono_params = MonoParams::default();
     if mono_active {
-        eprintln!(
-            "precursor-mono: auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
+        log::info!(
+            target: "precursor-mono",
+            "auto (max shift {}, min fit {:.2}, min gain {:.2}, min SNR {:.1}, \
              {} ppm, back-off {})",
             mono_params.max_shift,
             mono_params.min_fit,
@@ -941,7 +962,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 | model::protocol::Protocol::ITRAQPhospho
         )
     {
-        eprintln!(
+        log::info!(
             "isobaric windowed peak filter: off (high-resolution MS2; --peak-filter WINDOW:K turns it on)"
         );
     }
@@ -952,8 +973,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.max_missed_cleavages = if cli.glyco {
         let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
         if explicit && cli.max_missed_cleavages < 3 {
-            eprintln!(
-                "note: --glyco normally raises missed cleavages to 3 (sequon-bearing \
+            log::info!(
+                "--glyco normally raises missed cleavages to 3 (sequon-bearing \
                  tryptic peptides often need a third to reach a scoreable length); \
                  honouring your explicit --max-missed-cleavages {}. Expect fewer \
                  glycopeptide IDs in exchange for a smaller candidate index.",
@@ -983,7 +1004,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             params.max_length,
         );
         params.max_label_sites = extra;
-        eprintln!(
+        log::info!(
             "--label: channels {}; label mods added to the search (up to {extra} labelled sites \
              per peptide, apart from the {} other variable mods)",
             spec.describe(),
@@ -992,9 +1013,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.precursor_cal_mode = cli.precursor_cal;
     if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
-        eprintln!(
-            "WARN: --precursor-cal is ignored under --dia (a DIA scan has no selected precursor)"
-        );
+        log::warn!("--precursor-cal is ignored under --dia (a DIA scan has no selected precursor)");
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
     if let Some(n) = cli.cal_min_spec_keys {
@@ -1026,8 +1045,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     if let (false, Some(reason)) = (standalone, retrieval_excluded) {
-        eprintln!(
-            "[auto] {} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
+        log::info!(
+            "{} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
              index is not used: {reason})",
             param.data_type.activation.name()
         );
@@ -1091,33 +1110,33 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.isotope_error_range = 0..=2;
         params.fragment_index_top_k = top_k;
         params.precursor_cal_mode = PrecursorCalMode::Off;
-        eprintln!(
-            "open search: mass-offset window {delta_min:+}..{delta_max:+} Da, {top_k} candidates \
+        log::info!(
+            target: "open-search",
+            "mass-offset window {delta_min:+}..{delta_max:+} Da, {top_k} candidates \
              per spectrum (fragment-ion shortlist), isotope range 0..=2 (reported offset is \
              isotope-corrected)"
         );
     }
     if let Some(refusal) = choice.refused_because {
-        eprintln!(
-            "WARN: the fragment-ion index cannot be used here ({refusal}); using enumeration."
-        );
+        log::warn!("the fragment-ion index cannot be used here ({refusal}); using enumeration.");
     }
     if let Some(reason) = &choice.report {
         if choice.use_index {
-            eprintln!(
-                "candidate retrieval: fragment-ion index ({reason}; {} candidates per spectrum, \
+            log::info!(
+                target: "candidate-retrieval",
+                "fragment-ion index ({reason}; {} candidates per spectrum, \
                  >= {} matched b/y ions)",
                 params.fragment_index_top_k,
                 search::search_params::FRAGMENT_INDEX_MIN_MATCHED
             );
         } else {
-            eprintln!("candidate retrieval: per-spectrum enumeration ({reason})");
+            log::info!(target: "candidate-retrieval", "per-spectrum enumeration ({reason})");
         }
     }
 
     if !cli.glyco && arg_present("--glyco-hcd-pair") {
-        eprintln!(
-            "WARN: --glyco-hcd-pair has no effect without --glyco (it only drives \
+        log::warn!(
+            "--glyco-hcd-pair has no effect without --glyco (it only drives \
              paired-scan candidate generation in glyco mode); ignoring it."
         );
     }
@@ -1187,8 +1206,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             decoy_strategy,
             search::decoy::DecoyStrategy::None | search::decoy::DecoyStrategy::Sequon
         ) {
-            eprintln!(
-                "WARN: --glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
+            log::warn!(
+                "--glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
                  target proteome), which does NOT preserve N-X-S/T sequon density that \
                  glyco scoring gates on — the resulting .glyco.pin FDR is \
                  ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
@@ -1198,8 +1217,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if cli.glyco_hcd_pair && spectrum_paths.len() > 1 {
-            eprintln!(
-                "WARN: --glyco-hcd-pair is disabled for {} --spectrum inputs: paired-scan \
+            log::warn!(
+                "--glyco-hcd-pair is disabled for {} --spectrum inputs: paired-scan \
                  generation pairs ETD<->HCD over the concatenated spectra and would cross \
                  file boundaries. Run one file at a time to use paired generation.",
                 spectrum_paths.len()
@@ -1207,25 +1226,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if params.chimeric && cli.refine {
-        eprintln!(
-            "WARN: --refine + --chimeric do not fully stack in this release — chimeric \
+        log::warn!(
+            "--refine + --chimeric do not fully stack in this release — chimeric \
              already explains many of the spectra refinement would otherwise rescue, so \
              refinement adds much less on top of chimeric than it does alone. See \
              docs/benchmarks/README.md for the measured combination."
         );
     }
     if params.score_mode == search::ScoreMode::Strong {
-        eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
+        log::info!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
 
-    eprintln!("──────── andes resolved parameters ────────");
-    eprintln!("  spectra        : {}", spectrum_path.display());
+    log::info!(target: "run", "──────── andes resolved parameters ────────");
+    log::info!(target: "run", "spectra        : {}", spectrum_path.display());
     let model_source = if cli.model_id_override.is_some() {
         "--model"
     } else {
         "selected from store"
     };
-    eprintln!("  model          : {resolved_model_id} [{model_source}]");
+    log::info!(target: "run", "model          : {resolved_model_id} [{model_source}]");
     let activation_source = if cli.fragmentation != Fragmentation::Auto {
         "--fragmentation"
     } else if detected_activation.is_some() {
@@ -1233,29 +1252,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "default"
     };
-    eprintln!(
-        "  activation     : {} [{activation_source}] (model trained on {})",
+    log::info!(
+        target: "run",
+        "activation     : {} [{activation_source}] (model trained on {})",
         routed_activation.name(),
         param.data_type.activation.name()
     );
     let instrument_source = acquisition.resolution_source.tag();
-    eprintln!(
-        "  instrument     : {} [{instrument_source}] (model trained on {})",
+    log::info!(
+        target: "run",
+        "instrument     : {} [{instrument_source}] (model trained on {})",
         routed_instrument.map_or("LowRes", |i| i.name()),
         param.data_type.instrument.name()
     );
-    eprintln!("  acquisition    : {}", acquisition.describe());
-    eprintln!("  protocol       : {:?}", param.data_type.protocol);
+    log::info!(target: "run", "acquisition    : {}", acquisition.describe());
+    log::info!(target: "run", "protocol       : {:?}", param.data_type.protocol);
     if extra_enzymes.is_empty() {
-        eprintln!(
-            "  enzyme         : {} ({:?} termini, <={} missed cleavages)",
+        log::info!(
+            target: "run",
+            "enzyme         : {} ({:?} termini, <={} missed cleavages)",
             search_enzyme.name(),
             cli.enzyme_specificity,
             params.max_missed_cleavages
         );
     } else {
         let extras: Vec<&str> = extra_enzymes.iter().map(|e| e.name()).collect();
-        eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
+        log::info!(target: "run", "enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
                   search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
     }
     let mod_names = |fixed: bool| {
@@ -1272,41 +1294,46 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             names.join(", ")
         }
     };
-    eprintln!("  fixed mods     : {}", mod_names(true));
-    eprintln!("  variable mods  : {}", mod_names(false));
-    eprintln!(
-        "  max var-mods   : {} per peptide",
+    log::info!(target: "run", "fixed mods     : {}", mod_names(true));
+    log::info!(target: "run", "variable mods  : {}", mod_names(false));
+    log::info!(
+        target: "run",
+        "max var-mods   : {} per peptide",
         params.max_variable_mods_per_peptide
     );
-    eprintln!(
-        "  peptide length : {}-{}",
+    log::info!(
+        target: "run",
+        "peptide length : {}-{}",
         params.min_length, params.max_length
     );
-    eprintln!(
-        "  precursor tol  : {:?} (calibration: {:?})",
+    log::info!(
+        target: "run",
+        "precursor tol  : {:?} (calibration: {:?})",
         params.precursor_tolerance, params.precursor_cal_mode
     );
-    eprintln!(
-        "  charge range   : {}-{}",
+    log::info!(
+        target: "run",
+        "charge range   : {}-{}",
         params.charge_range.start(),
         params.charge_range.end()
     );
-    eprintln!(
-        "  isotope errors : {}..={}",
+    log::info!(
+        target: "run",
+        "isotope errors : {}..={}",
         params.isotope_error_range.start(),
         params.isotope_error_range.end()
     );
-    eprintln!(
-        "  decoy          : {:?} (prefix {})   chimeric: {}",
+    log::info!(
+        target: "run",
+        "decoy          : {:?} (prefix {})   chimeric: {}",
         decoy_strategy, cli.db.decoy_prefix, params.chimeric
     );
-    eprintln!("───────────────────────────────────────────");
 
     const CHUNK_SIZE: usize = 5000;
 
     let t_phase = std::time::Instant::now();
 
-    eprintln!("Using {} worker threads", cli.threads);
+    log::info!(target: "run", "Using {} worker threads", cli.threads);
 
     let fragment_tol_da = 0.5_f64;
 
@@ -1317,16 +1344,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
     if (is_raw || is_d) && cli.ms_level != 2 {
-        eprintln!(
-            "WARN: --ms-level={} is ignored for native .raw/.d input; these formats \
+        log::warn!(
+            "--ms-level={} is ignored for native .raw/.d input; these formats \
              search MS2 (identification) scans only.",
             cli.ms_level
         );
     }
 
     if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
-        eprintln!(
-            "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
+        log::warn!(
+            "--precursor-cal is not yet supported for Thermo .raw input; \
              proceeding without calibration."
         );
         params.precursor_cal_mode = PrecursorCalMode::Off;
@@ -1354,8 +1381,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &mut cal_prepared,
         )?;
         drop(cal_prepared);
-        eprintln!(
-            "[PHASE calibration_prepass: {:.2}s] (includes opening or building the candidate index)",
+        log::info!(
+            target: "calibration_prepass",
+            "done in {:.2} s (includes opening or building the candidate index)",
             t_cal.elapsed().as_secs_f64()
         );
         params.precursor_mass_shift_ppm =
@@ -1371,7 +1399,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 && right_after.is_some()
                 && (left_after != left_before || right_after != right_before)
             {
-                eprintln!(
+                log::info!(
+                    target: "calibration",
                     "Tightened precursor tolerance for main pass: left {:.3} ppm -> {:.3} ppm, right {:.3} ppm -> {:.3} ppm",
                     left_before.unwrap_or(0.0),
                     left_after.unwrap_or(0.0),
@@ -1393,14 +1422,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.optimize_sample,
         )
         .or_else(|| {
-            sample_spectra(
-                &spectrum_path,
-                is_mzml,
-                is_mgf,
-                is_raw,
-                cli.ms_level as u32,
-            )
-            .map(|v| v.into_iter().take(cli.optimize_sample).collect())
+            sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
+                .map(|v| v.into_iter().take(cli.optimize_sample).collect())
         });
         match sample {
             Some(sample) => {
@@ -1427,15 +1450,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let optimize_path = optimize_dir.path().to_path_buf();
                 if let Err(e) = optimize_dir.close() {
-                    eprintln!(
-                        "WARN: optimize: could not remove {}: {e}",
+                    log::warn!(
+                        "optimize: could not remove {}: {e}",
                         optimize_path.display()
                     );
                 }
             }
-            None => eprintln!(
-                "WARN: --optimize could not read a sample; keeping the resolved parameters"
-            ),
+            None => {
+                log::warn!("--optimize could not read a sample; keeping the resolved parameters")
+            }
         }
     }
 
@@ -1478,8 +1501,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ) {
                 Ok(r) => r?,
                 Err(e) => {
-                    eprintln!(
-                        "WARN: per-scan model routing: {e}; {} scans use the run's model",
+                    log::warn!(
+                        target: "routing",
+                        "{e}; {} scans use the run's model",
                         activation.name()
                     );
                     return None;
@@ -1506,8 +1530,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(t) = frag_tol_override {
                 sc.set_fragment_tol_override(Some(t));
             }
-            eprintln!(
-                "Per-scan routing: {} scans -> model {model_id} (the run is routed {})",
+            log::info!(
+                target: "routing",
+                "{} scans -> model {model_id} (the run is routed {})",
                 activation.name(),
                 routed_activation.name()
             );
@@ -1515,13 +1540,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         prepared = prepared.with_per_scan_scorers(routed_activation, loader);
     }
-    eprintln!(
-        "[PHASE candidate_index_open: {:.2}s]",
+    log::info!(
+        target: "candidate_index_open",
+        "done in {:.2} s",
         t_index.elapsed().as_secs_f64()
     );
-    eprintln!(
-        "PreparedSearch: out-of-core candidate-index: mmap \
-         (base peptides resolved lazily per spectrum)"
+    log::info!(
+        target: "candidate-index",
+        "out-of-core mmap (base peptides resolved lazily per spectrum)"
     );
 
     let bench_mode = cli.max_spectra > 0;
@@ -1536,8 +1562,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .is_err()
                 && ms3_carries_reporters(&spectrum_path, is_mzml, is_raw) =>
         {
-            eprintln!(
-                "Protocol resolver: --tmt {}: the MS2 is low-resolution and the MS3 scans carry \
+            log::info!(
+                target: "protocol",
+                "--tmt {}: the MS2 is low-resolution and the MS3 scans carry \
                  reporters (SPS-MS3); reading reporters from the MS3 (--tmt-level 3)",
                 plex.name()
             );
@@ -1597,14 +1624,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if !cli.glyco && !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
-            eprintln!(
-                "WARN: --tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
+            log::warn!(
+                "--tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
                  or add --rescore so only PSMs at q<=--psm-fdr are quantified."
             );
         }
         if !cli.glyco {
-            eprintln!("Quantification: {}", s.describe());
+            log::info!(target: "quant", "{}", s.describe());
         }
     }
     let predictors = if standalone {
@@ -1613,7 +1640,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
     };
     if let Some(p) = &predictors {
-        eprintln!("Predict: {}", p.describe());
+        log::info!(target: "predict", "{}", p.describe());
     }
     let keep_peaks = cli.refine
         || cli.dia
@@ -1627,8 +1654,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_search_start = std::time::Instant::now();
 
     let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
-        eprintln!(
-            "WARN: --ms-level={} requested for an MGF input; MGF carries no MS \
+        log::warn!(
+            "--ms-level={} requested for an MGF input; MGF carries no MS \
              level (always treated as MS2). The flag has no effect on this input.",
             cli.ms_level
         );
@@ -1650,8 +1677,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("create --precursor-mono-dump {}: {e}", p.display()))?,
         ),
         (Some(p), false) => {
-            eprintln!(
-                "WARN: --precursor-mono-dump {} ignored: the correction is not active.",
+            log::warn!(
+                "--precursor-mono-dump {} ignored: the correction is not active.",
                 p.display()
             );
             None
@@ -1683,8 +1710,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let title_prefix = title_prefix_for(file_stem);
 
         if spectrum_paths.len() > 1 {
-            eprintln!(
-                "=== spectrum [{}/{}] {} ===",
+            log::info!(
+                target: "input",
+                "spectrum file {}/{}: {}",
                 file_idx + 1,
                 spectrum_paths.len(),
                 input_path.display()
@@ -1921,8 +1949,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let span_da = index_chunk_span_da(cli.fragment_index_slice_da);
                 measurer.measure(&prepared, pending.iter().map(|e| &e.0), Some(span_da));
                 pending.sort_by(|a, b| index_order_mass(&a.0).total_cmp(&index_order_mass(&b.0)));
-                eprintln!(
-                    "fragment-index: {} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
+                log::info!(
+                    target: "fragment-index",
+                    "{} spectra sorted by precursor mass, chunks of <= {} spectra and <= {:.0} Da",
                     pending.len(),
                     INDEX_CHUNK_SIZE,
                     span_da
@@ -1970,13 +1999,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .join()
                 .map_err(|_| "MS1-linked parser thread panicked".to_string())??;
             run_scans = scans;
-            eprintln!(
-                "{}: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
-                if chimeric_active {
-                    "chimeric mode"
-                } else {
+            log::info!(
+                target: if chimeric_active {
+                    "chimeric"
+                } else if mono_active {
                     "precursor-mono"
+                } else {
+                    "xl"
                 },
+                "streamed {} MS2 spectra ({} MS1 scans linked) from {}",
                 file_offset,
                 ms1_linked,
                 input_path.display()
@@ -2207,8 +2238,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
 
     if parse_stats.error_count > 0 {
-        eprintln!(
-            "WARN: {} spectra failed to parse{}",
+        log::warn!(
+            target: "input",
+            "{} spectra failed to parse{}",
             parse_stats.error_count,
             if !parse_stats.first_errors.is_empty() {
                 format!(" (first {}):", parse_stats.first_errors.len())
@@ -2217,13 +2249,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         );
         for e in &parse_stats.first_errors {
-            eprintln!("  - {e}");
+            log::warn!(target: "input", "- {e}");
         }
     }
 
     if is_mzml || is_raw {
-        eprintln!(
-            "MS-level filter: {} (only MS{} spectra entered the search)",
+        log::info!(
+            target: "input",
+            "MS-level filter {} (only MS{} spectra entered the search)",
             cli.ms_level, cli.ms_level
         );
     }
@@ -2237,20 +2270,23 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let search_elapsed = t_search_start.elapsed();
-    eprintln!(
-        "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
+    log::info!(
+        target: "stream_search",
+        "Loaded and scored {} spectra from {} in chunks of {}, done in {:.2} s",
         all_spectra.len(),
         spectrum_path.display(),
         CHUNK_SIZE,
         t_phase.elapsed().as_secs_f64()
     );
-    eprintln!(
-        "[PHASE chunk_candidate_prep: {:.2}s] (part of stream_search: fragment-index build or record expansion, summed over chunks)",
+    log::info!(
+        target: "chunk_candidate_prep",
+        "done in {:.2} s (part of stream_search: fragment-index build or record expansion, summed over chunks)",
         prepared.chunk_prep_seconds()
     );
     for (activation, own_model, scans) in prepared.per_scan_routes() {
-        eprintln!(
-            "Per-scan routing: {scans} {} scan scorings with {} (run routed {})",
+        log::info!(
+            target: "routing",
+            "{scans} {} scan scorings with {} (run routed {})",
             activation.name(),
             if own_model {
                 "the model of their own activation"
@@ -2261,7 +2297,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if bench_mode {
-        eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
+        log::info!(target: "bench", "capped at {} spectra", cli.max_spectra);
     }
 
     prepared.sync_materialized_candidates();
@@ -2269,8 +2305,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mono_columns = mono_active;
     let mono_active = mono_active && {
         if mono_stats.fitted == 0 {
-            eprintln!(
-                "WARN: --precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
+            log::warn!(
+                "--precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
                  a linked MS1 and a known charge); precursors are left as recorded and the \
                  glyco PIN Mono columns are 0.",
                 mono_stats.seen
@@ -2292,8 +2328,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(_, &n)| n > 0)
             .map(|(k, n)| format!("{k}:{n}"))
             .collect();
-        eprintln!(
-            "precursor-mono: {} of {} MS2 fitted (linked MS1 + known charge), {} shifted \
+        log::info!(
+            target: "precursor-mono",
+            "{} of {} MS2 fitted (linked MS1 + known charge), {} shifted \
              down [shift:count {}]",
             mono_stats.fitted,
             mono_stats.seen,
@@ -2323,8 +2360,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .is_some_and(|c| c.verified_within(mono_params.min_fit, *window.end()))
             })
             .collect();
-        eprintln!(
-            "precursor-mono: isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
+        log::info!(
+            target: "precursor-mono",
+            "isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
              with a verified monoisotope (the others keep {}..={}; a verified monoisotope \
              needs no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — \
              pass --isotope-error to override)",
@@ -2346,7 +2384,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut queues = all_queues;
 
     if standalone {
-        eprintln!(
+        log::info!(
             "Standard peptide search skipped in --{} mode (PSMs unused; the driver \
              derives its own candidates); {} spectra loaded ({:.2}s)",
             if cli.glyco { "glyco" } else { "xl" },
@@ -2355,7 +2393,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     } else {
         let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
-        eprintln!(
+        log::info!(
             "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
             spectra.len(),
             search_elapsed.as_secs_f64()
@@ -2363,16 +2401,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli.open_search {
         let (attempts, wins) = prepared.open_search_stats();
-        eprintln!(
-            "open search: {attempts} modification-aware re-scores ({wins} improved the node \
+        log::info!(
+            target: "open-search",
+            "{attempts} modification-aware re-scores ({wins} improved the node \
              score)"
         );
     }
 
     if cli.xl.is_some() {
         if xl_snap_files > 0 {
-            eprintln!(
-                "[xl] {xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
+            log::info!(
+                target: "xl",
+                "{xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
                 search::xl_search::PRECURSOR_SNAP_PPM
             );
         }
@@ -2427,9 +2467,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
-            eprintln!(
-                "WARN: refine is high-res-only and the data is low-res; skipping refinement."
-            );
+            log::warn!("refine is high-res-only and the data is low-res; skipping refinement.");
             None
         } else {
             let target_db = idx.target_db();
@@ -2449,8 +2487,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 decoy_strategy,
                 1,
             );
-            eprintln!(
-                "[PHASE refinement: {:.2}s]",
+            log::info!(
+                target: "refinement",
+                "done in {:.2} s",
                 t_refine.elapsed().as_secs_f64()
             );
             out
@@ -2460,8 +2499,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let t_phase = std::time::Instant::now();
-    let refine_merged = refine_output.is_some();
-    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
+    let refine_merged = refine_output
+        .as_ref()
+        .is_some_and(|o| !o.candidates.is_empty());
+    let ipf_scoring = cli
+        .localize
+        .is_some()
+        .then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2492,10 +2536,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &params,
         &pin_index,
     )?;
-    eprintln!(
-        "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
+    log::info!(
+        target: "output",
+        "Wrote PIN: {} in {:.2} s",
         output_pin_path.display(),
-        t_phase.elapsed().as_secs_f64(),
+        t_phase.elapsed().as_secs_f64()
+    );
+    log::info!(
+        target: "total",
+        "done in {:.2} s",
         t_total.elapsed().as_secs_f64()
     );
     if let Some(p) = &predictors {
@@ -2510,9 +2559,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli.refine {
         if refine_merged {
-            eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
+            log::info!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
         } else {
-            eprintln!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
+            log::info!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
         }
     }
 
@@ -2526,8 +2575,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             (true, false) => "--psm-fdr",
             _ => "--pep",
         };
-        eprintln!(
-            "WARN: {which} set without --rescore or --rescore-native, so no rescoring \
+        log::warn!(
+            "{which} set without --rescore or --rescore-native, so no rescoring \
              runs and no filtered .tsv is written. andes does not compute FDR on its \
              own; the PIN is written for Percolator. Add --rescore to run Percolator \
              in-process."
@@ -2563,7 +2612,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .map_err(|e| format!("{e}"))?
             };
-            eprintln!("Rescore: Percolator backend = {}", backend.describe());
+            log::info!(target: "rescore", "Percolator backend = {}", backend.describe());
             let mut user_args: Vec<String> = cli
                 .percolator_args
                 .split_whitespace()
@@ -2587,8 +2636,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("{e}"))?;
             }
             rescore_decoys = Some(decoys);
-            eprintln!(
-                "Rescore: Percolator produced {} target PSMs [{:.2}s]",
+            log::info!(
+                target: "rescore",
+                "Percolator produced {} target PSMs [{:.2}s]",
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
@@ -2622,8 +2672,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fdr_threshold.max(proteoform_fdr),
             );
             if shared > 0 {
-                eprintln!(
-                    "Rescore: {shared} variant-class PSMs share their peptide with a reference \
+                log::info!(
+                    target: "rescore",
+                    "{shared} variant-class PSMs share their peptide with a reference \
                      protein once I and L are taken as equal; they now name it"
                 );
             }
@@ -2643,8 +2694,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )
                 })
                 .collect();
-            eprintln!(
-                "Rescore: FDR within each class (targets/decoys, method, pi0): {}",
+            log::info!(
+                target: "rescore",
+                "FDR within each class (targets/decoys, method, pi0): {}",
                 line.join(", ")
             );
         }
@@ -2657,8 +2709,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map(|c| c.real_before - c.tested_before)
             .sum();
         if untested > 0 {
-            eprintln!(
-                "Warning: {untested} variant PSMs at q <= {proteoform_fdr} have no knockoff \
+            log::warn!(
+                "{untested} variant PSMs at q <= {proteoform_fdr} have no knockoff \
                  (the enzyme or the variant kind leaves no position for one) and are not \
                  accepted; --knockoffs 0 leaves variants to the class FDR alone"
             );
@@ -2679,8 +2731,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )
                 })
                 .collect();
-            eprintln!(
-                "Rescore: variant PSMs at q<={proteoform_fdr} per substitution class, before -> \
+            log::info!(
+                target: "rescore",
+                "variant PSMs at q<={proteoform_fdr} per substitution class, before -> \
                  after knockoff q-values: {}",
                 line.join(", ")
             );
@@ -2729,8 +2782,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )
                 })
                 .collect();
-            eprintln!(
-                "Rescore: site-claim PSMs at q<={fdr_threshold} per modification and residue, \
+            log::info!(
+                target: "rescore",
+                "site-claim PSMs at q<={fdr_threshold} per modification and residue, \
                  before -> after site q<={proteoform_fdr}: {}",
                 line.join(", ")
             );
@@ -2741,18 +2795,20 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
             let path = dir.join(format!("{stem}.sites.tsv"));
             match output::write_sites_tsv(&path, &sites.rows) {
-                Ok(()) => eprintln!(
+                Ok(()) => log::info!(
+                    target: "output",
                     "Wrote site claims: {} ({} sites)",
                     path.display(),
                     sites.rows.len()
                 ),
-                Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+                Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
             }
         }
         if let Some(scoring) = ipf_scoring.as_ref() {
             use rayon::prelude::*;
             let t_ipf = std::time::Instant::now();
-            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
+            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> =
+                map;
             let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
             let searched_with = scoring.fragment_error();
             let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> =
@@ -2761,34 +2817,36 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for (f, &hi) in run_ends.iter().enumerate() {
                 scoring.set_fragment_error(measurer.per_file.get(f).copied().flatten());
                 let part: Vec<(String, search::ipf::IpfEvidence)> = queues[lo..hi]
-                .par_iter()
-                .enumerate()
-                .map(|(j, q)| (lo + j, q))
-                .flat_map_iter(|(i, q)| {
-                    let rows: Vec<(String, u32, u8)> =
-                        output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
-                            .into_iter()
-                            .filter(|(id, c, _)| {
-                                !pin_candidates[*c as usize].is_decoy
-                                    && !knockoff_rows.contains(id)
-                                    && map_ref.get(id).is_some_and(|p| p.q_value <= cutoffs.of(id))
-                            })
+                    .par_iter()
+                    .enumerate()
+                    .map(|(j, q)| (lo + j, q))
+                    .flat_map_iter(|(i, q)| {
+                        let rows: Vec<(String, u32, u8)> =
+                            output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
+                                .into_iter()
+                                .filter(|(id, c, _)| {
+                                    !pin_candidates[*c as usize].is_decoy
+                                        && !knockoff_rows.contains(id)
+                                        && map_ref
+                                            .get(id)
+                                            .is_some_and(|p| p.q_value <= cutoffs.of(id))
+                                })
+                                .collect();
+                        let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
+                            .iter()
+                            .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
                             .collect();
-                    let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
-                        .iter()
-                        .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
-                        .collect();
-                    let found = if peptides.is_empty() {
-                        Vec::new()
-                    } else {
-                        scoring.evidence(&spectra[i], &peptides)
-                    };
-                    rows.into_iter()
-                        .zip(found)
-                        .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                        let found = if peptides.is_empty() {
+                            Vec::new()
+                        } else {
+                            scoring.evidence(&spectra[i], &peptides)
+                        };
+                        rows.into_iter()
+                            .zip(found)
+                            .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
                 evidence.extend(part);
                 lo = hi;
             }
@@ -2803,14 +2861,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output::ipf::write_ipf_tsv(&path, &rows)
                 .map_err(|e| format!("could not write {}: {e}", path.display()))?;
             if rows.is_empty() {
-                eprintln!(
-                    "WARN: --localize ipf: no identified target PSM has a variable \
+                log::warn!(
+                    "--localize ipf: no identified target PSM has a variable \
                      modification with more than one possible site; {} is empty",
                     path.display()
                 );
             }
             let truncated = rows.iter().filter(|r| r.truncated).count();
-            eprintln!(
+            log::info!(
+                target: "output",
                 "Wrote IPF localization: {} ({} PSMs, {} with placements limited to the \
                  {} nearest the search's; ion PEP by intensity quartile {:?}, unmatched \
                  {:.3}) [{:.2}s]",
@@ -2840,14 +2899,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let path = dir.join(format!("{stem}.protein_groups.tsv"));
         let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
         match output::write_protein_groups_tsv(&path, &inf) {
-            Ok(()) => eprintln!(
+            Ok(()) => log::info!(
+                target: "output",
                 "Wrote protein groups: {} ({} groups; {} at protein q<=0.01, {} at q<=0.05)",
                 path.display(),
                 inf.groups.len(),
                 at(0.01),
                 at(0.05)
             ),
-            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
         }
         inf
     });
@@ -2896,23 +2956,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pep_note.push_str(&format!(", protein groups at q<={t}"));
         }
         match write_filtered_tsv(&filtered_path, &accepted, protein_groups.as_ref()) {
-            Ok(()) => eprintln!(
+            Ok(()) => log::info!(
+                target: "output",
                 "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
                 filtered_path.display(),
                 accepted.len(),
                 fdr,
                 pep_note
             ),
-            Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
+            Err(e) => {
+                log::warn!(target: "output", "could not write {}: {e}", filtered_path.display())
+            }
         }
         if cli.open_search {
-            open_search_summary = write_open_offsets(
-                &output_pin_path,
-                dir,
-                &stem,
-                &accepted,
-                &rescore_decoy_psms,
-            );
+            open_search_summary =
+                write_open_offsets(&output_pin_path, dir, &stem, &accepted, &rescore_decoy_psms);
         }
         identified = Some((accepted, pep_note));
     }
@@ -2982,7 +3040,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(summary) = id_summary.as_mut() {
         summary.open_search = open_search_summary.take();
     }
-    eprint!("{}", run_stats.render_with(id_summary.as_ref()));
+    log::info!(target: "summary", "{}", run_stats.render_with(id_summary.as_ref()));
     let stats_path = {
         let stem = report_base
             .file_stem()
@@ -2992,8 +3050,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         dir.join(format!("{stem}.statistics.log"))
     };
     match output::write_statistics_log(&run_stats, id_summary.as_ref(), &stats_path) {
-        Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
-        Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
+        Ok(()) => log::info!(target: "output", "Wrote statistics: {}", stats_path.display()),
+        Err(e) => log::warn!(target: "output", "could not write {}: {e}", stats_path.display()),
     }
 
     knockoff_rows.extend(rerank_dropped);
@@ -3022,7 +3080,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &knockoff_rows,
             ipf_qpx.as_ref(),
         ) {
-            Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
+            Ok(()) => log::info!(target: "output", "Wrote QPX bundle: {}", parquet_dir.display()),
             Err(e) => {
                 return Err(format!(
                     "failed to write requested --output-parquet {}: {e}",
@@ -3102,7 +3160,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map(|q| q.columns.clone())
             .unwrap_or_default();
         match output::write_proteoform_tsv(&path, &rows, &columns) {
-            Ok(()) => eprintln!(
+            Ok(()) => log::info!(
+                target: "output",
                 "Wrote proteoform table: {} ({} family members, {} families)",
                 path.display(),
                 rows.len(),
@@ -3111,7 +3170,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
             ),
-            Err(e) => eprintln!("WARN: could not write {}: {e}", path.display()),
+            Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
         }
     }
 
@@ -3136,7 +3195,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     drop(mbr_decoys);
 
     if bench_mode {
-        eprintln!("Bench mode: skipping TSV write.");
+        log::info!(target: "bench", "skipping TSV write.");
     } else if let Some(ref tsv_path) = cli.output_tsv {
         let spec_file_name = if spectrum_paths.len() == 1 {
             spectrum_path
@@ -3160,7 +3219,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &spec_file_name,
             is_mgf,
         )?;
-        eprintln!("Wrote TSV: {}", tsv_path.display());
+        log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
     }
 
     let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
@@ -3233,8 +3292,9 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
     } else {
         String::new()
     };
-    eprintln!(
-        "{source}: {} rows{files}: {} variant, {} knockoff and {} chain entries, {} sites on \
+    log::info!(
+        target: source,
+        "{} rows{files}: {} variant, {} knockoff and {} chain entries, {} sites on \
          reference proteins, {} rows merged into an equal claim, {} into an equal database \
          entry{}{}",
         stats.rows,
@@ -3252,14 +3312,16 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
         dropped.join(", "),
     );
     if stats.knockoff_entries > 0 {
-        eprintln!(
-            "{source}: {} single-residue variants with no position for a knockoff",
+        log::info!(
+            target: source,
+            "{} single-residue variants with no position for a knockoff",
             stats.variants_without_knockoff
         );
     }
     if stats.knockoffs_dropped > 0 {
-        eprintln!(
-            "{source}: {} earlier knockoff entries dropped, within the knockoff distance of a \
+        log::info!(
+            target: source,
+            "{} earlier knockoff entries dropped, within the knockoff distance of a \
              variant these files list",
             stats.knockoffs_dropped
         );
@@ -3267,8 +3329,9 @@ fn log_claims(source: &str, stats: &input::AnnotationLoadStats) {
 }
 
 fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOptions) {
-    eprintln!(
-        "UniProt XML: {} entries, {} annotated modification sites, {} variant entries \
+    log::info!(
+        target: "uniprot",
+        "{} entries, {} annotated modification sites, {} variant entries \
          (evidence >= {}; {} features below it, {} not fitting their sequence, \
          {} on isoforms not searched)",
         stats.entries,
@@ -3280,15 +3343,17 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
         stats.isoform_features,
     );
     if opts.variants && opts.knockoffs.is_some_and(|k| k.per_variant > 0) {
-        eprintln!(
-            "UniProt XML: {} knockoff variant entries ({} single-residue variants with no \
+        log::info!(
+            target: "uniprot",
+            "{} knockoff variant entries ({} single-residue variants with no \
              position for a knockoff)",
             stats.knockoff_proteins, stats.variants_without_knockoff,
         );
     }
     if opts.isoforms || opts.chains {
-        eprintln!(
-            "UniProt XML: {} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",
+        log::info!(
+            target: "uniprot",
+            "{} isoform entries ({} isoforms not rebuildable), {} mature-chain entries",
             stats.isoform_proteins, stats.unbuilt_isoforms, stats.chain_proteins,
         );
     }
@@ -3301,8 +3366,9 @@ fn log_uniprot_load(stats: &input::UniProtLoadStats, opts: &input::UniProtOption
             .take(5)
             .map(|(name, n)| format!("{name} ({n})"))
             .collect();
-        eprintln!(
-            "UniProt XML: {total} modification features have no single known mass and are not \
+        log::info!(
+            target: "uniprot",
+            "{total} modification features have no single known mass and are not \
              used as sites, e.g. {}",
             examples.join(", ")
         );
@@ -3321,11 +3387,12 @@ fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
                 .iter()
                 .any(|a| (m.mass_delta - a).abs() <= model::protein::SITE_MASS_TOLERANCE)
         {
-            eprintln!(
-                "WARN: {} ({:+.4} Da) is restricted to annotated sites while \
+            log::warn!(
+                "{} ({:+.4} Da) is restricted to annotated sites while \
                  --uniprot-variants is on: variants of the same mass lose the \
                  competing explanation at unannotated residues.",
-                m.name, m.mass_delta
+                m.name,
+                m.mass_delta
             );
         }
     }
@@ -3365,14 +3432,14 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
             }
         }
         if sites == 0 {
-            eprintln!(
-                "WARN: {name} ({mass:+.4} Da) is restricted to annotated sites (restrict_to: annotated), \
+            log::warn!(
+                "{name} ({mass:+.4} Da) is restricted to annotated sites (restrict_to: annotated), \
                  but no target protein annotates a site of that mass, so it is never placed. \
                  Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
                  --uniprot-evidence sets which are used."
             );
         } else {
-            eprintln!(
+            log::info!(
                 "Annotated-site mod {name} ({mass:+.4} Da): {sites} sites on {proteins} target \
                  proteins"
             );
@@ -3439,7 +3506,7 @@ fn write_open_offsets(
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("WARN: open-search offset report not written: {e}");
+            log::warn!("open-search offset report not written: {e}");
             return None;
         }
     };
@@ -3448,21 +3515,31 @@ fn write_open_offsets(
     let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
         .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
     if let Err(e) = written {
+        let mut left = Vec::new();
         for stale in [&peaks_path, &psms_path] {
             if let Err(r) = std::fs::remove_file(stale) {
                 if r.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("WARN: could not remove {}: {r}", stale.display());
+                    log::warn!(target: "output", "could not remove {}: {r}", stale.display());
+                    left.push(stale.display().to_string());
                 }
             }
         }
-        eprintln!(
-            "WARN: open-search report not written ({e}); neither {} nor {} is left",
-            peaks_path.display(),
-            psms_path.display()
-        );
+        if left.is_empty() {
+            log::warn!(
+                "open-search report not written ({e}); neither {} nor {} is left",
+                peaks_path.display(),
+                psms_path.display()
+            );
+        } else {
+            log::warn!(
+                "open-search report not written ({e}); incomplete file left: {}",
+                left.join(", ")
+            );
+        }
         return None;
     }
-    eprintln!(
+    log::info!(
+        target: "output",
         "Wrote open-search report: {} ({} offset peaks) and {} ({} PSMs)",
         peaks_path.display(),
         report.peaks.len(),

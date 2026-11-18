@@ -58,7 +58,7 @@ fn gate_or_fallback(
     fallback: impl FnOnce() -> GbdtPeakModel,
 ) -> Result<GbdtPeakModel, TrainError> {
     if allow_degenerate {
-        eprintln!("WARN: gbdt quality gate failed ({reason}); returning degenerate model (--allow-degenerate-model)");
+        log::warn!("gbdt quality gate failed ({reason}); returning degenerate model (--allow-degenerate-model)");
         Ok(fallback())
     } else {
         Err(TrainError::QualityGate(reason))
@@ -443,8 +443,9 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let n_pos_val = val_y.iter().filter(|&&y| y == 1).count();
     let val_auc = auc(&raw_val_final, &val_y);
-    eprintln!(
-        "train-gbdt: validation AUC = {val_auc:.4}  (n_val={val_n}, pos={n_pos_val}, neg={})",
+    log::debug!(
+        target: "train-gbdt",
+        "validation AUC = {val_auc:.4}  (n_val={val_n}, pos={n_pos_val}, neg={})",
         val_n - n_pos_val
     );
 
@@ -726,7 +727,7 @@ pub fn train_gbdt_regression(
 
     let (r, r2) = pearson_r2(&raw_val_final, &val_y);
     let n = val_n;
-    eprintln!("train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})");
+    log::debug!(target: "train-gbdt", "regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})");
 
     if trees.is_empty() {
         return gate_or_fallback(

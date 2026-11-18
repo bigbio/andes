@@ -218,8 +218,9 @@ fn static_scores(pin: &Pin, a: &Args, is_decoy: &[bool]) -> Result<Vec<f64>, Str
     let w: Vec<Vec<f64>> = match read_init_weights(path, &pin.feature_names)? {
         Some(ww) => vec![ww; FOLDS],
         None => {
-            eprintln!(
-                "WARNING: Could not find weights input file {}. Using default weights instead.",
+            log::warn!(
+                target: "rescore",
+                "could not find weights input file {}; using default weights instead",
                 path.display()
             );
             init_directions(pin, &norm, &mask, FOLDS, a.initial_selection_fdr, false)?

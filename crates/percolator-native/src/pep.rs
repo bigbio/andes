@@ -488,8 +488,9 @@ fn ispline_fit(x: &[f64], y: &[f64], clip_lo: f64, clip_hi: f64) -> Result<Vec<f
     lb[0] = f64::NEG_INFINITY;
     let (sol, iters, converged) = solve_box_qp(&g, &h, &lb, &ub);
     if !converged {
-        eprintln!(
-            "Warning: the I-spline regression of the PEPs did not converge ({iters} iterations, {p} coefficients); the PEPs may be inaccurate."
+        log::warn!(
+            target: "rescore",
+            "the I-spline regression of the PEPs did not converge ({iters} iterations, {p} coefficients); the PEPs may be inaccurate"
         );
     }
     if !splines {

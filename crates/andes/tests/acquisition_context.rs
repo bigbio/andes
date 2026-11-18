@@ -29,7 +29,8 @@ fn run(spectrum: &str, database: &str, extra: &[&str]) -> String {
 fn banner_line<'a>(stderr: &'a str, key: &str) -> &'a str {
     stderr
         .lines()
-        .find(|l| l.trim_start().starts_with(key))
+        .filter_map(|l| l.split_once(" run: ").map(|(_, rest)| rest))
+        .find(|rest| rest.starts_with(key))
         .unwrap_or_else(|| panic!("no `{key}` line in:\n{stderr}"))
 }
 
@@ -92,7 +93,7 @@ fn explicit_fragment_tol_is_honoured_on_detected_input() {
         "{err}"
     );
     assert!(!err.contains("--fragment-tol-* ignored"), "{err}");
-    assert!(!err.contains("Fragment error:"), "{err}");
+    assert!(!err.contains("fragment-error:"), "{err}");
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn high_res_run_measures_or_reports_its_fragment_error() {
     );
     let line = err
         .lines()
-        .find(|l| l.starts_with("Fragment error:"))
+        .find(|l| l.contains(" fragment-error: "))
         .unwrap_or_else(|| panic!("no measurement line:\n{err}"));
     assert!(
         line.contains("not measured") && line.contains("Ppm(20.0)"),

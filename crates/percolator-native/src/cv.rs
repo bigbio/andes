@@ -244,7 +244,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             let s = score(&pin.rows, &fd.train, w, Some(norm));
             let p = positives(&s, &fd.train_decoy, cfg.initial_selection_fdr, true);
             let j = w[..nf].iter().position(|&v| v != 0.0).map_or(0, |j| j + 1);
-            eprintln!(
+            log::info!(
+                target: "rescore",
                 "Split {}:\tSelected feature {j} as initial direction. Could separate {p} training set positives with q<{} in that direction.",
                 f + 1,
                 cfg.initial_selection_fdr
@@ -260,7 +261,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         })
         .sum();
     if cfg.verbose > 0 {
-        eprintln!(
+        log::info!(
+            target: "rescore",
             "Found {init_positives} test set positives with q<{} in initial direction",
             cfg.test_fdr
         );
@@ -301,11 +303,12 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             }
         };
         if cfg.verbose > 1 {
-            eprintln!("Iteration {}:", it + 1);
+            log::info!(target: "rescore", "Iteration {}:", it + 1);
         }
         if cfg.verbose > 2 {
             for (f, t) in sets.iter().enumerate() {
-                eprintln!(
+                log::info!(
+                    target: "rescore",
                     "Split {}: Training with {} positives and {} negatives",
                     f + 1,
                     t.ex.rows.len() - t.negatives,
@@ -400,7 +403,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     w[f].clone_from(fold_fits[k].as_ref().expect("chosen fit"));
                     if cfg.verbose > 2 {
                         let (_, cpos, cfrac) = pairs[f * per_fold + k];
-                        eprintln!(
+                        log::info!(
+                            target: "rescore",
                             "Split {}: selected Cpos={cpos} Cneg={} with {best} training set positives",
                             f + 1,
                             cfrac * cpos
@@ -418,7 +422,8 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             if cfg.verbose > 1 {
                 for (f, &k) in picked.iter().enumerate() {
                     let (_, cpos, cfrac) = pairs[f * per_fold + k];
-                    eprintln!(
+                    log::info!(
+                        target: "rescore",
                         "Split {}: using Cpos={cpos}, Cneg={} in the remaining iterations",
                         f + 1,
                         cfrac * cpos
@@ -433,15 +438,16 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             .sum();
         let estimated = (found as f64 / (FOLDS - 1) as f64) as i64;
         if cfg.verbose > 1 {
-            eprintln!("Estimated {estimated} PSMs with q<{}", cfg.test_fdr);
+            log::info!(target: "rescore", "Estimated {estimated} PSMs with q<{}", cfg.test_fdr);
         }
         if estimated > 0
             && found_old_old > 0
             && ((estimated - found_old_old) as f64) <= found_old_old as f64 * MIN_GROWTH
         {
             if cfg.verbose > 0 {
-                eprintln!(
-                    "Performance increase over the last two iterations indicate that the algorithm has converged\n({estimated} vs {found_old_old})"
+                log::info!(
+                    target: "rescore",
+                    "Performance increase over the last two iterations indicate that the algorithm has converged ({estimated} vs {found_old_old})"
                 );
             }
             break;
@@ -461,7 +467,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         .map(|(fd, s)| positives(s, &fd.test_decoy, cfg.test_fdr, false))
         .sum();
     if cfg.verbose > 0 {
-        eprintln!("Found {found} test set PSMs with q<{}.", cfg.test_fdr);
+        log::info!(target: "rescore", "Found {found} test set PSMs with q<{}.", cfg.test_fdr);
     }
     if (found == 0 || init_positives > found) && !cfg.overrule {
         w = init;

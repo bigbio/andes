@@ -379,14 +379,16 @@ impl<'a> PreparedSearch<'a> {
             ));
         }
         if was_built {
-            eprintln!(
-                "candidate-index: built and cached {} records → {}",
+            log::info!(
+                target: "candidate-index",
+                "built and cached {} records → {}",
                 mmap_index.len(),
                 index_path.display()
             );
         } else {
-            eprintln!(
-                "candidate-index: reusing cached index ({} records) from {}",
+            log::info!(
+                target: "candidate-index",
+                "reusing cached index ({} records) from {}",
                 mmap_index.len(),
                 index_path.display()
             );
@@ -439,8 +441,9 @@ impl<'a> PreparedSearch<'a> {
             lo,
             hi,
         );
-        eprintln!(
-            "open-search-index: {:.1}-{:.1} Da, {} forms, built in {:.1} s",
+        log::info!(
+            target: "open-search-index",
+            "{:.1}-{:.1} Da, {} forms, built in {:.1} s",
             lo,
             hi,
             index.n_forms(),

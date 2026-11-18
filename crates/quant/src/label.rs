@@ -2,7 +2,7 @@ use model::mass::ISOTOPE;
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
-pub const D_H: f64 = 2.014_101_778 - 1.007_825_032;
+pub const D_H: f64 = 2.014_101_778 - model::mass::H;
 pub const LOWEST_OFFSET: i32 = -2;
 pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
@@ -613,9 +613,9 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
     }])
 }
 
-const C13_C12: f64 = 13.003_354_835 - 12.0;
-const N15_N14: f64 = 15.000_108_899 - 14.003_074_004;
-const CH2: f64 = 12.0 + 2.0 * 1.007_825_032;
+const C13_C12: f64 = model::mass::ISOTOPE;
+const N15_N14: f64 = 15.000_108_899 - model::mass::N;
+const CH2: f64 = model::mass::C + 2.0 * model::mass::H;
 
 #[derive(Debug, Clone, Copy)]
 struct Composition {

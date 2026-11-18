@@ -9,7 +9,7 @@ fn core_y_steps(core: GlycanCore) -> &'static [f64] {
     }
 }
 
-pub(crate) const H2O: f64 = 18.010565;
+pub(crate) const H2O: f64 = model::mass::H2O;
 
 const BY_COMPLEMENT_OFFSET: f64 = 2.0 * PROTON;
 
@@ -299,7 +299,7 @@ pub fn best_frag_intensity(
     tol_ppm: f64,
     max_charge: u8,
 ) -> f32 {
-    const ISOTOPE: f64 = 1.003_354_83;
+    const ISOTOPE: f64 = model::mass::ISOTOPE;
     let hi_charge = y_hicharge_enabled();
     let zmax = if hi_charge {
         max_charge.clamp(1, 5)

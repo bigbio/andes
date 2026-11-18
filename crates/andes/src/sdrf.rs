@@ -651,6 +651,7 @@ pub fn apply(
     let cli = |id: &str| crate::config::cli_set(m, id);
     let mut applied = Vec::new();
     let mut kept = Vec::new();
+    let mut warnings = Vec::new();
     let names = |v: &[String]| {
         if v.is_empty() {
             "none".to_string()
@@ -668,7 +669,7 @@ pub fn apply(
             .map(|p| p.display().to_string())
             .collect();
         if !extra.is_empty() {
-            applied.push(format!(
+            warnings.push(format!(
                 "WARN: --spectrum files not in the SDRF (its settings still apply): {}",
                 extra.join(", ")
             ));
@@ -773,6 +774,7 @@ pub fn apply(
     }
     args.sdrf_dissociation = s.dissociation;
     let mut out = vec![format!("SDRF {}: {}", s.path.display(), applied.join("; "))];
+    out.extend(warnings);
     if !kept.is_empty() {
         out.push(format!(
             "SDRF: the command line or --config set {}; the SDRF values are not used",
@@ -1130,5 +1132,34 @@ mod tests {
         );
         let e = apply_xl(&["NT=DSSO;TA=K", "NT=DSSO;TA=K,S"]).unwrap_err();
         assert!(e.contains("different settings"), "{e}");
+    }
+
+    #[test]
+    fn a_spectrum_missing_from_the_sdrf_is_a_line_of_its_own_marked_as_a_warning() {
+        use clap::{CommandFactory, FromArgMatches};
+        let s = SdrfSettings {
+            data_files: vec![PathBuf::from("run1.mzML")],
+            ..Default::default()
+        };
+        let base = [
+            "andes",
+            "--spectrum",
+            "other.mzML",
+            "--database",
+            "y",
+            "--output-pin",
+            "o",
+        ];
+        let m = crate::TopCli::command().try_get_matches_from(base).unwrap();
+        let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
+        let lines = apply(&s, &mut a, &m, ConfigKeys::default()).unwrap();
+        assert!(!lines[0].contains("WARN"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("WARN: --spectrum files not in the SDRF")
+                    && l.ends_with("other.mzML")),
+            "{lines:?}"
+        );
     }
 }

@@ -27,8 +27,7 @@ fn y_offset_bits() -> u32 {
     ((model::mass::H2O + model::mass::PROTON) as f32).to_bits()
 }
 fn c_offset_bits() -> u32 {
-    const NH3: f64 = 17.026549;
-    ((model::mass::PROTON + NH3) as f32).to_bits()
+    ((model::mass::PROTON + model::mass::NH3) as f32).to_bits()
 }
 fn z_offset_bits() -> u32 {
     const Z_DOT_OFFSET: f64 = -16.018724;

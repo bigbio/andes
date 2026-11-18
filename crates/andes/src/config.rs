@@ -1285,6 +1285,8 @@ glyco:
         "xl_oracle",
         "xl_rescore_intra",
         "xl_rescore_inter",
+        "quiet",
+        "verbose",
     ];
 
     #[test]

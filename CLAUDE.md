@@ -16,6 +16,6 @@ Task-specific guidance lives in `.claude/skills/` and loads when a task needs it
 | `scientific-citations` | writing docs, NOTICE or doc comments that credit prior work |
 | `fdr-validation` | changing scores, features, decoys, rescoring or quantification |
 | `benchmark-reproducibility` | running or publishing benchmarks |
-| `parameters-and-constants` | adding or changing a number, threshold, default or mass |
+| `parameters-and-constants` | proposing an algorithm, adding a flag, or a number, threshold, default or mass |
 | `cli-flags-not-env-vars` | adding a setting or switch, or code that reads `std::env` |
 | `mass-spec-correctness` | masses, tolerances, modifications, digestion, decoys, readers |

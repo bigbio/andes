@@ -1,9 +1,43 @@
 ---
 name: parameters-and-constants
-description: Decide whether a number in andes is a user parameter (CLI flag), a physical constant, an algorithm constant or an engineering constant, and how each kind is defined, named, scoped and changed. Use when adding or changing a numeric literal, a const, a threshold, a tolerance, a default value, or a mass.
+description: Infer values from the data instead of adding parameters, and decide whether a remaining number is a user parameter (CLI flag), a physical, format, algorithm or engineering constant, and how each is defined, named, scoped and changed. Use when proposing an algorithm, adding a flag, or adding or changing a numeric literal, a const, a threshold, a tolerance, a default value, or a mass.
 ---
 
 # Parameters and constants
+
+## First rule: infer from the data, avoid parameters
+
+andes is data-driven. Every parameter is a choice the user can get wrong, a value
+benchmarks must cover, and a line in `--help`. Keep the number of parameters as small as
+possible.
+
+When proposing or changing an algorithm, first ask **what the data can tell us**, and
+estimate the value from the run itself before defining any parameter or constant. andes
+already does this:
+
+- fragment resolution read from the peaks (isotope-pair enrichment) when the file has no
+  analyzer metadata;
+- precursor mass shift and tolerance learned from confident PSMs (`--precursor-cal`);
+- the scoring model selected from the detected instrument and experiment class;
+- the memory budget taken from the cgroup limit or `MemAvailable`.
+
+An inferred value must:
+
+- come from a robust estimator (median, MAD, quantiles, mixture fit), not from one PSM;
+- need a minimum amount of evidence, and fall back to a safe, documented default when the
+  data is too thin (that minimum and the fallback are algorithm constants, below);
+- be deterministic for the same input, whatever the thread count;
+- be reported in the log: what was inferred, from how much data, and when the fallback was
+  used (see `clean-logs` and the `run` banner in `cli-reports`).
+
+A proposal for a new method says, for each number it needs: inferred from the data (how),
+a constant (which kind, below), or a parameter (why it cannot be inferred). "Make it a
+flag" is the last option, not the first.
+
+When a flag is unavoidable, prefer `auto` as its default, with the inferred value, and let
+the flag override it. A flag whose A/B is settled is removed (`cli-flags-not-env-vars`).
+
+## Kinds of numbers
 
 Every number in non-test code is one of five kinds. Find its kind first; the kind decides
 where it lives and what it takes to change it.
@@ -13,9 +47,10 @@ where it lives and what it takes to change it.
 Ask in order:
 
 1. **Would a user with another instrument, sample or experiment need a different value?**
-   It is a **parameter**: a typed CLI flag with a documented default (see
+   Then first try to **infer it from the data** (above). Only if it cannot be inferred
+   (it encodes the user's intent, not a property of the data) is it a **parameter**: a typed CLI flag with a documented default (see
    `cli-flags-not-env-vars`). Tolerances, enzyme, missed cleavages, modifications, charge
-   range, FDR thresholds, peptide length, top-N. Never a `const`.
+   range, FDR thresholds. Never a `const`.
 2. **Is it a fact of nature or of a standard?** It is a **physical constant**: masses,
    isotope spacings, the proton. One definition, in `crates/model/src/mass.rs`.
 3. **Is it a fixed fact of a file format or external spec?** It is a **format constant**:
@@ -27,8 +62,10 @@ Ask in order:
 5. **Does it only affect speed or memory?** It is an **engineering constant**: chunk sizes,
    buffer capacities, batch counts. A named `const` that must not change any result.
 
-If you cannot tell 4 from 1, it is 1 until a benchmark shows one value is right for every
-dataset (then the flag can be removed, per `cli-flags-not-env-vars`).
+Enzyme, modifications and the FDR threshold encode the user's intent and are parameters.
+Tolerances, mass shifts, resolution, charge states and score distributions are properties
+of the data and should be inferred. If you cannot tell 4 from 1, try inference first, then
+an algorithm constant that a benchmark shows is right for every dataset.
 
 ## Rules for every constant
 
@@ -81,6 +118,9 @@ dataset (then the flag can be removed, per `cli-flags-not-env-vars`).
 
 ## Review checklist
 
+- [ ] Every value that is a property of the data is inferred from it, with a minimum
+      evidence count, a fallback and a log line.
+- [ ] No new flag that could have been inferred; a needed flag defaults to `auto`.
 - [ ] No new bare numeric literals outside tests.
 - [ ] No mass or isotope value typed outside `model::mass`.
 - [ ] New `const` has a unit suffix, minimal visibility and a `///` doc.

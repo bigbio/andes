@@ -24,10 +24,10 @@ pub const P: f64 = 30.973761998;
 /// Monoisotopic mass of water, in Da.
 pub const H2O: f64 = H * 2.0 + O;
 
-/// Monoisotopic mass of ammonia, in Da. Written out rather than derived as `N + 3.0 * H`
-/// (17.026549105): the shipped scoring models key their neutral-loss ion tables on the f32
-/// bits of offsets built from this value, and the derived value moves the y-NH3 key by one
-/// ulp, so those ions would no longer find their tables.
+/// Monoisotopic mass of ammonia, in Da. Kept as the typed value rather than derived as
+/// `N + 3.0 * H` (17.026549105, 1.05e-7 Da higher) so that defining the constants in one
+/// place leaves search results unchanged; moving to the derived value is its own measured
+/// change.
 pub const NH3: f64 = 17.026549;
 
 /// Monoisotopic mass of carbon monoxide (b → a ion), in Da.

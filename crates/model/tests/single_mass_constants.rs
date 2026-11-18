@@ -10,17 +10,20 @@ use std::path::{Path, PathBuf};
 
 /// Literal prefixes (digits only, underscores removed) of values that must come from
 /// `model::mass`.
-const ANYWHERE: [(&str, &str); 3] = [
+const ANYWHERE: [(&str, &str); 5] = [
     ("1.00727", "model::mass::PROTON"),
+    ("1.0073", "model::mass::PROTON"),
     ("1.00782", "model::mass::H"),
     ("1.00335", "model::mass::ISOTOPE"),
+    ("1.0034", "model::mass::ISOTOPE"),
 ];
 
-/// Prefixes rejected when they are the value of a `const`.
-const AS_CONST: [(&str, &str); 3] = [
-    ("18.01", "model::mass::H2O"),
-    ("17.02", "model::mass::NH3"),
-    ("27.99", "model::mass::CO"),
+/// Prefixes rejected when they are the value of a `const` or `static`.
+const AS_CONST: [(&str, &str); 4] = [
+    ("18.0105", "model::mass::H2O"),
+    ("18.0106", "model::mass::H2O"),
+    ("17.0265", "model::mass::NH3"),
+    ("27.9949", "model::mass::CO"),
 ];
 
 /// Literal copies kept on purpose, each with the reason. Replacing one changes search
@@ -100,11 +103,26 @@ fn code_of(line: &str) -> String {
     out
 }
 
-/// The numeric literals of a code line, each with whether it is the value of a `const`.
-fn literals(code: &str) -> Vec<(String, bool)> {
-    let is_const = code.trim_start().starts_with("const ")
-        || code.trim_start().starts_with("pub const ")
-        || code.trim_start().starts_with("pub(crate) const ");
+/// Whether a code line declares a `const` or `static` item, with any visibility.
+fn declares_item(code: &str) -> bool {
+    let mut rest = code.trim_start();
+    if let Some(after) = rest.strip_prefix("pub") {
+        rest = after.trim_start();
+        if rest.starts_with('(') {
+            match rest.find(')') {
+                Some(close) => rest = rest[close + 1..].trim_start(),
+                None => return false,
+            }
+        }
+    }
+    rest.starts_with("const ") || rest.starts_with("static ")
+}
+
+/// The numeric literals of a code line, each with whether it is the value of a `const` or
+/// `static`. `continues_item` is true when the previous line declared such an item and
+/// ended at its `=`, so this line holds its value.
+fn literals_of(code: &str, continues_item: bool) -> Vec<(String, bool)> {
+    let is_const = continues_item || declares_item(code);
     let bytes = code.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -122,6 +140,10 @@ fn literals(code: &str) -> Vec<(String, bool)> {
         }
     }
     out
+}
+
+fn literals(code: &str) -> Vec<(String, bool)> {
+    literals_of(code, false)
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -155,15 +177,18 @@ fn physical_constants_come_only_from_model_mass() {
             continue;
         }
         let text = std::fs::read_to_string(file).expect("read source");
+        let mut continues_item = false;
         for line in without_test_modules(&text).lines() {
+            let code = code_of(line);
+            let item_value_next = declares_item(&code) && code.trim_end().ends_with('=');
+            let item_value_here = std::mem::replace(&mut continues_item, item_value_next);
             let excepted = KNOWN_EXCEPTIONS.iter().any(|(path, text, _)| {
                 file.to_string_lossy().replace('\\', "/").ends_with(path) && line.trim() == *text
             });
             if excepted {
                 continue;
             }
-            let code = code_of(line);
-            for (lit, is_const) in literals(&code) {
+            for (lit, is_const) in literals_of(&code, item_value_here) {
                 let hit = ANYWHERE
                     .iter()
                     .chain(AS_CONST.iter().filter(|_| is_const))
@@ -205,4 +230,42 @@ fn comments_strings_and_unimod_deltas_are_not_flagged() {
     assert!(literals(&delta).iter().all(|(_, c)| !c));
     let defined = code_of("const NH3: f64 = 17.026_549;");
     assert_eq!(literals(&defined), vec![("17.026549".to_string(), true)]);
+}
+
+#[test]
+fn every_const_and_static_form_is_an_item() {
+    for line in [
+        "const W: f64 = 18.010565;",
+        "pub const W: f64 = 18.010565;",
+        "pub(crate) const W: f64 = 18.010565;",
+        "pub(super) const W: f64 = 18.010565;",
+        "pub(in crate::x) const W: f64 = 18.010565;",
+        "static W: f64 = 18.010565;",
+        "pub static W: f64 = 18.010565;",
+    ] {
+        assert!(declares_item(&code_of(line)), "{line}");
+    }
+    assert!(!declares_item(&code_of("let w = 18.010565;")));
+    assert!(!declares_item(&code_of("pub fn constant() -> f64 {")));
+    assert_eq!(
+        literals_of(&code_of("    18.010_565;"), true),
+        vec![("18.010565".to_string(), true)]
+    );
+}
+
+#[test]
+fn rounded_spellings_and_only_exact_small_molecules_are_flagged() {
+    let hit = |lit: &str, is_const: bool| {
+        ANYWHERE
+            .iter()
+            .chain(AS_CONST.iter().filter(|_| is_const))
+            .any(|(prefix, _)| lit.starts_with(prefix))
+    };
+    assert!(hit("1.0073", false));
+    assert!(hit("1.0034", false));
+    assert!(hit("18.0106", true));
+    assert!(hit("17.0265", true));
+    assert!(!hit("18.0124", true));
+    assert!(!hit("17.0200", true));
+    assert!(!hit("27.9900", true));
 }

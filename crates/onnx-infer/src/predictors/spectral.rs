@@ -20,7 +20,7 @@ pub enum FragmentTolerance {
 }
 
 impl FragmentTolerance {
-    fn window(self, mz: f64) -> f64 {
+    pub fn window(self, mz: f64) -> f64 {
         match self {
             FragmentTolerance::Da(d) => d,
             FragmentTolerance::Ppm(p) => mz * p * 1e-6,

@@ -35,6 +35,10 @@ flowchart TD
   scan keeps its `--top-n` (10) rows by z-scored RawScore plus z-scored andes-ms2 spectral angle.
   In 45% of the scans where a true precursor ranked below first, the winner was a decoy, and the
   true peptide's predicted-MS2 angle was usually higher.
+- **Summed-spectrum and elution-profile columns.** With `--predict ms2`, each row also gets the
+  predicted-MS2 angle of the apex±1 summed spectrum and of its top 8 predicted fragments projected
+  on their median elution profile, plus how well those fragments follow that profile. Weak
+  precursors lose most to interfered fragments; these columns score the ones that co-elute.
 - **Rescoring.** A DIA PIN has about ten rows per scan and few PSMs at 1%, so Percolator trains at
   `--trainFDR 0.05`. A gradient-boosted model of each run's predicted-RT residual, fitted out of
   fold on the first pass's targets at q ≤ 1%, adds `dia_rt_refined_err`, and Percolator runs again.
@@ -47,7 +51,7 @@ not implemented.
 ## What it changes
 
 On the ProteoBench Astral entrapment set (two 15-min, 50 ng runs, 300 windows of 2 Th), andes
-reaches 88% / 83% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
+reaches 93% / 89% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
 the [DIA benchmark](../benchmarks/dia.md).
 
 ```bash

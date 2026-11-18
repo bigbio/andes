@@ -7,6 +7,7 @@ use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
+use onnx_infer::predictors::spectral::FragmentTolerance;
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
@@ -142,17 +143,11 @@ pub(crate) fn rerank_pin(
     Ok(dropped)
 }
 
-pub(crate) fn add_to_pin(
-    pin: &Path,
+pub(crate) fn windows(
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: Vec<Vec<Ms1Scan>>,
-) -> Result<(), String> {
-    let t0 = Instant::now();
-    let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
-    let table = read_pin(pin, spectra, &cols)?;
+) -> (Vec<(u32, u32)>, Vec<Vec<u32>>) {
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
-
     let mut by_window: HashMap<(usize, i64), Vec<u32>> = HashMap::new();
     for (i, s) in spectra.iter().enumerate() {
         let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
@@ -171,6 +166,38 @@ pub(crate) fn add_to_pin(
         }
         windows.push(v);
     }
+    (slot, windows)
+}
+
+pub(crate) fn neighbours<'a>(
+    spectra: &'a [Spectrum],
+    slot: &[(u32, u32)],
+    windows: &[Vec<u32>],
+    spec: usize,
+) -> (Vec<&'a [(f64, f32)]>, usize) {
+    let (w, p) = slot[spec];
+    let win = &windows[w as usize];
+    let (p, lo) = (p as usize, (p as usize).saturating_sub(HALF_CYCLES));
+    let hi = (p + HALF_CYCLES + 1).min(win.len());
+    let scans = win[lo..hi]
+        .iter()
+        .map(|&i| spectra[i as usize].peaks.as_slice())
+        .collect();
+    (scans, p - lo)
+}
+
+pub(crate) fn add_to_pin(
+    pin: &Path,
+    spectra: &[Spectrum],
+    run_ends: &[usize],
+    ms1: Vec<Vec<Ms1Scan>>,
+) -> Result<(), String> {
+    let t0 = Instant::now();
+    let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
+    let table = read_pin(pin, spectra, &cols)?;
+    let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
+    let rt = |i: u32| spectra[i as usize].rt_seconds.unwrap_or(0.0);
+    let (slot, windows) = windows(spectra, run_ends);
     let n_ms1: usize = ms1.iter().map(Vec::len).sum();
     let ms1: Vec<Option<Ms1RunIndex>> = ms1
         .into_iter()
@@ -267,6 +294,149 @@ pub(crate) fn add_to_pin(
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+pub(crate) const EVIDENCE_COLUMNS: [&str; 5] = [
+    "dia_sum3_angle",
+    "dia_sum3_explained",
+    "dia_pf_corr",
+    "dia_pf_clean",
+    "dia_proj_angle",
+];
+const EVIDENCE_TOP: usize = 8;
+
+fn angle(p: &[f64], o: &[f64]) -> f64 {
+    let dot: f64 = p.iter().zip(o).map(|(a, b)| a * b).sum();
+    let (np, no) = (
+        p.iter().map(|v| v * v).sum::<f64>().sqrt(),
+        o.iter().map(|v| v * v).sum::<f64>().sqrt(),
+    );
+    if np > 0.0 && no > 0.0 {
+        1.0 - 2.0 * (dot / (np * no)).clamp(-1.0, 1.0).acos() / std::f64::consts::PI
+    } else {
+        0.0
+    }
+}
+
+pub(crate) fn evidence(
+    pred: &[f32],
+    ions: &[(bool, u8)],
+    mass: &Mass,
+    charge: u8,
+    scans: &[&[(f64, f32)]],
+    center: usize,
+    tol: FragmentTolerance,
+) -> [f64; EVIDENCE_COLUMNS.len()] {
+    let n = mass.res.len();
+    let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+    let mut frags: Vec<(f64, f64)> = Vec::new();
+    let mut prefix = mass.nterm;
+    for i in 0..n.saturating_sub(1) {
+        prefix += mass.res[i];
+        for (k, &(b, z)) in ions.iter().enumerate() {
+            if z > charge {
+                continue;
+            }
+            let neutral = if b { prefix } else { total - prefix + H2O };
+            let p = pred.get(i * ions.len() + k).copied().unwrap_or(0.0) as f64;
+            frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
+        }
+    }
+    let trace = |mz: f64| -> Vec<f64> {
+        let w = tol.window(mz);
+        scans
+            .iter()
+            .map(|s| {
+                let lo = s.partition_point(|p| p.0 < mz - w);
+                s[lo..]
+                    .iter()
+                    .take_while(|p| p.0 <= mz + w)
+                    .fold(0.0, |m, p| f64::max(m, p.1 as f64))
+            })
+            .collect()
+    };
+    let traces: Vec<Vec<f64>> = frags.iter().map(|f| trace(f.0)).collect();
+    let p: Vec<f64> = frags.iter().map(|f| f.1).collect();
+    let lo = center.saturating_sub(1);
+    let hi = (center + 2).min(scans.len());
+    let apex = (lo..hi)
+        .max_by(|&x, &y| {
+            let at = |s: usize| traces.iter().zip(&p).map(|(t, w)| t[s] * w).sum::<f64>();
+            at(x)
+                .total_cmp(&at(y))
+                .then(y.abs_diff(center).cmp(&x.abs_diff(center)))
+        })
+        .unwrap_or(center);
+    let (a, b) = (apex.saturating_sub(1), (apex + 2).min(scans.len()));
+    let sum3: Vec<f64> = traces.iter().map(|t| t[a..b].iter().sum()).collect();
+    let sp: f64 = p.iter().sum();
+    let sum3_angle = angle(&p, &sum3);
+    let sum3_explained = if sp > 0.0 {
+        p.iter()
+            .zip(&sum3)
+            .filter(|(_, o)| **o > 0.0)
+            .map(|(v, _)| v)
+            .sum::<f64>()
+            / sp
+    } else {
+        0.0
+    };
+
+    let mut top: Vec<usize> = (0..frags.len()).collect();
+    top.sort_by(|&x, &y| p[y].total_cmp(&p[x]));
+    top.truncate(EVIDENCE_TOP);
+    let norm: Vec<Vec<f64>> = top
+        .iter()
+        .map(|&k| {
+            let m = traces[k].iter().cloned().fold(0.0, f64::max);
+            traces[k]
+                .iter()
+                .map(|v| if m > 0.0 { v / m } else { 0.0 })
+                .collect()
+        })
+        .collect();
+    let profile: Vec<f64> = (0..scans.len())
+        .map(|s| {
+            let mut v: Vec<f64> = norm.iter().map(|t| t[s]).collect();
+            v.sort_by(f64::total_cmp);
+            match v.len() {
+                0 => 0.0,
+                n if n % 2 == 1 => v[n / 2],
+                n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+            }
+        })
+        .collect();
+    let pn = profile.len().max(1) as f64;
+    let pm = profile.iter().sum::<f64>() / pn;
+    let pvar: f64 = profile.iter().map(|v| (v - pm) * (v - pm)).sum();
+    let corrs: Vec<f64> = top.iter().map(|&k| pearson(&traces[k], &profile)).collect();
+    let pf_corr = corrs.iter().sum::<f64>() / corrs.len().max(1) as f64;
+    let pf_clean =
+        corrs.iter().filter(|&&c| c >= COELUTE_MIN_CORR).count() as f64 / top.len().max(1) as f64;
+    let proj: Vec<f64> = top
+        .iter()
+        .map(|&k| {
+            let tm = traces[k].iter().sum::<f64>() / pn;
+            let cov: f64 = traces[k]
+                .iter()
+                .zip(&profile)
+                .map(|(x, y)| (x - tm) * (y - pm))
+                .sum();
+            if pvar > 0.0 {
+                (cov / pvar).max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let ptop: Vec<f64> = top.iter().map(|&k| p[k]).collect();
+    [
+        sum3_angle,
+        sum3_explained,
+        pf_corr,
+        pf_clean,
+        angle(&ptop, &proj),
+    ]
 }
 
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {
@@ -838,6 +1008,80 @@ mod tests {
                 "r/c=2 scan=1_1_1_0",
                 "r/c=1 scan=2_2_1"
             ]
+        );
+    }
+
+    #[test]
+    fn evidence_ignores_an_interfered_fragment() {
+        let (_, mass) = parse_peptide("K.PEPTIDEKLR.A").unwrap();
+        let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+        let ions = [(false, 1u8)];
+        let n = mass.res.len() - 1;
+        let pred: Vec<f32> = (0..n).map(|i| 1.0 + i as f32).collect();
+        let mut prefix = mass.nterm;
+        let ys: Vec<f64> = mass.res[..n]
+            .iter()
+            .map(|r| {
+                prefix += r;
+                total - prefix + H2O + PROTON
+            })
+            .collect();
+        let shape = [0.0, 0.2, 0.6, 1.0, 0.6, 0.2, 0.0];
+        let build = |bad: u8| -> Vec<Vec<(f64, f32)>> {
+            shape
+                .iter()
+                .enumerate()
+                .map(|(k, &h)| {
+                    let mut p: Vec<(f64, f32)> = ys
+                        .iter()
+                        .zip(&pred)
+                        .enumerate()
+                        .map(|(j, (&mz, &w))| {
+                            let top = j == n - 1;
+                            let v = match bad {
+                                1 if top => h + 3.0,
+                                2 if top => 5.0 * (k as f64 / 6.0),
+                                _ => h,
+                            };
+                            (mz, (1e4 * w as f64 * v) as f32 + 1.0)
+                        })
+                        .collect();
+                    p.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    p
+                })
+                .collect()
+        };
+        let score = |s: &Vec<Vec<(f64, f32)>>| {
+            let v: Vec<&[(f64, f32)]> = s.iter().map(|x| x.as_slice()).collect();
+            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))
+        };
+        let clean = score(&build(0));
+        assert!(clean[0] > 0.99 && clean[4] > 0.99, "{clean:?}");
+        let off = build(0);
+        let v: Vec<&[(f64, f32)]> = off[1..].iter().map(|x| x.as_slice()).collect();
+        let from_side = evidence(&pred, &ions, &mass, 2, &v, 1, FragmentTolerance::Ppm(7.0));
+        let at_apex = evidence(&pred, &ions, &mass, 2, &v, 2, FragmentTolerance::Ppm(7.0));
+        assert_eq!(from_side[0], at_apex[0], "the sum is centred on the apex");
+        let shifted: Vec<Vec<(f64, f32)>> = off
+            .iter()
+            .map(|s| s.iter().map(|&(mz, i)| (mz + 0.02, i)).collect())
+            .collect();
+        let v: Vec<&[(f64, f32)]> = shifted.iter().map(|x| x.as_slice()).collect();
+        assert_eq!(
+            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))[0],
+            0.0
+        );
+        assert!(evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Da(0.05))[0] > 0.99);
+        let flat = score(&build(1));
+        assert!(
+            flat[0] < 0.95,
+            "background lowers the summed angle: {flat:?}"
+        );
+        assert!(flat[4] > 0.99, "the baseline fit removes it: {flat:?}");
+        let ramp = score(&build(2));
+        assert!(
+            ramp[3] < 1.0,
+            "an interfered trace is not counted clean: {ramp:?}"
         );
     }
 }

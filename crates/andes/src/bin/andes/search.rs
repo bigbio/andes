@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
-use std::sync::Arc;
 use std::thread;
 
 use crate::cli::{Cli, Fragmentation};
@@ -443,13 +442,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             if gbdt_max_trees > 0 {
                 for slot in [&mut p.frag_intensity_model, &mut p.rich_ion_model] {
-                    if let Some(g) = slot.as_ref() {
-                        if gbdt_max_trees < g.trees.len() {
-                            let mut t = (**g).clone();
-                            t.trees.truncate(gbdt_max_trees);
-                            *slot = Some(Arc::new(t));
-                        }
-                    }
+                    resolve::truncate_gbdt(slot, gbdt_max_trees);
                 }
             }
             p.data_type.protocol = run_protocol;

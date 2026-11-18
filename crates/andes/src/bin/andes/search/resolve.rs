@@ -106,17 +106,14 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
         );
     }
     if cli.rescore_native {
-        let ignored: Vec<&str> = [
-            ("--percolator-bin", cli.percolator_bin.is_some()),
-            ("--percolator-docker", cli.percolator_docker),
+        let ignored = set_flags(&[
+            (cli.percolator_bin.is_some(), "--percolator-bin"),
+            (cli.percolator_docker, "--percolator-docker"),
             (
-                "--percolator-image",
                 cli.percolator_image != output::DEFAULT_PERCOLATOR_IMAGE,
+                "--percolator-image",
             ),
-        ]
-        .into_iter()
-        .filter_map(|(flag, set)| set.then_some(flag))
-        .collect();
+        ]);
         if !ignored.is_empty() {
             return Err(format!(
                 "native rescoring runs no Percolator binary, so {} has no effect; drop it, or drop --rescore-native to run Percolator",
@@ -181,8 +178,7 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
         }
     }
     if cli.xl.is_some() {
-        let mut unsupported: Vec<&str> = Vec::new();
-        for (on, flag) in [
+        let unsupported = set_flags(&[
             (cli.output_tsv.is_some(), "--output-tsv"),
             (cli.output_parquet.is_some(), "--output-parquet"),
             (cli.rescore_native, "--rescore-native"),
@@ -196,11 +192,7 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
             (cli.localize.is_some(), "--localize"),
             (cli.tmt.is_some(), "--tmt"),
             (cli.label.is_some(), "--label"),
-        ] {
-            if on {
-                unsupported.push(flag);
-            }
-        }
+        ]);
         if !unsupported.is_empty() {
             return Err(format!(
                 "--xl does not support: {} (crosslink mode writes its own .xl.pin and \
@@ -210,28 +202,15 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
         }
     }
     if cli.glyco {
-        let mut unsupported: Vec<&str> = Vec::new();
-        if cli.output_tsv.is_some() {
-            unsupported.push("--output-tsv");
-        }
-        if cli.output_parquet.is_some() {
-            unsupported.push("--output-parquet");
-        }
-        if cli.rescore {
-            unsupported.push("--rescore");
-        }
-        if cli.rescore_native {
-            unsupported.push("--rescore-native");
-        }
-        if cli.refine {
-            unsupported.push("--refine");
-        }
-        if cli.psm_fdr.is_some() {
-            unsupported.push("--psm-fdr");
-        }
-        if cli.pep.is_some() {
-            unsupported.push("--pep");
-        }
+        let unsupported = set_flags(&[
+            (cli.output_tsv.is_some(), "--output-tsv"),
+            (cli.output_parquet.is_some(), "--output-parquet"),
+            (cli.rescore, "--rescore"),
+            (cli.rescore_native, "--rescore-native"),
+            (cli.refine, "--refine"),
+            (cli.psm_fdr.is_some(), "--psm-fdr"),
+            (cli.pep.is_some(), "--pep"),
+        ]);
         if !unsupported.is_empty() {
             return Err(format!(
                 "--glyco does not support: {} (glyco mode writes a standalone \
@@ -283,7 +262,7 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
     }
     QuantSettings::check_args(cli)?;
     if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
-        log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+        warn_search(&warning);
     }
     let mut _rescore_tmp: Option<tempfile::TempDir> = None;
     let (output_pin_path, report_base) = rescore_pin_destination(
@@ -415,7 +394,7 @@ pub(super) fn load_search_database(
     }
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
-            log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+            warn_search(&warning);
         }
     }
     let t_phase = std::time::Instant::now();
@@ -473,7 +452,7 @@ pub(super) fn detect_inputs(
             other_path,
             other,
         )? {
-            log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+            warn_search(&warning);
         }
     }
 
@@ -577,13 +556,8 @@ pub(super) fn resolve_scoring_model(
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected {
                 (Some(method), Some(inst)) => {
-                    let chosen = match cli.fragmentation {
-                        Fragmentation::Auto => method,
-                        Fragmentation::Cid => ActivationMethod::CID,
-                        Fragmentation::Etd => ActivationMethod::ETD,
-                        Fragmentation::Hcd => ActivationMethod::HCD,
-                        Fragmentation::Uvpd => ActivationMethod::UVPD,
-                    };
+                    let chosen =
+                        cli_fragmentation_to_activation_opt(cli.fragmentation).unwrap_or(method);
                     if chosen != method {
                         log::info!(
                             target: "model",
@@ -648,24 +622,17 @@ pub(super) fn resolve_scoring_model(
         crate::cli::DEFAULT_GBDT_MAX_TREES
     });
     if gbdt_k > 0 {
-        let k = gbdt_k;
-        let truncate = |slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>,
-                        name: &str| {
-            if let Some(g) = slot.as_ref() {
-                let before = g.trees.len();
-                if k < before {
-                    let mut t = (**g).clone();
-                    t.trees.truncate(k);
-                    *slot = Some(Arc::new(t));
-                    log::info!(target: "search",
-                        "--gbdt-max-trees {k}: {name} ensemble {before} -> {k} trees \
-                         (changes predictions; not byte-identical)"
-                    );
-                }
+        for (slot, name) in [
+            (&mut param.frag_intensity_model, "frag-intensity"),
+            (&mut param.rich_ion_model, "rich-ion"),
+        ] {
+            if let Some(before) = truncate_gbdt(slot, gbdt_k) {
+                log::info!(target: "search",
+                    "--gbdt-max-trees {gbdt_k}: {name} ensemble {before} -> {gbdt_k} trees \
+                     (changes predictions; not byte-identical)"
+                );
             }
-        };
-        truncate(&mut param.frag_intensity_model, "frag-intensity");
-        truncate(&mut param.rich_ion_model, "rich-ion");
+        }
     }
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
@@ -673,8 +640,8 @@ pub(super) fn resolve_scoring_model(
         Protocol::ItraqPhospho => {
             param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho
         }
-        Protocol::Auto => match label {
-            Some(l @ (input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro)) => {
+        Protocol::Auto => {
+            if let Some(l) = label {
                 log::info!(
                     target: "protocol",
                     "{} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
@@ -684,22 +651,16 @@ pub(super) fn resolve_scoring_model(
                         "detected"
                     }
                 );
-                param.data_type.protocol = model::protocol::Protocol::TMT;
-            }
-            Some(l @ (input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8)) => {
-                log::info!(
-                    target: "protocol",
-                    "{} {l:?} → isobaric protocol (windowed peak filter on low-res MS2)",
-                    if cli.tmt.is_some() {
-                        "--tmt"
-                    } else {
-                        "detected"
+                param.data_type.protocol = match l {
+                    input::IsobaricLabel::Tmt | input::IsobaricLabel::TmtPro => {
+                        model::protocol::Protocol::TMT
                     }
-                );
-                param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+                    input::IsobaricLabel::Itraq | input::IsobaricLabel::Itraq8 => {
+                        model::protocol::Protocol::ITRAQ
+                    }
+                };
             }
-            None => {}
-        },
+        }
         _ => {}
     }
     if cli.db.fixed_mods.is_none() {
@@ -1254,6 +1215,36 @@ pub(crate) fn retrieval_choice(
             }
         }
     }
+}
+
+/// Logs a pre-formatted warning under the `search` target without its `WARN: ` prefix.
+fn warn_search(warning: &str) {
+    log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(warning));
+}
+
+/// The names of the flags in `flags` that are set.
+fn set_flags<'a>(flags: &[(bool, &'a str)]) -> Vec<&'a str> {
+    flags
+        .iter()
+        .filter_map(|&(on, flag)| on.then_some(flag))
+        .collect()
+}
+
+/// Shortens the GBDT ensemble in `slot` to `k` trees and returns its former tree count, or
+/// `None` when it is absent or already no longer than `k`.
+pub(super) fn truncate_gbdt(
+    slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>,
+    k: usize,
+) -> Option<usize> {
+    let g = slot.as_ref()?;
+    let before = g.trees.len();
+    if k >= before {
+        return None;
+    }
+    let mut t = (**g).clone();
+    t.trees.truncate(k);
+    *slot = Some(Arc::new(t));
+    Some(before)
 }
 
 fn isobaric_peak_filter(explicit: Option<(f64, usize)>, high_res: bool) -> Option<(f64, usize)> {

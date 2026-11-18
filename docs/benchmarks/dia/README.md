@@ -97,6 +97,14 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   by RawScore 1801 / 1861; keep 100, RawScore + angle 1832 / 1867; keep 50, RawScore + angle
   1833 / 1884. Cost: search plus prediction 1.0 → 2.0 min, peak memory 13 → 15 GB per run
   (keeping 100 rows took 49 GB).
+- **Soft MS1 gate** (not kept). Letting a gate-failing candidate through when it has at least *v*
+  fragment-index votes (the gate-failing misses match a median of 7 ions at DIA-NN's peak, and for
+  about 75 % of them DIA-NN has no MS1 apex either). Slice, with re-ranking, DIA-NN precursors in the
+  PIN 425 → 425 / 426 / 428 / 416 at *v* = 12 / 10 / 8 / 6 (at 6: 9 gained, 18 pushed out of the
+  50-row pool), N@FDP_c 1 % mean of 3 seeds 277 → 282 / 295 / 262 / 282, inside slice noise. At
+  *v* ≥ 8 the PIN gains at most 4 DIA-NN precursors, so the gate is not what keeps them out: the
+  gate-failing ones lose the fragment vote too. The
+  existing `dia_ms1_found` column already marks rows without a survey peak.
 - **Cost per run**: andes search 6–7 min (wall, 14 threads) plus 12–15 min of Percolator; DIA-NN 8.8–21 min
   (`diann-decoys-20261114/RESULT.md`).
 

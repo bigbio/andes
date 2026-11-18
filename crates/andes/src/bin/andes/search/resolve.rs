@@ -283,7 +283,7 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
     }
     QuantSettings::check_args(cli)?;
     if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
-        log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+        log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
     }
     let mut _rescore_tmp: Option<tempfile::TempDir> = None;
     let (output_pin_path, report_base) = rescore_pin_destination(
@@ -295,7 +295,7 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
         &mut _rescore_tmp,
     )?;
     if cli.spectrum.len() > 1 {
-        log::info!(
+        log::info!(target: "search",
             "Multi-spectrum search: {} inputs → one PIN",
             cli.spectrum.len()
         );
@@ -340,7 +340,7 @@ pub(super) fn load_search_database(
     if let Some(peff) = &loaded.peff {
         log_claims("PEFF", &peff.claims);
         if peff.sites_without_mass + peff.processing_not_chain > 0 {
-            log::info!(
+            log::info!(target: "search",
                 "PEFF: {} entries; left out {} sites with no known mass and {} processed spans \
                  that are not mature chains",
                 peff.entries,
@@ -376,7 +376,7 @@ pub(super) fn load_search_database(
                 (cli.db.uniprot_chains, "--uniprot-chains"),
             ] {
                 if set {
-                    log::warn!(
+                    log::warn!(target: "search",
                         "{flag} needs a UniProt XML database (*.xml[.gz]); {} is FASTA, \
                          so it does nothing.",
                         database_path.display()
@@ -415,7 +415,7 @@ pub(super) fn load_search_database(
     }
     if decoy_strategy != search::decoy::DecoyStrategy::None {
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
-            log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+            log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
         }
     }
     let t_phase = std::time::Instant::now();
@@ -473,7 +473,7 @@ pub(super) fn detect_inputs(
             other_path,
             other,
         )? {
-            log::warn!("{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
+            log::warn!(target: "search", "{}", warning.strip_prefix("WARN: ").unwrap_or(&warning));
         }
     }
 
@@ -509,7 +509,7 @@ pub(super) fn detect_inputs(
     );
     if let (Some(said), Some(read)) = (cli.sdrf_dissociation, acquisition.activation) {
         if said != read {
-            log::warn!(
+            log::warn!(target: "search",
                 "the SDRF dissociation method is {} but {} records {}; andes follows the file",
                 said.name(),
                 spectrum_path.display(),
@@ -657,7 +657,7 @@ pub(super) fn resolve_scoring_model(
                     let mut t = (**g).clone();
                     t.trees.truncate(k);
                     *slot = Some(Arc::new(t));
-                    log::info!(
+                    log::info!(target: "search",
                         "--gbdt-max-trees {k}: {name} ensemble {before} -> {k} trees \
                          (changes predictions; not byte-identical)"
                     );
@@ -736,7 +736,7 @@ pub(super) fn resolve_scoring_model(
         && cli.fragment_tol_da.is_none();
     if dia_tol_default {
         cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
-        log::info!(
+        log::info!(target: "search",
             "--dia: fragment tolerance {} ppm (Orbitrap Astral MS2)",
             crate::dia::FRAGMENT_TOL_PPM
         );
@@ -744,7 +744,7 @@ pub(super) fn resolve_scoring_model(
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if let Some(t) = frag_tol_override {
         if instrument_was_detected && !dia_tol_default {
-            log::info!(
+            log::info!(target: "search",
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())
             );
@@ -814,13 +814,13 @@ pub(super) fn resolve_search_params(
     let has_ms1 = is_mzml || is_raw || is_d;
     let chimeric_active = cli.chimeric && has_ms1;
     if cli.chimeric && !has_ms1 {
-        log::warn!(
+        log::warn!(target: "search",
             "--chimeric requires MS1 data (mzML, Thermo .raw or Bruker .d); the input \
              is MGF, so the co-isolation cascade is disabled and the search runs normally."
         );
     }
     if chimeric_active && cli.ms_level != 2 {
-        log::warn!(
+        log::warn!(target: "search",
             "--ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
             cli.ms_level
         );
@@ -845,7 +845,7 @@ pub(super) fn resolve_search_params(
         && (cli.glyco || cli.open_search)
         && !mono_active
     {
-        log::warn!(
+        log::warn!(target: "search",
             "--precursor-mono auto needs an input with MS1 (mzML, Thermo .raw or \
              Bruker .d); \
              {} has none — precursors are left as recorded.",
@@ -903,7 +903,7 @@ pub(super) fn resolve_search_params(
                 | model::protocol::Protocol::ITRAQPhospho
         )
     {
-        log::info!(
+        log::info!(target: "search",
             "isobaric windowed peak filter: off (high-resolution MS2; --peak-filter WINDOW:K turns it on)"
         );
     }
@@ -914,7 +914,7 @@ pub(super) fn resolve_search_params(
     params.max_missed_cleavages = if cli.glyco {
         let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
         if explicit && cli.max_missed_cleavages < 3 {
-            log::info!(
+            log::info!(target: "search",
                 "--glyco normally raises missed cleavages to 3 (sequon-bearing \
                  tryptic peptides often need a third to reach a scoreable length); \
                  honouring your explicit --max-missed-cleavages {}. Expect fewer \
@@ -945,7 +945,7 @@ pub(super) fn resolve_search_params(
             params.max_length,
         );
         params.max_label_sites = extra;
-        log::info!(
+        log::info!(target: "search",
             "--label: channels {}; label mods added to the search (up to {extra} labelled sites \
              per peptide, apart from the {} other variable mods)",
             spec.describe(),
@@ -954,7 +954,7 @@ pub(super) fn resolve_search_params(
     }
     params.precursor_cal_mode = cli.precursor_cal;
     if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
-        log::warn!("--precursor-cal is ignored under --dia (a DIA scan has no selected precursor)");
+        log::warn!(target: "search", "--precursor-cal is ignored under --dia (a DIA scan has no selected precursor)");
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
     if let Some(n) = cli.cal_min_spec_keys {
@@ -986,7 +986,7 @@ pub(super) fn resolve_search_params(
         None
     };
     if let (false, Some(reason)) = (standalone, retrieval_excluded) {
-        log::info!(
+        log::info!(target: "search",
             "{} fragmentation -> per-spectrum candidate enumeration (the fragment-ion \
              index is not used: {reason})",
             param.data_type.activation.name()
@@ -1031,7 +1031,7 @@ pub(super) fn resolve_search_params(
         );
     }
     if let Some(refusal) = choice.refused_because {
-        log::warn!("the fragment-ion index cannot be used here ({refusal}); using enumeration.");
+        log::warn!(target: "search", "the fragment-ion index cannot be used here ({refusal}); using enumeration.");
     }
     if let Some(reason) = &choice.report {
         if choice.use_index {
@@ -1048,7 +1048,7 @@ pub(super) fn resolve_search_params(
     }
 
     if !cli.glyco && arg_present("--glyco-hcd-pair") {
-        log::warn!(
+        log::warn!(target: "search",
             "--glyco-hcd-pair has no effect without --glyco (it only drives \
              paired-scan candidate generation in glyco mode); ignoring it."
         );
@@ -1058,7 +1058,7 @@ pub(super) fn resolve_search_params(
             decoy_strategy,
             search::decoy::DecoyStrategy::None | search::decoy::DecoyStrategy::Sequon
         ) {
-            log::warn!(
+            log::warn!(target: "search",
                 "--glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
                  target proteome), which does NOT preserve N-X-S/T sequon density that \
                  glyco scoring gates on — the resulting .glyco.pin FDR is \
@@ -1069,7 +1069,7 @@ pub(super) fn resolve_search_params(
             );
         }
         if cli.glyco_hcd_pair && spectrum_paths.len() > 1 {
-            log::warn!(
+            log::warn!(target: "search",
                 "--glyco-hcd-pair is disabled for {} --spectrum inputs: paired-scan \
                  generation pairs ETD<->HCD over the concatenated spectra and would cross \
                  file boundaries. Run one file at a time to use paired generation.",
@@ -1078,7 +1078,7 @@ pub(super) fn resolve_search_params(
         }
     }
     if params.chimeric && cli.refine {
-        log::warn!(
+        log::warn!(target: "search",
             "--refine + --chimeric do not fully stack in this release — chimeric \
              already explains many of the spectra refinement would otherwise rescue, so \
              refinement adds much less on top of chimeric than it does alone. See \
@@ -1086,7 +1086,7 @@ pub(super) fn resolve_search_params(
         );
     }
     if params.score_mode == search::ScoreMode::Strong {
-        log::info!("score mode: strong (ranking + PIN RawScore use StrongScore)");
+        log::info!(target: "search", "score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
 
     Ok(ResolvedSearch {
@@ -1328,7 +1328,7 @@ fn unpack_d_archives(
         {
             let t = std::time::Instant::now();
             let run = input::unpack_d_archive(p, dir.path())?;
-            log::info!(
+            log::info!(target: "search",
                 "Bruker .d archive {}: unpacked to {} ({:.1}s)",
                 p.display(),
                 run.display(),
@@ -1454,7 +1454,7 @@ fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
                 .iter()
                 .any(|a| (m.mass_delta - a).abs() <= model::protein::SITE_MASS_TOLERANCE)
         {
-            log::warn!(
+            log::warn!(target: "search",
                 "{} ({:+.4} Da) is restricted to annotated sites while \
                  --uniprot-variants is on: variants of the same mass lose the \
                  competing explanation at unannotated residues.",
@@ -1499,14 +1499,14 @@ fn report_annotated_site_mods(aa: &model::AminoAcidSet, target_db: &model::Prote
             }
         }
         if sites == 0 {
-            log::warn!(
+            log::warn!(target: "search",
                 "{name} ({mass:+.4} Da) is restricted to annotated sites (restrict_to: annotated), \
                  but no target protein annotates a site of that mass, so it is never placed. \
                  Annotated sites come from a UniProt XML database (--database *.xml[.gz]); \
                  --uniprot-evidence sets which are used."
             );
         } else {
-            log::info!(
+            log::info!(target: "search",
                 "Annotated-site mod {name} ({mass:+.4} Da): {sites} sites on {proteins} target \
                  proteins"
             );

@@ -1141,29 +1141,23 @@ fn kdecoy_q(items: &[(usize, f32, u8)], q: &mut [Option<f64>]) {
     let k = decoys as f64 / targets as f64;
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|&a, &b| items[b].1.total_cmp(&items[a].1));
-    let mut fdr = vec![0.0f64; order.len()];
-    let (mut t, mut d, mut d_id) = (0usize, 0usize, 0usize);
-    let mut start = 0;
-    while start < order.len() {
-        let score = items[order[start]].1;
-        let mut end = start;
-        while end < order.len() && (end == start || items[order[end]].1 == score) {
-            match items[order[end]].2 {
-                TARGET => t += 1,
-                IDENTITY => d_id += 1,
-                _ => d += 1,
-            }
-            end += 1;
-        }
-        let tf = t.max(1) as f64;
-        let v = ((d + 1) as f64 / (k * tf) + d_id as f64 / tf).min(1.0);
-        fdr[start..end].fill(v);
-        start = end;
-    }
-    let mut running = 1.0f64;
-    for (pos, &j) in order.iter().enumerate().rev() {
-        running = running.min(fdr[pos]);
-        q[items[j].0] = Some(running);
+    let ranked = model::fdr::ranked_q::<(usize, usize, usize)>(
+        order.len(),
+        |(t, d, d_id), rank| match items[order[rank]].2 {
+            TARGET => *t += 1,
+            IDENTITY => *d_id += 1,
+            _ => *d += 1,
+        },
+        |start, rank| items[order[rank]].1 == items[order[start]].1,
+        model::fdr::Eval::GroupEnd,
+        |&(t, d, d_id)| {
+            let tf = t.max(1) as f64;
+            ((d + 1) as f64 / (k * tf) + d_id as f64 / tf).min(1.0)
+        },
+        1.0,
+    );
+    for (&j, v) in order.iter().zip(ranked) {
+        q[items[j].0] = Some(v);
     }
 }
 

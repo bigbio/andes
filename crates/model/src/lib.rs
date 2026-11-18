@@ -3,6 +3,7 @@ pub mod activation;
 pub mod amino_acid;
 pub mod annotation;
 pub mod enzyme;
+pub mod fdr;
 pub mod instrument;
 pub mod isomer_class;
 pub mod isotope;

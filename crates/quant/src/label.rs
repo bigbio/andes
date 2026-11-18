@@ -1,3 +1,4 @@
+use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::ISOTOPE;
 use model::stats::{median_mut, Even, MAD_TO_SD};
 
@@ -1529,21 +1530,17 @@ pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f6
             .total_cmp(&key(rows[a].0))
             .then(rows[b].1.cmp(&rows[a].1))
     });
+    let ranked = ranked_q::<Counts>(
+        rows.len(),
+        |c, rank| c.add(rows[order[rank]].1),
+        |_, _| false,
+        Eval::PerRow,
+        |c| c.ratio_plus_one_over(k),
+        1.0,
+    );
     let mut q = vec![1.0; rows.len()];
-    let (mut t, mut d) = (0usize, 0usize);
-    let mut raw = Vec::with_capacity(rows.len());
-    for &i in &order {
-        if rows[i].1 {
-            d += 1;
-        } else {
-            t += 1;
-        }
-        raw.push((((d + 1) as f64 / k) / t.max(1) as f64).min(1.0));
-    }
-    let mut run = 1.0f64;
-    for (r, &i) in order.iter().enumerate().rev() {
-        run = run.min(raw[r]);
-        q[i] = run;
+    for (&i, qi) in order.iter().zip(ranked) {
+        q[i] = qi;
     }
     q
 }
@@ -1562,21 +1559,24 @@ pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
             .total_cmp(&key(rows[a].0))
             .then((rows[b].1 > 0.0).cmp(&(rows[a].1 > 0.0)))
     });
-    let (mut t, mut d) = (0usize, 0.0f64);
-    let mut raw = Vec::with_capacity(rows.len());
-    for &i in &order {
-        if rows[i].1 > 0.0 {
-            d += rows[i].1;
-        } else {
-            t += 1;
-        }
-        raw.push(((d + w_bar) / t.max(1) as f64).min(1.0));
-    }
+    let ranked = ranked_q::<(usize, f64)>(
+        rows.len(),
+        |(t, d), rank| {
+            let w = rows[order[rank]].1;
+            if w > 0.0 {
+                *d += w;
+            } else {
+                *t += 1;
+            }
+        },
+        |_, _| false,
+        Eval::PerRow,
+        |&(t, d)| (d + w_bar) / t.max(1) as f64,
+        1.0,
+    );
     let mut q = vec![1.0; rows.len()];
-    let mut run = 1.0f64;
-    for (r, &i) in order.iter().enumerate().rev() {
-        run = run.min(raw[r]);
-        q[i] = run;
+    for (&i, qi) in order.iter().zip(ranked) {
+        q[i] = qi;
     }
     q
 }

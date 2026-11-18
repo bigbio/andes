@@ -1,4 +1,5 @@
 use crate::align::{align, AlignParams, Alignment, Observation};
+use model::fdr::{ranked_q, Counts, Eval};
 use model::stats::{median_f32_mut, Even};
 
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
@@ -34,21 +35,17 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         .collect();
     ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
 
-    let mut fdr = Vec::with_capacity(ranked.len());
-    let (mut t, mut d) = (0u64, 0u64);
-    for &(_, is_decoy, _) in &ranked {
-        if is_decoy {
-            d += 1;
-        } else {
-            t += 1;
-        }
-        fdr.push((d + 1) as f64 / t.max(1) as f64);
-    }
-    let mut running = f64::INFINITY;
+    let q = ranked_q::<Counts>(
+        ranked.len(),
+        |c, rank| c.add(ranked[rank].1),
+        |_, _| false,
+        Eval::PerRow,
+        Counts::ratio_plus_one,
+        1.0,
+    );
     let mut out = vec![None; n];
-    for (i, &(id, _, _)) in ranked.iter().enumerate().rev() {
-        running = running.min(fdr[i]);
-        out[id as usize] = Some(running.min(1.0));
+    for (&(id, _, _), qi) in ranked.iter().zip(q) {
+        out[id as usize] = Some(qi);
     }
     out
 }

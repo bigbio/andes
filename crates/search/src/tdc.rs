@@ -1,13 +1,12 @@
+use model::fdr::{ranked_q, Counts, Eval};
+
 #[derive(Debug, Clone, Copy)]
 pub struct ScoredLabel {
     pub score: f32,
     pub is_decoy: bool,
 }
 
-pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<usize> {
-    if items.is_empty() {
-        return Vec::new();
-    }
+fn ranked(items: &[ScoredLabel]) -> (Vec<usize>, Vec<f64>) {
     let n = items.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
@@ -23,37 +22,20 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
         };
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut q = vec![1.0_f64; n];
-    let (mut targets, mut decoys) = (0u64, 0u64);
-    for (rank, &i) in order.iter().enumerate() {
-        if items[i].is_decoy {
-            decoys += 1;
-        } else {
-            targets += 1;
-        }
-        q[rank] = decoys as f64 / targets.max(1) as f64;
-    }
-    let mut min_q = 1.0_f64;
-    for qi in q.iter_mut().rev() {
-        if *qi < min_q {
-            min_q = *qi;
-        }
-        *qi = min_q;
-    }
-    let mut start = 0usize;
-    while start < n {
-        let s = items[order[start]].score;
-        let mut end = start + 1;
-        let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
-        while end < n && tie(items[order[end]].score, s) {
-            end += 1;
-        }
-        let worst = q[start..end].iter().cloned().fold(0.0_f64, f64::max);
-        for qi in &mut q[start..end] {
-            *qi = worst;
-        }
-        start = end;
-    }
+    let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
+    let q = ranked_q::<Counts>(
+        n,
+        |c, rank| c.add(items[order[rank]].is_decoy),
+        |start, rank| tie(items[order[rank]].score, items[order[start]].score),
+        Eval::PerRowGroupMax,
+        Counts::ratio,
+        1.0,
+    );
+    (order, q)
+}
+
+pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<usize> {
+    let (order, q) = ranked(items);
     order
         .iter()
         .zip(q.iter())
@@ -63,56 +45,8 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
 }
 
 pub fn qvalues(items: &[ScoredLabel]) -> Vec<f64> {
-    let n = items.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        let sa = if items[a].score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            items[a].score
-        };
-        let sb = if items[b].score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            items[b].score
-        };
-        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut q = vec![1.0_f64; n];
-    let (mut targets, mut decoys) = (0u64, 0u64);
-    for (rank, &i) in order.iter().enumerate() {
-        if items[i].is_decoy {
-            decoys += 1;
-        } else {
-            targets += 1;
-        }
-        q[rank] = decoys as f64 / targets.max(1) as f64;
-    }
-    let mut min_q = 1.0_f64;
-    for qi in q.iter_mut().rev() {
-        if *qi < min_q {
-            min_q = *qi;
-        }
-        *qi = min_q;
-    }
-    let mut start = 0usize;
-    while start < n {
-        let s = items[order[start]].score;
-        let mut end = start + 1;
-        let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
-        while end < n && tie(items[order[end]].score, s) {
-            end += 1;
-        }
-        let worst = q[start..end].iter().cloned().fold(0.0_f64, f64::max);
-        for qi in &mut q[start..end] {
-            *qi = worst;
-        }
-        start = end;
-    }
-    let mut out = vec![1.0_f64; n];
+    let (order, q) = ranked(items);
+    let mut out = vec![1.0_f64; items.len()];
     for (rank, &i) in order.iter().enumerate() {
         out[i] = q[rank];
     }

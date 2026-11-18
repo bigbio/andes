@@ -3,6 +3,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use input::FastaReader;
+use model::fdr::{ranked_q, Counts, Eval};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
@@ -120,45 +121,14 @@ pub(crate) fn tdc_q_values<T>(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| is_decoy(a).cmp(&is_decoy(b)))
     });
-    let mut q = vec![1.0_f64; psms.len()];
-    let (mut n_targets, mut n_decoys) = (0u64, 0u64);
-    for (qi, p) in q.iter_mut().zip(psms.iter()) {
-        if is_decoy(p) {
-            n_decoys += 1;
-        } else {
-            n_targets += 1;
-        }
-        *qi = n_decoys as f64 / n_targets.max(1) as f64;
-    }
-    let mut min_q = 1.0_f64;
-    for qi in q.iter_mut().rev() {
-        min_q = min_q.min(*qi);
-        *qi = min_q;
-    }
-    assign_bucket_worst_q(psms, &mut q, score_of);
-    q
-}
-
-pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl Fn(&T) -> f32) {
-    debug_assert_eq!(psms.len(), q.len());
-    let mut start = 0usize;
-    while start < psms.len() {
-        let s = score_of(&psms[start]);
-        let mut end = start + 1;
-        while end < psms.len() && scores_tie(score_of(&psms[end]), s) {
-            end += 1;
-        }
-        let mut worst = q[start];
-        for &qi in &q[start + 1..end] {
-            if qi > worst {
-                worst = qi;
-            }
-        }
-        for qi in &mut q[start..end] {
-            *qi = worst;
-        }
-        start = end;
-    }
+    ranked_q::<Counts>(
+        psms.len(),
+        |c, rank| c.add(is_decoy(&psms[rank])),
+        |start, rank| scores_tie(score_of(&psms[rank]), score_of(&psms[start])),
+        Eval::PerRowGroupMax,
+        Counts::ratio,
+        1.0,
+    )
 }
 
 fn scores_tie(a: f32, b: f32) -> bool {

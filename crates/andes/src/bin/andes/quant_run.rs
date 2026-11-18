@@ -2278,6 +2278,16 @@ mod tests {
         assert_eq!(hits[0].psm_index, 1);
     }
 
+    #[test]
+    fn omitted_rows_are_skipped_without_rescoring() {
+        let cands = vec![candidate(b"PEPTIDEK", false), candidate(b"KEDITPEP", false)];
+        let (c, spectra, queues) = one_spectrum(vec![psm(12.0, 0, None)]);
+        let hits = select_hits(&c, &spectra, &queues, &cands, None, &HashSet::new(), None);
+        assert_eq!(hits.len(), 1);
+        let omitted: HashSet<String> = [hits[0].spec_id.clone()].into();
+        assert!(select_hits(&c, &spectra, &queues, &cands, None, &omitted, None).is_empty());
+    }
+
     fn settings(lfq: bool, quant_dir: Option<&str>) -> QuantSettings {
         QuantSettings {
             plex: None,

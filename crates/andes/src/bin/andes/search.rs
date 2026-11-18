@@ -2954,17 +2954,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let omitted_psms = match (&quant, rescore_map.as_ref()) {
-        (Some(_), Some(map)) => output::omitted_psm_rows(
+    let omitted_psms = match &quant {
+        Some(_) => output::omitted_psm_rows(
             &spectra,
             &queues,
             &pin_candidates,
-            Some(map),
+            rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
         )
         .map_err(|e| format!("quant: {e}"))?,
-        _ => std::collections::HashSet::new(),
+        None => std::collections::HashSet::new(),
     };
     if let Some(ref mut map) = rescore_map {
         map.retain(|id, _| !knockoff_rows.contains(id));

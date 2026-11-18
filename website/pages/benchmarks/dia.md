@@ -33,7 +33,7 @@ average (0.8–1.2% and 0.7–0.8% over the seeds).
 ## Time
 
 Wall time per run, 14 threads: andes 6.7–8.0 min, of which the search, prediction, PIN and DIA
-columns take about 1.5 min and the two Percolator passes 4.5–5.6 min; DIA-NN 8.8 min (raw02) and 13.5 min
+columns take about 2 min and the two Percolator passes 4.5–5.6 min; DIA-NN 8.8 min (raw02) and 13.5 min
 (raw01). The two tools ran on different machines (andes on a cluster node, DIA-NN in Docker on a
 workstation), so the times are indicative only.
 

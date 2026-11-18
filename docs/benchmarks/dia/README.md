@@ -119,7 +119,8 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   seeds, N@FDP_c 1 %: 1948 / 2084 against 1825 / 1907, higher on every seed (+46 to +186 / +129 to
   +208). q ≤ 0.01 measures 0.8–1.2 % / 0.7–0.8 % true FDP (seed 42 on raw01 at 1.2 %). Separately:
   the summed-spectrum pair alone 1872 / 2062, the profile trio alone 1942 / 2040. Search plus
-  prediction 1.3–1.5 min, peak memory 16 GB per run.
+  prediction step 22 → 27–30 s, search plus PIN plus columns still about 2 min, peak memory 16 GB
+  per run.
 - **Cost per run**: andes search 6–7 min (wall, 14 threads) plus 12–15 min of Percolator; DIA-NN 8.8–21 min
   (`diann-decoys-20261114/RESULT.md`).
 

@@ -1,6 +1,7 @@
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
+use crate::pin::{PIN_FEATURE_COLUMNS, PIN_LEAD_COLUMNS};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use search::candidate_gen::Candidate;
@@ -21,104 +22,40 @@ use search::precursor_mono::MonoCorrection;
 
 pub const GLYCO_PIN_MONO_COLS: [&str; 4] = ["MonoShift", "MonoFit", "MonoFitGain", "MonoSNR"];
 
+/// The glyco-specific PIN feature columns, after the shared ones.
+const GLYCO_FEATURE_COLUMNS: [&str; 16] = [
+    "OxoniumScore",
+    "NCoreOxoniumIons",
+    "YLadderScore",
+    "YHitFrac",
+    "PartialGlycanBY",
+    "CoreYHits",
+    "GlycanMass",
+    "IsGlycanDb",
+    "Y0Y1Anchor",
+    "SialicConsistency",
+    "CzHyperscore",
+    "CzIntensity",
+    "CzExplained",
+    "CzChanceLlr",
+    "DeltaRTRank",
+    "IsobaricRTMargin",
+];
+
 fn write_glyco_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
     max_charge: u8,
     mono: bool,
 ) -> io::Result<()> {
-    let mut cols: Vec<String> = vec![
-        "SpecId".to_string(),
-        "Label".to_string(),
-        "ScanNr".to_string(),
-        "ExpMass".to_string(),
-        "CalcMass".to_string(),
-        "FileName".to_string(),
-        "mass".to_string(),
-        "RankScore".to_string(),
-        "isotope_error".to_string(),
-        "peplen".to_string(),
-        "dm".to_string(),
-        "absdm".to_string(),
-    ];
-
+    let mut cols: Vec<String> = PIN_LEAD_COLUMNS.iter().map(|c| c.to_string()).collect();
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
     }
     cols.push("chargeHi".to_string());
-
-    cols.extend_from_slice(&[
-        "enzN".to_string(),
-        "enzC".to_string(),
-        "enzInt".to_string(),
-        "NumMatchedMainIons".to_string(),
-        "longest_b".to_string(),
-        "longest_y".to_string(),
-        "longest_y_pct".to_string(),
-        "ExplainedIonCurrentRatio".to_string(),
-        "NTermIonCurrentRatio".to_string(),
-        "CTermIonCurrentRatio".to_string(),
-        "MS2IonCurrent".to_string(),
-        "IsolationWindowEfficiency".to_string(),
-        "MeanErrorTop7".to_string(),
-        "StdevErrorTop7".to_string(),
-        "MeanRelErrorTop7".to_string(),
-        "StdevRelErrorTop7".to_string(),
-        "matchedIonRatio".to_string(),
-        "EdgeScore".to_string(),
-        "PrecursorIsotopeKL".to_string(),
-        "PrecursorSNR".to_string(),
-        "DeltaRankScore".to_string(),
-        "TailorScore".to_string(),
-        "PpmGaussianScore".to_string(),
-        "NeutralLossIonCount".to_string(),
-        "LongestComplementaryLadder".to_string(),
-        "ComplementaryIonBalance".to_string(),
-        "MeanMatchedIntensityRank".to_string(),
-        "DoublyChargedMatchedIonCount".to_string(),
-        "UniqueMatchFraction".to_string(),
-        "ChanceMatchSurprise".to_string(),
-        "IntensitySignal".to_string(),
-        "FragPredExplained".to_string(),
-        "FragPredChanceLLR".to_string(),
-        "FragTopKObserved".to_string(),
-        "RichIonLLR".to_string(),
-        "IsRefinement".to_string(),
-        "NumMods".to_string(),
-        "RefinementModClass".to_string(),
-        "ModSiteShiftedMatched".to_string(),
-        "ModSiteShiftedFrac".to_string(),
-        "ModSiteIntensFrac".to_string(),
-        "ModSiteLocalized".to_string(),
-        "ModSiteDetCount".to_string(),
-        "MassCompetitionEvidence".to_string(),
-        "CandidateRankEntropy".to_string(),
-        "ListwiseScoreGap".to_string(),
-        "RawScore".to_string(),
-        "RawScoreCal".to_string(),
-        "RankScoreFloat".to_string(),
-        "DeltaRT".to_string(),
-        "AbsDeltaRT".to_string(),
-        "DeltaRTNorm".to_string(),
-        "OxoniumScore".to_string(),
-        "NCoreOxoniumIons".to_string(),
-        "YLadderScore".to_string(),
-        "YHitFrac".to_string(),
-        "PartialGlycanBY".to_string(),
-        "CoreYHits".to_string(),
-        "GlycanMass".to_string(),
-        "IsGlycanDb".to_string(),
-        "Y0Y1Anchor".to_string(),
-        "SialicConsistency".to_string(),
-        "CzHyperscore".to_string(),
-        "CzIntensity".to_string(),
-        "CzExplained".to_string(),
-        "CzChanceLlr".to_string(),
-        "DeltaRTRank".to_string(),
-        "IsobaricRTMargin".to_string(),
-        "Peptide".to_string(),
-        "Proteins".to_string(),
-    ]);
+    cols.extend(PIN_FEATURE_COLUMNS.iter().map(|c| c.to_string()));
+    cols.extend(GLYCO_FEATURE_COLUMNS.iter().map(|c| c.to_string()));
+    cols.extend(["Peptide", "Proteins"].map(String::from));
 
     cols.retain(|c| glyco_col_kept(c));
     if mono {

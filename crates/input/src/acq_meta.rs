@@ -161,7 +161,7 @@ pub fn sample_mzml_ms2_meta<R: BufRead>(reader: R, n: usize) -> Ms2MetaSample {
     out
 }
 
-const ISOTOPE_SPACING_DA: f64 = 1.003_354_8;
+const ISOTOPE_SPACING_DA: f64 = model::mass::ISOTOPE;
 const PAIR_TOL_PPM: f64 = 10.0;
 const CONTROL_OFFSETS_DA: [f64; 6] = [-0.21, -0.14, -0.07, 0.07, 0.14, 0.21];
 const PAIR_PEAKS_PER_SPECTRUM: usize = 200;

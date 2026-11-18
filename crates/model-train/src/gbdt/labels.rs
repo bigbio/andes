@@ -2,8 +2,7 @@ use model::mass::{H2O, PROTON};
 use model::peptide::Peptide;
 use model::Tolerance;
 
-const NH3: f64 = 17.026549;
-const CO: f64 = 27.994915;
+use model::mass::{CO, NH3};
 
 fn residue_masses(peptide: &Peptide) -> Vec<f64> {
     peptide

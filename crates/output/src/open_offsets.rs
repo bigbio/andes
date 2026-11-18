@@ -12,7 +12,7 @@ use model::unimod::{Specificity, UnimodDb};
 use crate::percolator::PercolatorPsm;
 use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
-const ISOTOPE_DA: f64 = 1.003_355;
+const ISOTOPE_DA: f64 = model::mass::ISOTOPE;
 const REFINED_DA: f64 = 0.0005;
 const MIN_PEAK_PSMS: usize = 2;
 const DEFAULT_PRECISION_DA: f64 = 0.002;

@@ -8,9 +8,9 @@ pub const NEUAC: f64 = 291.095417;
 
 pub const NEUGC: f64 = 307.090331;
 
-pub const PROTON: f64 = 1.007276;
+pub const PROTON: f64 = model::mass::PROTON;
 
-pub const WATER: f64 = 18.010565;
+pub const WATER: f64 = model::mass::H2O;
 
 pub const CORE_OXONIUM_MZ: [f64; 5] = [138.05496, 168.06552, 186.07608, 204.08665, 366.13947];
 

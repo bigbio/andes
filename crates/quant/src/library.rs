@@ -1,6 +1,6 @@
 use crate::align::{align, AlignParams, Alignment, Observation};
 use model::fdr::{ranked_q, Counts, Eval};
-use model::stats::{median_f32_mut, Even};
+use model::stats::{median_f32_mut, nan_low, Even};
 
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let Some(max_id) = rows.iter().map(|r| r.0).max() else {
@@ -9,11 +9,7 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let n = max_id as usize + 1;
     let mut best: Vec<Option<(bool, f64)>> = vec![None; n];
     for &(id, is_decoy, score) in rows {
-        let score = if score.is_nan() {
-            f64::NEG_INFINITY
-        } else {
-            score
-        };
+        let score = nan_low(score);
         let slot = &mut best[id as usize];
         match slot {
             Some((d, s)) => {
@@ -132,14 +128,6 @@ pub fn build_library(
     b.finish(meta, max_q, ap)
 }
 
-fn score_of(score: f64) -> f64 {
-    if score.is_nan() {
-        f64::NEG_INFINITY
-    } else {
-        score
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Donor {
     score: f64,
@@ -163,7 +151,7 @@ impl Donor {
     }
 
     fn beats(&self, best: &Donor) -> bool {
-        let (a, b) = (score_of(self.score), score_of(best.score));
+        let (a, b) = (nan_low(self.score), nan_low(best.score));
         a > b || (a == b && self.rt < best.rt)
     }
 }
@@ -235,7 +223,7 @@ impl LibraryBuilder {
         if id >= self.best.len() || p.run as usize >= self.n_runs {
             return;
         }
-        let score = score_of(p.score);
+        let score = nan_low(p.score);
         match &mut self.best[id] {
             Some((d, s)) => {
                 debug_assert_eq!(
@@ -905,13 +893,7 @@ mod tests {
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut obs: Vec<Observation> = Vec::new();
         let mut decoy_obs: Vec<Observation> = Vec::new();
-        let score_of = |p: &PsmIn| {
-            if p.score.is_nan() {
-                f64::NEG_INFINITY
-            } else {
-                p.score
-            }
-        };
+        let score_of = |p: &PsmIn| nan_low(p.score);
         let mut i = 0;
         while i < by_prec.len() {
             let id = by_prec[i].precursor;

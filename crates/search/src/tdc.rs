@@ -1,4 +1,5 @@
 use model::fdr::{ranked_q, Counts, Eval};
+use model::stats::nan_low_f32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScoredLabel {
@@ -10,16 +11,7 @@ fn ranked(items: &[ScoredLabel]) -> (Vec<usize>, Vec<f64>) {
     let n = items.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        let sa = if items[a].score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            items[a].score
-        };
-        let sb = if items[b].score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            items[b].score
-        };
+        let (sa, sb) = (nan_low_f32(items[a].score), nan_low_f32(items[b].score));
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();

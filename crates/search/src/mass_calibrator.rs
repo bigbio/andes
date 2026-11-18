@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 
 use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::{H2O, PROTON};
+use model::stats::nan_low_f32;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 use model::Spectrum;
 
@@ -298,16 +299,7 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
     }
 
     cands.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            a.rank_score
-        };
-        let bv = if b.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            b.rank_score
-        };
+        let (av, bv) = (nan_low_f32(a.rank_score), nan_low_f32(b.rank_score));
         bv.total_cmp(&av)
             .then_with(|| a.spectrum_idx.cmp(&b.spectrum_idx))
     });

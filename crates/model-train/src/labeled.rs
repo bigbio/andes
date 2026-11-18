@@ -6,6 +6,7 @@ use input::FastaReader;
 use model::fdr::{ranked_q, Counts, Eval};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
+use model::stats::nan_low_f32;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
 use search::psm::PsmMatch;
@@ -107,14 +108,7 @@ pub(crate) fn tdc_q_values<T>(
     score_of: impl Fn(&T) -> f32,
     is_decoy: impl Fn(&T) -> bool,
 ) -> Vec<f64> {
-    let key = |p: &T| {
-        let s = score_of(p);
-        if s.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            s
-        }
-    };
+    let key = |p: &T| nan_low_f32(score_of(p));
     psms.sort_by(|a, b| {
         key(b)
             .partial_cmp(&key(a))

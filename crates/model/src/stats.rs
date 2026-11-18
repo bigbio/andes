@@ -9,6 +9,24 @@
 /// Factor that turns a median absolute deviation into a standard deviation for normal data.
 pub const MAD_TO_SD: f64 = 1.4826;
 
+/// `x`, or negative infinity for a NaN, so that a NaN score ranks last when sorting by score.
+pub fn nan_low(x: f64) -> f64 {
+    if x.is_nan() {
+        f64::NEG_INFINITY
+    } else {
+        x
+    }
+}
+
+/// [`nan_low`] for `f32`.
+pub fn nan_low_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        f32::NEG_INFINITY
+    } else {
+        x
+    }
+}
+
 /// How the median of an even number of values is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Even {
@@ -104,6 +122,14 @@ pub fn quantile_sorted(sorted: &[f64], q: f64, clamp: bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nan_scores_rank_below_every_number() {
+        assert_eq!(nan_low(f64::NAN), f64::NEG_INFINITY);
+        assert_eq!(nan_low(-3.5), -3.5);
+        assert_eq!(nan_low_f32(f32::NAN), f32::NEG_INFINITY);
+        assert_eq!(nan_low_f32(2.0), 2.0);
+    }
 
     #[test]
     fn median_odd_even_and_empty() {

@@ -1,6 +1,6 @@
 use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::ISOTOPE;
-use model::stats::{median_mut, Even, MAD_TO_SD};
+use model::stats::{median_mut, nan_low, Even, MAD_TO_SD};
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
@@ -1524,10 +1524,9 @@ pub fn channel_score(fit: &ChannelFit) -> f64 {
 pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f64> {
     let k = decoys_per_target.max(1) as f64;
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    let key = |s: f64| if s.is_nan() { f64::NEG_INFINITY } else { s };
     order.sort_by(|&a, &b| {
-        key(rows[b].0)
-            .total_cmp(&key(rows[a].0))
+        nan_low(rows[b].0)
+            .total_cmp(&nan_low(rows[a].0))
             .then(rows[b].1.cmp(&rows[a].1))
     });
     let ranked = ranked_q::<Counts>(
@@ -1552,11 +1551,10 @@ pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
     } else {
         decoys.iter().sum::<f64>() / decoys.len() as f64
     };
-    let key = |s: f64| if s.is_nan() { f64::NEG_INFINITY } else { s };
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
-        key(rows[b].0)
-            .total_cmp(&key(rows[a].0))
+        nan_low(rows[b].0)
+            .total_cmp(&nan_low(rows[a].0))
             .then((rows[b].1 > 0.0).cmp(&(rows[a].1 > 0.0)))
     });
     let ranked = ranked_q::<(usize, f64)>(

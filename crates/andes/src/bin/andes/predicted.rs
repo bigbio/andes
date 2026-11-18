@@ -123,8 +123,9 @@ impl Predictors {
                 .predictor_instrument
                 .clone()
                 .unwrap_or_else(|| acquisition.ms2_instrument().to_string());
-            eprintln!(
-                "Predict: andes-ms2 (activation {activation}, instrument {}, NCE {})",
+            log::info!(
+                target: "predict",
+                "andes-ms2 (activation {activation}, instrument {}, NCE {})",
                 if inst.is_empty() { "unknown" } else { &inst },
                 nce.map_or("unknown".to_string(), |v| v.to_string())
             );
@@ -160,8 +161,9 @@ impl Predictors {
                 has(PredictFeature::PeptDeepMs2),
             )
             .map_err(|e| format!("--predict: {e}"))?;
-            eprintln!(
-                "Predict: AlphaPeptDeep from {} (instrument {inst}, NCE {nce}); modifications: {}",
+            log::info!(
+                target: "predict",
+                "AlphaPeptDeep from {} (instrument {inst}, NCE {nce}); modifications: {}",
                 dir.display(),
                 {
                     let mut m: Vec<&str> = p.known_mods().collect();
@@ -335,8 +337,9 @@ impl Predictors {
             let n_miss = miss.iter().filter(|m| **m).count();
             report.push(format!("{} missing rows {n_miss} of {n}", pred.prefix()));
             if n > 0 && n_miss * 5 > n {
-                eprintln!(
-                    "WARN: --predict: {} could not score {n_miss} of {n} PIN rows ({:.0}%); \
+                log::warn!(
+                    target: "predict",
+                    "{} could not score {n_miss} of {n} PIN rows ({:.0}%); \
                      a modification the model does not encode (for AlphaPeptDeep: one missing \
                      from peptdeep_mods.json) or missing retention times are the usual causes",
                     pred.prefix(),
@@ -352,8 +355,9 @@ impl Predictors {
 
         for (src, (_, flags)) in self.sources.iter().zip(&blocks) {
             if n > 0 && flags.iter().all(|&m| m != 0.0) {
-                eprintln!(
-                    "WARN: --predict: {} scored no PIN row; its columns are constant",
+                log::warn!(
+                    target: "predict",
+                    "{} scored no PIN row; its columns are constant",
                     src.pred.prefix()
                 );
             }
@@ -368,10 +372,11 @@ impl Predictors {
 
         write_pin(pin, &table, &new_cols, &values)?;
         for line in &report {
-            eprintln!("Predict: {line}");
+            log::info!(target: "predict", "{line}");
         }
-        eprintln!(
-            "Predict: added {} columns to {} PIN rows ({} peptidoforms) [PHASE predict: wall {:.2}s, cpu {:.1}s]",
+        log::info!(
+            target: "predict",
+            "added {} columns to {} PIN rows ({} peptidoforms) in {:.2} s wall, {:.1} s CPU",
             new_cols.len(),
             n,
             table.forms.len(),
@@ -400,8 +405,9 @@ impl Predictors {
             }
             Ok(())
         })?;
-        eprintln!(
-            "Predict: {} RT for {} of {} peptidoforms in {:.1}s",
+        log::info!(
+            target: "predict",
+            "{} RT for {} of {} peptidoforms in {:.1}s",
             pred.prefix(),
             ix.len(),
             forms.len(),
@@ -490,8 +496,9 @@ impl Predictors {
             }
         }
         if no_peaks > 0 {
-            eprintln!(
-                "WARN: --predict ms2: {no_peaks} PIN rows have a spectrum without peaks; \
+            log::warn!(
+                target: "predict",
+                "{no_peaks} PIN rows have a spectrum without peaks; \
                  they are marked missing"
             );
         }
@@ -690,8 +697,9 @@ pub(crate) fn read_pin(
         });
     }
     if unlocated > 0 {
-        eprintln!(
-            "WARN: --predict: {unlocated} PIN rows match no searched spectrum; they are marked missing"
+        log::warn!(
+            target: "predict",
+            "{unlocated} PIN rows match no searched spectrum; they are marked missing"
         );
     }
     Ok(PinTable {

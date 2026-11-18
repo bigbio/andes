@@ -600,8 +600,9 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         .filter(|(i, _)| keep.contains(i))
         .map(|(_, c)| c)
         .collect();
-    eprintln!(
-        "[tmt-mbr] {stem}: {} identified PSMs on {} scans; precursor window {:+.2} +- {:.2} ppm{}, RT window {:.1} predicted widths (median half-window {:.1} s){}; {} empty channel(s) detected; training rows: floor {}, value {}, identity {}; {} transfer candidates",
+    log::info!(
+        target: "tmt-mbr",
+        "{stem}: {} identified PSMs on {} scans; precursor window {:+.2} +- {:.2} ppm{}, RT window {:.1} predicted widths (median half-window {:.1} s){}; {} empty channel(s) detected; training rows: floor {}, value {}, identity {}; {} transfer candidates",
         ids.len(),
         seen.len(),
         ppm.centre,
@@ -726,8 +727,9 @@ pub(crate) fn run(
         Ok(risk) => {
             summary.model_fitted = true;
             if !risk.value_fitted() {
-                eprintln!(
-                    "WARN: [tmt-mbr] too few masked sibling scans ({}) to fit the value-risk model: the identified noise floor stands in for it, so only identity and floor-level risk are priced",
+                log::warn!(
+                    target: "tmt-mbr",
+                    "too few masked sibling scans ({}) to fit the value-risk model: the identified noise floor stands in for it, so only identity and floor-level risk are priced",
                     training.value_y.len()
                 );
             }
@@ -766,12 +768,14 @@ pub(crate) fn run(
                 .iter()
                 .map(|(p, o, n)| format!("{p:.4}->{o:.4} (n={n})"))
                 .collect();
-            eprintln!(
-                "[tmt-mbr] masked-pair calibration of the value risk, predicted -> observed wrong rate by quintile: {}",
+            log::debug!(
+                target: "tmt-mbr",
+                "masked-pair calibration of the value risk, predicted -> observed wrong rate by quintile: {}",
                 table.join(", ")
             );
-            eprintln!(
-                "[tmt-mbr] risk model: floor {} rows (wrong {:.4}), value {} rows (wrong {:.4}; {} masked siblings), identity {} rows ({} target and {} decoy candidates of the real attempts); mean predicted over the transfers: identity {:.4}, value {:.4}, floor {:.4}; {} of {} transfers at quant_q<={}",
+            log::info!(
+                target: "tmt-mbr",
+                "risk model: floor {} rows (wrong {:.4}), value {} rows (wrong {:.4}; {} masked siblings), identity {} rows ({} target and {} decoy candidates of the real attempts); mean predicted over the transfers: identity {:.4}, value {:.4}, floor {:.4}; {} of {} transfers at quant_q<={}",
                 training.floor_y.len(),
                 training.floor_y.iter().sum::<f64>() / training.floor_y.len().max(1) as f64,
                 training.value_y.len(),
@@ -788,12 +792,13 @@ pub(crate) fn run(
                 p.accept_q
             );
         }
-        Err(e) => eprintln!(
-            "WARN: [tmt-mbr] {e}; the {} transfer candidates are reported with quant_q 1 and are not accepted",
+        Err(e) => log::warn!(
+            target: "tmt-mbr",
+            "{e}; the {} transfer candidates are reported with quant_q 1 and are not accepted",
             cands.len()
         ),
     }
-    eprintln!("[PHASE tmt_mbr: {:.2}s]", t0.elapsed().as_secs_f64());
+    log::info!(target: "tmt-mbr", "done in {:.2} s", t0.elapsed().as_secs_f64());
     Ok((cands, summary))
 }
 

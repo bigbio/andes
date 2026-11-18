@@ -100,8 +100,9 @@ impl QuantSettings {
                 .map(|c| c.name.as_str())
                 .collect();
             if !unnamed.is_empty() {
-                eprintln!(
-                    "[andes] warning: --label channel(s) {} have no SDRF/QPX label (SILAC light, \
+                log::warn!(
+                    target: "quant",
+                    "--label channel(s) {} have no SDRF/QPX label (SILAC light, \
                      medium, heavy; DIMETHYL0/4/6/8): their intensities are left out of the QPX \
                      features; label.parquet has every channel",
                     unnamed.join(", ")
@@ -146,8 +147,9 @@ impl QuantSettings {
         }
         Self::check_args(cli)?;
         if cli.label.is_some() && !high_res {
-            eprintln!(
-                "WARN: --label: the MS2 scans are low-resolution; labelled-pair quantification \
+            log::warn!(
+                target: "quant",
+                "--label: the MS2 scans are low-resolution; labelled-pair quantification \
                  assumes high-resolution (Orbitrap/TOF) MS1 scans and checks them per run"
             );
         }
@@ -186,8 +188,9 @@ impl QuantSettings {
                 let m = CorrectionMatrix::parse(plex, &text)
                     .map_err(|e| format!("--tmt-correction {}: {e}", path.display()))?;
                 if m.is_identity() {
-                    eprintln!(
-                        "WARN: --tmt-correction {} is an identity matrix; no correction applied",
+                    log::warn!(
+                        target: "quant",
+                        "--tmt-correction {} is an identity matrix; no correction applied",
                         path.display()
                     );
                     None
@@ -205,14 +208,16 @@ impl QuantSettings {
             ..LfqParams::default()
         };
         if cli.tmt_unmix == TmtUnmix::On && !high_res {
-            eprintln!(
-                "WARN: --tmt-unmix on: the MS2 scans are low-resolution; interference unmixing \
+            log::warn!(
+                target: "quant",
+                "--tmt-unmix on: the MS2 scans are low-resolution; interference unmixing \
                  needs high-resolution MS2 reporter ions and is not applied"
             );
         }
         if cli.lfq && !high_res {
-            eprintln!(
-                "WARN: --lfq: the MS2 scans are low-resolution; label-free quantification \
+            log::warn!(
+                target: "quant",
+                "--lfq: the MS2 scans are low-resolution; label-free quantification \
                  assumes high-resolution (Orbitrap/TOF) MS1 scans and checks them per run"
             );
         }
@@ -475,8 +480,9 @@ impl QuantCollector {
         if let (Some(what), Some(idx)) = (ms1_quant, &ms1) {
             if let Some(frac) = idx.isotope_partner_fraction(MS1_RESOLUTION_CHECK_PPM) {
                 if frac < MS1_MIN_ISOTOPE_PARTNER_FRACTION {
-                    eprintln!(
-                        "WARN: quant: {stem}: the MS1 scans do not look high-resolution \
+                    log::warn!(
+                        target: "quant",
+                        "{stem}: the MS1 scans do not look high-resolution \
                          ({:.0}% of their most intense centroids have an isotope partner within \
                          {MS1_RESOLUTION_CHECK_PPM} ppm; Orbitrap/TOF survey scans reach 70-95%). \
                          {what} from low-resolution MS1 are not meaningful.",
@@ -486,14 +492,16 @@ impl QuantCollector {
             }
         }
         if ms3_no_parent > 0 {
-            eprintln!(
-                "quant: {stem}: {ms3_no_parent} MS3 scans without a parent reference \
+            log::warn!(
+                target: "quant",
+                "{stem}: {ms3_no_parent} MS3 scans without a parent reference \
                  (not linked to an MS2, not quantified)"
             );
         }
         if let Some(idx) = &ms1 {
-            eprintln!(
-                "quant: {}: {} MS1 scans ({} centroids) indexed{}",
+            log::info!(
+                target: "quant",
+                "{}: {} MS1 scans ({} centroids) indexed{}",
                 stem,
                 idx.len(),
                 idx.total_peaks(),
@@ -504,8 +512,9 @@ impl QuantCollector {
                 }
             );
         } else if self.settings.needs_ms1() {
-            eprintln!(
-                "WARN: quant: {}: no MS1 scans captured ({}); {}",
+            log::warn!(
+                target: "quant",
+                "{}: no MS1 scans captured ({}); {}",
                 stem,
                 path.display(),
                 if self.settings.needs_ms1_series() {
@@ -779,8 +788,9 @@ fn write_run_ms2(
     )
     .map_err(|e| format!("write MS2 table: {e}"))?;
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    eprintln!(
-        "quant: {stem}: wrote {} ({n} MS2 scans, {:.1} MB)",
+    log::info!(
+        target: "quant",
+        "{stem}: wrote {} ({n} MS2 scans, {:.1} MB)",
         path.display(),
         bytes as f64 / 1e6
     );
@@ -1335,8 +1345,9 @@ fn write_run_artifacts(
         let mods: Vec<(String, f64)> = mods.into_iter().collect();
         write_run_quant_table(&table_path, &run.stem, &rows, &mods)
             .map_err(|e| format!("write {}: {e}", table_path.display()))?;
-        eprintln!(
-            "quant: {}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
+        log::info!(
+            target: "quant",
+            "{}: wrote {} and {} ({} PSMs, one per precursor of a spectrum, targets and decoys{})",
             run.stem,
             ms1_path.display(),
             table_path.display(),
@@ -1374,8 +1385,9 @@ pub(crate) fn run_quant(
         write_run_artifacts(collector, spectra, queues, candidates, index, dir)?;
     }
     let hits = select_hits(collector, spectra, queues, candidates, rescore, omitted, cutoffs);
-    eprintln!(
-        "quant: {} rank-1 target PSMs selected{} ({})",
+    log::info!(
+        target: "quant",
+        "{} rank-1 target PSMs selected{} ({})",
         hits.len(),
         match rescore {
             Some(_) => format!(" at q<={}", s.psm_fdr),
@@ -1520,8 +1532,9 @@ pub(crate) fn run_quant(
                     Some(m) => {
                         let fractions: Vec<f32> =
                             unmixed.iter().flatten().map(|u| u.interference).collect();
-                        eprintln!(
-                            "quant: {}: interference model on {} scans (precursor yield {:.3}/{:.3}/{:.3} \
+                        log::info!(
+                            target: "quant",
+                            "{}: interference model on {} scans (precursor yield {:.3}/{:.3}/{:.3} \
                              at charge <=2/3/>=4, co-isolated {:.3}, hidden {:.3}, R2(log) {:.2}); \
                              {} scans unmixed, median interference {:.2}, strength {:.2}",
                             run.stem,
@@ -1537,8 +1550,9 @@ pub(crate) fn run_quant(
                             applied
                         );
                     }
-                    None => eprintln!(
-                        "WARN: quant: {}: too few scans with an isolation-window record and \
+                    None => log::warn!(
+                        target: "quant",
+                        "{}: too few scans with an isolation-window record and \
                          reporter ions to fit the interference model ({} scans, {} needed); \
                          its unmix_ columns are empty",
                         run.stem,
@@ -1573,8 +1587,9 @@ pub(crate) fn run_quant(
             let stems: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
             let make = || crate::quant_cmd::rescore_scores(targets, input.decoys, input.source);
             let (transfers, outcome) = crate::tmt_mbr::run(quant_dir, &stems, &make, &params)?;
-            eprintln!(
-                "quant: --mbr transferred {} reporter rows, {} at quant_q<={}{}",
+            log::info!(
+                target: "quant",
+                "--mbr transferred {} reporter rows, {} at quant_q<={}{}",
                 outcome.candidates,
                 outcome.accepted,
                 input.accept_q,
@@ -1662,8 +1677,9 @@ pub(crate) fn run_quant(
                 unmix.as_ref(),
             )?;
         }
-        eprintln!(
-            "quant: wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
+        log::info!(
+            target: "quant",
+            "wrote {} ({} PSMs with reporter ions passing the quantification gate{}{}{})",
             tmt_path.display(),
             rows.iter().filter(|r| r.quant_gate_passed).count(),
             if no_scan > 0 {
@@ -1682,8 +1698,9 @@ pub(crate) fn run_quant(
             gated.describe(s)
         );
         if with_noise == 0 && s.min_sn > 0.0 && !rows.is_empty() {
-            eprintln!(
-                "WARN: quant: no reporter scan carries noise values (mzML converted without \
+            log::warn!(
+                target: "quant",
+                "no reporter scan carries noise values (mzML converted without \
                  noise arrays, or ion-trap reporter scans); --tmt-min-sn was not applied and \
                  the sn_ columns are empty"
             );
@@ -1865,8 +1882,9 @@ pub(crate) fn run_quant(
                     feature,
                 });
             }
-            eprintln!(
-                "quant: {}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}{}{}",
+            log::info!(
+                target: "quant",
+                "{}: {} of {} precursors quantified, {} at feature q<={} and envelope cosine>={}{}{}",
                 run.stem,
                 n_found,
                 targets.len(),
@@ -1918,8 +1936,9 @@ pub(crate) fn run_quant(
                 min_cosine: s.lfq_params.min_cosine,
             },
         )?;
-        eprintln!(
-            "quant: wrote {} ({} features, {} accepted at feature q<={}, cosine>={})",
+        log::info!(
+            target: "quant",
+            "wrote {} ({} features, {} accepted at feature q<={}, cosine>={})",
             lfq_path.display(),
             all_rows.len(),
             confident.len(),
@@ -2006,14 +2025,16 @@ pub(crate) fn run_quant(
                 extra: &label_meta,
             },
         )?;
-        eprintln!(
-            "quant: wrote {} ({} channel rows)",
+        log::info!(
+            target: "quant",
+            "wrote {} ({} channel rows)",
             path.display(),
             rows.len()
         );
         if parquet_dir.is_some() && ls.spec.channels.iter().any(|c| c.qpx_label.is_none()) {
-            eprintln!(
-                "WARN: --label: channels outside the SDRF/QPX label vocabulary (SILAC light / \
+            log::warn!(
+                target: "quant",
+                "--label: channels outside the SDRF/QPX label vocabulary (SILAC light / \
                  medium / heavy, DIMETHYL0/4/6/8) are not written to quantms.feature.parquet"
             );
         }
@@ -2033,8 +2054,9 @@ pub(crate) fn run_quant(
         let ppath = dir.join(format!("{stem}.label_proteins.tsv"));
         std::fs::write(&ppath, label_run::protein_ratio_tsv(&ratios))
             .map_err(|e| format!("write {}: {e}", ppath.display()))?;
-        eprintln!(
-            "quant: wrote {} ({} protein ratios from at least {} peptides)",
+        log::info!(
+            target: "quant",
+            "wrote {} ({} protein ratios from at least {} peptides)",
             ppath.display(),
             ratios.len(),
             label_run::MIN_RATIO_COUNT
@@ -2059,8 +2081,9 @@ pub(crate) fn run_quant(
         let path = pdir.join("quantms.feature.parquet");
         output::write_feature_parquet(&path, &records)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
-        eprintln!(
-            "quant: wrote {} ({} feature rows)",
+        log::info!(
+            target: "quant",
+            "wrote {} ({} feature rows)",
             path.display(),
             records.len()
         );
@@ -2071,7 +2094,7 @@ pub(crate) fn run_quant(
             tally.write_pg(pdir, pg, &runs)?;
         }
     }
-    eprintln!("[PHASE quant: {:.2}s]", t0.elapsed().as_secs_f64());
+    log::info!(target: "quant", "done in {:.2} s", t0.elapsed().as_secs_f64());
     Ok(summary)
 }
 

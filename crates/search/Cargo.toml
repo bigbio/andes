@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+log = { workspace = true }
 andes-xl = { path = "../andes-xl" }
 glyco = { path = "../glyco" }
 input = { path = "../input" }

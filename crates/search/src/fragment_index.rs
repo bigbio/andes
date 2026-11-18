@@ -171,8 +171,9 @@ impl ChunkFragmentIndex {
             form_ids[(record_form_start[r as usize] + k as u64) as usize] = id as u32;
         }
         drop(all);
-        eprintln!(
-            "fragment-index: chunk window {:.1}-{:.1} Da, {} records, {} forms, {} ion entries, {} bins",
+        log::debug!(
+            target: "fragment-index",
+            "chunk window {:.1}-{:.1} Da, {} records, {} forms, {} ion entries, {} bins",
             mass_lo,
             mass_hi,
             records.len(),

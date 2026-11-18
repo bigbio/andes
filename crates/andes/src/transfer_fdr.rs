@@ -232,8 +232,9 @@ pub fn train_bagged_folds(sets: &[&[FdrRow]], seed: u64, params: &TrainParams) -
         if models[f].is_empty() {
             failed_folds.push(e.join("; "));
         } else {
-            eprintln!(
-                "[mbr] fold {f}: {} of {} classifier members failed, the fold averages the others ({})",
+            log::warn!(
+                target: "mbr",
+                "fold {f}: {} of {} classifier members failed, the fold averages the others ({})",
                 e.len(),
                 sets.len(),
                 e.join("; ")
@@ -583,7 +584,7 @@ impl FoldScores {
                     }
                     kappa = stratum_kappa(&counts, k);
                 }
-                eprintln!("[mbr] transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
+                log::debug!(target: "mbr", "transfer q-values, fold {fold}: {strata} strata, shrinkage {kappa:.1} pseudo-targets");
                 let mut fold_betas = Vec::with_capacity(strata);
                 if let Some(pool) = peps.last().and_then(Option::as_ref) {
                     for g in groups.clone() {
@@ -601,7 +602,7 @@ impl FoldScores {
                         decoys.extend(z_of(RT_SHIFT));
                         fold_betas.push(logit_shift(&targets, &decoys, k));
                     }
-                    eprintln!("[mbr] transfer PEP, fold {fold}: logit shifts by stratum {fold_betas:.2?}");
+                    log::debug!(target: "mbr", "transfer PEP, fold {fold}: logit shifts by stratum {fold_betas:.2?}");
                 }
                 stratum_beta.push(fold_betas);
                 for g in groups {

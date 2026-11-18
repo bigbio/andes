@@ -351,13 +351,15 @@ fn report(results: &[XlSpectrumResult]) {
     for r in results {
         hist[r.doublets.masses.len().min(3)] += 1;
     }
-    eprintln!(
-        "[xl] doublets: {n} spectra (charge >= gate); doublet peptide masses per spectrum \
+    log::info!(
+        target: "xl",
+        "doublets: {n} spectra (charge >= gate); doublet peptide masses per spectrum \
          0: {}, 1: {}, 2: {}, >=3: {}",
         hist[0], hist[1], hist[2], hist[3]
     );
-    eprintln!(
-        "[xl] mass pairs: {} spectra with a full pair, {} with a half pair only",
+    log::info!(
+        target: "xl",
+        "mass pairs: {} spectra with a full pair, {} with a half pair only",
         results
             .iter()
             .filter(|r| r.doublets.n_full_pairs > 0)
@@ -385,8 +387,9 @@ fn report_linker(linker: &Crosslinker) {
             d.join(", ")
         )
     });
-    eprintln!(
-        "[xl] linker {}{}: intact {:+.6} Da, sites {}{}",
+    log::info!(
+        target: "xl",
+        "linker {}{}: intact {:+.6} Da, sites {}{}",
         linker.name,
         linker
             .accession
@@ -475,8 +478,9 @@ pub(crate) fn run_xl(
         let t = std::time::Instant::now();
         let table = XlCandidates::from_out_of_core(prepared, &linker);
         let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
-        eprintln!(
-            "[xl] {} linkable peptidoforms ({} decoy){} [{:.2}s]",
+        log::info!(
+            target: "xl",
+            "{} linkable peptidoforms ({} decoy){} [{:.2}s]",
             table.peptides().len(),
             n_decoy,
             if table.has_open_index() {
@@ -494,8 +498,9 @@ pub(crate) fn run_xl(
         }
         let t = std::time::Instant::now();
         let mut found = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
-        eprintln!(
-            "[xl] {}: searched {} spectra, {} CSMs [{:.2}s]",
+        log::info!(
+            target: "xl",
+            "{}: searched {} spectra, {} CSMs [{:.2}s]",
             linker.name,
             found.len(),
             found.iter().filter(|r| r.csm.is_some()).count(),
@@ -523,8 +528,9 @@ pub(crate) fn run_xl(
             .zip(&by)
             .map(|(r, n)| format!("{} {n}", r.linker.name))
             .collect();
-        eprintln!(
-            "[xl] best CSM per spectrum across linkers: {}",
+        log::info!(
+            target: "xl",
+            "best CSM per spectrum across linkers: {}",
             parts.join(", ")
         );
     }
@@ -545,7 +551,7 @@ pub(crate) fn run_xl(
         &run_of,
         None,
     )?;
-    eprintln!("[xl] wrote {} ({n_pin} CSM rows)", pin_path.display());
+    log::info!(target: "xl", "wrote {} ({n_pin} CSM rows)", pin_path.display());
     let mut score: Vec<Option<f64>> = results
         .iter()
         .map(|r| r.csm.as_ref().map(|c| c.score() as f64))
@@ -561,7 +567,7 @@ pub(crate) fn run_xl(
             &run_of,
             Some(intra),
         )?;
-        eprintln!("[xl] wrote {} ({n} CSM rows)", path.display());
+        log::info!(target: "xl", "wrote {} ({n} CSM rows)", path.display());
         let s = crate::xl_fdr::percolator_scores(cli, &path, &results)?;
         for ((dst, src), r) in score.iter_mut().zip(s).zip(&results) {
             if r.csm.as_ref().is_some_and(|c| c.intra == intra) {
@@ -601,9 +607,10 @@ pub(crate) fn run_xl(
     )?;
     let dbl_path = sibling(report_base, ".xl.doublets.tsv");
     write_doublets(&dbl_path, spectra_for_xl, &results, &runs)?;
-    eprintln!(
-        "Wrote {} ({n} CSMs), the residue-pair, protein-pair and doublet tables \
-         [PHASE TOTAL: {:.2}s]",
+    log::info!(
+        target: "xl",
+        "wrote {} ({n} CSMs), the residue-pair, protein-pair and doublet tables; \
+         total {:.2} s",
         csm_path.display(),
         t_total.elapsed().as_secs_f64()
     );

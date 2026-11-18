@@ -1,8 +1,19 @@
 # Andes
 
-## Code comments
+@AGENTS.md
 
-- Do not add short single-line `//` comments to the code.
-- Doc comments (`///`, `//!`) are fine, for example to describe a function's parameters.
-- Existing comments stay; do not remove them only to follow these rules.
-- Put design decisions and their rationale in commit messages and pull request descriptions, not in code comments.
+## Skills
+
+Task-specific guidance lives in `.claude/skills/` and loads when a task needs it:
+
+| Skill | Use when |
+|---|---|
+| `bug-prevention` | editing any Rust code, fixing a bug, adding a flag |
+| `clean-logs` | adding or changing stderr output, warnings, errors |
+| `cli-reports` | changing the run summary, statistics.log or `--help` |
+| `performance` | touching a hot path or a structure that scales with the data |
+| `open-data-models` | training, porting or shipping any model or weights |
+| `scientific-citations` | writing docs, NOTICE or doc comments that credit prior work |
+| `fdr-validation` | changing scores, features, decoys, rescoring or quantification |
+| `benchmark-reproducibility` | running or publishing benchmarks |
+| `mass-spec-correctness` | masses, tolerances, modifications, digestion, decoys, readers |

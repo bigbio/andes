@@ -503,8 +503,9 @@ pub fn write_glyco_pin_to<W: Write>(
     }
 
     writer.flush()?;
-    eprintln!(
-        "[glyco-pin] wrote {} PSM rows ({})",
+    log::info!(
+        target: "glyco-pin",
+        "wrote {} PSM rows ({})",
         row_count,
         if collapse {
             "top-1-per-scan collapse — FDR-valid"

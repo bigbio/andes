@@ -32,7 +32,12 @@ impl Log for StderrLogger {
             return;
         }
         let secs = START.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
-        let text = render(secs, record.level(), stage_of(record.target()), record.args());
+        let text = render(
+            secs,
+            record.level(),
+            stage_of(record.target()),
+            record.args(),
+        );
         let _ = std::io::stderr().lock().write_all(text.as_bytes());
     }
 
@@ -100,14 +105,22 @@ mod tests {
 
     #[test]
     fn a_line_carries_time_level_and_stage() {
-        let text = render(12.34, Level::Warn, "calibration", &format_args!("too few PSMs"));
+        let text = render(
+            12.34,
+            Level::Warn,
+            "calibration",
+            &format_args!("too few PSMs"),
+        );
         assert_eq!(text, "[   12.3s] WARN  calibration: too few PSMs\n");
     }
 
     #[test]
     fn every_line_of_a_multi_line_message_gets_the_prefix() {
         let text = render(0.0, Level::Info, "summary", &format_args!("a\nb\n"));
-        assert_eq!(text, "[    0.0s] INFO  summary: a\n[    0.0s] INFO  summary: b\n");
+        assert_eq!(
+            text,
+            "[    0.0s] INFO  summary: a\n[    0.0s] INFO  summary: b\n"
+        );
     }
 
     #[test]

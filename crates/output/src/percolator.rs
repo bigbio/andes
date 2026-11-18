@@ -423,7 +423,7 @@ pub fn run_percolator_with_decoys(
 ) -> Result<(HashMap<String, PercolatorPsm>, HashSet<String>), PercolatorError> {
     let mut targets = run_percolator_pooled(backend, pin, extra_args)?;
     if let Some(summary) = apply_per_run_q(backend, pin, extra_args, &mut targets)? {
-        eprintln!("{summary}");
+        log::info!("{summary}");
     }
     let out = result_paths(pin);
     let decoys = match std::fs::File::open(&out.decoy) {
@@ -471,7 +471,7 @@ pub fn run_percolator_pooled(
     let mut targets = parse_psm_results(&text)?;
     if pep_is_degenerate(&targets) {
         if let Err(e) = repair_pep(backend, pin, &out_dir, &out, extra_args, &mut targets) {
-            eprintln!("WARN: Percolator's PEP is 1 for every accepted PSM and the mix-max re-estimate failed: {e}");
+            log::warn!("Percolator's PEP is 1 for every accepted PSM and the mix-max re-estimate failed: {e}");
         }
     }
     Ok(targets)
@@ -706,7 +706,7 @@ pub fn apply_per_run_q(
         Ok(Some(x)) => x,
         Ok(None) => return Ok(None),
         Err(e) => {
-            eprintln!("WARN: per-run q-values skipped, the PIN cannot be read ({e}); the q-values stay pooled");
+            log::warn!("per-run q-values skipped, the PIN cannot be read ({e}); the q-values stay pooled");
             return Ok(None);
         }
     };
@@ -724,8 +724,8 @@ pub fn apply_per_run_q(
     let failed = std::cell::Cell::new(0usize);
     let unscorable = std::cell::Cell::new(0usize);
     let warn_failed = |run: &str, why: &dyn std::fmt::Display| {
-        eprintln!(
-            "WARN: Percolator per-run q-values of run {run} failed ({why}); \
+        log::warn!(
+            "Percolator per-run q-values of run {run} failed ({why}); \
              its PSMs keep the pooled q-values"
         );
         failed.set(failed.get() + 1);
@@ -788,7 +788,7 @@ pub fn apply_per_run_q(
     match rewrite_result_q_values(&main, &target_q, &decoy_q) {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("WARN: the per-run q-values could not be written to the result files ({e}); the q-values stay pooled");
+            log::warn!("the per-run q-values could not be written to the result files ({e}); the q-values stay pooled");
             note = ", result files left pooled";
             target_q.clear();
         }
@@ -858,8 +858,8 @@ fn repair_pep(
     pass.clear_stale()?;
     let repaired = result?;
     if pep_is_degenerate(&repaired) {
-        eprintln!(
-            "WARN: Percolator's PEP is 1 for every accepted PSM, also after the mix-max \
+        log::warn!(
+            "Percolator's PEP is 1 for every accepted PSM, also after the mix-max \
              re-estimate; the PEP column is not usable"
         );
         return Ok(());
@@ -871,8 +871,9 @@ fn repair_pep(
             replaced += 1;
         }
     }
-    eprintln!(
-        "Percolator: the target-decoy-competition PEP was 1 for every accepted PSM; PEP of {replaced} \
+    log::info!(
+        target: "percolator",
+        "the target-decoy-competition PEP was 1 for every accepted PSM; PEP of {replaced} \
          PSMs re-estimated by the mix-max method on the same model (q-values unchanged)"
     );
     Ok(())

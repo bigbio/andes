@@ -36,7 +36,7 @@ fn uniprot_xml_database_gives_the_fasta_pin() {
     search("test-fixtures/BSA.fasta", &fasta_pin, &[]);
     let out = search("test-fixtures/BSA.xml.gz", &xml_pin, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("UniProt XML: 1 entries"), "{stderr}");
+    assert!(stderr.contains("uniprot: 1 entries"), "{stderr}");
     let (fasta, xml) = (
         std::fs::read_to_string(&fasta_pin).unwrap(),
         std::fs::read_to_string(&xml_pin).unwrap(),
@@ -165,7 +165,7 @@ fn restricted_artefact_mods_warn_only_with_variants() {
         &["--config", mods, "--uniprot-variants"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("WARN: Deamidated"), "{stderr}");
+    assert!(stderr.contains("WARN  search: Deamidated"), "{stderr}");
     assert!(stderr.contains(warning), "{stderr}");
     let out = search(
         "test-fixtures/BSA.xml.gz",
@@ -213,7 +213,7 @@ fn rescoring_estimates_fdr_within_each_class() {
     );
     let stderr = String::from_utf8_lossy(&with_classes.stderr);
     assert!(
-        stderr.contains("Rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
+        stderr.contains("rescore: FDR within each class (targets/decoys, method, pi0): canonical"),
         "{stderr}"
     );
     let table = std::fs::read_to_string(dir.path().join("xml.proteoforms.tsv")).unwrap();
@@ -261,8 +261,8 @@ fn knockoff_variants_are_searched_but_never_reported() {
         .find(|l| l.contains("knockoff variant entries"))
         .unwrap_or_else(|| panic!("{stderr}"));
     let made: usize = line
-        .split_whitespace()
-        .nth(2)
+        .split_once("uniprot: ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("{line}"));
     assert!(made > 0, "{line}");
@@ -315,7 +315,7 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let line = stderr
         .lines()
-        .find(|l| l.starts_with("Site claims:"))
+        .find(|l| l.contains(" site-claims: "))
         .unwrap_or_else(|| panic!("{stderr}"));
     assert!(!line.contains(" 0 knockoff sites"), "{line}");
     assert!(

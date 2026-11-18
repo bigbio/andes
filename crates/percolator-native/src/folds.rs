@@ -1,4 +1,5 @@
 use crate::pin::RowMeta;
+use rayon::prelude::*;
 
 const PARK_MILLER_MODULUS: u64 = 4_294_967_291;
 
@@ -36,12 +37,13 @@ pub fn folds_by_spectrum(meta: &[RowMeta], k: usize, seed: u64) -> Vec<u8> {
         return fold;
     }
     let mut order: Vec<(u32, u32, u32, i8, u32)> = (0..n)
+        .into_par_iter()
         .map(|i| {
             let m = &meta[i];
             (scan_hash(m), m.file, m.scan as u32, -m.label, i as u32)
         })
         .collect();
-    order.sort_unstable();
+    order.par_sort_unstable();
     let mut remain = vec![0i64; k];
     let mut left = n as i64;
     for f in (0..k).rev() {

@@ -1,6 +1,6 @@
 use crate::pin::RowMeta;
 use crate::scores::psm_order;
-use crate::text::Texts;
+use crate::text::{RowText, Texts};
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -61,16 +61,14 @@ const LINES_PER_WINDOW: usize = 16 * LINES_PER_TASK;
 
 struct Lines<'a> {
     meta: &'a [RowMeta],
-    texts: &'a Texts,
     file_names: &'a [String],
     rows: &'a [usize],
     cols: [&'a [f64]; 3],
 }
 
 impl Lines<'_> {
-    fn push(&self, k: usize, line: &mut String) -> Result<(), String> {
+    fn push(&self, k: usize, t: &RowText, line: &mut String) {
         let m = &self.meta[self.rows[k]];
-        let t = self.texts.get(self.rows[k])?;
         line.push_str(&t.psm_id);
         line.push('\t');
         if !self.file_names.is_empty() {
@@ -96,7 +94,6 @@ impl Lines<'_> {
             first = false;
         }
         line.push('\n');
-        Ok(())
     }
 }
 
@@ -122,19 +119,44 @@ fn write_one(
         .map_err(|e| io_err(path, e))?;
     let lines = Lines {
         meta,
-        texts,
         file_names,
         rows,
         cols,
     };
+    let spilled = texts.is_spilled();
     for window in order.chunks(LINES_PER_WINDOW) {
+        let read: Vec<RowText> = if spilled {
+            let ids: Vec<usize> = window
+                .iter()
+                .filter(|&&k| meta[rows[k]].label == label)
+                .map(|&k| rows[k])
+                .collect();
+            texts.get_many(&ids)?
+        } else {
+            Vec::new()
+        };
+        let starts: Vec<usize> = window
+            .chunks(LINES_PER_TASK)
+            .scan(0usize, |n, ks| {
+                let at = *n;
+                *n += ks.iter().filter(|&&k| meta[rows[k]].label == label).count();
+                Some(at)
+            })
+            .collect();
         let parts: Vec<Result<String, String>> = window
             .par_chunks(LINES_PER_TASK)
-            .map(|ks| {
+            .zip(&starts)
+            .map(|(ks, &at)| {
                 let mut buf = String::new();
+                let mut j = at;
                 for &k in ks {
                     if meta[rows[k]].label == label {
-                        lines.push(k, &mut buf)?;
+                        if spilled {
+                            lines.push(k, &read[j], &mut buf);
+                            j += 1;
+                        } else {
+                            lines.push(k, &texts.get(rows[k])?, &mut buf);
+                        }
                     }
                 }
                 Ok(buf)

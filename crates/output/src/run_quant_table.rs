@@ -11,9 +11,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
+
+use crate::atomic::write_atomic_str;
+use crate::versioned_parquet::{column_at as column, zstd_props};
 
 pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 2;
 
@@ -155,31 +156,29 @@ fn write_versioned(
         version
     };
     let schema = Arc::new(schema(with_mobility));
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_max_row_group_size(BATCH_ROWS)
-        .set_key_value_metadata(Some(vec![
+    let props = zstd_props(
+        BATCH_ROWS,
+        vec![
             KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
             KeyValue::new(RUN_KEY.to_string(), run_stem.to_string()),
             KeyValue::new(
                 MODS_KEY.to_string(),
                 encode_mods(mods).map_err(|e| err(&e))?,
             ),
-        ]))
-        .build();
-    crate::atomic::write_atomic(path, |partial| {
-        let io = |e: &dyn std::fmt::Display| std::io::Error::other(e.to_string());
-        let file = File::create(partial)?;
+        ],
+    )
+    .build();
+    write_atomic_str(path, |partial| {
+        let file = File::create(partial).map_err(|e| err(&e))?;
         let mut writer =
-            ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| io(&e))?;
+            ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| err(&e))?;
         for chunk in rows.chunks(BATCH_ROWS) {
-            let b = batch(&schema, chunk, with_mobility).map_err(|e| io(&e))?;
-            writer.write(&b).map_err(|e| io(&e))?;
+            let b = batch(&schema, chunk, with_mobility).map_err(|e| err(&e))?;
+            writer.write(&b).map_err(|e| err(&e))?;
         }
-        writer.close().map_err(|e| io(&e))?;
+        writer.close().map_err(|e| err(&e))?;
         Ok(())
     })
-    .map_err(|e| err(&e))
 }
 
 pub fn write_run_quant_table(
@@ -223,17 +222,6 @@ pub fn read_run_quant_mods(path: &Path) -> Result<HashMap<String, f64>, String> 
         out.insert(acc.to_string(), delta);
     }
     Ok(out)
-}
-
-fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
-    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
-        format!(
-            "{}: column {} has unexpected type {}",
-            path.display(),
-            b.schema().field(i).name(),
-            b.column(i).data_type()
-        )
-    })
 }
 
 pub const RUN_QUANT_COLUMNS: [&str; 13] = [

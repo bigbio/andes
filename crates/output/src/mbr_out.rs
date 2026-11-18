@@ -561,7 +561,14 @@ pub struct MbrParquetWriter {
 impl MbrParquetWriter {
     pub fn create(path: &Path) -> Result<Self, String> {
         let schema = Arc::new(mbr_schema());
-        let table = TableWriter::create(path, &MBR_TABLE, MBR_TABLE.version, schema.clone(), &[])?;
+        let table = TableWriter::create(
+            path,
+            &MBR_TABLE,
+            MBR_TABLE.version,
+            schema.clone(),
+            &[],
+            BATCH_ROWS,
+        )?;
         Ok(Self {
             schema,
             columns: MbrColumnsBuilder::new(),

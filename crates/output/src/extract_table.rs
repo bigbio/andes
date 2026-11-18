@@ -9,15 +9,13 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
-use parquet::format::KeyValue;
 use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 use quant::shared::SharedEvidence;
+
+use crate::versioned_parquet::{column_at as column, TableVersion, TableWriter};
 
 pub const EXTRACT_SCHEMA_MAJOR: u32 = 7;
 
@@ -331,48 +329,9 @@ fn write_versioned(
     schema: Schema,
     tags: &[(String, String)],
 ) -> Result<(), String> {
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = std::path::PathBuf::from(partial);
-    let written = write_file(&partial, rows, version, schema, tags).and_then(|()| {
-        std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))
-    });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
-}
-
-fn write_file(
-    path: &Path,
-    rows: &[ExtractRow],
-    version: &str,
-    schema: Schema,
-    tags: &[(String, String)],
-) -> Result<(), String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let schema = Arc::new(schema);
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_max_row_group_size(BATCH_ROWS)
-        .set_key_value_metadata(Some(
-            std::iter::once(KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()))
-                .chain(
-                    tags.iter()
-                        .map(|(k, v)| KeyValue::new(k.clone(), v.clone())),
-                )
-                .collect(),
-        ))
-        .build();
-    let file = File::create(path).map_err(|e| err(&e))?;
-    let mut writer =
-        ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| err(&e))?;
-    for chunk in rows.chunks(BATCH_ROWS) {
-        let b = batch(&schema, chunk).map_err(|e| err(&e))?;
-        writer.write(&b).map_err(|e| err(&e))?;
-    }
-    writer.close().map_err(|e| err(&e))?;
-    Ok(())
+    let mut w = ExtractTableWriter::open(path, version, schema, tags, BATCH_ROWS)?;
+    w.write(rows)?;
+    w.finish()
 }
 
 pub fn write_extract_table(path: &Path, rows: &[ExtractRow]) -> Result<(), String> {
@@ -387,12 +346,19 @@ pub fn write_extract_table_tagged(
     write_versioned(path, rows, SCHEMA_VERSION, schema(), tags)
 }
 
+const EXTRACT_TABLE: TableVersion = TableVersion {
+    key: SCHEMA_KEY,
+    version: SCHEMA_VERSION,
+    major: EXTRACT_SCHEMA_MAJOR,
+    what: "extract table",
+};
+
+/// Streaming extract-table writer: a `TableWriter` plus the schema and the rows per
+/// batch that turn `ExtractRow`s into record batches.
 pub struct ExtractTableWriter {
-    path: std::path::PathBuf,
-    partial: std::path::PathBuf,
+    table: TableWriter,
     schema: Arc<Schema>,
     rows_per_group: usize,
-    writer: Option<ArrowWriter<File>>,
 }
 
 impl ExtractTableWriter {
@@ -401,75 +367,46 @@ impl ExtractTableWriter {
         tags: &[(String, String)],
         row_group_rows: usize,
     ) -> Result<Self, String> {
-        let mut partial = path.as_os_str().to_owned();
-        partial.push(".partial");
-        let partial = std::path::PathBuf::from(partial);
-        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", partial.display());
+        Self::open(path, SCHEMA_VERSION, schema(), tags, row_group_rows)
+    }
+
+    fn open(
+        path: &Path,
+        version: &str,
+        schema: Schema,
+        tags: &[(String, String)],
+        row_group_rows: usize,
+    ) -> Result<Self, String> {
         let rows_per_group = row_group_rows.max(1);
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_max_row_group_size(rows_per_group)
-            .set_key_value_metadata(Some(
-                std::iter::once(KeyValue::new(
-                    SCHEMA_KEY.to_string(),
-                    SCHEMA_VERSION.to_string(),
-                ))
-                .chain(
-                    tags.iter()
-                        .map(|(k, v)| KeyValue::new(k.clone(), v.clone())),
-                )
-                .collect(),
-            ))
-            .build();
-        let schema = Arc::new(schema());
-        let file = File::create(&partial).map_err(|e| err(&e))?;
-        let writer = match ArrowWriter::try_new(file, schema.clone(), Some(props)) {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = std::fs::remove_file(&partial);
-                return Err(err(&e));
-            }
-        };
+        let schema = Arc::new(schema);
+        let extra: Vec<(&str, String)> =
+            tags.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let table = TableWriter::create(
+            path,
+            &EXTRACT_TABLE,
+            version,
+            schema.clone(),
+            &extra,
+            rows_per_group,
+        )?;
         Ok(Self {
-            path: path.to_path_buf(),
-            partial,
+            table,
             schema,
             rows_per_group,
-            writer: Some(writer),
         })
     }
 
     pub fn write(&mut self, rows: &[ExtractRow]) -> Result<(), String> {
-        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", self.partial.display());
-        let w = self.writer.as_mut().expect("writer is open until finish");
         for chunk in rows.chunks(self.rows_per_group) {
-            let b = batch(&self.schema, chunk).map_err(|e| err(&e))?;
-            w.write(&b).map_err(|e| err(&e))?;
+            let b = batch(&self.schema, chunk)
+                .map_err(|e| format!("{}: {e}", self.table.partial().display()))?;
+            self.table.write(&b)?;
         }
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<(), String> {
-        let w = self.writer.take().expect("writer is open until finish");
-        let done = w
-            .close()
-            .map_err(|e| format!("{}: {e}", self.partial.display()))
-            .and_then(|_| {
-                std::fs::rename(&self.partial, &self.path)
-                    .map_err(|e| format!("{}: {e}", self.path.display()))
-            });
-        if done.is_err() {
-            let _ = std::fs::remove_file(&self.partial);
-        }
-        done
-    }
-}
-
-impl Drop for ExtractTableWriter {
-    fn drop(&mut self) {
-        if self.writer.take().is_some() {
-            let _ = std::fs::remove_file(&self.partial);
-        }
+    pub fn finish(self) -> Result<(), String> {
+        self.table.finish()
     }
 }
 
@@ -502,17 +439,6 @@ pub(crate) fn write_with_schema_version(
     version: &str,
 ) -> Result<(), String> {
     write_versioned(path, rows, version, schema(), &[])
-}
-
-fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
-    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
-        format!(
-            "{}: column {} has unexpected type {}",
-            path.display(),
-            b.schema().field(i).name(),
-            b.column(i).data_type()
-        )
-    })
 }
 
 pub fn read_extract_table(path: &Path) -> Result<Vec<ExtractRow>, String> {
@@ -859,6 +785,9 @@ fn decode_batch(b: &RecordBatch, path: &Path) -> Result<Vec<ExtractRow>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use parquet::format::KeyValue;
 
     fn evidence(i: usize) -> Evidence {
         let f = i as f64;

@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, Float32Array, Float64Array, ListArray, StringArray};
@@ -10,11 +10,14 @@ use arrow::record_batch::RecordBatch;
 use model::stats::{median_mut, Even};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
-use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::basic::Encoding;
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
 use quant::ms1_index::{Ms1RunIndex, Ms1Scan};
+
+use crate::atomic::write_atomic_str;
+use crate::versioned_parquet::{column_at_unpathed as column, zstd_props};
 
 pub const MS1_SCHEMA_MAJOR: u32 = 1;
 
@@ -58,8 +61,11 @@ fn schema(with_mobility: bool) -> Schema {
 fn properties(version: &str, run: &str, with_mobility: bool) -> WriterProperties {
     let list_values =
         |name: &str| ColumnPath::new(vec![name.to_string(), "list".into(), "item".into()]);
-    let mut b = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+    let meta = vec![
+        KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
+        KeyValue::new(RUN_KEY.to_string(), run.to_string()),
+    ];
+    let mut b = zstd_props(SCANS_PER_GROUP, meta)
         .set_dictionary_enabled(false)
         .set_column_encoding(ColumnPath::from(COLUMNS[1]), Encoding::BYTE_STREAM_SPLIT)
         .set_column_encoding(list_values(COLUMNS[3]), Encoding::BYTE_STREAM_SPLIT)
@@ -67,12 +73,7 @@ fn properties(version: &str, run: &str, with_mobility: bool) -> WriterProperties
     if with_mobility {
         b = b.set_column_encoding(list_values(COLUMNS[5]), Encoding::BYTE_STREAM_SPLIT);
     }
-    b.set_max_row_group_size(SCANS_PER_GROUP)
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
-            KeyValue::new(RUN_KEY.to_string(), run.to_string()),
-        ]))
-        .build()
+    b.build()
 }
 
 fn offsets(lens: impl Iterator<Item = usize>) -> Result<OffsetBuffer<i32>, String> {
@@ -164,11 +165,7 @@ pub fn write_ms1<W: Write + Send>(out: W, run: &str, index: &Ms1RunIndex) -> Res
     write_with_version(out, run, index, SCHEMA_VERSION)
 }
 
-pub fn partial_path(path: &Path) -> PathBuf {
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    PathBuf::from(partial)
-}
+pub use crate::atomic::partial_path;
 
 fn write_file_with_version(
     path: &Path,
@@ -176,30 +173,16 @@ fn write_file_with_version(
     index: &Ms1RunIndex,
     version: &str,
 ) -> Result<(), String> {
-    let partial = partial_path(path);
-    let written = File::create(&partial)
-        .map_err(|e| e.to_string())
-        .and_then(|f| write_with_version(f, run, index, version))
-        .and_then(|()| std::fs::rename(&partial, path).map_err(|e| e.to_string()))
-        .map_err(|e| format!("{}: {e}", path.display()));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
+    write_atomic_str(path, |partial| {
+        File::create(partial)
+            .map_err(|e| e.to_string())
+            .and_then(|f| write_with_version(f, run, index, version))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
 }
 
 pub fn write_ms1_table(path: &Path, run: &str, index: &Ms1RunIndex) -> Result<(), String> {
     write_file_with_version(path, run, index, SCHEMA_VERSION)
-}
-
-fn column<T: 'static>(b: &RecordBatch, i: usize) -> Result<&T, String> {
-    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
-        format!(
-            "column {} has unexpected type {}",
-            b.schema().field(i).name(),
-            b.column(i).data_type()
-        )
-    })
 }
 
 fn list<T: 'static + Array>(b: &RecordBatch, i: usize) -> Result<(&T, &[i32]), String> {

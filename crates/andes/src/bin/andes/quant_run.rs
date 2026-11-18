@@ -492,7 +492,7 @@ impl QuantCollector {
             }
         }
         if ms3_no_parent > 0 {
-            log::info!(
+            log::warn!(
                 target: "quant",
                 "{stem}: {ms3_no_parent} MS3 scans without a parent reference \
                  (not linked to an MS2, not quantified)"

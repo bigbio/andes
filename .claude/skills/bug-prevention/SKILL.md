@@ -29,7 +29,7 @@ description: Checklist for writing and changing andes code without introducing b
 - Integer widths: scan numbers, charges and indices from files are untrusted. Use checked
   or saturating arithmetic at the boundary.
 - Every new result-changing switch is a typed CLI flag with a documented default
-  (`cli-flags-not-env-vars` skill). Never read an environment variable in shipped code.
+  (`cli-flags-not-env-vars` skill). Never read an `ANDES_*` environment variable in shipped code; only locating external tools (`PATH`, `DOTNET_ROOT`) may use the environment.
 - Determinism: results must not depend on thread count, `HashMap` iteration order or
   rayon scheduling. Sort before writing; use `rustc_hash`/`BTreeMap` where order leaks out.
 

@@ -1959,13 +1959,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "MS1-linked parser thread panicked".to_string())??;
             run_scans = scans;
             log::info!(
-                target: if chimeric_active { "chimeric" } else { "precursor-mono" },
-                "{}: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
-                if chimeric_active {
-                    "chimeric mode"
-                } else {
+                target: if chimeric_active {
+                    "chimeric"
+                } else if mono_active {
                     "precursor-mono"
+                } else {
+                    "xl"
                 },
+                "streamed {} MS2 spectra ({} MS1 scans linked) from {}",
                 file_offset,
                 ms1_linked,
                 input_path.display()
@@ -2459,7 +2460,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let t_phase = std::time::Instant::now();
-    let refine_merged = refine_output.is_some();
+    let refine_merged = refine_output
+        .as_ref()
+        .is_some_and(|o| !o.candidates.is_empty());
     let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
@@ -3503,18 +3506,27 @@ fn write_open_offsets(
     let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
         .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
     if let Err(e) = written {
+        let mut left = Vec::new();
         for stale in [&peaks_path, &psms_path] {
             if let Err(r) = std::fs::remove_file(stale) {
                 if r.kind() != std::io::ErrorKind::NotFound {
                     log::warn!(target: "output", "could not remove {}: {r}", stale.display());
+                    left.push(stale.display().to_string());
                 }
             }
         }
-        log::warn!(
-            "open-search report not written ({e}); neither {} nor {} is left",
-            peaks_path.display(),
-            psms_path.display()
-        );
+        if left.is_empty() {
+            log::warn!(
+                "open-search report not written ({e}); neither {} nor {} is left",
+                peaks_path.display(),
+                psms_path.display()
+            );
+        } else {
+            log::warn!(
+                "open-search report not written ({e}); incomplete file left: {}",
+                left.join(", ")
+            );
+        }
         return None;
     }
     log::info!(

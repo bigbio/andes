@@ -48,10 +48,11 @@ Ask in order:
 
 1. **Would a user with another instrument, sample or experiment need a different value?**
    Then first try to **infer it from the data** (above). Only if it cannot be inferred
-   (it encodes the user's intent, not a property of the data) is it a **parameter**: a typed CLI flag with a documented default (see
-   `cli-flags-not-env-vars`). Tolerances, enzyme, missed cleavages, modifications, charge
-   range, FDR thresholds. Never a `const`.
-2. **Is it a fact of nature or of a standard?** It is a **physical constant**: masses,
+   (it encodes the user's intent, not a property of the data) is it a **parameter**: a
+   typed CLI flag with a documented default (see `cli-flags-not-env-vars`). Enzyme,
+   missed cleavages, modifications, FDR thresholds; a tolerance or charge range only as an
+   override of the inferred value. Never a `const`.
+2. **Is it a physical quantity of nature?** It is a **physical constant**: masses,
    isotope spacings, the proton. One definition, in `crates/model/src/mass.rs`.
 3. **Is it a fixed fact of a file format or external spec?** It is a **format constant**:
    Unimod accessions, mzML CV terms, PIN column names. Defined once next to the reader or
@@ -135,4 +136,4 @@ an algorithm constant that a benchmark shows is right for every dataset.
 - [ ] New `const` has a unit suffix, minimal visibility and a `///` doc.
 - [ ] Result-changing constant change carries `fdr-validation` evidence.
 - [ ] Engineering constant change keeps the PIN bit-identical.
-- [ ] A value users need to vary is a flag, documented in DOCS.md and `--help`.
+- [ ] A value that encodes the user's intent (enzyme, modifications, FDR threshold) or needs an explicit override is a flag, documented in DOCS.md and `--help`.

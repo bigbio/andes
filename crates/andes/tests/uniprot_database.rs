@@ -315,7 +315,7 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let line = stderr
         .lines()
-        .find(|l| l.contains(" site-claims: "))
+        .find(|l| l.contains("] INFO  site-claims: "))
         .unwrap_or_else(|| panic!("{stderr}"));
     assert!(!line.contains(" 0 knockoff sites"), "{line}");
     assert!(

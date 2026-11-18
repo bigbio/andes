@@ -163,8 +163,11 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 | `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
-No environment variable changes a search result; the binary reads none. Every setting is a
-command-line flag.
+No environment variable changes a search result; the binary reads no `ANDES_*` variable.
+Search settings come from command-line flags or the `--config` YAML file; `--quiet` and
+`--verbose` are command-line only. The environment is used only to locate external tools:
+Percolator is looked up on `PATH` unless `--percolator-bin` names it (pass it for
+reproducible rescoring), and Thermo builds read `DOTNET_ROOT`.
 
 ---
 

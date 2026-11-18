@@ -379,12 +379,22 @@ fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
     };
 
     if mz.len() != intensity.len() {
-        log::debug!(
-            "scan has mismatched peak arrays (m/z {} vs intensity {}); \
-             pairing only the common prefix",
-            mz.len(),
-            intensity.len()
-        );
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "a scan has mismatched peak arrays (m/z {} vs intensity {}); pairing only the \
+                 common prefix (reported once; --verbose lists every such scan)",
+                mz.len(),
+                intensity.len()
+            );
+        } else {
+            log::debug!(
+                "scan has mismatched peak arrays (m/z {} vs intensity {}); \
+                 pairing only the common prefix",
+                mz.len(),
+                intensity.len()
+            );
+        }
     }
     let n = mz.len().min(intensity.len());
 

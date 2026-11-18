@@ -21,7 +21,7 @@ pub(crate) fn optimize_parameters(
     sample: &[Spectrum],
 ) {
     if sample.is_empty() {
-        log::info!("the sample is empty; keeping the resolved parameters");
+        log::warn!("the sample is empty; keeping the resolved parameters");
         return;
     }
     let base = params.clone();
@@ -37,7 +37,7 @@ pub(crate) fn optimize_parameters(
     ) {
         Ok(p) => p,
         Err(e) => {
-            log::info!(
+            log::warn!(
                 "cannot prepare the sample search: {e}; keeping the resolved parameters"
             );
             return;
@@ -160,7 +160,7 @@ pub(crate) fn optimize_parameters(
         ..
     }) = best
     else {
-        log::info!("no combination could be scored; keeping the resolved parameters");
+        log::warn!("no combination could be scored; keeping the resolved parameters");
         return;
     };
     log::info!(

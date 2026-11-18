@@ -335,16 +335,26 @@ impl ParseFailures {
         }
     }
 
+    /// Adds spectra a reader skipped on its own, with the errors it kept.
+    fn add_skipped(&mut self, count: usize, errors: &[String]) {
+        self.count += count;
+        if self.first.is_none() {
+            self.first = errors.first().cloned();
+        }
+    }
+
     /// One warning for all failed spectra of `path`, none when every spectrum parsed.
     fn report(&self, path: &Path) {
-        if let Some(first) = &self.first {
-            log::warn!(
-                target: "train",
-                "{} spectra of {} could not be parsed and were skipped (first: {first})",
-                self.count,
-                path.display()
-            );
+        if self.count == 0 {
+            return;
         }
+        let first = self.first.as_deref().unwrap_or("no message");
+        log::warn!(
+            target: "train",
+            "{} spectra of {} could not be parsed and were skipped (first: {first})",
+            self.count,
+            path.display()
+        );
     }
 }
 
@@ -364,15 +374,7 @@ pub(crate) fn load_spectra_for_train(
                     Err(e) => failed.add(e),
                 }
             }
-            if reader.skipped_count() > 0 {
-                log::warn!(
-                    target: "train",
-                    "{} spectra of {} failed to parse and were skipped (first: {})",
-                    reader.skipped_count(),
-                    path.display(),
-                    reader.skipped_errors().join("; ")
-                );
-            }
+            failed.add_skipped(reader.skipped_count(), reader.skipped_errors());
         }
         Some("raw") => {
             #[cfg(feature = "thermo")]
@@ -1605,7 +1607,7 @@ pub(crate) fn run_train_update(
         } else {
             log::warn!(target: "train-update", "REJECTED (candidate < current)");
             if args.force {
-                log::info!(target: "train-update", "--force set, committing anyway");
+                log::warn!(target: "train-update", "--force set, committing anyway");
                 true
             } else {
                 log::info!(target: "train-update", "skipping commit (use --force to override)");
@@ -1613,7 +1615,7 @@ pub(crate) fn run_train_update(
             }
         }
     } else {
-        log::info!(target: "train-update", "no --validate dataset; skipping acceptance gate");
+        log::warn!(target: "train-update", "no --validate dataset; skipping acceptance gate");
         if args.force {
             log::info!(target: "train-update", "--force set, committing unconditionally");
         }

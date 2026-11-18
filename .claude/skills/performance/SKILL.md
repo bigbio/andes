@@ -12,7 +12,11 @@ memory on the reference sets (README tables); keep it that way.
 ## Measure first, every time
 
 ```bash
-/usr/bin/time -v target/release/andes --spectrum <mzML> --database <fasta> --output-pin out.pin --threads 8
+SPECTRUM=path/to/run.mzML DATABASE=path/to/db.fasta
+```
+
+```bash
+/usr/bin/time -v target/release/andes --spectrum "$SPECTRUM" --database "$DATABASE" --output-pin out.pin --threads 8
 ```
 
 Record wall, user+sys CPU and `Maximum resident set size`. Run at least twice; wall varies

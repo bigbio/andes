@@ -126,11 +126,17 @@ pub(crate) fn run_train_intensity_gbdt(
 
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
-        log::info!(target: "train-intensity-gbdt", "reading {} ...", input.display());
+        log::debug!(target: "train-intensity-gbdt", "reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
-        log::info!(target: "train-intensity-gbdt", "{} PSM rows", part.len());
+        log::debug!(target: "train-intensity-gbdt", "{} PSM rows", part.len());
         psms.extend(part);
     }
+    log::info!(
+        target: "train-intensity-gbdt",
+        "{} PSM rows from {} files",
+        psms.len(),
+        args.inputs.len()
+    );
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
@@ -223,11 +229,17 @@ pub(crate) fn run_train_rich_ion_llr(
 
     let mut psms: Vec<MsnetPsm> = Vec::new();
     for input in &args.inputs {
-        log::info!(target: "train-rich-ion-llr", "reading {} ...", input.display());
+        log::debug!(target: "train-rich-ion-llr", "reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
-        log::info!(target: "train-rich-ion-llr", "{} PSM rows", part.len());
+        log::debug!(target: "train-rich-ion-llr", "{} PSM rows", part.len());
         psms.extend(part);
     }
+    log::info!(
+        target: "train-rich-ion-llr",
+        "{} PSM rows from {} files",
+        psms.len(),
+        args.inputs.len()
+    );
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }

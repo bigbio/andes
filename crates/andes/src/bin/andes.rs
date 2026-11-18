@@ -70,32 +70,26 @@ use crate::train_intensity::{
     run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
-/// Seconds between two progress lines at the default level; every chunk's line is a
-/// debug line.
-const PROGRESS_INTERVAL_SECS: u64 = 10;
+/// Time between two progress lines at the default level; every chunk's line is a debug
+/// line.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
-static LAST_PROGRESS_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the last default-level progress line finished writing; `None` until the first one.
+static LAST_PROGRESS: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 fn report_search_progress(scored: usize, start: std::time::Instant) {
-    use std::sync::atomic::Ordering;
     let secs = start.elapsed().as_secs_f64();
     let rate = if secs > 0.0 {
         scored as f64 / secs
     } else {
         0.0
     };
-    let whole = PROCESS_START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs();
-    let last = LAST_PROGRESS_SECS.load(Ordering::Relaxed);
-    let due = whole >= last + PROGRESS_INTERVAL_SECS
-        && LAST_PROGRESS_SECS
-            .compare_exchange(last, whole, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-    if due {
+    let mut last = LAST_PROGRESS.lock().unwrap_or_else(|e| e.into_inner());
+    let since = last.unwrap_or(*PROCESS_START.get_or_init(std::time::Instant::now));
+    if since.elapsed() >= PROGRESS_INTERVAL {
         log::info!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
+        *last = Some(std::time::Instant::now());
     } else {
         log::debug!(target: "search", "{scored} spectra scored (~{rate:.0}/s)");
     }
@@ -230,7 +224,10 @@ fn main() -> ExitCode {
                 match sdrf::read(&sdrf_path)
                     .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
                 {
-                    Ok(lines) => lines.iter().for_each(|l| log::info!(target: "sdrf", "{l}")),
+                    Ok(lines) => lines.iter().for_each(|l| match l.strip_prefix("WARN: ") {
+                        Some(w) => log::warn!(target: "sdrf", "{w}"),
+                        None => log::info!(target: "sdrf", "{l}"),
+                    }),
                     Err(e) => {
                         log::error!("{e}");
                         return ExitCode::from(2);

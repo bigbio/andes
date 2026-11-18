@@ -648,7 +648,7 @@ pub(super) fn quantify(
         .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
         .count();
     if shared > 0 {
-        log::info!(
+        log::warn!(
             target: "label",
             "{shared} groups have an Arg->Pro satellite within the MS1 tolerance \
              of another channel's isotope; the split between the two (converted_fraction, and \

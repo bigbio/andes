@@ -503,16 +503,17 @@ pub fn write_glyco_pin_to<W: Write>(
     }
 
     writer.flush()?;
-    log::info!(
-        target: "glyco-pin",
-        "wrote {} PSM rows ({})",
-        row_count,
-        if collapse {
-            "top-1-per-scan collapse — FDR-valid"
-        } else {
-            "ALL hits — DIAGNOSTIC ONLY, not FDR-valid"
-        }
-    );
+    if collapse {
+        log::info!(
+            target: "glyco-pin",
+            "wrote {row_count} PSM rows (top-1-per-scan collapse — FDR-valid)"
+        );
+    } else {
+        log::warn!(
+            target: "glyco-pin",
+            "wrote {row_count} PSM rows (ALL hits — DIAGNOSTIC ONLY, not FDR-valid)"
+        );
+    }
     Ok(())
 }
 

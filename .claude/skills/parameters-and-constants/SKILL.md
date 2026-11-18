@@ -91,7 +91,16 @@ an algorithm constant that a benchmark shows is right for every dataset.
   `18.010565` or `17.026549` anywhere else, and do not redefine them as local `const`s.
 - Each has its source (CODATA, IUPAC atomic masses, Unimod) in its doc comment and a check
   in `crates/model/tests/chemistry_constants.rs`.
-- Derived values are computed from the base ones (`H2O = 2 * H + O`), not typed.
+- Derived values are computed from the base ones (`H2O = 2 * H + O`), not typed, unless a
+  stored artefact depends on the typed value: the shipped scoring models key their ion
+  tables on the f32 bits of ion offsets, so `NH3` stays `17.026549` (the derived value
+  moves the y-NH3 key by one ulp and those ions lose their statistics). Such a value says
+  why in its doc comment.
+- `crates/model/tests/single_mass_constants.rs` fails on a proton, ¹H or isotope-spacing
+  literal anywhere outside `mass.rs`, and on a `const` defined as water, ammonia or CO.
+  Unimod modification deltas are format constants and stay literal. A copy that cannot be
+  replaced yet without changing results goes in its `KNOWN_EXCEPTIONS` with the reason,
+  and is replaced in its own measured change.
 - Replacing a retyped literal with the shared constant must keep the PIN bit-identical;
   if the digits differ, that difference is a bug to report, not to paper over.
 

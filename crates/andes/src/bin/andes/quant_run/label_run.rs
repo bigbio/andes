@@ -634,8 +634,9 @@ pub(super) fn quantify(
             .get(super::native_id(run, &spectra[h.spec_idx].title))
             .and_then(|c| c.faims_cv);
     }
-    eprintln!(
-        "quant: label: {} label groups from {} PSMs ({} without a consistent label state, \
+    log::info!(
+        target: "label",
+        "{} label groups from {} PSMs ({} without a consistent label state, \
          {} without a retention time)",
         groups.len(),
         hits.len(),
@@ -647,8 +648,9 @@ pub(super) fn quantify(
         .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
         .count();
     if shared > 0 {
-        eprintln!(
-            "quant: label: {shared} groups have an Arg->Pro satellite within the MS1 tolerance \
+        log::warn!(
+            target: "label",
+            "{shared} groups have an Arg->Pro satellite within the MS1 tolerance \
              of another channel's isotope; the split between the two (converted_fraction, and \
              the ratio through it) is weakly determined there"
         );
@@ -752,8 +754,9 @@ pub(super) fn quantify(
                 .collect();
             let w = learn_width(ms1, &groups, &anchors, tol);
             let shifts = learn_shifts(ms1, &groups, &anchors, (dt, w), spec, tol);
-            eprintln!(
-                "quant: label: {}{}: {} identified groups, elution width {:.2} s, MS1 spacing \
+            log::info!(
+                target: "label",
+                "{}{}: {} identified groups, elution width {:.2} s, MS1 spacing \
                  {:.2} s{}",
                 run.stem,
                 match series[si].0 {
@@ -910,8 +913,9 @@ pub(super) fn quantify(
         })
         .collect();
     for (r, (m, sd)) in calib.iter().enumerate() {
-        eprintln!(
-            "quant: label: {}: mass error of the identified channels {m:+.2} ppm, spread {sd:.2} \
+        log::info!(
+            target: "label",
+            "{}: mass error of the identified channels {m:+.2} ppm, spread {sd:.2} \
              ppm; apex offset spread {:.2} s",
             collector.runs[r].stem, offset_sd[r]
         );
@@ -1169,8 +1173,9 @@ pub(super) fn quantify(
         }
     }
     for (c, k) in counts.iter().enumerate() {
-        eprintln!(
-            "quant: label: channel {} ({}): {} identified, {} matched between channels, {} \
+        log::info!(
+            target: "label",
+            "channel {} ({}): {} identified, {} matched between channels, {} \
              transferred, {} below detection, {} not quantifiable",
             c + 1,
             spec.channels[c].name,
@@ -1186,8 +1191,9 @@ pub(super) fn quantify(
         v.sort_by_key(|x| *x.0);
         v
     } {
-        eprintln!(
-            "quant: label: {} channel {} median log2 ratio to channel {}: {o:+.3}",
+        log::debug!(
+            target: "label",
+            "{} channel {} median log2 ratio to channel {}: {o:+.3}",
             collector.runs[*run_idx].stem,
             c + 1,
             r + 1
@@ -1268,8 +1274,9 @@ fn transfer(
             continue;
         };
         if alignment.component(run_idx as u16).is_none() {
-            eprintln!(
-                "quant: label: {}: not aligned (too few shared identified groups); no transfers \
+            log::warn!(
+                target: "label",
+                "{}: not aligned (too few shared identified groups); no transfers \
                  into it",
                 run.stem
             );
@@ -1381,8 +1388,9 @@ fn transfer(
             kept.push(f);
         }
     }
-    eprintln!(
-        "quant: label: match between runs: {} of {} transfers at transfer q<={fdr} (lowest \
+    log::info!(
+        target: "label",
+        "match between runs: {} of {} transfers at transfer q<={fdr} (lowest \
          q {:.4}; identity decoys: {} of {} transferred, false-donor rate {:.4} added to the \
          q-values)",
         kept.len(),

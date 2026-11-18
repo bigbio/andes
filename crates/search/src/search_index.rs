@@ -61,15 +61,17 @@ impl SearchIndex {
         match strategy {
             DecoyStrategy::None => {
                 if pre == 0 {
-                    eprintln!(
-                        "WARN: --decoy-strategy none and no input proteins carry the '{norm}_' \
+                    log::warn!(
+                        target: "database",
+                        "--decoy-strategy none and no input proteins carry the '{norm}_' \
                          prefix — the search will have NO decoys, so target/decoy FDR cannot be \
                          estimated. Supply a FASTA that already contains decoys, or use \
                          --decoy-strategy reverse/shuffle."
                     );
                 } else {
-                    eprintln!(
-                        "INFO: --decoy-strategy none — using the input FASTA verbatim; \
+                    log::info!(
+                        target: "database",
+                        "--decoy-strategy none — using the input FASTA verbatim; \
                          {pre}/{} proteins carry the '{norm}_' decoy prefix.",
                         target.proteins.len()
                     );
@@ -77,8 +79,9 @@ impl SearchIndex {
             }
             _ => {
                 if pre > 0 {
-                    eprintln!(
-                        "WARN: {pre}/{} input proteins already carry the '{norm}_' decoy prefix — \
+                    log::warn!(
+                        target: "database",
+                        "{pre}/{} input proteins already carry the '{norm}_' decoy prefix — \
                          the FASTA appears to already contain decoys. andes generates its own \
                          decoys, so this DOUBLES decoys and biases FDR. Use --decoy-strategy none, \
                          a target-only FASTA, or a different --decoy-prefix.",

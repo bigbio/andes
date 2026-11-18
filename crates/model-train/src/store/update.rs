@@ -156,13 +156,15 @@ pub fn update_decay(
     for mut l in existing_ledgers {
         let s = store.load_source_stats(model_id, &l.source_id)?;
         if l.date.is_empty() {
-            eprintln!(
-                "update_decay: source '{}' has no date — weight not decayed",
+            log::warn!(
+                target: "update-decay",
+                "source '{}' has no date — weight not decayed",
                 l.source_id
             );
         } else if parse_date(&l.date).is_none() {
-            eprintln!(
-                "update_decay: source '{}' has unparseable date '{}' — weight not decayed",
+            log::warn!(
+                target: "update-decay",
+                "source '{}' has unparseable date '{}' — weight not decayed",
                 l.source_id, l.date
             );
         }

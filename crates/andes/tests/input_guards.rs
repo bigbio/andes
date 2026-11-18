@@ -187,7 +187,7 @@ fn analyzer_is_read_from_an_mzml_without_activation() {
     assert!(err.contains("no activation recorded"), "{err}");
     let acquisition = err
         .lines()
-        .find(|l| l.trim_start().starts_with("acquisition"))
+        .find(|l| l.contains(" run: acquisition"))
         .unwrap_or_else(|| panic!("no acquisition line:\n{err}"));
     assert!(
         acquisition.contains("high-resolution MS2") && !acquisition.contains("inferred from peaks"),
@@ -195,7 +195,7 @@ fn analyzer_is_read_from_an_mzml_without_activation() {
     );
     let model = err
         .lines()
-        .find(|l| l.trim_start().starts_with("model "))
+        .find(|l| l.contains(" run: model "))
         .unwrap_or_else(|| panic!("no model line:\n{err}"));
     assert!(model.contains("hcd_"), "{model}");
 }

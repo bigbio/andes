@@ -268,8 +268,9 @@ impl Drop for BuildLock {
 }
 
 fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex> {
-    eprintln!(
-        "candidate-index: another process is building {}; waiting for it",
+    log::info!(
+        target: "candidate-index",
+        "another process is building {}; waiting for it",
         path.display()
     );
     let mut seen_mtime = None;
@@ -286,8 +287,9 @@ fn wait_for_builder(path: &Path, lock_path: &Path) -> Option<MmapCandidateIndex>
             seen_mtime = mtime;
             seen_at = std::time::Instant::now();
         } else if seen_at.elapsed() > LOCK_STALE {
-            eprintln!(
-                "candidate-index: the lock {} has not been refreshed for {} s; taking over",
+            log::warn!(
+                target: "candidate-index",
+                "the lock {} has not been refreshed for {} s; taking over",
                 lock_path.display(),
                 LOCK_STALE.as_secs()
             );

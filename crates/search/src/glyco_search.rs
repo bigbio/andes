@@ -338,8 +338,9 @@ impl GlycoCtxOwned {
                         .lines()
                         .filter_map(|l| l.trim().parse::<i32>().ok())
                         .collect();
-                    eprintln!(
-                        "[glyco] restricting to {} scans from {}",
+                    log::info!(
+                        target: "glyco",
+                        "restricting to {} scans from {}",
                         set.len(),
                         path.display()
                     );
@@ -350,8 +351,9 @@ impl GlycoCtxOwned {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "WARN: --glyco-scans {} could not be read ({e}); scoring all scans",
+                    log::warn!(
+                        target: "glyco",
+                        "--glyco-scans {} could not be read ({e}); scoring all scans",
                         path.display()
                     );
                     None
@@ -375,8 +377,9 @@ impl GlycoCtxOwned {
                 .collect();
             let est_mb = seq_entries.len().saturating_mul(20 * 24) / 1_000_000;
             if seq_entries.len() > 3_000_000 {
-                eprintln!(
-                    "WARN glyco fragment index: {} sequon candidates (~{} MB postings) — \
+                log::warn!(
+                    target: "glyco",
+                    "{} sequon candidates (~{} MB postings) — \
                      large database; consider narrowing the search space",
                     seq_entries.len(),
                     est_mb

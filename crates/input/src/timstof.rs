@@ -232,8 +232,8 @@ impl Ms1Frames {
         };
         match ms1.calibrate(&base, &tables.precursor_peaks) {
             Some(fit) => {
-                eprintln!(
-                    "Bruker .d: MS1 m/z calibration from {} precursor peaks: residual to the \
+                log::info!(
+                    "MS1 m/z calibration from {} precursor peaks: residual to the \
                      vendor m/z median {:+.2} ppm, robust SD {:.2} ppm (acquisition-range \
                      model: {:+.2} ppm, SD {:.2} ppm)",
                     fit.n_used,
@@ -244,8 +244,8 @@ impl Ms1Frames {
                 );
                 ms1.calibration = fit.calibration;
             }
-            None => eprintln!(
-                "WARN: Bruker .d: too few precursor peaks matched their MS1 frame for an m/z \
+            None => log::warn!(
+                "too few precursor peaks matched their MS1 frame for an m/z \
                  calibration; MS1 m/z uses the acquisition-range model"
             ),
         }

@@ -288,8 +288,8 @@ impl ThermoRawReader {
             );
         }
         if skipped_higher_ms > 0 {
-            eprintln!(
-                "Thermo .raw: skipped {skipped_higher_ms} MS3+ scans (not searched; \
+            log::info!(
+                "skipped {skipped_higher_ms} MS3+ scans (not searched; \
                  e.g. TMT SPS-MS3 reporter-quant scans)"
             );
         }
@@ -379,12 +379,22 @@ fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
     };
 
     if mz.len() != intensity.len() {
-        eprintln!(
-            "Thermo .raw: scan has mismatched peak arrays (m/z {} vs intensity {}); \
-             pairing only the common prefix",
-            mz.len(),
-            intensity.len()
-        );
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "a scan has mismatched peak arrays (m/z {} vs intensity {}); pairing only the \
+                 common prefix (reported once; --verbose lists every such scan)",
+                mz.len(),
+                intensity.len()
+            );
+        } else {
+            log::debug!(
+                "scan has mismatched peak arrays (m/z {} vs intensity {}); \
+                 pairing only the common prefix",
+                mz.len(),
+                intensity.len()
+            );
+        }
     }
     let n = mz.len().min(intensity.len());
 
@@ -513,8 +523,8 @@ fn warn_mixed_electron_activation(act: &HashMap<u8, usize>, seen: usize) {
     let n = |m: ActivationMethod| act.get(&(m as u8)).copied().unwrap_or(0);
     let (etd, ethcd) = (n(ActivationMethod::ETD), n(ActivationMethod::EThcD));
     if etd > 0 && ethcd > 0 {
-        eprintln!(
-            "WARN: mixed electron activation in the first {seen} MS2 scans: EThcD/ETciD {ethcd}, \
+        log::warn!(
+            "mixed electron activation in the first {seen} MS2 scans: EThcD/ETciD {ethcd}, \
              ETD {etd}. The run is routed by the dominant activation; ETD scans are scored \
              with the run's model (the fragment-ion index cannot serve c/z-only spectra). \
              Pass --model or --ethcd-activation etd to choose explicitly."

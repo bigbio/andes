@@ -149,6 +149,8 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
+| `--quiet` | bool | `false` | Print only warnings and errors to stderr. Every subcommand takes it. Does not change any result. | — |
+| `--verbose` | bool | `false` | Also print debug lines to stderr. Every subcommand takes it; `--quiet` wins over it. Does not change any result. | — |
 | `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
 | `--temp-dir` | dir | output directory | Directory of the run's private temporary files (MS1 scans between searching and quantification, the `--mbr` directory without `--quant-dir`, the PIN of `--keep-pin false`); created if missing, emptied at exit; config key `io.temp_dir`. An unwritable directory is an error. | — |
 | `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
@@ -161,8 +163,11 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 | `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
-No environment variable changes a search result; the binary reads none. The test-harness
-variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
+No environment variable changes a search result; the binary reads no `ANDES_*` variable.
+Search settings come from command-line flags or the `--config` YAML file; `--quiet` and
+`--verbose` are command-line only. The environment is used only to locate external tools:
+Percolator is looked up on `PATH` unless `--percolator-bin` names it (pass it for
+reproducible rescoring), and Thermo builds read `DOTNET_ROOT`.
 
 ---
 

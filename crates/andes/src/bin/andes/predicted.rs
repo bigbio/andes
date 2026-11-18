@@ -40,6 +40,7 @@ pub(crate) struct Predictors {
     tol: FragmentTolerance,
     threads: usize,
     batch: usize,
+    dia: bool,
 }
 
 fn requested(list: &[PredictFeature]) -> Result<Option<Vec<PredictFeature>>, String> {
@@ -205,6 +206,7 @@ impl Predictors {
             tol,
             threads: cli.threads.max(1),
             batch: cli.predictor_batch.max(1),
+            dia: cli.dia && std::env::var_os("ANDES_DIA_NO_EVIDENCE").is_none(),
         }))
     }
 
@@ -234,6 +236,13 @@ impl Predictors {
             let p = s.pred.prefix();
             if s.ms2 {
                 cols.extend(MS2_FEATURES.iter().map(|f| format!("{p}_{f}")));
+                if self.dia {
+                    cols.extend(
+                        crate::dia::EVIDENCE_COLUMNS
+                            .iter()
+                            .map(|f| format!("{p}_{f}")),
+                    );
+                }
             }
             if s.rt {
                 cols.push(format!("{p}_rt_diff"));
@@ -280,7 +289,7 @@ impl Predictors {
             let mut miss = vec![false; n];
             let mut cols: Vec<Vec<f64>> = Vec::new();
             if src.ms2 {
-                let (ms2_cols, msg) = self.ms2_block(src, &table, spectra, &mut miss)?;
+                let (ms2_cols, msg) = self.ms2_block(src, &table, spectra, run_ends, &mut miss)?;
                 cols.extend(ms2_cols);
                 report.push(msg);
             }
@@ -415,6 +424,7 @@ impl Predictors {
         src: &Source,
         table: &PinTable,
         spectra: &[Spectrum],
+        run_ends: &[usize],
         miss: &mut [bool],
     ) -> Result<(Vec<Vec<f64>>, String), String> {
         let pred = src.pred.as_ref();
@@ -461,24 +471,57 @@ impl Predictors {
         let ms2_pred = out.into_inner().expect("MS2 output lock");
         let predict_s = t.elapsed().as_secs_f64();
         let tol = self.tol;
-        let feats: Vec<Option<[f64; 8]>> = table
+        let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
+        let tol_ppm = match tol {
+            FragmentTolerance::Ppm(p) => p,
+            FragmentTolerance::Da(_) => 20.0,
+        };
+        let width = MS2_FEATURES.len()
+            + if dia.is_some() {
+                crate::dia::EVIDENCE_COLUMNS.len()
+            } else {
+                0
+            };
+        let feats: Vec<Option<Vec<f64>>> = table
             .rows
             .par_iter()
             .map(|r| {
                 let k = fz_ix.get(&(r.form, r.charge))?;
                 let spec = &spectra[r.spec as usize];
                 let (_, mass) = &forms[r.form as usize];
-                Some(ms2_features(
+                let mut v = ms2_features(
                     &ms2_pred[*k as usize],
                     pred.ions(),
                     mass,
                     r.charge,
                     &spec.peaks,
                     tol,
-                ))
+                )
+                .to_vec();
+                if let Some((slot, windows)) = &dia {
+                    let (w, p) = slot[r.spec as usize];
+                    let win = &windows[w as usize];
+                    let p = p as usize;
+                    let lo = p.saturating_sub(5);
+                    let hi = (p + 6).min(win.len());
+                    let scans: Vec<&[(f64, f32)]> = win[lo..hi]
+                        .iter()
+                        .map(|&i| spectra[i as usize].peaks.as_slice())
+                        .collect();
+                    v.extend(crate::dia::evidence(
+                        &ms2_pred[*k as usize],
+                        pred.ions(),
+                        mass,
+                        r.charge,
+                        &scans,
+                        p - lo,
+                        tol_ppm,
+                    ));
+                }
+                Some(v)
             })
             .collect();
-        let mut cols = vec![vec![f64::NAN; table.rows.len()]; MS2_FEATURES.len()];
+        let mut cols = vec![vec![f64::NAN; table.rows.len()]; width];
         for (i, f) in feats.iter().enumerate() {
             match f {
                 Some(v) => {
@@ -1089,6 +1132,7 @@ mod tests {
             tol: FragmentTolerance::Ppm(20.0),
             threads: 2,
             batch: 7,
+            dia: false,
         };
         preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
         let out = std::fs::read_to_string(&pin).unwrap();

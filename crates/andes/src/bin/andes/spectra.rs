@@ -521,7 +521,7 @@ pub(crate) fn run_precursor_calibration(
         build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
 
     if spec_keys.len() < params.cal_min_spec_keys {
-        log::info!(
+        log::warn!(
             target: "calibration",
             "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
              The sample is too small for a reliable calibration pre-pass.",
@@ -552,7 +552,7 @@ pub(crate) fn run_precursor_calibration(
             t_cal.elapsed().as_secs_f64()
         );
     } else {
-        log::info!(
+        log::warn!(
             target: "calibration",
             "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
             stats.queues_with_psm,

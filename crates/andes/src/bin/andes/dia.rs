@@ -557,6 +557,7 @@ pub(crate) fn refine_rt(
 
     let mut err = vec![f64::NAN; table.rows.len()];
     let mut report = Vec::new();
+    let mut skipped = Vec::new();
     let mut by_run: Vec<Vec<usize>> = vec![Vec::new(); files.len()];
     for i in (0..table.rows.len()).filter(|&i| usable(i)) {
         by_run[run[i]].push(i);
@@ -569,6 +570,7 @@ pub(crate) fn refine_rt(
             .collect();
         if anchors.len() < RT_MIN_ANCHORS {
             report.push(format!("{}: {} anchors, skipped", files[r], anchors.len()));
+            skipped.push(files[r].to_string());
             continue;
         }
         for k in 0..3u64 {
@@ -611,7 +613,11 @@ pub(crate) fn refine_rt(
         ));
     }
     if err.iter().all(|e| !e.is_finite()) {
-        log::info!(target: "dia-rt", "{}", report.join("; "));
+        log::warn!(
+            target: "dia-rt",
+            "RT refinement skipped, no dia_rt_refined_err column: {}",
+            report.join("; ")
+        );
         return Ok(false);
     }
     let mut fin: Vec<f64> = err.iter().copied().filter(|e| e.is_finite()).collect();
@@ -623,6 +629,16 @@ pub(crate) fn refine_rt(
         }
     }
     write_pin(pin, &table, &[RT_REFINED.to_string()], &[err])?;
+    if !skipped.is_empty() {
+        log::warn!(
+            target: "dia-rt",
+            "RT refinement skipped for {} of {} runs (fewer than {} anchors); their dia_rt_refined_err is the median: {}",
+            skipped.len(),
+            files.len(),
+            RT_MIN_ANCHORS,
+            skipped.join(", ")
+        );
+    }
     log::info!(
         target: "dia-rt",
         "{} [{:.2}s]",

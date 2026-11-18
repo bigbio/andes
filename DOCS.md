@@ -1246,6 +1246,10 @@ a different peptide pair for the spectrum (the `score` column), less 15 for a ha
 peptide by its doublet, the other by mass) of a triply charged precursor; for an MS-cleavable linker each
 peptide's score is credited 3 per cleavage-stub ion of it found in the spectrum (its mass plus
 a stub, at a charge below the precursor's). Precursors are matched at isotope offsets 0 to 2.
+In an MS2 search of files with MS1 scans (mzML, Thermo `.raw`), a precursor m/z moves to the most intense MS1 peak within
+25 ppm when that peak is at least 3 times the reported one: an Orbitrap at times reports a weak
+side peak about 20 ppm off an intense ion as the precursor. With several FAIMS compensation
+voltages, each MS2 scan reads the latest MS1 scan at its own voltage.
 When S, T or Y are among the sites of an amine-reactive end (`--xl "DSSO (K, S, T, Y, Protein N-term)"`),
 a link on one of them costs 12 against a link on K, as xiSEARCH penalises these side reactions.
 q-values are computed per link

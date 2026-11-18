@@ -1589,6 +1589,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted;
 
+    let mut xl_snapped = 0usize;
+    let mut xl_snap_files = 0usize;
     let ms1_input = chimeric_active || mono_active;
     let mut parse_stats = ParseStats::default();
     let mut mono_table: Vec<Option<MonoCorrection>> = Vec::new();
@@ -1640,7 +1642,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        if ms1_input && !(file_is_mzml || file_is_raw || file_is_d) {
+        let file_ms1 = file_is_mzml || file_is_raw || file_is_d;
+        let file_snap =
+            xl_precursor_snap(cli.xl.is_some(), cli.ms_level, file_is_mzml, file_is_raw);
+        xl_snap_files += usize::from(file_snap);
+        // This file reads its MS1 scans with its MS2 scans.
+        let file_linked = (ms1_input && file_ms1) || file_snap;
+        if (chimeric_active || mono_active) && !file_ms1 {
             return Err(format!(
                 "{} only supports mzML/.raw/.d inputs, got {}",
                 if chimeric_active {
@@ -1655,7 +1663,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let spectra_before = all_spectra.len();
         let mut run_scans = RunScans::default();
-        let file_stats = if ms1_input {
+        let file_stats = if file_linked {
             let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
             let spectrum_path = input_path.clone();
             let cap = remaining_cap;
@@ -1776,6 +1784,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for (mut chunk_spectra, chunk_link) in rx {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk_spectra, prefix);
+                }
+                if file_snap {
+                    for (i, spec) in chunk_spectra.iter_mut().enumerate() {
+                        let ms1 = chunk_link
+                            .ms2_to_ms1
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .and_then(|m| chunk_link.ms1_peaks.get(m));
+                        if let Some(mz) = ms1.and_then(|p| {
+                            search::precursor_mono::snap_precursor_mz(
+                                p,
+                                spec.precursor_mz,
+                                search::xl_search::PRECURSOR_SNAP_PPM,
+                                search::xl_search::PRECURSOR_SNAP_RATIO,
+                            )
+                        }) {
+                            spec.precursor_mz = mz;
+                            xl_snapped += 1;
+                        }
+                    }
                 }
                 if mono_active {
                     correct_chunk(
@@ -2101,7 +2130,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
         require_spectra(
             input_path,
-            if ms1_input { 2 } else { cli.ms_level },
+            if file_linked { 2 } else { cli.ms_level },
             all_spectra.len() - spectra_before,
         )
         .map_err(|e| crate::spectra::with_first_read_error(e, &file_stats.first_errors))?;
@@ -2292,6 +2321,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.xl.is_some() {
+        if xl_snap_files > 0 {
+            eprintln!(
+                "[xl] {xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
+                search::xl_search::PRECURSOR_SNAP_PPM
+            );
+        }
         crate::xl_run::run_xl(
             &cli,
             &spectra,
@@ -3414,6 +3449,43 @@ fn isobaric_label_of_plex(plex: quant::Plex) -> input::IsobaricLabel {
         }
         quant::Plex::Itraq4 => input::IsobaricLabel::Itraq,
         quant::Plex::Itraq8 => input::IsobaricLabel::Itraq8,
+    }
+}
+
+/// Whether a crosslink search moves this file's precursor m/z values to the dominant MS1 peak
+/// (`search::xl_search::PRECURSOR_SNAP_PPM`): an MS2 search of a file that carries its MS1
+/// scans (mzML, Thermo `.raw`). Decided per file, so the order of the inputs does not matter.
+pub(crate) fn xl_precursor_snap(
+    xl: bool,
+    ms_level: u8,
+    file_is_mzml: bool,
+    file_is_raw: bool,
+) -> bool {
+    xl && ms_level == 2 && (file_is_mzml || file_is_raw)
+}
+
+#[cfg(test)]
+mod xl_snap_tests {
+    use super::xl_precursor_snap;
+
+    #[test]
+    fn the_precursor_snap_is_decided_per_file_for_ms2_crosslink_searches() {
+        // An MGF next to an mzML: each file decides alone, whatever the input order.
+        let files = [(false, false), (true, false), (false, true)];
+        let got: Vec<bool> = files
+            .iter()
+            .map(|&(m, r)| xl_precursor_snap(true, 2, m, r))
+            .collect();
+        assert_eq!(got, [false, true, true]);
+        let reversed: Vec<bool> = files
+            .iter()
+            .rev()
+            .map(|&(m, r)| xl_precursor_snap(true, 2, m, r))
+            .collect();
+        assert_eq!(reversed, [true, true, false]);
+        // An MS3 search keeps its own reader; no crosslink search, no snap.
+        assert!(!xl_precursor_snap(true, 3, true, false));
+        assert!(!xl_precursor_snap(false, 2, true, false));
     }
 }
 

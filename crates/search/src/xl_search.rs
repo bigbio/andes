@@ -45,6 +45,11 @@ pub const STUB_ION_WEIGHT: f32 = 3.0;
 pub const SECONDARY_SITE_PENALTY: f32 = 12.0;
 
 pub const PAIR_DELTA_WEIGHT: f32 = 0.3;
+/// A crosslink precursor m/z moves to the most intense MS1 peak within this many ppm when that
+/// peak is at least `PRECURSOR_SNAP_RATIO` times the reported one: an Orbitrap at times reports
+/// a weak side peak 15-25 ppm off an intense ion as the precursor.
+pub const PRECURSOR_SNAP_PPM: f64 = 25.0;
+pub const PRECURSOR_SNAP_RATIO: f32 = 3.0;
 
 pub const LOW_CHARGE_HALF_PAIR_PENALTY: f32 = 15.0;
 

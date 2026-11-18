@@ -342,7 +342,8 @@ pub struct MzMLReader<R: BufRead> {
     done: bool,
     capture_ms1: bool,
     captured_ms1: Vec<Vec<(f64, f32)>>,
-    latest_ms1_idx: Option<usize>,
+    ms1_tracker: crate::ms1_link::Ms1Tracker,
+    last_faims_cv: Option<f32>,
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
     capture_product_scans: bool,
@@ -370,7 +371,8 @@ impl<R: BufRead> MzMLReader<R> {
             done: false,
             capture_ms1: false,
             captured_ms1: Vec::new(),
-            latest_ms1_idx: None,
+            ms1_tracker: Default::default(),
+            last_faims_cv: None,
             capture_run_ms1: false,
             run_ms1: Vec::new(),
             capture_product_scans: false,
@@ -878,7 +880,8 @@ impl<R: BufRead> MzMLReader<R> {
                                     if self.capture_ms1 {
                                         let last = self.run_ms1.last().expect("just pushed");
                                         self.captured_ms1.push(last.peaks.clone());
-                                        self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
+                                        self.ms1_tracker
+                                            .push(self.captured_ms1.len() - 1, sb.faims_cv);
                                         continue;
                                     }
                                 }
@@ -913,7 +916,8 @@ impl<R: BufRead> MzMLReader<R> {
                                         sb.is_profile,
                                     )?;
                                     self.captured_ms1.push(peaks);
-                                    self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
+                                    self.ms1_tracker
+                                        .push(self.captured_ms1.len() - 1, sb.faims_cv);
                                     continue;
                                 }
                                 let noise = sb.take_noise();
@@ -925,7 +929,9 @@ impl<R: BufRead> MzMLReader<R> {
                                     noise,
                                     ion_mobility: None,
                                 });
+                                let faims_cv = sb.faims_cv;
                                 if let Some(s) = self.finish_spectrum(sb)? {
+                                    self.last_faims_cv = faims_cv;
                                     if let Some(c) = context {
                                         self.scan_contexts.push(c);
                                     }
@@ -1003,7 +1009,7 @@ impl<R: BufRead> MzMLReader<R> {
         loop {
             match self.pump() {
                 Ok(Some(s)) => {
-                    ms2_to_ms1.push(self.latest_ms1_idx);
+                    ms2_to_ms1.push(self.ms1_tracker.link(self.last_faims_cv));
                     spectra.push(s);
                 }
                 Ok(None) => break,
@@ -1040,8 +1046,9 @@ impl<R: BufRead> MzMLReader<R> {
         let mut chunk: Vec<Spectrum> = Vec::with_capacity(chunk_size);
         let mut chunk_ms1: Vec<Vec<(f64, f32)>> = Vec::new();
         let mut links: Vec<Option<usize>> = Vec::with_capacity(chunk_size);
-        let mut carry: Option<Vec<(f64, f32)>> = None;
-        let mut carry_in_chunk: Option<usize> = None;
+        // Captured MS1 index -> its copy in this chunk.
+        let mut in_chunk: Vec<(usize, usize)> = Vec::new();
+        let mut kept = 0usize;
 
         loop {
             if total >= cap {
@@ -1049,21 +1056,29 @@ impl<R: BufRead> MzMLReader<R> {
             }
             match self.pump() {
                 Ok(Some(ms2)) => {
-                    if self.latest_ms1_idx.is_some() {
-                        carry = self.captured_ms1.pop();
-                        self.captured_ms1.clear();
-                        self.latest_ms1_idx = None;
-                        carry_in_chunk = None;
+                    if self.captured_ms1.len() > kept {
+                        // New MS1 scans arrived: keep only those a later MS2 can link to.
+                        let live = self.ms1_tracker.live();
+                        let mut all = std::mem::take(&mut self.captured_ms1);
+                        self.captured_ms1 =
+                            live.iter().map(|&i| std::mem::take(&mut all[i])).collect();
+                        in_chunk = in_chunk
+                            .into_iter()
+                            .filter_map(|(g, c)| live.binary_search(&g).ok().map(|n| (n, c)))
+                            .collect();
+                        self.ms1_tracker.renumber_to_live();
+                        kept = self.captured_ms1.len();
                     }
-                    let link = if carry.is_some() {
-                        if carry_in_chunk.is_none() {
-                            chunk_ms1.push(carry.clone().expect("carry is Some"));
-                            carry_in_chunk = Some(chunk_ms1.len() - 1);
+                    let link = self.ms1_tracker.link(self.last_faims_cv).map(|g| {
+                        match in_chunk.iter().find(|(k, _)| *k == g) {
+                            Some(&(_, c)) => c,
+                            None => {
+                                chunk_ms1.push(self.captured_ms1[g].clone());
+                                in_chunk.push((g, chunk_ms1.len() - 1));
+                                chunk_ms1.len() - 1
+                            }
                         }
-                        carry_in_chunk
-                    } else {
-                        None
-                    };
+                    });
                     chunk.push(ms2);
                     links.push(link);
                     total += 1;
@@ -1079,7 +1094,7 @@ impl<R: BufRead> MzMLReader<R> {
                         chunk = Vec::with_capacity(chunk_size);
                         chunk_ms1 = Vec::new();
                         links = Vec::with_capacity(chunk_size);
-                        carry_in_chunk = None;
+                        in_chunk.clear();
                     }
                 }
                 Ok(None) => break,
@@ -1359,6 +1374,9 @@ pub fn read_ms1_linked_parallel(
     )
 }
 
+/// Per MS2 scan of a piece: the MS1 scans before it and its FAIMS compensation voltage.
+type Ms2Seen = (usize, Option<f32>);
+
 fn read_ms1_linked_in_pieces(
     path: &std::path::Path,
     threads: usize,
@@ -1367,7 +1385,7 @@ fn read_ms1_linked_in_pieces(
     piece_bytes_target: u64,
 ) -> std::io::Result<Option<Ms1LinkedRead>> {
     let pieces = spectrum_pieces(path, piece_bytes_target)?;
-    let parse_piece = |i: usize| -> std::io::Result<Option<Ms1LinkedRead>> {
+    let parse_piece = |i: usize| -> std::io::Result<Option<(Ms1LinkedRead, Vec<Ms2Seen>)>> {
         let bytes = piece_bytes(path, &pieces, i)?;
         let mut reader = MzMLReader::new(bytes.as_slice())
             .with_ms_level_range(2, 2)
@@ -1375,16 +1393,13 @@ fn read_ms1_linked_in_pieces(
             .with_scan_context_capture(capture_context)
             .with_noise_capture(capture_noise);
         let mut read = Ms1LinkedRead::default();
-        let mut latest: Option<usize> = None;
+        // Per MS2 scan: the MS1 scans of the piece before it, and its compensation voltage.
+        let mut seen: Vec<Ms2Seen> = Vec::new();
         loop {
-            let before = reader.run_ms1.len();
             match reader.pump() {
                 Ok(Some(spectrum)) => {
-                    if reader.run_ms1.len() > before {
-                        latest = Some(reader.run_ms1.len() - 1);
-                    }
+                    seen.push((reader.run_ms1.len(), reader.last_faims_cv));
                     read.spectra.push(spectrum);
-                    read.ms2_to_ms1.push(latest);
                 }
                 Ok(None) => break,
                 Err(_) => return Ok(None),
@@ -1392,25 +1407,33 @@ fn read_ms1_linked_in_pieces(
         }
         read.run_ms1 = reader.take_run_ms1();
         read.contexts = reader.take_scan_contexts();
-        Ok(Some(read))
+        Ok(Some((read, seen)))
     };
     let mut out = Ms1LinkedRead::default();
+    let mut seen: Vec<Ms2Seen> = Vec::new();
     for r in map_pieces(pieces.len(), threads, parse_piece) {
-        let Some(piece) = r? else {
+        let Some((piece, piece_seen)) = r? else {
             return Ok(None);
         };
         let base = out.run_ms1.len();
-        let before = base.checked_sub(1);
-        out.ms2_to_ms1.extend(
-            piece
-                .ms2_to_ms1
-                .into_iter()
-                .map(|l| l.map(|j| base + j).or(before)),
-        );
+        seen.extend(piece_seen.into_iter().map(|(n, cv)| (base + n, cv)));
         out.spectra.extend(piece.spectra);
         out.run_ms1.extend(piece.run_ms1);
         out.contexts.extend(piece.contexts);
     }
+    // Link in acquisition order across the pieces.
+    let mut tracker = crate::ms1_link::Ms1Tracker::default();
+    let mut next = 0usize;
+    out.ms2_to_ms1 = seen
+        .into_iter()
+        .map(|(n, cv)| {
+            while next < n {
+                tracker.push(next, out.run_ms1[next].faims_cv);
+                next += 1;
+            }
+            tracker.link(cv)
+        })
+        .collect();
     Ok(Some(out))
 }
 
@@ -4032,6 +4055,87 @@ mod tests {
                     );
                 }
             }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_ms2_scan_links_to_the_latest_ms1_at_its_faims_voltage() {
+        let spectrum = |n: u32, level: u32, cv: Option<f64>, mz: f64| {
+            let cv = cv.map_or(String::new(), |v| {
+                format!(r#"<cvParam accession="MS:1001581" name="FAIMS compensation voltage" value="{v}"/>"#)
+            });
+            let precursor = if level == 2 {
+                r#"<precursorList count="1"><precursor><selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                  </selectedIon></selectedIonList></precursor></precursorList>"#
+            } else {
+                ""
+            };
+            format!(
+                r#"<spectrum index="{n}" id="scan={n}" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="{level}"/>
+              <scanList count="1"><scan>
+                <cvParam accession="MS:1000016" name="scan start time" value="1.0"
+                         unitAccession="UO:0000031" unitName="minute"/>
+                {cv}
+              </scan></scanList>
+              {precursor}
+              <binaryDataArrayList count="2">{mzb}{intb}</binaryDataArrayList>
+            </spectrum>"#,
+                mzb = bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                intb = bda_plain("MS:1000515", &encode_f64_b64(&[7.0])),
+            )
+        };
+        // MS1 at -50 (m/z 100), MS1 at -60 (200), MS2 -50, MS2 -60, MS1 at -50 (300),
+        // MS2 -60, MS2 without a voltage.
+        let xml = wrap_spectra(
+            &[
+                spectrum(1, 1, Some(-50.0), 100.0),
+                spectrum(2, 1, Some(-60.0), 200.0),
+                spectrum(3, 2, Some(-50.0), 400.0),
+                spectrum(4, 2, Some(-60.0), 400.0),
+                spectrum(5, 1, Some(-50.0), 300.0),
+                spectrum(6, 2, Some(-60.0), 400.0),
+                spectrum(7, 2, None, 400.0),
+            ]
+            .concat(),
+        );
+        let want = vec![Some(100.0), Some(200.0), Some(200.0), Some(300.0)];
+        let first_mz = |link: &Ms1Link| -> Vec<Option<f64>> {
+            link.ms2_to_ms1
+                .iter()
+                .map(|l| l.map(|m| link.ms1_peaks[m][0].0))
+                .collect()
+        };
+        let (_, link) = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .expect("read");
+        assert_eq!(first_mz(&link), want);
+        for chunk in [1, 2, 3] {
+            let mut got = Vec::new();
+            MzMLReader::new(Cursor::new(xml.clone())).read_with_ms1_chunked(
+                chunk,
+                usize::MAX,
+                |_, link| got.extend(first_mz(&link)),
+            );
+            assert_eq!(got, want, "chunk {chunk}");
+        }
+        let path =
+            std::env::temp_dir().join(format!("andes-faims-link-{}.mzML", std::process::id()));
+        std::fs::write(&path, &xml).expect("write");
+        for piece in [300u64, 1 << 30] {
+            let read = read_ms1_linked_in_pieces(&path, 2, false, false, piece)
+                .expect("read")
+                .expect("no parse error");
+            let got: Vec<Option<f64>> = read
+                .ms2_to_ms1
+                .iter()
+                .map(|l| l.map(|m| read.run_ms1[m].peaks[0].0))
+                .collect();
+            assert_eq!(got, want, "piece {piece}");
         }
         let _ = std::fs::remove_file(&path);
     }

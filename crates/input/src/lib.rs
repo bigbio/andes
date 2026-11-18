@@ -5,6 +5,7 @@ pub mod database;
 pub mod fasta;
 pub mod isobaric;
 pub mod mgf;
+pub mod ms1_link;
 pub mod mzml;
 pub mod peff;
 #[cfg(feature = "thermo")]

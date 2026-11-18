@@ -87,6 +87,30 @@ fn peak_at(ms1: &[(f64, f32)], target: f64, tol: f64) -> f32 {
     best
 }
 
+/// The m/z of the most intense MS1 peak within `ppm` of the reported precursor `mz`, when it
+/// is at least `ratio` times as intense as the peak at `mz` itself (searched within
+/// `ppm / 8`). The instrument at times reports a side peak of a Fourier-transform signal, a
+/// fraction as intense and 15-25 ppm off the ion it belongs to. `None` keeps the reported m/z.
+pub fn snap_precursor_mz(ms1: &[(f64, f32)], mz: f64, ppm: f64, ratio: f32) -> Option<f64> {
+    if ms1.is_empty() || mz.is_nan() || mz <= 0.0 {
+        return None;
+    }
+    let tol = mz * ppm * 1e-6;
+    let own = peak_at(ms1, mz, tol / 8.0);
+    let start = ms1.partition_point(|&(m, _)| m < mz - tol);
+    let mut best: Option<(f64, f32)> = None;
+    for &(m, inten) in &ms1[start..] {
+        if m > mz + tol {
+            break;
+        }
+        if best.is_none_or(|(_, b)| inten > b) {
+            best = Some((m, inten));
+        }
+    }
+    let (m, inten) = best?;
+    ((m - mz).abs() > tol / 8.0 && inten >= ratio * own.max(f32::MIN_POSITIVE)).then_some(m)
+}
+
 pub fn envelope_fit(
     ms1: &[(f64, f32)],
     mono_mz: f64,
@@ -215,6 +239,28 @@ pub fn correct_precursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_weak_side_peak_moves_to_the_intense_ion_beside_it() {
+        // The reported 619.8634 is a side peak of the ion at 619.8765 (+21 ppm, 9x as intense).
+        let ms1 = vec![
+            (619.4734, 4e4),
+            (619.8634, 3.9e5),
+            (619.8765, 3.6e6),
+            (620.0771, 5.0e6),
+        ];
+        let got = snap_precursor_mz(&ms1, 619.8634, 25.0, 3.0).unwrap();
+        assert!((got - 619.8765).abs() < 1e-9);
+        // A neighbour under three times as intense, or beyond the window, leaves it.
+        assert_eq!(snap_precursor_mz(&ms1, 619.8634, 25.0, 10.0), None);
+        assert_eq!(snap_precursor_mz(&ms1, 619.8634, 15.0, 3.0), None);
+        // The reported peak is itself the most intense one.
+        assert_eq!(snap_precursor_mz(&ms1, 619.8765, 25.0, 3.0), None);
+        // Nothing at the reported m/z: the most intense peak in the window.
+        let got = snap_precursor_mz(&ms1, 619.8700, 25.0, 3.0).unwrap();
+        assert!((got - 619.8765).abs() < 1e-9);
+        assert_eq!(snap_precursor_mz(&[], 619.8634, 25.0, 3.0), None);
+    }
 
     fn synth_ms1(mono_mz: f64, charge: u8, n: usize, scale: f32, noise: f32) -> Vec<(f64, f32)> {
         let neutral = (mono_mz - PROTON) * charge as f64;

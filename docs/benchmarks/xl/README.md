@@ -167,6 +167,30 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
   false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
   groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).
 
+- **Precursor m/z on the dominant MS1 peak** (adopted). On the Clasen runs 6 % of the accepted
+  CSMs had a precursor error near −20 ppm, a separate group from the rest (97 between 15 and
+  25 ppm against 3 between 10 and 15 ppm on batch 4), while both peptide masses from their
+  doublets were within 2 ppm. The MS1 scans show why: the instrument reported a side peak at a
+  ninth of the intensity, about 20 ppm below the real ion (619.8634 beside 619.8765 at 5+).
+  The precursor m/z now moves to the most intense MS1 peak within 25 ppm when that peak is at
+  least 3 times the reported one. The Clasen and Eclipse runs are FAIMS runs with three
+  compensation voltages, and the MS1 scan just before an MS2 scan is usually at another
+  voltage; MS2 scans now read the latest MS1 scan at their own voltage (in the Thermo and mzML
+  readers alike, so the monoisotope correction and the chimeric search read the right MS1
+  scan too). With the reader fix and ratio 3: 16,797 → 17,079 true CSMs at 1 %; Clasen
+  batch 1 1,300 → 1,417 and batch 4 1,685 → 1,835, the eight non-FAIMS runs within ±1 %, the
+  Eclipse run 2,816 → 2,797 (19 of its 26 lost CSMs a tie group at the 1 % edge). Without
+  the reader fix the snap gave 16,813, as most precursors were looked for in the wrong scan.
+  Ratio 10 gives 17,099. Held out: Clasen batch 1 well E5 2,000 → 2,190 (ratio 10: 2,134), a
+  Clasen batch 2 run 363 → 380 true CSMs at actual 1 % (none accepted at 1 % either way),
+  Eclipse replicate 2 3,044 → 3,054, ribosome DSBU replicate 2 2,453 → 2,441 (1.8 % → 1.9 %
+  false), Beveridge DSS R2 unchanged.
+- **Precursor error in the CSM score** (−w × |error − the run's median error|, measured
+  offline on saved results): +1.2 % at w = 0.25 and +1.8 % at 0.5, but Clasen batch 4 loses at
+  every weight because of the −20 ppm group above; with the m/z on the dominant peak it still
+  loses at 0.5 and batch 1 loses at 0.25. A Gaussian log-likelihood term loses more. Not
+  adopted.
+
 `mat_dsbu` stays above target (2.8 % overall, 3.8 % inter). Most of its false inter matches are
 half pairs, one peptide with a doublet and the other by mass, and several repeat one
 E. coli pair (EFTS–RL23) that is not in the library; this may be carry-over.

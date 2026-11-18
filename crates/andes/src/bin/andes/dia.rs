@@ -168,6 +168,23 @@ pub(crate) fn windows(
     (slot, windows)
 }
 
+pub(crate) fn neighbours<'a>(
+    spectra: &'a [Spectrum],
+    slot: &[(u32, u32)],
+    windows: &[Vec<u32>],
+    spec: usize,
+) -> (Vec<&'a [(f64, f32)]>, usize) {
+    let (w, p) = slot[spec];
+    let win = &windows[w as usize];
+    let (p, lo) = (p as usize, (p as usize).saturating_sub(HALF_CYCLES));
+    let hi = (p + HALF_CYCLES + 1).min(win.len());
+    let scans = win[lo..hi]
+        .iter()
+        .map(|&i| spectra[i as usize].peaks.as_slice())
+        .collect();
+    (scans, p - lo)
+}
+
 pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],

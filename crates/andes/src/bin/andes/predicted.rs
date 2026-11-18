@@ -206,7 +206,7 @@ impl Predictors {
             tol,
             threads: cli.threads.max(1),
             batch: cli.predictor_batch.max(1),
-            dia: cli.dia && std::env::var_os("ANDES_DIA_NO_EVIDENCE").is_none(),
+            dia: cli.dia,
         }))
     }
 
@@ -499,22 +499,15 @@ impl Predictors {
                 )
                 .to_vec();
                 if let Some((slot, windows)) = &dia {
-                    let (w, p) = slot[r.spec as usize];
-                    let win = &windows[w as usize];
-                    let p = p as usize;
-                    let lo = p.saturating_sub(5);
-                    let hi = (p + 6).min(win.len());
-                    let scans: Vec<&[(f64, f32)]> = win[lo..hi]
-                        .iter()
-                        .map(|&i| spectra[i as usize].peaks.as_slice())
-                        .collect();
+                    let (scans, center) =
+                        crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
                     v.extend(crate::dia::evidence(
                         &ms2_pred[*k as usize],
                         pred.ions(),
                         mass,
                         r.charge,
                         &scans,
-                        p - lo,
+                        center,
                         tol_ppm,
                     ));
                 }

@@ -1,3 +1,4 @@
+use model::hash::{splitmix64, SPLITMIX_GOLDEN};
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
 use rayon::prelude::*;
 use scoring_crate::gbdt_eval::GbdtPeakModel;
@@ -115,11 +116,7 @@ pub struct FdrCounts {
 }
 
 pub fn fold_of(precursor: u32, seed: u64) -> usize {
-    let mut z = (seed ^ (precursor as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-        .wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^= z >> 31;
+    let z = splitmix64(seed ^ (precursor as u64).wrapping_mul(SPLITMIX_GOLDEN));
     (z % N_FOLDS as u64) as usize
 }
 
@@ -362,11 +359,7 @@ pub fn row_unit(precursor: u32, run: u16) -> u64 {
 }
 
 pub fn sample_hash(unit: u64, seed: u64) -> u64 {
-    let mut z = (seed ^ 0x5bd1_e995_7a4f_3c21 ^ unit.wrapping_mul(0x9e37_79b9_7f4a_7c15))
-        .wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    splitmix64(seed ^ 0x5bd1_e995_7a4f_3c21 ^ unit.wrapping_mul(SPLITMIX_GOLDEN))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1169,11 +1162,7 @@ mod tests {
 
     impl Normal {
         fn unit(&mut self) -> f64 {
-            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            z ^= z >> 31;
+            let z = model::hash::splitmix64_next(&mut self.0);
             ((z >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn draw(&mut self) -> f32 {

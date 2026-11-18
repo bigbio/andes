@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use model::hash::fnv1a64;
+
 use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
 
 pub const DENOVO_TOPOLOGY_ID: u64 = u64::MAX;
@@ -259,12 +261,7 @@ impl GlycanTree {
     }
 
     pub fn topology_id(&self) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in self.canonical().as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
+        fnv1a64(self.canonical().as_bytes())
     }
 
     pub fn y_ion_retained_masses(&self) -> Vec<f64> {

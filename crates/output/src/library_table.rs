@@ -9,6 +9,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use model::hash::{fnv1a64_extend, FNV1A64_OFFSET};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::format::KeyValue;
@@ -103,13 +104,10 @@ struct Fnv(u64);
 
 impl Fnv {
     fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
+        Fnv(FNV1A64_OFFSET)
     }
     fn bytes(&mut self, b: &[u8]) {
-        for &x in b {
-            self.0 ^= x as u64;
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        self.0 = fnv1a64_extend(self.0, b);
     }
     fn u64(&mut self, v: u64) {
         self.bytes(&v.to_le_bytes());

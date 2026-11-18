@@ -1,3 +1,4 @@
+use model::hash::{splitmix64_next, SPLITMIX_GOLDEN};
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
 use super::isotonic::pava;
@@ -63,15 +64,6 @@ fn gate_or_fallback(
     } else {
         Err(TrainError::QualityGate(reason))
     }
-}
-
-#[inline]
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 #[inline]
@@ -180,7 +172,7 @@ fn bin_of(v: f32, uppers: &[f32]) -> u8 {
 fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
     let n = indices.len();
     for i in (1..n).rev() {
-        let j = (splitmix64(rng) as usize) % (i + 1);
+        let j = (splitmix64_next(rng) as usize) % (i + 1);
         indices.swap(i, j);
     }
 }
@@ -237,8 +229,8 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         .collect();
 
     let is_val = |g: u32| {
-        let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
-        let h = splitmix64(&mut state);
+        let mut state = seed ^ (g as u64).wrapping_mul(SPLITMIX_GOLDEN);
+        let h = splitmix64_next(&mut state);
         to_unit(h) < p.val_fraction as f64
     };
 
@@ -618,8 +610,8 @@ pub fn train_gbdt_regression(
     let val_set: std::collections::BTreeSet<u32> = distinct_groups
         .iter()
         .filter(|&&g| {
-            let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
-            let h = splitmix64(&mut state);
+            let mut state = seed ^ (g as u64).wrapping_mul(SPLITMIX_GOLDEN);
+            let h = splitmix64_next(&mut state);
             to_unit(h) < p.val_fraction as f64
         })
         .copied()

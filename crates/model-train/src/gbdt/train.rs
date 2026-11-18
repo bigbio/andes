@@ -177,6 +177,49 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
     }
 }
 
+fn bin_uppers_per_feature(x: &[f32], n_rows: usize, nf: usize, n_bins: usize) -> Vec<Vec<f32>> {
+    (0..nf)
+        .map(|f| {
+            let col: Vec<f32> = (0..n_rows).map(|r| x[r * nf + f]).collect();
+            compute_bin_uppers(&col, n_bins)
+        })
+        .collect()
+}
+
+fn bin_rows(x: &[f32], nf: usize, rows: &[usize], bin_uppers: &[Vec<f32>]) -> Vec<u8> {
+    let mut binned = vec![0u8; rows.len() * nf];
+    for (i, &r) in rows.iter().enumerate() {
+        for f in 0..nf {
+            binned[i * nf + f] = bin_of(x[r * nf + f], &bin_uppers[f]);
+        }
+    }
+    binned
+}
+
+fn split_rows_by_group(groups: &[u32], seed: u64, val_fraction: f32) -> (Vec<usize>, Vec<usize>) {
+    let is_val = |g: u32| {
+        let mut state = seed ^ (g as u64).wrapping_mul(SPLITMIX_GOLDEN);
+        to_unit(splitmix64_next(&mut state)) < val_fraction as f64
+    };
+    (0..groups.len()).partition(|&r| !is_val(groups[r]))
+}
+
+fn gbdt_model(
+    feature_names: &[String],
+    apply_sigmoid: bool,
+    trees: Vec<scoring_crate::gbdt_eval::Tree>,
+) -> GbdtPeakModel {
+    GbdtPeakModel {
+        packed: Default::default(),
+        n_features: feature_names.len() as u32,
+        feature_names: feature_names.to_vec(),
+        apply_sigmoid,
+        trees,
+        iso_x: vec![],
+        iso_y: vec![],
+    }
+}
+
 pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
@@ -187,15 +230,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         )));
     }
 
-    let empty_classifier = || GbdtPeakModel {
-        packed: Default::default(),
-        n_features: nf as u32,
-        feature_names: ds.feature_names.clone(),
-        apply_sigmoid: true,
-        trees: vec![],
-        iso_x: vec![],
-        iso_y: vec![],
-    };
+    let empty_classifier = || gbdt_model(&ds.feature_names, true, vec![]);
     let n_pos = ds.y.iter().filter(|&&y| y == 1).count();
     if nf == 0 {
         return gate_or_fallback(
@@ -221,28 +256,9 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let n_bins = p.n_bins.min(256);
 
-    let bin_uppers: Vec<Vec<f32>> = (0..nf)
-        .map(|f| {
-            let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
-            compute_bin_uppers(&col, n_bins)
-        })
-        .collect();
+    let bin_uppers = bin_uppers_per_feature(&ds.x, n_rows, nf, n_bins);
 
-    let is_val = |g: u32| {
-        let mut state = seed ^ (g as u64).wrapping_mul(SPLITMIX_GOLDEN);
-        let h = splitmix64_next(&mut state);
-        to_unit(h) < p.val_fraction as f64
-    };
-
-    let mut train_rows: Vec<usize> = Vec::new();
-    let mut val_rows: Vec<usize> = Vec::new();
-    for r in 0..n_rows {
-        if is_val(ds.groups[r]) {
-            val_rows.push(r);
-        } else {
-            train_rows.push(r);
-        }
-    }
+    let (train_rows, val_rows) = split_rows_by_group(&ds.groups, seed, p.val_fraction);
 
     if val_rows.is_empty() {
         return gate_or_fallback(
@@ -293,14 +309,8 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    let mut train_binned = vec![0u8; n_active * nf];
-    let mut train_y = vec![0u8; n_active];
-    for (i, &r) in active_train.iter().enumerate() {
-        train_y[i] = ds.y[r];
-        for f in 0..nf {
-            train_binned[i * nf + f] = bin_of(ds.x[r * nf + f], &bin_uppers[f]);
-        }
-    }
+    let train_binned = bin_rows(&ds.x, nf, &active_train, &bin_uppers);
+    let train_y: Vec<u8> = active_train.iter().map(|&r| ds.y[r]).collect();
 
     let val_n = val_rows.len();
     let val_y: Vec<u8> = val_rows.iter().map(|&r| ds.y[r]).collect();
@@ -460,15 +470,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         return gate_or_fallback(
             p.allow_degenerate,
             format!("classifier: held-out AUC {val_auc:.4} < minimum {MIN_VAL_AUC}"),
-            move || GbdtPeakModel {
-                packed: Default::default(),
-                n_features: nf as u32,
-                feature_names: ds.feature_names.clone(),
-                apply_sigmoid: true,
-                trees: trees_for_fallback,
-                iso_x: vec![],
-                iso_y: vec![],
-            },
+            move || gbdt_model(&ds.feature_names, true, trees_for_fallback),
         );
     }
 
@@ -484,13 +486,9 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let (iso_x, iso_y) = pava(&sorted_p, &sorted_y);
 
     Ok(GbdtPeakModel {
-        packed: Default::default(),
-        n_features: nf as u32,
-        feature_names: ds.feature_names.clone(),
-        apply_sigmoid: true,
-        trees,
         iso_x,
         iso_y,
+        ..gbdt_model(&ds.feature_names, true, trees)
     })
 }
 
@@ -563,15 +561,7 @@ pub fn train_gbdt_regression(
         )));
     }
 
-    let empty_regressor = || GbdtPeakModel {
-        packed: Default::default(),
-        n_features: nf as u32,
-        feature_names: ds.feature_names.clone(),
-        apply_sigmoid: false,
-        trees: vec![],
-        iso_x: vec![],
-        iso_y: vec![],
-    };
+    let empty_regressor = || gbdt_model(&ds.feature_names, false, vec![]);
     if nf == 0 {
         return gate_or_fallback(
             p.allow_degenerate,
@@ -589,43 +579,9 @@ pub fn train_gbdt_regression(
 
     let n_bins = p.n_bins.min(256);
 
-    let bin_uppers: Vec<Vec<f32>> = (0..nf)
-        .map(|f| {
-            let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
-            compute_bin_uppers(&col, n_bins)
-        })
-        .collect();
+    let bin_uppers = bin_uppers_per_feature(&ds.x, n_rows, nf, n_bins);
 
-    let mut binned_all = vec![0u8; n_rows * nf];
-    for r in 0..n_rows {
-        for f in 0..nf {
-            binned_all[r * nf + f] = bin_of(ds.x[r * nf + f], &bin_uppers[f]);
-        }
-    }
-
-    let mut distinct_groups: Vec<u32> = ds.groups.clone();
-    distinct_groups.sort_unstable();
-    distinct_groups.dedup();
-
-    let val_set: std::collections::BTreeSet<u32> = distinct_groups
-        .iter()
-        .filter(|&&g| {
-            let mut state = seed ^ (g as u64).wrapping_mul(SPLITMIX_GOLDEN);
-            let h = splitmix64_next(&mut state);
-            to_unit(h) < p.val_fraction as f64
-        })
-        .copied()
-        .collect();
-
-    let mut train_rows: Vec<usize> = Vec::new();
-    let mut val_rows: Vec<usize> = Vec::new();
-    for r in 0..n_rows {
-        if val_set.contains(&ds.groups[r]) {
-            val_rows.push(r);
-        } else {
-            train_rows.push(r);
-        }
-    }
+    let (train_rows, val_rows) = split_rows_by_group(&ds.groups, seed, p.val_fraction);
 
     if val_rows.is_empty() || train_rows.is_empty() {
         return gate_or_fallback(
@@ -643,14 +599,8 @@ pub fn train_gbdt_regression(
             empty_regressor,
         );
     }
-    let mut train_binned = vec![0u8; n_active * nf];
-    let mut train_y = vec![0.0f32; n_active];
-    for (i, &r) in train_rows.iter().enumerate() {
-        train_y[i] = ds.y[r];
-        for f in 0..nf {
-            train_binned[i * nf + f] = binned_all[r * nf + f];
-        }
-    }
+    let train_binned = bin_rows(&ds.x, nf, &train_rows, &bin_uppers);
+    let train_y: Vec<f32> = train_rows.iter().map(|&r| ds.y[r]).collect();
 
     let val_n = val_rows.len();
     let val_y: Vec<f32> = val_rows.iter().map(|&r| ds.y[r]).collect();
@@ -736,27 +686,11 @@ pub fn train_gbdt_regression(
                 "regressor: held-out Pearson r = {r:.4} (min {MIN_VAL_PEARSON}), \
                  R2 = {r2:.4} (min {MIN_VAL_R2})"
             ),
-            move || GbdtPeakModel {
-                packed: Default::default(),
-                n_features: nf as u32,
-                feature_names: ds.feature_names.clone(),
-                apply_sigmoid: false,
-                trees: trees_for_fallback,
-                iso_x: vec![],
-                iso_y: vec![],
-            },
+            move || gbdt_model(&ds.feature_names, false, trees_for_fallback),
         );
     }
 
-    Ok(GbdtPeakModel {
-        packed: Default::default(),
-        n_features: nf as u32,
-        feature_names: ds.feature_names.clone(),
-        apply_sigmoid: false,
-        trees,
-        iso_x: vec![],
-        iso_y: vec![],
-    })
+    Ok(gbdt_model(&ds.feature_names, false, trees))
 }
 
 #[cfg(test)]

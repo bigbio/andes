@@ -40,6 +40,9 @@ const REACH_MAX: f64 = 2.0;
 
 const FRESH: u32 = u32::MAX;
 
+/// Breakpoints from which the line search sorts them on the thread pool.
+const PAR_SORT_MIN: usize = 1 << 15;
+
 pub(crate) fn stride_for(ncols: usize) -> usize {
     ncols.div_ceil(LANES) * LANES
 }
@@ -808,7 +811,11 @@ fn line_search(
             deltas.push(((1.0 - y * o[i]) / diff, i, 1.0));
         }
     });
-    deltas.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if deltas.len() >= PAR_SORT_MIN {
+        deltas.par_sort_by(|a, b| a.0.total_cmp(&b.0));
+    } else {
+        deltas.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
     let mut stop = None;
     for &(delta, ii, s) in deltas.iter() {
         let delta_prime = l + delta * (r - l);

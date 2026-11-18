@@ -8,6 +8,44 @@ pub struct UnimodMod {
     pub name: String,
     pub mono_mass: f64,
     pub sites: Vec<String>,
+    pub specificities: Vec<Specificity>,
+    pub isotopic_label: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SitePosition {
+    Anywhere,
+    AnyNTerm,
+    AnyCTerm,
+    ProteinNTerm,
+    ProteinCTerm,
+}
+
+impl SitePosition {
+    fn parse(text: &str) -> Self {
+        match text {
+            "Any N-term" => SitePosition::AnyNTerm,
+            "Any C-term" => SitePosition::AnyCTerm,
+            "Protein N-term" => SitePosition::ProteinNTerm,
+            "Protein C-term" => SitePosition::ProteinCTerm,
+            _ => SitePosition::Anywhere,
+        }
+    }
+
+    pub fn needs_n_terminus(self) -> bool {
+        matches!(self, SitePosition::AnyNTerm | SitePosition::ProteinNTerm)
+    }
+
+    pub fn needs_c_terminus(self) -> bool {
+        matches!(self, SitePosition::AnyCTerm | SitePosition::ProteinCTerm)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Specificity {
+    pub site: String,
+    pub position: SitePosition,
+    pub hidden: bool,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
@@ -37,12 +75,33 @@ impl UnimodDb {
         let mut cur_name: Option<String> = None;
         let mut cur_mass: Option<f64> = None;
         let mut cur_sites: Vec<String> = Vec::new();
+        let mut cur_specs: HashMap<String, SpecFields> = HashMap::new();
 
         let commit = |db: &mut UnimodDb,
                       id: &mut Option<String>,
                       name: &mut Option<String>,
                       mass: &mut Option<f64>,
-                      sites: &mut Vec<String>| {
+                      sites: &mut Vec<String>,
+                      specs: &mut HashMap<String, SpecFields>| {
+            let isotopic_label = !specs.is_empty()
+                && specs
+                    .values()
+                    .all(|f| f.classification.as_deref() == Some("Isotopic label"));
+            let mut specificities: Vec<Specificity> = specs
+                .drain()
+                .filter_map(|(_, f)| {
+                    Some(Specificity {
+                        site: f.site?,
+                        position: f
+                            .position
+                            .as_deref()
+                            .map_or(SitePosition::Anywhere, SitePosition::parse),
+                        hidden: f.hidden.unwrap_or(true),
+                    })
+                })
+                .collect();
+            specificities.sort();
+            specificities.dedup();
             if let (Some(id_v), Some(name_v), Some(mass_v)) = (id.take(), name.take(), mass.take())
             {
                 let entry = UnimodMod {
@@ -50,6 +109,8 @@ impl UnimodDb {
                     name: name_v.clone(),
                     mono_mass: mass_v,
                     sites: std::mem::take(sites),
+                    specificities,
+                    isotopic_label,
                 };
                 db.by_name
                     .entry(name_v.to_ascii_lowercase())
@@ -70,6 +131,7 @@ impl UnimodDb {
                     &mut cur_name,
                     &mut cur_mass,
                     &mut cur_sites,
+                    &mut cur_specs,
                 );
                 in_term = true;
                 continue;
@@ -81,6 +143,7 @@ impl UnimodDb {
                     &mut cur_name,
                     &mut cur_mass,
                     &mut cur_sites,
+                    &mut cur_specs,
                 );
                 in_term = false;
                 continue;
@@ -103,9 +166,18 @@ impl UnimodDb {
                         cur_mass = Some(v);
                     }
                 } else if let Some(site) = parse_spec_site(rest) {
+                    if let Some(idx) = spec_index(rest) {
+                        cur_specs.entry(idx).or_default().site = Some(site.clone());
+                    }
                     if !cur_sites.contains(&site) {
                         cur_sites.push(site);
                     }
+                } else if let Some((idx, hidden)) = parse_spec_hidden(rest) {
+                    cur_specs.entry(idx).or_default().hidden = Some(hidden);
+                } else if let Some((idx, class)) = parse_spec_value(rest, "_classification") {
+                    cur_specs.entry(idx).or_default().classification = Some(class);
+                } else if let Some((idx, position)) = parse_spec_value(rest, "_position") {
+                    cur_specs.entry(idx).or_default().position = Some(position);
                 }
             }
         }
@@ -115,6 +187,7 @@ impl UnimodDb {
             &mut cur_name,
             &mut cur_mass,
             &mut cur_sites,
+            &mut cur_specs,
         );
 
         db
@@ -168,6 +241,10 @@ impl UnimodDb {
             .and_then(|(_, accession)| self.by_accession.get(accession))
     }
 
+    pub fn mods(&self) -> impl Iterator<Item = &UnimodMod> {
+        self.by_accession.values()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.by_accession
             .values()
@@ -192,6 +269,33 @@ fn parse_quoted_f64(s: &str) -> Option<f64> {
     let start = s.find('"')? + 1;
     let end = s[start..].find('"')? + start;
     s[start..end].trim().parse().ok()
+}
+
+#[derive(Default)]
+struct SpecFields {
+    site: Option<String>,
+    hidden: Option<bool>,
+    classification: Option<String>,
+    position: Option<String>,
+}
+
+fn parse_spec_value(s: &str, field: &str) -> Option<(String, String)> {
+    let idx = spec_index(s)?;
+    let rest = s.strip_prefix("spec_")?;
+    let val = rest[idx.len()..].strip_prefix(field)?;
+    let start = val.find('"')? + 1;
+    let end = val[start..].find('"')? + start;
+    Some((idx, val[start..end].trim().to_string()))
+}
+
+fn spec_index(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("spec_")?;
+    let underscore = rest.find('_')?;
+    Some(rest[..underscore].to_string())
+}
+
+fn parse_spec_hidden(s: &str) -> Option<(String, bool)> {
+    parse_spec_value(s, "_hidden").map(|(idx, v)| (idx, v == "1"))
 }
 
 fn parse_spec_site(s: &str) -> Option<String> {

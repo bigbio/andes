@@ -759,6 +759,112 @@ re-score is capped at 64 per spectrum.
 | `--open-search-delta` | Da, `MIN..MAX` | `-100..300` | Accepted offset window; must contain 0 and be at most 2000 Da wide. |
 | `--open-search-top-k` | integer | `100` | Base peptides scored per spectrum, best fragment votes first. |
 
+**Mass-offset report.** With `--rescore` or `--rescore-native`, an open search also writes
+two versioned Parquet tables, and prints the ten largest peaks:
+- `<stem>.open_offsets.parquet` (schema key `andes.open_offsets.schema`);
+- `<stem>.open_psms.parquet` (schema key `andes.open_psms.schema`).
+
+Both carry the run's calibration in their metadata: `andes.open_offsets.ppm_shift`,
+`andes.open_offsets.precision_da` and `andes.open_offsets.refined_precision_da`.
+
+**Summary for an open search.** The end-of-run identification summary and `<stem>.statistics.log`
+replace two parts that make no sense for an open search: the variable-modification breakdown
+(every PSM would read as unmodified) and the raw precursor mass error (every offset would count as
+an error). In their place is an open-search section:
+
+- the calibration and both precisions;
+- how the identified PSMs split: unmodified at zero offset, explained offset, isotope pick with no
+  modification, unexplained offset, and outside every peak;
+- the number of peaks, and how many have at least 20 PSMs;
+- the PSMs per modification, with isotope picks counted with their modification;
+- the ten largest peaks, with their decoys, residues and top explanation.
+
+The run summary gives the precursor tolerance as the offset window.
+
+- **Calibration.** Precursor calibration is off in open search, so the offsets carry the
+  instrument's mass error, which scales with peptide mass. The report measures it as the median
+  ppm error of the accepted PSMs within 0.02 Da of zero offset whose offset was measured on the
+  precursor (when there are at least 20). It subtracts that error,
+  `delta − ppm × 10⁻⁶ × (CalcMass + delta)`, from every offset measured on the precursor, for targets
+  and decoys alike.
+  - With several input files, each run (the PIN's `FileName`) is calibrated on its own zero-offset
+    PSMs before the runs are pooled. A run with fewer than 20 such PSMs uses the pooled shift.
+  - An offset that localisation refined from the fragment ions keeps its value. The fragments are
+    already recentred.
+  - The PIN marks such a row by a `DeltaMass` that differs from
+    `ExpMass − isotope_error × 1.003355 − CalcMass` by more than 0.0005 Da.
+- **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
+  - The precision is 1.4826 × MAD of the calibrated offsets within 0.02 Da of zero, at least
+    0.0005 Da, or 0.002 Da when fewer than 20 PSMs are near zero.
+  - A gap wider than four precisions starts a new group.
+  - Inside a group, a Gaussian density with that precision as bandwidth is split at every valley
+    lower than half the smaller of its two neighbouring maxima. This separates neighbours such as
+    deamidation (+0.984) and an isotope pick (+1.003).
+  - A peak needs at least two PSMs.
+- **Columns per peak.** `<stem>.open_offsets.parquet` has one row per peak:
+  `peak`, `mass_shift`, `width_da`, `psms`, `peptides`, `decoys`, `decoy_ratio`, `residues`, and
+  `explanation_k` / `mass_k` / `posterior_k` for k = 1..3. Each peak's:
+  - median offset (`mass_shift`) and width (`width_da`);
+  - PSM and peptide counts;
+  - its localised residues (`residues`, the three most frequent with counts);
+  - `decoys`: the decoy PSMs at or above the lowest accepted target score whose calibrated offsets
+    fall in the peak's window. The window is the peak's range widened by one precision on each side,
+    and cut at the midpoint to a neighbouring peak, so each decoy counts in at most one peak.
+    `decoys / psms` is a per-peak FDR estimate, independent of the run-wide q-value.
+- **Explanations.** A peak no wider than twice the expected spread is treated as one species. The
+  expected spread is the refined spread when at least half of its PSMs are refined, otherwise the
+  precision.
+  - Its candidates are scored on the peak's median, with a Gaussian whose spread is
+    √(width² / n + expected²). The spread is the standard error of the centre plus the measurement
+    precision.
+  - A peak that sits consistently off every candidate is therefore called "unexplained".
+  - Its PSMs all take the peak's top explanation.
+- **Wider peaks.** A wider peak can hold several species, such as deamidation and an isotope pick.
+  It is fitted as a mixture of the candidates:
+  - Every candidate keeps its fixed mass.
+  - A PSM's likelihood under a candidate is a Gaussian of its calibrated offset, with the precision
+    or the refined spread, × its site support.
+  - EM estimates each candidate's share of the peak's PSMs. It starts from the priors and adds them
+    as a Dirichlet pseudo-count of one PSM.
+  - Each PSM takes the candidate with its highest responsibility.
+- **Reported explanations.** A peak lists its three largest posteriors or shares as
+  `explanation_k` / `posterior_k`.
+  - The candidates:
+    - no modification;
+    - an isotope error of ±1 or ±2;
+    - every Unimod entry, alone or with one isotope step;
+    - pairs of the Unimod entries that are the top explanation of another peak of the same run with
+      a share ≥ 0.5,
+      counting only peaks with at least 20 PSMs and decoys ≤ 1 % of their PSMs;
+    - "unexplained", a flat density over the offset range.
+  - The terms of the likelihood and the priors:
+    - The priors are 1 for no modification or for a Unimod entry with at least one common
+      specificity (`hidden` 0 in Unimod), 0.1 for an entry whose specificities are all rare or
+      that Unimod classifies only as an isotopic label (a label-free run carries no labels),
+      0.2 for an isotope error, and 0.05 for "unexplained".
+    - An entry plus an isotope step takes the entry's prior × 0.1.
+    - A pair takes 0.05 × the two entries' priors.
+    - The Gaussian's spread depends on how the PSM's offset was measured. For an offset measured
+      on the precursor it is the precision. For one refined from the fragment ions it is the median
+      width of the peaks with at least 20 PSMs of which at least half are refined, and never less than the
+      precision.
+    - Site support for a Unimod entry is (k + 0.5) / (n + 1) over the n localised PSMs (one PSM in
+      the mixture). Each localised PSM adds 1 to k when its residue, or peptide terminus, matches
+      a common specificity of the entry, and 0.1 when it matches only a rare one.
+    - A specificity matches on its site and its Unimod position together. An `Any N-term` or
+      `Protein N-term` specificity needs the residue at the peptide N-terminus, and a C-term one at
+      the C-terminus. Gln→pyro-Glu therefore supports a Q at position 1, but not a Q inside the
+      peptide.
+    - The hypotheses without a site (no modification, isotope errors, "unexplained") and entries
+      with no listed site take a neutral 0.5. The support is 1 when no PSM is localised. A PSM on
+      the right residue then favours the entry, and one on a wrong residue counts against it.
+  - Entries with the same mass and sites tie, and are reported as ties.
+- **Per-PSM file.** `<stem>.open_psms.parquet` has one row per accepted PSM: `psm_id`,
+  `delta_mass` (calibrated), `peak` (null outside every peak), `residue`, and `explanation` /
+  `posterior`.
+  - In a single-species peak, the explanation is the peak's top explanation.
+  - In a mixed peak, it is the candidate with the PSM's highest responsibility.
+
 Fixed behaviour in this mode: the isotope range is set internally to **0..=2** (an isotope step
 is indistinguishable from a ~1 Da offset, so the search tries each offset and keeps the one whose
 shifted fragments fit; an explicit `--isotope-error` is refused). `--precursor-mono auto` is

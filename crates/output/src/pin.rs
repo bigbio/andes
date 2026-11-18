@@ -572,9 +572,9 @@ fn write_psm_row<W: Write>(
             exp_mass - f64::from(psm.isotope_offset) * ISOTOPE - calc_mass
         };
         writer.write_all(b"\t")?;
-        write_double(writer, delta)?;
+        write_mass(writer, delta)?;
         writer.write_all(b"\t")?;
-        write_double(writer, delta.abs())?;
+        write_mass(writer, delta.abs())?;
         write!(writer, "\t{}", f.open_site)?;
         writer.write_all(b"\t")?;
         write_double(writer, f64::from(f.open_loc_score))?;

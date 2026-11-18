@@ -2844,6 +2844,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| output::Cutoffs::new(m, &pin_index, fdr_threshold, proteoform_fdr));
 
     let mut identified: Option<(Vec<&output::PercolatorPsm>, String)> = None;
+    let mut open_search_summary: Option<String> = None;
     if let (Some(map), Some(cutoffs)) = (rescore_map.as_ref(), cutoffs.as_ref()) {
         let fdr = fdr_threshold;
         let stem = report_base
@@ -2889,6 +2890,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }
+        if cli.open_search {
+            open_search_summary = write_open_offsets(
+                &output_pin_path,
+                dir,
+                &stem,
+                &accepted,
+                &rescore_decoy_psms,
+            );
+        }
         identified = Some((accepted, pep_note));
     }
 
@@ -2900,7 +2910,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &scorer.pin_match_tolerance(),
         &scorer.node_score_window(),
     );
-    let id_summary = identified.as_ref().map(|(accepted, cut_note)| {
+    let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
         let facts = output::psm_facts(
@@ -2954,6 +2964,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     });
+    if let Some(summary) = id_summary.as_mut() {
+        summary.open_search = open_search_summary.take();
+    }
     eprint!("{}", run_stats.render_with(id_summary.as_ref()));
     let stats_path = {
         let stem = report_base
@@ -3394,6 +3407,54 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
 
 fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
     std::mem::forget(candidates);
+}
+
+fn write_open_offsets(
+    pin: &Path,
+    dir: &Path,
+    stem: &str,
+    accepted: &[&output::PercolatorPsm],
+    decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
+) -> Option<String> {
+    let report = match output::open_offsets::report_from_results(
+        pin,
+        accepted,
+        decoys,
+        model::unimod::bundled(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("WARN: open-search offset report not written: {e}");
+            return None;
+        }
+    };
+    let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
+    let psms_path = dir.join(format!("{stem}.open_psms.parquet"));
+    let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
+        .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
+    if let Err(e) = written {
+        for stale in [&peaks_path, &psms_path] {
+            if let Err(r) = std::fs::remove_file(stale) {
+                if r.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("WARN: could not remove {}: {r}", stale.display());
+                }
+            }
+        }
+        eprintln!(
+            "WARN: open-search report not written ({e}); neither {} nor {} is left",
+            peaks_path.display(),
+            psms_path.display()
+        );
+        return None;
+    }
+    eprintln!(
+        "Wrote open-search report: {} ({} offset peaks) and {} ({} PSMs)",
+        peaks_path.display(),
+        report.peaks.len(),
+        psms_path.display(),
+        report.assignments.len()
+    );
+    Some(output::open_offsets::summary_block(&report))
 }
 
 pub(crate) fn write_filtered_tsv(

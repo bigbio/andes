@@ -94,7 +94,13 @@ impl RunStatistics {
         ptm_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         Self {
-            precursor_tolerance: format!("{:?}", params.precursor_tolerance),
+            precursor_tolerance: match &params.open_search {
+                Some(o) => format!(
+                    "open-search offset window {:+} … {:+} Da",
+                    o.delta_min, o.delta_max
+                ),
+                None => format!("{:?}", params.precursor_tolerance),
+            },
             precursor_calibration: format!("{:?}", params.precursor_cal_mode),
             fragment_tolerance: fmt_fragment_tolerance(matching_tolerance, pin_feature_tolerance),
             node_score_bin: fmt_tol(node_score_bin),
@@ -520,6 +526,7 @@ pub struct IdentificationSummary {
     pub by_run: Vec<RateRow>,
     pub ptm_counts: Vec<(String, usize)>,
     pub unmodified_psms: usize,
+    pub open_search: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -724,6 +731,7 @@ impl IdentificationSummary {
             by_run,
             ptm_counts,
             unmodified_psms,
+            open_search: None,
         }
     }
 
@@ -762,7 +770,7 @@ impl IdentificationSummary {
             s.push_str(&line(&format!("Protein groups (q ≤ {q})"), thousands(n)));
         }
         s.push_str(&line("Decoys at the cut", thousands(self.decoys_at_cut)));
-        if let Some((median, q1, q3)) = self.mass_error_ppm {
+        if let (Some((median, q1, q3)), None) = (self.mass_error_ppm, &self.open_search) {
             s.push_str(&line(
                 "Precursor mass error (raw)",
                 format!(
@@ -773,7 +781,7 @@ impl IdentificationSummary {
                 ),
             ));
         }
-        if let Some((median, q1, q3)) = self.mass_error_after_shift_ppm {
+        if let (Some((median, q1, q3)), None) = (self.mass_error_after_shift_ppm, &self.open_search) {
             s.push_str(&line(
                 "  after calibration shift",
                 format!(
@@ -837,37 +845,41 @@ impl IdentificationSummary {
                 f.site
             ));
         }
-        s.push_str(
-            "  Variable modifications on identified PSMs (unmodified: none of them; \
-             share of identified PSMs):\n",
-        );
-        let label_w = self
-            .ptm_counts
-            .iter()
-            .map(|(n, _)| n.chars().count())
-            .chain(std::iter::once("(unmodified)".len()))
-            .max()
-            .unwrap_or(12);
-        let count_w = thousands(
-            self.ptm_counts
+        if let Some(open) = &self.open_search {
+            s.push_str(open);
+        } else {
+            s.push_str(
+                "  Variable modifications on identified PSMs (unmodified: none of them; \
+                 share of identified PSMs):\n",
+            );
+            let label_w = self
+                .ptm_counts
                 .iter()
-                .map(|&(_, c)| c)
-                .chain(std::iter::once(self.unmodified_psms))
+                .map(|(n, _)| n.chars().count())
+                .chain(std::iter::once("(unmodified)".len()))
                 .max()
-                .unwrap_or(0),
-        )
-        .len();
-        let ptm_line = |name: &str, count: usize| {
-            format!(
-                "    {name:<label_w$} : {:>count_w$}  ({})\n",
-                thousands(count),
-                percent(count, linked)
+                .unwrap_or(12);
+            let count_w = thousands(
+                self.ptm_counts
+                    .iter()
+                    .map(|&(_, c)| c)
+                    .chain(std::iter::once(self.unmodified_psms))
+                    .max()
+                    .unwrap_or(0),
             )
-        };
-        for (name, count) in &self.ptm_counts {
-            s.push_str(&ptm_line(name, *count));
+            .len();
+            let ptm_line = |name: &str, count: usize| {
+                format!(
+                    "    {name:<label_w$} : {:>count_w$}  ({})\n",
+                    thousands(count),
+                    percent(count, linked)
+                )
+            };
+            for (name, count) in &self.ptm_counts {
+                s.push_str(&ptm_line(name, *count));
+            }
+            s.push_str(&ptm_line("(unmodified)", self.unmodified_psms));
         }
-        s.push_str(&ptm_line("(unmodified)", self.unmodified_psms));
         s.push_str("───────────────────────────────────────────────────────────────\n");
         s
     }

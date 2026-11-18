@@ -97,10 +97,9 @@ pub fn blank(src: &str, keep: Keep) -> String {
             i = end;
         } else if b[i] == b'\'' {
             let end = if b.get(i + 1) == Some(&b'\\') {
-                b[i + 2..]
-                    .iter()
-                    .position(|&c| c == b'\'')
-                    .map(|p| i + 2 + p + 1)
+                b.get(i + 3..)
+                    .and_then(|rest| rest.iter().position(|&c| c == b'\''))
+                    .map(|p| i + 3 + p + 1)
             } else {
                 let ch_len = src[i + 1..].chars().next().map_or(1, char::len_utf8);
                 (b.get(i + 1 + ch_len) == Some(&b'\'')).then_some(i + 1 + ch_len + 1)
@@ -221,6 +220,14 @@ mod tests {
         assert!(code.contains("let a") && code.contains('\n'));
         let strings = blank(src, Keep::Strings);
         assert!(strings.contains("\"x{\"") && !strings.contains("// }"));
+    }
+
+    #[test]
+    fn an_escaped_quote_char_ends_at_its_own_closing_quote() {
+        let src = "let q = ['\\'', 'x']; eprintln!(\"{}\", q[0]);";
+        let code = blank(src, Keep::Code);
+        assert!(!code.contains('\'') && !code.contains('x'));
+        assert_eq!(macro_calls(&code, "eprintln").len(), 1);
     }
 
     #[test]

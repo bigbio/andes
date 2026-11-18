@@ -34,11 +34,9 @@ were trained by the andes authors on retention times from publicly available
 reanalysed proteomics datasets and are distributed under the Apache License,
 Version 2.0, with andes. The andes-ms2 fragment-intensity model weights
 (`resources/predictors/andes_ms2.ams2`) were trained by the andes authors on
-annotated MS/MS spectra of publicly available proteomics datasets (the MsNet
-reanalysis collection of PRIDE and partner-repository projects; the benchmark
-accessions PXD070049, PXD001819, PXD007683, PXD007653, PXD005553, PXD002047,
-PXD053748, PXD064202, PXD014502 and PXD005411 were excluded) and are distributed
-under the Apache License, Version 2.0, with andes. The glyco MBR match-scoring
+annotated MS/MS spectra of publicly available, openly licensed proteomics
+datasets (none of them used to benchmark andes) and are distributed under the
+Apache License, Version 2.0, with andes. The glyco MBR match-scoring
 weights (`resources/quant/glyco_mbr_model.txt`) were trained by the andes authors
 on labels andes generates itself (`--glyco-mbr-match-train`) from its own
 benchmark runs, and are distributed under the Apache License, Version 2.0, with

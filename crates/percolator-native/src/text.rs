@@ -1,6 +1,6 @@
 use crate::budget::{Budget, Reservation};
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +64,47 @@ impl Texts {
         Ok(())
     }
 
+    pub(crate) fn is_spilled(&self) -> bool {
+        matches!(self.data, Data::Spill(..))
+    }
+
+    /// The texts of `rows`, in the order given. A spilled store is read in
+    /// one locked pass in file order through a buffered reader, instead of a
+    /// seek and a read per row.
+    pub(crate) fn get_many(&self, rows: &[usize]) -> Result<Vec<RowText>, String> {
+        let Data::Spill(path, file) = &self.data else {
+            return rows.iter().map(|&i| self.get(i)).collect();
+        };
+        let err = |e: std::io::Error| format!("read {}: {e}", path.display());
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_unstable_by_key(|&k| rows[k]);
+        let mut out: Vec<Option<RowText>> = (0..rows.len()).map(|_| None).collect();
+        let mut f = file
+            .lock()
+            .map_err(|_| "text spill file lock".to_string())?;
+        let mut r = BufReader::with_capacity(1 << 20, &mut *f);
+        let mut pos: Option<u64> = None;
+        let mut buf = Vec::new();
+        for &k in &order {
+            let i = rows[k];
+            let (a, b) = (self.offsets[i], self.offsets[i + 1]);
+            match pos {
+                Some(p) if a >= p => r.seek_relative((a - p) as i64).map_err(err)?,
+                _ => {
+                    r.seek(SeekFrom::Start(a)).map_err(err)?;
+                }
+            }
+            buf.resize((b - a) as usize, 0);
+            r.read_exact(&mut buf).map_err(err)?;
+            pos = Some(b);
+            out[k] = Some(split_record(&buf));
+        }
+        Ok(out
+            .into_iter()
+            .map(|t| t.expect("every row read"))
+            .collect())
+    }
+
     pub fn get(&self, i: usize) -> Result<RowText, String> {
         let (a, b) = (self.offsets[i], self.offsets[i + 1]);
         let bytes = match &self.data {
@@ -79,13 +120,17 @@ impl Texts {
                 buf
             }
         };
-        let text = String::from_utf8_lossy(&bytes);
-        let mut parts = text.splitn(3, '\t');
-        Ok(RowText {
-            psm_id: parts.next().unwrap_or("").to_string(),
-            peptide: parts.next().unwrap_or("").to_string(),
-            proteins: parts.next().unwrap_or("").to_string(),
-        })
+        Ok(split_record(&bytes))
+    }
+}
+
+fn split_record(bytes: &[u8]) -> RowText {
+    let text = String::from_utf8_lossy(bytes);
+    let mut parts = text.splitn(3, '\t');
+    RowText {
+        psm_id: parts.next().unwrap_or("").to_string(),
+        peptide: parts.next().unwrap_or("").to_string(),
+        proteins: parts.next().unwrap_or("").to_string(),
     }
 }
 

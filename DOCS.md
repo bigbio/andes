@@ -1206,6 +1206,17 @@ sets the crosslinker below the command line and the config file: the reagent by 
 checked against the reagent. Monolinks are variable modifications, by UNIMOD record or as
 `reagent:quencher`, e.g. `--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"`.
 
+Several crosslinkers are searched together as a `;`-separated list (`--xl "DSSO; DSBU"`), a
+YAML list under `search.xl`, or SDRF rows naming different reagents. Each linker is searched with
+its own candidates, each spectrum keeps the CSM with the best pair score across them (its
+`second` then also covers the other linkers' peptide pairs; a precursor without a charge keeps
+the charge of its best pair score, and its `second` covers every charge tried), and the q-values
+are computed
+over all of them; the CSM table then adds a `crosslinker` column. Every listed linker enlarges the
+target and decoy space: on the benchmark, DSSO data searched as `DSSO; DSBU` assigned 0–1.5 % of
+its accepted CSMs to DSBU and found 1.6 % fewer true CSMs (DSBU data as `DSBU; DSSO`: 2.5 %
+fewer), so list only the reagents in the samples.
+
 | Reagent (aliases) | Intact Da | MS-cleavable stubs | Default sites | Masses from |
 |---|---|---|---|---|
 | DSSO | 158.0038 | alkene 54.0106, thiol 85.9826, sulfenic 103.9932 | K, Protein N-term | UNIMOD |

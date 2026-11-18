@@ -149,6 +149,20 @@ Measured after the first release (against the main branch, 15,492 / 14,829):
 - **Minimum matched fragments per peptide** (2–6, xiFDR's boost filter) and a per-run boost
   over score, precursor error and pair kind: 16,164–16,446 and +0.9 % (fitted to each run's
   decoys); not adopted.
+- **Several crosslinkers in one search** (adopted as an option, `--xl "DSSO; DSBU"`). With one
+  linker the 11 runs give byte-identical results. A spectrum keeps the CSM with the best pair
+  score over the linkers, and its runner-up covers every linker's pairs. DSSO runs searched as
+  `DSSO; DSBU` put 12 of 804 accepted CSMs on DSBU on Beveridge DSSO and none on the other six,
+  and find 1.6 % fewer true CSMs (11,170 → 10,988) as the decoy space doubles; DSBU runs
+  searched as `DSBU; DSSO` put 2 of 2,389 on DSSO and find 2.5 % fewer (2,971 → 2,898). With
+  each linker's own runner-up only, the losses were 4 % and 11 %.
+- **MS1 monoisotope correction** (the glyco mode's envelope fit, run in crosslink mode):
+  16,809 / 16,008 against 16,797 / 15,912, about 1 % of precursors moved; with a 0..1 isotope
+  window instead of 0..2, 14,996 with the correction and 14,921 without, so 0..2 stays and
+  the correction stays off.
+- **Fragment coverage in the CSM score** (xiSEARCH's coverage terms: matched fragments of the
+  weaker peptide, raw or per residue): the ribosome runs gain up to 9 % while Clasen and part
+  of the Cas9 runs lose; three to seven runs go down at every weight, so not adopted.
 - **Separate FDR for half pairs** (one peptide by its doublet, the other by mass): the
   false share falls (DSBU 2.8 % → 2.2 %) but true CSMs at 1 % fall to 14,123, as the half-pair
   groups of smaller runs miss the 200-match floor (Beveridge DSBU 545 → 263).

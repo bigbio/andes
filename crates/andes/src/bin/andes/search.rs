@@ -337,7 +337,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut cli = cli;
     if let Some(x) = &cli.xl {
-        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), x) {
+        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0) {
             cli.db.variable_mods = Some(v);
         }
     }

@@ -21,7 +21,7 @@ pub struct SdrfSettings {
     pub variable_mods: Option<Vec<String>>,
     pub quant: Option<Quant>,
     pub dissociation: Option<ActivationMethod>,
-    pub xl: Option<String>,
+    pub xl: Vec<String>,
 }
 
 const DATA_FILE: &str = "comment[data file]";
@@ -131,10 +131,19 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     agree(&rows, LABEL, |r| {
         r.label.as_deref().map(label_kind).unwrap_or("").to_string()
     })?;
-    agree(&rows, XL, |r| r.xl.clone().unwrap_or_default())?;
-    if let Some(v) = &rows[0].xl {
-        andes_xl::spec::from_sdrf(v, model::unimod::bundled())
-            .map_err(|e| format!("`{XL}`: {e}"))?;
+    let mut linkers: Vec<String> = Vec::new();
+    for v in rows.iter().filter_map(|r| r.xl.clone()) {
+        if !linkers.contains(&v) {
+            andes_xl::spec::from_sdrf(&v, model::unimod::bundled())
+                .map_err(|e| format!("`{XL}`: {e}"))?;
+            linkers.push(v);
+        }
+    }
+    if !linkers.is_empty() && rows.iter().any(|r| r.xl.is_none()) {
+        return Err(format!(
+            "`{XL}` is set for some files and not others; split the SDRF into crosslinked and \
+             linear runs"
+        ));
     }
 
     let first = &rows[0];
@@ -175,7 +184,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         variable_mods,
         quant,
         dissociation: first.dissociation.as_deref().and_then(dissociation_of),
-        xl: first.xl.clone(),
+        xl: linkers,
     })
 }
 
@@ -616,6 +625,23 @@ impl ConfigKeys {
     }
 }
 
+/// Two crosslinker definitions that link the same way: equal once each end's residues are
+/// taken as a set (`TA=K,S` and `TA=S,K`).
+fn same_linker(
+    a: &andes_xl::crosslinker::Crosslinker,
+    b: &andes_xl::crosslinker::Crosslinker,
+) -> bool {
+    let canonical = |x: &andes_xl::crosslinker::Crosslinker| {
+        let mut x = x.clone();
+        for e in x.ends.iter_mut() {
+            e.residues.sort_unstable();
+            e.residues.dedup();
+        }
+        x
+    };
+    canonical(a) == canonical(b)
+}
+
 pub fn apply(
     s: &SdrfSettings,
     args: &mut crate::SearchArgs,
@@ -716,18 +742,33 @@ pub fn apply(
             }
         }
     }
-    if let Some(v) = &s.xl {
+    if !s.xl.is_empty() {
         if cli("xl") || cfg.xl {
             kept.push("xl");
         } else {
-            let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
-                .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
-            applied.push(format!(
-                "crosslink search --xl {} ({})",
-                x.name,
-                x.describe_sites()
-            ));
-            args.xl = Some(x);
+            let mut set: Vec<andes_xl::crosslinker::Crosslinker> = Vec::new();
+            for v in &s.xl {
+                let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+                    .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
+                match set.iter().find(|y| y.name == x.name) {
+                    // The same definition written differently (fields or sites in another
+                    // order).
+                    Some(y) if same_linker(y, &x) => continue,
+                    Some(_) => {
+                        return Err(format!(
+                            "--sdrf `{XL}`: {} appears with different settings in different rows",
+                            x.name
+                        ))
+                    }
+                    None => set.push(x),
+                }
+            }
+            let names: Vec<String> = set
+                .iter()
+                .map(|x| format!("{} ({})", x.name, x.describe_sites()))
+                .collect();
+            applied.push(format!("crosslink search --xl {}", names.join("; ")));
+            args.xl = Some(crate::cli::XlSet(set));
         }
     }
     args.sdrf_dissociation = s.dissociation;
@@ -982,32 +1023,41 @@ mod tests {
     ];
 
     #[test]
-    fn the_crosslinker_is_read_checked_and_must_agree() {
+    fn the_crosslinkers_are_read_checked_and_listed() {
         let row = |f: &'static str, x: &'static str| -> Vec<&'static str> {
             vec!["s", f, "label free sample", x]
         };
         let dsso = "NT=DSSO;AC=XLMOD:02126;CL=yes;TA=K,S,T,Y,nterm;MH=54.01;ML=85.98";
         let t = sdrf(HX, &[&row("a.raw", dsso), &row("b.raw", dsso)]);
         let s = parse(&t, Path::new(".")).unwrap();
-        assert_eq!(s.xl.as_deref(), Some(dsso));
+        assert_eq!(s.xl, vec![dsso.to_string()]);
         let t = sdrf(
             HX,
             &[&row("a.raw", dsso), &row("b.raw", "NT=DSS;AC=XLMOD:02001")],
         );
+        let s = parse(&t, Path::new(".")).unwrap();
+        assert_eq!(
+            s.xl,
+            vec![dsso.to_string(), "NT=DSS;AC=XLMOD:02001".to_string()]
+        );
+        let t = sdrf(HX, &[&row("a.raw", dsso), &row("b.raw", "not applicable")]);
         let e = parse(&t, Path::new(".")).unwrap_err();
-        assert!(e.contains("cross-linker") && e.contains("differs"), "{e}");
+        assert!(
+            e.contains("cross-linker") && e.contains("some files"),
+            "{e}"
+        );
         let t = sdrf(HX, &[&row("a.raw", "NT=DSS;CL=yes")]);
         let e = parse(&t, Path::new(".")).unwrap_err();
         assert!(e.contains("CL=yes but DSS is not MS-cleavable"), "{e}");
         let t = sdrf(HX, &[&row("a.raw", "not applicable")]);
-        assert_eq!(parse(&t, Path::new(".")).unwrap().xl, None);
+        assert!(parse(&t, Path::new(".")).unwrap().xl.is_empty());
     }
 
     #[test]
     fn the_sdrf_crosslinker_applies_below_the_command_line_and_the_config() {
         use clap::{CommandFactory, FromArgMatches};
         let s = SdrfSettings {
-            xl: Some("NT=DSBU;AC=XLMOD:02120;TA=K,nterm".into()),
+            xl: vec!["NT=DSBU;AC=XLMOD:02120;TA=K,nterm".into()],
             ..Default::default()
         };
         let run = |extra: &[&str], yaml: Option<&str>| -> crate::SearchArgs {
@@ -1033,12 +1083,52 @@ mod tests {
             apply(&s, &mut a, &m, keys).unwrap();
             a
         };
-        let x = run(&[], None).xl.unwrap();
+        let x = run(&[], None).xl.unwrap().0.remove(0);
         assert_eq!(x.name, "DSBU");
         assert_eq!(x.describe_sites(), "K, Protein N-term");
-        assert_eq!(run(&["--xl", "DSS"], None).xl.unwrap().name, "DSS");
+        assert_eq!(
+            run(&["--xl", "DSS"], None).xl.unwrap().0.remove(0).name,
+            "DSS"
+        );
         let cfg = Some("search:\n  xl: DSSO\n");
-        assert_eq!(run(&[], cfg).xl.unwrap().name, "DSSO");
-        assert_eq!(run(&["--xl", "DSS"], cfg).xl.unwrap().name, "DSS");
+        assert_eq!(run(&[], cfg).xl.unwrap().0.remove(0).name, "DSSO");
+        assert_eq!(
+            run(&["--xl", "DSS"], cfg).xl.unwrap().0.remove(0).name,
+            "DSS"
+        );
+    }
+
+    #[test]
+    fn equal_sdrf_crosslinkers_written_differently_are_one_linker() {
+        use clap::{CommandFactory, FromArgMatches};
+        let apply_xl = |cells: &[&str]| -> Result<Vec<String>, String> {
+            let s = SdrfSettings {
+                xl: cells.iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            };
+            let base = [
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ];
+            let m = crate::TopCli::command().try_get_matches_from(base).unwrap();
+            let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
+            apply(&s, &mut a, &m, ConfigKeys::default())?;
+            Ok(a.xl.unwrap().0.into_iter().map(|x| x.name).collect())
+        };
+        assert_eq!(
+            apply_xl(&["NT=DSSO;AC=XLMOD:02126", "AC=XLMOD:02126;NT=DSSO"]).unwrap(),
+            vec!["DSSO"]
+        );
+        assert_eq!(
+            apply_xl(&["NT=DSSO;TA=K,S", "NT=DSSO;TA=S,K"]).unwrap(),
+            vec!["DSSO"]
+        );
+        let e = apply_xl(&["NT=DSSO;TA=K", "NT=DSSO;TA=K,S"]).unwrap_err();
+        assert!(e.contains("different settings"), "{e}");
     }
 }

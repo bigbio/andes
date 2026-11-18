@@ -270,10 +270,41 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
         .map_err(|e| e.to_string())
 }
 
-pub(crate) fn parse_xl(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
+#[derive(Debug, Clone)]
+pub(crate) struct XlSet(pub(crate) Vec<andes_xl::crosslinker::Crosslinker>);
+
+impl XlSet {
+    /// One or more crosslinkers with distinct names; `key` names the option in an error.
+    pub(crate) fn new(
+        key: &str,
+        linkers: Vec<andes_xl::crosslinker::Crosslinker>,
+    ) -> Result<Self, String> {
+        if linkers.is_empty() {
+            return Err(format!("{key}: no crosslinker"));
+        }
+        for (i, a) in linkers.iter().enumerate() {
+            if linkers[..i].iter().any(|b| b.name == a.name) {
+                return Err(format!("{key}: {} is given twice", a.name));
+            }
+        }
+        Ok(Self(linkers))
+    }
+}
+
+pub(crate) fn parse_xl_one(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
     andes_xl::spec::XlDecl::parse(s)
         .and_then(|d| d.resolve(model::unimod::bundled()))
         .map_err(|e| e.to_string())
+}
+
+pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
+    let linkers = s
+        .split(';')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(parse_xl_one)
+        .collect::<Result<Vec<_>, _>>()?;
+    XlSet::new("--xl", linkers)
 }
 
 /// The protein database options shared by the search, `andes inference` and
@@ -640,7 +671,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) glyco: bool,
 
-    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO" (experimental)
+    /// Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO"; several as "DSSO; DSBU" (experimental)
     ///
     /// The linker is written like a modification: a reagent name (DSSO, DSBU or BuUrBu,
     /// DSBSO, CDI; non-cleavable DSS or BS3, BS2G or DSG, EGS, DST, DSP or DTSSP, PhoX or
@@ -674,7 +705,7 @@ pub(crate) struct SearchArgs {
     /// doublet summary of every spectrum (<base>.xl.doublets.tsv).
     #[arg(long, value_name = "LINKER", value_parser = parse_xl, hide_short_help = true,
           help_heading = H_MODES, conflicts_with = "glyco")]
-    pub(crate) xl: Option<andes_xl::crosslinker::Crosslinker>,
+    pub(crate) xl: Option<XlSet>,
 
     /// With --xl: also run the exhaustive pair search (no doublet gate) on the first N spectra
     #[arg(

@@ -14,7 +14,7 @@ look for each precursor's fragment chromatograms instead.
 ```mermaid
 flowchart TD
     A["Each MS2 scan: candidates are the peptides<br/>whose m/z lies in its isolation window"] --> B["MS1 gate: the monoisotopic m/z has a<br/>survey peak within 5 ppm, nearest scan ±1"]
-    B --> C["Fragment-ion retrieval and andes scoring<br/>top 10 rows per scan"]
+    B --> C["Fragment-ion retrieval and andes scoring<br/>top 50 rows per scan, trimmed to 10 by<br/>score + predicted-MS2 angle"]
     C --> D["16 DIA columns from the neighbouring cycles<br/>of the same window: fragment and MS1<br/>co-elution, summed apex, support"]
     D --> E["Percolator, --trainFDR 0.05"]
     E --> F["Per-run RT refinement on the<br/>first pass's confident targets"]
@@ -31,6 +31,10 @@ flowchart TD
   the same window, together with the precursor's MS1 trace and isotope pattern; the summed-apex
   columns count fragments present in at least two of three adjacent cycles, which is what
   separates weak true precursors that span only 1–3 scans.
+- **Re-ranking.** With `--predict ms2` the search keeps 50 rows per scan, and after prediction each
+  scan keeps its `--top-n` (10) rows by z-scored RawScore plus z-scored andes-ms2 spectral angle.
+  In 45% of the scans where a true precursor ranked below first, the winner was a decoy, and the
+  true peptide's predicted-MS2 angle was usually higher.
 - **Rescoring.** A DIA PIN has about ten rows per scan and few PSMs at 1%, so Percolator trains at
   `--trainFDR 0.05`. A gradient-boosted model of each run's predicted-RT residual, fitted out of
   fold on the first pass's targets at q ≤ 1%, adds `dia_rt_refined_err`, and Percolator runs again.
@@ -43,7 +47,7 @@ not implemented.
 ## What it changes
 
 On the ProteoBench Astral entrapment set (two 15-min, 50 ng runs, 300 windows of 2 Th), andes
-reaches 87% / 79% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
+reaches 88% / 83% of DIA-NN's precursors at an entrapment true FDP of 1%, ahead of OpenDIA. See
 the [DIA benchmark](../benchmarks/dia.md).
 
 ```bash

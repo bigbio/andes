@@ -237,6 +237,27 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
         read_pep_column(&qdir_ex.join("psms.parquet")).len(),
         spec_ids.len() - 1
     );
+    let qdir_unscored = tmp.path().join("excluded_unscored.idparquet");
+    output::write_qpx(
+        &qdir_unscored,
+        &spectra,
+        &queues,
+        &candidates,
+        &params,
+        &idx,
+        &Tolerance::Da(0.5),
+        "test_run",
+        &["test.mgf".to_string()],
+        &[spectra.len()],
+        None,
+        None,
+        &excluded,
+        None,
+    )
+    .unwrap();
+    let unscored = read_pep_column(&qdir_unscored.join("psms.parquet"));
+    assert_eq!(unscored.len(), spec_ids.len() - 1);
+    assert!(unscored.iter().all(|p| p.is_none()));
 
     let qdir_off = tmp.path().join("plain.idparquet");
     output::write_qpx(

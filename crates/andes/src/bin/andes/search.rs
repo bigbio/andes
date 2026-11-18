@@ -883,6 +883,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
     params.top_n_psms_per_spectrum = cli.top_n;
+    if cli.dia && cli.predict.contains(&crate::cli::PredictFeature::Ms2) {
+        params.top_n_psms_per_spectrum = cli.top_n.max(crate::dia::RERANK_POOL);
+    }
     params.enzyme = search_enzyme;
     params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -2452,6 +2455,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
+    let mut rerank_dropped = std::collections::HashSet::new();
+    if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
+        rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+    }
     if cli.dia {
         crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
     }
@@ -2961,6 +2968,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
+    knockoff_rows.extend(rerank_dropped);
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()
@@ -2997,17 +3005,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let omitted_psms = match (&quant, rescore_map.as_ref()) {
-        (Some(_), Some(map)) => output::omitted_psm_rows(
+    let omitted_psms = match &quant {
+        Some(_) => output::omitted_psm_rows(
             &spectra,
             &queues,
             &pin_candidates,
-            Some(map),
+            rescore_map.as_ref(),
             rescore_decoys.as_ref(),
             &knockoff_rows,
         )
         .map_err(|e| format!("quant: {e}"))?,
-        _ => std::collections::HashSet::new(),
+        None => std::collections::HashSet::new(),
     };
     if let Some(ref mut map) = rescore_map {
         map.retain(|id, _| !knockoff_rows.contains(id));

@@ -39,9 +39,15 @@ pub fn omitted_psm_rows(
     excluded: &HashSet<String>,
 ) -> std::io::Result<HashSet<String>> {
     let Some(m) = rescore else {
-        return Ok(HashSet::new());
+        return Ok(excluded.clone());
     };
-    let mut omitted = audit_rescore_join(&rescore_rows(spectra, queues, candidates), m, rescore_decoys)?;
+    let mut rows = rescore_rows(spectra, queues, candidates);
+    rows.retain(|r| {
+        !excluded.contains(&r.spec_id)
+            || m.contains_key(&r.spec_id)
+            || rescore_decoys.is_some_and(|d| d.contains(&r.spec_id))
+    });
+    let mut omitted = audit_rescore_join(&rows, m, rescore_decoys)?;
     omitted.extend(excluded.iter().cloned());
     Ok(omitted)
 }
@@ -478,15 +484,11 @@ fn build_psms_batch(
             let adj_observed_mz = precursor_mz - ISOTOPE * (psm.isotope_offset as f64) / z;
             let scan_num = spec.scan.unwrap_or(0);
 
-            let matched = if let Some(m) = rescore {
-                let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
-                if competed_away.contains(&spec_id) {
-                    continue;
-                }
-                m.get(&spec_id)
-            } else {
-                None
-            };
+            let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+            if competed_away.contains(&spec_id) {
+                continue;
+            }
+            let matched = rescore.and_then(|m| m.get(&spec_id));
 
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));

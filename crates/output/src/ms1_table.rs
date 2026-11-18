@@ -7,6 +7,7 @@ use arrow::array::{Array, ArrayRef, Float32Array, Float64Array, ListArray, Strin
 use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
+use model::stats::{median_mut, Even};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -355,8 +356,7 @@ pub fn read_ms1_scan_spacing(path: &Path) -> Result<Option<f64>, String> {
     if gaps.is_empty() {
         return Ok(None);
     }
-    gaps.sort_by(f64::total_cmp);
-    Ok(Some(gaps[gaps.len() / 2]))
+    Ok(median_mut(&mut gaps, Even::Upper))
 }
 
 pub fn read_ms1_table(path: &Path) -> Result<Ms1RunIndex, String> {

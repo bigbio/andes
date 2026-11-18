@@ -1,5 +1,6 @@
 use model::isotope::glycopeptide_isotope_envelope;
 use model::mass::{ISOTOPE, PROTON};
+use model::stats::{median_f32_mut, Even};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MonoParams {
@@ -151,18 +152,7 @@ pub fn envelope_fit(
 
 pub fn median_nonzero_intensity(ms1: &[(f64, f32)]) -> Option<f32> {
     let mut nz: Vec<f32> = ms1.iter().map(|&(_, i)| i).filter(|&i| i > 0.0).collect();
-    if nz.is_empty() {
-        return None;
-    }
-    let mid = nz.len() / 2;
-    let (_, m, _) = nz.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-    let m = *m;
-    if nz.len() % 2 == 1 {
-        Some(m)
-    } else {
-        let (_, lo, _) = nz.select_nth_unstable_by(mid - 1, |a, b| a.total_cmp(b));
-        Some(0.5 * (*lo + m))
-    }
+    median_f32_mut(&mut nz, Even::Mean)
 }
 
 pub fn correct_precursor(

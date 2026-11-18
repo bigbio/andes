@@ -59,7 +59,7 @@ pub mod constants {
     pub const TIGHTENED_WINDOW_FLOOR_PPM: f64 = 2.0;
     pub const TIGHTENED_WINDOW_MARGIN_PPM: f64 = 0.5;
     pub const TIGHTENED_WINDOW_SIGMA_MULTIPLIER: f64 = 3.0;
-    pub const MAD_TO_SIGMA_SCALE: f64 = 1.4826;
+    pub const MAD_TO_SIGMA_SCALE: f64 = model::stats::MAD_TO_SD;
 }
 
 pub fn median_absolute_deviation(values: &[f64], center: f64) -> f64 {

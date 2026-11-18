@@ -1,4 +1,5 @@
 use crate::align::{align, AlignParams, Alignment, Observation};
+use model::stats::{median_f32_mut, Even};
 
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let Some(max_id) = rows.iter().map(|r| r.0).max() else {
@@ -206,19 +207,6 @@ impl DonorRuns {
 
 const NO_SLOT: u32 = u32::MAX;
 
-fn median_f32(v: &mut [f32]) -> Option<f32> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(f32::total_cmp);
-    let n = v.len();
-    Some(if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    })
-}
-
 #[derive(Debug, Clone)]
 pub struct LibraryBuilder {
     n_runs: usize,
@@ -363,7 +351,7 @@ impl LibraryBuilder {
                     faims_cv = Some(cv);
                 }
             }
-            let ion_mobility = median_f32(&mut d.k0s);
+            let ion_mobility = median_f32_mut(&mut d.k0s, Even::Mean);
             let b = d.best.expect("an entry has a donor PSM");
             entries.push(LibraryEntry {
                 precursor: id,
@@ -1005,7 +993,7 @@ mod tests {
                 .iter()
                 .filter_map(|p| p.ion_mobility.filter(|v| v.is_finite()))
                 .collect();
-            let ion_mobility = median_f32(&mut k0s);
+            let ion_mobility = median_f32_mut(&mut k0s, Even::Mean);
             entries.push(LibraryEntry {
                 precursor: id,
                 identity_decoy,

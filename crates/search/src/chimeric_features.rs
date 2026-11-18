@@ -1,5 +1,6 @@
 use model::isotope::averagine_isotope_envelope;
 use model::mass::ISOTOPE;
+use model::stats::{median_mut, Even};
 
 pub(crate) fn precursor_isotope_match(
     ms1_peaks: &[(f64, f32)],
@@ -72,16 +73,7 @@ fn median_nonzero_intensity(ms1_peaks: &[(f64, f32)]) -> Option<f64> {
         .map(|&(_, i)| i as f64)
         .filter(|&i| i > 0.0)
         .collect();
-    if nz.is_empty() {
-        return None;
-    }
-    nz.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = nz.len();
-    Some(if n % 2 == 1 {
-        nz[n / 2]
-    } else {
-        0.5 * (nz[n / 2 - 1] + nz[n / 2])
-    })
+    median_mut(&mut nz, Even::Mean)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use model::mass::ISOTOPE;
+use model::stats::{median_mut, Even, MAD_TO_SD};
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
@@ -1007,9 +1008,8 @@ fn robust_sigma(y: &[f64], floor: f64) -> f64 {
         return floor.max(1.0);
     }
     let mut d: Vec<f64> = y.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
-    let mid = d.len() / 2;
-    let med = *d.select_nth_unstable_by(mid, f64::total_cmp).1;
-    (1.4826 * med / std::f64::consts::SQRT_2)
+    let med = median_mut(&mut d, Even::Upper).unwrap_or(0.0);
+    (MAD_TO_SD * med / std::f64::consts::SQRT_2)
         .max(floor)
         .max(1e-9)
 }
@@ -1044,8 +1044,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .clone()
         .map(|i| ms1.detection_limit(i) as f64)
         .collect();
-    let mid = limits.len() / 2;
-    let limit = *limits.select_nth_unstable_by(mid, f64::total_cmp).1;
+    let limit = median_mut(&mut limits, Even::Upper).unwrap_or(f64::NAN);
     let away: Vec<bool> = rt
         .iter()
         .map(|&t| (t - probe.t_hat).abs() > 3.0 * s.max(w_max) + max_shift)
@@ -1693,29 +1692,14 @@ pub fn learn_rt_shifts(pairs: &[(usize, f64)], n_channels: usize, min_pairs: usi
             if v.len() < min_pairs.max(1) {
                 return 0.0;
             }
-            v.sort_by(f64::total_cmp);
-            let n = v.len();
-            if n % 2 == 1 {
-                v[n / 2]
-            } else {
-                (v[n / 2 - 1] + v[n / 2]) / 2.0
-            }
+            median_mut(&mut v, Even::Mean).unwrap_or(0.0)
         })
         .collect()
 }
 
 pub fn median(mut v: Vec<f64>) -> f64 {
     v.retain(|x| x.is_finite());
-    if v.is_empty() {
-        return f64::NAN;
-    }
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
+    median_mut(&mut v, Even::Mean).unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]

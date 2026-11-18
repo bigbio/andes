@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use model::mass::{ISOTOPE, PROTON};
 use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
+use model::stats::{median_f32_mut, Even};
 use model::{IsomerClass, Tolerance};
 use output::feature_parquet::{FeatureRecord, MbrColumns};
 use output::ms2_table::{write_ms2_table, Ms2Table};
@@ -1167,12 +1168,7 @@ fn peptide_ion_current(peaks: &[(f64, f32)], plex: Plex) -> f32 {
 }
 
 fn median_f32(v: &[f32]) -> f32 {
-    if v.is_empty() {
-        return f32::NAN;
-    }
-    let mut v = v.to_vec();
-    let mid = v.len() / 2;
-    *v.select_nth_unstable_by(mid, f32::total_cmp).1
+    median_f32_mut(&mut v.to_vec(), Even::Upper).unwrap_or(f32::NAN)
 }
 
 type Quantified = (usize, Option<FeatureQuant>, Option<FeatureQuant>);

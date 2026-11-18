@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use model::stats::{median_mut, Even};
+
 use crate::acquisition::Acquisition;
 use model::{InstrumentType, Spectrum};
 use onnx_infer::predictors::calibration::RtCalibration;
@@ -788,14 +790,7 @@ fn impute_median(col: &mut [f64], miss: &[f64]) {
         .filter(|(v, m)| v.is_finite() && **m == 0.0)
         .map(|(v, _)| *v)
         .collect();
-    ok.sort_by(f64::total_cmp);
-    let med = if ok.is_empty() {
-        0.0
-    } else if ok.len() % 2 == 1 {
-        ok[ok.len() / 2]
-    } else {
-        0.5 * (ok[ok.len() / 2 - 1] + ok[ok.len() / 2])
-    };
+    let med = median_mut(&mut ok, Even::Mean).unwrap_or(0.0);
     for (v, m) in col.iter_mut().zip(miss) {
         if !v.is_finite() || *m != 0.0 {
             *v = med;

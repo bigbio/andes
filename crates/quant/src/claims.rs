@@ -1,3 +1,5 @@
+use model::stats::quantile_sorted;
+
 pub const SEARCH_PPM: f64 = 20.0;
 pub const SEARCH_S: f64 = 60.0;
 pub const MIN_PAIRS: usize = 30;
@@ -45,18 +47,12 @@ impl Claim {
     }
 }
 
-fn quantile(v: &[f64], q: f64) -> f64 {
-    let pos = q * (v.len() - 1) as f64;
-    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-    v[lo] + (v[hi] - v[lo]) * (pos - lo as f64)
-}
-
 fn robust_sd(x: &mut [f64], clip: f64) -> f64 {
     x.sort_by(f64::total_cmp);
-    let median = quantile(x, 0.5);
+    let median = quantile_sorted(x, 0.5, false);
     let mut dev: Vec<f64> = x.iter().map(|v| (v - median).abs()).collect();
     dev.sort_by(f64::total_cmp);
-    let v = quantile(&dev, ONE_SD_QUANTILE);
+    let v = quantile_sorted(&dev, ONE_SD_QUANTILE, false);
     if v > 0.0 {
         return v;
     }

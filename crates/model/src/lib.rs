@@ -14,6 +14,7 @@ pub mod protein;
 pub mod protocol;
 pub mod scan;
 pub mod spectrum;
+pub mod stats;
 pub mod tolerance;
 pub mod unimod;
 pub mod xl_reagents;

@@ -1,3 +1,4 @@
+use model::stats::{median_mad, Even, MAD_TO_SD};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TofCentroid {
     pub tof: f64,
@@ -507,15 +508,6 @@ pub(crate) fn offset_curve(
     (!knots.is_empty()).then_some(OffsetCurve { knots })
 }
 
-fn median(v: &mut [f64]) -> Option<f64> {
-    if v.is_empty() {
-        return None;
-    }
-    let mid = v.len() / 2;
-    let (_, m, _) = v.select_nth_unstable_by(mid, f64::total_cmp);
-    Some(*m)
-}
-
 fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
@@ -554,11 +546,8 @@ pub(crate) struct CalibrationFit {
 }
 
 fn residual_stats(ppm: &[f64]) -> (f64, f64) {
-    let mut v = ppm.to_vec();
-    let med = median(&mut v).unwrap_or(0.0);
-    let mut dev: Vec<f64> = ppm.iter().map(|r| (r - med).abs()).collect();
-    let mad = median(&mut dev).unwrap_or(0.0);
-    (med, 1.4826 * mad)
+    let (med, mad) = median_mad(ppm, Even::Upper).unwrap_or((0.0, 0.0));
+    (med, MAD_TO_SD * mad)
 }
 
 pub(crate) fn fit_calibration(

@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::ms2::Fragment;
+use model::stats::{finite_vec, quantile_sorted, MAD_TO_SD};
 use model::Tolerance;
 
 pub const DEFAULT_WRONG_LOG2: f64 = 0.5;
@@ -16,22 +17,10 @@ pub const MIN_VALUE_ROWS: usize = 100;
 const VALUE_L2: f64 = 3.0;
 pub const LEAK_BINS: usize = 5;
 
-const ROBUST_SIGMA: f64 = 1.4826;
-
-pub fn quantile(sorted: &[f64], q: f64) -> f64 {
-    if sorted.is_empty() {
-        return f64::NAN;
-    }
-    let pos = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-}
-
 pub fn median_finite(v: &[f64]) -> f64 {
-    let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    let mut s = finite_vec(v);
     s.sort_by(f64::total_cmp);
-    quantile(&s, 0.5)
+    quantile_sorted(&s, 0.5, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,10 +40,11 @@ impl PpmWindow {
             return None;
         }
         e.sort_by(f64::total_cmp);
-        let centre = quantile(&e, 0.5);
+        let centre = quantile_sorted(&e, 0.5, true);
         let mut dev: Vec<f64> = e.iter().map(|x| (x - centre).abs()).collect();
         dev.sort_by(f64::total_cmp);
-        let hw = (3.0 * ROBUST_SIGMA * quantile(&dev, 0.5)).clamp(PPM_BOUNDS.0, PPM_BOUNDS.1);
+        let hw =
+            (3.0 * MAD_TO_SD * quantile_sorted(&dev, 0.5, true)).clamp(PPM_BOUNDS.0, PPM_BOUNDS.1);
         Some(Self {
             centre,
             half_width: hw,
@@ -87,7 +77,10 @@ pub fn learn_rt_multiplier(z: &[f64]) -> (f64, bool) {
         return (FALLBACK_RT_K, false);
     }
     a.sort_by(f64::total_cmp);
-    ((3.0 * ROBUST_SIGMA * quantile(&a, 0.5)).max(1.0), true)
+    (
+        (3.0 * MAD_TO_SD * quantile_sorted(&a, 0.5, true)).max(1.0),
+        true,
+    )
 }
 
 pub fn log2_deviation(a: &[f32], b: &[f32]) -> Option<f64> {
@@ -186,7 +179,7 @@ impl RunProfile {
             };
             let mut e: Vec<f64> = rows[lo..hi].iter().map(|r| r.1).collect();
             e.sort_by(f64::total_cmp);
-            p99.push(quantile(&e, 0.99));
+            p99.push(quantile_sorted(&e, 0.99, true));
             if b + 1 < LEAK_BINS {
                 edges.push(rows[hi].0);
             }

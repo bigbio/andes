@@ -1,3 +1,5 @@
+use model::stats::{median_mad_mut, median_mut, Even, MAD_TO_SD};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Observation {
     pub precursor: u32,
@@ -940,11 +942,8 @@ fn residual_width(pairs: &[(f64, f64)], floor: f64) -> Vec<(f64, f64)> {
             xs.extend(pairs[b.clone()].iter().map(|q| q.0));
             res.extend(pairs[b].iter().map(|q| q.1));
             let x = median_in_place(&mut xs);
-            let med = median_in_place(&mut res);
-            for e in res.iter_mut() {
-                *e = (*e - med).abs();
-            }
-            (x, 1.4826 * median_in_place(&mut res))
+            let mad = median_mad_mut(&mut res, Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
+            (x, MAD_TO_SD * mad)
         })
         .collect();
     let raw: Vec<f64> = knots.iter().map(|k| k.1).collect();
@@ -959,16 +958,7 @@ fn residual_width(pairs: &[(f64, f64)], floor: f64) -> Vec<(f64, f64)> {
 }
 
 fn median_in_place(v: &mut [f64]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    v.sort_by(f64::total_cmp);
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    }
+    median_mut(v, Even::Mean).unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]

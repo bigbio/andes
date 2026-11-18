@@ -1,4 +1,33 @@
+//! Every `ANDES_*` environment variable the code reads must be a test-harness variable
+//! listed in [`TEST_HARNESS_VARS`]; the policy is in the `cli-flags-not-env-vars` skill
+//! (`.claude/skills/cli-flags-not-env-vars/SKILL.md`).
+
 use std::collections::BTreeSet;
+
+/// The test-harness variables: each selects an optional fixture at `cargo test` time and is
+/// never read by the shipped binary. Paired with the file that reads it.
+const TEST_HARNESS_VARS: &[(&str, &str)] = &[
+    ("ANDES_GBDT_DIR", "crates/scoring/tests/gbdt_bench.rs"),
+    ("ANDES_GLYCO_GDB", "crates/glyco/src/glycan_first.rs"),
+    (
+        "ANDES_GLYCO_MGF",
+        "crates/glyco/tests/glycan_first_mouse.rs",
+    ),
+    ("ANDES_TEST_D", "crates/input/tests/timstof_d_loads.rs"),
+    (
+        "ANDES_TEST_PERCOLATOR_BIN",
+        "crates/output/tests/percolator_integration.rs",
+    ),
+    ("ANDES_TEST_RAW", "crates/input/tests/thermo_raw.rs"),
+    (
+        "ANDES_TRAIN_BENCH",
+        "crates/model-train/tests/yield_nonregression.rs",
+    ),
+    (
+        "ANDES_V1_STORE",
+        "crates/model-train/tests/partition_parity.rs",
+    ),
+];
 
 fn vars_in_sources() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -49,47 +78,37 @@ fn collect(dir: &std::path::Path, out: &mut BTreeSet<String>) {
 }
 
 #[test]
-fn every_env_var_is_documented() {
-    let registry = include_str!("../../../docs/ENV_VARS.md");
+fn every_env_var_is_a_listed_test_harness_variable() {
     let found = vars_in_sources();
     assert!(
         !found.is_empty(),
         "scan found no variables at all — the scanner is broken, not the code"
     );
-
-    let undocumented: Vec<&String> = found
+    let listed: BTreeSet<&str> = TEST_HARNESS_VARS.iter().map(|(v, _)| *v).collect();
+    let unlisted: Vec<&String> = found
         .iter()
-        .filter(|v| !registry.contains(&format!("`{v}`")))
+        .filter(|v| !listed.contains(v.as_str()))
         .collect();
-
     assert!(
-        undocumented.is_empty(),
-        "these environment variables are read by the engine but absent from \
-         docs/ENV_VARS.md: {undocumented:?}\n\
-         Add a row with its gating form, location and purpose. If the variable gates a \
-         CORRECTION that is off by default, say so explicitly and say why it has not \
-         been made the default — that decision is the whole point of the registry."
+        unlisted.is_empty(),
+        "these environment variables are read by the code but are not test-harness \
+         variables in TEST_HARNESS_VARS: {unlisted:?}\n\
+         A setting that changes a result must be a typed CLI flag (see the \
+         cli-flags-not-env-vars skill). Only a variable that selects a test fixture may be \
+         added to the list."
     );
 }
 
 #[test]
-fn registry_has_no_stale_entries() {
-    let registry = include_str!("../../../docs/ENV_VARS.md");
+fn test_harness_list_has_no_stale_entries() {
     let found = vars_in_sources();
-    let mut stale = Vec::new();
-    for line in registry.lines() {
-        if !line.starts_with("| `ANDES_") {
-            continue;
-        }
-        if let Some(name) = line.split('`').nth(1).filter(|n| n.starts_with("ANDES_")) {
-            if !found.contains(name) {
-                stale.push(name.to_string());
-            }
-        }
-    }
+    let stale: Vec<&str> = TEST_HARNESS_VARS
+        .iter()
+        .map(|(v, _)| *v)
+        .filter(|v| !found.contains(*v))
+        .collect();
     assert!(
         stale.is_empty(),
-        "docs/ENV_VARS.md lists variables the code no longer reads: {stale:?} — \
-         remove them so the registry stays trustworthy"
+        "TEST_HARNESS_VARS lists variables the code no longer reads: {stale:?} — remove them"
     );
 }

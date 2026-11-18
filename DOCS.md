@@ -163,8 +163,8 @@ its choice; `--fragment-index off` scores every candidate in each precursor wind
 | `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
-No environment variable changes a search result; the binary reads none. The test-harness
-variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
+No environment variable changes a search result; the binary reads none. Every setting is a
+command-line flag.
 
 ---
 

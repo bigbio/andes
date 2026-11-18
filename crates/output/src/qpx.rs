@@ -41,7 +41,13 @@ pub fn omitted_psm_rows(
     let Some(m) = rescore else {
         return Ok(HashSet::new());
     };
-    let mut omitted = audit_rescore_join(&rescore_rows(spectra, queues, candidates), m, rescore_decoys)?;
+    let mut rows = rescore_rows(spectra, queues, candidates);
+    rows.retain(|r| {
+        !excluded.contains(&r.spec_id)
+            || m.contains_key(&r.spec_id)
+            || rescore_decoys.is_some_and(|d| d.contains(&r.spec_id))
+    });
+    let mut omitted = audit_rescore_join(&rows, m, rescore_decoys)?;
     omitted.extend(excluded.iter().cloned());
     Ok(omitted)
 }

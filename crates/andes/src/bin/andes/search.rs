@@ -2404,8 +2404,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
+    let mut rerank_dropped = std::collections::HashSet::new();
     if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
-        crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+        rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
     }
     if cli.dia {
         crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
@@ -2916,6 +2917,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
     }
 
+    knockoff_rows.extend(rerank_dropped);
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()

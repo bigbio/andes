@@ -42,7 +42,19 @@ pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
 pub(crate) const RERANK_POOL: u32 = 50;
 const RERANK_FEATURE: &str = "andesms2_spectral_angle";
 
-pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
+fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {
+    let p: Vec<&str> = spec_id.rsplitn(4, '_').collect();
+    if p.len() == 4 && p[2] == scan {
+        p[3]
+    } else {
+        spec_id.rsplitn(3, '_').nth(2).unwrap_or(spec_id)
+    }
+}
+
+pub(crate) fn rerank_pin(
+    pin: &Path,
+    keep: usize,
+) -> Result<std::collections::HashSet<String>, String> {
     let t0 = Instant::now();
     let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = text.lines();
@@ -52,7 +64,7 @@ pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
     let (Some(c_scan), Some(c_raw), Some(c_ms2)) =
         (at("ScanNr"), at("RawScore"), at(RERANK_FEATURE))
     else {
-        return Ok(false);
+        return Ok(Default::default());
     };
     let need = c_scan.max(c_raw).max(c_ms2) + 1;
     let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
@@ -66,7 +78,7 @@ pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
             return Err(format!("{}: short row while re-ranking", pin.display()));
         }
         let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
-        file.push(x[0].split('/').next().unwrap_or(""));
+        file.push(spectrum_key(x[0], x[c_scan]));
         scan.push(x[c_scan]);
         raw.push(r.unwrap_or(f64::NAN));
         ms2.push(m.unwrap_or(f64::NAN));
@@ -109,6 +121,7 @@ pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
         i = j;
     }
     let kept = keep_row.iter().filter(|k| **k).count();
+    let mut dropped = std::collections::HashSet::with_capacity(rows.len() - kept);
     let mut out = String::with_capacity(text.len());
     out.push_str(header);
     out.push('\n');
@@ -116,6 +129,8 @@ pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
         if *k {
             out.push_str(l);
             out.push('\n');
+        } else {
+            dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
         }
     }
     std::fs::write(pin, out).map_err(|e| format!("{}: {e}", pin.display()))?;
@@ -124,7 +139,7 @@ pub(crate) fn rerank_pin(pin: &Path, keep: usize) -> Result<bool, String> {
         rows.len(),
         t0.elapsed().as_secs_f64()
     );
-    Ok(true)
+    Ok(dropped)
 }
 
 pub(crate) fn add_to_pin(
@@ -772,23 +787,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = dir.path().join("x.pin");
         let rows = [
-            ("r/1/a", 1, 10.0, 0.1),
-            ("r/1/b", 1, 9.0, 0.9),
-            ("r/1/c", 1, 8.0, 0.2),
-            ("r/2/d", 2, 1.0, 0.1),
+            ("r/c=1 scan=1_1_1_0", 1, 10.0, 0.1),
+            ("r/c=1 scan=1_1_2_1", 1, 9.0, 0.9),
+            ("r/c=1 scan=1_1_3_2", 1, 8.0, 0.2),
+            ("r/c=2 scan=1_1_1_0", 1, 1.0, 0.1),
+            ("r/c=2 scan=1_1_2_1", 1, 0.5, 0.1),
+            ("r/c=1 scan=2_2_1", 2, 1.0, 0.1),
         ];
         let mut s = String::from("SpecId\tLabel\tScanNr\tRawScore\tandesms2_spectral_angle\n");
         for (id, scan, raw, ms2) in rows {
             s.push_str(&format!("{id}\t1\t{scan}\t{raw}\t{ms2}\n"));
         }
         std::fs::write(&pin, s).unwrap();
-        assert!(rerank_pin(&pin, 1).unwrap());
+        let dropped = rerank_pin(&pin, 1).unwrap();
+        let want: std::collections::HashSet<String> = [
+            "r/c=1 scan=1_1_1_0",
+            "r/c=1 scan=1_1_3_2",
+            "r/c=2 scan=1_1_2_1",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(dropped, want);
         let ids: Vec<String> = std::fs::read_to_string(&pin)
             .unwrap()
             .lines()
             .skip(1)
             .map(|l| l.split('\t').next().unwrap().to_string())
             .collect();
-        assert_eq!(ids, ["r/1/b", "r/2/d"]);
+        assert_eq!(
+            ids,
+            [
+                "r/c=1 scan=1_1_2_1",
+                "r/c=2 scan=1_1_1_0",
+                "r/c=1 scan=2_2_1"
+            ]
+        );
     }
 }

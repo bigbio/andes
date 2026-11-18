@@ -161,6 +161,34 @@ fn optimize_grids_the_narrow_search() {
 }
 
 #[test]
+fn optimize_leaves_other_files_in_the_output_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let own = tmp.path().join("optimize");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("keep.txt"), "unrelated").unwrap();
+    std::fs::write(tmp.path().join("keep.txt"), "unrelated").unwrap();
+    let (log, _tsv, _pin) = run(tmp.path(), &["--optimize", "--optimize-sample", "60"]);
+    assert!(log.contains("optimize: chosen"), "the grid runs: {log}");
+    assert_eq!(
+        std::fs::read_to_string(own.join("keep.txt")).unwrap(),
+        "unrelated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("keep.txt")).unwrap(),
+        "unrelated"
+    );
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("andes-optimize-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the run removes its own directory: {left:?}"
+    );
+}
+
+#[test]
 fn open_search_rejects_incompatible_flags() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))

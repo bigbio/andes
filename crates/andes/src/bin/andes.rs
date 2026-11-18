@@ -36,8 +36,6 @@ mod quant_finalize;
 mod quant_mbr;
 #[path = "andes/quant_run.rs"]
 mod quant_run;
-#[path = "../rescore.rs"]
-mod rescore;
 #[path = "../sdrf.rs"]
 mod sdrf;
 #[path = "andes/optimize.rs"]
@@ -129,6 +127,12 @@ enum Command {
     ///
     /// Writes the QPX protein-group view.
     Inference(Box<cli::InferenceArgs>),
+
+    #[command(
+        hide = true,
+        about = "Run the native Percolator engine (Percolator master a9783ee8) on a Percolator command line"
+    )]
+    Percolator(Box<cli::PercolatorArgs>),
 }
 
 const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
@@ -207,6 +211,7 @@ fn main() -> ExitCode {
             }
             inference_cmd::run_inference(*args)
         }
+        Some(Command::Percolator(args)) => run_native_percolator(*args),
         None => {
             let mut cfg_missed_cleavages = false;
             let mut cfg_keys = sdrf::ConfigKeys::default();
@@ -281,6 +286,16 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn run_native_percolator(args: cli::PercolatorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cli::ensure_scratch_dir(&args.temp_dir)?;
+    let limit = output::MemLimit {
+        bytes: args.rescore_memory_gb.saturating_mul(1 << 30),
+        spill_dir: args.temp_dir,
+    };
+    output::run_native_percolator(&args.args, limit)?;
+    Ok(())
 }
 
 #[cfg(feature = "thermo")]

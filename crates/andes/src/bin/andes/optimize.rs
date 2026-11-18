@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::ops::RangeInclusive;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use model::spectrum::Spectrum;
 use model::tolerance::{PrecursorTolerance, Tolerance};
@@ -9,8 +10,14 @@ use search::{PreparedSearch, SearchIndex, SearchParams};
 const TOLERANCES_PPM: [f64; 4] = [5.0, 10.0, 20.0, 50.0];
 const TOP_NS: [u32; 4] = [1, 2, 3, 5];
 const OPTIMIZE_Q: f64 = 0.01;
-const OPTIMIZE_SEED: u64 = 42;
 
+pub(crate) struct SampleRescorer {
+    pub(crate) backend: output::PercolatorBackend,
+    pub(crate) args: Vec<String>,
+    pub(crate) dir: PathBuf,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn optimize_parameters(
     idx: &SearchIndex,
     scorer: &RankScorer,
@@ -19,6 +26,7 @@ pub(crate) fn optimize_parameters(
     index_path: &Path,
     params: &mut SearchParams,
     sample: &[Spectrum],
+    rescorer: &SampleRescorer,
 ) {
     if sample.is_empty() {
         log::warn!("the sample is empty; keeping the resolved parameters");
@@ -74,7 +82,7 @@ pub(crate) fn optimize_parameters(
         for &tol in &TOLERANCES_PPM {
             let mut p = base.clone();
             p.precursor_tolerance = PrecursorTolerance::symmetric(Tolerance::Ppm(tol));
-            let Some(targets) = evaluate(&mut prepared, sample, idx, &p) else {
+            let Some(targets) = evaluate(&mut prepared, sample, idx, &p, rescorer) else {
                 continue;
             };
             rows.push(Row {
@@ -113,7 +121,7 @@ pub(crate) fn optimize_parameters(
             let mut p = stage1_params.clone();
             p.top_n_psms_per_spectrum = top_n;
             p.charge_range = range.clone();
-            let Some(targets) = evaluate(&mut prepared, sample, idx, &p) else {
+            let Some(targets) = evaluate(&mut prepared, sample, idx, &p, rescorer) else {
                 continue;
             };
             rows.push(Row {
@@ -187,16 +195,18 @@ fn evaluate(
     sample: &[Spectrum],
     idx: &SearchIndex,
     params: &SearchParams,
+    rescorer: &SampleRescorer,
 ) -> Option<usize> {
     let queues = prepared.run_chunk_with_params(sample, 0, params);
     prepared.sync_materialized_candidates();
-    let mut buf: Vec<u8> = Vec::new();
-    output::write_pin_to(&mut buf, sample, &queues, &prepared.candidates, params, idx).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let rescored = crate::rescore::native_rescore_pin_all(&text, OPTIMIZE_SEED).ok()?;
+    let pin = rescorer.dir.join("optimize.pin");
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&pin).ok()?);
+    output::write_pin_to(&mut file, sample, &queues, &prepared.candidates, params, idx).ok()?;
+    file.flush().ok()?;
+    drop(file);
+    let targets = output::run_percolator_pooled(&rescorer.backend, &pin, &rescorer.args).ok()?;
     Some(
-        rescored
-            .targets
+        targets
             .values()
             .filter(|p| p.q_value <= OPTIMIZE_Q)
             .count(),

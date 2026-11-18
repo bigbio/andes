@@ -1,0 +1,21 @@
+seed 42	Percolator version 3.09.0, Build Date Nov 17 2026 18:57:23
+seed 42	Split 1:	Selected feature 1 as initial direction. Could separate 19 training set positives with q<0.01 in that direction.
+seed 42	Split 2:	Selected feature 1 as initial direction. Could separate 76 training set positives with q<0.01 in that direction.
+seed 42	Split 3:	Selected feature 1 as initial direction. Could separate 109 training set positives with q<0.01 in that direction.
+seed 42	Split 1: Training with 19 positives and 828 negatives
+seed 42	Split 2: Training with 76 positives and 849 negatives
+seed 42	Split 3: Training with 109 positives and 859 negatives
+seed 7	Percolator version 3.09.0, Build Date Nov 17 2026 18:57:23
+seed 7	Split 1:	Selected feature 1 as initial direction. Could separate 104 training set positives with q<0.01 in that direction.
+seed 7	Split 2:	Selected feature 1 as initial direction. Could separate 27 training set positives with q<0.01 in that direction.
+seed 7	Split 3:	Selected feature 1 as initial direction. Could separate 20 training set positives with q<0.01 in that direction.
+seed 7	Split 1: Training with 104 positives and 848 negatives
+seed 7	Split 2: Training with 27 positives and 848 negatives
+seed 7	Split 3: Training with 20 positives and 840 negatives
+seed 1	Percolator version 3.09.0, Build Date Nov 17 2026 18:57:23
+seed 1	Split 1:	Selected feature 1 as initial direction. Could separate 63 training set positives with q<0.01 in that direction.
+seed 1	Split 2:	Selected feature 1 as initial direction. Could separate 165 training set positives with q<0.01 in that direction.
+seed 1	Split 3:	Selected feature 1 as initial direction. Could separate 25 training set positives with q<0.01 in that direction.
+seed 1	Split 1: Training with 63 positives and 844 negatives
+seed 1	Split 2: Training with 165 positives and 847 negatives
+seed 1	Split 3: Training with 25 positives and 845 negatives

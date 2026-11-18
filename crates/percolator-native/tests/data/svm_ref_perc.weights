@@ -1,0 +1,12 @@
+# This file contains the weights from each cross validation bin from percolator training
+# First line is the feature names, followed by normalized weights, and the raw weights of bin 1
+# This is repeated for the other bins
+sep	f2	f3	f4	f5	m0
+0.39	-0.0118	-0.0071	0.0402	0.0055	-0.6477
+0.2747	-0.0101	-0.0074	0.0385	0.0111	-1.1262
+sep	f2	f3	f4	f5	m0
+0.396	-0.0091	-0.0046	0.0600	0.0316	-0.6089
+0.2789	-0.0078	-0.0048	0.0575	0.0633	-1.1237
+sep	f2	f3	f4	f5	m0
+0.383	0.0026	-0.0187	0.0483	0.0059	-0.6777
+0.2696	0.0023	-0.0196	0.0463	0.0118	-1.1534

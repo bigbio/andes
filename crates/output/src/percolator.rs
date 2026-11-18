@@ -28,6 +28,7 @@ impl PercolatorPsm {
 pub enum PercolatorBackend {
     Binary(PathBuf),
     Docker { image: String },
+    Native { memory: percolator_native::MemLimit },
 }
 
 impl PercolatorBackend {
@@ -35,6 +36,54 @@ impl PercolatorBackend {
         match self {
             PercolatorBackend::Binary(p) => format!("binary {}", p.display()),
             PercolatorBackend::Docker { image } => format!("docker {image}"),
+            PercolatorBackend::Native { memory } => format!(
+                "native ({:.1} GB in memory, spill to {})",
+                memory.bytes as f64 / (1u64 << 30) as f64,
+                memory.spill_dir.display()
+            ),
+        }
+    }
+}
+
+struct Invocation {
+    success: bool,
+    status: String,
+    log: String,
+}
+
+impl Invocation {
+    fn of_process(output: std::process::Output) -> Self {
+        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
+        if log.trim().is_empty() {
+            log = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        Invocation {
+            success: output.status.success(),
+            status: output.status.to_string(),
+            log,
+        }
+    }
+
+    fn of_native(args: &[String], memory: &percolator_native::MemLimit) -> Self {
+        match percolator_native::run(args, memory.clone()) {
+            Ok(()) => Invocation {
+                success: true,
+                status: "finished".to_string(),
+                log: String::new(),
+            },
+            Err(e) => Invocation {
+                success: false,
+                status: "error".to_string(),
+                log: e,
+            },
+        }
+    }
+
+    fn failure(&self, backend: &PercolatorBackend, tail: usize) -> PercolatorError {
+        PercolatorError::Run {
+            backend: backend.describe(),
+            status: self.status.clone(),
+            log_tail: tail_lines(&self.log, tail),
         }
     }
 }
@@ -210,7 +259,10 @@ pub fn percolator_args_with_threads(extra: &[String], threads: usize) -> Vec<Str
     {
         return extra.to_vec();
     }
-    let mut args = vec!["--num-threads".to_string(), threads.max(1).to_string()];
+    let mut args = vec![
+        "--num-threads".to_string(),
+        threads.clamp(1, 128).to_string(),
+    ];
     args.extend(extra.iter().cloned());
     args
 }
@@ -346,19 +398,24 @@ fn run_static_pass(
     weights: &Path,
     extra_args: &[String],
     tdc: bool,
-) -> Result<std::process::Output, PercolatorError> {
+) -> Result<Invocation, PercolatorError> {
+    let local_args = || {
+        static_pass_args(
+            pin.to_string_lossy().into_owned(),
+            pass.target.to_string_lossy().into_owned(),
+            pass.decoy.to_string_lossy().into_owned(),
+            weights.to_string_lossy().into_owned(),
+            extra_args,
+            tdc,
+        )
+    };
     match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
-            .args(static_pass_args(
-                pin.to_string_lossy().into_owned(),
-                pass.target.to_string_lossy().into_owned(),
-                pass.decoy.to_string_lossy().into_owned(),
-                weights.to_string_lossy().into_owned(),
-                extra_args,
-                tdc,
-            ))
+            .args(local_args())
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn),
+        PercolatorBackend::Native { memory } => Ok(Invocation::of_native(&local_args(), memory)),
         PercolatorBackend::Docker { image } => {
             let pin_dir = host_dir(pin.parent().unwrap_or_else(|| Path::new(".")))?;
             let in_out = |p: &Path| {
@@ -395,6 +452,7 @@ fn run_static_pass(
             Command::new("docker")
                 .args(args)
                 .output()
+                .map(Invocation::of_process)
                 .map_err(PercolatorError::Spawn)
         }
     }
@@ -443,28 +501,24 @@ pub fn run_percolator_pooled(
     let out = result_paths(pin);
     out.clear_stale()?;
 
-    let output = match backend {
+    let ran = match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
             .args(native_args(pin, &out, extra_args))
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn)?,
         PercolatorBackend::Docker { image } => Command::new("docker")
             .args(docker_args(image, pin, &out_dir, &out, extra_args)?)
             .output()
+            .map(Invocation::of_process)
             .map_err(PercolatorError::Spawn)?,
+        PercolatorBackend::Native { memory } => {
+            Invocation::of_native(&native_args(pin, &out, extra_args), memory)
+        }
     };
 
-    if !output.status.success() || !out.target.exists() {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        let log_tail = tail_lines(&log, 20);
-        return Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail,
-        });
+    if !ran.success || !out.target.exists() {
+        return Err(ran.failure(backend, 20));
     }
 
     let text = std::fs::read_to_string(&out.target)?;
@@ -662,19 +716,11 @@ fn score_run(
     let ids = pin_spec_ids(run_pin)?;
     pass.clear_stale()?;
     let result = run_static_pass(backend, run_pin, out_dir, pass, weights, extra_args, true)
-        .and_then(|output| {
-            if output.status.success() && pass.target.exists() {
+        .and_then(|ran| {
+            if ran.success && pass.target.exists() {
                 Ok(())
             } else {
-                let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-                if log.trim().is_empty() {
-                    log = String::from_utf8_lossy(&output.stdout).into_owned();
-                }
-                Err(PercolatorError::Run {
-                    backend: backend.describe(),
-                    status: output.status.to_string(),
-                    log_tail: tail_lines(&log, 5),
-                })
+                Err(ran.failure(backend, 5))
             }
         })
         .and_then(|()| {
@@ -831,7 +877,7 @@ fn repair_pep(
         .unwrap_or_else(|| "andes".to_string());
     let pass = ResultPaths::new(out_dir, &format!("{stem}.pep"));
     pass.clear_stale()?;
-    let output = run_static_pass(
+    let ran = run_static_pass(
         backend,
         pin,
         out_dir,
@@ -840,20 +886,12 @@ fn repair_pep(
         extra_args,
         false,
     )?;
-    let result = if output.status.success() && pass.target.exists() {
+    let result = if ran.success && pass.target.exists() {
         std::fs::read_to_string(&pass.target)
             .map_err(PercolatorError::Io)
             .and_then(|t| parse_psm_results(&t))
     } else {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail: tail_lines(&log, 20),
-        })
+        Err(ran.failure(backend, 20))
     };
     pass.clear_stale()?;
     let repaired = result?;
@@ -894,7 +932,15 @@ pub fn score_all_rows(
         .unwrap_or_else(|| "andes".to_string());
     let pass = ResultPaths::new(&out_dir, &format!("{stem}.rows"));
     pass.clear_stale()?;
-    let output = run_static_pass(backend, pin, &out_dir, &pass, &main.weights, extra_args, false)?;
+    let ran = run_static_pass(
+        backend,
+        pin,
+        &out_dir,
+        &pass,
+        &main.weights,
+        extra_args,
+        false,
+    )?;
     let scores = |path: &Path| -> Result<HashMap<String, f64>, PercolatorError> {
         let text = std::fs::read_to_string(path).map_err(PercolatorError::Io)?;
         Ok(parse_psm_results(&text)?
@@ -902,18 +948,10 @@ pub fn score_all_rows(
             .filter_map(|(id, p)| p.score.map(|s| (id, s)))
             .collect())
     };
-    let result = if output.status.success() && pass.target.exists() && pass.decoy.exists() {
+    let result = if ran.success && pass.target.exists() && pass.decoy.exists() {
         scores(&pass.target).and_then(|t| Ok((t, scores(&pass.decoy)?)))
     } else {
-        let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
-        if log.trim().is_empty() {
-            log = String::from_utf8_lossy(&output.stdout).into_owned();
-        }
-        Err(PercolatorError::Run {
-            backend: backend.describe(),
-            status: output.status.to_string(),
-            log_tail: tail_lines(&log, 20),
-        })
+        Err(ran.failure(backend, 20))
     };
     pass.clear_stale()?;
     result
@@ -1183,6 +1221,29 @@ mod tests {
         let set_eq = vec!["--num-threads=4".to_string()];
         assert_eq!(percolator_args_with_threads(&set_eq, 16), set_eq);
         assert_eq!(percolator_args_with_threads(&[], 0), ["--num-threads", "1"]);
+    }
+
+    #[test]
+    fn percolator_threads_clamped_to_percolator_range() {
+        assert_eq!(
+            percolator_args_with_threads(&[], 192),
+            ["--num-threads", "128"]
+        );
+        assert_eq!(
+            percolator_args_with_threads(&[], 128),
+            ["--num-threads", "128"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let native = PercolatorBackend::Native {
+            memory: percolator_native::MemLimit {
+                bytes: 1 << 30,
+                spill_dir: dir.path().to_path_buf(),
+            },
+        };
+        let pin = native_fixture_pin(dir.path());
+        let targets =
+            run_percolator_pooled(&native, &pin, &percolator_args_with_threads(&[], 500)).unwrap();
+        assert!(!targets.is_empty());
     }
 
     #[test]
@@ -1520,5 +1581,60 @@ mod tests {
             assert_eq!(col("q-value").parse::<f64>().unwrap(), 0.5);
             assert_eq!(col(POOLED_Q_COLUMN), pooled);
         }
+    }
+
+    fn native_fixture_pin(dir: &Path) -> PathBuf {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../percolator-native/tests/data/svm_ref.pin");
+        let text = std::fs::read_to_string(src).unwrap();
+        let mut lines = text.lines();
+        let (id, rest) = lines.next().unwrap().split_once('\t').unwrap();
+        let mut out = format!("{id}\t{RUN_COLUMN}\t{rest}\n");
+        let rows: Vec<&str> = lines.collect();
+        for run in 0..2u64 {
+            for line in &rows {
+                let c: Vec<&str> = line.split('\t').collect();
+                let scan: u64 = c[2].parse().unwrap();
+                out.push_str(&format!(
+                    "r{run}_{}\trun{run}.mzML\t{}\t{}\t{}\n",
+                    c[0],
+                    c[1],
+                    scan + 1000 * run,
+                    c[3..].join("\t")
+                ));
+            }
+        }
+        let pin = dir.join("fixture.pin");
+        std::fs::write(&pin, out).unwrap();
+        pin
+    }
+
+    #[test]
+    fn native_backend_runs_main_and_static_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = native_fixture_pin(dir.path());
+        let backend = PercolatorBackend::Native {
+            memory: percolator_native::MemLimit {
+                bytes: 1 << 30,
+                spill_dir: dir.path().to_path_buf(),
+            },
+        };
+        assert!(backend.describe().contains("native"));
+        let extra = percolator_args_with_threads(&[], 2);
+        let mut targets = run_percolator_pooled(&backend, &pin, &extra).unwrap();
+        assert!(targets.values().any(|p| p.q_value < 0.01));
+        let summary = apply_per_run_q(&backend, &pin, &extra, &mut targets)
+            .unwrap()
+            .unwrap();
+        assert!(summary.contains("of 2 runs"), "{summary}");
+        assert!(!summary.contains("kept the pooled"), "{summary}");
+        assert!(targets.values().any(|p| p.pooled_q_value.is_some()));
+        let out = result_paths(&pin);
+        parse_psm_results(&std::fs::read_to_string(&out.target).unwrap()).unwrap();
+        parse_psm_results(&std::fs::read_to_string(&out.decoy).unwrap()).unwrap();
+        let (t, d) = score_all_rows(&backend, &pin, &extra).unwrap();
+        assert_eq!(t.len() + d.len(), 402);
+        let (map, decoys) = run_percolator_with_decoys(&backend, &pin, &extra).unwrap();
+        assert!(!map.is_empty() && !decoys.is_empty());
     }
 }

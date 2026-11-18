@@ -124,6 +124,7 @@ pub struct RescoringCfg {
     pub percolator_image: Option<String>,
     pub percolator_args: Option<String>,
     pub keep_pin: Option<bool>,
+    pub memory_gb: Option<u64>,
     pub predict: Option<Vec<String>>,
     pub predictor_models: Option<PathBuf>,
     pub predictor_backend: Option<String>,
@@ -627,6 +628,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.percolator_args
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
+    set!(
+        "rescore_memory_gb",
+        rescore_memory_gb,
+        cfg.rescoring.memory_gb
+    );
     if let Some(list) = cfg.rescoring.predict {
         if !cli_set(m, "predict") {
             args.predict = list
@@ -804,6 +810,9 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     if let Some(v) = args.psm_fdr {
         check_unit_fraction("psm_fdr", v)?;
+    }
+    if args.rescore_memory_gb == 0 {
+        return Err("config: `memory_gb` must be at least 1 (GB)".to_string());
     }
     if let Some(v) = args.proteoform_fdr {
         check_unit_fraction("proteoform_fdr", v)?;
@@ -1470,6 +1479,21 @@ glyco:
         )
         .unwrap();
         assert_eq!(a.gbdt_max_trees, Some(50));
+    }
+
+    #[test]
+    fn config_memory_gb_inherits() {
+        let a = applied("rescoring:\n  keep_pin: true\n", &[]).unwrap();
+        assert_eq!(a.rescore_memory_gb, 16);
+        let a = applied("rescoring:\n  memory_gb: 4\n", &[]).unwrap();
+        assert_eq!(a.rescore_memory_gb, 4);
+        let a = applied(
+            "rescoring:\n  memory_gb: 4\n",
+            &["--rescore-memory-gb", "8"],
+        )
+        .unwrap();
+        assert_eq!(a.rescore_memory_gb, 8);
+        assert!(applied("rescoring:\n  memory_gb: 0\n", &[]).is_err());
     }
 
     #[test]

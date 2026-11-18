@@ -648,6 +648,58 @@ fn predict_rt_keeps_the_pin_well_formed() {
 }
 
 #[test]
+fn native_rejects_percolator_backend_flags() {
+    for flags in [
+        &["--percolator-bin", "/usr/bin/percolator"][..],
+        &["--percolator-docker"][..],
+        &["--percolator-image", "example/percolator:1"][..],
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = base_cmd(
+            "test-fixtures/test.mgf.gz",
+            "test-fixtures/BSA.fasta",
+            &dir.path().join("out.pin"),
+        )
+        .arg("--rescore-native")
+        .args(flags)
+        .output()
+        .expect("run andes");
+        assert!(!out.status.success(), "{flags:?} is refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "native rescoring runs no Percolator binary, so {} has no effect",
+                flags[0]
+            )),
+            "stderr: {stderr}"
+        );
+        assert!(!dir.path().join("out.pin").exists());
+    }
+}
+
+#[test]
+fn native_rejects_percolator_args() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("out.pin"),
+    )
+    .args(["--rescore-native", "--percolator-args", "--testFDR 0.05"])
+    .output()
+    .expect("run andes");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(!dir.path().join("out.pin").exists());
+}
+
+#[test]
 fn dia_refuses_the_searches_without_its_window_and_ms1_gate() {
     let gdb = fixture("test-fixtures/glyco_fixture.gdb");
     let gdb = gdb.to_str().expect("utf-8 fixture path");

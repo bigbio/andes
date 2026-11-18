@@ -54,6 +54,7 @@ pub use percolator::{
     run_percolator_with_decoys, score_all_rows, PercolatorBackend, PercolatorError, PercolatorPsm,
     PsmResultReader, PsmResultRow, RowScores, DEFAULT_PERCOLATOR_IMAGE,
 };
+pub use percolator_native::{run as run_native_percolator, MemLimit};
 
 pub(crate) mod percolator_enz;
 pub(crate) mod row_context;

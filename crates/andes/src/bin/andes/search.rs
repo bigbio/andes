@@ -18,7 +18,6 @@ use crate::model_select::{
 };
 use crate::mono::{correct_chunk, MonoDump, MonoStats};
 use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
-use crate::rescore;
 use crate::spectra::{
     add_mzml_skipped, compare_with_first_input, detect_acquisition_metadata,
     detect_isobaric_sampled, input_format_flags, merge_parse_stats, ms3_carries_reporters,
@@ -340,7 +339,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut cli = cli;
     if let Some(x) = &cli.xl {
-        if let Some(v) = crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0) {
+        if let Some(v) =
+            crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0)
+        {
             cli.db.variable_mods = Some(v);
         }
     }
@@ -349,6 +350,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
         return Err("--localize ipf needs --rescore or --rescore-native".into());
+    }
+    if cli.rescore_native && !cli.percolator_args.trim().is_empty() {
+        return Err(
+            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
+                .into(),
+        );
+    }
+    if cli.rescore_native {
+        let ignored: Vec<&str> = [
+            ("--percolator-bin", cli.percolator_bin.is_some()),
+            ("--percolator-docker", cli.percolator_docker),
+            (
+                "--percolator-image",
+                cli.percolator_image != output::DEFAULT_PERCOLATOR_IMAGE,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(flag, set)| set.then_some(flag))
+        .collect();
+        if !ignored.is_empty() {
+            return Err(format!(
+                "native rescoring runs no Percolator binary, so {} has no effect; drop it, or drop --rescore-native to run Percolator",
+                ignored.join(", ")
+            )
+            .into());
+        }
     }
     let scratch_dir = crate::cli::dir_or_output_dir(
         cli.temp_dir.as_deref(),
@@ -424,7 +451,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             log::info!(
                 "PEFF: {} entries; left out {} sites with no known mass and {} processed spans \
                  that are not mature chains",
-                peff.entries, peff.sites_without_mass, peff.processing_not_chain
+                peff.entries,
+                peff.sites_without_mass,
+                peff.processing_not_chain
             );
         }
     }
@@ -843,7 +872,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return Err("--dia and --open-search cannot be combined: a DIA scan has no selected precursor to offset from".into());
         }
         if cli.refine {
-            return Err("--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into());
+            return Err(
+                "--dia and --refine cannot be combined: the refinement pass has no MS1 gate".into(),
+            );
         }
         if cli.glyco {
             return Err("--dia and --glyco cannot be combined: the glycopeptide search has no isolation-window or MS1 gate".into());
@@ -867,9 +898,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "N-X-S/T sequon-bearing peptides only (--glyco-index-sequon-only)"
         );
     }
-    let mono_active = cli.precursor_mono == PrecursorMonoFlag::Auto
-        && (cli.glyco || cli.open_search)
-        && has_ms1;
+    let mono_active =
+        cli.precursor_mono == PrecursorMonoFlag::Auto && (cli.glyco || cli.open_search) && has_ms1;
     if cli.precursor_mono == PrecursorMonoFlag::Auto
         && (cli.glyco || cli.open_search)
         && !mono_active
@@ -983,9 +1013,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.precursor_cal_mode = cli.precursor_cal;
     if cli.dia && params.precursor_cal_mode != PrecursorCalMode::Off {
-        log::warn!(
-            "--precursor-cal is ignored under --dia (a DIA scan has no selected precursor)"
-        );
+        log::warn!("--precursor-cal is ignored under --dia (a DIA scan has no selected precursor)");
         params.precursor_cal_mode = PrecursorCalMode::Off;
     }
     if let Some(n) = cli.cal_min_spec_keys {
@@ -1090,9 +1118,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(refusal) = choice.refused_because {
-        log::warn!(
-            "the fragment-ion index cannot be used here ({refusal}); using enumeration."
-        );
+        log::warn!("the fragment-ion index cannot be used here ({refusal}); using enumeration.");
     }
     if let Some(reason) = &choice.report {
         if choice.use_index {
@@ -1396,28 +1422,43 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.optimize_sample,
         )
         .or_else(|| {
-            sample_spectra(
-                &spectrum_path,
-                is_mzml,
-                is_mgf,
-                is_raw,
-                cli.ms_level as u32,
-            )
-            .map(|v| v.into_iter().take(cli.optimize_sample).collect())
+            sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
+                .map(|v| v.into_iter().take(cli.optimize_sample).collect())
         });
         match sample {
-            Some(sample) => crate::optimize::optimize_parameters(
-                &idx,
-                &scorer,
-                fragment_tol_da,
-                &cli.db.decoy_prefix,
-                &index_path,
-                &mut params,
-                &sample,
-            ),
-            None => log::warn!(
-                "--optimize could not read a sample; keeping the resolved parameters"
-            ),
+            Some(sample) => {
+                let optimize_dir = scratch_tempdir("andes-optimize-", &scratch_dir)?;
+                let rescorer = crate::optimize::SampleRescorer {
+                    backend: output::PercolatorBackend::Native {
+                        memory: output::MemLimit {
+                            bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
+                            spill_dir: optimize_dir.path().to_path_buf(),
+                        },
+                    },
+                    args: output::percolator_args_with_threads(&[], cli.threads),
+                    dir: optimize_dir.path().to_path_buf(),
+                };
+                crate::optimize::optimize_parameters(
+                    &idx,
+                    &scorer,
+                    fragment_tol_da,
+                    &cli.db.decoy_prefix,
+                    &index_path,
+                    &mut params,
+                    &sample,
+                    &rescorer,
+                );
+                let optimize_path = optimize_dir.path().to_path_buf();
+                if let Err(e) = optimize_dir.close() {
+                    log::warn!(
+                        "optimize: could not remove {}: {e}",
+                        optimize_path.display()
+                    );
+                }
+            }
+            None => {
+                log::warn!("--optimize could not read a sample; keeping the resolved parameters")
+            }
         }
     }
 
@@ -2426,9 +2467,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
-            log::warn!(
-                "refine is high-res-only and the data is low-res; skipping refinement."
-            );
+            log::warn!("refine is high-res-only and the data is low-res; skipping refinement.");
             None
         } else {
             let target_db = idx.target_db();
@@ -2463,7 +2502,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let refine_merged = refine_output
         .as_ref()
         .is_some_and(|o| !o.candidates.is_empty());
-    let ipf_scoring = cli.localize.is_some().then(|| prepared.ipf_scoring(&scorer));
+    let ipf_scoring = cli
+        .localize
+        .is_some()
+        .then(|| prepared.ipf_scoring(&scorer));
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
@@ -2525,26 +2567,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let fdr_threshold = cli.psm_fdr();
     let proteoform_fdr = cli.proteoform_fdr();
-    let (use_percolator, use_native) = if cli.rescore {
-        (true, false)
-    } else if cli.rescore_native {
-        (false, true)
-    } else {
-        if cli.psm_fdr.is_some() || cli.pep.is_some() {
-            let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
-                (true, true) => "--psm-fdr and --pep",
-                (true, false) => "--psm-fdr",
-                _ => "--pep",
-            };
-            log::warn!(
-                "{which} set without --rescore or --rescore-native, so no rescoring \
-                 runs and no filtered .tsv is written. andes does not compute FDR on its \
-                 own; the PIN is written for Percolator. Add --rescore to run Percolator \
-                 in-process."
-            );
-        }
-        (false, false)
-    };
+    let use_native = cli.rescore_native;
+    let use_percolator = cli.rescore || cli.rescore_native;
+    if !use_percolator && (cli.psm_fdr.is_some() || cli.pep.is_some()) {
+        let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
+            (true, true) => "--psm-fdr and --pep",
+            (true, false) => "--psm-fdr",
+            _ => "--pep",
+        };
+        log::warn!(
+            "{which} set without --rescore or --rescore-native, so no rescoring \
+             runs and no filtered .tsv is written. andes does not compute FDR on its \
+             own; the PIN is written for Percolator. Add --rescore to run Percolator \
+             in-process."
+        );
+    }
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
     let mut mbr_source = String::new();
@@ -2559,12 +2596,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut row_scores: Option<output::RowScores> = None;
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
-            let backend = output::resolve_backend(
-                cli.percolator_bin.as_deref(),
-                cli.percolator_docker,
-                &cli.percolator_image,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let backend = if use_native {
+                crate::cli::ensure_scratch_dir(&scratch_dir)?;
+                output::PercolatorBackend::Native {
+                    memory: output::MemLimit {
+                        bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
+                        spill_dir: scratch_dir.clone(),
+                    },
+                }
+            } else {
+                output::resolve_backend(
+                    cli.percolator_bin.as_deref(),
+                    cli.percolator_docker,
+                    &cli.percolator_image,
+                )
+                .map_err(|e| format!("{e}"))?
+            };
             log::info!(target: "rescore", "Percolator backend = {}", backend.describe());
             let mut user_args: Vec<String> = cli
                 .percolator_args
@@ -2610,45 +2657,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if cli.mbr {
                 mbr_source = format!("the Percolator results of {}", output_pin_path.display());
             }
-            Some(map)
-        } else if use_native {
-            log::info!(
-                target: "rescore",
-                "native rescorer (no Percolator; 3-fold cross-validated semi-supervised \
-                 linear model, target-decoy competition per scan and precursor mass). \
-                 Use --rescore (Percolator) for production FDR."
-            );
-            let t_resc = std::time::Instant::now();
-            let pin_text = std::fs::read_to_string(&output_pin_path)
-                .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
-            let all = rescore::native_rescore_pin_all(&pin_text, 42)
-                .map_err(|e| format!("native rescore: {e}"))?;
-            if all.untrained_folds > 0 {
-                log::warn!(
-                    target: "rescore",
-                    "{} of 3 cross-validation folds had too few confident \
-                     targets or decoys to train on and ranked by the best single PIN feature. \
-                     The q-values stay valid but identify fewer PSMs.",
-                    all.untrained_folds
-                );
-            }
-            rescore_decoys = Some(all.decoys.keys().cloned().collect());
-            rescore_decoy_psms = all.decoys;
-            if has_site_claims {
-                row_scores = Some(all.row_scores);
-            }
-            if cli.mbr {
-                mbr_source = "the native rescoring result".to_string();
-            }
-            let map = all.targets;
-            log::info!(
-                target: "rescore",
-                "native produced {} target PSMs (q-value+PEP; {} rows lost \
-                 target-decoy competition) [{:.2}s]",
-                map.len(),
-                all.competed_away,
-                t_resc.elapsed().as_secs_f64()
-            );
             Some(map)
         } else {
             None
@@ -2799,7 +2807,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(scoring) = ipf_scoring.as_ref() {
             use rayon::prelude::*;
             let t_ipf = std::time::Instant::now();
-            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> = map;
+            let map_ref: &std::collections::HashMap<String, output::percolator::PercolatorPsm> =
+                map;
             let cutoffs = output::Cutoffs::new(map_ref, &pin_index, fdr_threshold, proteoform_fdr);
             let searched_with = scoring.fragment_error();
             let mut evidence: std::collections::HashMap<String, search::ipf::IpfEvidence> =
@@ -2808,34 +2817,36 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for (f, &hi) in run_ends.iter().enumerate() {
                 scoring.set_fragment_error(measurer.per_file.get(f).copied().flatten());
                 let part: Vec<(String, search::ipf::IpfEvidence)> = queues[lo..hi]
-                .par_iter()
-                .enumerate()
-                .map(|(j, q)| (lo + j, q))
-                .flat_map_iter(|(i, q)| {
-                    let rows: Vec<(String, u32, u8)> =
-                        output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
-                            .into_iter()
-                            .filter(|(id, c, _)| {
-                                !pin_candidates[*c as usize].is_decoy
-                                    && !knockoff_rows.contains(id)
-                                    && map_ref.get(id).is_some_and(|p| p.q_value <= cutoffs.of(id))
-                            })
+                    .par_iter()
+                    .enumerate()
+                    .map(|(j, q)| (lo + j, q))
+                    .flat_map_iter(|(i, q)| {
+                        let rows: Vec<(String, u32, u8)> =
+                            output::emitted_row_candidates(&spectra[i], q, &pin_candidates)
+                                .into_iter()
+                                .filter(|(id, c, _)| {
+                                    !pin_candidates[*c as usize].is_decoy
+                                        && !knockoff_rows.contains(id)
+                                        && map_ref
+                                            .get(id)
+                                            .is_some_and(|p| p.q_value <= cutoffs.of(id))
+                                })
+                                .collect();
+                        let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
+                            .iter()
+                            .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
                             .collect();
-                    let peptides: Vec<(&model::peptide::Peptide, u8)> = rows
-                        .iter()
-                        .map(|(_, c, z)| (&pin_candidates[*c as usize].peptide, *z))
-                        .collect();
-                    let found = if peptides.is_empty() {
-                        Vec::new()
-                    } else {
-                        scoring.evidence(&spectra[i], &peptides)
-                    };
-                    rows.into_iter()
-                        .zip(found)
-                        .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                        let found = if peptides.is_empty() {
+                            Vec::new()
+                        } else {
+                            scoring.evidence(&spectra[i], &peptides)
+                        };
+                        rows.into_iter()
+                            .zip(found)
+                            .filter_map(|((id, _, _), e)| e.map(|e| (id, e)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
                 evidence.extend(part);
                 lo = hi;
             }
@@ -2953,16 +2964,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fdr,
                 pep_note
             ),
-            Err(e) => log::warn!(target: "output", "could not write {}: {e}", filtered_path.display()),
+            Err(e) => {
+                log::warn!(target: "output", "could not write {}: {e}", filtered_path.display())
+            }
         }
         if cli.open_search {
-            open_search_summary = write_open_offsets(
-                &output_pin_path,
-                dir,
-                &stem,
-                &accepted,
-                &rescore_decoy_psms,
-            );
+            open_search_summary =
+                write_open_offsets(&output_pin_path, dir, &stem, &accepted, &rescore_decoy_psms);
         }
         identified = Some((accepted, pep_note));
     }
@@ -3009,7 +3017,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             accepted.len() - linked.len(),
             &output::SummaryContext {
                 rescorer: if use_native {
-                    "native rescorer"
+                    "Percolator (native engine)"
                 } else {
                     "Percolator"
                 },
@@ -3383,7 +3391,8 @@ fn warn_restricted_artefacts(aa: &model::AminoAcidSet, variants_on: bool) {
                 "{} ({:+.4} Da) is restricted to annotated sites while \
                  --uniprot-variants is on: variants of the same mass lose the \
                  competing explanation at unannotated residues.",
-                m.name, m.mass_delta
+                m.name,
+                m.mass_delta
             );
         }
     }

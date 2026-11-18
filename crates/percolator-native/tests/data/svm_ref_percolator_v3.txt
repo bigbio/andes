@@ -1,0 +1,8 @@
+Learned normalized SVM weights for the 3 cross-validation splits:
+ Split1	 Split2	 Split3	FeatureName
+ 2.1452	 1.8136	 1.9549	sep
+-0.0649	-0.0417	 0.0135	f2
+-0.0389	-0.0209	-0.0957	f3
+ 0.2211	 0.2749	 0.2469	f4
+ 0.0304	 0.1448	 0.0302	f5
+ 0.0150	-0.0547	 0.0449	m0

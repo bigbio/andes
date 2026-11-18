@@ -40,7 +40,11 @@ test instead:
   channel at all. Each channel is triggered for MS2 independently with
   probability `SILAC_TRIGGER_PROBABILITY`, so many groups are identified in one
   channel only (match between channels) and some in one run only (match
-  between runs). Run 2 is warped by `1.05 t + 20`.
+  between runs). Run 2 is warped by `1.05 t + 20`. Every
+  `SILAC_NOISE_MS2_EVERY_S` seconds a poor MS2 is added: the precursor of a
+  random channel species triggered in that run, with `SILAC_NOISE_TRUE_IONS` of its fragment ions
+  among `SILAC_NOISE_PEAKS` random peaks, so that some targets score like
+  decoys, as in real data.
 
 With `--dimethyl` it writes one dimethyl triplex run instead:
 
@@ -403,6 +407,9 @@ SILAC_RATIOS = [1.0, 0.5, 2.0, 0.25]
 SILAC_HEAVY_ABSENT_EVERY = 10
 SILAC_TRIGGER_PROBABILITY = 0.6
 SILAC_WARPS = [lambda t: t, lambda t: 1.05 * t + 20.0]
+SILAC_NOISE_MS2_EVERY_S = 4
+SILAC_NOISE_PEAKS = 40
+SILAC_NOISE_TRUE_IONS = 4
 
 
 def silac_heavy(seq_str: str) -> str:
@@ -421,6 +428,7 @@ def silac_heavy(seq_str: str) -> str:
 
 def make_silac_run(run: int, precursors, path: str):
     rnd = random.Random(301 + run)
+    noise = random.Random(401 + run)
     warp = SILAC_WARPS[run]
     exp = p.MSExperiment()
     instrument = exp.getInstrument()
@@ -446,6 +454,7 @@ def make_silac_run(run: int, precursors, path: str):
             triggered = rnd.random() < SILAC_TRIGGER_PROBABILITY
             species.append((seq, mono, warp(apex_c), apex_int * scale, z, envelope(seq, LABEL_ISOTOPES), triggered))
 
+    identified = [x for x in species if x[6]]
     end = max(warp(MBR_LAST_APEX_S), MBR_LAST_APEX_S) + MBR_TAIL_S
     scan = 1
     spectra = []
@@ -489,6 +498,30 @@ def make_silac_run(run: int, precursors, path: str):
             pre.setActivationMethods({hcd_activation()})
             ms2.setPrecursors([pre])
             frag = sorted(fragments(seq, z))
+            ms2.set_peaks(([mz for mz, _ in frag], [it for _, it in frag]))
+            spectra.append(ms2)
+            scan += 1
+        if int(t) % SILAC_NOISE_MS2_EVERY_S == 0:
+            j += 1
+            ms2 = p.MSSpectrum()
+            ms2.setMSLevel(2)
+            ms2.setRT(t + 0.05 * j)
+            ms2.setNativeID(f"controllerType=0 controllerNumber=1 scan={scan}")
+            ms2.setType(p.SpectrumSettings.SpectrumType.CENTROID)
+            seq, mono, _, _, z, _, _ = noise.choice(identified)
+            pre = p.Precursor()
+            pre.setMZ(mono)
+            pre.setCharge(z)
+            pre.setIntensity(1.0e5)
+            pre.setIsolationWindowLowerOffset(0.7)
+            pre.setIsolationWindowUpperOffset(0.7)
+            pre.setActivationMethods({hcd_activation()})
+            ms2.setPrecursors([pre])
+            true_ions = noise.sample(fragments(seq, z), SILAC_NOISE_TRUE_IONS)
+            frag = sorted(
+                [(mz, noise.uniform(100.0, 1500.0)) for mz, _ in true_ions]
+                + [(noise.uniform(150.0, 1600.0), noise.uniform(100.0, 1500.0)) for _ in range(SILAC_NOISE_PEAKS)]
+            )
             ms2.set_peaks(([mz for mz, _ in frag], [it for _, it in frag]))
             spectra.append(ms2)
             scan += 1

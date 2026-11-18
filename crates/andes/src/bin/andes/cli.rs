@@ -824,14 +824,21 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Rescore with the built-in rescorer instead of Percolator (no Percolator needed)
+    /// Rescore as --rescore, with the native Percolator engine instead of the binary
     ///
-    /// Percolator's algorithm in process: a 3-fold cross-validated semi-supervised linear
-    /// model over the PIN features, with target-decoy competition per scan and precursor
-    /// mass, gives q-values and PEPs. Same outputs as --rescore, which is the production
-    /// path and wins when both are given.
+    /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
+    /// repair and the scores of every PIN row) runs in process with the algorithm of
+    /// upstream Percolator master (commit a9783ee8) and Percolator's output files; no
+    /// Percolator binary or Docker is needed. Takes no --percolator-args, --percolator-bin,
+    /// --percolator-docker or --percolator-image.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) rescore_native: bool,
+
+    /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
+    #[arg(long, value_name = "GB", default_value_t = 16,
+          value_parser = clap::value_parser!(u64).range(1..), hide = true,
+          help_heading = H_RESCORING)]
+    pub(crate) rescore_memory_gb: u64,
 
     /// PEP threshold applied with --psm-fdr: a PSM must pass both [default: none]
     #[arg(long, value_name = "PEP", value_parser = parse_unit_fraction, hide_short_help = true,
@@ -1295,6 +1302,23 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, hide_short_help = true,
           help_heading = ADVANCED_FDR)]
     pub(crate) quant_channel_fdr: Option<f64>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct PercolatorArgs {
+    /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
+    #[arg(long, value_name = "GB", default_value_t = 16,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) rescore_memory_gb: u64,
+
+    /// Directory of the spill files, created if missing
+    #[arg(long, value_name = "DIR", required = true)]
+    pub(crate) temp_dir: PathBuf,
+
+    /// Percolator arguments as given to the percolator binary, the PIN last
+    #[arg(value_name = "PERCOLATOR_ARGS", required = true, num_args = 1..,
+          trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
 }
 
 /// `andes inference`: protein groups over the rescored PSMs of one or more runs.
@@ -2615,6 +2639,7 @@ mod help_layout_tests {
         "xl_rescore_intra",
         "xl_rescore_inter",
         "optimize_sample",
+        "rescore_memory_gb",
     ];
 
     #[test]

@@ -128,8 +128,9 @@ pub(crate) fn run(
     cli: &Cli,
 ) -> Result<(), String> {
     let settings = Settings::from_cli(cli);
-    eprintln!(
-        "Quantification: intact glycopeptides from MS1 (tol {}, rt window ±{} s, {MIN_ISOTOPES}-\
+    log::info!(
+        target: "glyco-quant",
+        "intact glycopeptides from MS1 (tol {}, rt window ±{} s, {MIN_ISOTOPES}-\
          {MAX_ISOTOPES} isotopes, min cosine {}, transfer FDR {}, monoisotopic intensity)",
         match settings.params.tol {
             Tolerance::Ppm(v) => format!("{v} ppm"),
@@ -141,8 +142,9 @@ pub(crate) fn run(
     );
     let targets = build_targets(spectra, results, candidates, index, runs, &settings);
     if targets.is_empty() {
-        eprintln!(
-            "[glyco-quant] nothing to quantify: the PIN has no emitted hit with a resolved \
+        log::warn!(
+            target: "glyco-quant",
+            "nothing to quantify: the PIN has no emitted hit with a resolved \
              glycan composition and a precursor retention time"
         );
         return Ok(());
@@ -175,8 +177,9 @@ pub(crate) fn run(
             assign_qvalues(&mut transfer_rows, &settings);
             rows.append(&mut transfer_rows);
         }
-        eprintln!(
-            "[glyco-mbr] {} run maps ({} anchors); {} transfers attempted, {} measured, \
+        log::info!(
+            target: "glyco-mbr",
+            "{} run maps ({} anchors); {} transfers attempted, {} measured, \
              {} accepted",
             transfer_counts.maps,
             transfer_counts.anchors,
@@ -187,10 +190,11 @@ pub(crate) fn run(
                 .count()
         );
     } else if settings.mbr {
-        eprintln!("[glyco-mbr] --mbr needs two or more runs; nothing to transfer");
+        log::info!(target: "glyco-mbr", "--mbr needs two or more runs; nothing to transfer");
     } else if runs.len() > 1 {
-        eprintln!(
-            "[glyco-mbr] match-between-runs is off; pass --mbr to transfer identified \
+        log::info!(
+            target: "glyco-mbr",
+            "match-between-runs is off; pass --mbr to transfer identified \
              glycopeptides into runs that did not identify them"
         );
     }
@@ -202,8 +206,9 @@ pub(crate) fn run(
             .filter(|r| r.target.evidence == evidence && accepted(r, &settings))
             .count()
     };
-    eprintln!(
-        "[glyco-quant] quantified {} features from {} targets; {} accepted ({} identified, \
+    log::info!(
+        target: "glyco-quant",
+        "quantified {} features from {} targets; {} accepted ({} identified, \
          quality-gated only; {} transferred at feature q <= {}); {} glycopeptides, {} \
          glycoform-site spectra across {} runs",
         features + transfer_counts.measured,
@@ -306,20 +311,23 @@ fn build_targets(
         }
     }
     if no_rt > 0 {
-        eprintln!(
-            "[glyco-quant] {no_rt} spectra have no retention time and are not quantified \
+        log::info!(
+            target: "glyco-quant",
+            "{no_rt} spectra have no retention time and are not quantified \
              (their XIC anchor would be undefined)"
         );
     }
     if no_glycan > 0 {
-        eprintln!(
-            "[glyco-quant] {no_glycan} emitted hits carry no enumerated glycan composition \
+        log::info!(
+            target: "glyco-quant",
+            "{no_glycan} emitted hits carry no enumerated glycan composition \
              and are not quantified (their intact precursor mass is unknown)"
         );
     }
     if decoy_rows > 0 {
-        eprintln!(
-            "[glyco-quant] {decoy_rows} emitted rows are decoy-backbone hits and are not \
+        log::info!(
+            target: "glyco-quant",
+            "{decoy_rows} emitted rows are decoy-backbone hits and are not \
              quantified (the PIN carries them for Percolator; a decoy precursor is not a \
              glycopeptide)"
         );
@@ -427,8 +435,9 @@ fn measure_with(
             .collect();
         let run_found = part.iter().filter(|(_, m)| m.feature.is_some()).count();
         found += run_found;
-        eprintln!(
-            "[glyco-quant] {phase} {}: {} features in {} targets, {:.2}s",
+        log::info!(
+            target: "glyco-quant",
+            "{phase} {}: {} features in {} targets, {:.2}s",
             run.stem,
             run_found,
             part.len(),
@@ -850,8 +859,9 @@ impl Alignment {
                 })
                 .collect();
             if pairs.len() < MBR_MIN_ANCHORS {
-                eprintln!(
-                    "[glyco-mbr] {}: {} shared glycopeptides, fewer than {MBR_MIN_ANCHORS} \
+                log::warn!(
+                    target: "glyco-mbr",
+                    "{}: {} shared glycopeptides, fewer than {MBR_MIN_ANCHORS} \
                      needed for an RT map; no transfers into or out of it",
                     run_names[r],
                     pairs.len()
@@ -862,8 +872,9 @@ impl Alignment {
                 continue;
             };
             if fitted.sigma_s > MBR_MAX_RESIDUAL_S {
-                eprintln!(
-                    "[glyco-mbr] {}: RT map residual {:.1}s is above {MBR_MAX_RESIDUAL_S}s; \
+                log::warn!(
+                    target: "glyco-mbr",
+                    "{}: RT map residual {:.1}s is above {MBR_MAX_RESIDUAL_S}s; \
                      no transfers into or out of it",
                     run_names[r], fitted.sigma_s
                 );
@@ -1115,16 +1126,18 @@ fn dump_match_training(
             }
             positives += pair_pos;
             negatives += pair_neg;
-            eprintln!(
-                "[glyco-mbr-match-train] runs {d}->{t_run}: {pair_pos} positive, \
+            log::debug!(
+                target: "glyco-mbr-match-train",
+                "runs {d}->{t_run}: {pair_pos} positive, \
                  {pair_neg} negative candidate windows"
             );
         }
     }
     out.flush()
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    eprintln!(
-        "[glyco-mbr-match-train] {} glycopeptide pairs, {positives} positive and \
+    log::info!(
+        target: "glyco-mbr-match-train",
+        "{} glycopeptide pairs, {positives} positive and \
          {negatives} negative rows written to {}",
         pairs,
         path.display()

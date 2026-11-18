@@ -410,7 +410,7 @@ fn quantity_rule(summaries: &Summaries, precursor: u32) -> (Option<f64>, bool) {
 fn mark_trace_precursors(summaries: &mut Summaries, fraction: f64) {
     let mut snrs: Vec<f64> = summaries.values().filter_map(|s| s.snr).collect();
     if snrs.is_empty() {
-        eprintln!("[mbr] finalize: trace area for 0 precursors (no identified fit with a signal-to-noise)");
+        log::info!(target: "finalize", "trace area for 0 precursors (no identified fit with a signal-to-noise)");
         return;
     }
     snrs.sort_unstable_by(f64::total_cmp);
@@ -423,8 +423,9 @@ fn mark_trace_precursors(summaries: &mut Summaries, fraction: f64) {
         marked += usize::from(s.trace);
     }
     let at = |q: f64| snrs[((q * (n - 1) as f64).round() as usize).min(n - 1)];
-    eprintln!(
-        "[mbr] finalize: trace area for {marked} of {n} precursors with an identified fit (share {fraction}): median amplitude signal-to-noise >= {cut:.1}; distribution p50 {:.1}, p90 {:.1}, p99 {:.1}",
+    log::info!(
+        target: "finalize",
+        "trace area for {marked} of {n} precursors with an identified fit (share {fraction}): median amplitude signal-to-noise >= {cut:.1}; distribution p50 {:.1}, p90 {:.1}, p99 {:.1}",
         at(0.5),
         at(0.9),
         at(0.99)
@@ -634,7 +635,7 @@ pub(crate) fn strata_edges(
             },
         );
     let edges = edges_of_hist(&hist);
-    eprintln!("[mbr] presence prior strata edges {edges:?}");
+    log::debug!(target: "mbr", "presence prior strata edges {edges:?}");
     edges
 }
 
@@ -1602,8 +1603,9 @@ pub(crate) fn finalize_stream(
     if trace_fraction > 0.0 {
         mark_trace_precursors(&mut all_summaries, trace_fraction);
     }
-    eprintln!(
-        "[mbr] finalize: {} extract tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
+    log::debug!(
+        target: "finalize",
+        "{} extract tables, {} threads, temporary tables in {}; donor summaries of {} precursors in {groups} pass(es), {:.1} s",
         source.chunks(),
         rayon::current_num_threads(),
         dir.display(),
@@ -1723,8 +1725,9 @@ pub(crate) fn finalize_stream(
     ] {
         let (seen, kept, share) = s.stats();
         if kept < seen {
-            eprintln!(
-                "[mbr] {name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
+            log::debug!(
+                target: "mbr",
+                "{name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
             );
         }
     }
@@ -1746,15 +1749,17 @@ pub(crate) fn finalize_stream(
     drop(t_refs);
     drop((t_sets, i_rows));
     let w_models = train_folds(&w_rows, seed);
-    eprintln!(
-        "[mbr] wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
+    log::debug!(
+        target: "mbr",
+        "wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
         w_rows.len(),
         100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
         w_models.failed_folds.len()
     );
     drop(w_rows);
-    eprintln!(
-        "[mbr] finalize: training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
+    log::debug!(
+        target: "finalize",
+        "training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
         rows_read.into_inner(),
         (t1 - t0).as_secs_f64(),
         secs(t1),
@@ -1847,13 +1852,14 @@ pub(crate) fn finalize_stream(
     let wrong_cal =
         WrongCalibration::fit(w_held.into_inner().expect("wrong-peak calibration lock"));
     match &wrong_cal {
-        Some(c) => eprintln!(
-            "[mbr] wrong-peak calibration: {} blocks, probability {:.4} at the best margin, {:.4} at the worst",
+        Some(c) => log::debug!(
+            target: "mbr",
+            "wrong-peak calibration: {} blocks, probability {:.4} at the best margin, {:.4} at the worst",
             c.p.len(),
             c.p.last().copied().unwrap_or(f64::NAN),
             c.p.first().copied().unwrap_or(f64::NAN)
         ),
-        None => eprintln!("[mbr] wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1"),
+        None => log::warn!(target: "mbr", "wrong-peak calibration: no pseudo-transfers; every transfer's quant_q is 1"),
     }
     let thresholds = [VALIDATION_Q, mbr_fdr];
     let t1 = Instant::now();
@@ -1862,8 +1868,9 @@ pub(crate) fn finalize_stream(
         || i_store.finish(&i_models.failed_folds, &[]),
     );
     let ((fdr, t_spills), (id_fdr, i_spills)) = (t_done?, i_done?);
-    eprintln!(
-        "[mbr] finalize: held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled; {t_spills} and {i_spills} score spills)",
+    log::debug!(
+        target: "finalize",
+        "held-out scores {:.1} s, step functions {:.1} s ({} and {} steps, {} and {} pooled; {t_spills} and {i_spills} score spills)",
         (t1 - t0).as_secs_f64(),
         secs(t1),
         fdr.steps(),
@@ -1937,19 +1944,22 @@ pub(crate) fn finalize_stream(
     let cells = cells.into_inner().expect("normalisation cells lock");
     let (seen, kept, share) = cells.stats();
     if kept < seen {
-        eprintln!(
-            "[mbr] run normalisation: fitted on {kept} of {seen} reference cells (whole precursors, {share} of them)"
+        log::debug!(
+            target: "mbr",
+            "run normalisation: fitted on {kept} of {seen} reference cells (whole precursors, {share} of them)"
         );
     }
     let t1 = Instant::now();
     let (cells, width_weights) = weigh_widths(cells.into_items(), stems.len());
-    eprintln!(
-        "[mbr] finalize: run width weights (0 = relative width, 1 = own fitted width), runs per weight: {}",
+    log::debug!(
+        target: "finalize",
+        "run width weights (0 = relative width, 1 = own fitted width), runs per weight: {}",
         describe_width_weights(&width_weights)
     );
     let norm = fit_normalization(&cells, stems.len(), &NormParams::default());
-    eprintln!(
-        "[mbr] finalize: normalisation cells {:.1} s, fit {:.1} s",
+    log::debug!(
+        target: "finalize",
+        "normalisation cells {:.1} s, fit {:.1} s",
         (t1 - t0).as_secs_f64(),
         secs(t1)
     );
@@ -2284,8 +2294,9 @@ pub(crate) fn finalize_stream(
     summary.rows_written = write_merged(&paths, dir, lib, stems, params.mbr_path, on_features)?;
     write_mbr_validation(params.validation_path, &v)?;
     drop(tmp);
-    eprintln!(
-        "[mbr] finalize: output rows {:.1} s, merged outputs {:.1} s",
+    log::debug!(
+        target: "finalize",
+        "output rows {:.1} s, merged outputs {:.1} s",
         (t1 - t0).as_secs_f64(),
         secs(t1)
     );
@@ -2374,20 +2385,23 @@ fn log_summary(
     mbr_fdr: f64,
     quant_feature_fdr: Option<f64>,
 ) {
-    eprintln!(
-        "[mbr] transfer FDR (internal quant-quality score) features: {}",
+    log::debug!(
+        target: "mbr",
+        "transfer FDR (internal quant-quality score) features: {}",
         TRANSFER_FEATURES.join(",")
     );
-    eprintln!(
-        "[mbr] library entries {} targets, {} identity decoys",
+    log::info!(
+        target: "mbr",
+        "library entries {} targets, {} identity decoys",
         v.target_entries,
         v.identity_entries
     );
     for f in &fdr.counts.failed_folds {
-        eprintln!("[mbr] transfer FDR fold without a model: {f}");
+        log::warn!(target: "mbr", "transfer FDR fold without a model: {f}");
     }
-    eprintln!(
-        "[mbr] transfers {}: {} with a q-value; {} transfer rows without features, {} unscored, {} scored without a q-value",
+    log::info!(
+        target: "mbr",
+        "transfers {}: {} with a q-value; {} transfer rows without features, {} unscored, {} scored without a q-value",
         v.transfers,
         v.transfers_scored,
         summary.no_features,
@@ -2395,10 +2409,11 @@ fn log_summary(
         fdr.counts.no_q
     );
     for f in &id_fdr.counts.failed_folds {
-        eprintln!("[mbr] identified quality fold without a model: {f}");
+        log::warn!(target: "mbr", "identified quality fold without a model: {f}");
     }
-    eprintln!(
-        "[mbr] identified rows {}: {} with a quality q-value (quant_q, internal), {} at q <= {VALIDATION_Q}; {} identified rows without features, {} unscored, {} scored without a q-value{}",
+    log::info!(
+        target: "mbr",
+        "identified rows {}: {} with a quality q-value (quant_q, internal), {} at q <= {VALIDATION_Q}; {} identified rows without features, {} unscored, {} scored without a q-value{}",
         v.identified,
         v.identified_scored,
         v.identified_q01,
@@ -2410,8 +2425,9 @@ fn log_summary(
             v.identified_below_threshold
         ))
     );
-    eprintln!(
-        "[mbr] pseudo-transfers {}: wrong peak {} of {}, wrong measurement (wrong peak, or quantity off by more than a factor of 2) {}",
+    log::info!(
+        target: "mbr",
+        "pseudo-transfers {}: wrong peak {} of {}, wrong measurement (wrong peak, or quantity off by more than a factor of 2) {}",
         v.pseudo_transfers, v.wrong_peak, v.wrong_peak_pairs, v.wrong_measurement
     );
     let rate = |a: usize, b: usize| {
@@ -2421,8 +2437,9 @@ fn log_summary(
             "NA".to_string()
         }
     };
-    eprintln!(
-        "[mbr] MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
+    log::info!(
+        target: "mbr",
+        "MS2 support (at least {} fragments at angle >= {}): transfer targets {} of {} ({}), mass-shift decoys {} of {} ({}), RT decoys {} of {} ({}), pseudo-transfers {} of {} ({}); {} accepted transfers are transfer_ms2",
         quant::ms2::SUPPORT_MIN_MATCHED,
         quant::ms2::SUPPORT_MIN_ANGLE,
         v.ms2_supported[0],
@@ -2439,21 +2456,24 @@ fn log_summary(
         rate(v.ms2_pseudo_supported, v.ms2_pseudo_rows),
         v.transfer_ms2
     );
-    eprintln!(
-        "[mbr] shared-feature classifier (probability above {}): {} accepted transfers reported as shared_feature",
+    log::info!(
+        target: "mbr",
+        "shared-feature classifier (probability above {}): {} accepted transfers reported as shared_feature",
         quant::shared::Model::shipped().threshold,
         v.shared_feature
     );
-    eprintln!(
-        "[mbr] run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
+    log::info!(
+        target: "mbr",
+        "run normalisation (quantity_normalized): {} reference precursors (identified, quant_q <= {VALIDATION_Q}, in >= 3 runs or all runs)",
         norm.precursors
     );
     for (run, stem) in stems.iter().enumerate() {
         match norm.summary(run as u16) {
-            Some((level, sd, n)) => eprintln!(
-                "[mbr]   {stem}: median offset {level:+.3} log2, sd along RT {sd:.3}, {n} reference cells"
+            Some((level, sd, n)) => log::info!(
+                target: "mbr",
+                "  {stem}: median offset {level:+.3} log2, sd along RT {sd:.3}, {n} reference cells"
             ),
-            None => eprintln!("[mbr]   {stem}: not normalised (too few reference cells)"),
+            None => log::info!(target: "mbr", "  {stem}: not normalised (too few reference cells)"),
         }
     }
     let shown: &[(f64, &Accepted)] = if mbr_fdr == VALIDATION_Q {
@@ -2462,8 +2482,9 @@ fn log_summary(
         &[(VALIDATION_Q, &v.at_q01), (mbr_fdr, &v.at_threshold)]
     };
     for &(t, a) in shown {
-        eprintln!(
-            "[mbr] at q <= {t}: decoy transfers accepted: mass-shift {} of {}, RT-shift {} of {}, identity decoys {} of {}; {} transfers would pass on the wrong-peak decoys alone",
+        log::info!(
+            target: "mbr",
+            "at q <= {t}: decoy transfers accepted: mass-shift {} of {}, RT-shift {} of {}, identity decoys {} of {}; {} transfers would pass on the wrong-peak decoys alone",
             a.decoys[0],
             v.decoy_transfers[0],
             a.decoys[1],
@@ -2472,8 +2493,9 @@ fn log_summary(
             v.decoy_transfers[2],
             a.wrong_peak_only
         );
-        eprintln!(
-            "[mbr] at q <= {t}: {} transfers (mass-shift decoys only {}, RT decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
+        log::info!(
+            target: "mbr",
+            "at q <= {t}: {} transfers (mass-shift decoys only {}, RT decoys only {}); {} pseudo-transfers (acceptance rate {}, optimistic for transfers: the alignment kept their runs' anchors), {} of {} accepted at the wrong peak, {} with a wrong measurement",
             a.pooled,
             a.mass_only,
             a.rt_only,

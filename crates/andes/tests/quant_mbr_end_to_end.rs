@@ -334,8 +334,8 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     let out = andes(&args.iter().map(String::as_str).collect::<Vec<_>>());
     let log = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "all-in-one failed:\n{log}");
-    assert!(log.contains("[mbr] library:"), "{log}");
-    assert!(log.contains("[mbr] extract mbr_run3:"), "{log}");
+    assert!(log.contains("INFO  library: "), "{log}");
+    assert!(log.contains("INFO  extract: mbr_run3:"), "{log}");
 
     assert!(
         same_mbr_tables(&staged.join("out"), &aio.join("a")),

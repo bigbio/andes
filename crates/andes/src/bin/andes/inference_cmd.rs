@@ -174,8 +174,9 @@ pub(crate) fn run_inference(a: InferenceArgs) -> Result<(), Box<dyn std::error::
         None,
     )?;
     let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
-    eprintln!(
-        "Wrote {} ({} of {} target groups at protein q<={} over {} run(s): {} at q<=0.01, {} at q<=0.05)",
+    log::info!(
+        target: "inference",
+        "wrote {} ({} of {} target groups at protein q<={} over {} run(s): {} at q<=0.01, {} at q<=0.05)",
         path.display(),
         at(a.proteins.protein_fdr),
         inf.groups.len(),

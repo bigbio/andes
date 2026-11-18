@@ -1181,9 +1181,6 @@ dependencies = [
 [[package]]
 name = "glyco"
 version = "0.4.0"
-dependencies = [
- "log",
-]
 
 [[package]]
 name = "half"
@@ -2356,7 +2353,6 @@ dependencies = [
 name = "quant"
 version = "0.4.0"
 dependencies = [
- "log",
  "model",
  "rayon",
  "rustc-hash",
@@ -2644,7 +2640,6 @@ version = "0.4.0"
 dependencies = [
  "byteorder",
  "input",
- "log",
  "model",
  "rustc-hash",
  "thiserror 2.0.18",

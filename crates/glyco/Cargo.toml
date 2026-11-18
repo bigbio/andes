@@ -5,4 +5,3 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
-log = { workspace = true }

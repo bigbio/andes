@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-log = { workspace = true }
 model = { path = "../model" }
 rustc-hash = "2"
 thiserror = { workspace = true }

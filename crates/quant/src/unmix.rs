@@ -1,4 +1,5 @@
 use model::mass::ISOTOPE;
+use model::stats::{median_mad, Even, MAD_TO_SD};
 
 use crate::nnls::nnls;
 
@@ -148,14 +149,6 @@ fn summed(r: &[f32]) -> f64 {
     r.iter().map(|&v| (v as f64).max(0.0)).sum()
 }
 
-fn median(mut v: Vec<f64>) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    let mid = v.len() / 2;
-    *v.select_nth_unstable_by(mid, f64::total_cmp).1
-}
-
 impl InterferenceModel {
     pub fn fit(scans: &[ScanInput]) -> Option<Self> {
         let (rows, y): (Vec<[f64; N_COEF]>, Vec<f64>) = scans
@@ -186,9 +179,8 @@ impl InterferenceModel {
             let resid: Vec<f64> = (0..m)
                 .map(|i| (y[i] - dot(&rows[i], &beta)) / y[i])
                 .collect();
-            let centre = median(resid.clone());
-            let mad =
-                (1.4826 * median(resid.iter().map(|r| (r - centre).abs()).collect())).max(MIN_MAD);
+            let (_, raw_mad) = median_mad(&resid, Even::Upper).unwrap_or((0.0, 0.0));
+            let mad = (MAD_TO_SD * raw_mad).max(MIN_MAD);
             for (w, r) in weight.iter_mut().zip(&resid) {
                 let u = r / (BISQUARE_K * mad);
                 *w = if u.abs() < 1.0 { 1.0 - u * u } else { 0.0 };

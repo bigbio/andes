@@ -1519,16 +1519,14 @@ fn secs(t: Instant) -> f64 {
     t.elapsed().as_secs_f64()
 }
 
-pub(crate) fn finalize_stream(
-    stems: &[String],
-    lib: &Library,
-    source: &dyn ExtractSource,
-    params: &FinalizeParams<'_>,
-    on_features: &mut dyn FnMut(Vec<MbrFeature>) -> Result<(), String>,
-) -> Result<FinalizeSummary, String> {
-    let (mbr_fdr, quant_feature_fdr, seed) =
-        (params.mbr_fdr, params.quant_feature_fdr, params.seed);
-    let limits = &params.limits;
+type Key = (u32, u64);
+
+fn check_thresholds(params: &FinalizeParams<'_>) -> Result<(), String> {
+    let (mbr_fdr, quant_feature_fdr, trace_fraction) = (
+        params.mbr_fdr,
+        params.quant_feature_fdr,
+        params.trace_fraction,
+    );
     if !(mbr_fdr > 0.0 && mbr_fdr <= 1.0) {
         return Err(format!(
             "transfer q-value threshold {mbr_fdr} is outside (0, 1]"
@@ -1539,33 +1537,23 @@ pub(crate) fn finalize_stream(
             "identified quality q-value threshold {t} is outside (0, 1]"
         ));
     }
-    let trace_fraction = params.trace_fraction;
     if !(0.0..=1.0).contains(&trace_fraction) {
         return Err(format!(
             "trace-area precursor share {trace_fraction} is outside [0, 1]"
         ));
     }
-    let maps = &lib.alignment.maps;
-    let idx = EntryIndex::new(lib, stems.len());
-    let bounds = Bounds {
-        runs: stems.len(),
-        precursors: lib.meta.len(),
-    };
-    let tmp_parent = match &limits.temp_dir {
-        Some(d) => d.as_path(),
-        None => params
-            .mbr_path
-            .parent()
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    };
-    let tmp = tempfile::Builder::new()
-        .prefix(".andes-finalize-")
-        .tempdir_in(tmp_parent)
-        .map_err(|e| format!("temporary directory in {}: {e}", tmp_parent.display()))?;
-    let dir = tmp.path();
-    let mut summary = FinalizeSummary::default();
+    Ok(())
+}
 
+fn donor_summaries(
+    lib: &Library,
+    source: &dyn ExtractSource,
+    bounds: Bounds,
+    trace_fraction: f64,
+    limits: &FinalizeLimits,
+    dir: &Path,
+) -> Result<Summaries, String> {
+    let maps = &lib.alignment.maps;
     let t0 = Instant::now();
     let upper: usize = lib.entries.iter().map(|e| e.donors.len()).sum();
     let groups = upper.div_ceil(limits.max_donor_fits.max(1)).max(1);
@@ -1612,10 +1600,162 @@ pub(crate) fn finalize_stream(
         all_summaries.len(),
         secs(t0)
     );
+    Ok(all_summaries)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalisation_cells(
+    source: &dyn ExtractSource,
+    bounds: Bounds,
+    idx: &EntryIndex<'_>,
+    dir: &Path,
+    summaries: &Summaries,
+    id_fdr: &QValues,
+    limits: &FinalizeLimits,
+    seed: u64,
+) -> Result<TrainingSample<Key, (NormCell, Option<f64>)>, String> {
+    let cells: Mutex<TrainingSample<Key, (NormCell, Option<f64>)>> =
+        Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
+    for_each_block(
+        source,
+        false,
+        bounds,
+        |_| (None::<Vec<f32>>, 0usize),
+        |(cache, at), chunk, first, rows| {
+            if cache.is_none() {
+                *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
+            }
+            let cache = cache.as_deref().unwrap_or_default();
+            let mut local = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
+                    continue;
+                };
+                let s = *cache.get(*at).ok_or_else(|| {
+                    format!("{}: fewer cached scores than rows", source.name(chunk))
+                })?;
+                *at += 1;
+                if t != Table::Identified || s.is_nan() {
+                    continue;
+                }
+                let s = (s != NO_SCORE).then_some(s);
+                if r.kind != Hypothesis::Target
+                    || !id_fdr
+                        .q(Estimate::Pooled, r.precursor, fam.into(), s)
+                        .is_some_and(|q| q <= VALIDATION_Q)
+                {
+                    continue;
+                }
+                let Some(e) = r.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
+                    continue;
+                };
+                let (k, trace) = quantity_rule(summaries, r.precursor);
+                let q = reported_quantity(e, k, trace, 0.0).0;
+                if q > 0.0 && q.is_finite() {
+                    local.push((
+                        (chunk as u32, first + i as u64),
+                        u64::from(r.precursor),
+                        (
+                            NormCell {
+                                precursor: r.precursor,
+                                run: r.run,
+                                log2_quantity: q.log2(),
+                                rt: e.t0,
+                            },
+                            width_deviation(e, k, trace),
+                        ),
+                    ));
+                }
+            }
+            let mut c = cells.lock().expect("normalisation cells lock");
+            for (k, u, cell) in local {
+                c.push(k, u, cell);
+            }
+            Ok(())
+        },
+        |_, _| Ok(()),
+    )?;
+    let cells = cells.into_inner().expect("normalisation cells lock");
+    let (seen, kept, share) = cells.stats();
+    if kept < seen {
+        log::debug!(
+            target: "mbr",
+            "run normalisation: fitted on {kept} of {seen} reference cells (whole precursors, {share} of them)"
+        );
+    }
+    Ok(cells)
+}
+
+fn wrong_peak_probabilities(
+    rows: &[ExtractRow],
+    idx: &EntryIndex<'_>,
+    w_models: &FoldModels,
+    wrong_cal: Option<&WrongCalibration>,
+) -> Vec<f64> {
+    let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
+    let at: Vec<usize> = (0..rows.len())
+        .filter(|&i| {
+            rows[i].role == Role::Transfer
+                && matches!(idx.table(&rows[i]), Some((Table::Transfer, TARGET)))
+        })
+        .collect();
+    let xs: Vec<Option<Vec<f32>>> = at
+        .iter()
+        .map(|&i| rows[i].evidence.as_ref().and_then(wrong_features))
+        .collect();
+    let ok: Vec<usize> = (0..at.len()).filter(|&k| xs[k].is_some()).collect();
+    let precursors: Vec<u32> = ok.iter().map(|&k| rows[at[k]].precursor).collect();
+    let x_refs: Vec<&[f32]> = ok
+        .iter()
+        .map(|&k| xs[k].as_deref().expect("filtered on features"))
+        .collect();
+    let mut margins = Vec::new();
+    w_models.score(&precursors, &x_refs, &mut margins);
+    for (&k, m) in ok.iter().zip(margins) {
+        if let (Some(m), Some(c)) = (m, wrong_cal) {
+            p_wrong[at[k]] = c.at(m);
+        }
+    }
+    p_wrong
+}
+
+pub(crate) fn finalize_stream(
+    stems: &[String],
+    lib: &Library,
+    source: &dyn ExtractSource,
+    params: &FinalizeParams<'_>,
+    on_features: &mut dyn FnMut(Vec<MbrFeature>) -> Result<(), String>,
+) -> Result<FinalizeSummary, String> {
+    let (mbr_fdr, quant_feature_fdr, seed) =
+        (params.mbr_fdr, params.quant_feature_fdr, params.seed);
+    let limits = &params.limits;
+    check_thresholds(params)?;
+    let trace_fraction = params.trace_fraction;
+    let maps = &lib.alignment.maps;
+    let idx = EntryIndex::new(lib, stems.len());
+    let bounds = Bounds {
+        runs: stems.len(),
+        precursors: lib.meta.len(),
+    };
+    let tmp_parent = match &limits.temp_dir {
+        Some(d) => d.as_path(),
+        None => params
+            .mbr_path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    };
+    let tmp = tempfile::Builder::new()
+        .prefix(".andes-finalize-")
+        .tempdir_in(tmp_parent)
+        .map_err(|e| format!("temporary directory in {}: {e}", tmp_parent.display()))?;
+    let dir = tmp.path();
+    let mut summary = FinalizeSummary::default();
+
+    let all_summaries = donor_summaries(lib, source, bounds, trace_fraction, limits, dir)?;
     let summaries = &all_summaries;
 
     let t0 = Instant::now();
-    type Key = (u32, u64);
     let members = limits.transfer_models.max(1);
     let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
         .map(|m| {
@@ -1883,75 +2023,7 @@ pub(crate) fn finalize_stream(
     );
 
     let t0 = Instant::now();
-    let cells: Mutex<TrainingSample<Key, (NormCell, Option<f64>)>> =
-        Mutex::new(TrainingSample::new(limits.max_norm_cells, seed));
-    for_each_block(
-        source,
-        false,
-        bounds,
-        |_| (None::<Vec<f32>>, 0usize),
-        |(cache, at), chunk, first, rows| {
-            if cache.is_none() {
-                *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
-            }
-            let cache = cache.as_deref().unwrap_or_default();
-            let mut local = Vec::new();
-            for (i, r) in rows.iter().enumerate() {
-                let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
-                    continue;
-                };
-                let s = *cache.get(*at).ok_or_else(|| {
-                    format!("{}: fewer cached scores than rows", source.name(chunk))
-                })?;
-                *at += 1;
-                if t != Table::Identified || s.is_nan() {
-                    continue;
-                }
-                let s = (s != NO_SCORE).then_some(s);
-                if r.kind != Hypothesis::Target
-                    || !id_fdr
-                        .q(Estimate::Pooled, r.precursor, fam.into(), s)
-                        .is_some_and(|q| q <= VALIDATION_Q)
-                {
-                    continue;
-                }
-                let Some(e) = r.evidence.as_ref().filter(|e| e.amplitude > 0.0) else {
-                    continue;
-                };
-                let (k, trace) = quantity_rule(summaries, r.precursor);
-                let q = reported_quantity(e, k, trace, 0.0).0;
-                if q > 0.0 && q.is_finite() {
-                    local.push((
-                        (chunk as u32, first + i as u64),
-                        u64::from(r.precursor),
-                        (
-                            NormCell {
-                                precursor: r.precursor,
-                                run: r.run,
-                                log2_quantity: q.log2(),
-                                rt: e.t0,
-                            },
-                            width_deviation(e, k, trace),
-                        ),
-                    ));
-                }
-            }
-            let mut c = cells.lock().expect("normalisation cells lock");
-            for (k, u, cell) in local {
-                c.push(k, u, cell);
-            }
-            Ok(())
-        },
-        |_, _| Ok(()),
-    )?;
-    let cells = cells.into_inner().expect("normalisation cells lock");
-    let (seen, kept, share) = cells.stats();
-    if kept < seen {
-        log::debug!(
-            target: "mbr",
-            "run normalisation: fitted on {kept} of {seen} reference cells (whole precursors, {share} of them)"
-        );
-    }
+    let cells = normalisation_cells(source, bounds, &idx, dir, summaries, &id_fdr, limits, seed)?;
     let t1 = Instant::now();
     let (cells, width_weights) = weigh_widths(cells.into_items(), stems.len());
     log::debug!(
@@ -2037,32 +2109,7 @@ pub(crate) fn finalize_stream(
                     )
                 })
             };
-            let mut p_wrong: Vec<f64> = vec![1.0; rows.len()];
-            {
-                let at: Vec<usize> = (0..rows.len())
-                    .filter(|&i| {
-                        rows[i].role == Role::Transfer
-                            && matches!(idx.table(&rows[i]), Some((Table::Transfer, TARGET)))
-                    })
-                    .collect();
-                let xs: Vec<Option<Vec<f32>>> = at
-                    .iter()
-                    .map(|&i| rows[i].evidence.as_ref().and_then(wrong_features))
-                    .collect();
-                let ok: Vec<usize> = (0..at.len()).filter(|&k| xs[k].is_some()).collect();
-                let precursors: Vec<u32> = ok.iter().map(|&k| rows[at[k]].precursor).collect();
-                let x_refs: Vec<&[f32]> = ok
-                    .iter()
-                    .map(|&k| xs[k].as_deref().expect("filtered on features"))
-                    .collect();
-                let mut margins = Vec::new();
-                w_models.score(&precursors, &x_refs, &mut margins);
-                for (&k, m) in ok.iter().zip(margins) {
-                    if let (Some(m), Some(c)) = (m, &wrong_cal) {
-                        p_wrong[at[k]] = c.at(m);
-                    }
-                }
-            }
+            let p_wrong = wrong_peak_probabilities(rows, &idx, &w_models, wrong_cal.as_ref());
             for (i, r) in rows.iter().enumerate() {
                 if idx.is_identity(r.precursor) {
                     if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {

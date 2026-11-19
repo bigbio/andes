@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use model::mass::ISOTOPE;
 pub use model::scan::Ms1Scan;
+use model::stats::{median_mut, Even};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobilityGate {
@@ -202,8 +203,7 @@ impl Ms1RunIndex {
         if gaps.is_empty() {
             return None;
         }
-        let mid = gaps.len() / 2;
-        Some(*gaps.select_nth_unstable_by(mid, f64::total_cmp).1)
+        median_mut(&mut gaps, Even::Upper)
     }
 
     pub fn scan_window(&self, rt_lo: f64, rt_hi: f64) -> std::ops::Range<usize> {

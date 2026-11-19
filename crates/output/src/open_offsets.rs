@@ -7,6 +7,7 @@ use arrow::array::{ArrayRef, Float64Array, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
+use model::stats::{median_mad, median_mut, Even, MAD_TO_SD};
 use model::unimod::{Specificity, UnimodDb};
 
 use crate::percolator::PercolatorPsm;
@@ -189,18 +190,11 @@ fn site_label(sequence: &str, site: usize) -> Option<String> {
 }
 
 fn median(values: &mut [f64]) -> f64 {
-    values.sort_by(|a, b| a.total_cmp(b));
-    values[values.len() / 2]
+    median_mut(values, Even::Upper).unwrap_or(f64::NAN)
 }
 
 fn mad(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut v = values.to_vec();
-    let med = median(&mut v);
-    let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
-    1.4826 * median(&mut dev)
+    median_mad(values, Even::Upper).map_or(0.0, |(_, mad)| MAD_TO_SD * mad)
 }
 
 fn shift_of(rows: &[&PinOffset]) -> Option<f64> {

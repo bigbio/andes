@@ -6,6 +6,7 @@ use glyco::glycan_db::GlycanComp;
 use glyco::glycan_first::GlycanCore;
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
+use model::stats::{median_mad, Even, MAD_TO_SD};
 use model::Tolerance;
 use output::glyco_pin::select_emitted_hits;
 use quant::formula::Formula;
@@ -761,9 +762,8 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
         .iter()
         .map(|&(x, y)| y - (intercept + slope * x))
         .collect();
-    let center = crate::quant_mbr::median(residuals.clone());
-    let mad =
-        1.4826 * crate::quant_mbr::median(residuals.iter().map(|r| (r - center).abs()).collect());
+    let (center, mad) = median_mad(&residuals, Even::Mean).unwrap_or((f64::NAN, f64::NAN));
+    let mad = MAD_TO_SD * mad;
     let mut kept: Vec<(f64, f64)> = pairs
         .iter()
         .zip(&residuals)
@@ -795,10 +795,8 @@ fn fit_rt_map(pairs: &[(f64, f64)]) -> Option<RtMap> {
         ys,
         sigma_s: 0.0,
     };
-    let mut dev: Vec<f64> = kept.iter().map(|&(x, y)| y - map.forward(x)).collect();
-    let dev_center = crate::quant_mbr::median(dev.clone());
-    let sigma =
-        1.4826 * crate::quant_mbr::median(dev.drain(..).map(|d| (d - dev_center).abs()).collect());
+    let dev: Vec<f64> = kept.iter().map(|&(x, y)| y - map.forward(x)).collect();
+    let sigma = MAD_TO_SD * median_mad(&dev, Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
     let map = RtMap {
         sigma_s: sigma,
         ..map

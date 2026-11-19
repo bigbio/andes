@@ -11,13 +11,14 @@ use arrow::record_batch::RecordBatch;
 use model::Tolerance;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::basic::Encoding;
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
 use quant::ms2::{Ms2Scan, ScanReporters};
 
-use crate::ms1_table::partial_path;
+use crate::atomic::write_atomic_str;
+use crate::versioned_parquet::{column_at_unpathed as column, zstd_props};
 
 pub const MS2_SCHEMA_MAJOR: u32 = 1;
 
@@ -108,19 +109,17 @@ fn parse_tolerance(s: &str) -> Option<Tolerance> {
 fn properties(version: &str, run: &str, tol: Tolerance, top_peaks: usize) -> WriterProperties {
     let list_values =
         |name: &str| ColumnPath::new(vec![name.to_string(), "list".into(), "item".into()]);
-    WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+    let meta = vec![
+        KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
+        KeyValue::new(RUN_KEY.to_string(), run.to_string()),
+        KeyValue::new(TOL_KEY.to_string(), format_tolerance(tol)),
+        KeyValue::new(TOP_KEY.to_string(), top_peaks.to_string()),
+    ];
+    zstd_props(SCANS_PER_GROUP, meta)
         .set_dictionary_enabled(false)
         .set_column_encoding(ColumnPath::from(COLUMNS[2]), Encoding::BYTE_STREAM_SPLIT)
         .set_column_encoding(list_values(COLUMNS[9]), Encoding::BYTE_STREAM_SPLIT)
         .set_column_encoding(list_values(COLUMNS[10]), Encoding::BYTE_STREAM_SPLIT)
-        .set_max_row_group_size(SCANS_PER_GROUP)
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new(SCHEMA_KEY.to_string(), version.to_string()),
-            KeyValue::new(RUN_KEY.to_string(), run.to_string()),
-            KeyValue::new(TOL_KEY.to_string(), format_tolerance(tol)),
-            KeyValue::new(TOP_KEY.to_string(), top_peaks.to_string()),
-        ]))
         .build()
 }
 
@@ -208,45 +207,32 @@ fn batch(
 }
 
 fn write_with_version(path: &Path, t: &Ms2Table, version: &str) -> Result<(), String> {
-    let partial = partial_path(path);
     let with_reporters = t.scans.iter().any(|s| s.reporters.is_some());
     let version = if with_reporters && version == SCHEMA_VERSION {
         SCHEMA_VERSION_REPORTERS
     } else {
         version
     };
-    let written = (|| {
-        let schema = Arc::new(schema(with_reporters));
-        let file = File::create(&partial).map_err(|e| e.to_string())?;
-        let props = properties(version, &t.run, t.fragment_tol, t.top_peaks);
-        let mut w =
-            ArrowWriter::try_new(file, schema.clone(), Some(props)).map_err(|e| e.to_string())?;
-        for chunk in t.scans.chunks(SCANS_PER_GROUP) {
-            w.write(&batch(&schema, chunk, with_reporters)?)
+    write_atomic_str(path, |partial| {
+        (|| {
+            let schema = Arc::new(schema(with_reporters));
+            let file = File::create(partial).map_err(|e| e.to_string())?;
+            let props = properties(version, &t.run, t.fragment_tol, t.top_peaks);
+            let mut w = ArrowWriter::try_new(file, schema.clone(), Some(props))
                 .map_err(|e| e.to_string())?;
-        }
-        w.close().map_err(|e| e.to_string())?;
-        std::fs::rename(&partial, path).map_err(|e| e.to_string())
-    })()
-    .map_err(|e| format!("{}: {e}", path.display()));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
+            for chunk in t.scans.chunks(SCANS_PER_GROUP) {
+                w.write(&batch(&schema, chunk, with_reporters)?)
+                    .map_err(|e| e.to_string())?;
+            }
+            w.close().map_err(|e| e.to_string())?;
+            Ok(())
+        })()
+        .map_err(|e: String| format!("{}: {e}", path.display()))
+    })
 }
 
 pub fn write_ms2_table(path: &Path, table: &Ms2Table) -> Result<(), String> {
     write_with_version(path, table, SCHEMA_VERSION)
-}
-
-fn column<T: 'static>(b: &RecordBatch, i: usize) -> Result<&T, String> {
-    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
-        format!(
-            "column {} has unexpected type {}",
-            b.schema().field(i).name(),
-            b.column(i).data_type()
-        )
-    })
 }
 
 fn f32_list(b: &RecordBatch, i: usize) -> Result<(&Float32Array, &[i32]), String> {
@@ -457,7 +443,7 @@ mod tests {
         let p = dir.path().join("run.ms2.parquet");
         let t = table(SCANS_PER_GROUP + 13);
         write_ms2_table(&p, &t).unwrap();
-        assert!(!partial_path(&p).exists());
+        assert!(!crate::atomic::partial_path(&p).exists());
         let back = read_ms2_table(&p).unwrap();
         assert_eq!(back, t);
         let groups = ParquetRecordBatchReaderBuilder::try_new(File::open(&p).unwrap())
@@ -574,6 +560,6 @@ mod tests {
         let bad = dir.path().join("missing").join("d.ms2.parquet");
         let e = write_ms2_table(&bad, &table(2)).unwrap_err();
         assert!(e.contains("d.ms2.parquet"), "{e}");
-        assert!(!bad.exists() && !partial_path(&bad).exists());
+        assert!(!bad.exists() && !crate::atomic::partial_path(&bad).exists());
     }
 }

@@ -876,12 +876,6 @@ mod tests {
         assert_eq!(rows, 2);
     }
 
-    fn fnv1a(bytes: &[u8]) -> u64 {
-        bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
-            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-        })
-    }
-
     #[test]
     fn records_without_mbr_columns_write_the_qpx_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -899,7 +893,7 @@ mod tests {
         let footer = u32::from_le_bytes(b[n - 8..n - 4].try_into().unwrap()) as usize;
         let data = &b[4..n - 8 - footer];
         assert_eq!(data.len(), 5460);
-        let h = fnv1a(data);
+        let h = model::hash::fnv1a64(data);
         assert_eq!(h, 0xade2_cf2b_3c40_c827, "hash {h:#018x}");
 
         let builder =

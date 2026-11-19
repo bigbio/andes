@@ -1,5 +1,6 @@
 use crate::glycan_first::GlycanCore;
 use crate::glycan_mass::{CORE_Y_STEPS, O_CORE_Y_STEPS, PROTON};
+use model::hash::{splitmix64, SPLITMIX_GOLDEN};
 
 #[inline]
 fn core_y_steps(core: GlycanCore) -> &'static [f64] {
@@ -416,15 +417,6 @@ fn ladder_norm_scale(score: f64, n_rungs: usize) -> f64 {
     }
 }
 
-#[inline]
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn glycan_y_intensity_decoy(
     peaks: &[(f64, f32)],
@@ -447,7 +439,7 @@ pub fn glycan_y_intensity_decoy(
         let shift = if ai == 0 || ai == last {
             0.0
         } else {
-            let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let h = splitmix64(seed ^ (ai as u64).wrapping_mul(SPLITMIX_GOLDEN));
             1.0 + (h % 29_000) as f64 / 1000.0
         };
         score += match_int(bb_neutral + r + shift);
@@ -475,7 +467,7 @@ pub fn glycan_y_hit_frac(
     for (ai, &r) in retained.iter().enumerate() {
         let shift = match decoy_seed {
             Some(seed) if ai != 0 && ai != last => {
-                let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let h = splitmix64(seed ^ (ai as u64).wrapping_mul(SPLITMIX_GOLDEN));
                 1.0 + (h % 29_000) as f64 / 1000.0
             }
             _ => 0.0,

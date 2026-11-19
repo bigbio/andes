@@ -1,4 +1,5 @@
 use model::mass::ISOTOPE;
+use model::stats::{median_f32_as_f64_mut, MAD_TO_SD};
 
 use crate::decoys::Probe;
 use crate::gaussian;
@@ -7,7 +8,6 @@ use crate::ms1_index::{slice_value, MobilityGate, Ms1RunIndex};
 pub const MAX_ISOTOPES: usize = 4;
 pub const MIN_SCANS: usize = 5;
 pub const WIDTH_GRID: [f64; 3] = [0.7, 1.0, 1.4];
-const MAD_SCALE: f64 = 1.4826;
 const DEFAULT_DETECTION_LIMIT: f64 = 1.0;
 const NOISE_FLOOR_OF_LIMIT: f64 = 0.5;
 const MIN_CENTRED_SGG: f64 = 1e-9;
@@ -345,8 +345,7 @@ pub fn fit_on_grid_gated(
 fn detection_limit(ms1: &Ms1RunIndex, scans: std::ops::Range<usize>, buf: &mut Vec<f32>) -> f64 {
     buf.clear();
     buf.extend(scans.map(|j| ms1.detection_limit(j)));
-    buf.sort_unstable_by(f32::total_cmp);
-    median_sorted(buf)
+    median_f32_as_f64_mut(buf).unwrap_or(0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -790,17 +789,8 @@ fn mean(y: &[f32]) -> f64 {
 fn noise_sigma(y: &[f32], floor: f64, sort: &mut Vec<f32>) -> f64 {
     sort.clear();
     sort.extend(y.windows(2).map(|w| (w[1] - w[0]).abs()));
-    sort.sort_unstable_by(f32::total_cmp);
-    let mad = median_sorted(sort);
-    (MAD_SCALE * mad / std::f64::consts::SQRT_2).max(floor)
-}
-
-fn median_sorted(v: &[f32]) -> f64 {
-    match v.len() {
-        0 => 0.0,
-        n if n % 2 == 1 => v[n / 2] as f64,
-        n => 0.5 * (v[n / 2 - 1] as f64 + v[n / 2] as f64),
-    }
+    let mad = median_f32_as_f64_mut(sort).unwrap_or(0.0);
+    (MAD_TO_SD * mad / std::f64::consts::SQRT_2).max(floor)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1172,7 +1162,10 @@ fn trace_area(
             (part.len() >= MIN_BASELINE_SCANS).then(|| {
                 sort.clear();
                 sort.extend_from_slice(part);
-                (median_unsorted(sort), median_var(part.len()))
+                (
+                    median_f32_as_f64_mut(sort).unwrap_or(0.0),
+                    median_var(part.len()),
+                )
             })
         };
         let (left, right) = (side(&trace[..lo]), side(&trace[hi..]));
@@ -1188,7 +1181,10 @@ fn trace_area(
                 sort.clear();
                 sort.extend_from_slice(&trace[..lo]);
                 sort.extend_from_slice(&trace[hi..]);
-                (median_unsorted(sort), median_var(n_left + n_right))
+                (
+                    median_f32_as_f64_mut(sort).unwrap_or(0.0),
+                    median_var(n_left + n_right),
+                )
             }
             (Some(one), None) | (None, Some(one)) => one,
             (None, None) => (mean(trace) - a * pi[i] * gbar, s2 / trace.len() as f64),
@@ -1203,21 +1199,6 @@ fn trace_area(
         (num / den, var.sqrt() / den)
     } else {
         (0.0, 0.0)
-    }
-}
-
-fn median_unsorted(v: &mut [f32]) -> f64 {
-    let n = v.len();
-    if n == 0 {
-        return 0.0;
-    }
-    let (left, mid, _) = v.select_nth_unstable_by(n / 2, f32::total_cmp);
-    let upper = *mid as f64;
-    if n % 2 == 1 {
-        upper
-    } else {
-        let lower = left.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-        0.5 * (lower + upper)
     }
 }
 
@@ -1283,11 +1264,7 @@ mod tests {
 
     impl Rng {
         fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut x = self.0;
-            x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            x ^ (x >> 31)
+            model::hash::splitmix64_next(&mut self.0)
         }
 
         fn uniform(&mut self) -> f64 {
@@ -2584,8 +2561,8 @@ mod tests {
 
     #[test]
     fn median_of_an_unsorted_slice() {
-        assert_eq!(median_unsorted(&mut []), 0.0);
-        assert_eq!(median_unsorted(&mut [3.0, 1.0, 2.0]), 2.0);
-        assert_eq!(median_unsorted(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+        assert_eq!(median_f32_as_f64_mut(&mut []).unwrap_or(0.0), 0.0);
+        assert_eq!(median_f32_as_f64_mut(&mut [3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median_f32_as_f64_mut(&mut [4.0, 1.0, 3.0, 2.0]), Some(2.5));
     }
 }

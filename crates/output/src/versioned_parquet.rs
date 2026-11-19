@@ -9,8 +9,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::format::KeyValue;
+
+use crate::atomic::partial_path;
 
 pub(crate) const BATCH_ROWS: usize = 65_536;
 
@@ -19,6 +21,15 @@ pub(crate) struct TableVersion {
     pub version: &'static str,
     pub major: u32,
     pub what: &'static str,
+}
+
+/// Writer properties shared by every ZSTD table: compression, row-group size and the
+/// key-value footer. Returns the builder so a caller can add column encodings.
+pub(crate) fn zstd_props(row_group_rows: usize, meta: Vec<KeyValue>) -> WriterPropertiesBuilder {
+    WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .set_max_row_group_size(row_group_rows)
+        .set_key_value_metadata(Some(meta))
 }
 
 pub(crate) struct TableWriter {
@@ -34,10 +45,9 @@ impl TableWriter {
         version: &str,
         schema: Arc<Schema>,
         extra: &[(&str, String)],
+        row_group_rows: usize,
     ) -> Result<Self, String> {
-        let mut partial = path.as_os_str().to_owned();
-        partial.push(".partial");
-        let partial = PathBuf::from(partial);
+        let partial = partial_path(path);
         let meta: Vec<KeyValue> =
             std::iter::once(KeyValue::new(table.key.to_string(), version.to_string()))
                 .chain(
@@ -46,11 +56,7 @@ impl TableWriter {
                         .map(|(k, v)| KeyValue::new(k.to_string(), v.clone())),
                 )
                 .collect();
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_max_row_group_size(BATCH_ROWS)
-            .set_key_value_metadata(Some(meta))
-            .build();
+        let props = zstd_props(row_group_rows, meta).build();
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", partial.display());
         let file = File::create(&partial).map_err(|e| err(&e))?;
         let writer = ArrowWriter::try_new(file, schema, Some(props));
@@ -66,6 +72,10 @@ impl TableWriter {
             partial,
             writer: Some(writer),
         })
+    }
+
+    pub(crate) fn partial(&self) -> &Path {
+        &self.partial
     }
 
     pub(crate) fn write(&mut self, b: &RecordBatch) -> Result<(), String> {
@@ -106,7 +116,7 @@ pub(crate) fn write_table(
     batches: impl IntoIterator<Item = Result<RecordBatch, String>>,
     extra: &[(&str, String)],
 ) -> Result<(), String> {
-    let mut w = TableWriter::create(path, table, version, schema, extra)?;
+    let mut w = TableWriter::create(path, table, version, schema, extra, BATCH_ROWS)?;
     for b in batches {
         let b = b.map_err(|e| format!("{}: {e}", path.display()))?;
         w.write(&b)?;
@@ -155,6 +165,38 @@ pub(crate) fn read_table(path: &Path, table: &TableVersion) -> Result<ReadTable,
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| err(&e))?;
     Ok(ReadTable { batches, meta })
+}
+
+/// Typed column by position. The error names the file when a path is given and is
+/// otherwise the bare column message used by tables read from a stream.
+fn downcast_column<'a, T: 'static>(
+    b: &'a RecordBatch,
+    i: usize,
+    path: Option<&Path>,
+) -> Result<&'a T, String> {
+    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
+        let what = format!(
+            "column {} has unexpected type {}",
+            b.schema().field(i).name(),
+            b.column(i).data_type()
+        );
+        match path {
+            Some(p) => format!("{}: {what}", p.display()),
+            None => what,
+        }
+    })
+}
+
+pub(crate) fn column_at<'a, T: 'static>(
+    b: &'a RecordBatch,
+    i: usize,
+    path: &Path,
+) -> Result<&'a T, String> {
+    downcast_column(b, i, Some(path))
+}
+
+pub(crate) fn column_at_unpathed<T: 'static>(b: &RecordBatch, i: usize) -> Result<&T, String> {
+    downcast_column(b, i, None)
 }
 
 pub(crate) fn column<'a, T: 'static>(

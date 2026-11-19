@@ -3,6 +3,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use model::enzyme::Enzyme;
+use model::hash::{fnv1a64, splitmix64};
 use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 
 use crate::candidate_gen::{compute_cleavage_positions, has_met_cleaved_walk};
@@ -287,27 +288,11 @@ impl TargetSegments {
 }
 
 fn folded_hash(residues: impl Iterator<Item = u8>) -> u64 {
-    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
-    for r in residues {
-        h ^= u64::from(if r == b'I' { b'L' } else { r });
-        h = h.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    h
-}
-
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
+    fnv1a64(residues.map(|r| if r == b'I' { b'L' } else { r }))
 }
 
 fn segment_seed(seed: u64, seg: &[u8], lead_met: bool, k: u64) -> u64 {
-    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
-    for &r in seg {
-        h ^= u64::from(r);
-        h = h.wrapping_mul(0x0000_0100_0000_01B3);
-    }
+    let h = fnv1a64(seg);
     splitmix64(h ^ splitmix64(seed ^ splitmix64(k.wrapping_mul(2) | u64::from(lead_met))))
 }
 

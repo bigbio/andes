@@ -5,6 +5,7 @@ use std::path::Path;
 
 use model::modification::{ModLocation, ResidueSpec};
 use model::spectrum::Spectrum;
+use model::stats::{quantile_sorted, MAD_TO_SD};
 use model::tolerance::Tolerance;
 use rayon::prelude::*;
 use search::candidate_gen::Candidate;
@@ -538,19 +539,6 @@ pub struct FixedModRow {
     pub eligible: usize,
 }
 
-fn quantile(sorted: &[f64], p: f64) -> f64 {
-    match sorted.len() {
-        0 => f64::NAN,
-        1 => sorted[0],
-        n => {
-            let pos = p * (n - 1) as f64;
-            let lo = pos.floor() as usize;
-            let hi = pos.ceil() as usize;
-            sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-        }
-    }
-}
-
 fn run_rate_z(rates: &[Option<f64>]) -> Vec<Option<f64>> {
     let logs: Vec<f64> = rates.iter().flatten().map(|&r| r.max(1e-6).ln()).collect();
     if logs.len() < 3 {
@@ -558,10 +546,10 @@ fn run_rate_z(rates: &[Option<f64>]) -> Vec<Option<f64>> {
     }
     let mut sorted = logs.clone();
     sorted.sort_by(f64::total_cmp);
-    let median = quantile(&sorted, 0.5);
+    let median = quantile_sorted(&sorted, 0.5, false);
     let mut dev: Vec<f64> = logs.iter().map(|l| (l - median).abs()).collect();
     dev.sort_by(f64::total_cmp);
-    let scale = (1.4826 * quantile(&dev, 0.5)).max(MIN_LOG_RATE_SCALE);
+    let scale = (MAD_TO_SD * quantile_sorted(&dev, 0.5, false)).max(MIN_LOG_RATE_SCALE);
     rates
         .iter()
         .map(|r| r.map(|r| (r.max(1e-6).ln() - median) / scale))
@@ -595,9 +583,9 @@ impl IdentificationSummary {
         ppm.sort_by(f64::total_cmp);
         let mass_error_ppm = (!ppm.is_empty()).then(|| {
             (
-                quantile(&ppm, 0.5),
-                quantile(&ppm, 0.25),
-                quantile(&ppm, 0.75),
+                quantile_sorted(&ppm, 0.5, false),
+                quantile_sorted(&ppm, 0.25, false),
+                quantile_sorted(&ppm, 0.75, false),
             )
         });
         let mass_error_after_shift_ppm = (ctx.calibration_shift_ppm != 0.0)
@@ -610,9 +598,9 @@ impl IdentificationSummary {
                 after.sort_by(f64::total_cmp);
                 (!after.is_empty()).then(|| {
                     (
-                        quantile(&after, 0.5),
-                        quantile(&after, 0.25),
-                        quantile(&after, 0.75),
+                        quantile_sorted(&after, 0.5, false),
+                        quantile_sorted(&after, 0.25, false),
+                        quantile_sorted(&after, 0.75, false),
                     )
                 })
             })

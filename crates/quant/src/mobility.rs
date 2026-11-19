@@ -1,4 +1,5 @@
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
+use model::stats::{median_mad, Even, MAD_TO_SD};
 
 pub const SEARCH_K0: f64 = 0.1;
 pub const REFINE_SIGMAS: f64 = 4.0;
@@ -31,21 +32,8 @@ impl RunMobility {
     }
 }
 
-fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    }
-}
-
 fn location_scale(d: &[f64]) -> (f64, f64) {
-    let mut v = d.to_vec();
-    let m = median(&mut v);
-    let mut dev: Vec<f64> = d.iter().map(|x| (x - m).abs()).collect();
-    (m, 1.4826 * median(&mut dev))
+    median_mad(d, Even::Mean).map_or((f64::NAN, f64::NAN), |(m, mad)| (m, MAD_TO_SD * mad))
 }
 
 fn differences(

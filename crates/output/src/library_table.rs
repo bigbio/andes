@@ -9,14 +9,16 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use model::hash::{fnv1a64_extend, FNV1A64_OFFSET};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use quant::align::{Alignment, RunAlignment, RunMap};
 use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
+
+use crate::atomic::write_atomic_str;
+use crate::versioned_parquet::{column_at as column, zstd_props};
 
 pub const LIBRARY_SCHEMA_MAJOR: u32 = 5;
 pub const LIBRARY_FILE: &str = "library.parquet";
@@ -102,13 +104,10 @@ struct Fnv(u64);
 
 impl Fnv {
     fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
+        Fnv(FNV1A64_OFFSET)
     }
     fn bytes(&mut self, b: &[u8]) {
-        for &x in b {
-            self.0 ^= x as u64;
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        self.0 = fnv1a64_extend(self.0, b);
     }
     fn u64(&mut self, v: u64) {
         self.bytes(&v.to_le_bytes());
@@ -408,16 +407,9 @@ fn write_parquet(
     batches: impl Iterator<Item = Result<RecordBatch, String>>,
 ) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
-    let written = (|| {
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_max_row_group_size(BATCH_ROWS)
-            .set_key_value_metadata(Some(meta))
-            .build();
-        let file = File::create(&partial).map_err(|e| err(&e))?;
+    write_atomic_str(path, |partial| {
+        let props = zstd_props(BATCH_ROWS, meta).build();
+        let file = File::create(partial).map_err(|e| err(&e))?;
         let mut writer = ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| err(&e))?;
         for b in batches {
             writer
@@ -425,12 +417,8 @@ fn write_parquet(
                 .map_err(|e| err(&e))?;
         }
         writer.close().map_err(|e| err(&e))?;
-        std::fs::rename(&partial, path).map_err(|e| err(&e))
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written
+        Ok(())
+    })
 }
 
 fn write_versioned(dir: &Path, lib: &StoredLibrary, version: &str) -> Result<(), String> {
@@ -609,17 +597,6 @@ fn open(
     };
     let reader = builder.build().map_err(|e| err(&e))?;
     Ok((reader, meta, layout))
-}
-
-fn column<'a, T: 'static>(b: &'a RecordBatch, i: usize, path: &Path) -> Result<&'a T, String> {
-    b.column(i).as_any().downcast_ref::<T>().ok_or_else(|| {
-        format!(
-            "{}: column {} has unexpected type {}",
-            path.display(),
-            b.schema().field(i).name(),
-            b.column(i).data_type()
-        )
-    })
 }
 
 fn items<T: Clone + 'static, A: Array + 'static>(

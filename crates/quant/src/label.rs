@@ -1,4 +1,6 @@
+use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::ISOTOPE;
+use model::stats::{median_mut, nan_low, Even, MAD_TO_SD};
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
@@ -1007,9 +1009,8 @@ fn robust_sigma(y: &[f64], floor: f64) -> f64 {
         return floor.max(1.0);
     }
     let mut d: Vec<f64> = y.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
-    let mid = d.len() / 2;
-    let med = *d.select_nth_unstable_by(mid, f64::total_cmp).1;
-    (1.4826 * med / std::f64::consts::SQRT_2)
+    let med = median_mut(&mut d, Even::Upper).unwrap_or(0.0);
+    (MAD_TO_SD * med / std::f64::consts::SQRT_2)
         .max(floor)
         .max(1e-9)
 }
@@ -1044,8 +1045,7 @@ pub fn fit_group(ms1: &Ms1RunIndex, probe: &GroupProbe, params: &FitParams) -> O
         .clone()
         .map(|i| ms1.detection_limit(i) as f64)
         .collect();
-    let mid = limits.len() / 2;
-    let limit = *limits.select_nth_unstable_by(mid, f64::total_cmp).1;
+    let limit = median_mut(&mut limits, Even::Upper).unwrap_or(f64::NAN);
     let away: Vec<bool> = rt
         .iter()
         .map(|&t| (t - probe.t_hat).abs() > 3.0 * s.max(w_max) + max_shift)
@@ -1524,27 +1524,22 @@ pub fn channel_score(fit: &ChannelFit) -> f64 {
 pub fn channel_qvalues(rows: &[(f64, bool)], decoys_per_target: usize) -> Vec<f64> {
     let k = decoys_per_target.max(1) as f64;
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    let key = |s: f64| if s.is_nan() { f64::NEG_INFINITY } else { s };
     order.sort_by(|&a, &b| {
-        key(rows[b].0)
-            .total_cmp(&key(rows[a].0))
+        nan_low(rows[b].0)
+            .total_cmp(&nan_low(rows[a].0))
             .then(rows[b].1.cmp(&rows[a].1))
     });
+    let ranked = ranked_q::<Counts>(
+        rows.len(),
+        |c, rank| c.add(rows[order[rank]].1),
+        |_, _| false,
+        Eval::PerRow,
+        |c| c.ratio_plus_one_over(k),
+        1.0,
+    );
     let mut q = vec![1.0; rows.len()];
-    let (mut t, mut d) = (0usize, 0usize);
-    let mut raw = Vec::with_capacity(rows.len());
-    for &i in &order {
-        if rows[i].1 {
-            d += 1;
-        } else {
-            t += 1;
-        }
-        raw.push((((d + 1) as f64 / k) / t.max(1) as f64).min(1.0));
-    }
-    let mut run = 1.0f64;
-    for (r, &i) in order.iter().enumerate().rev() {
-        run = run.min(raw[r]);
-        q[i] = run;
+    for (&i, qi) in order.iter().zip(ranked) {
+        q[i] = qi;
     }
     q
 }
@@ -1556,28 +1551,30 @@ pub fn weighted_qvalues(rows: &[(f64, f64)]) -> Vec<f64> {
     } else {
         decoys.iter().sum::<f64>() / decoys.len() as f64
     };
-    let key = |s: f64| if s.is_nan() { f64::NEG_INFINITY } else { s };
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
-        key(rows[b].0)
-            .total_cmp(&key(rows[a].0))
+        nan_low(rows[b].0)
+            .total_cmp(&nan_low(rows[a].0))
             .then((rows[b].1 > 0.0).cmp(&(rows[a].1 > 0.0)))
     });
-    let (mut t, mut d) = (0usize, 0.0f64);
-    let mut raw = Vec::with_capacity(rows.len());
-    for &i in &order {
-        if rows[i].1 > 0.0 {
-            d += rows[i].1;
-        } else {
-            t += 1;
-        }
-        raw.push(((d + w_bar) / t.max(1) as f64).min(1.0));
-    }
+    let ranked = ranked_q::<(usize, f64)>(
+        rows.len(),
+        |(t, d), rank| {
+            let w = rows[order[rank]].1;
+            if w > 0.0 {
+                *d += w;
+            } else {
+                *t += 1;
+            }
+        },
+        |_, _| false,
+        Eval::PerRow,
+        |&(t, d)| (d + w_bar) / t.max(1) as f64,
+        1.0,
+    );
     let mut q = vec![1.0; rows.len()];
-    let mut run = 1.0f64;
-    for (r, &i) in order.iter().enumerate().rev() {
-        run = run.min(raw[r]);
-        q[i] = run;
+    for (&i, qi) in order.iter().zip(ranked) {
+        q[i] = qi;
     }
     q
 }
@@ -1693,29 +1690,14 @@ pub fn learn_rt_shifts(pairs: &[(usize, f64)], n_channels: usize, min_pairs: usi
             if v.len() < min_pairs.max(1) {
                 return 0.0;
             }
-            v.sort_by(f64::total_cmp);
-            let n = v.len();
-            if n % 2 == 1 {
-                v[n / 2]
-            } else {
-                (v[n / 2 - 1] + v[n / 2]) / 2.0
-            }
+            median_mut(&mut v, Even::Mean).unwrap_or(0.0)
         })
         .collect()
 }
 
 pub fn median(mut v: Vec<f64>) -> f64 {
     v.retain(|x| x.is_finite());
-    if v.is_empty() {
-        return f64::NAN;
-    }
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
+    median_mut(&mut v, Even::Mean).unwrap_or(f64::NAN)
 }
 
 #[cfg(test)]

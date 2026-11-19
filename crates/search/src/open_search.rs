@@ -1,5 +1,6 @@
 use model::mass::{H2O, PROTON};
 use model::peptide::Peptide;
+use model::stats::{median_mut, Even};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Localization {
@@ -75,13 +76,7 @@ pub fn refine_offset(
     if diffs.len() < 2 {
         return delta;
     }
-    diffs.sort_by(|a, b| a.total_cmp(b));
-    let mid = diffs.len() / 2;
-    let median = if diffs.len() % 2 == 1 {
-        diffs[mid]
-    } else {
-        0.5 * (diffs[mid - 1] + diffs[mid])
-    };
+    let median = median_mut(&mut diffs, Even::Mean).unwrap_or(0.0);
     if median.abs() > MAX_REFINE_DA {
         return delta;
     }

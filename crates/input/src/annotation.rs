@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use model::hash::{fnv1a64, splitmix64_next};
 use model::{
     AminoAcid, Annotation, Edit, EntryKind, EntryOrigin, Enzyme, ModSite, Protein,
     ProteinAnnotation, ProteinDb, SiteAnchor, SiteClaim, Substitution, VariantRegion,
@@ -222,7 +223,7 @@ pub fn knockoff_annotations(
         .filter(|a| a.kind == EntryKind::Variant && a.is_single_substitution())
     {
         let e = &a.edits[0];
-        let seed = fnv1a(format!("{seed_key}:{}", a.id).as_bytes());
+        let seed = fnv1a64(format!("{seed_key}:{}", a.id).as_bytes());
         let positions = knockoff_positions(sequence, e.start as usize, listed, ko, seed);
         if positions.is_empty() {
             untested += 1;
@@ -324,25 +325,11 @@ pub(crate) fn knockoff_positions(
     let mut state = seed;
     let take = ko.per_variant.min(eligible.len());
     for i in 0..take {
-        let j = i + (splitmix64(&mut state) % (eligible.len() - i) as u64) as usize;
+        let j = i + (splitmix64_next(&mut state) % (eligible.len() - i) as u64) as usize;
         eligible.swap(i, j);
     }
     eligible.truncate(take);
     eligible
-}
-
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -456,7 +443,7 @@ pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnocko
                         }
                 })
                 .collect();
-            let seed = fnv1a(
+            let seed = fnv1a64(
                 format!(
                     "{}:{}:{}",
                     primary_accession(&p.accession),
@@ -468,7 +455,7 @@ pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnocko
             let mut state = seed;
             let take = ko.per_variant.min(eligible.len());
             for i in 0..take {
-                let j = i + (splitmix64(&mut state) % (eligible.len() - i) as u64) as usize;
+                let j = i + (splitmix64_next(&mut state) % (eligible.len() - i) as u64) as usize;
                 eligible.swap(i, j);
             }
             eligible.truncate(take);

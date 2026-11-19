@@ -1,6 +1,7 @@
 use model::mass::{nominal_from, H2O, INTEGER_MASS_SCALER, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
+use model::stats::{median_mad, Even, MAD_TO_SD};
 use scoring_crate::scoring::fragment_ions::{predict_by_ions, IonKind, PredictedIon};
 use scoring_crate::scoring::FragmentErrorModel;
 
@@ -45,21 +46,8 @@ pub fn top_ion_errors(spec: &Spectrum, peptide: &Peptide, k: usize) -> Vec<(f64,
     matched.into_iter().map(|(_, e)| e).collect()
 }
 
-fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    }
-}
-
 fn centre_and_spread(errors: &[f64]) -> (f64, f64) {
-    let mut v = errors.to_vec();
-    let c = median(&mut v);
-    let mut dev: Vec<f64> = errors.iter().map(|e| (e - c).abs()).collect();
-    (c, 1.4826 * median(&mut dev))
+    median_mad(errors, Even::Mean).map_or((f64::NAN, f64::NAN), |(c, mad)| (c, MAD_TO_SD * mad))
 }
 
 pub fn estimate(errors: &[(f64, f64)], psms: usize) -> Option<FragmentErrorModel> {

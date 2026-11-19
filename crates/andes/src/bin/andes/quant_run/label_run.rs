@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use model::mass::PROTON;
+use model::stats::{finite_vec, median_mad, Even, MAD_TO_SD};
 use quant::formula::Formula;
 use quant::label::{
     channel_score, classify_channel, classify_identified, classify_transferred, coelution_factor,
@@ -884,9 +885,8 @@ pub(super) fn quantify(
             if v.len() < MIN_WIDTH_FITS {
                 return (0.0, tol / 3.0);
             }
-            let m = median(v.clone());
-            let mad = median(v.iter().map(|x| (x - m).abs()).collect());
-            (m, (1.4826 * mad).max(0.5))
+            let (m, mad) = median_mad(&finite_vec(&v), Even::Mean).unwrap_or((f64::NAN, f64::NAN));
+            (m, (MAD_TO_SD * mad).max(0.5))
         })
         .collect();
     let offset_sd: Vec<f64> = (0..n_runs)
@@ -908,8 +908,8 @@ pub(super) fn quantify(
             if v.len() < MIN_WIDTH_FITS {
                 return dt;
             }
-            let m = median(v.clone());
-            (1.4826 * median(v.iter().map(|x| (x - m).abs()).collect())).max(0.25 * dt)
+            let mad = median_mad(&finite_vec(&v), Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
+            (MAD_TO_SD * mad).max(0.25 * dt)
         })
         .collect();
     for (r, (m, sd)) in calib.iter().enumerate() {

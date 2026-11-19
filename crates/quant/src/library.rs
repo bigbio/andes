@@ -1,4 +1,6 @@
 use crate::align::{align, AlignParams, Alignment, Observation};
+use model::fdr::{ranked_q, Counts, Eval};
+use model::stats::{median_f32_mut, nan_low, Even};
 
 pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let Some(max_id) = rows.iter().map(|r| r.0).max() else {
@@ -7,11 +9,7 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
     let n = max_id as usize + 1;
     let mut best: Vec<Option<(bool, f64)>> = vec![None; n];
     for &(id, is_decoy, score) in rows {
-        let score = if score.is_nan() {
-            f64::NEG_INFINITY
-        } else {
-            score
-        };
+        let score = nan_low(score);
         let slot = &mut best[id as usize];
         match slot {
             Some((d, s)) => {
@@ -33,21 +31,17 @@ pub fn precursor_qvalues(rows: &[(u32, bool, f64)]) -> Vec<Option<f64>> {
         .collect();
     ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
 
-    let mut fdr = Vec::with_capacity(ranked.len());
-    let (mut t, mut d) = (0u64, 0u64);
-    for &(_, is_decoy, _) in &ranked {
-        if is_decoy {
-            d += 1;
-        } else {
-            t += 1;
-        }
-        fdr.push((d + 1) as f64 / t.max(1) as f64);
-    }
-    let mut running = f64::INFINITY;
+    let q = ranked_q::<Counts>(
+        ranked.len(),
+        |c, rank| c.add(ranked[rank].1),
+        |_, _| false,
+        Eval::PerRow,
+        Counts::ratio_plus_one,
+        1.0,
+    );
     let mut out = vec![None; n];
-    for (i, &(id, _, _)) in ranked.iter().enumerate().rev() {
-        running = running.min(fdr[i]);
-        out[id as usize] = Some(running.min(1.0));
+    for (&(id, _, _), qi) in ranked.iter().zip(q) {
+        out[id as usize] = Some(qi);
     }
     out
 }
@@ -134,14 +128,6 @@ pub fn build_library(
     b.finish(meta, max_q, ap)
 }
 
-fn score_of(score: f64) -> f64 {
-    if score.is_nan() {
-        f64::NEG_INFINITY
-    } else {
-        score
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Donor {
     score: f64,
@@ -165,7 +151,7 @@ impl Donor {
     }
 
     fn beats(&self, best: &Donor) -> bool {
-        let (a, b) = (score_of(self.score), score_of(best.score));
+        let (a, b) = (nan_low(self.score), nan_low(best.score));
         a > b || (a == b && self.rt < best.rt)
     }
 }
@@ -206,19 +192,6 @@ impl DonorRuns {
 
 const NO_SLOT: u32 = u32::MAX;
 
-fn median_f32(v: &mut [f32]) -> Option<f32> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(f32::total_cmp);
-    let n = v.len();
-    Some(if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    })
-}
-
 #[derive(Debug, Clone)]
 pub struct LibraryBuilder {
     n_runs: usize,
@@ -250,7 +223,7 @@ impl LibraryBuilder {
         if id >= self.best.len() || p.run as usize >= self.n_runs {
             return;
         }
-        let score = score_of(p.score);
+        let score = nan_low(p.score);
         match &mut self.best[id] {
             Some((d, s)) => {
                 debug_assert_eq!(
@@ -363,7 +336,7 @@ impl LibraryBuilder {
                     faims_cv = Some(cv);
                 }
             }
-            let ion_mobility = median_f32(&mut d.k0s);
+            let ion_mobility = median_f32_mut(&mut d.k0s, Even::Mean);
             let b = d.best.expect("an entry has a donor PSM");
             entries.push(LibraryEntry {
                 precursor: id,
@@ -920,13 +893,7 @@ mod tests {
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut obs: Vec<Observation> = Vec::new();
         let mut decoy_obs: Vec<Observation> = Vec::new();
-        let score_of = |p: &PsmIn| {
-            if p.score.is_nan() {
-                f64::NEG_INFINITY
-            } else {
-                p.score
-            }
-        };
+        let score_of = |p: &PsmIn| nan_low(p.score);
         let mut i = 0;
         while i < by_prec.len() {
             let id = by_prec[i].precursor;
@@ -1005,7 +972,7 @@ mod tests {
                 .iter()
                 .filter_map(|p| p.ion_mobility.filter(|v| v.is_finite()))
                 .collect();
-            let ion_mobility = median_f32(&mut k0s);
+            let ion_mobility = median_f32_mut(&mut k0s, Even::Mean);
             entries.push(LibraryEntry {
                 precursor: id,
                 identity_decoy,

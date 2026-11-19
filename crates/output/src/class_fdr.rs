@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use model::fdr::{ranked_q, Counts, Eval};
 use model::EntryKind;
 use search::SearchIndex;
 
@@ -224,23 +225,14 @@ fn class_tdc_q<T>(ts: &[(f64, T)], ds: &[f64]) -> Vec<f64> {
         .chain(ds.iter().map(|&s| (s, false, usize::MAX)))
         .collect();
     rows.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    let mut q = vec![0.0f64; rows.len()];
-    let (mut t, mut d) = (0usize, 0usize);
-    for (k, r) in rows.iter().enumerate() {
-        if r.1 {
-            t += 1;
-        } else {
-            d += 1;
-        }
-        q[k] = if t == 0 {
-            1.0
-        } else {
-            ((d + 1) as f64 / t as f64).min(1.0)
-        };
-    }
-    for k in (0..q.len().saturating_sub(1)).rev() {
-        q[k] = q[k].min(q[k + 1]);
-    }
+    let q = ranked_q::<Counts>(
+        rows.len(),
+        |c, rank| c.add(!rows[rank].1),
+        |_, _| false,
+        Eval::PerRow,
+        Counts::ratio_plus_one,
+        1.0,
+    );
     let mut out = vec![1.0; ts.len()];
     for (r, qv) in rows.iter().zip(q) {
         if r.1 {

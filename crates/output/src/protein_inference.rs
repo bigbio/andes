@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use model::fdr::{ranked_q, Counts, Eval};
 use model::{EntryKind, Protein};
 use search::SearchIndex;
 
@@ -310,19 +311,14 @@ pub fn infer_protein_groups(
         .chain(d_win.iter().map(|&g| (decoy.groups[g].score, true, g)))
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-    let mut fdp = Vec::with_capacity(ranked.len());
-    let (mut d, mut t) = (0usize, 0usize);
-    for &(_, is_decoy, _) in &ranked {
-        if is_decoy {
-            d += 1;
-        } else {
-            t += 1;
-        }
-        fdp.push((d as f64 / t.max(1) as f64).min(1.0));
-    }
-    for i in (0..fdp.len().saturating_sub(1)).rev() {
-        fdp[i] = fdp[i].min(fdp[i + 1]);
-    }
+    let fdp = ranked_q::<Counts>(
+        ranked.len(),
+        |c, rank| c.add(ranked[rank].1),
+        |_, _| false,
+        Eval::PerRow,
+        Counts::ratio,
+        1.0,
+    );
     let mut q_of: HashMap<usize, f64> = HashMap::new();
     let mut decoy_q: Vec<(usize, f64)> = Vec::new();
     for (&(_, is_decoy, g), &q) in ranked.iter().zip(&fdp) {

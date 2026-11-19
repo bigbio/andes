@@ -1,5 +1,6 @@
 use std::io::BufRead;
 
+use model::stats::{finite_vec, median_mut, Even};
 use quick_xml::{events::Event, Reader};
 
 const CV_COLLISION_ENERGY: &str = "MS:1000045";
@@ -18,17 +19,7 @@ pub struct Ms2MetaSample {
 }
 
 fn median(values: &[f64]) -> Option<f64> {
-    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    Some(if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    })
+    median_mut(&mut finite_vec(values), Even::Mean)
 }
 
 impl Ms2MetaSample {

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
+use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::{H2O, PROTON};
+use model::stats::nan_low_f32;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 use model::Spectrum;
 
@@ -297,59 +299,20 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
     }
 
     cands.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            a.rank_score
-        };
-        let bv = if b.rank_score.is_nan() {
-            f32::NEG_INFINITY
-        } else {
-            b.rank_score
-        };
+        let (av, bv) = (nan_low_f32(a.rank_score), nan_low_f32(b.rank_score));
         bv.total_cmp(&av)
             .then_with(|| a.spectrum_idx.cmp(&b.spectrum_idx))
     });
 
-    let n = cands.len();
-    let mut q = vec![1.0_f64; n];
-    let (mut targets, mut decoys) = (0u64, 0u64);
-    for (i, c) in cands.iter().enumerate() {
-        if c.is_decoy {
-            decoys += 1;
-        } else {
-            targets += 1;
-        }
-        q[i] = decoys as f64 / targets.max(1) as f64;
-    }
-
-    let mut min_q = 1.0_f64;
-    for qi in q.iter_mut().rev() {
-        if *qi < min_q {
-            min_q = *qi;
-        }
-        *qi = min_q;
-    }
-
-    let mut start = 0usize;
-    while start < n {
-        let s = cands[start].rank_score;
-        let mut end = start + 1;
-        let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
-        while end < n && tie(cands[end].rank_score, s) {
-            end += 1;
-        }
-        let mut worst = q[start];
-        for &qi in &q[start + 1..end] {
-            if qi > worst {
-                worst = qi;
-            }
-        }
-        for qi in &mut q[start..end] {
-            *qi = worst;
-        }
-        start = end;
-    }
+    let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
+    let q = ranked_q::<Counts>(
+        cands.len(),
+        |c, rank| c.add(cands[rank].is_decoy),
+        |start, rank| tie(cands[rank].rank_score, cands[start].rank_score),
+        Eval::PerRowGroupMax,
+        Counts::ratio,
+        1.0,
+    );
 
     cands
         .iter()

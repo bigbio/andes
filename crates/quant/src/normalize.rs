@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use model::stats::{median_mut, Even};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NormCell {
     pub precursor: u32,
@@ -60,17 +62,7 @@ pub struct RunNormalization {
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
-    let n = v.len();
-    if n == 0 {
-        return None;
-    }
-    let cmp = |a: &f64, b: &f64| a.total_cmp(b);
-    let (_, &mut hi, _) = v.select_nth_unstable_by(n / 2, cmp);
-    if n % 2 == 1 {
-        return Some(hi);
-    }
-    let lo = v[..n / 2].iter().copied().max_by(cmp).unwrap_or(hi);
-    Some(0.5 * (lo + hi))
+    median_mut(v, Even::Mean)
 }
 
 pub fn fit(cells: &[NormCell], n_runs: usize, params: &NormParams) -> RunNormalization {

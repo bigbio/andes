@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use model::stats::{median_mad_mut, median_mut, Even};
 use output::ms1_table::read_ms1_table;
 use quant::align::RunMap;
 use quant::claims;
@@ -312,13 +313,7 @@ impl WidthPrior {
 }
 
 pub(crate) fn median(mut v: Vec<f64>) -> f64 {
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    }
+    median_mut(&mut v, Even::Mean).unwrap_or(f64::NAN)
 }
 
 fn identified_rt(entry: &LibraryEntry, run: u16) -> Option<f64> {
@@ -1115,23 +1110,6 @@ const WIDTH_WEIGHT_MIN_RUN_CELLS: usize = 11;
 const WIDTH_WEIGHT_PASSES: usize = 2;
 const WIDTH_WEIGHT_TOLERANCE: f64 = 1e-6;
 
-fn median_absolute_deviation(v: &mut [f64]) -> f64 {
-    let mid = |v: &mut [f64]| {
-        v.sort_unstable_by(f64::total_cmp);
-        let n = v.len();
-        if n % 2 == 1 {
-            v[n / 2]
-        } else {
-            0.5 * (v[n / 2 - 1] + v[n / 2])
-        }
-    };
-    let m = mid(v);
-    for x in v.iter_mut() {
-        *x = (*x - m).abs();
-    }
-    mid(v)
-}
-
 pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
     let mut weights = vec![0.0; runs];
     let mut order: Vec<usize> = (0..cells.len())
@@ -1178,7 +1156,7 @@ pub(crate) fn run_width_weights(cells: &[WidthCell], runs: usize) -> Vec<f64> {
                         .zip(members)
                         .map(|(b, &i)| b + w * cells[i].deviation),
                 );
-                let spread = median_absolute_deviation(&mut res);
+                let spread = median_mad_mut(&mut res, Even::Mean).map_or(f64::NAN, |(_, mad)| mad);
                 if spread < best.1 - WIDTH_WEIGHT_TOLERANCE {
                     best = (w, spread);
                 }

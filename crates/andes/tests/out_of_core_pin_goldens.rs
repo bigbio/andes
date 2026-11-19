@@ -27,13 +27,8 @@ fn float_columns(rows: &[String]) -> Vec<bool> {
 
 fn identity_digest(header: &str, rows: &[String]) -> (usize, u64) {
     let float = float_columns(rows);
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut h = model::hash::FNV1A64_OFFSET;
+    let mut feed = |bytes: &[u8]| h = model::hash::fnv1a64_extend(h, bytes);
     feed(header.as_bytes());
     feed(b"\n");
     for row in rows {

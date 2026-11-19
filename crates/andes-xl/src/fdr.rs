@@ -1,3 +1,5 @@
+use model::fdr::{ranked_q, Eval};
+
 use crate::decoy::PairClass;
 
 pub const MIN_FALSE: f64 = 2.0;
@@ -47,26 +49,17 @@ fn q_values_by(scores: &[f64], classes: &[PairClass], fdr: fn(&ClassCounts) -> f
     assert_eq!(scores.len(), classes.len());
     let mut order: Vec<usize> = (0..scores.len()).collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
-    let mut fdr_at = vec![0.0; scores.len()];
-    let mut counts = ClassCounts::default();
-    let mut k = 0;
-    while k < order.len() {
-        let mut end = k;
-        while end < order.len() && scores[order[end]].total_cmp(&scores[order[k]]).is_eq() {
-            counts.add(classes[order[end]]);
-            end += 1;
-        }
-        let f = fdr(&counts);
-        for &i in &order[k..end] {
-            fdr_at[i] = f;
-        }
-        k = end;
-    }
-    let mut q = fdr_at.clone();
-    let mut running = f64::INFINITY;
-    for &i in order.iter().rev() {
-        running = running.min(fdr_at[i]);
-        q[i] = running;
+    let ranked = ranked_q::<ClassCounts>(
+        order.len(),
+        |c, rank| c.add(classes[order[rank]]),
+        |start, rank| scores[order[rank]].total_cmp(&scores[order[start]]).is_eq(),
+        Eval::GroupEnd,
+        fdr,
+        f64::INFINITY,
+    );
+    let mut q = vec![0.0; scores.len()];
+    for (&i, qi) in order.iter().zip(ranked) {
+        q[i] = qi;
     }
     q
 }

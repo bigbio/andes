@@ -1,3 +1,5 @@
+use model::fdr::{ranked_q, Counts, Eval};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Pair {
     pub target: Option<f32>,
@@ -24,29 +26,14 @@ pub fn picked_qvalues(pairs: &[Pair]) -> Vec<Option<f64>> {
         }
     }
     winners.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut q = vec![1.0; winners.len()];
-    let (mut n_t, mut n_d) = (0usize, 0usize);
-    let mut start = 0;
-    while start < winners.len() {
-        let mut end = start + 1;
-        while end < winners.len() && winners[end].0 == winners[start].0 {
-            end += 1;
-        }
-        for &(_, is_decoy, _) in &winners[start..end] {
-            if is_decoy {
-                n_d += 1;
-            } else {
-                n_t += 1;
-            }
-        }
-        q[start..end].fill((n_d as f64 + 1.0) / n_t.max(1) as f64);
-        start = end;
-    }
-    let mut running = f64::INFINITY;
-    for value in q.iter_mut().rev() {
-        running = running.min(*value);
-        *value = running.min(1.0);
-    }
+    let q = ranked_q::<Counts>(
+        winners.len(),
+        |c, rank| c.add(winners[rank].1),
+        |start, rank| winners[rank].0 == winners[start].0,
+        Eval::GroupEnd,
+        Counts::ratio_plus_one,
+        1.0,
+    );
     let mut out = vec![None; pairs.len()];
     for (k, &(_, is_decoy, i)) in winners.iter().enumerate() {
         if !is_decoy {

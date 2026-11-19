@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{self, BufWriter, Write};
 
 use crate::percolator_enz::enzyme_features;
@@ -28,13 +29,13 @@ pub fn spec_id_run(spec_id: &str) -> &str {
     spec_id.split_once('/').map_or("", |(run, _)| run)
 }
 
-pub fn emitted_row_evidence(
+/// The emitted rows of a spectrum in output order, each with its SpecId.
+pub fn emitted_spec_ids<'a>(
     spec: &Spectrum,
-    queue: &TopNQueue,
+    psms_sorted: &'a [PsmMatch],
     candidates: &[Candidate],
-) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
-    let psms = queue.clone().into_rank_sorted_vec();
-    let ranked = emitted_rows(spec, &psms, candidates);
+) -> Vec<(String, Cow<'a, PsmMatch>)> {
+    let ranked = emitted_rows(spec, psms_sorted, candidates);
     let multi_row = ranked.len() > 1;
     let scan = spec.scan.unwrap_or(0);
     let title = if spec.title.is_empty() {
@@ -45,13 +46,19 @@ pub fn emitted_row_evidence(
     ranked
         .into_iter()
         .enumerate()
-        .map(|(row_idx, (rank, psm))| {
-            (
-                format_spec_id(&title, scan, rank, row_idx, multi_row),
-                psm.isotope_offset,
-                psm.site_evidence.clone(),
-            )
-        })
+        .map(|(row_idx, (rank, psm))| (format_spec_id(&title, scan, rank, row_idx, multi_row), psm))
+        .collect()
+}
+
+pub fn emitted_row_evidence(
+    spec: &Spectrum,
+    queue: &TopNQueue,
+    candidates: &[Candidate],
+) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
+    let psms = queue.clone().into_rank_sorted_vec();
+    emitted_spec_ids(spec, &psms, candidates)
+        .into_iter()
+        .map(|(id, psm)| (id, psm.isotope_offset, psm.site_evidence.clone()))
         .collect()
 }
 
@@ -61,24 +68,9 @@ pub fn emitted_row_candidates(
     candidates: &[Candidate],
 ) -> Vec<(String, u32, u8)> {
     let psms = queue.clone().into_rank_sorted_vec();
-    let ranked = emitted_rows(spec, &psms, candidates);
-    let multi_row = ranked.len() > 1;
-    let scan = spec.scan.unwrap_or(0);
-    let title = if spec.title.is_empty() {
-        format!("scan={scan}")
-    } else {
-        spec.title.clone()
-    };
-    ranked
+    emitted_spec_ids(spec, &psms, candidates)
         .into_iter()
-        .enumerate()
-        .map(|(row_idx, (rank, psm))| {
-            (
-                format_spec_id(&title, scan, rank, row_idx, multi_row),
-                psm.primary_candidate_idx(),
-                psm.charge_used,
-            )
-        })
+        .map(|(id, psm)| (id, psm.primary_candidate_idx(), psm.charge_used))
         .collect()
 }
 

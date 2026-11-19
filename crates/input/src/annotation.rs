@@ -308,7 +308,7 @@ pub(crate) fn knockoff_positions(
             residue_class(a) == residue_class(b)
         }
     };
-    let mut eligible: Vec<usize> = (0..seq.len() - 1)
+    let eligible: Vec<usize> = (0..seq.len() - 1)
         .filter(|&q| {
             seq[q] == o
                 && next_ok(q)
@@ -322,8 +322,13 @@ pub(crate) fn knockoff_positions(
                 }
         })
         .collect();
+    sample_positions(eligible, ko.per_variant, seed)
+}
+
+/// At most `take` of `eligible`, drawn without replacement by a SplitMix64 stream from `seed`.
+fn sample_positions(mut eligible: Vec<usize>, take: usize, seed: u64) -> Vec<usize> {
     let mut state = seed;
-    let take = ko.per_variant.min(eligible.len());
+    let take = take.min(eligible.len());
     for i in 0..take {
         let j = i + (splitmix64_next(&mut state) % (eligible.len() - i) as u64) as usize;
         eligible.swap(i, j);
@@ -426,7 +431,7 @@ pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnocko
                     residue_class(a) == residue_class(b)
                 }
             };
-            let mut eligible: Vec<usize> = (0..seq.len() - 1)
+            let eligible: Vec<usize> = (0..seq.len() - 1)
                 .filter(|&q| {
                     seq[q] == seq[pos]
                         && next_ok(q)
@@ -452,13 +457,7 @@ pub fn add_site_knockoffs(db: &mut ProteinDb, ko: KnockoffOptions) -> SiteKnocko
                 )
                 .as_bytes(),
             );
-            let mut state = seed;
-            let take = ko.per_variant.min(eligible.len());
-            for i in 0..take {
-                let j = i + (splitmix64_next(&mut state) % (eligible.len() - i) as u64) as usize;
-                eligible.swap(i, j);
-            }
-            eligible.truncate(take);
+            let eligible = sample_positions(eligible, ko.per_variant, seed);
             if eligible.is_empty() {
                 stats.untested += 1;
                 continue;

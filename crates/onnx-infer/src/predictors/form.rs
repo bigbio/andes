@@ -4,28 +4,8 @@ pub const PROTON: f64 = model::mass::PROTON;
 pub const H2O: f64 = model::mass::H2O;
 
 pub fn residue_mass(c: char) -> Option<f64> {
-    Some(match c {
-        'G' => 57.021_463_72,
-        'A' => 71.037_113_79,
-        'S' => 87.032_028_41,
-        'P' => 97.052_763_85,
-        'V' => 99.068_413_91,
-        'T' => 101.047_678_5,
-        'C' => 103.009_184_5,
-        'L' | 'I' => 113.084_064,
-        'N' => 114.042_927_4,
-        'D' => 115.026_943,
-        'Q' => 128.058_577_5,
-        'K' => 128.094_963,
-        'E' => 129.042_593_1,
-        'M' => 131.040_484_6,
-        'H' => 137.058_911_9,
-        'F' => 147.068_413_9,
-        'R' => 156.101_111,
-        'Y' => 163.063_328_6,
-        'W' => 186.079_312_9,
-        _ => return None,
-    })
+    let residue = u8::try_from(c).ok().filter(|&r| r != b'U')?;
+    model::amino_acid::AminoAcid::standard(residue).map(|a| a.mass)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

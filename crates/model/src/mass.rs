@@ -58,6 +58,12 @@ pub const C13: f64 = 13.00335483507;
 /// Spacing of the ¹³C isotope peaks, in Da (divide by the charge for m/z).
 pub const ISOTOPE: f64 = C13 - C;
 
+/// Mass difference of ¹⁵N and ¹⁴N, in Da.
+pub const N15_N14: f64 = N15 - N;
+
+/// Mass difference of ²H and ¹H, in Da.
+pub const D_H: f64 = H2 - H;
+
 /// Offset of a z• ion from the y ion of the same residues, in Da: the y ion loses NH₃ and
 /// gains a hydrogen atom, which is `-(N + 2H)`.
 pub const Z_DOT_OFFSET: f64 = -(N + H * 2.0);

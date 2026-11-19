@@ -1,3 +1,4 @@
+use model::reporter;
 use model::spectrum::Spectrum;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,10 +20,33 @@ impl IsobaricLabel {
     }
 }
 
-const TMT_CHANNELS: &[f64] = &[126.1277, 127.1248, 128.1344, 129.1378, 130.1411, 131.1382];
-const ITRAQ_CHANNELS: &[f64] = &[114.1112, 115.1083, 116.1116, 117.1150];
-const TMTPRO_EXTRA: &[f64] = &[132.1415, 132.1479, 133.1449, 133.1512, 134.1482];
-const ITRAQ8_EXTRA: &[f64] = &[113.1079, 118.1120, 119.1153, 121.1220];
+const TMT_CHANNELS: &[f64] = &[
+    reporter::TMT6[0].mz,
+    reporter::TMT6[1].mz,
+    reporter::TMT6[2].mz,
+    reporter::TMT6[3].mz,
+    reporter::TMT6[4].mz,
+    reporter::TMT6[5].mz,
+];
+const ITRAQ_CHANNELS: &[f64] = &[
+    reporter::ITRAQ4[0].mz,
+    reporter::ITRAQ4[1].mz,
+    reporter::ITRAQ4[2].mz,
+    reporter::ITRAQ4[3].mz,
+];
+const TMTPRO_EXTRA: &[f64] = &[
+    reporter::TMT16[11].mz,
+    reporter::TMT16[12].mz,
+    reporter::TMT16[13].mz,
+    reporter::TMT16[14].mz,
+    reporter::TMT16[15].mz,
+];
+const ITRAQ8_EXTRA: &[f64] = &[
+    reporter::ITRAQ8[0].mz,
+    reporter::ITRAQ8[5].mz,
+    reporter::ITRAQ8[6].mz,
+    reporter::ITRAQ8[7].mz,
+];
 const EXTRA_MIN_CHANNELS: usize = 2;
 const EXTRA_FRACTION: f64 = 0.5;
 

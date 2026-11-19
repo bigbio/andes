@@ -247,7 +247,7 @@ struct Group {
 
 fn heavy_proline_delta(arg: &quant::label::LabelSite) -> Option<f64> {
     const C13_C12: f64 = model::mass::ISOTOPE;
-    const N15_N14: f64 = 0.997_034_886;
+    const N15_N14: f64 = model::mass::N15_N14;
     let n15 = arg.heavy_atoms.saturating_sub(arg.carbon13);
     (arg.carbon13 >= 5).then(|| 5.0 * C13_C12 + f64::from(n15.min(1)) * N15_N14)
 }

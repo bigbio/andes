@@ -174,27 +174,27 @@ pub fn predict_by_ions_with_losses(
 }
 
 pub const NH3: f64 = model::mass::NH3;
-pub const Z_DOT_OFFSET: f64 = -16.018724;
+pub const Z_DOT_OFFSET: f64 = model::mass::Z_DOT_OFFSET;
 
 fn cz_remnant_enabled() -> bool {
     use std::sync::OnceLock;
     static F: OnceLock<bool> = OnceLock::new();
-    *F.get_or_init(|| {
-        false
-    })
+    *F.get_or_init(|| false)
 }
 
 fn cz_spanning_shifts(glycan_mass: f64, remnant: bool) -> Vec<f64> {
     if glycan_mass == 0.0 || !remnant {
         return vec![glycan_mass];
     }
+    use model::glycan_residue::{HEX, HEXNAC};
     const REMNANTS: [f64; 5] = [
         0.0,
-        203.079373,
-        365.132196,
-        406.158746,
-        892.317218,
+        HEXNAC,
+        HEXNAC + HEX,
+        2.0 * HEXNAC,
+        2.0 * HEXNAC + 3.0 * HEX,
     ];
+
     let mut v = Vec::with_capacity(1 + REMNANTS.len());
     v.push(glycan_mass);
     for &r in &REMNANTS {
@@ -398,17 +398,22 @@ mod tests {
         let s = cz_spanning_shifts(1000.0, true);
         assert_eq!(s[0], 1000.0, "intact glycan must be first");
         assert_eq!(s.len(), 6, "intact glycan + 5 remnants, no collision");
-        for r in [0.0, 203.079373, 365.132196, 406.158746, 892.317218] {
+        use model::glycan_residue::{HEX, HEXNAC};
+        for r in [
+            0.0,
+            HEXNAC,
+            HEXNAC + HEX,
+            2.0 * HEXNAC,
+            2.0 * HEXNAC + 3.0 * HEX,
+        ] {
             assert!(
                 s.iter().any(|&x| (x - r).abs() < 1e-9),
                 "missing remnant {r}"
             );
         }
-        let s2 = cz_spanning_shifts(203.079373, true);
+        let s2 = cz_spanning_shifts(HEXNAC, true);
         assert_eq!(
-            s2.iter()
-                .filter(|&&x| (x - 203.079373).abs() < 1e-6)
-                .count(),
+            s2.iter().filter(|&&x| (x - HEXNAC).abs() < 1e-6).count(),
             1,
             "remnant equal to the intact glycan must not be duplicated"
         );

@@ -1,13 +1,13 @@
 use crate::glycan_db::GlycanComp;
 use crate::glycan_first::PPM_FLOOR_DA;
-use crate::glycan_mass::CORE_OXONIUM_MZ;
+use crate::glycan_mass::{CORE_OXONIUM_MZ, HEX, HEXNAC, NEUAC, NEUGC, PROTON, WATER};
 
 const OXONIUM_TOL_FLOOR_DA: f64 = 0.01;
 
-pub const NEUAC_OXONIUM_MZ: [f64; 2] = [274.09211, 292.10267];
-pub const NEUGC_OXONIUM_MZ: [f64; 2] = [290.08702, 308.09759];
+pub const NEUAC_OXONIUM_MZ: [f64; 2] = [NEUAC + PROTON - WATER, NEUAC + PROTON];
+pub const NEUGC_OXONIUM_MZ: [f64; 2] = [NEUGC + PROTON - WATER, NEUGC + PROTON];
 
-pub const HEX_DIAGNOSTIC_MZ: [f64; 2] = [163.0604, 366.1395];
+pub const HEX_DIAGNOSTIC_MZ: [f64; 2] = [HEX + PROTON, HEXNAC + HEX + PROTON];
 
 pub fn sialic_consistency(peaks: &[(f64, f32)], comp: &GlycanComp, tol_ppm: f64) -> f32 {
     let base = peaks.iter().map(|p| p.1).fold(0.0f32, f32::max).max(1e-9);

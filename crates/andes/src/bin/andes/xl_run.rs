@@ -186,7 +186,7 @@ fn write_csms(
             xl::rollup::LinkClass::of(c.intra, c.homotypic)
                 .name()
                 .to_string(),
-            s.map_or("NA".to_string(), |v| format!("{v:.4}")),
+            s.map_or("NA".to_string(), |v| v.to_string()),
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             format!("{:.3}", c.pair_score),
             c.second_pair_score

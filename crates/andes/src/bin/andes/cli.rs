@@ -648,8 +648,8 @@ pub(crate) struct SearchArgs {
     ///
     /// A DIA candidate is scored only when its monoisotopic m/z has an MS1 peak within this
     /// tolerance in the survey scan nearest the MS2 scan or one either side. timsTOF MS1 is less
-    /// accurate than Orbitrap MS1, so diaPASEF runs need a wider gate (15 on the ProteoBench
-    /// low-input runs).
+    /// accurate than Orbitrap MS1, so diaPASEF runs need a wider gate (8 on the ProteoBench
+    /// low-input runs, after andes recentres their MS1 m/z).
     #[arg(long, value_name = "PPM", default_value = "5", help_heading = H_MODES)]
     pub(crate) dia_ms1_tol_ppm: f64,
 

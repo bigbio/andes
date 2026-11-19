@@ -1,18 +1,18 @@
-pub const HEXNAC: f64 = 203.079373;
-
-pub const HEX: f64 = 162.052824;
-
-pub const FUC: f64 = 146.057909;
-
-pub const NEUAC: f64 = 291.095417;
-
-pub const NEUGC: f64 = 307.090331;
+pub use model::glycan_residue::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
 
 pub const PROTON: f64 = model::mass::PROTON;
 
 pub const WATER: f64 = model::mass::H2O;
 
-pub const CORE_OXONIUM_MZ: [f64; 5] = [138.05496, 168.06552, 186.07608, 204.08665, 366.13947];
+/// Core oxonium ions, each carrying one proton: the C7H7NO2 fragment, HexNAc minus two and
+/// one water, HexNAc, and HexNAc+Hex.
+pub const CORE_OXONIUM_MZ: [f64; 5] = [
+    model::glycan_residue::residue_mass(7, 7, 1, 2) + PROTON,
+    HEXNAC + PROTON - 2.0 * WATER,
+    HEXNAC + PROTON - WATER,
+    HEXNAC + PROTON,
+    HEXNAC + HEX + PROTON,
+];
 
 pub const CORE_Y_STEPS: [f64; 5] = [
     HEXNAC,

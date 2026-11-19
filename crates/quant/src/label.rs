@@ -4,7 +4,7 @@ use model::stats::{median_mut, nan_low, Even, MAD_TO_SD};
 
 use crate::ms1_index::{MobilityGate, Ms1RunIndex};
 
-pub const D_H: f64 = 2.014_101_778 - model::mass::H;
+pub const D_H: f64 = model::mass::D_H;
 pub const LOWEST_OFFSET: i32 = -2;
 pub const HIGHEST_OFFSET: i32 = 5;
 const N_OFFSETS: usize = (HIGHEST_OFFSET - LOWEST_OFFSET + 1) as usize;
@@ -616,7 +616,7 @@ fn parse_label_token(token: &str) -> Result<Vec<LabelSite>, String> {
 }
 
 const C13_C12: f64 = model::mass::ISOTOPE;
-const N15_N14: f64 = 15.000_108_899 - model::mass::N;
+const N15_N14: f64 = model::mass::N15_N14;
 const CH2: f64 = model::mass::C + 2.0 * model::mass::H;
 
 #[derive(Debug, Clone, Copy)]

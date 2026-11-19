@@ -1,4 +1,7 @@
-use model::mass::{nominal_from, C, H, H2O, INTEGER_MASS_SCALER, N, O, PROTON, S};
+use model::mass::{
+    nominal_from, C, C13, CO, H, H2, H2O, INTEGER_MASS_SCALER, ISOTOPE, N, N15, NH3, O, P, PROTON,
+    S, Z_DOT_OFFSET,
+};
 
 fn bit_eq(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits()
@@ -6,15 +9,18 @@ fn bit_eq(a: f64, b: f64) -> bool {
 
 #[test]
 fn h_o_match_iupac_literals() {
-    assert_eq!(H.to_bits(), 1.007825035_f64.to_bits());
-    assert_eq!(O.to_bits(), 15.99491463_f64.to_bits());
+    assert_eq!(H.to_bits(), 1.00782503223_f64.to_bits());
+    assert_eq!(O.to_bits(), 15.99491461957_f64.to_bits());
 }
 
 #[test]
 fn h2o_matches_composition() {
-    assert_eq!(H2O.to_bits(), 0x403202b45e40fdf7);
+    assert_eq!(
+        H2O.to_bits(),
+        (1.00782503223_f64 * 2.0 + 15.99491461957_f64).to_bits()
+    );
     assert!(
-        bit_eq(H2O, 1.007825035_f64 * 2.0 + 15.99491463_f64),
+        bit_eq(H2O, 1.00782503223_f64 * 2.0 + 15.99491461957_f64),
         "H2O drifted from H*2+O: rust=0x{:016x}",
         H2O.to_bits()
     );
@@ -22,7 +28,7 @@ fn h2o_matches_composition() {
 
 #[test]
 fn proton_matches_iupac() {
-    assert_eq!(PROTON.to_bits(), 1.00727649_f64.to_bits());
+    assert_eq!(PROTON.to_bits(), 1.0072764665789_f64.to_bits());
 }
 
 #[test]
@@ -76,6 +82,25 @@ fn nominal_from_matches_f32_round_boundary() {
 #[test]
 fn c_n_s_match_iupac_literals() {
     assert_eq!(C.to_bits(), 12.0_f64.to_bits());
-    assert_eq!(N.to_bits(), 14.003074_f64.to_bits());
-    assert_eq!(S.to_bits(), 31.9720707_f64.to_bits());
+    assert_eq!(N.to_bits(), 14.00307400443_f64.to_bits());
+    assert_eq!(S.to_bits(), 31.9720711744_f64.to_bits());
+    assert_eq!(P.to_bits(), 30.97376199842_f64.to_bits());
+    assert_eq!(C13.to_bits(), 13.00335483507_f64.to_bits());
+    assert_eq!(N15.to_bits(), 15.00010889888_f64.to_bits());
+    assert_eq!(H2.to_bits(), 2.01410177812_f64.to_bits());
+    assert_eq!(model::mass::O17.to_bits(), 16.9991317565_f64.to_bits());
+    assert_eq!(model::mass::O18.to_bits(), 17.99915961286_f64.to_bits());
+    assert_eq!(model::mass::S33.to_bits(), 32.9714589098_f64.to_bits());
+    assert_eq!(model::mass::S34.to_bits(), 33.967867004_f64.to_bits());
+}
+
+#[test]
+fn derived_masses_follow_their_elements() {
+    assert_eq!(NH3.to_bits(), (N + 3.0 * H).to_bits());
+    assert_eq!(CO.to_bits(), (C + O).to_bits());
+    assert_eq!(ISOTOPE.to_bits(), (C13 - C).to_bits());
+    assert_eq!(Z_DOT_OFFSET.to_bits(), (-(N + 2.0 * H)).to_bits());
+    assert!((NH3 - 17.0265491015).abs() < 1e-9);
+    assert!((H2O - 18.0105646837).abs() < 1e-9);
+    assert!((Z_DOT_OFFSET + 16.0187240).abs() < 1e-6);
 }

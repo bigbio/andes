@@ -24,6 +24,57 @@ const N_ISO: &[f64] = &[0.996_36, 0.003_64];
 const O_ISO: &[f64] = &[0.997_57, 0.000_38, 0.002_05];
 const S_ISO: &[f64] = &[0.9499, 0.0075, 0.0425, 0.0, 0.0001];
 
+/// Averagine atoms per dalton of neutral mass: C, H, N, O, S.
+const AVERAGINE_ATOMS_PER_DA: [f64; 5] = [
+    4.9384 / 111.1254,
+    7.7583 / 111.1254,
+    1.3577 / 111.1254,
+    1.4773 / 111.1254,
+    0.0417 / 111.1254,
+];
+
+/// Expected distance in Da between the M+1 and M+2 peaks of an averagine peptide of neutral
+/// mass `mass`: the intensity-weighted mean mass of the M+2 isotopologues minus that of the
+/// M+1 isotopologues. M+1 comes from one heavy atom (¹³C, ²H, ¹⁵N, ¹⁷O, ³³S), M+2 from two
+/// of them or from one ¹⁸O or ³⁴S, each weighted by its natural abundance and the number
+/// of atoms of that element (Poisson limit of the isotope convolution). Returns
+/// `mass::ISOTOPE` when `mass` is not positive.
+pub fn averagine_m1_m2_spacing(mass: f64) -> f64 {
+    use crate::mass::{C, C13, H, H2, N, N15, O, O17, O18, S, S33, S34};
+    if mass <= 0.0 {
+        return crate::mass::ISOTOPE;
+    }
+    let atoms = |i: usize| mass * AVERAGINE_ATOMS_PER_DA[i];
+    let rate = |count: f64, ladder: &[f64], k: usize| count * ladder[k] / ladder[0];
+    let one: [(f64, f64); 5] = [
+        (rate(atoms(0), C_ISO, 1), C13 - C),
+        (rate(atoms(1), H_ISO, 1), H2 - H),
+        (rate(atoms(2), N_ISO, 1), N15 - N),
+        (rate(atoms(3), O_ISO, 1), O17 - O),
+        (rate(atoms(4), S_ISO, 1), S33 - S),
+    ];
+    let two: [(f64, f64); 2] = [
+        (rate(atoms(3), O_ISO, 2), O18 - O),
+        (rate(atoms(4), S_ISO, 2), S34 - S),
+    ];
+    let weight_1: f64 = one.iter().map(|(r, _)| r).sum();
+    let shift_1: f64 = one.iter().map(|(r, d)| r * d).sum();
+    let mut weight_2 = 0.0;
+    let mut shift_2 = 0.0;
+    for (i, &(ri, di)) in one.iter().enumerate() {
+        for (j, &(rj, dj)) in one.iter().enumerate().skip(i) {
+            let w = if i == j { ri * ri / 2.0 } else { ri * rj };
+            weight_2 += w;
+            shift_2 += w * (di + dj);
+        }
+    }
+    for &(r, d) in &two {
+        weight_2 += r;
+        shift_2 += r * d;
+    }
+    shift_2 / weight_2 - shift_1 / weight_1
+}
+
 pub fn isotope_envelope_from_formula(
     c: u32,
     h: u32,
@@ -106,6 +157,18 @@ pub fn glycopeptide_isotope_envelope(mass: f64, n_isotopes: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m1_m2_spacing_stays_below_the_carbon_spacing_and_above_the_sulfur_shift() {
+        for mass in [300.0, 600.0, 1200.0, 2400.0, 4000.0] {
+            let d = averagine_m1_m2_spacing(mass);
+            assert!(
+                d > 0.999 && d < crate::mass::ISOTOPE,
+                "mass {mass}: spacing {d}"
+            );
+        }
+        assert_eq!(averagine_m1_m2_spacing(0.0), crate::mass::ISOTOPE);
+    }
 
     #[test]
     fn share_is_the_fraction_of_the_whole_pattern_in_the_kept_peaks() {

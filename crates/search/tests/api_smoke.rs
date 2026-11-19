@@ -49,7 +49,7 @@ fn enzyme_and_tolerance_via_public_api() {
 
 #[test]
 fn chemistry_constants_via_public_api() {
-    assert_eq!(PROTON, 1.00727649);
+    assert_eq!(PROTON, 1.0072764665789);
     let h2o: f64 = H2O;
     assert!(h2o > 18.0 && h2o < 18.1);
 }

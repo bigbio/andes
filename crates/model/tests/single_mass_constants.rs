@@ -29,18 +29,7 @@ const AS_CONST: [(&str, &str); 4] = [
 /// Literal copies kept on purpose, each with the reason. Replacing one changes search
 /// results, so it is done in its own change with benchmark evidence (entrapment FDP on the
 /// reference datasets), not as a refactor.
-const KNOWN_EXCEPTIONS: [(&str, &str, &str); 2] = [
-    (
-        "search/src/match_engine.rs",
-        "const H2O_LOSS_DA: f64 = 18.0106;",
-        "rounded water loss; model::mass::H2O moves RawScore on ~2.4% of low-res PSMs",
-    ),
-    (
-        "search/src/match_engine.rs",
-        "const NH3_LOSS_DA: f64 = 17.0265;",
-        "rounded ammonia loss; model::mass::NH3 moves RawScore on ~2.4% of low-res PSMs",
-    ),
-];
+const KNOWN_EXCEPTIONS: [(&str, &str, &str); 0] = [];
 
 fn without_test_modules(src: &str) -> String {
     let mut out = String::with_capacity(src.len());

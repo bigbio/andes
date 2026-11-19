@@ -92,9 +92,9 @@ an algorithm constant that a benchmark shows is right for every dataset.
   `18.010565` or `17.026549` anywhere else, and do not redefine them as local `const`s.
 - Each has its source (CODATA, IUPAC atomic masses, Unimod) in its doc comment and a check
   in `crates/model/tests/chemistry_constants.rs`.
-- Derived values are computed from the base ones (`H2O = 2 * H + O`), not typed, unless
-  deriving it would change results and that change has not been measured yet: `NH3` stays
-  `17.026549` for now. Such a value says why in its doc comment.
+- Derived values are computed from the base ones (`H2O = 2 * H + O`, `NH3 = N + 3 * H`),
+  never typed. Base values are the reference values to full published precision (NIST
+  atomic masses, CODATA), with the source in the doc comment.
 - The shipped scoring models key their ion tables on the exact f32 bits of each ion offset.
   Code that rebuilds an offset to look a table up must build it exactly as the model files
   were written, or the lookup silently finds no table.

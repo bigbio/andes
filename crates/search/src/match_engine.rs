@@ -1913,8 +1913,8 @@ pub(crate) fn compute_psm_features_with_edge(
     let model_tol_is_ppm = matches!(model_tol, model::tolerance::Tolerance::Ppm(_));
     let model_tol = model_tol.raw_value();
 
-    const H2O_LOSS_DA: f64 = 18.0106;
-    const NH3_LOSS_DA: f64 = 17.0265;
+    const H2O_LOSS_DA: f64 = model::mass::H2O;
+    const NH3_LOSS_DA: f64 = model::mass::NH3;
     let mut neutral_loss_ion_count: u32 = 0;
 
     for p in &predicted {
@@ -2836,11 +2836,15 @@ mod feature_tests {
             f_unique.unique_match_fraction
         );
 
-        const H2O: f64 = 18.0106;
-        const NH3: f64 = 17.0265;
+        const H2O: f64 = model::mass::H2O;
+        const NH3: f64 = model::mass::NH3;
         let mut contested_case: Option<(Peptide, f64, f64)> = None;
-        'search: for len in 3..=12 {
-            let pep2 = ala_peptide(len);
+        'search: for seq in ["PFAH", "PFSR", "PFLM", "PFML"] {
+            let residues: Vec<AminoAcid> = seq
+                .bytes()
+                .map(|r| AminoAcid::standard(r).unwrap())
+                .collect();
+            let pep2 = Peptide::new(residues, b'_', b'-');
             let pred2 = predict_by_ions(&pep2, 1..=1);
             let mut theo: Vec<f64> = Vec::new();
             for p in &pred2 {
@@ -2848,18 +2852,22 @@ mod feature_tests {
                 theo.push(p.mz - H2O);
                 theo.push(p.mz - NH3);
             }
-            for i in 0..theo.len() {
-                let tol = theo[i] * 20e-6;
-                for j in (i + 1)..theo.len() {
-                    if (theo[i] - theo[j]).abs() <= 2.0 * tol {
-                        contested_case = Some((pep2, theo[i], theo[j]));
-                        break 'search;
-                    }
+            for p in &pred2 {
+                let tol = p.mz * 20e-6;
+                let near_real = pred2.iter().filter(|q| (q.mz - p.mz).abs() < 0.05).count();
+                let others: Vec<f64> = theo
+                    .iter()
+                    .copied()
+                    .filter(|t| (t - p.mz).abs() > 1e-6 && (t - p.mz).abs() <= tol)
+                    .collect();
+                if near_real == 1 && others.len() == 1 {
+                    contested_case = Some((pep2, p.mz, others[0]));
+                    break 'search;
                 }
             }
         }
         let (pep2, peak_mz, other_mz) =
-            contested_case.expect("should find a contested theo pair in alanine scan");
+            contested_case.expect("should find a contested theo pair among the candidate peptides");
         let tol = peak_mz * 20e-6;
         assert!(
             (other_mz - peak_mz).abs() <= tol,

@@ -30,8 +30,7 @@ fn c_offset_bits() -> u32 {
     ((model::mass::PROTON + model::mass::NH3) as f32).to_bits()
 }
 fn z_offset_bits() -> u32 {
-    const Z_DOT_OFFSET: f64 = -16.018724;
-    ((model::mass::H2O + model::mass::PROTON + Z_DOT_OFFSET) as f32).to_bits()
+    ((model::mass::H2O + model::mass::PROTON + model::mass::Z_DOT_OFFSET) as f32).to_bits()
 }
 
 pub fn derive_mass_tiers(masses: &[f32], n_tiers: usize) -> Vec<f32> {
@@ -379,8 +378,9 @@ mod tests {
             max_fragment_charge: 5,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
-        let c_off = ((model::mass::PROTON + 17.026549) as f32).to_bits();
-        let z_off = ((model::mass::H2O + model::mass::PROTON - 16.018724) as f32).to_bits();
+        let c_off = ((model::mass::PROTON + model::mass::NH3) as f32).to_bits();
+        let z_off =
+            ((model::mass::H2O + model::mass::PROTON + model::mass::Z_DOT_OFFSET) as f32).to_bits();
         let mut saw_multicharge = false;
         for (part, frags) in &p.frag_off_table {
             for f in frags {

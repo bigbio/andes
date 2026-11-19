@@ -21,6 +21,7 @@ pub struct Spectrum {
     pub isolation_lower_offset: Option<f64>,
     pub isolation_upper_offset: Option<f64>,
     pub isolation_target_mz: Option<f64>,
+    pub mobility_window: Option<(u32, u32)>,
 }
 
 impl Spectrum {
@@ -46,6 +47,7 @@ impl Default for Spectrum {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 }
@@ -78,6 +80,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 
@@ -87,6 +90,7 @@ mod tests {
         assert_eq!(s.isolation_lower_offset, None);
         assert_eq!(s.isolation_upper_offset, None);
         assert_eq!(s.isolation_target_mz, None);
+        assert_eq!(s.mobility_window, None);
     }
 
     #[test]
@@ -115,6 +119,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);

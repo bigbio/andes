@@ -168,6 +168,7 @@ fn build_spec_keys_skips_below_min_peaks_and_expands_missing_charge() {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
     let spectra = vec![

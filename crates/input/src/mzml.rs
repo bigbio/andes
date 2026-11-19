@@ -476,6 +476,7 @@ impl<R: BufRead> MzMLReader<R> {
             isolation_lower_offset: sb.isolation_lower_offset,
             isolation_upper_offset: sb.isolation_upper_offset,
             isolation_target_mz: sb.isolation_target_mz,
+            mobility_window: None,
         }))
     }
 

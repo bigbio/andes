@@ -2235,6 +2235,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let mut queue = TopNQueue::new(10);
         for p in psms {

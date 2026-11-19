@@ -1320,6 +1320,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let spectra = vec![spec(Some(2)), spec(None), spec(Some(3)), spec(Some(2))];
         let t = SpectraTally::of(&spectra, &[2, 4]);

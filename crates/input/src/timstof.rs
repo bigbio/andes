@@ -15,7 +15,8 @@ use crate::timstof_ms1::{
     WIDE_WINDOW_PPM,
 };
 use crate::timstof_ms2::{
-    ms2_peaks, push_scans, read_frame_rows, read_pasef_precursors, FrameRow, PasefPrecursor,
+    has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
+    FrameRow, PasefPrecursor,
 };
 use crate::{Ms1Link, Spectrum};
 
@@ -118,6 +119,12 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
         }
     }
     let mut precursor_peaks: HashMap<usize, Vec<f64>> = HashMap::new();
+    if !has_table(&conn, "Precursors")? {
+        return Ok(TdfTables {
+            temperatures,
+            precursor_peaks,
+        });
+    }
     let mut stmt = conn.prepare("SELECT Parent, MonoisotopicMz, LargestPeakMz FROM Precursors")?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -422,7 +429,10 @@ impl Ms2Source {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(tables_err)?;
-        let precursors = read_pasef_precursors(&conn).map_err(tables_err)?;
+        let mut precursors = read_pasef_precursors(&conn).map_err(tables_err)?;
+        if precursors.is_empty() {
+            precursors = read_dia_windows(&conn).map_err(tables_err)?;
+        }
         let rows = read_frame_rows(&conn).map_err(tables_err)?;
         let mut positions = HashMap::with_capacity(frames.len());
         for pos in 0..frames.len() {
@@ -517,6 +527,7 @@ impl Ms2Source {
         }
         let parent_rt = p
             .parent
+            .filter(|_| !p.dia)
             .and_then(|id| self.rows.get(&id))
             .map(|r| r.time)
             .filter(|t| t.is_finite());
@@ -574,7 +585,12 @@ fn to_spectrum(
         activation_method: None,
         isolation_lower_offset,
         isolation_upper_offset,
-        isolation_target_mz: None,
+        isolation_target_mz: p.dia.then_some(p.mz),
+        mobility_window: p
+            .selections
+            .first()
+            .filter(|_| p.dia)
+            .map(|s| (s.scan_begin as u32, s.scan_end as u32)),
     })
 }
 
@@ -897,6 +913,7 @@ mod tests {
                 scan_begin: 690,
                 scan_end: 715,
             }],
+            dia: false,
         }
     }
 
@@ -914,6 +931,29 @@ mod tests {
         assert_eq!(spec.isolation_lower_offset, Some(1.0));
         assert_eq!(spec.isolation_upper_offset, Some(1.0));
         assert_eq!(spec.peaks, peaks);
+        assert_eq!(spec.isolation_target_mz, None);
+        assert_eq!(spec.mobility_window, None);
+        let dia = PasefPrecursor { dia: true, ..p };
+        let spec = to_spectrum(&dia, Some(1800.0), Vec::new()).unwrap();
+        assert_eq!(spec.isolation_target_mz, Some(654.32));
+        assert_eq!(spec.mobility_window, Some((690, 715)));
+    }
+
+    #[test]
+    fn read_tables_needs_no_precursors_table_but_reports_a_broken_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("analysis.tdf")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Frames (Id INTEGER, T1 REAL, T2 REAL);
+             INSERT INTO Frames VALUES (1, 25.0, 26.0);",
+        )
+        .unwrap();
+        let t = read_tables(dir.path()).unwrap();
+        assert_eq!(t.temperatures[&1], [25.0, 26.0]);
+        assert!(t.precursor_peaks.is_empty());
+        conn.execute_batch("CREATE TABLE Precursors (Parent INTEGER);")
+            .unwrap();
+        assert!(read_tables(dir.path()).is_err());
     }
 
     #[test]

@@ -143,16 +143,18 @@ pub(crate) fn rerank_pin(
     Ok(dropped)
 }
 
+type WindowKey = (usize, i64, Option<(u32, u32)>);
+
 pub(crate) fn windows(
     spectra: &[Spectrum],
     run_ends: &[usize],
 ) -> (Vec<(u32, u32)>, Vec<Vec<u32>>) {
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
-    let mut by_window: HashMap<(usize, i64), Vec<u32>> = HashMap::new();
+    let mut by_window: HashMap<WindowKey, Vec<u32>> = HashMap::new();
     for (i, s) in spectra.iter().enumerate() {
         let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
         by_window
-            .entry((run_of(i), (t * 100.0).round() as i64))
+            .entry((run_of(i), (t * 100.0).round() as i64, s.mobility_window))
             .or_default()
             .push(i as u32);
     }
@@ -892,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn windows_keep_mobility_windows_with_one_centre_apart() {
+        let spec = |rt: f64, mobility_window: Option<(u32, u32)>| Spectrum {
+            rt_seconds: Some(rt),
+            isolation_target_mz: Some(600.0),
+            mobility_window,
+            ..Default::default()
+        };
+        let spectra = [
+            spec(2.0, Some((34, 500))),
+            spec(1.0, Some((500, 935))),
+            spec(1.0, Some((34, 500))),
+            spec(2.0, Some((500, 935))),
+            spec(3.0, None),
+        ];
+        let (slot, windows) = windows(&spectra, &[spectra.len()]);
+        assert_eq!(windows.len(), 3);
+        let at = |i: usize| &windows[slot[i].0 as usize];
+        assert_eq!(at(0), &vec![2, 0]);
+        assert_eq!(at(1), &vec![1, 3]);
+        assert_eq!(at(4), &vec![4]);
+        assert_eq!((slot[0].1, slot[2].1), (1, 0));
+    }
+
+    #[test]
     fn refine_rt_learns_a_run_offset() {
         let dir = tempfile::tempdir().unwrap();
         let pin = dir.path().join("x.pin");
@@ -920,6 +946,7 @@ mod tests {
                 isolation_lower_offset: None,
                 isolation_upper_offset: None,
                 isolation_target_mz: None,
+                mobility_window: None,
             });
             text.push_str(&format!(
                 "t.{scan}_{scan}_1\t1\t{scan}\tr\t{}\t1\t{pred}\t{pep}\tP1\n",

@@ -1759,6 +1759,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 
@@ -1896,6 +1897,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let ss = ScoredSpectrum::new(&s, &scorer, 2);
 
@@ -1946,6 +1948,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
 
         let param = Param {
@@ -2056,6 +2059,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let param = deconv_param(true);
         let scorer = RankScorer::new(&param);
@@ -2090,6 +2094,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let param = deconv_param(true);
         let scorer = RankScorer::new(&param);
@@ -2126,6 +2131,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let param = deconv_param(false);
         let scorer = RankScorer::new(&param);
@@ -2427,6 +2433,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let ss = ScoredSpectrum::new_without_filtering(&s);
 
@@ -2491,6 +2498,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
 
         let param_plain = tiny_param_with_ions();
@@ -2515,6 +2523,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let s_gbdt = ScoredSpectrum::new(&spec_gbdt, &scorer_gbdt, 2);
         let parent_mass_gbdt = s_gbdt.parent_mass;
@@ -2596,6 +2605,7 @@ mod precursor_filter_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 

@@ -377,6 +377,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let keys = build_spec_keys(&[spec], &(2..=3), 10);
         assert_eq!(keys.len(), 2);

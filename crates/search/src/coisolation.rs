@@ -217,6 +217,7 @@ pub(crate) fn search_secondary(
         isolation_lower_offset: spec.isolation_lower_offset,
         isolation_upper_offset: spec.isolation_upper_offset,
         isolation_target_mz: spec.isolation_target_mz,
+        mobility_window: spec.mobility_window,
     };
     let res_ss = ScoredSpectrum::new(&co_spec, scorer, z);
 
@@ -675,6 +676,7 @@ pub(crate) mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
 
         let got = search_secondary(
@@ -751,6 +753,7 @@ pub(crate) mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let co = CoIsolated {
             mono_mz: (planted.mass() + z as f64 * PROTON) / z as f64,
@@ -944,6 +947,7 @@ pub(crate) mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
 
         let got = search_secondary(

@@ -670,9 +670,16 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 
 ### DIA (`--dia`, experimental)
 
-Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans; a run without MS1
-scans is an error. Cannot be combined with `--chimeric`, `--open-search`, `--refine`, `--glyco` or
-`--xl`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
+Needs **mzML, Thermo `.raw` or Bruker `.d` (diaPASEF)** with per-scan isolation windows and MS1
+scans; a run without MS1 scans is an error. Cannot be combined with `--chimeric`, `--open-search`,
+`--refine`, `--glyco` or `--xl`; `--precursor-cal` is turned off (a DIA scan has no selected
+precursor).
+
+On diaPASEF `.d` input, andes reads one spectrum per frame and isolation window. That spectrum sums
+the window's mobility range. The co-elution columns trace each (m/z centre, mobility range) window
+on its own. The FDR is not calibrated yet: on an Arabidopsis entrapment test of two ProteoBench
+low-input runs, q ≤ 0.01 measured a 5-7% true FDP (DIA-NN 2.2: about 1.8%). andes logs a warning
+when `--dia` runs on `.d` input.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|

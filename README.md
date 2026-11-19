@@ -326,8 +326,7 @@ two or more inputs: every confident precursor is measured in every run, and tran
 internal quant-quality q-value (`<stem>.mbr.parquet`, threshold `--quant-fdr`). The same stages
 run one at a time with `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines
 that spread runs over machines. Results on ProteoBench, truth designs, TMT and a 500-run study
-are in the [quantification benchmarks](#quantification-benchmarks) above and on the
-[benchmark page](docs/benchmarks/lfq.md).
+are on the [benchmark page](docs/benchmarks/lfq.md).
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta \

@@ -87,6 +87,21 @@ impl ThermoRawReader {
         self
     }
 
+    fn record_scan_context(&mut self, i: usize, raw: &RawSpectrum, spec: &Spectrum) {
+        if !self.capture_scan_context {
+            return;
+        }
+        self.scan_contexts.push(ScanContext {
+            id: spec.title.clone(),
+            parent_id: master_scan_number(&self.handle, i)
+                .map(|scan| with_scan_number(&spec.title, scan)),
+            scan_window: scan_window(raw),
+            faims_cv: faims_cv(raw),
+            noise: self.noise_of(i),
+            ion_mobility: None,
+        });
+    }
+
     fn noise_of(&self, index: usize) -> Option<NoiseProfile> {
         if !self.capture_noise {
             return None;
@@ -244,17 +259,7 @@ impl ThermoRawReader {
                         Some(spec) => spec,
                         None => continue,
                     };
-                    if self.capture_scan_context {
-                        self.scan_contexts.push(ScanContext {
-                            id: spec.title.clone(),
-                            parent_id: master_scan_number(&self.handle, i)
-                                .map(|scan| with_scan_number(&spec.title, scan)),
-                            scan_window: scan_window(&raw),
-                            faims_cv: faims_cv(&raw),
-                            noise: self.noise_of(i),
-                            ion_mobility: None,
-                        });
-                    }
+                    self.record_scan_context(i, &raw, &spec);
                     chunk.push(spec);
                     ms2_to_ms1.push(tracker.link(faims_cv(&raw)));
                     emitted_ms2 += 1;
@@ -613,17 +618,7 @@ impl Iterator for ThermoRawReader {
             }
             match Self::convert(&raw, &self.handle) {
                 Some(spec) => {
-                    if self.capture_scan_context {
-                        self.scan_contexts.push(ScanContext {
-                            id: spec.title.clone(),
-                            parent_id: master_scan_number(&self.handle, i)
-                                .map(|scan| with_scan_number(&spec.title, scan)),
-                            scan_window: scan_window(&raw),
-                            faims_cv: faims_cv(&raw),
-                            noise: self.noise_of(i),
-                            ion_mobility: None,
-                        });
-                    }
+                    self.record_scan_context(i, &raw, &spec);
                     return Some(Ok(spec));
                 }
                 None => continue,

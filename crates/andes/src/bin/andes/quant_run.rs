@@ -1358,6 +1358,137 @@ fn write_run_artifacts(
     Ok(())
 }
 
+fn write_feature_outputs(
+    pdir: &Path,
+    groups: Option<&crate::quant_cmd::ProteinGroups<'_>>,
+    mut records: Vec<FeatureRecord>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
+    let mut tally = crate::quant_cmd::GroupTally::default();
+    if let Some(pg) = groups {
+        records.retain_mut(|r| match tally.assign(pg, &r.sequence) {
+            Some((proteins, group)) => {
+                r.proteins = proteins;
+                r.group = Some(group);
+                true
+            }
+            None => false,
+        });
+    }
+    let path = pdir.join("quantms.feature.parquet");
+    output::write_feature_parquet(&path, &records)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    log::info!(
+        target: "quant",
+        "wrote {} ({} feature rows)",
+        path.display(),
+        records.len()
+    );
+    if let Some(pg) = groups {
+        let mut runs: Vec<String> = records.iter().map(|r| r.run_file_name.clone()).collect();
+        runs.sort();
+        runs.dedup();
+        tally.write_pg(pdir, pg, &runs)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quantify_label(
+    collector: &QuantCollector,
+    ls: &LabelSettings,
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    index: &SearchIndex,
+    hits: &[Hit<'_>],
+    label_decoys: Option<&HashMap<String, PercolatorPsm>>,
+    cutoffs: Option<&output::Cutoffs>,
+    parquet_dir: Option<&Path>,
+    groups: Option<&crate::quant_cmd::ProteinGroups<'_>>,
+    next_feature_id: &mut i64,
+    dir: &Path,
+    stem: &str,
+) -> Result<Vec<FeatureRecord>, String> {
+    let decoy_hits: Vec<Hit<'_>> = match label_decoys {
+        Some(d) => select_rank1(
+            collector,
+            spectra,
+            queues,
+            candidates,
+            Some(d),
+            None,
+            cutoffs,
+            true,
+        )
+        .into_iter()
+        .filter(|h| h.cand.is_decoy)
+        .collect(),
+        None => Vec::new(),
+    };
+    let (rows, label_records, label_meta) = label_run::quantify(
+        collector,
+        ls,
+        spectra,
+        hits,
+        &decoy_hits,
+        candidates,
+        index,
+        parquet_dir.is_some(),
+        next_feature_id,
+    )?;
+    let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
+    let channels: Vec<String> = ls.spec.channels.iter().map(|c| c.name.clone()).collect();
+    let path = dir.join(format!("{stem}.label.parquet"));
+    output::write_label_parquet(
+        &path,
+        &rows,
+        &output::LabelTableMeta {
+            channels: &channels,
+            reference: ls.spec.reference,
+            runs: &runs,
+            extra: &label_meta,
+        },
+    )?;
+    log::info!(
+        target: "quant",
+        "wrote {} ({} channel rows)",
+        path.display(),
+        rows.len()
+    );
+    if parquet_dir.is_some() && ls.spec.channels.iter().any(|c| c.qpx_label.is_none()) {
+        log::warn!(
+            target: "quant",
+            "--label: channels outside the SDRF/QPX label vocabulary (SILAC light / \
+             medium / heavy, DIMETHYL0/4/6/8) are not written to quantms.feature.parquet"
+        );
+    }
+    let ratios = label_run::protein_ratios(
+        &rows,
+        |seq| {
+            let pg = groups?;
+            match pg.inf.group_at(seq, pg.max_q) {
+                output::protein_inference::GroupAt::Group { group, .. } => {
+                    Some((group.accessions.join(";"), group.lead.clone()))
+                }
+                _ => None,
+            }
+        },
+        label_run::MIN_RATIO_COUNT,
+    );
+    let ppath = dir.join(format!("{stem}.label_proteins.tsv"));
+    std::fs::write(&ppath, label_run::protein_ratio_tsv(&ratios))
+        .map_err(|e| format!("write {}: {e}", ppath.display()))?;
+    log::info!(
+        target: "quant",
+        "wrote {} ({} protein ratios from at least {} peptides)",
+        ppath.display(),
+        ratios.len(),
+        label_run::MIN_RATIO_COUNT
+    );
+    Ok(label_records)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_quant(
     collector: &QuantCollector,
@@ -1981,114 +2112,27 @@ pub(crate) fn run_quant(
     }
 
     if let Some(ls) = &s.label {
-        let decoy_hits: Vec<Hit<'_>> = match label_decoys {
-            Some(d) => select_rank1(
-                collector,
-                spectra,
-                queues,
-                candidates,
-                Some(d),
-                None,
-                cutoffs,
-                true,
-            )
-            .into_iter()
-            .filter(|h| h.cand.is_decoy)
-            .collect(),
-            None => Vec::new(),
-        };
-        let (rows, label_records, label_meta) = label_run::quantify(
+        records.extend(quantify_label(
             collector,
             ls,
             spectra,
-            &hits,
-            &decoy_hits,
+            queues,
             candidates,
             index,
-            parquet_dir.is_some(),
+            &hits,
+            label_decoys,
+            cutoffs,
+            parquet_dir,
+            groups,
             &mut next_feature_id,
-        )?;
-        let runs: Vec<String> = collector.runs.iter().map(|r| r.stem.clone()).collect();
-        let channels: Vec<String> = ls.spec.channels.iter().map(|c| c.name.clone()).collect();
-        let path = dir.join(format!("{stem}.label.parquet"));
-        output::write_label_parquet(
-            &path,
-            &rows,
-            &output::LabelTableMeta {
-                channels: &channels,
-                reference: ls.spec.reference,
-                runs: &runs,
-                extra: &label_meta,
-            },
-        )?;
-        log::info!(
-            target: "quant",
-            "wrote {} ({} channel rows)",
-            path.display(),
-            rows.len()
-        );
-        if parquet_dir.is_some() && ls.spec.channels.iter().any(|c| c.qpx_label.is_none()) {
-            log::warn!(
-                target: "quant",
-                "--label: channels outside the SDRF/QPX label vocabulary (SILAC light / \
-                 medium / heavy, DIMETHYL0/4/6/8) are not written to quantms.feature.parquet"
-            );
-        }
-        let ratios = label_run::protein_ratios(
-            &rows,
-            |seq| {
-                let pg = groups?;
-                match pg.inf.group_at(seq, pg.max_q) {
-                    output::protein_inference::GroupAt::Group { group, .. } => {
-                        Some((group.accessions.join(";"), group.lead.clone()))
-                    }
-                    _ => None,
-                }
-            },
-            label_run::MIN_RATIO_COUNT,
-        );
-        let ppath = dir.join(format!("{stem}.label_proteins.tsv"));
-        std::fs::write(&ppath, label_run::protein_ratio_tsv(&ratios))
-            .map_err(|e| format!("write {}: {e}", ppath.display()))?;
-        log::info!(
-            target: "quant",
-            "wrote {} ({} protein ratios from at least {} peptides)",
-            ppath.display(),
-            ratios.len(),
-            label_run::MIN_RATIO_COUNT
-        );
-        records.extend(label_records);
+            &dir,
+            &stem,
+        )?);
     }
 
     let quantified = s.plex.is_some() || s.lfq || s.label.is_some() || !records.is_empty();
     if let (Some(pdir), true) = (parquet_dir, quantified) {
-        std::fs::create_dir_all(pdir).map_err(|e| format!("create {}: {e}", pdir.display()))?;
-        let mut tally = crate::quant_cmd::GroupTally::default();
-        if let Some(pg) = groups {
-            records.retain_mut(|r| match tally.assign(pg, &r.sequence) {
-                Some((proteins, group)) => {
-                    r.proteins = proteins;
-                    r.group = Some(group);
-                    true
-                }
-                None => false,
-            });
-        }
-        let path = pdir.join("quantms.feature.parquet");
-        output::write_feature_parquet(&path, &records)
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
-        log::info!(
-            target: "quant",
-            "wrote {} ({} feature rows)",
-            path.display(),
-            records.len()
-        );
-        if let Some(pg) = groups {
-            let mut runs: Vec<String> = records.iter().map(|r| r.run_file_name.clone()).collect();
-            runs.sort();
-            runs.dedup();
-            tally.write_pg(pdir, pg, &runs)?;
-        }
+        write_feature_outputs(pdir, groups, records)?;
     }
     log::info!(target: "quant", "done in {:.2} s", t0.elapsed().as_secs_f64());
     Ok(summary)

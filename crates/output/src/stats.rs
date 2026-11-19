@@ -352,9 +352,8 @@ pub fn psm_facts(
     run_ends: &[usize],
     wanted: &HashSet<&str>,
 ) -> HashMap<String, PsmFacts> {
-    use crate::pin::{format_spec_id, precursor_error};
+    use crate::pin::{emitted_spec_ids, precursor_error};
     use crate::qpx::{bare_sequence, peptidoform_string};
-    use crate::row_context::emitted_rows;
     use model::mass::{ISOTOPE, PROTON};
     use search::precursor_cal::adjusted_observed_neutral_mass;
 
@@ -368,18 +367,9 @@ pub fn psm_facts(
         .flat_map_iter(|i| {
             let spec = &spectra[i];
             let psms = queues[i].clone().into_rank_sorted_vec();
-            let ranked = emitted_rows(spec, &psms, candidates);
-            let multi_row = ranked.len() > 1;
-            let scan = spec.scan.unwrap_or(0);
-            let title = if spec.title.is_empty() {
-                format!("scan={scan}")
-            } else {
-                spec.title.clone()
-            };
             let run = run_ends.partition_point(|&end| end <= i);
             let mut out = Vec::new();
-            for (row_idx, (rank, psm)) in ranked.into_iter().enumerate() {
-                let id = format_spec_id(&title, scan, rank, row_idx, multi_row);
+            for (id, psm) in emitted_spec_ids(spec, &psms, candidates) {
                 if !wanted.contains(id.as_str()) {
                     continue;
                 }

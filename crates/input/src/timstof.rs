@@ -148,12 +148,15 @@ fn to_peaks(
     calibration: &MzCalibration,
     frame: FrameConditions,
 ) -> Vec<(f64, f32)> {
-    let mut peaks: Vec<(f64, f32)> = centroids
-        .iter()
-        .map(|c| {
-            let cond = crate::timstof_ms1::conditions(frame, c.intensity);
-            (calibration.mz(c.tof, cond), c.intensity as f32)
-        })
+    finite_sorted_peaks(centroids.iter().map(|c| {
+        let cond = crate::timstof_ms1::conditions(frame, c.intensity);
+        (calibration.mz(c.tof, cond), c.intensity as f32)
+    }))
+}
+
+/// The peaks with a finite positive m/z and intensity, in m/z order.
+pub(crate) fn finite_sorted_peaks(peaks: impl Iterator<Item = (f64, f32)>) -> Vec<(f64, f32)> {
+    let mut peaks: Vec<(f64, f32)> = peaks
         .filter(|&(mz, i)| mz.is_finite() && mz > 0.0 && i.is_finite() && i > 0.0)
         .collect();
     if peaks.windows(2).any(|w| w[0].0 > w[1].0) {

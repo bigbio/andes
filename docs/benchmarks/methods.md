@@ -46,6 +46,23 @@ entrapment-estimated FDP stays at or below 1%.
   protein. `entrap_common.py` holds this rule for `run.sh`, `build_databases.sh` and the glyco
   evaluators. A natural entrapment (a foreign proteome) can be contaminated by conserved homologs;
   the shuffle is the primary reading.
+- **Scope of the (1 + T/E) estimator.** It assumes a wrong match can land on any peptide of the real
+  database in proportion to its share of the searchable peptides. That holds for PSMs and peptides,
+  where a wrong match to a present protein's peptide is still wrong. It does not hold for protein
+  groups: a wrong match to a peptide of a present protein is absorbed into that protein's group and
+  is never a false group, so the real-database half of the false groups is smaller than
+  N_entrapment × T/E and the estimate is an upper bound. Measured on 33 runs with peptide-shuffle
+  entrapment (UPS1, four plasma timsTOF runs, Astral and phospho, three draws each), estimated
+  false hits divided by decoy hits at the same cut: PSMs 1.08 (q ≤ 0.01) and 1.06 (q ≤ 0.05),
+  peptides 1.06 and 1.06, picked protein groups 1.26 and 1.28 (true FDP read 1.24% and 6.39%).
+  Within the entrapment families picked competition is symmetric (622 entrapment target groups
+  against 608 decoy groups of entrapment families at q ≤ 0.01; 3,564 against 3,384 at 0.05), and
+  taking the false groups of the real database from the observed decoy groups of real families
+  gives 1.00% and 5.2%. So protein-group FDP figures from the (1 + T/E) estimator are upper bounds
+  (about 1.25 times the decoy-based value on these sets); PSM- and peptide-level figures are
+  unbiased within about 6%. The two groups-level rows of DOCS.md (protein inference) and the
+  protein-group figure of the website are upper bounds; the larger the share of the real proteome
+  that is present (a small database such as UPS1 in yeast), the larger the excess.
 - **Entrapment designs.** Peptide-level shuffles ([`build_shuffled_entrap.py`](build_shuffled_entrap.py);
   each tryptic peptide shuffled with its C-terminal residue fixed, after Wen et al., Nat. Methods
   2025) give every entrapment peptide a target of the same composition and mass. Three realisations

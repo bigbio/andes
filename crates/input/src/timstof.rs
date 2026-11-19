@@ -16,7 +16,7 @@ use crate::timstof_ms1::{
 };
 use crate::timstof_ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
-    FrameRow, PasefPrecursor,
+    slice_dia_windows, FrameRow, PasefPrecursor,
 };
 use crate::{Ms1Link, Spectrum};
 
@@ -640,6 +640,12 @@ impl TimsTofReader {
 
     pub fn with_ms1_mobility(mut self, resolve: bool) -> Self {
         self.ms1_mobility = resolve;
+        self
+    }
+
+    pub fn with_dia_mobility_slices(mut self, n: usize) -> Self {
+        let p = std::mem::take(&mut self.ms2.precursors);
+        self.ms2.precursors = slice_dia_windows(p, n);
         self
     }
 

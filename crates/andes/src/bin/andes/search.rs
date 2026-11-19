@@ -728,6 +728,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     {
                         let mut reader = input::TimsTofReader::open(&spectrum_path)
                             .map_err(|e| format!("open Bruker .d: {e}"))?
+                            .with_dia_mobility_slices(cli.dia_mobility_slices)
                             .with_run_ms1_capture(capture_ms1)
                             .with_ms1_mobility(true)
                             .with_scan_context_capture(capture_context);
@@ -1027,6 +1028,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let mut reader = input::TimsTofReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Bruker .d: {e}"))?
+                                .with_dia_mobility_slices(cli.dia_mobility_slices)
                                 .with_run_ms1_capture(capture_ms1)
                                 .with_ms1_mobility(true)
                                 .with_scan_context_capture(capture_context);

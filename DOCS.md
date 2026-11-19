@@ -684,6 +684,7 @@ when `--dia` runs on `.d` input.
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. A candidate is scored only when its monoisotopic m/z has an MS1 peak within 5 ppm in the survey scan nearest the scan or one either side (the MS1 gate; on the Astral benchmark it keeps 93 % of DIA-NN's precursors and 13 % of random candidates). Co-elution columns are then added to the PIN. Config key `search.dia`. |
+| `--dia-mobility-slices` | integer | `1` | diaPASEF (`.d`) only. Splits each isolation window's TIMS scan range into N slices. Each slice spans 2/(N+1) of the range, and neighbouring slices overlap by half. Each slice is a separate spectrum, and the co-elution columns trace it on its own across cycles. A slice spectrum mixes fewer co-isolated peptides than the whole window. 1 keeps one spectrum per window. No effect on mzML, `.raw` or ddaPASEF. Config key `search.dia_mobility_slices`. |
 
 The added PIN columns (`crates/andes/src/bin/andes/dia.rs`), for every row, targets and decoys
 alike:

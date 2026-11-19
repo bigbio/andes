@@ -59,6 +59,7 @@ pub struct SearchCfg {
     pub fragment_index_slice_da: Option<f64>,
     pub index_cache_dir: Option<PathBuf>,
     pub dia: Option<bool>,
+    pub dia_mobility_slices: Option<usize>,
     pub open_search: Option<bool>,
     pub open_search_delta: Option<String>,
     pub open_search_top_k: Option<u32>,
@@ -480,6 +481,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("min_peaks", min_peaks, cfg.search.min_peaks);
     set!("top_n", top_n, cfg.search.top_n);
     set!("dia", dia, cfg.search.dia);
+    set!(
+        "dia_mobility_slices",
+        dia_mobility_slices,
+        cfg.search.dia_mobility_slices
+    );
     if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
         if v != "ipf" {
             return Err(format!("search.localize: '{v}' is not one of: ipf"));

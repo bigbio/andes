@@ -635,6 +635,15 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) dia: bool,
 
+    /// diaPASEF (.d) only: split each isolation window's mobility range into N slices
+    ///
+    /// Each slice spans two N+1ths of the window's TIMS scan range, and neighbouring slices
+    /// overlap by half. Each slice is searched as its own spectrum and traced on its own across
+    /// cycles. A slice spectrum mixes fewer co-isolated peptides than the whole window. 1 keeps
+    /// one spectrum per window. Ignored for mzML, .raw and ddaPASEF.
+    #[arg(long, value_name = "N", default_value = "1", help_heading = H_MODES)]
+    pub(crate) dia_mobility_slices: usize,
+
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
     ///
     /// The modifications are a built-in tier, or the tier of --refine-config.

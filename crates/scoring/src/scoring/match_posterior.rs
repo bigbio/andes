@@ -162,13 +162,56 @@ mod tests {
         Peptide::new(residues, b'K', b'R')
     }
 
-    fn empty_param() -> Param {
-        crate::testutil::tiny_param()
+    fn param_without_tables() -> Param {
+        let mut param = crate::testutil::tiny_param();
+        param.rank_dist_table.clear();
+        param
+    }
+
+    fn param_with_b_and_noise() -> Param {
+        use rustc_hash::FxHashMap;
+        let mut param = crate::testutil::tiny_param();
+        let part = param.partition_for(2, 1500.0, 0);
+        let mut table: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
+        table.insert(
+            IonType::Prefix {
+                charge: 1,
+                offset_bits: (PROTON as f32).to_bits(),
+                loss_class: 0,
+            },
+            vec![0.5, 0.3, 0.0, 0.2],
+        );
+        table.insert(IonType::Noise, vec![0.01, 0.01, 0.03, 0.95]);
+        param.rank_dist_table.insert(part, table);
+        param
+    }
+
+    #[test]
+    fn priors_follow_the_model_and_unmodelled_ions_fall_back_to_noise() {
+        let param = param_with_b_and_noise();
+        let priors = IonPriors::new(&param, 2, 1500.0);
+        let b = FragmentIon {
+            kind: IonKind::B,
+            position: 3,
+            loss: FragmentLoss::None,
+        };
+        let y = FragmentIon {
+            kind: IonKind::Y,
+            position: 3,
+            loss: FragmentLoss::None,
+        };
+        let b_water = FragmentIon {
+            loss: FragmentLoss::Water,
+            ..b
+        };
+        assert!((priors.prior(b, 400.0) - 0.8).abs() < 1e-6);
+        assert!((priors.prior(y, 400.0) - 0.05).abs() < 1e-6);
+        assert!((priors.prior(b_water, 400.0) - 0.05).abs() < 1e-6);
     }
 
     #[test]
     fn a_coincident_ion_halves_the_posterior_and_an_unambiguous_ion_keeps_it() {
-        let param = empty_param();
+        let param = param_without_tables();
         let priors = IonPriors::new(&param, 2, 1500.0);
         let peptide = pep(b"GAKAG");
         let predicted = predict_by_ions(&peptide, 1..=1);
@@ -205,5 +248,51 @@ mod tests {
         assert!((f64::from(pc.mean) - 0.5).abs() < 0.01, "{}", pc.mean);
         assert!(pa.mean > 0.99, "{}", pa.mean);
         assert!(pa.log_odds_sum > pc.log_odds_sum);
+    }
+
+    #[test]
+    fn a_higher_prior_competitor_lowers_the_posterior() {
+        let param = param_with_b_and_noise();
+        let priors = IonPriors::new(&param, 2, 1500.0);
+        let peptide = pep(b"GAKAG");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let theoretical = theoretical_fragment_ions(&predicted);
+        let b2 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::B && p.position == 2)
+            .unwrap();
+        let y2 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 2)
+            .unwrap();
+        let spectrum = Spectrum {
+            peaks: vec![(b2.mz, 1000.0)],
+            ..Default::default()
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&spectrum);
+        let as_b = [(
+            1000.0_f32,
+            b2.mz,
+            b2.mz,
+            true,
+            FragmentIon::of_predicted(b2),
+        )];
+        let water_loss = FragmentIon {
+            loss: FragmentLoss::Water,
+            ..FragmentIon::of_predicted(y2)
+        };
+        let as_y_loss = [(1000.0_f32, b2.mz, b2.mz, false, water_loss)];
+        let pb = match_posteriors(&ss, &as_b, &theoretical, &priors, 20.0, true);
+        let py = match_posteriors(&ss, &as_y_loss, &theoretical, &priors, 20.0, true);
+        assert!(
+            (f64::from(pb.mean) - 0.8 / 0.85).abs() < 0.01,
+            "{}",
+            pb.mean
+        );
+        assert!(
+            (f64::from(py.mean) - 0.05 / 0.85).abs() < 0.01,
+            "{}",
+            py.mean
+        );
     }
 }

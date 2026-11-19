@@ -1168,6 +1168,35 @@ an error naming the column and two files (split the SDRF by setting). Empty cell
 `not available` and `not applicable` count as absent. The run prints what it took from the SDRF
 and what the command line or config kept.
 
+### Cohorts (`andes cohort plan`, experimental)
+
+`andes cohort plan cohort.yaml` plans the analysis of several projects' SDRFs together. The
+config file's `cohort` section lists the SDRFs (see `config.example.yaml`); its other sections
+are the settings every run shares (database, charge, decoys, FDR). The command searches
+nothing: it checks the cohort, prints the groups, and writes `<name>.plan.json` (or
+`--output`) with one entry per spectrum file and one per group. Every problem is reported in
+one pass, and no plan is written while any remains.
+
+- **Runs.** Each SDRF is read as with `--sdrf`, except that rows which disagree on the
+  protease, modifications, precursor tolerance, dissociation method, label kind or
+  crosslinker are split into settings groups instead of being an error. A run's `args` are the
+  search flags its settings give, with the precedence `cohort.overrides > config section >
+  SDRF`; a key the config sets is left out of `args`, so the runner's `--config` applies it.
+- **Run names.** `cohort.run_name` (default `{project}.{stem}`) gives each spectrum file a
+  name unique in the cohort; `stage_as` is the file name to stage the spectrum under, so that
+  its stem, the PIN `SpecId` prefix, is the run name. Two files with one name are an error.
+- **Groups.** Runs share a group, and later one FDR, only when they share the kind of data
+  (`dda`, `lfq`, `tmt`, `label`, `xl`), the enzyme and the crosslinkers. Each group lists the
+  stages it runs after the searches: `percolator > inference` (`dda`), then `quant` (`lfq`,
+  `label`) or `tmt-quant` (`tmt`); `xl-fdr` for crosslinking.
+- **Checks.** Unreadable SDRFs, rows with too few fields, unknown proteases, modifications or
+  crosslinker accessions, overrides or exclusions naming a project not listed, invalid override
+  values and duplicate run names are errors; an SDRF that splits into several settings groups,
+  or that gives no precursor tolerance, is a warning.
+
+The stages are not yet run by andes itself: a job array runs `andes` once per entry in `runs`,
+then each group's stages over its runs.
+
 ---
 
 ## 1c. Splitting a search across cluster tasks

@@ -6,6 +6,10 @@ use clap::{Parser, Subcommand};
 mod acquisition;
 #[path = "andes/cli.rs"]
 mod cli;
+#[path = "../cohort.rs"]
+mod cohort;
+#[path = "andes/cohort_cmd.rs"]
+mod cohort_cmd;
 #[path = "../config.rs"]
 mod config;
 #[path = "andes/dia.rs"]
@@ -123,6 +127,13 @@ enum Command {
     #[command(subcommand)]
     Quant(cli::QuantCommand),
 
+    /// Analyse the SDRFs of several projects together
+    ///
+    /// `plan` reads the `cohort` section of a config file and the SDRFs it lists, checks
+    /// them, and writes every run's settings and the groups that share one FDR as JSON.
+    #[command(subcommand)]
+    Cohort(cli::CohortCommand),
+
     /// Protein groups with protein-level q-values over the rescored PSMs of one or more runs
     ///
     /// Writes the QPX protein-group view.
@@ -212,6 +223,7 @@ fn main() -> ExitCode {
             inference_cmd::run_inference(*args)
         }
         Some(Command::Percolator(args)) => run_native_percolator(*args),
+        Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
             let mut cfg_keys = sdrf::ConfigKeys::default();

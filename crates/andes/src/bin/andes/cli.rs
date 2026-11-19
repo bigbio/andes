@@ -1413,6 +1413,26 @@ pub(crate) struct ProteinArgs {
 /// `andes quant`: the match-between-runs stages over a quant directory
 /// written by a search with `--quant-dir`.
 #[derive(clap::Subcommand, Debug)]
+pub(crate) enum CohortCommand {
+    /// Check a cohort and write its plan: every run's search settings and the FDR groups
+    ///
+    /// Searches nothing. Prints the groups and every problem found, and writes the plan
+    /// only when there is no error.
+    Plan(CohortPlanArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortPlanArgs {
+    /// Config file with a `cohort` section; its other sections are the settings every
+    /// run shares
+    #[arg(value_name = "CONFIG")]
+    pub(crate) config: PathBuf,
+    /// Where to write the plan [default: <cohort name>.plan.json in the current directory]
+    #[arg(long, short, value_name = "FILE")]
+    pub(crate) output: Option<PathBuf>,
+}
+
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum QuantCommand {
     /// Build the precursor library and the joint retention-time alignment
     ///

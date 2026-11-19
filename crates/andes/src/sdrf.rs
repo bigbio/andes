@@ -46,6 +46,47 @@ pub fn read(path: &Path) -> Result<SdrfSettings, String> {
 }
 
 pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
+    let (rows, has_mods) = parse_rows(text)?;
+    settings_of(&rows, has_mods, dir)
+}
+
+/// The SDRF's rows split into groups that agree on every setting andes reads, one
+/// [`SdrfSettings`] per group, in the order each group's first row appears. A file whose
+/// rows all agree gives one group, the same settings [`parse`] gives.
+pub fn split(text: &str, dir: &Path) -> Result<Vec<SdrfSettings>, String> {
+    let mut groups: Vec<(Vec<String>, Vec<RowSettings>)> = Vec::new();
+    let (rows, has_mods) = parse_rows(text)?;
+    for row in rows {
+        let key: Vec<String> = SETTINGS.iter().map(|(_, k)| k(&row)).collect();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(_, rows)| settings_of(rows, has_mods, dir))
+        .collect()
+}
+
+type SettingKey = fn(&RowSettings) -> String;
+
+/// The settings every row of one andes run must share: the SDRF column and the row's value.
+const SETTINGS: [(&str, SettingKey); 6] = [
+    (CLEAVAGE, |r| r.enzymes.join("+")),
+    (MODS, |r| {
+        let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
+        m.sort();
+        m.join(", ")
+    }),
+    (PRECURSOR_TOL, |r| r.precursor_tol.clone().unwrap_or_default()),
+    (DISSOCIATION, |r| r.dissociation.clone().unwrap_or_default()),
+    (LABEL, |r| r.label.as_deref().map(label_kind).unwrap_or("").to_string()),
+    (XL, |r| r.xl.clone().unwrap_or_default()),
+];
+
+/// The data rows, and whether the file has any modification column.
+fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header: Vec<String> = lines
         .next()
@@ -115,22 +156,13 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     if rows.is_empty() {
         return Err("no data rows".into());
     }
+    Ok((rows, !mods.is_empty()))
+}
 
-    agree(&rows, CLEAVAGE, |r| r.enzymes.join("+"))?;
-    agree(&rows, MODS, |r| {
-        let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
-        m.sort();
-        m.join(", ")
-    })?;
-    agree(&rows, PRECURSOR_TOL, |r| {
-        r.precursor_tol.clone().unwrap_or_default()
-    })?;
-    agree(&rows, DISSOCIATION, |r| {
-        r.dissociation.clone().unwrap_or_default()
-    })?;
-    agree(&rows, LABEL, |r| {
-        r.label.as_deref().map(label_kind).unwrap_or("").to_string()
-    })?;
+fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfSettings, String> {
+    for (column, key) in &SETTINGS[..5] {
+        agree(rows, column, key)?;
+    }
     let mut linkers: Vec<String> = Vec::new();
     for v in rows.iter().filter_map(|r| r.xl.clone()) {
         if !linkers.contains(&v) {
@@ -148,7 +180,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
-    for r in &rows {
+    for r in rows {
         let p = resolve_data_file(dir, &r.file);
         if !data_files.contains(&p) {
             data_files.push(p);
@@ -160,7 +192,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         Some(Quant::Label(_)) => !m.is_label_channel(),
         _ => true,
     };
-    let (fixed_mods, variable_mods) = if mods.is_empty() {
+    let (fixed_mods, variable_mods) = if !has_mods {
         (None, None)
     } else {
         let list = |fixed: bool| -> Result<Vec<String>, String> {

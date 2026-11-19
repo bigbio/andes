@@ -95,7 +95,7 @@ fn predicted_linear_intensity(g: &GbdtPeakModel, feats: &[f32]) -> f64 {
 use crate::frag_features::extract_frag_features;
 use crate::gbdt_eval::GbdtPeakModel;
 use crate::ion_features::extract_ion_features;
-use crate::scoring::fragment_ions::predict_by_ions;
+use crate::scoring::fragment_ions::{predict_by_ions, IonKind, PredictedIon};
 use crate::scoring::ScoredSpectrum;
 
 pub fn spectral_cosine_similarity(pred: &[f64], obs: &[f64]) -> f64 {
@@ -241,27 +241,100 @@ pub fn frag_llr_battery(
     (explained, sum_chance_llr as f32, topk_observed)
 }
 
-pub type MatchedIon = (f32, f64, f64, bool);
+/// Neutral-loss class of a theoretical fragment ion: none, water, ammonia, or a
+/// modification-specific loss identified by its `PredictedIon::loss_class`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentLoss {
+    None,
+    Water,
+    Ammonia,
+    Modification(u8),
+}
+
+/// Identity of one theoretical fragment ion of a peptide: series, position and loss class.
+/// Two different ions can share an m/z bit for bit; identity, not m/z, tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentIon {
+    pub kind: IonKind,
+    pub position: u32,
+    pub loss: FragmentLoss,
+}
+
+impl FragmentIon {
+    pub fn of_predicted(p: &PredictedIon) -> Self {
+        Self {
+            kind: p.kind,
+            position: p.position,
+            loss: if p.loss_class == 0 {
+                FragmentLoss::None
+            } else {
+                FragmentLoss::Modification(p.loss_class)
+            },
+        }
+    }
+}
+
+pub type MatchedIon = (f32, f64, f64, bool, FragmentIon);
+
+pub type TheoreticalIons = Vec<(f64, FragmentIon)>;
+
+/// Charge-1 theoretical ions of a peptide with the water and ammonia loss of each,
+/// every entry keeping the identity of the ion it comes from.
+pub fn theoretical_fragment_ions(charge1_predicted: &[PredictedIon]) -> TheoreticalIons {
+    let mut out = TheoreticalIons::with_capacity(3 * charge1_predicted.len());
+    for p in charge1_predicted {
+        let ion = FragmentIon::of_predicted(p);
+        out.push((p.mz, ion));
+        out.push((
+            p.mz - model::mass::H2O,
+            FragmentIon {
+                loss: FragmentLoss::Water,
+                ..ion
+            },
+        ));
+        out.push((
+            p.mz - model::mass::NH3,
+            FragmentIon {
+                loss: FragmentLoss::Ammonia,
+                ..ion
+            },
+        ));
+    }
+    out
+}
+
+/// Number of theoretical ions other than `matched` that lie within the feature tolerance
+/// of the observed peak at `obs`.
+pub fn fragment_ambiguity(
+    theoretical: &[(f64, FragmentIon)],
+    obs: f64,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+    matched: FragmentIon,
+) -> usize {
+    let tol_da = if feature_tol_is_ppm {
+        obs * feature_tol / 1e6
+    } else {
+        feature_tol
+    };
+    theoretical
+        .iter()
+        .filter(|&&(theo, ion)| (theo - obs).abs() <= tol_da && ion != matched)
+        .count()
+}
 
 pub fn mass_competition_evidence(
     scored_spec: &ScoredSpectrum<'_>,
     matched_ions: &[MatchedIon],
-    theo_mz_list: &[f64],
+    theoretical: &[(f64, FragmentIon)],
     feature_tol: f64,
     feature_tol_is_ppm: bool,
 ) -> f32 {
     matched_ions
         .iter()
-        .map(|&(_, obs, pred, _)| {
-            let tol_da = if feature_tol_is_ppm {
-                obs * feature_tol / 1e6
-            } else {
-                feature_tol
-            };
-            let ambiguity = theo_mz_list
-                .iter()
-                .filter(|&&theo| (theo - obs).abs() <= tol_da && (theo - pred).abs() > 1e-9)
-                .count();
+        .map(|&(_, obs, _, _, ion)| {
+            let ambiguity =
+                fragment_ambiguity(theoretical, obs, feature_tol, feature_tol_is_ppm, ion);
             let rho = scored_spec.local_peak_density(obs, DENSITY_HW);
             let competition = ambiguity as f64 + rho;
             1.0 / (1.0 + competition)
@@ -448,7 +521,6 @@ pub fn rich_ion_llr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scoring::fragment_ions::IonKind;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;
@@ -480,6 +552,65 @@ mod tests {
     }
 
     #[test]
+    fn a_coincident_ion_of_another_series_counts_as_ambiguity() {
+        let peptide = pep(b"GAKAG");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let theoretical = theoretical_fragment_ions(&predicted);
+        let b2 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::B && p.position == 2)
+            .unwrap();
+        let y2 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 2)
+            .unwrap();
+        let y2_water_loss = y2.mz - model::mass::H2O;
+        assert!((y2_water_loss - b2.mz).abs() < 1e-9);
+        let n = fragment_ambiguity(
+            &theoretical,
+            b2.mz,
+            20.0,
+            true,
+            FragmentIon::of_predicted(b2),
+        );
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn an_unambiguous_peak_has_no_competitor_and_full_evidence() {
+        let peptide = pep(b"ARCDE");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let theoretical = theoretical_fragment_ions(&predicted);
+        let y3 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 3)
+            .unwrap();
+        let n = fragment_ambiguity(
+            &theoretical,
+            y3.mz,
+            20.0,
+            true,
+            FragmentIon::of_predicted(y3),
+        );
+        assert_eq!(n, 0);
+        let sparse = Spectrum {
+            peaks: vec![(y3.mz, 1000.0)],
+            ..Default::default()
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&sparse);
+        let matched = vec![(
+            1000.0_f32,
+            y3.mz,
+            y3.mz,
+            false,
+            FragmentIon::of_predicted(y3),
+        )];
+        let ev = mass_competition_evidence(&ss, &matched, &theoretical, 20.0, true);
+        let expected = 1.0 / (1.0 + 1.0 / (2.0 * DENSITY_HW));
+        assert!((f64::from(ev) - expected).abs() < 1e-6);
+    }
+
+    #[test]
     fn mass_competition_lower_in_crowded_region() {
         let peptide = pep(b"ARCDE");
         let predicted = predict_by_ions(&peptide, 1..=1);
@@ -499,11 +630,14 @@ mod tests {
         };
         let ss_sparse = ScoredSpectrum::new_without_filtering(&sparse);
         let ss_crowded = ScoredSpectrum::new_without_filtering(&crowded);
-        let mut theo: Vec<f64> = Vec::new();
-        for p in &predicted {
-            theo.push(p.mz);
-        }
-        let matched = vec![(1000.0_f32, y3.mz, y3.mz, false)];
+        let theo = theoretical_fragment_ions(&predicted);
+        let matched = vec![(
+            1000.0_f32,
+            y3.mz,
+            y3.mz,
+            false,
+            FragmentIon::of_predicted(y3),
+        )];
         let sparse_ev = mass_competition_evidence(&ss_sparse, &matched, &theo, 20.0, true);
         let crowded_ev = mass_competition_evidence(&ss_crowded, &matched, &theo, 20.0, true);
         assert!(sparse_ev > crowded_ev);

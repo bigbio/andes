@@ -32,10 +32,11 @@ use scoring_crate::scoring::fragment_ions::{
     predict_by_ions, predict_by_ions_with_losses, IonKind,
 };
 use scoring_crate::scoring::{
-    edge_scoring_enabled, frag_llr_battery, fuse_strong_score, intensity_signal,
-    mass_competition_evidence, predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm,
-    score_psm_float, scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer,
-    ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
+    edge_scoring_enabled, frag_llr_battery, fragment_ambiguity, fuse_strong_score,
+    intensity_signal, mass_competition_evidence, predict_frag_intensities, psm_edge_score,
+    rich_ion_llr, score_psm, score_psm_float, scored_for_charge, strong_score_calibrated,
+    theoretical_fragment_ions, FragmentIon, MatchedIon, OnlineStats, RankScorer, ScoredSpectrum,
+    StrongScoreInputs, DENSITY_HW,
 };
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
@@ -1902,7 +1903,7 @@ pub(crate) fn compute_psm_features_with_edge(
     let mut b_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
     let mut y_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
 
-    let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
+    let mut matched_ions: SmallVec<[MatchedIon; 96]> = SmallVec::new();
     let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
 
     let feat_tol = scorer.pin_match_tolerance();
@@ -1925,7 +1926,13 @@ pub(crate) fn compute_psm_features_with_edge(
         };
         if let Some((rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
             let is_b = matches!(p.kind, IonKind::B | IonKind::C);
-            matched_ions.push((intensity, peak_mz, p.mz, is_b));
+            matched_ions.push((
+                intensity,
+                peak_mz,
+                p.mz,
+                is_b,
+                FragmentIon::of_predicted(p),
+            ));
             matched_ion_ranks.push(rank);
 
             let pos = (p.position - 1) as usize;
@@ -2101,13 +2108,13 @@ pub(crate) fn compute_psm_features_with_edge(
 
     let abs_ppm_errors: Vec<f64> = top7
         .iter()
-        .filter(|&&(_, _, pred, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _)| ((obs - pred) / pred * 1e6).abs())
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| ((obs - pred) / pred * 1e6).abs())
         .collect();
     let rel_ppm_errors: Vec<f64> = top7
         .iter()
-        .filter(|&&(_, _, pred, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _)| (obs - pred) / pred * 1e6)
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| (obs - pred) / pred * 1e6)
         .collect();
 
     fn mean_and_pop_stdev(values: &[f64]) -> (f32, f32) {
@@ -2127,8 +2134,8 @@ pub(crate) fn compute_psm_features_with_edge(
     let (ppm_centre, ppm_sigma) = scorer.ppm_gaussian();
     let ppm_gaussian_score: f32 = matched_ions
         .iter()
-        .filter(|&&(_, _, pred, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _)| {
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| {
             let z = ((obs - pred) / pred * 1e6 - ppm_centre) / ppm_sigma;
             (-0.5 * z * z).exp()
         })
@@ -2136,8 +2143,8 @@ pub(crate) fn compute_psm_features_with_edge(
 
     let chance_match_surprise: f32 = matched_ions
         .iter()
-        .filter(|&&(_, _, pred, _)| pred > 0.0)
-        .map(|&(_, obs, pred, _)| {
+        .filter(|&&(_, _, pred, _, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _, _)| {
             let tol_da = if feature_tol_is_ppm {
                 pred * feature_tol / 1e6
             } else {
@@ -2176,27 +2183,20 @@ pub(crate) fn compute_psm_features_with_edge(
     };
 
     let charge1_predicted = predict_by_ions(peptide, 1..=1);
-    let mut theo_mz_list: SmallVec<[f64; 128]> = SmallVec::new();
-    for p in &charge1_predicted {
-        theo_mz_list.push(p.mz);
-        theo_mz_list.push(p.mz - H2O_LOSS_DA);
-        theo_mz_list.push(p.mz - NH3_LOSS_DA);
-    }
+    let theoretical_ions = theoretical_fragment_ions(&charge1_predicted);
     let unique_match_fraction = if num_matched == 0 {
         0.0
     } else {
         let evidence_sum: f64 = matched_ions
             .iter()
-            .map(|&(_, obs, pred, _)| {
-                let tol_da = if feature_tol_is_ppm {
-                    obs * feature_tol / 1e6
-                } else {
-                    feature_tol
-                };
-                let ambiguity = theo_mz_list
-                    .iter()
-                    .filter(|&&theo| (theo - obs).abs() <= tol_da && (theo - pred).abs() > 1e-9)
-                    .count();
+            .map(|&(_, obs, _, _, ion)| {
+                let ambiguity = fragment_ambiguity(
+                    &theoretical_ions,
+                    obs,
+                    feature_tol,
+                    feature_tol_is_ppm,
+                    ion,
+                );
                 1.0 / (1.0 + ambiguity as f64)
             })
             .sum();
@@ -2205,7 +2205,7 @@ pub(crate) fn compute_psm_features_with_edge(
     let mass_competition_evidence_val = mass_competition_evidence(
         scored_spec,
         &matched_ions,
-        &theo_mz_list,
+        &theoretical_ions,
         feature_tol,
         feature_tol_is_ppm,
     );

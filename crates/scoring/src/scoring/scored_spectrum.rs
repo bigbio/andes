@@ -1478,7 +1478,6 @@ fn deconvolute_spectrum(
     tol: f64,
 ) -> (Vec<(f64, f32)>, Vec<u32>) {
     const ISOTOPE: f64 = model::mass::ISOTOPE;
-    const C14_MINUS_C13: f64 = 0.999_886_17;
 
     let n = peaks.len();
     if n == 0 {
@@ -1509,7 +1508,9 @@ fn deconvolute_spectrum(
                     p_mz = p_new_mz;
                     is_deconvoluted = true;
 
-                    let p3_diff_expected = C14_MINUS_C13 / ion_charge;
+                    let neutral_mass = ion_charge * (p2_mz - PROTON);
+                    let p3_diff_expected =
+                        model::isotope::averagine_m1_m2_spacing(neutral_mass) / ion_charge;
                     for k in (j + 1)..n {
                         let (p3_mz, p3_int) = peaks[k];
                         let diff2 = p3_mz - p2_mz - p3_diff_expected;

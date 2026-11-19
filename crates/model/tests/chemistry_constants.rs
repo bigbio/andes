@@ -88,6 +88,10 @@ fn c_n_s_match_iupac_literals() {
     assert_eq!(C13.to_bits(), 13.00335483507_f64.to_bits());
     assert_eq!(N15.to_bits(), 15.00010889888_f64.to_bits());
     assert_eq!(H2.to_bits(), 2.01410177812_f64.to_bits());
+    assert_eq!(model::mass::O17.to_bits(), 16.9991317565_f64.to_bits());
+    assert_eq!(model::mass::O18.to_bits(), 17.99915961286_f64.to_bits());
+    assert_eq!(model::mass::S33.to_bits(), 32.9714589098_f64.to_bits());
+    assert_eq!(model::mass::S34.to_bits(), 33.967867004_f64.to_bits());
 }
 
 #[test]

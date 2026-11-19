@@ -22,8 +22,20 @@ pub const N: f64 = 14.00307400443;
 /// Monoisotopic mass of ¹⁵N, in Da: 15.00010889888(64), NIST (AME2020).
 pub const N15: f64 = 15.00010889888;
 
+/// Mass of ¹⁷O, in Da: 16.99913175650(69), NIST (AME2020).
+pub const O17: f64 = 16.9991317565;
+
+/// Mass of ¹⁸O, in Da: 17.99915961286(76), NIST (AME2020).
+pub const O18: f64 = 17.99915961286;
+
 /// Monoisotopic mass of ³²S, in Da: 31.9720711744(14), NIST (AME2020).
 pub const S: f64 = 31.9720711744;
+
+/// Mass of ³³S, in Da: 32.9714589098(15), NIST (AME2020).
+pub const S33: f64 = 32.9714589098;
+
+/// Mass of ³⁴S, in Da: 33.967867004(47), NIST (AME2020).
+pub const S34: f64 = 33.967867004;
 
 /// Monoisotopic mass of ³¹P, in Da: 30.97376199842(70), NIST (AME2020).
 pub const P: f64 = 30.97376199842;

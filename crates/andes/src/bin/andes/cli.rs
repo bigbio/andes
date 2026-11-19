@@ -1419,6 +1419,23 @@ pub(crate) enum CohortCommand {
     /// Searches nothing. Prints the groups and every problem found, and writes the plan
     /// only when there is no error.
     Plan(CohortPlanArgs),
+    /// Crosslink FDR over the CSM tables of several runs, as one search would compute it
+    ///
+    /// Reads each run's <base>.xl.tsv, groups all CSMs into residue pairs and protein pairs,
+    /// and gives every level its q-values once over all runs. Writes <output>.xl.tsv,
+    /// <output>.xl.residue_pairs.tsv and <output>.xl.ppi.tsv.
+    #[command(name = "xl-fdr")]
+    XlFdr(CohortXlFdrArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortXlFdrArgs {
+    /// The runs' CSM tables (<base>.xl.tsv from `andes --xl`)
+    #[arg(value_name = "CSM_TABLE", required = true)]
+    pub(crate) tables: Vec<PathBuf>,
+    /// Output base name: <output>.xl.tsv, <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv
+    #[arg(long, short, value_name = "BASE")]
+    pub(crate) output: PathBuf,
 }
 
 #[derive(clap::Args, Debug)]

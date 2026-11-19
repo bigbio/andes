@@ -605,8 +605,7 @@ pub(crate) fn run_xl(
         &sibling(report_base, ".xl.residue_pairs.tsv"),
         &sibling(report_base, ".xl.ppi.tsv"),
         &levels,
-        &results,
-        spectra_for_xl,
+        &|row| spectra_for_xl[results[row].spec_idx].title.clone(),
     )?;
     let dbl_path = sibling(report_base, ".xl.doublets.tsv");
     write_doublets(&dbl_path, spectra_for_xl, &results, &runs)?;

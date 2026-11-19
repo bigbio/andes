@@ -356,6 +356,17 @@ pub(crate) fn roll_up(
         ppi_of_csm.push(ppi_key);
         csm_rows.push(i);
     }
+    levels_of(csm_items, ppi_of_csm, csm_rows)
+}
+
+/// The CSM, residue-pair and protein-pair levels with their q-values, from scored CSMs:
+/// `csm_items` keyed by residue pair, `ppi_of_csm` the protein-pair key of each, and
+/// `csm_rows` each CSM's row in the caller's own table.
+pub(crate) fn levels_of(
+    csm_items: Vec<Item>,
+    ppi_of_csm: Vec<String>,
+    csm_rows: Vec<usize>,
+) -> Levels {
     let csm_groups: Vec<Group> = csm_items
         .iter()
         .enumerate()
@@ -455,12 +466,13 @@ fn fmt_q(q: Option<f64>) -> String {
     q.map_or("NA".to_string(), |v| format!("{v:.5}"))
 }
 
+/// Write the residue-pair and protein-pair tables; `title_of` names the spectrum of the CSM
+/// at a `csm_rows` value.
 pub(crate) fn write_levels(
     rp_path: &PathBuf,
     ppi_path: &PathBuf,
     l: &Levels,
-    results: &[XlSpectrumResult],
-    spectra: &[Spectrum],
+    title_of: &dyn Fn(usize) -> String,
 ) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(rp_path)?);
     writeln!(
@@ -468,7 +480,6 @@ pub(crate) fn write_levels(
         "residue_pair\tclass\tlink\tscore\tq_value\tq_value_min2\tn_csms\tbest_spectrum"
     )?;
     for (g, (q, q2)) in l.rp.iter().zip(l.rp_q.iter().zip(&l.rp_q2)) {
-        let r = &results[l.csm_rows[g.best]];
         writeln!(
             w,
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
@@ -479,7 +490,7 @@ pub(crate) fn write_levels(
             fmt_q(*q),
             fmt_q(*q2),
             g.n_csms,
-            spectra[r.spec_idx].title
+            title_of(l.csm_rows[g.best])
         )?;
     }
     w.flush()?;
@@ -489,7 +500,6 @@ pub(crate) fn write_levels(
         "protein_pair\tclass\tlink\tscore\tq_value\tn_residue_pairs\tn_csms\tbest_spectrum"
     )?;
     for (g, q) in l.ppi.iter().zip(&l.ppi_q) {
-        let r = &results[l.csm_rows[l.rp[g.best].best]];
         writeln!(
             w,
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
@@ -500,7 +510,7 @@ pub(crate) fn write_levels(
             fmt_q(*q),
             g.n_members,
             g.n_csms,
-            spectra[r.spec_idx].title
+            title_of(l.csm_rows[l.rp[g.best].best])
         )?;
     }
     w.flush()

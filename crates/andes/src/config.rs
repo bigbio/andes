@@ -360,12 +360,9 @@ fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, Strin
     Ok(d)
 }
 
-pub fn xl_linker(
-    key: &str,
-    v: &serde_yaml::Value,
-) -> Result<andes_xl::crosslinker::Crosslinker, String> {
-    use andes_xl::spec::XlDecl;
+pub fn xl_linker(key: &str, v: &serde_yaml::Value) -> Result<xl::crosslinker::Crosslinker, String> {
     use serde_yaml::Value;
+    use xl::spec::XlDecl;
     let at = |e: String| format!("{key}: {e}");
     let db = model::unimod::bundled();
     match v {
@@ -375,7 +372,7 @@ pub fn xl_linker(
         Value::Mapping(map) if map.contains_key("intact") => {
             let r: model::xl_reagents::Reagent =
                 serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
-            andes_xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
+            xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
         }
         Value::Mapping(map) => {
             let mut name = None;

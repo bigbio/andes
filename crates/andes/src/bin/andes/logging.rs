@@ -22,7 +22,7 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 /// warnings and errors reach the andes log.
 const OWN_CRATES: &[&str] = &[
     "andes",
-    "andes_xl",
+    "xl",
     "glyco",
     "input",
     "model",

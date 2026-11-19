@@ -61,7 +61,6 @@ dependencies = [
 name = "andes"
 version = "0.4.0"
 dependencies = [
- "andes-xl",
  "arrow",
  "clap",
  "flate2",
@@ -83,15 +82,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
-]
-
-[[package]]
-name = "andes-xl"
-version = "0.4.0"
-dependencies = [
- "model",
- "serde_yaml",
- "thiserror 2.0.18",
+ "xl",
 ]
 
 [[package]]
@@ -2662,7 +2653,6 @@ dependencies = [
 name = "search"
 version = "0.4.0"
 dependencies = [
- "andes-xl",
  "glyco",
  "input",
  "log",
@@ -2677,6 +2667,7 @@ dependencies = [
  "sha2",
  "smallvec 1.15.1",
  "tempfile",
+ "xl",
 ]
 
 [[package]]
@@ -3801,6 +3792,15 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xl"
+version = "0.4.0"
+dependencies = [
+ "model",
+ "serde_yaml",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

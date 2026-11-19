@@ -134,7 +134,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     let mut linkers: Vec<String> = Vec::new();
     for v in rows.iter().filter_map(|r| r.xl.clone()) {
         if !linkers.contains(&v) {
-            andes_xl::spec::from_sdrf(&v, model::unimod::bundled())
+            xl::spec::from_sdrf(&v, model::unimod::bundled())
                 .map_err(|e| format!("`{XL}`: {e}"))?;
             linkers.push(v);
         }
@@ -627,11 +627,8 @@ impl ConfigKeys {
 
 /// Two crosslinker definitions that link the same way: equal once each end's residues are
 /// taken as a set (`TA=K,S` and `TA=S,K`).
-fn same_linker(
-    a: &andes_xl::crosslinker::Crosslinker,
-    b: &andes_xl::crosslinker::Crosslinker,
-) -> bool {
-    let canonical = |x: &andes_xl::crosslinker::Crosslinker| {
+fn same_linker(a: &xl::crosslinker::Crosslinker, b: &xl::crosslinker::Crosslinker) -> bool {
+    let canonical = |x: &xl::crosslinker::Crosslinker| {
         let mut x = x.clone();
         for e in x.ends.iter_mut() {
             e.residues.sort_unstable();
@@ -747,9 +744,9 @@ pub fn apply(
         if cli("xl") || cfg.xl {
             kept.push("xl");
         } else {
-            let mut set: Vec<andes_xl::crosslinker::Crosslinker> = Vec::new();
+            let mut set: Vec<xl::crosslinker::Crosslinker> = Vec::new();
             for v in &s.xl {
-                let x = andes_xl::spec::from_sdrf(v, model::unimod::bundled())
+                let x = xl::spec::from_sdrf(v, model::unimod::bundled())
                     .map_err(|e| format!("--sdrf `{XL}`: {e}"))?;
                 match set.iter().find(|y| y.name == x.name) {
                     // The same definition written differently (fields or sites in another

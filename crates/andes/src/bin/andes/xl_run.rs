@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 use crate::xl_fdr::XlRun;
-use andes_xl::crosslinker::Crosslinker;
-use andes_xl::crosslinker::LinkForm;
-use andes_xl::decoy::PairClass;
 use model::Spectrum;
 use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
 use search::PreparedSearch;
+use xl::crosslinker::Crosslinker;
+use xl::crosslinker::LinkForm;
+use xl::decoy::PairClass;
 
 fn sibling(report_base: &Path, suffix: &str) -> PathBuf {
     let mut s = if report_base
@@ -182,7 +182,7 @@ fn write_csms(
             r.charge.to_string(),
             format!("{:.5}", r.precursor_mass),
             c.class.name().to_string(),
-            andes_xl::rollup::LinkClass::of(c.intra, c.homotypic)
+            xl::rollup::LinkClass::of(c.intra, c.homotypic)
                 .name()
                 .to_string(),
             s.map_or("NA".to_string(), |v| format!("{v:.4}")),
@@ -689,9 +689,9 @@ mod tests {
     }
 
     fn result(linker: usize, csm: Option<(&str, f32)>, pairs: &[(&str, f32)]) -> XlSpectrumResult {
-        use andes_xl::crosslinker::LinkForm;
-        use andes_xl::sites::LinkSite;
         use search::xl_search::{Csm, PeptideHit};
+        use xl::crosslinker::LinkForm;
+        use xl::sites::LinkSite;
         let key = |p: &str| [p.as_bytes().to_vec(), b"PEPTIDEK".to_vec()];
         let hit = PeptideHit {
             pep: 0,
@@ -721,7 +721,7 @@ mod tests {
                 second_pair_score: search::xl_search::runner_up(&pairs, &key(p)),
                 kind: search::xl_search::PairKind::Full,
                 iso: 0,
-                class: andes_xl::decoy::PairClass::TT,
+                class: xl::decoy::PairClass::TT,
                 intra: true,
                 homotypic: false,
                 precursor_err_ppm: 0.0,

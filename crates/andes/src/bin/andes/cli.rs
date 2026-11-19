@@ -641,7 +641,8 @@ pub(crate) struct SearchArgs {
     /// overlap by half. Each slice is searched as its own spectrum and traced on its own across
     /// cycles. A slice spectrum mixes fewer co-isolated peptides than the whole window. 1 keeps
     /// one spectrum per window. Ignored for mzML, .raw and ddaPASEF.
-    #[arg(long, value_name = "N", default_value = "1", help_heading = H_MODES)]
+    #[arg(long, value_name = "N", default_value = "1", hide_short_help = true,
+          help_heading = H_MODES)]
     pub(crate) dia_mobility_slices: usize,
 
     /// --dia MS1 gate: ppm tolerance for a candidate's monoisotopic peak in the survey scans
@@ -650,7 +651,8 @@ pub(crate) struct SearchArgs {
     /// tolerance in the survey scan nearest the MS2 scan or one either side. timsTOF MS1 is less
     /// accurate than Orbitrap MS1, so diaPASEF runs need a wider gate (8 on the ProteoBench
     /// low-input runs, after andes recentres their MS1 m/z).
-    #[arg(long, value_name = "PPM", default_value = "5", help_heading = H_MODES)]
+    #[arg(long, value_name = "PPM", default_value = "5", hide_short_help = true,
+          help_heading = H_MODES)]
     pub(crate) dia_ms1_tol_ppm: f64,
 
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins

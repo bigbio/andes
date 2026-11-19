@@ -497,14 +497,61 @@ fn log_floor_hits(library: &Library, ap: &AlignParams, stems: &[String]) {
     }
 }
 
-pub(crate) fn build_and_write_library(
-    dir: &Path,
-    stems: &[String],
-    scores: ScoreLoader<'_>,
-    max_q: f64,
-    donor_q: f64,
-    donor_pep: Option<f64>,
-) -> Result<StoredLibrary, String> {
+fn log_alignment(library: &Library, ap: &AlignParams, stems: &[String]) {
+    let a = &library.alignment;
+    let no_consensus = library
+        .entries
+        .iter()
+        .filter(|e| !e.consensus_rt.is_finite())
+        .count();
+    if no_consensus > 0 {
+        log::info!(
+            target: "library",
+            "{no_consensus} entries have no consensus RT (no observation in an aligned run) and are not transferred"
+        );
+    }
+    if a.n_components() > 1 {
+        let mut groups: Vec<Vec<&str>> = vec![Vec::new(); a.n_components()];
+        for (r, stem) in stems.iter().enumerate() {
+            if let Some(c) = a.component(r as u16) {
+                groups[c as usize].push(stem);
+            }
+        }
+        log::info!(
+            target: "alignment",
+            "the aligned runs form {} components (runs joined when they share at least {} precursors); transfers stay inside a component: {}",
+            groups.len(),
+            ap.min_shared,
+            groups
+                .iter()
+                .enumerate()
+                .map(|(c, g)| format!("component {c}: {}", g.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    for (r, stem) in stems.iter().enumerate() {
+        if a.maps[r].is_none() {
+            let isolated = a.anchors[r] >= ap.min_anchors && a.coverage[r] >= ap.min_coverage;
+            log::warn!(
+                target: "mbr",
+                "run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range{}): it neither gives nor receives transfers and keeps its identified quantities",
+                a.anchors[r],
+                a.coverage[r],
+                if isolated {
+                    format!(
+                        "; shares fewer than {} precursors with every other aligned run",
+                        ap.min_shared
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+}
+
+fn check_library_gates(max_q: f64, donor_q: f64, donor_pep: Option<f64>) -> Result<(), String> {
     if !(max_q > 0.0 && max_q <= 1.0) {
         return Err(format!("library entry gate {max_q} is outside (0, 1]"));
     }
@@ -516,6 +563,18 @@ pub(crate) fn build_and_write_library(
     if let Some(c) = donor_pep.filter(|c| !(0.0..=1.0).contains(c)) {
         return Err(format!("donor PSM PEP cap {c} is outside [0, 1]"));
     }
+    Ok(())
+}
+
+pub(crate) fn build_and_write_library(
+    dir: &Path,
+    stems: &[String],
+    scores: ScoreLoader<'_>,
+    max_q: f64,
+    donor_q: f64,
+    donor_pep: Option<f64>,
+) -> Result<StoredLibrary, String> {
+    check_library_gates(max_q, donor_q, donor_pep)?;
     let paths: Vec<PathBuf> = stems
         .iter()
         .map(|s| artifact(dir, s, TABLE_SUFFIX))
@@ -860,57 +919,7 @@ pub(crate) fn build_and_write_library(
         sc.too_few,
         quant::ms2::MIN_LIBRARY_FRAGMENTS
     );
-    let a = &library.alignment;
-    let no_consensus = library
-        .entries
-        .iter()
-        .filter(|e| !e.consensus_rt.is_finite())
-        .count();
-    if no_consensus > 0 {
-        log::info!(
-            target: "library",
-            "{no_consensus} entries have no consensus RT (no observation in an aligned run) and are not transferred"
-        );
-    }
-    if a.n_components() > 1 {
-        let mut groups: Vec<Vec<&str>> = vec![Vec::new(); a.n_components()];
-        for (r, stem) in stems.iter().enumerate() {
-            if let Some(c) = a.component(r as u16) {
-                groups[c as usize].push(stem);
-            }
-        }
-        log::info!(
-            target: "alignment",
-            "the aligned runs form {} components (runs joined when they share at least {} precursors); transfers stay inside a component: {}",
-            groups.len(),
-            ap.min_shared,
-            groups
-                .iter()
-                .enumerate()
-                .map(|(c, g)| format!("component {c}: {}", g.join(", ")))
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-    for (r, stem) in stems.iter().enumerate() {
-        if a.maps[r].is_none() {
-            let isolated = a.anchors[r] >= ap.min_anchors && a.coverage[r] >= ap.min_coverage;
-            log::warn!(
-                target: "mbr",
-                "run {stem} is unaligned ({} anchors, {:.2} of the consensus RT range{}): it neither gives nor receives transfers and keeps its identified quantities",
-                a.anchors[r],
-                a.coverage[r],
-                if isolated {
-                    format!(
-                        "; shares fewer than {} precursors with every other aligned run",
-                        ap.min_shared
-                    )
-                } else {
-                    String::new()
-                }
-            );
-        }
-    }
+    log_alignment(&library, &ap, stems);
     let stored = StoredLibrary {
         runs: stems.to_vec(),
         max_q,

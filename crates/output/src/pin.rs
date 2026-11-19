@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{self, BufWriter, Write};
 
 use crate::percolator_enz::enzyme_features;
@@ -28,13 +29,13 @@ pub fn spec_id_run(spec_id: &str) -> &str {
     spec_id.split_once('/').map_or("", |(run, _)| run)
 }
 
-pub fn emitted_row_evidence(
+/// The emitted rows of a spectrum in output order, each with its SpecId.
+pub fn emitted_spec_ids<'a>(
     spec: &Spectrum,
-    queue: &TopNQueue,
+    psms_sorted: &'a [PsmMatch],
     candidates: &[Candidate],
-) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
-    let psms = queue.clone().into_rank_sorted_vec();
-    let ranked = emitted_rows(spec, &psms, candidates);
+) -> Vec<(String, Cow<'a, PsmMatch>)> {
+    let ranked = emitted_rows(spec, psms_sorted, candidates);
     let multi_row = ranked.len() > 1;
     let scan = spec.scan.unwrap_or(0);
     let title = if spec.title.is_empty() {
@@ -45,13 +46,19 @@ pub fn emitted_row_evidence(
     ranked
         .into_iter()
         .enumerate()
-        .map(|(row_idx, (rank, psm))| {
-            (
-                format_spec_id(&title, scan, rank, row_idx, multi_row),
-                psm.isotope_offset,
-                psm.site_evidence.clone(),
-            )
-        })
+        .map(|(row_idx, (rank, psm))| (format_spec_id(&title, scan, rank, row_idx, multi_row), psm))
+        .collect()
+}
+
+pub fn emitted_row_evidence(
+    spec: &Spectrum,
+    queue: &TopNQueue,
+    candidates: &[Candidate],
+) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
+    let psms = queue.clone().into_rank_sorted_vec();
+    emitted_spec_ids(spec, &psms, candidates)
+        .into_iter()
+        .map(|(id, psm)| (id, psm.isotope_offset, psm.site_evidence.clone()))
         .collect()
 }
 
@@ -61,24 +68,9 @@ pub fn emitted_row_candidates(
     candidates: &[Candidate],
 ) -> Vec<(String, u32, u8)> {
     let psms = queue.clone().into_rank_sorted_vec();
-    let ranked = emitted_rows(spec, &psms, candidates);
-    let multi_row = ranked.len() > 1;
-    let scan = spec.scan.unwrap_or(0);
-    let title = if spec.title.is_empty() {
-        format!("scan={scan}")
-    } else {
-        spec.title.clone()
-    };
-    ranked
+    emitted_spec_ids(spec, &psms, candidates)
         .into_iter()
-        .enumerate()
-        .map(|(row_idx, (rank, psm))| {
-            (
-                format_spec_id(&title, scan, rank, row_idx, multi_row),
-                psm.primary_candidate_idx(),
-                psm.charge_used,
-            )
-        })
+        .map(|(id, psm)| (id, psm.primary_candidate_idx(), psm.charge_used))
         .collect()
 }
 
@@ -321,97 +313,102 @@ fn pin_charge_columns(params: &SearchParams) -> (u8, u8) {
 
 const PIN_FORMAT_BATCH_SPECTRA: usize = 8192;
 
+/// The PIN columns from `SpecId` to `absdm`, shared by the standard and the glyco PIN.
+pub(crate) const PIN_LEAD_COLUMNS: [&str; 12] = [
+    "SpecId",
+    "Label",
+    "ScanNr",
+    "ExpMass",
+    "CalcMass",
+    "FileName",
+    "mass",
+    "RankScore",
+    "isotope_error",
+    "peplen",
+    "dm",
+    "absdm",
+];
+
+/// The PIN feature columns from `enzN` to `DeltaRTNorm`, shared by the standard and the glyco PIN.
+pub(crate) const PIN_FEATURE_COLUMNS: [&str; 52] = [
+    "enzN",
+    "enzC",
+    "enzInt",
+    "NumMatchedMainIons",
+    "longest_b",
+    "longest_y",
+    "longest_y_pct",
+    "ExplainedIonCurrentRatio",
+    "NTermIonCurrentRatio",
+    "CTermIonCurrentRatio",
+    "MS2IonCurrent",
+    "IsolationWindowEfficiency",
+    "MeanErrorTop7",
+    "StdevErrorTop7",
+    "MeanRelErrorTop7",
+    "StdevRelErrorTop7",
+    "matchedIonRatio",
+    "EdgeScore",
+    "PrecursorIsotopeKL",
+    "PrecursorSNR",
+    "DeltaRankScore",
+    "TailorScore",
+    "PpmGaussianScore",
+    "NeutralLossIonCount",
+    "LongestComplementaryLadder",
+    "ComplementaryIonBalance",
+    "MeanMatchedIntensityRank",
+    "DoublyChargedMatchedIonCount",
+    "UniqueMatchFraction",
+    "ChanceMatchSurprise",
+    "IntensitySignal",
+    "FragPredExplained",
+    "FragPredChanceLLR",
+    "FragTopKObserved",
+    "RichIonLLR",
+    "IsRefinement",
+    "NumMods",
+    "RefinementModClass",
+    "ModSiteShiftedMatched",
+    "ModSiteShiftedFrac",
+    "ModSiteIntensFrac",
+    "ModSiteLocalized",
+    "ModSiteDetCount",
+    "MassCompetitionEvidence",
+    "CandidateRankEntropy",
+    "ListwiseScoreGap",
+    "RawScore",
+    "RawScoreCal",
+    "RankScoreFloat",
+    "DeltaRT",
+    "AbsDeltaRT",
+    "DeltaRTNorm",
+];
+
 fn write_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
     max_charge: u8,
     open_search: bool,
 ) -> io::Result<()> {
-    let mut cols: Vec<String> = vec![
-        "SpecId".to_string(),
-        "Label".to_string(),
-        "ScanNr".to_string(),
-        "ExpMass".to_string(),
-        "CalcMass".to_string(),
-        "FileName".to_string(),
-        "mass".to_string(),
-        "RankScore".to_string(),
-    ];
-    cols.extend_from_slice(&[
-        "isotope_error".to_string(),
-        "peplen".to_string(),
-        "dm".to_string(),
-        "absdm".to_string(),
-    ]);
-
+    let mut cols: Vec<String> = PIN_LEAD_COLUMNS.iter().map(|c| c.to_string()).collect();
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
     }
-
-    cols.extend_from_slice(&[
-        "enzN".to_string(),
-        "enzC".to_string(),
-        "enzInt".to_string(),
-        "NumMatchedMainIons".to_string(),
-        "longest_b".to_string(),
-        "longest_y".to_string(),
-        "longest_y_pct".to_string(),
-        "ExplainedIonCurrentRatio".to_string(),
-        "NTermIonCurrentRatio".to_string(),
-        "CTermIonCurrentRatio".to_string(),
-        "MS2IonCurrent".to_string(),
-        "IsolationWindowEfficiency".to_string(),
-        "MeanErrorTop7".to_string(),
-        "StdevErrorTop7".to_string(),
-        "MeanRelErrorTop7".to_string(),
-        "StdevRelErrorTop7".to_string(),
-    ]);
-    cols.extend_from_slice(&[
-        "matchedIonRatio".to_string(),
-        "EdgeScore".to_string(),
-        "PrecursorIsotopeKL".to_string(),
-        "PrecursorSNR".to_string(),
-        "DeltaRankScore".to_string(),
-        "TailorScore".to_string(),
-        "PpmGaussianScore".to_string(),
-        "NeutralLossIonCount".to_string(),
-        "LongestComplementaryLadder".to_string(),
-        "ComplementaryIonBalance".to_string(),
-        "MeanMatchedIntensityRank".to_string(),
-        "DoublyChargedMatchedIonCount".to_string(),
-        "UniqueMatchFraction".to_string(),
-        "ChanceMatchSurprise".to_string(),
-        "IntensitySignal".to_string(),
-        "FragPredExplained".to_string(),
-        "FragPredChanceLLR".to_string(),
-        "FragTopKObserved".to_string(),
-        "RichIonLLR".to_string(),
-        "IsRefinement".to_string(),
-        "NumMods".to_string(),
-        "RefinementModClass".to_string(),
-        "ModSiteShiftedMatched".to_string(),
-        "ModSiteShiftedFrac".to_string(),
-        "ModSiteIntensFrac".to_string(),
-        "ModSiteLocalized".to_string(),
-        "ModSiteDetCount".to_string(),
-        "MassCompetitionEvidence".to_string(),
-        "CandidateRankEntropy".to_string(),
-        "ListwiseScoreGap".to_string(),
-        "RawScore".to_string(),
-        "RawScoreCal".to_string(),
-        "RankScoreFloat".to_string(),
-        "DeltaRT".to_string(),
-        "AbsDeltaRT".to_string(),
-        "DeltaRTNorm".to_string(),
-        "IsVariant".to_string(),
-        "IsIsoform".to_string(),
-        "IsChain".to_string(),
-        "RefCompetitor".to_string(),
-        "DeltaRefScore".to_string(),
-        "IsotopeMimic".to_string(),
-        "IsotopeErrorAbs".to_string(),
-        "IsotopeErrorNeg".to_string(),
-    ]);
+    cols.extend(PIN_FEATURE_COLUMNS.iter().map(|c| c.to_string()));
+    cols.extend(
+        [
+            "IsVariant",
+            "IsIsoform",
+            "IsChain",
+            "RefCompetitor",
+            "DeltaRefScore",
+            "IsotopeMimic",
+            "IsotopeErrorAbs",
+            "IsotopeErrorNeg",
+        ]
+        .map(String::from),
+    );
 
     if open_search {
         cols.extend_from_slice(&[

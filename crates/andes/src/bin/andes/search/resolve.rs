@@ -794,7 +794,7 @@ pub(super) fn resolve_search_params(
                     .into(),
             );
         }
-        if is_d {
+        if spectrum_paths.iter().any(|p| input_format_flags(p).2) {
             log::warn!(
                 "--dia on Bruker .d (diaPASEF) is not FDR-calibrated yet. \
                  On an entrapment test, q <= 0.01 measured a 5-7% true FDP. \

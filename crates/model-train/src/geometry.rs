@@ -379,7 +379,7 @@ mod tests {
             max_fragment_charge: 5,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
-        let c_off = ((model::mass::PROTON + 17.026549) as f32).to_bits();
+        let c_off = ((model::mass::PROTON + model::mass::NH3) as f32).to_bits();
         let z_off = ((model::mass::H2O + model::mass::PROTON - 16.018724) as f32).to_bits();
         let mut saw_multicharge = false;
         for (part, frags) in &p.frag_off_table {

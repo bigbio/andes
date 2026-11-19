@@ -60,6 +60,8 @@ pub struct PsmFeatures {
     pub mod_site_det_count: f32,
 
     pub mass_competition_evidence: f32,
+    pub match_posterior_mean: f32,
+    pub match_log_odds: f32,
     pub candidate_rank_entropy: f32,
     pub listwise_score_gap: f32,
 

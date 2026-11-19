@@ -33,10 +33,10 @@ use scoring_crate::scoring::fragment_ions::{
 };
 use scoring_crate::scoring::{
     edge_scoring_enabled, frag_llr_battery, fragment_ambiguity, fuse_strong_score,
-    intensity_signal, mass_competition_evidence, predict_frag_intensities, psm_edge_score,
-    rich_ion_llr, score_psm, score_psm_float, scored_for_charge, strong_score_calibrated,
-    theoretical_fragment_ions, FragmentIon, MatchedIon, OnlineStats, RankScorer, ScoredSpectrum,
-    StrongScoreInputs, DENSITY_HW,
+    intensity_signal, mass_competition_evidence, match_posteriors, predict_frag_intensities,
+    psm_edge_score, rich_ion_llr, score_psm, score_psm_float, scored_for_charge,
+    strong_score_calibrated, theoretical_fragment_ions, FragmentIon, IonPriors, MatchedIon,
+    OnlineStats, RankScorer, ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
@@ -2202,6 +2202,14 @@ pub(crate) fn compute_psm_features_with_edge(
             .sum();
         (evidence_sum / num_matched as f64) as f32
     };
+    let posteriors = match_posteriors(
+        scored_spec,
+        &matched_ions,
+        &theoretical_ions,
+        &IonPriors::new(scorer.param(), charge, parent_mass),
+        feature_tol,
+        feature_tol_is_ppm,
+    );
     let mass_competition_evidence_val = mass_competition_evidence(
         scored_spec,
         &matched_ions,
@@ -2293,6 +2301,8 @@ pub(crate) fn compute_psm_features_with_edge(
         mod_site_localized: mod_site[FEAT_SITE_LOCALIZED],
         mod_site_det_count: mod_site[FEAT_SITE_DET_COUNT],
         mass_competition_evidence: mass_competition_evidence_val,
+        match_posterior_mean: posteriors.mean,
+        match_log_odds: posteriors.log_odds_sum,
         candidate_rank_entropy: 0.0,
         listwise_score_gap: 0.0,
         strong_score: 0.0,

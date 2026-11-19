@@ -184,6 +184,8 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
             f.mass_competition_evidence as f64,
             Double,
         ),
+        ("MatchPosteriorMean", f.match_posterior_mean as f64, Double),
+        ("MatchLogOdds", f.match_log_odds as f64, Double),
         (
             "CandidateRankEntropy",
             f.candidate_rank_entropy as f64,
@@ -330,7 +332,7 @@ pub(crate) const PIN_LEAD_COLUMNS: [&str; 12] = [
 ];
 
 /// The PIN feature columns from `enzN` to `DeltaRTNorm`, shared by the standard and the glyco PIN.
-pub(crate) const PIN_FEATURE_COLUMNS: [&str; 52] = [
+pub(crate) const PIN_FEATURE_COLUMNS: [&str; 54] = [
     "enzN",
     "enzC",
     "enzInt",
@@ -375,6 +377,8 @@ pub(crate) const PIN_FEATURE_COLUMNS: [&str; 52] = [
     "ModSiteLocalized",
     "ModSiteDetCount",
     "MassCompetitionEvidence",
+    "MatchPosteriorMean",
+    "MatchLogOdds",
     "CandidateRankEntropy",
     "ListwiseScoreGap",
     "RawScore",
@@ -954,6 +958,8 @@ mod tests {
             "ModSiteLocalized",
             "ModSiteDetCount",
             "MassCompetitionEvidence",
+            "MatchPosteriorMean",
+            "MatchLogOdds",
             "CandidateRankEntropy",
             "ListwiseScoreGap",
             "RawScore",

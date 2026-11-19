@@ -1,5 +1,6 @@
 pub mod fragment_error;
 pub mod fragment_ions;
+pub mod match_posterior;
 pub mod psm_score;
 pub mod rank_scorer;
 pub mod scored_spectrum;
@@ -7,6 +8,7 @@ pub mod strong_score;
 
 pub use fragment_error::FragmentErrorModel;
 pub use fragment_ions::{predict_by_ions, predict_cz_ions, PredictedIon};
+pub use match_posterior::{match_posteriors, IonPriors, MatchPosteriors};
 pub use psm_score::{
     cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features, edge_scoring_enabled,
     hyperscore_psm, hyperscore_psm_with_matches, init_cz_settings, psm_edge_existence_facts,

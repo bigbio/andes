@@ -40,7 +40,6 @@ use scoring_crate::scoring::{
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
-const DIA_MS1_GATE_PPM: f64 = 5.0;
 const DIA_MS1_GATE_SCANS: usize = 1;
 
 pub type ScorerLoader = Box<dyn Fn(ActivationMethod) -> Option<RankScorer> + Send + Sync>;
@@ -640,7 +639,7 @@ impl<'a> PreparedSearch<'a> {
     }
 
     fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
-        let tol = mz * DIA_MS1_GATE_PPM * 1e-6;
+        let tol = mz * self.params.dia_ms1_tol_ppm * 1e-6;
         self.dia_ms1[scans].iter().any(|s| {
             let i = s.peaks.partition_point(|p| p.0 < mz - tol);
             s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)

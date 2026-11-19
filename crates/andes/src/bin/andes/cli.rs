@@ -644,6 +644,15 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "N", default_value = "1", help_heading = H_MODES)]
     pub(crate) dia_mobility_slices: usize,
 
+    /// --dia MS1 gate: ppm tolerance for a candidate's monoisotopic peak in the survey scans
+    ///
+    /// A DIA candidate is scored only when its monoisotopic m/z has an MS1 peak within this
+    /// tolerance in the survey scan nearest the MS2 scan or one either side. timsTOF MS1 is less
+    /// accurate than Orbitrap MS1, so diaPASEF runs need a wider gate (15 on the ProteoBench
+    /// low-input runs).
+    #[arg(long, value_name = "PPM", default_value = "5", help_heading = H_MODES)]
+    pub(crate) dia_ms1_tol_ppm: f64,
+
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
     ///
     /// The modifications are a built-in tier, or the tier of --refine-config.

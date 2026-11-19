@@ -99,6 +99,9 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
     if cli.dia_mobility_slices == 0 {
         return Err("--dia-mobility-slices must be at least 1".into());
     }
+    if !cli.dia_ms1_tol_ppm.is_finite() || cli.dia_ms1_tol_ppm <= 0.0 {
+        return Err("--dia-ms1-tol-ppm must be a positive number".into());
+    }
     if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
         return Err("--localize ipf needs --rescore or --rescore-native".into());
     }
@@ -805,6 +808,7 @@ pub(super) fn resolve_search_params(
             );
         }
         params.dia = true;
+        params.dia_ms1_tol_ppm = cli.dia_ms1_tol_ppm;
     }
     params.require_nxst_sequon = cli.glyco && cli.glyco_index_sequon_only;
     if params.require_nxst_sequon {

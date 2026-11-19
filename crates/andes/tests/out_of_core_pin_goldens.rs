@@ -386,7 +386,7 @@ fn refine_enumeration_pin_matches_golden() {
     let (header, rows, _) = run_refine("off", &dir.path().join("enum.pin"));
     let refined = refinement_rows(&header, &rows);
     assert!(
-        refined > 50,
+        refined >= 95,
         "fixture produced only {refined} IsRefinement rows — the gate would be vacuous"
     );
     assert_matches_golden_pin(&header, &rows, REFINE_SLICE_PIN);

@@ -12,8 +12,14 @@ andes is a peptide database search engine for shotgun proteomics. Spectra (mzML,
 Thermo `.raw`, Bruker timsTOF `.d`) and a FASTA go in; a Percolator-ready `.pin` comes out. The
 scoring model is picked per file from its metadata. Opt-in modes recover co-isolated peptides
 (`--chimeric`), search data-independent acquisition runs (`--dia`), search secondary
-modifications (`--refine`) and identify intact N-glycopeptides (`--glyco`). To our knowledge it is the first proteomics search engine designed
-and built end-to-end with AI coding agents, under human direction.
+modifications (`--refine`), identify intact N-glycopeptides (`--glyco`) and search cross-linked
+peptides (`--xl`). andes can also run Percolator, infer protein groups and quantify (TMT,
+label-free, labelled pairs) in the same run. To our knowledge it is the first proteomics search
+engine designed and built end-to-end with AI coding agents, under human direction.
+
+Where to go next: [Install](#install) and [Quick start](#quick-start) to run a search,
+[`DOCS.md`](DOCS.md) for every option and output column, [Benchmarks](docs/benchmarks/README.md)
+for measurements, [Development](#development) to build and change the code.
 
 ## Identification benchmarks
 
@@ -154,11 +160,13 @@ flowchart TD
    `--glyco` builds its own sequon-only candidate table from the same out-of-core index.
 3. **Score**: low-res by the generating-function rank score, high-res by the fused strong
    score, plus GBDT fragment-intensity features. High-res searches score only the 100 candidates
-   whose fragment ions best match the spectrum (Astral: +22% PSMs at an equal true FDP; phospho:
-   164 s instead of 99 minutes).
-4. **Optional passes** `--chimeric`, `--dia`, `--refine` and the separate `--glyco` pipeline (below).
-5. **Rescore** with Percolator, run by you or by `--rescore`. andes computes no production FDR.
-6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`) or MS1 features (`--lfq`).
+   whose fragment ions best match the spectrum.
+4. **Optional passes** `--chimeric`, `--dia`, `--refine`, and the separate `--glyco` and `--xl`
+   pipelines (below).
+5. **Rescore** with Percolator, run by you, by `--rescore`, or by the in-process engine
+   `--rescore-native`. andes computes no production FDR of its own.
+6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`), MS1 features (`--lfq`)
+   or labelled pairs (`--label`).
 
 Full parameter reference: [`DOCS.md`](DOCS.md).
 
@@ -204,7 +212,13 @@ andes \
 
 This runs a tryptic search with no configuration: for mzML, `.raw` and `.d` the model is chosen
 from the file metadata, and the precursor tolerance defaults to `20ppm`. Feed `out.pin` to
-Percolator for q-values.
+Percolator for q-values, or add `--rescore` to run it in the same command
+([In-process rescoring](#common-workflows)):
+
+```bash
+docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
+  percolator -X /data/weights.txt /data/out.pin
+```
 
 > **MGF has no instrument metadata.** andes reads the fragment resolution from the peaks of the
 > first 1,000 spectra (13C isotope pairs at 1.00335/z within 10 ppm, compared with chance) and
@@ -219,13 +233,9 @@ The final tolerances and a per-modification PSM tally go to stderr and `<stem>.s
 
 ## Common workflows
 
-**Tryptic DDA + Percolator** (default):
-
-```bash
-andes --spectrum spectra.mzML --database db.fasta --output-pin out.pin
-docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
-  percolator -X /data/weights.txt /data/out.pin
-```
+**Settings from a file.** `--config run.yaml` sets any option from YAML, and `--sdrf design.sdrf.tsv`
+reads the search settings an SDRF-Proteomics file records. A command-line flag overrides the
+config file, which overrides the SDRF ([`DOCS.md` §1b](DOCS.md#1b-configuration-file---config)).
 
 **Modifications** are UNIMOD names with their sites, as in MaxQuant (format:
 [`DOCS.md` §2](DOCS.md#2-modifications)). The defaults are fixed Carbamidomethyl (C) and
@@ -244,41 +254,27 @@ andes \
 Neutral losses, cleavage blocking, diagnostic ions, annotated-only sites and custom masses are
 set per modification in the config file (`--config`).
 
-**UniProt XML database.** `--database uniprot_sprot_human.xml.gz` searches like the UniProt
-FASTA. It also offers opt-in uses of UniProt's annotation. A mod declared
-`restrict_to: annotated` in the config file is placed only where UniProt annotates that
-modification.
-`--uniprot-variants` searches natural sequence variants as their own entries, with the change in
-the accession. `--uniprot-isoforms` adds the described isoforms, and `--uniprot-chains` the
-peptides at the new termini of mature chains (after signal peptide or propeptide removal).
-Annotation is filtered by evidence (`--uniprot-evidence`); see
-[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases). With rescoring, variant calls are checked
-against knockoff variants ([below](#variant-calls-checked-against-knockoffs---knockoffs---proteoform-fdr)).
+**UniProt XML and PEFF databases.** `--database uniprot_sprot_human.xml.gz` searches like the
+UniProt FASTA and can use UniProt's annotation: `--uniprot-variants` searches natural sequence
+variants as their own entries, `--uniprot-isoforms` adds the described isoforms,
+`--uniprot-chains` the peptides at the new termini of mature chains, and a mod declared
+`restrict_to: annotated` in the config file is placed only where UniProt annotates it. Annotation
+is filtered by evidence (`--uniprot-evidence`). `--database x.peff` reads a PSI Extended FASTA
+file, whose variant, modification and processing keys become claims in the same way. With
+rescoring, variant calls are checked against knockoff variants
+([below](#variant-calls-checked-against-knockoffs---knockoffs---proteoform-fdr)). Details:
+[`DOCS.md` §1a](DOCS.md#uniprot-xml-databases) and [PEFF](DOCS.md#peff-databases).
 
 ```bash
 andes --spectrum spectra.mzML --database uniprot_sprot_human.xml.gz \
   --config phospho_annotated.yaml --uniprot-variants --output-pin out.pin
 ```
 
-**PEFF databases.** `--database x.peff` reads a PSI Extended FASTA file. Its variant,
-modification and processing header keys become claims built like UniProt's
-([`DOCS.md` §1a](DOCS.md#peff-databases)).
-
-**Site claims (experimental).** Annotated modification sites are checked against knockoff
-sites: the same modification on matched residues no annotation names. With rescoring, each site
-gets a site q-value and `<stem>.sites.tsv` lists the accepted ones. The estimate errs towards
-rejecting true claims; it is most useful with freely placed mods
-([`DOCS.md` §1a](DOCS.md#site-claims-knockoff-sites-experimental)). Each site also gets its
-occupancy and the probability of each modification it may carry (acetyl 0.71, trimethyl 0.29),
-from the competing explanations of each spectrum, diagnostic ions and neutral losses
-([`DOCS.md`](DOCS.md#site-identity-occupancy-and-which-modification)).
-
-**Annotation files.** `--annotations claims.annotations.parquet` adds claims about the proteins
-of any database, FASTA included: sequence edits (variant entries), modification sites, mature
-chains. The claims can come from variant catalogues, a sample's own variant calls or site
-databases, one row per claim, with a checksum of the sequence each was written against. They are
-built into entries exactly like UniProt's own, so knockoffs, the class FDR and the proteoform table
-apply unchanged. The flag can be repeated, and equal claims are merged. The columns are listed in
+**Annotation files.** `--annotations claims.annotations.parquet` adds claims (sequence edits,
+modification sites, mature chains) about the proteins of any database, FASTA included, one row
+per claim with a checksum of the sequence it was written against. The claims are built into
+entries like UniProt's own, so knockoffs, the class FDR and the proteoform table apply
+unchanged. The flag can be repeated. Columns:
 [`DOCS.md` §1a](DOCS.md#annotation-files---annotations).
 
 ```bash
@@ -286,6 +282,13 @@ andes --spectrum spectra.mzML --database human.fasta \
   --annotations cosmic.annotations.parquet --annotations sample.annotations.parquet \
   --rescore --output-pin out.pin
 ```
+
+**Site claims (experimental).** Annotated modification sites are checked against knockoff
+sites: the same modification on matched residues no annotation names. With rescoring, each site
+gets a site q-value, `<stem>.sites.tsv` lists the accepted ones, and each site also gets its
+occupancy and the probability of each modification it may carry. The estimate errs towards
+rejecting true claims; it is most useful with freely placed mods
+([`DOCS.md` §1a](DOCS.md#site-claims-knockoff-sites-experimental)).
 
 **TSV and Parquet output:**
 
@@ -310,31 +313,20 @@ entries is one family), each with a protein q-value from picked target-decoy com
 families in the proteoform table; no quantification is needed
 ([`DOCS.md`](DOCS.md#protein-groups-and-protein-fdr)).
 
-**Quantification (`--tmt`, `--lfq`).** andes quantifies the confident PSMs in the same run:
+**Quantification (`--tmt`, `--lfq`, `--label`).** andes quantifies the confident PSMs in the same run:
 `--tmt tmt10` reads the reporter ions of every identified MS2 (or its SPS-MS3 with
 `--tmt-level 3`), applies the kit's impurity matrix (`--tmt-correction`) and reports the
 precursor isolation purity; `--lfq` integrates the isotope chromatograms of every identified
-precursor from the MS1 scans with an experimental decoy-based feature q-value estimate. Both write
-versioned Parquet tables (`<stem>.tmt.parquet`, `<stem>.lfq.parquet`) and, with `--output-parquet`, the QPX
+precursor from the MS1 scans, with an experimental decoy-based feature q-value; `--label` measures
+labelled pairs (SILAC, dimethyl). Each writes a versioned Parquet table (for example
+`<stem>.tmt.parquet`, `<stem>.lfq.parquet`) and, with `--output-parquet`, the QPX
 `quantms.feature.parquet` that quantms consumes. Normalization and protein roll-up stay
-downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--lfq --mbr` adds match between runs
-over two or more inputs: every confident precursor is measured in every run, and transfers carry
-an internal quant-quality q-value (`<stem>.mbr.parquet`). The same stages run one at a time with
-`andes quant library|extract|finalize` over a `--quant-dir`, for pipelines that spread runs
-over machines. On the ProteoBench label-free DDA modules (six runs each; measured 2026-11-05 at
-`09e1c00d` with default settings), andes quantified 63,796 precursors in at least 3 runs on
-QExactive (PXD028735) at transfer q 0.01, with a median |ε| of 0.161 and a CV of 0.117 using
-`quantity_normalized` (52,166 at 0.154 / 0.105 with the transfers left out; 71,299 at q 0.05; the
-default is 0.01; the raw quantity reads |ε| 0.222, CV 0.245). On the same module FragPipe 23.0
-reports 63,701 at 0.200 / 0.156 and Sage 0.15.0-beta.2 81,933 at 0.388 / 0.393, without filtering
-transferred quantities. On Astral (PXD070049) andes quantified 36,675 at |ε| 0.186 and CV 0.112
-(31,739 at 0.186 / 0.100 without transfers); FragPipe 23.0 reports 39,057 at 0.212 / 0.127, Sage
-0.14.6 30,319 at 0.167 / 0.070 and DIA-NN 2.6.0 93,237 at 0.277 / 0.159. Leaderboard snapshot
-2026-07-16, one andes seed. On a 500-run study (PXD042233, measured 2026-10-23 at `2051616b`) the
-per-run pipeline took 146 CPU hours end to end and quantified 243,895 precursors in at least 3
-runs ([benchmarks](docs/benchmarks/lfq.md#large-study-pxd042233-500-runs)). Quantification against truth
-designs, with and without match between runs and next to MaxQuant and FragPipe, and the TMT
-comparisons are in the same report.
+downstream ([`DOCS.md` §10](DOCS.md#10-quantification)). `--mbr` adds match between runs over
+two or more inputs: every confident precursor is measured in every run, and transfers carry an
+internal quant-quality q-value (`<stem>.mbr.parquet`, threshold `--quant-fdr`). The same stages
+run one at a time with `andes quant library|extract|finalize` over a `--quant-dir`, for pipelines
+that spread runs over machines. Results on ProteoBench, truth designs, TMT and a 500-run study
+are on the [benchmark page](docs/benchmarks/lfq.md).
 
 ```bash
 andes --spectrum tmt_run.mzML --database human.fasta \
@@ -342,6 +334,9 @@ andes --spectrum tmt_run.mzML --database human.fasta \
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq
 andes --spectrum run1.mzML --spectrum run2.mzML --database human.fasta --rescore --lfq --mbr
 ```
+
+**Several runs, protein groups for the whole dataset.** `andes inference` runs protein inference once
+over the PSMs of many runs ([`DOCS.md`](DOCS.md#several-runs-andes-inference)).
 
 **[quantms](https://github.com/bigbio/quantms).** Point the search step at `andes`. Use named
 flag values; legacy numeric values are rejected ([`DOCS.md` §8](DOCS.md#8-legacy-numeric-values--behavior-notes)).
@@ -389,23 +384,19 @@ To train your own, see [`TRAIN.md`](TRAIN.md).
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
 With `--chimeric` (mzML or Thermo `.raw`), pass 1 is the normal search, keeping the same top-N
-candidates per scan (`--top-n`, default 10); pass 2 takes the best one as the primary peptide,
+candidates per scan (`--top-n`, default 10). Pass 2 takes the best one as the primary peptide,
 finds co-isolated precursors in the MS1 isolation window and searches the residual spectrum for
-a second peptide. Keeping the alternatives (rather than only the best candidate) took Astral from
-60,435 to 66,405 PSMs and 26,717 to 29,400 peptides at an equal entrapment true FDP of 1%. On
-phospho the alternatives first cost about 1% of peptides (15,084 → 14,904): most of them were the
-same phosphopeptide with the phosphate on another site. The PIN now keeps one row per peptide and
-modification multiset per precursor (see [DOCS.md](DOCS.md) §3a), and phospho with `--chimeric`
-reaches 39,470–39,592 PSMs and 15,107–15,156 peptides, above top-1 (39,404–39,489 / 15,046–15,084).
+a second peptide. The PIN keeps one row per peptide and modification multiset per precursor
+([`DOCS.md` §3a](DOCS.md#3a-pin-columns)).
 
-On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with entrapment
-hits flat (166 → 167). On high-res data `--chimeric` runs on the default out-of-core path with
-fragment-ion retrieval. On Astral with an entrapment database (Percolator, three seeds), at an
-equal 1% true FDP, it gives 66,377–66,424 PSMs against 43,076–43,145 without `--chimeric`
-(+54%) and 29,384–29,400 distinct peptides against 26,723–26,746 (+10%); measured 2026-10-05 to
-2026-10-13 on earlier builds. The true FDP at nominal q ≤ 0.01 was measured only with one
-candidate kept per scan in pass 1 (1.18%, against 1.05% without `--chimeric`), not with the
-alternatives kept.
+On Astral with an entrapment database (Percolator, three seeds), at an equal 1% true FDP, it
+gives 66,377–66,424 PSMs against 43,076–43,145 without `--chimeric` (+54%) and 29,384–29,400
+distinct peptides against 26,723–26,746 (+10%); measured 2026-10-05 to 2026-10-13 on earlier
+builds. On UPS1 (with entrapment) PSMs at q ≤ 0.01 rose from 15,838 to 17,112 (+8.0%) with
+entrapment hits flat (166 → 167). On phospho it gives 39,470–39,592 PSMs and 15,107–15,156
+peptides, above top-1 (39,404–39,489 / 15,046–15,084). The true FDP at nominal q ≤ 0.01 was
+measured only with one candidate kept per scan in pass 1 (1.18%, against 1.05% without
+`--chimeric`), not with the alternatives kept.
 
 ## Data-independent acquisition (`--dia`, experimental)
 
@@ -573,12 +564,14 @@ andes --spectrum sample.mzML \
 
 - A glycan database is required: `--glyco-species` (`human`, `mouse`,
   `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
-- Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore` and
-  `--refine` are rejected. Run Percolator on it with `--trainFDR 0.05`.
+- Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore`,
+  `--rescore-native`, `--refine`, `--psm-fdr` and `--pep` are rejected. Run Percolator on it with `--trainFDR 0.05`.
 - Use `--decoy-strategy sequon`; the other generated decoys carry fewer sequons than their targets,
   which makes q-values anti-conservative.
 - Search each fraction separately, concatenate the `.glyco.pin` files (one header) and run
   Percolator once: one fraction has too few decoys for a stable 1%.
+- `--lfq` (with `--mbr` for several runs) quantifies the identified glycopeptides; see
+  [`DOCS.md` §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
 - HCD/CID and ETD/EThcD/AI-ETD are supported; c/z fragments localize the glycosite. The site is
   reported as `@N<pos>` only for a single N-X-S/T sequon, otherwise `@N?`.
 
@@ -592,6 +585,14 @@ Memory: `--glyco` runs on the out-of-core candidate index and holds in memory on
 candidates that carry an N-X-S/T sequon (3.2 of 28.0 million on the mouse fraction above), so
 that run peaks at 4.5 GB with output identical to the former in-RAM path (20.0 GB). All flags:
 [DOCS.md §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
+
+## Cross-linked peptides (`--xl`, experimental)
+
+`--xl "DSSO (K, S, T, Y, Protein N-term)"` searches cross-linked peptide pairs for the named
+reagent and writes match, residue-pair and protein-pair tables with their own FDR. It is not
+combined with `--glyco` or `--dia`. The reagent syntax, the output files and the config key are in
+[`DOCS.md`](DOCS.md#crosslinkers---xl-experimental); the ground-truth benchmark is in
+[`docs/benchmarks/xl/`](docs/benchmarks/xl/README.md).
 
 ## Reading Thermo `.raw` files
 
@@ -627,6 +628,35 @@ mobility and measures each precursor within a mobility window around its identif
 out of its traces. Ion mobility is not scored. A TDF holds no MS3 scans, so `--tmt-level 3` is an
 error (reporters are read from the MS2). Runs written with the frame compression of early
 acquisition software (TDF compression type 1) are not readable; convert them to mzML.
+
+## Development
+
+The code is a Cargo workspace under `crates/`:
+
+| Crate | Content |
+|---|---|
+| `andes` | the `andes` binary: command line, config, run orchestration |
+| `input` | spectrum, FASTA, UniProt and PEFF readers |
+| `model`, `scoring` | shared types and constants; the scoring models and features |
+| `search` | candidate index, matching, chimeric, refine and the other search passes |
+| `output` | PIN, TSV and QPX Parquet writers |
+| `quant`, `percolator-native` | quantification and match between runs; the in-process Percolator engine |
+| `model-train`, `onnx-infer` | training the scoring models; ONNX inference of the predictors |
+| glyco and cross-link crates | the `--glyco` and `--xl` searches |
+
+```bash
+cargo build --release --workspace
+cargo test --release --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+CI runs the same commands, plus the PIN goldens
+(`cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored`). Format only the
+files you change (`rustfmt <file>`); `main` is not fully formatted. Before changing code read
+[`AGENTS.md`](AGENTS.md) and the guides in [`.claude/skills/`](.claude/skills/) (bug prevention,
+logging, CLI reports, performance, citations, FDR validation, benchmarks, constants, CLI flags).
+Benchmark methods and the scripts that regenerate the tables above are in
+[`docs/benchmarks/`](docs/benchmarks/README.md); model training is in [`TRAIN.md`](TRAIN.md).
 
 ## Citation
 

@@ -1454,24 +1454,26 @@ the fused strong score Percolator weights most; historically `StrongScore`; it a
 | 58 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
 | 59 | `ModSiteDetCount` | int | ≥0 | Site-determining (bracketing) ions over all sites. |
 | 60 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)`, alternative-mass competition. |
-| 61 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
-| 62 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
-| 63 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
-| 64 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
-| 65 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
-| 66 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
-| 67 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
-| 68 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
-| 69 | `IsVariant` | 0/1 | — | A protein of the peptide is a UniProt natural-variant entry (§1a, provenance). |
-| 70 | `IsIsoform` | 0/1 | — | A protein of the peptide is an isoform entry. |
-| 71 | `IsChain` | 0/1 | — | A protein of the peptide is a mature-chain entry. |
-| 72 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
-| 73 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
-| 74 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
-| 75 | `IsotopeErrorAbs` | int | [0, 2] | `\|isotope_error\|`. With `isotope_error` and `IsotopeErrorNeg` it lets Percolator weight each isotope offset on its own. |
-| 76 | `IsotopeErrorNeg` | 0/1 | — | 1 when the winning isotope offset is negative (the peptide is one isotope step heavier than the spectrum's precursor). |
-| 77 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 78 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
+| 61 | `MatchPosteriorMean` | float | (0, 1] | Mean over matched peaks of the posterior that the peak comes from its assigned ion rather than another theoretical ion within tolerance (by ion identity) or chance: `π_a·N(x−m_a; σ) / (Σ_k π_k·N(x−m_k; σ) + ρ(x))`, with `π` the model's ion presence prior for the ion type, `σ` a quarter of the run's fragment tolerance and `ρ` the local peak density per Da. |
+| 62 | `MatchLogOdds` | float | signed | Sum over matched peaks of `ln(P/(1−P))` of the same posterior, `P` held in [10⁻⁶, 1−10⁻⁶]. |
+| 63 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy of the retained top-K scores. |
+| 64 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
+| 65 | `RawScore` | float | unbounded | **Fused strong score** `signal − null`; the primary feature. |
+| 66 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore`. |
+| 67 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum). |
+| 68 | `DeltaRT` | float | signed | Observed − predicted retention time (min); 0 without RT. |
+| 69 | `AbsDeltaRT` | float | ≥0 | `|DeltaRT|`. |
+| 70 | `DeltaRTNorm` | float | signed | `DeltaRT` divided by the run's gradient span. |
+| 71 | `IsVariant` | 0/1 | — | A protein of the peptide is a UniProt natural-variant entry (§1a, provenance). |
+| 72 | `IsIsoform` | 0/1 | — | A protein of the peptide is an isoform entry. |
+| 73 | `IsChain` | 0/1 | — | A protein of the peptide is a mature-chain entry. |
+| 74 | `RefCompetitor` | 0/1 | — | A canonical (or FASTA) candidate with another peptidoform was scored for the spectrum. |
+| 75 | `DeltaRefScore` | float | signed | Flagged rows: `RankScore` minus that best canonical candidate's; 0 otherwise. |
+| 76 | `IsotopeMimic` | 0/1 | — | The precursor fits better when isotope-like deltas (deamidation, N→D, Q→E) are read as isotope steps. |
+| 77 | `IsotopeErrorAbs` | int | [0, 2] | `\|isotope_error\|`. With `isotope_error` and `IsotopeErrorNeg` it lets Percolator weight each isotope offset on its own. |
+| 78 | `IsotopeErrorNeg` | 0/1 | — | 1 when the winning isotope offset is negative (the peptide is one isotope step heavier than the spectrum's precursor). |
+| 79 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 80 | `Proteins` | string | — | Protein accession(s), tab-separated; decoys carry `--decoy-prefix`. A UniProt variant entry names its change (`sp\|P04637_VAR_005851_D7H\|P53_HUMAN`), an isoform its id (`sp\|P04637-2\|P53_HUMAN`), a mature chain its feature id (`sp\|P02769_PRO_0000001058\|ALBU_BOVIN`). |
 
 Columns marked **0.0 unless/without** stay in the header and are zero when their condition
 does not hold.

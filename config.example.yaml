@@ -164,7 +164,9 @@ quant:
 # Read by `andes cohort plan` only; a search ignores this section. The sections above are the
 # settings every run of the cohort shares; each run's own settings come from its SDRF row.
 # cohort:
-#   name: human-xl                 # names the plan file (<name>.plan.json)
+#   name: human-xl                 # the default output folder, <name>/ next to this file
+#   data_dir: /data/raw            # spectrum files, any layout; <data_dir>/<project>/ is used when present
+#   output_dir: /data/human-xl     # runs/<run>/, groups/<group>/ and plan.json
 #   sdrfs:                         # one entry per project; paths relative to this file
 #     - {project: PXD019110, sdrf: PXD019110.sdrf.tsv}
 #     - {project: PXD059766, sdrf: PXD059766.sdrf.tsv}

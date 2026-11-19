@@ -1168,23 +1168,35 @@ an error naming the column and two files (split the SDRF by setting). Empty cell
 `not available` and `not applicable` count as absent. The run prints what it took from the SDRF
 and what the command line or config kept.
 
-### Cohorts (`andes cohort plan`, experimental)
+### Cohorts (`andes cohort plan` / `run`, experimental)
 
-`andes cohort plan cohort.yaml` plans the analysis of several projects' SDRFs together. The
-config file's `cohort` section lists the SDRFs (see `config.example.yaml`); its other sections
-are the settings every run shares (database, charge, decoys, FDR). The command searches
-nothing: it checks the cohort, prints the groups, and writes `<name>.plan.json` (or
-`--output`) with one entry per spectrum file and one per group. Every problem is reported in
-one pass, and no plan is written while any remains.
+A cohort is the SDRFs of several projects analysed together. The config file's `cohort`
+section lists the SDRFs, the folder with the spectrum files (`data_dir`) and the output folder
+(`output_dir`; see `config.example.yaml`); its other sections are the settings every run
+shares (database, charge, decoys, FDR).
+
+- `andes cohort plan cohort.yaml` checks the cohort and writes `<output_dir>/plan.json` (or
+  `--output`): one entry per spectrum file and one per group. It searches nothing. Every
+  problem is reported in one pass, and no plan is written while any remains.
+- `andes cohort run cohort.yaml` plans, searches every run into `<output_dir>/runs/<run>/`,
+  then runs each group's stages into `<output_dir>/groups/<group>/`. A run whose search has
+  finished is kept, so a rerun searches only new or failed runs. It runs the `xl-fdr` stage;
+  the other stages are not run yet and are named in a warning.
 
 - **Runs.** Each SDRF is read as with `--sdrf`, except that rows which disagree on the
   protease, modifications, precursor tolerance, dissociation method, label kind or
   crosslinker are split into settings groups instead of being an error. A run's `args` are the
   search flags its settings give, with the precedence `cohort.overrides > config section >
   SDRF`; a key the config sets is left out of `args`, so the runner's `--config` applies it.
+- **Files.** Each name in `comment[data file]` is found below `data_dir`, or a converted copy
+  with the same stem (`.mzML`, `.mzML.gz`, `.d`, `.d.zip`, ...). When `<data_dir>/<project>/`
+  exists only that folder is searched, so projects whose files share a name never swap them;
+  one name matching two files in the same folder tree is an error naming both. Without
+  `data_dir` the files are looked up next to the SDRF, and missing ones are a warning.
 - **Run names.** `cohort.run_name` (default `{project}.{stem}`) gives each spectrum file a
-  name unique in the cohort; `stage_as` is the file name to stage the spectrum under, so that
-  its stem, the PIN `SpecId` prefix, is the run name. Two files with one name are an error.
+  name unique in the cohort. The file is staged under that name (`stage_as`) in the run's
+  folder, so its stem, the PIN `SpecId` prefix, is unique across projects. Two files with one
+  run name are an error.
 - **Groups.** Runs share a group, and later one FDR, only when they share the kind of data
   (`dda`, `lfq`, `tmt`, `label`, `xl`), the enzyme and the crosslinkers. Each group lists the
   stages it runs after the searches: `percolator > inference` (`dda`), then `quant` (`lfq`,
@@ -1194,8 +1206,15 @@ one pass, and no plan is written while any remains.
   values and duplicate run names are errors; an SDRF that splits into several settings groups,
   or that gives no precursor tolerance, is a warning.
 
-The stages are not yet run by andes itself: a job array runs `andes` once per entry in `runs`,
-then each group's stages over its runs.
+On a cluster, a job array can run `andes` once per entry in `runs` (with `--config`, the
+staged file, `--output-pin <dir>/<run>.pin` and the entry's `args`), then each group's stages
+over its `inputs`.
+
+**Crosslink FDR over a cohort.** The `xl-fdr` stage reads every run's CSM table, with each
+CSM's TT/TD/DD class and its residue-pair and protein-pair keys (the `residue_pair` and
+`protein_pair` columns), and computes the CSM, residue-pair and protein-pair q-values once
+over the group, with the rules of one search (above). The per-run q-values each search writes
+are superseded by the group's.
 
 ---
 

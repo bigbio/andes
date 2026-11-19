@@ -2520,6 +2520,7 @@ mod chargeless_unit_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 
@@ -2712,6 +2713,7 @@ mod feature_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 

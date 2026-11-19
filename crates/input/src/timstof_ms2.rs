@@ -63,7 +63,7 @@ pub(crate) fn read_frame_rows(
     Ok(out)
 }
 
-fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, rusqlite::Error> {
+pub(crate) fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, rusqlite::Error> {
     conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
         [name],
@@ -135,7 +135,7 @@ pub(crate) fn read_dia_windows(
                 charge: None,
                 intensity: None,
                 parent: parent_of.get(&frame).copied(),
-                scan_number: Some((begin + end) as f64 / 2.0),
+                scan_number: None,
                 isolation_width: width,
                 collision_energy: energy,
                 selections: vec![Selection {
@@ -394,7 +394,9 @@ mod tests {
                 (5, 745.0, Some(4), 400),
             ]
         );
-        assert!(w.iter().all(|p| p.dia && p.charge.is_none()));
+        assert!(w
+            .iter()
+            .all(|p| p.dia && p.charge.is_none() && p.scan_number.is_none()));
         assert_eq!(w[1].isolation_width, 45.0);
         assert_eq!(w[1].collision_energy, 40.0);
         let ids: Vec<usize> = w.iter().map(|p| p.id).collect();

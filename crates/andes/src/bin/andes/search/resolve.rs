@@ -794,6 +794,13 @@ pub(super) fn resolve_search_params(
                     .into(),
             );
         }
+        if is_d {
+            log::warn!(
+                "--dia on Bruker .d (diaPASEF) is not FDR-calibrated yet. \
+                 On an entrapment test, q <= 0.01 measured a 5-7% true FDP. \
+                 Do not use these q-values as a 1% FDR."
+            );
+        }
         params.dia = true;
     }
     params.require_nxst_sequon = cli.glyco && cli.glyco_index_sequon_only;

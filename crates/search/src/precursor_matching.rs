@@ -143,6 +143,7 @@ mod tests {
         let spec = Spectrum {
             precursor_mz: 500.0,
             isolation_target_mz: Some(500.0),
+            mobility_window: None,
             isolation_lower_offset: Some(1.0),
             isolation_upper_offset: Some(1.0),
             ..Default::default()

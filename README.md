@@ -434,6 +434,9 @@ andes's nominal q ≤ 0.01 measures 1.1% / 0.8% true FDP. The two tools' wall ti
 different machines. Commands, every tested variant and the remaining gap to DIA-NN are in
 [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 
+`--dia` also reads Bruker diaPASEF `.d` runs. Their FDR is not calibrated yet: q ≤ 0.01 measured a
+5-7% true FDP on an entrapment test (DOCS.md, "DIA").
+
 ## Secondary modifications (`--refine`, experimental)
 
 `--refine` searches the spectra pass 1 missed against confident proteins with a fixed tier of

@@ -171,6 +171,7 @@ fn write_csms(
     if stub_cols.is_some() {
         head.push("crosslinker".into());
     }
+    head.extend(["residue_pair".to_string(), "protein_pair".to_string()]);
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
     for ((r, s), q) in results.iter().zip(score).zip(q) {
@@ -216,6 +217,8 @@ fn write_csms(
         if stub_cols.is_some() {
             row.push(run.linker.name.clone());
         }
+        let (rp_key, ppi_key) = crate::xl_fdr::pair_keys(c, &run.table, prepared);
+        row.extend([rp_key, ppi_key]);
         writeln!(w, "{}", row.join("\t"))?;
         n += 1;
     }

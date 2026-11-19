@@ -308,6 +308,19 @@ fn pair_key(a: String, b: String) -> String {
     }
 }
 
+/// The residue-pair and protein-pair keys of a CSM: each side's accessions with the linked
+/// residue's position (`P12345:120`), or the accessions alone, the two sides in sorted order.
+pub(crate) fn pair_keys(
+    c: &Csm,
+    table: &XlCandidates,
+    prepared: &PreparedSearch,
+) -> (String, String) {
+    (
+        pair_key(rp_side(&c.alpha, table, prepared), rp_side(&c.beta, table, prepared)),
+        pair_key(ppi_side(&c.alpha, table, prepared), ppi_side(&c.beta, table, prepared)),
+    )
+}
+
 pub(crate) struct Levels {
     pub csm_items: Vec<Item>,
     pub csm_rows: Vec<usize>,
@@ -332,21 +345,15 @@ pub(crate) fn roll_up(
         let (Some(c), Some(s)) = (&r.csm, s) else {
             continue;
         };
-        let table = &runs[r.linker].table;
+        let (rp_key, ppi_key) = pair_keys(c, &runs[r.linker].table, prepared);
         csm_items.push(Item {
-            key: pair_key(
-                rp_side(&c.alpha, table, prepared),
-                rp_side(&c.beta, table, prepared),
-            ),
+            key: rp_key,
             score: *s,
             class: c.class,
             link: LinkClass::of(c.intra, c.homotypic),
             n_csms: 1,
         });
-        ppi_of_csm.push(pair_key(
-            ppi_side(&c.alpha, table, prepared),
-            ppi_side(&c.beta, table, prepared),
-        ));
+        ppi_of_csm.push(ppi_key);
         csm_rows.push(i);
     }
     let csm_groups: Vec<Group> = csm_items

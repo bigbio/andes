@@ -215,6 +215,12 @@ pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
         "shuffle, then restore the segment's N-X-S/T sequon count; use it with --glyco",
     ),
     (
+        "mutate",
+        "substitute one interior residue per tryptic segment of 7 or more (mass change > 1.1 Da); \
+         near-variant decoys that share most fragments with their target, for --dia on \
+         wide-window data such as diaPASEF",
+    ),
+    (
         "none",
         "no decoys: the database already holds them (--decoy-prefix, --decoy-suffix), or \
          the FDR is computed elsewhere",
@@ -1835,7 +1841,7 @@ pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -
 
 pub(crate) fn parse_decoy_strategy(s: &str) -> Result<DecoyStrategy, String> {
     DecoyStrategy::from_name(s).ok_or_else(|| {
-        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/none)")
+        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/mutate/none)")
     })
 }
 
@@ -1844,6 +1850,7 @@ pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
         DecoyStrategy::Shuffle => "shuffle",
         DecoyStrategy::Reverse => "reverse",
         DecoyStrategy::Sequon => "sequon",
+        DecoyStrategy::Mutate => "mutate",
         DecoyStrategy::None => "none",
     }
 }

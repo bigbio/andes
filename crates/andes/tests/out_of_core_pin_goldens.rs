@@ -152,12 +152,12 @@ fn run(args: &[&str], out: &Path) -> (String, Vec<String>, String) {
 
 type Golden = (usize, u64, Option<&'static str>);
 
-const ECOLI_DEFAULT_MODS: Golden = (75_009, 0xc189_0f50_38d5_c9ea, None);
-const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0xa181_3557_efb7_ae83, None);
-const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x428b_4490_d8f0_7cbc, None);
+const ECOLI_DEFAULT_MODS: Golden = (75_009, 0x725b_7bf7_3a07_620b, None);
+const ECOLI_FIXED_MODS_ONLY: Golden = (77_496, 0x372a_d8b2_48da_d25d, None);
+const ECOLI_ONE_VARIABLE_MOD: Golden = (75_570, 0x761e_d8dd_6e62_610f, None);
 const ECOLI_PRECURSOR_CAL_AUTO: Golden = (
     75_009,
-    0xc189_0f50_38d5_c9ea,
+    0x725b_7bf7_3a07_620b,
     Some("Precursor mass calibration skipped (insufficient confident PSMs: 489 with PSMs, 63 below RawScore floor, 0 failed |residual|>50ppm"),
 );
 

@@ -186,18 +186,14 @@ pub(crate) fn ms2_peaks(
     n_frames: usize,
 ) -> Vec<(f64, f32)> {
     let per_frame = 1.0 / n_frames.max(1) as f64;
-    let mut peaks: Vec<(f64, f32)> = centroid_profile(&sum_over_mobility(tof, intensity))
-        .iter()
-        .map(|c| {
-            let cond = conditions(frame, c.intensity * per_frame);
-            (calibration.mz(c.tof, cond), c.intensity as f32)
-        })
-        .filter(|&(mz, i)| mz.is_finite() && mz > 0.0 && i.is_finite() && i > 0.0)
-        .collect();
-    if peaks.windows(2).any(|w| w[0].0 > w[1].0) {
-        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-    }
-    peaks
+    crate::timstof::finite_sorted_peaks(
+        centroid_profile(&sum_over_mobility(tof, intensity))
+            .iter()
+            .map(|c| {
+                let cond = conditions(frame, c.intensity * per_frame);
+                (calibration.mz(c.tof, cond), c.intensity as f32)
+            }),
+    )
 }
 
 #[cfg(test)]

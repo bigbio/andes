@@ -993,7 +993,11 @@ keep only groups at or below it. The proteoform table's members are then claims 
 accepted protein: each still needs its own specific evidence at its class-aware cutoff.
 
 Measured with entrapment databases (a group is false when every accession in it is an
-entrapment entry; true FDP = entrapment groups / accepted × (1 + target : entrapment proteins)):
+entrapment entry; true FDP = entrapment groups / accepted × (1 + target : entrapment proteins)).
+This estimate is an upper bound for protein groups: a wrong match to a peptide of a present
+protein joins that protein's group and cannot be a false group, so the real-database share of
+false groups is overstated (about 1.25 times on 33 peptide-shuffle runs, where the decoy-based
+reading is 1.0% at q ≤ 0.01 and 5.2% at 0.05; see docs/benchmarks/methods.md):
 
 | Run | PSMs at 1% | Groups at protein q ≤ 0.01 | True FDP | At q ≤ 0.05 | True FDP |
 |---|---|---|---|---|---|

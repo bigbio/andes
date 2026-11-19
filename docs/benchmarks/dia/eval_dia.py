@@ -8,12 +8,15 @@ A precursor is (modified sequence in UniMod notation, charge); its score is the 
 best PSM. The q-value is precursor-level target-decoy competition over those best scores (decoy
 precursors from the decoy PSM file), (D + 1) / T, monotone.
 
-Usage: eval_dia.py <pin> <percolator.target.psms.txt> <percolator.decoy.psms.txt>
+Usage: eval_dia.py <pin> <percolator.target.psms.txt> <percolator.decoy.psms.txt> [library.tsv]
+
+The library table defaults to $B/diann-pairlib-20261113/lib_targets.tsv; a fourth argument
+names another one with the same columns (public/build_library.py writes one).
 """
 import os, sys, re, numpy as np, pandas as pd
 
-B = os.environ['B']
-lib = pd.read_csv(B + '/diann-pairlib-20261113/lib_targets.tsv', sep='\t',
+lib_path = sys.argv[4] if len(sys.argv) > 4 else os.environ['B'] + '/diann-pairlib-20261113/lib_targets.tsv'
+lib = pd.read_csv(lib_path, sep='\t',
                   usecols=['ModifiedPeptideSequence', 'PrecursorCharge', 'ProteinId'], dtype=str)
 lib = lib.drop_duplicates(['ModifiedPeptideSequence', 'PrecursorCharge'])
 lib['ent'] = lib.ProteinId.str.split(';').map(lambda ps: all('_p_target' in p for p in ps))

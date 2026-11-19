@@ -2,13 +2,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
-use andes_xl::crosslinker::Crosslinker;
-use andes_xl::crosslinker::{LinkForm, MAX_STUBS};
-use andes_xl::decoy::PairClass;
-use andes_xl::fdr::ClassCounts;
-use andes_xl::rollup::{as_items, group_by, split_q_values, Group, Item, LinkClass};
 use model::Spectrum;
 use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
+use xl::crosslinker::Crosslinker;
+use xl::crosslinker::{LinkForm, MAX_STUBS};
+use xl::decoy::PairClass;
+use xl::fdr::ClassCounts;
+use xl::rollup::{as_items, group_by, split_q_values, Group, Item, LinkClass};
 
 pub(crate) struct XlRun {
     pub linker: Crosslinker,
@@ -88,7 +88,7 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
     let (ag, agm) = gap(c.alpha.gap_next);
     let (bg, bgm) = gap(c.beta.gap_next);
     let tic = r.doublets.tic.max(1.0);
-    let dbl = |d: &Option<andes_xl::doublet::DoubletMass>| match d {
+    let dbl = |d: &Option<xl::doublet::DoubletMass>| match d {
         Some(d) => (
             d.intensity / tic,
             d.isotope_confirmed as u8 as f64,

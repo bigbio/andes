@@ -271,13 +271,13 @@ pub(crate) fn parse_variable_mods(s: &str) -> Result<ModList, String> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct XlSet(pub(crate) Vec<andes_xl::crosslinker::Crosslinker>);
+pub(crate) struct XlSet(pub(crate) Vec<xl::crosslinker::Crosslinker>);
 
 impl XlSet {
     /// One or more crosslinkers with distinct names; `key` names the option in an error.
     pub(crate) fn new(
         key: &str,
-        linkers: Vec<andes_xl::crosslinker::Crosslinker>,
+        linkers: Vec<xl::crosslinker::Crosslinker>,
     ) -> Result<Self, String> {
         if linkers.is_empty() {
             return Err(format!("{key}: no crosslinker"));
@@ -291,8 +291,8 @@ impl XlSet {
     }
 }
 
-pub(crate) fn parse_xl_one(s: &str) -> Result<andes_xl::crosslinker::Crosslinker, String> {
-    andes_xl::spec::XlDecl::parse(s)
+pub(crate) fn parse_xl_one(s: &str) -> Result<xl::crosslinker::Crosslinker, String> {
+    xl::spec::XlDecl::parse(s)
         .and_then(|d| d.resolve(model::unimod::bundled()))
         .map_err(|e| e.to_string())
 }

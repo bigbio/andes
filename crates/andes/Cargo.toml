@@ -11,7 +11,7 @@ path = "src/bin/andes.rs"
 
 [dependencies]
 log = { workspace = true }
-andes-xl = { path = "../andes-xl" }
+xl = { path = "../xl" }
 glyco = { path = "../glyco" }
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }

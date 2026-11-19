@@ -2,19 +2,17 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Mutex;
 
-use andes_xl::crosslinker::{Crosslinker, LinkForm, ISOTOPE_SPACING, N_FORMS, PROTON};
-use andes_xl::decoy::PairClass;
-use andes_xl::doublet::{
-    find_doublets, group_by_mass, stub_ions_present, DoubletMass, DoubletParams,
-};
-use andes_xl::pair::{pairs_by_sum, MassIndex};
-use andes_xl::sites::{link_sites, LinkSite};
 use model::amino_acid::AminoAcid;
 use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
+use xl::crosslinker::{Crosslinker, LinkForm, ISOTOPE_SPACING, N_FORMS, PROTON};
+use xl::decoy::PairClass;
+use xl::doublet::{find_doublets, group_by_mass, stub_ions_present, DoubletMass, DoubletParams};
+use xl::pair::{pairs_by_sum, MassIndex};
+use xl::sites::{link_sites, LinkSite};
 
 use crate::candidate_gen::Candidate;
 use crate::fragment_index::ChunkFragmentIndex;
@@ -934,7 +932,7 @@ fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSum
             min_rel_intensity: floor,
             ..cfg.doublet
         };
-        let count = |c: &andes_xl::crosslinker::Cleavage| {
+        let count = |c: &xl::crosslinker::Cleavage| {
             let ds = find_doublets(peaks, z, c, &p);
             let iso: Vec<_> = ds.iter().copied().filter(|d| d.isotope_confirmed).collect();
             [
@@ -1363,7 +1361,7 @@ mod tests {
     use super::*;
 
     pub(crate) fn linker(spec: &str) -> Crosslinker {
-        andes_xl::spec::XlDecl::parse(spec)
+        xl::spec::XlDecl::parse(spec)
             .and_then(|d| d.resolve(model::unimod::bundled()))
             .unwrap()
     }
@@ -1419,12 +1417,12 @@ mod tests {
         let key = |p: &str| [p.as_bytes().to_vec(), b"PEPTIDEK".to_vec()];
         let hit = PeptideHit {
             pep: 0,
-            site: andes_xl::sites::LinkSite {
+            site: xl::sites::LinkSite {
                 pos: 0,
                 n_term: false,
                 c_term: false,
             },
-            form: andes_xl::crosslinker::LinkForm::Intact,
+            form: xl::crosslinker::LinkForm::Intact,
             score,
             form_scores: Default::default(),
             n_sites: 1,

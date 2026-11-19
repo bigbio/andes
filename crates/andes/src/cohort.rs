@@ -4,7 +4,7 @@
 //! lists, resolves each run's search settings, groups the runs that can share one FDR, and
 //! writes the plan as JSON. It searches nothing; a job array or the pipeline runs the plan.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,10 @@ const DEFAULT_ENZYME: &str = "trypsin";
 #[serde(default, deny_unknown_fields)]
 pub struct CohortCfg {
     pub name: Option<String>,
+    /// Folder holding the spectrum files, in any layout below it; unset: next to each SDRF.
+    pub data_dir: Option<PathBuf>,
+    /// Folder for every run's and group's outputs; unset: `<name>/` next to the config.
+    pub output_dir: Option<PathBuf>,
     pub sdrfs: Vec<CohortSdrf>,
     pub run_name: Option<String>,
     pub overrides: Vec<Override>,
@@ -93,8 +97,10 @@ pub struct PlannedRun {
     pub run: String,
     pub project: String,
     pub sdrf: PathBuf,
-    /// The spectrum file as the SDRF names it, resolved next to the SDRF.
+    /// The spectrum file: the SDRF's name found under `data_dir`, or next to the SDRF.
     pub file: PathBuf,
+    /// The run's output folder; its search writes `<dir>/<run>.pin` and the tables beside it.
+    pub dir: PathBuf,
     /// The name to give the spectrum file when it is staged, so that its stem (the PIN
     /// `SpecId` prefix) is the run name.
     pub stage_as: String,
@@ -112,11 +118,16 @@ pub struct PlannedGroup {
     pub stages: Vec<&'static str>,
     pub projects: Vec<String>,
     pub runs: Vec<String>,
+    /// The group's output folder; its stages write `<dir>/<group>.*`.
+    pub dir: PathBuf,
+    /// The run outputs the group's first stage reads, one per run.
+    pub inputs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Plan {
     pub cohort: String,
+    pub output_dir: PathBuf,
     pub runs: Vec<PlannedRun>,
     pub groups: Vec<PlannedGroup>,
     pub warnings: Vec<String>,
@@ -190,12 +201,10 @@ impl Resolved {
     }
 }
 
+/// A modification list as the `--fixed-mods` / `--variable-mods` value; an empty list is the
+/// empty string, which those flags read as no modifications.
 fn list(m: &[String]) -> String {
-    if m.is_empty() {
-        "none".into()
-    } else {
-        m.join(", ")
-    }
+    m.join(", ")
 }
 
 /// The `--xl` spec of an SDRF `comment[cross-linker]` cell: the reagent name and its sites.
@@ -221,11 +230,18 @@ fn check_override(project: &str, o: &OverrideSearch, problems: &mut Problems) {
     check("precursor_tol", &o.precursor_tol, &|v| {
         crate::parse_precursor_tol(v).map(|_| ())
     });
+    let none = |v: &str| {
+        if v.trim().eq_ignore_ascii_case("none") {
+            String::new()
+        } else {
+            v.to_string()
+        }
+    };
     check("fixed_mods", &o.fixed_mods, &|v| {
-        crate::cli::parse_fixed_mods(v).map(|_| ())
+        crate::cli::parse_fixed_mods(&none(v)).map(|_| ())
     });
     check("variable_mods", &o.variable_mods, &|v| {
-        crate::cli::parse_variable_mods(v).map(|_| ())
+        crate::cli::parse_variable_mods(&none(v)).map(|_| ())
     });
     check("xl", &o.xl, &|v| crate::cli::parse_xl(v).map(|_| ()));
 }
@@ -300,7 +316,7 @@ fn resolve(
     }
     let to_list = |v: Option<String>| {
         v.map(|v| {
-            if v == "none" {
+            if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("none") {
                 Vec::new()
             } else {
                 v.split(", ").map(str::to_string).collect()
@@ -338,13 +354,31 @@ fn resolve(
 
 /// The run name for one spectrum file: the template with `{project}` and `{stem}` filled.
 pub fn run_name(template: &str, project: &str, file: &Path) -> String {
-    let stem = file
-        .file_stem()
+    let name = file
+        .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let (stem, _) = split_name(&name);
     template
         .replace("{project}", project)
-        .replace("{stem}", &stem)
+        .replace("{stem}", stem)
+}
+
+/// A file name split into its stem and its format suffix: the longest [`CONVERTED`] suffix
+/// it ends with, ignoring case (`x.d.zip` -> `x` + `.d.zip`), else its last extension.
+fn split_name(name: &str) -> (&str, &str) {
+    let lower = name.to_ascii_lowercase();
+    let known = CONVERTED
+        .iter()
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .filter(|e| e.len() < lower.len() && lower.ends_with(e.as_str()))
+        .map(|e| e.len())
+        .max();
+    let at = match known {
+        Some(n) => name.len() - n,
+        None => name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len()),
+    };
+    name.split_at(at)
 }
 
 fn check_template(t: &str) -> Result<(), String> {
@@ -378,6 +412,90 @@ fn readable(file: &Path) -> bool {
     [".mzml", ".raw", ".d", ".mgf"]
         .iter()
         .any(|e| name.ends_with(e))
+}
+
+/// The spectrum files below a folder by lower-cased file name. A Bruker `.d` folder is one
+/// entry; its contents are not listed.
+fn index_files(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
+    let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("cohort.data_dir: cannot read {}: {e}", dir.display()))?;
+        for e in entries {
+            let path = e
+                .map_err(|e| format!("cohort.data_dir: cannot read {}: {e}", dir.display()))?
+                .path();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if path.is_dir() && !name.ends_with(".d") {
+                todo.push(path);
+            } else {
+                out.entry(name).or_default().push(path);
+            }
+        }
+    }
+    for v in out.values_mut() {
+        v.sort();
+    }
+    Ok(out)
+}
+
+/// Spectrum formats a file named in an SDRF may have been converted to, tried when the
+/// named file itself is not under `data_dir`.
+const CONVERTED: &[&str] = &[
+    "mzML", "mzML.gz", "raw", "d", "d.zip", "d.tar", "d.tar.gz", "d.tgz", "mgf", "mgf.gz",
+];
+
+/// Find the file an SDRF names under `data_dir`: the name itself, else a converted copy
+/// with the same stem. When `<data_dir>/<project>/` exists only that folder is searched, so
+/// a project never takes another project's file of the same name.
+fn locate(
+    index: &BTreeMap<String, Vec<PathBuf>>,
+    root: &Path,
+    project: &str,
+    name: &str,
+) -> Result<PathBuf, String> {
+    let lower = name.to_ascii_lowercase();
+    let (stem, _) = split_name(&lower);
+    let own = root.join(project);
+    let scope = if own.is_dir() {
+        own
+    } else {
+        root.to_path_buf()
+    };
+    let mut names = vec![lower.clone()];
+    names.extend(
+        CONVERTED
+            .iter()
+            .map(|e| format!("{stem}.{}", e.to_ascii_lowercase()))
+            .filter(|n| *n != lower),
+    );
+    for n in names {
+        let found: Vec<&PathBuf> = index
+            .get(&n)
+            .map(|v| v.iter().filter(|p| p.starts_with(&scope)).collect())
+            .unwrap_or_default();
+        match found.len() {
+            0 => continue,
+            1 => return Ok(found[0].clone()),
+            k => {
+                return Err(format!(
+                    "{name}: {k} files under {} match ({}); keep one, or put each project's files \
+                     in <data_dir>/<project>/",
+                    scope.display(),
+                    found
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+        }
+    }
+    Err(format!("{name}: not found under {}", scope.display()))
 }
 
 fn slug(s: &str) -> String {
@@ -465,6 +583,31 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         check_override(&o.project, &o.search, &mut problems);
     }
 
+    let abs = |p: &Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base.join(p)
+        }
+    };
+    let data_dir = cohort.data_dir.as_deref().map(abs);
+    let index = match &data_dir {
+        Some(d) => match index_files(d) {
+            Ok(i) => Some(i),
+            Err(e) => {
+                problems.errors.push(e);
+                None
+            }
+        },
+        None => None,
+    };
+    let cohort_name = cohort.name.clone().unwrap_or_else(|| "cohort".into());
+    let output_dir = cohort
+        .output_dir
+        .as_deref()
+        .map(abs)
+        .unwrap_or_else(|| base.join(&cohort_name));
+
     let mut parts: Vec<Part> = Vec::new();
     for s in cohort
         .sdrfs
@@ -537,24 +680,57 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
             }
         };
         let args = r.args();
-        let unread: Vec<&PathBuf> = part
-            .settings
-            .data_files
-            .iter()
-            .filter(|f| !readable(f))
-            .collect();
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+        for f in &part.settings.data_files {
+            let name = f
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match (&data_dir, &index) {
+                (Some(root), Some(idx)) => match locate(idx, root, &part.project, &name) {
+                    Ok(p) => files.push(p),
+                    Err(e) => missing.push(e),
+                },
+                (Some(_), None) => {}
+                (None, _) => {
+                    if !f.exists() {
+                        missing.push(format!("{name}: not found next to the SDRF"));
+                    }
+                    files.push(f.clone());
+                }
+            }
+        }
+        if let Some(first) = missing.first() {
+            let msg = format!(
+                "{}: {} of {} data files in {} are missing ({first}{})",
+                part.project,
+                missing.len(),
+                part.settings.data_files.len(),
+                part.sdrf.display(),
+                if missing.len() > 1 { "; ..." } else { "" }
+            );
+            if data_dir.is_some() {
+                problems.errors.push(msg);
+            } else {
+                problems.warnings.push(format!(
+                    "{msg}; set cohort.data_dir to the folder that holds them"
+                ));
+            }
+        }
+        let unread: Vec<&PathBuf> = files.iter().filter(|f| !readable(f)).collect();
         if let Some(first) = unread.first() {
             problems.warnings.push(format!(
                 "{}: {} of {} data files in {} are not spectrum files andes reads (e.g. {}); \
                  convert or extract each and stage the result under its run's stage_as name",
                 part.project,
                 unread.len(),
-                part.settings.data_files.len(),
+                files.len(),
                 part.sdrf.display(),
                 first.display()
             ));
         }
-        for file in &part.settings.data_files {
+        for file in &files {
             let run = run_name(template, &part.project, file);
             if !names.insert(run.clone()) {
                 problems.errors.push(format!(
@@ -563,12 +739,14 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                     part.sdrf.display()
                 ));
             }
-            let ext = file
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
+            let fname = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let (_, ext) = split_name(&fname);
             runs.push(PlannedRun {
                 stage_as: format!("{run}{ext}"),
+                dir: output_dir.join("runs").join(&run),
                 run,
                 project: part.project.clone(),
                 sdrf: part.sdrf.clone(),
@@ -593,17 +771,24 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                     projects.push(r.project.clone());
                 }
             }
+            let input = |r: &PlannedRun| match key.0 {
+                Kind::Xl => r.dir.join(format!("{}.xl.tsv", r.run)),
+                _ => r.dir.join(format!("{}.pin", r.run)),
+            };
             PlannedGroup {
                 name: name.clone(),
                 kind: key.0.clone(),
                 stages: key.0.stages(),
                 projects,
                 runs: members.iter().map(|r| r.run.clone()).collect(),
+                dir: output_dir.join("groups").join(name),
+                inputs: members.iter().map(|r| input(r)).collect(),
             }
         })
         .collect();
     Ok(Plan {
-        cohort: cohort.name.clone().unwrap_or_else(|| "cohort".into()),
+        cohort: cohort_name,
+        output_dir,
         runs,
         groups,
         warnings: problems.warnings,
@@ -651,6 +836,8 @@ mod tests {
             &sdrf(&[("r1.raw", "10 ppm", DSSO), ("r2.raw", "10 ppm", DSSO)]),
         );
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
+        write(d, "r1.raw", "");
+        write(d, "r2.raw", "");
         let c = cfg("cohort:\n  name: t\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n");
         let p = plan(&c, d).unwrap();
         let names: Vec<&str> = p.runs.iter().map(|r| r.run.as_str()).collect();
@@ -661,8 +848,12 @@ mod tests {
         assert_eq!(p.groups[0].projects, ["A", "B"]);
         assert_eq!(p.runs[0].stage_as, "A.r1.raw");
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
-        let xl = p.runs[0].args.iter().position(|a| a == "--xl").unwrap();
-        crate::cli::parse_xl(&p.runs[0].args[xl + 1]).unwrap();
+        let a = &p.runs[0].args;
+        let value = |flag: &str| &a[a.iter().position(|x| x == flag).unwrap() + 1];
+        crate::cli::parse_xl(value("--xl")).unwrap();
+        crate::cli::parse_fixed_mods(value("--fixed-mods")).unwrap();
+        assert_eq!(value("--variable-mods"), "", "no variable mods in the SDRF");
+        crate::cli::parse_variable_mods(value("--variable-mods")).unwrap();
     }
 
     #[test]
@@ -777,6 +968,95 @@ mod tests {
             "{w:?}"
         );
         assert!(readable(Path::new("x.mzML.gz")) && readable(Path::new("x.d")));
+    }
+
+    #[test]
+    fn data_files_are_found_under_data_dir_by_name() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
+        write(
+            d,
+            "b.sdrf.tsv",
+            &sdrf(&[("r1.raw", "10 ppm", DSSO), ("r2.d.zip", "10 ppm", DSSO)]),
+        );
+        for sub in ["raw/A", "raw/B", "raw/other"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        write(d, "raw/A/r1.mzML", "");
+        write(d, "raw/B/r1.raw", "");
+        write(d, "raw/other/r1.raw", "");
+        write(d, "raw/B/r2.d.zip", "");
+        let yaml = "cohort:\n  name: t\n  data_dir: raw\n  output_dir: out\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
+        let p = plan(&cfg(yaml), d).unwrap();
+        let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap();
+        assert_eq!(file("A.r1").file, d.join("raw/A/r1.mzML"), "converted copy");
+        assert_eq!(file("A.r1").stage_as, "A.r1.mzML");
+        assert_eq!(
+            file("B.r1").file,
+            d.join("raw/B/r1.raw"),
+            "project folder wins"
+        );
+        assert_eq!(file("B.r2").stage_as, "B.r2.d.zip");
+        assert_eq!(file("B.r2").dir, d.join("out/runs/B.r2"));
+        assert_eq!(
+            p.groups[0].dir,
+            d.join("out/groups").join(&p.groups[0].name)
+        );
+        assert!(p.groups[0]
+            .inputs
+            .contains(&d.join("out/runs/A.r1/A.r1.xl.tsv")));
+
+        std::fs::remove_file(d.join("raw/B/r1.raw")).unwrap();
+        write(
+            d,
+            "b.sdrf.tsv",
+            &sdrf(&[("r1.raw", "10 ppm", DSSO), ("r9.raw", "10 ppm", DSSO)]),
+        );
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(
+            e.iter()
+                .any(|m| m.contains("B:") && m.contains("2 of 2 data files")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn two_projects_with_the_same_file_name_get_their_own_file_and_run() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
+        std::fs::create_dir_all(d.join("raw")).unwrap();
+        write(d, "raw/r1.raw", "");
+        let flat = t.path().join("raw/A");
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::create_dir_all(d.join("raw/B")).unwrap();
+        write(d, "raw/A/r1.raw", "");
+        write(d, "raw/B/r1.raw", "");
+        let p = plan(&cfg(yaml), d).unwrap();
+        let a = p.runs.iter().find(|r| r.project == "A").unwrap();
+        let b = p.runs.iter().find(|r| r.project == "B").unwrap();
+        assert_eq!((a.run.as_str(), b.run.as_str()), ("A.r1", "B.r1"));
+        assert_eq!(a.file, d.join("raw/A/r1.raw"));
+        assert_eq!(b.file, d.join("raw/B/r1.raw"));
+        assert_ne!(a.stage_as, b.stage_as);
+
+        std::fs::remove_dir_all(d.join("raw/A")).unwrap();
+        std::fs::remove_dir_all(d.join("raw/B")).unwrap();
+        std::fs::create_dir_all(d.join("raw/x")).unwrap();
+        write(d, "raw/x/r1.raw", "");
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(e.iter().any(|m| m.contains("2 files under")), "{e:?}");
+    }
+
+    #[test]
+    fn file_names_split_at_the_format_suffix() {
+        assert_eq!(split_name("x.d.zip"), ("x", ".d.zip"));
+        assert_eq!(split_name("run.1.RAW"), ("run.1", ".RAW"));
+        assert_eq!(split_name("a.mzML.gz"), ("a", ".mzML.gz"));
+        assert_eq!(split_name("noext"), ("noext", ""));
     }
 
     #[test]

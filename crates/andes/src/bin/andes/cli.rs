@@ -1424,8 +1424,24 @@ pub(crate) enum CohortCommand {
     /// Reads each run's <base>.xl.tsv, groups all CSMs into residue pairs and protein pairs,
     /// and gives every level its q-values once over all runs. Writes <output>.xl.tsv,
     /// <output>.xl.residue_pairs.tsv and <output>.xl.ppi.tsv.
-    #[command(name = "xl-fdr")]
+    #[command(name = "xl-fdr", hide = true)]
     XlFdr(CohortXlFdrArgs),
+    /// Plan the cohort, search every run, then run each group's stages
+    ///
+    /// Each run's outputs go to <output_dir>/runs/<run>/, each group's to
+    /// <output_dir>/groups/<group>/. A run whose search has finished is kept, so a rerun
+    /// searches only new or failed runs.
+    Run(CohortRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortRunArgs {
+    /// Config file with a `cohort` section
+    #[arg(value_name = "CONFIG")]
+    pub(crate) config: PathBuf,
+    /// Worker threads of each search [default: the number of logical CPUs]
+    #[arg(long, value_name = "N")]
+    pub(crate) threads: Option<usize>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1444,7 +1460,7 @@ pub(crate) struct CohortPlanArgs {
     /// run shares
     #[arg(value_name = "CONFIG")]
     pub(crate) config: PathBuf,
-    /// Where to write the plan [default: <cohort name>.plan.json in the current directory]
+    /// Where to write the plan [default: <output_dir>/plan.json]
     #[arg(long, short, value_name = "FILE")]
     pub(crate) output: Option<PathBuf>,
 }

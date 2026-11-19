@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{CohortCommand, CohortPlanArgs, CohortXlFdrArgs};
+use crate::cli::{CohortCommand, CohortPlanArgs, CohortRunArgs, CohortXlFdrArgs};
 use crate::cohort::{self, Plan};
 use crate::config::RunConfig;
 
@@ -11,7 +11,160 @@ pub(crate) fn run(cmd: CohortCommand) -> Result<(), Box<dyn Error>> {
     match cmd {
         CohortCommand::Plan(args) => plan(args),
         CohortCommand::XlFdr(args) => xl_fdr(args),
+        CohortCommand::Run(args) => run_cohort(args),
     }
+}
+
+/// The cohort's plan, or every problem logged and an error.
+fn load_plan(config: &Path) -> Result<Plan, Box<dyn Error>> {
+    let cfg = RunConfig::load(config)?;
+    let base = config.parent().unwrap_or_else(|| Path::new("."));
+    match cohort::plan(&cfg, base) {
+        Ok(p) => {
+            for w in &p.warnings {
+                log::warn!(target: "cohort", "{w}");
+            }
+            Ok(p)
+        }
+        Err(problems) => {
+            for w in &problems.warnings {
+                log::warn!(target: "cohort", "{w}");
+            }
+            for e in &problems.errors {
+                log::error!(target: "cohort", "{e}");
+            }
+            let n = problems.errors.len();
+            Err(format!(
+                "{n} error{} in {}; no plan written",
+                if n == 1 { "" } else { "s" },
+                config.display()
+            )
+            .into())
+        }
+    }
+}
+
+fn write_plan(plan: &Plan, out: &Path) -> Result<(), Box<dyn Error>> {
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(plan)?;
+    std::fs::write(out, json + "\n").map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    log::info!(target: "cohort", "wrote {}", out.display());
+    Ok(())
+}
+
+/// Give the spectrum file its run's name inside the run folder, so that the PIN `SpecId`
+/// prefix is the run name.
+fn stage(file: &Path, at: &Path) -> std::io::Result<()> {
+    if at.symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(file, at)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::hard_link(file, at)
+    }
+}
+
+/// Marker a run's folder gets once its search has finished, so that a rerun skips it.
+const DONE: &str = "search.done";
+
+fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
+    let config = std::fs::canonicalize(&args.config)
+        .map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
+    let plan = load_plan(&config)?;
+    report(&plan);
+    write_plan(&plan, &plan.output_dir.join("plan.json"))?;
+    let exe = std::env::current_exe()?;
+    let n = plan.runs.len();
+    let mut skipped = 0;
+    for (i, r) in plan.runs.iter().enumerate() {
+        if r.dir.join(DONE).exists() {
+            skipped += 1;
+            continue;
+        }
+        std::fs::create_dir_all(&r.dir)
+            .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
+        let staged = r.dir.join(&r.stage_as);
+        stage(&r.file, &staged).map_err(|e| {
+            format!(
+                "cannot stage {} as {}: {e}",
+                r.file.display(),
+                staged.display()
+            )
+        })?;
+        let log_path = r.dir.join("andes.log");
+        let log = std::fs::File::create(&log_path)
+            .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--config")
+            .arg(&config)
+            .arg("--spectrum")
+            .arg(&staged)
+            .arg("--output-pin")
+            .arg(r.dir.join(format!("{}.pin", r.run)));
+        if let Some(t) = args.threads {
+            cmd.arg("--threads").arg(t.to_string());
+        }
+        cmd.args(&r.args).stdout(log.try_clone()?).stderr(log);
+        let start = std::time::Instant::now();
+        log::info!(target: "cohort", "search {}/{n}: {}", i + 1, r.run);
+        let status = cmd
+            .status()
+            .map_err(|e| format!("{}: cannot start {}: {e}", r.run, exe.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "{}: the search failed ({status}); see {}",
+                r.run,
+                log_path.display()
+            )
+            .into());
+        }
+        std::fs::write(r.dir.join(DONE), "")?;
+        log::info!(
+            target: "cohort",
+            "search {}/{n}: {} done in {:.0} s",
+            i + 1,
+            r.run,
+            start.elapsed().as_secs_f64()
+        );
+    }
+    if skipped > 0 {
+        log::info!(target: "cohort", "{skipped} of {n} runs already searched; kept");
+    }
+    let mut not_run: Vec<&str> = Vec::new();
+    for g in &plan.groups {
+        for stage in &g.stages {
+            match *stage {
+                "xl-fdr" => {
+                    std::fs::create_dir_all(&g.dir)
+                        .map_err(|e| format!("cannot create {}: {e}", g.dir.display()))?;
+                    log::info!(target: "cohort", "group {}: crosslink FDR over {} runs", g.name, g.inputs.len());
+                    xl_fdr_tables(&g.inputs, &g.dir.join(&g.name))?;
+                }
+                other => {
+                    if !not_run.contains(&other) {
+                        not_run.push(other);
+                    }
+                }
+            }
+        }
+    }
+    if !not_run.is_empty() {
+        log::warn!(
+            target: "cohort",
+            "`andes cohort run` does not yet run the {} stage(s); those groups' runs are searched \
+             and their outputs are in {}",
+            not_run.join(", "),
+            plan.output_dir.join("runs").display()
+        );
+    }
+    Ok(())
 }
 
 /// One CSM read from a run's table.
@@ -80,8 +233,13 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<usize, String> {
 }
 
 fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
+    xl_fdr_tables(&args.tables, &args.output)
+}
+
+/// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`.
+fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
-    for t in &args.tables {
+    for t in tables {
         let n = read_csms(t, &mut csms)?;
         log::info!(target: "cohort", "{}: {n} scored CSMs", t.display());
     }
@@ -100,7 +258,7 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
     let levels = crate::xl_fdr::levels_of(items, ppi, rows);
     crate::xl_fdr::report_levels(&levels);
     let with = |ext: &str| {
-        let mut s = args.output.clone().into_os_string();
+        let mut s = output.to_path_buf().into_os_string();
         s.push(ext);
         PathBuf::from(s)
     };
@@ -144,44 +302,18 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
         "wrote {} ({} CSMs from {} runs) and the residue-pair and protein-pair tables",
         csm_path.display(),
         csms.len(),
-        args.tables.len()
+        tables.len()
     );
     Ok(())
 }
 
 fn plan(args: CohortPlanArgs) -> Result<(), Box<dyn Error>> {
-    let cfg = RunConfig::load(&args.config)?;
-    let base = args.config.parent().unwrap_or_else(|| Path::new("."));
-    let plan = match cohort::plan(&cfg, base) {
-        Ok(p) => p,
-        Err(problems) => {
-            for w in &problems.warnings {
-                log::warn!(target: "cohort", "{w}");
-            }
-            for e in &problems.errors {
-                log::error!(target: "cohort", "{e}");
-            }
-            let n = problems.errors.len();
-            return Err(format!(
-                "{n} error{} in {}; no plan written",
-                if n == 1 { "" } else { "s" },
-                args.config.display()
-            )
-            .into());
-        }
-    };
-    for w in &plan.warnings {
-        log::warn!(target: "cohort", "{w}");
-    }
+    let plan = load_plan(&args.config)?;
     report(&plan);
     let out = args
         .output
-        .unwrap_or_else(|| PathBuf::from(format!("{}.plan.json", plan.cohort)));
-    let json = serde_json::to_string_pretty(&plan)?;
-    std::fs::write(&out, json + "\n")
-        .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
-    log::info!(target: "cohort", "wrote {}", out.display());
-    Ok(())
+        .unwrap_or_else(|| plan.output_dir.join("plan.json"));
+    write_plan(&plan, &out)
 }
 
 fn report(plan: &Plan) {

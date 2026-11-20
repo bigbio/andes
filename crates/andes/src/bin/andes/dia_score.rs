@@ -171,6 +171,7 @@ pub(crate) fn learned_score(
     let mut kept: Option<Vec<f32>> = None;
     let mut degenerate_folds = 0usize;
     for (round, &round_q) in ROUND_Q.iter().enumerate() {
+        let t_round = std::time::Instant::now();
         let fits: Vec<Result<Vec<(usize, f32)>, String>> = (0..FOLDS)
             .into_par_iter()
             .map(|f| {
@@ -193,8 +194,9 @@ pub(crate) fn learned_score(
                 };
                 let m = train_gbdt(&ds, &p, seed ^ (round as u64) << 8 ^ f)
                     .map_err(|e| format!("fold {f}: {e:?}"))?;
-                let out: Vec<(usize, f32)> = (0..n)
-                    .filter(|&i| fold[i] == f)
+                let held: Vec<usize> = (0..n).filter(|&i| fold[i] == f).collect();
+                let out: Vec<(usize, f32)> = held
+                    .into_par_iter()
                     .map(|i| (i, m.predict_value(&x[i * nf..(i + 1) * nf])))
                     .collect();
                 if out.len() > 1 && out.iter().all(|&(_, s)| s == out[0].1) {
@@ -230,8 +232,9 @@ pub(crate) fn learned_score(
         }
         log::info!(
             target: "dia",
-            "learned score round {round}: {} targets at q <= 0.01 (out of fold)",
-            (0..n).filter(|&i| target[i] && q[i] <= 0.01).count()
+            "learned score round {round}: {} targets at q <= 0.01 (out of fold) [{:.2}s]",
+            (0..n).filter(|&i| target[i] && q[i] <= 0.01).count(),
+            t_round.elapsed().as_secs_f64()
         );
         kept = Some(score);
     }
@@ -382,6 +385,12 @@ pub(crate) fn write_precursor_pin(
         .collect();
     let p1 = read_pass1(pin, &own)?;
     drop(own);
+    log::info!(
+        target: "dia",
+        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
+        pin.display(),
+        t0.elapsed().as_secs_f64()
+    );
     let p1_of = p1.of_rows(t);
     let n = t.len();
     let mut names: Vec<String> = extra.iter().map(|(n, _)| n.clone()).collect();
@@ -410,6 +419,7 @@ pub(crate) fn write_precursor_pin(
         .collect();
     let learned = learned_score(&x, &names, &target, &key, seed);
     let gb = learned.score.as_deref();
+    let t_write = std::time::Instant::now();
 
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", out_pin.display());
     let tmp = out_pin.with_extension("pin.partial");
@@ -476,13 +486,14 @@ pub(crate) fn write_precursor_pin(
     log::info!(
         target: "dia",
         "precursor PIN: {n} rows ({} targets), {} learned-score features ({}, {} degenerate \
-         folds), {} pass-1 columns, {} with a pass-1 row [{:.2}s]",
+         folds), {} pass-1 columns, {} with a pass-1 row [written in {:.2}s; total {:.2}s]",
         ids.targets.len(),
         nf,
         if ids.learned { "kept" } else { "score left out" },
         ids.degenerate_folds,
         p1.names.len(),
         p1_of.iter().filter(|p| p.is_some()).count(),
+        t_write.elapsed().as_secs_f64(),
         t0.elapsed().as_secs_f64()
     );
     Ok(ids)

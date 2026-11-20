@@ -1632,7 +1632,7 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "temp-dir", value_name = "DIR")]
     pub(crate) temp_dir: Option<PathBuf>,
 
-    /// Seed of the transfer FDR folds and models and of the samples
+    /// Seed of the transfer FDR folds and models and of the samples; on a DIA study, of the learned score and the rescoring
     #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,

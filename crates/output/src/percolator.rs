@@ -274,10 +274,18 @@ fn tdc_flag(extra_args: &[String]) -> Option<String> {
     (!set).then(|| "-Y".to_string())
 }
 
+/// `--seed 42` unless `extra_args` set the seed.
+fn default_seed(extra_args: &[String]) -> Vec<String> {
+    if extra_args.iter().any(|a| a == "--seed" || a == "-S") {
+        Vec::new()
+    } else {
+        vec!["--seed".to_string(), "42".to_string()]
+    }
+}
+
 fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<String> {
-    let mut args = vec![
-        "--seed".to_string(),
-        "42".to_string(),
+    let mut args = default_seed(extra_args);
+    args.extend([
         "--results-psms".to_string(),
         out.target.to_string_lossy().into_owned(),
         "--decoy-results-psms".to_string(),
@@ -285,7 +293,7 @@ fn native_args(pin: &Path, out: &ResultPaths, extra_args: &[String]) -> Vec<Stri
         "--weights".to_string(),
         out.weights.to_string_lossy().into_owned(),
         "--only-psms".to_string(),
-    ];
+    ]);
     args.extend(tdc_flag(extra_args));
     args.extend(extra_args.iter().cloned());
     args.push(pin.to_string_lossy().into_owned());
@@ -323,8 +331,9 @@ fn docker_args(
         format!("{}:/out", out_dir.display()),
         image.to_string(),
         "percolator".to_string(),
-        "--seed".to_string(),
-        "42".to_string(),
+    ];
+    args.extend(default_seed(extra_args));
+    args.extend([
         "--results-psms".to_string(),
         in_out(&out.target),
         "--decoy-results-psms".to_string(),
@@ -332,7 +341,7 @@ fn docker_args(
         "--weights".to_string(),
         in_out(&out.weights),
         "--only-psms".to_string(),
-    ];
+    ]);
     args.extend(tdc_flag(extra_args));
     args.extend(extra_args.iter().cloned());
     args.push(format!("/pin/{pin_name}"));
@@ -360,16 +369,15 @@ fn static_pass_args(
     extra_args: &[String],
     tdc: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--seed".to_string(),
-        "42".to_string(),
+    let mut args = default_seed(extra_args);
+    args.extend([
         "--results-psms".to_string(),
         target,
         "--decoy-results-psms".to_string(),
         decoy,
         "--only-psms".to_string(),
         "--static".to_string(),
-    ];
+    ]);
     if tdc {
         args.push("--override".to_string());
     }
@@ -1497,6 +1505,19 @@ mod tests {
         assert_eq!(args.last().unwrap(), "/tmp/d/x.pin");
         let fdr_pos = args.iter().position(|a| a == "--testFDR").unwrap();
         assert!(fdr_pos < args.len() - 1);
+        let seeded = native_args(Path::new("/tmp/d/x.pin"), &out, &["--seed".into(), "7".into()]);
+        assert_eq!(seeded.iter().filter(|a| *a == "--seed").count(), 1);
+        assert!(seeded.windows(2).any(|w| w == ["--seed", "7"]));
+        let seeded = static_pass_args(
+            "/p/x.pin".into(),
+            "/p/t".into(),
+            "/p/d".into(),
+            "/p/w".into(),
+            &["--seed".into(), "7".into()],
+            true,
+        );
+        assert_eq!(seeded.iter().filter(|a| *a == "--seed").count(), 1);
+        assert!(seeded.windows(2).any(|w| w == ["--seed", "7"]));
     }
 
     #[test]

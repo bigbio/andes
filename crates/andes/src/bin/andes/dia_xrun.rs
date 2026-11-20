@@ -238,6 +238,19 @@ pub(crate) fn study_runs(quant_dir: &Path) -> Result<Vec<String>, String> {
     Ok(stems)
 }
 
+/// Replaces any seed in the rescoring arguments by `--seed <seed>`.
+fn set_seed(args: &mut Vec<String>, seed: u64) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--seed" || args[i] == "-S" {
+            args.drain(i..(i + 2).min(args.len()));
+        } else {
+            i += 1;
+        }
+    }
+    args.extend(["--seed".to_string(), seed.to_string()]);
+}
+
 fn with_suffix(base: &Path, suffix: &str) -> PathBuf {
     let mut p = base.as_os_str().to_owned();
     p.push(suffix);
@@ -301,7 +314,7 @@ pub(crate) fn finalize(
         return Err(format!("{}: no DIA runs", dir.display()));
     };
     let (searched, searched_args) = decode_rescore(&rescore)?;
-    let seed = crate::dia_score::percolator_seed(&searched_args);
+    let seed = a.seed;
     let (backend, mut args) = match searched {
         PercolatorBackend::Native { memory } => (PercolatorBackend::Native { memory }, searched_args),
         other => {
@@ -326,6 +339,7 @@ pub(crate) fn finalize(
         }
     };
     crate::dia::default_train_fdr(&mut args);
+    set_seed(&mut args, seed);
     if let PercolatorBackend::Native { memory } = &backend {
         std::fs::create_dir_all(&memory.spill_dir)
             .map_err(|e| format!("create {}: {e}", memory.spill_dir.display()))?;
@@ -543,6 +557,16 @@ mod tests {
         assert_eq!(col(&xr, "xr_max"), &[20.0]);
         assert_eq!(col(&xr, "xr_n"), &[2.0]);
         assert_eq!(col(&xr, "xr_rtd"), &[0.25]);
+    }
+
+    #[test]
+    fn the_study_seed_replaces_the_searched_one() {
+        let mut args = vec!["--seed".to_string(), "7".into(), "--trainFDR".into(), "0.05".into()];
+        set_seed(&mut args, 3);
+        assert_eq!(args, ["--trainFDR", "0.05", "--seed", "3"]);
+        let mut args = Vec::new();
+        set_seed(&mut args, 42);
+        assert_eq!(args, ["--seed", "42"]);
     }
 
     #[test]

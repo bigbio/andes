@@ -8,7 +8,11 @@
 //! with the vote intensity as tie-break. `raw RT` is the andes-rt prediction of the form's own
 //! sequence (targets and decoys alike), `f` a monotone piecewise-linear map from raw
 //! predictions to the run's minutes and `sigma` the robust spread of confident matches around
-//! it; both are fitted per run by [`DiaRtPrior::fit`].
+//! it; both are fitted per run by [`DiaRtPrior::fit`]. Beyond the end knots `f` continues
+//! with the map's overall slope: a form predicted to elute before the first or after the last
+//! anchor is calibrated outside the anchors' RT range, not pinned at its edge (pinned, every
+//! such form would agree with the scans at the edge, and on a short run or an RT slice that is
+//! about half of the forms).
 
 use model::peptide::Peptide;
 use model::stats::MAD_TO_SD;
@@ -26,6 +30,9 @@ const MAX_KNOTS: usize = 40;
 const MIN_KNOTS: usize = 6;
 /// Anchors per knot when the anchors are too few for `MAX_KNOTS`.
 const ANCHORS_PER_KNOT: usize = 25;
+/// Anchors at which the monotone map reaches its full resolution (`MAX_KNOTS` knots); the
+/// calibration sample grows until it holds this many or the run is used up.
+pub const FULL_MAP_ANCHORS: usize = MAX_KNOTS * ANCHORS_PER_KNOT;
 /// Rounds of residual trimming in the fit.
 const TRIM_ROUNDS: usize = 5;
 /// Residuals beyond this many sigmas leave the next fitting round.
@@ -131,7 +138,8 @@ impl DiaRtPrior {
         })
     }
 
-    /// Calibrated RT in minutes of a raw prediction (NaN stays NaN; constant beyond the ends).
+    /// Calibrated RT in minutes of a raw prediction (NaN stays NaN; beyond the end knots the
+    /// map continues with its overall slope).
     pub fn apply(&self, raw: f64) -> f64 {
         if raw.is_finite() {
             interp(&self.knots_raw, &self.knots_min, raw)
@@ -188,14 +196,21 @@ fn median_in_place(v: &mut [f64]) -> f64 {
     }
 }
 
-/// Piecewise-linear interpolation through strictly increasing `xs`, constant beyond the ends.
+/// Piecewise-linear interpolation through strictly increasing `xs`, extended beyond the ends
+/// with the overall slope `(y_last - y_first) / (x_last - x_first)` (constant with one knot).
 fn interp(xs: &[f64], ys: &[f64], x: f64) -> f64 {
+    let last = xs.len() - 1;
+    let slope = if last > 0 {
+        (ys[last] - ys[0]) / (xs[last] - xs[0])
+    } else {
+        0.0
+    };
     let i = xs.partition_point(|&k| k <= x);
     if i == 0 {
-        return ys[0];
+        return ys[0] + slope * (x - xs[0]);
     }
     if i == xs.len() {
-        return ys[xs.len() - 1];
+        return ys[last] + slope * (x - xs[last]);
     }
     let (x0, x1, y0, y1) = (xs[i - 1], xs[i], ys[i - 1], ys[i]);
     y0 + (x - x0) * (y1 - y0) / (x1 - x0)
@@ -248,6 +263,23 @@ mod tests {
     }
 
     #[test]
+    fn the_map_reaches_its_full_resolution_at_full_map_anchors() {
+        let mut s = 11u64;
+        let pts = |n: usize, s: &mut u64| -> Vec<(f64, f64)> {
+            (0..n)
+                .map(|_| {
+                    let x = lcg(s);
+                    (x, 8.0 * x + 0.2 * normal(s))
+                })
+                .collect()
+        };
+        let full = DiaRtPrior::fit(&pts(FULL_MAP_ANCHORS, &mut s)).unwrap();
+        assert_eq!(full.knots(), MAX_KNOTS);
+        let short = DiaRtPrior::fit(&pts(FULL_MAP_ANCHORS / 4, &mut s)).unwrap();
+        assert!(short.knots() < MAX_KNOTS / 2, "knots {}", short.knots());
+    }
+
+    #[test]
     fn too_few_or_non_finite_anchors_give_no_prior() {
         let few: Vec<(f64, f64)> = (0..MIN_ANCHORS - 1).map(|i| (i as f64, i as f64)).collect();
         assert!(DiaRtPrior::fit(&few).is_none());
@@ -260,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn calibrated_rt_is_non_decreasing_and_constant_beyond_the_anchors() {
+    fn calibrated_rt_is_non_decreasing_and_extends_beyond_the_anchors() {
         let mut s = 3u64;
         let pts: Vec<(f64, f64)> = (0..400)
             .map(|_| {
@@ -275,8 +307,10 @@ mod tests {
             assert!(y >= last);
             last = y;
         }
-        assert_eq!(p.apply(-5.0), p.apply(-1.0));
-        assert_eq!(p.apply(5.0), p.apply(2.0));
+        assert!(p.apply(-1.0) < p.apply(0.0) - 4.0, "{}", p.apply(-1.0));
+        assert!(p.apply(2.0) > p.apply(1.0) + 4.0, "{}", p.apply(2.0));
+        let slope = (p.apply(3.0) - p.apply(2.0)) / 1.0;
+        assert!((slope - 5.0).abs() < 0.3, "overall slope {slope}");
         assert!(p.apply(f64::NAN).is_nan());
     }
 

@@ -113,12 +113,29 @@ const DIA_RT_CAL_MIN_SPECTRA: usize = 2_000;
 const DIA_RT_CAL_Q: f64 = 0.01;
 const SECS_PER_MIN: f64 = 60.0;
 
+/// Calibration sample sizes in search order: the first sample (`DIA_RT_CAL_FRACTION` of the
+/// run, at least `DIA_RT_CAL_MIN_SPECTRA`), then doubling up to every spectrum of the run.
+fn dia_rt_cal_sizes(n_spectra: usize) -> Vec<usize> {
+    let mut n = ((n_spectra as f64 * DIA_RT_CAL_FRACTION).round() as usize)
+        .max(DIA_RT_CAL_MIN_SPECTRA)
+        .min(n_spectra);
+    let mut sizes = vec![n];
+    while n < n_spectra {
+        n = (2 * n).min(n_spectra);
+        sizes.push(n);
+    }
+    sizes
+}
+
 /// Fits the run's RT prior for the DIA vote cut and installs it on `prepared`: a deterministic
 /// subsample of the run is searched with the plain vote rank, the top match of each sample
 /// spectrum that is a target at q <= `DIA_RT_CAL_Q` becomes an anchor (andes-rt raw prediction
 /// of its peptide, scan minutes), and [`search::dia_rt_rank::DiaRtPrior::fit`] maps raw
-/// predictions to minutes. With too few anchors no prior is installed and the cut keeps the
-/// vote rank.
+/// predictions to minutes. While the anchors are fewer than the map needs for its full
+/// resolution ([`search::dia_rt_rank::FULL_MAP_ANCHORS`]) the sample grows (sizes of
+/// `dia_rt_cal_sizes`, each adding the next spectra of the same hash order), so a short or
+/// sparse run gets the anchors of a long one when its spectra hold them. With too few anchors
+/// no prior is installed and the cut keeps the vote rank.
 fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f64) {
     let Some(model) = prepared.form_rt_model() else {
         return;
@@ -127,56 +144,61 @@ fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f6
         return;
     }
     let t = std::time::Instant::now();
-    let n = ((spectra.len() as f64 * DIA_RT_CAL_FRACTION).round() as usize)
-        .max(DIA_RT_CAL_MIN_SPECTRA)
-        .min(spectra.len());
     let mut order: Vec<(u64, usize)> = (0..spectra.len())
         .map(|i| (splitmix64(i as u64), i))
         .collect();
-    if n < order.len() {
-        order.select_nth_unstable(n - 1);
-        order.truncate(n);
-    }
-    let mut sample: Vec<Spectrum> = order.iter().map(|&(_, i)| spectra[i].clone()).collect();
-    sample.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
-    let mut queues: Vec<TopNQueue> = Vec::with_capacity(sample.len());
-    let mut start = 0;
-    while start < sample.len() {
-        let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
-        queues.extend(prepared.run_chunk(&sample[start..start + take], start));
-        start += take;
-    }
-    let mut tops: Vec<(usize, u32)> = Vec::new();
+    order.sort_unstable();
+    let mut tops: Vec<(u32, f64)> = Vec::new();
     let mut labels: Vec<search::tdc::ScoredLabel> = Vec::new();
-    for (i, q) in queues.iter().enumerate() {
-        if let Some(p) = q.peek_top() {
-            let idx = p.primary_candidate_idx();
-            tops.push((i, idx));
-            labels.push(search::tdc::ScoredLabel {
-                score: p.score,
-                is_decoy: prepared.candidate_is_decoy(idx),
-            });
+    let mut anchors: Vec<(f64, f64)> = Vec::new();
+    let mut searched = 0;
+    for n in dia_rt_cal_sizes(spectra.len()) {
+        let mut part: Vec<&Spectrum> = order[searched..n]
+            .iter()
+            .map(|&(_, i)| &spectra[i])
+            .collect();
+        part.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+        let part: Vec<Spectrum> = part.into_iter().cloned().collect();
+        let mut start = 0;
+        while start < part.len() {
+            let take = index_chunk_len(&part[start..], index_order_mass, span_da);
+            let chunk = &part[start..start + take];
+            for (s, q) in chunk.iter().zip(prepared.run_chunk(chunk, searched + start)) {
+                if let Some(p) = q.peek_top() {
+                    let idx = p.primary_candidate_idx();
+                    let rt = s
+                        .rt_seconds
+                        .filter(|t| t.is_finite())
+                        .map_or(f64::NAN, |t| t / SECS_PER_MIN);
+                    tops.push((idx, rt));
+                    labels.push(search::tdc::ScoredLabel {
+                        score: p.score,
+                        is_decoy: prepared.candidate_is_decoy(idx),
+                    });
+                }
+            }
+            start += take;
+        }
+        searched = n;
+        let q = search::tdc::qvalues(&labels);
+        anchors = tops
+            .iter()
+            .zip(&labels)
+            .zip(&q)
+            .filter(|((top, l), q)| !l.is_decoy && **q <= DIA_RT_CAL_Q && top.1.is_finite())
+            .map(|((top, _), _)| (f64::from(model(&prepared.candidate_peptide(top.0))), top.1))
+            .collect();
+        if anchors.len() >= search::dia_rt_rank::FULL_MAP_ANCHORS {
+            break;
         }
     }
-    let q = search::tdc::qvalues(&labels);
-    let anchors: Vec<(f64, f64)> = tops
-        .iter()
-        .zip(&labels)
-        .zip(&q)
-        .filter(|((_, l), q)| !l.is_decoy && **q <= DIA_RT_CAL_Q)
-        .filter_map(|(((si, idx), _), _)| {
-            let rt = sample[*si].rt_seconds.filter(|t| t.is_finite())? / SECS_PER_MIN;
-            Some((f64::from(model(&prepared.candidate_peptide(*idx))), rt))
-        })
-        .collect();
     match search::dia_rt_rank::DiaRtPrior::fit(&anchors) {
         Some(prior) => {
             log::info!(
                 target: "dia-rt-rank",
-                "RT prior from {} of {} spectra: {} anchors at q <= {DIA_RT_CAL_Q} ({} within \
-                 the trimming band), {} knots, sigma {:.3} min; the vote cut ranks by votes \
-                 and RT [{:.1}s]",
-                sample.len(),
+                "RT prior from {searched} of {} spectra: {} anchors at q <= {DIA_RT_CAL_Q} ({} \
+                 within the trimming band), {} knots, sigma {:.3} min; the vote cut ranks by \
+                 votes and RT [{:.1}s]",
                 spectra.len(),
                 prior.anchors(),
                 prior.kept(),
@@ -188,10 +210,9 @@ fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f6
         }
         None => log::info!(
             target: "dia-rt-rank",
-            "no RT prior: {} anchors at q <= {DIA_RT_CAL_Q} from {} sample spectra (at least \
-             {} needed); the vote cut ranks by votes [{:.1}s]",
+            "no RT prior: {} anchors at q <= {DIA_RT_CAL_Q} from {searched} sample spectra (at \
+             least {} needed); the vote cut ranks by votes [{:.1}s]",
             anchors.len(),
-            sample.len(),
             search::dia_rt_rank::MIN_ANCHORS,
             t.elapsed().as_secs_f64()
         ),
@@ -2596,5 +2617,21 @@ mod filtered_tsv_tests {
         assert!(text.starts_with("PSMId\tq-value\t"));
         assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
         assert!(!output::ms1_table::partial_path(&path).exists());
+    }
+}
+
+#[cfg(test)]
+mod dia_rt_cal_tests {
+    use super::dia_rt_cal_sizes;
+
+    #[test]
+    fn the_rt_calibration_sample_doubles_up_to_the_whole_run() {
+        assert_eq!(
+            dia_rt_cal_sizes(292_883),
+            [5_858, 11_716, 23_432, 46_864, 93_728, 187_456, 292_883]
+        );
+        assert_eq!(dia_rt_cal_sizes(12_032), [2_000, 4_000, 8_000, 12_032]);
+        assert_eq!(dia_rt_cal_sizes(1_500), [1_500]);
+        assert_eq!(dia_rt_cal_sizes(4_000), [2_000, 4_000]);
     }
 }

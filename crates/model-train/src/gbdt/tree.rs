@@ -1,4 +1,11 @@
+use rayon::prelude::*;
 use scoring_crate::gbdt_eval::Tree;
+
+/// Nodes with fewer rows than this build their histograms on the calling thread.
+const PAR_MIN_ROWS: usize = 4096;
+
+/// Features per histogram task: each task reads a node's gradients once for its block.
+const FEATURE_BLOCK: usize = 4;
 
 pub struct TreeParams {
     pub max_depth: u32,
@@ -31,7 +38,8 @@ impl BinHist {
 
 struct Builder<'a> {
     params: &'a TreeParams,
-    binned: &'a [u8],
+    cols: &'a [u8],
+    n_rows: usize,
     grad: &'a [f32],
     hess: &'a [f32],
     bin_uppers: &'a [Vec<f32>],
@@ -47,7 +55,7 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn new(
         params: &'a TreeParams,
-        binned: &'a [u8],
+        cols: &'a [u8],
         grad: &'a [f32],
         hess: &'a [f32],
         bin_uppers: &'a [Vec<f32>],
@@ -55,7 +63,8 @@ impl<'a> Builder<'a> {
         let capacity = 1 << (params.max_depth.min(20) + 1);
         Self {
             params,
-            binned,
+            cols,
+            n_rows: grad.len(),
             grad,
             hess,
             bin_uppers,
@@ -111,8 +120,36 @@ impl<'a> Builder<'a> {
         self.default_left[idx] = 1;
     }
 
-    fn build(&mut self, rows: &[usize], depth: u32) -> usize {
+    fn col(&self, feat: usize) -> &'a [u8] {
+        &self.cols[feat * self.n_rows..(feat + 1) * self.n_rows]
+    }
+
+    /// Gradient and hessian histograms of every feature over `rows`. Each bin adds its rows in
+    /// the order of `rows`, so the sums do not depend on how the features are split over threads.
+    fn histograms(&self, rows: &[usize]) -> Vec<BinHist> {
         let nf = self.params.n_features;
+        let nb = self.params.n_bins;
+        let gh: Vec<(f32, f32)> = rows.iter().map(|&r| (self.grad[r], self.hess[r])).collect();
+        let block = |first: usize| -> Vec<BinHist> {
+            let feats = first..(first + FEATURE_BLOCK).min(nf);
+            let cols: Vec<&[u8]> = feats.clone().map(|f| self.col(f)).collect();
+            let mut hists: Vec<BinHist> = feats.map(|_| BinHist::new(nb)).collect();
+            for (&r, &(g, h)) in rows.iter().zip(&gh) {
+                for (hist, col) in hists.iter_mut().zip(&cols) {
+                    hist.accumulate(col[r], g, h);
+                }
+            }
+            hists
+        };
+        let firsts: Vec<usize> = (0..nf).step_by(FEATURE_BLOCK).collect();
+        if rows.len() < PAR_MIN_ROWS {
+            firsts.into_iter().flat_map(block).collect()
+        } else {
+            firsts.into_par_iter().map(block).collect::<Vec<_>>().concat()
+        }
+    }
+
+    fn build(&mut self, rows: &[usize], depth: u32) -> usize {
         let nb = self.params.n_bins;
         let lambda = self.params.lambda;
         let min_h = self.params.min_hessian;
@@ -129,15 +166,7 @@ impl<'a> Builder<'a> {
             return node_idx;
         }
 
-        let mut hists: Vec<BinHist> = (0..nf).map(|_| BinHist::new(nb)).collect();
-        for &r in rows {
-            let g = self.grad[r];
-            let h = self.hess[r];
-            for (feat, hist) in hists.iter_mut().enumerate() {
-                let bin = self.binned[r * nf + feat];
-                hist.accumulate(bin, g, h);
-            }
-        }
+        let hists = self.histograms(rows);
 
         let base_score = g_total * g_total / (h_total + lambda);
         let mut best_gain = 0.0_f32;
@@ -170,9 +199,9 @@ impl<'a> Builder<'a> {
                 self.mark_leaf(rows, node_idx);
             }
             Some(feat) => {
-                let (left_rows, right_rows): (Vec<usize>, Vec<usize>) = rows
-                    .iter()
-                    .partition(|&&r| (self.binned[r * nf + feat] as usize) <= best_bin);
+                let col = self.col(feat);
+                let (left_rows, right_rows): (Vec<usize>, Vec<usize>) =
+                    rows.iter().partition(|&&r| (col[r] as usize) <= best_bin);
 
                 let left_idx = self.build(&left_rows, depth + 1);
                 let right_idx = self.build(&right_rows, depth + 1);
@@ -184,6 +213,19 @@ impl<'a> Builder<'a> {
 
         node_idx
     }
+}
+
+/// Row-major bins (`binned[row * n_features + feature]`) to feature-major columns
+/// (`cols[feature * n_rows + row]`), the layout of [`fit_tree_cols`].
+pub fn to_columns(binned: &[u8], n_features: usize) -> Vec<u8> {
+    let n_rows = binned.len() / n_features.max(1);
+    let mut cols = vec![0u8; binned.len()];
+    for (r, row) in binned.chunks_exact(n_features.max(1)).enumerate() {
+        for (f, &b) in row.iter().enumerate() {
+            cols[f * n_rows + r] = b;
+        }
+    }
+    cols
 }
 
 pub fn fit_tree(
@@ -203,9 +245,21 @@ pub fn fit_tree_with_leaves(
     params: &TreeParams,
     bin_uppers: &[Vec<f32>],
 ) -> (Tree, Vec<u32>) {
+    let cols = to_columns(binned, params.n_features);
+    fit_tree_cols(&cols, grad, hess, params, bin_uppers)
+}
+
+/// [`fit_tree_with_leaves`] on feature-major bins (`cols[feature * n_rows + row]`).
+pub fn fit_tree_cols(
+    cols: &[u8],
+    grad: &[f32],
+    hess: &[f32],
+    params: &TreeParams,
+    bin_uppers: &[Vec<f32>],
+) -> (Tree, Vec<u32>) {
     debug_assert_eq!(grad.len(), hess.len(), "grad/hess length mismatch");
     debug_assert_eq!(
-        binned.len(),
+        cols.len(),
         grad.len() * params.n_features,
         "binned length mismatch"
     );
@@ -213,7 +267,7 @@ pub fn fit_tree_with_leaves(
     let n_rows = grad.len();
     let all_rows: Vec<usize> = (0..n_rows).collect();
 
-    let mut builder = Builder::new(params, binned, grad, hess, bin_uppers);
+    let mut builder = Builder::new(params, cols, grad, hess, bin_uppers);
     builder.build(&all_rows, 0);
 
     let tree = Tree {

@@ -5,6 +5,7 @@ use std::time::Instant;
 use model::isotope::averagine_isotope_envelope;
 use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
+use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
 use onnx_infer::predictors::spectral::FragmentTolerance;
@@ -49,7 +50,6 @@ const RERANK_RT_MISSING: &str = "andesrt_missing";
 /// Rounds of 3-sigma trimming of the per-file RT spread in the re-rank.
 const RERANK_RT_TRIM_ROUNDS: usize = 5;
 const RERANK_RT_TRIM_SIGMAS: f64 = 3.0;
-const MAD_TO_SD: f64 = 1.4826;
 
 fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {
     let p: Vec<&str> = spec_id.rsplitn(4, '_').collect();

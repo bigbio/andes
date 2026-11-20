@@ -11,6 +11,7 @@
 //! it; both are fitted per run by [`DiaRtPrior::fit`].
 
 use model::peptide::Peptide;
+use model::stats::MAD_TO_SD;
 
 /// Weight of the squared RT z-score against one fragment vote.
 pub const RT_PENALTY_WEIGHT: f64 = 0.5;
@@ -29,9 +30,6 @@ const ANCHORS_PER_KNOT: usize = 25;
 const TRIM_ROUNDS: usize = 5;
 /// Residuals beyond this many sigmas leave the next fitting round.
 const TRIM_SIGMAS: f64 = 3.0;
-/// Median absolute deviation to standard deviation of a normal distribution.
-const MAD_TO_SD: f64 = 1.4826;
-
 /// Predicts the raw andes-rt value of one peptidoform; NaN when the model cannot encode it.
 pub type FormRtModel = dyn Fn(&Peptide) -> f32 + Send + Sync;
 

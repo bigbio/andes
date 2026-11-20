@@ -7,13 +7,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams, MIN_VAL_AUC};
 use output::dia_pass2_table::Pass2Table;
+use output::PercolatorPsm;
 use rayon::prelude::*;
 
 pub(crate) const GB_COLUMN: &str = "dia_gb_score";
+/// Column present in every precursor PIN (1 when the precursor has a pass-1 row).
+pub(crate) const PRESENT_COLUMN: &str = "p1_present";
+/// Precursor q-value at which the precursor PIN must match pass 1 to be used.
+const COMPARE_Q: f64 = 0.01;
 const FOLDS: u64 = 3;
 const ROUND_Q: [f64; 3] = [f64::INFINITY, 0.05, 0.01];
 const MISSING_DIA_LLR: f32 = -99.0;
@@ -356,10 +361,12 @@ pub(crate) struct PrecursorPin {
     pub(crate) learned: bool,
 }
 
-/// Rewrites `pin` (the pass-1 PIN) as the precursor PIN: one row per pass-2 precursor with the
-/// learned score (left out when its first round is degenerate), `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
+/// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
+/// per pass-2 precursor with the learned score (left out when its first round is degenerate),
+/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
 pub(crate) fn write_precursor_pin(
     pin: &Path,
+    out_pin: &Path,
     t: &Pass2Table,
     extra: &[(String, Vec<f32>)],
     seed: u64,
@@ -402,8 +409,8 @@ pub(crate) fn write_precursor_pin(
     let learned = learned_score(&x, &names, &target, &key, seed);
     let gb = learned.score.as_deref();
 
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
-    let tmp = pin.with_extension("pin.partial");
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", out_pin.display());
+    let tmp = out_pin.with_extension("pin.partial");
     let mut out = BufWriter::new(std::fs::File::create(&tmp).map_err(|e| err(&e))?);
     let mut head = vec![
         "SpecId".to_string(),
@@ -416,7 +423,7 @@ pub(crate) fn write_precursor_pin(
     }
     head.extend(names.iter().cloned());
     head.extend(p1.names.iter().cloned());
-    head.extend(["p1_present".to_string(), "Peptide".into(), "Proteins".into()]);
+    head.extend([PRESENT_COLUMN.to_string(), "Peptide".into(), "Proteins".into()]);
     writeln!(out, "{}", head.join("\t")).map_err(|e| err(&e))?;
     let zeros = vec![0f32; p1.names.len()];
     let mut ids = PrecursorPin {
@@ -463,7 +470,7 @@ pub(crate) fn write_precursor_pin(
     }
     out.flush().map_err(|e| err(&e))?;
     drop(out);
-    std::fs::rename(&tmp, pin).map_err(|e| err(&e))?;
+    std::fs::rename(&tmp, out_pin).map_err(|e| err(&e))?;
     log::info!(
         target: "dia",
         "precursor PIN: {n} rows ({} targets), {} learned-score features ({}, {} degenerate \
@@ -477,6 +484,87 @@ pub(crate) fn write_precursor_pin(
         t0.elapsed().as_secs_f64()
     );
     Ok(ids)
+}
+
+/// Percolator's results on a PIN: target rows, decoy ids and decoy rows, by SpecId.
+pub(crate) struct Rescored {
+    pub(crate) targets: HashMap<String, PercolatorPsm>,
+    pub(crate) decoy_ids: HashSet<String>,
+    pub(crate) decoys: HashMap<String, PercolatorPsm>,
+}
+
+/// The rescored precursor PIN, when it is used in place of pass 1.
+pub(crate) struct PrecursorRescore {
+    pub(crate) pin: PathBuf,
+    pub(crate) ids: PrecursorPin,
+    pub(crate) rescored: Rescored,
+    /// SpecIds of the pass-1 PIN, which the precursor rows replace.
+    pub(crate) replaced: HashSet<String>,
+    /// Target precursors at q <= `COMPARE_Q`.
+    pub(crate) n_q: usize,
+}
+
+/// The precursor PIN written beside the pass-1 PIN `pin`.
+pub(crate) fn precursor_pin_path(pin: &Path) -> PathBuf {
+    pin.with_extension("precursor.pin")
+}
+
+/// Writes the precursor PIN beside the pass-1 PIN and rescores it with `rescore`. Its results
+/// replace pass 1 only when they are sound; otherwise the error says why pass 1 is kept:
+/// - the pass-2 table has decoys and at least `pass1_q` targets (`pass1_q`: pass 1's target
+///   precursors at q <= `COMPARE_Q`), since a PIN with fewer targets cannot match pass 1 and
+///   target-decoy competition needs both labels;
+/// - Percolator's training is not degenerate (at least two target scores, not every PEP 1);
+/// - at least `pass1_q` target precursors at q <= `COMPARE_Q`.
+///
+/// Any error while writing or rescoring also keeps pass 1.
+pub(crate) fn rescore_precursors(
+    pin: &Path,
+    t: &Pass2Table,
+    seed: u64,
+    pass1_q: usize,
+    rescore: impl FnOnce(&Path) -> Result<Rescored, String>,
+) -> Result<PrecursorRescore, String> {
+    let n_dec = t.decoy.iter().filter(|&&d| d).count();
+    let n_tgt = t.len() - n_dec;
+    if n_dec == 0 || n_tgt == 0 || n_tgt < pass1_q {
+        return Err(format!(
+            "pass 2 has {n_tgt} target and {n_dec} decoy rows, pass 1 {pass1_q} target \
+             precursors at q <= {COMPARE_Q}"
+        ));
+    }
+    let replaced = pin_ids(pin)?;
+    let out = precursor_pin_path(pin);
+    let ids = write_precursor_pin(pin, &out, t, &[], seed)?;
+    let rescored = rescore(&out)?;
+    let mut scores: Vec<f64> = rescored.targets.values().filter_map(|p| p.score).collect();
+    scores.sort_by(f64::total_cmp);
+    scores.dedup();
+    if scores.len() < 2 || rescored.targets.values().all(|p| p.pep >= 1.0) {
+        return Err(format!(
+            "Percolator on {} is degenerate ({} distinct target scores)",
+            out.display(),
+            scores.len()
+        ));
+    }
+    let n_q = rescored
+        .targets
+        .values()
+        .filter(|p| p.q_value <= COMPARE_Q)
+        .count();
+    if n_q < pass1_q {
+        return Err(format!(
+            "{n_q} target precursors at q <= {COMPARE_Q} in {}, fewer than pass 1's {pass1_q}",
+            out.display()
+        ));
+    }
+    Ok(PrecursorRescore {
+        pin: out,
+        ids,
+        rescored,
+        replaced,
+        n_q,
+    })
 }
 
 #[cfg(test)]
@@ -647,6 +735,101 @@ mod tests {
         let s = r.score.expect("round 0 trains on every target");
         assert!(r.degenerate_folds > 0, "round 1 has too few positives per fold");
         assert_no_constant_fold(&s, &key, 7);
+    }
+
+    fn pass1_pin(dir: &Path) -> PathBuf {
+        let pin = dir.join("run.pin");
+        std::fs::write(
+            &pin,
+            "SpecId\tLabel\tScanNr\tFileName\tdia_llr\tcharge2\tPeptide\tProteins\n\
+             s1\t1\t1\trun\t5\t1\tK.PEPTIDEK.A\tP1\n\
+             s2\t-1\t2\trun\t1\t1\tK.EDITPEPK.A\tXXX_P1\n",
+        )
+        .unwrap();
+        pin
+    }
+
+    fn pass2(rows: usize) -> Pass2Table {
+        Pass2Table {
+            spec_id: (0..rows).map(|i| format!("s{}", i + 1)).collect(),
+            run: vec![0; rows],
+            decoy: (0..rows).map(|i| i % 2 == 1).collect(),
+            charge: vec![2; rows],
+            peptide: (0..rows).map(|i| format!("K.PEPT{i}K.A")).collect(),
+            proteins: (0..rows)
+                .map(|i| if i % 2 == 1 { "XXX_P1".into() } else { "P1".into() })
+                .collect(),
+            seq: vec!["PEPTIDEK".into(); rows],
+            prec_mz: vec![500.0; rows],
+            features: vec![("p2_llr".to_string(), (0..rows).map(|i| i as f32).collect())],
+        }
+    }
+
+    /// Percolator results with one target row per score, all at q 0.001.
+    fn rescored(scores: &[f64]) -> Rescored {
+        let targets = scores
+            .iter()
+            .enumerate()
+            .map(|(i, &score)| {
+                let id = format!("s{}", 2 * i + 1);
+                let psm = PercolatorPsm {
+                    psm_id: id.clone(),
+                    q_value: 0.001,
+                    pooled_q_value: None,
+                    pep: 0.01,
+                    score: Some(score),
+                    peptide: "K.PEPTIDEK.A".into(),
+                    proteins: "P1".into(),
+                };
+                (id, psm)
+            })
+            .collect();
+        Rescored {
+            targets,
+            decoy_ids: HashSet::new(),
+            decoys: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn an_empty_or_tiny_pass2_table_keeps_pass1() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = pass1_pin(dir.path());
+        let never = |_: &Path| -> Result<Rescored, String> { panic!("no rescoring expected") };
+        assert!(rescore_precursors(&pin, &pass2(0), 42, 0, never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(6), 42, 10, never).is_err());
+        assert!(!precursor_pin_path(&pin).exists());
+        let before = std::fs::read_to_string(&pin).unwrap();
+        let fewer = |_: &Path| -> Result<Rescored, String> {
+            Ok(rescored(&[0.0, 1.0, 2.0]))
+        };
+        let why = rescore_precursors(&pin, &pass2(8), 42, 4, fewer).err().unwrap();
+        assert!(why.contains("fewer than pass 1"), "{why}");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), before, "pass-1 PIN untouched");
+        let head = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
+        assert!(!head.starts_with("SpecId\tLabel\tScanNr\tFileName\tdia_gb_score"));
+        let failing = |_: &Path| -> Result<Rescored, String> { Err("Percolator failed".into()) };
+        assert!(rescore_precursors(&pin, &pass2(8), 42, 0, failing).is_err());
+    }
+
+    #[test]
+    fn a_sound_precursor_pin_replaces_pass1() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = pass1_pin(dir.path());
+        let more = |p: &Path| -> Result<Rescored, String> {
+            assert_eq!(p, precursor_pin_path(&pin));
+            Ok(rescored(&[0.0, 1.0, 2.0, 3.0]))
+        };
+        let r = rescore_precursors(&pin, &pass2(8), 42, 4, more).unwrap();
+        assert_eq!(r.n_q, 4);
+        assert_eq!(r.ids.targets.len(), 4);
+        assert!(!r.ids.learned, "8 rows are too few to train the learned score");
+        assert_eq!(r.replaced.len(), 2);
+        let degenerate = |_: &Path| -> Result<Rescored, String> {
+            Ok(rescored(&[1.0; 4]))
+        };
+        let why = rescore_precursors(&pin, &pass2(8), 42, 0, degenerate).err().unwrap();
+        assert!(why.contains("degenerate"), "{why}");
     }
 
     #[test]

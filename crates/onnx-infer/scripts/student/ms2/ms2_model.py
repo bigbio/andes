@@ -1,4 +1,4 @@
-"""andes-ms2 v1: fragment-intensity CNN, its loss, and the weight export format.
+"""andes-ms2: fragment-intensity CNN, its loss, and the weight export format (v1 and v2).
 
 Peptide encoding is andes-rt's (``rt_model.encode``): tokens ``[N-term, residues,
 C-term]`` (I as L) plus a per-position modification composition vector.
@@ -6,7 +6,11 @@ C-term]`` (I as L) plus a per-position modification composition vector.
 Conditioning vector (``cond``, length ``MAX_CHARGE + 2 + 2 * cond_emb``):
 precursor charge one-hot (charges above ``MAX_CHARGE`` use the last slot),
 NCE / 100 and an NCE-known flag (0 / 0 when unknown), an activation embedding
-(``ACTIVATIONS``) and an instrument-family embedding (``INSTRUMENTS``).
+(``ACTIVATIONS``) and an instrument-family embedding (``INSTRUMENTS``). A v2 model
+appends a label embedding (``LABELS``: none, TMT, iTRAQ), so ``cond`` has length
+``MAX_CHARGE + 2 + 3 * cond_emb`` and the label reaches every FiLM block and the head.
+A v1 model has only the first 6 activation and 7 instrument rows; any index beyond a
+model's embedding table maps to 0 ("unknown"), and a v1 model ignores the label.
 
 Network::
 
@@ -16,13 +20,16 @@ Network::
     optional: x += proj(multi-head self-attention(x))   (padding keys masked)
     site j (cleavage after residue j+1): h = silu(conv_k2(x)[j+1] + cond_lin(cond))
     out = conv1x1(h) -> N_ION values per site (linear; clipped at 0 when used)
+    v2: out ++= head_ext(h) -> N_ION_V2 - N_ION more values (``ION_TYPES_V2`` order)
 
 Every layer output is multiplied by the padding mask, so a peptide's prediction
 does not depend on what it was batched with.
 
-Export (``AMS20001``): the ``ARTN0001`` tensor layout (magic, u32 count, then per
-tensor u32 name length, name, u32 ndim, u32 dims, little-endian f32 data) with
-extra tensors ``dilations`` and ``n_heads``.
+Export (``AMS20001`` for v1, ``AMS20002`` for v2): the ``ARTN0001`` tensor layout
+(magic, u32 count, then per tensor u32 name length, name, u32 ndim, u32 dims,
+little-endian f32 data) with extra tensors ``dilations`` and ``n_heads``. v2 adds
+``label_emb.weight`` and ``head_ext.{weight,bias}``, and its activation and
+instrument embeddings have ``len(ACTIVATIONS)`` and ``len(INSTRUMENTS)`` rows.
 """
 from __future__ import annotations
 
@@ -40,13 +47,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 from ms2_common import (  # noqa: E402
-    ACTIVATIONS, INSTRUMENTS, MAX_CHARGE, N_ION, activation_index, instrument_class,
-    parse_proforma, valid_mask,
+    ACTIVATIONS, INSTRUMENTS, LABELS, MAX_CHARGE, N_ION, N_ION_V2, V1_N_ACTIVATIONS, V1_N_INSTRUMENTS,
+    activation_index, instrument_class, ion_types, label_index, parse_proforma, valid_mask,
 )
 from rt_model import N_TOK, encode  # noqa: E402
 from mod_composition import N_COMP  # noqa: E402
 
 MAGIC = b"AMS20001"
+MAGIC_V2 = b"AMS20002"
+VERSIONS = (1, 2)
 
 
 def cond_numeric(charge: int, nce: float) -> np.ndarray:
@@ -61,15 +70,22 @@ def cond_numeric(charge: int, nce: float) -> np.ndarray:
 
 class Ms2Cnn(nn.Module):
     def __init__(self, emb: int = 32, ch: int = 96, dilations=(1, 2, 4, 8, 1, 2), n_heads: int = 4,
-                 cond_emb: int = 8, film_hidden: int = 64):
+                 cond_emb: int = 8, film_hidden: int = 64, version: int = 1):
         super().__init__()
+        assert version in VERSIONS, f"unknown AMS2 version {version}"
+        self.version = version
         self.dilations = tuple(dilations)
         self.n_heads = n_heads
         self.ch = ch
+        self.n_ion = N_ION_V2 if version >= 2 else N_ION
         self.emb = nn.Embedding(N_TOK, emb, padding_idx=0)
-        self.act_emb = nn.Embedding(len(ACTIVATIONS), cond_emb)
-        self.instr_emb = nn.Embedding(len(INSTRUMENTS), cond_emb)
-        cond_dim = MAX_CHARGE + 2 + 2 * cond_emb
+        self.act_emb = nn.Embedding(len(ACTIVATIONS) if version >= 2 else V1_N_ACTIVATIONS, cond_emb)
+        self.instr_emb = nn.Embedding(len(INSTRUMENTS) if version >= 2 else V1_N_INSTRUMENTS, cond_emb)
+        n_cond = 2
+        if version >= 2:
+            self.label_emb = nn.Embedding(len(LABELS), cond_emb)
+            n_cond = 3
+        cond_dim = MAX_CHARGE + 2 + n_cond * cond_emb
         self.film1 = nn.Linear(cond_dim, film_hidden)
         self.film2 = nn.Linear(film_hidden, 2 * ch * len(self.dilations))
         nn.init.zeros_(self.film2.weight)
@@ -84,15 +100,26 @@ class Ms2Cnn(nn.Module):
         self.head1 = nn.Conv1d(ch, ch, 2)
         self.head_cond = nn.Linear(cond_dim, ch)
         self.head2 = nn.Conv1d(ch, N_ION, 1)
+        if version >= 2:
+            self.head_ext = nn.Conv1d(ch, N_ION_V2 - N_ION, 1)
 
-    def cond(self, num, act, instr):
-        return torch.cat([num, self.act_emb(act), self.instr_emb(instr)], -1)
+    @staticmethod
+    def _known(idx, table: nn.Embedding):
+        return torch.where((idx >= 0) & (idx < table.num_embeddings), idx, torch.zeros_like(idx))
 
-    def forward(self, tok, comp, num, act, instr):
-        """-> (B, L, N_ION) for L = padded residue count; site j valid for j < n - 1."""
+    def cond(self, num, act, instr, label=None):
+        parts = [num, self.act_emb(self._known(act, self.act_emb)), self.instr_emb(self._known(instr, self.instr_emb))]
+        if self.version >= 2:
+            if label is None:
+                label = torch.zeros_like(act)
+            parts.append(self.label_emb(self._known(label, self.label_emb)))
+        return torch.cat(parts, -1)
+
+    def forward(self, tok, comp, num, act, instr, label=None):
+        """-> (B, L, n_ion) for L = padded residue count; site j valid for j < n - 1."""
         B, Lp = tok.shape
         m = (tok > 0).unsqueeze(1).to(comp.dtype)
-        c = self.cond(num, act, instr)
+        c = self.cond(num, act, instr, label)
         film = self.film2(F.silu(self.film1(c))).view(B, len(self.dilations), 2, self.ch, 1)
         x = torch.cat([self.emb(tok), comp], -1).transpose(1, 2)
         x = self.inp(x) * m
@@ -108,7 +135,10 @@ class Ms2Cnn(nn.Module):
             o = torch.einsum("bhij,bhdj->bhdi", torch.softmax(s, -1), v).reshape(B, self.ch, Lp)
             x = x + self.proj(o) * m
         h = F.silu(self.head1(x[:, :, 1:]) + self.head_cond(c).unsqueeze(-1))
-        return self.head2(h).transpose(1, 2)
+        out = self.head2(h)
+        if self.version >= 2:
+            out = torch.cat([out, self.head_ext(h)], 1)
+        return out.transpose(1, 2)
 
 
 def masked_sa_loss(pred, target, mask):
@@ -145,7 +175,7 @@ def export_weights(model: Ms2Cnn, path: str):
     sd["dilations"] = np.asarray(model.dilations, dtype=np.float32)
     sd["n_heads"] = np.asarray([model.n_heads], dtype=np.float32)
     with open(path, "wb") as f:
-        f.write(MAGIC)
+        f.write(MAGIC_V2 if model.version >= 2 else MAGIC)
         f.write(struct.pack("<I", len(sd)))
         for name, arr in sd.items():
             nb = name.encode()
@@ -159,39 +189,44 @@ def export_weights(model: Ms2Cnn, path: str):
 def config_of(model: Ms2Cnn) -> dict:
     return {"emb": model.emb.embedding_dim, "ch": model.ch, "dilations": list(model.dilations),
             "n_heads": model.n_heads, "cond_emb": model.act_emb.embedding_dim,
-            "film_hidden": model.film1.out_features}
+            "film_hidden": model.film1.out_features, "version": model.version}
 
 
 def make_batch(items):
-    """items: list of (tok, comp, charge, nce, activation idx, instrument idx) -> tensors."""
+    """items: list of (tok, comp, charge, nce, activation idx, instrument idx[, label idx]) ->
+    (tok, comp, num, act, instr, label) tensors; a missing label is 0 (none)."""
     L = max(len(t) for t, *_ in items)
     T = np.zeros((len(items), L), np.int64)
     C = np.zeros((len(items), L, N_COMP), np.float32)
     num = np.zeros((len(items), MAX_CHARGE + 2), np.float32)
     act = np.zeros(len(items), np.int64)
     ins = np.zeros(len(items), np.int64)
-    for i, (t, c, z, nce, a, k) in enumerate(items):
+    lab = np.zeros(len(items), np.int64)
+    for i, (t, c, z, nce, a, k, *rest) in enumerate(items):
         T[i, : len(t)] = t
         C[i, : len(t)] = c
         num[i] = cond_numeric(z, nce)
         act[i], ins[i] = a, k
+        lab[i] = rest[0] if rest else 0
     return (torch.from_numpy(T), torch.from_numpy(C), torch.from_numpy(num),
-            torch.from_numpy(act), torch.from_numpy(ins))
+            torch.from_numpy(act), torch.from_numpy(ins), torch.from_numpy(lab))
 
 
 def predict(model: Ms2Cnn, requests, bs: int = 1024, device="cpu", raw: bool = False):
-    """requests: (proforma, charge, nce, activation name, instrument name) ->
-    list of (n-1, N_ION) arrays clipped at 0 with invalid channels set to 0 (the
+    """requests: (proforma, charge, nce, activation name, instrument name[, label name]) ->
+    list of (n-1, model.n_ion) arrays clipped at 0 with invalid channels set to 0 (the
     unprocessed network output with ``raw``), or None when the peptidoform cannot
     be encoded."""
     out = [None] * len(requests)
     enc = []
-    for i, (pf, z, nce, act, instr) in enumerate(requests):
+    ions = ion_types(model.version)
+    for i, (pf, z, nce, act, instr, *rest) in enumerate(requests):
         p = parse_proforma(pf)
         e = encode(*p) if p else None
         if e is None or len(p[0]) < 2 or z < 1:
             continue
-        enc.append((i, p, (e[0], e[1], z, nce, activation_index(act), instrument_class(instr))))
+        lab = label_index(rest[0]) if rest else 0
+        enc.append((i, p, (e[0], e[1], z, nce, activation_index(act), instrument_class(instr), lab)))
     model.eval()
     with torch.no_grad():
         for k in range(0, len(enc), bs):
@@ -199,7 +234,7 @@ def predict(model: Ms2Cnn, requests, bs: int = 1024, device="cpu", raw: bool = F
             y = model(*(t.to(device) for t in make_batch([c[2] for c in chunk]))).cpu().numpy()
             for b, (i, (seq, mods), it) in enumerate(chunk):
                 n = len(seq)
-                v = valid_mask(seq, mods, it[2])
+                v = valid_mask(seq, mods, it[2], ions, it[4])
                 y_b = y[b, : n - 1]
                 out[i] = (y_b if raw else np.where(v, np.maximum(y_b, 0), 0)).astype(np.float32)
     return out
@@ -219,4 +254,18 @@ if __name__ == "__main__":
     for a_, b_ in zip(full, solo):
         assert np.allclose(a_, b_, atol=1e-5)
     assert full[1].shape == (4, N_ION) and (full[0][:, 4:] == 0).all()
-    print("ok", [f.shape for f in full])
+    torch.manual_seed(0)
+    m2 = Ms2Cnn(ch=16, dilations=(1, 2), n_heads=2, version=2)
+    with torch.no_grad():
+        for prm in m2.parameters():
+            prm.normal_(0, 0.3)
+    r2 = [r + ("TMT",) for r in reqs] + [("PEPTIDEK", 3, 30.0, "EThcD", "timsTOF Pro", "iTRAQ")]
+    full2 = predict(m2, r2)
+    solo2 = [predict(m2, [r])[0] for r in r2]
+    for a_, b_ in zip(full2, solo2):
+        assert np.allclose(a_, b_, atol=1e-5)
+    assert full2[0].shape == (7, N_ION_V2) and (full2[0][:, 15:] == 0).all()
+    unk = predict(m2, [("PEPTIDEK", 2, float("nan"), "XYZ", "", "none")], raw=True)[0]
+    zero = predict(m2, [("PEPTIDEK", 2, float("nan"), "unknown", "unknown", "none")], raw=True)[0]
+    assert np.array_equal(unk, zero)
+    print("ok", [f.shape for f in full], [f.shape for f in full2])

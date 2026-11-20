@@ -133,7 +133,7 @@ impl NativeMs2 {
     }
 
     fn conditions(&self, charge: u8) -> Ms2Conditions {
-        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument)
+        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument, "none")
     }
 }
 

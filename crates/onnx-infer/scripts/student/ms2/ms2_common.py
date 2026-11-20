@@ -10,7 +10,19 @@ y = the complementary C-terminal fragment::
     8..11  the same four, minus CH4SO (63.9983)    only if the fragment holds oxidised M
 
 The first four channels are the PeptDeep ``b_z1, b_z2, y_z1, y_z2`` layout used by
-``examples/rescore_pin.rs``. A channel is *invalid* (stored as -1) when its
+``examples/rescore_pin.rs``.
+
+The v2 layout (``ION_TYPES_V2``, ``N_ION_V2`` = 19) keeps those 12 channels first, in
+the same order, and appends::
+
+    12 b3  13 y3                                   plain b/y, fragment charge 3
+    14 a1                                          b - CO
+    15 c1  16 c2                                   b + NH3
+    17 z1  18 z2                                   z-dot: y - NH3 + H
+
+c and z-dot channels are valid only for electron-based activation (ETD, EThcD) and
+never at a cleavage N-terminal to proline (the proline ring keeps the fragments
+together). A channel is *invalid* (stored as -1) when its
 fragment charge exceeds the precursor charge or, for a loss channel, when the
 fragment carries no residue that can lose that group. Valid channels hold the
 observed intensity divided by the most intense valid annotated ion, so values lie
@@ -36,6 +48,9 @@ PROTON = 1.007276466812
 H2O = 18.0105646837
 H3PO4 = 97.976895573
 CH4SO = 63.998285
+CO = 27.99491461957
+NH3 = 17.02654910101
+H_ATOM = 1.00782503207
 LOSS_MASS = {None: 0.0, "H3PO4": H3PO4, "CH4SO": CH4SO}
 
 # (ion, fragment charge, neutral loss)
@@ -46,11 +61,26 @@ ION_TYPES = [
 ]
 N_ION = len(ION_TYPES)
 N_BASE_ION = 4
+ION_TYPES_V2 = ION_TYPES + [
+    ("b", 3, None), ("y", 3, None),
+    ("a", 1, None),
+    ("c", 1, None), ("c", 2, None),
+    ("z", 1, None), ("z", 2, None),
+]
+N_ION_V2 = len(ION_TYPES_V2)
+PREFIX_SERIES = ("a", "b", "c")
+ELECTRON_SERIES = ("c", "z")
 
-# Activation = dissociation + MS2 analyser; index 0 = unknown.
-ACTIVATIONS = ["unknown", "HCD-FTMS", "HCD-ITMS", "CID-ITMS", "CID-FTMS", "HCD-ASTMS"]
-# Instrument family; index 0 = unknown.
-INSTRUMENTS = ["unknown", "QExactive", "Exploris", "Tribrid", "VelosElite", "Astral", "LTQ"]
+# Activation = dissociation + MS2 analyser; index 0 = unknown. v2 entries only after the v1 ones.
+ACTIVATIONS = ["unknown", "HCD-FTMS", "HCD-ITMS", "CID-ITMS", "CID-FTMS", "HCD-ASTMS", "ETD", "EThcD", "HCD-TOF"]
+ELECTRON_ACTIVATIONS = ("ETD", "EThcD")
+# Instrument family; index 0 = unknown. v2 entries only after the v1 ones.
+INSTRUMENTS = ["unknown", "QExactive", "Exploris", "Tribrid", "VelosElite", "Astral", "LTQ", "timsTOF", "TOF"]
+# Rows of the activation / instrument embeddings in a v1 (AMS20001) model.
+V1_N_ACTIVATIONS = 6
+V1_N_INSTRUMENTS = 7
+# Isobaric label condition (v2 only); index 0 = none.
+LABELS = ["none", "TMT", "iTRAQ"]
 # Precursor charges 1..MAX_CHARGE are one-hot encoded; higher charges use the last slot.
 MAX_CHARGE = 6
 
@@ -83,11 +113,30 @@ def instrument_class(name: str | None) -> int:
         return INSTRUMENTS.index("VelosElite")
     if "ltq" in s:
         return INSTRUMENTS.index("LTQ")
+    if "timstof" in s:
+        return INSTRUMENTS.index("timsTOF")
+    if "tof" in s:
+        return INSTRUMENTS.index("TOF")
     return 0
 
 
 def activation_index(name: str | None) -> int:
     return ACTIVATIONS.index(name) if name in ACTIVATIONS else 0
+
+
+def label_index(name: str | None) -> int:
+    """Index in ``LABELS`` for a label name (``none``, ``TMT``, ``TMTpro``, ``iTRAQ8plex`` ...)."""
+    s = (name or "").lower()
+    if "itraq" in s:
+        return LABELS.index("iTRAQ")
+    if "tmt" in s:
+        return LABELS.index("TMT")
+    return 0
+
+
+def ion_types(version: int):
+    """Channel layout of an AMS2 model of the given format version."""
+    return ION_TYPES_V2 if version >= 2 else ION_TYPES
 
 
 def split_of(seq: str) -> str:
@@ -184,49 +233,56 @@ def loss_carriers(seq: str, mods):
     return ph, ox
 
 
-def valid_mask(seq: str, mods, charge: int) -> np.ndarray:
-    """(n - 1, N_ION) bool: which channels exist for this precursor."""
+def valid_mask(seq: str, mods, charge: int, ions=ION_TYPES, activation: int = 0) -> np.ndarray:
+    """(n - 1, len(ions)) bool: which channels exist for this precursor.
+
+    ``activation`` is an ``ACTIVATIONS`` index; it only matters for c / z-dot channels."""
     n = len(seq)
     ph, ox = loss_carriers(seq, mods)
     ph_pre, ox_pre = np.cumsum(ph), np.cumsum(ox)
-    v = np.zeros((n - 1, N_ION), bool)
+    electron = 0 <= activation < len(ACTIVATIONS) and ACTIVATIONS[activation] in ELECTRON_ACTIVATIONS
+    v = np.zeros((n - 1, len(ions)), bool)
     for i in range(n - 1):
         has_b = {"H3PO4": ph_pre[i] > 0, "CH4SO": ox_pre[i] > 0}
         has_y = {"H3PO4": ph_pre[-1] - ph_pre[i] > 0, "CH4SO": ox_pre[-1] - ox_pre[i] > 0}
-        for k, (ion, z, loss) in enumerate(ION_TYPES):
+        before_proline = seq[i + 1] == "P"
+        for k, (ion, z, loss) in enumerate(ions):
             if z > charge:
+                continue
+            if ion in ELECTRON_SERIES and (not electron or before_proline):
                 continue
             if loss is None:
                 v[i, k] = True
             else:
-                v[i, k] = has_b[loss] if ion == "b" else has_y[loss]
+                v[i, k] = has_b[loss] if ion in PREFIX_SERIES else has_y[loss]
     return v
 
 
-def fragment_mz(seq: str, mods) -> np.ndarray:
-    """(n - 1, N_ION) theoretical m/z for every channel (valid or not)."""
+def fragment_mz(seq: str, mods, ions=ION_TYPES) -> np.ndarray:
+    """(n - 1, len(ions)) theoretical m/z for every channel (valid or not)."""
     res = residue_masses(seq, mods)
     total = res.sum()
     prefix = np.cumsum(res)[:-1]
-    out = np.zeros((len(prefix), N_ION))
-    for k, (ion, z, loss) in enumerate(ION_TYPES):
-        neutral = prefix if ion == "b" else total - prefix + H2O
-        out[:, k] = (neutral - LOSS_MASS[loss] + z * PROTON) / z
+    suffix = total - prefix + H2O
+    neutral_of = {"b": prefix, "a": prefix - CO, "c": prefix + NH3, "y": suffix, "z": suffix - NH3 + H_ATOM}
+    out = np.zeros((len(prefix), len(ions)))
+    for k, (ion, z, loss) in enumerate(ions):
+        out[:, k] = (neutral_of[ion] - LOSS_MASS[loss] + z * PROTON) / z
     return out
 
 
 def annotate(seq: str, mods, charge: int, mz: np.ndarray, intensity: np.ndarray,
-             tol: float, ppm: bool):
+             tol: float, ppm: bool, ions=ION_TYPES, activation: int = 0):
     """Observed intensities per channel, normalised to the most intense valid ion.
 
     ``mz`` must be sorted. The observed value of an ion is the most intense peak
     within the tolerance (as in ``rescore_pin.rs``). Returns
-    ``(values (n-1, N_ION) float32 with -1 for invalid channels, n_matched_base,
+    ``(values (n-1, len(ions)) float32 with -1 for invalid channels, n_matched_base,
     explained)``; ``explained`` is the intensity of distinct matched peaks over the
     total spectrum intensity. ``values`` is None when nothing matched.
     """
-    theo = fragment_mz(seq, mods)
-    valid = valid_mask(seq, mods, charge)
+    theo = fragment_mz(seq, mods, ions)
+    valid = valid_mask(seq, mods, charge, ions, activation)
     w = theo * tol * 1e-6 if ppm else np.full_like(theo, tol)
     lo = np.searchsorted(mz, theo - w, side="left")
     hi = np.searchsorted(mz, theo + w, side="right")
@@ -318,4 +374,17 @@ if __name__ == "__main__":
     assert parse_filter("FTMS + p NSI d Full ms2 445.12@etd50.00@hcd20.00 [110.00-905.00]")[0] == "unknown"
     assert instrument_class("Q Exactive HF-X") == 1 and instrument_class("Orbitrap Fusion Lumos") == 3
     assert instrument_class("Orbitrap Astral") == 5 and instrument_class("LTQ Orbitrap Velos") == 4
+    assert instrument_class("timsTOF Pro 2") == 7 and instrument_class("TripleTOF 6600") == 8
+    assert activation_index("EThcD") == 7 and label_index("TMTpro") == 1 and label_index("iTRAQ8plex") == 2
+    assert ION_TYPES_V2[:N_ION] == ION_TYPES and N_ION_V2 == 19
+    # PEPTIDE, hand-computed: c1 = P + NH3 + proton, a2 = P + E - CO + proton, z-dot1 = E + H2O - NH3 + H + proton
+    t2 = fragment_mz("PEPTIDE", [], ION_TYPES_V2)
+    assert abs(t2[0, 15] - (97.05276385 + 17.02654910 + PROTON)) < 1e-6
+    assert abs(t2[1, 14] - (97.05276385 + 129.0425931 - 27.99491462 + PROTON)) < 1e-6
+    assert abs(t2[-1, 17] - (129.0425931 + H2O - 17.02654910 + 1.00782503 + PROTON)) < 1e-6
+    assert abs(t2[0, 12] * 3 - (97.05276385 + 3 * PROTON)) < 1e-6
+    v2 = valid_mask("PEPTIDE", [], 3, ION_TYPES_V2, activation_index("ETD"))
+    assert v2[:, 12].all() and list(v2[:, 15]) == [True, False, True, True, True, True]
+    assert not valid_mask("PEPTIDE", [], 3, ION_TYPES_V2, activation_index("HCD-FTMS"))[:, 15:].any()
+    assert not valid_mask("PEPTIDE", [], 2, ION_TYPES_V2)[:, 12:14].any()
     print("ms2_common ok")

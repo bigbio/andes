@@ -45,7 +45,13 @@ fn main() {
             "andes" => RtPeptide::from_andes(x[cp]),
             other => panic!("format {other}"),
         };
-        let c = Ms2Conditions::new(x[cz].parse().unwrap(), x[cn].parse().ok(), x[ca], x[ci]);
+        let c = Ms2Conditions::new(
+            x[cz].parse().unwrap(),
+            x[cn].parse().ok(),
+            x[ca],
+            x[ci],
+            "none",
+        );
         let got = p.as_ref().and_then(|p| model.predict_with(p, &c, &mut s));
         match got {
             Some(got) => {

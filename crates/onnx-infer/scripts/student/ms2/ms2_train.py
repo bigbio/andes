@@ -109,7 +109,7 @@ class Data:
         for i in idx:
             e = self.enc[self.form_id[i]]
             items.append((e[0], e[1], int(self.charge[i]), float(self.nce[i]), int(self.act[i]), int(self.instr[i])))
-        T, C, num, act, ins = (x.to(device) for x in make_batch(items))
+        T, C, num, act, ins, lab = (x.to(device) for x in make_batch(items))
         S = T.shape[1] - 2  # sites in the padded batch (model output rows)
         tgt = np.full((len(idx), S, N_ION), -1.0, np.float32)
         tch = np.full((len(idx), S, N_ION), -1.0, np.float32) if self.teacher is not None else None
@@ -120,7 +120,7 @@ class Data:
                 tch[b, :n] = self.teacher[self.off[i]: self.off[i + 1]].reshape(n, N_ION)
         tgt = torch.from_numpy(tgt).to(device)
         tch = torch.from_numpy(tch).to(device) if tch is not None else None
-        return (T, C, num, act, ins), tgt, tch
+        return (T, C, num, act, ins, lab), tgt, tch
 
 
 def sa_rows(model, data, idx, device, bs=1024):

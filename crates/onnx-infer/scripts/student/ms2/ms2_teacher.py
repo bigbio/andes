@@ -47,7 +47,7 @@ NTERM = {737: "TMT6plex@Any_N-term", 2016: "TMTpro@Any_N-term", 214: "iTRAQ4plex
          36: "Dimethyl@Any_N-term"}
 # andes-ms2 instrument family -> PeptDeep instrument name
 PDEEP_INSTRUMENT = {"unknown": "Lumos", "QExactive": "QE", "Exploris": "QE", "Tribrid": "Lumos",
-                    "VelosElite": "Lumos", "Astral": "Lumos", "LTQ": "Lumos"}
+                    "VelosElite": "Lumos", "Astral": "Lumos", "LTQ": "Lumos", "timsTOF": "Lumos", "TOF": "Lumos"}
 FRAG = ["b_z1", "b_z2", "y_z1", "y_z2", "b_modloss_z1", "b_modloss_z2", "y_modloss_z1", "y_modloss_z2"]
 
 

@@ -14,6 +14,8 @@ mod dia;
 mod dia_llr;
 #[path = "andes/dia_pass2.rs"]
 mod dia_pass2;
+#[path = "andes/dia_score.rs"]
+mod dia_score;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]

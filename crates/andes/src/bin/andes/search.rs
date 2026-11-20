@@ -1514,6 +1514,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
+    let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         if let Some(predicted) = kept.filter(|_| pooled) {
@@ -1525,7 +1526,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
-            crate::dia_pass2::run(&output_pin_path, &spectra, &run_ends, &dia_ms1, &pool, &predicted)?;
+            dia_pass2 = Some(crate::dia_pass2::run(
+                &output_pin_path,
+                &spectra,
+                &run_ends,
+                &dia_ms1,
+                &pool,
+                &predicted,
+            )?);
         }
     }
     let mut rerank_dropped = std::collections::HashSet::new();
@@ -1572,6 +1580,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .is_some_and(|a| !a.site_claims.is_empty())
     });
     let mut row_scores: Option<output::RowScores> = None;
+    let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = if use_native {
@@ -1613,6 +1623,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
             }
+            if let Some(t) = dia_pass2.take() {
+                let seed = crate::dia_score::percolator_seed(&user_args);
+                dia_replaced = crate::dia_score::pin_ids(&output_pin_path)?;
+                let ids = crate::dia_score::write_precursor_pin(&output_pin_path, &t, &[], seed)?;
+                (map, decoys) =
+                    output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
+                        .map_err(|e| format!("{e}"))?;
+                dia_precursor_ids = ids.targets.into_iter().chain(ids.decoys).collect();
+            }
             rescore_decoys = Some(decoys);
             log::info!(
                 target: "rescore",
@@ -1625,7 +1644,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             rescore_decoy_psms =
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-            if cli.dia {
+            if cli.dia && dia_precursor_ids.is_empty() {
                 let (t, d, n) = crate::dia::precursor_q(
                     &output_pin_path,
                     &spectra,
@@ -2045,6 +2064,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     knockoff_rows.extend(rerank_dropped);
+    if !dia_precursor_ids.is_empty() {
+        knockoff_rows.extend(dia_replaced);
+        knockoff_rows.retain(|id| !dia_precursor_ids.contains(id));
+    }
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()

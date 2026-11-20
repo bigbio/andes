@@ -148,8 +148,16 @@ fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
                 .map(|v| tolerance(&v))
                 .transpose()?,
             fragment_tol: ftol.first().and_then(|&i| cell(i)),
-            label: label_col.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
-            dissociation: diss.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
+            label: label_col
+                .first()
+                .and_then(|&i| cell(i))
+                .map(|v| nt(&v))
+                .transpose()?,
+            dissociation: diss
+                .first()
+                .and_then(|&i| cell(i))
+                .map(|v| nt(&v))
+                .transpose()?,
             xl: xl_col.first().and_then(|&i| cell(i)),
         });
     }
@@ -287,12 +295,21 @@ fn value(cell: &str) -> Option<String> {
     }
 }
 
-fn key_values(v: &str) -> BTreeMap<String, String> {
+/// The `KEY=value` pairs of an SDRF cell. A key given twice is an error: the cell holds two
+/// terms (`NT=Trypsin/P;AC=MS:1001313;NT=Lys-C;AC=MS:1001309`), and each needs its own
+/// repeated column; reading only one of them would search with the wrong settings.
+fn key_values(v: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for part in v.split(';') {
         match part.split_once('=') {
             Some((k, val)) => {
-                out.insert(k.trim().to_ascii_uppercase(), val.trim().to_string());
+                let key = k.trim().to_ascii_uppercase();
+                if out.insert(key.clone(), val.trim().to_string()).is_some() {
+                    return Err(format!(
+                        "`{v}`: {key}= appears twice in one cell; give each term its own \
+                         column (repeat the column header)"
+                    ));
+                }
             }
             None if !part.trim().is_empty() => {
                 out.entry("NT".to_string())
@@ -301,17 +318,18 @@ fn key_values(v: &str) -> BTreeMap<String, String> {
             None => {}
         }
     }
-    out
+    Ok(out)
 }
 
-fn nt(v: &str) -> String {
-    key_values(v)
+fn nt(v: &str) -> Result<String, String> {
+    Ok(key_values(v)?
         .remove("NT")
-        .unwrap_or_else(|| v.trim().to_string())
+        .unwrap_or_else(|| v.trim().to_string()))
 }
 
 fn enzyme_of(v: &str) -> Result<String, String> {
-    let name = nt(v).to_ascii_lowercase();
+    let given = nt(v).map_err(|e| format!("`{CLEAVAGE}` {e}"))?;
+    let name = given.to_ascii_lowercase();
     let andes = match name.as_str() {
         "trypsin" | "trypsin/p" => "trypsin",
         "lys-c" | "lys-c/p" | "lysc" | "endoproteinase lys-c" => "lysc",
@@ -325,8 +343,7 @@ fn enzyme_of(v: &str) -> Result<String, String> {
         "no cleavage" | "nocleavage" => "nocleavage",
         _ => {
             return Err(format!(
-                "`{CLEAVAGE}`: protease `{}` has no andes equivalent; give --enzyme",
-                nt(v)
+                "`{CLEAVAGE}`: protease `{given}` has no andes equivalent; give --enzyme"
             ))
         }
     };
@@ -359,7 +376,7 @@ struct ModParam {
 
 impl ModParam {
     fn parse(v: &str) -> Result<Self, String> {
-        let kv = key_values(v);
+        let kv = key_values(v).map_err(|e| format!("`{MODS}` {e}"))?;
         let mut names: Vec<String> = kv.get("NT").cloned().into_iter().collect();
         if let Some(ac) = kv
             .get("AC")
@@ -1044,6 +1061,12 @@ mod tests {
         assert_eq!(tolerance("20 mmu").unwrap(), "0.02da");
         assert_eq!(norm_header("Comment [ Data File ]"), "comment[data file]");
         assert!(enzyme_of("NT=Pepsin").is_err());
+        let two = enzyme_of("NT=Trypsin/P;AC=MS:1001313;NT=Lys-C;AC=MS:1001309").unwrap_err();
+        assert!(
+            two.contains("NT= appears twice") && two.contains(CLEAVAGE),
+            "{two}"
+        );
+        assert_eq!(enzyme_of("NT=Trypsin/P;AC=MS:1001313").unwrap(), "trypsin");
     }
 
     const HX: &[&str] = &[

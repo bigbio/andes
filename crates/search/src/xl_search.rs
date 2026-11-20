@@ -1460,6 +1460,43 @@ mod tests {
     }
 
     #[test]
+    fn a_peptide_of_two_proteins_lists_both_whatever_its_flanks() {
+        use model::aa_set::AminoAcidSetBuilder;
+        use model::protein::{Protein, ProteinDb};
+        let prot = |acc: &str, seq: &[u8]| Protein {
+            accession: acc.into(),
+            description: String::new(),
+            sequence: seq.to_vec(),
+            annotation: None,
+        };
+        let db = ProteinDb {
+            proteins: vec![
+                prot("CETN2", b"MSEKAFKLFDDDETGKISFKNLK"),
+                prot("CETN1", b"MSEKAFRLFDDDETGKISFKNLK"),
+            ],
+        };
+        let idx = crate::search_index::SearchIndex::from_target_db(&db, "XXX_");
+        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = crate::search_params::SearchParams::default_tryptic(aa);
+        let cands: Vec<Candidate> =
+            crate::candidate_gen::enumerate_candidates(&idx, &params, "XXX_").collect();
+        let table = XlCandidates::from_candidates(cands, &linker("DSSO"));
+        let shared = |t: &XlCandidates| {
+            t.peptides()
+                .iter()
+                .find(|p| p.bare() == b"LFDDDETGKISFK" && !p.is_decoy)
+                .map(|p| p.proteins.clone())
+                .unwrap()
+        };
+        assert_eq!(shared(&table).len(), 2);
+        let scorer = crate::coisolation::tests::tiny_scorer();
+        let prepared =
+            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX_").unwrap();
+        let table = XlCandidates::from_out_of_core(&prepared, &linker("DSSO"));
+        assert_eq!(shared(&table).len(), 2, "{:?}", shared(&table));
+    }
+
+    #[test]
     fn an_ms3_precursor_matches_its_stub_peptide_at_its_charge() {
         let dsso = linker("DSSO");
         let alkene = dsso.cleavage.as_ref().unwrap().stubs[0].mass;

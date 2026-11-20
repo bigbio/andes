@@ -40,6 +40,8 @@ pub struct ChunkFragmentIndex {
     n_blocks: usize,
     block_first_id: Vec<u32>,
     block_off: Vec<u32>,
+    form_rt_min: Vec<f32>,
+    rt_sigma_min: f64,
 }
 
 const ENTRIES_PER_CELL: usize = 16;
@@ -262,7 +264,75 @@ impl ChunkFragmentIndex {
             n_blocks,
             block_first_id,
             block_off,
+            form_rt_min: Vec::new(),
+            rt_sigma_min: f64::NAN,
         }
+    }
+
+    /// Attaches the calibrated RT (minutes) of every form, predicted by `model` from the
+    /// form's own sequence and mapped by `prior`; from then on a DIA query ranks the vote cut
+    /// with the RT term of [`crate::dia_rt_rank`]. Forms the model cannot encode stay NaN and
+    /// get the capped penalty.
+    pub fn attach_rt(
+        &mut self,
+        db: &SearchIndex,
+        params: &SearchParams,
+        model: &crate::dia_rt_rank::FormRtModel,
+        prior: &crate::dia_rt_rank::DiaRtPrior,
+    ) {
+        let n = self.form_mass.len();
+        let mut by_record: Vec<(u32, u32, u32)> = (0..n)
+            .map(|id| (self.form_record[id], self.form_k[id], id as u32))
+            .collect();
+        by_record.par_sort_unstable();
+        let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut i = 0;
+        while i < by_record.len() {
+            let mut j = i + 1;
+            while j < by_record.len() && by_record[j].0 == by_record[i].0 {
+                j += 1;
+            }
+            runs.push(i..j);
+            i = j;
+        }
+        let pairs: Vec<Vec<(u32, f32)>> = runs
+            .par_chunks(RT_ATTACH_RECORDS_PER_TASK)
+            .map(|group| {
+                let mut out = Vec::new();
+                let mut ks: Vec<u32> = Vec::new();
+                for run in group {
+                    let forms = &by_record[run.clone()];
+                    ks.clear();
+                    ks.extend(forms.iter().map(|f| f.1));
+                    let cands = expand_base_record_bounded(
+                        db,
+                        params,
+                        &self.tables,
+                        &self.records[forms[0].0 as usize],
+                        self.mass_lo,
+                        self.mass_hi,
+                        &ks,
+                    );
+                    for (f, c) in forms.iter().zip(&cands) {
+                        out.push((f.2, prior.apply(f64::from(model(&c.peptide))) as f32));
+                    }
+                }
+                out
+            })
+            .collect();
+        let mut rt = vec![f32::NAN; n];
+        for (id, v) in pairs.into_iter().flatten() {
+            rt[id as usize] = v;
+        }
+        self.form_rt_min = rt;
+        self.rt_sigma_min = prior.sigma_min();
+    }
+
+    /// Rank key of the RT-aware vote cut for one form at scan RT `scan_rt_min`.
+    #[inline]
+    fn rt_key(&self, id: u32, votes: u16, scan_rt_min: f64) -> f64 {
+        let pred = f64::from(self.form_rt_min[id as usize]);
+        f64::from(votes) + crate::dia_rt_rank::rt_penalty(scan_rt_min - pred, self.rt_sigma_min)
     }
 
     pub fn n_forms(&self) -> usize {
@@ -366,7 +436,16 @@ impl ChunkFragmentIndex {
             &complement_masses,
         );
         sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
-        select_top_k(&mut sel, top_k);
+        match spec
+            .rt_seconds
+            .filter(|t| params.dia && t.is_finite() && !self.form_rt_min.is_empty())
+        {
+            Some(t) => {
+                let scan_rt_min = t / SECS_PER_MIN;
+                select_top_k_by(&mut sel, top_k, |id, v| self.rt_key(id, v, scan_rt_min));
+            }
+            None => select_top_k(&mut sel, top_k),
+        }
         sel.into_iter()
             .filter(|&(id, _, _)| {
                 let m = self.form_mass[id as usize];
@@ -543,6 +622,9 @@ impl ChunkFragmentIndex {
 }
 
 const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
+/// Records per parallel task when attaching predicted RTs to a chunk's forms.
+const RT_ATTACH_RECORDS_PER_TASK: usize = 4096;
+const SECS_PER_MIN: f64 = 60.0;
 
 fn sort_bin_by_block(seg: &mut [(u32, f32)], block_first_id: &[u32], offs: &mut [u32]) {
     seg.sort_unstable_by_key(|e| e.0);
@@ -628,9 +710,60 @@ pub(crate) fn select_top_k(sel: &mut Vec<(u32, u16, f32)>, top_k: usize) {
     sel.sort_unstable_by(order);
 }
 
+/// Keeps the `top_k` forms with the highest `key(form, votes)`, the vote intensity breaking
+/// ties and then the lower form id, sorted best first.
+pub(crate) fn select_top_k_by(
+    sel: &mut Vec<(u32, u16, f32)>,
+    top_k: usize,
+    key: impl Fn(u32, u16) -> f64,
+) {
+    if top_k == 0 {
+        sel.clear();
+        return;
+    }
+    let mut keyed: Vec<(f64, (u32, u16, f32))> = sel.iter().map(|&e| (key(e.0, e.1), e)).collect();
+    let order = |a: &(f64, (u32, u16, f32)), b: &(f64, (u32, u16, f32))| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| b.1 .2.total_cmp(&a.1 .2))
+            .then_with(|| a.1 .0.cmp(&b.1 .0))
+    };
+    if keyed.len() > top_k {
+        keyed.select_nth_unstable_by(top_k - 1, order);
+        keyed.truncate(top_k);
+    }
+    keyed.sort_unstable_by(order);
+    sel.clear();
+    sel.extend(keyed.into_iter().map(|(_, e)| e));
+}
+
 #[cfg(test)]
 mod select_top_k_tests {
-    use super::select_top_k;
+    use super::{select_top_k, select_top_k_by};
+
+    #[test]
+    fn a_form_at_its_predicted_rt_beats_one_with_one_more_vote_far_off_it() {
+        let mut sel = vec![(1u32, 6u16, 1.0f32), (2u32, 5u16, 1.0f32)];
+        let penalty = |id: u32| if id == 1 { -8.0 } else { 0.0 };
+        select_top_k_by(&mut sel, 1, |id, v| f64::from(v) + penalty(id));
+        assert_eq!(sel[0].0, 2);
+    }
+
+    #[test]
+    fn with_no_rt_term_the_keyed_cut_equals_the_vote_cut() {
+        let base = vec![
+            (5u32, 3u16, 1.0f32),
+            (2u32, 7u16, 4.0f32),
+            (9u32, 3u16, 9.0f32),
+            (4u32, 7u16, 4.0f32),
+            (3u32, 1u16, 2.0f32),
+        ];
+        for k in 0..=6 {
+            let (mut a, mut b) = (base.clone(), base.clone());
+            select_top_k(&mut a, k);
+            select_top_k_by(&mut b, k, |_, v| f64::from(v));
+            assert_eq!(a, b, "top {k}");
+        }
+    }
 
     #[test]
     fn a_tie_is_broken_by_evidence_not_by_position_in_the_index() {

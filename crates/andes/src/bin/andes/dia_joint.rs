@@ -270,6 +270,8 @@ struct Model {
     lpd: [f64; LM_BINS],
     l1mpd: [f64; LM_BINS],
     ls: [f64; LM_BINS],
+    /// `ls` exponentiated: the intensity-residual spread of each bin.
+    sd_res: [f64; LM_BINS],
     bias: [f64; LM_BINS],
     sd_dev: [f64; DEV_BINS],
     p0: [[f64; MZ_BINS]; TOP_IONS],
@@ -472,6 +474,7 @@ fn model(st: Stats, log_shape: [[f64; PROFILE]; SHAPES], edges: [f64; 2]) -> Mod
         lpd: [0.0; LM_BINS],
         l1mpd: [0.0; LM_BINS],
         ls: [0.0; LM_BINS],
+        sd_res: [0.0; LM_BINS],
         bias: [0.0; LM_BINS],
         sd_dev: [0.0; DEV_BINS],
         p0: [[0.0; MZ_BINS]; TOP_IONS],
@@ -489,6 +492,7 @@ fn model(st: Stats, log_shape: [[f64; PROFILE]; SHAPES], edges: [f64; 2]) -> Mod
         m.lpd[b] = pd.ln();
         m.l1mpd[b] = (1.0 - pd).ln();
         m.ls[b] = sres.ln();
+        m.sd_res[b] = m.ls[b].exp();
         m.bias[b] = bias;
     }
     let pm = st.prof.iter().map(|p| p / st.nprof.max(1.0)).fold(0.0, f64::max).max(DIV_EPS);
@@ -559,6 +563,30 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
         }
     }
     let ln_shapes = (SHAPES as f64).ln();
+    let ions: Vec<usize> = (0..TOP_IONS).filter(|&j| t.valid_ion[j]).collect();
+    let mut present = [[false; TOP_IONS]; CYCLES];
+    for (k, row) in present.iter_mut().enumerate() {
+        for &j in &ions {
+            row[j] = t.present(k, j);
+        }
+    }
+    let fit = 2 * FIT_HALF as usize + 1;
+    let cell = |sh: usize, a: usize, d: isize| {
+        (sh * AMP_GRID.len() + a) * fit + (d + FIT_HALF) as usize
+    };
+    let mut expect = vec![[(0f64, 0usize); TOP_IONS]; SHAPES * AMP_GRID.len() * fit];
+    for sh in 0..SHAPES {
+        for (a, &ga) in AMP_GRID.iter().enumerate() {
+            for d in -FIT_HALF..=FIT_HALF {
+                let lef = m.log_shape[sh][(PROFILE_HALF as isize + d) as usize];
+                let e = &mut expect[cell(sh, a, d)];
+                for &j in &ions {
+                    let lm = ga + t.logr[j] + lef;
+                    e[j] = (lm, lm_bin(lm));
+                }
+            }
+        }
+    }
     let eval = |wd: isize| -> (f64, f64, usize, usize, usize) {
         let mut best = f64::NEG_INFINITY;
         let (mut bt, mut ba, mut bs) = (0usize, 0usize, 0usize);
@@ -566,7 +594,7 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
         for (ti, lpi) in log_prior.iter().enumerate() {
             let c0 = HALF_CYCLES as isize - OFFSETS as isize + ti as isize;
             for sh in 0..SHAPES {
-                for (a, &ga) in AMP_GRID.iter().enumerate() {
+                for (a, &lpa) in m.log_pa.iter().enumerate() {
                     let mut tot = 0.0;
                     for d in -wd..=wd {
                         let c = c0 + d;
@@ -574,19 +602,18 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
                             continue;
                         }
                         let c = c as usize;
-                        let lef = m.log_shape[sh][(PROFILE_HALF as isize + d) as usize];
-                        for j in (0..TOP_IONS).filter(|&j| t.valid_ion[j]) {
-                            let lm = ga + t.logr[j] + lef;
-                            let b = lm_bin(lm);
-                            if t.present(c, j) {
-                                let z = (ly[c][j] - lm - m.bias[b]) / m.ls[b].exp();
+                        let e = &expect[cell(sh, a, d)];
+                        for &j in &ions {
+                            let (lm, b) = e[j];
+                            if present[c][j] {
+                                let z = (ly[c][j] - lm - m.bias[b]) / m.sd_res[b];
                                 tot += base[c][j] + m.lpd[b] - m.ls[b] - 0.5 * z * z;
                             } else {
                                 tot += base[c][j] + m.l1mpd[b];
                             }
                         }
                     }
-                    let s = tot + lpi + m.log_pa[a] - ln_shapes;
+                    let s = tot + lpi + lpa - ln_shapes;
                     if s > best {
                         best = s;
                         bt = ti;

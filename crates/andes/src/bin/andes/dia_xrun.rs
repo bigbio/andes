@@ -27,6 +27,16 @@
 //! A decoy is keyed by its own (shuffled) peptide string, so it only ever meets the same decoy
 //! in other runs, never its source target, and targets and decoys get the columns by the same
 //! rule.
+//!
+//! Finalize also writes `<base>.dia_quant.parquet` (`output::dia_quant_table`): every target
+//! precursor of a run at reported q <= `--quant-fdr` with its pass-2 quantities, own and
+//! transferred rows alike (one row per peptide and charge, the lowest q), nothing below it.
+//! `quantity` is the [`DEFAULT_QUANTITY`] arm; `quantity_normalized` divides it by the run's
+//! median-level factor, `2^d` with `d` the median over the precursors quantified in every
+//! normalised run of the run's log2 quantity minus the precursor's mean over those runs. A run
+//! that shares too few quantified precursors with the others (fewer than
+//! [`MIN_SHARED_PRECURSORS`] in every remaining run) is dropped from the shared set one at a
+//! time, fewest shared first, and left unscaled.
 
 use std::collections::BTreeSet;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
@@ -35,6 +45,7 @@ use std::path::{Path, PathBuf};
 use output::dia_pass2_table::{
     read_pass2, read_pass2_keys, read_pass2_meta, write_pass2_with, Pass2Keys, Pass2Table,
 };
+use output::dia_quant_table::{write_dia_quant, DiaQuantRow};
 use output::PercolatorBackend;
 use rayon::prelude::*;
 
@@ -55,6 +66,186 @@ const RTD_WARN_MIN: f32 = 1.0;
 pub(crate) const XR_COLUMNS: [&str; 3] = ["xr_max", "xr_n", "xr_rtd"];
 const LLR: &str = "p2_llr";
 const RTSTAR: &str = "p2_rtstar";
+/// Quantity arms of the DIA quantity table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuantArm {
+    /// Summed area of the best co-eluting fragments (`quant_frag` of pass 2).
+    Fragment,
+    /// Area of the monoisotopic and M+1 MS1 traces (`quant_ms1` of pass 2).
+    Ms1,
+}
+impl QuantArm {
+    /// The arm's column in the DIA quantity table.
+    pub(crate) fn column(self) -> &'static str {
+        match self {
+            QuantArm::Fragment => "quantity_frag",
+            QuantArm::Ms1 => "quantity_ms1",
+        }
+    }
+}
+/// Every quantity arm, in table column order.
+const QUANT_ARMS: [QuantArm; 2] = [QuantArm::Fragment, QuantArm::Ms1];
+/// The arm reported as `quantity` (and normalised).
+pub(crate) const DEFAULT_QUANTITY: QuantArm = QuantArm::Fragment;
+/// Precursors quantified in every normalised run that median-level normalisation needs.
+const MIN_SHARED_PRECURSORS: usize = 20;
+/// Metadata key of the DIA quantity table naming the default arm.
+const DEFAULT_ARM_KEY: &str = "andes.dia_quant.default";
+
+/// A target row of a run's pass-2 table, kept for the quantity table until its q is known.
+pub(crate) struct QuantCandidate {
+    spec_id: String,
+    peptide: String,
+    charge: u8,
+    proteins: String,
+    transfer: bool,
+    frag: Option<f64>,
+    ms1: Option<f64>,
+}
+
+/// The target rows of a pass-2 table with their quantities.
+pub(crate) fn quant_candidates(t: &Pass2Table) -> Vec<QuantCandidate> {
+    let xfer = t.feature(crate::dia_pass2::XFER_COLUMN);
+    (0..t.len())
+        .filter(|&i| !t.decoy[i])
+        .map(|i| QuantCandidate {
+            spec_id: t.spec_id[i].clone(),
+            peptide: t.peptide[i].clone(),
+            charge: t.charge[i],
+            proteins: t.proteins[i].clone(),
+            transfer: xfer.is_some_and(|x| x[i] > 0.5),
+            frag: t.quant_frag.get(i).copied().flatten(),
+            ms1: t.quant_ms1.get(i).copied().flatten(),
+        })
+        .collect()
+}
+
+/// The rows of run `stem` at reported q <= `max_q` (`q` by PIN SpecId), one per peptide and
+/// charge (lowest q, then the run's own row, then SpecId), sorted by peptide and charge.
+pub(crate) fn reported_rows(
+    stem: &str,
+    cands: &[QuantCandidate],
+    q: &std::collections::HashMap<String, output::PercolatorPsm>,
+    max_q: f64,
+) -> Vec<DiaQuantRow> {
+    let mut best: std::collections::BTreeMap<(&str, u8), (f64, &QuantCandidate)> =
+        std::collections::BTreeMap::new();
+    for c in cands {
+        let Some(p) = q.get(&c.spec_id) else {
+            continue;
+        };
+        if p.q_value.is_nan() || p.q_value > max_q {
+            continue;
+        }
+        let e = best.entry((c.peptide.as_str(), c.charge)).or_insert((p.q_value, c));
+        let better = p
+            .q_value
+            .total_cmp(&e.0)
+            .then(c.transfer.cmp(&e.1.transfer))
+            .then(c.spec_id.cmp(&e.1.spec_id))
+            .is_lt();
+        if better {
+            *e = (p.q_value, c);
+        }
+    }
+    best.into_values()
+        .map(|(q_value, c)| DiaQuantRow {
+            filename: stem.to_string(),
+            peptide: c.peptide.clone(),
+            charge: c.charge,
+            proteins: c.proteins.clone(),
+            transfer: c.transfer,
+            q_value,
+            quantity: match DEFAULT_QUANTITY {
+                QuantArm::Fragment => c.frag,
+                QuantArm::Ms1 => c.ms1,
+            },
+            quantity_frag: c.frag,
+            quantity_ms1: c.ms1,
+            quantity_normalized: None,
+        })
+        .collect()
+}
+
+/// Sets `quantity_normalized` of every row (module doc); returns each run's factor (`None`
+/// for a run left unscaled), runs by `stems` order.
+pub(crate) fn normalise(rows: &mut [DiaQuantRow], stems: &[String]) -> Vec<Option<f64>> {
+    use std::collections::BTreeMap;
+    let run_of: BTreeMap<&str, usize> = stems.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let mut by_key: BTreeMap<(String, u8), Vec<(usize, f64)>> = BTreeMap::new();
+    for r in rows.iter() {
+        if let (Some(&run), Some(v)) = (run_of.get(r.filename.as_str()), r.quantity) {
+            if v > 0.0 && v.is_finite() {
+                by_key
+                    .entry((r.peptide.clone(), r.charge))
+                    .or_default()
+                    .push((run, v.log2()));
+            }
+        }
+    }
+    let n_runs = stems.len();
+    let mut active: BTreeSet<usize> = by_key.values().flatten().map(|c| c.0).collect();
+    let shared = loop {
+        if active.len() < 2 {
+            break Vec::new();
+        }
+        let shared: Vec<&Vec<(usize, f64)>> = by_key
+            .values()
+            .filter(|v| active.iter().all(|r| v.iter().any(|c| c.0 == *r)))
+            .collect();
+        if shared.len() >= MIN_SHARED_PRECURSORS {
+            break shared;
+        }
+        let score = |r: usize| {
+            let mut overlap = 0usize;
+            let mut total = 0usize;
+            for v in by_key.values() {
+                if v.iter().any(|c| c.0 == r) {
+                    total += 1;
+                    overlap += usize::from(v.iter().any(|c| c.0 != r && active.contains(&c.0)));
+                }
+            }
+            (overlap, total, std::cmp::Reverse(r))
+        };
+        if let Some(drop) = active.iter().copied().min_by_key(|&r| score(r)) {
+            active.remove(&drop);
+        }
+    };
+    let mut factor: Vec<Option<f64>> = vec![None; n_runs];
+    if !shared.is_empty() {
+        let mut dev: Vec<Vec<f64>> = vec![Vec::new(); n_runs];
+        for v in &shared {
+            let cells: Vec<&(usize, f64)> = v.iter().filter(|c| active.contains(&c.0)).collect();
+            let mean = cells.iter().map(|c| c.1).sum::<f64>() / cells.len() as f64;
+            for c in cells {
+                dev[c.0].push(c.1 - mean);
+            }
+        }
+        for &r in &active {
+            factor[r] = model::stats::median_mut(&mut dev[r], model::stats::Even::Mean).map(f64::exp2);
+        }
+    }
+    for (r, s) in stems.iter().enumerate() {
+        match factor[r] {
+            Some(f) => log::info!(
+                target: "dia",
+                "quantities, run {s}: median-level factor {f:.4} over {} precursors quantified \
+                 in every normalised run",
+                shared.len()
+            ),
+            None => log::info!(
+                target: "dia",
+                "quantities, run {s}: left unscaled (fewer than {MIN_SHARED_PRECURSORS} \
+                 quantified precursors shared with the other runs)"
+            ),
+        }
+    }
+    for r in rows.iter_mut() {
+        let f = run_of.get(r.filename.as_str()).and_then(|&i| factor[i]).unwrap_or(1.0);
+        r.quantity_normalized = r.quantity.filter(|v| *v > 0.0 && v.is_finite()).map(|v| v / f);
+    }
+    factor
+}
 
 /// Join key of a precursor across runs: a 128-bit hash of (peptide string, charge, decoy).
 pub(crate) fn precursor_key(peptide: &str, charge: u8, decoy: bool) -> u128 {
@@ -485,6 +676,7 @@ pub(crate) fn finalize(
 
     let mut all_targets = std::collections::HashMap::new();
     let mut all_decoys = std::collections::HashMap::new();
+    let mut quant_rows: Vec<DiaQuantRow> = Vec::new();
     for (r, s) in stems.iter().enumerate() {
         let t_run = std::time::Instant::now();
         let t = read_pass2(&table_path(s), None)?;
@@ -525,6 +717,7 @@ pub(crate) fn finalize(
         }
         crate::dia_score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed)?;
         let has_xfer = t.feature(crate::dia_pass2::XFER_COLUMN).is_some();
+        let cands = quant_candidates(&t);
         drop(t);
         drop(xr);
         let (mut map, _) = output::run_percolator_with_decoys(&backend, &pin, &extra)
@@ -559,12 +752,40 @@ pub(crate) fn finalize(
                 c[0][1]
             );
         }
+        let rows = reported_rows(s, &cands, &map, a.quant_fdr);
+        drop(cands);
+        log::info!(
+            target: "dia",
+            "run {s}: {} target precursors at q <= {}, {} with a fragment and {} with an MS1 \
+             quantity",
+            rows.len(),
+            a.quant_fdr,
+            rows.iter().filter(|r| r.quantity_frag.is_some()).count(),
+            rows.iter().filter(|r| r.quantity_ms1.is_some()).count()
+        );
+        quant_rows.extend(rows);
         if a.database.is_some() {
             all_targets.extend(map.into_iter().map(|(id, p)| (format!("{s}\t{id}"), p)));
             all_decoys.extend(decoys.into_iter().map(|(id, p)| (format!("{s}\t{id}"), p)));
         }
     }
     drop(keys);
+    normalise(&mut quant_rows, stems);
+    let quant_path = with_suffix(&a.output, ".dia_quant.parquet");
+    write_dia_quant(
+        &quant_path,
+        &quant_rows,
+        &[(DEFAULT_ARM_KEY, DEFAULT_QUANTITY.column().to_string())],
+    )?;
+    log::info!(
+        target: "dia",
+        "wrote {} ({} run-precursor rows; quantity = {}, arms {})",
+        quant_path.display(),
+        quant_rows.len(),
+        DEFAULT_QUANTITY.column(),
+        QUANT_ARMS.map(QuantArm::column).join(", ")
+    );
+    drop(quant_rows);
     if let Some(database) = &a.database {
         let inf = crate::inference_cmd::infer_from_maps(
             database,
@@ -622,6 +843,151 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    fn psm(id: &str, q: f64) -> (String, output::PercolatorPsm) {
+        (
+            id.to_string(),
+            output::PercolatorPsm {
+                psm_id: id.to_string(),
+                q_value: q,
+                pooled_q_value: None,
+                pep: 0.0,
+                score: Some(1.0),
+                peptide: String::new(),
+                proteins: String::new(),
+            },
+        )
+    }
+
+    fn cand(id: &str, pep: &str, transfer: bool, frag: Option<f64>) -> QuantCandidate {
+        QuantCandidate {
+            spec_id: id.into(),
+            peptide: pep.into(),
+            charge: 2,
+            proteins: "P1".into(),
+            transfer,
+            frag,
+            ms1: frag.map(|v| 10.0 * v),
+        }
+    }
+
+    #[test]
+    fn only_rows_at_reported_q_are_quantified() {
+        let mut t = table(&[
+            ("AAK", 2, false, 1.0, 1.0),
+            ("CCK", 2, true, 1.0, 1.0),
+            ("DDK", 2, false, 1.0, 1.0),
+        ]);
+        t.quant_frag = vec![Some(5.0), Some(6.0), None];
+        t.quant_ms1 = vec![Some(50.0), Some(60.0), Some(70.0)];
+        t.quant_n_frag = vec![6, 6, 0];
+        let c = quant_candidates(&t);
+        assert_eq!(c.len(), 2, "decoys are never quantified");
+        let cands = vec![
+            cand("a", "AAK", false, Some(5.0)),
+            cand("b", "BBK", false, Some(6.0)),
+            cand("c", "CCK", true, Some(7.0)),
+            cand("d", "DDK", false, None),
+            cand("e", "EEK", false, Some(9.0)),
+            cand("f", "AAK", true, Some(1.0)),
+        ];
+        let q: std::collections::HashMap<_, _> = [
+            psm("a", 0.002),
+            psm("b", 0.02),
+            psm("c", 0.01),
+            psm("d", 0.004),
+            psm("f", 0.002),
+        ]
+        .into_iter()
+        .collect();
+        let rows = reported_rows("run1", &cands, &q, 0.01);
+        let got: Vec<(&str, bool, Option<f64>)> = rows
+            .iter()
+            .map(|r| (r.peptide.as_str(), r.transfer, r.quantity))
+            .collect();
+        assert_eq!(
+            got,
+            [("AAK", false, Some(5.0)), ("CCK", true, Some(7.0)), ("DDK", false, None)],
+            "above q (b) and without a q (e) are out; at equal q the own row wins"
+        );
+        assert!(rows.iter().all(|r| r.filename == "run1" && r.q_value <= 0.01));
+        assert_eq!(rows[1].quantity_ms1, Some(70.0));
+    }
+
+    fn qrow(run: &str, pep: &str, v: f64) -> DiaQuantRow {
+        DiaQuantRow {
+            filename: run.into(),
+            peptide: pep.into(),
+            charge: 2,
+            proteins: "P".into(),
+            transfer: false,
+            q_value: 0.001,
+            quantity: Some(v),
+            quantity_frag: Some(v),
+            quantity_ms1: None,
+            quantity_normalized: None,
+        }
+    }
+
+    #[test]
+    fn median_normalisation_over_shared_precursors() {
+        let stems: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        let mut rows = Vec::new();
+        for p in 0..25 {
+            let base = 1000.0 * (1 + p) as f64;
+            rows.push(qrow("A", &format!("P{p}"), base));
+            rows.push(qrow("B", &format!("P{p}"), 2.0 * base));
+            rows.push(qrow("C", &format!("P{p}"), 0.5 * base));
+        }
+        for p in 0..10 {
+            rows.push(qrow("B", &format!("X{p}"), 1e9));
+        }
+        let mut missing = qrow("C", "M0", 1.0);
+        missing.quantity = None;
+        rows.push(missing);
+        let f = normalise(&mut rows, &stems);
+        for (got, want) in f.iter().zip([1.0, 2.0, 0.5]) {
+            assert!((got.unwrap() - want).abs() < 1e-9, "{got:?} vs {want}");
+        }
+        for p in 0..25 {
+            let n: Vec<f64> = rows
+                .iter()
+                .filter(|r| r.peptide == format!("P{p}"))
+                .map(|r| r.quantity_normalized.unwrap())
+                .collect();
+            assert!(n.iter().all(|v| (v - n[0]).abs() < 1e-6 * n[0]), "{n:?}");
+        }
+        assert!(rows
+            .iter()
+            .filter(|r| r.peptide.starts_with('X'))
+            .all(|r| r.quantity_normalized == Some(5e8)));
+        assert_eq!(rows.last().unwrap().quantity_normalized, None, "missing stays missing");
+        assert!(rows.iter().flat_map(|r| r.quantity_normalized).all(|v| v > 0.0 && v.is_finite()));
+    }
+
+    #[test]
+    fn run_without_shared_precursors_is_left_unscaled() {
+        let stems: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        let mut rows = Vec::new();
+        for p in 0..30 {
+            let base = 100.0 * (1 + p) as f64;
+            rows.push(qrow("A", &format!("P{p}"), base));
+            rows.push(qrow("B", &format!("P{p}"), 4.0 * base));
+            rows.push(qrow("C", &format!("Q{p}"), 3.0 * base));
+        }
+        let f = normalise(&mut rows, &stems);
+        assert!((f[0].unwrap() - 0.5).abs() < 1e-9);
+        assert!((f[1].unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(f[2], None);
+        for r in &rows {
+            if r.filename == "C" {
+                assert_eq!(r.quantity_normalized, r.quantity);
+            }
+        }
+        let mut alone = vec![qrow("A", "P0", 7.0)];
+        assert_eq!(normalise(&mut alone, &stems), vec![None; 3]);
+        assert_eq!(alone[0].quantity_normalized, Some(7.0));
     }
 
     fn keys(rows: &[(&str, u8, bool, f32, f32)]) -> RunKeys {

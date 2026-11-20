@@ -832,6 +832,7 @@ metadata.
 | `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.1 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
 | `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
 | `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
+| `<base>.dia_quant.parquet` | `andes.dia_quant.schema` 1.0 | One row per run and target precursor at reported q ≤ `--quant-fdr` (default 0.01), own and transferred: `filename peptide charge proteins evidence_type q_value quantity quantity_frag quantity_ms1 quantity_normalized`. `evidence_type` is `identified` (the run's own nominee) or `transfer`; `peptide` is as in the precursor PIN; `quantity` is the fragment quantity (`quantity_frag`; the metadata key `andes.dia_quant.default` names the arm), `quantity_ms1` the MS1 quantity, both from the pass-2 table; `quantity_normalized` divides `quantity` by the run's median-level factor over the precursors quantified in every normalised run (a run sharing fewer than 20 with the others is left unscaled and logged). Missing quantities are null, never 0; precursors above the q threshold have no row and are not filled from other runs |
 
 **Resources.** Per Astral run (15 min gradient, 3.5 million nominees): the search with `--dia
 --predict rt,ms2 --rescore --quant-dir` takes about 20 minutes and a peak of about 36 GB; the

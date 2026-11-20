@@ -404,11 +404,14 @@ near-variant FASTA has one decoy per target protein, made as described above, wi
 |---|---:|---:|
 | Near-variant FASTA, seed 7 | 3,105 / 1.7% | 2,928 / 2.3% |
 | Near-variant FASTA, seed 11 | 3,287 / 2.6% | 2,698 / 2.4% |
+| `--decoy-strategy mutate` (default seed) | 3,206 / 2.9% | 3,007 / 3.2% |
+| `--decoy-strategy mutate --decoy-seed 7` | 3,163 / 2.2% | 2,995 / 2.7% |
 | Near-variant FASTA, 2 substitutions per segment, seed 7 | 3,515 / 3.4% | 3,125 / 4.6% |
 | Near-variant FASTA, 2 substitutions per segment, seed 11 | 3,478 / 3.5% | 3,072 / 4.0% |
 
 - One decoy set against another moves FDP_c by up to 1 point at the same q ≤ 1% count, so the
-  1.7% / 2.3% of the first row is partly a lucky draw.
+  1.7% / 2.3% of the first row is partly a lucky draw. The built-in `mutate` sets and the FASTA
+  sets overlap in that range. Across the four one-substitution sets the mean is 2.3% / 2.7%.
 - At andes's top 4,000 precursors, decoys are 1.4-1.5 times the entrapment hits. Decoys that
   modelled entrapment exactly would give 1/r = 2.1, so near-variant decoys still undercount the
   wrong targets by about a third.
@@ -431,8 +434,7 @@ same length and differs at 1 or 2 residues (I = L). The winner can be a target o
 | Near-variant, 4 sets (mean), new Percolator run | none | 3,190 / 2.3% | 2,907 / 2.7% |
 | Near-variant, 4 sets (mean), new Percolator run | before Percolator (on the PIN) | 3,238 / 2.3% | 2,929 / 2.5% |
 
-The 4 near-variant sets are the two one-substitution FASTA sets above and two sets made inside
-andes with the same rule (`--decoy-strategy mutate`, a separate change). The "after" rows apply
+The 4 near-variant sets are the four one-substitution sets above. The "after" rows apply
 the rule to Percolator's PSM scores and then compute precursor q-values again. The last two rows
 run Percolator on a new PIN, so compare each row with the "none" row above it.
 

@@ -31,6 +31,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use model::scan::Ms1Scan;
+use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
 use onnx_infer::predictors::spectral::FragmentTolerance;
@@ -70,6 +71,8 @@ impl Calib {
     }
 }
 
+/// m/z tolerance (ppm) of the precursor's monoisotopic peak in the MS1 scan nearest the pool row,
+/// whose intensity gives the row's MS1 quartile (a coarse abundance bin, not an evidence term).
 const MS1_PPM: f64 = 10.0;
 const RANK_BINS: usize = 12;
 const MS1_BINS: usize = 5;
@@ -78,6 +81,10 @@ const MZ_BINS: usize = 20;
 const Z_BINS: usize = 2;
 const SOFT_ROUNDS: usize = 2;
 const P_MIN: f64 = 1e-4;
+/// Anchors of a (rank, MS1 quartile) cell below which its presence rate pools the rank's quartiles.
+const Q_MIN_ANCHORS: f64 = 20.0;
+/// Width (Th) of the fragment m/z bins of the chance table.
+const MZ_BIN_TH: f64 = 100.0;
 
 fn rank_bin(rank: usize, pred: f32) -> usize {
     if pred <= 0.0 {
@@ -98,7 +105,7 @@ fn len_bin(len: u8) -> usize {
 }
 
 fn mz_bin(mz: f64) -> usize {
-    ((mz / 100.0) as usize).min(MZ_BINS - 1)
+    ((mz / MZ_BIN_TH) as usize).min(MZ_BINS - 1)
 }
 
 #[derive(Clone, Copy)]
@@ -265,7 +272,7 @@ impl Tables {
         for r in 0..RANK_BINS {
             for b in 0..MS1_BINS {
                 let (mut h, mut n) = (c.q_hit[r][b], c.q_n[r][b]);
-                if n < 20.0 {
+                if n < Q_MIN_ANCHORS {
                     h = c.q_hit[r].iter().sum();
                     n = c.q_n[r].iter().sum();
                 }
@@ -480,7 +487,7 @@ pub(crate) fn add_to_pin(
             let med = f64::from(e[e.len() / 2]);
             let mut dev: Vec<f32> = e.iter().map(|&x| (f64::from(x) - med).abs() as f32).collect();
             dev.sort_by(f32::total_cmp);
-            let sigma = 1.4826 * f64::from(dev[dev.len() / 2]);
+            let sigma = MAD_TO_SD * f64::from(dev[dev.len() / 2]);
             log::info!(
                 target: "dia",
                 "run {run}: fragment shift {med:.2} ppm, spread {sigma:.2} ppm from {} ions",

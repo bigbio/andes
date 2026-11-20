@@ -1178,10 +1178,14 @@ shares (database, charge, decoys, FDR).
 - `andes cohort plan cohort.yaml` checks the cohort and writes `<output_dir>/plan.json` (or
   `--output`): one entry per spectrum file and one per group. It searches nothing. Every
   problem is reported in one pass, and no plan is written while any remains.
-- `andes cohort run cohort.yaml` plans, searches every run into `<output_dir>/runs/<run>/`,
-  then runs each group's stages into `<output_dir>/groups/<group>/`. A run whose search has
-  finished is kept, so a rerun searches only new or failed runs. It runs the `xl-fdr` stage;
-  the other stages are not run yet and are named in a warning.
+- `andes cohort run cohort.yaml [--threads N]` plans, searches every run into
+  `<output_dir>/runs/<run>/`, then runs each group's stages into
+  `<output_dir>/groups/<group>/`. `--threads` is passed to each search (default: the number
+  of logical CPUs). A finished search is kept while its spectrum file (path, size,
+  modification time), the config's sections other than `cohort` and its search flags are
+  unchanged, so a rerun searches only new, failed or changed runs; adding a project to the
+  `cohort` section does not search the others again. It runs the `xl-fdr` stage; the other
+  stages are not run yet and are named in a warning.
 
 - **Runs.** Each SDRF is read as with `--sdrf`, except that rows which disagree on the
   protease, modifications, precursor tolerance, dissociation method, label kind or
@@ -1190,8 +1194,10 @@ shares (database, charge, decoys, FDR).
   SDRF`; a key the config sets is left out of `args`, so the runner's `--config` applies it.
 - **Files.** Each name in `comment[data file]` is found below `data_dir`, or a converted copy
   with the same stem (`.mzML`, `.mzML.gz`, `.d`, `.d.zip`, ...). When `<data_dir>/<project>/`
-  exists only that folder is searched, so projects whose files share a name never swap them;
-  one name matching two files in the same folder tree is an error naming both. Without
+  exists only that folder is searched; otherwise all of `data_dir` is searched except the
+  other projects' folders, so projects whose files share a name never swap them. One name
+  matching two files in the searched tree is an error naming both, and so is one spectrum
+  file given to two runs (for example two SDRFs next to each other naming the same file). Without
   `data_dir` the files are looked up next to the SDRF, and missing ones are a warning.
 - **Run names.** `cohort.run_name` (default `{project}.{stem}`) gives each spectrum file a
   name unique in the cohort. The file is staged under that name (`stage_as`) in the run's
@@ -1214,7 +1220,11 @@ over its `inputs`.
 CSM's TT/TD/DD class and its residue-pair and protein-pair keys (the `residue_pair` and
 `protein_pair` columns), and computes the CSM, residue-pair and protein-pair q-values once
 over the group, with the rules of one search (above). The per-run q-values each search writes
-are superseded by the group's.
+are superseded by the group's. `andes cohort xl-fdr <CSM_TABLE>... --output <BASE>` runs the
+stage on its own over any runs' `<base>.xl.tsv` tables and writes `<BASE>.xl.tsv`,
+`<BASE>.xl.residue_pairs.tsv` and `<BASE>.xl.ppi.tsv`. Rows with the score `NA` (spectra
+without a CSM) are counted and skipped; any other unreadable score, or a scored row without
+its residue pair or protein pair, is an error naming the table and row.
 
 ---
 

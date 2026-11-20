@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::{CohortCommand, CohortPlanArgs, CohortRunArgs, CohortXlFdrArgs};
 use crate::cohort::{self, Plan};
 use crate::config::RunConfig;
+use output::stats::thousands;
 
 pub(crate) fn run(cmd: CohortCommand) -> Result<(), Box<dyn Error>> {
     match cmd {
@@ -56,10 +57,13 @@ fn write_plan(plan: &Plan, out: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Give the spectrum file its run's name inside the run folder, so that the PIN `SpecId`
-/// prefix is the run name.
+/// prefix is the run name. A link left by an earlier plan that points elsewhere is replaced.
 fn stage(file: &Path, at: &Path) -> std::io::Result<()> {
     if at.symlink_metadata().is_ok() {
-        return Ok(());
+        if std::fs::read_link(at).is_ok_and(|t| t == file) {
+            return Ok(());
+        }
+        std::fs::remove_file(at)?;
     }
     #[cfg(unix)]
     {
@@ -71,8 +75,36 @@ fn stage(file: &Path, at: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Marker a run's folder gets once its search has finished, so that a rerun skips it.
+/// Marker a run's folder gets once its search has finished, so that a rerun skips it; it
+/// holds the run's [`fingerprint`].
 const DONE: &str = "search.done";
+
+/// What a run's search depends on: the spectrum file (path, size, modification time), the
+/// config's sections other than `cohort`, and the run's search flags. A finished search is
+/// kept only while its fingerprint is unchanged, so editing the cohort section to add a
+/// project does not search the other projects again.
+fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn Error>> {
+    let meta = std::fs::metadata(&r.file)
+        .map_err(|e| format!("{}: cannot read {}: {e}", r.run, r.file.display()))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let text = std::fs::read_to_string(config)
+        .map_err(|e| format!("cannot read {}: {e}", config.display()))?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&text)?;
+    if let Some(m) = yaml.as_mapping_mut() {
+        m.remove("cohort");
+    }
+    Ok(format!(
+        "file\t{}\t{}\t{mtime}\nargs\t{}\nconfig\t{}",
+        r.file.display(),
+        meta.len(),
+        r.args.join("\u{1f}"),
+        serde_yaml::to_string(&yaml)?
+    ))
+}
 
 fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
     let config = std::fs::canonicalize(&args.config)
@@ -83,10 +115,24 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
     let exe = std::env::current_exe()?;
     let n = plan.runs.len();
     let mut skipped = 0;
+    let mut redone = 0;
     for (i, r) in plan.runs.iter().enumerate() {
-        if r.dir.join(DONE).exists() {
-            skipped += 1;
-            continue;
+        let print = fingerprint(r, &config)?;
+        match std::fs::read_to_string(r.dir.join(DONE)) {
+            Ok(old) if old == print => {
+                skipped += 1;
+                continue;
+            }
+            Ok(_) => {
+                redone += 1;
+                log::info!(
+                    target: "cohort",
+                    "{}: its file, config or search flags changed; searching again",
+                    r.run
+                );
+                std::fs::remove_file(r.dir.join(DONE))?;
+            }
+            Err(_) => {}
         }
         std::fs::create_dir_all(&r.dir)
             .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
@@ -125,7 +171,7 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
-        std::fs::write(r.dir.join(DONE), "")?;
+        std::fs::write(r.dir.join(DONE), &print)?;
         log::info!(
             target: "cohort",
             "search {}/{n}: {} done in {:.0} s",
@@ -135,7 +181,20 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
         );
     }
     if skipped > 0 {
-        log::info!(target: "cohort", "{skipped} of {n} runs already searched; kept");
+        log::info!(
+            target: "cohort",
+            "{} of {} runs already searched with the same settings; kept",
+            thousands(skipped),
+            thousands(n)
+        );
+    }
+    if redone > 0 {
+        log::info!(
+            target: "cohort",
+            "{} of {} runs searched again after a change",
+            thousands(redone),
+            thousands(n)
+        );
     }
     let mut not_run: Vec<&str> = Vec::new();
     for g in &plan.groups {
@@ -189,7 +248,10 @@ fn link_class(s: &str) -> Option<xl::rollup::LinkClass> {
         .find(|c| c.name() == s)
 }
 
-fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<usize, String> {
+/// Read one run's CSM table into `out`. Rows with the score `NA` (spectra without a CSM)
+/// are counted, not read; any other score that is not a number, or a scored row without
+/// its residue pair or protein pair, is an error. Returns (scored, unscored).
+fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let name = path
@@ -210,26 +272,38 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<usize, String> {
     };
     let (sp, cl, li, sc) = (col("spectrum")?, col("class")?, col("link")?, col("score")?);
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
-    let mut n = 0;
+    let (mut n, mut unscored) = (0, 0);
     for (k, line) in lines.enumerate() {
         let f: Vec<&str> = line.split('\t').collect();
         let get = |i: usize| f.get(i).copied().unwrap_or("");
-        let Ok(score) = get(sc).parse::<f64>() else {
-            continue;
-        };
         let bad = |what: &str| format!("{}: row {}: bad {what}", path.display(), k + 2);
+        if get(sc) == "NA" {
+            unscored += 1;
+            continue;
+        }
+        let score = get(sc)
+            .parse::<f64>()
+            .ok()
+            .filter(|s| s.is_finite())
+            .ok_or_else(|| bad("score"))?;
+        let pair = |i: usize, what: &str| {
+            Some(get(i))
+                .filter(|v| !v.is_empty() && *v != "NA")
+                .map(str::to_string)
+                .ok_or_else(|| bad(what))
+        };
         out.push(CsmRow {
             run: run.clone(),
             spectrum: get(sp).to_string(),
             class: pair_class(get(cl)).ok_or_else(|| bad("class"))?,
             link: link_class(get(li)).ok_or_else(|| bad("link"))?,
             score,
-            residue_pair: get(rp).to_string(),
-            protein_pair: get(pp).to_string(),
+            residue_pair: pair(rp, "residue_pair")?,
+            protein_pair: pair(pp, "protein_pair")?,
         });
         n += 1;
     }
-    Ok(n)
+    Ok((n, unscored))
 }
 
 fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
@@ -240,8 +314,14 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
 fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
     for t in tables {
-        let n = read_csms(t, &mut csms)?;
-        log::info!(target: "cohort", "{}: {n} scored CSMs", t.display());
+        let (n, unscored) = read_csms(t, &mut csms)?;
+        log::info!(
+            target: "cohort",
+            "{}: {} scored CSMs, {} spectra without a CSM",
+            t.display(),
+            thousands(n),
+            thousands(unscored)
+        );
     }
     let items: Vec<xl::rollup::Item> = csms
         .iter()
@@ -301,8 +381,8 @@ fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>
         target: "cohort",
         "wrote {} ({} CSMs from {} runs) and the residue-pair and protein-pair tables",
         csm_path.display(),
-        csms.len(),
-        tables.len()
+        thousands(csms.len()),
+        thousands(tables.len())
     );
     Ok(())
 }
@@ -366,7 +446,7 @@ mod tests {
         )
         .unwrap();
         let mut rows = Vec::new();
-        assert_eq!(read_csms(&p, &mut rows).unwrap(), 2);
+        assert_eq!(read_csms(&p, &mut rows).unwrap(), (2, 1));
         assert_eq!(rows[0].run, "A.r1");
         assert_eq!(rows[0].class, xl::decoy::PairClass::TT);
         assert_eq!(rows[1].link, xl::rollup::LinkClass::Homotypic);
@@ -375,5 +455,83 @@ mod tests {
         assert!(read_csms(&old, &mut rows)
             .unwrap_err()
             .contains("residue_pair"));
+    }
+
+    #[test]
+    fn a_malformed_score_or_missing_pair_is_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let head = "spectrum\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
+        for (name, row, what) in [
+            (
+                "a.xl.tsv",
+                "s1\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
+                "row 2: bad score",
+            ),
+            (
+                "b.xl.tsv",
+                "s1\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
+                "bad score",
+            ),
+            (
+                "c.xl.tsv",
+                "s1\tTT\tinter\t12.5\t\tP1 -- P2",
+                "bad residue_pair",
+            ),
+            (
+                "d.xl.tsv",
+                "s1\tTT\tinter\t12.5\tP1:5 -- P2:9",
+                "bad protein_pair",
+            ),
+        ] {
+            let p = t.path().join(name);
+            std::fs::write(&p, format!("{head}{row}\n")).unwrap();
+            let e = read_csms(&p, &mut Vec::new()).unwrap_err();
+            assert!(e.contains(what), "{name}: {e}");
+        }
+    }
+
+    #[test]
+    fn staging_replaces_a_link_to_another_file() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b, at) = (
+            t.path().join("a.raw"),
+            t.path().join("b.raw"),
+            t.path().join("r.raw"),
+        );
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        stage(&a, &at).unwrap();
+        stage(&a, &at).unwrap();
+        stage(&b, &at).unwrap();
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), "b");
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_search_settings_but_not_the_cohort_section() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("r1.raw");
+        std::fs::write(&file, "spectra").unwrap();
+        let config = t.path().join("c.yaml");
+        let run = |args: &[&str]| cohort::PlannedRun {
+            run: "A.r1".into(),
+            project: "A".into(),
+            sdrf: t.path().join("a.sdrf.tsv"),
+            file: file.clone(),
+            dir: t.path().join("runs/A.r1"),
+            stage_as: "A.r1.raw".into(),
+            kind: cohort::Kind::Xl,
+            group: "xl".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        std::fs::write(&config, "search: {threads: 4}\ncohort: {name: one}\n").unwrap();
+        let base = fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap();
+        std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
+        assert_eq!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+        assert_ne!(fingerprint(&run(&["--xl", "DSBU"]), &config).unwrap(), base);
+        std::fs::write(&config, "search: {threads: 8}\ncohort: {name: two}\n").unwrap();
+        assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+        std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
+        std::fs::write(&file, "other spectra").unwrap();
+        assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
     }
 }

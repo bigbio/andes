@@ -15,9 +15,6 @@ use crate::sdrf::{self, Quant, SdrfSettings};
 /// Run name template used when the cohort section gives none.
 pub const DEFAULT_RUN_NAME: &str = "{project}.{stem}";
 
-/// The enzyme of a run whose SDRF and config give none: the `--enzyme` default.
-const DEFAULT_ENZYME: &str = "trypsin";
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CohortCfg {
@@ -309,9 +306,10 @@ fn resolve(
     );
     if precursor_tol.is_none() && sc.precursor_tol.is_none() {
         problems.warnings.push(format!(
-            "{p}: {} gives no precursor tolerance; its runs use the default 20 ppm \
+            "{p}: {} gives no precursor tolerance; its runs use the default {} \
              (set cohort.overrides search.precursor_tol to change it)",
-            part.sdrf.display()
+            part.sdrf.display(),
+            crate::cli::default_value::<crate::cli::SearchArgs>("precursor_tol")
         ));
     }
     let to_list = |v: Option<String>| {
@@ -339,7 +337,7 @@ fn resolve(
     let group_enzyme = enzyme
         .clone()
         .or_else(|| sc.enzyme.clone())
-        .unwrap_or_else(|| DEFAULT_ENZYME.into());
+        .unwrap_or_else(|| crate::cli::default_value::<crate::cli::DatabaseArgs>("enzyme"));
     ok.then(|| Resolved {
         kind,
         enzyme,
@@ -450,21 +448,31 @@ const CONVERTED: &[&str] = &[
 ];
 
 /// Find the file an SDRF names under `data_dir`: the name itself, else a converted copy
-/// with the same stem. When `<data_dir>/<project>/` exists only that folder is searched, so
-/// a project never takes another project's file of the same name.
+/// with the same stem. When `<data_dir>/<project>/` exists only that folder is searched;
+/// otherwise the whole of `data_dir` is, except the folders of the other `projects`, so a
+/// project never takes another project's file of the same name.
 fn locate(
     index: &BTreeMap<String, Vec<PathBuf>>,
     root: &Path,
     project: &str,
+    projects: &[&str],
     name: &str,
 ) -> Result<PathBuf, String> {
     let lower = name.to_ascii_lowercase();
     let (stem, _) = split_name(&lower);
     let own = root.join(project);
-    let scope = if own.is_dir() {
-        own
+    let (scope, others): (PathBuf, Vec<PathBuf>) = if own.is_dir() {
+        (own, Vec::new())
     } else {
-        root.to_path_buf()
+        (
+            root.to_path_buf(),
+            projects
+                .iter()
+                .filter(|p| **p != project)
+                .map(|p| root.join(p))
+                .filter(|d| d.is_dir())
+                .collect(),
+        )
     };
     let mut names = vec![lower.clone()];
     names.extend(
@@ -476,7 +484,11 @@ fn locate(
     for n in names {
         let found: Vec<&PathBuf> = index
             .get(&n)
-            .map(|v| v.iter().filter(|p| p.starts_with(&scope)).collect())
+            .map(|v| {
+                v.iter()
+                    .filter(|p| p.starts_with(&scope) && !others.iter().any(|o| p.starts_with(o)))
+                    .collect()
+            })
             .unwrap_or_default();
         match found.len() {
             0 => continue,
@@ -660,6 +672,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
     let mut keys: Vec<((Kind, String, String), String)> = Vec::new();
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut owner: BTreeMap<PathBuf, String> = BTreeMap::new();
     for part in &parts {
         let ov = cohort
             .overrides
@@ -688,7 +701,8 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             match (&data_dir, &index) {
-                (Some(root), Some(idx)) => match locate(idx, root, &part.project, &name) {
+                (Some(root), Some(idx)) => match locate(idx, root, &part.project, &projects, &name)
+                {
                     Ok(p) => files.push(p),
                     Err(e) => missing.push(e),
                 },
@@ -722,7 +736,8 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         if let Some(first) = unread.first() {
             problems.warnings.push(format!(
                 "{}: {} of {} data files in {} are not spectrum files andes reads (e.g. {}); \
-                 convert or extract each and stage the result under its run's stage_as name",
+                 convert or extract each to mzML, Thermo .raw, Bruker .d or MGF with the same \
+                 stem and plan again",
                 part.project,
                 unread.len(),
                 files.len(),
@@ -732,6 +747,16 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         }
         for file in &files {
             let run = run_name(template, &part.project, file);
+            let id = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+            if let Some(first) = owner.get(&id) {
+                problems.errors.push(format!(
+                    "{} is the spectrum file of both {first} and {run}; give each project its own \
+                     copy (<data_dir>/<project>/) or list the file in one SDRF",
+                    file.display()
+                ));
+            } else {
+                owner.insert(id, run.clone());
+            }
             if !names.insert(run.clone()) {
                 problems.errors.push(format!(
                     "run name {run} is given to two spectrum files (from {}); make cohort.run_name \
@@ -835,10 +860,12 @@ mod tests {
             "a.sdrf.tsv",
             &sdrf(&[("r1.raw", "10 ppm", DSSO), ("r2.raw", "10 ppm", DSSO)]),
         );
-        write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
+        std::fs::create_dir_all(d.join("b")).unwrap();
+        write(d, "b/b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
         write(d, "r1.raw", "");
         write(d, "r2.raw", "");
-        let c = cfg("cohort:\n  name: t\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n");
+        write(d, "b/r1.raw", "");
+        let c = cfg("cohort:\n  name: t\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b/b.sdrf.tsv}\n");
         let p = plan(&c, d).unwrap();
         let names: Vec<&str> = p.runs.iter().map(|r| r.run.as_str()).collect();
         assert_eq!(names, ["A.r1", "A.r2", "B.r1"]);
@@ -1049,6 +1076,53 @@ mod tests {
         write(d, "raw/x/r1.raw", "");
         let e = plan(&cfg(yaml), d).unwrap_err().errors;
         assert!(e.iter().any(|m| m.contains("2 files under")), "{e:?}");
+    }
+
+    #[test]
+    fn one_spectrum_file_given_to_two_projects_is_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "r1.raw", "");
+        let c = cfg("cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n");
+        let e = plan(&c, d).unwrap_err().errors;
+        assert!(
+            e.iter()
+                .any(|m| m.contains("spectrum file of both A.r1 and B.r1")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_project_without_a_folder_does_not_take_another_projects_file() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        std::fs::create_dir_all(d.join("raw/B")).unwrap();
+        write(d, "raw/B/r1.raw", "");
+        let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(
+            e.iter()
+                .any(|m| m.starts_with("A:") && m.contains("1 of 1 data files")),
+            "{e:?}"
+        );
+        write(d, "raw/r1.raw", "");
+        let p = plan(&cfg(yaml), d).unwrap();
+        let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap().file.clone();
+        assert_eq!(file("A.r1"), d.join("raw/r1.raw"));
+        assert_eq!(file("B.r1"), d.join("raw/B/r1.raw"));
+    }
+
+    #[test]
+    fn defaults_come_from_the_flags() {
+        assert_eq!(
+            crate::cli::default_value::<crate::cli::DatabaseArgs>("enzyme"),
+            "trypsin"
+        );
+        assert!(!crate::cli::default_value::<crate::cli::SearchArgs>("precursor_tol").is_empty());
     }
 
     #[test]

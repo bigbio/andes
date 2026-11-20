@@ -917,7 +917,8 @@ fn rate_table(title: &str, rows: &[RateRow], extra: Option<(String, usize)>) -> 
     s
 }
 
-fn thousands(n: usize) -> String {
+/// `n` with a comma between each group of three digits (52,169).
+pub fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

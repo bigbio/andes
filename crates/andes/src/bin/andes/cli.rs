@@ -1410,8 +1410,7 @@ pub(crate) struct ProteinArgs {
     pub(crate) protein_fdr: f64,
 }
 
-/// `andes quant`: the match-between-runs stages over a quant directory
-/// written by a search with `--quant-dir`.
+/// `andes cohort`: plan, search and run the stages of several projects' SDRFs together.
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum CohortCommand {
     /// Check a cohort and write its plan: every run's search settings and the FDR groups
@@ -1465,6 +1464,20 @@ pub(crate) struct CohortPlanArgs {
     pub(crate) output: Option<PathBuf>,
 }
 
+/// The `default_value` of the flag `id` of the clap arguments `A`, so that code which
+/// needs a flag's default reads it from the one place it is declared.
+pub(crate) fn default_value<A: clap::Args>(id: &str) -> String {
+    let cmd = A::augment_args(clap::Command::new("defaults"));
+    let value = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == id)
+        .and_then(|a| a.get_default_values().first())
+        .map(|v| v.to_string_lossy().into_owned());
+    value.unwrap_or_else(|| panic!("flag {id} has no default value"))
+}
+
+/// `andes quant`: the match-between-runs stages over a quant directory
+/// written by a search with `--quant-dir`.
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum QuantCommand {
     /// Build the precursor library and the joint retention-time alignment

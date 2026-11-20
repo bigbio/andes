@@ -17,7 +17,6 @@ use onnx_infer::predictors::{
     DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
 };
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
-use rayon::prelude::*;
 use search::tdc::{qvalues, ScoredLabel};
 
 use crate::cli::{Cli, PredictFeature, PredictorBackend};
@@ -455,12 +454,69 @@ impl Predictors {
                 });
             }
         }
+        let mut row_start = vec![0u32; fz.len() + 1];
+        let fz_of_row: Vec<u32> = table
+            .rows
+            .iter()
+            .map(|r| {
+                let k = fz_ix.get(&(r.form, r.charge)).copied().unwrap_or(NONE);
+                if k != NONE {
+                    row_start[k as usize + 1] += 1;
+                }
+                k
+            })
+            .collect();
+        drop(fz_ix);
+        for k in 0..fz.len() {
+            row_start[k + 1] += row_start[k];
+        }
+        let mut fill = row_start.clone();
+        let mut rows_of_fz = vec![0u32; row_start[fz.len()] as usize];
+        for (i, &k) in fz_of_row.iter().enumerate() {
+            if k != NONE {
+                rows_of_fz[fill[k as usize] as usize] = i as u32;
+                fill[k as usize] += 1;
+            }
+        }
+        drop(fill);
+        for (m, &k) in miss.iter_mut().zip(&fz_of_row) {
+            *m |= k == NONE;
+        }
+        drop(fz_of_row);
         let jobs = batches(
             fz.iter()
                 .map(|(f, _)| pred.batch_key(&forms[*f as usize].0)),
             self.batch,
         );
-        let out = Mutex::new(vec![Vec::new(); fz.len()]);
+        let tol = self.tol;
+        let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
+        let width = MS2_FEATURES.len()
+            + if dia.is_some() {
+                crate::dia::EVIDENCE_COLUMNS.len()
+            } else {
+                0
+            };
+        let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
+            let spec = &spectra[r.spec as usize];
+            let (_, mass) = &forms[r.form as usize];
+            let mut v =
+                ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
+            if let Some((slot, windows)) = &dia {
+                let (scans, center) =
+                    crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
+                v.extend(crate::dia::evidence(
+                    prediction,
+                    pred.ions(),
+                    mass,
+                    r.charge,
+                    &scans,
+                    center,
+                    tol,
+                ));
+            }
+            v
+        };
+        let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
         let t = Instant::now();
         run_parallel(&src.sessions, self.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job
@@ -470,65 +526,22 @@ impl Predictors {
             let v = pred
                 .ms2(s, &items)
                 .map_err(|e| format!("{} MS2: {e}", pred.prefix()))?;
+            let mut done: Vec<(u32, Vec<f64>)> = Vec::new();
+            for (&i, x) in job.iter().zip(&v) {
+                for &row in &rows_of_fz[row_start[i] as usize..row_start[i + 1] as usize] {
+                    done.push((row, row_features(x, &table.rows[row as usize])));
+                }
+            }
             let mut g = out.lock().expect("MS2 output lock");
-            for (&i, x) in job.iter().zip(v) {
-                g[i] = x;
+            for (row, f) in done {
+                for (c, x) in g.iter_mut().zip(f) {
+                    c[row as usize] = x;
+                }
             }
             Ok(())
         })?;
-        let ms2_pred = out.into_inner().expect("MS2 output lock");
+        let cols = out.into_inner().expect("MS2 output lock");
         let predict_s = t.elapsed().as_secs_f64();
-        let tol = self.tol;
-        let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
-        let width = MS2_FEATURES.len()
-            + if dia.is_some() {
-                crate::dia::EVIDENCE_COLUMNS.len()
-            } else {
-                0
-            };
-        let feats: Vec<Option<Vec<f64>>> = table
-            .rows
-            .par_iter()
-            .map(|r| {
-                let k = fz_ix.get(&(r.form, r.charge))?;
-                let spec = &spectra[r.spec as usize];
-                let (_, mass) = &forms[r.form as usize];
-                let mut v = ms2_features(
-                    &ms2_pred[*k as usize],
-                    pred.ions(),
-                    mass,
-                    r.charge,
-                    &spec.peaks,
-                    tol,
-                )
-                .to_vec();
-                if let Some((slot, windows)) = &dia {
-                    let (scans, center) =
-                        crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
-                    v.extend(crate::dia::evidence(
-                        &ms2_pred[*k as usize],
-                        pred.ions(),
-                        mass,
-                        r.charge,
-                        &scans,
-                        center,
-                        tol,
-                    ));
-                }
-                Some(v)
-            })
-            .collect();
-        let mut cols = vec![vec![f64::NAN; table.rows.len()]; width];
-        for (i, f) in feats.iter().enumerate() {
-            match f {
-                Some(v) => {
-                    for (c, x) in cols.iter_mut().zip(v) {
-                        c[i] = *x;
-                    }
-                }
-                None => miss[i] = true,
-            }
-        }
         if no_peaks > 0 {
             log::warn!(
                 target: "predict",

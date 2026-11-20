@@ -90,6 +90,8 @@ impl Acquisition {
         let dissociation = match self.activation {
             Some(ActivationMethod::HCD) => "HCD",
             Some(ActivationMethod::CID) => "CID",
+            Some(ActivationMethod::ETD) => return "ETD",
+            Some(ActivationMethod::EThcD) => return "EThcD",
             Some(_) => return "unknown",
             None if self.high_res => "HCD",
             None => "CID",
@@ -333,6 +335,15 @@ mod tests {
         assert_eq!(tims.ms2_activation(), "unknown");
         assert_eq!(
             resolve(ActivationMethod::ETD, Some(InstrumentType::QExactive), None).ms2_activation(),
+            "ETD"
+        );
+        assert_eq!(
+            resolve(ActivationMethod::EThcD, Some(InstrumentType::QExactive), None)
+                .ms2_activation(),
+            "EThcD"
+        );
+        assert_eq!(
+            resolve(ActivationMethod::PQD, Some(InstrumentType::QExactive), None).ms2_activation(),
             "unknown"
         );
     }

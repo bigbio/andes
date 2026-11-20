@@ -14,7 +14,8 @@ use onnx_infer::predictors::calibration::RtCalibration;
 use onnx_infer::predictors::form::{parse_peptide, Form, Mass};
 use onnx_infer::predictors::spectral::{ms2_features, FragmentTolerance, MS2_FEATURES};
 use onnx_infer::predictors::{
-    DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
+    ms2_label, DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE,
+    PEPTDEEP_FILES,
 };
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
 use search::tdc::{qvalues, ScoredLabel};
@@ -67,10 +68,13 @@ fn peptdeep_instrument(i: InstrumentType) -> &'static str {
 }
 
 impl Predictors {
+    /// `protocol` is the run's resolved protocol (from `--protocol` or the detected isobaric
+    /// label); it sets the label condition of andes-ms2.
     pub(crate) fn from_cli(
         cli: &Cli,
         acquisition: &Acquisition,
         model_instrument: InstrumentType,
+        protocol: model::protocol::Protocol,
     ) -> Result<Option<Self>, String> {
         let instrument = acquisition.predictor_instrument(model_instrument);
         let Some(want) = requested(&cli.predict)? else {
@@ -125,15 +129,16 @@ impl Predictors {
                 .predictor_instrument
                 .clone()
                 .unwrap_or_else(|| acquisition.ms2_instrument().to_string());
+            let label = ms2_label(protocol);
             log::info!(
                 target: "predict",
-                "andes-ms2 (activation {activation}, instrument {}, NCE {})",
+                "andes-ms2 (activation {activation}, instrument {}, NCE {}, label {label})",
                 if inst.is_empty() { "unknown" } else { &inst },
                 nce.map_or("unknown".to_string(), |v| v.to_string())
             );
             sources.push(Source {
                 pred: Box::new(
-                    NativeMs2::from_bytes(ANDES_MS2_WEIGHTS, nce, activation, &inst)
+                    NativeMs2::from_bytes(ANDES_MS2_WEIGHTS, nce, activation, &inst, label)
                         .map_err(|e| e.to_string())?,
                 ),
                 sessions: Vec::new(),
@@ -491,17 +496,26 @@ impl Predictors {
             } else {
                 0
             };
-        let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
+        let row_features = |prediction: &[f32], valid: Option<&[bool]>, r: &PinRow| -> Vec<f64> {
             let spec = &spectra[r.spec as usize];
             let (_, mass) = &forms[r.form as usize];
-            let mut v =
-                ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
+            let mut v = ms2_features(
+                prediction,
+                pred.ions(),
+                valid,
+                mass,
+                r.charge,
+                &spec.peaks,
+                tol,
+            )
+            .to_vec();
             if let Some((slot, windows)) = &dia {
                 let (scans, center) =
                     crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
                 v.extend(crate::dia::evidence(
                     prediction,
                     pred.ions(),
+                    valid,
                     mass,
                     r.charge,
                     &scans,
@@ -522,9 +536,13 @@ impl Predictors {
                 .ms2(s, &items)
                 .map_err(|e| format!("{} MS2: {e}", pred.prefix()))?;
             let mut done: Vec<(u32, Vec<f64>)> = Vec::new();
-            for (&i, x) in job.iter().zip(&v) {
+            for ((&i, x), item) in job.iter().zip(&v).zip(&items) {
+                let valid = pred.ms2_valid(item.0, item.1);
                 for &row in &rows_of_fz[row_start[i] as usize..row_start[i + 1] as usize] {
-                    done.push((row, row_features(x, &table.rows[row as usize])));
+                    done.push((
+                        row,
+                        row_features(x, valid.as_deref(), &table.rows[row as usize]),
+                    ));
                 }
             }
             let mut g = out.lock().expect("MS2 output lock");

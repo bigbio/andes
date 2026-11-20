@@ -406,6 +406,7 @@ fn main() {
                 ms2_features(
                     &ms2_pred[k],
                     pred.ions(),
+                    None,
                     &forms[f].1,
                     r.charge,
                     &s.peaks,

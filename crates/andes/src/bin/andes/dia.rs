@@ -7,7 +7,7 @@ use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
-use onnx_infer::predictors::spectral::FragmentTolerance;
+use onnx_infer::predictors::spectral::{self, FragmentTolerance, Ion};
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
@@ -369,30 +369,23 @@ fn angle(p: &[f64], o: &[f64]) -> f64 {
     }
 }
 
+/// DIA co-elution evidence of the predicted spectrum `pred` around scan `center`; impossible
+/// channels (`valid`, see [`spectral::fragments`]) never enter the sums or the top fragments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evidence(
     pred: &[f32],
-    ions: &[(bool, u8)],
+    ions: &[Ion],
+    valid: Option<&[bool]>,
     mass: &Mass,
     charge: u8,
     scans: &[&[(f64, f32)]],
     center: usize,
     tol: FragmentTolerance,
 ) -> [f64; EVIDENCE_COLUMNS.len()] {
-    let n = mass.res.len();
-    let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-    let mut frags: Vec<(f64, f64)> = Vec::new();
-    let mut prefix = mass.nterm;
-    for i in 0..n.saturating_sub(1) {
-        prefix += mass.res[i];
-        for (k, &(b, z)) in ions.iter().enumerate() {
-            if z > charge {
-                continue;
-            }
-            let neutral = if b { prefix } else { total - prefix + H2O };
-            let p = pred.get(i * ions.len() + k).copied().unwrap_or(0.0) as f64;
-            frags.push(((neutral + z as f64 * PROTON) / z as f64, p.max(0.0)));
-        }
-    }
+    let frags: Vec<(f64, f64)> = spectral::fragments(pred, ions, valid, mass, charge)
+        .iter()
+        .map(|f| (f.mz, f.pred.max(0.0)))
+        .collect();
     let trace = |mz: f64| -> Vec<f64> {
         let w = tol.window(mz);
         scans
@@ -433,9 +426,7 @@ pub(crate) fn evidence(
         0.0
     };
 
-    let mut top: Vec<usize> = (0..frags.len()).collect();
-    top.sort_by(|&x, &y| p[y].total_cmp(&p[x]));
-    top.truncate(EVIDENCE_TOP);
+    let top = spectral::top_by_weight(&p, EVIDENCE_TOP);
     let norm: Vec<Vec<f64>> = top
         .iter()
         .map(|&k| {
@@ -1115,7 +1106,7 @@ mod tests {
     fn evidence_ignores_an_interfered_fragment() {
         let (_, mass) = parse_peptide("K.PEPTIDEKLR.A").unwrap();
         let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-        let ions = [(false, 1u8)];
+        let ions = [onnx_infer::ms2_native::ION_TYPES[2]];
         let n = mass.res.len() - 1;
         let pred: Vec<f32> = (0..n).map(|i| 1.0 + i as f32).collect();
         let mut prefix = mass.nterm;
@@ -1153,14 +1144,15 @@ mod tests {
         };
         let score = |s: &Vec<Vec<(f64, f32)>>| {
             let v: Vec<&[(f64, f32)]> = s.iter().map(|x| x.as_slice()).collect();
-            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))
+            evidence(&pred, &ions, None, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))
         };
         let clean = score(&build(0));
         assert!(clean[0] > 0.99 && clean[4] > 0.99, "{clean:?}");
         let off = build(0);
         let v: Vec<&[(f64, f32)]> = off[1..].iter().map(|x| x.as_slice()).collect();
-        let from_side = evidence(&pred, &ions, &mass, 2, &v, 1, FragmentTolerance::Ppm(7.0));
-        let at_apex = evidence(&pred, &ions, &mass, 2, &v, 2, FragmentTolerance::Ppm(7.0));
+        let tol = FragmentTolerance::Ppm(7.0);
+        let from_side = evidence(&pred, &ions, None, &mass, 2, &v, 1, tol);
+        let at_apex = evidence(&pred, &ions, None, &mass, 2, &v, 2, tol);
         assert_eq!(from_side[0], at_apex[0], "the sum is centred on the apex");
         let shifted: Vec<Vec<(f64, f32)>> = off
             .iter()
@@ -1168,10 +1160,11 @@ mod tests {
             .collect();
         let v: Vec<&[(f64, f32)]> = shifted.iter().map(|x| x.as_slice()).collect();
         assert_eq!(
-            evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))[0],
+            evidence(&pred, &ions, None, &mass, 2, &v, 3, FragmentTolerance::Ppm(7.0))[0],
             0.0
         );
-        assert!(evidence(&pred, &ions, &mass, 2, &v, 3, FragmentTolerance::Da(0.05))[0] > 0.99);
+        let wide = evidence(&pred, &ions, None, &mass, 2, &v, 3, FragmentTolerance::Da(0.05));
+        assert!(wide[0] > 0.99);
         let flat = score(&build(1));
         assert!(
             flat[0] < 0.95,

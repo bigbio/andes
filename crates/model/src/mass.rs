@@ -49,6 +49,12 @@ pub const NH3: f64 = N + H * 3.0;
 /// Monoisotopic mass of carbon monoxide (b → a ion), in Da.
 pub const CO: f64 = C + O;
 
+/// Monoisotopic mass of phosphoric acid, the neutral loss of phospho-Ser/Thr, in Da.
+pub const H3PO4: f64 = H * 3.0 + P + O * 4.0;
+
+/// Monoisotopic mass of methanesulfenic acid, the neutral loss of oxidised Met, in Da.
+pub const CH4SO: f64 = C + H * 4.0 + S + O;
+
 /// Mass of a proton, in Da: 1.0072764665789(83), CODATA 2022 (proton mass in u).
 pub const PROTON: f64 = 1.0072764665789;
 

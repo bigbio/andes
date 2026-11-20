@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use onnx_infer::ms2_native::{
+    IonType, Ms2Conditions, Ms2Model, Ms2Scratch, NeutralLoss, Series, ION_TYPES, N_BASE_ION,
+};
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
 use onnx_infer::rt_native::RtPeptide;
 use onnx_infer::{ms2pip, BackendKind, BackendOptions, OnnxSession, Result};
@@ -49,7 +51,7 @@ pub struct Ms2pip {
     pub model: String,
 }
 
-const MS2PIP_IONS: [Ion; 2] = [(true, 1), (false, 1)];
+const MS2PIP_IONS: [Ion; 2] = [ION_TYPES[0], ION_TYPES[2]];
 
 impl Predictor for Ms2pip {
     fn prefix(&self) -> &str {
@@ -97,7 +99,7 @@ impl Predictor for Ms2pip {
     }
 }
 
-const ANDES_MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
+const ANDES_MS2_IONS: [Ion; 4] = [ION_TYPES[0], ION_TYPES[1], ION_TYPES[2], ION_TYPES[3]];
 
 pub struct AndesMs2 {
     pub model: Ms2Model,
@@ -166,7 +168,7 @@ impl Predictor for AndesMs2 {
                     .model
                     .predict_with(&Self::peptide(f), &self.conditions(*z), &mut scratch)
                     .expect("supports_ms2 checked the encoding");
-                full.chunks_exact(N_ION)
+                full.chunks_exact(self.model.n_ion())
                     .flat_map(|site| site[..N_BASE_ION].to_vec())
                     .collect()
             })
@@ -180,12 +182,12 @@ pub struct Prosit {
 }
 
 const PROSIT_IONS: [Ion; 6] = [
-    (true, 1),
-    (true, 2),
-    (true, 3),
-    (false, 1),
-    (false, 2),
-    (false, 3),
+    IonType::new(Series::B, 1, NeutralLoss::None),
+    IonType::new(Series::B, 2, NeutralLoss::None),
+    IonType::new(Series::B, 3, NeutralLoss::None),
+    IonType::new(Series::Y, 1, NeutralLoss::None),
+    IonType::new(Series::Y, 2, NeutralLoss::None),
+    IonType::new(Series::Y, 3, NeutralLoss::None),
 ];
 
 impl Prosit {

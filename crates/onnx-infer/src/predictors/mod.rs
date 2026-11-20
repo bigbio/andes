@@ -10,7 +10,9 @@ use serde::Deserialize;
 
 use crate::deeplc::{self, DeepLcPeptide};
 use crate::error::{Error, Result};
-use crate::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use crate::ms2_native::{
+    activation_index, channel_mask, Ms2Conditions, Ms2Model, Ms2Scratch, ION_TYPES, N_BASE_ION,
+};
 use crate::peptdeep::{pack_ms2_batch, pack_rt_batch, PeptDeepPeptide};
 use crate::rt_native::{RtModel, Scratch};
 use crate::{BackendKind, BackendOptions, OnnxSession};
@@ -48,6 +50,22 @@ pub trait Predictor: Sync {
     fn sessions(&self) -> Result<Vec<OnnxSession>>;
     fn rt(&self, s: &mut [OnnxSession], forms: &[&Form]) -> Result<Vec<f32>>;
     fn ms2(&self, s: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>>;
+    /// Which of the [`Predictor::ions`] channels can exist for `form` at precursor `charge`,
+    /// site-major like [`Predictor::ms2`]; `None` keeps every channel up to the precursor
+    /// charge.
+    fn ms2_valid(&self, _form: &Form, _charge: u8) -> Option<Vec<bool>> {
+        None
+    }
+}
+
+/// The isobaric label condition of an andes-ms2 model for a run searched with `protocol`.
+pub fn ms2_label(protocol: model::protocol::Protocol) -> &'static str {
+    use model::protocol::Protocol;
+    match protocol {
+        Protocol::TMT => "TMT",
+        Protocol::ITRAQ | Protocol::ITRAQPhospho => "iTRAQ",
+        Protocol::Automatic | Protocol::Phosphorylation | Protocol::Standard => "none",
+    }
 }
 
 pub struct NativeRt {
@@ -106,21 +124,28 @@ impl Predictor for NativeRt {
     }
 }
 
-const MS2_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
+const MS2_V1_IONS: [Ion; N_BASE_ION] = [ION_TYPES[0], ION_TYPES[1], ION_TYPES[2], ION_TYPES[3]];
 
+/// The andes-ms2 predictor. A v1 (`AMS20001`) model reports its four plain b/y channels,
+/// as before the v2 format; a v2 model reports all of its channels, and the channels that
+/// cannot exist for a precursor ([`channel_mask`]) are left out of every feature.
 pub struct NativeMs2 {
     model: Ms2Model,
     nce: Option<f32>,
     activation: String,
     instrument: String,
+    label: String,
 }
 
 impl NativeMs2 {
+    /// `label` is the isobaric label condition (`none`, `TMT` or `iTRAQ`, see [`ms2_label`]);
+    /// a v1 model ignores it.
     pub fn from_bytes(
         buf: &[u8],
         nce: Option<f32>,
         activation: &str,
         instrument: &str,
+        label: &str,
     ) -> Result<Self> {
         let model = Ms2Model::from_bytes(buf)
             .map_err(|e| Error::InvalidArg(format!("andes-ms2 weights: {e}")))?;
@@ -129,11 +154,17 @@ impl NativeMs2 {
             nce,
             activation: activation.to_string(),
             instrument: instrument.to_string(),
+            label: label.to_string(),
         })
     }
 
-    fn conditions(&self, charge: u8) -> Ms2Conditions {
-        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument, "none")
+    /// The conditions the model is run with for a precursor of `charge`.
+    pub fn conditions(&self, charge: u8) -> Ms2Conditions {
+        Ms2Conditions::new(charge, self.nce, &self.activation, &self.instrument, &self.label)
+    }
+
+    fn v1(&self) -> bool {
+        self.model.version() == 1
     }
 }
 
@@ -142,7 +173,11 @@ impl Predictor for NativeMs2 {
         "andesms2"
     }
     fn ions(&self) -> &[Ion] {
-        &MS2_IONS
+        if self.v1() {
+            &MS2_V1_IONS
+        } else {
+            self.model.ion_types()
+        }
     }
     fn has_rt(&self) -> bool {
         false
@@ -164,6 +199,8 @@ impl Predictor for NativeMs2 {
     }
     fn ms2(&self, _: &mut [OnnxSession], items: &[(&Form, u8)]) -> Result<Vec<Vec<f32>>> {
         let mut scratch = Ms2Scratch::default();
+        let n_ion = self.model.n_ion();
+        let keep = self.ions().len();
         items
             .iter()
             .map(|(f, z)| {
@@ -174,11 +211,22 @@ impl Predictor for NativeMs2 {
                         Error::Inference("andes-ms2 could not encode a peptidoform".into())
                     })?;
                 Ok(full
-                    .chunks_exact(N_ION)
-                    .flat_map(|site| site[..N_BASE_ION].to_vec())
+                    .chunks_exact(n_ion)
+                    .flat_map(|site| site[..keep].to_vec())
                     .collect())
             })
             .collect()
+    }
+    fn ms2_valid(&self, f: &Form, z: u8) -> Option<Vec<bool>> {
+        if self.v1() {
+            return None;
+        }
+        Some(channel_mask(
+            &f.rt_peptide(),
+            z,
+            activation_index(&self.activation),
+            self.model.ion_types(),
+        ))
     }
 }
 
@@ -208,7 +256,7 @@ pub struct PeptDeep {
     load_ms2: bool,
 }
 
-const PDEEP_IONS: [Ion; 4] = [(true, 1), (true, 2), (false, 1), (false, 2)];
+const PDEEP_IONS: [Ion; 4] = MS2_V1_IONS;
 
 impl PeptDeep {
     pub fn new(
@@ -395,7 +443,7 @@ impl Predictor for PeptDeep {
                 for r in 0..rows {
                     for (k, &c) in self.cols.iter().enumerate() {
                         let x = out.data[(b * rows + r) * ncol + c].max(0.0);
-                        v.push(if PDEEP_IONS[k].1 > charges[b] { 0.0 } else { x });
+                        v.push(if PDEEP_IONS[k].charge > charges[b] { 0.0 } else { x });
                     }
                 }
                 v
@@ -496,7 +544,7 @@ mod tests {
             "/fixtures/ms2_native/tiny.ams2"
         ))
         .unwrap();
-        let p = NativeMs2::from_bytes(&buf, Some(28.0), "HCD-FTMS", "Q Exactive").unwrap();
+        let p = NativeMs2::from_bytes(&buf, Some(28.0), "HCD-FTMS", "Q Exactive", "none").unwrap();
         assert_eq!(p.prefix(), "andesms2");
         assert_eq!(p.ions().len(), 4);
         let (f, _) = form::parse_peptide("K.PEPM+15.99491TIDEK.R").unwrap();
@@ -508,6 +556,90 @@ mod tests {
         assert!(out.iter().all(|v| v.len() == sites * 4));
         assert!(out.iter().flatten().all(|x| x.is_finite()));
         assert!(p.rt(&mut [], &[&f]).is_err());
+    }
+
+    fn tiny_v2() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/ms2_native/tiny_v2.ams2"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn native_ms2_v2_reports_every_channel_and_masks_the_impossible_ones() {
+        let p = NativeMs2::from_bytes(&tiny_v2(), Some(28.0), "HCD-FTMS", "Q Exactive", "none")
+            .unwrap();
+        assert_eq!(p.ions(), &crate::ms2_native::ION_TYPES_V2[..]);
+        let (f, _) = form::parse_peptide("K.PEPTIDEK.R").unwrap();
+        let sites = f.seq.len() - 1;
+        let out = p.ms2(&mut [], &[(&f, 2)]).unwrap();
+        assert_eq!(out[0].len(), sites * p.ions().len());
+        let valid = p.ms2_valid(&f, 2).unwrap();
+        assert_eq!(valid.len(), out[0].len());
+        for (k, (x, ok)) in out[0].iter().zip(&valid).enumerate() {
+            let ion = p.ions()[k % p.ions().len()];
+            if ion.charge > 2 || ion.series.is_electron() {
+                assert!(!ok, "channel {ion:?}");
+            }
+            if !ok {
+                assert_eq!(*x, 0.0, "channel {ion:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_ms2_v1_keeps_its_four_channels_and_no_mask() {
+        let buf = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/ms2_native/tiny.ams2"
+        ))
+        .unwrap();
+        let p = NativeMs2::from_bytes(&buf, None, "HCD-FTMS", "", "TMT").unwrap();
+        assert_eq!(p.ions(), &ION_TYPES[..N_BASE_ION]);
+        let (f, _) = form::parse_peptide("K.PEPTIDEK.R").unwrap();
+        assert!(p.ms2_valid(&f, 2).is_none());
+    }
+
+    #[test]
+    fn tmt_label_condition_reaches_model() {
+        use model::protocol::Protocol;
+        assert_eq!(ms2_label(Protocol::TMT), "TMT");
+        assert_eq!(ms2_label(Protocol::ITRAQ), "iTRAQ");
+        assert_eq!(ms2_label(Protocol::ITRAQPhospho), "iTRAQ");
+        assert_eq!(ms2_label(Protocol::Standard), "none");
+        assert_eq!(ms2_label(Protocol::Automatic), "none");
+        let tmt = NativeMs2::from_bytes(
+            &tiny_v2(),
+            Some(30.0),
+            "HCD-FTMS",
+            "Orbitrap Exploris 480",
+            ms2_label(Protocol::TMT),
+        )
+        .unwrap();
+        assert_eq!(tmt.conditions(2).label, 1);
+        let itraq = NativeMs2::from_bytes(
+            &tiny_v2(),
+            Some(30.0),
+            "HCD-FTMS",
+            "",
+            ms2_label(Protocol::ITRAQ),
+        )
+        .unwrap();
+        assert_eq!(itraq.conditions(2).label, 2);
+        let plain = NativeMs2::from_bytes(
+            &tiny_v2(),
+            Some(30.0),
+            "HCD-FTMS",
+            "",
+            ms2_label(Protocol::Standard),
+        )
+        .unwrap();
+        assert_eq!(plain.conditions(2).label, 0);
+        let (f, _) = form::parse_peptide("K.K+229.16293+229.16293PEPTK+229.16293.D").unwrap();
+        assert!(tmt.supports_ms2(&f, 2));
+        let out = tmt.ms2(&mut [], &[(&f, 2)]).unwrap();
+        assert_eq!(out[0].len(), (f.seq.len() - 1) * crate::ms2_native::N_ION_V2);
     }
 
     #[test]

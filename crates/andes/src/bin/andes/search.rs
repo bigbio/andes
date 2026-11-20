@@ -594,7 +594,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let predictors = if standalone {
         None
     } else {
-        crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
+        crate::predicted::Predictors::from_cli(
+            &cli,
+            &acquisition,
+            param.data_type.instrument,
+            param.data_type.protocol,
+        )?
     };
     if let Some(p) = &predictors {
         log::info!(target: "predict", "{}", p.describe());

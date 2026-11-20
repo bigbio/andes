@@ -13,9 +13,9 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
    --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES_V2`` channels at the
    analyser's tolerance and normalise;
-5. set ``label``, ``hard`` and ``agree`` (``ms2_select.finalize_rows``, with the
-   submitter identifications of --submitter-ids when given) and drop hard rows
-   without agreement;
+5. set ``label``, ``hard`` and ``source_engine`` (``ms2_select.annotate_rows``);
+   the shard is a candidate shard (agreement columns null, nothing dropped):
+   ``ms2_finalize.py`` applies the multi-engine label rule later;
 6. delete the mzML. With --keep-mzml the task's scratch directory under
    --work-dir, with the converted mzML files, is kept and its path printed.
 
@@ -51,7 +51,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import ION_TYPES_V2, activation_index, annotate, parse_filter_v2, parse_proforma, precursor_mz, shard_table  # noqa: E402
-from ms2_select import finalize_rows, load_submitter_ids  # noqa: E402
+from ms2_select import annotate_rows  # noqa: E402
 from mzml_reader import instrument_name, read_scans  # noqa: E402
 
 DEFAULT_CONVERTER_ARGS = "-i {raw} -o {outdir} -f 1"
@@ -167,7 +167,8 @@ def main():
     p.add_argument("--prec-tol-ppm", type=float, default=20.0)
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--overwrite", action="store_true")
-    p.add_argument("--submitter-ids", help="parquet of the submitters' identifications (run, scan, peptidoform)")
+    p.add_argument("--source-engine", default="unknown",
+                   help="engine that produced the selected identifications (andes, comet, msfragger or other)")
     a = p.parse_args()
     if not a.converter and not a.mzml_dir:
         p.error("--converter is required unless --mzml-dir is given")
@@ -221,8 +222,8 @@ def main():
            ("selected", "found", "activation_skipped", "precursor_mismatch", "too_few_ions", "kept")}
     tot["runs"], tot["runs_failed"] = len(log), sum("error" in s for s in log)
     complete = tot["runs_failed"] == 0
-    rows, fin = finalize_rows(rows, load_submitter_ids(a.submitter_ids, ds))
-    tot.update(fin)
+    rows = annotate_rows(rows, a.source_engine)
+    tot["hard"] = sum(bool(r["hard"]) for r in rows)
     if complete and rows:
         pq.write_table(shard_table(rows), part + ".tmp", compression="zstd")
         os.replace(part + ".tmp", part)

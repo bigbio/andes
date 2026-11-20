@@ -35,13 +35,19 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import CARBAMIDOMETHYL, ITRAQ_MODS, TMT_MODS, label_of_mods, parse_proforma, supported  # noqa: E402
 
-# Training-label rules (plan Global Constraints): a hard example is a peptide of at most
-# HARD_MAX_LENGTH residues, a matched-intensity share in the bottom quartile of its extraction unit
-# and activation, or a modification outside COMMON_MODS. A hard example is kept only when the
-# submitter's identification of the same spectrum agrees.
+# Training-label rules (plan Global Constraints, user ruling 2026-11-20). A hard example is a peptide of
+# at most HARD_MAX_LENGTH residues, a matched-intensity share in the bottom quartile of its extraction
+# unit and activation, or a modification outside COMMON_MODS. A PSM is a training label only when at
+# least MIN_VOTES independent identifications of the same scan agree on its peptidoform: the engines of
+# VOTE_ENGINES (each with its own Percolator at q <= 0.01), the submitters' identifications, and the
+# source's own identification when its engine is not one of VOTE_ENGINES. A hard example also needs
+# every engine of HARD_ENGINES.
 HARD_MAX_LENGTH = 9
 HARD_EXPLAINED_QUANTILE = 0.25
 COMMON_MODS = frozenset({CARBAMIDOMETHYL, 35, 21}) | TMT_MODS | ITRAQ_MODS
+VOTE_ENGINES = ("andes", "comet", "msfragger")
+HARD_ENGINES = ("comet", "msfragger")
+MIN_VOTES = 2
 # A run is labelled TMT / iTRAQ when at least this share of its PSMs carries the tag.
 RUN_LABEL_SHARE = 0.5
 
@@ -71,9 +77,10 @@ def same_identification(a: str, b: str) -> bool:
     return ka is not None and ka == _ident_key(b)
 
 
-def load_submitter_ids(path: str | None, dataset: str | None = None) -> dict | None:
-    """``{(run, scan): peptidoform}`` from a parquet with ``run``, ``scan``, ``peptidoform`` (ProForma
-    with Unimod accessions; optional ``dataset`` column filtered to ``dataset``); None without a path."""
+def load_votes(path: str | None, dataset: str | None = None) -> dict | None:
+    """``{(run, scan): peptidoform}`` from a parquet with ``run``, ``scan``, ``peptidoform`` (ProForma with
+    Unimod accessions; the confident identifications of one engine; an optional ``dataset`` column is filtered
+    to ``dataset``). None without a path, which means the engine did not run."""
     if not path:
         return None
     t = pq.read_table(path)
@@ -83,15 +90,14 @@ def load_submitter_ids(path: str | None, dataset: str | None = None) -> dict | N
     return {(r, int(sc)): pf for r, sc, pf in zip(runs, t["scan"].to_pylist(), t["peptidoform"].to_pylist())}
 
 
-def finalize_rows(rows: list[dict], submitter: dict | None):
-    """Set ``label``, ``hard`` and ``agree`` on annotated shard rows and drop hard rows without agreement.
+def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
+    """Candidate stage: set ``label``, ``hard`` and ``source_engine`` on annotated rows; the agreement
+    columns stay null and nothing is dropped (``finalize_rows`` does that once the other engines ran).
 
-    ``label`` is the run's isobaric label (``RUN_LABEL_SHARE`` of its PSMs carry the tag). ``agree`` is
-    True / False when ``submitter`` (``{(run, scan): peptidoform}``) identifies the spectrum, None otherwise.
-    The explained-share quartile is taken per activation over ``rows``. Returns (kept rows, counts)."""
-    st = {"rows": len(rows), "hard": 0, "hard_dropped": 0, "agree_true": 0, "agree_false": 0, "agree_null": 0}
+    ``label`` is the run's isobaric label (``RUN_LABEL_SHARE`` of its PSMs carry the tag). The explained-share
+    quartile is taken per activation over ``rows``."""
     if not rows:
-        return [], st
+        return rows
     by_run: dict = {}
     for r in rows:
         if "mods" not in r:
@@ -105,20 +111,53 @@ def finalize_rows(rows: list[dict], submitter: dict | None):
     for act in {r["activation"] for r in rows}:
         ex = np.array([r["explained"] for r in rows if r["activation"] == act], np.float64)
         cut[act] = float(np.quantile(ex, HARD_EXPLAINED_QUANTILE))
-    kept = []
     for r in rows:
         r["label"] = run_label[r["run"]]
         r["hard"] = (len(r["sequence"]) <= HARD_MAX_LENGTH or r["explained"] < cut[r["activation"]]
                      or any(uid not in COMMON_MODS for _, uid in r["mods"]))
-        theirs = submitter.get((r["run"], int(r["scan"]))) if submitter else None
-        r["agree"] = None if theirs is None else same_identification(r["peptidoform"], theirs)
-        st["agree_null" if r["agree"] is None else "agree_true" if r["agree"] else "agree_false"] += 1
-        st["hard"] += r["hard"]
-        if r["hard"] and r["agree"] is not True:
-            st["hard_dropped"] += 1
-            continue
+        r["source_engine"] = source_engine
+        for e in VOTE_ENGINES + ("submitter",):
+            r[f"agree_{e}"] = None
+        r["n_engines"] = None
         del r["mods"]
+    return rows
+
+
+def finalize_rows(rows: list[dict], votes: dict):
+    """Set the agreement columns and keep only multi-engine labels.
+
+    ``votes`` maps ``andes`` / ``comet`` / ``msfragger`` / ``submitter`` to ``{(run, scan): peptidoform}``
+    of that source's confident identifications, or to None when the source did not run (the column stays
+    null). ``agree_<e>`` is True when the source names the same identification, False when it names another
+    or none. ``n_engines`` counts the True columns plus the row's own source when its engine is not one of
+    ``VOTE_ENGINES``. Kept: ``n_engines >= MIN_VOTES``, and for hard rows every ``HARD_ENGINES`` column True.
+    Returns (kept rows, counts)."""
+    st = {"rows": len(rows), "hard": 0, "dropped_votes": 0, "dropped_hard": 0, "kept": 0}
+    for e in VOTE_ENGINES + ("submitter",):
+        st[f"agree_{e}_true"] = st[f"agree_{e}_false"] = st[f"agree_{e}_null"] = 0
+    kept = []
+    for r in rows:
+        key = (r["run"], int(r["scan"]))
+        n = 0 if r["source_engine"] in VOTE_ENGINES else 1
+        for e in VOTE_ENGINES + ("submitter",):
+            v = votes.get(e)
+            if v is None:
+                r[f"agree_{e}"] = None
+            else:
+                theirs = v.get(key)
+                r[f"agree_{e}"] = theirs is not None and same_identification(r["peptidoform"], theirs)
+            st[f"agree_{e}_" + {None: "null", True: "true", False: "false"}[r[f"agree_{e}"]]] += 1
+            n += r[f"agree_{e}"] is True
+        r["n_engines"] = n
+        st["hard"] += bool(r["hard"])
+        if n < MIN_VOTES:
+            st["dropped_votes"] += 1
+            continue
+        if r["hard"] and not all(r[f"agree_{e}"] is True for e in HARD_ENGINES):
+            st["dropped_hard"] += 1
+            continue
         kept.append(r)
+    st["kept"] = len(kept)
     return kept, st
 
 

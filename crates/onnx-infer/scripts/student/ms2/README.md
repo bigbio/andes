@@ -37,6 +37,7 @@ AlphaPeptDeep predictions can be added.
 | `ms2_select.py` | Confident PSMs (PEP ≤ 0.01, supported mods, ≤ 4 per precursor) → `selected/*.parquet` + `tasks.tsv` |
 | `ms2_extract_raw.py` | One array task: raw → mzML (ThermoRawFileParser) → annotated shard |
 | `ms2_extract_flats.py` | The same from andes training flats (peak lists attached; e.g. PXD009875) |
+| `ms2_finalize.py` | Candidate shards + per-engine confident IDs → training shards (multi-engine label rule) |
 | `ms2_teacher.py` | Adds a `teacher` column with AlphaPeptDeep predictions (optional distillation) |
 | `ms2_model.py` | Network, loss, `AMS20001` export |
 | `ms2_train.py` | Trainer: sequence-hash split, held-out datasets, stratified test report |
@@ -69,16 +70,20 @@ One row per annotated PSM. Shards carry the key metadata `andes.ms2_shard.schema
 | `intensities` | (n − 1) × 19 (`ION_TYPES_V2`), site-major. −1 = invalid channel; otherwise 0–1, normalised to the most intense valid ion |
 | `label` | Isobaric label of the run: `none`, `TMT` or `iTRAQ` (at least half of the run's PSMs carry the tag) |
 | `hard` | Hard example: at most 9 residues, matched-intensity share in the bottom quartile (per extraction unit and activation), or a modification outside Carbamidomethyl/Oxidation/Phospho/TMT/iTRAQ |
-| `agree` | The submitter's identification of the spectrum equals this one (I = L, carbamidomethylation ignored); null without a submitter identification |
+| `source_engine` | Engine of the identification the row was selected from (`comet` for quantms qpx tables) |
+| `agree_andes`, `agree_comet`, `agree_msfragger`, `agree_submitter` | That source identifies the scan with the same peptidoform (I = L, carbamidomethylation ignored); null when the source did not run |
+| `n_engines` | Agreeing identifications: the true `agree_*` columns, plus the source when its engine is not andes, Comet or MSFragger |
+
+Two stages. The extractors write *candidate* shards (`andes.ms2_shard.finalized` = `false`, agreement columns
+null, nothing dropped). `ms2_finalize.py --votes ENGINE=PATH ...` sets the agreement columns from each engine's
+own Percolator q ≤ 0.01 identifications (same FASTA, modifications and enzyme) and keeps a row when
+`n_engines` ≥ 2, and a hard row only when Comet and MSFragger both agree (`finalized` = `true`).
 
 Annotation details:
 - Tolerance is 20 ppm for FTMS/ASTMS/TOF and 0.5 Da for ITMS.
 - Fragment masses use the element masses of `crates/model/src/mass.rs` bit for bit (z• = y + `Z_DOT_OFFSET`).
 - c and z• channels exist only for ETD/EThcD; EThcD NCE is the supplemental collision energy.
-- Hard rows without submitter agreement are dropped (`ms2_select.finalize_rows`) and counted in the
-  extractor's JSON (`hard`, `hard_dropped`, `agree_true`, `agree_false`, `agree_null`).
-- The precursor m/z must match the peptidoform (isotope −1..3, 20 ppm), which catches run/scan join errors.
-- Fewer than 4 matched b/y ions drops the PSM.
+- The finalize counts go to `finalize.json` (`dropped_votes`, `dropped_hard`, `agree_<source>_true/false/null`).
 
 ## Checks before a cluster run
 

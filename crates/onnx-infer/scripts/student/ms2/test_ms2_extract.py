@@ -51,11 +51,10 @@ def test_flats_keep_c_terminal_amidation(tmp_path):
     out = tmp_path / "out"
     run_script("ms2_extract_flats.py", "--dataset", "PXD000000", "--out", out, flat)
     st = json.load(open(out / "flats.json"))
-    # both rows are annotated; amidation is outside the common mods, so that row is a hard example and,
-    # with no submitter identification in a flat, it is dropped
-    assert st["unmapped"] == 0 and st["kept"] == 2 and st["hard_dropped"] == 1, st
+    # amidation is outside the common mods: a hard example, kept in the candidate shard
+    assert st["unmapped"] == 0 and st["kept"] == 2 and st["hard"] == 1, st
     kept = pq.read_table(glob.glob(str(out / "part-flat-*.parquet"))[0]).column("peptidoform").to_pylist()
-    assert kept == ["PEPTIDEKAR"], kept
+    assert kept == ["PEPTIDEKAR", "PEPTIDEKAR-[UNIMOD:2]"], kept
 
 
 def test_flats_decode_summed_nterm_plus_residue_delta():
@@ -207,16 +206,20 @@ def test_shard_schema_version(tmp_path):
     row = {"dataset": "D", "run": "r", "scan": 1, "peptidoform": "PEPTIDEK", "sequence": "PEPTIDEK", "charge": 2,
            "nce": 27.0, "activation": "HCD-FTMS", "instrument": "Q Exactive", "pep": 0.001, "n_matched": 6,
            "explained": 0.5, "intensities": np.zeros((7, 19), np.float32), "label": "TMT", "hard": True,
-           "agree": None}
+           "source_engine": "comet", "agree_andes": None, "agree_comet": True, "agree_msfragger": False,
+           "agree_submitter": None, "n_engines": 1}
     t = shard_table([row])
     assert t.schema.metadata[b"andes.ms2_shard.schema"] == b"2.0"
+    assert t.schema.metadata[b"andes.ms2_shard.finalized"] == b"false"
+    assert shard_table([row], finalized=True).schema.metadata[b"andes.ms2_shard.finalized"] == b"true"
     assert t.column_names == SHARD_COLUMNS
-    assert {"label", "hard", "agree"} <= set(t.column_names)
+    assert {"label", "hard", "agree_andes", "agree_comet", "agree_msfragger", "agree_submitter",
+            "n_engines"} <= set(t.column_names)
     pq.write_table(t, tmp_path / "s.parquet")
     back = pq.read_table(tmp_path / "s.parquet")
     assert back.schema.metadata[b"andes.ms2_shard.schema"] == b"2.0"
-    assert back.column("agree").to_pylist() == [None] and back.column("hard").to_pylist() == [True]
-    assert back.column("label").to_pylist() == ["TMT"]
+    assert back.column("agree_andes").to_pylist() == [None] and back.column("agree_comet").to_pylist() == [True]
+    assert back.column("hard").to_pylist() == [True] and back.column("label").to_pylist() == ["TMT"]
 
 
 def _row(seq, explained, pep_form=None, run="r", scan=1, act="HCD-FTMS"):
@@ -228,31 +231,67 @@ def _row(seq, explained, pep_form=None, run="r", scan=1, act="HCD-FTMS"):
             "explained": explained, "intensities": np.zeros((len(s) - 1, 19), np.float32)}
 
 
-def test_hard_requires_agree():
-    """Hard rows (length <= 9, bottom-quartile matched share, uncommon mod) need submitter agreement."""
-    from ms2_select import finalize_rows
+def test_hard_flags_at_the_candidate_stage():
+    """Hard = length <= 9, bottom-quartile matched share, or an uncommon mod; candidates keep every row."""
+    from ms2_select import annotate_rows
     rows = [
-        _row("SHORTPEK", 0.6, scan=1),                       # hard (length 8), no submitter ID
-        _row("SHORTPEK", 0.6, scan=2),                       # hard, submitter agrees
-        _row("SHORTPEK", 0.6, scan=3),                       # hard, submitter disagrees
-        _row("LONGPEPTIDEK", 0.6, scan=4),                   # easy, no submitter ID: kept, agree null
-        _row("LONGPEPTIDEK", 0.6, "LONGPEPTIDEK-[UNIMOD:2]", scan=5),  # hard (amidation), no ID
-        _row("LONGPEPTIDEK", 0.6, "LONGPEPTIDEM[UNIMOD:35]K", scan=6),  # easy: oxidation
-        _row("LONGPEPTIDEK", 0.6, "[UNIMOD:737]-LONGPEPTIDEK[UNIMOD:737]", scan=7),  # easy: TMT
+        _row("SHORTPEK", 0.6, scan=1),
+        _row("LONGPEPTIDEK", 0.6, "LONGPEPTIDEK-[UNIMOD:2]", scan=2),
+        _row("LONGPEPTIDEK", 0.6, "LONGPEPTIDEM[UNIMOD:35]K", scan=3),
+        _row("LONGPEPTIDEK", 0.6, "[UNIMOD:737]-LONGPEPTIDEK[UNIMOD:737]", scan=4),
     ] + [_row("ANOTHERLONGPEPK", 0.7 + 0.01 * k, scan=10 + k) for k in range(5)] + [
-        _row("ANOTHERLONGPEPK", 0.01, scan=20),              # hard: bottom quartile of explained
-    ]
-    sub = {("r", 2): "SHORTPEK", ("r", 3): "SHORTPEKK", ("r", 4): "LONGPEPTIDEK"}
-    kept, st = finalize_rows(rows, sub)
-    by_scan = {r["scan"]: r for r in kept}
-    assert set(by_scan) == {2, 4, 6, 7, 10, 11, 12, 13, 14}, sorted(by_scan)
-    assert by_scan[2]["hard"] and by_scan[2]["agree"] is True
-    assert not by_scan[4]["hard"] and by_scan[4]["agree"] is True
-    assert by_scan[6]["agree"] is None and not by_scan[6]["hard"] and not by_scan[7]["hard"]
-    assert st["hard"] == 5 and st["hard_dropped"] == 4 and st["agree_true"] == 2 and st["agree_false"] == 1
-    # without any submitter table every hard row is dropped and agree stays null
-    kept, st = finalize_rows([dict(r) for r in rows], None)
-    assert all(r["agree"] is None and not r["hard"] for r in kept)
+        _row("ANOTHERLONGPEPK", 0.01, scan=20)]
+    out = annotate_rows(rows, "comet")
+    assert len(out) == len(rows)
+    assert {r["scan"] for r in out if r["hard"]} == {1, 2, 20}
+    assert all(r["source_engine"] == "comet" and r["agree_comet"] is None and r["n_engines"] is None for r in out)
+
+
+def test_hard_requires_agree():
+    """A label needs >= 2 agreeing identifications; a hard row needs Comet and MSFragger both."""
+    from ms2_select import annotate_rows, finalize_rows
+    rows = annotate_rows([
+        _row("SHORTPEK", 0.6, scan=1),            # hard; Comet and MSFragger agree -> kept
+        _row("SHORTPEK", 0.6, scan=2),            # hard; andes + Comet agree, MSFragger not -> dropped
+        _row("LONGPEPTIDEK", 0.6, scan=3),        # easy; andes + MSFragger (+ source) -> kept
+        _row("LONGPEPTIDEK", 0.6, scan=4),        # easy; andes plus the msnet source vote -> kept
+        _row("LONGPEPTIDEK", 0.6, scan=5),        # easy; only the submitter, plus the msnet source vote -> kept
+    ] + [_row("ANOTHERLONGPEPK", 0.7, scan=10 + k) for k in range(3)], "msnet")
+    votes = {"andes": {("r", 2): "SHORTPEK", ("r", 3): "LONGPEPTIDEK", ("r", 4): "LONGPEPTIDEK"},
+             "comet": {("r", 1): "SHORTPEK", ("r", 2): "SHORTPEK"},
+             "msfragger": {("r", 1): "SHORTPEK", ("r", 2): "SHORTPEKK", ("r", 3): "LONGPEPTIDEK"},
+             "submitter": {("r", 5): "LONGPEPTIDEK"}}
+    kept, st = finalize_rows([dict(r) for r in rows], votes)
+    by = {r["scan"]: r for r in kept}
+    assert set(by) == {1, 3, 4, 5}, sorted(by)
+    assert by[1]["n_engines"] == 3 and by[4]["n_engines"] == 2 and by[5]["n_engines"] == 2
+    assert st["dropped_hard"] == 1 and st["dropped_votes"] == 3
+    # the source is a vote only when its engine is not one of andes / Comet / MSFragger
+    rows_c = annotate_rows([_row("LONGPEPTIDEK", 0.6, scan=4)] + [_row("ANOTHERLONGPEPK", 0.7, scan=9)], "comet")
+    kept, _ = finalize_rows(rows_c, {"andes": {("r", 4): "LONGPEPTIDEK"}})
+    assert kept == []
+    # engines that did not run leave their column null
+    kept, _ = finalize_rows([dict(r) for r in rows], {"comet": {}, "msfragger": {}})
+    assert all(r["agree_andes"] is None and r["agree_comet"] is False for r in kept) and kept == []
+
+
+def test_finalize_script(tmp_path):
+    from ms2_common import shard_table
+    from ms2_select import annotate_rows
+    rows = annotate_rows([_row("LONGPEPTIDEK", 0.6, scan=k) for k in (1, 2)], "comet")
+    cand = tmp_path / "cand" / "cellA" / "D"
+    cand.mkdir(parents=True)
+    pq.write_table(shard_table(rows), cand / "part-msnet-0000.parquet")
+    for e, scans in (("andes", [1, 2]), ("msfragger", [1])):
+        pq.write_table(pa.table({"dataset": ["D"] * len(scans), "run": ["r"] * len(scans), "scan": scans,
+                                 "peptidoform": ["LONGPEPTIDEK"] * len(scans)}), tmp_path / f"{e}.parquet")
+    out = tmp_path / "final"
+    run_script("ms2_finalize.py", "--candidates", tmp_path / "cand", "--out", out,
+               "--votes", f"andes={tmp_path / 'andes.parquet'}", "--votes", f"msfragger={tmp_path / 'msfragger.parquet'}")
+    t = pq.read_table(out / "cellA" / "D" / "part-msnet-0000.parquet")
+    assert t.schema.metadata[b"andes.ms2_shard.finalized"] == b"true"
+    assert t.column("scan").to_pylist() == [1] and t.column("agree_comet").to_pylist() == [None]
+    assert t.column("n_engines").to_pylist() == [2]
 
 
 def test_submitter_agreement_ignores_i_l_and_carbamidomethyl():
@@ -263,14 +302,14 @@ def test_submitter_agreement_ignores_i_l_and_carbamidomethyl():
 
 
 def test_run_label_from_tags():
-    from ms2_select import finalize_rows
+    from ms2_select import annotate_rows
     tmt = "[UNIMOD:737]-LONGPEPTIDEK[UNIMOD:737]"
     rows = [_row("LONGPEPTIDEK", 0.6, tmt, run="t", scan=1), _row("LONGPEPTIDEK", 0.6, tmt, run="t", scan=2),
             _row("LONGPEPTIDEK", 0.6, run="t", scan=3),
             _row("LONGPEPTIDEK", 0.6, "[UNIMOD:214]-LONGPEPTIDEK[UNIMOD:214]", run="i", scan=4),
             _row("LONGPEPTIDEK", 0.6, run="n", scan=5)]
-    kept, _ = finalize_rows(rows, None)
-    assert {r["scan"]: r["label"] for r in kept} == {1: "TMT", 2: "TMT", 3: "TMT", 4: "iTRAQ", 5: "none"}
+    out = annotate_rows(rows, "comet")
+    assert {r["scan"]: r["label"] for r in out} == {1: "TMT", 2: "TMT", 3: "TMT", 4: "iTRAQ", 5: "none"}
 
 
 def test_filter_v2_electron_activations():

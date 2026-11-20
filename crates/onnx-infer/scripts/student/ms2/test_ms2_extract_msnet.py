@@ -109,5 +109,7 @@ def test_run_filter_and_v2_columns(tmp_path):
     rows = t.to_pylist()
     assert {x["run"] for x in rows} == {"keep"} and len(rows) == 2
     assert json.load(open(out / "msnet.json"))["dup_scan"] == 2
-    assert all(x["label"] == "none" and x["agree"] is None and not x["hard"] for x in rows)
+    assert all(x["label"] == "none" and x["agree_comet"] is None and x["n_engines"] is None and not x["hard"]
+               for x in rows)
+    assert t.schema.metadata[b"andes.ms2_shard.finalized"] == b"false"
     assert len(rows[0]["intensities"]) == (len(seq) - 1) * N_ION_V2

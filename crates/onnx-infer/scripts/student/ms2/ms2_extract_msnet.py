@@ -22,9 +22,9 @@ ETD or for time-of-flight instruments). Fragment tolerance is 20 ppm except for 
 
 A spectrum (run, scan) is kept once, also across files (several searches of one dataset).
 --runs (one run name per line) keeps only those runs; row groups without any of them are not read.
-``label``, ``hard`` and ``agree`` come from ``ms2_select.finalize_rows`` over all kept rows of the call
-(the explained-share quartile is per activation over them), with --submitter-ids when given; hard rows
-without agreement are dropped and counted.
+``label``, ``hard`` and ``source_engine`` come from ``ms2_select.annotate_rows`` over all kept rows of the
+call (the explained-share quartile is per activation over them). The output is a candidate shard (agreement
+columns null, nothing dropped); ``ms2_finalize.py`` applies the multi-engine label rule.
 
 Sampling: PSMs with PEP <= ``--pep-max``, targets only, at most ``--per-key`` PSMs per (peptidoform,
 charge, NCE bin of 2) and ``--cap`` PSMs per dataset. Large files are sampled by row group (random, seeded
@@ -51,7 +51,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import (INSTRUMENTS, ION_TYPES_V2, activation_index, annotate, instrument_class,  # noqa: E402
                         precursor_mz, shard_table, to_proforma, v2_activation)
-from ms2_select import finalize_rows, load_submitter_ids  # noqa: E402
+from ms2_select import annotate_rows  # noqa: E402
 from mod_composition import UNIMOD  # noqa: E402
 
 NAME_TO_ID = {v[0].lower(): k for k, v in UNIMOD.items()}
@@ -177,7 +177,7 @@ def main():
     p.add_argument("--max-groups", type=int, default=12, help="row groups sampled per file")
     p.add_argument("--batch", type=int, default=20000)
     p.add_argument("--runs", help="file with one run name per line: keep only these runs")
-    p.add_argument("--submitter-ids", help="parquet of the submitters' identifications (run, scan, peptidoform)")
+    p.add_argument("--source-engine", default="unknown", help="engine of the MsNet identifications")
     p.add_argument("files", nargs="+")
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -280,8 +280,8 @@ def main():
                 if got >= quota or kept_total >= a.cap:
                     break
         print(f"{path}: {json.dumps(st)}", flush=True)
-    rows, fin = finalize_rows(rows, load_submitter_ids(a.submitter_ids, a.dataset))
-    st.update({k: v for k, v in fin.items() if k != "rows"})
+    rows = annotate_rows(rows, a.source_engine)
+    st["hard"] = sum(bool(r["hard"]) for r in rows)
     st["written"] = len(rows)
     for k in range(0, len(rows), 50000):
         pq.write_table(shard_table(rows[k:k + 50000]), os.path.join(a.out, f"part-msnet-{k // 50000:04d}.parquet"),

@@ -283,6 +283,15 @@ fn resolve(
     let xl_over = ov.and_then(|o| o.xl.as_ref());
     let mut xl_sdrf = Vec::new();
     let mut ok = true;
+    if let Some(t) = &precursor_tol {
+        if let Err(e) = crate::parse_precursor_tol(t) {
+            problems.errors.push(format!(
+                "{p}: {}: precursor tolerance `{t}`: {e}",
+                part.sdrf.display()
+            ));
+            ok = false;
+        }
+    }
     if xl_over.is_none() {
         for cell in &s.xl {
             match xl_spec(cell) {
@@ -376,6 +385,11 @@ fn resolve(
     })
 }
 
+/// Whether a run name can be a folder and file name: one path component, not `.` or `..`.
+fn valid_run_name(run: &str) -> bool {
+    !run.is_empty() && run != "." && run != ".." && !run.contains(['/', '\\', '\0'])
+}
+
 /// The run name for one spectrum file: the template with `{project}` and `{stem}` filled.
 pub fn run_name(template: &str, project: &str, file: &Path) -> String {
     let name = file
@@ -439,7 +453,7 @@ fn readable(file: &Path) -> bool {
 }
 
 /// The spectrum files below a folder by lower-cased file name. A Bruker `.d` folder is one
-/// entry; its contents are not listed. Symbolic links to folders are followed, and each
+/// entry; its contents are not listed. A link whose target is missing is not listed. Symbolic links to folders are followed, and each
 /// folder is listed once, under its real path, however many links lead to it, so a link
 /// loop ends and a file reached through a link keeps the project folder it is really in.
 fn index_files(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
@@ -463,6 +477,9 @@ fn index_files(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
+            if std::fs::metadata(&path).is_err() {
+                continue;
+            }
             if path.is_dir() && !name.ends_with(".d") {
                 todo.push(path);
             } else {
@@ -483,7 +500,7 @@ const CONVERTED: &[&str] = &[
 ];
 
 /// Find the file an SDRF names under `data_dir`: the name itself, else a converted copy
-/// with the same stem. When `<data_dir>/<project>/` exists only that folder is searched;
+/// with the same stem; two converted copies (`x.mzML` and `x.mgf`) are ambiguous. When `<data_dir>/<project>/` exists only that folder is searched;
 /// otherwise the whole of `data_dir` is, except the folders of the other `projects`, so a
 /// project never takes another project's file of the same name.
 fn locate(
@@ -511,40 +528,41 @@ fn locate(
                 .collect(),
         )
     };
-    let mut names = vec![lower.clone()];
-    names.extend(
-        CONVERTED
-            .iter()
-            .map(|e| format!("{stem}.{}", e.to_ascii_lowercase()))
-            .filter(|n| *n != lower),
-    );
-    for n in names {
-        let found: Vec<&PathBuf> = index
-            .get(&n)
+    let in_scope = |n: &str| -> Vec<&PathBuf> {
+        index
+            .get(n)
             .map(|v| {
                 v.iter()
                     .filter(|p| p.starts_with(&scope) && !others.iter().any(|o| p.starts_with(o)))
                     .collect()
             })
-            .unwrap_or_default();
-        match found.len() {
-            0 => continue,
-            1 => return Ok(found[0].clone()),
-            k => {
-                return Err(format!(
-                    "{name}: {k} files under {} match ({}); keep one, or put each project's files \
-                     in <data_dir>/<project>/",
-                    scope.display(),
-                    found
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }
-        }
+            .unwrap_or_default()
+    };
+    let exact = in_scope(&lower);
+    let found: Vec<&PathBuf> = if exact.is_empty() {
+        CONVERTED
+            .iter()
+            .map(|e| format!("{stem}.{}", e.to_ascii_lowercase()))
+            .filter(|n| *n != lower)
+            .flat_map(|n| in_scope(&n))
+            .collect()
+    } else {
+        exact
+    };
+    match found.len() {
+        0 => Err(format!("{name}: not found under {}", scope.display())),
+        1 => Ok(found[0].clone()),
+        k => Err(format!(
+            "{name}: {k} files under {} match ({}); keep one, or put each project's files in \
+             <data_dir>/<project>/",
+            scope.display(),
+            found
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
-    Err(format!("{name}: not found under {}", scope.display()))
 }
 
 /// Resolve a cohort config into a plan. `base` is the directory the config's relative
@@ -697,9 +715,13 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         let args = r.args();
         let mut files: Vec<PathBuf> = Vec::new();
         let mut missing: Vec<String> = Vec::new();
-        for f in &part.settings.data_files {
-            let name = f
-                .file_name()
+        for (k, f) in part.settings.data_files.iter().enumerate() {
+            let name = part
+                .settings
+                .data_names
+                .get(k)
+                .and_then(|n| Path::new(n).file_name())
+                .or_else(|| f.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             match (&data_dir, &index) {
@@ -717,14 +739,14 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                 }
             }
         }
-        if let Some(first) = missing.first() {
+        if !missing.is_empty() {
             let msg = format!(
-                "{}: {} of {} data files in {} are missing ({first}{})",
+                "{}: {} of {} data files in {} are missing: {}",
                 part.project,
                 missing.len(),
                 part.settings.data_files.len(),
                 part.sdrf.display(),
-                if missing.len() > 1 { "; ..." } else { "" }
+                missing.join("; ")
             );
             if data_dir.is_some() {
                 problems.errors.push(msg);
@@ -764,6 +786,14 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         }
         for file in &files {
             let run = run_name(template, &part.project, file);
+            if !valid_run_name(&run) {
+                problems.errors.push(format!(
+                    "{}: run name `{run}` is not a single file name; use a project name without \
+                     a path separator",
+                    part.project
+                ));
+                continue;
+            }
             let id = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
             if let Some(first) = owner.get(&id) {
                 problems.errors.push(format!(
@@ -1080,6 +1110,67 @@ mod tests {
                 .any(|m| m.contains("B:") && m.contains("2 of 2 data files")),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn data_dir_lookup_takes_the_sdrf_name_and_rejects_ambiguous_or_broken_files() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(
+            d,
+            "a.sdrf.tsv",
+            &sdrf(&[("r1.raw", "10 ppm", DSSO), ("r2.raw", "10 ppm", DSSO)]),
+        );
+        write(d, "r1.mzML", "spectra");
+        std::fs::create_dir_all(d.join("raw/A")).unwrap();
+        write(d, "raw/A/r1.raw", "spectra");
+        write(d, "raw/A/r1.mzML", "spectra");
+        write(d, "raw/A/r2.mzML", "spectra");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.join("nowhere.raw"), d.join("raw/A/r2.raw")).unwrap();
+        let yaml = "cohort:\n  name: t\n  data_dir: raw\n  output_dir: out\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n";
+        let p = plan(&cfg(yaml), d).unwrap();
+        let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap().file.clone();
+        assert_eq!(
+            file("A.r1"),
+            d.join("raw/A/r1.raw"),
+            "the SDRF's own name wins"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            file("A.r2"),
+            d.join("raw/A/r2.mzML"),
+            "a broken link is not a match"
+        );
+        write(d, "raw/A/r2.mgf", "spectra");
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(
+            e.iter()
+                .any(|m| m.contains("r2.raw: 2 files") && m.contains("match")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_sdrf_tolerance_or_a_path_in_the_run_name_is_a_plan_error() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "-1 ppm", DSSO)]));
+        write(d, "r1.raw", "spectra");
+        let yaml = "cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n";
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(
+            e.iter().any(|m| m.contains("precursor tolerance `-1ppm`")),
+            "{e:?}"
+        );
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
+        let yaml = "cohort:\n  sdrfs:\n    - {project: lab/A, sdrf: a.sdrf.tsv}\n";
+        let e = plan(&cfg(yaml), d).unwrap_err().errors;
+        assert!(
+            e.iter().any(|m| m.contains("is not a single file name")),
+            "{e:?}"
+        );
+        assert!(valid_run_name("A.r1") && !valid_run_name("..") && !valid_run_name("a/b"));
     }
 
     #[test]

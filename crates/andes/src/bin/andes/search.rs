@@ -1017,7 +1017,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
             let spectrum_path = input_path.clone();
             let capture_ms1 = cli.dia || quant.as_ref().is_some_and(|q| q.settings.needs_ms1());
-            let capture_ms3 = quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
+            let capture_ms3 =
+                xl_ms3_capture || quant.as_ref().is_some_and(|q| q.settings.needs_ms3());
             let capture_context = quant.is_some();
             let capture_noise = quant.as_ref().is_some_and(|q| q.settings.plex.is_some());
             let parser_handle = thread::spawn(
@@ -1205,6 +1206,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let linked = crate::xl_run::link_ms3(
                 &all_spectra[spectra_before..],
                 spectra_before,
+                title_prefix.as_deref(),
                 ms3,
                 &mut xl_ms3,
             );

@@ -1033,6 +1033,12 @@ fn search_spectrum(
     mods: &StubMods,
     run_oracle: bool,
 ) -> Option<XlSpectrumResult> {
+    let ms3: Vec<Spectrum> = if cfg.linker.cleavage.is_some() {
+        ms3.iter().map(ms3_spectrum).collect()
+    } else {
+        Vec::new()
+    };
+    let ms3 = ms3.as_slice();
     match spec.precursor_charge {
         Some(z) => {
             let z = u8::try_from(z).ok()?;
@@ -1099,7 +1105,7 @@ fn choose_charge(
 fn search_spectrum_at(
     spec_idx: usize,
     spec: &Spectrum,
-    ms3: &[ProductScan],
+    ms3: &[Spectrum],
     z: u8,
     prepared: &PreparedSearch<'_>,
     table: &XlCandidates,
@@ -1145,12 +1151,7 @@ fn search_spectrum_at(
     if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);
     }
-    let ms3_specs: Vec<Spectrum> = if linker.cleavage.is_some() {
-        ms3.iter().map(ms3_spectrum).collect()
-    } else {
-        Vec::new()
-    };
-    let ms3_ctx = ms3_contexts(&ms3_specs, prepared.scorer, z);
+    let ms3_ctx = ms3_contexts(ms3, prepared.scorer, z);
     let ctx = SpecCtx {
         ss: ScoredSpectrum::new(spec, prepared.scorer, z),
         scorer: prepared.scorer,

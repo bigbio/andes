@@ -251,13 +251,17 @@ impl ThermoRawReader {
         let mut skipped_higher_ms = 0usize;
 
         for i in 0..self.len {
-            if cap > 0 && emitted_ms2 >= cap {
+            let capped = cap > 0 && emitted_ms2 >= cap;
+            if capped && !self.capture_product_scans {
                 break;
             }
             let raw = match self.handle.get(i) {
                 Some(raw) => raw,
                 None => continue,
             };
+            if capped && raw.ms_level() < 3 {
+                break;
+            }
             match raw.ms_level() {
                 1 => {
                     let idx = ms1_peaks.len();

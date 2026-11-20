@@ -1422,14 +1422,16 @@ pub(crate) enum CohortCommand {
     ///
     /// Reads each run's <base>.xl.tsv, groups all CSMs into residue pairs and protein pairs,
     /// and gives every level its q-values once over all runs. Writes <output>.xl.tsv,
-    /// <output>.xl.residue_pairs.tsv and <output>.xl.ppi.tsv.
+    /// <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv and each project's share of the
+    /// pooled list, <output>.xl.projects.parquet.
     #[command(name = "xl-fdr", hide = true)]
     XlFdr(CohortXlFdrArgs),
     /// Plan the cohort, search every run, then run each group's stages
     ///
     /// Each run's outputs go to <output_dir>/runs/<run>/, each group's to
-    /// <output_dir>/groups/<group>/. A run whose search has finished is kept, so a rerun
-    /// searches only new or failed runs.
+    /// <output_dir>/groups/<group>/. A finished search is kept while its spectrum file, its
+    /// settings, the files they name and its outputs are unchanged, so a rerun searches only
+    /// new, failed or changed runs.
     Run(CohortRunArgs),
 }
 
@@ -1451,6 +1453,10 @@ pub(crate) struct CohortXlFdrArgs {
     /// Output base name: <output>.xl.tsv, <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv
     #[arg(long, short, value_name = "BASE")]
     pub(crate) output: PathBuf,
+    /// The cohort's plan.json, which gives each run's project for the per-project error
+    /// table [default: the run name up to its first `.`]
+    #[arg(long, value_name = "PLAN_JSON")]
+    pub(crate) plan: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

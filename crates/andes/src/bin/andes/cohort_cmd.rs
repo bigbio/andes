@@ -79,31 +79,104 @@ fn stage(file: &Path, at: &Path) -> std::io::Result<()> {
 /// holds the run's [`fingerprint`].
 const DONE: &str = "search.done";
 
-/// What a run's search depends on: the spectrum file (path, size, modification time), the
-/// config's sections other than `cohort`, and the run's search flags. A finished search is
-/// kept only while its fingerprint is unchanged, so editing the cohort section to add a
-/// project does not search the other projects again.
-fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn Error>> {
-    let meta = std::fs::metadata(&r.file)
-        .map_err(|e| format!("{}: cannot read {}: {e}", r.run, r.file.display()))?;
+/// A file's size and modification time (ns since the epoch).
+fn identity(meta: &std::fs::Metadata) -> (u64, u128) {
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos());
+    (meta.len(), mtime)
+}
+
+/// Every string of a config value, depth first.
+fn strings<'a>(v: &'a serde_yaml::Value, out: &mut Vec<&'a str>) {
+    match v {
+        serde_yaml::Value::String(s) => out.push(s),
+        serde_yaml::Value::Sequence(seq) => seq.iter().for_each(|x| strings(x, out)),
+        serde_yaml::Value::Mapping(m) => m.values().for_each(|x| strings(x, out)),
+        _ => {}
+    }
+}
+
+/// What a run's search depends on: the spectrum file, the config's sections other than
+/// `cohort`, the run's search flags, and every file those name (the database, a model),
+/// each file by path, size and modification time. A finished search is kept only while its
+/// fingerprint is unchanged, so editing the cohort section to add a project does not search
+/// the other projects again, while replacing the database at the same path does.
+fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn Error>> {
+    let meta = std::fs::metadata(&r.file)
+        .map_err(|e| format!("{}: cannot read {}: {e}", r.run, r.file.display()))?;
+    let (len, mtime) = identity(&meta);
     let text = std::fs::read_to_string(config)
         .map_err(|e| format!("cannot read {}: {e}", config.display()))?;
     let mut yaml: serde_yaml::Value = serde_yaml::from_str(&text)?;
     if let Some(m) = yaml.as_mapping_mut() {
         m.remove("cohort");
     }
+    let base = config.parent().unwrap_or_else(|| Path::new("."));
+    let mut named = Vec::new();
+    strings(&yaml, &mut named);
+    named.extend(r.args.iter().map(String::as_str));
+    let mut inputs = std::collections::BTreeSet::new();
+    for s in named {
+        let p = Path::new(s);
+        let p = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base.join(p)
+        };
+        if let Some(m) = std::fs::metadata(&p).ok().filter(|m| m.is_file()) {
+            let (l, t) = identity(&m);
+            inputs.insert(format!("input\t{}\t{l}\t{t}", p.display()));
+        }
+    }
     Ok(format!(
-        "file\t{}\t{}\t{mtime}\nargs\t{}\nconfig\t{}",
+        "file\t{}\t{len}\t{mtime}\nargs\t{}\n{}\nconfig\t{}",
         r.file.display(),
-        meta.len(),
         r.args.join("\u{1f}"),
+        inputs.into_iter().collect::<Vec<_>>().join("\n"),
         serde_yaml::to_string(&yaml)?
     ))
+}
+
+/// The outputs the plan's groups read from a run's folder.
+fn planned_outputs<'a>(plan: &'a Plan, r: &cohort::PlannedRun) -> Vec<&'a PathBuf> {
+    plan.groups
+        .iter()
+        .flat_map(|g| g.inputs.iter())
+        .filter(|p| p.starts_with(&r.dir))
+        .collect()
+}
+
+/// Each run's project, by run name.
+type Projects = std::collections::BTreeMap<String, String>;
+
+/// The run -> project map of a plan written by `andes cohort plan`.
+fn projects_of_plan(path: &Path) -> Result<Projects, Box<dyn Error>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: not a plan: {e}", path.display()))?;
+    let runs = v
+        .get("runs")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| format!("{}: no `runs` list; not a plan", path.display()))?;
+    let mut out = Projects::new();
+    for r in runs {
+        match (
+            r.get("run").and_then(|x| x.as_str()),
+            r.get("project").and_then(|x| x.as_str()),
+        ) {
+            (Some(run), Some(project)) => {
+                out.insert(run.to_string(), project.to_string());
+            }
+            _ => {
+                return Err(format!("{}: a run without `run` or `project`", path.display()).into())
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
@@ -118,10 +191,21 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
     let mut redone = 0;
     for (i, r) in plan.runs.iter().enumerate() {
         let print = fingerprint(r, &config)?;
+        let missing = planned_outputs(&plan, r).into_iter().find(|p| !p.exists());
         match std::fs::read_to_string(r.dir.join(DONE)) {
-            Ok(old) if old == print => {
+            Ok(old) if old == print && missing.is_none() => {
                 skipped += 1;
                 continue;
+            }
+            Ok(old) if old == print => {
+                redone += 1;
+                log::info!(
+                    target: "cohort",
+                    "{}: {} is missing; searching again",
+                    r.run,
+                    missing.map_or(String::new(), |p| p.display().to_string())
+                );
+                std::fs::remove_file(r.dir.join(DONE))?;
             }
             Ok(_) => {
                 redone += 1;
@@ -196,6 +280,11 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
             thousands(n)
         );
     }
+    let projects: Projects = plan
+        .runs
+        .iter()
+        .map(|r| (r.run.clone(), r.project.clone()))
+        .collect();
     let mut not_run: Vec<&str> = Vec::new();
     for g in &plan.groups {
         for stage in &g.stages {
@@ -204,7 +293,7 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
                     std::fs::create_dir_all(&g.dir)
                         .map_err(|e| format!("cannot create {}: {e}", g.dir.display()))?;
                     log::info!(target: "cohort", "group {}: crosslink FDR over {} runs", g.name, g.inputs.len());
-                    xl_fdr_tables(&g.inputs, &g.dir.join(&g.name))?;
+                    xl_fdr_tables(&g.inputs, &g.dir.join(&g.name), &projects)?;
                 }
                 other => {
                     if !not_run.contains(&other) {
@@ -318,15 +407,23 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), Strin
 }
 
 fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
-    xl_fdr_tables(&args.tables, &args.output)
+    let projects = match &args.plan {
+        Some(p) => projects_of_plan(p)?,
+        None => Projects::new(),
+    };
+    xl_fdr_tables(&args.tables, &args.output, &projects)
 }
 
 /// The q cuts of the per-project error report.
 const PROJECT_REPORT_CUTS: [f64; 2] = [0.01, 0.05];
 
-/// The project of a cohort run, named `<project>.<file stem>` by the plan.
-fn project_of(run: &str) -> &str {
-    run.split_once('.').map_or(run, |(p, _)| p)
+/// The project of a run: from the plan when one is given, else the part of the run name
+/// before its first `.` (the default run name is `<project>.<file stem>`).
+fn project_of<'a>(run: &'a str, projects: &'a Projects) -> &'a str {
+    projects
+        .get(run)
+        .map(String::as_str)
+        .unwrap_or_else(|| run.split_once('.').map_or(run, |(p, _)| p))
 }
 
 /// The decoy estimate of a share's false target-target CSMs, as a fraction of its TT:
@@ -345,7 +442,11 @@ fn share_fdr(c: &xl::fdr::ClassCounts, link: xl::rollup::LinkClass) -> f64 {
 
 /// Every project's share of the CSMs each pooled cut of `PROJECT_REPORT_CUTS` accepts, per link
 /// class, for the projects with a scored CSM of that class.
-fn project_error(csms: &[CsmRow], q: &[Option<f64>]) -> Vec<output::xl_projects::XlProjectRow> {
+fn project_error(
+    csms: &[CsmRow],
+    q: &[Option<f64>],
+    projects: &Projects,
+) -> Vec<output::xl_projects::XlProjectRow> {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<(&str, usize), [xl::fdr::ClassCounts; PROJECT_REPORT_CUTS.len()]> =
         BTreeMap::new();
@@ -354,7 +455,9 @@ fn project_error(csms: &[CsmRow], q: &[Option<f64>]) -> Vec<output::xl_projects:
             .iter()
             .position(|&l| l == c.link)
             .unwrap_or(0);
-        let e = counts.entry((project_of(&c.run), li)).or_default();
+        let e = counts
+            .entry((project_of(&c.run, projects), li))
+            .or_default();
         for (k, cut) in PROJECT_REPORT_CUTS.iter().enumerate() {
             if q.is_some_and(|v| v <= *cut) {
                 e[k].add(c.class);
@@ -422,7 +525,11 @@ fn report_project_error(rows: &[output::xl_projects::XlProjectRow]) {
 }
 
 /// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`.
-fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>> {
+fn xl_fdr_tables(
+    tables: &[PathBuf],
+    output: &Path,
+    projects: &Projects,
+) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
     for t in tables {
         let (n, unscored) = read_csms(t, &mut csms)?;
@@ -488,9 +595,9 @@ fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>
         &levels,
         &|row| format!("{}:{}", csms[row].run, csms[row].spectrum),
     )?;
-    let projects = project_error(&csms, &q);
-    report_project_error(&projects);
-    output::xl_projects::write_xl_projects(&with(".xl.projects.parquet"), &projects)?;
+    let shares = project_error(&csms, &q, projects);
+    report_project_error(&shares);
+    output::xl_projects::write_xl_projects(&with(".xl.projects.parquet"), &shares)?;
     log::info!(
         target: "cohort",
         "wrote {} ({} CSMs from {} runs), the residue-pair and protein-pair tables and the \
@@ -653,6 +760,34 @@ mod tests {
         std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
         std::fs::write(&file, "other spectra").unwrap();
         assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+
+        std::fs::write(t.path().join("db.fasta"), ">P1\nPEPTIDEK\n").unwrap();
+        std::fs::write(&config, "io: {database: db.fasta}\ncohort: {name: two}\n").unwrap();
+        let with_db = fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap();
+        assert!(with_db.contains("db.fasta"), "{with_db}");
+        std::fs::write(t.path().join("db.fasta"), ">P1\nPEPTIDEKR\n").unwrap();
+        assert_ne!(
+            fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(),
+            with_db,
+            "a database replaced at the same path"
+        );
+    }
+
+    #[test]
+    fn projects_come_from_the_plan_when_one_is_given() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("plan.json");
+        std::fs::write(
+            &p,
+            r#"{"runs": [{"run": "A.v1.r1", "project": "A.v1"}, {"run": "r2", "project": "B"}]}"#,
+        )
+        .unwrap();
+        let projects = projects_of_plan(&p).unwrap();
+        assert_eq!(project_of("A.v1.r1", &projects), "A.v1");
+        assert_eq!(project_of("r2", &projects), "B");
+        assert_eq!(project_of("C.r3", &projects), "C");
+        std::fs::write(&p, r#"{"runs": [{"run": "x"}]}"#).unwrap();
+        assert!(projects_of_plan(&p).is_err());
     }
 
     #[test]
@@ -688,7 +823,7 @@ mod tests {
             Some(0.01),
             Some(0.01),
         ];
-        let rows = project_error(&csms, &q);
+        let rows = project_error(&csms, &q, &Projects::new());
         let at = |p: &str, link: &str, cut: f64| {
             rows.iter()
                 .find(|r| r.project == p && r.link == link && r.q_cut == cut)
@@ -700,6 +835,6 @@ mod tests {
         assert_eq!(at("B", "intra", 0.05), (1, 0, 1, 0.0));
         assert_eq!(at("B", "homotypic", 0.01), (1, 1, 0, 1.0));
         assert_eq!(rows.len(), 6);
-        assert_eq!(project_of("PXD1.run.with.dots"), "PXD1");
+        assert_eq!(project_of("PXD1.run.with.dots", &Projects::new()), "PXD1");
     }
 }

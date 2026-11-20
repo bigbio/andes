@@ -125,15 +125,27 @@ fn native_scan(id: &str) -> Option<i32> {
 }
 
 /// Files `ms3` under the MS2 scan each was taken from: `ms2` are one run's spectra, at
-/// `offset` in the search's spectrum list, and `out[offset + i]` receives the MS3 scans of
-/// `ms2[i]`. An MS3 scan is linked by its parent's scan number. Returns how many were linked.
+/// `offset` in the search's spectrum list, their titles the file's native ids after
+/// `title_prefix`, and `out[offset + i]` receives the MS3 scans of `ms2[i]`. An MS3 scan is
+/// linked by its parent's native id (`scan=`, `index=` or any other form the file uses),
+/// else by the scan number in it. Returns how many were linked.
 pub(crate) fn link_ms3(
     ms2: &[Spectrum],
     offset: usize,
+    title_prefix: Option<&str>,
     ms3: Vec<model::scan::ProductScan>,
     out: &mut Vec<Vec<model::scan::ProductScan>>,
 ) -> usize {
     out.resize_with(offset + ms2.len(), Vec::new);
+    let id_of = |s: &Spectrum| -> String {
+        let t = s.title.as_str();
+        title_prefix
+            .and_then(|p| t.strip_prefix(p))
+            .unwrap_or(t)
+            .to_string()
+    };
+    let by_id: std::collections::HashMap<String, usize> =
+        ms2.iter().enumerate().map(|(i, s)| (id_of(s), i)).collect();
     let by_scan: std::collections::HashMap<i32, usize> = ms2
         .iter()
         .enumerate()
@@ -141,8 +153,13 @@ pub(crate) fn link_ms3(
         .collect();
     let mut linked = 0;
     for p in ms3 {
-        let parent = p.parent_id.as_deref().and_then(native_scan);
-        if let Some(&i) = parent.and_then(|n| by_scan.get(&n)) {
+        let Some(parent) = p.parent_id.as_deref() else {
+            continue;
+        };
+        let hit = by_id
+            .get(parent)
+            .or_else(|| native_scan(parent).and_then(|n| by_scan.get(&n)));
+        if let Some(&i) = hit {
             out[offset + i].push(p);
             linked += 1;
         }
@@ -916,6 +933,7 @@ mod tests {
         let linked = link_ms3(
             &run,
             3,
+            None,
             vec![
                 child("a", Some("controllerType=0 controllerNumber=1 scan=14")),
                 child("b", Some("controllerType=0 controllerNumber=1 scan=10")),
@@ -933,6 +951,23 @@ mod tests {
         assert!(out[..3].iter().all(Vec::is_empty));
         assert_eq!(native_scan("scan=7"), Some(7));
         assert_eq!(native_scan("index=7"), None);
+
+        let titled = |title: &str, scan: i32| Spectrum {
+            title: title.to_string(),
+            scan: Some(scan),
+            ..Default::default()
+        };
+        let run = [titled("R1/index=100", 101), titled("R1/index=101", 102)];
+        let mut out = Vec::new();
+        let linked = link_ms3(
+            &run,
+            0,
+            Some("R1/"),
+            vec![child("m", Some("index=101")), child("n", Some("index=7"))],
+            &mut out,
+        );
+        assert_eq!(linked, 1);
+        assert_eq!(ids(&out[1]), ["m"]);
     }
 
     #[test]

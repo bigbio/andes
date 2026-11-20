@@ -161,7 +161,7 @@ quant:
   # label_2h_enrichment_chemical: 0.99  # --label-2h-enrichment-chemical (advanced)
   # label_heavy_enrichment: 0.99        # --label-heavy-enrichment (advanced)
 
-# Read by `andes cohort plan` only; a search ignores this section. The sections above are the
+# Read by `andes cohort plan` and `andes cohort run`; a search ignores this section. The sections above are the
 # settings every run of the cohort shares; each run's own settings come from its SDRF row.
 # cohort:
 #   name: human-xl                 # the default output folder, <name>/ next to this file

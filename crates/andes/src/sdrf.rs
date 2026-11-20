@@ -14,6 +14,9 @@ pub enum Quant {
 pub struct SdrfSettings {
     pub path: PathBuf,
     pub data_files: Vec<PathBuf>,
+    /// The file names the SDRF gives, in the order of `data_files` (which may be a converted
+    /// copy found next to the SDRF instead).
+    pub data_names: Vec<String>,
     pub enzyme: Option<String>,
     pub precursor_tol: Option<String>,
     pub fragment_tol: Option<String>,
@@ -122,11 +125,12 @@ fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
             ));
         }
         let cell = |i: usize| value(cells[i]);
+        let at = |e: String| format!("row {}: {e}", n + 2);
         let file = cell(data_col).ok_or_else(|| format!("row {}: no data file", n + 2))?;
         let mut enzymes = Vec::new();
         for &i in &cleave {
             if let Some(v) = cell(i) {
-                let e = enzyme_of(&v)?;
+                let e = enzyme_of(&v).map_err(at)?;
                 if !enzymes.contains(&e) {
                     enzymes.push(e);
                 }
@@ -135,7 +139,7 @@ fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
         let mut row_mods = Vec::new();
         for &i in &mods {
             if let Some(v) = cell(i) {
-                row_mods.push(ModParam::parse(&v)?);
+                row_mods.push(ModParam::parse(&v).map_err(at)?);
             }
         }
         rows.push(RowSettings {
@@ -151,12 +155,12 @@ fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
             label: label_col
                 .first()
                 .and_then(|&i| cell(i))
-                .map(|v| nt(&v))
+                .map(|v| nt(&v).map_err(|e| at(format!("`{LABEL}` {e}"))))
                 .transpose()?,
             dissociation: diss
                 .first()
                 .and_then(|&i| cell(i))
-                .map(|v| nt(&v))
+                .map(|v| nt(&v).map_err(|e| at(format!("`{DISSOCIATION}` {e}"))))
                 .transpose()?,
             xl: xl_col.first().and_then(|&i| cell(i)),
         });
@@ -188,10 +192,12 @@ fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfS
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
+    let mut data_names: Vec<String> = Vec::new();
     for r in rows {
         let p = resolve_data_file(dir, &r.file);
         if !data_files.contains(&p) {
             data_files.push(p);
+            data_names.push(r.file.clone());
         }
     }
     let labels: BTreeSet<String> = rows.iter().filter_map(|r| r.label.clone()).collect();
@@ -217,6 +223,7 @@ fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfS
     Ok(SdrfSettings {
         path: PathBuf::new(),
         data_files,
+        data_names,
         enzyme: (!first.enzymes.is_empty()).then(|| first.enzymes.join(",")),
         precursor_tol: first.precursor_tol.clone(),
         fragment_tol: first.fragment_tol.clone(),
@@ -312,8 +319,12 @@ fn key_values(v: &str) -> Result<BTreeMap<String, String>, String> {
                 }
             }
             None if !part.trim().is_empty() => {
-                out.entry("NT".to_string())
-                    .or_insert_with(|| part.trim().to_string());
+                if out.insert("NT".to_string(), part.trim().to_string()).is_some() {
+                    return Err(format!(
+                        "`{v}`: two terms in one cell; give each term its own column (repeat \
+                         the column header)"
+                    ));
+                }
             }
             None => {}
         }
@@ -1067,6 +1078,10 @@ mod tests {
             "{two}"
         );
         assert_eq!(enzyme_of("NT=Trypsin/P;AC=MS:1001313").unwrap(), "trypsin");
+        for both in ["NT=Trypsin;Lys-C", "Lys-C;NT=Trypsin"] {
+            assert!(enzyme_of(both).is_err(), "{both}");
+        }
+        assert_eq!(enzyme_of("Trypsin").unwrap(), "trypsin");
     }
 
     const HX: &[&str] = &[

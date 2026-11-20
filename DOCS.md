@@ -750,12 +750,18 @@ the pool scores:
    and peak-sharing evidence). A joint model of the traces adds ten `dia_jf_*` columns: a
    likelihood ratio over elution offset, peak shape and amplitude, learned per run from confident
    targets and a sample of decoys.
-2. **Learned score and precursor PIN.** The PIN is rewritten with one row per nominated precursor:
-   the pass-2 columns, the best pass-1 row of the precursor (`p1_*`, `p1_present`) and
-   `dia_gb_score`, an out-of-fold gradient-boosted score (3 folds keyed by residue composition, so
-   a decoy is never scored by a model that saw its source target). Percolator rescores this PIN and
-   its results replace the pass-1 results. With one row per precursor, Percolator's q is the
-   precursor-level q.
+2. **Learned score and precursor PIN.** A precursor PIN is written beside the pass-1 PIN
+   (`<stem>.precursor.pin`) with one row per nominated precursor: the pass-2 columns, the best
+   pass-1 row of the precursor (`p1_*`, `p1_present`) and `dia_gb_score`, an out-of-fold
+   gradient-boosted score (3 folds keyed by protein, so a decoy is never scored by a model that saw
+   its source target, whatever the decoy strategy). A fold with too few positives (910 per fold)
+   or a constant score is degenerate; the score then stays at the previous round, or is left out
+   when the first round is degenerate. Percolator rescores
+   this PIN (results `<stem>.precursor.percolator.*`). Its results replace the pass-1 results only
+   when pass 2 has at least as many targets as pass 1 has precursors at q 0.01, Percolator's
+   training is not degenerate, and it reaches at least as many target precursors at q 0.01 as
+   pass 1; otherwise pass 1 is kept and the log says why. With one row per precursor,
+   Percolator's q is the precursor-level q.
 3. **RT-aware candidate cut.** Under `--dia` the fragment-index cut (best 100 forms per scan and
    charge) ranks by votes minus a squared RT-agreement term. The RT map and its spread are fitted
    per run on a 2 % subsample searched first. With fewer than 50 anchors (for example a model that
@@ -842,8 +848,8 @@ Plan memory for the search step by the 36 GB peak.
   test only.
 - The RT-aware cut needs a usable RT prediction. On chemistry that andes-rt predicts poorly it
   falls back to the vote rank.
-- The fold key assumes a decoy has the residue composition of its source target (shuffled and
-  reversed decoys).
+- The fold key assumes a decoy protein's accession is the decoy prefix plus its target's
+  accession (true for every built-in decoy strategy). The prefix is read from the accessions.
 - Study-mode memory grows with the number of runs times the union of their nominees: each
   extract step holds its run's own nominees plus every key nominated elsewhere, and finalize
   holds the cross-run keys of all runs (about 24 bytes a precursor per run).

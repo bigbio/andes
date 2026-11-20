@@ -66,8 +66,10 @@ with the steps below.
 - **Pass 2.** Each precursor nominated by its best scan is traced over 73 cycles around its
   predicted RT, and its top predicted fragments are scored per cycle against per-run chance rates.
   A joint model of the traces adds likelihood columns.
-- **Learned score.** The PIN becomes one row per nominated precursor, with a cross-fitted
-  gradient-boosted score as a feature. Percolator rescores it, so its q is the precursor-level q.
+- **Learned score.** A precursor PIN beside the pass-1 PIN has one row per nominated precursor,
+  with a cross-fitted gradient-boosted score as a feature. Percolator rescores it, so its q is the
+  precursor-level q. Its results are used only when they reach at least as many precursors at
+  q 0.01 as pass 1; otherwise the pass-1 results are kept.
 - **RT-aware candidate cut.** The per-scan cut of 100 candidates also ranks by agreement with the
   run's predicted RT. It falls back to votes when the RT prediction is poor.
 - **Study mode.** For two or more runs of one experiment, each run adds evidence from the others:

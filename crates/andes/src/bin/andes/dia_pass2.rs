@@ -1210,16 +1210,34 @@ pub(crate) fn run(
         noms.len(),
         t0.elapsed().as_secs_f64()
     );
-    if let Some(out) = nominees_out {
-        let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
-        let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);
-        crate::dia_xfer::write_nominees_table(&out, &noms, shift, rt_cal)?;
+    let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
+    let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);
+    let (stored, p2) = std::thread::scope(|scope| {
+        let stored = nominees_out.map(|out| {
+            let noms = &noms;
+            scope.spawn(move || {
+                let t = std::time::Instant::now();
+                crate::dia_xfer::write_nominees_table(&out, noms, shift, rt_cal)
+                    .map(|()| t.elapsed().as_secs_f64())
+            })
+        });
+        let idx: Vec<Option<Ms1RunIndex>> = ms1
+            .iter()
+            .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
+            .collect();
+        let p2 = extract(&noms, spectra, run_ends, &idx, &pool.shift_ppm);
+        let stored = stored.map(|h| {
+            h.join()
+                .unwrap_or_else(|_| Err("writing the nominee table panicked".to_string()))
+        });
+        (stored, p2)
+    });
+    if let Some(secs) = stored.transpose()? {
+        log::info!(
+            target: "dia",
+            "pass 2: stored the nominees for the study, beside the extraction [{secs:.2}s]"
+        );
     }
-    let idx: Vec<Option<Ms1RunIndex>> = ms1
-        .iter()
-        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
-        .collect();
-    let p2 = extract(&noms, spectra, run_ends, &idx, &pool.shift_ppm);
     let table = to_table(&noms, &p2);
     let path = pin.with_extension("dia_pass2.parquet");
     output::dia_pass2_table::write_pass2(&path, &table)?;

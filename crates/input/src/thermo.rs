@@ -213,6 +213,23 @@ impl ThermoRawReader {
         })
     }
 
+    /// The MS3+ scan at `index`, linked to its parent scan by the master scan number.
+    fn product_scan(&self, index: usize, raw: &RawSpectrum) -> ProductScan {
+        let parent_id = master_scan_number(&self.handle, index)
+            .map(|scan| with_scan_number(&raw.native_id(), scan));
+        ProductScan {
+            id: raw.native_id(),
+            scan: Some(raw.index() as i32 + 1),
+            rt_seconds: Some(raw.time() * 60.0),
+            ms_level: raw.ms_level(),
+            parent_id,
+            precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
+            scan_window: scan_window(raw),
+            peaks: extract_peaks(raw),
+            noise: self.noise_of(index),
+        }
+    }
+
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -254,7 +271,12 @@ impl ThermoRawReader {
                     tracker.push(idx, faims_cv(&raw));
                 }
                 level if level >= 3 => {
-                    skipped_higher_ms += 1;
+                    if self.capture_product_scans {
+                        let p = self.product_scan(i, &raw);
+                        self.product_scans.push(p);
+                    } else {
+                        skipped_higher_ms += 1;
+                    }
                 }
                 2 => {
                     let spec = match Self::convert(&raw, &self.handle) {
@@ -598,19 +620,8 @@ impl Iterator for ThermoRawReader {
                 });
             }
             if level >= 3 && self.capture_product_scans {
-                let parent_id = master_scan_number(&self.handle, i)
-                    .map(|scan| with_scan_number(&raw.native_id(), scan));
-                self.product_scans.push(ProductScan {
-                    id: raw.native_id(),
-                    scan: Some(raw.index() as i32 + 1),
-                    rt_seconds: Some(raw.time() * 60.0),
-                    ms_level: level,
-                    parent_id,
-                    precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
-                    scan_window: scan_window(&raw),
-                    peaks: extract_peaks(&raw),
-                    noise: self.noise_of(i),
-                });
+                let p = self.product_scan(i, &raw);
+                self.product_scans.push(p);
                 continue;
             }
             if let Some(want) = self.ms_level_filter {

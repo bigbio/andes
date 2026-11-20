@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use model::amino_acid::AminoAcid;
 use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
+use model::scan::ProductScan;
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
@@ -50,6 +51,9 @@ pub const PRECURSOR_SNAP_PPM: f64 = 25.0;
 pub const PRECURSOR_SNAP_RATIO: f32 = 3.0;
 
 pub const LOW_CHARGE_HALF_PAIR_PENALTY: f32 = 15.0;
+/// An MS3 scan matches a stub peptide when its precursor m/z is within this many Th of the
+/// stub peptide's m/z: a Thermo MS3 precursor is the MSn filter's target, given to 0.01.
+pub const MS3_PRECURSOR_MZ_TOL: f64 = 0.01;
 
 impl XlConfig {
     pub fn new(linker: Crosslinker) -> Self {
@@ -376,6 +380,9 @@ pub struct PeptideHit {
     pub n_sites: u8,
     pub gap_next: Option<f32>,
     pub mass_err_ppm: f64,
+    /// The best score of an MS3 scan of the spectrum on this peptide with its cleaved stub,
+    /// already part of `score`; `None` when no MS3 precursor matches the stub peptide.
+    pub ms3: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -541,6 +548,62 @@ struct SpecCtx<'a> {
     stub_weight: f32,
     stub_tol_ppm: f64,
     secondary_site_penalty: f32,
+    ms3: &'a [Ms3Ctx<'a>],
+}
+
+/// One MS3 scan of the spectrum, scored at every charge a stub peptide of the precursor can
+/// carry (1 to the precursor charge - 1).
+struct Ms3Ctx<'a> {
+    mz: f64,
+    by_charge: Vec<(u8, ScoredSpectrum<'a>)>,
+}
+
+fn ms3_spectrum(p: &ProductScan) -> Spectrum {
+    let mut peaks = p.peaks.clone();
+    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Spectrum {
+        title: p.id.clone(),
+        precursor_mz: p.precursor_mz,
+        scan: p.scan,
+        rt_seconds: p.rt_seconds,
+        peaks,
+        ..Default::default()
+    }
+}
+
+fn ms3_contexts<'a>(specs: &'a [Spectrum], scorer: &RankScorer, z: u8) -> Vec<Ms3Ctx<'a>> {
+    specs
+        .iter()
+        .filter(|s| s.precursor_mz > 0.0 && !s.peaks.is_empty())
+        .map(|s| Ms3Ctx {
+            mz: s.precursor_mz,
+            by_charge: (1..z.max(2))
+                .map(|q| (q, ScoredSpectrum::new(s, scorer, q)))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Whether an MS3 precursor at `mz` is a stub peptide of neutral mass `mass` at `charge`.
+fn ms3_precursor_matches(mz: f64, charge: u8, mass: f64) -> bool {
+    charge > 0 && (mz - (mass / charge as f64 + PROTON)).abs() <= MS3_PRECURSOR_MZ_TOL
+}
+
+/// The best score of an MS3 scan whose precursor is `stub_peptide` at some charge.
+fn ms3_score(ctx: &SpecCtx<'_>, stub_peptide: &Peptide) -> Option<f32> {
+    let m = stub_peptide.mass();
+    let mut best: Option<f32> = None;
+    for c in ctx.ms3 {
+        for (q, ss) in &c.by_charge {
+            if !ms3_precursor_matches(c.mz, *q, m) {
+                continue;
+            }
+            let s = score_psm(ss, stub_peptide, ctx.scorer, *q, ctx.frag_tol)
+                + psm_edge_score(ss, stub_peptide, ctx.scorer, *q) as f32;
+            best = Some(best.map_or(s, |b| b.max(s)));
+        }
+    }
+    best
 }
 
 fn site_penalty(
@@ -593,7 +656,7 @@ fn score_peptide(
 ) -> Option<PeptideHit> {
     let p = &table.peptides[pep_idx as usize];
     let sites = p.sites_of_end(end);
-    let mut best: Option<(f32, LinkSite, LinkForm)> = None;
+    let mut best: Option<(f32, LinkSite, LinkForm, Option<f32>)> = None;
     let mut form_scores = [f32::NEG_INFINITY; N_FORMS];
     for &site in sites {
         for form in linker.forms() {
@@ -601,19 +664,24 @@ fn score_peptide(
                 continue;
             };
             let scored = with_link_mass(&p.peptide, site.pos, form, delta, mods);
+            let ms3 = match form {
+                LinkForm::Stub(_) if !ctx.ms3.is_empty() => ms3_score(ctx, &scored),
+                _ => None,
+            };
             let s = score_psm(&ctx.ss, &scored, ctx.scorer, ctx.z, ctx.frag_tol)
                 + psm_edge_score(&ctx.ss, &scored, ctx.scorer, ctx.z) as f32
-                - site_penalty(ctx.secondary_site_penalty, &p.peptide, &site, linker, end);
+                - site_penalty(ctx.secondary_site_penalty, &p.peptide, &site, linker, end)
+                + ms3.map_or(0.0, |v| v.max(0.0));
             let fi = form.index();
             if s > form_scores[fi] {
                 form_scores[fi] = s;
             }
-            if best.is_none_or(|(b, _, _)| s > b) {
-                best = Some((s, site, form));
+            if best.is_none_or(|(b, _, _, _)| s > b) {
+                best = Some((s, site, form, ms3));
             }
         }
     }
-    let (score, site, form) = best?;
+    let (score, site, form, ms3) = best?;
     let score = score + stub_bonus(ctx, p.peptide.mass(), linker);
     Some(PeptideHit {
         pep: pep_idx,
@@ -624,6 +692,7 @@ fn score_peptide(
         n_sites: sites.len().min(255) as u8,
         gap_next: None,
         mass_err_ppm: 0.0,
+        ms3,
     })
 }
 
@@ -953,9 +1022,11 @@ fn summarize_doublets(peaks: &[(f64, f32)], z: u8, cfg: &XlConfig) -> DoubletSum
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn search_spectrum(
     spec_idx: usize,
     spec: &Spectrum,
+    ms3: &[ProductScan],
     prepared: &PreparedSearch<'_>,
     table: &XlCandidates,
     cfg: &XlConfig,
@@ -968,14 +1039,16 @@ fn search_spectrum(
             if z < cfg.min_precursor_charge {
                 return None;
             }
-            search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, run_oracle)
+            search_spectrum_at(
+                spec_idx, spec, ms3, z, prepared, table, cfg, mods, run_oracle,
+            )
         }
         None => {
             let range = &prepared.params.charge_range;
             let lo = (*range.start()).max(cfg.min_precursor_charge);
             choose_charge(
                 (lo..=*range.end()).filter_map(|z| {
-                    search_spectrum_at(spec_idx, spec, z, prepared, table, cfg, mods, false)
+                    search_spectrum_at(spec_idx, spec, ms3, z, prepared, table, cfg, mods, false)
                 }),
                 cfg.charge_by_pair_score,
             )
@@ -1026,6 +1099,7 @@ fn choose_charge(
 fn search_spectrum_at(
     spec_idx: usize,
     spec: &Spectrum,
+    ms3: &[ProductScan],
     z: u8,
     prepared: &PreparedSearch<'_>,
     table: &XlCandidates,
@@ -1071,6 +1145,12 @@ fn search_spectrum_at(
     if pairs.is_empty() && open_rows.is_empty() && !run_oracle {
         return Some(result);
     }
+    let ms3_specs: Vec<Spectrum> = if linker.cleavage.is_some() {
+        ms3.iter().map(ms3_spectrum).collect()
+    } else {
+        Vec::new()
+    };
+    let ms3_ctx = ms3_contexts(&ms3_specs, prepared.scorer, z);
     let ctx = SpecCtx {
         ss: ScoredSpectrum::new(spec, prepared.scorer, z),
         scorer: prepared.scorer,
@@ -1080,6 +1160,7 @@ fn search_spectrum_at(
         stub_weight: cfg.stub_weight,
         stub_tol_ppm: cfg.doublet.tol_ppm,
         secondary_site_penalty: cfg.secondary_site_penalty,
+        ms3: &ms3_ctx,
     };
 
     struct Cand {
@@ -1329,8 +1410,11 @@ fn oracle(
     }
 }
 
+/// Search every spectrum; `ms3[i]` holds the MS3 scans of spectrum `i` (missing or empty
+/// when it has none).
 pub fn xl_search_run(
     spectra: &[Spectrum],
+    ms3: &[Vec<ProductScan>],
     prepared: &PreparedSearch<'_>,
     table: &XlCandidates,
     cfg: &XlConfig,
@@ -1351,7 +1435,8 @@ pub fn xl_search_run(
         .enumerate()
         .filter_map(|(i, spec)| {
             let run_oracle = eligible.binary_search(&i).is_ok();
-            search_spectrum(i, spec, prepared, table, cfg, &mods, run_oracle)
+            let children = ms3.get(i).map_or(&[][..], Vec::as_slice);
+            search_spectrum(i, spec, children, prepared, table, cfg, &mods, run_oracle)
         })
         .collect()
 }
@@ -1372,6 +1457,27 @@ mod tests {
             .map(|&r| AminoAcid::standard(r).unwrap())
             .collect();
         Peptide::new(residues, b'K', b'A')
+    }
+
+    #[test]
+    fn an_ms3_precursor_matches_its_stub_peptide_at_its_charge() {
+        let dsso = linker("DSSO");
+        let alkene = dsso.cleavage.as_ref().unwrap().stubs[0].mass;
+        let stub_peptide = 1000.5 + alkene;
+        let mz2 = stub_peptide / 2.0 + PROTON;
+        assert!(ms3_precursor_matches(mz2, 2, stub_peptide));
+        assert!(ms3_precursor_matches(mz2 + 0.009, 2, stub_peptide));
+        assert!(!ms3_precursor_matches(mz2 + 0.02, 2, stub_peptide));
+        assert!(!ms3_precursor_matches(mz2, 3, stub_peptide));
+        assert!(!ms3_precursor_matches(mz2, 0, stub_peptide));
+        let s = ms3_spectrum(&ProductScan {
+            id: "scan=9".into(),
+            precursor_mz: mz2,
+            peaks: vec![(300.0, 1.0), (200.0, 2.0)],
+            ..Default::default()
+        });
+        assert_eq!(s.peaks, vec![(200.0, 2.0), (300.0, 1.0)]);
+        assert_eq!(s.precursor_charge, None);
     }
 
     #[test]
@@ -1429,6 +1535,7 @@ mod tests {
             n_sites: 1,
             gap_next: None,
             mass_err_ppm: 0.0,
+            ms3: None,
         };
         let mut pairs = vec![(key(pair), score)];
         pairs.extend(second.map(|(p, s)| (key(p), s)));

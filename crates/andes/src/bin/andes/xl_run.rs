@@ -80,6 +80,7 @@ fn peptide_cols(
         h.gap_next.map_or("NA".to_string(), |g| format!("{g:.3}")),
         format!("{:.2}", h.mass_err_ppm),
         p.peptide.length().to_string(),
+        h.ms3.map_or("NA".to_string(), |v| format!("{v:.3}")),
     ]);
     cols
 }
@@ -109,11 +110,44 @@ fn pep_cols(linker: &Crosslinker, stub_cols: Option<usize>) -> Vec<String> {
         }
     }
     v.extend(
-        ["n_sites", "gap_next", "mass_err_ppm", "length"]
+        ["n_sites", "gap_next", "mass_err_ppm", "length", "ms3"]
             .iter()
             .map(|s| s.to_string()),
     );
     v
+}
+
+/// The scan number in a native spectrum id (`... scan=<n>`).
+fn native_scan(id: &str) -> Option<i32> {
+    let rest = &id[id.rfind("scan=")? + "scan=".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Files `ms3` under the MS2 scan each was taken from: `ms2` are one run's spectra, at
+/// `offset` in the search's spectrum list, and `out[offset + i]` receives the MS3 scans of
+/// `ms2[i]`. An MS3 scan is linked by its parent's scan number. Returns how many were linked.
+pub(crate) fn link_ms3(
+    ms2: &[Spectrum],
+    offset: usize,
+    ms3: Vec<model::scan::ProductScan>,
+    out: &mut Vec<Vec<model::scan::ProductScan>>,
+) -> usize {
+    out.resize_with(offset + ms2.len(), Vec::new);
+    let by_scan: std::collections::HashMap<i32, usize> = ms2
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.scan.map(|n| (n, i)))
+        .collect();
+    let mut linked = 0;
+    for p in ms3 {
+        let parent = p.parent_id.as_deref().and_then(native_scan);
+        if let Some(&i) = parent.and_then(|n| by_scan.get(&n)) {
+            out[offset + i].push(p);
+            linked += 1;
+        }
+    }
+    linked
 }
 
 fn scan_of(spec: &Spectrum) -> String {
@@ -372,6 +406,32 @@ fn write_doublets(
     w.flush()
 }
 
+/// How many searched spectra had MS3 scans, and how many CSMs an MS3 scan supports on one
+/// or both peptides.
+fn report_ms3(results: &[XlSpectrumResult], ms3: &[Vec<model::scan::ProductScan>]) {
+    let with = results
+        .iter()
+        .filter(|r| ms3.get(r.spec_idx).is_some_and(|v| !v.is_empty()))
+        .count();
+    if with == 0 {
+        return;
+    }
+    let (mut one, mut both, mut csms) = (0usize, 0usize, 0usize);
+    for c in results.iter().filter_map(|r| r.csm.as_ref()) {
+        csms += 1;
+        match (c.alpha.ms3.is_some(), c.beta.ms3.is_some()) {
+            (true, true) => both += 1,
+            (true, false) | (false, true) => one += 1,
+            _ => {}
+        }
+    }
+    log::info!(
+        target: "xl",
+        "{with} searched spectra have MS3 scans; of {csms} CSMs, an MS3 scan matches both \
+         peptides in {both} and one peptide in {one}"
+    );
+}
+
 fn report(results: &[XlSpectrumResult]) {
     let n = results.len();
     let mut hist = [0usize; 4];
@@ -482,9 +542,11 @@ pub(crate) fn xl_default_variable_mods(
     Some(crate::cli::ModList(mods))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
+    ms3: &[Vec<model::scan::ProductScan>],
     prepared: &PreparedSearch,
     report_base: &Path,
     spectrum_paths: &[PathBuf],
@@ -524,7 +586,7 @@ pub(crate) fn run_xl(
             cfg.isotope_offsets = lo..=hi;
         }
         let t = std::time::Instant::now();
-        let mut found = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
+        let mut found = xl_search_run(spectra_for_xl, ms3, prepared, &table, &cfg);
         log::info!(
             target: "xl",
             "{}: searched {} spectra, {} CSMs [{:.2}s]",
@@ -534,6 +596,7 @@ pub(crate) fn run_xl(
             t.elapsed().as_secs_f64()
         );
         report(&found);
+        report_ms3(&found, ms3);
         for r in found.iter_mut() {
             r.linker = li;
         }
@@ -736,6 +799,7 @@ mod tests {
             n_sites: 1,
             gap_next: None,
             mass_err_ppm: 0.0,
+            ms3: None,
         };
         let pairs: Vec<_> = pairs.iter().map(|(p, s)| (key(p), *s)).collect();
         XlSpectrumResult {
@@ -833,6 +897,42 @@ mod tests {
             ),
             (0, 4, 110.0, Some(109.0))
         );
+    }
+
+    #[test]
+    fn ms3_scans_are_filed_under_their_parent_ms2_scan() {
+        use model::scan::ProductScan;
+        let ms2 = |scan: i32| Spectrum {
+            scan: Some(scan),
+            ..Default::default()
+        };
+        let child = |id: &str, parent: Option<&str>| ProductScan {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            ..Default::default()
+        };
+        let run = [ms2(10), ms2(14)];
+        let mut out = vec![Vec::new(); 3];
+        let linked = link_ms3(
+            &run,
+            3,
+            vec![
+                child("a", Some("controllerType=0 controllerNumber=1 scan=14")),
+                child("b", Some("controllerType=0 controllerNumber=1 scan=10")),
+                child("c", Some("controllerType=0 controllerNumber=1 scan=14")),
+                child("d", Some("controllerType=0 controllerNumber=1 scan=99")),
+                child("e", None),
+            ],
+            &mut out,
+        );
+        assert_eq!(linked, 3);
+        assert_eq!(out.len(), 5);
+        let ids = |v: &Vec<ProductScan>| v.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&out[3]), ["b"]);
+        assert_eq!(ids(&out[4]), ["a", "c"]);
+        assert!(out[..3].iter().all(Vec::is_empty));
+        assert_eq!(native_scan("scan=7"), Some(7));
+        assert_eq!(native_scan("index=7"), None);
     }
 
     #[test]

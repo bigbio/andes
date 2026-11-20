@@ -607,6 +607,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut all_queues: Vec<TopNQueue> = Vec::new();
     let mut run_ends: Vec<usize> = Vec::with_capacity(spectrum_paths.len());
     let mut dia_ms1: Vec<Vec<model::scan::Ms1Scan>> = Vec::new();
+    let xl_ms3_capture = cli
+        .xl
+        .as_ref()
+        .is_some_and(|x| x.0.iter().any(|l| l.cleavage.is_some()));
+    let mut xl_ms3: Vec<Vec<model::scan::ProductScan>> = Vec::new();
 
     let t_search_start = std::time::Instant::now();
 
@@ -712,6 +717,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 && cap == usize::MAX
                 && !is_gzip_path(input_path);
             let threads = cli.threads;
+            let capture_product = xl_ms3_capture;
             type Ms1Parsed = (usize, Vec<String>, RunScans);
             let parser_handle = thread::spawn(move || -> Result<Ms1Parsed, String> {
                 let linked = if parallel_read {
@@ -747,6 +753,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .with_ms_level_range(mslevel, mslevel)
                     .with_ms1_capture(true)
                     .with_run_ms1_capture(capture_ms1)
+                    .with_product_scan_capture(capture_product)
                     .with_scan_context_capture(capture_context)
                     .with_noise_capture(capture_noise);
                     let (errc, errs) =
@@ -755,7 +762,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         });
                     let scans = RunScans {
                         ms1: reader.take_run_ms1(),
-                        ms3: Vec::new(),
+                        ms3: reader.take_product_scans(),
                         contexts: reader.take_scan_contexts(),
                     };
                     Ok((errc, errs, scans))
@@ -791,6 +798,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let mut reader = input::ThermoRawReader::open(&spectrum_path)
                             .map_err(|e| format!("open Thermo .raw: {e}"))?
                             .with_run_ms1_capture(capture_ms1)
+                            .with_product_scan_capture(capture_product)
                             .with_scan_context_capture(capture_context)
                             .with_noise_capture(capture_noise);
                         let (errc, errs) =
@@ -799,7 +807,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             });
                         let scans = RunScans {
                             ms1: reader.take_run_ms1(),
-                            ms3: Vec::new(),
+                            ms3: reader.take_product_scans(),
                             contexts: reader.take_scan_contexts(),
                         };
                         Ok((errc, errs, scans))
@@ -1191,6 +1199,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::mem::take(&mut run_scans.ms1)
             });
         }
+        if xl_ms3_capture {
+            let ms3 = std::mem::take(&mut run_scans.ms3);
+            let n = ms3.len();
+            let linked = crate::xl_run::link_ms3(
+                &all_spectra[spectra_before..],
+                spectra_before,
+                ms3,
+                &mut xl_ms3,
+            );
+            if n > 0 {
+                log::info!(
+                    target: "xl",
+                    "{} MS3 scans, {} linked to an MS2 scan of {}",
+                    n,
+                    linked,
+                    input_path.display()
+                );
+            }
+        }
         if let Some(q) = quant.as_mut() {
             q.finish_file(
                 input_path,
@@ -1385,6 +1412,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         crate::xl_run::run_xl(
             &cli,
             &spectra,
+            &xl_ms3,
             &prepared,
             &report_base,
             spectrum_paths,

@@ -2,10 +2,10 @@
 //! the best pass-1 PIN row of the same precursor, and a cross-fitted learned score.
 //!
 //! The learned score is a gradient-boosted classifier trained out of fold: folds are keyed by
-//! the residue composition of the peptide, so a shuffled or reversed decoy always falls in the
-//! fold of its source target, and no row is scored by a model that saw it.
+//! protein, so a decoy always falls in the fold of its source target whatever the decoy strategy,
+//! and no row is scored by a model that saw it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
@@ -35,12 +35,57 @@ fn params() -> TrainParams {
     }
 }
 
-/// Fold key of a peptide: a hash of its sorted residue letters, equal for a target and every
-/// permutation of it (shuffled or reversed decoys).
-pub(crate) fn fold_key(seq: &str) -> u64 {
+/// Accessions of a `Proteins` field (`;`- or tab-separated).
+fn accessions(proteins: &str) -> impl Iterator<Item = &str> {
+    proteins
+        .split([';', '\t'])
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+}
+
+/// Fold key of a precursor row: a hash of the smallest of its protein accessions with
+/// `decoy_prefix` taken off. A decoy gets the key of the target protein it was made from, under
+/// every decoy strategy (reversed, shuffled or mutated), and the rows of one peptide get one key
+/// even when it is in several proteins. A row without proteins falls back to its sorted residue
+/// letters, equal for a target and every permutation of it.
+pub(crate) fn fold_key(seq: &str, proteins: &str, decoy_prefix: &str) -> u64 {
+    let smallest = accessions(proteins)
+        .map(|a| a.strip_prefix(decoy_prefix).unwrap_or(a))
+        .min();
+    if let Some(a) = smallest {
+        return model::hash::fnv1a64_extend(model::hash::FNV1A64_OFFSET, a.as_bytes().iter());
+    }
     let mut b: Vec<u8> = seq.bytes().filter(u8::is_ascii_uppercase).collect();
     b.sort_unstable();
     model::hash::fnv1a64_extend(model::hash::FNV1A64_OFFSET, b.iter())
+}
+
+/// The decoy prefix of the table's accessions, read from the data: the leading part of the
+/// smallest decoy accession whose removal turns the most decoy accessions into target accessions
+/// of the table (the longest such part at ties). Empty when the table has no decoys.
+pub(crate) fn decoy_prefix(t: &Pass2Table) -> String {
+    let of = |decoy: bool| -> HashSet<&str> {
+        (0..t.len())
+            .filter(|&i| t.decoy[i] == decoy)
+            .flat_map(|i| accessions(&t.proteins[i]))
+            .collect()
+    };
+    let (targets, decoys) = (of(false), of(true));
+    let Some(first) = decoys.iter().min() else {
+        return String::new();
+    };
+    let hits = |k: usize| {
+        let p = &first[..k];
+        decoys
+            .iter()
+            .filter(|d| d.strip_prefix(p).is_some_and(|rest| targets.contains(rest)))
+            .count()
+    };
+    let k = (0..=first.len())
+        .filter(|&k| first.is_char_boundary(k))
+        .max_by_key(|&k| (hits(k), k))
+        .unwrap_or(0);
+    first[..k].to_string()
 }
 
 /// Target-decoy q-values of a score ((D + 1) / T, decoys first at ties, monotone).
@@ -287,7 +332,10 @@ pub(crate) fn write_precursor_pin(
         row[k + 1] = t.prec_mz[i] as f32;
     });
     let target: Vec<bool> = t.decoy.iter().map(|d| !d).collect();
-    let key: Vec<u64> = t.seq.iter().map(|s| fold_key(s)).collect();
+    let prefix = decoy_prefix(t);
+    let key: Vec<u64> = (0..n)
+        .map(|i| fold_key(&t.seq[i], &t.proteins[i], &prefix))
+        .collect();
     let gb = learned_score(&x, &names, &target, &key, seed)?;
 
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
@@ -400,9 +448,43 @@ mod tests {
 
     #[test]
     fn fold_key_keeps_decoy_with_its_target() {
-        assert_eq!(fold_key("PEPTIDEK"), fold_key("EDITPEPK"));
-        assert_eq!(fold_key("PEPTIDEK"), fold_key("KEDITPEP"));
-        assert_ne!(fold_key("PEPTIDEK"), fold_key("PEPTIDER"));
+        let p = "XXX_";
+        let target = fold_key("PEPTIDEK", "P1", p);
+        assert_eq!(target, fold_key("PEPTLDEK", "XXX_P1", p), "one-residue mutant decoy");
+        assert_eq!(target, fold_key("EDITPEPK", "XXX_P1", p), "reversed decoy");
+        assert_ne!(target, fold_key("PEPTIDEK", "P2", p));
+        let shared = fold_key("SHAREDPEPK", "P2;P1", p);
+        assert_eq!(shared, fold_key("SHAREDPEPK", "P1;P2", p));
+        assert_eq!(shared, fold_key("SHAREDPEPK", "P1\tP2", p));
+        assert_eq!(shared, fold_key("SHARLDPEPK", "XXX_P1;XXX_P2", p), "mutant of a shared peptide");
+        assert_eq!(shared, target, "every peptide of P1 shares its fold");
+        assert_eq!(fold_key("PEPTIDEK", "", p), fold_key("KEDITPEP", "", p));
+    }
+
+    #[test]
+    fn decoy_prefix_is_read_from_the_accessions() {
+        let t = Pass2Table {
+            spec_id: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            run: vec![0; 4],
+            decoy: vec![false, false, true, true],
+            charge: vec![2; 4],
+            peptide: vec!["K.PEPTIDEK.A".into(); 4],
+            proteins: vec![
+                "sp|P1|A_HUMAN".into(),
+                "sp|P2|B_HUMAN".into(),
+                "DECOY_sp|P1|A_HUMAN".into(),
+                "DECOY_sp|P2|B_HUMAN;DECOY_sp|P3|C_HUMAN".into(),
+            ],
+            seq: vec!["PEPTIDEK".into(); 4],
+            prec_mz: vec![500.0; 4],
+            features: Vec::new(),
+        };
+        assert_eq!(decoy_prefix(&t), "DECOY_");
+        let none = Pass2Table {
+            decoy: vec![false; 4],
+            ..t
+        };
+        assert_eq!(decoy_prefix(&none), "");
     }
 
     #[test]

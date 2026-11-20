@@ -176,6 +176,66 @@ fn decode_rescore(s: &str) -> Result<(PercolatorBackend, Vec<String>), String> {
     }
 }
 
+/// The scoring part of stored rescoring settings: the engine and its arguments. The native
+/// engine's storage budget and spill directory only bound memory, so runs searched with
+/// per-job budgets or temporary directories still compare equal.
+fn scoring_settings(stored: &str) -> Result<String, String> {
+    let (backend, args) = decode_rescore(stored)?;
+    let engine = match &backend {
+        PercolatorBackend::Binary(p) => format!("binary {}", p.display()),
+        PercolatorBackend::Docker { image } => format!("docker {image}"),
+        PercolatorBackend::Native { .. } => "native".to_string(),
+    };
+    Ok(format!("{engine}; {}", args.join(" ")))
+}
+
+/// The study's rescoring backend and arguments from the settings stored by each run (`(stem,
+/// stored)`, study order, at least one): an error when two runs differ in their scoring
+/// settings. The study is always rescored by the native engine, with the first run's storage
+/// budget (or the default one when the runs used another engine) and spilling to `scratch`.
+fn study_rescore(
+    stored: &[(&str, String)],
+    scratch: &Path,
+) -> Result<(PercolatorBackend, Vec<String>), String> {
+    let (s0, r0) = &stored[0];
+    let k0 = scoring_settings(r0)?;
+    for (s, r) in &stored[1..] {
+        if scoring_settings(r)? != k0 {
+            return Err(format!(
+                "runs {s0} and {s} were searched with different Percolator settings \
+                 ({r0:?} and {r:?}); search every run of a study with the same ones"
+            ));
+        }
+    }
+    let (searched, searched_args) = decode_rescore(r0)?;
+    Ok(match searched {
+        PercolatorBackend::Native { memory } => (
+            PercolatorBackend::Native {
+                memory: output::MemLimit {
+                    bytes: memory.bytes,
+                    spill_dir: scratch.to_path_buf(),
+                },
+            },
+            searched_args,
+        ),
+        other => {
+            log::info!(
+                target: "dia",
+                "the runs were rescored with Percolator {}; the study is rescored with the \
+                 native engine ({} GB storage budget, spill to {})",
+                other.describe(),
+                crate::cli::DEFAULT_RESCORE_MEMORY_GB,
+                scratch.display()
+            );
+            let memory = output::MemLimit {
+                bytes: crate::cli::DEFAULT_RESCORE_MEMORY_GB.saturating_mul(1 << 30),
+                spill_dir: scratch.to_path_buf(),
+            };
+            (PercolatorBackend::Native { memory }, Vec::new())
+        }
+    })
+}
+
 /// Stores a run of a DIA study: its pass-1 PIN as `<stem>.pin` and its pass-2 table as
 /// `<stem>.parquet` in `<quant_dir>/dia_pass2/`, the table last (its presence marks a complete
 /// run). `rescore` is the run's Percolator backend and arguments; `None` without rescoring.
@@ -284,7 +344,7 @@ pub(crate) fn finalize(
     }
     let dir = a.quant_dir.join(PASS2_DIR);
     let table_path = |s: &str| dir.join(format!("{s}.parquet"));
-    let mut rescore: Option<(String, &str)> = None;
+    let mut stored: Vec<(&str, String)> = Vec::with_capacity(stems.len());
     for s in stems {
         let p = table_path(s);
         let meta = read_pass2_meta(&p)?;
@@ -299,45 +359,24 @@ pub(crate) fn finalize(
                     p.display()
                 )
             })?;
-        match &rescore {
-            None => rescore = Some((r, s.as_str())),
-            Some((r0, s0)) if *r0 != r => {
-                return Err(format!(
-                    "runs {s0} and {s} were searched with different Percolator settings \
-                     ({r0:?} and {r:?}); search every run of a study with the same ones"
-                ));
-            }
-            _ => {}
-        }
+        stored.push((s.as_str(), r));
     }
-    let Some((rescore, _)) = rescore else {
+    if stored.is_empty() {
         return Err(format!("{}: no DIA runs", dir.display()));
-    };
-    let (searched, searched_args) = decode_rescore(&rescore)?;
-    let seed = a.seed;
-    let (backend, mut args) = match searched {
-        PercolatorBackend::Native { memory } => (PercolatorBackend::Native { memory }, searched_args),
-        other => {
-            let spill_dir = a
-                .output
+    }
+    let scratch = a
+        .temp_dir
+        .clone()
+        .or_else(|| {
+            a.output
                 .parent()
                 .filter(|d| !d.as_os_str().is_empty())
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            log::info!(
-                target: "dia",
-                "the runs were rescored with Percolator {}; the study is rescored with the \
-                 native engine ({} GB storage budget, spill to {})",
-                other.describe(),
-                crate::cli::DEFAULT_RESCORE_MEMORY_GB,
-                spill_dir.display()
-            );
-            let memory = output::MemLimit {
-                bytes: crate::cli::DEFAULT_RESCORE_MEMORY_GB.saturating_mul(1 << 30),
-                spill_dir,
-            };
-            (PercolatorBackend::Native { memory }, Vec::new())
-        }
-    };
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (backend, mut args) = study_rescore(&stored, &scratch)?;
+    drop(stored);
+    let seed = a.seed;
     crate::dia::default_train_fdr(&mut args);
     set_seed(&mut args, seed);
     if let PercolatorBackend::Native { memory } = &backend {
@@ -567,6 +606,41 @@ mod tests {
         let mut args = Vec::new();
         set_seed(&mut args, 42);
         assert_eq!(args, ["--seed", "42"]);
+    }
+
+    #[test]
+    fn runs_differing_only_in_the_spill_dir_and_budget_share_their_settings() {
+        let native = |gb: u64, dir: &str, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            encode_rescore(
+                &PercolatorBackend::Native {
+                    memory: output::MemLimit {
+                        bytes: gb << 30,
+                        spill_dir: PathBuf::from(dir),
+                    },
+                },
+                &args,
+            )
+        };
+        let stored = vec![
+            ("run01", native(8, "/scratch/job1/run01", &["--trainFDR", "0.05"])),
+            ("run02", native(16, "/scratch/job2/run02", &["--trainFDR", "0.05"])),
+        ];
+        let (b, args) = study_rescore(&stored, Path::new("/finalize/tmp")).unwrap();
+        assert_eq!(args, ["--trainFDR", "0.05"]);
+        match b {
+            PercolatorBackend::Native { memory } => {
+                assert_eq!(memory.spill_dir, PathBuf::from("/finalize/tmp"));
+                assert_eq!(memory.bytes, 8 << 30);
+            }
+            other => panic!("expected the native engine, got {}", other.describe()),
+        }
+        let differ = vec![
+            ("run01", native(8, "/a", &["--trainFDR", "0.05"])),
+            ("run02", native(8, "/a", &["--trainFDR", "0.01"])),
+        ];
+        let e = study_rescore(&differ, Path::new(".")).unwrap_err();
+        assert!(e.contains("run01") && e.contains("run02"), "{e}");
     }
 
     #[test]

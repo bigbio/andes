@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use model::mass::ISOTOPE;
+use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{H2O, PROTON};
 use quant::Ms1RunIndex;
@@ -328,7 +329,7 @@ fn calibrate_rt(noms: &[&Nominee]) -> (Vec<f64>, f64) {
     (cal, sigma)
 }
 
-/// 1.4826 x median absolute deviation; `None` for fewer than 50 values.
+/// `MAD_TO_SD` x median absolute deviation; `None` for fewer than 50 values.
 fn robust_sigma(v: &mut [f64]) -> Option<f64> {
     if v.len() < 50 {
         return None;
@@ -337,7 +338,7 @@ fn robust_sigma(v: &mut [f64]) -> Option<f64> {
     let med = v[v.len() / 2];
     let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
     dev.sort_by(f64::total_cmp);
-    Some(1.4826 * dev[dev.len() / 2])
+    Some(MAD_TO_SD * dev[dev.len() / 2])
 }
 
 /// A confident target with an andes-rt prediction: a row of the RT ridge.
@@ -392,6 +393,20 @@ impl Window<'_> {
             .take_while(|(_, p)| p.0 <= mz + tol)
             .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
             .map(|(k, p)| (p.1, (lo + k) as u32))
+    }
+}
+
+#[cfg(test)]
+impl<'a> Window<'a> {
+    /// A window without isolation or mobility bounds, for tests of the per-window models.
+    pub(crate) fn for_test(rt: Vec<f64>, scans: Vec<&'a [(f64, f32)]>) -> Self {
+        Window {
+            centre: 0.0,
+            iso: (0.0, f64::INFINITY),
+            mobility: None,
+            rt,
+            scans,
+        }
     }
 }
 
@@ -827,7 +842,7 @@ pub(crate) fn extract(
             }
         }
         let shift = 1.0 + shift_ppm.get(run).copied().unwrap_or(0.0) * 1e-6;
-        let rates = by_win
+        let per_win_rates: Vec<Rates> = by_win
             .par_iter()
             .enumerate()
             .map(|(w, ks)| {
@@ -838,10 +853,11 @@ pub(crate) fn extract(
                 }
                 r
             })
-            .reduce(Rates::default, |mut a, b| {
-                a.add(&b);
-                a
-            });
+            .collect();
+        let rates = per_win_rates.iter().fold(Rates::default(), |mut a, b| {
+            a.add(b);
+            a
+        });
         let terms = rates.terms();
         let per_win: Vec<Vec<(usize, RowFeatures)>> = by_win
             .par_iter()

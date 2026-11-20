@@ -7,6 +7,7 @@
 //! the intensity distribution of chance peaks and the amplitude prior. A nominee's score is
 //! log P(traces | peptide) / P(traces | chance), summed over the offsets within the RT prior.
 
+use model::stats::MAD_TO_SD;
 use rayon::prelude::*;
 
 use crate::dia_pass2::{Nominee, Window, CYCLES, HALF_CYCLES, TOP_IONS};
@@ -46,15 +47,59 @@ const COELUTE_HALF: usize = 3;
 const FAR_CYCLES: usize = 8;
 const OFFSETS: usize = 28;
 const SHAPES: usize = 3;
+/// Width of the expected-log10-intensity bins of the detection, residual and bias tables.
 const LM_STEP: f64 = 0.25;
 const LM_BINS: usize = 31;
+/// Log10 amplitudes of the marginalised peak height, `AMP_STEP` apart.
 const AMP_GRID: [f64; 10] = [2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0];
+const AMP_STEP: f64 = 0.5;
 const MZ_EDGES: [f64; 7] = [300.0, 400.0, 500.0, 650.0, 800.0, 1000.0, 1300.0];
 const MZ_BINS: usize = 8;
+/// Bins of the log10 intensity of chance peaks, `INT_STEP` wide from 0 up to `INT_MAX_LOG`.
 const INT_BINS: usize = 40;
+const INT_STEP: f64 = 0.25;
+const INT_MAX_LOG: f64 = 10.0;
+/// Bins of the mass-error spread by log10 intensity, `DEV_STEP` wide from `DEV_LOG_MIN`.
 const DEV_BINS: usize = 10;
+const DEV_LOG_MIN: f64 = 2.0;
+const DEV_STEP: f64 = 0.5;
+/// Ions of a bin below which its mass-error spread takes the smallest measured one.
+const DEV_MIN_IONS: usize = 200;
+/// Floor of a bin's mass-error spread, and its value when no bin is measured (ppm).
+const DEV_SD_MIN_PPM: f64 = 0.5;
+const DEV_SD_FALLBACK_PPM: f64 = 2.0;
+/// Share of a present fragment's mass error from a uniform outlier density.
 const MASS_EPS: f64 = 0.02;
+/// Width (ppm) of that uniform density: the presence window either side of the ion.
+const MASS_UNIFORM_PPM: f64 = 2.0 * PRESENT_PPM;
 const HALF_LOG_2PI: f64 = 0.918_938_533_204_672_7;
+const SQRT_2PI: f64 = 2.506_628_274_631_000_5;
+/// Pseudo-counts of the chance rate of a fragment (hits, trials), and its bounds per run and
+/// per (ion rank, m/z bin) cell.
+const P0_PRIOR_HITS: f64 = 0.5;
+const P0_PRIOR_TRIALS: f64 = 50.0;
+const P0_RUN_MIN: f64 = 1e-3;
+const P0_RUN_MAX: f64 = 0.3;
+const P0_CELL_MIN: f64 = 1e-4;
+const P0_CELL_MAX: f64 = 0.5;
+/// Trials of an expected-intensity bin below which its detection probability is the chance rate.
+const DET_MIN_TRIALS: f64 = 30.0;
+/// Upper bound of a detection probability.
+const DET_MAX: f64 = 0.995;
+/// Detections of a bin below which its intensity residual takes the default spread and no bias.
+const RES_MIN_HITS: f64 = 20.0;
+const RES_VAR_MIN: f64 = 0.01;
+const RES_SD_DEFAULT: f64 = 0.5;
+/// Percentiles of the central width that split the confident profiles into the three shapes.
+const SHAPE_SPLIT_PCT: [f64; 2] = [33.3, 66.7];
+/// Floors of a relative predicted intensity and of a shape's relative height before their log.
+const REL_INT_MIN: f64 = 1e-4;
+const SHAPE_MIN: f64 = 1e-6;
+/// Added to denominators and maxima that may be zero.
+const DIV_EPS: f64 = 1e-9;
+/// Floors of the cycle time (min) and of the RT prior's spread in cycles.
+const CYCLE_MIN_FLOOR: f64 = 1e-6;
+const PRIOR_SD_MIN_CYCLES: f64 = 1e-3;
 
 /// One nominee's traces: intensity and ppm error of the nearest peak per cycle and ion.
 struct Traces {
@@ -80,11 +125,11 @@ fn traces(w: &Window, n: &Nominee, rt_cal: f64, shift: f64) -> Traces {
     let mut logr = [0f64; TOP_IONS];
     let mut mzb = [0usize; TOP_IONS];
     let mut wn = [0f64; TOP_IONS];
-    let wmax = n.ions.iter().map(|i| f64::from(i.1)).fold(0.0, f64::max).max(1e-9);
+    let wmax = n.ions.iter().map(|i| f64::from(i.1)).fold(0.0, f64::max).max(DIV_EPS);
     for (j, &(mz, p)) in n.ions.iter().enumerate().take(TOP_IONS) {
         valid_ion[j] = mz > 0.0;
         wn[j] = f64::from(p) / wmax;
-        logr[j] = wn[j].max(1e-4).log10();
+        logr[j] = wn[j].max(REL_INT_MIN).log10();
         mzb[j] = MZ_EDGES.iter().filter(|&&e| mz >= e).count();
     }
     for k in 0..CYCLES {
@@ -186,11 +231,11 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         sa += (x - ma) * (x - ma);
         sb += (y - mb) * (y - mb);
     }
-    s / ((sa * sb).sqrt() + 1e-9)
+    s / ((sa * sb).sqrt() + DIV_EPS)
 }
 
 fn normalised(p: &[f64; PROFILE]) -> [f64; PROFILE] {
-    let m = p.iter().copied().fold(0.0, f64::max).max(1e-9);
+    let m = p.iter().copied().fold(0.0, f64::max).max(DIV_EPS);
     let mut o = [0.0; PROFILE];
     for (a, b) in o.iter_mut().zip(p) {
         *a = b / m;
@@ -238,6 +283,16 @@ fn lm_bin(lm: f64) -> usize {
         return 0;
     }
     ((lm / LM_STEP) as usize).min(LM_BINS - 1)
+}
+
+/// Bin of a chance peak's log10 intensity.
+fn int_bin(l: f64) -> usize {
+    ((l / INT_STEP) as usize).min(INT_BINS - 1)
+}
+
+/// Mass-error bin of a present peak's log10 intensity.
+fn dev_bin(l: f64) -> usize {
+    (((l - DEV_LOG_MIN) / DEV_STEP).max(0.0) as usize).min(DEV_BINS - 1)
 }
 
 fn l10(v: f32) -> f64 {
@@ -309,7 +364,10 @@ impl Stats {
 
 fn shapes(confident: &[[f64; PROFILE]]) -> ([[f64; PROFILE]; SHAPES], [f64; 2]) {
     let mut widths: Vec<f64> = confident.iter().map(central_width).collect();
-    let edges = [percentile(&mut widths, 33.3), percentile(&mut widths, 66.7)];
+    let edges = [
+        percentile(&mut widths, SHAPE_SPLIT_PCT[0]),
+        percentile(&mut widths, SHAPE_SPLIT_PCT[1]),
+    ];
     let mut sum = [[0f64; PROFILE]; SHAPES];
     let mut cnt = [0f64; SHAPES];
     for p in confident {
@@ -322,9 +380,9 @@ fn shapes(confident: &[[f64; PROFILE]]) -> ([[f64; PROFILE]; SHAPES], [f64; 2]) 
     let mut log_shape = [[0f64; PROFILE]; SHAPES];
     for g in 0..SHAPES {
         let mean: Vec<f64> = sum[g].iter().map(|s| s / cnt[g].max(1.0)).collect();
-        let m = mean.iter().copied().fold(0.0, f64::max).max(1e-9);
+        let m = mean.iter().copied().fold(0.0, f64::max).max(DIV_EPS);
         for (ls, &mp) in log_shape[g].iter_mut().zip(&mean) {
-            *ls = (mp / m).max(1e-6).log10();
+            *ls = (mp / m).max(SHAPE_MIN).log10();
         }
     }
     (log_shape, edges)
@@ -373,7 +431,7 @@ fn fit_row(
         st.la.push(la);
         for j in (0..TOP_IONS).filter(|&j| t.present(s.cs, j)) {
             let lv = l10(t.v[s.cs][j]);
-            let q = (((lv - 2.0) / 0.5).max(0.0) as usize).min(DEV_BINS - 1);
+            let q = dev_bin(lv);
             st.dev[q].push(f64::from(t.d[s.cs][j]));
         }
     }
@@ -384,8 +442,8 @@ fn fit_row(
                 if t.present(k, j) {
                     st.p0k[j][t.mzb[j]] += 1.0;
                     let lv = l10(t.v[k][j]);
-                    if lv <= 10.0 {
-                        st.f0[((lv / 0.25) as usize).min(INT_BINS - 1)] += 1.0;
+                    if lv <= INT_MAX_LOG {
+                        st.f0[int_bin(lv)] += 1.0;
                     }
                 }
             }
@@ -396,14 +454,14 @@ fn fit_row(
 fn model(st: Stats, log_shape: [[f64; PROFILE]; SHAPES], edges: [f64; 2]) -> Model {
     let p0k: f64 = st.p0k.iter().flatten().sum();
     let p0n: f64 = st.p0n.iter().flatten().sum();
-    let p0m = ((p0k + 0.5) / (p0n + 50.0)).clamp(1e-3, 0.3);
+    let p0m = ((p0k + P0_PRIOR_HITS) / (p0n + P0_PRIOR_TRIALS)).clamp(P0_RUN_MIN, P0_RUN_MAX);
     let mut pdet = [0f64; LM_BINS];
     let mut run = 0f64;
     for (b, pd) in pdet.iter_mut().enumerate() {
-        let v = if st.n[b] < 30.0 {
+        let v = if st.n[b] < DET_MIN_TRIALS {
             p0m
         } else {
-            ((st.k[b] + 0.5) / (st.n[b] + 1.0)).clamp(p0m, 0.995)
+            ((st.k[b] + 0.5) / (st.n[b] + 1.0)).clamp(p0m, DET_MAX)
         };
         run = run.max(v);
         *pd = run;
@@ -423,50 +481,51 @@ fn model(st: Stats, log_shape: [[f64; PROFILE]; SHAPES], edges: [f64; 2]) -> Mod
     };
     for (b, &pd) in pdet.iter().enumerate() {
         let cnt = st.k[b].max(1.0);
-        let (bias, sres) = if st.k[b] > 20.0 {
+        let (bias, sres) = if st.k[b] > RES_MIN_HITS {
             let bias = st.r1[b] / cnt;
-            (bias, (st.r2[b] / cnt - bias * bias).max(0.01).sqrt())
+            (bias, (st.r2[b] / cnt - bias * bias).max(RES_VAR_MIN).sqrt())
         } else {
-            (0.0, 0.5)
+            (0.0, RES_SD_DEFAULT)
         };
         m.lpd[b] = pd.ln();
         m.l1mpd[b] = (1.0 - pd).ln();
         m.ls[b] = sres.ln();
         m.bias[b] = bias;
     }
-    let pm = st.prof.iter().map(|p| p / st.nprof.max(1.0)).fold(0.0, f64::max).max(1e-9);
+    let pm = st.prof.iter().map(|p| p / st.nprof.max(1.0)).fold(0.0, f64::max).max(DIV_EPS);
     for p in 0..PROFILE {
         m.e_prof[p] = st.prof[p] / st.nprof.max(1.0) / pm;
     }
     let mut sd: Vec<Option<f64>> = Vec::with_capacity(DEV_BINS);
     for mut v in st.dev {
-        if v.len() > 200 {
+        if v.len() > DEV_MIN_IONS {
             let med = median(&mut v);
             let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
-            sd.push(Some((1.4826 * median(&mut dev)).max(0.5)));
+            sd.push(Some((MAD_TO_SD * median(&mut dev)).max(DEV_SD_MIN_PPM)));
         } else {
             sd.push(None);
         }
     }
     let floor = sd.iter().flatten().copied().fold(f64::INFINITY, f64::min);
-    let floor = if floor.is_finite() { floor } else { 2.0 };
+    let floor = if floor.is_finite() { floor } else { DEV_SD_FALLBACK_PPM };
     for (q, s) in sd.into_iter().enumerate() {
         m.sd_dev[q] = s.unwrap_or(floor);
     }
     for j in 0..TOP_IONS {
         for b in 0..MZ_BINS {
-            m.p0[j][b] = ((st.p0k[j][b] + 0.5) / (st.p0n[j][b] + 50.0)).clamp(1e-4, 0.5);
+            m.p0[j][b] = ((st.p0k[j][b] + P0_PRIOR_HITS) / (st.p0n[j][b] + P0_PRIOR_TRIALS))
+                .clamp(P0_CELL_MIN, P0_CELL_MAX);
         }
     }
     let ftot: f64 = st.f0.iter().map(|c| c + 1.0).sum();
     for b in 0..INT_BINS {
-        m.f0[b] = (st.f0[b] + 1.0) / ftot / 0.25;
+        m.f0[b] = (st.f0[b] + 1.0) / ftot / INT_STEP;
     }
     let mut pa = [1f64; AMP_GRID.len()];
-    let lo = AMP_GRID[0] - 0.25;
-    let hi = AMP_GRID[AMP_GRID.len() - 1] + 0.25;
+    let lo = AMP_GRID[0] - 0.5 * AMP_STEP;
+    let hi = AMP_GRID[AMP_GRID.len() - 1] + 0.5 * AMP_STEP;
     for &la in st.la.iter().filter(|&&la| la >= lo && la <= hi) {
-        pa[(((la - lo) / 0.5) as usize).min(AMP_GRID.len() - 1)] += 1.0;
+        pa[(((la - lo) / AMP_STEP) as usize).min(AMP_GRID.len() - 1)] += 1.0;
     }
     let tot: f64 = pa.iter().sum();
     for (lp, &c) in m.log_pa.iter_mut().zip(&pa) {
@@ -485,15 +544,15 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
             if t.present(k, j) {
                 let l = l10(t.v[k][j]);
                 ly[k][j] = l;
-                let cint = -m.f0[((l / 0.25) as usize).min(INT_BINS - 1)].ln();
-                let q = (((l - 2.0) / 0.5).max(0.0) as usize).min(DEV_BINS - 1);
+                let cint = -m.f0[int_bin(l)].ln();
+                let q = dev_bin(l);
                 let sdd = m.sd_dev[q];
                 let dn = f64::from(t.d[k][j]);
                 let cmass = ((1.0 - MASS_EPS) * (-0.5 * (dn / sdd).powi(2)).exp()
-                    / (sdd * 2.506_628_274_631_000_5)
-                    + MASS_EPS / 14.0)
+                    / (sdd * SQRT_2PI)
+                    + MASS_EPS / MASS_UNIFORM_PPM)
                     .ln()
-                    + 14f64.ln();
+                    + MASS_UNIFORM_PPM.ln();
                 base[k][j] = -lp0.ln() + cint + cmass - HALF_LOG_2PI;
             } else {
                 base[k][j] = -(1.0 - lp0).ln();
@@ -560,7 +619,7 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
             if t.present(c, j) {
                 let z = (ly[c][j] - lm - m.bias[b]) / m.ls[b].exp();
                 let l = ly[c][j];
-                let cint = -m.f0[((l / 0.25) as usize).min(INT_BINS - 1)].ln();
+                let cint = -m.f0[int_bin(l)].ln();
                 det += -lp0.ln() + m.lpd[b];
                 int += cint - m.ls[b] - 0.5 * z * z - HALF_LOG_2PI;
                 mass += base[c][j] - (-lp0.ln() + cint - HALF_LOG_2PI);
@@ -586,7 +645,7 @@ fn score(m: &Model, t: &Traces, s: &Summary, log_prior: &[f64]) -> [f32; COLUMNS
 
 /// RT prior over the elution offsets: Gaussian with the run's RT calibration spread.
 fn log_prior(sigma_min: f64, cycle_min: f64) -> Vec<f64> {
-    let sg = (sigma_min / cycle_min.max(1e-6)).max(1e-3);
+    let sg = (sigma_min / cycle_min.max(CYCLE_MIN_FLOOR)).max(PRIOR_SD_MIN_CYCLES);
     let lp: Vec<f64> = (-(OFFSETS as isize)..=OFFSETS as isize)
         .map(|o| -0.5 * (o as f64 / sg).powi(2))
         .collect();
@@ -631,7 +690,7 @@ pub(crate) fn run(inp: &RunInput) -> Vec<(usize, [f32; COLUMNS.len()])> {
         })
         .collect();
     let (log_shape, edges) = shapes(&profiles);
-    let stats = by_win
+    let per_win: Vec<Stats> = by_win
         .par_iter()
         .enumerate()
         .map(|(w, ks)| {
@@ -643,7 +702,8 @@ pub(crate) fn run(inp: &RunInput) -> Vec<(usize, [f32; COLUMNS.len()])> {
             }
             st
         })
-        .reduce(Stats::default, Stats::add);
+        .collect();
+    let stats = per_win.into_iter().fold(Stats::default(), Stats::add);
     let n_conf = stats.la.len();
     let m = model(stats, log_shape, edges);
     log::info!(
@@ -676,6 +736,102 @@ pub(crate) fn run(inp: &RunInput) -> Vec<(usize, [f32; COLUMNS.len()])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nominee(decoy: bool, apex_rt: f64, ions: Vec<(f64, f32)>) -> Nominee {
+        Nominee {
+            run: 0,
+            charge: 2,
+            decoy,
+            prec_mz: 500.0,
+            pred_rt: apex_rt,
+            rt_missing: false,
+            apex_rt,
+            dia_llr: if decoy { 0.0 } else { 20.0 },
+            mobility: f64::NAN,
+            ions,
+            seq: "PEPTIDEK".into(),
+            peptide: "-.PEPTIDEK.-".into(),
+            proteins: "P1".into(),
+            spec_id: "s".into(),
+        }
+    }
+
+    /// Windows of 160 cycles with co-eluting targets of non-integer intensities and decoys
+    /// without signal: (scans per window, RT per window, nominees, window of each nominee).
+    #[allow(clippy::type_complexity)]
+    fn study() -> (Vec<Vec<Vec<(f64, f32)>>>, Vec<f64>, Vec<Nominee>, Vec<Vec<usize>>) {
+        let n_win = 9;
+        let n_cyc = 160;
+        let rt: Vec<f64> = (0..n_cyc).map(|c| c as f64 * 0.021).collect();
+        let mut scans = vec![vec![Vec::new(); n_cyc]; n_win];
+        let mut noms = Vec::new();
+        let mut by_win = vec![Vec::new(); n_win];
+        for w in 0..n_win {
+            for i in 0..24 {
+                let decoy = i % 4 == 3;
+                let apex = 30 + (i * 37 + w * 11) % 100;
+                let ions: Vec<(f64, f32)> = (0..TOP_IONS)
+                    .map(|j| {
+                        let mz = 200.0 + 3.17 * i as f64 + 61.3 * j as f64 + 0.37 * w as f64;
+                        (mz, 1.0 / (1.0 + 0.71 * j as f32))
+                    })
+                    .collect();
+                if !decoy {
+                    for c in apex.saturating_sub(9)..(apex + 10).min(n_cyc) {
+                        let d = c as f64 - apex as f64;
+                        let h = 1.0e5 * (1.0 + 0.13 * i as f64) * (-0.5 * (d / 2.7).powi(2)).exp();
+                        for (j, &(mz, p)) in ions.iter().enumerate() {
+                            let ppm = 1.3 * ((i + j + c) % 5) as f64 - 2.6;
+                            scans[w][c].push((mz * (1.0 + ppm * 1e-6), (h * f64::from(p)) as f32 + 17.3));
+                        }
+                    }
+                }
+                by_win[w].push(noms.len());
+                noms.push(nominee(decoy, rt[apex], ions));
+            }
+            for (c, sc) in scans[w].iter_mut().enumerate() {
+                for k in 0..40 {
+                    sc.push((150.0 + 23.71 * k as f64 + 0.011 * c as f64, 50.0 + 7.3 * k as f32));
+                }
+                sc.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+        }
+        (scans, rt, noms, by_win)
+    }
+
+    #[test]
+    fn joint_columns_do_not_depend_on_the_thread_count() {
+        let (scans, rt, noms, by_win) = study();
+        let wins: Vec<Window> = scans
+            .iter()
+            .map(|w| Window::for_test(rt.clone(), w.iter().map(|s| s.as_slice()).collect()))
+            .collect();
+        let win_refs: Vec<&Window> = wins.iter().collect();
+        let refs: Vec<&Nominee> = noms.iter().collect();
+        let rt_cal: Vec<f64> = noms.iter().map(|n| n.pred_rt).collect();
+        let inp = RunInput {
+            wins: &win_refs,
+            by_win: &by_win,
+            noms: &refs,
+            rt_cal: &rt_cal,
+            shift: 1.0,
+            rt_sigma_min: 0.2,
+        };
+        let bits = |threads: usize| -> Vec<(usize, Vec<u32>)> {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut out = pool.install(|| run(&inp));
+            out.sort_by_key(|r| r.0);
+            out.into_iter()
+                .map(|(k, v)| (k, v.iter().map(|x| x.to_bits()).collect()))
+                .collect()
+        };
+        let one = bits(1);
+        assert_eq!(one.len(), noms.len());
+        assert!(one.iter().any(|(_, v)| f32::from_bits(v[0]) > 0.0), "targets score");
+        for threads in [2, 5, 8] {
+            assert_eq!(bits(threads), one, "{threads} threads");
+        }
+    }
 
     #[test]
     fn log_prior_is_normalised_and_centred() {

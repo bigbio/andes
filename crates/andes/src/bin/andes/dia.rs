@@ -200,7 +200,8 @@ pub(crate) fn windows(
     run_ends: &[usize],
 ) -> (Vec<(u32, u32)>, Vec<Vec<u32>>) {
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
-    let mut by_window: HashMap<WindowKey, Vec<u32>> = HashMap::new();
+    let mut by_window: std::collections::BTreeMap<WindowKey, Vec<u32>> =
+        std::collections::BTreeMap::new();
     for (i, s) in spectra.iter().enumerate() {
         let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
         by_window
@@ -1116,6 +1117,26 @@ mod tests {
         assert_eq!(apex_sum(refs[4], None, None, &mass, z).0, 0.0);
         assert_eq!(apex_sum(refs[4], Some(refs[3]), None, &mass, z).0, n);
         assert_eq!(apex_sum(refs[4], None, None, &other, z).0, 0.0);
+    }
+
+    #[test]
+    fn windows_come_out_in_key_order() {
+        let targets: Vec<f64> = (0..64).map(|i| 400.0 + ((i * 37) % 64) as f64 * 2.5).collect();
+        let spectra: Vec<Spectrum> = targets
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| Spectrum {
+                rt_seconds: Some(i as f64),
+                isolation_target_mz: Some(t),
+                ..Default::default()
+            })
+            .collect();
+        let (_, windows) = windows(&spectra, &[spectra.len()]);
+        let centre = |w: &Vec<u32>| spectra[w[0] as usize].isolation_target_mz.unwrap();
+        let got: Vec<f64> = windows.iter().map(centre).collect();
+        let mut want = targets.clone();
+        want.sort_by(f64::total_cmp);
+        assert_eq!(got, want);
     }
 
     #[test]

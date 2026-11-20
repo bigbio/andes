@@ -100,12 +100,14 @@ def test_run_filter_and_v2_columns(tmp_path):
     runs = tmp_path / "runs.txt"
     runs.write_text("keep\n")
     out = tmp_path / "out"
+    # the same file twice: a spectrum is kept once
     r = subprocess.run([sys.executable, os.path.join(HERE, "ms2_extract_msnet.py"), "--dataset", "PXD000000",
-                        "--out", str(out), "--runs", str(runs), str(f)], capture_output=True, text=True)
+                        "--out", str(out), "--runs", str(runs), str(f), str(f)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     t = pq.read_table(glob.glob(str(out / "part-*.parquet"))[0])
     assert t.schema.metadata[b"andes.ms2_shard.schema"] == b"2.0"
     rows = t.to_pylist()
     assert {x["run"] for x in rows} == {"keep"} and len(rows) == 2
+    assert json.load(open(out / "msnet.json"))["dup_scan"] == 2
     assert all(x["label"] == "none" and x["agree"] is None and not x["hard"] for x in rows)
     assert len(rows[0]["intensities"]) == (len(seq) - 1) * N_ION_V2

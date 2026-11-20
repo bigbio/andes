@@ -20,6 +20,7 @@ give the v2 activation, ``ms2_common.v2_activation``: ``HCD-FTMS``, ``CID-ITMS``
 ``HCD-TOF``...; the collision energy is the NCE for orbitrap HCD, ion trap and EThcD, NaN when missing, for
 ETD or for time-of-flight instruments). Fragment tolerance is 20 ppm except for ITMS (0.5 Da).
 
+A spectrum (run, scan) is kept once, also across files (several searches of one dataset).
 --runs (one run name per line) keeps only those runs; row groups without any of them are not read.
 ``label``, ``hard`` and ``agree`` come from ``ms2_select.finalize_rows`` over all kept rows of the call
 (the explained-share quartile is per activation over them), with --submitter-ids when given; hard rows
@@ -182,7 +183,8 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(int(hashlib.md5(a.dataset.encode()).hexdigest()[:8], 16))
     st = {"rows": 0, "decoy_or_pep": 0, "bad_charge": 0, "unmapped": 0, "precursor_mismatch": 0, "activation_unknown": 0,
-          "too_few_ions": 0, "key_full": 0, "kept": 0, "files": 0, "run_filtered": 0}
+          "too_few_ions": 0, "key_full": 0, "kept": 0, "files": 0, "run_filtered": 0, "dup_scan": 0}
+    seen_scans: set = set()
     want = {x.strip() for x in open(a.runs) if x.strip()} if a.runs else None
     seen: dict = {}
     rows = []
@@ -256,9 +258,14 @@ def main():
                     if vals is None or n_base < a.min_matched:
                         st["too_few_ions"] += 1
                         continue
-                    seen[key] = seen.get(key, 0) + 1
                     scan = d["scan"][i]
                     scan = scan[0] if isinstance(scan, list) and scan else scan
+                    if scan is not None:
+                        if (str(d[c_run][i]), int(scan)) in seen_scans:
+                            st["dup_scan"] += 1
+                            continue
+                        seen_scans.add((str(d[c_run][i]), int(scan)))
+                    seen[key] = seen.get(key, 0) + 1
                     rows.append({
                         "dataset": a.dataset, "run": str(d[c_run][i]), "scan": int(scan) if scan is not None else -1,
                         "peptidoform": key[0], "sequence": seq, "mods": mods, "charge": z, "nce": nce, "activation": act,

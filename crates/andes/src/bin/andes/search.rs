@@ -1629,14 +1629,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_decoy_psms =
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut pass1_q = 0;
+            let mut pass1_best = Vec::new();
             if cli.dia {
-                let (t, d, n) = crate::dia::precursor_q(
+                let ((t, d, n), best) = crate::dia::precursor_q(
                     &output_pin_path,
                     &spectra,
                     &mut map,
                     &rescore_decoy_psms,
                 )?;
                 pass1_q = n;
+                pass1_best = best;
                 log::info!(
                     target: "rescore",
                     "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
@@ -1664,7 +1666,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &output_pin_path,
                     &t,
                     seed,
-                    pass1_q,
+                    &pass1_best,
                     rescore,
                 ) {
                     Ok(r) => {

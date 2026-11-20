@@ -17,8 +17,10 @@ use rayon::prelude::*;
 pub(crate) const GB_COLUMN: &str = "dia_gb_score";
 /// Column present in every precursor PIN (1 when the precursor has a pass-1 row).
 pub(crate) const PRESENT_COLUMN: &str = "p1_present";
-/// Precursor q-value at which the precursor PIN must match pass 1 to be used.
+/// Precursor q-value of the reported counts and of the pass-2 size check.
 const COMPARE_Q: f64 = 0.01;
+/// Precursor q-values at which the precursor PIN must keep pass 1's target count.
+const SELECT_Q: [f64; 2] = [0.005, 0.01];
 const FOLDS: u64 = 3;
 const ROUND_Q: [f64; 3] = [f64::INFINITY, 0.05, 0.01];
 const MISSING_DIA_LLR: f32 = -99.0;
@@ -509,22 +511,72 @@ pub(crate) fn precursor_pin_path(pin: &Path) -> PathBuf {
     pin.with_extension("precursor.pin")
 }
 
+/// Target and decoy precursors at precursor q <= `q` among best-per-precursor
+/// `(score, is decoy)` pairs: q = (D + 1) / T over the score-ordered pairs, made monotone, with
+/// tied scores counting decoys first (the q of [`crate::dia::precursor_q`]).
+pub(crate) fn tdc_counts(best: &[(f64, bool)], q: f64) -> (usize, usize) {
+    let mut v = best.to_vec();
+    v.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+    let (mut t, mut d, mut at_q) = (0usize, 0usize, (0, 0));
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j < v.len() && v[j].0 == v[i].0 {
+            if v[j].1 {
+                d += 1;
+            } else {
+                t += 1;
+            }
+            j += 1;
+        }
+        if (d + 1) as f64 / t.max(1) as f64 <= q {
+            at_q = (t, d);
+        }
+        i = j;
+    }
+    at_q
+}
+
+/// Why pass 1 is preferred to the precursor PIN, or `None` when the precursor PIN wins: at each
+/// q of `SELECT_Q`, the precursor PIN counted at its own q tightened by one standard error of
+/// its decoy count, `q (1 - 1 / sqrt(D + 1))` with D its decoys at q, must keep at least
+/// pass 1's target precursors at q. The larger of two noisy counts favours the arm whose decoys
+/// came out low; the Poisson error of D + 1 is that fraction of the estimated FDR, so a win
+/// smaller than the decoy noise keeps pass 1, and so does a win at only one point of the curve.
+fn pass1_preferred(pass1: &[(f64, bool)], precursor: &[(f64, bool)]) -> Option<String> {
+    SELECT_Q.iter().find_map(|&q| {
+        let n1 = tdc_counts(pass1, q).0;
+        let d = tdc_counts(precursor, q).1;
+        let strict = q * (1.0 - 1.0 / ((d + 1) as f64).sqrt());
+        let n = tdc_counts(precursor, strict).0;
+        (n < n1).then(|| {
+            format!(
+                "{n} target precursors at q <= {strict:.4} (q {q} less one decoy standard \
+                 error, {d} decoys), fewer than pass 1's {n1} at q <= {q}"
+            )
+        })
+    })
+}
+
 /// Writes the precursor PIN beside the pass-1 PIN and rescores it with `rescore`. Its results
 /// replace pass 1 only when they are sound; otherwise the error says why pass 1 is kept:
 /// - the pass-2 table has decoys and at least `pass1_q` targets (`pass1_q`: pass 1's target
 ///   precursors at q <= `COMPARE_Q`), since a PIN with fewer targets cannot match pass 1 and
 ///   target-decoy competition needs both labels;
 /// - Percolator's training is not degenerate (at least two target scores, not every PEP 1);
-/// - at least `pass1_q` target precursors at q <= `COMPARE_Q`.
+/// - the precursor-level target-decoy curve beats pass 1's (`pass1`: the best
+///   `(score, is decoy)` of every pass-1 precursor) by more than the decoy noise at q 0.005
+///   and 0.01 (`pass1_preferred`).
 ///
 /// Any error while writing or rescoring also keeps pass 1.
 pub(crate) fn rescore_precursors(
     pin: &Path,
     t: &Pass2Table,
     seed: u64,
-    pass1_q: usize,
+    pass1: &[(f64, bool)],
     rescore: impl FnOnce(&Path) -> Result<Rescored, String>,
 ) -> Result<PrecursorRescore, String> {
+    let pass1_q = tdc_counts(pass1, COMPARE_Q).0;
     let n_dec = t.decoy.iter().filter(|&&d| d).count();
     let n_tgt = t.len() - n_dec;
     if n_dec == 0 || n_tgt == 0 || n_tgt < pass1_q {
@@ -547,17 +599,17 @@ pub(crate) fn rescore_precursors(
             scores.len()
         ));
     }
-    let n_q = rescored
+    let best: Vec<(f64, bool)> = rescored
         .targets
         .values()
-        .filter(|p| p.q_value <= COMPARE_Q)
-        .count();
-    if n_q < pass1_q {
-        return Err(format!(
-            "{n_q} target precursors at q <= {COMPARE_Q} in {}, fewer than pass 1's {pass1_q}",
-            out.display()
-        ));
+        .map(|p| (p, false))
+        .chain(rescored.decoys.values().map(|p| (p, true)))
+        .filter_map(|(p, decoy)| p.score.map(|s| (s, decoy)))
+        .collect();
+    if let Some(why) = pass1_preferred(pass1, &best) {
+        return Err(format!("{}: {why}", out.display()));
     }
+    let n_q = tdc_counts(&best, COMPARE_Q).0;
     Ok(PrecursorRescore {
         pin: out,
         ids,
@@ -765,30 +817,100 @@ mod tests {
         }
     }
 
-    /// Percolator results with one target row per score, all at q 0.001.
-    fn rescored(scores: &[f64]) -> Rescored {
+    /// Percolator results with one target row per score, all at q 0.001, and one decoy row per
+    /// `decoys` score.
+    fn rescored_with(scores: &[f64], decoys: &[f64]) -> Rescored {
+        let psm = |id: String, score: f64| PercolatorPsm {
+            psm_id: id,
+            q_value: 0.001,
+            pooled_q_value: None,
+            pep: 0.01,
+            score: Some(score),
+            peptide: "K.PEPTIDEK.A".into(),
+            proteins: "P1".into(),
+        };
         let targets = scores
             .iter()
             .enumerate()
             .map(|(i, &score)| {
                 let id = format!("s{}", 2 * i + 1);
-                let psm = PercolatorPsm {
-                    psm_id: id.clone(),
-                    q_value: 0.001,
-                    pooled_q_value: None,
-                    pep: 0.01,
-                    score: Some(score),
-                    peptide: "K.PEPTIDEK.A".into(),
-                    proteins: "P1".into(),
-                };
-                (id, psm)
+                (id.clone(), psm(id, score))
+            })
+            .collect();
+        let decoys: HashMap<String, PercolatorPsm> = decoys
+            .iter()
+            .enumerate()
+            .map(|(i, &score)| {
+                let id = format!("s{}", 2 * i + 2);
+                (id.clone(), psm(id, score))
             })
             .collect();
         Rescored {
             targets,
-            decoy_ids: HashSet::new(),
-            decoys: HashMap::new(),
+            decoy_ids: decoys.keys().cloned().collect(),
+            decoys,
         }
+    }
+
+    fn rescored(scores: &[f64]) -> Rescored {
+        rescored_with(scores, &[])
+    }
+
+    /// `n` best-per-precursor targets with `top` decoys under the best target and `c r^2` more
+    /// decoys above the r-th target, so the estimated FDR at the r-th target is about
+    /// `(top + 1) / r + c r`.
+    fn curve(n: usize, c: f64, top: usize) -> Vec<(f64, bool)> {
+        let mut v = Vec::new();
+        let mut d = 0usize;
+        for r in 1..=n {
+            v.push((-(r as f64), false));
+            let want = if r == 1 { top } else { top + (c * (r * r) as f64) as usize };
+            while d < want {
+                v.push((-(r as f64) - 0.5, true));
+                d += 1;
+            }
+        }
+        v
+    }
+
+    fn clean(n: usize) -> Vec<(f64, bool)> {
+        (0..n).map(|i| (-(i as f64), false)).collect()
+    }
+
+    #[test]
+    fn tdc_counts_use_d_plus_one_over_t_monotone_with_tied_decoys_first() {
+        assert_eq!(tdc_counts(&clean(200), 0.005), (200, 0));
+        assert_eq!(tdc_counts(&clean(199), 0.005), (0, 0));
+        let mut v = clean(300);
+        v.push((-0.5, true));
+        assert_eq!(tdc_counts(&v, 0.01), (300, 1), "q 2/300 after the decoy");
+        v.push((-299.0, true));
+        assert_eq!(
+            tdc_counts(&v, 0.009),
+            (299, 1),
+            "the tied decoy counts with its target, so q 3/300 holds at the last target"
+        );
+        assert_eq!(tdc_counts(&[], 0.01), (0, 0));
+    }
+
+    #[test]
+    fn the_precursor_pin_must_win_by_more_than_the_decoy_noise_at_both_q() {
+        let pass1 = curve(12_000, 1e-6, 0);
+        assert!(pass1_preferred(&pass1, &pass1).is_some(), "a tie keeps pass 1");
+        let close = curve(12_000, 0.95e-6, 0);
+        for q in SELECT_Q {
+            assert!(tdc_counts(&close, q).0 > tdc_counts(&pass1, q).0, "ahead at q {q}");
+        }
+        let why = pass1_preferred(&pass1, &close).expect("within the decoy noise");
+        assert!(why.contains("fewer than pass 1"), "{why}");
+        let clear = curve(25_000, 0.5e-6, 0);
+        assert_eq!(pass1_preferred(&pass1, &clear), None);
+        let top_heavy = curve(25_000, 0.5e-6, 30);
+        assert!(tdc_counts(&top_heavy, 0.01).0 > 13_000);
+        assert_eq!(tdc_counts(&top_heavy, 0.005).0, 0);
+        let why = pass1_preferred(&pass1, &top_heavy).expect("behind at q 0.005");
+        assert!(why.contains("at q <= 0.005"), "{why}");
+        assert_eq!(pass1_preferred(&[], &clean(150)), None, "pass 1 has none at q 0.005");
     }
 
     #[test]
@@ -796,39 +918,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = pass1_pin(dir.path());
         let never = |_: &Path| -> Result<Rescored, String> { panic!("no rescoring expected") };
-        assert!(rescore_precursors(&pin, &pass2(0), 42, 0, never).is_err());
-        assert!(rescore_precursors(&pin, &pass2(6), 42, 10, never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never).is_err());
         assert!(!precursor_pin_path(&pin).exists());
         let before = std::fs::read_to_string(&pin).unwrap();
         let fewer = |_: &Path| -> Result<Rescored, String> {
-            Ok(rescored(&[0.0, 1.0, 2.0]))
+            Ok(rescored_with(&[0.0, 1.0, 2.0], &[0.5]))
         };
-        let why = rescore_precursors(&pin, &pass2(8), 42, 4, fewer).err().unwrap();
+        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer)
+            .err()
+            .unwrap();
         assert!(why.contains("fewer than pass 1"), "{why}");
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), before, "pass-1 PIN untouched");
         let head = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
         assert!(!head.starts_with("SpecId\tLabel\tScanNr\tFileName\tdia_gb_score"));
         let failing = |_: &Path| -> Result<Rescored, String> { Err("Percolator failed".into()) };
-        assert!(rescore_precursors(&pin, &pass2(8), 42, 0, failing).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing).is_err());
     }
 
     #[test]
     fn a_sound_precursor_pin_replaces_pass1() {
         let dir = tempfile::tempdir().unwrap();
         let pin = pass1_pin(dir.path());
+        let scores: Vec<f64> = (0..150).map(f64::from).collect();
         let more = |p: &Path| -> Result<Rescored, String> {
             assert_eq!(p, precursor_pin_path(&pin));
-            Ok(rescored(&[0.0, 1.0, 2.0, 3.0]))
+            Ok(rescored(&scores))
         };
-        let r = rescore_precursors(&pin, &pass2(8), 42, 4, more).unwrap();
-        assert_eq!(r.n_q, 4);
+        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more).unwrap();
+        assert_eq!(r.n_q, 150);
         assert_eq!(r.ids.targets.len(), 4);
         assert!(!r.ids.learned, "8 rows are too few to train the learned score");
         assert_eq!(r.replaced.len(), 2);
         let degenerate = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored(&[1.0; 4]))
         };
-        let why = rescore_precursors(&pin, &pass2(8), 42, 0, degenerate).err().unwrap();
+        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate).err().unwrap();
         assert!(why.contains("degenerate"), "{why}");
     }
 

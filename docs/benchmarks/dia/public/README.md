@@ -109,7 +109,11 @@ noise. Percolator 3.7.1, N@FDP_c 1 %, final build (bdb64ee, flag off) against ma
    |`RawScoreCal`| > 1000 (largest 2.5e5); after the fix the largest is 67 (slice 02: 1.1e4 →
    69). One entrapment precursor that had `RawScoreCal` 151,473 was accepted on every seed and
    is no longer accepted. The value changes on nearly every DIA row because the pool now spans
-   the charges. DDA spectra with a recorded charge are unchanged (PIN goldens).
+   the charges. The minimum pool size applies to every mode: `RawScoreCal` becomes 0 on 8 of
+   1,718 rows of the chimeric golden PIN, 18 of 1,548 of the refine golden and 25 of 366 of a
+   DDA golden against one protein (values of −14.75 to 28.33 from two or three other
+   candidates), and nothing else changes in them; the four E. coli goldens are unchanged. The
+   effect on DDA identifications was not measured.
 2. **`rerank_pin` streams the PIN** (2227602) and **the predicted-MS2 row features are computed
    inside the prediction workers** (b2aad7b). The PIN is byte-identical before and after. Peak
    RSS falls by 16 % on a slice and by 20 % on a four times longer slice (RT 950–1230 s, 51,185

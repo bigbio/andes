@@ -35,7 +35,7 @@ import pyarrow.parquet as pq
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import N_BASE_ION, N_ION, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
+from ms2_common import N_BASE_ION, N_ION, N_ION_V2, activation_index, instrument_class, parse_proforma, split_of  # noqa: E402
 from ms2_model import Ms2Cnn, config_of, export_weights, make_batch, masked_sa_loss, teacher_kl  # noqa: E402
 from rt_model import encode  # noqa: E402
 
@@ -50,6 +50,15 @@ def shard_files(paths):
     return out
 
 
+def v1_channels(t, col):
+    """A v2 shard column (``N_ION_V2`` channels per site) cut to the first ``N_ION`` (v1) channels."""
+    arr = t[col].combine_chunks()
+    off = arr.offsets.to_numpy().astype(np.int64)
+    vals = arr.values.to_numpy(zero_copy_only=False).reshape(-1, N_ION_V2)[:, :N_ION].ravel()
+    cut = pa.ListArray.from_arrays(pa.array(off // N_ION_V2 * N_ION, pa.int32()), pa.array(vals, pa.float32()))
+    return t.set_column(t.column_names.index(col), col, cut)
+
+
 class Data:
     """All rows in memory: per-row metadata arrays plus flat float16 intensities."""
 
@@ -61,6 +70,10 @@ class Data:
             has_teacher = has_teacher and "teacher" in names
         for f in files:
             t = pq.read_table(f, columns=COLS + (["teacher"] if has_teacher else []))
+            meta = pq.ParquetFile(f).schema_arrow.metadata or {}
+            if meta.get(b"andes.ms2_shard.schema", b"1.0").startswith(b"2."):
+                # v1 training reads the first 12 channels of a v2 shard
+                t = v1_channels(t, "intensities")
             t = t.filter(pc.and_(pc.greater_equal(t["n_matched"], min_matched),
                                  pc.greater_equal(t["explained"], min_explained)))
             tables.append(t)

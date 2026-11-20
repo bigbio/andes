@@ -12,11 +12,18 @@ Peptidoforms are written with named modifications (``N[Deamidated]``, ``[Acetyl]
 mapped to the built-in Unimod table. A PSM with an unknown name, a precursor m/z that does not fit the
 parsed peptidoform (isotope offsets -1..3 within ``--prec-tol-ppm``), an unknown activation, or fewer than
 ``--min-matched`` matched plain b/y ions is dropped and counted. The annotation arrays of MsNet are not
-used: ions are annotated with ``ms2_common.annotate`` from the peak list, as for every other source.
+used: the ``ms2_common.ION_TYPES_V2`` channels are annotated with ``ms2_common.annotate`` from the peak
+list, as for every other source.
 
-Activation and NCE come from each PSM's ``cv_params`` (dissociation method and mass analyzer give
-``HCD-FTMS``, ``CID-ITMS``...; the collision energy is the NCE for orbitrap HCD and ion trap, NaN when
-missing or for time-of-flight instruments). Fragment tolerance is 20 ppm for FTMS and 0.5 Da for ITMS.
+Activation and NCE come from each PSM's ``cv_params`` (dissociation method, mass analyzer and instrument
+give the v2 activation, ``ms2_common.v2_activation``: ``HCD-FTMS``, ``CID-ITMS``, ``ETD``, ``EThcD``,
+``HCD-TOF``...; the collision energy is the NCE for orbitrap HCD, ion trap and EThcD, NaN when missing, for
+ETD or for time-of-flight instruments). Fragment tolerance is 20 ppm except for ITMS (0.5 Da).
+
+--runs (one run name per line) keeps only those runs; row groups without any of them are not read.
+``label``, ``hard`` and ``agree`` come from ``ms2_select.finalize_rows`` over all kept rows of the call
+(the explained-share quartile is per activation over them), with --submitter-ids when given; hard rows
+without agreement are dropped and counted.
 
 Sampling: PSMs with PEP <= ``--pep-max``, targets only, at most ``--per-key`` PSMs per (peptidoform,
 charge, NCE bin of 2) and ``--cap`` PSMs per dataset. Large files are sampled by row group (random, seeded
@@ -41,7 +48,9 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import ACTIVATIONS, annotate, instrument_class, precursor_mz, shard_table, to_proforma  # noqa: E402
+from ms2_common import (INSTRUMENTS, ION_TYPES_V2, activation_index, annotate, instrument_class,  # noqa: E402
+                        precursor_mz, shard_table, to_proforma, v2_activation)
+from ms2_select import finalize_rows, load_submitter_ids  # noqa: E402
 from mod_composition import UNIMOD  # noqa: E402
 
 NAME_TO_ID = {v[0].lower(): k for k, v in UNIMOD.items()}
@@ -126,9 +135,7 @@ def conditions(cv):
     """-> (activation name, analyser, NCE or nan, instrument model) from a cv_params value."""
     d = cv_dict(cv)
     analyser = str(d.get("mass analyzer") or "").upper()
-    diss = str(d.get("dissociation method") or d.get("fragmentation method") or "").upper()
-    name = f"{diss}-{analyser}"
-    act = name if name in ACTIVATIONS else "unknown"
+    diss = str(d.get("dissociation method") or d.get("fragmentation method") or "")
     inst = str(d.get("instrument") or "")
     nce = float("nan")
     raw = d.get("normalized collision energy", d.get("collision energy"))
@@ -138,6 +145,9 @@ def conditions(cv):
         pass
     if analyser in ("TOF", "QTOF", "TIME-OF-FLIGHT") or "tims" in inst.lower() or "bruker" in inst.lower():
         analyser = "TOF"
+        nce = float("nan")
+    act = v2_activation(diss, analyser, INSTRUMENTS[instrument_class(inst)])
+    if act == "ETD":
         nce = float("nan")
     return act, analyser, nce, inst
 
@@ -165,12 +175,15 @@ def main():
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--max-groups", type=int, default=12, help="row groups sampled per file")
     p.add_argument("--batch", type=int, default=20000)
+    p.add_argument("--runs", help="file with one run name per line: keep only these runs")
+    p.add_argument("--submitter-ids", help="parquet of the submitters' identifications (run, scan, peptidoform)")
     p.add_argument("files", nargs="+")
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(int(hashlib.md5(a.dataset.encode()).hexdigest()[:8], 16))
     st = {"rows": 0, "decoy_or_pep": 0, "bad_charge": 0, "unmapped": 0, "precursor_mismatch": 0, "activation_unknown": 0,
-          "too_few_ions": 0, "key_full": 0, "kept": 0, "files": 0}
+          "too_few_ions": 0, "key_full": 0, "kept": 0, "files": 0, "run_filtered": 0}
+    want = {x.strip() for x in open(a.runs) if x.strip()} if a.runs else None
     seen: dict = {}
     rows = []
     kept_total = 0
@@ -189,6 +202,9 @@ def main():
         cols = ["peptidoform", c_z, c_mz, c_run, "scan", "cv_params", "mz_array", "intensity_array",
                 "posterior_error_probability", "is_decoy"]
         groups = list(range(pf.metadata.num_row_groups))
+        if want is not None:
+            groups = [g for g in groups if want & set(map(str, pf.read_row_group(g, columns=[c_run])
+                                                          .column(0).unique().to_pylist()))]
         if len(groups) > a.max_groups:
             groups = sorted(rng.sample(groups, a.max_groups))
         quota = max(1, (a.cap - kept_total) // max(1, len(groups))) if a.cap > kept_total else 0
@@ -199,6 +215,9 @@ def main():
             for batch in pf.iter_batches(batch_size=a.batch, row_groups=[g], columns=cols):
                 d = batch.to_pydict()
                 for i in range(batch.num_rows):
+                    if want is not None and str(d[c_run][i]) not in want:
+                        st["run_filtered"] += 1
+                        continue
                     st["rows"] += 1
                     pep = d["posterior_error_probability"][i]
                     if d["is_decoy"][i] or pep is None or not pep <= a.pep_max:
@@ -218,7 +237,7 @@ def main():
                         st["precursor_mismatch"] += 1
                         continue
                     act, analyser, nce, inst = conditions(d["cv_params"][i])
-                    if act == "unknown" and analyser != "TOF":
+                    if act == "unknown":
                         st["activation_unknown"] += 1
                         continue
                     key = (to_proforma(seq, mods), z, -1 if math.isnan(nce) else int(nce // 2), act)
@@ -232,7 +251,8 @@ def main():
                         continue
                     order = np.argsort(mz, kind="stable")
                     ppm = analyser != "ITMS"
-                    vals, n_base, explained = annotate(seq, mods, z, mz[order], inten[order], 20.0 if ppm else 0.5, ppm)
+                    vals, n_base, explained = annotate(seq, mods, z, mz[order], inten[order], 20.0 if ppm else 0.5, ppm,
+                                                       ION_TYPES_V2, activation_index(act))
                     if vals is None or n_base < a.min_matched:
                         st["too_few_ions"] += 1
                         continue
@@ -241,7 +261,7 @@ def main():
                     scan = scan[0] if isinstance(scan, list) and scan else scan
                     rows.append({
                         "dataset": a.dataset, "run": str(d[c_run][i]), "scan": int(scan) if scan is not None else -1,
-                        "peptidoform": key[0], "sequence": seq, "charge": z, "nce": nce, "activation": act,
+                        "peptidoform": key[0], "sequence": seq, "mods": mods, "charge": z, "nce": nce, "activation": act,
                         "instrument": inst, "pep": float(pep), "n_matched": n_base, "explained": explained,
                         "intensities": vals,
                     })
@@ -252,12 +272,13 @@ def main():
                         break
                 if got >= quota or kept_total >= a.cap:
                     break
-            if len(rows) >= 50000:
-                pq.write_table(shard_table(rows), os.path.join(a.out, f"part-msnet-{fi:03d}-{g:04d}.parquet"), compression="zstd")
-                rows = []
         print(f"{path}: {json.dumps(st)}", flush=True)
-    if rows:
-        pq.write_table(shard_table(rows), os.path.join(a.out, "part-msnet-last.parquet"), compression="zstd")
+    rows, fin = finalize_rows(rows, load_submitter_ids(a.submitter_ids, a.dataset))
+    st.update({k: v for k, v in fin.items() if k != "rows"})
+    st["written"] = len(rows)
+    for k in range(0, len(rows), 50000):
+        pq.write_table(shard_table(rows[k:k + 50000]), os.path.join(a.out, f"part-msnet-{k // 50000:04d}.parquet"),
+                       compression="zstd")
     json.dump(st, open(os.path.join(a.out, "msnet.json"), "w"), indent=1)
 
 

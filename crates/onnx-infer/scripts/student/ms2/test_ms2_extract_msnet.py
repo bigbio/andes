@@ -37,10 +37,16 @@ def test_conditions_for_both_cv_layouts():
     assert conditions(b) == ("CID-ITMS", "ITMS", 35.0, "LTQ Orbitrap Velos")
     act, an, nce, inst = conditions({"Instrument": "timsTOF Pro", "Fragmentation Method": "CID", "Collision Energy": "30",
                                      "Mass Analyzer": "TOF"})
-    assert act == "unknown" and np.isnan(nce)
+    assert act == "HCD-TOF" and np.isnan(nce)
     act, an, nce, inst = conditions({"Instrument": "Bruker Daltonics instrument model", "Fragmentation Method": "CID",
                                      "Collision Energy": "36", "Mass Analyzer": "time-of-flight"})
-    assert (act, an) == ("unknown", "TOF") and np.isnan(nce)
+    assert (act, an) == ("HCD-TOF", "TOF") and np.isnan(nce)
+    act, an, nce, inst = conditions({"Instrument": "Orbitrap Fusion Lumos", "Fragmentation Method": "EThcD",
+                                     "Collision Energy": "25", "Mass Analyzer": "FTMS"})
+    assert (act, an, nce) == ("EThcD", "FTMS", 25.0)
+    act, an, nce, inst = conditions({"Instrument": "LTQ Orbitrap Velos", "Fragmentation Method": "ETD",
+                                     "Mass Analyzer": "ITMS"})
+    assert (act, an) == ("ETD", "ITMS") and np.isnan(nce)
 
 
 def spectrum(seq, mods, z):
@@ -50,7 +56,7 @@ def spectrum(seq, mods, z):
 
 
 def test_both_layouts_extract(tmp_path):
-    seq, z = "PEPTIDEKR", 2
+    seq, z = "PEPTIDEKAR", 2  # 10 residues: not a hard example
     mz, inten = spectrum(seq, [], z)
     pmz = precursor_mz(seq, [], z)
     cv_a = [{"cv_name": "instrument", "cv_value": "Q Exactive HF"}, {"cv_name": "dissociation method", "cv_value": "HCD"},
@@ -75,3 +81,31 @@ def test_both_layouts_extract(tmp_path):
         rows = pq.read_table(glob.glob(str(out / "part-*.parquet"))[0]).to_pylist()
         assert rows[0]["activation"] == ("HCD-FTMS" if name == "a" else "CID-ITMS")
         assert rows[0]["nce"] == (28.0 if name == "a" else 35.0)
+
+
+def test_run_filter_and_v2_columns(tmp_path):
+    """--runs keeps only the listed runs; rows carry the v2 channels and the label / hard / agree columns."""
+    from ms2_common import N_ION_V2
+    seq, z = "PEPTIDEKAR", 2
+    mz, inten = spectrum(seq, [], z)
+    pmz = precursor_mz(seq, [], z)
+    cv = {"Instrument": "Q Exactive", "Fragmentation Method": "HCD", "Collision Energy": "27", "Mass Analyzer": "FTMS"}
+    n = 4
+    t = pa.table({"peptidoform": [seq] * n, "scan": [[k] for k in range(n)], "mz_array": [mz] * n,
+                  "intensity_array": [inten] * n, "posterior_error_probability": [1e-5] * n, "is_decoy": [False] * n,
+                  "charge": [z] * n, "observed_mz": [pmz] * n, "run_file_name": ["keep", "drop", "keep", "drop"],
+                  "cv_params": [cv] * n})
+    f = tmp_path / "a.parquet"
+    pq.write_table(t, f, row_group_size=1)
+    runs = tmp_path / "runs.txt"
+    runs.write_text("keep\n")
+    out = tmp_path / "out"
+    r = subprocess.run([sys.executable, os.path.join(HERE, "ms2_extract_msnet.py"), "--dataset", "PXD000000",
+                        "--out", str(out), "--runs", str(runs), str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    t = pq.read_table(glob.glob(str(out / "part-*.parquet"))[0])
+    assert t.schema.metadata[b"andes.ms2_shard.schema"] == b"2.0"
+    rows = t.to_pylist()
+    assert {x["run"] for x in rows} == {"keep"} and len(rows) == 2
+    assert all(x["label"] == "none" and x["agree"] is None and not x["hard"] for x in rows)
+    assert len(rows[0]["intensities"]) == (len(seq) - 1) * N_ION_V2

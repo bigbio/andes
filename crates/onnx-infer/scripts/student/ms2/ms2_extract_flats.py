@@ -12,7 +12,9 @@ The flats carry no run, scan, NCE or activation, so those come from arguments
 (--activation, --instrument, --nce; NCE NaN = unknown). Rows whose precursor
 does not fit the parsed peptidoform (isotope offsets -1..3 within
 --prec-tol-ppm), carry an unmapped delta, or match fewer than --min-matched plain
-b/y ions are dropped and counted.
+b/y ions are dropped and counted. The ``ms2_common.ION_TYPES_V2`` channels are annotated;
+``label`` and ``hard`` come from ``ms2_select.finalize_rows`` per file. Flats carry no
+submitter identifications, so ``agree`` is null and hard rows are dropped (counted).
 
 Usage::
 
@@ -30,7 +32,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import ACTIVATIONS, annotate, precursor_mz, shard_table, to_proforma  # noqa: E402
+from ms2_common import ACTIVATIONS, ION_TYPES_V2, activation_index, annotate, precursor_mz, shard_table, to_proforma  # noqa: E402
+from ms2_select import finalize_rows  # noqa: E402
 from mod_composition import match_mass, split_nterm_residue  # noqa: E402
 
 CAM = 4
@@ -90,7 +93,8 @@ def main():
     p.add_argument("flats", nargs="+")
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    st = {"rows": 0, "unmapped": 0, "added_cam": 0, "precursor_mismatch": 0, "too_few_ions": 0, "kept": 0}
+    st = {"rows": 0, "unmapped": 0, "added_cam": 0, "precursor_mismatch": 0, "too_few_ions": 0, "kept": 0,
+          "hard": 0, "hard_dropped": 0}
     cols = ["seq", "charge", "prec_mz", "res_mod_pos", "res_mod_delta", "nterm_delta", "cterm_delta", "mz", "intensity"]
     for fi, path in enumerate(a.flats):
         rows = []
@@ -119,20 +123,24 @@ def main():
                 mz = np.asarray(d["mz"][i], np.float64)
                 inten = np.asarray(d["intensity"][i], np.float64)
                 order = np.argsort(mz, kind="stable")
-                vals, n_base, explained = annotate(seq, mods, z, mz[order], inten[order], a.tol, a.unit == "ppm")
+                vals, n_base, explained = annotate(seq, mods, z, mz[order], inten[order], a.tol, a.unit == "ppm",
+                                                   ION_TYPES_V2, activation_index(a.activation))
                 if vals is None or n_base < a.min_matched:
                     st["too_few_ions"] += 1
                     continue
                 st["kept"] += 1
                 rows.append({
                     "dataset": a.dataset, "run": os.path.basename(path), "scan": row_in_file, "peptidoform": to_proforma(seq, mods),
-                    "sequence": seq, "charge": z, "nce": a.nce, "activation": a.activation, "instrument": a.instrument,
+                    "sequence": seq, "mods": mods, "charge": z, "nce": a.nce, "activation": a.activation, "instrument": a.instrument,
                     "pep": float("nan"), "n_matched": n_base, "explained": explained, "intensities": vals,
                 })
                 if a.limit and st["rows"] >= a.limit:
                     break
             if a.limit and st["rows"] >= a.limit:
                 break
+        rows, fin = finalize_rows(rows, None)
+        st["hard"] += fin["hard"]
+        st["hard_dropped"] += fin["hard_dropped"]
         if rows:
             pq.write_table(shard_table(rows), os.path.join(a.out, f"part-flat-{fi:05d}.parquet"), compression="zstd")
         print(f"{path}: {json.dumps(st)}", flush=True)

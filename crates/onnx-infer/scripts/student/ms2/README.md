@@ -53,7 +53,8 @@ The Rust side has three parts:
 
 ## Shard schema
 
-One row per annotated PSM:
+One row per annotated PSM. Shards carry the key metadata `andes.ms2_shard.schema` = `2.0`
+(v1 shards have none and 12 channels per site):
 
 | Column | Content |
 |---|---|
@@ -65,10 +66,17 @@ One row per annotated PSM:
 | `pep` | Posterior error probability of the PSM |
 | `n_matched` | Number of plain b/y ions matched |
 | `explained` | Matched intensity ÷ total intensity |
-| `intensities` | (n − 1) × 12, site-major. −1 = invalid channel; otherwise 0–1, normalised to the most intense valid ion |
+| `intensities` | (n − 1) × 19 (`ION_TYPES_V2`), site-major. −1 = invalid channel; otherwise 0–1, normalised to the most intense valid ion |
+| `label` | Isobaric label of the run: `none`, `TMT` or `iTRAQ` (at least half of the run's PSMs carry the tag) |
+| `hard` | Hard example: at most 9 residues, matched-intensity share in the bottom quartile (per extraction unit and activation), or a modification outside Carbamidomethyl/Oxidation/Phospho/TMT/iTRAQ |
+| `agree` | The submitter's identification of the spectrum equals this one (I = L, carbamidomethylation ignored); null without a submitter identification |
 
 Annotation details:
-- Tolerance is 20 ppm for FTMS/ASTMS and 0.5 Da for ITMS.
+- Tolerance is 20 ppm for FTMS/ASTMS/TOF and 0.5 Da for ITMS.
+- Fragment masses use the element masses of `crates/model/src/mass.rs` bit for bit (z• = y + `Z_DOT_OFFSET`).
+- c and z• channels exist only for ETD/EThcD; EThcD NCE is the supplemental collision energy.
+- Hard rows without submitter agreement are dropped (`ms2_select.finalize_rows`) and counted in the
+  extractor's JSON (`hard`, `hard_dropped`, `agree_true`, `agree_false`, `agree_null`).
 - The precursor m/z must match the peptidoform (isotope −1..3, 20 ppm), which catches run/scan join errors.
 - Fewer than 4 matched b/y ions drops the PSM.
 

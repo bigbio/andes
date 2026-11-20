@@ -42,15 +42,25 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
-from mod_composition import MASSES, UNIMOD  # noqa: E402
+from mod_composition import UNIMOD  # noqa: E402
 
-PROTON = 1.007276466812
-H2O = 18.0105646837
-H3PO4 = 97.976895573
-CH4SO = 63.998285
-CO = 27.99491461957
-NH3 = 17.02654910101
-H_ATOM = 1.00782503207
+# Element and group masses: the same f64 expressions as ``crates/model/src/mass.rs`` (bit-identical;
+# ``test_v2_masses_equal_model_mass_rs`` parses that file).
+EL_H = 1.00782503223
+EL_C = 12.0
+EL_N = 14.00307400443
+EL_O = 15.99491461957
+EL_S = 31.9720711744
+EL_P = 30.97376199842
+EL_ISOTOPE = {"2H": 2.01410177812, "13C": 13.00335483507, "15N": 15.00010889888, "18O": 17.99915961286}
+PROTON = 1.0072764665789
+H2O = EL_H * 2.0 + EL_O
+NH3 = EL_N + EL_H * 3.0
+CO = EL_C + EL_O
+H3PO4 = EL_H * 3.0 + EL_P + EL_O * 4.0
+CH4SO = EL_C + EL_H * 4.0 + EL_S + EL_O
+H_ATOM = EL_H
+Z_DOT_OFFSET = -(EL_N + EL_H * 2.0)
 LOSS_MASS = {None: 0.0, "H3PO4": H3PO4, "CH4SO": CH4SO}
 
 # (ion, fragment charge, neutral loss)
@@ -81,16 +91,42 @@ V1_N_ACTIVATIONS = 6
 V1_N_INSTRUMENTS = 7
 # Isobaric label condition (v2 only); index 0 = none.
 LABELS = ["none", "TMT", "iTRAQ"]
+TMT_MODS = frozenset({737, 738, 739, 2016})
+ITRAQ_MODS = frozenset({214, 730})
+CARBAMIDOMETHYL = 4
 # Precursor charges 1..MAX_CHARGE are one-hot encoded; higher charges use the last slot.
 MAX_CHARGE = 6
 
-RESIDUE_MASS = {
-    "G": 57.02146372, "A": 71.03711379, "S": 87.03202841, "P": 97.05276385,
-    "V": 99.06841391, "T": 101.0476785, "C": 103.0091845, "L": 113.084064,
-    "I": 113.084064, "N": 114.0429274, "D": 115.026943, "Q": 128.0585775,
-    "K": 128.094963, "E": 129.0425931, "M": 131.0404846, "H": 137.0589119,
-    "F": 147.0684139, "R": 156.101111, "Y": 163.0633286, "W": 186.0793129,
+# (C, H, N, O, S) per residue, as ``model::amino_acid::standard_composition``.
+RESIDUE_COMPOSITION = {
+    "G": (2, 3, 1, 1, 0), "A": (3, 5, 1, 1, 0), "S": (3, 5, 1, 2, 0), "P": (5, 7, 1, 1, 0),
+    "V": (5, 9, 1, 1, 0), "T": (4, 7, 1, 2, 0), "C": (3, 5, 1, 1, 1), "L": (6, 11, 1, 1, 0),
+    "I": (6, 11, 1, 1, 0), "N": (4, 6, 2, 2, 0), "D": (4, 5, 1, 3, 0), "Q": (5, 8, 2, 2, 0),
+    "K": (6, 12, 2, 1, 0), "E": (5, 7, 1, 3, 0), "M": (5, 9, 1, 1, 1), "H": (6, 7, 3, 1, 0),
+    "F": (9, 9, 1, 1, 0), "R": (6, 12, 4, 1, 0), "Y": (9, 9, 1, 2, 0), "W": (11, 10, 2, 1, 0),
 }
+RESIDUE_MASS = {
+    aa: float(c) * EL_C + float(h) * EL_H + float(n) * EL_N + float(o) * EL_O + float(sx) * EL_S
+    for aa, (c, h, n, o, sx) in RESIDUE_COMPOSITION.items()
+}
+
+
+def _composition_mass(comp: dict) -> float:
+    """Monoisotopic mass of a Unimod composition with the ``mass.rs`` element masses (others from
+    ``mod_composition.MONO``)."""
+    from mod_composition import MONO
+
+    el = {"H": EL_H, "C": EL_C, "N": EL_N, "O": EL_O, "S": EL_S, "P": EL_P, **EL_ISOTOPE}
+    return sum(el.get(e, MONO[e]) * n for e, n in comp.items())
+
+
+def _mod_masses() -> dict:
+    from mod_composition import parse_composition
+
+    return {k: _composition_mass(parse_composition(c)) for k, (_, c, _) in UNIMOD.items()}
+
+
+MOD_MASS = _mod_masses()
 
 PHOSPHO = 21
 OXIDATION = 35
@@ -211,7 +247,7 @@ def residue_masses(seq: str, mods):
     n = len(seq)
     m = np.array([RESIDUE_MASS[c] for c in seq], dtype=np.float64)
     for pos, uid in mods:
-        m[min(max(pos, 1), n) - 1] += MASSES[uid]
+        m[min(max(pos, 1), n) - 1] += MOD_MASS[uid]
     return m
 
 
@@ -264,7 +300,7 @@ def fragment_mz(seq: str, mods, ions=ION_TYPES) -> np.ndarray:
     total = res.sum()
     prefix = np.cumsum(res)[:-1]
     suffix = total - prefix + H2O
-    neutral_of = {"b": prefix, "a": prefix - CO, "c": prefix + NH3, "y": suffix, "z": suffix - NH3 + H_ATOM}
+    neutral_of = {"b": prefix, "a": prefix - CO, "c": prefix + NH3, "y": suffix, "z": suffix + Z_DOT_OFFSET}
     out = np.zeros((len(prefix), len(ions)))
     for k, (ion, z, loss) in enumerate(ions):
         out[:, k] = (neutral_of[ion] - LOSS_MASS[loss] + z * PROTON) / z
@@ -319,17 +355,79 @@ def parse_filter(filt: str | None):
     return (name if name in ACTIVATIONS else "unknown"), float(acts[0][1])
 
 
-# Shard schema (one row per annotated PSM).
+def parse_filter_v2(filt: str | None):
+    """Thermo filter string -> (v2 activation name, NCE or nan).
+
+    As ``parse_filter`` for one HCD/CID step; ``@etd..@hcd..`` (or ``@cid``) is ``EThcD`` with the
+    supplemental collision energy as NCE, ``@etd..`` alone is ``ETD`` with NCE nan."""
+    if not filt:
+        return "unknown", float("nan")
+    acts = re.findall(r"@([a-z]+)(\d+(?:\.\d+)?)", filt.strip())
+    kinds = [k for k, _ in acts]
+    if kinds and kinds[0] == "etd":
+        if len(acts) == 1:
+            return "ETD", float("nan")
+        if len(acts) == 2 and kinds[1] in ("hcd", "cid"):
+            return "EThcD", float(acts[1][1])
+        return "unknown", float("nan")
+    return parse_filter(filt)
+
+
+def v2_activation(dissociation, analyser, instrument_cls: str | None) -> str:
+    """v2 activation name from a dissociation method, an MS2 analyser and an ``INSTRUMENTS`` name.
+
+    Collisional activation on a time-of-flight analyser is HCD-TOF; an Orbitrap Astral MS2 is HCD-ASTMS;
+    Q Exactive and Exploris have only HCD with Orbitrap detection (HCD-FTMS) and timsTOF only beam-type
+    collisional activation (HCD-TOF), whatever the label says. 'unknown' when it cannot be decided."""
+    d = str(dissociation or "").upper().replace("-", "").replace(" ", "")
+    an = str(analyser or "").upper().replace("-", "")
+    if "ETHCD" in d or "ETCID" in d:
+        return "EThcD"
+    if "ETD" in d or "ELECTRONTRANSFER" in d:
+        return "ETD"
+    tof = an in ("TOF", "QTOF", "TIMEOFFLIGHT") or instrument_cls in ("timsTOF", "TOF")
+    collisional = d in ("HCD", "CID", "CAD", "BEAMTYPECID", "COLLISIONINDUCEDDISSOCIATION",
+                        "HIGHERENERGYBEAMTYPECOLLISIONINDUCEDDISSOCIATION", "BEAMTYPECOLLISIONINDUCEDDISSOCIATION")
+    if instrument_cls in ("QExactive", "Exploris") and (not d or collisional):
+        return "HCD-FTMS"
+    if instrument_cls == "timsTOF" and (not d or collisional):
+        return "HCD-TOF"
+    if not collisional:
+        return "unknown"
+    if tof:
+        return "HCD-TOF"
+    hcd = d in ("HCD", "BEAMTYPECID", "HIGHERENERGYBEAMTYPECOLLISIONINDUCEDDISSOCIATION",
+                "BEAMTYPECOLLISIONINDUCEDDISSOCIATION")
+    if an == "ASTMS" or (instrument_cls == "Astral" and an not in ("FTMS", "ITMS")):
+        return "HCD-ASTMS"
+    if an in ("FTMS", "ITMS"):
+        return f"{'HCD' if hcd else 'CID'}-{an}"
+    return "unknown"
+
+
+def label_of_mods(mods) -> str:
+    """``LABELS`` name of the isobaric tag a peptidoform carries ("none" without one)."""
+    ids = {uid for _, uid in mods}
+    if ids & TMT_MODS:
+        return "TMT"
+    if ids & ITRAQ_MODS:
+        return "iTRAQ"
+    return "none"
+
+
+SHARD_SCHEMA_VERSION = "2.0"
+# Shard schema v2 (one row per annotated PSM); ``intensities`` holds ``N_ION_V2`` channels per site.
 SHARD_COLUMNS = [
     "dataset", "run", "scan", "peptidoform", "sequence", "charge", "nce", "activation",
-    "instrument", "pep", "n_matched", "explained", "intensities",
+    "instrument", "pep", "n_matched", "explained", "intensities", "label", "hard", "agree",
 ]
 
 
 def shard_table(rows: list[dict]):
+    """Rows -> a v2 shard table with the key metadata ``andes.ms2_shard.schema`` = ``2.0``."""
     import pyarrow as pa
 
-    return pa.table({
+    t = pa.table({
         "dataset": pa.array([r["dataset"] for r in rows], pa.string()),
         "run": pa.array([r["run"] for r in rows], pa.string()),
         "scan": pa.array([r["scan"] for r in rows], pa.int64()),
@@ -343,7 +441,11 @@ def shard_table(rows: list[dict]):
         "n_matched": pa.array([r["n_matched"] for r in rows], pa.int16()),
         "explained": pa.array([r["explained"] for r in rows], pa.float32()),
         "intensities": pa.array([r["intensities"].ravel() for r in rows], pa.list_(pa.float32())),
+        "label": pa.array([r["label"] for r in rows], pa.string()),
+        "hard": pa.array([bool(r["hard"]) for r in rows], pa.bool_()),
+        "agree": pa.array([r["agree"] for r in rows], pa.bool_()),
     })
+    return t.replace_schema_metadata({"andes.ms2_shard.schema": SHARD_SCHEMA_VERSION})
 
 
 if __name__ == "__main__":

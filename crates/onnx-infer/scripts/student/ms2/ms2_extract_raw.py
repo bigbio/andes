@@ -8,14 +8,18 @@ For each run of the task (``ms2_select.py`` ``tasks.tsv``):
    e.g. a container exec; ``--converter-args``: the argument template) into
    --work-dir;
 3. stream the mzML, keeping only the selected scans; read NCE and activation
-   from the scan's filter string, the instrument model from the file header;
+   from the scan's filter string (``ms2_common.parse_filter_v2``: HCD/CID, ETD,
+   EThcD), the instrument model from the file header;
 4. check the precursor m/z against the peptidoform (isotope offsets -1..3 within
-   --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES`` channels at the
+   --prec-tol-ppm), annotate the ``ms2_common.ION_TYPES_V2`` channels at the
    analyser's tolerance and normalise;
-5. delete the mzML. With --keep-mzml the task's scratch directory under
+5. set ``label``, ``hard`` and ``agree`` (``ms2_select.finalize_rows``, with the
+   submitter identifications of --submitter-ids when given) and drop hard rows
+   without agreement;
+6. delete the mzML. With --keep-mzml the task's scratch directory under
    --work-dir, with the converted mzML files, is kept and its path printed.
 
-Spectra that are not HCD/CID, fail the precursor check or match fewer than
+Spectra of an unknown activation, fail the precursor check or match fewer than
 --min-matched plain b/y ions are dropped and counted. The task writes
 ``<out-dir>/<dataset>/part-<task>.json`` with the counts and, when every run of
 the task succeeded, ``part-<task>.parquet`` (schema ``ms2_common.SHARD_COLUMNS``;
@@ -46,15 +50,18 @@ import numpy as np
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import annotate, parse_filter, parse_proforma, precursor_mz, shard_table  # noqa: E402
+from ms2_common import ION_TYPES_V2, activation_index, annotate, parse_filter_v2, parse_proforma, precursor_mz, shard_table  # noqa: E402
+from ms2_select import finalize_rows, load_submitter_ids  # noqa: E402
 from mzml_reader import instrument_name, read_scans  # noqa: E402
 
 DEFAULT_CONVERTER_ARGS = "-i {raw} -o {outdir} -f 1"
 
 
-def tolerance(activation: str, a) -> tuple[float, bool]:
-    """(tolerance, is_ppm) for the MS2 analyser of an activation name."""
-    if activation.endswith("-ITMS"):
+def tolerance(activation: str, filt: str | None, a) -> tuple[float, bool]:
+    """(tolerance, is_ppm) for the MS2 analyser: from the activation name, or for ETD / EThcD from the
+    filter string's analyser (``ITMS + ...``)."""
+    analyser = (filt or "").strip().split(" ", 1)[0].upper()
+    if activation.endswith("-ITMS") or analyser == "ITMS":
         return a.itms_tol_da, False
     return a.ftms_tol_ppm, True
 
@@ -108,7 +115,7 @@ def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]
     for spec in read_scans(mzml, set(want)):
         r = want[spec["scan"]]
         stats["found"] += 1
-        act, nce = parse_filter(spec["filter"])
+        act, nce = parse_filter_v2(spec["filter"])
         if act == "unknown":
             stats["activation_skipped"] += 1
             continue
@@ -118,15 +125,16 @@ def process_run(mzml: str, psms, dataset: str, run: str, a, stats) -> list[dict]
         if not prec_ok(seq, mods, int(r.charge), spec["precursor_mz"], a.prec_tol_ppm):
             stats["precursor_mismatch"] += 1
             continue
-        tol, ppm = tolerance(act, a)
-        vals, n_base, explained = annotate(seq, mods, int(r.charge), spec["mz"], spec["intensity"], tol, ppm)
+        tol, ppm = tolerance(act, spec["filter"], a)
+        vals, n_base, explained = annotate(seq, mods, int(r.charge), spec["mz"], spec["intensity"], tol, ppm,
+                                           ION_TYPES_V2, activation_index(act))
         if vals is None or n_base < a.min_matched:
             stats["too_few_ions"] += 1
             continue
         stats["kept"] += 1
         out.append({
             "dataset": dataset, "run": run, "scan": spec["scan"], "peptidoform": r.peptidoform,
-            "sequence": seq, "charge": int(r.charge), "nce": nce, "activation": act,
+            "sequence": seq, "mods": mods, "charge": int(r.charge), "nce": nce, "activation": act,
             "instrument": instr, "pep": float(r.pep), "n_matched": n_base, "explained": explained,
             "intensities": vals,
         })
@@ -159,6 +167,7 @@ def main():
     p.add_argument("--prec-tol-ppm", type=float, default=20.0)
     p.add_argument("--min-matched", type=int, default=4)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--submitter-ids", help="parquet of the submitters' identifications (run, scan, peptidoform)")
     a = p.parse_args()
     if not a.converter and not a.mzml_dir:
         p.error("--converter is required unless --mzml-dir is given")
@@ -212,6 +221,8 @@ def main():
            ("selected", "found", "activation_skipped", "precursor_mismatch", "too_few_ions", "kept")}
     tot["runs"], tot["runs_failed"] = len(log), sum("error" in s for s in log)
     complete = tot["runs_failed"] == 0
+    rows, fin = finalize_rows(rows, load_submitter_ids(a.submitter_ids, ds))
+    tot.update(fin)
     if complete and rows:
         pq.write_table(shard_table(rows), part + ".tmp", compression="zstd")
         os.replace(part + ".tmp", part)

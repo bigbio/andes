@@ -7,6 +7,10 @@ built-in Unimod table (``mod_composition``); keep at most --max-per-precursor
 PSMs per (peptidoform, charge) with the lowest PEP (ties broken at random, seeded);
 write ``selected/<dataset>.parquet`` (dataset, run, scan, peptidoform, charge, pep).
 
+--runs (TSV with ``dataset`` and ``run`` columns, e.g. the corpus ``manifest_v2.tsv``)
+keeps only the listed runs; --max-psms-per-dataset keeps whole runs, in a seeded random
+order, until the dataset reaches that many selected PSMs (fewer raw conversions).
+
 Runs are then grouped into tasks of about --psms-per-task selected PSMs (whole
 runs only), written to ``tasks.tsv`` (task, dataset, raw_dir, selected, runs
 separated by "|"); one task is one SLURM array element of ``ms2_extract_raw.py``.
@@ -29,7 +33,17 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ms2_common import parse_proforma, supported  # noqa: E402
+from ms2_common import CARBAMIDOMETHYL, ITRAQ_MODS, TMT_MODS, label_of_mods, parse_proforma, supported  # noqa: E402
+
+# Training-label rules (plan Global Constraints): a hard example is a peptide of at most
+# HARD_MAX_LENGTH residues, a matched-intensity share in the bottom quartile of its extraction unit
+# and activation, or a modification outside COMMON_MODS. A hard example is kept only when the
+# submitter's identification of the same spectrum agrees.
+HARD_MAX_LENGTH = 9
+HARD_EXPLAINED_QUANTILE = 0.25
+COMMON_MODS = frozenset({CARBAMIDOMETHYL, 35, 21}) | TMT_MODS | ITRAQ_MODS
+# A run is labelled TMT / iTRAQ when at least this share of its PSMs carries the tag.
+RUN_LABEL_SHARE = 0.5
 
 CHARGE_COLS = ["precursor_charge", "charge"]
 SCAN_COLS = ["scan", "scan_number"]
@@ -40,6 +54,72 @@ RAW_EXT = re.compile(r"\.(raw|mzml|mzml\.gz|mgf|d)$", re.I)
 
 def run_stem(name: str) -> str:
     return RAW_EXT.sub("", os.path.basename(str(name)))
+
+
+def _ident_key(peptidoform: str):
+    p = parse_proforma(peptidoform)
+    if p is None:
+        return None
+    seq, mods = p
+    return seq.replace("I", "L"), tuple(sorted(m for m in mods if m[1] != CARBAMIDOMETHYL))
+
+
+def same_identification(a: str, b: str) -> bool:
+    """Whether two ProForma peptidoforms name the same identification: I and L are equal, and
+    carbamidomethylation (a fixed mod some submitters leave out) is ignored."""
+    ka = _ident_key(a)
+    return ka is not None and ka == _ident_key(b)
+
+
+def load_submitter_ids(path: str | None, dataset: str | None = None) -> dict | None:
+    """``{(run, scan): peptidoform}`` from a parquet with ``run``, ``scan``, ``peptidoform`` (ProForma
+    with Unimod accessions; optional ``dataset`` column filtered to ``dataset``); None without a path."""
+    if not path:
+        return None
+    t = pq.read_table(path)
+    if dataset is not None and "dataset" in t.column_names:
+        t = t.filter(pc.equal(t["dataset"], dataset))
+    runs = [run_stem(r) for r in t["run"].to_pylist()]
+    return {(r, int(sc)): pf for r, sc, pf in zip(runs, t["scan"].to_pylist(), t["peptidoform"].to_pylist())}
+
+
+def finalize_rows(rows: list[dict], submitter: dict | None):
+    """Set ``label``, ``hard`` and ``agree`` on annotated shard rows and drop hard rows without agreement.
+
+    ``label`` is the run's isobaric label (``RUN_LABEL_SHARE`` of its PSMs carry the tag). ``agree`` is
+    True / False when ``submitter`` (``{(run, scan): peptidoform}``) identifies the spectrum, None otherwise.
+    The explained-share quartile is taken per activation over ``rows``. Returns (kept rows, counts)."""
+    st = {"rows": len(rows), "hard": 0, "hard_dropped": 0, "agree_true": 0, "agree_false": 0, "agree_null": 0}
+    if not rows:
+        return [], st
+    by_run: dict = {}
+    for r in rows:
+        if "mods" not in r:
+            r["mods"] = parse_proforma(r["peptidoform"])[1]
+        by_run.setdefault(r["run"], []).append(label_of_mods(r["mods"]))
+    run_label = {}
+    for run, labs in by_run.items():
+        top = max(("TMT", "iTRAQ"), key=labs.count)
+        run_label[run] = top if labs.count(top) >= RUN_LABEL_SHARE * len(labs) else "none"
+    cut = {}
+    for act in {r["activation"] for r in rows}:
+        ex = np.array([r["explained"] for r in rows if r["activation"] == act], np.float64)
+        cut[act] = float(np.quantile(ex, HARD_EXPLAINED_QUANTILE))
+    kept = []
+    for r in rows:
+        r["label"] = run_label[r["run"]]
+        r["hard"] = (len(r["sequence"]) <= HARD_MAX_LENGTH or r["explained"] < cut[r["activation"]]
+                     or any(uid not in COMMON_MODS for _, uid in r["mods"]))
+        theirs = submitter.get((r["run"], int(r["scan"]))) if submitter else None
+        r["agree"] = None if theirs is None else same_identification(r["peptidoform"], theirs)
+        st["agree_null" if r["agree"] is None else "agree_true" if r["agree"] else "agree_false"] += 1
+        st["hard"] += r["hard"]
+        if r["hard"] and r["agree"] is not True:
+            st["hard_dropped"] += 1
+            continue
+        del r["mods"]
+        kept.append(r)
+    return kept, st
 
 
 def pick(names, cands, what):
@@ -88,7 +168,14 @@ def main():
     p.add_argument("--max-per-precursor", type=int, default=4)
     p.add_argument("--psms-per-task", type=int, default=150000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--runs", help="TSV with dataset and run columns: keep only these runs")
+    p.add_argument("--max-psms-per-dataset", type=int, default=0, help="0 = no cap; else whole runs at random")
     a = p.parse_args()
+    keep_runs = None
+    if a.runs:
+        keep_runs = {}
+        for r in csv.DictReader(open(a.runs), delimiter="\t"):
+            keep_runs.setdefault(r["dataset"], set()).add(run_stem(r["run"]))
     os.makedirs(os.path.join(a.out_dir, "selected"), exist_ok=True)
     rows = list(csv.DictReader(open(a.manifest), delimiter="\t"))
     if a.datasets:
@@ -107,6 +194,14 @@ def main():
         df = df.groupby(["peptidoform", "charge"], sort=False).head(a.max_per_precursor)
         df = df.drop(columns="_r").drop_duplicates(["run", "scan"])
         df["run"] = df.run.map(run_stem)
+        if keep_runs is not None:
+            df = df[df.run.isin(keep_runs.get(ds, set()))]
+        if a.max_psms_per_dataset and len(df) > a.max_psms_per_dataset:
+            sizes = df.groupby("run").size()
+            order = sizes.index.to_numpy()[np.random.default_rng(a.seed).permutation(len(sizes))]
+            total = np.cumsum(sizes.loc[order].to_numpy())
+            n_keep = int(np.searchsorted(total, a.max_psms_per_dataset) + 1)
+            df = df[df.run.isin(set(order[:n_keep]))]
         df.insert(0, "dataset", ds)
         df = df.sort_values(["run", "scan"]).reset_index(drop=True)
         sel = os.path.join(a.out_dir, "selected", f"{ds}.parquet")

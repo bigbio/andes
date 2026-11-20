@@ -584,44 +584,6 @@ fn ms3_contexts<'a>(specs: &'a [Spectrum], scorer: &RankScorer, z: u8) -> Vec<Ms
         .collect()
 }
 
-/// The peptide masses of the MS2 doublets and of the MS3 scans: an MS3 scan fragments one stub
-/// ion of the precursor, so its precursor m/z at each charge 1 to the precursor charge - 1, less
-/// each stub of the linker, is a peptide mass the doublets may have missed. An MS3 mass within the
-/// doublet tolerance of one already listed is not added again.
-fn with_ms3_masses(
-    doublets: &[DoubletMass],
-    ms3: &[ProductScan],
-    z: u8,
-    cfg: &XlConfig,
-) -> Vec<DoubletMass> {
-    let mut out = doublets.to_vec();
-    let Some(cleavage) = cfg.linker.cleavage.as_ref() else {
-        return out;
-    };
-    for p in ms3.iter().filter(|p| p.precursor_mz > 0.0) {
-        for q in 1..z.max(2) {
-            for stub in cleavage.stub_masses() {
-                let mass = q as f64 * (p.precursor_mz - PROTON) - stub;
-                if mass < cfg.min_peptide_mass {
-                    continue;
-                }
-                let tol = mass * cfg.doublet_mass_tol_ppm * 1e-6;
-                if out.iter().any(|d| (d.mass - mass).abs() <= tol) {
-                    continue;
-                }
-                out.push(DoubletMass {
-                    mass,
-                    intensity: 0.0,
-                    n_charges: 1,
-                    isotope_confirmed: false,
-                    min_charge: q,
-                });
-            }
-        }
-    }
-    out
-}
-
 /// Whether an MS3 precursor at `mz` is a stub peptide of neutral mass `mass` at `charge`.
 fn ms3_precursor_matches(mz: f64, charge: u8, mass: f64) -> bool {
     charge > 0 && (mz - (mass / charge as f64 + PROTON)).abs() <= MS3_PRECURSOR_MZ_TOL
@@ -1152,8 +1114,7 @@ fn search_spectrum_at(
     let peaks = sorted_peaks(spec);
     let mut doublets = summarize_doublets(&peaks, z, cfg);
     let prec_tol = precursor_window_da(prepared.params, precursor_mass);
-    let masses = with_ms3_masses(&doublets.masses, ms3, z, cfg);
-    let pairs = mass_pairs(&peaks, &masses, precursor_mass, prec_tol, z, cfg);
+    let pairs = mass_pairs(&peaks, &doublets.masses, precursor_mass, prec_tol, z, cfg);
     doublets.n_full_pairs = pairs.iter().filter(|p| p.kind == PairKind::Full).count();
     doublets.n_half_pairs = pairs.len() - doublets.n_full_pairs;
 
@@ -1533,41 +1494,6 @@ mod tests {
             PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX_").unwrap();
         let table = XlCandidates::from_out_of_core(&prepared, &linker("DSSO"));
         assert_eq!(shared(&table).len(), 2, "{:?}", shared(&table));
-    }
-
-    #[test]
-    fn ms3_precursors_add_the_peptide_masses_the_doublets_missed() {
-        let cfg = XlConfig::new(linker("DSSO"));
-        let stubs: Vec<f64> = cfg
-            .linker
-            .cleavage
-            .as_ref()
-            .unwrap()
-            .stub_masses()
-            .collect();
-        let peptide = 1200.6;
-        let mz = (peptide + stubs[0]) / 2.0 + PROTON;
-        let known = DoubletMass {
-            mass: 900.4,
-            intensity: 1.0,
-            n_charges: 1,
-            isotope_confirmed: true,
-            min_charge: 2,
-        };
-        let ms3 = [ProductScan {
-            precursor_mz: mz,
-            ..Default::default()
-        }];
-        let out = with_ms3_masses(std::slice::from_ref(&known), &ms3, 4, &cfg);
-        assert_eq!(out[0], known);
-        assert!(out
-            .iter()
-            .any(|d| (d.mass - peptide).abs() < 1e-6 && d.min_charge == 2));
-        assert!(out.iter().all(|d| d.mass >= cfg.min_peptide_mass));
-        assert!(out.len() <= 1 + 3 * stubs.len());
-        let again = with_ms3_masses(&out, &ms3, 4, &cfg);
-        assert_eq!(again.len(), out.len());
-        assert_eq!(with_ms3_masses(&[], &[], 4, &cfg), vec![]);
     }
 
     #[test]

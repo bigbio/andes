@@ -1219,7 +1219,7 @@ shares (database, charge, decoys, FDR).
   `label`) or `tmt-quant` (`tmt`); `xl-fdr` for crosslinking.
 - **Checks.** Unreadable SDRFs, rows with too few fields, unknown proteases, modifications or
   crosslinker accessions, overrides or exclusions naming a project not listed, invalid override
-  values and duplicate run names are errors; an SDRF that splits into several settings groups,
+  values, duplicate run names and empty data files (an interrupted download) are errors; an SDRF that splits into several settings groups,
   or that gives no precursor tolerance, is a warning.
 
 On a cluster, a job array can run `andes` once per entry in `runs` (with `--config`, the

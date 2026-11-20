@@ -734,6 +734,21 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                 ));
             }
         }
+        let empty: Vec<&PathBuf> = files
+            .iter()
+            .filter(|f| std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.len() == 0))
+            .collect();
+        if let Some(first) = empty.first() {
+            problems.errors.push(format!(
+                "{}: {} of {} data files in {} are empty (e.g. {}); an interrupted download? \
+                 fetch them again",
+                part.project,
+                empty.len(),
+                files.len(),
+                part.sdrf.display(),
+                first.display()
+            ));
+        }
         let unread: Vec<&PathBuf> = files.iter().filter(|f| !readable(f)).collect();
         if let Some(first) = unread.first() {
             problems.warnings.push(format!(
@@ -864,9 +879,9 @@ mod tests {
         );
         std::fs::create_dir_all(d.join("b")).unwrap();
         write(d, "b/b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
-        write(d, "r1.raw", "");
-        write(d, "r2.raw", "");
-        write(d, "b/r1.raw", "");
+        write(d, "r1.raw", "spectra");
+        write(d, "r2.raw", "spectra");
+        write(d, "b/r1.raw", "spectra");
         let c = cfg("cohort:\n  name: t\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b/b.sdrf.tsv}\n");
         let p = plan(&c, d).unwrap();
         let names: Vec<&str> = p.runs.iter().map(|r| r.run.as_str()).collect();
@@ -1029,10 +1044,10 @@ mod tests {
         for sub in ["raw/A", "raw/B", "raw/other"] {
             std::fs::create_dir_all(d.join(sub)).unwrap();
         }
-        write(d, "raw/A/r1.mzML", "");
-        write(d, "raw/B/r1.raw", "");
-        write(d, "raw/other/r1.raw", "");
-        write(d, "raw/B/r2.d.zip", "");
+        write(d, "raw/A/r1.mzML", "spectra");
+        write(d, "raw/B/r1.raw", "spectra");
+        write(d, "raw/other/r1.raw", "spectra");
+        write(d, "raw/B/r2.d.zip", "spectra");
         let yaml = "cohort:\n  name: t\n  data_dir: raw\n  output_dir: out\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
         let p = plan(&cfg(yaml), d).unwrap();
         let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap();
@@ -1075,12 +1090,12 @@ mod tests {
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
         std::fs::create_dir_all(d.join("raw")).unwrap();
-        write(d, "raw/r1.raw", "");
+        write(d, "raw/r1.raw", "spectra");
         let flat = t.path().join("raw/A");
         std::fs::create_dir_all(&flat).unwrap();
         std::fs::create_dir_all(d.join("raw/B")).unwrap();
-        write(d, "raw/A/r1.raw", "");
-        write(d, "raw/B/r1.raw", "");
+        write(d, "raw/A/r1.raw", "spectra");
+        write(d, "raw/B/r1.raw", "spectra");
         let p = plan(&cfg(yaml), d).unwrap();
         let a = p.runs.iter().find(|r| r.project == "A").unwrap();
         let b = p.runs.iter().find(|r| r.project == "B").unwrap();
@@ -1092,7 +1107,7 @@ mod tests {
         std::fs::remove_dir_all(d.join("raw/A")).unwrap();
         std::fs::remove_dir_all(d.join("raw/B")).unwrap();
         std::fs::create_dir_all(d.join("raw/x")).unwrap();
-        write(d, "raw/x/r1.raw", "");
+        write(d, "raw/x/r1.raw", "spectra");
         let e = plan(&cfg(yaml), d).unwrap_err().errors;
         assert!(e.iter().any(|m| m.contains("2 files under")), "{e:?}");
     }
@@ -1103,7 +1118,7 @@ mod tests {
         let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
-        write(d, "r1.raw", "");
+        write(d, "r1.raw", "spectra");
         let c = cfg("cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n");
         let e = plan(&c, d).unwrap_err().errors;
         assert!(
@@ -1120,7 +1135,7 @@ mod tests {
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         std::fs::create_dir_all(d.join("raw/B")).unwrap();
-        write(d, "raw/B/r1.raw", "");
+        write(d, "raw/B/r1.raw", "spectra");
         let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
         let e = plan(&cfg(yaml), d).unwrap_err().errors;
         assert!(
@@ -1128,7 +1143,7 @@ mod tests {
                 .any(|m| m.starts_with("A:") && m.contains("1 of 1 data files")),
             "{e:?}"
         );
-        write(d, "raw/r1.raw", "");
+        write(d, "raw/r1.raw", "spectra");
         let p = plan(&cfg(yaml), d).unwrap();
         let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap().file.clone();
         assert_eq!(file("A.r1"), d.join("raw/r1.raw"));
@@ -1140,7 +1155,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
-        write(d, "r1.raw", "");
+        write(d, "r1.raw", "spectra");
         let sdrfs = "cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n";
         let p = plan(&cfg(sdrfs), d).unwrap();
         assert_eq!(p.groups[0].kind, Kind::Lfq, "the SDRF says label free");
@@ -1180,8 +1195,8 @@ mod tests {
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         std::fs::create_dir_all(d.join("store/b")).unwrap();
         std::fs::create_dir_all(d.join("raw/A")).unwrap();
-        write(d, "raw/A/r1.raw", "");
-        write(d, "store/b/r1.raw", "");
+        write(d, "raw/A/r1.raw", "spectra");
+        write(d, "store/b/r1.raw", "spectra");
         std::os::unix::fs::symlink(d.join("store/b"), d.join("raw/B")).unwrap();
         std::os::unix::fs::symlink(d.join("store/b"), d.join("raw/A/alias")).unwrap();
         std::os::unix::fs::symlink(d.join("raw"), d.join("raw/loop")).unwrap();
@@ -1192,6 +1207,26 @@ mod tests {
         assert_eq!(file("B.r1"), d.join("store/b/r1.raw"));
         let index = index_files(&d.join("raw")).unwrap();
         assert_eq!(index["r1.raw"].len(), 2, "{:?}", index["r1.raw"]);
+    }
+
+    #[test]
+    fn an_empty_data_file_is_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(
+            d,
+            "a.sdrf.tsv",
+            &sdrf(&[("r1.raw", "10 ppm", ""), ("r2.raw", "10 ppm", "")]),
+        );
+        write(d, "r1.raw", "spectra");
+        write(d, "r2.raw", "");
+        let c = cfg("cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n");
+        let e = plan(&c, d).unwrap_err().errors;
+        assert!(
+            e.iter()
+                .any(|m| m.contains("1 of 2 data files") && m.contains("empty")),
+            "{e:?}"
+        );
     }
 
     #[test]

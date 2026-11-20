@@ -1211,8 +1211,10 @@ shares (database, charge, decoys, FDR).
 - **Linked folders.** Symbolic links to folders below `data_dir` are followed; each folder is
   listed once under its real path, so a link loop ends, and a file reached through a link
   belongs to the project folder it really sits in.
-- **Groups.** Runs share a group, and later one FDR, only when they share the kind of data
-  (`dda`, `lfq`, `tmt`, `label`, `xl`), the enzyme and the crosslinkers. Each group lists the
+- **Groups.** A cohort is one integrated analysis: runs share a group, and later one FDR,
+  when they share the kind of data (`dda`, `lfq`, `tmt`, `label`, `xl`), and the group is
+  named after it. The enzyme, crosslinker, tolerance and instrument set each run's search,
+  not its group, so projects with different settings are pooled. Each group lists the
   stages it runs after the searches: `percolator > inference` (`dda`), then `quant` (`lfq`,
   `label`) or `tmt-quant` (`tmt`); `xl-fdr` for crosslinking.
 - **Checks.** Unreadable SDRFs, rows with too few fields, unknown proteases, modifications or

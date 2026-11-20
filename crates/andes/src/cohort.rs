@@ -150,8 +150,6 @@ struct Part {
 struct Resolved {
     kind: Kind,
     enzyme: Option<String>,
-    /// The enzyme the run is searched with, wherever it comes from; it names the group.
-    group_enzyme: String,
     precursor_tol: Option<String>,
     fixed_mods: Option<Vec<String>>,
     variable_mods: Option<Vec<String>>,
@@ -190,12 +188,11 @@ impl Resolved {
         a
     }
 
-    /// The key of the FDR group: runs share a group only when they share the kind of data,
-    /// the enzyme and the crosslinkers.
-    fn group_key(&self) -> (Kind, String, String) {
-        let mut xl = self.xl.clone();
-        xl.sort();
-        (self.kind.clone(), self.group_enzyme.clone(), xl.join("; "))
+    /// The key of the FDR group: the kind of data alone. Runs of one kind are one pooled
+    /// list with one FDR, whatever their enzyme, crosslinker or instrument; those only set
+    /// each run's search.
+    fn group_key(&self) -> Kind {
+        self.kind.clone()
     }
 }
 
@@ -368,14 +365,9 @@ fn resolve(
             }
         }
     };
-    let group_enzyme = enzyme
-        .clone()
-        .or_else(|| sc.enzyme.clone())
-        .unwrap_or_else(|| crate::cli::default_value::<crate::cli::DatabaseArgs>("enzyme"));
     ok.then(|| Resolved {
         kind,
         enzyme,
-        group_enzyme,
         precursor_tol,
         fixed_mods: to_list(fixed),
         variable_mods: to_list(variable),
@@ -555,39 +547,6 @@ fn locate(
     Err(format!("{name}: not found under {}", scope.display()))
 }
 
-fn slug(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn group_name(key: &(Kind, String, String), taken: &BTreeSet<String>) -> String {
-    let linkers: Vec<&str> = key
-        .2
-        .split("; ")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.split(" (").next().unwrap_or(s))
-        .collect();
-    let mut base = key.0.name().to_string();
-    if !linkers.is_empty() {
-        base = format!("{base}-{}", slug(&linkers.join("-")));
-    }
-    base = format!("{base}-{}", slug(&key.1));
-    let mut name = base.clone();
-    let mut n = 2;
-    while taken.contains(&name) {
-        name = format!("{base}-{n}");
-        n += 1;
-    }
-    name
-}
-
 /// Resolve a cohort config into a plan. `base` is the directory the config's relative
 /// SDRF paths are read from. Returns the plan, or every error found.
 pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
@@ -714,8 +673,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
     }
 
     let mut runs: Vec<PlannedRun> = Vec::new();
-    let mut keys: Vec<((Kind, String, String), String)> = Vec::new();
-    let mut taken: BTreeSet<String> = BTreeSet::new();
+    let mut keys: Vec<(Kind, String)> = Vec::new();
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut owner: BTreeMap<PathBuf, String> = BTreeMap::new();
     for part in &parts {
@@ -731,8 +689,7 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
         let group = match keys.iter().find(|(k, _)| *k == key) {
             Some((_, g)) => g.clone(),
             None => {
-                let g = group_name(&key, &taken);
-                taken.insert(g.clone());
+                let g = key.name().to_string();
                 keys.push((key, g.clone()));
                 g
             }
@@ -841,14 +798,14 @@ pub fn plan(cfg: &RunConfig, base: &Path) -> Result<Plan, Problems> {
                     projects.push(r.project.clone());
                 }
             }
-            let input = |r: &PlannedRun| match key.0 {
+            let input = |r: &PlannedRun| match key {
                 Kind::Xl => r.dir.join(format!("{}.xl.tsv", r.run)),
                 _ => r.dir.join(format!("{}.pin", r.run)),
             };
             PlannedGroup {
                 name: name.clone(),
-                kind: key.0.clone(),
-                stages: key.0.stages(),
+                kind: key.clone(),
+                stages: key.stages(),
                 projects,
                 runs: members.iter().map(|r| r.run.clone()).collect(),
                 dir: output_dir.join("groups").join(name),
@@ -1008,7 +965,24 @@ mod tests {
         assert_eq!(a[i + 1], "5ppm");
         let i = a.iter().position(|x| x == "--xl").unwrap();
         assert_eq!(a[i + 1], "DSBU");
-        assert_eq!(p.groups[0].name, "xl-dsbu-lysc");
+        assert_eq!(p.groups[0].name, "xl");
+    }
+
+    #[test]
+    fn projects_with_other_enzymes_and_linkers_share_the_kind_group() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
+        write(d, "b.sdrf.tsv", &sdrf(&[("r2.raw", "10 ppm", DSSO)]));
+        let c = cfg("cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n  overrides:\n    - {project: B, search: {enzyme: lysc, xl: DSBU}}\n");
+        let p = plan(&c, d).unwrap();
+        assert_eq!(p.groups.len(), 1);
+        assert_eq!(p.groups[0].name, "xl");
+        assert_eq!(p.groups[0].projects, ["A", "B"]);
+        assert_ne!(
+            p.runs[0].args, p.runs[1].args,
+            "each run keeps its own search"
+        );
     }
 
     #[test]

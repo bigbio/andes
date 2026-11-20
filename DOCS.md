@@ -1203,6 +1203,14 @@ shares (database, charge, decoys, FDR).
   name unique in the cohort. The file is staged under that name (`stage_as`) in the run's
   folder, so its stem, the PIN `SpecId` prefix, is unique across projects. Two files with one
   run name are an error.
+- **Quantification.** A config `quant` section that sets `tmt`, `lfq` or `label` decides the
+  kind of data (`tmt` before `label` before `lfq: true`; `lfq: false` alone is `dda`), as it
+  wins over the SDRF in `--sdrf`; the runner's `--config` applies it, so it is not in `args`.
+  A label column it overrules with another kind is a warning. Without it, the label column
+  decides (`--lfq`, `--tmt <plex>` or `--label` in `args`).
+- **Linked folders.** Symbolic links to folders below `data_dir` are followed; each folder is
+  listed once under its real path, so a link loop ends, and a file reached through a link
+  belongs to the project folder it really sits in.
 - **Groups.** Runs share a group, and later one FDR, only when they share the kind of data
   (`dda`, `lfq`, `tmt`, `label`, `xl`), the enzyme and the crosslinkers. Each group lists the
   stages it runs after the searches: `percolator > inference` (`dda`), then `quant` (`lfq`,
@@ -1225,6 +1233,11 @@ stage on its own over any runs' `<base>.xl.tsv` tables and writes `<BASE>.xl.tsv
 `<BASE>.xl.residue_pairs.tsv` and `<BASE>.xl.ppi.tsv`. Rows with the score `NA` (spectra
 without a CSM) are counted and skipped; any other unreadable score, or a scored row without
 its residue pair or protein pair, is an error naming the table and row.
+Each CSM table's `score_source` column says where a row's score comes from: `pair` for the
+search's pair score, which is on one scale across runs, or `percolator` when the run was
+rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
+not comparable, so pooling a `percolator` row is an error; search those runs without the
+flags, or search them together and rescore once.
 
 ---
 

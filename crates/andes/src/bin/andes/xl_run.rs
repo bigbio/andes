@@ -122,11 +122,33 @@ fn scan_of(spec: &Spectrum) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Which link classes had their CSM scores replaced by this run's own Percolator scores
+/// (`--xl-rescore-intra`, `--xl-rescore-inter`).
+#[derive(Clone, Copy)]
+struct Rescored {
+    intra: bool,
+    inter: bool,
+}
+
+impl Rescored {
+    /// The `score_source` column: `pair` for the search's pair score, which is on one scale
+    /// across runs, or `percolator` for a score learned on this run alone.
+    fn source(self, intra: bool) -> &'static str {
+        if (intra && self.intra) || (!intra && self.inter) {
+            "percolator"
+        } else {
+            "pair"
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_csms(
     path: &Path,
     spectra: &[Spectrum],
     results: &[XlSpectrumResult],
     score: &[Option<f64>],
+    rescored: Rescored,
     q: &[Option<f64>],
     runs: &[XlRun],
     prepared: &PreparedSearch,
@@ -147,6 +169,7 @@ fn write_csms(
         "class",
         "link",
         "score",
+        "score_source",
         "q_value",
         "pair_score",
         "second_pair_score",
@@ -187,6 +210,7 @@ fn write_csms(
                 .name()
                 .to_string(),
             s.map_or("NA".to_string(), |v| v.to_string()),
+            rescored.source(c.intra).to_string(),
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             format!("{:.3}", c.pair_score),
             c.second_pair_score
@@ -597,6 +621,10 @@ pub(crate) fn run_xl(
         spectra_for_xl,
         &results,
         &score,
+        Rescored {
+            intra: cli.xl_rescore_intra,
+            inter: cli.xl_rescore_inter,
+        },
         &q,
         &runs,
         prepared,

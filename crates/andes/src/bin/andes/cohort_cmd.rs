@@ -264,14 +264,15 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), Strin
     let col = |c: &str| {
         header.iter().position(|h| *h == c).ok_or_else(|| {
             format!(
-                "{}: no `{c}` column; the table must come from an andes --xl search that writes \
-                 residue_pair and protein_pair",
+                "{}: no `{c}` column; the table must come from an andes --xl search of this \
+                 version (with the residue_pair, protein_pair and score_source columns)",
                 path.display()
             )
         })
     };
     let (sp, cl, li, sc) = (col("spectrum")?, col("class")?, col("link")?, col("score")?);
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
+    let src = col("score_source")?;
     let (mut n, mut unscored) = (0, 0);
     for (k, line) in lines.enumerate() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -280,6 +281,16 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), Strin
         if get(sc) == "NA" {
             unscored += 1;
             continue;
+        }
+        if get(src) != "pair" {
+            return Err(format!(
+                "{}: row {}: score_source `{}`; the run was rescored on its own \
+                 (--xl-rescore-intra/--xl-rescore-inter), so its scores are not on the scale of \
+                 the other runs. Search the runs without those flags to pool them",
+                path.display(),
+                k + 2,
+                get(src)
+            ));
         }
         let score = get(sc)
             .parse::<f64>()
@@ -439,10 +450,10 @@ mod tests {
         let p = t.path().join("A.r1.xl.tsv");
         std::fs::write(
             &p,
-            "spectrum\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
-             A.r1/s1\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
-             A.r1/s2\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
-             A.r1/s3\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
+            "spectrum\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
+             A.r1/s1\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
+             A.r1/s2\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
+             A.r1/s3\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
         )
         .unwrap();
         let mut rows = Vec::new();
@@ -460,26 +471,31 @@ mod tests {
     #[test]
     fn a_malformed_score_or_missing_pair_is_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let head = "spectrum\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
+        let head = "spectrum\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
         for (name, row, what) in [
             (
                 "a.xl.tsv",
-                "s1\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
                 "row 2: bad score",
             ),
             (
                 "b.xl.tsv",
-                "s1\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
                 "bad score",
             ),
             (
                 "c.xl.tsv",
-                "s1\tTT\tinter\t12.5\t\tP1 -- P2",
+                "s1\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
                 "bad residue_pair",
             ),
             (
+                "e.xl.tsv",
+                "s1\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
+                "rescored on its own",
+            ),
+            (
                 "d.xl.tsv",
-                "s1\tTT\tinter\t12.5\tP1:5 -- P2:9",
+                "s1\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
                 "bad protein_pair",
             ),
         ] {

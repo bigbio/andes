@@ -94,7 +94,8 @@ pub struct PlannedRun {
     pub run: String,
     pub project: String,
     pub sdrf: PathBuf,
-    /// The spectrum file: the SDRF's name found under `data_dir`, or next to the SDRF.
+    /// The spectrum file: the SDRF's name found under `data_dir` (by its real path, symbolic
+    /// links to folders resolved), or next to the SDRF.
     pub file: PathBuf,
     /// The run's output folder; its search writes `<dir>/<run>.pin` and the tables beside it.
     pub dir: PathBuf,
@@ -327,11 +328,44 @@ fn resolve(
     let (kind, quant_flag) = if !xl.is_empty() || sc.xl.is_some() {
         (Kind::Xl, None)
     } else {
-        match &s.quant {
-            Some(Quant::Lfq) => (Kind::Lfq, Some(("--lfq".into(), None))),
-            Some(Quant::Isobaric(plex)) => (Kind::Tmt, Some(("--tmt".into(), Some(plex.clone())))),
-            Some(Quant::Label(spec)) => (Kind::Label, Some(("--label".into(), Some(spec.clone())))),
-            None => (Kind::Dda, None),
+        let q = &cfg.quant;
+        if q.tmt.is_some() || q.lfq.is_some() || q.label.is_some() {
+            let kind = if q.tmt.is_some() {
+                Kind::Tmt
+            } else if q.label.is_some() {
+                Kind::Label
+            } else if q.lfq == Some(true) {
+                Kind::Lfq
+            } else {
+                Kind::Dda
+            };
+            let sdrf_kind = match &s.quant {
+                Some(Quant::Lfq) => Kind::Lfq,
+                Some(Quant::Isobaric(_)) => Kind::Tmt,
+                Some(Quant::Label(_)) => Kind::Label,
+                None => Kind::Dda,
+            };
+            if s.quant.is_some() && sdrf_kind != kind {
+                problems.warnings.push(format!(
+                    "{p}: the config's quant section makes its runs {}, not the {} the label \
+                     column of {} gives",
+                    kind.name(),
+                    sdrf_kind.name(),
+                    part.sdrf.display()
+                ));
+            }
+            (kind, None)
+        } else {
+            match &s.quant {
+                Some(Quant::Lfq) => (Kind::Lfq, Some(("--lfq".into(), None))),
+                Some(Quant::Isobaric(plex)) => {
+                    (Kind::Tmt, Some(("--tmt".into(), Some(plex.clone()))))
+                }
+                Some(Quant::Label(spec)) => {
+                    (Kind::Label, Some(("--label".into(), Some(spec.clone()))))
+                }
+                None => (Kind::Dda, None),
+            }
         }
     };
     let group_enzyme = enzyme
@@ -413,11 +447,20 @@ fn readable(file: &Path) -> bool {
 }
 
 /// The spectrum files below a folder by lower-cased file name. A Bruker `.d` folder is one
-/// entry; its contents are not listed.
+/// entry; its contents are not listed. Symbolic links to folders are followed, and each
+/// folder is listed once, under its real path, however many links lead to it, so a link
+/// loop ends and a file reached through a link keeps the project folder it is really in.
 fn index_files(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
     let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut todo = vec![root.to_path_buf()];
     while let Some(dir) = todo.pop() {
+        let real = std::fs::canonicalize(&dir)
+            .map_err(|e| format!("cohort.data_dir: cannot read {}: {e}", dir.display()))?;
+        if !seen.insert(real.clone()) {
+            continue;
+        }
+        let dir = real;
         let entries = std::fs::read_dir(&dir)
             .map_err(|e| format!("cohort.data_dir: cannot read {}: {e}", dir.display()))?;
         for e in entries {
@@ -460,17 +503,19 @@ fn locate(
 ) -> Result<PathBuf, String> {
     let lower = name.to_ascii_lowercase();
     let (stem, _) = split_name(&lower);
+    let real = |d: PathBuf| std::fs::canonicalize(&d).unwrap_or(d);
     let own = root.join(project);
     let (scope, others): (PathBuf, Vec<PathBuf>) = if own.is_dir() {
-        (own, Vec::new())
+        (real(own), Vec::new())
     } else {
         (
-            root.to_path_buf(),
+            real(root.to_path_buf()),
             projects
                 .iter()
                 .filter(|p| **p != project)
                 .map(|p| root.join(p))
                 .filter(|d| d.is_dir())
+                .map(real)
                 .collect(),
         )
     };
@@ -854,7 +899,7 @@ mod tests {
     #[test]
     fn two_projects_share_a_group_and_get_distinct_run_names() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(
             d,
             "a.sdrf.tsv",
@@ -886,7 +931,7 @@ mod tests {
     #[test]
     fn disagreeing_rows_split_into_settings_groups() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(
             d,
             "a.sdrf.tsv",
@@ -914,7 +959,7 @@ mod tests {
     #[test]
     fn every_problem_is_reported_at_once() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(
             d,
@@ -939,7 +984,7 @@ mod tests {
     #[test]
     fn duplicate_run_names_are_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         let c = cfg("cohort:\n  run_name: \"{stem}\"\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n");
@@ -950,7 +995,7 @@ mod tests {
     #[test]
     fn override_replaces_the_sdrf_and_config_keys_win_over_the_sdrf() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "", DSSO)]));
         let c = cfg("search: {enzyme: lysc}\ncohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n  overrides:\n    - {project: A, search: {precursor_tol: 5ppm, xl: DSBU}}\n");
         let p = plan(&c, d).unwrap();
@@ -969,7 +1014,7 @@ mod tests {
     #[test]
     fn excluded_projects_are_not_planned() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r9.raw", "10 ppm", "")]));
         let c = cfg("cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n  exclude: [B]\n");
@@ -981,7 +1026,7 @@ mod tests {
     #[test]
     fn unreadable_data_files_are_a_warning() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(
             d,
             "a.sdrf.tsv",
@@ -1000,7 +1045,7 @@ mod tests {
     #[test]
     fn data_files_are_found_under_data_dir_by_name() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", DSSO)]));
         write(
             d,
@@ -1051,7 +1096,7 @@ mod tests {
     #[test]
     fn two_projects_with_the_same_file_name_get_their_own_file_and_run() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
@@ -1081,7 +1126,7 @@ mod tests {
     #[test]
     fn one_spectrum_file_given_to_two_projects_is_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "r1.raw", "");
@@ -1097,7 +1142,7 @@ mod tests {
     #[test]
     fn a_project_without_a_folder_does_not_take_another_projects_file() {
         let t = tempfile::tempdir().unwrap();
-        let d = t.path();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
         write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
         std::fs::create_dir_all(d.join("raw/B")).unwrap();
@@ -1114,6 +1159,65 @@ mod tests {
         let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap().file.clone();
         assert_eq!(file("A.r1"), d.join("raw/r1.raw"));
         assert_eq!(file("B.r1"), d.join("raw/B/r1.raw"));
+    }
+
+    #[test]
+    fn the_config_quant_section_sets_the_kind_of_data() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "r1.raw", "");
+        let sdrfs = "cohort:\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n";
+        let p = plan(&cfg(sdrfs), d).unwrap();
+        assert_eq!(p.groups[0].kind, Kind::Lfq, "the SDRF says label free");
+        assert!(p.runs[0].args.contains(&"--lfq".to_string()));
+
+        let p = plan(&cfg(&format!("quant: {{tmt: tmt10}}\n{sdrfs}")), d).unwrap();
+        assert_eq!(p.groups[0].kind, Kind::Tmt);
+        assert_eq!(p.groups[0].stages, ["percolator", "inference", "tmt-quant"]);
+        assert!(
+            !p.runs[0].args.iter().any(|a| a == "--lfq" || a == "--tmt"),
+            "the runner's --config applies the config: {:?}",
+            p.runs[0].args
+        );
+        assert!(
+            p.warnings.iter().any(|w| w.contains("makes its runs tmt")),
+            "{:?}",
+            p.warnings
+        );
+
+        let p = plan(&cfg(&format!("quant: {{lfq: true}}\n{sdrfs}")), d).unwrap();
+        assert_eq!(p.groups[0].kind, Kind::Lfq);
+        assert!(
+            p.warnings.is_empty(),
+            "config and SDRF agree: {:?}",
+            p.warnings
+        );
+        let p = plan(&cfg(&format!("quant: {{lfq: false}}\n{sdrfs}")), d).unwrap();
+        assert_eq!(p.groups[0].kind, Kind::Dda);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_folders_are_followed_once_and_keep_their_project() {
+        let t = tempfile::tempdir().unwrap();
+        let d = &std::fs::canonicalize(t.path()).unwrap();
+        write(d, "a.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        write(d, "b.sdrf.tsv", &sdrf(&[("r1.raw", "10 ppm", "")]));
+        std::fs::create_dir_all(d.join("store/b")).unwrap();
+        std::fs::create_dir_all(d.join("raw/A")).unwrap();
+        write(d, "raw/A/r1.raw", "");
+        write(d, "store/b/r1.raw", "");
+        std::os::unix::fs::symlink(d.join("store/b"), d.join("raw/B")).unwrap();
+        std::os::unix::fs::symlink(d.join("store/b"), d.join("raw/A/alias")).unwrap();
+        std::os::unix::fs::symlink(d.join("raw"), d.join("raw/loop")).unwrap();
+        let yaml = "cohort:\n  data_dir: raw\n  sdrfs:\n    - {project: A, sdrf: a.sdrf.tsv}\n    - {project: B, sdrf: b.sdrf.tsv}\n";
+        let p = plan(&cfg(yaml), d).unwrap();
+        let file = |run: &str| p.runs.iter().find(|r| r.run == run).unwrap().file.clone();
+        assert_eq!(file("A.r1"), d.join("raw/A/r1.raw"));
+        assert_eq!(file("B.r1"), d.join("store/b/r1.raw"));
+        let index = index_files(&d.join("raw")).unwrap();
+        assert_eq!(index["r1.raw"].len(), 2, "{:?}", index["r1.raw"]);
     }
 
     #[test]

@@ -22,11 +22,34 @@ const NOMINATE_MIN_LLR: f64 = -15.0;
 const CONFIDENT_LLR: f64 = 15.0;
 const HALF_CYCLES: usize = 36;
 const CYCLES: usize = 2 * HALF_CYCLES + 1;
-const FRAG_PPM: f64 = 7.0;
-const MS1_PPM: f64 = 7.0;
+/// m/z tolerance (ppm) of a predicted fragment's peak in a cycle of its trace, around the run's
+/// shifted fragment position; tighter than the pool search's tolerance because the shift is
+/// learned first.
+const FRAG_TRACE_PPM: f64 = 7.0;
+/// m/z tolerance (ppm) of the precursor's isotope peaks in the MS1 scans around the fragment apex.
+const MS1_TRACE_PPM: f64 = 7.0;
 const MS1_HALF: usize = 5;
+/// Isotope peaks (monoisotopic first) looked up for `p2_ms1_iso`.
+const MS1_ISOTOPES: u8 = 4;
+/// Half-width (Th) of a window's isolation range when the spectrum gives no isolation offsets.
 const WINDOW_REACH_MZ: f64 = 1.6;
 const RIDGE_LAMBDA: f64 = 1e-3;
+/// Pivot magnitude below which the RT ridge system counts as singular.
+const PIVOT_MIN: f64 = 1e-12;
+/// Ions, most intense first, that `p2_n6` and `p2_any6` count.
+const TOP_SUBSET: usize = 6;
+/// Floor of a per-cycle log-likelihood ratio where a cycle has no value: the second-best cycle of
+/// `p2_gap` and `p2_llr2`, and a neighbour of the best cycle outside the trace or the run in
+/// `p2_lsum3`.
+const LLR_FLOOR: f64 = -50.0;
+/// Bounds of the per-run presence rates at the apex (`q`) and by chance (`p0`).
+const Q_MIN: f64 = 1e-3;
+const P0_MIN: f64 = 1e-4;
+const RATE_MAX: f64 = 0.999;
+/// Added to the spread of the per-cycle log-likelihood ratios in `p2_z`.
+const Z_SD_EPS: f64 = 1e-3;
+/// Added to denominators of correlations and fractions.
+const DIV_EPS: f64 = 1e-9;
 const COELUTE_HALF: usize = 3;
 const COELUTE_MIN_CORR: f64 = 0.6;
 const FAR_CYCLES: usize = 3;
@@ -72,6 +95,9 @@ pub(crate) struct Nominee {
     pub(crate) prec_mz: f64,
     /// Predicted RT (min) of the peptidoform.
     pub(crate) pred_rt: f64,
+    /// The PIN row had no andes-rt prediction (`andesrt_missing`): `pred_rt` is an imputed value,
+    /// so the row stays out of the RT ridge and its spread.
+    pub(crate) rt_missing: bool,
     /// RT (min) of the scan whose pool row nominated it.
     pub(crate) apex_rt: f64,
     pub(crate) dia_llr: f64,
@@ -128,7 +154,7 @@ pub(crate) fn nominate(
     let out = want
         .par_iter()
         .zip(fields.into_par_iter())
-        .map(|(&i, (pred_rt, peptide, proteins))| {
+        .map(|(&i, (pred_rt, rt_missing, peptide, proteins))| {
             let r = &table.rows[i];
             let (form, mass) = &table.forms[r.form as usize];
             let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
@@ -157,6 +183,7 @@ pub(crate) fn nominate(
                 decoy: r.decoy,
                 prec_mz: (total + H2O) / f64::from(r.charge) + PROTON,
                 pred_rt,
+                rt_missing,
                 apex_rt: sp.rt_seconds.unwrap_or(0.0) / 60.0,
                 dia_llr: llr[i],
                 mobility: mobility_centre(sp.mobility_window),
@@ -171,8 +198,9 @@ pub(crate) fn nominate(
     Ok(out)
 }
 
-/// Predicted RT, Peptide and Proteins of the wanted PIN rows (sorted row indices).
-fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, String, String)>, String> {
+/// Predicted RT, its missing flag, Peptide and Proteins of the wanted PIN rows (sorted row
+/// indices).
+fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, bool, String, String)>, String> {
     let f = std::fs::File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = BufReader::new(f).lines();
     let header = lines
@@ -185,7 +213,12 @@ fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, String, String)>, 
             .position(|c| *c == n)
             .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
     };
-    let (c_rt, c_pep, c_prot) = (at("andesrt_predicted_rt")?, at("Peptide")?, at("Proteins")?);
+    let (c_rt, c_miss, c_pep, c_prot) = (
+        at("andesrt_predicted_rt")?,
+        at("andesrt_missing")?,
+        at("Peptide")?,
+        at("Proteins")?,
+    );
     let mut out = Vec::with_capacity(want.len());
     let mut w = 0usize;
     let mut idx = 0usize;
@@ -199,11 +232,12 @@ fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, String, String)>, 
         }
         if want[w] == idx {
             let x: Vec<&str> = line.split('\t').collect();
-            if x.len() <= c_prot.max(c_pep).max(c_rt) {
+            if x.len() <= c_prot.max(c_pep).max(c_rt).max(c_miss) {
                 return Err(format!("{}: PIN row {} is short", pin.display(), idx + 2));
             }
             out.push((
                 x[c_rt].trim().parse().unwrap_or(f64::NAN),
+                x[c_miss].trim().parse::<f64>() != Ok(0.0),
                 x[c_pep].to_string(),
                 x[c_prot..].join(";"),
             ));
@@ -244,7 +278,7 @@ fn calibrate_rt(noms: &[&Nominee]) -> Vec<f64> {
     let mut n_fit = 0usize;
     for n in noms
         .iter()
-        .filter(|n| !n.decoy && n.dia_llr > CONFIDENT_LLR && n.pred_rt.is_finite())
+        .filter(|n| rt_fit_member(n))
     {
         let x = design(n);
         for i in 0..RT_TERMS {
@@ -271,11 +305,16 @@ fn calibrate_rt(noms: &[&Nominee]) -> Vec<f64> {
         .collect()
 }
 
+/// A confident target with an andes-rt prediction: a row of the RT ridge.
+fn rt_fit_member(n: &Nominee) -> bool {
+    !n.decoy && n.dia_llr > CONFIDENT_LLR && !n.rt_missing && n.pred_rt.is_finite()
+}
+
 /// Gaussian elimination with partial pivoting; `None` when singular.
 fn solve(mut a: [[f64; RT_TERMS]; RT_TERMS], mut b: [f64; RT_TERMS]) -> Option<[f64; RT_TERMS]> {
     for c in 0..RT_TERMS {
         let p = (c..RT_TERMS).max_by(|&i, &j| a[i][c].abs().total_cmp(&a[j][c].abs()))?;
-        if a[p][c].abs() < 1e-12 {
+        if a[p][c].abs() < PIVOT_MIN {
             return None;
         }
         a.swap(c, p);
@@ -299,6 +338,8 @@ fn solve(mut a: [[f64; RT_TERMS]; RT_TERMS], mut b: [f64; RT_TERMS]) -> Option<[
 /// One isolation window of one run: its cycles in RT order.
 struct Window<'a> {
     centre: f64,
+    /// Isolation range (Th), lower and upper bound.
+    iso: (f64, f64),
     mobility: Option<(u32, u32)>,
     rt: Vec<f64>,
     scans: Vec<&'a [(f64, f32)]>,
@@ -308,7 +349,7 @@ impl Window<'_> {
     /// Most intense peak within the tolerance of `mz` in cycle `c`: (intensity, peak id).
     fn peak(&self, c: usize, mz: f64) -> Option<(f32, u32)> {
         let peaks = self.scans[c];
-        let tol = mz * FRAG_PPM * 1e-6;
+        let tol = mz * FRAG_TRACE_PPM * 1e-6;
         let lo = peaks.partition_point(|p| p.0 < mz - tol);
         peaks[lo..]
             .iter()
@@ -385,8 +426,8 @@ impl Rates {
     fn terms(&self) -> [(f64, f64); TOP_IONS] {
         let mut t = [(0.0, 0.0); TOP_IONS];
         for (j, tj) in t.iter_mut().enumerate() {
-            let q = ((self.qh[j] + 1.0) / (self.qn[j] + 2.0)).clamp(1e-3, 0.999);
-            let p0 = ((self.ph[j] + 1.0) / (self.pn[j] + 2.0)).clamp(1e-4, 0.999);
+            let q = ((self.qh[j] + 1.0) / (self.qn[j] + 2.0)).clamp(Q_MIN, RATE_MAX);
+            let p0 = ((self.ph[j] + 1.0) / (self.pn[j] + 2.0)).clamp(P0_MIN, RATE_MAX);
             *tj = ((q / p0).ln(), ((1.0 - q) / (1.0 - p0)).ln());
         }
         t
@@ -441,7 +482,7 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         sa += (x - ma) * (x - ma);
         sb += (y - mb) * (y - mb);
     }
-    s / ((sa * sb).sqrt() + 1e-9)
+    s / ((sa * sb).sqrt() + DIV_EPS)
 }
 
 fn row_features(
@@ -455,7 +496,7 @@ fn row_features(
     let nj = n.ions.len();
     let wt: Vec<f64> = n.ions.iter().map(|i| f64::from(i.1)).collect();
     let pres = |k: usize, j: usize| t.x[k][j] > 0.0;
-    let mut lc = [-1e9f64; CYCLES];
+    let mut lc = [f64::NEG_INFINITY; CYCLES];
     for (k, l) in lc.iter_mut().enumerate() {
         if t.valid[k] {
             *l = (0..nj)
@@ -473,15 +514,17 @@ fn row_features(
     let vk: Vec<usize> = (0..CYCLES).filter(|&k| t.valid[k]).collect();
     let vm = vk.len().max(1) as f64;
     let mean = vk.iter().map(|&k| lc[k]).sum::<f64>() / vm;
-    let sd = (vk.iter().map(|&k| (lc[k] - mean).powi(2)).sum::<f64>() / vm).sqrt() + 1e-3;
+    let sd = (vk.iter().map(|&k| (lc[k] - mean).powi(2)).sum::<f64>() / vm).sqrt() + Z_SD_EPS;
     let second = vk
         .iter()
         .filter(|&&k| k.abs_diff(cs) > FAR_CYCLES)
         .map(|&k| lc[k])
-        .fold(-1e9f64, f64::max);
+        .reduce(f64::max)
+        .unwrap_or(LLR_FLOOR);
     let lo1 = cs.saturating_sub(1);
     let hi1 = (cs + 1).min(CYCLES - 1);
-    let n6 = nj.min(6);
+    let beside = |k: usize| if k != cs && t.valid[k] { lc[k] } else { LLR_FLOOR };
+    let n6 = nj.min(TOP_SUBSET);
     let n_top6 = (0..n6).filter(|&j| pres(cs, j)).count();
     let n_all = (0..nj).filter(|&j| pres(cs, j)).count();
     let any6 = (0..n6)
@@ -489,12 +532,12 @@ fn row_features(
         .count() as f64
         / n6.max(1) as f64;
     let wsum: f64 = wt.iter().sum();
-    let expl = (0..nj).filter(|&j| pres(cs, j)).map(|j| wt[j]).sum::<f64>() / wsum.max(1e-9);
+    let expl = (0..nj).filter(|&j| pres(cs, j)).map(|j| wt[j]).sum::<f64>() / wsum.max(DIV_EPS);
     let xc: Vec<f64> = (0..nj).map(|j| f64::from(t.x[cs][j])).collect();
     let num: f64 = xc.iter().zip(&wt).map(|(a, b)| a * b).sum();
     let den = (xc.iter().map(|a| a * a).sum::<f64>() * wt.iter().map(|b| b * b).sum::<f64>())
         .sqrt()
-        + 1e-9;
+        + DIV_EPS;
     let ang = num / den;
     let span: Vec<usize> = (0..=2 * COELUTE_HALF)
         .map(|d| (cs + d).saturating_sub(COELUTE_HALF).min(CYCLES - 1))
@@ -540,7 +583,7 @@ fn row_features(
     set(&mut vals, "p2_llr", best);
     set(&mut vals, "p2_llr2", second);
     set(&mut vals, "p2_z", (best - mean) / sd);
-    set(&mut vals, "p2_gap", best - second.max(-50.0));
+    set(&mut vals, "p2_gap", best - second.max(LLR_FLOOR));
     set(&mut vals, "p2_n6", n_top6 as f64);
     set(&mut vals, "p2_nall", n_all as f64);
     set(&mut vals, "p2_any6", any6);
@@ -549,7 +592,7 @@ fn row_features(
     set(&mut vals, "p2_cor", cor_sum / np);
     set(&mut vals, "p2_cor6", cor6 as f64 / np);
     set(&mut vals, "p2_apex", apex_here as f64 / np);
-    set(&mut vals, "p2_lsum3", lc[lo1] + best + lc[hi1]);
+    set(&mut vals, "p2_lsum3", beside(lo1) + best + beside(hi1));
     set(&mut vals, "p2_logI", (tr.iter().sum::<f64>() + 1.0).log10());
     set(&mut vals, "p2_width", width as f64);
     set(&mut vals, "p2_rterr", (tt[cs] - rt_cal).abs());
@@ -588,7 +631,7 @@ fn ms1_columns(ms1: &Ms1RunIndex, n: &Nominee, rt_star: f64, tt: &[f64], tr: &[f
     let z = f64::from(n.charge.max(1));
     let at = |s: usize, mz: f64| -> f64 {
         let peaks = &ms1.scan(s).peaks;
-        let tol = mz * MS1_PPM * 1e-6;
+        let tol = mz * MS1_TRACE_PPM * 1e-6;
         let lo = peaks.partition_point(|p| p.0 < mz - tol);
         peaks[lo..]
             .iter()
@@ -599,7 +642,7 @@ fn ms1_columns(ms1: &Ms1RunIndex, n: &Nominee, rt_star: f64, tt: &[f64], tr: &[f
     let mono: Vec<f64> = scans.iter().map(|&s| at(s, n.prec_mz)).collect();
     let mid = MS1_HALF - 1..=MS1_HALF + 1;
     let log_i = (mono[mid.clone()].iter().copied().fold(0.0, f64::max) + 1.0).log10();
-    let iso = (0..4)
+    let iso = (0..MS1_ISOTOPES)
         .filter(|&k| {
             let mz = n.prec_mz + f64::from(k) * ISOTOPE / z;
             mid.clone().map(|d| at(scans[d], mz)).sum::<f64>() > 0.0
@@ -636,29 +679,54 @@ pub(crate) fn mobility_centre(w: Option<(u32, u32)>) -> f64 {
     w.map_or(f64::NAN, |(lo, hi)| 0.5 * (f64::from(lo) + f64::from(hi)))
 }
 
-/// Where a window sits: (isolation centre, mobility window, first spectrum index).
-type Place = (f64, Option<(u32, u32)>, u32);
+/// Where a window sits.
+#[derive(Clone, Copy, Debug)]
+struct Place {
+    /// Isolation target (Th).
+    centre: f64,
+    /// Isolation range (Th), lower and upper bound.
+    iso: (f64, f64),
+    mobility: Option<(u32, u32)>,
+    /// Index of the window's first spectrum.
+    first: u32,
+}
+
+/// Isolation range of a window's spectrum: target minus its lower offset to target plus its
+/// upper offset, or [`WINDOW_REACH_MZ`] either side of the target when the offsets are missing.
+fn isolation_range(s: &Spectrum) -> (f64, f64) {
+    let t = s.isolation_target_mz.unwrap_or(s.precursor_mz);
+    let off = |o: Option<f64>| o.filter(|v| v.is_finite() && *v >= 0.0);
+    match (off(s.isolation_lower_offset), off(s.isolation_upper_offset)) {
+        (Some(lo), Some(hi)) if lo + hi > 0.0 => (t - lo, t + hi),
+        _ => (t - WINDOW_REACH_MZ, t + WINDOW_REACH_MZ),
+    }
+}
 
 /// The window of a nominee at precursor `mz` and `mobility` (NaN without one) among `places`,
-/// one [`Place`] per window: of the windows whose
-/// centre is within `WINDOW_REACH_MZ`, the first by (mobility outside the window, m/z distance,
-/// distance to the window's mobility centre, first spectrum index). Without mobility on either
-/// side the mobility keys are equal, so the nearest centre wins.
+/// one [`Place`] per window: of the windows whose isolation range holds `mz` (within the
+/// precursor m/z accuracy `MS1_TRACE_PPM`, as the search widens a window by its precursor
+/// tolerance; adjacent windows may leave sub-mTh gaps), the first by
+/// (mobility outside the window, m/z distance to the centre, distance to the window's mobility
+/// centre, first spectrum index). Without mobility on either side the mobility keys are equal,
+/// so the nearest centre wins.
 fn window_of(places: &[Place], mz: f64, mobility: f64) -> Option<usize> {
-    let key = |&(centre, mob, first): &Place| {
-        let (outside, dmob) = match mob {
+    let key = |p: &Place| {
+        let (outside, dmob) = match p.mobility {
             Some((lo, hi)) if mobility.is_finite() => (
                 mobility < f64::from(lo) || mobility > f64::from(hi),
-                (mobility_centre(mob) - mobility).abs(),
+                (mobility_centre(p.mobility) - mobility).abs(),
             ),
             _ => (false, 0.0),
         };
-        (outside, (centre - mz).abs(), dmob, first)
+        (outside, (p.centre - mz).abs(), dmob, p.first)
     };
     places
         .iter()
         .enumerate()
-        .filter(|(_, p)| (p.0 - mz).abs() <= WINDOW_REACH_MZ)
+        .filter(|(_, p)| {
+            let tol = mz * MS1_TRACE_PPM * 1e-6;
+            mz >= p.iso.0 - tol && mz <= p.iso.1 + tol
+        })
         .min_by(|(_, a), (_, b)| {
             let (ka, kb) = (key(a), key(b));
             ka.0.cmp(&kb.0)
@@ -693,6 +761,7 @@ pub(crate) fn extract(
                     v,
                     Window {
                         centre: s0.isolation_target_mz.unwrap_or(s0.precursor_mz),
+                        iso: isolation_range(s0),
                         mobility: s0.mobility_window,
                         rt: v
                             .iter()
@@ -709,7 +778,12 @@ pub(crate) fn extract(
         let mut by_win: Vec<Vec<usize>> = vec![Vec::new(); wins.len()];
         let places: Vec<Place> = wins
             .iter()
-            .map(|(v, w)| (w.centre, w.mobility, v[0]))
+            .map(|(v, w)| Place {
+                centre: w.centre,
+                iso: w.iso,
+                mobility: w.mobility,
+                first: v[0],
+            })
             .collect();
         for (k, &i) in idx.iter().enumerate() {
             if let Some(w) = window_of(&places, noms[i].prec_mz, noms[i].mobility) {
@@ -866,6 +940,7 @@ mod tests {
             decoy,
             prec_mz: 500.0,
             pred_rt: 10.0,
+            rt_missing: false,
             apex_rt: 10.0,
             dia_llr: llr,
             mobility: f64::NAN,
@@ -894,26 +969,133 @@ mod tests {
         (scans, rt)
     }
 
+    fn place(centre: f64, half: f64, mobility: Option<(u32, u32)>, first: u32) -> Place {
+        Place {
+            centre,
+            iso: (centre - half, centre + half),
+            mobility,
+            first,
+        }
+    }
+
     #[test]
     fn window_of_picks_by_mz_then_mobility_and_breaks_ties_by_first_spectrum() {
         let slices = [
-            (500.0, Some((600, 700)), 40),
-            (500.0, Some((650, 750)), 10),
-            (500.0, Some((700, 800)), 20),
-            (520.0, Some((650, 750)), 5),
+            place(500.0, 1.6, Some((600, 700)), 40),
+            place(500.0, 1.6, Some((650, 750)), 10),
+            place(500.0, 1.6, Some((700, 800)), 20),
+            place(520.0, 1.6, Some((650, 750)), 5),
         ];
         assert_eq!(window_of(&slices, 500.2, 700.0), Some(1));
         assert_eq!(window_of(&slices, 500.2, 750.0), Some(2));
         assert_eq!(window_of(&slices, 500.2, 640.0), Some(0));
         assert_eq!(window_of(&slices, 500.2, 900.0), Some(2), "nearest slice when none holds it");
         assert_eq!(window_of(&slices, 500.2, f64::NAN), Some(1), "earliest of equal slices");
-        let fenced = [(500.0, Some((600, 640)), 1), (501.0, Some((650, 700)), 2)];
+        let fenced = [place(500.0, 1.6, Some((600, 640)), 1), place(501.0, 1.6, Some((650, 700)), 2)];
         assert_eq!(window_of(&fenced, 500.2, 660.0), Some(1), "the window that holds it");
-        assert_eq!(window_of(&fenced, 503.0, 660.0), None, "out of m/z reach");
-        let astral = [(512.0, None, 30), (500.0, None, 7), (503.0, None, 3)];
+        assert_eq!(window_of(&fenced, 503.0, 660.0), None, "outside both isolation ranges");
+        let astral = [place(512.0, 1.6, None, 30), place(500.0, 1.6, None, 7), place(503.0, 1.6, None, 3)];
         assert_eq!(window_of(&astral, 501.0, f64::NAN), Some(1));
         assert_eq!(window_of(&astral, 501.5, f64::NAN), Some(2), "a tie goes to the first spectrum");
         assert_eq!(window_of(&astral, 520.0, f64::NAN), None);
+    }
+
+    #[test]
+    fn a_precursor_inside_a_wide_isolation_window_is_placed_in_it() {
+        let wide = [place(500.0, 10.0, None, 1), place(520.0, 10.0, None, 2)];
+        assert_eq!(window_of(&wide, 503.0, f64::NAN), Some(0), "3 Th from the centre of a 20 Th window");
+        assert_eq!(window_of(&wide, 509.9, f64::NAN), Some(0));
+        assert_eq!(window_of(&wide, 512.5, f64::NAN), Some(1));
+        assert_eq!(window_of(&wide, 531.0, f64::NAN), None, "above every window");
+        let pasef = [
+            place(612.5, 12.5, Some((300, 420)), 4),
+            place(612.5, 12.5, Some((420, 540)), 9),
+            place(637.5, 12.5, Some((300, 420)), 2),
+        ];
+        assert_eq!(window_of(&pasef, 621.0, 500.0), Some(1), "the m/z window, then the mobility slice");
+        assert_eq!(window_of(&pasef, 630.0, 350.0), Some(2));
+        let asym = [Place { centre: 700.0, iso: (699.0, 712.0), mobility: None, first: 0 }];
+        assert_eq!(window_of(&asym, 711.0, f64::NAN), Some(0), "asymmetric offsets");
+        assert_eq!(window_of(&asym, 698.5, f64::NAN), None);
+        let gap = [place(381.42325, 1.0, None, 1), place(383.42416, 1.0, None, 2)];
+        assert_eq!(window_of(&gap, 382.4237, f64::NAN), Some(0), "inside the 0.9 mTh gap");
+    }
+
+    #[test]
+    fn isolation_range_uses_the_offsets_and_falls_back_to_the_reach() {
+        let mut s = Spectrum {
+            isolation_target_mz: Some(600.0),
+            isolation_lower_offset: Some(12.5),
+            isolation_upper_offset: Some(12.5),
+            ..Default::default()
+        };
+        assert_eq!(isolation_range(&s), (587.5, 612.5));
+        s.isolation_upper_offset = None;
+        assert_eq!(isolation_range(&s), (600.0 - WINDOW_REACH_MZ, 600.0 + WINDOW_REACH_MZ));
+    }
+
+    fn edge_features(on: std::ops::Range<usize>, rt_cal_cycle: usize, n_cycles: usize) -> RowFeatures {
+        let mzs: Vec<f64> = (0..12).map(|j| 300.0 + 50.0 * j as f64).collect();
+        let (scans, rt) = window(n_cycles, &mzs, on);
+        let w = Window {
+            centre: 500.0,
+            iso: (499.0, 501.0),
+            mobility: None,
+            rt: rt.clone(),
+            scans: scans.iter().map(|s| s.as_slice()).collect(),
+        };
+        let ids: Vec<u32> = (0..n_cycles as u32).collect();
+        let n = nominee(false, 20.0, mzs.iter().map(|&m| (m, 1.0)).collect());
+        let rt_cal = rt[rt_cal_cycle];
+        let t = trace(&w, &n, rt_cal, 1.0);
+        let terms = [(2.0, -1.0); TOP_IONS];
+        row_features(&w, &ids, &n, &t, &terms, rt_cal)
+    }
+
+    #[test]
+    fn lsum3_stays_bounded_when_the_best_cycle_is_the_first_of_the_run() {
+        let f = edge_features(0..1, 0, 120);
+        let v = |c: &str| f.vals[col_ix(c)];
+        assert_eq!(v("p2_llr"), 24.0);
+        assert_eq!(v("p2_lsum3"), (LLR_FLOOR + 24.0 - 12.0) as f32);
+        let f = edge_features(119..120, 119, 120);
+        assert_eq!(f.vals[col_ix("p2_lsum3")], (LLR_FLOOR + 24.0 - 12.0) as f32, "last cycle of the run");
+    }
+
+    #[test]
+    fn lsum3_counts_the_best_cycle_once_at_the_trace_edge() {
+        let f = edge_features(0..120, 60, 200);
+        let v = |c: &str| f.vals[col_ix(c)];
+        assert_eq!(v("p2_llr"), 24.0);
+        assert_eq!(v("p2_lsum3"), (LLR_FLOOR + 24.0 + 24.0) as f32, "best at trace cycle 0");
+        let short = edge_features(0..3, 1, 3);
+        let v = |c: &str| short.vals[col_ix(c)];
+        assert_eq!(v("p2_llr2"), LLR_FLOOR as f32, "no far cycle in a three-cycle run");
+        assert_eq!(v("p2_lsum3"), (LLR_FLOOR + 24.0 + 24.0) as f32);
+    }
+
+    #[test]
+    fn rows_without_an_rt_prediction_stay_out_of_the_ridge() {
+        let mut noms: Vec<Nominee> = (0..200)
+            .map(|i| {
+                let mut n = nominee(false, 20.0, vec![(300.0, 1.0)]);
+                n.pred_rt = i as f64 * 0.1;
+                n.apex_rt = 1.0 + 0.9 * n.pred_rt;
+                n
+            })
+            .collect();
+        let clean: Vec<&Nominee> = noms.iter().collect();
+        let cal_clean = calibrate_rt(&clean);
+        noms.extend((0..200).map(|i| {
+            let mut n = nominee(false, 20.0, vec![(300.0, 1.0)]);
+            n.pred_rt = 10.0;
+            n.apex_rt = i as f64 * 0.3;
+            n.rt_missing = true;
+            n
+        }));
+        let all: Vec<&Nominee> = noms.iter().collect();
+        let cal_all = calibrate_rt(&all);
+        assert_eq!(&cal_all[..200], &cal_clean[..]);
     }
 
     #[test]
@@ -922,6 +1104,7 @@ mod tests {
         let (scans, rt) = window(120, &mzs, 32..36);
         let w = Window {
             centre: 500.0,
+            iso: (499.0, 501.0),
             mobility: None,
             rt: rt.clone(),
             scans: scans.iter().map(|s| s.as_slice()).collect(),

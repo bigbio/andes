@@ -37,17 +37,22 @@ from ms2_common import CARBAMIDOMETHYL, ITRAQ_MODS, TMT_MODS, label_of_mods, par
 
 # Training-label rules (plan Global Constraints, user ruling 2026-11-20). A hard example is a peptide of
 # at most HARD_MAX_LENGTH residues, a matched-intensity share in the bottom quartile of its extraction
-# unit and activation, or a modification outside COMMON_MODS. A PSM is a training label only when at
-# least MIN_VOTES independent identifications of the same scan agree on its peptidoform: the engines of
-# VOTE_ENGINES (each with its own Percolator at q <= 0.01), the submitters' identifications, and the
-# source's own identification when its engine is not one of VOTE_ENGINES. A hard example also needs
-# every engine of HARD_ENGINES.
+# unit and activation, or a modification outside COMMON_MODS. The engine panel is VOTE_ENGINES, each
+# run with its own FDR control at q <= 0.01 on the same FASTA, modifications and enzyme. A PSM is a
+# training label only when at least MIN_VOTES independent non-andes identifications of the same scan agree
+# on its peptidoform (the andes column is recorded but never counts); a hard example needs MIN_VOTES_HARD.
+# Independent votes: every panel engine but andes, the submitters' identifications, and the source's own
+# identification when its engine is outside the panel and not in NO_VOTE_SOURCES (MS-GF+ is excluded
+# because andes descends from it).
 HARD_MAX_LENGTH = 9
 HARD_EXPLAINED_QUANTILE = 0.25
 COMMON_MODS = frozenset({CARBAMIDOMETHYL, 35, 21}) | TMT_MODS | ITRAQ_MODS
-VOTE_ENGINES = ("andes", "comet", "msfragger")
-HARD_ENGINES = ("comet", "msfragger")
+VOTE_ENGINES = ("andes", "comet", "msfragger", "sage", "maxquant")
+VOTE_SOURCES = VOTE_ENGINES + ("submitter",)
+NON_VOTING = ("andes",)
+NO_VOTE_SOURCES = ("andes", "msgf+", "msgfplus")
 MIN_VOTES = 2
+MIN_VOTES_HARD = 3
 # A run is labelled TMT / iTRAQ when at least this share of its PSMs carries the tag.
 RUN_LABEL_SHARE = 0.5
 
@@ -116,7 +121,7 @@ def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
         r["hard"] = (len(r["sequence"]) <= HARD_MAX_LENGTH or r["explained"] < cut[r["activation"]]
                      or any(uid not in COMMON_MODS for _, uid in r["mods"]))
         r["source_engine"] = source_engine
-        for e in VOTE_ENGINES + ("submitter",):
+        for e in VOTE_SOURCES:
             r[f"agree_{e}"] = None
         r["n_engines"] = None
         del r["mods"]
@@ -126,20 +131,20 @@ def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
 def finalize_rows(rows: list[dict], votes: dict):
     """Set the agreement columns and keep only multi-engine labels.
 
-    ``votes`` maps ``andes`` / ``comet`` / ``msfragger`` / ``submitter`` to ``{(run, scan): peptidoform}``
-    of that source's confident identifications, or to None when the source did not run (the column stays
-    null). ``agree_<e>`` is True when the source names the same identification, False when it names another
-    or none. ``n_engines`` counts the True columns plus the row's own source when its engine is not one of
-    ``VOTE_ENGINES``. Kept: ``n_engines >= MIN_VOTES``, and for hard rows every ``HARD_ENGINES`` column True.
-    Returns (kept rows, counts)."""
+    ``votes`` maps each ``VOTE_SOURCES`` name to ``{(run, scan): peptidoform}`` of that source's confident
+    identifications, or to None when the source did not run (the column stays null). ``agree_<e>`` is True
+    when the source names the same identification, False when it names another or none. ``n_engines``
+    counts the independent agreeing votes (see the module constants). Kept: ``n_engines >= MIN_VOTES``, hard
+    rows ``>= MIN_VOTES_HARD``. Returns (kept rows, counts)."""
     st = {"rows": len(rows), "hard": 0, "dropped_votes": 0, "dropped_hard": 0, "kept": 0}
-    for e in VOTE_ENGINES + ("submitter",):
+    for e in VOTE_SOURCES:
         st[f"agree_{e}_true"] = st[f"agree_{e}_false"] = st[f"agree_{e}_null"] = 0
     kept = []
     for r in rows:
         key = (r["run"], int(r["scan"]))
-        n = 0 if r["source_engine"] in VOTE_ENGINES else 1
-        for e in VOTE_ENGINES + ("submitter",):
+        src = str(r["source_engine"]).lower()
+        n = 0 if src in VOTE_ENGINES or src in NO_VOTE_SOURCES else 1
+        for e in VOTE_SOURCES:
             v = votes.get(e)
             if v is None:
                 r[f"agree_{e}"] = None
@@ -147,13 +152,13 @@ def finalize_rows(rows: list[dict], votes: dict):
                 theirs = v.get(key)
                 r[f"agree_{e}"] = theirs is not None and same_identification(r["peptidoform"], theirs)
             st[f"agree_{e}_" + {None: "null", True: "true", False: "false"}[r[f"agree_{e}"]]] += 1
-            n += r[f"agree_{e}"] is True
+            n += r[f"agree_{e}"] is True and e not in NON_VOTING
         r["n_engines"] = n
         st["hard"] += bool(r["hard"])
         if n < MIN_VOTES:
             st["dropped_votes"] += 1
             continue
-        if r["hard"] and not all(r[f"agree_{e}"] is True for e in HARD_ENGINES):
+        if r["hard"] and n < MIN_VOTES_HARD:
             st["dropped_hard"] += 1
             continue
         kept.append(r)

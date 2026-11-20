@@ -71,13 +71,14 @@ One row per annotated PSM. Shards carry the key metadata `andes.ms2_shard.schema
 | `label` | Isobaric label of the run: `none`, `TMT` or `iTRAQ` (at least half of the run's PSMs carry the tag) |
 | `hard` | Hard example: at most 9 residues, matched-intensity share in the bottom quartile (per extraction unit and activation), or a modification outside Carbamidomethyl/Oxidation/Phospho/TMT/iTRAQ |
 | `source_engine` | Engine of the identification the row was selected from (`comet` for quantms qpx tables) |
-| `agree_andes`, `agree_comet`, `agree_msfragger`, `agree_submitter` | That source identifies the scan with the same peptidoform (I = L, carbamidomethylation ignored); null when the source did not run |
-| `n_engines` | Agreeing identifications: the true `agree_*` columns, plus the source when its engine is not andes, Comet or MSFragger |
+| `agree_andes`, `agree_comet`, `agree_msfragger`, `agree_sage`, `agree_maxquant`, `agree_submitter` | That source identifies the scan with the same peptidoform (I = L, carbamidomethylation ignored); null when the source did not run |
+| `n_engines` | Independent agreeing non-andes votes: the true `agree_*` columns except andes, plus the source when its engine is outside the panel and is not MS-GF+ (andes descends from it) |
 
 Two stages. The extractors write *candidate* shards (`andes.ms2_shard.finalized` = `false`, agreement columns
 null, nothing dropped). `ms2_finalize.py --votes ENGINE=PATH ...` sets the agreement columns from each engine's
 own Percolator q ≤ 0.01 identifications (same FASTA, modifications and enzyme) and keeps a row when
-`n_engines` ≥ 2, and a hard row only when Comet and MSFragger both agree (`finalized` = `true`).
+`n_engines` ≥ 2, a hard row when `n_engines` ≥ 3 (`finalized` = `true`). The panel is andes, Comet, MSFragger,
+Sage and MaxQuant; the andes column is recorded but never counts.
 
 Annotation details:
 - Tolerance is 20 ppm for FTMS/ASTMS/TOF and 0.5 Da for ITMS.

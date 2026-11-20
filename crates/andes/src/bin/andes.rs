@@ -10,6 +10,8 @@ mod cli;
 mod config;
 #[path = "andes/dia.rs"]
 mod dia;
+#[path = "andes/dia_llr.rs"]
+mod dia_llr;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]

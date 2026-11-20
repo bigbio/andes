@@ -134,6 +134,41 @@ pub fn measure_on_queues(
     })
 }
 
+pub fn dia_ms1_offset_ppm(
+    prepared: &PreparedSearch<'_>,
+    sample: &[Spectrum],
+    queues: &[crate::TopNQueue],
+    window_ppm: f64,
+) -> Option<(f64, usize)> {
+    let mut tops: Vec<(usize, u32, u8)> = Vec::new();
+    let mut labels: Vec<ScoredLabel> = Vec::new();
+    for (i, q) in queues.iter().enumerate() {
+        if let Some(p) = q.peek_top() {
+            let idx = p.primary_candidate_idx();
+            tops.push((i, idx, p.charge_used));
+            labels.push(ScoredLabel {
+                score: p.rank_score,
+                is_decoy: prepared.candidate_is_decoy(idx),
+            });
+        }
+    }
+    let mut ppm: Vec<f64> = Vec::new();
+    for k in confident_target_indices(&labels, MEASURE_Q) {
+        let (si, idx, z) = tops[k];
+        let Some(spec) = sample.get(si) else {
+            continue;
+        };
+        let mz = prepared.candidate_peptide(idx).mass() / f64::from(z) + PROTON;
+        if let Some(e) = prepared.dia_ms1_error_ppm(spec.rt_seconds, mz, window_ppm) {
+            ppm.push(e);
+        }
+    }
+    if ppm.len() < MIN_CONFIDENT_PSMS {
+        return None;
+    }
+    median_mad(&ppm, Even::Mean).map(|(c, _)| (c, ppm.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

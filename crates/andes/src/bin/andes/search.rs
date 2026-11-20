@@ -96,6 +96,42 @@ fn score_mass_ordered(
     }
 }
 
+fn recalibrate_dia_ms1(prepared: &mut PreparedSearch, pending: &[Spectrum], span_da: f64) {
+    const SAMPLE: usize = 20_000;
+    const WINDOW_PPM: f64 = 25.0;
+    let t = std::time::Instant::now();
+    let mut refs: Vec<&Spectrum> = pending.iter().filter(|s| s.peaks.len() >= 10).collect();
+    refs.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+    let n = SAMPLE.min(refs.len());
+    let lo = (refs.len() / 2).saturating_sub(n / 2);
+    let sample: Vec<Spectrum> = refs[lo..lo + n].iter().map(|s| (*s).clone()).collect();
+    drop(refs);
+    let mut wide = prepared.params.clone();
+    wide.dia_ms1_tol_ppm = WINDOW_PPM;
+    let mut queues: Vec<TopNQueue> = Vec::with_capacity(sample.len());
+    let mut start = 0;
+    while start < sample.len() {
+        let take = index_chunk_len(&sample[start..], index_order_mass, span_da);
+        queues.extend(prepared.run_chunk_with_params(&sample[start..start + take], start, &wide));
+        start += take;
+    }
+    match search::fragment_error::dia_ms1_offset_ppm(prepared, &sample, &queues, WINDOW_PPM) {
+        Some((ppm, n)) => {
+            prepared.shift_dia_ms1_ppm(ppm);
+            log::info!(
+                target: "dia",
+                "MS1 m/z offset {ppm:+.2} ppm from {n} confident PSMs; survey peaks recentred ({:.1}s)",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        None => log::info!(
+            target: "dia",
+            "MS1 m/z offset not measured (too few confident PSMs) ({:.1}s)",
+            t.elapsed().as_secs_f64()
+        ),
+    }
+}
+
 struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
@@ -728,6 +764,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     {
                         let mut reader = input::TimsTofReader::open(&spectrum_path)
                             .map_err(|e| format!("open Bruker .d: {e}"))?
+                            .with_dia_mobility_slices(cli.dia_mobility_slices)
                             .with_run_ms1_capture(capture_ms1)
                             .with_ms1_mobility(true)
                             .with_scan_context_capture(capture_context);
@@ -1027,6 +1064,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let mut reader = input::TimsTofReader::open(&spectrum_path)
                                 .map_err(|e| format!("open Bruker .d: {e}"))?
+                                .with_dia_mobility_slices(cli.dia_mobility_slices)
                                 .with_run_ms1_capture(capture_ms1)
                                 .with_ms1_mobility(true)
                                 .with_scan_context_capture(capture_context);
@@ -1113,6 +1151,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     std::mem::take(&mut run_scans.ms1)
                 });
+                if file_is_d {
+                    recalibrate_dia_ms1(
+                        &mut prepared,
+                        &pending,
+                        index_chunk_span_da(cli.fragment_index_slice_da),
+                    );
+                }
             }
             if mass_ordered {
                 score_mass_ordered(

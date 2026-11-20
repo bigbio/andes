@@ -869,6 +869,8 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             dia: false,
+            dia_ms1_tol_ppm: 5.0,
+            dia_vote_filter: None,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,

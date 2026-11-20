@@ -40,8 +40,29 @@ use scoring_crate::scoring::{
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
-const DIA_MS1_GATE_PPM: f64 = 5.0;
 const DIA_MS1_GATE_SCANS: usize = 1;
+
+fn windowed_top_k(peaks: &[(f64, f32)], width: f64, k: usize) -> Vec<(f64, f32)> {
+    let mut by_window: Vec<(i64, f32, usize)> = peaks
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ((p.0 / width).floor() as i64, p.1, i))
+        .collect();
+    by_window.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+    let mut keep: Vec<usize> = Vec::with_capacity(peaks.len().min(k * 32));
+    let (mut win, mut n) = (i64::MIN, 0usize);
+    for &(w, _, i) in &by_window {
+        if w != win {
+            (win, n) = (w, 0);
+        }
+        if n < k {
+            keep.push(i);
+            n += 1;
+        }
+    }
+    keep.sort_unstable();
+    keep.into_iter().map(|i| peaks[i]).collect()
+}
 
 pub type ScorerLoader = Box<dyn Fn(ActivationMethod) -> Option<RankScorer> + Send + Sync>;
 
@@ -639,8 +660,33 @@ impl<'a> PreparedSearch<'a> {
         std::mem::take(&mut self.dia_ms1)
     }
 
-    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
-        let tol = mz * DIA_MS1_GATE_PPM * 1e-6;
+    pub fn shift_dia_ms1_ppm(&mut self, ppm: f64) {
+        let f = 1.0 - ppm * 1e-6;
+        for s in &mut self.dia_ms1 {
+            for p in &mut s.peaks {
+                p.0 *= f;
+            }
+        }
+    }
+
+    pub fn dia_ms1_error_ppm(&self, rt: Option<f64>, mz: f64, window_ppm: f64) -> Option<f64> {
+        let tol = mz * window_ppm * 1e-6;
+        self.dia_ms1_scans(rt)?
+            .filter_map(|k| {
+                let s = &self.dia_ms1[k];
+                let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+                s.peaks[i..]
+                    .iter()
+                    .take_while(|p| p.0 <= mz + tol)
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .copied()
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|p| (p.0 - mz) / mz * 1e6)
+    }
+
+    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64, tol_ppm: f64) -> bool {
+        let tol = mz * tol_ppm * 1e-6;
         self.dia_ms1[scans].iter().any(|s| {
             let i = s.peaks.partition_point(|p| p.0 < mz - tol);
             s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
@@ -1047,12 +1093,25 @@ impl<'a> PreparedSearch<'a> {
                         ms1_gate.clone().is_none_or(|r| {
                             dia_windows.iter().any(|&(z, lo, hi)| {
                                 (lo..=hi).contains(&mass)
-                                    && self.dia_ms1_has(r.clone(), mass / z as f64 + PROTON)
+                                    && self.dia_ms1_has(
+                                        r.clone(),
+                                        mass / z as f64 + PROTON,
+                                        params.dia_ms1_tol_ppm,
+                                    )
                             })
                         })
                     };
+                    let voted =
+                        params
+                            .dia_vote_filter
+                            .filter(|_| params.dia)
+                            .map(|(w, k)| Spectrum {
+                                peaks: windowed_top_k(&spec.peaks, w, k),
+                                title: String::new(),
+                                ..*spec
+                            });
                     let sel = fi.query_where(
-                        spec,
+                        voted.as_ref().unwrap_or(spec),
                         &charges_to_try,
                         params,
                         scorer.feature_match_tolerance(),
@@ -1121,9 +1180,9 @@ impl<'a> PreparedSearch<'a> {
                             let mass = cand.peptide.mass();
                             let mono_mz = mass / z as f64 + PROTON;
                             if (lo..=hi).contains(&mass)
-                                && ms1_gate
-                                    .clone()
-                                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz))
+                                && ms1_gate.clone().is_none_or(|r| {
+                                    self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm)
+                                })
                             {
                                 iso_errs.push(MassError {
                                     mass_error_da: 0.0,
@@ -2382,10 +2441,38 @@ mod accumulator_tests {
         assert_eq!(prepared.dia_ms1_scans(None), None);
         let r = prepared.dia_ms1_scans(Some(9.0)).unwrap();
         assert_eq!(r, 0..2);
-        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6)));
-        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6)));
-        assert!(!prepared.dia_ms1_has(r, 700.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6), 5.0));
+        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 5.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 25.0));
+        assert!(!prepared.dia_ms1_has(r, 700.0, 25.0));
         assert_eq!(prepared.dia_ms1_scans(Some(26.0)).unwrap(), 1..3);
+
+        let e = prepared
+            .dia_ms1_error_ppm(Some(20.0), 600.0 * (1.0 - 7e-6), 25.0)
+            .unwrap();
+        assert!((e - 7.0).abs() < 1e-3, "{e}");
+        assert_eq!(prepared.dia_ms1_error_ppm(Some(20.0), 650.0, 25.0), None);
+        prepared.shift_dia_ms1_ppm(7.0);
+        let e = prepared
+            .dia_ms1_error_ppm(Some(20.0), 600.0 * (1.0 - 7e-6), 25.0)
+            .unwrap();
+        assert!(e.abs() < 1e-3, "{e}");
+    }
+
+    #[test]
+    fn windowed_top_k_keeps_the_k_most_intense_per_window_in_mz_order() {
+        let peaks = [
+            (101.0, 1.0),
+            (150.0, 5.0),
+            (180.0, 3.0),
+            (199.0, 4.0),
+            (250.0, 2.0),
+        ];
+        assert_eq!(
+            windowed_top_k(&peaks, 100.0, 2),
+            vec![(150.0, 5.0), (199.0, 4.0), (250.0, 2.0)]
+        );
+        assert_eq!(windowed_top_k(&peaks, 100.0, 9), peaks.to_vec());
     }
 }
 

@@ -6,6 +6,9 @@ the results table are the steps that were kept, in order; the sections after it 
 that was tested and dropped, with its numbers. This is the
 dataset and the evaluation OpenDIA uses, so the numbers below compare directly with OpenDIA's and DIA-NN's.
 
+A benchmark on public inputs that fits 4 cores and 15 GB, with the merged DIA commits measured
+against each other and later variants, is in [`public/`](public/README.md).
+
 ## Data
 
 - ProteoBench `LFQ_Astral_DIA_15min_50ng_Human` runs 01 and 02 (Orbitrap Astral, 300 isolation windows of 2 Th

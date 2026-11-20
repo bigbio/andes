@@ -35,14 +35,35 @@ use scoring_crate::scoring::{
     edge_scoring_enabled, frag_llr_battery, fragment_ambiguity, fuse_strong_score,
     intensity_signal, mass_competition_evidence, predict_frag_intensities, psm_edge_score,
     rich_ion_llr, score_psm, score_psm_float, scored_for_charge, strong_score_calibrated,
-    theoretical_fragment_ions, FragmentIon, MatchedIon, OnlineStats, RankScorer, ScoredSpectrum,
-    StrongScoreInputs, DENSITY_HW,
+    strong_score_calibrated_loo, theoretical_fragment_ions, FragmentIon, MatchedIon, OnlineStats,
+    RankScorer, ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
-const DIA_MS1_GATE_PPM: f64 = 5.0;
 const DIA_MS1_GATE_SCANS: usize = 1;
+
+fn windowed_top_k(peaks: &[(f64, f32)], width: f64, k: usize) -> Vec<(f64, f32)> {
+    let mut by_window: Vec<(i64, f32, usize)> = peaks
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ((p.0 / width).floor() as i64, p.1, i))
+        .collect();
+    by_window.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+    let mut keep: Vec<usize> = Vec::with_capacity(peaks.len().min(k * 32));
+    let (mut win, mut n) = (i64::MIN, 0usize);
+    for &(w, _, i) in &by_window {
+        if w != win {
+            (win, n) = (w, 0);
+        }
+        if n < k {
+            keep.push(i);
+            n += 1;
+        }
+    }
+    keep.sort_unstable();
+    keep.into_iter().map(|i| peaks[i]).collect()
+}
 
 pub type ScorerLoader = Box<dyn Fn(ActivationMethod) -> Option<RankScorer> + Send + Sync>;
 
@@ -640,8 +661,33 @@ impl<'a> PreparedSearch<'a> {
         std::mem::take(&mut self.dia_ms1)
     }
 
-    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
-        let tol = mz * DIA_MS1_GATE_PPM * 1e-6;
+    pub fn shift_dia_ms1_ppm(&mut self, ppm: f64) {
+        let f = 1.0 - ppm * 1e-6;
+        for s in &mut self.dia_ms1 {
+            for p in &mut s.peaks {
+                p.0 *= f;
+            }
+        }
+    }
+
+    pub fn dia_ms1_error_ppm(&self, rt: Option<f64>, mz: f64, window_ppm: f64) -> Option<f64> {
+        let tol = mz * window_ppm * 1e-6;
+        self.dia_ms1_scans(rt)?
+            .filter_map(|k| {
+                let s = &self.dia_ms1[k];
+                let i = s.peaks.partition_point(|p| p.0 < mz - tol);
+                s.peaks[i..]
+                    .iter()
+                    .take_while(|p| p.0 <= mz + tol)
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .copied()
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|p| (p.0 - mz) / mz * 1e6)
+    }
+
+    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64, tol_ppm: f64) -> bool {
+        let tol = mz * tol_ppm * 1e-6;
         self.dia_ms1[scans].iter().any(|s| {
             let i = s.peaks.partition_point(|p| p.0 < mz - tol);
             s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
@@ -695,7 +741,11 @@ impl<'a> PreparedSearch<'a> {
             || params.charge_range.clone().count() < 2
             || spectra.iter().all(has_charge)
         {
-            return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
+            return self
+                .run_chunk_inner(spectra, spectrum_idx_offset, params)
+                .into_iter()
+                .map(|(queue, _pool)| queue)
+                .collect();
         }
         let mass = crate::fragment_index::index_order_mass;
         let (lo, hi) = spectra
@@ -719,19 +769,24 @@ impl<'a> PreparedSearch<'a> {
         let mut merged: Vec<TopNQueue> = (0..spectra.len())
             .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
             .collect();
+        let mut pools: Vec<Vec<f32>> = vec![Vec::new(); spectra.len()];
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for (mut q, i) in self
+            for ((mut q, pool), i) in self
                 .run_chunk_inner(&chunk, 0, params)
                 .into_iter()
                 .zip(owners)
             {
+                pools[i].extend(pool);
                 for mut psm in q.drain_into_vec() {
                     psm.spectrum_idx = spectrum_idx_offset + i;
                     merged[i].push(psm);
                 }
             }
+        }
+        for (queue, pool) in merged.iter_mut().zip(&pools) {
+            recalibrate_strong_over_spectrum(queue, pool);
         }
         merged
     }
@@ -874,12 +929,15 @@ impl<'a> PreparedSearch<'a> {
         }
     }
 
+    /// Scores each spectrum of `spectra` at every charge it is searched with and returns, per
+    /// spectrum, its retained PSMs and the strong scores of the pool its `strong_score_cal` was
+    /// calibrated against (empty when the spectrum was skipped).
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
-    ) -> Vec<TopNQueue> {
+    ) -> Vec<(TopNQueue, Vec<f32>)> {
         let scorer_set = self.scorer_set(spectra);
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
@@ -982,7 +1040,7 @@ impl<'a> PreparedSearch<'a> {
         self.chunk_prep_nanos
             .fetch_add(t_chunk_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        let queues: Vec<TopNQueue> = spectra
+        let queues: Vec<(TopNQueue, Vec<f32>)> = spectra
             .par_iter()
             .enumerate()
             .map(|(local_idx, spec)| {
@@ -992,7 +1050,7 @@ impl<'a> PreparedSearch<'a> {
                 let mut queue = TopNQueue::new(retention_cap);
 
                 if spec.peaks.len() < params.min_peaks as usize {
-                    return queue;
+                    return (queue, Vec::new());
                 }
 
                 let mut best_raw = i32::MIN;
@@ -1048,12 +1106,25 @@ impl<'a> PreparedSearch<'a> {
                         ms1_gate.clone().is_none_or(|r| {
                             dia_windows.iter().any(|&(z, lo, hi)| {
                                 (lo..=hi).contains(&mass)
-                                    && self.dia_ms1_has(r.clone(), mass / z as f64 + PROTON)
+                                    && self.dia_ms1_has(
+                                        r.clone(),
+                                        mass / z as f64 + PROTON,
+                                        params.dia_ms1_tol_ppm,
+                                    )
                             })
                         })
                     };
+                    let voted =
+                        params
+                            .dia_vote_filter
+                            .filter(|_| params.dia)
+                            .map(|(w, k)| Spectrum {
+                                peaks: windowed_top_k(&spec.peaks, w, k),
+                                title: String::new(),
+                                ..*spec
+                            });
                     let sel = fi.query_where(
-                        spec,
+                        voted.as_ref().unwrap_or(spec),
                         &charges_to_try,
                         params,
                         scorer.feature_match_tolerance(),
@@ -1122,9 +1193,9 @@ impl<'a> PreparedSearch<'a> {
                             let mass = cand.peptide.mass();
                             let mono_mz = mass / z as f64 + PROTON;
                             if (lo..=hi).contains(&mass)
-                                && ms1_gate
-                                    .clone()
-                                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz))
+                                && ms1_gate.clone().is_none_or(|r| {
+                                    self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm)
+                                })
                             {
                                 iso_errs.push(MassError {
                                     mass_error_da: 0.0,
@@ -1520,12 +1591,25 @@ impl<'a> PreparedSearch<'a> {
                     self.open_rescore_wins
                         .fetch_add(open_wins, Ordering::Relaxed);
                 }
-                queue
+                (queue, retained_strong)
             })
             .collect();
 
         queues
     }
+}
+
+/// Re-calibrates `strong_score_cal` of every PSM of one spectrum against `pool`, the strong
+/// scores retained over every charge the spectrum was searched with. With fewer than two pooled
+/// scores the per-charge value is kept.
+fn recalibrate_strong_over_spectrum(queue: &mut TopNQueue, pool: &[f32]) {
+    if pool.len() < 2 {
+        return;
+    }
+    queue.update_in_place(|psm| {
+        psm.features.strong_score_cal =
+            strong_score_calibrated_loo(pool, psm.features.strong_score);
+    });
 }
 
 pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;
@@ -2382,10 +2466,38 @@ mod accumulator_tests {
         assert_eq!(prepared.dia_ms1_scans(None), None);
         let r = prepared.dia_ms1_scans(Some(9.0)).unwrap();
         assert_eq!(r, 0..2);
-        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6)));
-        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6)));
-        assert!(!prepared.dia_ms1_has(r, 700.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6), 5.0));
+        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 5.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 25.0));
+        assert!(!prepared.dia_ms1_has(r, 700.0, 25.0));
         assert_eq!(prepared.dia_ms1_scans(Some(26.0)).unwrap(), 1..3);
+
+        let e = prepared
+            .dia_ms1_error_ppm(Some(20.0), 600.0 * (1.0 - 7e-6), 25.0)
+            .unwrap();
+        assert!((e - 7.0).abs() < 1e-3, "{e}");
+        assert_eq!(prepared.dia_ms1_error_ppm(Some(20.0), 650.0, 25.0), None);
+        prepared.shift_dia_ms1_ppm(7.0);
+        let e = prepared
+            .dia_ms1_error_ppm(Some(20.0), 600.0 * (1.0 - 7e-6), 25.0)
+            .unwrap();
+        assert!(e.abs() < 1e-3, "{e}");
+    }
+
+    #[test]
+    fn windowed_top_k_keeps_the_k_most_intense_per_window_in_mz_order() {
+        let peaks = [
+            (101.0, 1.0),
+            (150.0, 5.0),
+            (180.0, 3.0),
+            (199.0, 4.0),
+            (250.0, 2.0),
+        ];
+        assert_eq!(
+            windowed_top_k(&peaks, 100.0, 2),
+            vec![(150.0, 5.0), (199.0, 4.0), (250.0, 2.0)]
+        );
+        assert_eq!(windowed_top_k(&peaks, 100.0, 9), peaks.to_vec());
     }
 }
 
@@ -2520,6 +2632,7 @@ mod chargeless_unit_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 
@@ -2712,6 +2825,7 @@ mod feature_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         }
     }
 

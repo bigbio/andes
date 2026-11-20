@@ -22,6 +22,7 @@ pub(crate) struct PasefPrecursor {
     pub isolation_width: f64,
     pub collision_energy: f64,
     pub selections: Vec<Selection>,
+    pub dia: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,18 +63,139 @@ pub(crate) fn read_frame_rows(
     Ok(out)
 }
 
+pub(crate) fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+}
+
+type DiaWindow = (usize, usize, f64, f64, f64);
+
+pub(crate) fn mobility_slices(begin: usize, end: usize, n: usize) -> Vec<(usize, usize)> {
+    if n <= 1 || end - begin < 2 * n {
+        return vec![(begin, end)];
+    }
+    let len = end - begin;
+    (0..n)
+        .map(|k| (begin + k * len / (n + 1), begin + (k + 2) * len / (n + 1)))
+        .collect()
+}
+
+pub(crate) fn read_dia_windows(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<PasefPrecursor>, rusqlite::Error> {
+    if !has_table(conn, "DiaFrameMsMsInfo")? || !has_table(conn, "DiaFrameMsMsWindows")? {
+        return Ok(Vec::new());
+    }
+    let mut groups: HashMap<i64, Vec<DiaWindow>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT WindowGroup, ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth, \
+         CollisionEnergy FROM DiaFrameMsMsWindows ORDER BY WindowGroup, ScanNumBegin",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Option<f64>>(3)?,
+            r.get::<_, Option<f64>>(4)?,
+            r.get::<_, Option<f64>>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (group, begin, end, mz, width, energy) = row?;
+        let mz = mz.filter(|m| m.is_finite() && *m > 0.0);
+        if let (Some(mz), true) = (mz, begin >= 0 && end > begin) {
+            groups.entry(group).or_default().push((
+                begin as usize,
+                end as usize,
+                mz,
+                width.unwrap_or(0.0),
+                energy.unwrap_or(0.0),
+            ));
+        }
+    }
+    let mut parent_of: HashMap<i64, usize> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT Id, MsMsType FROM Frames ORDER BY Id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut last_ms1: Option<usize> = None;
+    for row in rows {
+        let (id, kind) = row?;
+        if kind == Some(0) {
+            last_ms1 = Some(id as usize);
+        } else if let Some(p) = last_ms1 {
+            parent_of.insert(id, p);
+        }
+    }
+    let mut out = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT Frame, WindowGroup FROM DiaFrameMsMsInfo ORDER BY Frame")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (frame, group) = row?;
+        for &(begin, end, mz, width, energy) in groups.get(&group).into_iter().flatten() {
+            out.push(PasefPrecursor {
+                id: out.len() + 1,
+                mz,
+                charge: None,
+                intensity: None,
+                parent: parent_of.get(&frame).copied(),
+                scan_number: None,
+                isolation_width: width,
+                collision_energy: energy,
+                selections: vec![Selection {
+                    frame_id: frame as usize,
+                    scan_begin: begin,
+                    scan_end: end,
+                }],
+                dia: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn slice_dia_windows(precursors: Vec<PasefPrecursor>, n: usize) -> Vec<PasefPrecursor> {
+    if n <= 1 || !precursors.iter().all(|p| p.dia) {
+        return precursors;
+    }
+    let mut out = Vec::with_capacity(precursors.len() * n);
+    for p in precursors {
+        let parts = match p.selections.as_slice() {
+            [s] => mobility_slices(s.scan_begin, s.scan_end, n),
+            _ => Vec::new(),
+        };
+        if parts.len() < 2 {
+            out.push(PasefPrecursor {
+                id: out.len() + 1,
+                ..p
+            });
+            continue;
+        }
+        for (lo, hi) in parts {
+            out.push(PasefPrecursor {
+                id: out.len() + 1,
+                selections: vec![Selection {
+                    scan_begin: lo,
+                    scan_end: hi,
+                    ..p.selections[0]
+                }],
+                ..p.clone()
+            });
+        }
+    }
+    out
+}
+
 pub(crate) fn read_pasef_precursors(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<PasefPrecursor>, rusqlite::Error> {
-    let has_table = |name: &str| -> Result<bool, rusqlite::Error> {
-        conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-    };
-    if !has_table("Precursors")? || !has_table("PasefFrameMsMsInfo")? {
+    if !has_table(conn, "Precursors")? || !has_table(conn, "PasefFrameMsMsInfo")? {
         return Ok(Vec::new());
     }
     let mut by_id: HashMap<usize, PasefPrecursor> = HashMap::new();
@@ -112,6 +234,7 @@ pub(crate) fn read_pasef_precursors(
                 isolation_width: 0.0,
                 collision_energy: 0.0,
                 selections: Vec::new(),
+                dia: false,
             },
         );
     }
@@ -273,6 +396,118 @@ mod tests {
         assert!(read_pasef_precursors(&conn).unwrap().is_empty());
         let frames = read_frame_rows(&conn).unwrap();
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn dia_windows_expand_to_one_precursor_per_frame_and_window() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Frames (Id INTEGER, Time REAL, NumPeaks INTEGER, MsMsType INTEGER);
+             INSERT INTO Frames VALUES (1, 0.1, 10, 0), (2, 0.2, 10, 9), (3, 0.3, 10, 9),
+               (4, 0.4, 10, 0), (5, 0.5, 10, 9);
+             CREATE TABLE DiaFrameMsMsInfo (Frame INTEGER, WindowGroup INTEGER);
+             INSERT INTO DiaFrameMsMsInfo VALUES (2, 1), (3, 2), (5, 1);
+             CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, \
+               ScanNumEnd INTEGER, IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL);
+             INSERT INTO DiaFrameMsMsWindows VALUES (1, 400, 600, 745.0, 45.0, 40.0),
+               (1, 100, 300, 417.0, 35.0, 25.0), (2, 100, 300, 452.0, 37.0, 26.0);",
+        )
+        .unwrap();
+        assert!(read_pasef_precursors(&conn).unwrap().is_empty());
+        let w = read_dia_windows(&conn).unwrap();
+        let got: Vec<(usize, f64, Option<usize>, usize)> = w
+            .iter()
+            .map(|p| {
+                (
+                    p.selections[0].frame_id,
+                    p.mz,
+                    p.parent,
+                    p.selections[0].scan_begin,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (2, 417.0, Some(1), 100),
+                (2, 745.0, Some(1), 400),
+                (3, 452.0, Some(1), 100),
+                (5, 417.0, Some(4), 100),
+                (5, 745.0, Some(4), 400),
+            ]
+        );
+        assert!(w
+            .iter()
+            .all(|p| p.dia && p.charge.is_none() && p.scan_number.is_none()));
+        assert_eq!(w[1].isolation_width, 45.0);
+        assert_eq!(w[1].collision_energy, 40.0);
+        let ids: Vec<usize> = w.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn mobility_slices_overlap_by_half_and_cover_the_window() {
+        assert_eq!(mobility_slices(100, 400, 1), vec![(100, 400)]);
+        assert_eq!(mobility_slices(100, 105, 4), vec![(100, 105)]);
+        assert_eq!(mobility_slices(100, 400, 2), vec![(100, 300), (200, 400)]);
+        let s = mobility_slices(34, 538, 8);
+        assert_eq!(s.len(), 8);
+        assert_eq!((s[0].0, s[7].1), (34, 538));
+        for w in s.windows(2) {
+            assert_eq!(w[1].0 - w[0].0, 56);
+            assert!(w[1].0 < w[0].1);
+        }
+        let s = mobility_slices(100, 135, 16);
+        assert_eq!(s.len(), 16);
+        assert_eq!((s[0].0, s[15].1), (100, 135));
+        assert!(s.iter().all(|&(lo, hi)| 100 <= lo && lo < hi && hi <= 135));
+        for w in s.windows(2) {
+            assert!(w[1].0 < w[0].1);
+        }
+    }
+
+    #[test]
+    fn slice_dia_windows_splits_only_dia_precursors() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Frames (Id INTEGER, Time REAL, NumPeaks INTEGER, MsMsType INTEGER);
+             INSERT INTO Frames VALUES (1, 0.1, 10, 0), (2, 0.2, 10, 9);
+             CREATE TABLE DiaFrameMsMsInfo (Frame INTEGER, WindowGroup INTEGER);
+             INSERT INTO DiaFrameMsMsInfo VALUES (2, 1);
+             CREATE TABLE DiaFrameMsMsWindows (WindowGroup INTEGER, ScanNumBegin INTEGER, \
+               ScanNumEnd INTEGER, IsolationMz REAL, IsolationWidth REAL, CollisionEnergy REAL);
+             INSERT INTO DiaFrameMsMsWindows VALUES (1, 100, 400, 745.0, 45.0, 40.0),
+               (1, 400, 700, 417.0, 35.0, 25.0);",
+        )
+        .unwrap();
+        let w = slice_dia_windows(read_dia_windows(&conn).unwrap(), 2);
+        let got: Vec<(usize, f64, usize, usize)> = w
+            .iter()
+            .map(|p| {
+                (
+                    p.id,
+                    p.mz,
+                    p.selections[0].scan_begin,
+                    p.selections[0].scan_end,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, 745.0, 100, 300),
+                (2, 745.0, 200, 400),
+                (3, 417.0, 400, 600),
+                (4, 417.0, 500, 700),
+            ]
+        );
+        assert!(w.iter().all(|p| p.dia && p.parent == Some(1)));
+        let dda = vec![PasefPrecursor {
+            id: 7,
+            dia: false,
+            ..w[0].clone()
+        }];
+        assert_eq!(slice_dia_windows(dda.clone(), 4), dda);
     }
 
     #[test]

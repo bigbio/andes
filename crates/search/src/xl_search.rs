@@ -1397,6 +1397,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let kept = without_peaks(&spec, &ions, 0.01);
         assert_eq!(kept.peaks, vec![(500.0, 2.0)]);

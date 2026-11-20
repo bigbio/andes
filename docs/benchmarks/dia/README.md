@@ -283,6 +283,178 @@ differ most in `matchedIonRatio` (AUC 0.75) and the andes-ms2 agreement (0.71), 
 already has. Counting repeats over adjacent scans adds a little on raw02 (above); what is left is
 deconvolving the apex scans or an empirical fragment library from the run.
 
+## diaPASEF (timsTOF `.d`)
+
+Summary: the search options below (`--dia-mobility-slices 16`, `--dia-ms1-tol-ppm 8`,
+`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,050-3,100 /
+2,450-2,950 precursors at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
+4,900 for DIA-NN. With reversed decoys, the measured FDP_c at q ≤ 1% is 4-5%. Near-variant decoys
+bring it to about 2%. The FDR of diaPASEF results is not calibrated yet, so andes writes a warning
+for `.d` input.
+
+Data: two ProteoBench low-input diaPASEF runs (O4, cond B, and B18, cond A), 15 windows (5 window
+groups x 3 mobility ranges), searched against HYE plus reviewed Arabidopsis as entrapment
+(r = 0.4804). FDP_c is the combined entrapment estimate at andes's q ≤ 0.01. Percolator 3.7.1,
+`--trainFDR 0.05`, seed 42 unless the row says 3 seeds (42, 1, 2, mean). DIA-NN 2.2
+library-free on the same FASTA: 4,940 / 4,931 precursors at about 1.8% / 1.7% FDP_c.
+
+| Change | O4 precursors / FDP_c | B18 precursors / FDP_c |
+|---|---:|---:|
+| Baseline, whole window (1 slice), seed 42 | 1,122 / 6.3% | 1,132 / 6.5% |
+| Baseline, whole window (1 slice), 3 seeds | 1,162 / 6.5% | 1,091 / 6.6% |
+| Baseline, 8 overlapping mobility slices | 2,893 / 5.7% | 2,617 / 5.2% |
+| timsTOF-trained model `cid_timstof_tryp` (1 slice) | 1,339 / 7.1% | 1,124 / 4.9% |
+| timsTOF-trained model (8 slices) | 2,971 / 5.4% | 2,618 / 5.3% |
+| 2D RT x mobility peak-group columns (13 `pg_*`, 1 slice), 3 seeds | 1,222 / 6.3% | 1,058 / 5.8% |
+| Shared-fragment filter, F = 0.3 (1 slice), 3 seeds | 1,230 / 5.7% | 998 / 3.1% |
+| Shared-fragment filter, F = 0.4 (1 slice), 3 seeds | 1,202 / 4.7% | 1,065 / 4.5% |
+| Shared-fragment filter, F = 0.4 (8 slices), 3 seeds | 2,916 / 4.5% | 2,560 / 5.0% |
+| Near-variant decoys (FASTA, `--decoy-strategy none`, 1 slice), 3 seeds | 866 / 2.0% | 843 / 2.9% |
+
+Near-variant decoys: each target protein gets a decoy with one random interior substitution per
+tryptic segment of length ≥ 7 (no K, R, P, C, M or I as the new residue, mass change > 1.1 Da).
+With these decoys, nominal q ≤ 0.01 measures 1.7-4.2% FDP_c instead of 6.3-7.0%. At a true FDP_c
+of 1%, the yield rises from 35 to 81 precursors (O4) and from 62 to 122 (B18), mean of 3 seeds.
+That count is small and noisy because one entrapment hit near the top of the list ends it.
+
+### Fragment-index vote on filtered peaks, and mobility slices
+
+A whole-window diaPASEF spectrum has a median of about 10,600 peaks (310 at 8 slices, 67 at 32).
+At high resolution every peak votes in the fragment index, and `--peak-filter` applied only at
+scoring. So a 1-slice search ran at about 11 spectra/s. The filtered vote uses `--peak-filter
+100:20`'s windowed top-K peaks for the fragment-index vote only. Scoring and
+the DIA columns keep every peak. All rows: near-variant decoys, `--dia-ms1-tol-ppm 15`,
+`--fragment-tol-ppm 15 --peak-filter 100:20`, Percolator 3 seeds (mean).
+
+| Slices | Wall time O4 / B18 | O4: q ≤ 1% / FDP_c | B18: q ≤ 1% / FDP_c | N at FDP_c 1% / 2%, O4 | N at FDP_c 1% / 2%, B18 |
+|---:|---|---:|---:|---:|---:|
+| 1, unfiltered vote | 22 / 17 min | 866 / 2.0% | 843 / 2.9% | 81 / – | 122 / – |
+| 8, unfiltered vote | 74 / 39 min | 2,352 / 2.0% | 2,170 / 2.7% | 1,498 / – | 698 / – |
+| 1 | 1.6 / 1.4 min | 1,520 / 2.6% | 1,216 / 1.4% | 846 / 1,377 | 1,006 / 1,396 |
+| 2 | 2.7 / 2.8 min | 1,778 / 2.2% | 1,419 / 2.2% | 695 / 1,731 | 473 / 1,169 |
+| 4 | 4.5 / 4.3 min | 1,934 / 1.5% | 1,737 / 2.5% | 1,128 / 2,122 | 267 / 1,175 |
+| 8 | 7.2 / 6.6 min | 2,515 / 1.9% | 1,925 / 2.8% | 1,162 / 2,666 | 0 / 0 |
+| 16 | 11.8 / 11.3 min | 2,594 / 1.9% | 2,174 / 2.3% | 1,266 / 2,745 | 271 / 1,989 |
+| 32 | 19.7 / 18.0 min | 2,725 / 2.0% | 1,909 / 2.1% | 1,327 / 2,783 | 360 / 1,972 |
+| 1, reversed decoys | 1.5 min | 1,641 / 5.5% | 1,338 / 5.8% | 37 / 37 | 3 / 116 |
+
+- The filtered vote is 10-14x faster and finds more precursors at the same FDP_c. It does not
+  fix calibration on its own: with reversed decoys it is still at 5.5-5.8%.
+- Slices raise q ≤ 1% counts up to 16 slices (O4 1,520 → 2,594, B18 1,216 → 2,174), at about
+  2% FDP_c. 32 slices add little and take 12x longer than 1 slice.
+- On B18 one Arabidopsis peptide (`PVQADLIGSKVPSPFLHTVDHGR`) ranks first at 8 slices in every
+  seed, so N at FDP_c 1% and 2% is 0 there. The N-at-FDP_c counts are unstable at this sample
+  size, and the q ≤ 1% counts are the steadier measure.
+- On the Astral set (reversed decoys, 3 seeds), the filtered vote costs precursors: N at FDP_c
+  1% falls from 1,914 / 2,059 (no peak filter) and 1,859 / 1,965 (`--peak-filter` at scoring) to
+  1,718 / 1,896. Astral spectra are sparse, so the vote filter is a diaPASEF option only.
+
+### m/z calibration, and what still misses DIA-NN's precursors
+
+diaPASEF `.d` runs have no `Precursors` table, so the reader cannot fit its MS1 m/z calibration
+and uses the acquisition-range model. On DIA-NN's confident precursors, andes's MS1 peak is a
+median 5.0 ppm off (4.1 ppm at m/z 400, 6.2 ppm at m/z 800), and the top fragment ions +3.8 ppm.
+`--fragment-tol-ppm 15` also turns off andes's own fragment-error measurement. All rows: 16
+slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
+
+| Change | O4: q ≤ 1% / FDP_c | B18: q ≤ 1% / FDP_c |
+|---|---:|---:|
+| `--fragment-tol-ppm 15`, MS1 gate 15 ppm | 2,594 / 1.9% | 2,174 / 2.3% |
+| + `--top-n 20` | 2,484 / 2.2% | 2,203 / 2.3% |
+| Fragment tolerance measured (offset +3.5 / +5.7 ppm, recentred) | 2,942 / 1.7% | 2,492 / 2.5% |
+| + MS1 offset measured on 20k spectra (+5.4 / +8.3 ppm), gate 8 ppm | **3,105 / 1.7%** | **2,928 / 2.3%** |
+| same, gate 5 ppm | 3,123 / 1.6% | 2,938 / 2.5% |
+| + fragment-index top-K 300 (default 100) | 2,980 / 1.8% | 2,771 / 2.4% |
+| + vote filter 100:40 (default 100:20) | 3,103 / 1.6% | 2,668 / 2.0% |
+| Gate 8 ppm, after the fix that gives the prepass its own 25 ppm MS1 gate | 3,053 / 1.8% | 2,465 / 2.0% |
+| DIA-NN 2.2 | ~4,900 / 1.8% | ~4,900 / 1.7% |
+
+- The MS1 offset is measured on a first pass over 20,000 mid-mass spectra with a 25 ppm gate:
+  the median signed error of the confident PSMs' monoisotopic peaks. Before a review fix, the
+  first pass used the configured gate (8 or 5 ppm) instead, so every row above the last andes
+  row comes from that build. The fixed build measures the same offsets (+5.5 / +8.2 ppm). On B18
+  its q ≤ 1% count is lower (2,465 against 2,928) because that cut is on a steep step of the
+  q-value curve. At q ≤ 2% and 5% it finds 3,467 and 4,206 (before: 3,415 and 4,093, seed 42). A
+  3,000-spectrum sample had too few confident PSMs on B18 (about 100).
+- After calibration andes finds 63% / 60% of DIA-NN's q ≤ 1% count. Of DIA-NN's HYE
+  precursors at q ≤ 1%, andes reports 56% / 51% at q ≤ 1%. 24% / 31% never reach the PIN
+  (their MS1 area is 0.25-0.3 log10 lower than the ones that do), and the rest are in the PIN
+  below the cut (median andes q 0.03-0.04).
+- More fragment-index candidates or a looser vote filter do not bring the missing precursors
+  in, so candidate retrieval is not the limit.
+
+### Near-variant decoys: which set, and their spread
+
+Same settings as the best row above (16 slices, filtered vote, MS1 recentring, MS1 gate 8 ppm),
+Percolator 3 seeds (mean). The decoy set changes from row to row. The targets do not. Each
+near-variant FASTA has one decoy per target protein, made as described above, with
+`--decoy-strategy none`.
+
+| Decoys | O4: q ≤ 1% / FDP_c | B18: q ≤ 1% / FDP_c |
+|---|---:|---:|
+| Near-variant FASTA, seed 7 | 3,105 / 1.7% | 2,928 / 2.3% |
+| Near-variant FASTA, seed 11 | 3,287 / 2.6% | 2,698 / 2.4% |
+| Near-variant FASTA, 2 substitutions per segment, seed 7 | 3,515 / 3.4% | 3,125 / 4.6% |
+| Near-variant FASTA, 2 substitutions per segment, seed 11 | 3,478 / 3.5% | 3,072 / 4.0% |
+
+- One decoy set against another moves FDP_c by up to 1 point at the same q ≤ 1% count, so the
+  1.7% / 2.3% of the first row is partly a lucky draw.
+- At andes's top 4,000 precursors, decoys are 1.4-1.5 times the entrapment hits. Decoys that
+  modelled entrapment exactly would give 1/r = 2.1, so near-variant decoys still undercount the
+  wrong targets by about a third.
+- Two substitutions per segment make the decoys less like the wrong targets, not more. They
+  share fewer fragments with the co-isolated real peptide, so they score lower. The q ≤ 1% count
+  goes up by 10-15% but FDP_c goes up to 3.4-4.6%.
+
+### Near-variant contest (offline test, not in andes)
+
+Label-blind rule: a PSM is removed when a PSM of the same spectrum with a higher score has the
+same length and differs at 1 or 2 residues (I = L). The winner can be a target or a decoy.
+16 slices, filtered vote, MS1 gate 8 ppm, mean of 3 Percolator seeds.
+
+| Decoys | Contest | O4: q ≤ 1% / FDP_c | B18: q ≤ 1% / FDP_c |
+|---|---|---:|---:|
+| Reversed | none | 3,531 / 4.3% | 2,794 / 5.0% |
+| Reversed | after Percolator | 3,529 / 3.0% | 2,753 / 3.5% |
+| Near-variant, 4 sets (mean) | none | 3,163 / 2.0% | 2,879 / 2.2% |
+| Near-variant, 4 sets (mean) | after Percolator | 3,318 / 1.8% | 3,006 / 2.0% |
+| Near-variant, 4 sets (mean), new Percolator run | none | 3,190 / 2.3% | 2,907 / 2.7% |
+| Near-variant, 4 sets (mean), new Percolator run | before Percolator (on the PIN) | 3,238 / 2.3% | 2,929 / 2.5% |
+
+The 4 near-variant sets are the two one-substitution FASTA sets above and two sets made inside
+andes with the same rule (`--decoy-strategy mutate`, a separate change). The "after" rows apply
+the rule to Percolator's PSM scores and then compute precursor q-values again. The last two rows
+run Percolator on a new PIN, so compare each row with the "none" row above it.
+
+- After Percolator the contest lowers FDP_c by about 30% with reversed decoys and by about 10%
+  with near-variant decoys, with no loss of IDs (near-variant: +4-5%).
+- Before Percolator it does almost nothing: Percolator relearns the same weights on the smaller
+  PIN, and the wrong variants that remain are those that already win their spectrum.
+- The contest and the near-variant decoys fix the same error, so their gains do not add up. The
+  best combination (near-variant decoys + contest after Percolator) is still at 1.8-2.0%.
+
+- The timsTOF model was trained with `andes train-from-search` on three public ddaPASEF runs of
+  a human, yeast and E. coli benchmark set (213,326 labels). On a held-out QC ddaPASEF run of the
+  same set it gives 64,685 precursors vs 64,737 for `hcd_qexactive_tryp`, so the seed model
+  already fits timsTOF MS2.
+- The peak-group columns trace each candidate's b/y ions over ±5 cycles of its window group and
+  8-scan mobility bins. They score a 2D median consensus, co-apex, RT and mobility marginal
+  correlations, and MS1 2D correlation (a probe example, not in andes).
+- The shared-fragment filter removes a PIN row before Percolator when a higher-RawScore row of
+  the same spectrum shares ≥ F of its b/y m/z (±0.02 Da). It does not use labels. About half of
+  the entrapment winners at q ≤ 0.01 are one-residue variants of a stronger HYE target in the
+  same spectrum, against 1-2% of HYE winners. The filter lowers FDP_c by 1-3 points but leaves it
+  at 3-5%. Run-to-run spread over seeds is about ±1 point.
+- Earlier attempts with no gain: `--trainFDR 0.01`, two other scoring models, an offline
+  ion-mobility residual column, and fragment mobility co-apex columns (6.3% → 6.8%).
+- Decoys are exchangeable with entrapment hits on every PIN feature (AUC 0.50-0.52). The excess
+  FDP comes from target-like wrong peptides, which reversed decoys do not model. Entrapment
+  winners share a median 7-18% of their b/y ions with a confident HYE peptide in the same
+  spectrum (19% share ≥ 50%), against 0% for HYE winners and for decoys at the cut. Their
+  precursor is a median 7 Th from that parent, which a 2 Th Astral window cannot hold but a
+  30-75 Th diaPASEF window can. Near-variant decoys share fragments in the same way, so they
+  restore most of the calibration (table above).
+
 ## Reproduce
 
 ```bash

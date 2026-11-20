@@ -353,6 +353,8 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             dia: false,
+            dia_ms1_tol_ppm: 5.0,
+            dia_vote_filter: None,
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
@@ -377,6 +379,7 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
             isolation_target_mz: None,
+            mobility_window: None,
         };
         let keys = build_spec_keys(&[spec], &(2..=3), 10);
         assert_eq!(keys.len(), 2);

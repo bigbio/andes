@@ -670,13 +670,37 @@ Needs MS1: **mzML or Thermo `.raw`** only (MGF/`.d` warn and run a normal search
 
 ### DIA (`--dia`, experimental)
 
-Needs **mzML or Thermo `.raw`** with per-scan isolation windows and MS1 scans; a run without MS1
-scans is an error. Cannot be combined with `--chimeric`, `--open-search`, `--refine`, `--glyco` or
-`--xl`; `--precursor-cal` is turned off (a DIA scan has no selected precursor).
+Needs **mzML, Thermo `.raw` or Bruker `.d` (diaPASEF)** with per-scan isolation windows and MS1
+scans; a run without MS1 scans is an error. Cannot be combined with `--chimeric`, `--open-search`,
+`--refine`, `--glyco` or `--xl`; `--precursor-cal` is turned off (a DIA scan has no selected
+precursor).
+
+On diaPASEF `.d` input, andes reads one spectrum per frame and isolation window. That spectrum sums
+the window's mobility range. The co-elution columns trace each (m/z centre, mobility range) window
+on its own. The FDR is not calibrated yet: on an Arabidopsis entrapment test of two ProteoBench
+low-input runs, q ≤ 0.01 measured a 5-7% true FDP (DIA-NN 2.2: about 1.8%). andes logs a warning
+when `--dia` runs on `.d` input.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. A candidate is scored only when its monoisotopic m/z has an MS1 peak within 5 ppm in the survey scan nearest the scan or one either side (the MS1 gate; on the Astral benchmark it keeps 93 % of DIA-NN's precursors and 13 % of random candidates). Co-elution columns are then added to the PIN. Config key `search.dia`. |
+| `--dia` | flag | *(off)* | Spectrum-centric direct DIA search (as MSFragger-DIA): every MS2 scan is searched against all peptides whose precursor m/z lies in its isolation window (widened by `--precursor-tol`), at every `--charge`. A PSM's precursor m/z is its peptide's own, so target-decoy competition groups a scan's rows by mass. A candidate is scored only when its monoisotopic m/z has an MS1 peak within 5 ppm (`--dia-ms1-tol-ppm`) in the survey scan nearest the scan or one either side (the MS1 gate; on the Astral benchmark it keeps 93 % of DIA-NN's precursors and 13 % of random candidates). Co-elution columns are then added to the PIN. Config key `search.dia`. |
+| `--dia-mobility-slices` | integer | `1` | diaPASEF (`.d`) only. Splits each isolation window's TIMS scan range into N slices. Each slice spans 2/(N+1) of the range, and neighbouring slices overlap by half. Each slice is a separate spectrum, and the co-elution columns trace it on its own across cycles. A slice spectrum mixes fewer co-isolated peptides than the whole window. 1 keeps one spectrum per window. No effect on mzML, `.raw` or ddaPASEF. Config key `search.dia_mobility_slices`. |
+| `--dia-ms1-tol-ppm` | float | `5` | Tolerance of the `--dia` MS1 gate. timsTOF MS1 is less accurate than Orbitrap MS1, and the ProteoBench low-input diaPASEF runs use 8 after calibration. Config key `search.dia_ms1_tol_ppm`. |
+
+On diaPASEF (`.d`) input, two more steps run under `--dia`:
+
+- MS1 m/z offset. A `.d` run without a `Precursors` table has no MS1 m/z calibration. Before the
+  search, andes searches 20,000 mid-mass spectra with a 25 ppm MS1 gate, takes the median
+  signed ppm error of the confident PSMs' monoisotopic MS1 peaks, and shifts every survey peak by
+  that offset. The log reports the offset.
+- Filtered fragment-index vote. When `--peak-filter WINDOW:K` is set, the fragment index votes
+  with that windowed top-K subset of each spectrum's peaks. A diaPASEF window spectrum has about
+  10,000 peaks, and voting with all of them is slow and adds random votes. Scoring and the DIA
+  columns keep every peak. On Orbitrap Astral this costs precursors, so it applies only when every
+  input is `.d`.
+
+Leave `--fragment-tol-*` unset on diaPASEF: andes then measures the fragment m/z offset and
+spread and recentres the peaks (a fixed tolerance turns that off).
 
 The added PIN columns (`crates/andes/src/bin/andes/dia.rs`), for every row, targets and decoys
 alike:

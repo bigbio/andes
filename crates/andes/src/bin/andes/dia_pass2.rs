@@ -1099,7 +1099,7 @@ pub(crate) fn extract(
             .map(|(w, ks)| {
                 let mut r = Rates::default();
                 let mut widths = Vec::new();
-                for &k in ks {
+                for &k in ks.iter().filter(|&&k| confident(refs[k]) || null_member(refs[k])) {
                     let t = trace(&wins[w].1, refs[k], rt_cal[k], shift);
                     r.add(&collect_rates(&wins[w].1, refs[k], &t));
                     if confident(refs[k]) {
@@ -1204,6 +1204,12 @@ pub(crate) fn run(
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
     let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
+    log::info!(
+        target: "dia",
+        "pass 2: nominated {} precursors [{:.2}s]",
+        noms.len(),
+        t0.elapsed().as_secs_f64()
+    );
     if let Some(out) = nominees_out {
         let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
         let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);

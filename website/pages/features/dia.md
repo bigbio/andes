@@ -58,8 +58,40 @@ flowchart TD
 - **Fragment tolerance.** On Orbitrap Astral, 7 ppm unless `--fragment-tol-*` is set: the per-run
   fragment-error measurement needs 100 confident PSMs, which a DIA sample rarely has.
 
-No spectral library is needed, and the output is a PSM-level PIN; quantification of DIA runs is
-not implemented.
+No spectral library is needed. A single run with `--predict rt,ms2 --rescore` goes on from here
+with the steps below.
+
+## Pass 2, learned score and study mode
+
+- **Pass 2.** Each precursor nominated by its best scan is traced over 73 cycles around its
+  predicted RT, and its top predicted fragments are scored per cycle against per-run chance rates.
+  A joint model of the traces adds likelihood columns.
+- **Learned score.** The PIN becomes one row per nominated precursor, with a cross-fitted
+  gradient-boosted score as a feature. Percolator rescores it, so its q is the precursor-level q.
+- **RT-aware candidate cut.** The per-scan cut of 100 candidates also ranks by agreement with the
+  run's predicted RT. It falls back to votes when the RT prediction is poor.
+- **Study mode.** For two or more runs of one experiment, each run adds evidence from the others:
+  cross-run columns, and candidates that another run nominated and this one did not (transfer).
+  The reported q is then class-wise: one competition for a run's own precursors and one for its
+  transferred precursors, so a filter at q 0.01 holds for each.
+
+```bash
+andes --spectrum a.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin a.pin --quant-dir q/          # once per run
+andes quant extract  --quant-dir q/ --run a      # once per run, after all searches
+andes quant finalize --quant-dir q/ -o experiment --database db.fasta
+```
+
+Finalize writes a precursor PIN and results per run, and the protein groups of all runs. Cost per
+Astral run: about 20 min and 36 GB for the search, 9 min for the extract, and about 65 min for
+finalize over three runs.
+
+On three replicate Astral injections (full ProteoBench entrapment FASTA), the whole stack reaches
+84,300 to 85,300 precursors per run at a true FDP of 1 %, against 57,000 to 58,000 for the build before this work. DIA-NN 2.3.2 reports about 85,100 per run at its own q 0.01, and at a matched true
+FDP andes is at least 4 to 5 % behind it. Limits: replicate runs only, diaPASEF untested with
+pass 2, and one transferred class measured 1.28 % true FDP at q 0.01. Details:
+[benchmark](../benchmarks/dia.md) and the
+[full reference](../reference.md#dia-pass-2-learned-score-and-study-mode).
 
 ## What it changes
 

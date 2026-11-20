@@ -147,38 +147,44 @@ pub(crate) fn rerank_pin(
             .map_or_else(|| "pin".into(), |n| n.to_string_lossy())
     ));
     let io = |e: std::io::Error| format!("{}: {e}", tmp.display());
-    let mut w = BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
-    w.write_all(header.as_bytes()).map_err(io)?;
-    w.write_all(b"\n").map_err(io)?;
-    let mut lines = open()?;
-    lines.next().transpose().map_err(err)?;
-    let mut row = 0usize;
-    for l in lines {
-        let l = l.map_err(err)?;
-        if l.is_empty() {
-            continue;
+    let mut write_kept = || -> Result<(), String> {
+        let mut w = BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
+        w.write_all(header.as_bytes()).map_err(io)?;
+        w.write_all(b"\n").map_err(io)?;
+        let mut lines = open()?;
+        lines.next().transpose().map_err(err)?;
+        let mut row = 0usize;
+        for l in lines {
+            let l = l.map_err(err)?;
+            if l.is_empty() {
+                continue;
+            }
+            match keep_row.get(row) {
+                Some(true) => {
+                    w.write_all(l.as_bytes()).map_err(io)?;
+                    w.write_all(b"\n").map_err(io)?;
+                }
+                Some(false) => {
+                    dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
+                }
+                None => {
+                    return Err(format!("{}: changed while re-ranking", pin.display()));
+                }
+            }
+            row += 1;
         }
-        match keep_row.get(row) {
-            Some(true) => {
-                w.write_all(l.as_bytes()).map_err(io)?;
-                w.write_all(b"\n").map_err(io)?;
-            }
-            Some(false) => {
-                dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
-            }
-            None => {
-                return Err(format!("{}: changed while re-ranking", pin.display()));
-            }
+        if row != n_rows {
+            return Err(format!("{}: changed while re-ranking", pin.display()));
         }
-        row += 1;
+        w.flush().map_err(io)?;
+        drop(w);
+        std::fs::rename(&tmp, pin)
+            .map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))
+    };
+    if let Err(e) = write_kept() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    if row != n_rows {
-        return Err(format!("{}: changed while re-ranking", pin.display()));
-    }
-    w.flush().map_err(io)?;
-    drop(w);
-    std::fs::rename(&tmp, pin)
-        .map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))?;
     log::info!(
         "kept {kept} of {n_rows} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
         t0.elapsed().as_secs_f64()

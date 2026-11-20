@@ -443,6 +443,37 @@ run Percolator on a new PIN, so compare each row with the "none" row above it.
 - The contest and the near-variant decoys fix the same error, so their gains do not add up. The
   best combination (near-variant decoys + contest after Percolator) is still at 1.8-2.0%.
 
+### Precursors andes scores in only 1-2 spectra (offline test, B18)
+
+A DIA-NN precursor elutes in a median of 16 andes spectra: its isolation window, its RT peak
+(DIA-NN RT.Start..RT.Stop) and the 16-slice mobility slices that hold its IM. In these 16
+spectra andes keeps a PIN row for a found precursor in 5 and ranks it first in 1. For a lost
+precursor (in the PIN, but not at q ≤ 1%) it keeps a row in 1 and ranks it first in none. For an
+absent one it keeps no row. 83% of spectra fill the 10-row limit.
+
+Paired test: every DIA-NN HYE precursor against its own one-residue mutant and its own
+pseudo-reverse, read in the same 16 spectra. Share of pairs in which the true precursor has the
+higher value (0.5 = no separation), mutant / reverse:
+
+| andes class | most ions in one spectrum | ions in ≥ 3 spectra | trace correlation | co-eluting ions |
+|---|---:|---:|---:|---:|
+| found (2,297) | 0.97 / 0.99 | 0.95 / 0.98 | 0.79 / 0.90 | 0.93 / 0.98 |
+| lost (1,117) | 0.92 / 0.97 | 0.87 / 0.93 | 0.75 / 0.80 | 0.86 / 0.93 |
+| absent (1,379) | 0.85 / 0.92 | 0.81 / 0.87 | 0.69 / 0.73 | 0.79 / 0.85 |
+
+- Against its own decoys, the single best spectrum already separates the true precursor best.
+  Evidence pooled over the RT x mobility area separates it less well, not better.
+- The real competitors are other peptides. In the spectra a lost or absent precursor does not
+  win, the winner is a target in 73-76% of cases. Half of these winners are also DIA-NN
+  precursors (48% / 61%) and 11-16% are entrapment. Against a winning target, the lost
+  precursor ties (most ions in one spectrum: 8 against 8). The absent one loses (8 against 10),
+  and it loses on every pooled measure too (co-eluting ions 4 against 6).
+- So pooled evidence does not bring these precursors in. Two co-eluting real peptides share the
+  same spectra, and andes keeps only the stronger one. DIA-NN reports both. A score per
+  spectrum cannot do this. It needs each candidate to be scored on its own fragments after the
+  fragments of the stronger peptide are taken out, or a fixed slot per precursor in each
+  spectrum instead of a top-10 list.
+
 - The timsTOF model was trained with `andes train-from-search` on three public ddaPASEF runs of
   a human, yeast and E. coli benchmark set (213,326 labels). On a held-out QC ddaPASEF run of the
   same set it gives 64,685 precursors vs 64,737 for `hcd_qexactive_tryp`, so the seed model

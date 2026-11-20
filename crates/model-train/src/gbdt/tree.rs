@@ -129,12 +129,12 @@ impl<'a> Builder<'a> {
     fn histograms(&self, rows: &[usize]) -> Vec<BinHist> {
         let nf = self.params.n_features;
         let nb = self.params.n_bins;
-        let gh: Vec<(f32, f32)> = rows.iter().map(|&r| (self.grad[r], self.hess[r])).collect();
         let block = |first: usize| -> Vec<BinHist> {
             let feats = first..(first + FEATURE_BLOCK).min(nf);
             let cols: Vec<&[u8]> = feats.clone().map(|f| self.col(f)).collect();
             let mut hists: Vec<BinHist> = feats.map(|_| BinHist::new(nb)).collect();
-            for (&r, &(g, h)) in rows.iter().zip(&gh) {
+            for &r in rows {
+                let (g, h) = (self.grad[r], self.hess[r]);
                 for (hist, col) in hists.iter_mut().zip(&cols) {
                     hist.accumulate(col[r], g, h);
                 }
@@ -149,24 +149,57 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Sums of the gradients and hessians of `rows`, added in row order.
+    fn totals(&self, rows: &[usize]) -> (f32, f32) {
+        let g_total: f32 = rows.iter().map(|&r| self.grad[r]).sum();
+        let h_total: f32 = rows.iter().map(|&r| self.hess[r]).sum();
+        (g_total, h_total)
+    }
+
+    /// Rows with bin <= `bin` of feature `feat` and the others, each in the order of `rows`.
+    fn split_rows(&self, rows: &[usize], feat: usize, bin: usize) -> (Vec<usize>, Vec<usize>) {
+        let col = self.col(feat);
+        let side = |c: &[usize]| -> (Vec<usize>, Vec<usize>) {
+            c.iter().partition(|&&r| (col[r] as usize) <= bin)
+        };
+        if rows.len() < PAR_MIN_ROWS {
+            return side(rows);
+        }
+        let parts: Vec<(Vec<usize>, Vec<usize>)> =
+            rows.par_chunks(PAR_MIN_ROWS).map(side).collect();
+        let n_left = parts.iter().map(|p| p.0.len()).sum();
+        let mut left = Vec::with_capacity(n_left);
+        let mut right = Vec::with_capacity(rows.len() - n_left);
+        for (l, r) in parts {
+            left.extend(l);
+            right.extend(r);
+        }
+        (left, right)
+    }
+
     fn build(&mut self, rows: &[usize], depth: u32) -> usize {
         let nb = self.params.n_bins;
         let lambda = self.params.lambda;
         let min_h = self.params.min_hessian;
 
-        let g_total: f32 = rows.iter().map(|&r| self.grad[r]).sum();
-        let h_total: f32 = rows.iter().map(|&r| self.hess[r]).sum();
+        let leaf = depth >= self.params.max_depth || rows.len() < 2;
+        let ((g_total, h_total), hists) = {
+            let this = &*self;
+            if leaf {
+                (this.totals(rows), Vec::new())
+            } else {
+                rayon::join(|| this.totals(rows), || this.histograms(rows))
+            }
+        };
         let leaf_weight = -g_total / (h_total + lambda);
 
         let node_idx = self.reserve_node();
 
-        if depth >= self.params.max_depth || rows.len() < 2 {
+        if leaf {
             self.write_leaf(node_idx, leaf_weight);
             self.mark_leaf(rows, node_idx);
             return node_idx;
         }
-
-        let hists = self.histograms(rows);
 
         let base_score = g_total * g_total / (h_total + lambda);
         let mut best_gain = 0.0_f32;
@@ -199,9 +232,7 @@ impl<'a> Builder<'a> {
                 self.mark_leaf(rows, node_idx);
             }
             Some(feat) => {
-                let col = self.col(feat);
-                let (left_rows, right_rows): (Vec<usize>, Vec<usize>) =
-                    rows.iter().partition(|&&r| (col[r] as usize) <= best_bin);
+                let (left_rows, right_rows) = self.split_rows(rows, feat, best_bin);
 
                 let left_idx = self.build(&left_rows, depth + 1);
                 let right_idx = self.build(&right_rows, depth + 1);

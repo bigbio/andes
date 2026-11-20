@@ -2010,13 +2010,7 @@ pub(crate) fn compute_psm_features_with_edge(
         };
         if let Some((rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
             let is_b = matches!(p.kind, IonKind::B | IonKind::C);
-            matched_ions.push((
-                intensity,
-                peak_mz,
-                p.mz,
-                is_b,
-                FragmentIon::of_predicted(p),
-            ));
+            matched_ions.push((intensity, peak_mz, p.mz, is_b, FragmentIon::of_predicted(p)));
             matched_ion_ranks.push(rank);
 
             let pos = (p.position - 1) as usize;

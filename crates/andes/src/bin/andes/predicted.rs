@@ -468,18 +468,13 @@ impl Predictors {
             }
         }
         let mut row_start = vec![0u32; fz.len() + 1];
-        let fz_of_row: Vec<u32> = table
-            .rows
-            .iter()
-            .map(|r| {
-                let k = fz_ix.get(&(r.form, r.charge)).copied().unwrap_or(NONE);
-                if k != NONE {
-                    row_start[k as usize + 1] += 1;
-                }
-                k
-            })
-            .collect();
+        let fz_of_row = prediction_of_rows(&table.rows, spectra, &fz_ix);
         drop(fz_ix);
+        for &k in &fz_of_row {
+            if k != NONE {
+                row_start[k as usize + 1] += 1;
+            }
+        }
         for k in 0..fz.len() {
             row_start[k + 1] += row_start[k];
         }
@@ -576,6 +571,24 @@ impl Predictors {
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+
+/// The index of each row's (peptidoform, charge) prediction, or `NONE` for a row that gets no
+/// MS2 features: one whose spectrum was not located or has no peaks, or whose pair has no
+/// prediction. Another row with the same pair does not lend such a row its prediction.
+fn prediction_of_rows(
+    rows: &[PinRow],
+    spectra: &[Spectrum],
+    fz_ix: &HashMap<(u32, u8), u32>,
+) -> Vec<u32> {
+    rows.iter()
+        .map(|r| {
+            if r.spec == NONE || spectra[r.spec as usize].peaks.is_empty() {
+                return NONE;
+            }
+            fz_ix.get(&(r.form, r.charge)).copied().unwrap_or(NONE)
+        })
+        .collect()
+}
 
 pub(crate) struct PinRow {
     pub(crate) spec: u32,
@@ -1030,6 +1043,26 @@ mod tests {
         assert_eq!(locate(&b, &spectra, "a_b_12_1_0", 12), 2);
         assert_eq!(locate(&b, &spectra, "run.10.10.2_10_1", 9), NONE);
         assert_eq!(locate(&b, &spectra, "other_5_1", 5), NONE);
+    }
+
+    #[test]
+    fn unlocated_and_peakless_rows_get_no_prediction_of_a_located_row() {
+        let mut empty = spectrum("run.11.11.2", 11, 2.0);
+        empty.peaks.clear();
+        let spectra = vec![spectrum("run.10.10.2", 10, 1.0), empty];
+        let row = |spec: u32, form: u32| PinRow {
+            spec,
+            form,
+            charge: 2,
+            decoy: false,
+            score: 0.0,
+        };
+        let rows = [row(0, 7), row(NONE, 7), row(1, 7), row(0, 8)];
+        let fz_ix = HashMap::from([((7u32, 2u8), 0u32)]);
+        assert_eq!(
+            prediction_of_rows(&rows, &spectra, &fz_ix),
+            [0, NONE, NONE, NONE]
+        );
     }
 
     #[test]

@@ -125,6 +125,7 @@ fn a_charge_less_spectrum_calibrates_its_strong_score_over_every_searched_charge
     let queues = prepared.run_chunk(&spectra, 0);
 
     let mut checked = 0usize;
+    let mut pooled_differs = 0usize;
     for q in &queues {
         let psms = q.clone().into_rank_sorted_vec();
         let charges: std::collections::BTreeSet<u8> = psms.iter().map(|p| p.charge_used).collect();
@@ -135,6 +136,15 @@ fn a_charge_less_spectrum_calibrates_its_strong_score_over_every_searched_charge
         for p in &psms {
             let want = strong_score_calibrated_loo(&pool, p.features.strong_score);
             let got = p.features.strong_score_cal;
+            let own: Vec<f32> = psms
+                .iter()
+                .filter(|o| o.charge_used == p.charge_used)
+                .map(|o| o.features.strong_score)
+                .collect();
+            let per_charge = strong_score_calibrated_loo(&own, p.features.strong_score);
+            if (want - per_charge).abs() > 1e-3 * want.abs().max(1.0) {
+                pooled_differs += 1;
+            }
             assert!(
                 (got - want).abs() <= 1e-3 * want.abs().max(1.0),
                 "charge {}: RawScoreCal {got} against {want} over the {} candidates of charges {charges:?}",
@@ -147,5 +157,9 @@ fn a_charge_less_spectrum_calibrates_its_strong_score_over_every_searched_charge
     assert!(
         checked >= 10,
         "only {checked} spectra matched at two or more charges"
+    );
+    assert!(
+        pooled_differs > 0,
+        "no PSM whose pooled value differs from the value over the candidates of its own charge"
     );
 }

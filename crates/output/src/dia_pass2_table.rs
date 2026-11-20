@@ -1,5 +1,10 @@
 //! Per-run DIA pass-2 table: one row per nominated precursor (targets and decoys) with its
-//! pass-2 evidence columns. Written by `andes --dia` and read by the study-level steps.
+//! pass-2 evidence columns and its quantities. Written by `andes --dia` and read by the
+//! study-level steps.
+//!
+//! Schema 1.1 adds the quantity columns [`QUANT_COLUMNS`] (nullable; a 1.0 table reads as
+//! having no quantities). They are kept apart from the evidence features, so they never enter
+//! the precursor PIN or the learned score.
 
 use std::fs::File;
 use std::path::Path;
@@ -16,7 +21,7 @@ use parquet::arrow::ProjectionMask;
 use crate::versioned_parquet::{write_table, TableVersion, BATCH_ROWS};
 
 pub const DIA_PASS2_SCHEMA_MAJOR: u32 = 1;
-const SCHEMA_VERSION: &str = "1.0";
+const SCHEMA_VERSION: &str = "1.1";
 const TABLE: TableVersion = TableVersion {
     key: "andes.dia_pass2.schema",
     version: SCHEMA_VERSION,
@@ -26,8 +31,12 @@ const TABLE: TableVersion = TableVersion {
 const META: [&str; 8] = [
     "spec_id", "run", "decoy", "charge", "peptide", "proteins", "seq", "prec_mz",
 ];
+/// Quantity columns of the table: the fragment quantity, the MS1 quantity and the number of
+/// fragments the fragment quantity sums.
+pub const QUANT_COLUMNS: [&str; 3] = ["quant_frag", "quant_ms1", "quant_n_frag"];
 
-/// Column-wise pass-2 rows; `features` hold the evidence columns in a fixed order.
+/// Column-wise pass-2 rows; `features` hold the evidence columns in a fixed order. The
+/// quantity vectors are either empty (no quantities: written as nulls) or one value per row.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pass2Table {
     pub spec_id: Vec<String>,
@@ -39,6 +48,12 @@ pub struct Pass2Table {
     pub seq: Vec<String>,
     pub prec_mz: Vec<f64>,
     pub features: Vec<(String, Vec<f32>)>,
+    /// Fragment quantity of the row in its run; `None` without a contained elution peak.
+    pub quant_frag: Vec<Option<f64>>,
+    /// MS1 quantity (monoisotopic and M+1 traces over the same window); `None` without signal.
+    pub quant_ms1: Vec<Option<f64>>,
+    /// Fragments summed into `quant_frag` (0 when it is `None`).
+    pub quant_n_frag: Vec<u8>,
 }
 
 impl Pass2Table {
@@ -74,6 +89,11 @@ fn schema(features: &[(String, Vec<f32>)]) -> Arc<Schema> {
             .iter()
             .map(|(n, _)| Field::new(n.as_str(), DataType::Float32, false)),
     );
+    fields.extend([
+        Field::new(QUANT_COLUMNS[0], DataType::Float64, true),
+        Field::new(QUANT_COLUMNS[1], DataType::Float64, true),
+        Field::new(QUANT_COLUMNS[2], DataType::UInt8, false),
+    ]);
     Arc::new(Schema::new(fields))
 }
 
@@ -85,6 +105,25 @@ pub fn write_pass2(path: &Path, t: &Pass2Table) -> Result<(), String> {
 pub fn write_pass2_with(path: &Path, t: &Pass2Table, meta: &[(&str, String)]) -> Result<(), String> {
     let sch = schema(&t.features);
     let n = t.len();
+    for (name, len) in [
+        (QUANT_COLUMNS[0], t.quant_frag.len()),
+        (QUANT_COLUMNS[1], t.quant_ms1.len()),
+        (QUANT_COLUMNS[2], t.quant_n_frag.len()),
+    ] {
+        if len != 0 && len != n {
+            return Err(format!(
+                "{}: {name} has {len} values for {n} rows",
+                path.display()
+            ));
+        }
+    }
+    let opt = |v: &[Option<f64>], r: std::ops::Range<usize>| -> ArrayRef {
+        if v.is_empty() {
+            Arc::new(Float64Array::from(vec![None; r.len()]))
+        } else {
+            Arc::new(Float64Array::from(v[r].to_vec()))
+        }
+    };
     let batches = (0..n.div_ceil(BATCH_ROWS).max(1)).map(|b| {
         let r = b * BATCH_ROWS..((b + 1) * BATCH_ROWS).min(n);
         let mut cols: Vec<ArrayRef> = vec![
@@ -102,6 +141,13 @@ pub fn write_pass2_with(path: &Path, t: &Pass2Table, meta: &[(&str, String)]) ->
                 .iter()
                 .map(|(_, v)| Arc::new(Float32Array::from(v[r.clone()].to_vec())) as ArrayRef),
         );
+        cols.push(opt(&t.quant_frag, r.clone()));
+        cols.push(opt(&t.quant_ms1, r.clone()));
+        cols.push(Arc::new(UInt8Array::from(if t.quant_n_frag.is_empty() {
+            vec![0; r.len()]
+        } else {
+            t.quant_n_frag[r.clone()].to_vec()
+        })));
         RecordBatch::try_new(sch.clone(), cols).map_err(|e| e.to_string())
     });
     write_table(path, &TABLE, SCHEMA_VERSION, sch.clone(), batches, meta)
@@ -214,7 +260,9 @@ pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, Stri
         .iter()
         .enumerate()
         .filter(|(_, n)| {
-            META.contains(&n.as_str()) || only.is_none_or(|o| o.contains(&n.as_str()))
+            META.contains(&n.as_str())
+                || QUANT_COLUMNS.contains(&n.as_str())
+                || only.is_none_or(|o| o.contains(&n.as_str()))
         })
         .map(|(i, _)| i)
         .collect();
@@ -228,7 +276,7 @@ pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, Stri
     let feat_names: Vec<String> = keep
         .iter()
         .map(|&i| names[i].clone())
-        .filter(|n| !META.contains(&n.as_str()))
+        .filter(|n| !META.contains(&n.as_str()) && !QUANT_COLUMNS.contains(&n.as_str()))
         .collect();
     t.features = feat_names.iter().map(|n| (n.clone(), Vec::new())).collect();
     for b in reader {
@@ -262,6 +310,28 @@ pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, Stri
             v.extend(a.values().iter().copied());
             debug_assert_eq!(a.null_count(), 0);
         }
+        for (n, v) in [
+            (QUANT_COLUMNS[0], &mut t.quant_frag),
+            (QUANT_COLUMNS[1], &mut t.quant_ms1),
+        ] {
+            match b.column_by_name(n) {
+                Some(c) => {
+                    let a = c.as_any().downcast_ref::<Float64Array>().ok_or_else(|| bad(n))?;
+                    v.extend((0..a.len()).map(|i| a.is_valid(i).then(|| a.value(i))));
+                }
+                None => v.extend(std::iter::repeat_n(None, b.num_rows())),
+            }
+        }
+        match b.column_by_name(QUANT_COLUMNS[2]) {
+            Some(c) => {
+                let a = c
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .ok_or_else(|| bad(QUANT_COLUMNS[2]))?;
+                t.quant_n_frag.extend(a.values().iter().copied());
+            }
+            None => t.quant_n_frag.extend(std::iter::repeat_n(0, b.num_rows())),
+        }
     }
     Ok(t)
 }
@@ -284,6 +354,9 @@ mod tests {
                 ("p2_llr".into(), vec![12.5, -3.0, 9.0]),
                 ("p2_rtstar".into(), vec![10.1, 11.0, 10.2]),
             ],
+            quant_frag: vec![Some(1.5e6), None, Some(2.0e5)],
+            quant_ms1: vec![Some(3.0e7), Some(1.0e4), None],
+            quant_n_frag: vec![6, 0, 3],
         }
     }
 
@@ -321,5 +394,24 @@ mod tests {
         assert_eq!(r.features.len(), 1);
         assert_eq!(r.feature("p2_rtstar").unwrap(), &[10.1, 11.0, 10.2]);
         assert_eq!(r.len(), 3);
+        assert_eq!(r.quant_frag, table().quant_frag, "quantities are read with any projection");
+    }
+
+    #[test]
+    fn quantities_stay_out_of_the_features_and_default_to_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("run.dia_pass2.parquet");
+        let mut t = table();
+        t.quant_frag.clear();
+        t.quant_ms1.clear();
+        t.quant_n_frag.clear();
+        write_pass2(&p, &t).unwrap();
+        let r = read_pass2(&p, None).unwrap();
+        assert_eq!(r.features, t.features);
+        assert_eq!(r.quant_frag, vec![None; 3]);
+        assert_eq!(r.quant_ms1, vec![None; 3]);
+        assert_eq!(r.quant_n_frag, vec![0; 3]);
+        t.quant_frag = vec![Some(1.0)];
+        assert!(write_pass2(&p, &t).is_err(), "a quantity column of the wrong length");
     }
 }

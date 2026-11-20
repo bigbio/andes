@@ -620,6 +620,7 @@ mod tests {
                 (LLR.to_string(), rows.iter().map(|r| r.3).collect()),
                 (RTSTAR.to_string(), rows.iter().map(|r| r.4).collect()),
             ],
+            ..Default::default()
         }
     }
 

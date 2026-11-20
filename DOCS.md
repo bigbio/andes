@@ -826,10 +826,10 @@ metadata.
 
 | File | Schema | Content |
 |---|---|---|
-| `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.0 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns |
-| `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.0 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
+| `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.1 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns and the row's quantities in its run: `quant_frag` (summed intensity, over the apex ± the run's learned peak width, of up to 6 fragments whose traces correlate best and positively with the summed trace), `quant_ms1` (monoisotopic and M+1 MS1 traces over the same span) and `quant_n_frag` (fragments summed); a quantity is null when the elution window is not contained in the traced cycles or has no signal, never 0. The quantities are not PIN features |
+| `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.1 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
 | `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.2 | The run's nominees (precursor, predicted RT, raw andes-rt prediction and missing flag, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window), with the run's andes-rt calibration and `--dia-mobility-slices` in the metadata |
-| `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.0 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
+| `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.1 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
 | `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
 | `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
 

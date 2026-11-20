@@ -73,7 +73,7 @@ type SettingKey = fn(&RowSettings) -> String;
 
 /// The settings every row of one andes run must share: the SDRF column and the row's value.
 const SETTINGS: [(&str, SettingKey); 6] = [
-    (CLEAVAGE, |r| r.enzymes.join("+")),
+    (CLEAVAGE, |r| r.enzymes.join(",")),
     (MODS, |r| {
         let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
         m.sort();
@@ -217,7 +217,7 @@ fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfS
     Ok(SdrfSettings {
         path: PathBuf::new(),
         data_files,
-        enzyme: (!first.enzymes.is_empty()).then(|| first.enzymes.join("+")),
+        enzyme: (!first.enzymes.is_empty()).then(|| first.enzymes.join(",")),
         precursor_tol: first.precursor_tol.clone(),
         fragment_tol: first.fragment_tol.clone(),
         fixed_mods,

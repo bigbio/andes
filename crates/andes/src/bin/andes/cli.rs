@@ -312,7 +312,7 @@ pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
 /// a decoy is recognised. Inference and finalize take the search's values.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct DatabaseArgs {
-    /// Protease; a list (gluc,trypsin or gluc+trypsin) cleaves at the sites of each one
+    /// Protease; a comma list (gluc,trypsin) cleaves at the sites of each one
     ///
     /// The first protease of a list is the primary one: it selects the model and the
     /// cleavage feature. A non-specific protease in a list makes the whole digest
@@ -2226,17 +2226,14 @@ mod enzyme_cli_tests {
     }
 
     #[test]
-    fn comma_and_plus_separators_both_parse() {
-        let (p1, e1) = parse_enzymes("gluc,trypsin").unwrap();
-        let (p2, e2) = parse_enzymes("gluc+trypsin").unwrap();
+    fn proteases_are_a_comma_list() {
+        let (p, e) = parse_enzymes("gluc,trypsin").unwrap();
         assert_eq!(
-            (p1, e1.as_slice()),
+            (p, e.as_slice()),
             (Enzyme::GluC, [Enzyme::Trypsin].as_slice())
         );
-        assert_eq!(
-            (p2, e2.as_slice()),
-            (Enzyme::GluC, [Enzyme::Trypsin].as_slice())
-        );
+        let err = parse_enzymes("gluc+trypsin").unwrap_err().to_string();
+        assert!(err.contains("separate proteases with a comma"), "{err}");
     }
 
     #[test]
@@ -2551,13 +2548,16 @@ mod spelling_tests {
                 "trypsin", "Trypsin", "tryp", "chymotrypsin", "chymo", "lysc", "lys-c", "aspn",
                 "Asp-N", "gluc", "glu-c", "lysn", "lys-n", "argc", "arg-c", "alp", "alpha-lp",
                 "alphalp", "nocleavage", "none", "nonspecific", "all", "elastase",
-                "gluc,trypsin", "gluc+trypsin", "  lysc , , trypsin ",
+                "gluc,trypsin", "  lysc , , trypsin ",
             ],
         );
-        rejects("--enzyme", &["bogus", "", " , ", "trypsin,bogus"]);
+        rejects(
+            "--enzyme",
+            &["bogus", "", " , ", "trypsin,bogus", "gluc+trypsin"],
+        );
         assert_eq!(
-            parse("--enzyme", "gluc+trypsin").unwrap().db.enzyme,
-            "gluc+trypsin",
+            parse("--enzyme", "gluc,trypsin").unwrap().db.enzyme,
+            "gluc,trypsin",
             "the value is kept as given"
         );
 

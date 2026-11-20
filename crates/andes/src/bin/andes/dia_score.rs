@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
+use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams, MIN_VAL_AUC};
 use output::dia_pass2_table::Pass2Table;
 use rayon::prelude::*;
 
@@ -33,6 +33,24 @@ fn params() -> TrainParams {
         pairwise: false,
         allow_degenerate: true,
     }
+}
+
+/// One-sided 95 % normal quantile: how many null standard errors above chance an AUC margin of
+/// `MIN_VAL_AUC - 0.5` must be for a fold's held-out set to tell a model from chance.
+const GATE_Z: f64 = 1.645;
+
+/// Minimum positives in the training rows of a fold. The GBDT holds out `val_fraction` of its rows
+/// to stop early. Without signal, the AUC of n positives against more negatives has standard error
+/// sqrt(1 / (12 n)) (the Mann-Whitney null variance); the held-out set tells a model that beats
+/// chance by the GBDT's AUC margin (`MIN_VAL_AUC - 0.5`) at one-sided 5 % only with
+/// n >= (GATE_Z / (MIN_VAL_AUC - 0.5))^2 / 12 held-out positives, or n / `val_fraction` training
+/// positives (910 with the parameters here). The AUC gate itself does not make a fold degenerate:
+/// round 0 trains on every target, most of them false, and its held-out AUC sits near 0.52 even
+/// when the model ranks well; the GBDT then keeps its trees uncalibrated, and the score uses the
+/// raw margin.
+fn min_fold_positives(p: &TrainParams) -> usize {
+    let held_out = ((GATE_Z / (MIN_VAL_AUC - 0.5)).powi(2) / 12.0).ceil();
+    (held_out / f64::from(p.val_fraction)).ceil() as usize
 }
 
 /// Accessions of a `Proteins` field (`;`- or tab-separated).
@@ -114,30 +132,48 @@ pub(crate) fn tdc_q(score: &[f32], target: &[bool]) -> Vec<f64> {
     q
 }
 
+/// The out-of-fold learned score and how its training went.
+pub(crate) struct LearnedScore {
+    /// The score of every row, from the last round whose folds all trained; `None` when a fold of
+    /// the first round did not.
+    pub(crate) score: Option<Vec<f32>>,
+    /// Folds that did not train (too few positives, or a GBDT that returned no trees and so a
+    /// constant score), over the rounds run.
+    pub(crate) degenerate_folds: usize,
+}
+
 /// Out-of-fold learned score of every row: the raw boosted margin (log-odds), the same scale in
-/// every fold. `x` is row-major with `names.len()` columns.
+/// every fold. `x` is row-major with `names.len()` columns. A round with a degenerate fold ends
+/// the training: the previous round's score is kept, or none after the first round.
 pub(crate) fn learned_score(
     x: &[f32],
     names: &[String],
     target: &[bool],
     key: &[u64],
     seed: u64,
-) -> Result<Vec<f32>, String> {
+) -> LearnedScore {
     let n = target.len();
     let nf = names.len();
+    let p = params();
+    let min_pos = min_fold_positives(&p);
     let fold: Vec<u64> = key
         .iter()
         .map(|k| (k ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) % FOLDS)
         .collect();
     let mut positive: Vec<bool> = target.to_vec();
-    let mut score = vec![0f32; n];
-    for (round, &q_cut) in ROUND_Q.iter().enumerate() {
-        let parts: Vec<Result<Vec<(usize, f32)>, String>> = (0..FOLDS)
+    let mut kept: Option<Vec<f32>> = None;
+    let mut degenerate_folds = 0usize;
+    for (round, &round_q) in ROUND_Q.iter().enumerate() {
+        let fits: Vec<Result<Vec<(usize, f32)>, String>> = (0..FOLDS)
             .into_par_iter()
             .map(|f| {
                 let train: Vec<usize> = (0..n)
                     .filter(|&i| fold[i] != f && (!target[i] || positive[i]))
                     .collect();
+                let n_pos = train.iter().filter(|&&i| target[i]).count();
+                if n_pos < min_pos {
+                    return Err(format!("fold {f}: {n_pos} positives < {min_pos}"));
+                }
                 let ds = Dataset {
                     x: train
                         .iter()
@@ -148,21 +184,40 @@ pub(crate) fn learned_score(
                     n_features: nf,
                     feature_names: names.to_vec(),
                 };
-                let m = train_gbdt(&ds, &params(), seed ^ (round as u64) << 8 ^ f)
-                    .map_err(|e| format!("learned DIA score, round {round} fold {f}: {e:?}"))?;
-                Ok((0..n)
+                let m = train_gbdt(&ds, &p, seed ^ (round as u64) << 8 ^ f)
+                    .map_err(|e| format!("fold {f}: {e:?}"))?;
+                let out: Vec<(usize, f32)> = (0..n)
                     .filter(|&i| fold[i] == f)
                     .map(|i| (i, m.predict_value(&x[i * nf..(i + 1) * nf])))
-                    .collect())
+                    .collect();
+                if out.len() > 1 && out.iter().all(|&(_, s)| s == out[0].1) {
+                    return Err(format!("fold {f}: constant score"));
+                }
+                Ok(out)
             })
             .collect();
-        for p in parts {
-            for (i, s) in p? {
-                score[i] = s;
-            }
+        let bad: Vec<&String> = fits.iter().filter_map(|r| r.as_ref().err()).collect();
+        if !bad.is_empty() {
+            degenerate_folds += bad.len();
+            log::info!(
+                target: "dia",
+                "learned score round {round}: {} of {FOLDS} folds degenerate ({}); {}",
+                bad.len(),
+                bad[0],
+                if round == 0 {
+                    format!("{GB_COLUMN} left out of the precursor PIN")
+                } else {
+                    format!("keeping the round {} score", round - 1)
+                }
+            );
+            break;
+        }
+        let mut score = vec![0f32; n];
+        for (i, s) in fits.into_iter().flatten().flatten() {
+            score[i] = s;
         }
         let q = tdc_q(&score, target);
-        let cut = ROUND_Q.get(round + 1).copied().unwrap_or(q_cut);
+        let cut = ROUND_Q.get(round + 1).copied().unwrap_or(round_q);
         for i in 0..n {
             positive[i] = target[i] && q[i] <= cut;
         }
@@ -171,8 +226,12 @@ pub(crate) fn learned_score(
             "learned score round {round}: {} targets at q <= 0.01 (out of fold)",
             (0..n).filter(|&i| target[i] && q[i] <= 0.01).count()
         );
+        kept = Some(score);
     }
-    Ok(score)
+    LearnedScore {
+        score: kept,
+        degenerate_folds,
+    }
 }
 
 /// Best pass-1 row per (FileName, Peptide, charge) of the PIN: its numeric columns, `dia_llr`
@@ -287,14 +346,18 @@ pub(crate) fn pin_ids(pin: &Path) -> Result<std::collections::HashSet<String>, S
     Ok(ids)
 }
 
-/// Ids of the rows written to the precursor PIN: (targets, decoys).
+/// The rows written to the precursor PIN and how its learned score trained.
 pub(crate) struct PrecursorPin {
     pub(crate) targets: Vec<String>,
     pub(crate) decoys: Vec<String>,
+    /// Folds of the learned score that did not train, over its rounds.
+    pub(crate) degenerate_folds: usize,
+    /// Whether the PIN has the learned-score column.
+    pub(crate) learned: bool,
 }
 
 /// Rewrites `pin` (the pass-1 PIN) as the precursor PIN: one row per pass-2 precursor with the
-/// learned score, `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
+/// learned score (left out when its first round is degenerate), `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
 pub(crate) fn write_precursor_pin(
     pin: &Path,
     t: &Pass2Table,
@@ -336,7 +399,8 @@ pub(crate) fn write_precursor_pin(
     let key: Vec<u64> = (0..n)
         .map(|i| fold_key(&t.seq[i], &t.proteins[i], &prefix))
         .collect();
-    let gb = learned_score(&x, &names, &target, &key, seed)?;
+    let learned = learned_score(&x, &names, &target, &key, seed);
+    let gb = learned.score.as_deref();
 
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
     let tmp = pin.with_extension("pin.partial");
@@ -346,8 +410,10 @@ pub(crate) fn write_precursor_pin(
         "Label".into(),
         "ScanNr".into(),
         "FileName".into(),
-        GB_COLUMN.into(),
     ];
+    if gb.is_some() {
+        head.push(GB_COLUMN.into());
+    }
     head.extend(names.iter().cloned());
     head.extend(p1.names.iter().cloned());
     head.extend(["p1_present".to_string(), "Peptide".into(), "Proteins".into()]);
@@ -356,6 +422,8 @@ pub(crate) fn write_precursor_pin(
     let mut ids = PrecursorPin {
         targets: Vec::new(),
         decoys: Vec::new(),
+        degenerate_folds: learned.degenerate_folds,
+        learned: gb.is_some(),
     };
     let mut line = String::new();
     for i in 0..n {
@@ -364,13 +432,15 @@ pub(crate) fn write_precursor_pin(
         let p = p1_of[i];
         let _ = write!(
             line,
-            "{}\t{}\t{}\t{}\t{:.5}",
+            "{}\t{}\t{}\t{}",
             t.spec_id[i],
             if t.decoy[i] { -1 } else { 1 },
             i + 1,
             p1.run_file.get(&t.run[i]).map_or("", String::as_str),
-            gb[i]
         );
+        if let Some(gb) = gb {
+            let _ = write!(line, "\t{:.5}", gb[i]);
+        }
         for v in &x[i * nf..(i + 1) * nf] {
             let _ = write!(line, "\t{v}");
         }
@@ -396,10 +466,12 @@ pub(crate) fn write_precursor_pin(
     std::fs::rename(&tmp, pin).map_err(|e| err(&e))?;
     log::info!(
         target: "dia",
-        "precursor PIN: {n} rows ({} targets), {} learned-score features, {} pass-1 columns, \
-         {} with a pass-1 row [{:.2}s]",
+        "precursor PIN: {n} rows ({} targets), {} learned-score features ({}, {} degenerate \
+         folds), {} pass-1 columns, {} with a pass-1 row [{:.2}s]",
         ids.targets.len(),
         nf,
+        if ids.learned { "kept" } else { "score left out" },
+        ids.degenerate_folds,
         p1.names.len(),
         p1_of.iter().filter(|p| p.is_some()).count(),
         t0.elapsed().as_secs_f64()
@@ -497,14 +569,35 @@ mod tests {
         }
     }
 
+    fn mix(i: u64) -> u64 {
+        i.wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(17) ^ 0x9e37_79b9
+    }
+
+    fn assert_no_constant_fold(s: &[f32], key: &[u64], seed: u64) {
+        for f in 0..FOLDS {
+            let v: Vec<f32> = (0..s.len())
+                .filter(|&i| (key[i] ^ seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) % FOLDS == f)
+                .map(|i| s[i])
+                .collect();
+            assert!(
+                v.len() < 2 || v.iter().any(|&x| x != v[0]),
+                "fold {f} has a constant score"
+            );
+        }
+    }
+
     #[test]
     fn learned_score_is_out_of_fold() {
         let n = 3000u64;
-        let mix = |i: u64| i.wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(17) ^ 0x9e37_79b9;
         let target: Vec<bool> = (0..n).map(|i| mix(i) % 2 == 0).collect();
         let key: Vec<u64> = (0..n).map(|i| mix(i + 77_777)).collect();
         let x: Vec<f32> = (0..n).map(|i| (mix(i + 5_000_000) % 10_000) as f32).collect();
-        let s = learned_score(&x, &["noise".to_string()], &target, &key, 7).unwrap();
+        let r = learned_score(&x, &["noise".to_string()], &target, &key, 7);
+        let Some(s) = r.score else {
+            assert!(r.degenerate_folds > 0, "no score without a degenerate fold");
+            return;
+        };
+        assert_no_constant_fold(&s, &key, 7);
         let (mut hit, mut tot) = (0f64, 0f64);
         for i in 0..n as usize {
             for j in (0..n as usize).step_by(13) {
@@ -516,5 +609,48 @@ mod tests {
         }
         let auc = hit / tot;
         assert!((auc - 0.5).abs() < 0.06, "out-of-fold AUC of a noise feature {auc}");
+    }
+
+    #[test]
+    fn a_small_table_falls_back_without_a_constant_score() {
+        let n = 500u64;
+        let target: Vec<bool> = (0..n).map(|i| mix(i) % 2 == 0).collect();
+        let key: Vec<u64> = (0..n).map(|i| mix(i + 77_777)).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| {
+                let shift = if target[i as usize] { 60.0 } else { 0.0 };
+                (mix(i + 5_000_000) % 100) as f32 + shift
+            })
+            .collect();
+        let r = learned_score(&x, &["signal".to_string()], &target, &key, 7);
+        match r.score {
+            Some(s) => assert_no_constant_fold(&s, &key, 7),
+            None => assert_eq!(r.degenerate_folds, FOLDS as usize, "every fold of round 0"),
+        }
+    }
+
+    #[test]
+    fn a_degenerate_later_round_keeps_the_previous_score() {
+        let n = 6000u64;
+        let target: Vec<bool> = (0..n).map(|i| mix(i) % 2 == 0).collect();
+        let strong: Vec<bool> = (0..n as usize)
+            .map(|i| target[i] && mix(i as u64 + 9) % 5 < 2)
+            .collect();
+        let key: Vec<u64> = (0..n).map(|i| mix(i + 77_777)).collect();
+        let x: Vec<f32> = (0..n as usize)
+            .map(|i| {
+                let shift = if strong[i] { 1000.0 } else { 0.0 };
+                (mix(i as u64 + 5_000_000) % 100) as f32 + shift
+            })
+            .collect();
+        let r = learned_score(&x, &["signal".to_string()], &target, &key, 7);
+        let s = r.score.expect("round 0 trains on every target");
+        assert!(r.degenerate_folds > 0, "round 1 has too few positives per fold");
+        assert_no_constant_fold(&s, &key, 7);
+    }
+
+    #[test]
+    fn min_fold_positives_follows_the_auc_gate() {
+        assert_eq!(min_fold_positives(&params()), 910);
     }
 }

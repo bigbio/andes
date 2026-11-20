@@ -12,6 +12,8 @@ mod config;
 mod dia;
 #[path = "andes/dia_llr.rs"]
 mod dia_llr;
+#[path = "andes/dia_pass2.rs"]
+mod dia_pass2;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]

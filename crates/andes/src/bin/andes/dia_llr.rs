@@ -330,6 +330,13 @@ struct RowOut {
 
 /// Adds the `COLUMNS` to every row of the PIN (the full pool, before re-ranking).
 #[allow(clippy::too_many_arguments)]
+/// The pool table with its `dia_llr` per row and each run's learned fragment m/z shift.
+pub(crate) struct PoolScores {
+    pub(crate) table: crate::predicted::PinTable,
+    pub(crate) llr: Vec<f64>,
+    pub(crate) shift_ppm: Vec<f64>,
+}
+
 pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],
@@ -337,7 +344,7 @@ pub(crate) fn add_to_pin(
     ms1: &[Vec<Ms1Scan>],
     predicted: &PredictedMs2,
     tol0: FragmentTolerance,
-) -> Result<(), String> {
+) -> Result<PoolScores, String> {
     let t0 = Instant::now();
     let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
     let table = read_pin(pin, spectra, &cols)?;
@@ -607,6 +614,8 @@ pub(crate) fn add_to_pin(
         }
     }
     write_pin(pin, &table, &cols, &values)?;
+    let shift_ppm: Vec<f64> = cals.iter().map(|c| c.shift_ppm).collect();
+    let llr = values.swap_remove(0);
     let report: Vec<String> = tables
         .iter()
         .enumerate()
@@ -628,7 +637,11 @@ pub(crate) fn add_to_pin(
         report.join("; "),
         t0.elapsed().as_secs_f64()
     );
-    Ok(())
+    Ok(PoolScores {
+        table,
+        llr,
+        shift_ppm,
+    })
 }
 
 fn explain_greedy(rows: &[(u32, Vec<IonObs>)], terms: &[Vec<(f64, f64)>], outs: &mut [RowOut]) {

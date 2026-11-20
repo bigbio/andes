@@ -1517,7 +1517,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         if let Some(predicted) = kept.filter(|_| pooled) {
-            crate::dia_llr::add_to_pin(
+            let pool = crate::dia_llr::add_to_pin(
                 &output_pin_path,
                 &spectra,
                 &run_ends,
@@ -1525,6 +1525,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
+            crate::dia_pass2::run(&output_pin_path, &spectra, &run_ends, &dia_ms1, &pool, &predicted)?;
         }
     }
     let mut rerank_dropped = std::collections::HashSet::new();

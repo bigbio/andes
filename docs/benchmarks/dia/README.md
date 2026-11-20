@@ -286,8 +286,8 @@ deconvolving the apex scans or an empirical fragment library from the run.
 ## diaPASEF (timsTOF `.d`)
 
 Summary: the search options below (`--dia-mobility-slices 16`, `--dia-ms1-tol-ppm 8`,
-`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,050-3,100 /
-2,450-2,950 precursors at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
+`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,100 / 2,800 precursors
+at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
 4,900 for DIA-NN. With reversed decoys, the measured FDP_c at q ≤ 1% is 4-5%. Near-variant decoys
 bring it to about 2%. The FDR of diaPASEF results is not calibrated yet, so andes writes a warning
 for `.d` input.
@@ -367,6 +367,7 @@ slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
 | + fragment-index top-K 300 (default 100) | 2,980 / 1.8% | 2,771 / 2.4% |
 | + vote filter 100:40 (default 100:20) | 3,103 / 1.6% | 2,668 / 2.0% |
 | Gate 8 ppm, after the fix that gives the prepass its own 25 ppm MS1 gate | 3,053 / 1.8% | 2,465 / 2.0% |
+| + scoring on every peak (the filter applies to the vote only) | **3,114 / 1.8%** | **2,802 / 1.5%** |
 | DIA-NN 2.2 | ~4,900 / 1.8% | ~4,900 / 1.7% |
 
 - The MS1 offset is measured on a first pass over 20,000 mid-mass spectra with a 25 ppm gate:
@@ -376,6 +377,15 @@ slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
   its q ≤ 1% count is lower (2,465 against 2,928) because that cut is on a steep step of the
   q-value curve. At q ≤ 2% and 5% it finds 3,467 and 4,206 (before: 3,415 and 4,093, seed 42). A
   3,000-spectrum sample had too few confident PSMs on B18 (about 100).
+- Until the last row, `--peak-filter` also filtered the peaks for scoring: a peak outside the
+  windowed top 20 had no rank, so it could not match a fragment ion. On a FASTA of only the
+  DIA-NN precursors that andes never reports plus 300 that it does, every one of them is retrieved
+  and ranks first in at least one spectrum. With the filtered scoring they match a median of 4
+  b/y ions against 7 for the found ones, and in the full search a stronger candidate wins their
+  spectra. With scoring on every peak they match 10 ions against 12, and B18 at q ≤ 1% / 2% / 5%
+  rises from 2,454 / 3,467 / 4,206 to 2,814 / 3,662 / 4,456 (seed 42). O4 is +2% at q ≤ 1% and
+  +7% at 5%. With reversed decoys FDP_c stays at 5.0% / 5.7% (before: 4.7% / 5.5%). Wall time is
+  12-15 min per run, the same as before.
 - After calibration andes finds 63% / 60% of DIA-NN's q ≤ 1% count. Of DIA-NN's HYE
   precursors at q ≤ 1%, andes reports 56% / 51% at q ≤ 1%. 24% / 31% never reach the PIN
   (their MS1 area is 0.25-0.3 log10 lower than the ones that do), and the rest are in the PIN

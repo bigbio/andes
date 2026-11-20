@@ -391,8 +391,7 @@ fn last_reaction_mz(filter: &str) -> Option<f64> {
         .split_whitespace()
         .filter_map(|t| t.split_once('@'))
         .filter_map(|(mz, _)| mz.parse::<f64>().ok())
-        .filter(|mz| mz.is_finite() && *mz > 0.0)
-        .last()
+        .rfind(|mz| mz.is_finite() && *mz > 0.0)
 }
 
 fn with_scan_number(native_id: &str, scan: usize) -> String {

@@ -39,6 +39,9 @@ struct Source {
 pub(crate) struct Predictors {
     sources: Vec<Source>,
     tol: FragmentTolerance,
+    /// Per-run fragment windows that replace `tol`, one per run, when the run's fragment
+    /// error was measured and applied; empty otherwise.
+    run_tols: Vec<FragmentTolerance>,
     threads: usize,
     batch: usize,
     dia: bool,
@@ -207,10 +210,20 @@ impl Predictors {
         Ok(Some(Self {
             sources,
             tol,
+            run_tols: Vec::new(),
             threads: cli.threads.max(1),
             batch: cli.predictor_batch.max(1),
             dia: cli.dia,
         }))
+    }
+
+    /// The fragment window of each run, replacing the one resolved from the flags.
+    pub(crate) fn set_run_tolerances(&mut self, run_tols: Vec<FragmentTolerance>) {
+        self.run_tols = run_tols;
+    }
+
+    pub(crate) fn tolerance(&self) -> FragmentTolerance {
+        self.tol
     }
 
     pub(crate) fn needs_peaks(&self) -> bool {
@@ -488,7 +501,9 @@ impl Predictors {
                 .map(|(f, _)| pred.batch_key(&forms[*f as usize].0)),
             self.batch,
         );
-        let tol = self.tol;
+        let run_of = |spec: u32| run_ends.partition_point(|&e| e <= spec as usize);
+        let (run_tols, default_tol) = (&self.run_tols, self.tol);
+        let tol_of = |spec: u32| run_tols.get(run_of(spec)).copied().unwrap_or(default_tol);
         let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
         let width = MS2_FEATURES.len()
             + if dia.is_some() {
@@ -498,6 +513,7 @@ impl Predictors {
             };
         let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
             let spec = &spectra[r.spec as usize];
+            let tol = tol_of(r.spec);
             let (_, mass) = &forms[r.form as usize];
             let mut v =
                 ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
@@ -1136,6 +1152,7 @@ mod tests {
                 ms2: false,
             }],
             tol: FragmentTolerance::Ppm(20.0),
+            run_tols: Vec::new(),
             threads: 2,
             batch: 7,
             dia: false,

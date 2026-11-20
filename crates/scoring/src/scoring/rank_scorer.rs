@@ -12,6 +12,7 @@ pub struct RankScorer {
     fragment_tol_override: Option<model::tolerance::Tolerance>,
     fragment_error: crate::scoring::fragment_error::SharedFragmentError,
     acquisition_high_res: Option<bool>,
+    recentre_default_tolerance: bool,
 }
 
 const FREQ_FLOOR: f32 = 1e-9;
@@ -112,6 +113,7 @@ impl RankScorer {
             fragment_tol_override: None,
             acquisition_high_res: None,
             fragment_error: crate::scoring::fragment_error::SharedFragmentError::new(),
+            recentre_default_tolerance: false,
         }
     }
 
@@ -143,6 +145,16 @@ impl RankScorer {
 
     pub fn set_fragment_tol_override(&mut self, tol: Option<model::tolerance::Tolerance>) {
         self.fragment_tol_override = tol;
+    }
+
+    /// Recentres the fragment tolerance override on the run's measured offset when `on`; the
+    /// override then stands for a `--dia` default, not for the user's `--fragment-tol-*`.
+    pub fn set_recentre_default_tolerance(&mut self, on: bool) {
+        self.recentre_default_tolerance = on;
+    }
+
+    pub fn recentres_default_tolerance(&self) -> bool {
+        self.recentre_default_tolerance
     }
 
     pub fn set_acquisition_high_res(&mut self, high_res: Option<bool>) {
@@ -202,7 +214,10 @@ impl RankScorer {
 
     pub fn fragment_recentre_ppm(&self) -> f64 {
         match self.fragment_error.get() {
-            Some(m) if self.fragment_tol_override.is_none() && self.acquisition_is_high_res() => {
+            Some(m)
+                if (self.fragment_tol_override.is_none() || self.recentre_default_tolerance)
+                    && self.acquisition_is_high_res() =>
+            {
                 m.offset_ppm
             }
             _ => 0.0,
@@ -366,6 +381,30 @@ mod tests {
         hi.set_fragment_error(None);
         assert_eq!(hi.fragment_recentre_ppm(), 0.0);
         assert_eq!(hi.pin_match_tolerance(), Tolerance::Ppm(20.0));
+    }
+
+    #[test]
+    fn the_default_override_is_recentred_only_when_asked() {
+        use crate::scoring::FragmentErrorModel;
+        use model::tolerance::Tolerance;
+        let m = FragmentErrorModel::new(-3.3, 1.3, 1000, 200);
+        let mut s = RankScorer::new(&tiny_param());
+        s.set_fragment_tol_override(Some(Tolerance::Ppm(7.0)));
+        s.set_fragment_error(Some(m));
+        assert_eq!(s.fragment_recentre_ppm(), 0.0, "off: the override wins");
+        s.set_recentre_default_tolerance(true);
+        assert_eq!(s.fragment_recentre_ppm(), -3.3);
+        assert_eq!(s.feature_match_tolerance(), Tolerance::Ppm(7.0));
+        assert_eq!(s.pin_match_tolerance(), Tolerance::Ppm(7.0));
+        assert_eq!(s.ppm_gaussian(), (0.0, 7.0));
+        s.set_fragment_error(None);
+        assert_eq!(s.fragment_recentre_ppm(), 0.0, "unmeasured: the default");
+        let mut lo = RankScorer::new(&low_res_param());
+        lo.set_fragment_tol_override(Some(Tolerance::Da(0.5)));
+        lo.set_recentre_default_tolerance(true);
+        lo.set_fragment_error(Some(m));
+        assert_eq!(lo.fragment_recentre_ppm(), 0.0);
+        assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
     }
 
     #[test]

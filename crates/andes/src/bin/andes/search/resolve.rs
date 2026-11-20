@@ -79,6 +79,8 @@ pub(super) struct ScoringModel {
     pub(super) resolved_model_id: String,
     pub(super) gbdt_k: usize,
     pub(super) frag_tol_override: Option<model::tolerance::Tolerance>,
+    /// Whether the run's measured fragment offset recentres the default `--dia` tolerance.
+    pub(super) recentre: bool,
 }
 
 /// The search parameters and the values derived while resolving them.
@@ -691,10 +693,9 @@ pub(super) fn resolve_scoring_model(
     }
     let mut scorer = RankScorer::new(&param);
     scorer.set_acquisition_high_res(Some(acquisition.high_res));
-    let dia_tol_default = cli.dia
-        && acquisition.analyzer == Some(InstrumentType::OrbitrapAstral)
-        && cli.fragment_tol_ppm.is_none()
-        && cli.fragment_tol_da.is_none();
+    let user_frag_tol = cli.fragment_tol_ppm.is_some() || cli.fragment_tol_da.is_some();
+    let dia_tol_default =
+        cli.dia && acquisition.analyzer == Some(InstrumentType::OrbitrapAstral) && !user_frag_tol;
     if dia_tol_default {
         cli.fragment_tol_ppm = Some(crate::dia::FRAGMENT_TOL_PPM);
         log::info!(target: "search",
@@ -702,9 +703,34 @@ pub(super) fn resolve_scoring_model(
             crate::dia::FRAGMENT_TOL_PPM
         );
     }
+    let recentre = cli.dia_recentre_fragments && !user_frag_tol && acquisition.high_res;
+    if recentre && cli.fragment_tol_ppm.is_none() {
+        if let model::tolerance::Tolerance::Ppm(p) = scorer.feature_match_tolerance() {
+            cli.fragment_tol_ppm = Some(p);
+        }
+    }
+    if cli.dia_recentre_fragments {
+        if recentre {
+            log::info!(target: "search",
+                "--dia-recentre-fragments: the measured fragment error moves the {:.1} ppm \
+                 default window, co-elution columns included",
+                cli.fragment_tol_ppm.unwrap_or(f64::NAN)
+            );
+        } else {
+            log::warn!(target: "search",
+                "--dia-recentre-fragments ignored: {}",
+                if user_frag_tol {
+                    "--fragment-tol-* sets the fragment tolerance"
+                } else {
+                    "the fragment spectra are not high resolution"
+                }
+            );
+        }
+    }
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
+    scorer.set_recentre_default_tolerance(recentre);
     if let Some(t) = frag_tol_override {
-        if instrument_was_detected && !dia_tol_default {
+        if instrument_was_detected && user_frag_tol {
             log::info!(target: "search",
                 "--fragment-tol-* {t:?} overrides the feature tolerance of the detected {} analyzer",
                 acquisition.analyzer.map_or("", |i| i.name())
@@ -725,6 +751,7 @@ pub(super) fn resolve_scoring_model(
         resolved_model_id,
         gbdt_k,
         frag_tol_override,
+        recentre,
     })
 }
 

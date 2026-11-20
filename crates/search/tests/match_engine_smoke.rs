@@ -283,3 +283,63 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
         top.iter().map(|p| p.charge_used).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn fragments_shifted_by_the_measured_offset_match_only_after_calibration() {
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+    use scoring_crate::scoring::FragmentErrorModel;
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"MKWVTFISLLR".to_vec(),
+            annotation: None,
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_peaks = 0;
+    let residues: Vec<AminoAcid> = b"WVTFISLLR"
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
+    let peptide = Peptide::new(residues, b'K', b'-');
+    let charge = 2u8;
+    let mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+    let offset_ppm = -4.0;
+    let mut spec = make_spectrum(mz, Some(charge as i32));
+    spec.peaks = predict_by_ions(&peptide, 1..=1)
+        .iter()
+        .map(|ion| (ion.mz * (1.0 + offset_ppm * 1e-6), 100.0))
+        .collect();
+    spec.peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let n_ions = spec.peaks.len() as u32;
+
+    let matched = |recentre: bool| {
+        let mut scorer = tiny_scorer();
+        scorer.set_fragment_tol_override(Some(Tolerance::Ppm(2.0)));
+        scorer.set_recentre_default_tolerance(recentre);
+        scorer.set_fragment_error(Some(FragmentErrorModel::new(offset_ppm, 0.5, 700, 100)));
+        let (queues, candidates) = search_enumerated(
+            std::slice::from_ref(&spec),
+            &idx,
+            &params,
+            &scorer,
+            0.05,
+            "XXX",
+        );
+        let top = queues.into_iter().next().unwrap().into_sorted_vec();
+        top.iter()
+            .find(|p| {
+                let c = &candidates[p.primary_candidate_idx() as usize];
+                !c.is_decoy && c.peptide.length() == 9
+            })
+            .map_or(0, |p| p.features.num_matched_main_ions)
+    };
+    assert!(
+        matched(false) < n_ions / 4,
+        "a 2 ppm window around the theoretical m/z misses peaks 4 ppm low"
+    );
+    assert_eq!(matched(true), n_ions);
+}

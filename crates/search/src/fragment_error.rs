@@ -13,6 +13,52 @@ pub const TOP_IONS_PER_PSM: usize = 7;
 pub const MIN_CONFIDENT_PSMS: usize = 100;
 pub const MEASURE_Q: f64 = 0.01;
 pub const SAMPLE_SPECTRA: usize = 3000;
+/// Spectra a `--dia` run measures on, spread over the run; with several candidates per scan
+/// they hold many times [`MIN_CONFIDENT_PSMS`] confident PSMs.
+pub const DIA_SAMPLE_SPECTRA: usize = 3_000;
+/// Candidates per `--dia` scan that enter the measurement, best first: a DIA scan holds
+/// several co-isolated peptides, and every confident one carries its own fragment errors.
+pub const DIA_RANKS_PER_SPECTRUM: usize = 10;
+
+/// The spectra a run's fragment-error measurement searches and the candidates it keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeasurePlan {
+    /// Spectra searched, a contiguous block in precursor-mass order.
+    pub sample_spectra: usize,
+    /// Best candidates per spectrum that compete for 1 % q.
+    pub ranks_per_spectrum: usize,
+    /// Spread the sample evenly over the precursor-mass order instead of taking a contiguous
+    /// block from its middle, so every isolation window and the whole gradient are sampled.
+    pub strided: bool,
+}
+
+impl MeasurePlan {
+    /// Positions, in precursor-mass order, of the spectra of a run of `len` spectra that the
+    /// measurement searches, ascending.
+    pub fn sample_positions(&self, len: usize) -> Vec<usize> {
+        let n = self.sample_spectra.min(len);
+        if !self.strided {
+            let lo = (len / 2).saturating_sub(n / 2);
+            return (lo..lo + n).collect();
+        }
+        (0..n).map(|i| i * len / n).collect()
+    }
+}
+
+impl MeasurePlan {
+    /// One candidate per spectrum from a small sample, for DDA.
+    pub const DDA: MeasurePlan = MeasurePlan {
+        sample_spectra: SAMPLE_SPECTRA,
+        ranks_per_spectrum: 1,
+        strided: false,
+    };
+    /// Several candidates per spectrum from a larger sample, for `--dia`.
+    pub const DIA: MeasurePlan = MeasurePlan {
+        sample_spectra: DIA_SAMPLE_SPECTRA,
+        ranks_per_spectrum: DIA_RANKS_PER_SPECTRUM,
+        strided: true,
+    };
+}
 
 fn nominal_reference_mz(ion: &PredictedIon, peptide: &Peptide) -> f64 {
     let scaler = INTEGER_MASS_SCALER as f64;
@@ -86,7 +132,7 @@ impl std::fmt::Display for NotMeasured {
         match self {
             NotMeasured::TooFewPsms { confident, scored } => write!(
                 f,
-                "{confident} of {scored} sampled spectra have a target PSM at {MEASURE_Q} q-value \
+                "{confident} of {scored} sampled PSMs are targets at {MEASURE_Q} q-value \
                  (need {MIN_CONFIDENT_PSMS})"
             ),
             NotMeasured::TooFewIons { confident } => {
@@ -96,22 +142,42 @@ impl std::fmt::Display for NotMeasured {
     }
 }
 
+/// The best `ranks` candidates of each queue as (spectrum, candidate, rank score), best first
+/// within a spectrum.
+pub fn ranked_candidates(queues: &[crate::TopNQueue], ranks: usize) -> Vec<(usize, u32, f32)> {
+    let mut out = Vec::new();
+    for (i, q) in queues.iter().enumerate() {
+        if ranks <= 1 {
+            if let Some(p) = q.peek_top() {
+                out.push((i, p.primary_candidate_idx(), p.rank_score));
+            }
+            continue;
+        }
+        let mut v: Vec<&crate::PsmMatch> = q.iter_psms().collect();
+        v.sort_by(|a, b| b.cmp(a));
+        out.extend(
+            v.into_iter()
+                .take(ranks)
+                .map(|p| (i, p.primary_candidate_idx(), p.rank_score)),
+        );
+    }
+    out
+}
+
 pub fn measure_on_queues(
     prepared: &PreparedSearch<'_>,
     sample: &[Spectrum],
     queues: &[crate::TopNQueue],
+    ranks: usize,
 ) -> Result<FragmentErrorModel, NotMeasured> {
     let mut tops: Vec<(usize, u32)> = Vec::new();
     let mut labels: Vec<ScoredLabel> = Vec::new();
-    for (i, q) in queues.iter().enumerate() {
-        if let Some(p) = q.peek_top() {
-            let idx = p.primary_candidate_idx();
-            tops.push((i, idx));
-            labels.push(ScoredLabel {
-                score: p.rank_score,
-                is_decoy: prepared.candidate_is_decoy(idx),
-            });
-        }
+    for (i, idx, score) in ranked_candidates(queues, ranks) {
+        tops.push((i, idx));
+        labels.push(ScoredLabel {
+            score,
+            is_decoy: prepared.candidate_is_decoy(idx),
+        });
     }
     let confident = confident_target_indices(&labels, MEASURE_Q);
     if confident.len() < MIN_CONFIDENT_PSMS {
@@ -205,6 +271,60 @@ mod tests {
         assert!((m.sigma_ppm - 1.6).abs() < 0.25, "{m:?}");
         assert_eq!(m.psms, 700);
         assert!(m.feature_tolerance_ppm() > 5.0 && m.feature_tolerance_ppm() < 8.0);
+    }
+
+    fn queue_of(scores: &[(u32, f32)]) -> crate::TopNQueue {
+        let mut q = crate::TopNQueue::new(scores.len() as u32);
+        for &(idx, s) in scores {
+            q.push(crate::PsmMatch {
+                spectrum_idx: 0,
+                candidate_idxs: vec![idx],
+                charge_used: 2,
+                mass_error_ppm: 0.0,
+                score: s,
+                rank_score: s,
+                edge_score: 0,
+                activation_method: None,
+                features: Default::default(),
+                isotope_offset: 0,
+                precursor_mz_override: None,
+                site_evidence: None,
+                tie_key: idx as u64,
+            });
+        }
+        q
+    }
+
+    #[test]
+    fn a_dia_plan_keeps_the_best_ranks_of_every_spectrum() {
+        let queues = vec![
+            queue_of(&[(1, 3.0), (2, 9.0), (3, 5.0)]),
+            queue_of(&[]),
+            queue_of(&[(7, 1.0)]),
+        ];
+        assert_eq!(
+            ranked_candidates(&queues, 1),
+            vec![(0, 2, 9.0), (2, 7, 1.0)]
+        );
+        assert_eq!(
+            ranked_candidates(&queues, 2),
+            vec![(0, 2, 9.0), (0, 3, 5.0), (2, 7, 1.0)]
+        );
+        assert_eq!(ranked_candidates(&queues, 10).len(), 4);
+    }
+
+    #[test]
+    fn a_strided_sample_spans_the_run_and_a_block_sits_in_its_middle() {
+        let plan = |strided| MeasurePlan {
+            sample_spectra: 4,
+            ranks_per_spectrum: 1,
+            strided,
+        };
+        assert_eq!(plan(true).sample_positions(10), vec![0, 2, 5, 7]);
+        assert_eq!(plan(false).sample_positions(10), vec![3, 4, 5, 6]);
+        assert_eq!(plan(true).sample_positions(3), vec![0, 1, 2]);
+        assert_eq!(plan(false).sample_positions(3), vec![0, 1, 2]);
+        assert!(plan(true).sample_positions(0).is_empty());
     }
 
     #[test]

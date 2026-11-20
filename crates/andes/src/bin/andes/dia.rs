@@ -43,6 +43,23 @@ pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
 pub(crate) const RERANK_POOL: u32 = 50;
 const RERANK_FEATURE: &str = "andesms2_spectral_angle";
 
+/// Fragment windows of the co-elution columns of one run: the apex and trace matches, and
+/// the summed-apex matches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ColumnTolerance {
+    pub(crate) frag: FragmentTolerance,
+    pub(crate) sum: FragmentTolerance,
+}
+
+impl Default for ColumnTolerance {
+    fn default() -> Self {
+        Self {
+            frag: FragmentTolerance::Ppm(FRAG_PPM),
+            sum: FragmentTolerance::Ppm(SUM_PPM),
+        }
+    }
+}
+
 fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {
     let p: Vec<&str> = spec_id.rsplitn(4, '_').collect();
     if p.len() == 4 && p[2] == scan {
@@ -236,6 +253,7 @@ pub(crate) fn add_to_pin(
     spectra: &[Spectrum],
     run_ends: &[usize],
     ms1: Vec<Vec<Ms1Scan>>,
+    run_tols: &[ColumnTolerance],
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
@@ -302,6 +320,7 @@ pub(crate) fn add_to_pin(
                 .collect();
             let rts: Vec<f64> = win[lo..hi].iter().map(|&i| rt(i)).collect();
             let run = run_of(r.spec as usize);
+            let tol = run_tols.get(run).copied().unwrap_or_default();
             let mut f = row_features(
                 &scans,
                 p - lo,
@@ -309,6 +328,7 @@ pub(crate) fn add_to_pin(
                 &table.forms[r.form as usize].1,
                 r.charge,
                 ms1.get(run).and_then(Option::as_ref),
+                tol.frag,
             );
             let (s_any, s_top) = support(r.form, r.charge, w, p as u32);
             f[11] = s_any;
@@ -320,6 +340,7 @@ pub(crate) fn add_to_pin(
                 nb((p + 1 < win.len()).then_some(p + 1)),
                 &table.forms[r.form as usize].1,
                 r.charge,
+                tol.sum,
             );
             f[13] = n2;
             f[14] = frac2;
@@ -388,6 +409,7 @@ pub(crate) fn evidence(
         }
     }
     let trace = |mz: f64| -> Vec<f64> {
+        let mz = tol.centre(mz);
         let w = tol.window(mz);
         scans
             .iter()
@@ -485,7 +507,15 @@ pub(crate) fn evidence(
 }
 
 fn best_peak(peaks: &[(f64, f32)], mz: f64, tol_ppm: f64) -> Option<(f64, f32)> {
-    let tol = mz * tol_ppm * 1e-6;
+    best_peak_within(peaks, mz, mz * tol_ppm * 1e-6)
+}
+
+fn best_fragment(peaks: &[(f64, f32)], mz: f64, tol: FragmentTolerance) -> Option<(f64, f32)> {
+    let centre = tol.centre(mz);
+    best_peak_within(peaks, centre, tol.window(centre))
+}
+
+fn best_peak_within(peaks: &[(f64, f32)], mz: f64, tol: f64) -> Option<(f64, f32)> {
     let lo = peaks.partition_point(|p| p.0 < mz - tol);
     peaks[lo..]
         .iter()
@@ -520,6 +550,7 @@ fn row_features(
     mass: &Mass,
     charge: u8,
     ms1: Option<&Ms1RunIndex>,
+    frag_tol: FragmentTolerance,
 ) -> [f64; COLUMNS.len()] {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
@@ -541,7 +572,7 @@ fn row_features(
     let here = scans[center];
     let mut matched: Vec<(f64, f32)> = ions
         .iter()
-        .filter_map(|&mz| best_peak(here, mz, FRAG_PPM).map(|(_, i)| (mz, i)))
+        .filter_map(|&mz| best_fragment(here, mz, frag_tol).map(|(_, i)| (mz, i)))
         .collect();
     let n_frag = matched.len() as f64;
     matched.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -551,7 +582,7 @@ fn row_features(
         .map(|&(mz, _)| {
             scans
                 .iter()
-                .map(|s| best_peak(s, mz, FRAG_PPM).map_or(0.0, |p| p.1 as f64))
+                .map(|s| best_fragment(s, mz, frag_tol).map_or(0.0, |p| p.1 as f64))
                 .collect()
         })
         .collect();
@@ -655,13 +686,15 @@ fn apex_sum(
     next: Option<&[(f64, f32)]>,
     mass: &Mass,
     charge: u8,
+    sum_tol: FragmentTolerance,
 ) -> (f64, f64, f64) {
     let n = mass.res.len();
     let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
     let mut prefix = mass.nterm;
     let (mut ions, mut n2, mut gain) = (0usize, 0usize, 0usize);
-    let has =
-        |s: Option<&[(f64, f32)]>, mz: f64| s.is_some_and(|s| best_peak(s, mz, SUM_PPM).is_some());
+    let has = |s: Option<&[(f64, f32)]>, mz: f64| {
+        s.is_some_and(|s| best_fragment(s, mz, sum_tol).is_some())
+    };
     for i in 0..n.saturating_sub(1) {
         prefix += mass.res[i];
         let (b_len, y_len) = (i + 1, n - i - 1);
@@ -917,7 +950,8 @@ mod tests {
         }
         let refs: Vec<&[(f64, f32)]> = scans.iter().map(Vec::as_slice).collect();
         let ms1 = Ms1RunIndex::new(survey);
-        let f = row_features(&refs, 4, &rts, &mass, z, Some(&ms1));
+        let t = ColumnTolerance::default();
+        let f = row_features(&refs, 4, &rts, &mass, z, Some(&ms1), t.frag);
         assert!(f[0] > 0.95, "frag corr {}", f[0]);
         assert_eq!(f[2], 0.0, "apex offset");
         assert!(f[4] > 0.95, "ms1 corr {}", f[4]);
@@ -925,15 +959,33 @@ mod tests {
         assert!(f[8] > 0.99, "iso cos {}", f[8]);
 
         let (_, other) = parse_peptide("K.GGGGWWWWK.A").unwrap();
-        let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1));
+        let g = row_features(&refs, 4, &rts, &other, z, Some(&ms1), t.frag);
         assert_eq!((g[0], g[5], g[10]), (0.0, 0.0, 0.0));
 
         let n = ys.len() as f64;
-        let (n2, _, gain) = apex_sum(refs[4], Some(refs[3]), Some(refs[5]), &mass, z);
+        let (n2, _, gain) = apex_sum(refs[4], Some(refs[3]), Some(refs[5]), &mass, z, t.sum);
         assert_eq!((n2, gain), (n, 0.0));
-        assert_eq!(apex_sum(refs[4], None, None, &mass, z).0, 0.0);
-        assert_eq!(apex_sum(refs[4], Some(refs[3]), None, &mass, z).0, n);
-        assert_eq!(apex_sum(refs[4], None, None, &other, z).0, 0.0);
+        assert_eq!(apex_sum(refs[4], None, None, &mass, z, t.sum).0, 0.0);
+        assert_eq!(apex_sum(refs[4], Some(refs[3]), None, &mass, z, t.sum).0, n);
+        assert_eq!(apex_sum(refs[4], None, None, &other, z, t.sum).0, 0.0);
+
+        let low: Vec<Vec<(f64, f32)>> = scans
+            .iter()
+            .map(|s| s.iter().map(|&(mz, i)| (mz * (1.0 - 4.0e-6), i)).collect())
+            .collect();
+        let low: Vec<&[(f64, f32)]> = low.iter().map(Vec::as_slice).collect();
+        let narrow = FragmentTolerance::Ppm(2.5);
+        let shifted = FragmentTolerance::PpmShifted {
+            ppm: 2.5,
+            offset_ppm: -4.0,
+        };
+        assert_eq!(row_features(&low, 4, &rts, &mass, z, None, narrow)[10], 0.0);
+        assert_eq!(row_features(&low, 4, &rts, &mass, z, None, shifted)[10], n);
+        assert_eq!(
+            apex_sum(low[4], Some(low[3]), None, &mass, z, narrow).0,
+            0.0
+        );
+        assert_eq!(apex_sum(low[4], Some(low[3]), None, &mass, z, shifted).0, n);
     }
 
     #[test]

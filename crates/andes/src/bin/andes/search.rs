@@ -100,6 +100,7 @@ struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
     per_file: Vec<Option<scoring_crate::scoring::FragmentErrorModel>>,
+    plan: search::fragment_error::MeasurePlan,
 }
 
 impl FragmentErrorMeasurer {
@@ -124,9 +125,12 @@ impl FragmentErrorMeasurer {
         let t = std::time::Instant::now();
         let mut refs: Vec<&Spectrum> = spectra.filter(|s| s.peaks.len() >= 10).collect();
         refs.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
-        let n = search::fragment_error::SAMPLE_SPECTRA.min(refs.len());
-        let lo = (refs.len() / 2).saturating_sub(n / 2);
-        let sample: Vec<Spectrum> = refs[lo..lo + n].iter().map(|s| (*s).clone()).collect();
+        let sample: Vec<Spectrum> = self
+            .plan
+            .sample_positions(refs.len())
+            .into_iter()
+            .map(|i| refs[i].clone())
+            .collect();
         drop(refs);
         let mut queues: Vec<TopNQueue> = Vec::with_capacity(sample.len());
         match index_span_da {
@@ -140,11 +144,29 @@ impl FragmentErrorMeasurer {
             }
             None => queues.extend(prepared.run_chunk(&sample, 0)),
         }
-        match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
+        let ranks = self.plan.ranks_per_spectrum;
+        match search::fragment_error::measure_on_queues(prepared, &sample, &queues, ranks) {
             Ok(m) => {
                 prepared.set_fragment_error(Some(m));
                 if let Some(last) = self.per_file.last_mut() {
                     *last = Some(m);
+                }
+                if prepared.scorer.recentres_default_tolerance() {
+                    log::info!(
+                        target: "fragment-error",
+                        "offset {:+.2} ppm, spread {:.2} ppm from {} ions of {} PSMs \
+                         at 1% q (best {ranks} per scan) in {} sampled spectra -> fragment peaks \
+                         recentred by {:+.2} ppm, tolerance {:?} ({:.1}s)",
+                        m.offset_ppm,
+                        m.sigma_ppm,
+                        m.ions,
+                        m.psms,
+                        sample.len(),
+                        prepared.scorer.fragment_recentre_ppm(),
+                        prepared.scorer.pin_match_tolerance(),
+                        t.elapsed().as_secs_f64()
+                    );
+                    return;
                 }
                 log::info!(
                     target: "fragment-error",
@@ -172,6 +194,35 @@ impl FragmentErrorMeasurer {
             ),
         }
     }
+}
+
+/// The fragment window of each run when `recentre` is on: `default`'s half-width around the
+/// measured offset where the run was measured, `default` elsewhere. `None` when `recentre` is
+/// off or `default` is not in ppm.
+fn recentred_run_tolerances(
+    recentre: bool,
+    measured_runs: &[Option<scoring_crate::scoring::FragmentErrorModel>],
+    default: onnx_infer::predictors::spectral::FragmentTolerance,
+) -> Option<Vec<onnx_infer::predictors::spectral::FragmentTolerance>> {
+    use onnx_infer::predictors::spectral::FragmentTolerance;
+    let FragmentTolerance::Ppm(default_ppm) = default else {
+        return None;
+    };
+    if !recentre || !default_ppm.is_finite() {
+        return None;
+    }
+    Some(
+        measured_runs
+            .iter()
+            .map(|m| match m {
+                Some(m) => FragmentTolerance::PpmShifted {
+                    ppm: default_ppm,
+                    offset_ppm: m.offset_ppm,
+                },
+                None => default,
+            })
+            .collect(),
+    )
 }
 
 fn scratch_tempdir(prefix: &str, scratch_dir: &Path) -> Result<tempfile::TempDir, String> {
@@ -244,6 +295,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         resolved_model_id,
         gbdt_k,
         frag_tol_override,
+        recentre,
     } = model;
     let RunInputs {
         is_mzml,
@@ -451,6 +503,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(t) = frag_tol_override {
                 sc.set_fragment_tol_override(Some(t));
             }
+            sc.set_recentre_default_tolerance(recentre);
             log::info!(
                 target: "routing",
                 "{} scans -> model {model_id} (the run is routed {})",
@@ -555,7 +608,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             log::info!(target: "quant", "{}", s.describe());
         }
     }
-    let predictors = if standalone {
+    let mut predictors = if standalone {
         None
     } else {
         crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
@@ -608,9 +661,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut measurer = FragmentErrorMeasurer {
-        enabled: acquisition.high_res && frag_tol_override.is_none() && !standalone,
+        enabled: acquisition.high_res && (frag_tol_override.is_none() || recentre) && !standalone,
         done: false,
         per_file: Vec::with_capacity(spectrum_paths.len()),
+        plan: if recentre {
+            search::fragment_error::MeasurePlan::DIA
+        } else {
+            search::fragment_error::MeasurePlan::DDA
+        },
     };
     for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
         if bench_mode && all_spectra.len() >= bench_cap {
@@ -1468,7 +1526,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "done in {:.2} s",
         t_total.elapsed().as_secs_f64()
     );
-    if let Some(p) = &predictors {
+    let measured_runs: Vec<Option<scoring_crate::scoring::FragmentErrorModel>> = (0..run_ends
+        .len())
+        .map(|f| measurer.per_file.get(f).copied().flatten())
+        .collect();
+    if let Some(p) = predictors.as_mut() {
+        if let Some(tols) = recentred_run_tolerances(recentre, &measured_runs, p.tolerance()) {
+            p.set_run_tolerances(tols);
+        }
         p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
     }
     let mut rerank_dropped = std::collections::HashSet::new();
@@ -1476,7 +1541,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
     }
     if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+        use onnx_infer::predictors::spectral::FragmentTolerance;
+        let default_ppm = cli.fragment_tol_ppm.unwrap_or(f64::NAN);
+        let column_tols: Vec<crate::dia::ColumnTolerance> = recentred_run_tolerances(
+            recentre,
+            &measured_runs,
+            FragmentTolerance::Ppm(default_ppm),
+        )
+        .map(|v| {
+            v.into_iter()
+                .map(|t| match t {
+                    FragmentTolerance::PpmShifted { .. } => {
+                        crate::dia::ColumnTolerance { frag: t, sum: t }
+                    }
+                    _ => crate::dia::ColumnTolerance::default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1, &column_tols)?;
     }
     if cli.refine {
         if refine_merged {

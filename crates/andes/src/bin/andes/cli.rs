@@ -635,6 +635,16 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) dia: bool,
 
+    /// With --dia: recentre the default fragment window on the run's measured offset (experimental)
+    ///
+    /// Off by default. Measures the fragment m/z error of the run's confident matches (3,000
+    /// spectra spread over the run) and moves the default window (7 ppm on Orbitrap Astral, 20
+    /// ppm on other high-resolution analyzers) by the measured offset for retrieval, scoring,
+    /// the PIN, the predicted-spectrum columns and the co-elution columns, which then match at
+    /// that window too. Ignored with --fragment-tol-*.
+    #[arg(long = "dia-recentre-fragments", hide = true, requires = "dia", help_heading = H_MODES)]
+    pub(crate) dia_recentre_fragments: bool,
+
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
     ///
     /// The modifications are a built-in tier, or the tier of --refine-config.
@@ -2640,6 +2650,7 @@ mod help_layout_tests {
         "xl_rescore_inter",
         "optimize_sample",
         "rescore_memory_gb",
+        "dia_recentre_fragments",
     ];
 
     #[test]

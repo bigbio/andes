@@ -17,13 +17,29 @@ pub const MS2_FEATURES: [&str; 8] = [
 pub enum FragmentTolerance {
     Da(f64),
     Ppm(f64),
+    /// `ppm` on each side of the theoretical m/z moved by the run's measured `offset_ppm`.
+    PpmShifted {
+        ppm: f64,
+        offset_ppm: f64,
+    },
 }
 
 impl FragmentTolerance {
+    /// Half-width of the window around `mz`, in Th.
     pub fn window(self, mz: f64) -> f64 {
         match self {
             FragmentTolerance::Da(d) => d,
-            FragmentTolerance::Ppm(p) => mz * p * 1e-6,
+            FragmentTolerance::Ppm(p) | FragmentTolerance::PpmShifted { ppm: p, .. } => {
+                mz * p * 1e-6
+            }
+        }
+    }
+
+    /// Where the window around the theoretical `mz` is centred.
+    pub fn centre(self, mz: f64) -> f64 {
+        match self {
+            FragmentTolerance::PpmShifted { offset_ppm, .. } => mz * (1.0 + offset_ppm * 1e-6),
+            _ => mz,
         }
     }
 }
@@ -68,7 +84,7 @@ pub fn ms2_features(
                 continue;
             }
             let neutral = if bion { prefix } else { total - prefix + H2O };
-            let mz = (neutral + z as f64 * PROTON) / z as f64;
+            let mz = tol.centre((neutral + z as f64 * PROTON) / z as f64);
             let w = tol.window(mz);
             let lo = peaks.partition_point(|(m, _)| *m < mz - w);
             let obs = peaks[lo..]
@@ -167,6 +183,25 @@ mod tests {
         assert!((f[6] - 1.0).abs() < 1e-6, "spectral angle {}", f[6]);
         assert!((f[7] - 1.0).abs() < 1e-9, "explained {}", f[7]);
         assert!(f[3] < 1e-12, "mse {}", f[3]);
+    }
+
+    #[test]
+    fn a_shifted_window_matches_peaks_at_the_measured_offset_only() {
+        let (_, mass) = parse_peptide("K.PEPTIDEK.R").unwrap();
+        let pred: Vec<f32> = (0..14).map(|i| 1.0 + (i % 5) as f32).collect();
+        let low: Vec<(f64, f32)> = ideal_peaks(&pred, &mass)
+            .into_iter()
+            .map(|(mz, i)| (mz * (1.0 - 4.0e-6), i))
+            .collect();
+        let explained = |tol| ms2_features(&pred, &BY1, &mass, 2, &low, tol)[7];
+        assert_eq!(explained(FragmentTolerance::Ppm(2.5)), 0.0);
+        let shifted = FragmentTolerance::PpmShifted {
+            ppm: 2.5,
+            offset_ppm: -4.0,
+        };
+        assert!((explained(shifted) - 1.0).abs() < 1e-9);
+        assert!((shifted.centre(1000.0) - 999.996).abs() < 1e-9);
+        assert!((shifted.window(1000.0) - 0.0025).abs() < 1e-12);
     }
 
     #[test]

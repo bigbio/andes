@@ -9,6 +9,13 @@
 //! runs' storage budget when they were rescored natively) and the precursor-level q, and infers
 //! the protein groups of all runs.
 //!
+//! With cross-run candidate transfer (`andes quant extract --run <stem>` for every run first,
+//! see `dia_xfer`), each run's table is the one over its own and its transferred nominees,
+//! the cross-run columns are computed over those tables, and the reported q is class-wise: one
+//! precursor-level target-decoy competition among the run's own nominees and one among its
+//! transferred nominees, so the q holds for each class a user filters (the counts under one
+//! pooled competition are logged for comparison).
+//!
 //! Cross-run columns of a precursor (peptide string, charge, target or decoy) of run r, from
 //! every other run o that nominated the same key (first row of the key in o's table):
 //! - `xr_max`: the largest `p2_llr` of the other runs ([`ABSENT_LLR`] when none has the key);
@@ -34,7 +41,7 @@ use rayon::prelude::*;
 /// Subdirectory of the quant directory with every DIA run's pass-1 PIN and pass-2 table.
 pub(crate) const PASS2_DIR: &str = "dia_pass2";
 /// Metadata key of the pass-2 table that holds the run's Percolator backend and arguments.
-const RESCORE_KEY: &str = "andes.dia.rescore";
+pub(crate) const RESCORE_KEY: &str = "andes.dia.rescore";
 /// `xr_max` of a precursor no other run nominated (a `p2_llr`, natural log units).
 const ABSENT_LLR: f32 = -30.0;
 /// `p2_llr` above which another run counts toward `xr_n`.
@@ -280,6 +287,14 @@ pub(crate) fn store_run(
     Ok(())
 }
 
+/// Whether `stem` is a DIA run stored in the quant directory (its pass-2 table exists).
+pub(crate) fn is_study_run(quant_dir: &Path, stem: &str) -> bool {
+    quant_dir
+        .join(PASS2_DIR)
+        .join(format!("{stem}.parquet"))
+        .is_file()
+}
+
 /// Stems of the DIA runs stored in a quant directory, sorted; empty when it holds none.
 pub(crate) fn study_runs(quant_dir: &Path) -> Result<Vec<String>, String> {
     let dir = quant_dir.join(PASS2_DIR);
@@ -343,7 +358,57 @@ pub(crate) fn finalize(
         );
     }
     let dir = a.quant_dir.join(PASS2_DIR);
-    let table_path = |s: &str| dir.join(format!("{s}.parquet"));
+    let with_xfer: Vec<&String> = stems
+        .iter()
+        .filter(|s| crate::dia_xfer::xfer_path(&a.quant_dir, s).is_file())
+        .collect();
+    let transfer = !with_xfer.is_empty();
+    if transfer && with_xfer.len() != stems.len() {
+        let missing: Vec<&str> = stems
+            .iter()
+            .filter(|s| !with_xfer.contains(s))
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "{}: {} of {} runs have a candidate-transfer table; run `andes quant extract              --quant-dir {} --run <stem>` for {}",
+            dir.display(),
+            with_xfer.len(),
+            stems.len(),
+            a.quant_dir.display(),
+            missing.join(", ")
+        ));
+    }
+    let table_path = |s: &str| {
+        if transfer {
+            crate::dia_xfer::xfer_path(&a.quant_dir, s)
+        } else {
+            dir.join(format!("{s}.parquet"))
+        }
+    };
+    if transfer {
+        let want = stems.join("\n");
+        for s in stems {
+            let p = table_path(s);
+            let built = read_pass2_meta(&p)?
+                .into_iter()
+                .find(|(k, _)| k == crate::dia_xfer::RUNS_KEY)
+                .map(|(_, v)| v);
+            if built.as_deref() != Some(want.as_str()) {
+                return Err(format!(
+                    "{}: built from other runs than the study's {} (stale transfer); run                      `andes quant extract --quant-dir {} --run {s}` again",
+                    p.display(),
+                    stems.join(", "),
+                    a.quant_dir.display()
+                ));
+            }
+        }
+        log::info!(
+            target: "dia",
+            "DIA study with cross-run candidate transfer: every run's pass-2 table holds its own \
+             and its transferred nominees (column {})",
+            crate::dia_pass2::XFER_COLUMN
+        );
+    }
     let mut stored: Vec<(&str, String)> = Vec::with_capacity(stems.len());
     for s in stems {
         let p = table_path(s);
@@ -447,6 +512,7 @@ pub(crate) fn finalize(
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         crate::dia_score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed)?;
+        let has_xfer = t.feature(crate::dia_pass2::XFER_COLUMN).is_some();
         drop(t);
         drop(xr);
         let (mut map, _) = output::run_percolator_with_decoys(&backend, &pin, &extra)
@@ -464,6 +530,23 @@ pub(crate) fn finalize(
              q <= 0.01 [{:.2}s]",
             t_run.elapsed().as_secs_f64()
         );
+        if has_xfer {
+            let c = crate::dia::precursor_q_by_class(
+                &pin,
+                crate::dia_pass2::XFER_COLUMN,
+                &mut map,
+                &decoys,
+            )?;
+            log::info!(
+                target: "rescore",
+                "run {s}: target precursors at q <= 0.01 own / transferred: class-wise q {} / {} \
+                 (reported), one pooled competition would give {} / {}",
+                c[1][0],
+                c[1][1],
+                c[0][0],
+                c[0][1]
+            );
+        }
         if a.database.is_some() {
             all_targets.extend(map.into_iter().map(|(id, p)| (format!("{s}\t{id}"), p)));
             all_decoys.extend(decoys.into_iter().map(|(id, p)| (format!("{s}\t{id}"), p)));

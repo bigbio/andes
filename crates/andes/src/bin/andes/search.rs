@@ -1666,6 +1666,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
+            let nominees_out = cli
+                .quant_dir
+                .as_deref()
+                .filter(|_| run_ends.len() == 1)
+                .map(|d| crate::dia_xfer::nominee_path(d, &crate::quant_run::run_stem(&spectrum_path)));
             dia_pass2 = Some(crate::dia_pass2::run(
                 &output_pin_path,
                 &spectra,
@@ -1673,6 +1678,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &dia_ms1,
                 &pool,
                 &predicted,
+                nominees_out.as_deref().map(|p| (p, spectrum_path.as_path())),
             )?);
         }
     }

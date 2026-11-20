@@ -37,7 +37,6 @@ pub(crate) const COLUMNS: [&str; 10] = [
 
 const SEARCH_PPM: f64 = 15.0;
 const PRESENT_PPM: f64 = 7.0;
-const CONFIDENT_LLR: f64 = 15.0;
 const MIN_PRESENT: usize = 6;
 const DECOY_SAMPLE_EVERY: usize = 5;
 const PROFILE_HALF: usize = 8;
@@ -665,11 +664,11 @@ pub(crate) fn run(inp: &RunInput) -> Vec<(usize, [f32; COLUMNS.len()])> {
         inp.shift,
         inp.rt_sigma_min,
     );
-    let confident = |n: &Nominee| !n.decoy && n.dia_llr > CONFIDENT_LLR;
+    let confident = |n: &Nominee| crate::dia_pass2::confident(n);
     let mut decoy_rank = vec![usize::MAX; noms.len()];
     let mut nd = 0usize;
     for (k, n) in noms.iter().enumerate() {
-        if n.decoy {
+        if crate::dia_pass2::null_member(n) {
             decoy_rank[k] = nd;
             nd += 1;
         }
@@ -753,6 +752,7 @@ mod tests {
             peptide: "-.PEPTIDEK.-".into(),
             proteins: "P1".into(),
             spec_id: "s".into(),
+            xfer: false,
         }
     }
 

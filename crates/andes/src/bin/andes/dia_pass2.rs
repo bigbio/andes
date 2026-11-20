@@ -21,6 +21,10 @@ use crate::predicted::{PinTable, PredictedMs2, NONE};
 pub(crate) const TOP_IONS: usize = 12;
 const NOMINATE_MIN_LLR: f64 = -15.0;
 const CONFIDENT_LLR: f64 = 15.0;
+/// `dia_llr` of a nominee transferred from another run of a study (no pool row in this run).
+pub(crate) const TRANSFER_DIA_LLR: f64 = -50.0;
+/// Name of the pass-2 column that marks transferred nominees (1) against the run's own (0).
+pub(crate) const XFER_COLUMN: &str = "xfer";
 pub(crate) const HALF_CYCLES: usize = 36;
 pub(crate) const CYCLES: usize = 2 * HALF_CYCLES + 1;
 /// m/z tolerance (ppm) of a predicted fragment's peak in a cycle of its trace, around the run's
@@ -113,6 +117,20 @@ pub(crate) struct Nominee {
     pub(crate) peptide: Box<str>,
     pub(crate) proteins: Box<str>,
     pub(crate) spec_id: Box<str>,
+    /// Nominated in another run of the study and scored here: never in a fit set.
+    pub(crate) xfer: bool,
+}
+
+/// A confident target of the run: the RT ridge, the presence rates at the apex and the joint
+/// model's fits use these. Transferred nominees never count.
+pub(crate) fn confident(n: &Nominee) -> bool {
+    !n.xfer && !n.decoy && n.dia_llr > CONFIDENT_LLR
+}
+
+/// A decoy of the run's chance model (presence rates, joint-model decoy sample); transferred
+/// decoys never count.
+pub(crate) fn null_member(n: &Nominee) -> bool {
+    n.decoy && !n.xfer
 }
 
 /// Pass-2 columns of the nominees, in `COLUMNS` order; rows outside every isolation window
@@ -197,6 +215,7 @@ pub(crate) fn nominate(
                 peptide: peptide.into(),
                 proteins: proteins.into(),
                 spec_id: spec_id.into(),
+                xfer: false,
             }
         })
         .filter(|n| !n.ions.is_empty())
@@ -343,7 +362,7 @@ fn robust_sigma(v: &mut [f64]) -> Option<f64> {
 
 /// A confident target with an andes-rt prediction: a row of the RT ridge.
 fn rt_fit_member(n: &Nominee) -> bool {
-    !n.decoy && n.dia_llr > CONFIDENT_LLR && !n.rt_missing && n.pred_rt.is_finite()
+    confident(n) && !n.rt_missing && n.pred_rt.is_finite()
 }
 
 /// Gaussian elimination with partial pivoting; `None` when singular.
@@ -487,7 +506,7 @@ impl Rates {
 fn collect_rates(w: &Window, n: &Nominee, t: &Trace) -> Rates {
     let mut r = Rates::default();
     let nj = n.ions.len();
-    if !n.decoy && n.dia_llr > CONFIDENT_LLR {
+    if confident(n) {
         let apex = (0..CYCLES)
             .filter(|&k| t.valid[k])
             .min_by(|&a, &b| {
@@ -502,7 +521,7 @@ fn collect_rates(w: &Window, n: &Nominee, t: &Trace) -> Rates {
             }
         }
     }
-    if n.decoy {
+    if null_member(n) {
         for k in (0..CYCLES).filter(|&k| t.valid[k]) {
             for j in 0..nj {
                 r.pn[j] += 1.0;
@@ -648,7 +667,11 @@ fn row_features(
     set(&mut vals, "p2_rterr", (tt[cs] - rt_cal).abs());
     set(&mut vals, "p2_rtstar", tt[cs]);
     set(&mut vals, "p2_dia_llr", n.dia_llr);
-    set(&mut vals, "p2_rt_pred_err", (rt_cal - n.apex_rt).abs());
+    set(
+        &mut vals,
+        "p2_rt_pred_err",
+        if n.xfer { 0.0 } else { (rt_cal - n.apex_rt).abs() },
+    );
     set(&mut vals, "p2_ok", 1.0);
     RowFeatures {
         vals,
@@ -911,7 +934,9 @@ pub(crate) fn extract(
     Pass2 { cols, joint }
 }
 
-/// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN.
+/// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN. With
+/// `nominees_out` (study mode: the nominee table path and the run's spectrum file), the
+/// nominees are also stored for the study's candidate transfer (`dia_xfer`).
 pub(crate) fn run(
     pin: &Path,
     spectra: &[Spectrum],
@@ -919,9 +944,14 @@ pub(crate) fn run(
     ms1: &[Vec<model::scan::Ms1Scan>],
     pool: &crate::dia_llr::PoolScores,
     predicted: &PredictedMs2,
+    nominees_out: Option<(&Path, &Path)>,
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
     let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
+    if let Some((path, spectrum)) = nominees_out {
+        let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
+        crate::dia_xfer::write_nominees_table(path, &noms, spectrum, shift)?;
+    }
     let idx: Vec<Option<Ms1RunIndex>> = ms1
         .iter()
         .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
@@ -961,6 +991,12 @@ pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia_pass2_table:
             .zip(&p2.cols)
             .chain(crate::dia_joint::COLUMNS.iter().zip(&p2.joint))
             .map(|(n, v)| (n.to_string(), keep.iter().map(|&i| v[i]).collect()))
+            .chain(noms.iter().any(|n| n.xfer).then(|| {
+                (
+                    XFER_COLUMN.to_string(),
+                    keep.iter().map(|&i| f32::from(u8::from(noms[i].xfer))).collect(),
+                )
+            }))
             .collect(),
     }
 }
@@ -1017,6 +1053,7 @@ mod tests {
             peptide: "-.PEPTIDEK.-".into(),
             proteins: "P1".into(),
             spec_id: "s_1_1".into(),
+            xfer: false,
         }
     }
 
@@ -1211,6 +1248,73 @@ mod tests {
         assert_eq!(rows[0].1.vals[col_ix("p2_shared")], 0.0);
         assert_eq!(rows[1].1.vals[col_ix("p2_shared")], 1.0);
         assert_eq!(rows[1].1.vals[col_ix("p2_lone")], 2.0);
+    }
+
+    #[test]
+    fn transferred_rows_stay_out_of_the_rt_ridge_and_the_rates() {
+        let mut noms: Vec<Nominee> = (0..200)
+            .map(|i| {
+                let mut n = nominee(false, 20.0, vec![(300.0, 1.0)]);
+                n.pred_rt = i as f64 * 0.1;
+                n.apex_rt = 1.0 + 0.9 * n.pred_rt;
+                n
+            })
+            .collect();
+        let own: Vec<&Nominee> = noms.iter().collect();
+        let (cal_own, sigma_own) = calibrate_rt(&own);
+        noms.extend((0..200).map(|i| {
+            let mut n = nominee(i % 2 == 0, 20.0, vec![(300.0, 1.0)]);
+            n.pred_rt = i as f64 * 0.1;
+            n.apex_rt = 50.0 - n.pred_rt;
+            n.xfer = true;
+            n
+        }));
+        let all: Vec<&Nominee> = noms.iter().collect();
+        let (cal_all, sigma_all) = calibrate_rt(&all);
+        assert_eq!(&cal_all[..200], &cal_own[..]);
+        assert_eq!(sigma_all, sigma_own);
+
+        let mzs: Vec<f64> = (0..12).map(|j| 300.0 + 50.0 * j as f64).collect();
+        let (scans, rt) = window(120, &mzs, 32..36);
+        let w = Window {
+            centre: 500.0,
+            iso: (499.0, 501.0),
+            mobility: None,
+            rt: rt.clone(),
+            scans: scans.iter().map(|s| s.as_slice()).collect(),
+        };
+        let ions: Vec<(f64, f32)> = mzs.iter().map(|&m| (m, 1.0)).collect();
+        for decoy in [false, true] {
+            let mut n = nominee(decoy, 20.0, ions.clone());
+            n.apex_rt = rt[33];
+            let t = trace(&w, &n, rt[33], 1.0);
+            let r = collect_rates(&w, &n, &t);
+            assert!(r.qn.iter().chain(&r.pn).sum::<f64>() > 0.0);
+            n.xfer = true;
+            let r = collect_rates(&w, &n, &t);
+            assert_eq!(r.qn.iter().chain(&r.pn).sum::<f64>(), 0.0);
+            assert!(!confident(&n) && !null_member(&n));
+        }
+    }
+
+    #[test]
+    fn xfer_column_marks_transferred_rows() {
+        let mut noms = vec![
+            nominee(false, 20.0, vec![(300.0, 1.0)]),
+            nominee(true, 20.0, vec![(300.0, 1.0)]),
+            nominee(false, TRANSFER_DIA_LLR, vec![(300.0, 1.0)]),
+        ];
+        let p2 = Pass2 {
+            cols: (0..COLUMNS.len())
+                .map(|c| if COLUMNS[c] == "p2_ok" { vec![1.0; 3] } else { vec![0.0; 3] })
+                .collect(),
+            joint: vec![vec![0.0; 3]; crate::dia_joint::COLUMNS.len()],
+        };
+        assert!(to_table(&noms, &p2).feature(XFER_COLUMN).is_none());
+        noms[2].xfer = true;
+        let t = to_table(&noms, &p2);
+        assert_eq!(t.feature(XFER_COLUMN).unwrap(), &[0.0, 0.0, 1.0]);
+        assert_eq!(t.features.last().unwrap().0, XFER_COLUMN);
     }
 
     #[test]

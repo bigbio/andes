@@ -1613,6 +1613,9 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
 }
 
 fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
+    if crate::dia_xrun::is_study_run(&a.quant_dir, &a.run) {
+        return crate::dia_xfer::extract_run(&a.quant_dir, &a.run);
+    }
     let ep = evidence_params(a.lfq_tol)?;
     let stored = read_library(&a.quant_dir)?;
     let run = stored

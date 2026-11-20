@@ -58,6 +58,12 @@ struct Source {
 pub(crate) struct PredictedMs2 {
     pub(crate) ions: Vec<onnx_infer::predictors::spectral::Ion>,
     pub(crate) by_form: HashMap<(Form, u8), Vec<f32>>,
+    /// The andes-rt source's raw (uncalibrated) prediction of every peptidoform of the PIN
+    /// table, by form id (NaN where it has none); empty without that source.
+    pub(crate) rt_raw: Vec<f32>,
+    /// Each run's andes-rt calibration from raw prediction to minutes (`andesrt_predicted_rt`);
+    /// `None` for a run with too few anchors.
+    pub(crate) rt_cal: Vec<Option<RtCalibration>>,
 }
 
 pub(crate) struct Predictors {
@@ -319,6 +325,7 @@ impl Predictors {
         let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
         let mut kept: Option<PredictedMs2> = None;
+        let mut kept_rt: Option<(Vec<f32>, Vec<Option<RtCalibration>>)> = None;
         for src in &self.sources {
             let pred = src.pred.as_ref();
             let mut miss = vec![false; n];
@@ -335,6 +342,7 @@ impl Predictors {
                 let mut diff = vec![f64::NAN; n];
                 let mut cal_rt = vec![f64::NAN; n];
                 let mut per_run = Vec::new();
+                let mut run_cals: Vec<Option<RtCalibration>> = Vec::with_capacity(anchors.len());
                 for (run, rows) in anchors.iter().enumerate() {
                     let pts: Vec<(f64, f64)> = rows
                         .iter()
@@ -358,6 +366,7 @@ impl Predictors {
                             ", median |residual| {m:.2} min"
                         ))
                     ));
+                    run_cals.push(cal.clone());
                     if let Some(c) = cal {
                         for (i, r) in table.rows.iter().enumerate() {
                             if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
@@ -375,6 +384,9 @@ impl Predictors {
                     *m |= !d.is_finite();
                 }
                 report.push(format!("{} RT: {}", pred.prefix(), per_run.join("; ")));
+                if keep_ms2 && kept_rt.is_none() && pred.prefix() == ANDES_RT_PREFIX {
+                    kept_rt = Some((raw, run_cals));
+                }
                 cols.push(diff);
                 cols.push(cal_rt);
             }
@@ -427,6 +439,10 @@ impl Predictors {
             t0.elapsed().as_secs_f64(),
             process_cpu_seconds() - c0
         );
+        if let (Some(k), Some((raw, cals))) = (kept.as_mut(), kept_rt) {
+            k.rt_raw = raw;
+            k.rt_cal = cals;
+        }
         Ok(kept)
     }
 
@@ -603,6 +619,8 @@ impl Predictors {
             *slot = Some(PredictedMs2 {
                 ions: pred.ions().to_vec(),
                 by_form,
+                rt_raw: Vec::new(),
+                rt_cal: Vec::new(),
             });
         }
         Ok((cols, msg))
@@ -610,6 +628,8 @@ impl Predictors {
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+/// Column prefix of the andes-rt source, whose calibrated prediction is `andesrt_predicted_rt`.
+const ANDES_RT_PREFIX: &str = "andesrt";
 
 /// The index of each row's (peptidoform, charge) prediction, or `NONE` for a row that gets no
 /// MS2 features: one whose spectrum was not located or has no peaks, or whose pair has no

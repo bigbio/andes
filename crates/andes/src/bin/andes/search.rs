@@ -1678,7 +1678,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &dia_ms1,
                 &pool,
                 &predicted,
-                nominees_out.as_deref().map(|p| (p, spectrum_path.as_path())),
+                nominees_out.as_deref().map(|path| crate::dia_xfer::NomineesOut {
+                    path,
+                    spectrum: spectrum_path.as_path(),
+                    mobility_slices: cli.dia_mobility_slices,
+                }),
             )?);
         }
     }

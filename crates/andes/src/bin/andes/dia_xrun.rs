@@ -272,6 +272,7 @@ pub(crate) fn store_run(
     let meta: Vec<(&str, String)> = rescore
         .map(|(b, a)| (RESCORE_KEY, encode_rescore(b, a)))
         .into_iter()
+        .chain([(crate::dia_xfer::STAMP_KEY, crate::dia_xfer::pass2_stamp(table))])
         .collect();
     let table_out = dir.join(format!("{stem}.parquet"));
     write_pass2_with(&table_out, table, &meta)?;
@@ -370,7 +371,8 @@ pub(crate) fn finalize(
             .map(String::as_str)
             .collect();
         return Err(format!(
-            "{}: {} of {} runs have a candidate-transfer table; run `andes quant extract              --quant-dir {} --run <stem>` for {}",
+            "{}: {} of {} runs have a candidate-transfer table; run `andes quant extract \
+             --quant-dir {} --run <stem>` for {}",
             dir.display(),
             with_xfer.len(),
             stems.len(),
@@ -387,6 +389,10 @@ pub(crate) fn finalize(
     };
     if transfer {
         let want = stems.join("\n");
+        let current: Vec<String> = stems
+            .iter()
+            .map(|s| crate::dia_xfer::run_inputs(&a.quant_dir, s))
+            .collect::<Result<_, _>>()?;
         for s in stems {
             let p = table_path(s);
             let built = read_pass2_meta(&p)?
@@ -395,12 +401,18 @@ pub(crate) fn finalize(
                 .map(|(_, v)| v);
             if built.as_deref() != Some(want.as_str()) {
                 return Err(format!(
-                    "{}: built from other runs than the study's {} (stale transfer); run                      `andes quant extract --quant-dir {} --run {s}` again",
+                    "{}: built from other runs than the study's {} (stale transfer); run \
+                     `andes quant extract --quant-dir {} --run {s}` again",
                     p.display(),
                     stems.join(", "),
                     a.quant_dir.display()
                 ));
             }
+            let built = read_pass2_meta(&p)?
+                .into_iter()
+                .find(|(k, _)| k == crate::dia_xfer::INPUTS_KEY)
+                .map(|(_, v)| v);
+            crate::dia_xfer::check_inputs(&a.quant_dir, &p, s, built.as_deref(), &current)?;
         }
         log::info!(
             target: "dia",

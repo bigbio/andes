@@ -105,6 +105,9 @@ pub(crate) struct Nominee {
     /// The PIN row had no andes-rt prediction (`andesrt_missing`): `pred_rt` is an imputed value,
     /// so the row stays out of the RT ridge and its spread.
     pub(crate) rt_missing: bool,
+    /// The raw (uncalibrated) andes-rt prediction of the peptidoform; NaN without one. Stored
+    /// for study mode, where a transferred nominee is calibrated with the receiving run's map.
+    pub(crate) raw_rt: f64,
     /// RT (min) of the scan whose pool row nominated it.
     pub(crate) apex_rt: f64,
     pub(crate) dia_llr: f64,
@@ -158,6 +161,14 @@ pub(crate) fn nominate(
     predicted: &PredictedMs2,
 ) -> Result<Vec<Nominee>, String> {
     let run_of = |s: usize| run_ends.partition_point(|&e| e <= s);
+    if !predicted.rt_raw.is_empty() && predicted.rt_raw.len() != table.forms.len() {
+        return Err(format!(
+            "{}: {} peptidoforms with an andes-rt prediction, {} in the pool table",
+            pin.display(),
+            predicted.rt_raw.len(),
+            table.forms.len()
+        ));
+    }
     let mut best: HashMap<(u32, u8, usize), usize> = HashMap::new();
     for (i, r) in table.rows.iter().enumerate() {
         if r.spec == NONE || r.form == NONE || r.charge == 0 || llr[i] <= NOMINATE_MIN_LLR {
@@ -207,6 +218,10 @@ pub(crate) fn nominate(
                 prec_mz: (total + H2O) / f64::from(r.charge) + PROTON,
                 pred_rt,
                 rt_missing,
+                raw_rt: predicted
+                    .rt_raw
+                    .get(r.form as usize)
+                    .map_or(f64::NAN, |&v| f64::from(v)),
                 apex_rt: sp.rt_seconds.unwrap_or(0.0) / 60.0,
                 dia_llr: llr[i],
                 mobility: mobility_centre(sp.mobility_window),
@@ -935,8 +950,8 @@ pub(crate) fn extract(
 }
 
 /// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN. With
-/// `nominees_out` (study mode: the nominee table path and the run's spectrum file), the
-/// nominees are also stored for the study's candidate transfer (`dia_xfer`).
+/// `nominees_out` (study mode), the nominees are also stored for the study's candidate
+/// transfer (`dia_xfer`).
 pub(crate) fn run(
     pin: &Path,
     spectra: &[Spectrum],
@@ -944,13 +959,14 @@ pub(crate) fn run(
     ms1: &[Vec<model::scan::Ms1Scan>],
     pool: &crate::dia_llr::PoolScores,
     predicted: &PredictedMs2,
-    nominees_out: Option<(&Path, &Path)>,
+    nominees_out: Option<crate::dia_xfer::NomineesOut>,
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
     let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
-    if let Some((path, spectrum)) = nominees_out {
+    if let Some(out) = nominees_out {
         let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
-        crate::dia_xfer::write_nominees_table(path, &noms, spectrum, shift)?;
+        let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);
+        crate::dia_xfer::write_nominees_table(&out, &noms, shift, rt_cal)?;
     }
     let idx: Vec<Option<Ms1RunIndex>> = ms1
         .iter()
@@ -1045,6 +1061,7 @@ mod tests {
             prec_mz: 500.0,
             pred_rt: 10.0,
             rt_missing: false,
+            raw_rt: f64::NAN,
             apex_rt: 10.0,
             dia_llr: llr,
             mobility: f64::NAN,

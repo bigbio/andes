@@ -786,10 +786,17 @@ final results; it stores what finalize needs. Step 2 gives each run every (pepti
 target or decoy) key that another run nominated and this run did not, from the run with the highest
 `dia_llr`, re-reads the run's spectra and scores those transferred nominees like its own. Transferred
 rows carry `xfer` 1 and `dia_llr` −50 (a flag); they are left out of the RT calibration, the chance
-rates and the joint-model fits, so the run's own nominees alone set the null. Targets and decoys
-follow one rule, and a decoy key only matches the same decoy. Step 2 is optional: without it,
-finalize uses the runs' own nominees only. Run it for every run or for none; finalize checks that
-the tables belong to the study's runs.
+rates and the joint-model fits, so the run's own nominees alone set the null. A transferred
+nominee's predicted RT is its raw andes-rt prediction through the receiving run's own calibration.
+Targets and decoys follow one rule, and a decoy key only matches the same decoy. Step 2 is
+optional: without it, finalize uses the runs' own nominees only. Run it for every run or for none;
+finalize checks that the tables belong to the study's runs and were built from the runs' current
+inputs (a run searched and stored again after step 2 makes every transfer table stale, and
+finalize names the run).
+
+Finalize compares the runs' Percolator engine and arguments (not the storage budget or the spill
+directory, which do not change results) and spills into its own `--temp-dir`, or the directory of
+the output base.
 
 Finalize adds three cross-run columns to every precursor, from the other runs' tables: `xr_max`
 (largest `p2_llr` of the same key in another run), `xr_n` (other runs where it is detected) and
@@ -815,7 +822,7 @@ metadata.
 |---|---|---|
 | `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.0 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns |
 | `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.0 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
-| `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.1 | The run's nominees (precursor, predicted RT, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window) |
+| `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.2 | The run's nominees (precursor, predicted RT, raw andes-rt prediction and missing flag, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window), with the run's andes-rt calibration and `--dia-mobility-slices` in the metadata |
 | `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.0 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
 | `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
 | `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
@@ -837,6 +844,9 @@ Plan memory for the search step by the 36 GB peak.
   falls back to the vote rank.
 - The fold key assumes a decoy has the residue composition of its source target (shuffled and
   reversed decoys).
+- Study-mode memory grows with the number of runs times the union of their nominees: each
+  extract step holds its run's own nominees plus every key nominated elsewhere, and finalize
+  holds the cross-run keys of all runs (about 24 bytes a precursor per run).
 - The transferred class of one benchmark run measured 1.28 % true FDP at q 0.01 (about 3,000
   transferred precursors, noisy); the other two runs measured 0.90 and 0.94 %.
 

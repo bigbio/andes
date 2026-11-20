@@ -2,8 +2,9 @@
 //! and decoys), so that a study step can score one run's nominees in another run. Written by
 //! `andes --dia --quant-dir` and read by `andes quant extract` on a DIA study.
 //!
-//! One row per nominee: its precursor (peptide string, charge, decoy, m/z), the predicted RT,
-//! the RT of the scan that nominated it, its pool `dia_llr`, the ion mobility of that scan's
+//! One row per nominee: its precursor (peptide string, charge, decoy, m/z), the predicted RT
+//! (calibrated to the run), the raw andes-rt prediction (NaN without one) and whether the PIN
+//! row had no prediction, the RT of the scan that nominated it, its pool `dia_llr`, the ion mobility of that scan's
 //! isolation window (NaN without one), and its top predicted fragments (m/z and predicted
 //! intensity, most intense first) as two list columns.
 
@@ -23,7 +24,7 @@ use parquet::arrow::ProjectionMask;
 use crate::versioned_parquet::{write_table, TableVersion, BATCH_ROWS};
 
 pub const DIA_NOMINEE_SCHEMA_MAJOR: u32 = 1;
-const SCHEMA_VERSION: &str = "1.1";
+const SCHEMA_VERSION: &str = "1.2";
 const TABLE: TableVersion = TableVersion {
     key: "andes.dia_nominees.schema",
     version: SCHEMA_VERSION,
@@ -41,6 +42,8 @@ pub struct NomineeRow<'a> {
     pub seq: &'a str,
     pub prec_mz: f64,
     pub pred_rt: f64,
+    pub raw_pred_rt: f64,
+    pub rt_missing: bool,
     pub apex_rt: f64,
     pub dia_llr: f64,
     /// Centre of the nominating scan's mobility window (scan index), NaN without one.
@@ -60,6 +63,8 @@ pub struct NomineeTable {
     pub seq: Vec<String>,
     pub prec_mz: Vec<f64>,
     pub pred_rt: Vec<f64>,
+    pub raw_pred_rt: Vec<f64>,
+    pub rt_missing: Vec<bool>,
     pub apex_rt: Vec<f64>,
     pub dia_llr: Vec<f64>,
     pub mobility: Vec<f64>,
@@ -110,6 +115,8 @@ fn schema() -> Arc<Schema> {
         Field::new("seq", DataType::Utf8, false),
         Field::new("prec_mz", DataType::Float64, false),
         Field::new("pred_rt", DataType::Float64, false),
+        Field::new("raw_pred_rt", DataType::Float64, false),
+        Field::new("rt_missing", DataType::Boolean, false),
         Field::new("apex_rt", DataType::Float64, false),
         Field::new("dia_llr", DataType::Float64, false),
         Field::new("mobility", DataType::Float64, false),
@@ -148,6 +155,8 @@ pub fn write_nominees<'a>(
             Arc::new(StringArray::from_iter_values(rows.iter().map(|x| x.seq))),
             Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.prec_mz))),
             Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.pred_rt))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.raw_pred_rt))),
+            Arc::new(BooleanArray::from_iter(rows.iter().map(|x| Some(x.rt_missing)))),
             Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.apex_rt))),
             Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.dia_llr))),
             Arc::new(Float64Array::from_iter_values(rows.iter().map(|x| x.mobility))),
@@ -273,6 +282,8 @@ pub fn read_nominees(path: &Path, keep: Option<&[u32]>) -> Result<NomineeTable, 
         let f64col = |c: &str| column::<Float64Array>(&b, c, path);
         let (mz, pred, apex, llr) = (f64col("prec_mz")?, f64col("pred_rt")?, f64col("apex_rt")?, f64col("dia_llr")?);
         let mobility = f64col("mobility")?;
+        let raw = f64col("raw_pred_rt")?;
+        let rt_missing = column::<BooleanArray>(&b, "rt_missing", path)?;
         let ion_mz = column::<ListArray>(&b, "ion_mz", path)?;
         let ion_int = column::<ListArray>(&b, "ion_int", path)?;
         let mut take = |i: usize| -> Result<(), String> {
@@ -284,6 +295,8 @@ pub fn read_nominees(path: &Path, keep: Option<&[u32]>) -> Result<NomineeTable, 
             t.seq.push(seq.value(i).to_string());
             t.prec_mz.push(mz.value(i));
             t.pred_rt.push(pred.value(i));
+            t.raw_pred_rt.push(raw.value(i));
+            t.rt_missing.push(rt_missing.value(i));
             t.apex_rt.push(apex.value(i));
             t.dia_llr.push(llr.value(i));
             t.mobility.push(mobility.value(i));
@@ -359,6 +372,8 @@ mod tests {
                 seq: &peps[i][2..10],
                 prec_mz: 400.0 + i as f64,
                 pred_rt: 10.0 + i as f64,
+                raw_pred_rt: if i == 2 { f64::NAN } else { 0.3 + i as f64 },
+                rt_missing: i == 2,
                 apex_rt: 11.0 + i as f64,
                 dia_llr: 20.0 - 10.0 * i as f64,
                 mobility: if i == 0 { 702.5 } else { f64::NAN },
@@ -372,6 +387,9 @@ mod tests {
         assert_eq!(t.decoy, vec![false, true, false]);
         assert_eq!(t.charge, vec![2, 3, 4]);
         assert_eq!(t.mobility[0], 702.5);
+        assert_eq!(t.raw_pred_rt[..2], [0.3, 1.3]);
+        assert!(t.raw_pred_rt[2].is_nan());
+        assert_eq!(t.rt_missing, vec![false, false, true]);
         assert!(t.mobility[1].is_nan() && t.mobility[2].is_nan());
         assert_eq!(t.ions(0).collect::<Vec<_>>(), ions[0]);
         assert_eq!(t.ions(1).count(), 0);

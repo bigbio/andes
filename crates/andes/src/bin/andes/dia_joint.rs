@@ -744,6 +744,7 @@ mod tests {
             prec_mz: 500.0,
             pred_rt: apex_rt,
             rt_missing: false,
+            raw_rt: f64::NAN,
             apex_rt,
             dia_llr: if decoy { 0.0 } else { 20.0 },
             mobility: f64::NAN,

@@ -780,7 +780,7 @@ rebuilds the peptide with that mass on the winning residue, re-scores it, and ke
 computed on the shifted form, and the winning isotope offset is reported in `isotope_error` and
 subtracted from `DeltaMass`. This is the localization-aware open search of Yu et al., *Nat.
 Commun.* 2020. Localisation itself is cheap (binary search into the sorted peak list); the full
-re-score is capped at 64 per spectrum.
+re-score runs on every shortlisted candidate, so `--open-search-top-k` bounds its cost.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|

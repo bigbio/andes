@@ -1,6 +1,6 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use scoring_crate::param_model::{IonType, Param, Partition};
+use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition};
 
 use crate::counts::CountStats;
 
@@ -56,6 +56,17 @@ impl Estimator {
             "EstimatorConfig.noise_pseudo must be > 0 (got {})",
             self.cfg.noise_pseudo
         );
+        let aligned_prior = prior.map(|p| {
+            let (aligned, missing) = align_prior_ions(p, template);
+            for ion in &missing {
+                log::warn!(
+                    target: "train",
+                    "prior model has no {ion:?} for the derived geometry; using segment counts"
+                );
+            }
+            aligned
+        });
+        let prior = aligned_prior.as_ref();
         let max_rank = template.max_rank;
         let esf = self
             .cfg
@@ -364,6 +375,153 @@ impl Estimator {
     }
 }
 
+/// Largest offset difference, in Da, at which a prior ion key and a template ion key of the same
+/// kind, charge and loss class are taken to name the same ion. It absorbs the last-bit drift of
+/// `f32` offsets computed from slightly different mass constants.
+const PRIOR_ION_OFFSET_TOLERANCE_DA: f64 = 1e-6;
+
+/// Deterministic sort key for an ion: kind, charge, offset bits, loss class.
+fn ion_sort_key(ion: &IonType) -> (u8, i32, u32, u8) {
+    match *ion {
+        IonType::Prefix {
+            charge,
+            offset_bits,
+            loss_class,
+        } => (0, charge, offset_bits, loss_class),
+        IonType::Suffix {
+            charge,
+            offset_bits,
+            loss_class,
+        } => (1, charge, offset_bits, loss_class),
+        IonType::Noise => (2, 0, 0, 0),
+    }
+}
+
+/// The template ion of the same kind, charge and loss class as `ion` whose offset is closest to
+/// it and within [`PRIOR_ION_OFFSET_TOLERANCE_DA`]. `template_ions` must be sorted by
+/// [`ion_sort_key`] so that ties resolve the same way on every run.
+fn matching_template_ion(ion: IonType, template_ions: &[IonType]) -> Option<IonType> {
+    let offset = f64::from(ion.offset()?);
+    template_ions
+        .iter()
+        .copied()
+        .filter(|t| {
+            t.is_prefix() == ion.is_prefix()
+                && t.is_suffix() == ion.is_suffix()
+                && t.charge() == ion.charge()
+                && t.loss_class() == ion.loss_class()
+        })
+        .filter_map(|t| t.offset().map(|o| ((f64::from(o) - offset).abs(), t)))
+        .filter(|(diff, _)| *diff <= PRIOR_ION_OFFSET_TOLERANCE_DA)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, t)| t)
+}
+
+/// Re-keys the ion tables of `prior` onto the ions of `template`.
+///
+/// Each prior ion key is replaced by the template ion of the same kind, charge and loss class
+/// whose offset lies within [`PRIOR_ION_OFFSET_TOLERANCE_DA`]; prior ions with no such template
+/// ion keep their key. Where two prior keys land on the same template ion, the one that already
+/// equals it wins. Every table keyed by [`IonType`] is remapped (`rank_dist_table`,
+/// `frag_off_table` and the derived ion-type cache).
+///
+/// Returns the remapped prior and the template ions (excluding noise) that no prior
+/// `rank_dist_table` key maps to, sorted by kind, charge, offset and loss class.
+pub(crate) fn align_prior_ions(prior: &Param, template: &Param) -> (Param, Vec<IonType>) {
+    let mut template_ions: Vec<IonType> = template
+        .frag_off_table
+        .values()
+        .flat_map(|frags| frags.iter().map(|f| f.ion_type))
+        .filter(|ion| !ion.is_noise())
+        .collect();
+    template_ions.sort_by_key(ion_sort_key);
+    template_ions.dedup();
+
+    let mut prior_ions: Vec<IonType> = prior
+        .rank_dist_table
+        .values()
+        .flat_map(|m| m.keys().copied())
+        .chain(
+            prior
+                .frag_off_table
+                .values()
+                .flat_map(|frags| frags.iter().map(|f| f.ion_type)),
+        )
+        .filter(|ion| !ion.is_noise())
+        .collect();
+    prior_ions.sort_by_key(ion_sort_key);
+    prior_ions.dedup();
+
+    let remap: FxHashMap<IonType, IonType> = prior_ions
+        .iter()
+        .filter_map(|&ion| matching_template_ion(ion, &template_ions).map(|t| (ion, t)))
+        .collect();
+    let target_of = |ion: IonType| -> IonType { remap.get(&ion).copied().unwrap_or(ion) };
+
+    let covered: FxHashSet<IonType> = prior
+        .rank_dist_table
+        .values()
+        .flat_map(|m| m.keys().copied())
+        .map(target_of)
+        .collect();
+    let missing: Vec<IonType> = template_ions
+        .iter()
+        .copied()
+        .filter(|t| !covered.contains(t))
+        .collect();
+
+    let rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = prior
+        .rank_dist_table
+        .iter()
+        .map(|(&part, ions)| {
+            let mut keys: Vec<IonType> = ions.keys().copied().collect();
+            keys.sort_by_key(|&ion| (target_of(ion) != ion, ion_sort_key(&ion)));
+            let mut table: FxHashMap<IonType, Vec<f32>> =
+                FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+            for ion in keys {
+                if let Some(dist) = ions.get(&ion) {
+                    table.entry(target_of(ion)).or_insert_with(|| dist.clone());
+                }
+            }
+            (part, table)
+        })
+        .collect();
+
+    let frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = prior
+        .frag_off_table
+        .iter()
+        .map(|(&part, frags)| {
+            let mut seen: FxHashSet<IonType> = frags
+                .iter()
+                .map(|f| f.ion_type)
+                .filter(|&ion| target_of(ion) == ion)
+                .collect();
+            let remapped: Vec<FragmentOffsetFrequency> = frags
+                .iter()
+                .filter_map(|f| {
+                    let target = target_of(f.ion_type);
+                    if target == f.ion_type {
+                        return Some(*f);
+                    }
+                    if !seen.insert(target) {
+                        return None;
+                    }
+                    let mut g = *f;
+                    g.ion_type = target;
+                    Some(g)
+                })
+                .collect();
+            (part, remapped)
+        })
+        .collect();
+
+    let mut aligned = prior.clone();
+    aligned.rank_dist_table = rank_dist_table;
+    aligned.frag_off_table = frag_off_table;
+    aligned.rebuild_cache();
+    (aligned, missing)
+}
+
 pub fn smooth_rank_window(dist: &[f32], max_rank: usize) -> Vec<f32> {
     let n = dist.len();
     let last = max_rank.min(n.saturating_sub(1));
@@ -528,4 +686,133 @@ fn charge_range(hist: &[(i32, i32)], template: &Param) -> (i32, i32) {
         .max()
         .unwrap_or(template.max_charge);
     (min, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::activation::ActivationMethod;
+    use model::instrument::InstrumentType;
+    use model::protocol::Protocol;
+    use model::tolerance::Tolerance;
+    use scoring_crate::param_model::SpecDataType;
+
+    fn part() -> Partition {
+        Partition {
+            charge: 2,
+            parent_mass: 1000.0,
+            seg_num: 0,
+        }
+    }
+
+    fn prefix(offset_bits: u32) -> IonType {
+        IonType::Prefix {
+            charge: 1,
+            offset_bits,
+            loss_class: 0,
+        }
+    }
+
+    fn suffix(offset_bits: u32) -> IonType {
+        IonType::Suffix {
+            charge: 1,
+            offset_bits,
+            loss_class: 0,
+        }
+    }
+
+    fn param_with_ions(ions: &[IonType], max_rank: i32) -> Param {
+        let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
+            FxHashMap::default();
+        frag_off_table.insert(
+            part(),
+            ions.iter()
+                .map(|&ion_type| FragmentOffsetFrequency {
+                    ion_type,
+                    frequency: 0.5,
+                })
+                .collect(),
+        );
+        let mut p = Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Ppm(20.0),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![(2, 100)],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![part()],
+            num_precursor_off: 0,
+            precursor_off_map: FxHashMap::default(),
+            frag_off_table,
+            max_rank,
+            rank_dist_table: FxHashMap::default(),
+            error_scaling_factor: 0,
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
+        };
+        p.rebuild_cache();
+        p
+    }
+
+    #[test]
+    fn prior_b_key_one_ulp_off_is_used() {
+        let max_rank = 3;
+        let prior_b = prefix(1065414256);
+        let template_b = prefix(1065414255);
+        let template = param_with_ions(&[template_b], max_rank);
+        let mut prior = param_with_ions(&[prior_b], max_rank);
+        let prior_dist = vec![0.5_f32, 0.25, 0.125, 0.125];
+        let mut ions = FxHashMap::default();
+        ions.insert(prior_b, prior_dist.clone());
+        prior.rank_dist_table.insert(part(), ions);
+
+        let (_, missing) = align_prior_ions(&prior, &template);
+        assert!(missing.is_empty(), "unexpected missing ions: {missing:?}");
+
+        let counts = CountStats::default();
+        let estimated = Estimator::new(EstimatorConfig::default()).estimate_with_prior(
+            &counts,
+            &template,
+            Some(&prior),
+        );
+        let dist = estimated
+            .rank_dist_table
+            .get(&part())
+            .and_then(|m| m.get(&template_b))
+            .expect("template b ion is estimated");
+        assert_eq!(dist, &prior_dist);
+    }
+
+    #[test]
+    fn prior_ion_without_counterpart_is_reported() {
+        let b = prefix((model::mass::PROTON as f32).to_bits());
+        let y = suffix(((model::mass::H2O + model::mass::PROTON) as f32).to_bits());
+        let c = prefix(((model::mass::PROTON + model::mass::NH3) as f32).to_bits());
+        let z_dot = suffix(
+            ((model::mass::H2O + model::mass::PROTON + model::mass::Z_DOT_OFFSET) as f32)
+                .to_bits(),
+        );
+        let template = param_with_ions(&[b, y, c, z_dot], 3);
+        let mut prior = param_with_ions(&[b, y], 3);
+        let mut ions = FxHashMap::default();
+        ions.insert(b, vec![0.25_f32; 4]);
+        ions.insert(y, vec![0.25_f32; 4]);
+        prior.rank_dist_table.insert(part(), ions);
+
+        let (_, missing) = align_prior_ions(&prior, &template);
+        assert_eq!(missing, vec![c, z_dot]);
+    }
 }

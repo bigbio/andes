@@ -34,8 +34,8 @@ use scoring_crate::scoring::fragment_ions::{
 use scoring_crate::scoring::{
     edge_scoring_enabled, frag_llr_battery, fuse_strong_score, intensity_signal,
     mass_competition_evidence, predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm,
-    score_psm_float, scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer,
-    ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
+    score_psm_float, scored_for_charge, strong_score_calibrated, strong_score_calibrated_loo,
+    OnlineStats, RankScorer, ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
@@ -740,7 +740,11 @@ impl<'a> PreparedSearch<'a> {
             || params.charge_range.clone().count() < 2
             || spectra.iter().all(has_charge)
         {
-            return self.run_chunk_inner(spectra, spectrum_idx_offset, params);
+            return self
+                .run_chunk_inner(spectra, spectrum_idx_offset, params)
+                .into_iter()
+                .map(|(queue, _pool)| queue)
+                .collect();
         }
         let mass = crate::fragment_index::index_order_mass;
         let (lo, hi) = spectra
@@ -764,19 +768,24 @@ impl<'a> PreparedSearch<'a> {
         let mut merged: Vec<TopNQueue> = (0..spectra.len())
             .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
             .collect();
+        let mut pools: Vec<Vec<f32>> = vec![Vec::new(); spectra.len()];
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
-            for (mut q, i) in self
+            for ((mut q, pool), i) in self
                 .run_chunk_inner(&chunk, 0, params)
                 .into_iter()
                 .zip(owners)
             {
+                pools[i].extend(pool);
                 for mut psm in q.drain_into_vec() {
                     psm.spectrum_idx = spectrum_idx_offset + i;
                     merged[i].push(psm);
                 }
             }
+        }
+        for (queue, pool) in merged.iter_mut().zip(&pools) {
+            recalibrate_strong_over_spectrum(queue, pool);
         }
         merged
     }
@@ -919,12 +928,15 @@ impl<'a> PreparedSearch<'a> {
         }
     }
 
+    /// Scores each spectrum of `spectra` at every charge it is searched with and returns, per
+    /// spectrum, its retained PSMs and the strong scores of the pool its `strong_score_cal` was
+    /// calibrated against (empty when the spectrum was skipped).
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
-    ) -> Vec<TopNQueue> {
+    ) -> Vec<(TopNQueue, Vec<f32>)> {
         let scorer_set = self.scorer_set(spectra);
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
@@ -1027,7 +1039,7 @@ impl<'a> PreparedSearch<'a> {
         self.chunk_prep_nanos
             .fetch_add(t_chunk_prep.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        let queues: Vec<TopNQueue> = spectra
+        let queues: Vec<(TopNQueue, Vec<f32>)> = spectra
             .par_iter()
             .enumerate()
             .map(|(local_idx, spec)| {
@@ -1037,7 +1049,7 @@ impl<'a> PreparedSearch<'a> {
                 let mut queue = TopNQueue::new(retention_cap);
 
                 if spec.peaks.len() < params.min_peaks as usize {
-                    return queue;
+                    return (queue, Vec::new());
                 }
 
                 let mut best_raw = i32::MIN;
@@ -1578,12 +1590,25 @@ impl<'a> PreparedSearch<'a> {
                     self.open_rescore_wins
                         .fetch_add(open_wins, Ordering::Relaxed);
                 }
-                queue
+                (queue, retained_strong)
             })
             .collect();
 
         queues
     }
+}
+
+/// Re-calibrates `strong_score_cal` of every PSM of one spectrum against `pool`, the strong
+/// scores retained over every charge the spectrum was searched with. With fewer than two pooled
+/// scores the per-charge value is kept.
+fn recalibrate_strong_over_spectrum(queue: &mut TopNQueue, pool: &[f32]) {
+    if pool.len() < 2 {
+        return;
+    }
+    queue.update_in_place(|psm| {
+        psm.features.strong_score_cal =
+            strong_score_calibrated_loo(pool, psm.features.strong_score);
+    });
 }
 
 pub const OUT_OF_CORE_SLICE_DA: f64 = 80.0;

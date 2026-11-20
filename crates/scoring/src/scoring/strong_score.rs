@@ -356,11 +356,18 @@ pub fn strong_score_zscore(score: f32, null: &OnlineStats) -> f32 {
     ((f64::from(score) - null.mean()) / null.population_stdev()) as f32
 }
 
+/// Fewest other retained scores the leave-one-out z-score of `strong_score_calibrated_loo`
+/// estimates its spread from; with fewer, the PSM gets 0 (no calibrated evidence).
+pub const STRONG_CAL_MIN_LOO_OTHERS: usize = 4;
+
 pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     if retained_strong.len() < 2 {
         return this;
     }
     let n = retained_strong.len();
+    if n - 1 < STRONG_CAL_MIN_LOO_OTHERS {
+        return 0.0;
+    }
     let this_d = f64::from(this);
     let sum: f64 = retained_strong.iter().map(|&s| f64::from(s)).sum();
     let n_others = (n - 1) as f64;
@@ -529,9 +536,18 @@ mod tests {
         }
         let z = strong_score_zscore(15.0, &null);
         assert!(z > 0.0);
-        let loo = strong_score_calibrated_loo(&[1.0, 3.0, 5.0], 5.0);
+        let loo = strong_score_calibrated_loo(&[1.0, 3.0, 5.0, 2.0, 4.0], 5.0);
         assert!(loo > 0.0);
         assert_eq!(strong_score_calibrated_loo(&[2.0], 2.0), 2.0);
+    }
+
+    #[test]
+    fn a_leave_one_out_z_score_needs_four_other_scores() {
+        let pool = [22.766172_f32, 32.432117, 22.761606];
+        assert_eq!(strong_score_calibrated_loo(&pool, 32.432117), 0.0);
+        let pool = [22.766172_f32, 32.432117, 22.761606, 22.7601, 22.7655];
+        let z = strong_score_calibrated_loo(&pool, 32.432117);
+        assert!(z > 0.0 && z.is_finite());
     }
 
     #[test]

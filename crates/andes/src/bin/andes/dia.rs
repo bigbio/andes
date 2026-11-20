@@ -56,10 +56,14 @@ pub(crate) fn rerank_pin(
     pin: &Path,
     keep: usize,
 ) -> Result<std::collections::HashSet<String>, String> {
+    use std::io::{BufRead, BufReader, BufWriter, Write};
     let t0 = Instant::now();
-    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    let mut lines = text.lines();
-    let header = lines.next().unwrap_or_default();
+    let err = |e: std::io::Error| format!("{}: {e}", pin.display());
+    let open = || -> Result<std::io::Lines<BufReader<std::fs::File>>, String> {
+        Ok(BufReader::new(std::fs::File::open(pin).map_err(err)?).lines())
+    };
+    let mut lines = open()?;
+    let header = lines.next().transpose().map_err(err)?.unwrap_or_default();
     let h: Vec<&str> = header.split('\t').collect();
     let at = |n: &str| h.iter().position(|c| *c == n);
     let (Some(c_scan), Some(c_raw), Some(c_ms2)) =
@@ -68,22 +72,39 @@ pub(crate) fn rerank_pin(
         return Ok(Default::default());
     };
     let need = c_scan.max(c_raw).max(c_ms2) + 1;
-    let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).collect();
-    let mut file = Vec::with_capacity(rows.len());
-    let mut scan = Vec::with_capacity(rows.len());
-    let mut raw = Vec::with_capacity(rows.len());
-    let mut ms2 = Vec::with_capacity(rows.len());
-    for l in &rows {
+    let mut group_of: HashMap<String, u32> = HashMap::new();
+    let mut key = String::new();
+    let mut group = Vec::new();
+    let mut raw = Vec::new();
+    let mut ms2 = Vec::new();
+    for l in lines {
+        let l = l.map_err(err)?;
+        if l.is_empty() {
+            continue;
+        }
         let x: Vec<&str> = l.splitn(need + 1, '\t').collect();
         if x.len() < need {
             return Err(format!("{}: short row while re-ranking", pin.display()));
         }
         let (r, m) = (x[c_raw].parse::<f64>(), x[c_ms2].parse::<f64>());
-        file.push(spectrum_key(x[0], x[c_scan]));
-        scan.push(x[c_scan]);
+        key.clear();
+        key.push_str(spectrum_key(x[0], x[c_scan]));
+        key.push('\t');
+        key.push_str(x[c_scan]);
+        let g = match group_of.get(&key) {
+            Some(&g) => g,
+            None => {
+                let g = group_of.len() as u32;
+                group_of.insert(key.clone(), g);
+                g
+            }
+        };
+        group.push(g);
         raw.push(r.unwrap_or(f64::NAN));
         ms2.push(m.unwrap_or(f64::NAN));
     }
+    drop(group_of);
+    let n_rows = group.len();
     let z = |v: &[f64]| -> Vec<f64> {
         let f: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
         let n = f.len().max(1) as f64;
@@ -100,20 +121,16 @@ pub(crate) fn rerank_pin(
             .collect()
     };
     let (zr, zm) = (z(&raw), z(&ms2));
+    drop((raw, ms2));
     let score: Vec<f64> = zr.iter().zip(&zm).map(|(a, b)| a + b).collect();
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| {
-        (file[a], scan[a])
-            .cmp(&(file[b], scan[b]))
-            .then(score[b].total_cmp(&score[a]))
-    });
-    let mut keep_row = vec![false; rows.len()];
+    drop((zr, zm));
+    let mut order: Vec<usize> = (0..n_rows).collect();
+    order.sort_by(|&a, &b| group[a].cmp(&group[b]).then(score[b].total_cmp(&score[a])));
+    let mut keep_row = vec![false; n_rows];
     let mut i = 0;
     while i < order.len() {
         let mut j = i;
-        while j < order.len()
-            && (file[order[j]], scan[order[j]]) == (file[order[i]], scan[order[i]])
-        {
+        while j < order.len() && group[order[j]] == group[order[i]] {
             if j - i < keep {
                 keep_row[order[j]] = true;
             }
@@ -121,23 +138,55 @@ pub(crate) fn rerank_pin(
         }
         i = j;
     }
+    drop((order, score, group));
     let kept = keep_row.iter().filter(|k| **k).count();
-    let mut dropped = std::collections::HashSet::with_capacity(rows.len() - kept);
-    let mut out = String::with_capacity(text.len());
-    out.push_str(header);
-    out.push('\n');
-    for (l, k) in rows.iter().zip(&keep_row) {
-        if *k {
-            out.push_str(l);
-            out.push('\n');
-        } else {
-            dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
+    let mut dropped = std::collections::HashSet::with_capacity(n_rows - kept);
+    let tmp = pin.with_file_name(format!(
+        "{}.rerank.tmp",
+        pin.file_name()
+            .map_or_else(|| "pin".into(), |n| n.to_string_lossy())
+    ));
+    let io = |e: std::io::Error| format!("{}: {e}", tmp.display());
+    let mut write_kept = || -> Result<(), String> {
+        let mut w = BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
+        w.write_all(header.as_bytes()).map_err(io)?;
+        w.write_all(b"\n").map_err(io)?;
+        let mut lines = open()?;
+        lines.next().transpose().map_err(err)?;
+        let mut row = 0usize;
+        for l in lines {
+            let l = l.map_err(err)?;
+            if l.is_empty() {
+                continue;
+            }
+            match keep_row.get(row) {
+                Some(true) => {
+                    w.write_all(l.as_bytes()).map_err(io)?;
+                    w.write_all(b"\n").map_err(io)?;
+                }
+                Some(false) => {
+                    dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
+                }
+                None => {
+                    return Err(format!("{}: changed while re-ranking", pin.display()));
+                }
+            }
+            row += 1;
         }
+        if row != n_rows {
+            return Err(format!("{}: changed while re-ranking", pin.display()));
+        }
+        w.flush().map_err(io)?;
+        drop(w);
+        std::fs::rename(&tmp, pin)
+            .map_err(|e| format!("{} -> {}: {e}", tmp.display(), pin.display()))
+    };
+    if let Err(e) = write_kept() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::write(pin, out).map_err(|e| format!("{}: {e}", pin.display()))?;
     log::info!(
-        "kept {kept} of {} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
-        rows.len(),
+        "kept {kept} of {n_rows} PIN rows, {keep} per scan by RawScore + {RERANK_FEATURE} [{:.2}s]",
         t0.elapsed().as_secs_f64()
     );
     Ok(dropped)
@@ -1035,6 +1084,30 @@ mod tests {
                 "r/c=2 scan=1_1_1_0",
                 "r/c=1 scan=2_2_1"
             ]
+        );
+    }
+
+    #[test]
+    fn rerank_keeps_the_earlier_of_tied_rows_of_a_scan_spread_over_the_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("x.pin");
+        let s = "SpecId\tLabel\tScanNr\tRawScore\tandesms2_spectral_angle\r\n\
+                 r_7_7_1\t1\t7\t2.0\t0.5\n\
+                 r_8_8_1\t1\t8\t5.0\t0.5\n\
+                 \n\
+                 r_7_7_2\t-1\t7\t2.0\t0.5\n\
+                 r_8_8_2\t1\t8\t1.0\tx\n\
+                 r_7_7_3\t1\t7\t1.0\t0.1";
+        std::fs::write(&pin, s).unwrap();
+        let dropped = rerank_pin(&pin, 1).unwrap();
+        let want: std::collections::HashSet<String> =
+            ["r_7_7_2", "r_8_8_2", "r_7_7_3"].map(String::from).into();
+        assert_eq!(dropped, want);
+        assert_eq!(
+            std::fs::read_to_string(&pin).unwrap(),
+            "SpecId\tLabel\tScanNr\tRawScore\tandesms2_spectral_angle\n\
+             r_7_7_1\t1\t7\t2.0\t0.5\n\
+             r_8_8_1\t1\t8\t5.0\t0.5\n"
         );
     }
 

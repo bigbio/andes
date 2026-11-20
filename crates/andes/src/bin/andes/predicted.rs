@@ -17,7 +17,6 @@ use onnx_infer::predictors::{
     DeepLc, Engine, NativeMs2, NativeRt, PeptDeep, Predictor, DEEPLC_FILE, PEPTDEEP_FILES,
 };
 use onnx_infer::{BackendKind, BackendOptions, OnnxSession};
-use rayon::prelude::*;
 use search::tdc::{qvalues, ScoredLabel};
 
 use crate::cli::{Cli, PredictFeature, PredictorBackend};
@@ -455,12 +454,64 @@ impl Predictors {
                 });
             }
         }
+        let mut row_start = vec![0u32; fz.len() + 1];
+        let fz_of_row = prediction_of_rows(&table.rows, spectra, &fz_ix);
+        drop(fz_ix);
+        for &k in &fz_of_row {
+            if k != NONE {
+                row_start[k as usize + 1] += 1;
+            }
+        }
+        for k in 0..fz.len() {
+            row_start[k + 1] += row_start[k];
+        }
+        let mut fill = row_start.clone();
+        let mut rows_of_fz = vec![0u32; row_start[fz.len()] as usize];
+        for (i, &k) in fz_of_row.iter().enumerate() {
+            if k != NONE {
+                rows_of_fz[fill[k as usize] as usize] = i as u32;
+                fill[k as usize] += 1;
+            }
+        }
+        drop(fill);
+        for (m, &k) in miss.iter_mut().zip(&fz_of_row) {
+            *m |= k == NONE;
+        }
+        drop(fz_of_row);
         let jobs = batches(
             fz.iter()
                 .map(|(f, _)| pred.batch_key(&forms[*f as usize].0)),
             self.batch,
         );
-        let out = Mutex::new(vec![Vec::new(); fz.len()]);
+        let tol = self.tol;
+        let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
+        let width = MS2_FEATURES.len()
+            + if dia.is_some() {
+                crate::dia::EVIDENCE_COLUMNS.len()
+            } else {
+                0
+            };
+        let row_features = |prediction: &[f32], r: &PinRow| -> Vec<f64> {
+            let spec = &spectra[r.spec as usize];
+            let (_, mass) = &forms[r.form as usize];
+            let mut v =
+                ms2_features(prediction, pred.ions(), mass, r.charge, &spec.peaks, tol).to_vec();
+            if let Some((slot, windows)) = &dia {
+                let (scans, center) =
+                    crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
+                v.extend(crate::dia::evidence(
+                    prediction,
+                    pred.ions(),
+                    mass,
+                    r.charge,
+                    &scans,
+                    center,
+                    tol,
+                ));
+            }
+            v
+        };
+        let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
         let t = Instant::now();
         run_parallel(&src.sessions, self.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job
@@ -470,65 +521,22 @@ impl Predictors {
             let v = pred
                 .ms2(s, &items)
                 .map_err(|e| format!("{} MS2: {e}", pred.prefix()))?;
+            let mut done: Vec<(u32, Vec<f64>)> = Vec::new();
+            for (&i, x) in job.iter().zip(&v) {
+                for &row in &rows_of_fz[row_start[i] as usize..row_start[i + 1] as usize] {
+                    done.push((row, row_features(x, &table.rows[row as usize])));
+                }
+            }
             let mut g = out.lock().expect("MS2 output lock");
-            for (&i, x) in job.iter().zip(v) {
-                g[i] = x;
+            for (row, f) in done {
+                for (c, x) in g.iter_mut().zip(f) {
+                    c[row as usize] = x;
+                }
             }
             Ok(())
         })?;
-        let ms2_pred = out.into_inner().expect("MS2 output lock");
+        let cols = out.into_inner().expect("MS2 output lock");
         let predict_s = t.elapsed().as_secs_f64();
-        let tol = self.tol;
-        let dia = self.dia.then(|| crate::dia::windows(spectra, run_ends));
-        let width = MS2_FEATURES.len()
-            + if dia.is_some() {
-                crate::dia::EVIDENCE_COLUMNS.len()
-            } else {
-                0
-            };
-        let feats: Vec<Option<Vec<f64>>> = table
-            .rows
-            .par_iter()
-            .map(|r| {
-                let k = fz_ix.get(&(r.form, r.charge))?;
-                let spec = &spectra[r.spec as usize];
-                let (_, mass) = &forms[r.form as usize];
-                let mut v = ms2_features(
-                    &ms2_pred[*k as usize],
-                    pred.ions(),
-                    mass,
-                    r.charge,
-                    &spec.peaks,
-                    tol,
-                )
-                .to_vec();
-                if let Some((slot, windows)) = &dia {
-                    let (scans, center) =
-                        crate::dia::neighbours(spectra, slot, windows, r.spec as usize);
-                    v.extend(crate::dia::evidence(
-                        &ms2_pred[*k as usize],
-                        pred.ions(),
-                        mass,
-                        r.charge,
-                        &scans,
-                        center,
-                        tol,
-                    ));
-                }
-                Some(v)
-            })
-            .collect();
-        let mut cols = vec![vec![f64::NAN; table.rows.len()]; width];
-        for (i, f) in feats.iter().enumerate() {
-            match f {
-                Some(v) => {
-                    for (c, x) in cols.iter_mut().zip(v) {
-                        c[i] = *x;
-                    }
-                }
-                None => miss[i] = true,
-            }
-        }
         if no_peaks > 0 {
             log::warn!(
                 target: "predict",
@@ -547,6 +555,24 @@ impl Predictors {
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+
+/// The index of each row's (peptidoform, charge) prediction, or `NONE` for a row that gets no
+/// MS2 features: one whose spectrum was not located or has no peaks, or whose pair has no
+/// prediction. Another row with the same pair does not lend such a row its prediction.
+fn prediction_of_rows(
+    rows: &[PinRow],
+    spectra: &[Spectrum],
+    fz_ix: &HashMap<(u32, u8), u32>,
+) -> Vec<u32> {
+    rows.iter()
+        .map(|r| {
+            if r.spec == NONE || spectra[r.spec as usize].peaks.is_empty() {
+                return NONE;
+            }
+            fz_ix.get(&(r.form, r.charge)).copied().unwrap_or(NONE)
+        })
+        .collect()
+}
 
 pub(crate) struct PinRow {
     pub(crate) spec: u32,
@@ -1001,6 +1027,26 @@ mod tests {
         assert_eq!(locate(&b, &spectra, "a_b_12_1_0", 12), 2);
         assert_eq!(locate(&b, &spectra, "run.10.10.2_10_1", 9), NONE);
         assert_eq!(locate(&b, &spectra, "other_5_1", 5), NONE);
+    }
+
+    #[test]
+    fn unlocated_and_peakless_rows_get_no_prediction_of_a_located_row() {
+        let mut empty = spectrum("run.11.11.2", 11, 2.0);
+        empty.peaks.clear();
+        let spectra = vec![spectrum("run.10.10.2", 10, 1.0), empty];
+        let row = |spec: u32, form: u32| PinRow {
+            spec,
+            form,
+            charge: 2,
+            decoy: false,
+            score: 0.0,
+        };
+        let rows = [row(0, 7), row(NONE, 7), row(1, 7), row(0, 8)];
+        let fz_ix = HashMap::from([((7u32, 2u8), 0u32)]);
+        assert_eq!(
+            prediction_of_rows(&rows, &spectra, &fz_ix),
+            [0, NONE, NONE, NONE]
+        );
     }
 
     #[test]

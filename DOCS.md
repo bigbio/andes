@@ -1240,6 +1240,13 @@ search's pair score, which is on one scale across runs, or `percolator` when the
 rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
 not comparable, so pooling a `percolator` row is an error; search those runs without the
 flags, or search them together and rescore once.
+The pooled q-values control the error of the whole list, not of each project's part of it:
+a project whose decoys score higher than the others' can hold more false CSMs than the cut.
+The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
+of the CSMs the pooled 1 % and 5 % cuts accept, per link class (`project`, `link`, `q_cut`,
+`tt`, `td`, `dd`, `decoy_fdr`). The project is the part of the run name before the first `.`
+(the plan names runs `<project>.<file stem>`). `decoy_fdr` is the decoy estimate of the
+share's false target-target CSMs, (TD - DD) / TT, and (TD + DD) / TT for homotypic links.
 
 ---
 

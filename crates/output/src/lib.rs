@@ -80,6 +80,7 @@ pub mod ms2_table;
 pub mod feature_parquet;
 pub mod mbr_out;
 pub mod versioned_parquet;
+pub mod xl_projects;
 pub use feature_parquet::{
     write_feature_parquet, FeatureGroup, FeatureParquetWriter, FeatureRecord, ProteinPosition,
 };

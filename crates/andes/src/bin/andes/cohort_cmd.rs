@@ -321,6 +321,106 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
     xl_fdr_tables(&args.tables, &args.output)
 }
 
+/// The q cuts of the per-project error report.
+const PROJECT_REPORT_CUTS: [f64; 2] = [0.01, 0.05];
+
+/// The project of a cohort run, named `<project>.<file stem>` by the plan.
+fn project_of(run: &str) -> &str {
+    run.split_once('.').map_or(run, |(p, _)| p)
+}
+
+/// The decoy estimate of a share's false target-target CSMs, as a fraction of its TT:
+/// (TD - DD) / TT, and (TD + DD) / TT for homotypic links, whose decoys are only TD and DD.
+fn share_fdr(c: &xl::fdr::ClassCounts, link: xl::rollup::LinkClass) -> f64 {
+    if c.tt == 0 {
+        return 0.0;
+    }
+    let false_tt = if link == xl::rollup::LinkClass::Homotypic {
+        (c.td + c.dd) as f64
+    } else {
+        (c.td as f64 - c.dd as f64).max(0.0)
+    };
+    false_tt / c.tt as f64
+}
+
+/// Every project's share of the CSMs each pooled cut of `PROJECT_REPORT_CUTS` accepts, per link
+/// class, for the projects with a scored CSM of that class.
+fn project_error(csms: &[CsmRow], q: &[Option<f64>]) -> Vec<output::xl_projects::XlProjectRow> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<(&str, usize), [xl::fdr::ClassCounts; PROJECT_REPORT_CUTS.len()]> =
+        BTreeMap::new();
+    for (c, q) in csms.iter().zip(q) {
+        let li = xl::rollup::LinkClass::ALL
+            .iter()
+            .position(|&l| l == c.link)
+            .unwrap_or(0);
+        let e = counts.entry((project_of(&c.run), li)).or_default();
+        for (k, cut) in PROJECT_REPORT_CUTS.iter().enumerate() {
+            if q.is_some_and(|v| v <= *cut) {
+                e[k].add(c.class);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for ((project, li), at) in counts {
+        let link = xl::rollup::LinkClass::ALL[li];
+        for (c, cut) in at.iter().zip(PROJECT_REPORT_CUTS) {
+            rows.push(output::xl_projects::XlProjectRow {
+                project: project.to_string(),
+                link: link.name().to_string(),
+                q_cut: cut,
+                tt: c.tt,
+                td: c.td,
+                dd: c.dd,
+                decoy_fdr: share_fdr(c, link),
+            });
+        }
+    }
+    rows
+}
+
+fn report_project_error(rows: &[output::xl_projects::XlProjectRow]) {
+    let shown: Vec<&output::xl_projects::XlProjectRow> = rows.iter().filter(|r| r.tt > 0).collect();
+    if shown.is_empty() {
+        return;
+    }
+    let width = shown
+        .iter()
+        .map(|r| r.project.len())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    log::info!(
+        target: "cohort",
+        "each project's share of the pooled list (decoy estimate = (TD - DD) / TT; \
+         homotypic (TD + DD) / TT):"
+    );
+    log::info!(
+        target: "cohort",
+        "{:<width$}  {:<9}  {:>5}  {:>7}  {:>5}  {:>5}  {:>8}",
+        "project",
+        "link",
+        "q",
+        "TT",
+        "TD",
+        "DD",
+        "estimate"
+    );
+    for r in shown {
+        log::info!(
+            target: "cohort",
+            "{:<width$}  {:<9}  {:>4}%  {:>7}  {:>5}  {:>5}  {:>7.1}%",
+            r.project,
+            r.link,
+            r.q_cut * 100.0,
+            thousands(r.tt),
+            thousands(r.td),
+            thousands(r.dd),
+            r.decoy_fdr * 100.0
+        );
+    }
+}
+
 /// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`.
 fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
@@ -388,9 +488,13 @@ fn xl_fdr_tables(tables: &[PathBuf], output: &Path) -> Result<(), Box<dyn Error>
         &levels,
         &|row| format!("{}:{}", csms[row].run, csms[row].spectrum),
     )?;
+    let projects = project_error(&csms, &q);
+    report_project_error(&projects);
+    output::xl_projects::write_xl_projects(&with(".xl.projects.parquet"), &projects)?;
     log::info!(
         target: "cohort",
-        "wrote {} ({} CSMs from {} runs) and the residue-pair and protein-pair tables",
+        "wrote {} ({} CSMs from {} runs), the residue-pair and protein-pair tables and the \
+         per-project error table",
         csm_path.display(),
         thousands(csms.len()),
         thousands(tables.len())
@@ -549,5 +653,53 @@ mod tests {
         std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
         std::fs::write(&file, "other spectra").unwrap();
         assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+    }
+
+    #[test]
+    fn each_project_share_is_counted_at_the_pooled_cuts() {
+        use xl::decoy::PairClass::{DD, TD, TT};
+        use xl::rollup::LinkClass::{Homotypic, Intra};
+        let row = |run: &str, class, link| CsmRow {
+            run: run.to_string(),
+            spectrum: String::new(),
+            class,
+            link,
+            score: 0.0,
+            residue_pair: String::new(),
+            protein_pair: String::new(),
+        };
+        let csms = vec![
+            row("A.r1", TT, Intra),
+            row("A.r1", TT, Intra),
+            row("A.r2", TD, Intra),
+            row("A.r2", TT, Intra),
+            row("B.r1", TT, Intra),
+            row("B.r1", DD, Intra),
+            row("B.r1", TD, Homotypic),
+            row("B.r1", TT, Homotypic),
+        ];
+        let q = vec![
+            Some(0.001),
+            Some(0.02),
+            Some(0.03),
+            None,
+            Some(0.004),
+            Some(0.04),
+            Some(0.01),
+            Some(0.01),
+        ];
+        let rows = project_error(&csms, &q);
+        let at = |p: &str, link: &str, cut: f64| {
+            rows.iter()
+                .find(|r| r.project == p && r.link == link && r.q_cut == cut)
+                .map(|r| (r.tt, r.td, r.dd, r.decoy_fdr))
+                .unwrap()
+        };
+        assert_eq!(at("A", "intra", 0.01), (1, 0, 0, 0.0));
+        assert_eq!(at("A", "intra", 0.05), (2, 1, 0, 0.5));
+        assert_eq!(at("B", "intra", 0.05), (1, 0, 1, 0.0));
+        assert_eq!(at("B", "homotypic", 0.01), (1, 1, 0, 1.0));
+        assert_eq!(rows.len(), 6);
+        assert_eq!(project_of("PXD1.run.with.dots"), "PXD1");
     }
 }

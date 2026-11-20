@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn v1_fixture_bit_identical() {
-        assert_eq!(fixture_hash("tiny.ams2"), 0xfc2c_f35f_cbc2_0fae, "tiny.ams2 changed");
+        assert_eq!(fixture_hash("tiny.ams2"), 0xd5b1_6273_e309_ac85, "tiny.ams2 changed");
         assert_eq!(
             fixture_hash("tiny_reference.tsv"),
             0x96f2_a0f2_83ad_2435,

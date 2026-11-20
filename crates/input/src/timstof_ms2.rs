@@ -78,17 +78,9 @@ pub(crate) fn mobility_slices(begin: usize, end: usize, n: usize) -> Vec<(usize,
     if n <= 1 || end - begin < 2 * n {
         return vec![(begin, end)];
     }
-    let step = (end - begin).div_ceil(n + 1);
+    let len = end - begin;
     (0..n)
-        .map(|k| {
-            let lo = begin + k * step;
-            let hi = if k + 1 == n {
-                end
-            } else {
-                (lo + 2 * step).min(end)
-            };
-            (lo, hi)
-        })
+        .map(|k| (begin + k * len / (n + 1), begin + (k + 2) * len / (n + 1)))
         .collect()
 }
 
@@ -463,6 +455,13 @@ mod tests {
         assert_eq!((s[0].0, s[7].1), (34, 538));
         for w in s.windows(2) {
             assert_eq!(w[1].0 - w[0].0, 56);
+            assert!(w[1].0 < w[0].1);
+        }
+        let s = mobility_slices(100, 135, 16);
+        assert_eq!(s.len(), 16);
+        assert_eq!((s[0].0, s[15].1), (100, 135));
+        assert!(s.iter().all(|&(lo, hi)| 100 <= lo && lo < hi && hi <= 135));
+        for w in s.windows(2) {
             assert!(w[1].0 < w[0].1);
         }
     }

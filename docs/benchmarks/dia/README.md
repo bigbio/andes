@@ -427,9 +427,10 @@ run Percolator on a new PIN, so compare each row with the "none" row above it.
 - The contest and the near-variant decoys fix the same error, so their gains do not add up. The
   best combination (near-variant decoys + contest after Percolator) is still at 1.8-2.0%.
 
-- The timsTOF model was trained with `andes train-from-search` on three PXD028735 ddaPASEF runs
-  (Human, Yeast, Ecoli _01, 213,326 labels). On held-out QC_01 ddaPASEF it gives 64,685
-  precursors vs 64,737 for `hcd_qexactive_tryp`, so the seed model already fits timsTOF MS2.
+- The timsTOF model was trained with `andes train-from-search` on three public ddaPASEF runs of
+  a human, yeast and E. coli benchmark set (213,326 labels). On a held-out QC ddaPASEF run of the
+  same set it gives 64,685 precursors vs 64,737 for `hcd_qexactive_tryp`, so the seed model
+  already fits timsTOF MS2.
 - The peak-group columns trace each candidate's b/y ions over ±5 cycles of its window group and
   8-scan mobility bins. They score a 2D median consensus, co-apex, RT and mobility marginal
   correlations, and MS1 2D correlation (a probe example, not in andes).

@@ -685,8 +685,8 @@ impl<'a> PreparedSearch<'a> {
             .map(|p| (p.0 - mz) / mz * 1e6)
     }
 
-    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64) -> bool {
-        let tol = mz * self.params.dia_ms1_tol_ppm * 1e-6;
+    fn dia_ms1_has(&self, scans: std::ops::Range<usize>, mz: f64, tol_ppm: f64) -> bool {
+        let tol = mz * tol_ppm * 1e-6;
         self.dia_ms1[scans].iter().any(|s| {
             let i = s.peaks.partition_point(|p| p.0 < mz - tol);
             s.peaks.get(i).is_some_and(|p| p.0 <= mz + tol)
@@ -1093,7 +1093,11 @@ impl<'a> PreparedSearch<'a> {
                         ms1_gate.clone().is_none_or(|r| {
                             dia_windows.iter().any(|&(z, lo, hi)| {
                                 (lo..=hi).contains(&mass)
-                                    && self.dia_ms1_has(r.clone(), mass / z as f64 + PROTON)
+                                    && self.dia_ms1_has(
+                                        r.clone(),
+                                        mass / z as f64 + PROTON,
+                                        params.dia_ms1_tol_ppm,
+                                    )
                             })
                         })
                     };
@@ -1176,9 +1180,9 @@ impl<'a> PreparedSearch<'a> {
                             let mass = cand.peptide.mass();
                             let mono_mz = mass / z as f64 + PROTON;
                             if (lo..=hi).contains(&mass)
-                                && ms1_gate
-                                    .clone()
-                                    .is_none_or(|r| self.dia_ms1_has(r, mono_mz))
+                                && ms1_gate.clone().is_none_or(|r| {
+                                    self.dia_ms1_has(r, mono_mz, params.dia_ms1_tol_ppm)
+                                })
                             {
                                 iso_errs.push(MassError {
                                     mass_error_da: 0.0,
@@ -2437,9 +2441,10 @@ mod accumulator_tests {
         assert_eq!(prepared.dia_ms1_scans(None), None);
         let r = prepared.dia_ms1_scans(Some(9.0)).unwrap();
         assert_eq!(r, 0..2);
-        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6)));
-        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6)));
-        assert!(!prepared.dia_ms1_has(r, 700.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 4e-6), 5.0));
+        assert!(!prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 5.0));
+        assert!(prepared.dia_ms1_has(r.clone(), 600.0 * (1.0 + 6e-6), 25.0));
+        assert!(!prepared.dia_ms1_has(r, 700.0, 25.0));
         assert_eq!(prepared.dia_ms1_scans(Some(26.0)).unwrap(), 1..3);
 
         let e = prepared

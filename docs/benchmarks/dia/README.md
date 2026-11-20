@@ -286,10 +286,11 @@ deconvolving the apex scans or an empirical fragment library from the run.
 ## diaPASEF (timsTOF `.d`)
 
 Summary: the search options below (`--dia-mobility-slices 16`, `--dia-ms1-tol-ppm 8`,
-`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,100 / 2,900 precursors
-at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about 4,900 for DIA-NN. With
-reversed decoys, the measured FDP_c at q ≤ 1% is 4-5%. Near-variant decoys bring it to about 2%.
-The FDR of diaPASEF results is not calibrated yet, so andes writes a warning for `.d` input.
+`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,050-3,100 /
+2,450-2,950 precursors at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
+4,900 for DIA-NN. With reversed decoys, the measured FDP_c at q ≤ 1% is 4-5%. Near-variant decoys
+bring it to about 2%. The FDR of diaPASEF results is not calibrated yet, so andes writes a warning
+for `.d` input.
 
 Data: two ProteoBench low-input diaPASEF runs (O4, cond B, and B18, cond A), 15 windows (5 window
 groups x 3 mobility ranges), searched against HYE plus reviewed Arabidopsis as entrapment
@@ -365,11 +366,16 @@ slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
 | same, gate 5 ppm | 3,123 / 1.6% | 2,938 / 2.5% |
 | + fragment-index top-K 300 (default 100) | 2,980 / 1.8% | 2,771 / 2.4% |
 | + vote filter 100:40 (default 100:20) | 3,103 / 1.6% | 2,668 / 2.0% |
+| Gate 8 ppm, after the fix that gives the prepass its own 25 ppm MS1 gate | 3,053 / 1.8% | 2,465 / 2.0% |
 | DIA-NN 2.2 | ~4,900 / 1.8% | ~4,900 / 1.7% |
 
 - The MS1 offset is measured on a first pass over 20,000 mid-mass spectra with a 25 ppm gate:
-  the median signed error of the confident PSMs' monoisotopic peaks. A 3,000-spectrum sample
-  had too few confident PSMs on B18 (about 100).
+  the median signed error of the confident PSMs' monoisotopic peaks. Before a review fix, the
+  first pass used the configured gate (8 or 5 ppm) instead, so every row above the last andes
+  row comes from that build. The fixed build measures the same offsets (+5.5 / +8.2 ppm). On B18
+  its q ≤ 1% count is lower (2,465 against 2,928) because that cut is on a steep step of the
+  q-value curve. At q ≤ 2% and 5% it finds 3,467 and 4,206 (before: 3,415 and 4,093, seed 42). A
+  3,000-spectrum sample had too few confident PSMs on B18 (about 100).
 - After calibration andes finds 63% / 60% of DIA-NN's q ≤ 1% count. Of DIA-NN's HYE
   precursors at q ≤ 1%, andes reports 56% / 51% at q ≤ 1%. 24% / 31% never reach the PIN
   (their MS1 area is 0.25-0.3 log10 lower than the ones that do), and the rest are in the PIN

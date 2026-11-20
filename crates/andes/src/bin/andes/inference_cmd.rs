@@ -98,6 +98,18 @@ pub(crate) fn infer_from_files(
         )
         .into());
     }
+    let targets = read_all(psms)?;
+    let decoys = read_all(decoy_psms)?;
+    infer_from_maps(database, a, targets, &decoys)
+}
+
+/// Protein inference over Percolator results already in memory (target and decoy PSMs).
+pub(crate) fn infer_from_maps(
+    database: &Path,
+    a: &ProteinArgs,
+    mut targets: HashMap<String, output::PercolatorPsm>,
+    decoys: &HashMap<String, output::PercolatorPsm>,
+) -> Result<output::Inference, Box<dyn std::error::Error>> {
     let (enzyme, _) = parse_enzymes(&a.db.enzyme)?;
     let (restricted, fixed_terminal) = annotated_site_masses(&a.db)?;
     let opts = input::UniProtOptions {
@@ -116,13 +128,11 @@ pub(crate) fn infer_from_files(
     let mut idx = SearchIndex::from_target_db(&db, &a.db.decoy_prefix);
     idx.decoy_suffix = a.db.decoy_suffix.clone();
 
-    let mut targets = read_all(psms)?;
-    let decoys = read_all(decoy_psms)?;
     let proteoform_fdr = a.proteoform_fdr();
     if idx.has_alternative_entries {
         output::share_isobaric_references(&mut targets, &idx, a.psm_fdr.max(proteoform_fdr));
     }
-    output::apply_class_fdr(&mut targets, &decoys, &idx);
+    output::apply_class_fdr(&mut targets, decoys, &idx);
     let mut knockoffs =
         output::apply_knockoff_fdr(&mut targets, &idx, proteoform_fdr, a.db.knockoffs > 0)
             .knockoff_rows;
@@ -143,7 +153,7 @@ pub(crate) fn infer_from_files(
     let cutoffs = output::Cutoffs::new(&targets, &idx, a.psm_fdr, proteoform_fdr);
     Ok(output::infer_protein_groups(
         &targets,
-        &decoys,
+        decoys,
         &idx,
         |id| targets[id].q_value <= cutoffs.of(id) && !knockoffs.contains(id),
     ))

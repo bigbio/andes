@@ -231,6 +231,17 @@ fn gbdt_model(
 }
 
 pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
+    train_gbdt_from(ds, p, seed, Vec::new())
+}
+
+/// [`train_gbdt`] continued from the trees `init`: margins start at their sum, and up to
+/// `p.n_rounds` trees are added to them.
+pub fn train_gbdt_from(
+    ds: &Dataset,
+    p: &TrainParams,
+    seed: u64,
+    init: Vec<scoring_crate::gbdt_eval::Tree>,
+) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
     if ds.feature_names.len() != nf {
@@ -359,8 +370,19 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         ));
     }
 
-    let mut raw_train = vec![0.0f32; n_active];
-    let mut raw_val = vec![0.0f32; val_n];
+    let margin = |rows: &[usize]| -> Vec<f32> {
+        if init.is_empty() {
+            return vec![0.0f32; rows.len()];
+        }
+        rows.par_iter()
+            .map(|&r| {
+                let row = &ds.x[r * nf..(r + 1) * nf];
+                init.iter().fold(0.0f32, |m, t| m + t.eval(row))
+            })
+            .collect()
+    };
+    let mut raw_train = margin(&active_train);
+    let mut raw_val = margin(&val_rows);
 
     let tree_params = TreeParams {
         max_depth: p.max_depth,
@@ -370,11 +392,15 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         n_features: nf,
     };
 
-    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = Vec::new();
-    let mut best_loss = f32::INFINITY;
-    let mut best_round: usize = 0;
+    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = init.clone();
+    let mut best_loss = if trees.is_empty() {
+        f32::INFINITY
+    } else {
+        logloss(&raw_val, &val_y)
+    };
+    let mut best_round: usize = trees.len();
     let mut no_improve = 0u32;
-    let mut best_raw_val = vec![0.0f32; val_n];
+    let mut best_raw_val = raw_val.clone();
     let mut grad = vec![0.0f32; n_active];
     let mut hess = vec![0.0f32; n_active];
 

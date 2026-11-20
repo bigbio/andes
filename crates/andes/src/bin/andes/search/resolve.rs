@@ -381,6 +381,16 @@ pub(super) fn load_search_database(
             EnzymeSpecificity::NonSpecific => 0,
         },
     };
+    if decoy_strategy == search::decoy::DecoyStrategy::Mutate
+        && (proteases.is_non_specific() || proteases.num_tolerable_termini < 2)
+    {
+        return Err(
+            "--decoy-strategy mutate needs fully specific digestion: a semi- or non-specific \
+             search reads sub-sequences of each decoy segment, and the ones without the changed \
+             residue are also target peptides. Use --decoy-strategy reverse or shuffle."
+                .into(),
+        );
+    }
     if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
         && proteases.is_non_specific()
         && target_db.proteins.iter().any(|p| {

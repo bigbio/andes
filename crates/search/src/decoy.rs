@@ -106,7 +106,13 @@ pub(crate) fn whole_sequence_decoy_db(
     let prefix = normalize_decoy_prefix(prefix);
     let proteins = match strategy {
         DecoyStrategy::None => Vec::new(),
-        DecoyStrategy::Mutate => mutated_decoys(target, &prefix, seed, &Proteases::default()),
+        DecoyStrategy::Mutate => whole_sequence_decoys(
+            target,
+            &prefix,
+            DecoyStrategy::Reverse,
+            seed,
+            &Proteases::default(),
+        ),
         _ => whole_sequence_decoys(target, &prefix, strategy, seed, &Proteases::default()),
     };
     ProteinDb { proteins }
@@ -130,11 +136,7 @@ fn mutated_decoys(
             let met = has_met_cleaved_walk(p);
             let sites: FxHashSet<usize> =
                 p.mod_sites().iter().map(|s| s.position as usize).collect();
-            let cuts = if proteases.is_non_specific() {
-                vec![0, sequence.len() as u32]
-            } else {
-                compute_cleavage_positions(&sequence, proteases.primary, &proteases.extra)
-            };
+            let cuts = compute_cleavage_positions(&sequence, proteases.primary, &proteases.extra);
             for w in cuts.windows(2) {
                 let (a, b) = (w[0] as usize, w[1] as usize);
                 if let Some((at, r)) = segment_mutation(
@@ -934,6 +936,20 @@ mod tests {
             DecoyStrategy::from_name("mutate"),
             Some(DecoyStrategy::Mutate)
         );
+    }
+
+    #[test]
+    fn refinement_mutate_decoys_are_reversed() {
+        let db = make_db(&[("P1", b"PEPKTIDE"), ("P2", b"ACDEFGHIK")]);
+        let d = whole_sequence_decoy_db(&db, "XXX", DecoyStrategy::Mutate, 7);
+        let r = whole_sequence_decoy_db(&db, "XXX", DecoyStrategy::Reverse, 7);
+        let seqs = |db: &ProteinDb| -> Vec<Vec<u8>> {
+            db.proteins.iter().map(|p| p.sequence.clone()).collect()
+        };
+        assert_eq!(seqs(&d), seqs(&r));
+        for (t, s) in db.proteins.iter().zip(&d.proteins) {
+            assert_ne!(t.sequence, s.sequence);
+        }
     }
 
     #[test]

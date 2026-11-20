@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::enzyme::Enzyme;
 use model::hash::{fnv1a64, splitmix64};
@@ -128,26 +128,41 @@ fn mutated_decoys(
     proteases: &Proteases,
 ) -> Vec<Protein> {
     let segments = TargetSegments::new(target, proteases);
+    let mut protected: FxHashMap<(u64, bool), Vec<usize>> = FxHashMap::default();
+    for p in &target.proteins {
+        let sites = p.mod_sites();
+        if sites.is_empty() {
+            continue;
+        }
+        let met = has_met_cleaved_walk(p);
+        let cuts = compute_cleavage_positions(&p.sequence, proteases.primary, &proteases.extra);
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            let local = sites
+                .iter()
+                .map(|s| s.position as usize)
+                .filter(|&i| (a..b).contains(&i))
+                .map(|i| i - a);
+            let key = (fnv1a64(&p.sequence[a..b]), met && a == 0);
+            protected.entry(key).or_default().extend(local);
+        }
+    }
     target
         .proteins
         .iter()
         .map(|p| {
             let mut sequence = p.sequence.clone();
             let met = has_met_cleaved_walk(p);
-            let sites: FxHashSet<usize> =
-                p.mod_sites().iter().map(|s| s.position as usize).collect();
             let cuts = compute_cleavage_positions(&sequence, proteases.primary, &proteases.extra);
             for w in cuts.windows(2) {
                 let (a, b) = (w[0] as usize, w[1] as usize);
-                if let Some((at, r)) = segment_mutation(
-                    &p.sequence[a..b],
-                    met && a == 0,
-                    a,
-                    &sites,
-                    seed,
-                    proteases,
-                    &segments,
-                ) {
+                let seg = &p.sequence[a..b];
+                let fixed = protected
+                    .get(&(fnv1a64(seg), met && a == 0))
+                    .map_or(&[][..], Vec::as_slice);
+                if let Some((at, r)) =
+                    segment_mutation(seg, met && a == 0, fixed, seed, proteases, &segments)
+                {
                     sequence[a + at] = r;
                 }
             }
@@ -164,8 +179,7 @@ fn mutated_decoys(
 fn segment_mutation(
     seg: &[u8],
     lead_met: bool,
-    offset: usize,
-    sites: &FxHashSet<usize>,
+    fixed: &[usize],
     seed: u64,
     proteases: &Proteases,
     targets: &TargetSegments,
@@ -178,7 +192,7 @@ fn segment_mutation(
     let open: Vec<usize> = (1..m - 1)
         .filter(|&i| {
             let fixed = (lead_met && i == 1)
-                || sites.contains(&(offset + i))
+                || fixed.contains(&i)
                 || proteases.makes_cut(seg[i])
                 || mass(seg[i]).is_none();
             !fixed
@@ -936,6 +950,38 @@ mod tests {
             DecoyStrategy::from_name("mutate"),
             Some(DecoyStrategy::Mutate)
         );
+    }
+
+    #[test]
+    fn mutate_gives_a_shared_segment_one_decoy() {
+        let seg = b"AGLSTVEFK";
+        let site = |position: u32| ModSite {
+            position,
+            mass_delta: 79.96633,
+            anchor: SiteAnchor::Residue,
+        };
+        let entry = |acc: &str, open: usize| Protein {
+            accession: acc.to_string(),
+            description: String::new(),
+            sequence: [b"WWK".as_slice(), seg].concat(),
+            annotation: Some(Arc::new(ProteinAnnotation::new(
+                (1..seg.len() - 1)
+                    .filter(|&i| i != open && i != 4)
+                    .map(|i| site(3 + i as u32))
+                    .collect(),
+                None,
+            ))),
+        };
+        let db = ProteinDb {
+            proteins: vec![entry("P1", 2), entry("P2", 6)],
+        };
+        let d = decoys(&db, DecoyStrategy::Mutate, &Proteases::default());
+        let tail = |s: &[u8]| s[3..].to_vec();
+        assert_eq!(tail(&d[0]), tail(&d[1]));
+        let changed: Vec<usize> = (0..seg.len())
+            .filter(|&i| tail(&d[0])[i] != seg[i])
+            .collect();
+        assert_eq!(changed, vec![4]);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::time::Instant;
 use model::isotope::averagine_isotope_envelope;
 use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
+use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
 use onnx_infer::predictors::spectral::FragmentTolerance;
@@ -43,6 +44,12 @@ pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
 /// Rows kept per scan in the search, before the pool scores re-rank them down to `--top-n`.
 pub(crate) const RERANK_POOL: u32 = 100;
 const RERANK_FEATURE: &str = "andesms2_spectral_angle";
+/// |scan RT - calibrated andes-rt RT| (minutes) of a PIN row, and its missing flag.
+const RERANK_RT_DIFF: &str = "andesrt_rt_diff";
+const RERANK_RT_MISSING: &str = "andesrt_missing";
+/// Rounds of 3-sigma trimming of the per-file RT spread in the re-rank.
+const RERANK_RT_TRIM_ROUNDS: usize = 5;
+const RERANK_RT_TRIM_SIGMAS: f64 = 3.0;
 
 fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {
     let p: Vec<&str> = spec_id.rsplitn(4, '_').collect();
@@ -72,12 +79,25 @@ pub(crate) fn rerank_pin(
     else {
         return Ok(Default::default());
     };
-    let need = c_scan.max(c_raw).max(c_ms2) + 1;
+    let c_rt = at(RERANK_RT_DIFF).zip(at(RERANK_RT_MISSING));
+    let c_label = at("Label");
+    let c_run = at("FileName");
+    let need = c_scan
+        .max(c_raw)
+        .max(c_ms2)
+        .max(c_rt.map_or(0, |(a, b)| a.max(b)))
+        .max(c_label.unwrap_or(0))
+        .max(c_run.unwrap_or(0))
+        + 1;
     let mut group_of: HashMap<String, u32> = HashMap::new();
+    let mut run_of: HashMap<String, u32> = HashMap::new();
     let mut key = String::new();
     let mut group = Vec::new();
     let mut raw = Vec::new();
     let mut ms2 = Vec::new();
+    let mut rt_diff = Vec::new();
+    let mut target = Vec::new();
+    let mut run = Vec::new();
     for l in lines {
         let l = l.map_err(err)?;
         if l.is_empty() {
@@ -103,6 +123,25 @@ pub(crate) fn rerank_pin(
         group.push(g);
         raw.push(r.unwrap_or(f64::NAN));
         ms2.push(m.unwrap_or(f64::NAN));
+        if let Some((cd, cm)) = c_rt {
+            let missing = x[cm].parse::<f64>() != Ok(0.0);
+            rt_diff.push(if missing {
+                f64::NAN
+            } else {
+                x[cd].parse::<f64>().unwrap_or(f64::NAN)
+            });
+            target.push(c_label.is_some_and(|c| x[c] == "1"));
+            let name = c_run.map_or("", |c| x[c]);
+            let id = match run_of.get(name) {
+                Some(&id) => id,
+                None => {
+                    let id = run_of.len() as u32;
+                    run_of.insert(name.to_string(), id);
+                    id
+                }
+            };
+            run.push(id);
+        }
     }
     drop(group_of);
     let n_rows = group.len();
@@ -123,8 +162,14 @@ pub(crate) fn rerank_pin(
     };
     let (zr, zm) = (z(&raw), z(&ms2));
     drop((raw, ms2));
-    let score: Vec<f64> = zr.iter().zip(&zm).map(|(a, b)| a + b).collect();
+    let mut score: Vec<f64> = zr.iter().zip(&zm).map(|(a, b)| a + b).collect();
     drop((zr, zm));
+    if !rt_diff.is_empty() {
+        let mut names: Vec<(String, u32)> = run_of.into_iter().collect();
+        names.sort_unstable();
+        add_rt_term(&mut score, &rt_diff, &target, &run, &group, &names);
+    }
+    drop((rt_diff, target, run));
     let mut order: Vec<usize> = (0..n_rows).collect();
     order.sort_by(|&a, &b| group[a].cmp(&group[b]).then(score[b].total_cmp(&score[a])));
     let mut keep_row = vec![false; n_rows];
@@ -191,6 +236,84 @@ pub(crate) fn rerank_pin(
         t0.elapsed().as_secs_f64()
     );
     Ok(dropped)
+}
+
+/// Adds the RT term of [`search::dia_rt_rank`] to the re-rank score of every row, with the
+/// spread fitted per run (`run`, the id of the PIN's FileName in `names`, sorted by name; one
+/// run without it): the target winners (best row of a scan `group` by the re-rank score) in the
+/// better half of their run by that score give `MAD_TO_SD * median |RT difference|`,
+/// re-estimated on the winners within `RERANK_RT_TRIM_SIGMAS` sigmas for
+/// `RERANK_RT_TRIM_ROUNDS` rounds. A run with fewer than
+/// [`search::dia_rt_rank::MIN_ANCHORS`] winners keeps the score without the term.
+fn add_rt_term(
+    score: &mut [f64],
+    rt_diff: &[f64],
+    target: &[bool],
+    run: &[u32],
+    group: &[u32],
+    names: &[(String, u32)],
+) {
+    let n_groups = group.iter().max().map_or(0, |g| *g as usize + 1);
+    let mut best = vec![usize::MAX; n_groups];
+    for (i, &g) in group.iter().enumerate() {
+        let b = &mut best[g as usize];
+        if *b == usize::MAX || score[i].total_cmp(&score[*b]).is_gt() {
+            *b = i;
+        }
+    }
+    let mut winners: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for &i in &best {
+        if i != usize::MAX && target[i] && rt_diff[i].is_finite() {
+            winners[run[i] as usize].push(i);
+        }
+    }
+    drop(best);
+    let mut sigma = vec![f64::NAN; names.len()];
+    for (f, id) in names {
+        let w = &mut winners[*id as usize];
+        if w.is_empty() {
+            continue;
+        }
+        w.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(a.cmp(&b)));
+        w.truncate(w.len().div_ceil(2));
+        let d: Vec<f64> = w.iter().map(|&i| rt_diff[i].abs()).collect();
+        let mut s = f64::INFINITY;
+        for _ in 0..RERANK_RT_TRIM_ROUNDS {
+            let mut kept: Vec<f64> = d
+                .iter()
+                .copied()
+                .filter(|v| *v < RERANK_RT_TRIM_SIGMAS * s)
+                .collect();
+            if kept.len() < search::dia_rt_rank::MIN_ANCHORS {
+                break;
+            }
+            s = MAD_TO_SD * median_mut(&mut kept);
+        }
+        if s.is_finite() && s > 0.0 {
+            log::info!(
+                target: "dia",
+                "re-rank RT term: run {f:?}: sigma {s:.3} min from {} target winners",
+                w.len()
+            );
+            sigma[*id as usize] = s;
+        }
+    }
+    for i in 0..score.len() {
+        let s = sigma[run[i] as usize];
+        if s.is_finite() {
+            score[i] += search::dia_rt_rank::rt_penalty(rt_diff[i], s);
+        }
+    }
+}
+
+fn median_mut(v: &mut [f64]) -> f64 {
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
 }
 
 type WindowKey = (usize, i64, Option<(u32, u32)>);
@@ -1282,6 +1405,31 @@ mod tests {
                 "r/c=1 scan=2_2_1"
             ]
         );
+    }
+
+    #[test]
+    fn rerank_drops_a_row_far_from_its_predicted_rt() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("x.pin");
+        let mut s = String::from(
+            "SpecId\tLabel\tScanNr\tFileName\tRawScore\tandesms2_spectral_angle\t\
+             andesrt_rt_diff\tandesrt_missing\n",
+        );
+        let id = |scan: u32, k: u32| format!("r/c=1 scan={scan}_{scan}_{k}_{}", k - 1);
+        for scan in 1..=120u32 {
+            let d = 0.3 * f64::from(scan % 5) / 4.0;
+            s.push_str(&format!("{}\t1\t{scan}\tr\t10\t0.5\t{d}\t0\n", id(scan, 2)));
+        }
+        s.push_str(&format!("{}\t1\t1\tr\t10.5\t0.5\t5.0\t0\n", id(1, 3)));
+        s.push_str(&format!("{}\t1\t1\tr\t10.2\t0.5\t0.0\t0\n", id(1, 4)));
+        std::fs::write(&pin, &s).unwrap();
+        let dropped = rerank_pin(&pin, 2).unwrap();
+        assert_eq!(dropped, [id(1, 3)].into());
+
+        let bare = s.replace("andesrt_rt_diff", "other");
+        std::fs::write(&pin, &bare).unwrap();
+        let dropped = rerank_pin(&pin, 2).unwrap();
+        assert_eq!(dropped, [id(1, 2)].into(), "no RT column, no RT term");
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod candidate_index;
 mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
+pub mod dia_rt_rank;
 pub mod fragment_error;
 pub mod fragment_index;
 pub mod glyco_fragment_index;

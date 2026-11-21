@@ -19,7 +19,7 @@ a measurement or override a derivation. A few test hooks and diagnostics are in 
 | Rescoring | | `--pep`, `--percolator-bin`, `--percolator-docker`, `--percolator-image`, `--percolator-args`, `--keep-pin` |
 | Calibration and runtime | | `--precursor-cal`, `--score`, `--fragmentation`, `--protocol`, `--fragment-tol-ppm`, `--fragment-tol-da`, `--peak-filter`, `--ethcd-activation`, `--ms-level`, `--fragment-index`, `--fragment-index-slice-da`, `--index-cache-dir`, `--temp-dir`, `--model-store`, `--model`, `--gbdt-max-trees` |
 | Prediction | | `--predict`, `--predictor-models`, `--predictor-backend`, `--predictor-nce`, `--predictor-instrument`, `--predictor-batch` |
-| Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2` |
+| Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2`; `quant finalize` on a TMT study: `--sdrf`, `--tmt-max-pep` |
 | Label-free | | `--lfq-tol`, `--lfq-rt-window`, `--lfq-gaussian-width`, `--lfq-min-cosine` |
 | Labelled pairs | | `--label-reference`, `--label-arg-pro`, `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` |
 | Glycopeptides | | `--glyco-glycan-gdb`, `--glyco-glycan-wurcs`, `--glyco-core`, `--precursor-mono`, `--glyco-tol-ppm`, `--glyco-min-core-y`, `--glyco-hcd-pair`, `--glyco-max-peaks`, `--glyco-cz-max-charge`, `--glyco-y-max-charge`, `--glyco-retrieval-tol-ppm`, `--glyco-peptide-first`, `--glyco-index-sequon-only` |
@@ -2305,6 +2305,47 @@ andes --spectrum tmt_run.mzML --database human.fasta \
       --rescore --psm-fdr 0.01 --tmt tmt10 --tmt-correction lot_XY.txt \
       --output-parquet run.idparquet
 ```
+
+#### TMT study (`andes quant finalize` on per-run tables)
+
+A study of many TMT runs (plexes and fractions, one SDRF) gets one score scale and one FDR when
+the runs are searched on their own **without** rescoring and their PINs are rescored together.
+`andes quant finalize` on the directory of the per-run tables then puts the pooled result back on
+every reporter row:
+
+```bash
+# per run (any machine): reporters and the run's gate (purity, S/N) into <run>.tmt.parquet
+andes --spectrum Fr01.raw --database human.fasta --sdrf study.sdrf.tsv --tmt tmt10 \
+      --output-pin tmt/Fr01.pin
+# once: rescore every run's PIN together (all.pin: the PINs concatenated, one header), then the study step
+andes percolator --temp-dir spill/ --results-psms all.t.psms --decoy-results-psms all.d.psms all.pin
+andes quant finalize --quant-dir tmt/ -o study --database human.fasta --sdrf study.sdrf.tsv \
+      --psms all.t.psms --decoy-psms all.d.psms [--output-parquet qpx/]
+```
+
+* **Join.** Each run's rows get the pooled q, PEP and score of their PSM on (run, SpecId); rows
+  at pooled q ≤ `--psm-fdr` are kept. A table with per-run q-values (a search with `--rescore`)
+  or from `--mbr` is refused, because it only holds the PSMs at that run's threshold.
+* **Gate.** `quant_gate_passed` is the run's gate (purity and summed S/N, as searched) and the
+  pooled PEP ≤ `--tmt-max-pep` (0.05); `run_gate_passed` keeps the run's part. `quant_weight` is
+  purity² for the rows that pass, else 0.
+* **Protein groups.** The study's groups (the inference of `andes inference` over the same pooled
+  results, `--database` and the search's database options) at `--protein-fdr`: `pg_accessions`,
+  `anchor_protein`, `unique`, `pg_q_value`, empty when the peptide has no group at the cut.
+* **SDRF design** (`--sdrf`). Runs are matched by data file name. Per row: `plex` (the files
+  whose channels have the same samples and technical replicates, numbered in SDRF order),
+  `fraction`
+  (`comment[fraction identifier]`), `instrument` (`comment[instrument]`), and per channel
+  `sample_tmt_<ch>` (source name) and `role_tmt_<ch>`: `reference` when
+  `characteristics[pooled sample]` is `pooled` or `SN=...` or `characteristics[biological
+  replicate]` is `pooled`; `blank` when a `characteristics[...]` cell, or the last word of the
+  source name, is `blank` or `empty`; otherwise `sample`.
+* **Output.** `<base>.tmt.parquet` (`andes.tmt_study.schema` 1.0): one row per (run, PSM) with
+  the run table's reporter columns (`tmt_<ch>`, `raw_`, `sn_`, `unmix_`) and the columns above.
+  With `--output-parquet DIR`, `quantms.feature.parquet` (the rows in a group; m/z computed
+  from the peptidoform, `observed_mz` equal to it) and `quantms.pg.parquet`.
+* **Not done here:** reference-channel ratios, normalisation, protein quantities and the
+  sample annotation beyond the source name (downstream, from the SDRF).
 
 ### Label-free MS1 features (`--lfq`)
 

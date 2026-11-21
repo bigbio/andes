@@ -704,7 +704,8 @@ impl GateCounts {
     }
 }
 
-fn quant_weight(purity: Option<f32>) -> f32 {
+/// Roll-up weight of a reporter row that passes the gate: its purity squared (1 when unknown).
+pub(crate) fn quant_weight(purity: Option<f32>) -> f32 {
     purity.unwrap_or(1.0).clamp(0.0, 1.0).powi(2)
 }
 

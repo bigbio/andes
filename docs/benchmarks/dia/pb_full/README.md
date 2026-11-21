@@ -170,7 +170,7 @@ Limits:
   (joint columns, RT-aware cut); the full-stack numbers above use 5 finalize seeds.
 - Behind DIA-NN at matched true FDP, as stated.
 
-User description: [DOCS.md](../../../DOCS.md), "DIA pass 2, learned score and study mode".
+User description: [DOCS.md](../../../../DOCS.md), "DIA pass 2, learned score and study mode".
 
 ## Per-ion measurements (`--dia-dump`, raw01; raw02 agrees to ±0.01)
 

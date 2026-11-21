@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::enzyme::Enzyme;
@@ -15,19 +16,32 @@ pub const DEFAULT_DECOY_SEED: u64 = 42;
 
 const MAX_REDRAWS: u64 = 20;
 
+mod collisions;
+
+/// The digestion the decoys are built for: the enzymes and specificity that place the cleavage
+/// sites, and the peptide length and missed-cleavage limits of the search, so every decoy peptide
+/// the search enumerates is checked against the target peptides it enumerates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proteases {
     pub primary: Enzyme,
     pub extra: Vec<Enzyme>,
     pub num_tolerable_termini: u8,
+    pub min_length: u32,
+    pub max_length: u32,
+    pub max_missed_cleavages: u32,
 }
 
 impl Default for Proteases {
+    /// Trypsin, fully specific, with the search command's default lengths (6 to 50) and
+    /// missed cleavages (2).
     fn default() -> Self {
         Self {
             primary: Enzyme::Trypsin,
             extra: Vec::new(),
             num_tolerable_termini: 2,
+            min_length: 6,
+            max_length: 50,
+            max_missed_cleavages: 2,
         }
     }
 }
@@ -38,6 +52,9 @@ impl Proteases {
             primary: params.enzyme,
             extra: params.extra_enzymes.clone(),
             num_tolerable_termini: params.num_tolerable_termini,
+            min_length: params.min_length,
+            max_length: params.max_length,
+            max_missed_cleavages: params.max_missed_cleavages,
         }
     }
 
@@ -85,16 +102,38 @@ pub fn decoy_db(
     seed: u64,
     proteases: &Proteases,
 ) -> ProteinDb {
-    let prefix = normalize_decoy_prefix(prefix);
-    let proteins = match strategy {
-        DecoyStrategy::None => Vec::new(),
-        DecoyStrategy::Mutate => mutated_decoys(target, &prefix, seed, proteases),
-        _ if proteases.is_non_specific() => {
-            whole_sequence_decoys(target, &prefix, strategy, seed, proteases)
-        }
-        _ => peptide_level_decoys(target, &prefix, strategy, seed, proteases),
-    };
+    if strategy == DecoyStrategy::None {
+        return ProteinDb {
+            proteins: Vec::new(),
+        };
+    }
+    let t0 = std::time::Instant::now();
+    let (proteins, repairs, target_peptides) =
+        build_decoys(target, prefix, strategy, seed, proteases);
+    collisions::log_repairs(&repairs, target_peptides, t0.elapsed().as_secs_f64());
     ProteinDb { proteins }
+}
+
+/// The decoy proteins of `strategy` (not `None`), the outcome of the peptide-level check for
+/// each, and the number of distinct target peptides checked against.
+fn build_decoys(
+    target: &ProteinDb,
+    prefix: &str,
+    strategy: DecoyStrategy,
+    seed: u64,
+    proteases: &Proteases,
+) -> (Vec<Protein>, Vec<collisions::Repair>, usize) {
+    let prefix = normalize_decoy_prefix(prefix);
+    let peptides = collisions::TargetPeptides::new(target, proteases);
+    let built = match strategy {
+        DecoyStrategy::Mutate => mutated_decoys(target, &prefix, seed, proteases, &peptides),
+        _ if proteases.is_non_specific() => {
+            whole_sequence_decoys(target, &prefix, strategy, seed, proteases, Some(&peptides))
+        }
+        _ => peptide_level_decoys(target, &prefix, strategy, seed, proteases, &peptides),
+    };
+    let (proteins, repairs) = built.into_iter().unzip();
+    (proteins, repairs, peptides.len())
 }
 
 pub(crate) fn whole_sequence_decoy_db(
@@ -112,10 +151,13 @@ pub(crate) fn whole_sequence_decoy_db(
             DecoyStrategy::Reverse,
             seed,
             &Proteases::default(),
+            None,
         ),
-        _ => whole_sequence_decoys(target, &prefix, strategy, seed, &Proteases::default()),
+        _ => whole_sequence_decoys(target, &prefix, strategy, seed, &Proteases::default(), None),
     };
-    ProteinDb { proteins }
+    ProteinDb {
+        proteins: proteins.into_iter().map(|(p, _)| p).collect(),
+    }
 }
 
 const MUTATE_MIN_SEGMENT: usize = 7;
@@ -126,7 +168,8 @@ fn mutated_decoys(
     prefix: &str,
     seed: u64,
     proteases: &Proteases,
-) -> Vec<Protein> {
+    peptides: &collisions::TargetPeptides,
+) -> Vec<(Protein, collisions::Repair)> {
     let segments = TargetSegments::new(target, proteases);
     let mut protected: FxHashMap<(u64, bool), Vec<usize>> = FxHashMap::default();
     for p in &target.proteins {
@@ -149,7 +192,7 @@ fn mutated_decoys(
     }
     target
         .proteins
-        .iter()
+        .par_iter()
         .map(|p| {
             let mut sequence = p.sequence.clone();
             let met = has_met_cleaved_walk(p);
@@ -166,12 +209,13 @@ fn mutated_decoys(
                     sequence[a + at] = r;
                 }
             }
-            Protein {
+            let decoy = Protein {
                 accession: format!("{}_{}", prefix, p.accession),
                 description: p.description.clone(),
                 sequence,
                 annotation: p.annotation.clone(),
-            }
+            };
+            collisions::repair_mutated(p, decoy, seed, proteases, peptides)
         })
         .collect()
 }
@@ -245,28 +289,33 @@ fn peptide_level_decoys(
     strategy: DecoyStrategy,
     seed: u64,
     proteases: &Proteases,
-) -> Vec<Protein> {
+    peptides: &collisions::TargetPeptides,
+) -> Vec<(Protein, collisions::Repair)> {
     let segments = TargetSegments::new(target, proteases);
     target
         .proteins
-        .iter()
+        .par_iter()
         .map(|p| {
             let source = peptide_level_permutation(p, strategy, seed, proteases, &segments);
-            decoy_protein(p, prefix, source, proteases)
+            collisions::repair_peptide_level(p, prefix, source, strategy, seed, proteases, peptides)
         })
         .collect()
 }
 
+/// Whole-sequence decoys of a non-specific search. With `peptides`, every decoy peptide the
+/// search enumerates that equals a target peptide is redrawn; without, the decoys are returned
+/// as built (the peptide-anchored refinement index, whose entries are single peptides).
 fn whole_sequence_decoys(
     target: &ProteinDb,
     prefix: &str,
     strategy: DecoyStrategy,
     seed: u64,
     proteases: &Proteases,
-) -> Vec<Protein> {
+    peptides: Option<&collisions::TargetPeptides>,
+) -> Vec<(Protein, collisions::Repair)> {
     target
         .proteins
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, p)| {
             let n = p.sequence.len() as u32;
@@ -284,7 +333,15 @@ fn whole_sequence_decoys(
                 }
                 _ => (0..n).rev().collect(),
             };
-            decoy_protein(p, prefix, source, proteases)
+            match peptides {
+                Some(peptides) => {
+                    collisions::repair_whole_sequence(p, prefix, source, seed, proteases, peptides)
+                }
+                None => (
+                    decoy_protein(p, prefix, source, proteases),
+                    collisions::Repair::default(),
+                ),
+            }
         })
         .collect()
 }
@@ -325,10 +382,34 @@ fn segment_permutation(
     proteases: &Proteases,
     targets: &TargetSegments,
 ) -> Vec<u32> {
+    let Some(first) = draw_segment(seg, lead_met, strategy, seed, proteases, 0) else {
+        return (0..seg.len() as u32).collect();
+    };
+    if !targets.collides(seg, &first, lead_met) {
+        return first;
+    }
+    (1..=MAX_REDRAWS)
+        .filter_map(|k| draw_segment(seg, lead_met, strategy, seed, proteases, k))
+        .find(|local| !targets.collides(seg, local, lead_met))
+        .unwrap_or(first)
+}
+
+/// Draw `k` of a segment's permutation (segment-local source indices): the cleavage residues,
+/// the cleavage-side terminal residue and a leading initiator Met stay in place; draw 0 of
+/// `Reverse` reverses the movable residues, every other draw shuffles them with a seed of the
+/// segment's residues and `k`, so a segment gets the same draw wherever it occurs. `None` when
+/// fewer than two residues can move.
+fn draw_segment(
+    seg: &[u8],
+    lead_met: bool,
+    strategy: DecoyStrategy,
+    seed: u64,
+    proteases: &Proteases,
+    k: u64,
+) -> Option<Vec<u32>> {
     let m = seg.len();
-    let identity: Vec<u32> = (0..m as u32).collect();
     if m == 0 {
-        return identity;
+        return None;
     }
     let anchor = if proteases.primary.is_n_term() {
         0
@@ -340,32 +421,22 @@ fn segment_permutation(
         .collect();
     let free: Vec<u32> = (0..m as u32).filter(|&i| movable[i as usize]).collect();
     if free.len() < 2 {
-        return identity;
+        return None;
     }
-    let draw = |k: u64| -> Vec<u32> {
-        let mut order = free.clone();
-        if k == 0 && strategy == DecoyStrategy::Reverse {
-            order.reverse();
-        } else {
-            shuffle_in_place(&mut order, segment_seed(seed, seg, lead_met, k));
-        }
-        let mut local = identity.clone();
-        for (&at, &from) in free.iter().zip(&order) {
-            local[at as usize] = from;
-        }
-        if strategy == DecoyStrategy::Sequon {
-            restore_sequons(seg, &mut local, &movable);
-        }
-        local
-    };
-    let first = draw(0);
-    if !targets.collides(seg, &first, lead_met) {
-        return first;
+    let mut order = free.clone();
+    if k == 0 && strategy == DecoyStrategy::Reverse {
+        order.reverse();
+    } else {
+        shuffle_in_place(&mut order, segment_seed(seed, seg, lead_met, k));
     }
-    (1..=MAX_REDRAWS)
-        .map(draw)
-        .find(|local| !targets.collides(seg, local, lead_met))
-        .unwrap_or(first)
+    let mut local: Vec<u32> = (0..m as u32).collect();
+    for (&at, &from) in free.iter().zip(&order) {
+        local[at as usize] = from;
+    }
+    if strategy == DecoyStrategy::Sequon {
+        restore_sequons(seg, &mut local, &movable);
+    }
+    Some(local)
 }
 
 struct TargetSegments(Vec<u64>);
@@ -1144,6 +1215,7 @@ mod tests {
                 primary: Enzyme::Trypsin,
                 extra: vec![Enzyme::AspN],
                 num_tolerable_termini: 2,
+                ..Proteases::default()
             },
         ];
         for proteases in &digests {
@@ -1347,5 +1419,211 @@ mod tests {
             Some(DecoyStrategy::Sequon)
         );
         assert_eq!(DecoyStrategy::default(), DecoyStrategy::Shuffle);
+    }
+
+    fn digest(min_length: u32, max_length: u32) -> Proteases {
+        Proteases {
+            min_length,
+            max_length,
+            ..Proteases::default()
+        }
+    }
+
+    fn folded(s: &[u8]) -> Vec<u8> {
+        s.iter().map(|&r| if r == b'I' { b'L' } else { r }).collect()
+    }
+
+    fn peptides_of(seqs: &[Vec<u8>], proteases: &Proteases) -> FxHashSet<Vec<u8>> {
+        let mut out = FxHashSet::default();
+        for seq in seqs {
+            let walk = seq.len() > 1 && seq[0] == b'M';
+            collisions::for_each_span(seq, walk, proteases, |s, e| {
+                out.insert(folded(&seq[s..e]));
+            });
+        }
+        out
+    }
+
+    fn sequences(db: &ProteinDb) -> Vec<Vec<u8>> {
+        db.proteins.iter().map(|p| p.sequence.clone()).collect()
+    }
+
+    #[test]
+    fn a_missed_cleavage_join_of_short_segments_is_redrawn() {
+        let db = make_db(&[("P1", b"ASKGVR"), ("P2", b"SAKVGR")]);
+        let proteases = digest(6, 30);
+        let segments = TargetSegments::new(&db, &proteases);
+        let unchecked: Vec<Vec<u8>> = db
+            .proteins
+            .iter()
+            .map(|p| {
+                let source = peptide_level_permutation(
+                    p,
+                    DecoyStrategy::Reverse,
+                    DEFAULT_DECOY_SEED,
+                    &proteases,
+                    &segments,
+                );
+                decoy_protein(p, "XXX", source, &proteases).sequence
+            })
+            .collect();
+        assert_eq!(unchecked, [b"SAKVGR".to_vec(), b"ASKGVR".to_vec()]);
+        let targets = peptides_of(&sequences(&db), &proteases);
+        let d = decoys(&db, DecoyStrategy::Reverse, &proteases);
+        for (t, s) in db.proteins.iter().zip(&d) {
+            assert!(!targets.contains(&folded(s)), "{}", String::from_utf8_lossy(s));
+            for (a, b) in [(0, 3), (3, 6)] {
+                let (mut x, mut y) = (t.sequence[a..b].to_vec(), s[a..b].to_vec());
+                assert_eq!(x[2], y[2]);
+                x.sort_unstable();
+                y.sort_unstable();
+                assert_eq!(x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_specific_decoy_holds_no_target_peptide() {
+        let fwd = b"ACDEFGHKLMNPQRSTVWYAGLK".to_vec();
+        let rev: Vec<u8> = fwd.iter().rev().copied().collect();
+        let db = make_db(&[("P1", &fwd), ("P2", &rev)]);
+        let proteases = Proteases {
+            primary: Enzyme::NonSpecific,
+            num_tolerable_termini: 0,
+            ..digest(8, 12)
+        };
+        let targets = peptides_of(&sequences(&db), &proteases);
+        for strategy in [
+            DecoyStrategy::Reverse,
+            DecoyStrategy::Shuffle,
+            DecoyStrategy::Sequon,
+        ] {
+            let d = decoys(&db, strategy, &proteases);
+            let hits = peptides_of(&d, &proteases)
+                .into_iter()
+                .filter(|p| targets.contains(p))
+                .count();
+            assert_eq!(hits, 0, "{strategy:?}");
+            for (t, s) in db.proteins.iter().zip(&d) {
+                let (mut x, mut y) = (t.sequence.clone(), s.clone());
+                x.sort_unstable();
+                y.sort_unstable();
+                assert_eq!(x, y, "{strategy:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mutate_changes_joins_of_segments_shorter_than_seven() {
+        let db = make_db(&[("P1", b"GASVKLLTGRDEFGHKW")]);
+        let proteases = digest(6, 30);
+        let targets = peptides_of(&sequences(&db), &proteases);
+        let d = decoys(&db, DecoyStrategy::Mutate, &proteases);
+        let hits: Vec<Vec<u8>> = peptides_of(&d, &proteases)
+            .into_iter()
+            .filter(|p| targets.contains(p))
+            .collect();
+        assert!(hits.is_empty(), "{hits:?}");
+        let (t, s) = (&db.proteins[0].sequence, &d[0]);
+        assert_eq!(
+            compute_cleavage_positions(t, Enzyme::Trypsin, &[]),
+            compute_cleavage_positions(s, Enzyme::Trypsin, &[])
+        );
+        let mass = |r: u8| model::AminoAcid::standard(r).unwrap().mass;
+        for i in (0..t.len()).filter(|&i| t[i] != s[i]) {
+            assert!((mass(s[i]) - mass(t[i])).abs() > 1.1);
+            assert!(!b"KRP".contains(&s[i]) && !b"KR".contains(&t[i]));
+        }
+    }
+
+    fn ecoli(count: usize) -> ProteinDb {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/ecoli.fasta");
+        let file = std::fs::File::open(path).expect("open ecoli.fasta");
+        let mut db = input::fasta::FastaReader::load_all(std::io::BufReader::new(file))
+            .expect("read ecoli.fasta");
+        db.proteins.truncate(count);
+        db
+    }
+
+    fn search_peptides(
+        db: &ProteinDb,
+        proteases: &Proteases,
+    ) -> Vec<(usize, usize, Vec<u8>)> {
+        let aa = model::aa_set::AminoAcidSetBuilder::new_standard()
+            .build()
+            .expect("standard amino acids");
+        let mut params = SearchParams::default_tryptic(aa);
+        params.enzyme = proteases.primary;
+        params.extra_enzymes = proteases.extra.clone();
+        params.num_tolerable_termini = proteases.num_tolerable_termini;
+        params.min_length = proteases.min_length;
+        params.max_length = proteases.max_length;
+        params.max_missed_cleavages = proteases.max_missed_cleavages;
+        params.max_variable_mods_per_peptide = 0;
+        let idx = crate::search_index::SearchIndex::from_target_db_for(
+            db,
+            "NONE",
+            None,
+            DecoyStrategy::None,
+            DEFAULT_DECOY_SEED,
+            proteases,
+        );
+        let mut out: Vec<(usize, usize, Vec<u8>)> =
+            crate::candidate_gen::enumerate_candidates(&idx, &params, "NONE")
+                .map(|c| {
+                    let r: Vec<u8> = c.peptide.residues.iter().map(|a| a.residue).collect();
+                    (c.protein_index, c.start_offset_in_protein, folded(&r))
+                })
+                .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn decoy_peptides_equal_to_targets_are_exactly_the_logged_remainder() {
+        let db = ecoli(300);
+        let tryptic = digest(7, 30);
+        let semi = Proteases {
+            num_tolerable_termini: 1,
+            ..digest(7, 30)
+        };
+        let non_specific = Proteases {
+            primary: Enzyme::NonSpecific,
+            num_tolerable_termini: 0,
+            ..digest(8, 12)
+        };
+        let permutations = [
+            DecoyStrategy::Reverse,
+            DecoyStrategy::Shuffle,
+            DecoyStrategy::Sequon,
+        ];
+        let mut with_mutate = permutations.to_vec();
+        with_mutate.push(DecoyStrategy::Mutate);
+        for (label, proteases, strategies) in [
+            ("tryptic", &tryptic, with_mutate),
+            ("semi", &semi, permutations.to_vec()),
+            ("non-specific", &non_specific, permutations.to_vec()),
+        ] {
+            let targets: FxHashSet<Vec<u8>> = search_peptides(&db, proteases)
+                .into_iter()
+                .map(|(_, _, r)| r)
+                .collect();
+            for strategy in strategies {
+                let (proteins, repairs, _) =
+                    build_decoys(&db, "XXX", strategy, DEFAULT_DECOY_SEED, proteases);
+                let found: usize = repairs.iter().map(|r| r.found).sum();
+                let left: usize = repairs.iter().map(|r| r.left).sum();
+                let still = search_peptides(&ProteinDb { proteins }, proteases)
+                    .into_iter()
+                    .filter(|(_, _, r)| targets.contains(r))
+                    .count();
+                assert_eq!(still, left, "[{label} {strategy:?}] found {found}");
+                assert!(left <= found, "[{label} {strategy:?}] {left} of {found} left");
+                if label == "tryptic" && strategy == DecoyStrategy::Shuffle {
+                    assert!(found > 0, "the fixture exercises no collision");
+                }
+            }
+        }
     }
 }

@@ -190,17 +190,26 @@ modification sites (a phospho decoy has as many S/T/Y as its target), the way a 
 the same digest looks. A segment's decoy depends only on its residues, so a peptide shared by
 several proteins has one decoy. A segment whose decoy reads as any target segment (I and L
 equal: a palindrome, or a permutation that spells another protein's peptide) is redrawn by a
-seeded shuffle; a segment too short to change stays, and such a decoy peptide is counted as a
-target. A non-specific search (`--enzyme nonspecific`, or `--enzyme-specificity non-specific`,
-as for HLA peptides) has no segments; its decoys permute each whole sequence. A semi-specific
-search uses the segments: its fully specific peptides keep their composition.
+seeded shuffle. Then every decoy peptide the search enumerates (the peptides of the search's
+`--enzyme`, `--enzyme-specificity`, `--min-length`, `--max-length` and `--max-missed-cleavages`,
+so missed-cleavage joins of short segments, semi-specific sub-spans and non-specific
+sub-sequences) is checked against the target peptides of the same digest, I and L equal. A
+decoy peptide that equals a target peptide is redrawn: one of its segments takes a new seeded
+shuffle (so segments keep their composition), up to 20 rounds; a non-specific decoy shuffles
+the peptide's window, widened by one residue each round. The search log reports how many decoy
+peptides were redrawn and how many still equal a target; those few (a peptide whose segments
+cannot change) are scored as targets, since the search relabels any decoy candidate equal to a
+target peptide with I and L folded. A non-specific search (`--enzyme nonspecific`, or
+`--enzyme-specificity non-specific`, as for HLA peptides) has no segments; its decoys permute
+each whole sequence. A semi-specific search uses the segments: its fully specific peptides keep
+their composition.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, `mutate`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. `mutate` changes one interior residue in each segment of 7 or more residues to a residue with a mass difference of more than 1.1 Da. It does not add or remove a cleavage site, and it does not change a modification site. A segment that more than one entry holds gets one decoy: andes protects every position that any of these entries annotates as a site, so the decoy depends only on the residues. When the change gives a target peptide, andes draws a new position and residue (up to 20 times). Each decoy keeps most of its target's fragment ions. Use `mutate` with `--dia` on wide-window data such as diaPASEF: there, a wrong peptide that is one residue from a co-isolated real peptide shares its fragments, and a shuffled or reversed decoy does not model that error (see `docs/benchmarks/dia/README.md`). DIA-NN 2.0 uses the same model in its Proteoforms mode. `mutate` needs fully specific digestion, and andes stops with an error for semi- or non-specific searches: their decoy peptides that skip the changed residue are target peptides. `--refine` builds its Pass-2 decoys with `reverse`, because a refinement entry is one peptide and a short peptide can have no segment of 7 or more residues. |
+| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, `mutate`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. `mutate` changes one interior residue in each segment of 7 or more residues to a residue with a mass difference of more than 1.1 Da. It does not add or remove a cleavage site, and it does not change a modification site. A segment that more than one entry holds gets one decoy: andes protects every position that any of these entries annotates as a site, so the decoy depends only on the residues. When the change gives a target segment, andes draws a new position and residue (up to 20 times). A peptide that still equals a target peptide, such as a missed-cleavage join of segments shorter than 7, gets one more substitution at an interior residue under the same rules. Each decoy keeps most of its target's fragment ions. Use `mutate` with `--dia` on wide-window data such as diaPASEF: there, a wrong peptide that is one residue from a co-isolated real peptide shares its fragments, and a shuffled or reversed decoy does not model that error (see `docs/benchmarks/dia/README.md`). DIA-NN 2.0 uses the same model in its Proteoforms mode. `mutate` needs fully specific digestion, and andes stops with an error for semi- or non-specific searches: their decoy peptides that skip the changed residue are target peptides. `--refine` builds its Pass-2 decoys with `reverse`, because a refinement entry is one peptide and a short peptide can have no segment of 7 or more residues. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
-| `--decoy-seed` | u64 | fixed | *(internal, in neither help)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
+| `--decoy-seed` | u64 | fixed | *(internal, in neither help)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment or peptide whose decoy reads as a target). |
 
 ### UniProt XML databases
 
@@ -3269,7 +3278,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
 | Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragment_error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
 | Isotope-mimic tolerance | 0.05 Da | `search/src/isotope_mimic.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
-| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
+| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws per segment and 20 rounds of peptide-level redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
 | Entrapment prefix | `ENT_` | `search/src/refinement.rs:431` | which proteins count as entrapment | no | Naming convention |
 | Refine mods per peptide | 5 | `refinement.rs:883` | combinatorial ceiling of the second pass | the refine tier's `max_mods` is clamped to it | Memory guard (code comment) |
 | Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |

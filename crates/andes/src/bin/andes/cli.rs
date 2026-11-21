@@ -216,7 +216,8 @@ pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
     ),
     (
         "mutate",
-        "substitute one interior residue per tryptic segment of 7 or more (mass change > 1.1 Da); \
+        "substitute one interior residue per tryptic segment of 7 or more (mass change > 1.1 Da), \
+         and one in each peptide that still equals a target, such as a join of shorter segments; \
          near-variant decoys that share most fragments with their target, for --dia on \
          wide-window data such as diaPASEF",
     ),
@@ -496,8 +497,11 @@ pub(crate) struct SearchArgs {
     /// Decoys are peptide-level: each segment between two cleavage sites is permuted with
     /// its cleavage residues, its cleavage-side terminal residue and an initiator Met in
     /// place, so every enzymatic peptide has a decoy of the same composition and C-terminal
-    /// residue (a non-specific search permutes whole sequences). With none and a
-    /// target-only database the search has no decoys and warns.
+    /// residue (a non-specific search permutes whole sequences). Every decoy peptide the
+    /// search enumerates (missed-cleavage joins, semi-specific and non-specific sub-spans
+    /// included) is checked against the target peptides with I and L folded; one that
+    /// equals a target is redrawn, and the few that still do are scored as targets. With
+    /// none and a target-only database the search has no decoys and warns.
     #[arg(long, value_name = "STRATEGY", default_value = "shuffle", help_heading = H_SEARCH,
           value_parser = Listed::new(DECOY_STRATEGIES, parse_decoy_strategy))]
     pub(crate) decoy_strategy: DecoyStrategy,

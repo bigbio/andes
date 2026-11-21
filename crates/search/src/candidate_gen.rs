@@ -1428,7 +1428,7 @@ pub fn lazy_candidates_for_nominal_window(
         .collect()
 }
 
-fn missed_cleavages_between(cleavage_positions: &[u32], start: u32, end: u32) -> u32 {
+pub(crate) fn missed_cleavages_between(cleavage_positions: &[u32], start: u32, end: u32) -> u32 {
     let lo = cleavage_positions.partition_point(|&c| c <= start);
     let hi = cleavage_positions.partition_point(|&c| c < end);
     (hi - lo) as u32

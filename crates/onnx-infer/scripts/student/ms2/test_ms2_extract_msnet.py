@@ -26,6 +26,10 @@ def test_named_modifications_parse():
     assert parse_named("PEP[UNIMOD:99999]K") is None
     assert parse_named("PEP[Mystery]K") is None
     assert parse_named("PEP[+15.9949]K") is None
+    assert parse_named(".[Acetyl]SDEGKLFIGGLNFDK") == ("SDEGKLFIGGLNFDK", [(0, 1)])
+    assert parse_named(".[TMT6plex]K[TMT6plex]ILQDK[TMT6plex]") == ("KILQDK", [(0, 737), (1, 737), (6, 737)])
+    assert parse_named("PEPK.[Amidated]") == ("PEPK", [(5, 2)])
+    assert parse_named(".[Mystery]PEPK") is None
 
 
 def test_conditions_for_both_cv_layouts():

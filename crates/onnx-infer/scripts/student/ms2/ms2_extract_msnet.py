@@ -76,11 +76,22 @@ def mod_id(tag: str):
 
 def parse_named(s: str):
     """``[Acetyl]-PEPM[Oxidation]K-[Amidated]`` -> (sequence, [(pos, unimod id)]) or None for an unknown
-    modification name, mass tag or non-standard residue. Position 0 = N-terminus, n + 1 = C-terminus."""
+    modification name, mass tag or non-standard residue. Position 0 = N-terminus, n + 1 = C-terminus.
+
+    The OpenMS N-terminal form ``.[Acetyl]PEPK`` (no dash) is read as ``[Acetyl]-PEPK``, and a trailing
+    ``.[Amidated]`` as ``-[Amidated]``."""
     mods = []
     i = 0
     n_term = []
-    if s.startswith("["):
+    if s.startswith(".["):
+        m = re.match(r"\.((?:\[[^\]]+\])+)", s)
+        n_term = _TOKEN.findall(m.group(1))
+        s = s[m.end():]
+        if s.startswith("-"):
+            s = s[1:]
+        if s.startswith("["):
+            return None
+    elif s.startswith("["):
         j = s.find("]-")
         if j < 0:
             return None
@@ -98,7 +109,7 @@ def parse_named(s: str):
                 return None
             mods.append((len(seq), uid))
             i = m.end()
-        elif c == "-":
+        elif c == "-" or (c == "." and s[i + 1: i + 2] == "["):
             tail = _TOKEN.findall(s[i + 1:])
             if not tail:
                 return None
@@ -182,7 +193,7 @@ def main():
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(int(hashlib.md5(a.dataset.encode()).hexdigest()[:8], 16))
-    st = {"rows": 0, "decoy_or_pep": 0, "bad_charge": 0, "unmapped": 0, "precursor_mismatch": 0, "activation_unknown": 0,
+    st = {"rows": 0, "decoy_or_pep": 0, "bad_charge": 0, "unmapped": 0, "precursor_mismatch": 0, "no_precursor_mz": 0, "activation_unknown": 0,
           "too_few_ions": 0, "key_full": 0, "kept": 0, "files": 0, "run_filtered": 0, "dup_scan": 0}
     seen_scans: set = set()
     want = {x.strip() for x in open(a.runs) if x.strip()} if a.runs else None
@@ -235,7 +246,9 @@ def main():
                         st["unmapped"] += 1
                         continue
                     seq, mods = parsed
-                    if d[c_mz][i] is None or not fits(seq, mods, z, float(d[c_mz][i]), a.prec_tol_ppm):
+                    if d[c_mz][i] is None:
+                        st["no_precursor_mz"] += 1
+                    elif not fits(seq, mods, z, float(d[c_mz][i]), a.prec_tol_ppm):
                         st["precursor_mismatch"] += 1
                         continue
                     act, analyser, nce, inst = conditions(d["cv_params"][i])

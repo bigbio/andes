@@ -19,7 +19,7 @@ a measurement or override a derivation. A few test hooks and diagnostics are in 
 | Rescoring | | `--pep`, `--percolator-bin`, `--percolator-docker`, `--percolator-image`, `--percolator-args`, `--keep-pin` |
 | Calibration and runtime | | `--precursor-cal`, `--score`, `--fragmentation`, `--protocol`, `--fragment-tol-ppm`, `--fragment-tol-da`, `--peak-filter`, `--ethcd-activation`, `--ms-level`, `--fragment-index`, `--fragment-index-slice-da`, `--index-cache-dir`, `--temp-dir`, `--model-store`, `--model`, `--gbdt-max-trees` |
 | Prediction | | `--predict`, `--predictor-models`, `--predictor-backend`, `--predictor-nce`, `--predictor-instrument`, `--predictor-batch` |
-| Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2`; `quant finalize` on a TMT study: `--sdrf`, `--tmt-max-pep` |
+| Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2`; `quant finalize` on a TMT study: `--sdrf`, `--pep` |
 | Label-free | | `--lfq-tol`, `--lfq-rt-window`, `--lfq-gaussian-width`, `--lfq-min-cosine` |
 | Labelled pairs | | `--label-reference`, `--label-arg-pro`, `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` |
 | Glycopeptides | | `--glyco-glycan-gdb`, `--glyco-glycan-wurcs`, `--glyco-core`, `--precursor-mono`, `--glyco-tol-ppm`, `--glyco-min-core-y`, `--glyco-hcd-pair`, `--glyco-max-peaks`, `--glyco-cz-max-charge`, `--glyco-y-max-charge`, `--glyco-retrieval-tol-ppm`, `--glyco-peptide-first`, `--glyco-index-sequon-only` |
@@ -1223,7 +1223,6 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--tmt-tol` | tolerance | `20ppm` (`10ppm` for `tmt32`/`tmt35`) for high-res MS2 and for `--tmt-level 3`; `0.3da` for ion-trap MS2 | Most intense centroid within this window of each reporter m/z. A window that reaches half the spacing of the kit's closest channels (6.3 mDa for the TMT 10/11/16/18-plex N/C pairs, 2.9 mDa for the TMTpro 32/35-plex deuterated channels, so at most 10.8 ppm) is refused, so ion-trap MS2 cannot quantify those kits at `--tmt-level 2`. |
 | `--tmt-correction` | path | *(none)* | Isotope impurity sheet of the kit lot (§10); corrected intensities by NNLS, raw kept alongside. Refused for `tmt32`/`tmt35`. |
 | `--tmt-min-purity` | 0..1 | `0.7` | Quantification gate (§10): PSMs below this precursor isolation purity fail the gate (`quant_gate_passed` false, `quant_weight` 0 in `tmt.parquet`). `0` turns it off. |
-| `--tmt-max-pep` | 0..1 | `0.05` | Quantification gate: PSMs whose Percolator PEP is above this fail the gate. Needs `--rescore`; `1` turns it off. |
 | `--tmt-min-sn` | ≥ 0 | `0` (off) | Quantification gate: PSMs whose summed reporter signal-to-noise is below this fail the gate. Applies only where the reporter scan records noise (Thermo `.raw`, mzML with noise arrays). |
 | `--tmt-unmix` | `auto`\|`off`\|`on` | `auto` | Estimate each MS2 scan's co-isolation interference and write the reporter intensities with it removed (`interference` and an `unmix_` channel block in `tmt.parquet`; `unmixed` in the quantms feature parquet). `on` removes all of the estimate; `auto` scales it by a strength learned per run; `off` writes nothing. `auto` and `on` apply to high-resolution MS2 reporters only; `auto` does nothing without `--tmt`, on low-resolution MS2 or at `--tmt-level 3`, where `on` is refused. |
 | `--lfq` | flag | off | Label-free MS1 quantification of the confident precursors (§10). Writes `<stem>.lfq.parquet`. mzML / `.raw` with high-resolution MS1; the MS2 may be ion-trap. |
@@ -2247,18 +2246,20 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   columns and their sum `reporter_sn_sum`. Both noise sources give the same values on the same
   scans. Ion-trap reporter scans, and mzML written without noise arrays (the converters'
   default), have none: the `sn_` cells stay empty and `--tmt-min-sn` does not apply to them.
-* **Quantification gate.** A PSM passes the gate (`quant_gate_passed` in `tmt.parquet`) only if its precursor purity is at least
-  `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
-  reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
-  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no
-  noise for S/N) is not
-  held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
+* **Quantified PSMs.** With rescoring, the PSMs at `--psm-fdr` (and `--pep` when given), the
+  rule of every identification output; without rescoring, every rank-1 target PSM.
+* **Quantification gate.** Quantification-quality criteria only: a PSM passes the gate
+  (`quant_gate_passed` in `tmt.parquet`) only if its precursor purity is at least
+  `--tmt-min-purity` (0.7) and its summed reporter signal-to-noise is at least `--tmt-min-sn`
+  (off). A PSM without the value a criterion needs (no MS1 or isolation window for purity, no
+  noise for S/N) is not held to that criterion. Identification confidence is not a gate: it
+  enters `quant_weight` as 1 - PEP. The gate only chooses which PSMs are quantified: every PSM stays in the
   identification output (PIN, TSV, `psms.parquet`), and `tmt.parquet` and the quantms feature
   parquet keep every quantified PSM with `quant_weight` 0 for the gated ones. The log counts the PSMs each criterion
-  removed. On SPS-MS3 data low-purity and high-PEP PSMs carry most of the interference and
-  ratio compression of the PSMs a deep search adds; purity barely matters for high-resolution
+  removed. On SPS-MS3 data low-purity PSMs carry most of the interference and ratio
+  compression of the PSMs a deep search adds; purity barely matters for high-resolution
   MS2 reporters, where the remaining interference is co-isolation inside a pure-looking window.
-  Set all three to their off values to quantify every confident PSM.
+  Set both to their off values to quantify every confident PSM.
 * **Interference unmixing** (`--tmt-unmix auto|on|off`, `auto` by default). The reporter ions of a high-resolution
   MS2 scan come from everything the quadrupole isolated, and purity misses most of it: much of
   the co-isolated ion current is below the MS1 detection limit. Each quantified scan gets an
@@ -2296,8 +2297,9 @@ single input run's MS1 scans still need to fit in memory while it is processed.
   (`andes.tmt.unmix` = `off`, `on` or `auto`) and each run's λ (`andes.tmt.unmix_strength`,
   `run=λ` joined by commas).
 * **Roll-up weight** (`quant_weight`). For a PSM that passed the gate, purity² (1 without a
-  purity); 0 for a gated PSM. A protein or peptide sum weighted by it lowers the influence of
-  the PSMs most exposed to co-isolation. The corrected intensities are never rescaled by it.
+  purity) times 1 - PEP (the Percolator PEP with `--rescore`, the pooled PEP in a TMT study, 1
+  without a PEP); 0 for a gated PSM. A protein or peptide sum weighted by it lowers the
+  influence of the PSMs most exposed to co-isolation and of the least certain identifications. The corrected intensities are never rescaled by it.
 * **Not done here:** reference-channel ratios, channel normalization, protein aggregation.
 
 ```bash
@@ -2325,11 +2327,10 @@ andes quant finalize --quant-dir tmt/ -o study --database human.fasta --sdrf stu
 ```
 
 * **Join.** Each run's rows get the pooled q, PEP and score of their PSM on (run, SpecId); rows
-  at pooled q ≤ `--psm-fdr` are kept. A table with per-run q-values (a search with `--rescore`)
+  at pooled q ≤ `--psm-fdr` (and pooled PEP ≤ `--pep` when given) are kept. A table with per-run q-values (a search with `--rescore`)
   or from `--mbr` is refused, because it only holds the PSMs at that run's threshold.
-* **Gate.** `quant_gate_passed` is the run's gate (purity and summed S/N, as searched) and the
-  pooled PEP ≤ `--tmt-max-pep` (0.05); `run_gate_passed` keeps the run's part. `quant_weight` is
-  purity² for the rows that pass, else 0.
+* **Gate and weight.** `quant_gate_passed` is the run's gate (purity and summed S/N, as
+  searched). `quant_weight` is purity² × (1 - pooled PEP) for the rows that pass, else 0.
 * **Protein groups.** The study's groups (the inference of `andes inference` over the same pooled
   results, `--database` and the search's database options) at `--protein-fdr`: `pg_accessions`,
   `anchor_protein`, `unique`, `pg_q_value`, empty when the peptide has no group at the cut.
@@ -3372,7 +3373,7 @@ here only where the value is a fixed choice rather than a documented option.
 | MBR FDRs | donor `--psm-fdr` (0.01), transfer `--quant-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | which library entries and transfers are reported | `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-fdr` | Convention |
 | Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant_run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |
 | Purity ladder | 10 steps in the window, 64 overall | `quant/src/purity.rs:21,23` | isotope ladder of the purity estimate | no | No recorded evidence |
-| TMT gate | purity 0.7, PEP 0.05, S/N 0 (off) | `andes/src/bin/andes/cli.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn` | No recorded evidence |
+| TMT gate | purity 0.7, S/N 0 (off); PEP enters `quant_weight` as 1 - PEP | `andes/src/bin/andes/cli.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-min-sn` | No recorded evidence |
 | TMT unmix | interference at most 0.8, 100 scans minimum (also the effective scans needed to learn λ), 10 ppm, isotopes -1 to 8, density half-width 5 Th, bisquare 4.685, 8 rounds, λ grid of 21 steps, reference weight (1 − interference)² | `quant/src/unmix.rs` | `--tmt-unmix` model | learned per run (coefficients and λ); constants bound the fit | Bisquare 4.685 is the standard 95% efficiency constant; others: no recorded evidence |
 | Mass-error ppm | 10 ppm default | `quant/src/evidence.rs:142` | centroid match tolerance | `--lfq-tol` and learned m/z window | See [§10](#10-quantification) |
 

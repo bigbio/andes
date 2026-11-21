@@ -2,14 +2,14 @@
 //!
 //! Each run is searched on its own with `--tmt` and without rescoring, so its
 //! `<stem>.tmt.parquet` holds every rank-1 target PSM with its reporter ions and the run's
-//! quantification gate on purity and summed S/N (the PEP part of the gate needs a rescoring).
+//! quantification gate on purity and summed S/N.
 //! The runs' PINs are rescored together (one Percolator run over every run gives one score
 //! scale and one FDR), and `andes quant finalize --quant-dir <dir>` on the directory of the
 //! per-run tables then:
 //! 1. joins the pooled q, PEP and score onto every run's rows on (run, SpecId) and keeps the
-//!    rows at pooled q <= `--psm-fdr`;
-//! 2. applies the gate again: the run's purity and S/N decision and the pooled PEP <=
-//!    `--tmt-max-pep`, with `quant_weight` the purity squared of the rows that pass;
+//!    rows at pooled q <= `--psm-fdr` (and PEP <= `--pep` when given), as every quantification;
+//! 2. keeps the run's gate (purity and summed S/N, quantification-quality criteria only) and
+//!    weights the rows that pass by purity squared times 1 - pooled PEP (`quant_weight`);
 //! 3. links each row's peptide to the study's protein group at `--protein-fdr` (the inference
 //!    of `andes inference` over the same pooled results);
 //! 4. adds the run's plex, fraction, instrument and the sample and role (sample, reference or
@@ -32,7 +32,7 @@ use output::feature_parquet::{FeatureGroup, FeatureRecord};
 use output::quant_out::{TMT_CORRECTED_KEY, TMT_MBR_KEY, TMT_PLEX_KEY, TMT_UNMIX_KEY};
 use output::tmt_study_table::{
     is_tmt_study_table, RunDesignColumns, StudyGroup, TmtStudyLayout, TmtStudyRow, TmtStudyWriter,
-    TMT_STUDY_MAX_PEP_KEY, TMT_STUDY_PROTEIN_FDR_KEY, TMT_STUDY_PSM_FDR_KEY, TMT_STUDY_RUNS_KEY,
+    TMT_STUDY_PEP_KEY, TMT_STUDY_PROTEIN_FDR_KEY, TMT_STUDY_PSM_FDR_KEY, TMT_STUDY_RUNS_KEY,
     TMT_STUDY_SDRF_KEY,
 };
 use output::FeatureParquetWriter;
@@ -251,11 +251,13 @@ pub(crate) struct Pooled {
     pub joined: bool,
 }
 
-/// The pooled target PSMs at q <= `max_q`, keyed by (run, SpecId); the run is the SpecId's
-/// `<run>/` prefix. Returns them with the number of target PSMs read.
+/// The pooled target PSMs at q <= `max_q` and, when given, PEP <= `max_pep`, keyed by (run,
+/// SpecId); the run is the SpecId's `<run>/` prefix. Returns them with the number of target
+/// PSMs read.
 pub(crate) fn pooled_targets(
     paths: &[PathBuf],
     max_q: f64,
+    max_pep: Option<f64>,
 ) -> Result<(HashMap<u128, Pooled>, usize), String> {
     let mut map = HashMap::new();
     let mut read = 0usize;
@@ -267,7 +269,7 @@ pub(crate) fn pooled_targets(
                 .map_err(|e| err(&e))?;
         while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
             read += 1;
-            if row.q_value > max_q {
+            if row.q_value > max_q || max_pep.is_some_and(|c| row.pep > c) {
                 continue;
             }
             let key = psm_key(output::spec_id_run(row.psm_id), row.psm_id);
@@ -286,11 +288,6 @@ pub(crate) fn pooled_targets(
         }
     }
     Ok((map, read))
-}
-
-/// The study gate: the run's purity and S/N decision and the pooled PEP.
-pub(crate) fn study_gate(run_passed: bool, pep: f64, max_pep: f64) -> bool {
-    run_passed && pep <= max_pep
 }
 
 /// The SDRF columns of one run: the samples of the plex channels in kit order.
@@ -353,8 +350,6 @@ pub(crate) struct StudyCounts {
     pub kept: usize,
     pub not_at_q: usize,
     pub gate_passed: usize,
-    pub run_gate_failed: usize,
-    pub pep_failed: usize,
     pub grouped: usize,
     pub unique: usize,
     /// SpecId prefix (`<spectrum file stem>/`) to the run whose rows carry it.
@@ -365,7 +360,6 @@ pub(crate) struct StudyCounts {
 pub(crate) fn study_rows(
     rows: Vec<RunRow>,
     pooled: &mut HashMap<u128, Pooled>,
-    max_pep: f64,
     groups: &ProteinGroups<'_>,
     tally: &mut GroupTally,
     counts: &mut StudyCounts,
@@ -395,15 +389,9 @@ pub(crate) fn study_rows(
         };
         p.joined = true;
         let p = *p;
-        let passed = study_gate(r.gate_passed, p.pep, max_pep);
+        let passed = r.gate_passed;
         counts.kept += 1;
-        if passed {
-            counts.gate_passed += 1;
-        } else if !r.gate_passed {
-            counts.run_gate_failed += 1;
-        } else {
-            counts.pep_failed += 1;
-        }
+        counts.gate_passed += usize::from(passed);
         let (sequence, _) = crate::quant_cmd::parse_peptidoform(&r.peptide);
         let group = tally.assign(groups, &sequence).map(|(accessions, g)| {
             counts.grouped += 1;
@@ -441,10 +429,9 @@ pub(crate) fn study_rows(
             sn: r.sn,
             interference: r.interference,
             unmixed: r.unmixed,
-            run_gate_passed: r.gate_passed,
             quant_gate_passed: passed,
             quant_weight: if passed {
-                crate::quant_run::quant_weight(r.purity)
+                crate::quant_run::quant_weight(r.purity, Some(p.pep))
             } else {
                 0.0
             },
@@ -582,11 +569,12 @@ pub(crate) fn finalize(
         inf: &inf,
         max_q: a.proteins.protein_fdr,
     };
-    let (mut pooled, read) = pooled_targets(&a.psms, psm_fdr)?;
+    let (mut pooled, read) = pooled_targets(&a.psms, psm_fdr, a.pep)?;
     let pooled_at_q = pooled.len();
     log::info!(
         target: "tmt",
-        "pooled results: {read} target PSMs, {pooled_at_q} at q <= {psm_fdr} [{:.2}s]",
+        "pooled results: {read} target PSMs, {pooled_at_q} at q <= {psm_fdr}{} [{:.2}s]",
+        a.pep.map_or_else(String::new, |p| format!(" and PEP <= {p}")),
         t0.elapsed().as_secs_f64()
     );
 
@@ -621,7 +609,10 @@ pub(crate) fn finalize(
                         TMT_STUDY_PROTEIN_FDR_KEY,
                         a.proteins.protein_fdr.to_string(),
                     ),
-                    (TMT_STUDY_MAX_PEP_KEY, a.tmt_max_pep.to_string()),
+                    (
+                        TMT_STUDY_PEP_KEY,
+                        a.pep.map_or_else(|| "none".to_string(), |p| p.to_string()),
+                    ),
                     (TMT_STUDY_RUNS_KEY, tables.len().to_string()),
                     (
                         TMT_STUDY_SDRF_KEY,
@@ -669,14 +660,7 @@ pub(crate) fn finalize(
             }
             let d = run_design(design.as_ref(), &run, layout.plex)?;
             let before = counts.clone();
-            let rows = study_rows(
-                rows,
-                &mut pooled,
-                a.tmt_max_pep,
-                &groups,
-                &mut tally,
-                &mut counts,
-            )?;
+            let rows = study_rows(rows, &mut pooled, &groups, &mut tally, &mut counts)?;
             if rows.is_empty() && counts.run_rows > before.run_rows {
                 log::warn!(
                     "run {run}: none of its {} PSMs is in the pooled results at q <= {psm_fdr}; \
@@ -785,11 +769,9 @@ pub(crate) fn finalize(
         "  passing the gate",
         counts.gate_passed,
         format!(
-            "{:.1} %; failed: run gate (purity, S/N) {}, PEP > {} {}",
+            "{:.1} %; failed the run's gate (purity, S/N) {}; weight purity^2 x (1 - PEP)",
             pct(counts.gate_passed, written),
-            counts.run_gate_failed,
-            a.tmt_max_pep,
-            counts.pep_failed
+            written - counts.gate_passed
         ),
     );
     s(
@@ -885,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_join_on_run_and_spec_id_and_the_gate_uses_the_pooled_pep() {
+    fn rows_join_on_run_and_spec_id_and_the_weight_uses_the_pooled_pep() {
         let inf = inference(&[("PEPTIDEK", "sp|P1|A")]);
         let groups = ProteinGroups {
             inf: &inf,
@@ -904,14 +886,13 @@ mod tests {
         ];
         let mut tally = GroupTally::default();
         let mut c = StudyCounts::default();
-        let out = study_rows(rows, &mut map, 0.05, &groups, &mut tally, &mut c).unwrap();
+        let out = study_rows(rows, &mut map, &groups, &mut tally, &mut c).unwrap();
         assert_eq!(out.len(), 2, "scan 3 is run b's, scan 4 is not rescored");
         assert_eq!(c.not_at_q, 2);
-        assert!(out[0].quant_gate_passed);
-        assert!((out[0].quant_weight - 0.64).abs() < 1e-6);
-        assert!(!out[1].quant_gate_passed && out[1].run_gate_passed);
-        assert_eq!(out[1].quant_weight, 0.0);
-        assert_eq!((c.gate_passed, c.pep_failed, c.run_gate_failed), (1, 1, 0));
+        assert!(out[0].quant_gate_passed && out[1].quant_gate_passed);
+        assert!((out[0].quant_weight - 0.64 * 0.99).abs() < 1e-6);
+        assert!((out[1].quant_weight - 0.64 * 0.8).abs() < 1e-6);
+        assert_eq!(c.gate_passed, 2);
         let joined: Vec<bool> = {
             let mut v: Vec<(f64, bool)> = map.values().map(|p| (p.q, p.joined)).collect();
             v.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -934,7 +915,6 @@ mod tests {
         study_rows(
             vec![run_row("a", 1, "PEPTIDEK", true)],
             &mut map,
-            0.05,
             &groups,
             &mut tally,
             &mut c,
@@ -942,16 +922,26 @@ mod tests {
         .unwrap();
         let mut r = run_row("b", 1, "PEPTIDEK", true);
         r.spec_id = "a/scan=2_2_1".into();
-        let e = study_rows(vec![r], &mut map, 0.05, &groups, &mut tally, &mut c).unwrap_err();
+        let e = study_rows(vec![r], &mut map, &groups, &mut tally, &mut c).unwrap_err();
         assert!(e.contains("same prefix `a/`"), "{e}");
     }
 
     #[test]
-    fn the_gate_needs_the_run_decision_and_the_pooled_pep() {
-        assert!(study_gate(true, 0.05, 0.05));
-        assert!(!study_gate(true, 0.051, 0.05));
-        assert!(!study_gate(false, 0.0, 0.05));
-        assert!(study_gate(true, 1.0, 1.0));
+    fn the_pep_threshold_applies_with_the_q_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.psms");
+        std::fs::write(
+            &p,
+            "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+             a/s_1_1\t3\t0.001\t0.01\tK.PEPK.A\tP1\n\
+             a/s_2_1\t2\t0.002\t0.3\tK.PEPK.A\tP1\n\
+             a/s_3_1\t1\t0.2\t0.5\tK.PEPK.A\tP1\n",
+        )
+        .unwrap();
+        let paths = [p];
+        assert_eq!(pooled_targets(&paths, 0.01, None).unwrap().0.len(), 2);
+        let (kept, read) = pooled_targets(&paths, 0.01, Some(0.1)).unwrap();
+        assert_eq!((kept.len(), read), (1, 3));
     }
 
     #[test]
@@ -968,7 +958,7 @@ mod tests {
         ];
         let mut tally = GroupTally::default();
         let mut c = StudyCounts::default();
-        let out = study_rows(rows, &mut map, 0.05, &groups, &mut tally, &mut c).unwrap();
+        let out = study_rows(rows, &mut map, &groups, &mut tally, &mut c).unwrap();
         let g = out[0].group.as_ref().expect("grouped");
         assert_eq!(out[0].sequence, "PEPTIDEK");
         assert_eq!((g.anchor.as_str(), g.unique), ("sp|P1|A", true));

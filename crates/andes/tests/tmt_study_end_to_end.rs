@@ -240,18 +240,16 @@ fn tmt_study_joins_pooled_scores_gates_groups_and_maps_channels() {
             let k = format!("tmt_{c}");
             assert_eq!(r[&k], run[&k], "{k} is the run's value");
         }
-        assert_eq!(r["run_gate_passed"], run["quant_gate_passed"]);
-        let run_passed = run["quant_gate_passed"] == "true";
-        let passed = run_passed && pep <= 0.05;
-        assert_eq!(
-            r["quant_gate_passed"],
-            passed.to_string(),
-            "{}",
-            r["spec_id"]
-        );
+        assert_eq!(r["quant_gate_passed"], run["quant_gate_passed"]);
+        let passed = run["quant_gate_passed"] == "true";
         let purity: f64 = r["purity"].parse().unwrap_or(1.0);
         let w: f64 = r["quant_weight"].parse().unwrap();
-        assert!((w - if passed { purity * purity } else { 0.0 }).abs() < 1e-4);
+        let want = if passed {
+            purity * purity * (1.0 - pep)
+        } else {
+            0.0
+        };
+        assert!((w - want).abs() < 1e-4, "{}: {w} vs {want}", r["spec_id"]);
         assert_eq!(r["plex"], "1");
         let fraction = if r["filename"] == "runA" { "1" } else { "2" };
         assert_eq!(r["fraction"], fraction);
@@ -273,13 +271,14 @@ fn tmt_study_joins_pooled_scores_gates_groups_and_maps_channels() {
     }
     assert!(grouped > 0);
     assert!(
-        rows.iter().any(|r| r["run_gate_passed"] == "false"),
+        rows.iter().any(|r| r["quant_gate_passed"] == "false"),
         "the interfered peptide fails the run's purity gate"
     );
     assert!(
-        rows.iter()
-            .any(|r| r["run_gate_passed"] == "true" && r["quant_gate_passed"] == "false"),
-        "the PEP 0.2 row fails the study gate"
+        rows.iter().any(|r| r["psm_pep"] == "0.2"
+            && r["quant_gate_passed"] == "true"
+            && r["quant_weight"].parse::<f64>().unwrap() < 0.81),
+        "the PEP 0.2 row is quantified with a lower weight"
     );
 
     let read_feature = |p: &Path| -> Vec<HashMap<String, String>> {

@@ -1082,11 +1082,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_min_purity: f64,
 
-    /// Quantification gate: largest Percolator PEP (1: off; needs --rescore)
-    #[arg(long, value_name = "PEP", default_value_t = DEFAULT_TMT_MAX_PEP,
-          value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ISOBARIC)]
-    pub(crate) tmt_max_pep: f64,
-
     /// Quantification gate: least summed reporter signal-to-noise (0: off)
     ///
     /// Applies where the reporter scan records noise (Thermo .raw, or mzML converted with
@@ -1749,22 +1744,18 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long, value_name = "FILE", help_heading = H_ISOBARIC)]
     pub(crate) sdrf: Option<PathBuf>,
 
-    /// TMT study: quantification gate, largest pooled Percolator PEP (1: off)
+    /// TMT study: PEP threshold of a quantified PSM, applied with --psm-fdr [default: none]
     ///
-    /// A row passes when its run's gate (purity and summed S/N) passed and its pooled PEP is
-    /// at or below it.
-    #[arg(long, value_name = "PEP", default_value_t = DEFAULT_TMT_MAX_PEP,
-          value_parser = parse_unit_fraction, help_heading = H_ISOBARIC)]
-    pub(crate) tmt_max_pep: f64,
+    /// The pooled Percolator posterior_error_prob column, as the search's --pep. Every
+    /// quantified row is weighted by 1 - PEP in quant_weight.
+    #[arg(long = "pep", value_name = "PEP", value_parser = parse_unit_fraction,
+          help_heading = H_FDR)]
+    pub(crate) pep: Option<f64>,
 
     /// Worker threads [default: the number of logical CPUs]
     #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
-
-/// Default of the quantification gate's largest PEP (--tmt-max-pep of the search and of a TMT
-/// study's finalize).
-pub(crate) const DEFAULT_TMT_MAX_PEP: f64 = 0.05;
 
 /// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
 pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;

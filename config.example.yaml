@@ -146,7 +146,6 @@ quant:
   # tmt_tol: 20ppm                 # --tmt-tol (advanced): unset: 20ppm (10ppm tmt32/tmt35), 0.3da on ion-trap MS2
   # tmt_correction: lot.txt        # --tmt-correction (advanced): kit impurity matrix; unset: none (example)
   # tmt_min_purity: 0.7            # --tmt-min-purity (advanced): gate on precursor purity, 0 = off
-  # tmt_max_pep: 0.05              # --tmt-max-pep (advanced): gate on Percolator PEP, 1 = off
   # tmt_min_sn: 0                  # --tmt-min-sn (advanced): gate on reporter signal-to-noise, 0 = off
   # tmt_unmix: auto                # --tmt-unmix (advanced): auto | off | on
   # mbr_wrong_log2: 0.5            # --mbr-wrong-log2 (advanced): tmt mbr: profile deviation that counts as wrong

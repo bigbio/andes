@@ -11,9 +11,8 @@
 //! - the reporters: `<prefix>_<channel>` (corrected when the runs were corrected),
 //!   `raw_<prefix>_<channel>` (with correction), `reporter_intensity_sum`, `reporter_sn_sum`,
 //!   `sn_<prefix>_<channel>`, and with unmixing `interference` and `unmix_<prefix>_<channel>`;
-//! - `purity`, `run_gate_passed` (the run's gate: purity and summed S/N), `quant_gate_passed`
-//!   (the run's gate and the pooled PEP), `quant_weight` (purity squared when the gate passes,
-//!   else 0);
+//! - `purity`, `quant_gate_passed` (the run's gate: purity and summed S/N), `quant_weight`
+//!   (purity squared times 1 - pooled PEP when the gate passes, else 0);
 //! - the study's protein group of the peptide at the protein q threshold: `pg_accessions`
 //!   (`;`-separated), `anchor_protein`, `unique`, `pg_q_value` (null when the peptide has no
 //!   group at the threshold);
@@ -44,7 +43,8 @@ const TABLE: TableVersion = TableVersion {
 pub const TMT_STUDY_SCHEMA_KEY: &str = TABLE.key;
 pub const TMT_STUDY_PSM_FDR_KEY: &str = "andes.tmt_study.psm_fdr";
 pub const TMT_STUDY_PROTEIN_FDR_KEY: &str = "andes.tmt_study.protein_fdr";
-pub const TMT_STUDY_MAX_PEP_KEY: &str = "andes.tmt_study.max_pep";
+/// The `--pep` threshold of the rows, or `none`.
+pub const TMT_STUDY_PEP_KEY: &str = "andes.tmt_study.pep";
 pub const TMT_STUDY_RUNS_KEY: &str = "andes.tmt_study.runs";
 pub const TMT_STUDY_SDRF_KEY: &str = "andes.tmt_study.sdrf";
 
@@ -72,7 +72,6 @@ pub struct TmtStudyRow {
     pub sn: Vec<Option<f32>>,
     pub interference: Option<f32>,
     pub unmixed: Vec<Option<f32>>,
-    pub run_gate_passed: bool,
     pub quant_gate_passed: bool,
     pub quant_weight: f32,
     pub group: Option<StudyGroup>,
@@ -157,7 +156,6 @@ fn schema(l: TmtStudyLayout) -> Schema {
         f.extend(block("unmix_", true));
     }
     f.extend([
-        Field::new("run_gate_passed", DataType::Boolean, false),
         Field::new("quant_gate_passed", DataType::Boolean, false),
         Field::new("quant_weight", DataType::Float32, false),
         Field::new("pg_accessions", DataType::Utf8, true),
@@ -258,7 +256,6 @@ impl TmtStudyWriter {
         let mut sum = Float32Builder::new();
         let mut sn_sum = Float32Builder::new();
         let mut interference = Float32Builder::new();
-        let mut run_gate = BooleanBuilder::new();
         let mut gate = BooleanBuilder::new();
         let mut weight = Float32Builder::new();
         let mut pg = StringBuilder::new();
@@ -312,7 +309,6 @@ impl TmtStudyWriter {
             for (b, &v) in unmix.iter_mut().zip(&r.unmixed) {
                 b.append_option(v);
             }
-            run_gate.append_value(r.run_gate_passed);
             gate.append_value(r.quant_gate_passed);
             weight.append_value(r.quant_weight);
             let g = r.group.as_ref();
@@ -360,7 +356,6 @@ impl TmtStudyWriter {
             cols.push(Arc::new(interference.finish()));
             cols.extend(fin(&mut unmix));
         }
-        cols.push(Arc::new(run_gate.finish()));
         cols.push(Arc::new(gate.finish()));
         cols.push(Arc::new(weight.finish()));
         cols.push(Arc::new(pg.finish()));
@@ -420,7 +415,6 @@ mod tests {
             sn: vec![None; 6],
             interference: None,
             unmixed: Vec::new(),
-            run_gate_passed: true,
             quant_gate_passed: gate,
             quant_weight: if gate { 0.81 } else { 0.0 },
             group: gate.then(|| StudyGroup {

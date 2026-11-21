@@ -51,7 +51,6 @@ pub(crate) struct QuantSettings {
     pub correction: Option<CorrectionMatrix>,
     pub min_purity: f32,
     pub min_sn: f32,
-    pub max_pep: f64,
     pub lfq: bool,
     pub lfq_params: LfqParams,
     pub feature_fdr: f64,
@@ -229,7 +228,6 @@ impl QuantSettings {
             correction,
             min_purity: cli.tmt_min_purity as f32,
             min_sn: cli.tmt_min_sn as f32,
-            max_pep: cli.tmt_max_pep,
             lfq: cli.lfq,
             lfq_params,
             feature_fdr: cli.lfq_feature_fdr(),
@@ -285,7 +283,7 @@ impl QuantSettings {
         if let Some(p) = self.plex {
             parts.push(format!(
                 "isobaric {} at MS{} (reporter tol {}, correction {}, quantification gate: \
-                 purity >= {}, summed S/N >= {}, PEP <= {})",
+                 purity >= {}, summed S/N >= {}; weight purity^2 x (1 - PEP))",
                 p.name(),
                 self.tmt_level,
                 match self.tmt_tol {
@@ -298,8 +296,7 @@ impl QuantSettings {
                     "off"
                 },
                 self.min_purity,
-                self.min_sn,
-                self.max_pep
+                self.min_sn
             ));
             if let Some(strength) = self.unmix {
                 parts.push(format!(
@@ -657,22 +654,13 @@ pub(crate) struct TmtMbrInput<'a> {
 #[derive(Debug, Default)]
 struct GateCounts {
     purity: usize,
-    pep: usize,
     sn: usize,
 }
 
 impl GateCounts {
-    fn check(
-        &mut self,
-        s: &QuantSettings,
-        purity: Option<f32>,
-        sn_sum: Option<f32>,
-        pep: Option<f64>,
-    ) -> bool {
+    fn check(&mut self, s: &QuantSettings, purity: Option<f32>, sn_sum: Option<f32>) -> bool {
         if purity.is_some_and(|p| p < s.min_purity) {
             self.purity += 1;
-        } else if pep.is_some_and(|p| p > s.max_pep) {
-            self.pep += 1;
         } else if sn_sum.is_some_and(|v| v < s.min_sn) {
             self.sn += 1;
         } else {
@@ -685,9 +673,6 @@ impl GateCounts {
         let mut parts = Vec::new();
         if self.purity > 0 {
             parts.push(format!("{} below purity {}", self.purity, s.min_purity));
-        }
-        if self.pep > 0 {
-            parts.push(format!("{} above PEP {}", self.pep, s.max_pep));
         }
         if self.sn > 0 {
             parts.push(format!("{} below summed S/N {}", self.sn, s.min_sn));
@@ -704,9 +689,11 @@ impl GateCounts {
     }
 }
 
-/// Roll-up weight of a reporter row that passes the gate: its purity squared (1 when unknown).
-pub(crate) fn quant_weight(purity: Option<f32>) -> f32 {
-    purity.unwrap_or(1.0).clamp(0.0, 1.0).powi(2)
+/// Roll-up weight of a reporter row that passes the gate: its purity squared (1 when unknown)
+/// times the probability that its identification is right, 1 - PEP (1 when no PEP is known).
+pub(crate) fn quant_weight(purity: Option<f32>, pep: Option<f64>) -> f32 {
+    let right = 1.0 - pep.unwrap_or(0.0).clamp(0.0, 1.0);
+    purity.unwrap_or(1.0).clamp(0.0, 1.0).powi(2) * right as f32
 }
 
 fn reduced_ms2(spec: &Spectrum) -> Ms2Scan {
@@ -1611,7 +1598,7 @@ pub(crate) fn run_quant(
                 let sn = noise.map(|n| signal_to_noise(&corrected, &n));
                 with_noise += usize::from(sn.is_some());
                 let sn_sum = sn.as_ref().map(|v| v.iter().sum::<f32>());
-                let passes = gated.check(s, purity, sn_sum, hit.pep);
+                let passes = gated.check(s, purity, sn_sum);
                 if s.unmix.is_some() {
                     let z = hit.psm.charge_used.max(1);
                     let window = ms1.as_ref().and_then(|ms1| {
@@ -1642,7 +1629,11 @@ pub(crate) fn run_quant(
                     raw,
                     corrected,
                     sn,
-                    quant_weight: if passes { quant_weight(purity) } else { 0.0 },
+                    quant_weight: if passes {
+                        quant_weight(purity, hit.pep)
+                    } else {
+                        0.0
+                    },
                     quant_gate_passed: passes,
                     interference: None,
                     unmixed: None,
@@ -1761,7 +1752,7 @@ pub(crate) fn run_quant(
                     corrected: t.corrected.clone(),
                     sn: None,
                     quant_weight: if t.accepted {
-                        quant_weight(t.purity)
+                        quant_weight(t.purity, None)
                     } else {
                         0.0
                     },
@@ -2361,7 +2352,6 @@ mod tests {
             correction: None,
             min_purity: 0.0,
             min_sn: 0.0,
-            max_pep: 1.0,
             lfq,
             lfq_params: LfqParams::default(),
             feature_fdr: 0.05,
@@ -2411,29 +2401,28 @@ mod tests {
     fn quantification_gate_counts_the_first_failed_criterion() {
         let mut s = settings(false, None);
         s.min_purity = 0.7;
-        s.max_pep = 0.05;
         s.min_sn = 100.0;
         let mut g = GateCounts::default();
-        assert!(g.check(&s, Some(0.9), Some(500.0), Some(0.01)));
-        assert!(g.check(&s, None, None, None));
-        assert!(!g.check(&s, Some(0.5), Some(50.0), Some(0.5)));
-        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.5)));
-        assert!(!g.check(&s, Some(0.8), Some(50.0), Some(0.01)));
-        assert_eq!((g.purity, g.pep, g.sn), (1, 1, 1));
+        assert!(g.check(&s, Some(0.9), Some(500.0)));
+        assert!(g.check(&s, None, None));
+        assert!(!g.check(&s, Some(0.5), Some(50.0)));
+        assert!(!g.check(&s, Some(0.8), Some(50.0)));
+        assert_eq!((g.purity, g.sn), (1, 1));
         let text = g.describe(&s);
         assert!(text.contains("1 below purity 0.7"), "{text}");
-        assert!(text.contains("1 above PEP 0.05"), "{text}");
         assert!(text.contains("1 below summed S/N 100"), "{text}");
         let off = settings(false, None);
-        assert!(GateCounts::default().check(&off, Some(0.0), Some(0.0), Some(1.0)));
+        assert!(GateCounts::default().check(&off, Some(0.0), Some(0.0)));
         assert!(GateCounts::default().describe(&off).is_empty());
     }
 
     #[test]
-    fn roll_up_weight_is_purity_squared() {
-        assert_eq!(quant_weight(None), 1.0);
-        assert!((quant_weight(Some(0.8)) - 0.64).abs() < 1e-6);
-        assert_eq!(quant_weight(Some(1.2)), 1.0);
+    fn roll_up_weight_is_purity_squared_times_the_chance_the_identification_is_right() {
+        assert_eq!(quant_weight(None, None), 1.0);
+        assert!((quant_weight(Some(0.8), None) - 0.64).abs() < 1e-6);
+        assert_eq!(quant_weight(Some(1.2), None), 1.0);
+        assert!((quant_weight(Some(0.8), Some(0.25)) - 0.48).abs() < 1e-6);
+        assert_eq!(quant_weight(None, Some(1.0)), 0.0);
     }
 
     #[test]

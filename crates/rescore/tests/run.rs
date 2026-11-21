@@ -12,6 +12,7 @@ fn limit(dir: &Path) -> MemLimit {
     MemLimit {
         bytes: 1 << 30,
         spill_dir: dir.to_path_buf(),
+        sizing: rescore::Sizing::Fixed,
     }
 }
 

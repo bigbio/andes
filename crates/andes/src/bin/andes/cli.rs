@@ -320,8 +320,10 @@ pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
 pub(crate) struct DatabaseArgs {
     /// Protease; a comma list (gluc,trypsin) cleaves at the sites of each one
     ///
-    /// The first protease of a list is the primary one: it selects the model and the
-    /// cleavage feature. A non-specific protease in a list makes the whole digest
+    /// The order of a list does not matter. The primary protease, which selects the model
+    /// and the cleavage feature, is trypsin whenever the list has it; otherwise the one whose
+    /// rule sets the C-terminal residue of most peptides (a C-terminal protease with more
+    /// cleavage residues). A non-specific protease in a list makes the whole digest
     /// non-specific. Also accepted: tryp, chymo, lys-c, asp-n, glu-c, lys-n, arg-c, alp,
     /// alpha-lp, none (nocleavage), all and elastase (nonspecific), in any case.
     #[arg(long, value_name = "ENZYME", default_value = "trypsin", help_heading = H_SEARCH,
@@ -869,11 +871,11 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
+    /// Fixed storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory [default: what the PIN needs to stay in memory, at most 16 GB and at most the memory free to the job or machine less a margin]
+    #[arg(long, value_name = "GB",
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
-    pub(crate) rescore_memory_gb: u64,
+    pub(crate) rescore_memory_gb: Option<u64>,
 
     /// PEP threshold applied with --psm-fdr: a PSM must pass both [default: none]
     #[arg(long, value_name = "PEP", value_parser = parse_unit_fraction, hide_short_help = true,
@@ -1347,10 +1349,10 @@ pub(crate) struct SearchArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RescoreArgs {
-    /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = 16,
+    /// Fixed storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory [default: what the PIN needs to stay in memory, at most 16 GB and at most the memory free to the job or machine less a margin]
+    #[arg(long, value_name = "GB",
           value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) rescore_memory_gb: u64,
+    pub(crate) rescore_memory_gb: Option<u64>,
 
     /// Directory of the spill files, created if missing
     #[arg(long, value_name = "DIR", required = true)]
@@ -1387,7 +1389,8 @@ pub(crate) struct InferenceArgs {
     #[command(flatten)]
     pub(crate) proteins: ProteinArgs,
 
-    /// Run names of the groups' grouped_runs [default: one per --psms file, named after it]
+    /// Run names of the groups' grouped_runs [default: the runs in the --psms files' FileName
+    /// column; one per file, named after it, for a file without that column]
     #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 
@@ -1757,7 +1760,8 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) threads: Option<usize>,
 }
 
-/// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
+/// Highest storage budget of the native Percolator engine when --rescore-memory-gb is not
+/// given, in GB: the engine takes what the PIN needs, up to this and the memory free.
 pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;
 
 pub(crate) type Cli = SearchArgs;
@@ -2276,16 +2280,78 @@ mod enzyme_cli_tests {
         let (p, e) = parse_enzymes("gluc,trypsin").unwrap();
         assert_eq!(
             (p, e.as_slice()),
-            (Enzyme::GluC, [Enzyme::Trypsin].as_slice())
+            (Enzyme::Trypsin, [Enzyme::GluC].as_slice())
         );
         let err = parse_enzymes("gluc+trypsin").unwrap_err().to_string();
         assert!(err.contains("separate proteases with a comma"), "{err}");
     }
 
     #[test]
-    fn first_token_is_primary_order_matters_for_selection() {
-        assert_eq!(parse_enzymes("trypsin,gluc").unwrap().0, Enzyme::Trypsin);
-        assert_eq!(parse_enzymes("gluc,trypsin").unwrap().0, Enzyme::GluC);
+    fn the_listed_order_of_proteases_does_not_change_the_parsed_set() {
+        for (a, b) in [
+            ("trypsin,lysc", "lysc,trypsin"),
+            ("trypsin,gluc", "gluc,trypsin"),
+            ("trypsin,argc", "argc,trypsin"),
+            ("lysn,trypsin", "trypsin,lysn"),
+            ("nonspecific,trypsin", "trypsin,nonspecific"),
+            ("lysc,argc,trypsin", "argc,trypsin,lysc"),
+            ("trypsin,chymotrypsin", "chymotrypsin,trypsin"),
+        ] {
+            assert_eq!(
+                parse_enzymes(a).unwrap(),
+                parse_enzymes(b).unwrap(),
+                "{a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_primary_protease_sets_most_peptide_c_termini() {
+        assert_eq!(parse_enzymes("lysc,trypsin").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("argc,trypsin").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("lysn,trypsin").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("aspn,lysc").unwrap().0, Enzyme::LysC);
+        assert_eq!(parse_enzymes("nonspecific,lysc").unwrap().0, Enzyme::LysC);
+        assert_eq!(parse_enzymes("gluc,lysc").unwrap().0, Enzyme::LysC);
+        assert_eq!(
+            parse_enzymes("argc,chymotrypsin").unwrap().0,
+            Enzyme::Chymotrypsin
+        );
+    }
+
+    #[test]
+    fn trypsin_is_the_primary_of_any_set_that_contains_it() {
+        for spec in [
+            "trypsin,chymotrypsin",
+            "chymotrypsin,trypsin",
+            "gluc,trypsin",
+            "trypsin,gluc",
+            "lysc,trypsin",
+            "alphalp,trypsin",
+            "nonspecific,trypsin",
+            "aspn,chymotrypsin,trypsin",
+        ] {
+            assert_eq!(parse_enzymes(spec).unwrap().0, Enzyme::Trypsin, "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_single_protease_is_its_own_primary() {
+        use model::enzyme::Enzyme::*;
+        for e in [
+            Trypsin,
+            Chymotrypsin,
+            LysC,
+            AspN,
+            GluC,
+            LysN,
+            ArgC,
+            AlphaLP,
+            NoCleavage,
+            NonSpecific,
+        ] {
+            assert_eq!(parse_enzymes(e.name()).unwrap(), (e, Vec::new()), "{e:?}");
+        }
     }
 
     #[test]
@@ -2298,8 +2364,8 @@ mod enzyme_cli_tests {
     #[test]
     fn whitespace_and_empties_tolerated() {
         let (primary, extras) = parse_enzymes("  lysc , , trypsin ").unwrap();
-        assert_eq!(primary, Enzyme::LysC);
-        assert_eq!(extras, vec![Enzyme::Trypsin]);
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert_eq!(extras, vec![Enzyme::LysC]);
     }
 
     #[test]

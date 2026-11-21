@@ -78,8 +78,21 @@ pub fn run(args: &[String], limit: MemLimit) -> Result<(), String> {
         make_room(&mut pin)?;
         pool.install(|| trained_scores(&pin, &a, &is_decoy, &pool))?
     };
-    pool.install(|| finish(&pin, &a, &is_decoy, &scores, mode))
+    pool.install(|| finish(&pin, &a, &is_decoy, &scores, mode))?;
+    log::debug!(
+        target: "rescore",
+        "storage budget {:.2} GiB, at most {:.2} GiB reserved at once; {} PSMs x {} features, features {}, texts {}",
+        pin.budget.total() as f64 / GIB,
+        pin.budget.peak() as f64 / GIB,
+        pin.meta.len(),
+        pin.rows.nfeat(),
+        if pin.rows.is_spilled() { "spilled" } else { "in memory" },
+        if pin.texts.is_spilled() { "spilled" } else { "in memory" }
+    );
+    Ok(())
 }
+
+const GIB: f64 = (1u64 << 30) as f64;
 
 fn trained_scores(
     pin: &Pin,

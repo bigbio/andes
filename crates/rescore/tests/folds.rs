@@ -48,6 +48,7 @@ fn folds_reproduce_percolator_training_sets() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: d.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -98,6 +99,7 @@ fn colliding_scan_hashes_split_as_percolator_at_any_thread_count() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: d.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -129,6 +131,7 @@ fn seeds_reduce_modulo_the_generator_and_zero_acts_as_one() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: d.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();

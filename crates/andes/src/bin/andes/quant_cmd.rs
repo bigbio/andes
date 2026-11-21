@@ -1706,7 +1706,8 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let inf = match (&a.output_parquet, &a.database) {
         (Some(_), Some(database)) => Some(
             crate::inference_cmd::infer_from_files(database, &a.proteins, &a.psms, &a.decoy_psms)
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| e.to_string())?
+                .0,
         ),
         _ => None,
     };

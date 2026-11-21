@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const UNLIMITED_MIN_BYTES: u64 = 1 << 50;
 
@@ -134,6 +134,114 @@ fn budget_from(node_available: Option<u64>, cgroup_limit: Option<u64>) -> Option
     }
 }
 
+fn process_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_status_resident(&status)
+}
+
+fn parse_status_resident(status: &str) -> Option<u64> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+/// Share of the free memory left to the rest of the process when the rescoring budget is
+/// sized automatically: allocator slack, buffers outside the budget and the estimate's error.
+const RESCORE_MARGIN_SHARE: f64 = 0.1;
+
+/// Smallest margin left when the rescoring budget is sized automatically.
+const RESCORE_MARGIN_MIN_BYTES: u64 = 1 << 30;
+
+/// Allowance assumed when neither the cgroup limit nor `MemAvailable` can be read.
+const RESCORE_FALLBACK_BYTES: u64 = 16 << 30;
+
+/// The native rescoring engine's memory limit. `gb` (`--rescore-memory-gb`) is a fixed
+/// budget. Without it the engine sizes the budget to the PIN, never above
+/// `DEFAULT_RESCORE_MEMORY_GB` nor above the memory free to this process now: the cgroup limit
+/// less what the process holds (when there is a limit) and `MemAvailable`, whichever is lower,
+/// less a margin.
+pub(crate) fn rescore_memory(gb: Option<u64>, spill_dir: PathBuf) -> output::MemLimit {
+    match gb {
+        Some(gb) => output::MemLimit {
+            bytes: gb.saturating_mul(1 << 30),
+            spill_dir,
+            sizing: output::Sizing::Fixed,
+        },
+        None => {
+            let (bytes, why) = rescore_allowance(
+                meminfo_available_bytes(),
+                cgroup_memory_limit(),
+                process_resident_bytes(),
+            );
+            output::MemLimit {
+                bytes,
+                spill_dir,
+                sizing: output::Sizing::FitInput {
+                    cap: crate::cli::DEFAULT_RESCORE_MEMORY_GB << 30,
+                    why,
+                },
+            }
+        }
+    }
+}
+
+fn gb(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
+}
+
+fn rescore_allowance(
+    node_available: Option<u64>,
+    cgroup_limit: Option<u64>,
+    resident: Option<u64>,
+) -> (u64, String) {
+    let in_cgroup = cgroup_limit.map(|l| {
+        let held = resident.unwrap_or(0);
+        (l.saturating_sub(held), l, held)
+    });
+    let (free, source) = match (node_available, in_cgroup) {
+        (Some(node), Some((c, l, held))) if c < node => (
+            c,
+            format!(
+                "the job's {:.1} GB limit less the {:.1} GB this process holds",
+                gb(l),
+                gb(held)
+            ),
+        ),
+        (Some(node), _) => (node, format!("{:.1} GB available on the machine", gb(node))),
+        (None, Some((c, l, held))) => (
+            c,
+            format!(
+                "the job's {:.1} GB limit less the {:.1} GB this process holds",
+                gb(l),
+                gb(held)
+            ),
+        ),
+        (None, None) => {
+            return (
+                RESCORE_FALLBACK_BYTES,
+                format!(
+                    "{:.1} GB assumed, the free memory could not be read",
+                    gb(RESCORE_FALLBACK_BYTES)
+                ),
+            )
+        }
+    };
+    let margin = ((free as f64 * RESCORE_MARGIN_SHARE) as u64).max(RESCORE_MARGIN_MIN_BYTES);
+    let bytes = free.saturating_sub(margin);
+    (
+        bytes,
+        format!(
+            "{:.1} GB allowed: {source}, less a {:.1} GB margin",
+            gb(bytes),
+            gb(margin)
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +365,43 @@ mod tests {
         assert_eq!(budget.source, MemorySource::NodeAvailable);
 
         assert_eq!(budget_from(None, None), None);
+    }
+
+    #[test]
+    fn rescore_allowance_is_the_tighter_of_job_and_machine_less_a_margin() {
+        let (bytes, why) = rescore_allowance(Some(600 * GIB), Some(64 * GIB), Some(4 * GIB));
+        assert_eq!(bytes, 60 * GIB - 6 * GIB);
+        assert!(why.contains("limit") && why.contains("holds"), "{why}");
+
+        let (bytes, why) = rescore_allowance(Some(20 * GIB), Some(64 * GIB), Some(4 * GIB));
+        assert_eq!(bytes, 18 * GIB);
+        assert!(why.contains("available on the machine"), "{why}");
+
+        let (bytes, _) = rescore_allowance(Some(5 * GIB), None, None);
+        assert_eq!(bytes, 4 * GIB);
+
+        let (bytes, _) = rescore_allowance(None, Some(8 * GIB), Some(9 * GIB));
+        assert_eq!(bytes, 0);
+
+        let (bytes, why) = rescore_allowance(None, None, None);
+        assert_eq!(bytes, RESCORE_FALLBACK_BYTES);
+        assert!(why.contains("assumed"), "{why}");
+    }
+
+    #[test]
+    fn a_fixed_rescore_budget_is_the_flag_in_gib() {
+        let m = rescore_memory(Some(3), PathBuf::from("/s"));
+        assert_eq!(m.bytes, 3 * GIB);
+        assert_eq!(m.sizing, output::Sizing::Fixed);
+        let m = rescore_memory(None, PathBuf::from("/s"));
+        assert!(matches!(m.sizing, output::Sizing::FitInput { .. }));
+    }
+
+    #[test]
+    fn status_resident_set_is_parsed_as_kilobytes() {
+        let text = "Name:\tandes\nVmPeak:\t  900 kB\nVmRSS:\t  2048 kB\n";
+        assert_eq!(parse_status_resident(text), Some(2048 * 1024));
+        assert_eq!(parse_status_resident("Name: andes\n"), None);
     }
 
     #[test]

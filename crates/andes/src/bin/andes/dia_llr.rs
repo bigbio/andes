@@ -37,7 +37,7 @@ use onnx_infer::predictors::spectral::FragmentTolerance;
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
-use crate::predicted::{anchor_rows, read_pin, write_pin, PredictedMs2, NONE};
+use crate::predicted::{anchor_rows, check_new_columns, write_pin, PinTable, PredictedMs2, NONE};
 
 /// PIN columns this module writes, in order.
 pub(crate) const COLUMNS: [&str; 7] = [
@@ -341,12 +341,13 @@ pub(crate) fn add_to_pin(
     spectra: &[Spectrum],
     run_ends: &[usize],
     ms1: &[Option<Ms1RunIndex>],
+    table: PinTable,
     predicted: &PredictedMs2,
     tol0: FragmentTolerance,
 ) -> Result<PoolScores, String> {
     let t0 = Instant::now();
     let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
-    let table = read_pin(pin, spectra, &cols)?;
+    check_new_columns(pin, &cols)?;
     let n = table.rows.len();
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
     let n_runs = run_ends.len().max(1);
@@ -432,10 +433,9 @@ pub(crate) fn add_to_pin(
             .iter()
             .map(|&i| {
                 let r = &table.rows[i as usize];
-                let (form, mass) = &table.forms[r.form as usize];
+                let (_, mass) = &table.forms[r.form as usize];
                 let ions = predicted
-                    .by_form
-                    .get(&(form.clone(), r.charge))
+                    .get(r.form, r.charge)
                     .map(|pred| row_ions(mass, r.charge, pred, layout, here, prev, next, cal))
                     .unwrap_or_default();
                 (i, ions)

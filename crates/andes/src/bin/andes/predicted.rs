@@ -54,16 +54,27 @@ struct Source {
 }
 
 /// Predicted fragment intensities of the first MS2 source, kept for the DIA pool scores.
-/// `by_form[(form, charge)]` holds one value per cleavage site and ion of `ions`, site-major.
+/// [`PredictedMs2::get`] gives, for a (peptidoform id of the PIN table, charge) pair, one value
+/// per cleavage site and ion of `ions`, site-major.
 pub(crate) struct PredictedMs2 {
     pub(crate) ions: Vec<onnx_infer::predictors::spectral::Ion>,
-    pub(crate) by_form: HashMap<(Form, u8), Vec<f32>>,
+    pair: HashMap<(u32, u8), u32>,
+    values: Vec<Vec<f32>>,
     /// The andes-rt source's raw (uncalibrated) prediction of every peptidoform of the PIN
     /// table, by form id (NaN where it has none); empty without that source.
     pub(crate) rt_raw: Vec<f32>,
     /// Each run's andes-rt calibration from raw prediction to minutes (`andesrt_predicted_rt`);
     /// `None` for a run with too few anchors.
     pub(crate) rt_cal: Vec<Option<RtCalibration>>,
+}
+
+impl PredictedMs2 {
+    /// The prediction of peptidoform `form` (its id in the PIN table) at `charge`.
+    pub(crate) fn get(&self, form: u32, charge: u8) -> Option<&[f32]> {
+        self.pair
+            .get(&(form, charge))
+            .map(|&k| self.values[k as usize].as_slice())
+    }
 }
 
 pub(crate) struct Predictors {
@@ -293,18 +304,19 @@ impl Predictors {
     }
 
     /// Adds the predicted-feature columns to the PIN; with `keep_ms2`, also returns the first
-    /// MS2 source's predictions.
+    /// MS2 source's predictions and the PIN table they index, which describes the rewritten
+    /// PIN (same rows, the new columns before `Peptide`).
     pub(crate) fn add_to_pin(
         &self,
         pin: &Path,
         spectra: &[Spectrum],
         run_ends: &[usize],
         keep_ms2: bool,
-    ) -> Result<Option<PredictedMs2>, String> {
+    ) -> Result<Option<(PredictedMs2, PinTable)>, String> {
         let t0 = Instant::now();
         let c0 = process_cpu_seconds();
         let new_cols = self.columns();
-        let table = read_pin(pin, spectra, &new_cols)?;
+        let mut table = read_pin(pin, spectra, &new_cols)?;
         crate::memlimit::mark_stage("predictions: PIN read");
         let n = table.rows.len();
         let run_of = |spec: u32| run_ends.partition_point(|&e| e <= spec as usize);
@@ -429,6 +441,8 @@ impl Predictors {
         crate::memlimit::mark_stage("predictions: columns computed");
 
         write_pin(pin, &table, &new_cols, &values)?;
+        drop(values);
+        table.peptide_col += new_cols.len();
         for line in &report {
             log::info!(target: "predict", "{line}");
         }
@@ -445,7 +459,7 @@ impl Predictors {
             k.rt_raw = raw;
             k.rt_cal = cals;
         }
-        Ok(kept)
+        Ok(kept.map(|k| (k, table)))
     }
 
     fn predict_rt(&self, src: &Source, forms: &[(Form, Mass)]) -> Result<Vec<f32>, String> {
@@ -509,7 +523,7 @@ impl Predictors {
         }
         let mut row_start = vec![0u32; fz.len() + 1];
         let fz_of_row = prediction_of_rows(&table.rows, spectra, &fz_ix);
-        drop(fz_ix);
+        let fz_ix = keep.is_some().then_some(fz_ix);
         for &k in &fz_of_row {
             if k != NONE {
                 row_start[k as usize + 1] += 1;
@@ -612,15 +626,11 @@ impl Predictors {
             fz.len(),
             jobs.len()
         );
-        if let (Some(slot), Some(kp)) = (keep, kept_pred) {
-            let by_form = fz
-                .iter()
-                .zip(kp.into_inner().expect("MS2 prediction lock"))
-                .map(|(&(f, z), v)| ((forms[f as usize].0.clone(), z), v))
-                .collect();
+        if let (Some(slot), Some(kp), Some(pair)) = (keep, kept_pred, fz_ix) {
             *slot = Some(PredictedMs2 {
                 ions: pred.ions().to_vec(),
-                by_form,
+                pair,
+                values: kp.into_inner().expect("MS2 prediction lock"),
                 rt_raw: Vec::new(),
                 rt_cal: Vec::new(),
             });
@@ -844,6 +854,21 @@ pub(crate) fn read_pin(
         forms,
         peptide_col: c_pep,
     })
+}
+
+/// Fails when the PIN's header already has one of `new_cols` (read from the header line only).
+pub(crate) fn check_new_columns(pin: &Path, new_cols: &[String]) -> Result<(), String> {
+    let f = File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    let header = BufReader::new(f)
+        .lines()
+        .next()
+        .ok_or_else(|| format!("{}: empty PIN", pin.display()))?
+        .map_err(|e| format!("{}: {e}", pin.display()))?;
+    let h: Vec<&str> = header.split('\t').collect();
+    match new_cols.iter().find(|c| h.contains(&c.as_str())) {
+        Some(c) => Err(format!("{}: PIN already has a {c} column", pin.display())),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn anchor_rows(
@@ -1213,6 +1238,46 @@ mod tests {
             s.trim_end(),
             "0 1 0.500000 0.123457 12.3457 1234.57 1.00000e-7 25000000 -0.250000"
         );
+    }
+
+    #[test]
+    fn the_table_of_a_pin_describes_it_after_columns_are_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("x.pin");
+        let mut text = String::from(
+            "SpecId\tLabel\tScanNr\tRawScore\tcharge2\tcharge3\tPeptide\tProteins\n",
+        );
+        let mut spectra = Vec::new();
+        let peptides = ["K.AEFVEVTK.L", "K.YLYEIAR.R", "K.AEFVEVTK.L", "R.HPEYAVSVLLR.L"];
+        for (i, p) in peptides.iter().enumerate() {
+            let scan = i as i32 + 1;
+            let title = format!("t.{scan}");
+            spectra.push(spectrum(&title, scan, 10.0 + i as f64));
+            let (z2, z3) = if i % 2 == 0 { (1, 0) } else { (0, 1) };
+            text.push_str(&format!(
+                "{title}_{scan}_1\t1\t{scan}\t{}\t{z2}\t{z3}\t{p}\tP1\n",
+                5 - i
+            ));
+        }
+        std::fs::write(&pin, &text).unwrap();
+        let cols = vec!["a_x".to_string(), "a_y".to_string()];
+        let mut table = read_pin(&pin, &spectra, &cols).unwrap();
+        write_pin(&pin, &table, &cols, &[vec![1.0; 4], vec![2.0; 4]]).unwrap();
+        table.peptide_col += cols.len();
+        let fresh = read_pin(&pin, &spectra, &["b".to_string()]).unwrap();
+        assert_eq!(table.peptide_col, fresh.peptide_col);
+        assert_eq!(table.rows.len(), fresh.rows.len());
+        for (a, b) in table.rows.iter().zip(&fresh.rows) {
+            assert_eq!(
+                (a.spec, a.form, a.charge, a.decoy, a.score.to_bits()),
+                (b.spec, b.form, b.charge, b.decoy, b.score.to_bits())
+            );
+        }
+        let forms =
+            |t: &PinTable| -> Vec<Form> { t.forms.iter().map(|f| f.0.clone()).collect() };
+        assert_eq!(forms(&table), forms(&fresh));
+        assert!(check_new_columns(&pin, &cols).is_err());
+        assert!(check_new_columns(&pin, &["b".to_string()]).is_ok());
     }
 
     #[test]

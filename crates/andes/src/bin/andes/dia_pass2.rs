@@ -229,7 +229,7 @@ pub(crate) fn nominate(
             let (form, mass) = &table.forms[r.form as usize];
             let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
             let mut ions: Vec<(f64, f32)> = Vec::new();
-            if let Some(pred) = predicted.by_form.get(&(form.clone(), r.charge)) {
+            if let Some(pred) = predicted.get(r.form, r.charge) {
                 let mut prefix = mass.nterm;
                 for site in 0..mass.res.len().saturating_sub(1) {
                     prefix += mass.res[site];

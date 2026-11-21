@@ -1726,12 +1726,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         crate::memlimit::mark_stage("predictions");
-        if let Some(predicted) = kept.filter(|_| pooled) {
+        if let Some((predicted, table)) = kept.filter(|_| pooled) {
             let pool = crate::dia_llr::add_to_pin(
                 &output_pin_path,
                 &spectra,
                 &run_ends,
                 &dia_ms1,
+                table,
                 &predicted,
                 p.tolerance(),
             )?;

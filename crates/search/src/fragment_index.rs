@@ -40,8 +40,18 @@ pub struct ChunkFragmentIndex {
     n_blocks: usize,
     block_first_id: Vec<u32>,
     block_off: Vec<u32>,
-    form_rt_min: Vec<f32>,
+    form_rt_min: Vec<std::sync::OnceLock<f32>>,
     rt_sigma_min: f64,
+}
+
+/// What a query needs to compute a form's calibrated RT on first use: the andes-rt model, the
+/// search's cache of its raw predictions and the run's prior.
+pub struct FormRtSource<'a> {
+    pub db: &'a SearchIndex,
+    pub params: &'a SearchParams,
+    pub model: &'a crate::dia_rt_rank::FormRtModel,
+    pub cache: &'a crate::dia_rt_rank::FormRtCache,
+    pub prior: &'a crate::dia_rt_rank::DiaRtPrior,
 }
 
 /// Mean ion entries per (bin, form-id block) cell; sets the block granularity a query's
@@ -274,73 +284,40 @@ impl ChunkFragmentIndex {
         }
     }
 
-    /// Attaches the calibrated RT (minutes) of every form, predicted by `model` from the
-    /// form's own sequence (once per search through `cache`) and mapped by `prior`; from then on a DIA query ranks the vote cut
-    /// with the RT term of [`crate::dia_rt_rank`]. Forms the model cannot encode stay NaN and
-    /// get the capped penalty.
-    pub fn attach_rt(
-        &mut self,
-        db: &SearchIndex,
-        params: &SearchParams,
-        model: &crate::dia_rt_rank::FormRtModel,
-        cache: &crate::dia_rt_rank::FormRtCache,
-        prior: &crate::dia_rt_rank::DiaRtPrior,
-    ) {
-        let n = self.form_mass.len();
-        let mut by_record: Vec<(u32, u32, u32)> = (0..n)
-            .map(|id| (self.form_record[id], self.form_k[id], id as u32))
+    /// Makes the DIA queries rank the vote cut with the RT term of [`crate::dia_rt_rank`]: a
+    /// form's calibrated RT (minutes), predicted from its own sequence and mapped by the prior
+    /// of the query's [`FormRtSource`], is computed the first time a query ranks the form.
+    /// Forms the model cannot encode get NaN and the capped penalty.
+    pub fn enable_rt(&mut self, prior: &crate::dia_rt_rank::DiaRtPrior) {
+        self.form_rt_min = (0..self.form_mass.len())
+            .map(|_| std::sync::OnceLock::new())
             .collect();
-        by_record.par_sort_unstable();
-        let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut i = 0;
-        while i < by_record.len() {
-            let mut j = i + 1;
-            while j < by_record.len() && by_record[j].0 == by_record[i].0 {
-                j += 1;
-            }
-            runs.push(i..j);
-            i = j;
-        }
-        let pairs: Vec<Vec<(u32, f32)>> = runs
-            .par_chunks(RT_ATTACH_RECORDS_PER_TASK)
-            .map(|group| {
-                let mut out = Vec::new();
-                let mut ks: Vec<u32> = Vec::new();
-                for run in group {
-                    let forms = &by_record[run.clone()];
-                    ks.clear();
-                    ks.extend(forms.iter().map(|f| f.1));
-                    let cands = expand_base_record_bounded(
-                        db,
-                        params,
-                        &self.tables,
-                        &self.records[forms[0].0 as usize],
-                        self.mass_lo,
-                        self.mass_hi,
-                        &ks,
-                    );
-                    for (f, c) in forms.iter().zip(&cands) {
-                        out.push((
-                            f.2,
-                            prior.apply(f64::from(cache.get_or_predict(&c.peptide, model))) as f32,
-                        ));
-                    }
-                }
-                out
-            })
-            .collect();
-        let mut rt = vec![f32::NAN; n];
-        for (id, v) in pairs.into_iter().flatten() {
-            rt[id as usize] = v;
-        }
-        self.form_rt_min = rt;
         self.rt_sigma_min = prior.sigma_min();
+    }
+
+    /// The calibrated RT (minutes) of form `id`.
+    fn form_rt(&self, id: u32, rt: &FormRtSource<'_>) -> f32 {
+        *self.form_rt_min[id as usize].get_or_init(|| {
+            let cands = expand_base_record_bounded(
+                rt.db,
+                rt.params,
+                &self.tables,
+                &self.records[self.form_record[id as usize] as usize],
+                self.mass_lo,
+                self.mass_hi,
+                &[self.form_k[id as usize]],
+            );
+            let raw = cands
+                .first()
+                .map_or(f32::NAN, |c| rt.cache.get_or_predict(&c.peptide, rt.model));
+            rt.prior.apply(f64::from(raw)) as f32
+        })
     }
 
     /// Rank key of the RT-aware vote cut for one form at scan RT `scan_rt_min`.
     #[inline]
-    fn rt_key(&self, id: u32, votes: u16, scan_rt_min: f64) -> f64 {
-        let pred = f64::from(self.form_rt_min[id as usize]);
+    fn rt_key(&self, id: u32, votes: u16, scan_rt_min: f64, rt: &FormRtSource<'_>) -> f64 {
+        let pred = f64::from(self.form_rt(id, rt));
         f64::from(votes) + crate::dia_rt_rank::rt_penalty(scan_rt_min - pred, self.rt_sigma_min)
     }
 
@@ -368,6 +345,7 @@ impl ChunkFragmentIndex {
             min_matched,
             vote_peaks,
             &|_| true,
+            None,
         )
     }
 
@@ -382,6 +360,7 @@ impl ChunkFragmentIndex {
         min_matched: u16,
         vote_peaks: usize,
         keep: &dyn Fn(f64) -> bool,
+        rt: Option<&FormRtSource<'_>>,
     ) -> Vec<(u32, u16)> {
         let shift_ppm = params.precursor_mass_shift_ppm;
         let mut lo = f64::MAX;
@@ -445,15 +424,16 @@ impl ChunkFragmentIndex {
             &complement_masses,
         );
         sel.retain(|&(id, _, _)| keep(self.form_mass[id as usize]));
-        match spec
-            .rt_seconds
-            .filter(|t| params.dia && t.is_finite() && !self.form_rt_min.is_empty())
-        {
-            Some(t) => {
+        match (
+            spec.rt_seconds
+                .filter(|t| params.dia && t.is_finite() && !self.form_rt_min.is_empty()),
+            rt,
+        ) {
+            (Some(t), Some(rt)) => {
                 let scan_rt_min = t / SECS_PER_MIN;
-                select_top_k_by(&mut sel, top_k, |id, v| self.rt_key(id, v, scan_rt_min));
+                select_top_k_by(&mut sel, top_k, |id, v| self.rt_key(id, v, scan_rt_min, rt));
             }
-            None => select_top_k(&mut sel, top_k),
+            _ => select_top_k(&mut sel, top_k),
         }
         sel.into_iter()
             .filter(|&(id, _, _)| {
@@ -641,8 +621,6 @@ const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
 /// rounding of the bin arithmetic, far below a bin, so no bin that holds a matching ion is
 /// skipped.
 const VOTE_BIN_MARGIN_DA: f64 = 1e-6;
-/// Records per parallel task when attaching predicted RTs to a chunk's forms.
-const RT_ATTACH_RECORDS_PER_TASK: usize = 4096;
 const SECS_PER_MIN: f64 = 60.0;
 
 fn sort_bin_by_block(seg: &mut [(u32, f32)], block_first_id: &[u32], offs: &mut [u32]) {

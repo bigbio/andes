@@ -1059,6 +1059,21 @@ impl<'a> PreparedSearch<'a> {
         let aa_set_for_scoring = &self.aa_set_for_scoring;
 
         let t_chunk_prep = std::time::Instant::now();
+        let rt_prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
+        let rt_source = match (
+            params.dia,
+            self.form_rt_model.as_deref(),
+            rt_prior.as_deref(),
+        ) {
+            (true, Some(model), Some(prior)) => Some(crate::fragment_index::FormRtSource {
+                db: self.idx,
+                params,
+                model,
+                cache: &self.form_rt_cache,
+                prior,
+            }),
+            _ => None,
+        };
         let owned_index: Option<ChunkFragmentIndex>;
         let (record_cache, frag_index): (Option<MmapRecordCache>, Option<&ChunkFragmentIndex>) = {
             let mi = &self.mmap_index;
@@ -1124,11 +1139,8 @@ impl<'a> PreparedSearch<'a> {
                         lo,
                         hi,
                     );
-                    let prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
-                    if let (true, Some(model), Some(prior)) =
-                        (params.dia, self.form_rt_model.as_deref(), prior)
-                    {
-                        index.attach_rt(self.idx, params, model, &self.form_rt_cache, &prior);
+                    if let Some(src) = &rt_source {
+                        index.enable_rt(src.prior);
                     }
                     index
                 });
@@ -1255,6 +1267,7 @@ impl<'a> PreparedSearch<'a> {
                         crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                         crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
                         &gate,
+                        rt_source.as_ref(),
                     );
                     let relabel = |v: &mut [Candidate]| {
                         relabel_collision_decoys_with(v, &self.target_bare_seqs)

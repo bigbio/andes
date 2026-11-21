@@ -2321,7 +2321,7 @@ every reporter row:
 andes --spectrum Fr01.raw --database human.fasta --sdrf study.sdrf.tsv --tmt tmt10 \
       --output-pin tmt/Fr01.pin
 # once: rescore every run's PIN together (all.pin: the PINs concatenated, one header), then the study step
-andes percolator --temp-dir spill/ --results-psms all.t.psms --decoy-results-psms all.d.psms all.pin
+andes rescore --temp-dir spill/ --results-psms all.t.psms --decoy-results-psms all.d.psms all.pin
 andes quant finalize --quant-dir tmt/ -o study --database human.fasta --sdrf study.sdrf.tsv \
       --psms all.t.psms --decoy-psms all.d.psms [--output-parquet qpx/]
 ```

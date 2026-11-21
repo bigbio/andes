@@ -423,6 +423,27 @@ fn write_doublets(
     w.flush()
 }
 
+/// How many spectra had doublets explained by chance, and how many doublet masses were left
+/// out of the pairs for it (`search::xl_search::paired_masses`).
+fn report_chance_doublets(results: &[XlSpectrumResult]) {
+    let (mut spectra, mut dropped, mut total) = (0usize, 0usize, 0usize);
+    for r in results {
+        let all = r.doublets.masses.len();
+        total += all;
+        if r.doublets.n_paired_masses < all {
+            spectra += 1;
+            dropped += all - r.doublets.n_paired_masses;
+        }
+    }
+    if spectra > 0 {
+        log::info!(
+            target: "xl",
+            "{spectra} spectra have doublets explained by chance; {dropped} of {total} doublet \
+             masses were not paired (the least intense)"
+        );
+    }
+}
+
 /// How many searched spectra had MS3 scans, and how many CSMs an MS3 scan supports on one
 /// or both peptides.
 fn report_ms3(results: &[XlSpectrumResult], ms3: &[Vec<model::scan::ProductScan>]) {
@@ -613,6 +634,7 @@ pub(crate) fn run_xl(
             t.elapsed().as_secs_f64()
         );
         report(&found);
+        report_chance_doublets(&found);
         report_ms3(&found, ms3);
         for r in found.iter_mut() {
             r.linker = li;

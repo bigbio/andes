@@ -1,8 +1,9 @@
 use model::hash::{splitmix64_next, SPLITMIX_GOLDEN};
+use rayon::prelude::*;
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
 use super::isotonic::pava;
-use super::tree::{fit_tree, fit_tree_with_leaves, TreeParams};
+use super::tree::{fit_tree_cols, TreeParams};
 use crate::TrainError;
 
 pub const MIN_TRAIN_ROWS: usize = 100;
@@ -179,6 +180,7 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
 
 fn bin_uppers_per_feature(x: &[f32], n_rows: usize, nf: usize, n_bins: usize) -> Vec<Vec<f32>> {
     (0..nf)
+        .into_par_iter()
         .map(|f| {
             let col: Vec<f32> = (0..n_rows).map(|r| x[r * nf + f]).collect();
             compute_bin_uppers(&col, n_bins)
@@ -186,14 +188,22 @@ fn bin_uppers_per_feature(x: &[f32], n_rows: usize, nf: usize, n_bins: usize) ->
         .collect()
 }
 
-fn bin_rows(x: &[f32], nf: usize, rows: &[usize], bin_uppers: &[Vec<f32>]) -> Vec<u8> {
-    let mut binned = vec![0u8; rows.len() * nf];
-    for (i, &r) in rows.iter().enumerate() {
-        for f in 0..nf {
-            binned[i * nf + f] = bin_of(x[r * nf + f], &bin_uppers[f]);
-        }
+/// Bins of `rows` in feature-major order (`cols[feature * rows.len() + i]`), the layout of
+/// [`fit_tree_cols`].
+fn bin_cols(x: &[f32], nf: usize, rows: &[usize], bin_uppers: &[Vec<f32>]) -> Vec<u8> {
+    let mut cols = vec![0u8; rows.len() * nf];
+    if rows.is_empty() {
+        return cols;
     }
-    binned
+    cols.par_chunks_mut(rows.len())
+        .zip(bin_uppers)
+        .enumerate()
+        .for_each(|(f, (col, uppers))| {
+            for (b, &r) in col.iter_mut().zip(rows) {
+                *b = bin_of(x[r * nf + f], uppers);
+            }
+        });
+    cols
 }
 
 fn split_rows_by_group(groups: &[u32], seed: u64, val_fraction: f32) -> (Vec<usize>, Vec<usize>) {
@@ -221,6 +231,17 @@ fn gbdt_model(
 }
 
 pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
+    train_gbdt_from(ds, p, seed, Vec::new())
+}
+
+/// [`train_gbdt`] continued from the trees `init`: margins start at their sum, and up to
+/// `p.n_rounds` trees are added to them.
+pub fn train_gbdt_from(
+    ds: &Dataset,
+    p: &TrainParams,
+    seed: u64,
+    init: Vec<scoring_crate::gbdt_eval::Tree>,
+) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
     if ds.feature_names.len() != nf {
@@ -309,7 +330,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    let train_binned = bin_rows(&ds.x, nf, &active_train, &bin_uppers);
+    let train_binned = bin_cols(&ds.x, nf, &active_train, &bin_uppers);
     let train_y: Vec<u8> = active_train.iter().map(|&r| ds.y[r]).collect();
 
     let val_n = val_rows.len();
@@ -349,8 +370,19 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         ));
     }
 
-    let mut raw_train = vec![0.0f32; n_active];
-    let mut raw_val = vec![0.0f32; val_n];
+    let margin = |rows: &[usize]| -> Vec<f32> {
+        if init.is_empty() {
+            return vec![0.0f32; rows.len()];
+        }
+        rows.par_iter()
+            .map(|&r| {
+                let row = &ds.x[r * nf..(r + 1) * nf];
+                init.iter().fold(0.0f32, |m, t| m + t.eval(row))
+            })
+            .collect()
+    };
+    let mut raw_train = margin(&active_train);
+    let mut raw_val = margin(&val_rows);
 
     let tree_params = TreeParams {
         max_depth: p.max_depth,
@@ -360,11 +392,15 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         n_features: nf,
     };
 
-    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = Vec::new();
-    let mut best_loss = f32::INFINITY;
-    let mut best_round: usize = 0;
+    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = init.clone();
+    let mut best_loss = if trees.is_empty() {
+        f32::INFINITY
+    } else {
+        logloss(&raw_val, &val_y)
+    };
+    let mut best_round: usize = trees.len();
     let mut no_improve = 0u32;
-    let mut best_raw_val = vec![0.0f32; val_n];
+    let mut best_raw_val = raw_val.clone();
     let mut grad = vec![0.0f32; n_active];
     let mut hess = vec![0.0f32; n_active];
 
@@ -388,28 +424,32 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
                 *h = h.max(1e-6);
             }
         } else {
-            for i in 0..n_active {
-                let pi = sigmoid(raw_train[i]);
-                grad[i] = pi - train_y[i] as f32;
-                hess[i] = (pi * (1.0 - pi)).max(1e-6);
-            }
+            grad.par_iter_mut()
+                .zip(hess.par_iter_mut())
+                .zip(raw_train.par_iter().zip(train_y.par_iter()))
+                .for_each(|((g, h), (&raw, &y))| {
+                    let pi = sigmoid(raw);
+                    *g = pi - y as f32;
+                    *h = (pi * (1.0 - pi)).max(1e-6);
+                });
         }
 
         let (mut tree, leaf_of) =
-            fit_tree_with_leaves(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
+            fit_tree_cols(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
 
         for v in tree.value.iter_mut() {
             *v *= p.learning_rate;
         }
 
-        for (raw, &leaf) in raw_train.iter_mut().zip(&leaf_of) {
-            *raw += tree.value[leaf as usize];
-        }
+        raw_train
+            .par_iter_mut()
+            .zip(leaf_of.par_iter())
+            .for_each(|(raw, &leaf)| *raw += tree.value[leaf as usize]);
 
-        for (j, &r) in val_rows.iter().enumerate() {
-            let row = &ds.x[r * nf..(r + 1) * nf];
-            raw_val[j] += tree.eval(row);
-        }
+        raw_val
+            .par_iter_mut()
+            .zip(val_rows.par_iter())
+            .for_each(|(raw, &r)| *raw += tree.eval(&ds.x[r * nf..(r + 1) * nf]));
 
         trees.push(tree);
 
@@ -599,7 +639,7 @@ pub fn train_gbdt_regression(
             empty_regressor,
         );
     }
-    let train_binned = bin_rows(&ds.x, nf, &train_rows, &bin_uppers);
+    let train_binned = bin_cols(&ds.x, nf, &train_rows, &bin_uppers);
     let train_y: Vec<f32> = train_rows.iter().map(|&r| ds.y[r]).collect();
 
     let val_n = val_rows.len();
@@ -625,7 +665,7 @@ pub fn train_gbdt_regression(
         let grad: Vec<f32> = (0..n_active).map(|i| raw_train[i] - train_y[i]).collect();
         let hess: Vec<f32> = vec![1.0f32; n_active];
 
-        let mut tree = fit_tree(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
+        let mut tree = fit_tree_cols(&train_binned, &grad, &hess, &tree_params, &bin_uppers).0;
 
         for v in tree.value.iter_mut() {
             *v *= p.learning_rate;

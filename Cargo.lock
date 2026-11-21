@@ -1845,6 +1845,7 @@ dependencies = [
  "log",
  "model",
  "parquet",
+ "rayon",
  "rustc-hash",
  "scoring",
  "search",

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams, MIN_VAL_AUC};
+use model_train::gbdt::train::{train_gbdt_from, Dataset, TrainParams, MIN_VAL_AUC};
 use output::dia_pass2_table::Pass2Table;
 use output::PercolatorPsm;
 use rayon::prelude::*;
@@ -23,6 +23,10 @@ const COMPARE_Q: f64 = 0.01;
 const SELECT_Q: [f64; 2] = [0.005, 0.01];
 const FOLDS: u64 = 3;
 const ROUND_Q: [f64; 3] = [f64::INFINITY, 0.05, 0.01];
+/// Trees a round after the first may add to its fold's model of the previous round: rounds 1
+/// and 2 continue that model on their sharper positive set instead of growing up to 600 trees
+/// anew (3-raw study, 5 seeds: N at 1 % entrapment FDP within seed spread, finalize -25 %).
+const WARM_ROUNDS: u32 = 200;
 const MISSING_DIA_LLR: f32 = -99.0;
 const PASS1_SKIP: [&str; 6] = ["SpecId", "Label", "ScanNr", "Peptide", "Proteins", "FileName"];
 
@@ -170,8 +174,11 @@ pub(crate) fn learned_score(
     let mut positive: Vec<bool> = target.to_vec();
     let mut kept: Option<Vec<f32>> = None;
     let mut degenerate_folds = 0usize;
+    let mut prev: Vec<Vec<scoring_crate::gbdt_eval::Tree>> = vec![Vec::new(); FOLDS as usize];
     for (round, &round_q) in ROUND_Q.iter().enumerate() {
-        let fits: Vec<Result<Vec<(usize, f32)>, String>> = (0..FOLDS)
+        let t_round = std::time::Instant::now();
+        type Fit = (Vec<(usize, f32)>, Vec<scoring_crate::gbdt_eval::Tree>);
+        let fits: Vec<Result<Fit, String>> = (0..FOLDS)
             .into_par_iter()
             .map(|f| {
                 let train: Vec<usize> = (0..n)
@@ -191,16 +198,22 @@ pub(crate) fn learned_score(
                     n_features: nf,
                     feature_names: names.to_vec(),
                 };
-                let m = train_gbdt(&ds, &p, seed ^ (round as u64) << 8 ^ f)
+                let mut pr = params();
+                if round > 0 {
+                    pr.n_rounds = WARM_ROUNDS;
+                }
+                let init = prev[f as usize].clone();
+                let m = train_gbdt_from(&ds, &pr, seed ^ (round as u64) << 8 ^ f, init)
                     .map_err(|e| format!("fold {f}: {e:?}"))?;
-                let out: Vec<(usize, f32)> = (0..n)
-                    .filter(|&i| fold[i] == f)
+                let held: Vec<usize> = (0..n).filter(|&i| fold[i] == f).collect();
+                let out: Vec<(usize, f32)> = held
+                    .into_par_iter()
                     .map(|i| (i, m.predict_value(&x[i * nf..(i + 1) * nf])))
                     .collect();
                 if out.len() > 1 && out.iter().all(|&(_, s)| s == out[0].1) {
                     return Err(format!("fold {f}: constant score"));
                 }
-                Ok(out)
+                Ok((out, m.trees.clone()))
             })
             .collect();
         let bad: Vec<&String> = fits.iter().filter_map(|r| r.as_ref().err()).collect();
@@ -220,8 +233,11 @@ pub(crate) fn learned_score(
             break;
         }
         let mut score = vec![0f32; n];
-        for (i, s) in fits.into_iter().flatten().flatten() {
-            score[i] = s;
+        for (f, (rows, trees)) in fits.into_iter().flatten().enumerate() {
+            for (i, s) in rows {
+                score[i] = s;
+            }
+            prev[f] = trees;
         }
         let q = tdc_q(&score, target);
         let cut = ROUND_Q.get(round + 1).copied().unwrap_or(round_q);
@@ -230,8 +246,9 @@ pub(crate) fn learned_score(
         }
         log::info!(
             target: "dia",
-            "learned score round {round}: {} targets at q <= 0.01 (out of fold)",
-            (0..n).filter(|&i| target[i] && q[i] <= 0.01).count()
+            "learned score round {round}: {} targets at q <= 0.01 (out of fold) [{:.2}s]",
+            (0..n).filter(|&i| target[i] && q[i] <= 0.01).count(),
+            t_round.elapsed().as_secs_f64()
         );
         kept = Some(score);
     }
@@ -382,6 +399,12 @@ pub(crate) fn write_precursor_pin(
         .collect();
     let p1 = read_pass1(pin, &own)?;
     drop(own);
+    log::info!(
+        target: "dia",
+        "precursor PIN: read the pass-1 PIN {} [{:.2}s]",
+        pin.display(),
+        t0.elapsed().as_secs_f64()
+    );
     let p1_of = p1.of_rows(t);
     let n = t.len();
     let mut names: Vec<String> = extra.iter().map(|(n, _)| n.clone()).collect();
@@ -410,6 +433,7 @@ pub(crate) fn write_precursor_pin(
         .collect();
     let learned = learned_score(&x, &names, &target, &key, seed);
     let gb = learned.score.as_deref();
+    let t_write = std::time::Instant::now();
 
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", out_pin.display());
     let tmp = out_pin.with_extension("pin.partial");
@@ -476,13 +500,14 @@ pub(crate) fn write_precursor_pin(
     log::info!(
         target: "dia",
         "precursor PIN: {n} rows ({} targets), {} learned-score features ({}, {} degenerate \
-         folds), {} pass-1 columns, {} with a pass-1 row [{:.2}s]",
+         folds), {} pass-1 columns, {} with a pass-1 row [written in {:.2}s; total {:.2}s]",
         ids.targets.len(),
         nf,
         if ids.learned { "kept" } else { "score left out" },
         ids.degenerate_folds,
         p1.names.len(),
         p1_of.iter().filter(|p| p.is_some()).count(),
+        t_write.elapsed().as_secs_f64(),
         t0.elapsed().as_secs_f64()
     );
     Ok(ids)

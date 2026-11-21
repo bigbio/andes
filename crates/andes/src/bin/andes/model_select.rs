@@ -149,16 +149,19 @@ pub(crate) fn parse_enzymes(
 /// first one is the primary protease, which selects the scoring model and the cleavage
 /// feature.
 ///
-/// The primary is the protease whose cleavage rule sets the C-terminal residue of most
-/// peptides of the union digest: a specific protease before `NoCleavage`/`NonSpecific`, a
-/// C-terminal one (cleaving after its residues) before an N-terminal one, then the one
-/// with more cleavage residues, a stand-in for the share of peptide C-termini it makes.
-/// Trypsin (K/R) therefore leads Lys-C (K) and Arg-C (R), whose sites are a subset of its
-/// own. Ties fall back to the declaration order of [`model::enzyme::Enzyme`].
-fn primary_rank(e: model::enzyme::Enzyme) -> (bool, bool, std::cmp::Reverse<usize>, u8) {
+/// Trypsin leads any set that contains it: the scoring models are trained mostly on tryptic
+/// digests, and with Lys-C, Arg-C, Glu-C or chymotrypsin beside it the digest is still
+/// mostly tryptic. A set without trypsin puts first the protease whose cleavage rule sets
+/// the C-terminal residue of most peptides of the union digest: a specific protease before
+/// `NoCleavage`/`NonSpecific`, a C-terminal one (cleaving after its residues) before an
+/// N-terminal one, then the one with more cleavage residues, a stand-in for the share of
+/// peptide C-termini it makes. Ties fall back to the declaration order of
+/// [`model::enzyme::Enzyme`].
+fn primary_rank(e: model::enzyme::Enzyme) -> (bool, bool, bool, std::cmp::Reverse<usize>, u8) {
     use model::enzyme::Enzyme;
     let specific = !matches!(e, Enzyme::NoCleavage | Enzyme::NonSpecific);
     (
+        e != Enzyme::Trypsin,
         !specific,
         !e.is_c_term(),
         std::cmp::Reverse(e.residues().len()),

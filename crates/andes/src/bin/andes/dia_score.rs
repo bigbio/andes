@@ -645,6 +645,7 @@ mod tests {
             seq: vec!["PEPTIDEK".into(); 3],
             prec_mz: vec![500.0; 3],
             features: Vec::new(),
+            ..Default::default()
         };
         let own: HashMap<&str, u32> =
             t.spec_id.iter().zip(&t.run).map(|(s, &r)| (s.as_str(), r)).collect();
@@ -690,6 +691,7 @@ mod tests {
             seq: vec!["PEPTIDEK".into(); 4],
             prec_mz: vec![500.0; 4],
             features: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(decoy_prefix(&t), "DECOY_");
         let none = Pass2Table {
@@ -814,6 +816,7 @@ mod tests {
             seq: vec!["PEPTIDEK".into(); rows],
             prec_mz: vec![500.0; rows],
             features: vec![("p2_llr".to_string(), (0..rows).map(|i| i as f32).collect())],
+            ..Default::default()
         }
     }
 

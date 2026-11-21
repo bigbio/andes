@@ -4,9 +4,20 @@
 //! decoys alike. Each nominee is traced over the cycles of its isolation window around its
 //! calibrated predicted RT; the presence of its top predicted fragments per cycle is scored
 //! against chance with per-run rates, and the best cycle gives the pass-2 columns.
+//!
+//! Each row also gets its quantities in the run, over the elution window: the apex ± the run's
+//! learned peak width, the median half-maximum width (cycles) of the summed fragment traces of
+//! the run's confident targets. The apex is the local maximum of the row's summed fragment
+//! trace reached from its best cycle. The fragment quantity is the summed
+//! intensity over that window of the [`QUANT_TOP_FRAGMENTS`] fragments whose traces correlate
+//! best (and positively) with the summed trace; the MS1 quantity is the summed intensity of the
+//! monoisotopic and M+1 MS1 traces over the same retention-time span. A row whose window does
+//! not lie inside its traced cycles (the peak is cut by the run's first or last spectrum or by
+//! the trace) or that has no signal has no quantity; a quantity is never 0.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::ops::Range;
 use std::path::Path;
 
 use model::mass::ISOTOPE;
@@ -62,6 +73,15 @@ const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
 /// RT prior spread when a run has too few confident targets to measure it.
 const RT_SIGMA_FALLBACK_MIN: f64 = 0.5;
 const RT_TERMS: usize = 4 + 20;
+/// Fragments summed into the fragment quantity: the best correlated with the summed trace.
+const QUANT_TOP_FRAGMENTS: usize = 6;
+/// Smallest half-width (cycles) of the quantity window.
+const QUANT_MIN_HALF_CYCLES: usize = 2;
+/// Half-width (cycles) of the quantity window when a run has too few confident targets to
+/// learn its peak width.
+const QUANT_HALF_CYCLES_FALLBACK: usize = 3;
+/// Confident targets with a measurable peak a run needs to learn its peak width.
+const QUANT_WIDTH_MIN_TARGETS: usize = 50;
 
 pub(crate) const COLUMNS: [&str; 27] = [
     "p2_llr",
@@ -141,6 +161,15 @@ pub(crate) fn null_member(n: &Nominee) -> bool {
 pub(crate) struct Pass2 {
     pub(crate) cols: Vec<Vec<f32>>,
     pub(crate) joint: Vec<Vec<f32>>,
+    pub(crate) quant: Vec<RowQuant>,
+}
+
+/// Quantities of one row in its run (module doc).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct RowQuant {
+    pub(crate) frag: Option<f64>,
+    pub(crate) n_frag: u8,
+    pub(crate) ms1: Option<f64>,
 }
 
 impl Pass2 {
@@ -555,6 +584,11 @@ struct RowFeatures {
     tr_full: [f32; CYCLES],
     tt: [f64; CYCLES],
     claims: Vec<(PeakKey, f64)>,
+    /// Best cycle (index into the traced cycles).
+    apex: usize,
+    quant: RowQuant,
+    /// Traced cycles of the quantity window; `None` without a contained peak.
+    quant_window: Option<Range<usize>>,
 }
 
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
@@ -693,7 +727,185 @@ fn row_features(
         tr_full,
         tt,
         claims,
+        apex: cs,
+        quant: RowQuant::default(),
+        quant_window: None,
     }
+}
+
+/// Half-maximum width (cycles) of the summed fragment trace of a confident target around its
+/// observed apex: the contiguous traced cycles at or above half the largest summed intensity
+/// within `COELUTE_HALF` cycles of the cycle nearest `n.apex_rt`. `None` without signal there.
+fn half_max_width(w: &Window, n: &Nominee, t: &Trace) -> Option<usize> {
+    let near = (0..CYCLES).filter(|&k| t.valid[k]).min_by(|&a, &b| {
+        (t.rt(w, a) - n.apex_rt)
+            .abs()
+            .total_cmp(&(t.rt(w, b) - n.apex_rt).abs())
+    })?;
+    let nj = n.ions.len();
+    let sum = |k: usize| -> f64 { (0..nj).map(|j| f64::from(t.x[k][j])).sum() };
+    let lo = near.saturating_sub(COELUTE_HALF);
+    let hi = (near + COELUTE_HALF).min(CYCLES - 1);
+    let top = (lo..=hi)
+        .filter(|&k| t.valid[k])
+        .max_by(|&a, &b| sum(a).total_cmp(&sum(b)).then(b.cmp(&a)))?;
+    let half_max = 0.5 * sum(top);
+    if half_max.is_nan() || half_max <= 0.0 {
+        return None;
+    }
+    let (mut l, mut r) = (top, top);
+    while l > 0 && t.valid[l - 1] && sum(l - 1) >= half_max {
+        l -= 1;
+    }
+    while r + 1 < CYCLES && t.valid[r + 1] && sum(r + 1) >= half_max {
+        r += 1;
+    }
+    Some(r - l + 1)
+}
+
+/// Half-width (cycles) of a run's quantity window from the half-maximum widths of its
+/// confident targets: their median, at least [`QUANT_MIN_HALF_CYCLES`] and inside the traced
+/// cycles; the fallback with fewer than [`QUANT_WIDTH_MIN_TARGETS`] widths.
+fn quant_half_cycles(widths: &mut [usize]) -> usize {
+    if widths.len() < QUANT_WIDTH_MIN_TARGETS {
+        return QUANT_HALF_CYCLES_FALLBACK;
+    }
+    let m = widths.len() / 2;
+    let (_, med, _) = widths.select_nth_unstable(m);
+    (*med).clamp(QUANT_MIN_HALF_CYCLES, HALF_CYCLES - 1)
+}
+
+/// The traced cycles of the quantity window of a row whose best cycle is `best`: from `best`,
+/// step to the largest `consensus` within ± `half` valid cycles until it stays (the apex), then
+/// the apex ± `half`. `None` when `best` is not a valid cycle or the window leaves the valid
+/// cycles (the peak is not contained).
+fn quant_window(
+    valid: &[bool; CYCLES],
+    consensus: &[f32],
+    best: usize,
+    half: usize,
+) -> Option<Range<usize>> {
+    let ok = |k: usize| k < CYCLES && valid[k];
+    if !ok(best) {
+        return None;
+    }
+    let value = |k: usize| consensus.get(k).copied().unwrap_or(0.0);
+    let mut apex = best;
+    for _ in 0..CYCLES {
+        let next = (apex.saturating_sub(half)..=(apex + half).min(CYCLES - 1))
+            .filter(|&k| ok(k))
+            .max_by(|&a, &b| value(a).total_cmp(&value(b)).then(b.cmp(&a)))
+            .unwrap_or(apex);
+        if value(next) <= value(apex) {
+            break;
+        }
+        apex = next;
+    }
+    let lo = apex.checked_sub(half)?;
+    let hi = apex + half;
+    (ok(lo) && ok(hi)).then_some(lo..hi + 1)
+}
+
+/// Fragment quantity over `window`: the summed intensity of the (at most
+/// [`QUANT_TOP_FRAGMENTS`]) traces with signal there whose correlation with `consensus` is
+/// positive and highest, and how many were summed. `None` (and 0) when no trace qualifies.
+pub(crate) fn fragment_quantity(
+    traces: &[Vec<f32>],
+    consensus: &[f32],
+    window: Range<usize>,
+) -> (Option<f64>, u8) {
+    let end = window.end.min(consensus.len());
+    let w = window.start.min(end)..end;
+    let cons: Vec<f64> = consensus[w.clone()].iter().map(|&v| f64::from(v)).collect();
+    let mut ranked: Vec<(f64, f64, usize)> = traces
+        .iter()
+        .enumerate()
+        .filter_map(|(j, tr)| {
+            let x: Vec<f64> = tr.get(w.clone())?.iter().map(|&v| f64::from(v)).collect();
+            let area: f64 = x.iter().sum();
+            let r = pearson(&x, &cons);
+            (area > 0.0 && area.is_finite() && r > 0.0).then_some((r, area, j))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
+    ranked.truncate(QUANT_TOP_FRAGMENTS);
+    let area: f64 = ranked.iter().map(|r| r.1).sum();
+    if ranked.is_empty() || !area.is_finite() || area <= 0.0 {
+        return (None, 0);
+    }
+    (Some(area), ranked.len() as u8)
+}
+
+/// MS1 quantity over `window`: the summed intensity of the monoisotopic and M+1 traces;
+/// `None` without monoisotopic signal there.
+pub(crate) fn ms1_quantity(mono: &[f32], m1: &[f32], window: Range<usize>) -> Option<f64> {
+    let end = window.end.min(mono.len()).min(m1.len());
+    let w = window.start.min(end)..end;
+    let sum = |v: &[f32]| -> f64 { v[w.clone()].iter().map(|&x| f64::from(x)).sum() };
+    let (s_mono, s_m1) = (sum(mono), sum(m1));
+    (s_mono > 0.0 && (s_mono + s_m1).is_finite()).then_some(s_mono + s_m1)
+}
+
+/// Fragment quantity of a traced row with its window (module doc).
+fn row_quantity(t: &Trace, nj: usize, best: usize, half: usize) -> (RowQuant, Option<Range<usize>>) {
+    let consensus: Vec<f32> = (0..CYCLES)
+        .map(|k| (0..nj).map(|j| t.x[k][j]).sum())
+        .collect();
+    let Some(win) = quant_window(&t.valid, &consensus, best, half) else {
+        return (RowQuant::default(), None);
+    };
+    let traces: Vec<Vec<f32>> = (0..nj)
+        .map(|j| (0..CYCLES).map(|k| t.x[k][j]).collect())
+        .collect();
+    let (frag, n_frag) = fragment_quantity(&traces, &consensus, win.clone());
+    (
+        RowQuant {
+            frag,
+            n_frag,
+            ms1: None,
+        },
+        Some(win),
+    )
+}
+
+/// MS1 quantity of a row over the retention times `rt_lo_min..=rt_hi_min` (minutes).
+fn ms1_row_quantity(ms1: &Ms1RunIndex, n: &Nominee, rt_lo_min: f64, rt_hi_min: f64) -> Option<f64> {
+    let len = ms1.len();
+    let first_at = |rt_s: f64, inclusive: bool| {
+        let (mut lo, mut hi) = (0usize, len);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let before = if inclusive {
+                ms1.rt(mid) < rt_s
+            } else {
+                ms1.rt(mid) <= rt_s
+            };
+            if before {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let (s0, s1) = (first_at(rt_lo_min * 60.0, true), first_at(rt_hi_min * 60.0, false));
+    if s0 >= s1 {
+        return None;
+    }
+    let z = f64::from(n.charge.max(1));
+    let at = |s: usize, mz: f64| -> f32 {
+        let peaks = &ms1.scan(s).peaks;
+        let tol = mz * MS1_TRACE_PPM * 1e-6;
+        let lo = peaks.partition_point(|p| p.0 < mz - tol);
+        peaks[lo..]
+            .iter()
+            .take_while(|p| p.0 <= mz + tol)
+            .map(|p| p.1)
+            .fold(0.0, f32::max)
+    };
+    let mono: Vec<f32> = (s0..s1).map(|s| at(s, n.prec_mz)).collect();
+    let m1: Vec<f32> = (s0..s1).map(|s| at(s, n.prec_mz + ISOTOPE / z)).collect();
+    ms1_quantity(&mono, &m1, 0..mono.len())
 }
 
 /// MS1 columns at the fragment apex: (log intensity, isotopes seen, apex offset, trace corr).
@@ -837,6 +1049,7 @@ pub(crate) fn extract(
     let n = noms.len();
     let mut cols = vec![vec![0f32; n]; COLUMNS.len()];
     let mut joint = vec![vec![0f32; n]; crate::dia_joint::COLUMNS.len()];
+    let mut quant = vec![RowQuant::default(); n];
     let (_, windows) = crate::dia::windows(spectra, run_ends);
     let run_of = |s: usize| run_ends.partition_point(|&e| e <= s);
     let n_runs = run_ends.len().max(1);
@@ -880,23 +1093,44 @@ pub(crate) fn extract(
             }
         }
         let shift = 1.0 + shift_ppm.get(run).copied().unwrap_or(0.0) * 1e-6;
-        let per_win_rates: Vec<Rates> = by_win
+        let per_win_rates: Vec<(Rates, Vec<usize>)> = by_win
             .par_iter()
             .enumerate()
             .map(|(w, ks)| {
                 let mut r = Rates::default();
+                let mut widths = Vec::new();
                 for &k in ks {
                     let t = trace(&wins[w].1, refs[k], rt_cal[k], shift);
                     r.add(&collect_rates(&wins[w].1, refs[k], &t));
+                    if confident(refs[k]) {
+                        widths.extend(half_max_width(&wins[w].1, refs[k], &t));
+                    }
                 }
-                r
+                (r, widths)
             })
             .collect();
-        let rates = per_win_rates.iter().fold(Rates::default(), |mut a, b| {
+        let mut widths: Vec<usize> = Vec::new();
+        let rates = per_win_rates.iter().fold(Rates::default(), |mut a, (b, wb)| {
             a.add(b);
+            widths.extend(wb);
             a
         });
         let terms = rates.terms();
+        let n_widths = widths.len();
+        let half = quant_half_cycles(&mut widths);
+        if n_widths >= QUANT_WIDTH_MIN_TARGETS {
+            log::info!(
+                target: "dia",
+                "pass 2 quantities, run {run}: window apex ± {half} cycles (median half-maximum \
+                 width of {n_widths} confident targets)"
+            );
+        } else {
+            log::info!(
+                target: "dia",
+                "pass 2 quantities, run {run}: window apex ± {half} cycles (fallback: {n_widths} \
+                 confident targets with a peak, {QUANT_WIDTH_MIN_TARGETS} needed)"
+            );
+        }
         let per_win: Vec<Vec<(usize, RowFeatures)>> = by_win
             .par_iter()
             .enumerate()
@@ -906,7 +1140,9 @@ pub(crate) fn extract(
                     .iter()
                     .map(|&k| {
                         let t = trace(win, refs[k], rt_cal[k], shift);
-                        (k, row_features(win, scans, refs[k], &t, &terms, rt_cal[k]))
+                        let mut f = row_features(win, scans, refs[k], &t, &terms, rt_cal[k]);
+                        (f.quant, f.quant_window) = row_quantity(&t, refs[k].ions.len(), f.apex, half);
+                        (k, f)
                     })
                     .collect();
                 share_peaks(&mut out);
@@ -920,6 +1156,10 @@ pub(crate) fn extract(
                         {
                             f.vals[col_ix(name)] = v as f32;
                         }
+                        if let Some(win) = &f.quant_window {
+                            let (lo, hi) = (f.tt[win.start], f.tt[win.end - 1]);
+                            f.quant.ms1 = ms1_row_quantity(m1, refs[*k], lo, hi);
+                        }
                     }
                 }
                 out
@@ -930,6 +1170,7 @@ pub(crate) fn extract(
             for (c, v) in cols.iter_mut().zip(f.vals) {
                 c[row] = v;
             }
+            quant[row] = f.quant;
         }
         let win_refs: Vec<&Window> = wins.iter().map(|(_, w)| w).collect();
         let jf = crate::dia_joint::run(&crate::dia_joint::RunInput {
@@ -946,7 +1187,7 @@ pub(crate) fn extract(
             }
         }
     }
-    Pass2 { cols, joint }
+    Pass2 { cols, joint, quant }
 }
 
 /// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN. With
@@ -1014,6 +1255,9 @@ pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia_pass2_table:
                 )
             }))
             .collect(),
+        quant_frag: keep.iter().map(|&i| p2.quant[i].frag).collect(),
+        quant_ms1: keep.iter().map(|&i| p2.quant[i].ms1).collect(),
+        quant_n_frag: keep.iter().map(|&i| p2.quant[i].n_frag).collect(),
     }
 }
 
@@ -1258,6 +1502,9 @@ mod tests {
                 tr_full: [0.0; CYCLES],
                 tt: [0.0; CYCLES],
                 claims: vec![(key, 2.0)],
+                apex: 0,
+                quant: RowQuant::default(),
+                quant_window: None,
             }
         };
         let mut rows = vec![(0, mk(10.0, (5, 7))), (1, mk(4.0, (5, 7)))];
@@ -1326,12 +1573,165 @@ mod tests {
                 .map(|c| if COLUMNS[c] == "p2_ok" { vec![1.0; 3] } else { vec![0.0; 3] })
                 .collect(),
             joint: vec![vec![0.0; 3]; crate::dia_joint::COLUMNS.len()],
+            quant: vec![
+                RowQuant::default(),
+                RowQuant {
+                    frag: Some(5.0),
+                    n_frag: 2,
+                    ms1: Some(7.0),
+                },
+                RowQuant::default(),
+            ],
         };
         assert!(to_table(&noms, &p2).feature(XFER_COLUMN).is_none());
         noms[2].xfer = true;
         let t = to_table(&noms, &p2);
         assert_eq!(t.feature(XFER_COLUMN).unwrap(), &[0.0, 0.0, 1.0]);
         assert_eq!(t.features.last().unwrap().0, XFER_COLUMN);
+        assert_eq!(t.quant_frag, vec![None, Some(5.0), None]);
+        assert_eq!(t.quant_ms1, vec![None, Some(7.0), None]);
+        assert_eq!(t.quant_n_frag, vec![0, 2, 0]);
+        assert!(t.features.iter().all(|(n, _)| !n.starts_with("quant")));
+    }
+
+    /// Gaussian elution profile over `cycles` cycles, apex at `apex`, sd `sd` cycles.
+    fn gauss(cycles: usize, apex: f64, sd: f64) -> Vec<f32> {
+        (0..cycles)
+            .map(|k| (-((k as f64 - apex).powi(2)) / (2.0 * sd * sd)).exp() as f32)
+            .collect()
+    }
+
+    fn consensus(traces: &[Vec<f32>]) -> Vec<f32> {
+        (0..traces[0].len())
+            .map(|k| traces.iter().map(|t| t[k]).sum())
+            .collect()
+    }
+
+    fn area(t: &[f32], w: Range<usize>) -> f64 {
+        t[w].iter().map(|&v| f64::from(v)).sum()
+    }
+
+    #[test]
+    fn fragment_quantity_uses_top_six_by_correlation() {
+        let g = gauss(21, 10.0, 2.0);
+        let mut traces: Vec<Vec<f32>> = (0..6)
+            .map(|j| g.iter().map(|v| v * 1000.0 * (j + 1) as f32).collect())
+            .collect();
+        for _ in 0..2 {
+            traces.push(g.iter().map(|v| 400.0 * (1.0 - v) + 1.0).collect());
+        }
+        let w = 4..17;
+        let (q, n) = fragment_quantity(&traces, &consensus(&traces), w.clone());
+        assert_eq!(n, 6);
+        let want: f64 = traces[..6].iter().map(|t| area(t, w.clone())).sum();
+        let got = q.unwrap();
+        assert!((got - want).abs() < 1e-6 * want, "{got} vs {want}");
+    }
+
+    #[test]
+    fn fragment_quantity_with_three_fragments() {
+        let g = gauss(21, 10.0, 2.0);
+        let traces: Vec<Vec<f32>> = [300.0f32, 900.0, 150.0]
+            .iter()
+            .map(|a| g.iter().map(|v| v * a).collect())
+            .collect();
+        let w = 6..15;
+        let (q, n) = fragment_quantity(&traces, &consensus(&traces), w.clone());
+        assert_eq!(n, 3);
+        let want: f64 = traces.iter().map(|t| area(t, w.clone())).sum();
+        assert!((q.unwrap() - want).abs() < 1e-6 * want);
+    }
+
+    #[test]
+    fn quantity_missing_without_signal() {
+        let zero = vec![vec![0f32; 21]; 6];
+        assert_eq!(fragment_quantity(&zero, &consensus(&zero), 4..17), (None, 0));
+        let g = gauss(21, 10.0, 2.0);
+        let one = vec![g.clone()];
+        assert_eq!(fragment_quantity(&one, &g, 9..9), (None, 0), "empty window");
+        assert_eq!(fragment_quantity(&[], &g, 4..17), (None, 0), "no fragments");
+        assert_eq!(ms1_quantity(&[0.0; 9], &[0.0; 9], 0..9), None);
+        assert_eq!(ms1_quantity(&[0.0; 9], &[5.0; 9], 0..9), None, "M+1 alone is not a quantity");
+        let mono: Vec<f32> = g.iter().map(|v| v * 1e4).collect();
+        let m1: Vec<f32> = g.iter().map(|v| v * 5e3).collect();
+        let q = ms1_quantity(&mono, &m1, 6..15).unwrap();
+        let want = area(&mono, 6..15) + area(&m1, 6..15);
+        assert!((q - want).abs() < 1e-6 * want);
+        assert_eq!(ms1_quantity(&mono, &m1, 30..40), None, "window past the trace");
+    }
+
+    #[test]
+    fn transferred_row_at_window_edge_is_missing() {
+        let mzs: Vec<f64> = (0..12).map(|j| 300.0 + 50.0 * j as f64).collect();
+        let rt: Vec<f64> = (0..40).map(|c| c as f64 * 0.02).collect();
+        let scans: Vec<Vec<(f64, f32)>> = (0..40)
+            .map(|c| {
+                let h = (c as usize).saturating_sub(29) as f32 * 1000.0;
+                mzs.iter().filter(|_| h > 0.0).map(|&m| (m, h)).collect()
+            })
+            .collect();
+        let w = Window {
+            centre: 500.0,
+            iso: (499.0, 501.0),
+            mobility: None,
+            rt: rt.clone(),
+            scans: scans.iter().map(|s| s.as_slice()).collect(),
+        };
+        let ions: Vec<(f64, f32)> = mzs.iter().map(|&m| (m, 1.0)).collect();
+        let mut n = nominee(false, TRANSFER_DIA_LLR, ions);
+        n.xfer = true;
+        let terms = [(2.0, -1.0); TOP_IONS];
+        let ids: Vec<u32> = (0..40).collect();
+        for rt_cal in [rt[39], rt[39] + 100.0] {
+            let t = trace(&w, &n, rt_cal, 1.0);
+            let f = row_features(&w, &ids, &n, &t, &terms, rt_cal);
+            let (q, win) = row_quantity(&t, n.ions.len(), f.apex, 3);
+            assert_eq!(q, RowQuant::default(), "rt_cal {rt_cal}");
+            assert!(win.is_none());
+        }
+        let (scans, rt) = window(120, &mzs, 28..39);
+        let w = Window {
+            centre: 500.0,
+            iso: (499.0, 501.0),
+            mobility: None,
+            rt: rt.clone(),
+            scans: scans.iter().map(|s| s.as_slice()).collect(),
+        };
+        let ids: Vec<u32> = (0..120).collect();
+        let t = trace(&w, &n, rt[33], 1.0);
+        let f = row_features(&w, &ids, &n, &t, &terms, rt[33]);
+        let (q, win) = row_quantity(&t, n.ions.len(), f.apex, 3);
+        let win = win.unwrap();
+        assert_eq!(win.len(), 7);
+        assert_eq!(t.rt(&w, win.start + 3), rt[33], "the window is centred on the trace maximum");
+        assert_eq!(q.n_frag, 6);
+        assert!(q.frag.is_some_and(|v| v > 0.0));
+    }
+
+    #[test]
+    fn run_peak_width_is_the_median_half_maximum_width() {
+        let mut few = vec![9usize; QUANT_WIDTH_MIN_TARGETS - 1];
+        assert_eq!(quant_half_cycles(&mut few), QUANT_HALF_CYCLES_FALLBACK);
+        let mut w: Vec<usize> = (0..101).map(|i| 1 + i % 9).collect();
+        assert_eq!(quant_half_cycles(&mut w), 5);
+        let mut narrow = vec![1usize; 60];
+        assert_eq!(quant_half_cycles(&mut narrow), QUANT_MIN_HALF_CYCLES);
+        let mut wide = vec![500usize; 60];
+        assert_eq!(quant_half_cycles(&mut wide), HALF_CYCLES - 1);
+
+        let mzs: Vec<f64> = (0..12).map(|j| 300.0 + 50.0 * j as f64).collect();
+        let (scans, rt) = window(120, &mzs, 28..39);
+        let win = Window {
+            centre: 500.0,
+            iso: (499.0, 501.0),
+            mobility: None,
+            rt: rt.clone(),
+            scans: scans.iter().map(|s| s.as_slice()).collect(),
+        };
+        let mut n = nominee(false, 20.0, mzs.iter().map(|&m| (m, 1.0)).collect());
+        n.apex_rt = rt[33];
+        let t = trace(&win, &n, rt[33], 1.0);
+        assert_eq!(half_max_width(&win, &n, &t), Some(7));
     }
 
     #[test]

@@ -1553,7 +1553,8 @@ pub(crate) struct QuantFinalizeArgs {
     /// Quantification FDR: q-value threshold of the transfers
     ///
     /// A quantification-quality q-value, not an identification FDR. The search's
-    /// --quant-fdr gives the result of --mbr.
+    /// --quant-fdr gives the result of --mbr. In a DIA study, the reported precursor q of the
+    /// rows written to <base>.dia_quant.parquet.
     #[arg(long = "quant-fdr", value_name = "FDR", default_value = "0.01",
           value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: f64,

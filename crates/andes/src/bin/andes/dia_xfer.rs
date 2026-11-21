@@ -767,6 +767,7 @@ mod tests {
             seq: vec!["PEPTIDEK".into()],
             prec_mz: vec![450.0],
             features: vec![("p2_llr".into(), vec![rt as f32])],
+            ..Default::default()
         };
         crate::dia_xrun::store_run(quant_dir, &spectrum, &pin, &table, None).unwrap();
     }

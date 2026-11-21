@@ -585,17 +585,43 @@ fn ms3_contexts<'a>(specs: &'a [Spectrum], scorer: &RankScorer, z: u8) -> Vec<Ms
 }
 
 /// Whether an MS3 precursor at `mz` is a stub peptide of neutral mass `mass` at `charge`.
+/// The instrument isolates the most intense peak of the stub peptide's isotope envelope,
+/// which is M+1 or M+2 for a heavy peptide, so the precursor may sit on any isotope peak
+/// from the monoisotopic one to the one above the averagine envelope's most abundant.
+#[cfg(test)]
 fn ms3_precursor_matches(mz: f64, charge: u8, mass: f64) -> bool {
-    charge > 0 && (mz - (mass / charge as f64 + PROTON)).abs() <= MS3_PRECURSOR_MZ_TOL
+    ms3_precursor_matches_up_to(mz, charge, mass, ms3_max_isotope(mass))
+}
+
+/// The highest isotope peak an MS3 precursor of a stub peptide of `mass` may sit on: one
+/// above the most abundant peak of its averagine envelope.
+fn ms3_max_isotope(mass: f64) -> usize {
+    model::isotope::averagine_isotope_envelope(mass, 8)
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map_or(0, |(k, _)| k)
+        + 1
+}
+
+fn ms3_precursor_matches_up_to(mz: f64, charge: u8, mass: f64, max_isotope: usize) -> bool {
+    if charge == 0 {
+        return false;
+    }
+    (0..=max_isotope).any(|k| {
+        let target = (mass + k as f64 * ISOTOPE_SPACING) / charge as f64 + PROTON;
+        (mz - target).abs() <= MS3_PRECURSOR_MZ_TOL
+    })
 }
 
 /// The best score of an MS3 scan whose precursor is `stub_peptide` at some charge.
 fn ms3_score(ctx: &SpecCtx<'_>, stub_peptide: &Peptide) -> Option<f32> {
     let m = stub_peptide.mass();
+    let max_isotope = ms3_max_isotope(m);
     let mut best: Option<f32> = None;
     for c in ctx.ms3 {
         for (q, ss) in &c.by_charge {
-            if !ms3_precursor_matches(c.mz, *q, m) {
+            if !ms3_precursor_matches_up_to(c.mz, *q, m, max_isotope) {
                 continue;
             }
             let s = score_psm(ss, stub_peptide, ctx.scorer, *q, ctx.frag_tol)
@@ -1508,6 +1534,19 @@ mod tests {
         assert!(!ms3_precursor_matches(mz2 + 0.02, 2, stub_peptide));
         assert!(!ms3_precursor_matches(mz2, 3, stub_peptide));
         assert!(!ms3_precursor_matches(mz2, 0, stub_peptide));
+        let heavy = 2496.2496 + alkene;
+        let m1 = (heavy + ISOTOPE_SPACING) / 2.0 + PROTON;
+        assert!(
+            ms3_precursor_matches(m1, 2, heavy),
+            "M+1 of a 2.5 kDa stub peptide"
+        );
+        assert!(!ms3_precursor_matches(m1 + 0.02, 2, heavy));
+        let light = 600.0 + alkene;
+        let far = (light + 3.0 * ISOTOPE_SPACING) / 2.0 + PROTON;
+        assert!(
+            !ms3_precursor_matches(far, 2, light),
+            "M+3 of a small stub peptide"
+        );
         let s = ms3_spectrum(&ProductScan {
             id: "scan=9".into(),
             precursor_mz: mz2,

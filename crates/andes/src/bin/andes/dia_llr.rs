@@ -613,6 +613,7 @@ pub(crate) fn add_to_pin(
             }
         }
     }
+    crate::memlimit::mark_stage("pool scores: columns computed");
     write_pin(pin, &table, &cols, &values)?;
     let shift_ppm: Vec<f64> = cals.iter().map(|c| c.shift_ppm).collect();
     let llr = values.swap_remove(0);

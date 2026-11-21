@@ -305,6 +305,7 @@ impl Predictors {
         let c0 = process_cpu_seconds();
         let new_cols = self.columns();
         let table = read_pin(pin, spectra, &new_cols)?;
+        crate::memlimit::mark_stage("predictions: PIN read");
         let n = table.rows.len();
         let run_of = |spec: u32| run_ends.partition_point(|&e| e <= spec as usize);
         let n_runs = run_ends.len().max(1);
@@ -425,6 +426,7 @@ impl Predictors {
             flag_values.push(flags);
         }
         values.extend(flag_values);
+        crate::memlimit::mark_stage("predictions: columns computed");
 
         write_pin(pin, &table, &new_cols, &values)?;
         for line in &report {

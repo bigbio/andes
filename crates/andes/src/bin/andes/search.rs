@@ -1541,6 +1541,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             search_elapsed.as_secs_f64()
         );
     }
+    crate::memlimit::mark_stage("search");
     if cli.open_search {
         let (attempts, wins) = prepared.open_search_stats();
         log::info!(
@@ -1685,6 +1686,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         output_pin_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
+    crate::memlimit::mark_stage("PIN written");
     log::info!(
         target: "total",
         "done in {:.2} s",
@@ -1694,6 +1696,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
+        crate::memlimit::mark_stage("predictions");
         if let Some(predicted) = kept.filter(|_| pooled) {
             let pool = crate::dia_llr::add_to_pin(
                 &output_pin_path,
@@ -1703,6 +1706,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
+            crate::memlimit::mark_stage("pool scores");
             let nominees_out = cli
                 .quant_dir
                 .as_deref()
@@ -1721,14 +1725,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     mobility_slices: cli.dia_mobility_slices,
                 }),
             )?);
+            crate::memlimit::mark_stage("pass 2");
         }
     }
+    crate::memlimit::mark_stage("pool released");
     let mut rerank_dropped = std::collections::HashSet::new();
     if pooled {
         rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+        crate::memlimit::mark_stage("per-scan cut");
     }
     if cli.dia {
         crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+        crate::memlimit::mark_stage("co-elution");
     }
     if cli.refine {
         if refine_merged {
@@ -1800,6 +1808,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
+            crate::memlimit::mark_stage("rescoring");
             if cli.dia
                 && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
                     map.get(id).is_some_and(|p| p.q_value <= 0.01)
@@ -1808,6 +1817,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 (map, decoys) =
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
+                crate::memlimit::mark_stage("rescoring after the RT refit");
             }
             let path = output::decoy_results_path(&output_pin_path);
             let text =
@@ -1825,6 +1835,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 pass1_q = n;
                 pass1_best = best;
+                crate::memlimit::mark_stage("precursor q");
                 log::info!(
                     target: "rescore",
                     "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
@@ -1839,6 +1850,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     t,
                     Some((&backend, &user_args)),
                 )?;
+                crate::memlimit::mark_stage("study tables stored");
                 dia_pass2 = None;
             }
             if let Some(t) = dia_pass2.take() {
@@ -1885,6 +1897,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "pass-1 results kept, the precursor PIN is not used: {why}"
                     ),
                 }
+                crate::memlimit::mark_stage("precursor rescoring");
             }
             rescore_decoys = Some(decoys);
             log::info!(
@@ -2476,6 +2489,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
     }
 
+    crate::memlimit::mark_stage("outputs");
     let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
         release_at_exit(pin_candidates);
         return Ok(());

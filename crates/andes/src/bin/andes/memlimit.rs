@@ -116,6 +116,39 @@ pub(crate) fn available_memory_budget() -> Option<MemoryBudget> {
     budget_from(meminfo_available_bytes(), cgroup_memory_limit())
 }
 
+/// Logs, at debug level (`--verbose`), the resident memory at the end of `stage` and the peak
+/// since the previous mark, then resets the kernel's peak counter so the next mark reports
+/// its own stage. Reads `/proc/self/status`; does nothing where that file is missing.
+pub(crate) fn mark_stage(stage: &str) {
+    if !log::log_enabled!(target: "memory", log::Level::Debug) {
+        return;
+    }
+    let Some((rss, hwm)) = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| parse_status_rss_hwm(&s))
+    else {
+        return;
+    };
+    let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
+    log::debug!(
+        target: "memory",
+        "{stage}: resident {:.2} GB, peak since the previous mark {:.2} GB",
+        gb(rss),
+        gb(hwm)
+    );
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+}
+
+/// `VmRSS` and `VmHWM` of a `/proc/<pid>/status` text, in bytes.
+fn parse_status_rss_hwm(status: &str) -> Option<(u64, u64)> {
+    let kb = |key: &str| -> Option<u64> {
+        let rest = status.lines().find_map(|l| l.strip_prefix(key))?;
+        let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+        Some(kb.saturating_mul(1024))
+    };
+    Some((kb("VmRSS:")?, kb("VmHWM:")?))
+}
+
 fn budget_from(node_available: Option<u64>, cgroup_limit: Option<u64>) -> Option<MemoryBudget> {
     match (node_available, cgroup_limit) {
         (Some(node), Some(limit)) if limit < node => Some(MemoryBudget {
@@ -248,6 +281,13 @@ mod tests {
     use std::collections::HashMap;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn status_rss_and_peak_are_read_in_bytes() {
+        let status = "Name:\tandes\nVmHWM:\t  2048 kB\nVmRSS:\t  1024 kB\n";
+        assert_eq!(parse_status_rss_hwm(status), Some((1 << 20, 2 << 20)));
+        assert_eq!(parse_status_rss_hwm("Name:\tandes\n"), None);
+    }
 
     fn fake_fs(files: &[(&str, &str)]) -> impl Fn(&Path) -> Option<String> {
         let map: HashMap<String, String> = files

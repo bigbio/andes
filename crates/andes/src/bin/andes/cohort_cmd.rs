@@ -637,7 +637,7 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     drop(out);
     let backend = output::PercolatorBackend::Native {
         memory: output::MemLimit {
-            bytes: crate::cli::default_value::<crate::cli::PercolatorArgs>("rescore_memory_gb")
+            bytes: crate::cli::default_value::<crate::cli::RescoreArgs>("rescore_memory_gb")
                 .parse::<u64>()
                 .unwrap_or(16)
                 .saturating_mul(1 << 30),

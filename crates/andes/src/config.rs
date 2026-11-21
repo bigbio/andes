@@ -1286,6 +1286,7 @@ glyco:
         "glyco_mbr_match_train",
         "ipf_debug",
         "xl_oracle",
+        "xl_linear_only",
         "xl_rescore_intra",
         "xl_rescore_inter",
         "quiet",

@@ -10,6 +10,8 @@ mod cli;
 mod config;
 #[path = "andes/dia.rs"]
 mod dia;
+#[path = "andes/dia_joint.rs"]
+mod dia_joint;
 #[path = "andes/dia_llr.rs"]
 mod dia_llr;
 #[path = "andes/dia_pass2.rs"]

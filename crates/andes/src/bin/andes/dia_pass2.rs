@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use model::mass::ISOTOPE;
+use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{H2O, PROTON};
 use quant::Ms1RunIndex;
@@ -20,8 +21,8 @@ use crate::predicted::{PinTable, PredictedMs2, NONE};
 pub(crate) const TOP_IONS: usize = 12;
 const NOMINATE_MIN_LLR: f64 = -15.0;
 const CONFIDENT_LLR: f64 = 15.0;
-const HALF_CYCLES: usize = 36;
-const CYCLES: usize = 2 * HALF_CYCLES + 1;
+pub(crate) const HALF_CYCLES: usize = 36;
+pub(crate) const CYCLES: usize = 2 * HALF_CYCLES + 1;
 /// m/z tolerance (ppm) of a predicted fragment's peak in a cycle of its trace, around the run's
 /// shifted fragment position; tighter than the pool search's tolerance because the shift is
 /// learned first.
@@ -54,6 +55,8 @@ const COELUTE_HALF: usize = 3;
 const COELUTE_MIN_CORR: f64 = 0.6;
 const FAR_CYCLES: usize = 3;
 const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
+/// RT prior spread when a run has too few confident targets to measure it.
+const RT_SIGMA_FALLBACK_MIN: f64 = 0.5;
 const RT_TERMS: usize = 4 + 20;
 
 pub(crate) const COLUMNS: [&str; 27] = [
@@ -116,6 +119,7 @@ pub(crate) struct Nominee {
 /// carry `p2_ok` = 0 and are left out downstream.
 pub(crate) struct Pass2 {
     pub(crate) cols: Vec<Vec<f32>>,
+    pub(crate) joint: Vec<Vec<f32>>,
 }
 
 impl Pass2 {
@@ -267,8 +271,9 @@ fn pin_fields(
 }
 
 /// Ridge fit of the observed apex RT on predicted RT (cubic) and residue counts over the
-/// confident targets of one run; returns the calibrated RT of every nominee given.
-fn calibrate_rt(noms: &[&Nominee]) -> Vec<f64> {
+/// confident targets of one run; returns the calibrated RT of every nominee given and the
+/// robust spread (min) of the fit residuals.
+fn calibrate_rt(noms: &[&Nominee]) -> (Vec<f64>, f64) {
     let design = |n: &Nominee| -> [f64; RT_TERMS] {
         let mut x = [0.0; RT_TERMS];
         let p = n.pred_rt;
@@ -307,12 +312,33 @@ fn calibrate_rt(noms: &[&Nominee]) -> Vec<f64> {
     } else {
         None
     };
-    noms.iter()
+    let cal: Vec<f64> = noms
+        .iter()
         .map(|n| match beta {
             Some(b) => design(n).iter().zip(b.iter()).map(|(x, c)| x * c).sum(),
             None => n.pred_rt,
         })
-        .collect()
+        .collect();
+    let mut res: Vec<f64> = noms
+        .iter()
+        .zip(&cal)
+        .filter(|(n, _)| rt_fit_member(n))
+        .map(|(n, c)| n.apex_rt - c)
+        .collect();
+    let sigma = robust_sigma(&mut res).unwrap_or(RT_SIGMA_FALLBACK_MIN);
+    (cal, sigma)
+}
+
+/// `MAD_TO_SD` x median absolute deviation; `None` for fewer than 50 values.
+fn robust_sigma(v: &mut [f64]) -> Option<f64> {
+    if v.len() < 50 {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let med = v[v.len() / 2];
+    let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
+    dev.sort_by(f64::total_cmp);
+    Some(MAD_TO_SD * dev[dev.len() / 2])
 }
 
 /// A confident target with an andes-rt prediction: a row of the RT ridge.
@@ -346,13 +372,13 @@ fn solve(mut a: [[f64; RT_TERMS]; RT_TERMS], mut b: [f64; RT_TERMS]) -> Option<[
 }
 
 /// One isolation window of one run: its cycles in RT order.
-struct Window<'a> {
+pub(crate) struct Window<'a> {
     centre: f64,
     /// Isolation range (Th), lower and upper bound.
     iso: (f64, f64),
     mobility: Option<(u32, u32)>,
-    rt: Vec<f64>,
-    scans: Vec<&'a [(f64, f32)]>,
+    pub(crate) rt: Vec<f64>,
+    pub(crate) scans: Vec<&'a [(f64, f32)]>,
 }
 
 impl Window<'_> {
@@ -367,6 +393,20 @@ impl Window<'_> {
             .take_while(|(_, p)| p.0 <= mz + tol)
             .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
             .map(|(k, p)| (p.1, (lo + k) as u32))
+    }
+}
+
+#[cfg(test)]
+impl<'a> Window<'a> {
+    /// A window without isolation or mobility bounds, for tests of the per-window models.
+    pub(crate) fn for_test(rt: Vec<f64>, scans: Vec<&'a [(f64, f32)]>) -> Self {
+        Window {
+            centre: 0.0,
+            iso: (0.0, f64::INFINITY),
+            mobility: None,
+            rt,
+            scans,
+        }
     }
 }
 
@@ -758,6 +798,7 @@ pub(crate) fn extract(
 ) -> Pass2 {
     let n = noms.len();
     let mut cols = vec![vec![0f32; n]; COLUMNS.len()];
+    let mut joint = vec![vec![0f32; n]; crate::dia_joint::COLUMNS.len()];
     let (_, windows) = crate::dia::windows(spectra, run_ends);
     let run_of = |s: usize| run_ends.partition_point(|&e| e <= s);
     let n_runs = run_ends.len().max(1);
@@ -784,7 +825,7 @@ pub(crate) fn extract(
             .collect();
         let idx: Vec<usize> = (0..n).filter(|&i| noms[i].run as usize == run).collect();
         let refs: Vec<&Nominee> = idx.iter().map(|&i| &noms[i]).collect();
-        let rt_cal = calibrate_rt(&refs);
+        let (rt_cal, rt_sigma) = calibrate_rt(&refs);
         let mut by_win: Vec<Vec<usize>> = vec![Vec::new(); wins.len()];
         let places: Vec<Place> = wins
             .iter()
@@ -801,7 +842,7 @@ pub(crate) fn extract(
             }
         }
         let shift = 1.0 + shift_ppm.get(run).copied().unwrap_or(0.0) * 1e-6;
-        let rates = by_win
+        let per_win_rates: Vec<Rates> = by_win
             .par_iter()
             .enumerate()
             .map(|(w, ks)| {
@@ -812,10 +853,11 @@ pub(crate) fn extract(
                 }
                 r
             })
-            .reduce(Rates::default, |mut a, b| {
-                a.add(&b);
-                a
-            });
+            .collect();
+        let rates = per_win_rates.iter().fold(Rates::default(), |mut a, b| {
+            a.add(b);
+            a
+        });
         let terms = rates.terms();
         let per_win: Vec<Vec<(usize, RowFeatures)>> = by_win
             .par_iter()
@@ -851,8 +893,22 @@ pub(crate) fn extract(
                 c[row] = v;
             }
         }
+        let win_refs: Vec<&Window> = wins.iter().map(|(_, w)| w).collect();
+        let jf = crate::dia_joint::run(&crate::dia_joint::RunInput {
+            wins: &win_refs,
+            by_win: &by_win,
+            noms: &refs,
+            rt_cal: &rt_cal,
+            shift,
+            rt_sigma_min: rt_sigma,
+        });
+        for (k, vals) in jf {
+            for (c, v) in joint.iter_mut().zip(vals) {
+                c[idx[k]] = v;
+            }
+        }
     }
-    Pass2 { cols }
+    Pass2 { cols, joint }
 }
 
 /// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN.
@@ -903,6 +959,7 @@ pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia_pass2_table:
         features: COLUMNS
             .iter()
             .zip(&p2.cols)
+            .chain(crate::dia_joint::COLUMNS.iter().zip(&p2.joint))
             .map(|(n, v)| (n.to_string(), keep.iter().map(|&i| v[i]).collect()))
             .collect(),
     }
@@ -1097,7 +1154,7 @@ mod tests {
             })
             .collect();
         let clean: Vec<&Nominee> = noms.iter().collect();
-        let cal_clean = calibrate_rt(&clean);
+        let (cal_clean, sigma_clean) = calibrate_rt(&clean);
         noms.extend((0..200).map(|i| {
             let mut n = nominee(false, 20.0, vec![(300.0, 1.0)]);
             n.pred_rt = 10.0;
@@ -1106,8 +1163,9 @@ mod tests {
             n
         }));
         let all: Vec<&Nominee> = noms.iter().collect();
-        let cal_all = calibrate_rt(&all);
+        let (cal_all, sigma_all) = calibrate_rt(&all);
         assert_eq!(&cal_all[..200], &cal_clean[..]);
+        assert_eq!(sigma_all, sigma_clean, "and out of the RT prior's spread");
     }
 
     #[test]
@@ -1166,7 +1224,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&Nominee> = noms.iter().collect();
-        let cal = calibrate_rt(&refs);
+        let (cal, _) = calibrate_rt(&refs);
         for (n, c) in noms.iter().zip(&cal) {
             assert!((n.apex_rt - c).abs() < 0.05, "{} vs {}", n.apex_rt, c);
         }

@@ -196,6 +196,7 @@ pub struct PreparedSearch<'a> {
     per_scan: Option<PerScanScorers>,
     form_rt_model: Option<Arc<crate::dia_rt_rank::FormRtModel>>,
     dia_rt_prior: RwLock<Option<Arc<crate::dia_rt_rank::DiaRtPrior>>>,
+    form_rt_cache: crate::dia_rt_rank::FormRtCache,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -510,6 +511,7 @@ impl<'a> PreparedSearch<'a> {
             per_scan: None,
             form_rt_model: None,
             dia_rt_prior: RwLock::new(None),
+            form_rt_cache: crate::dia_rt_rank::FormRtCache::default(),
         }
     }
 
@@ -524,7 +526,11 @@ impl<'a> PreparedSearch<'a> {
 
     /// Sets (or with `None` clears) the run's RT prior; while set, every DIA chunk index
     /// carries calibrated per-form RTs and its vote cut uses the RT term.
+    /// Clearing also drops the cached per-form RT predictions.
     pub fn set_dia_rt_prior(&self, prior: Option<crate::dia_rt_rank::DiaRtPrior>) {
+        if prior.is_none() {
+            self.form_rt_cache.clear();
+        }
         *self.dia_rt_prior.write().expect("RT prior lock") = prior.map(Arc::new);
     }
 
@@ -1110,7 +1116,7 @@ impl<'a> PreparedSearch<'a> {
                     if let (true, Some(model), Some(prior)) =
                         (params.dia, self.form_rt_model.as_deref(), prior)
                     {
-                        index.attach_rt(self.idx, params, model, &prior);
+                        index.attach_rt(self.idx, params, model, &self.form_rt_cache, &prior);
                     }
                     index
                 });

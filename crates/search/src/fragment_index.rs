@@ -270,7 +270,7 @@ impl ChunkFragmentIndex {
     }
 
     /// Attaches the calibrated RT (minutes) of every form, predicted by `model` from the
-    /// form's own sequence and mapped by `prior`; from then on a DIA query ranks the vote cut
+    /// form's own sequence (once per search through `cache`) and mapped by `prior`; from then on a DIA query ranks the vote cut
     /// with the RT term of [`crate::dia_rt_rank`]. Forms the model cannot encode stay NaN and
     /// get the capped penalty.
     pub fn attach_rt(
@@ -278,6 +278,7 @@ impl ChunkFragmentIndex {
         db: &SearchIndex,
         params: &SearchParams,
         model: &crate::dia_rt_rank::FormRtModel,
+        cache: &crate::dia_rt_rank::FormRtCache,
         prior: &crate::dia_rt_rank::DiaRtPrior,
     ) {
         let n = self.form_mass.len();
@@ -314,7 +315,10 @@ impl ChunkFragmentIndex {
                         &ks,
                     );
                     for (f, c) in forms.iter().zip(&cands) {
-                        out.push((f.2, prior.apply(f64::from(model(&c.peptide))) as f32));
+                        out.push((
+                            f.2,
+                            prior.apply(f64::from(cache.get_or_predict(&c.peptide, model))) as f32,
+                        ));
                     }
                 }
                 out

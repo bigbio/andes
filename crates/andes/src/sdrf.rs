@@ -847,6 +847,234 @@ pub fn apply(
     Ok(out)
 }
 
+const SOURCE_NAME: &str = "source name";
+const FRACTION: &str = "comment[fraction identifier]";
+const TECHNICAL_REPLICATE: &str = "comment[technical replicate]";
+const INSTRUMENT: &str = "comment[instrument]";
+const POOLED_SAMPLE: &str = "characteristics[pooled sample]";
+const BIOLOGICAL_REPLICATE: &str = "characteristics[biological replicate]";
+const CHARACTERISTICS: &str = "characteristics[";
+/// Cell values (lower case) that mark a channel without sample.
+const BLANK_VALUES: [&str; 3] = ["blank", "empty", "empty channel"];
+
+/// Role of an isobaric channel in its plex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelRole {
+    /// A sample of the study.
+    Sample,
+    /// A pooled reference: `characteristics[pooled sample]` is `pooled` or `SN=...`, or
+    /// `characteristics[biological replicate]` is `pooled`.
+    Reference,
+    /// A channel without sample: a `characteristics[...]` cell, or the last `-`/`_`/space
+    /// separated word of the source name, is `blank`, `empty` or `empty channel`.
+    Blank,
+}
+
+impl ChannelRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelRole::Sample => "sample",
+            ChannelRole::Reference => "reference",
+            ChannelRole::Blank => "blank",
+        }
+    }
+}
+
+/// The sample of one channel of a run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelSample {
+    /// The SDRF source name.
+    pub sample: String,
+    pub role: ChannelRole,
+}
+
+/// One run (data file) of an isobaric SDRF.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunDesign {
+    /// The plex (one labelled sample set, 1-based in SDRF order): the files whose channels
+    /// have the same samples and technical replicates (`comment[technical replicate]` may
+    /// differ between the channels of a file, as when it counts a sample's measurements).
+    pub plex: u32,
+    pub fraction: Option<String>,
+    /// The NT= name of `comment[instrument]`.
+    pub instrument: Option<String>,
+    /// SDRF channel (the label without its kit prefix, e.g. `127N`) to its sample.
+    pub channels: BTreeMap<String, ChannelSample>,
+}
+
+/// The channel design of an isobaric SDRF, by run name (the data file name without its
+/// extension, and without `.gz`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IsobaricDesign {
+    pub path: PathBuf,
+    pub runs: BTreeMap<String, RunDesign>,
+    pub plexes: u32,
+}
+
+/// Run name of an SDRF data file, as andes names a run after its spectrum file.
+fn run_name(file: &str) -> String {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let name = name.strip_suffix(".gz").unwrap_or(name);
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[..i].to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn is_blank_word(v: &str) -> bool {
+    BLANK_VALUES.contains(&v.trim().to_ascii_lowercase().as_str())
+}
+
+/// A plex: per channel its source name and technical replicate.
+type PlexKey = Vec<(String, String, Option<String>)>;
+
+/// Reads the channel design of an isobaric SDRF (`andes quant finalize --sdrf`).
+pub fn isobaric_design(path: &Path) -> Result<IsobaricDesign, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("--sdrf: cannot read {}: {e}", path.display()))?;
+    parse_isobaric_design(&text)
+        .map(|mut d| {
+            d.path = path.to_path_buf();
+            d
+        })
+        .map_err(|e| format!("--sdrf {}: {e}", path.display()))
+}
+
+pub fn parse_isobaric_design(text: &str) -> Result<IsobaricDesign, String> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let header: Vec<String> = lines
+        .next()
+        .ok_or("empty file")?
+        .split('\t')
+        .map(norm_header)
+        .collect();
+    let first = |name: &str| header.iter().position(|h| h == name);
+    let data_col = first(DATA_FILE).ok_or_else(|| format!("no `{DATA_FILE}` column"))?;
+    let label_col = first(LABEL).ok_or_else(|| format!("no `{LABEL}` column"))?;
+    let source_col = first(SOURCE_NAME).ok_or_else(|| format!("no `{SOURCE_NAME}` column"))?;
+    let (fraction_col, replicate_col) = (first(FRACTION), first(TECHNICAL_REPLICATE));
+    let (instrument_col, pooled_col) = (first(INSTRUMENT), first(POOLED_SAMPLE));
+    let bio_col = first(BIOLOGICAL_REPLICATE);
+    let characteristics: Vec<usize> = header
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.starts_with(CHARACTERISTICS))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut order: Vec<String> = Vec::new();
+    let mut runs: BTreeMap<String, RunDesign> = BTreeMap::new();
+    let mut replicates: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+    for (n, line) in lines.enumerate() {
+        let row = n + 2;
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != header.len() {
+            return Err(format!(
+                "row {row} has {} fields, the header {}",
+                cells.len(),
+                header.len()
+            ));
+        }
+        let cell = |i: usize| value(cells[i]);
+        let file = cell(data_col).ok_or_else(|| format!("row {row}: no data file"))?;
+        let label = cell(label_col).ok_or_else(|| format!("row {row}: no `{LABEL}`"))?;
+        let kind = label_kind(&label);
+        if kind != "tmt" && kind != "itraq" {
+            return Err(format!(
+                "row {row}: `{LABEL}` is `{label}`, not an isobaric (TMT or iTRAQ) channel"
+            ));
+        }
+        let sample = cells[source_col].trim().to_string();
+        if sample.is_empty() {
+            return Err(format!("row {row}: no `{SOURCE_NAME}`"));
+        }
+        let last_word = sample.rsplit(['-', '_', ' ']).next().unwrap_or(&sample);
+        let blank =
+            is_blank_word(last_word) || characteristics.iter().any(|&i| is_blank_word(cells[i]));
+        let pooled = pooled_col.and_then(cell).is_some_and(|v| {
+            let l = v.to_ascii_lowercase();
+            l == "pooled" || l.starts_with("sn=")
+        }) || bio_col
+            .and_then(cell)
+            .is_some_and(|v| v.eq_ignore_ascii_case("pooled"));
+        let role = if blank {
+            ChannelRole::Blank
+        } else if pooled {
+            ChannelRole::Reference
+        } else {
+            ChannelRole::Sample
+        };
+        let name = run_name(&file);
+        let fraction = fraction_col.and_then(cell);
+        let technical_replicate = replicate_col.and_then(cell);
+        let instrument = instrument_col
+            .and_then(cell)
+            .map(|v| nt(&v).map_err(|e| format!("row {row}: `{INSTRUMENT}` {e}")))
+            .transpose()?;
+        let run = runs.entry(name.clone()).or_insert_with(|| {
+            order.push(name.clone());
+            RunDesign {
+                plex: 0,
+                fraction: fraction.clone(),
+                instrument: instrument.clone(),
+                channels: BTreeMap::new(),
+            }
+        });
+        if run.fraction != fraction || run.instrument != instrument {
+            return Err(format!(
+                "row {row}: {file} has another fraction or instrument than its first row"
+            ));
+        }
+        let channel = isobaric_channel(&label);
+        replicates.insert((name.clone(), channel.clone()), technical_replicate);
+        let entry = ChannelSample { sample, role };
+        if let Some(prev) = run.channels.insert(channel.clone(), entry.clone()) {
+            if prev != entry {
+                return Err(format!(
+                    "row {row}: {file} channel {channel} is given twice, as {} and {}",
+                    prev.sample, entry.sample
+                ));
+            }
+        }
+    }
+    if runs.is_empty() {
+        return Err("no data rows".into());
+    }
+
+    let mut plex_of: BTreeMap<PlexKey, u32> = BTreeMap::new();
+    let mut seen: BTreeMap<(u32, Option<String>), String> = BTreeMap::new();
+    for name in &order {
+        let run = runs.get_mut(name).expect("every ordered run was inserted");
+        let key: PlexKey = run
+            .channels
+            .iter()
+            .map(|(c, s)| {
+                let rep = replicates
+                    .get(&(name.clone(), c.clone()))
+                    .cloned()
+                    .flatten();
+                (c.clone(), s.sample.clone(), rep)
+            })
+            .collect();
+        let next = plex_of.len() as u32 + 1;
+        let plex = *plex_of.entry(key).or_insert(next);
+        run.plex = plex;
+        if let Some(other) = seen.insert((plex, run.fraction.clone()), name.clone()) {
+            return Err(format!(
+                "{other} and {name} have the same channel samples, technical replicate and \
+                 fraction ({}), so their plexes cannot be told apart; give each file its \
+                 `{FRACTION}` or `{TECHNICAL_REPLICATE}`",
+                run.fraction.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+    Ok(IsobaricDesign {
+        path: PathBuf::new(),
+        plexes: plex_of.len() as u32,
+        runs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1227,6 +1455,150 @@ mod tests {
                 .any(|l| l.starts_with("WARN: --spectrum files not in the SDRF")
                     && l.ends_with("other.mzML")),
             "{lines:?}"
+        );
+    }
+
+    const DESIGN_H: &[&str] = &[
+        "source name",
+        "characteristics[organism part]",
+        "characteristics[biological replicate]",
+        "comment[instrument]",
+        "comment[label]",
+        "comment[fraction identifier]",
+        "comment[technical replicate]",
+        "comment[data file]",
+    ];
+
+    fn design_row<'a>(
+        source: &'a str,
+        part: &'a str,
+        bio: &'a str,
+        label: &'a str,
+        fraction: &'a str,
+        file: &'a str,
+    ) -> [&'a str; 8] {
+        [
+            source,
+            part,
+            bio,
+            "NT=Orbitrap Fusion;AC=MS:1002416",
+            label,
+            fraction,
+            "1",
+            file,
+        ]
+    }
+
+    #[test]
+    fn reference_and_blank_channels_get_their_roles_and_fractions_one_plex() {
+        let rows = [
+            design_row("S1", "Lung", "1", "TMT126", "1", "p1_Fr01.raw"),
+            design_row("S2", "Liver", "1", "TMT127N", "1", "p1_Fr01.raw"),
+            design_row(
+                "PXD-GIS",
+                "Global Internal Standard",
+                "pooled",
+                "TMT131",
+                "1",
+                "p1_Fr01.raw",
+            ),
+            design_row("PXD-blank", "blank", "1", "TMT127C", "1", "p1_Fr01.raw"),
+            design_row("S1", "Lung", "1", "TMT126", "2", "p1_Fr02.raw"),
+            design_row("S2", "Liver", "1", "TMT127N", "2", "p1_Fr02.raw"),
+            design_row(
+                "PXD-GIS",
+                "Global Internal Standard",
+                "pooled",
+                "TMT131",
+                "2",
+                "p1_Fr02.raw",
+            ),
+            design_row("PXD-blank", "blank", "1", "TMT127C", "2", "p1_Fr02.raw"),
+            design_row("S3", "Lung", "1", "TMT126", "1", "p2_Fr01.mzML.gz"),
+        ];
+        let rows: Vec<&[&str]> = rows.iter().map(|r| &r[..]).collect();
+        let d = parse_isobaric_design(&sdrf(DESIGN_H, &rows)).unwrap();
+        assert_eq!(d.plexes, 2);
+        let r1 = &d.runs["p1_Fr01"];
+        let r2 = &d.runs["p1_Fr02"];
+        assert_eq!((r1.plex, r2.plex, d.runs["p2_Fr01"].plex), (1, 1, 2));
+        assert_eq!(r2.fraction.as_deref(), Some("2"));
+        assert_eq!(r1.instrument.as_deref(), Some("Orbitrap Fusion"));
+        assert_eq!(r1.channels["126"].role, ChannelRole::Sample);
+        assert_eq!(r1.channels["131"].role, ChannelRole::Reference);
+        assert_eq!(r1.channels["131"].sample, "PXD-GIS");
+        assert_eq!(r1.channels["127C"].role, ChannelRole::Blank);
+    }
+
+    #[test]
+    fn the_pooled_sample_column_and_an_empty_source_name_word_set_the_roles() {
+        let h = [
+            "source name",
+            "characteristics[pooled sample]",
+            "comment[label]",
+            "comment[data file]",
+        ];
+        let rows: [&[&str]; 3] = [
+            &["ref", "SN=a,b", "TMT126", "x.raw"],
+            &["s", "not pooled", "TMT127N", "x.raw"],
+            &["chan_empty", "not pooled", "TMT127C", "x.raw"],
+        ];
+        let d = parse_isobaric_design(&sdrf(&h, &rows)).unwrap();
+        let c = &d.runs["x"].channels;
+        assert_eq!(c["126"].role, ChannelRole::Reference);
+        assert_eq!(c["127N"].role, ChannelRole::Sample);
+        assert_eq!(c["127C"].role, ChannelRole::Blank);
+        assert_eq!(d.runs["x"].fraction, None);
+    }
+
+    #[test]
+    fn two_files_of_one_channel_map_and_fraction_are_refused() {
+        let rows = [
+            design_row("S1", "Lung", "1", "TMT126", "1", "a.raw"),
+            design_row("S1", "Lung", "1", "TMT126", "1", "b.raw"),
+        ];
+        let rows: Vec<&[&str]> = rows.iter().map(|r| &r[..]).collect();
+        let e = parse_isobaric_design(&sdrf(DESIGN_H, &rows)).unwrap_err();
+        assert!(e.contains("cannot be told apart"), "{e}");
+        let rows = [design_row(
+            "S1",
+            "Lung",
+            "1",
+            "label free sample",
+            "1",
+            "a.raw",
+        )];
+        let rows: Vec<&[&str]> = rows.iter().map(|r| &r[..]).collect();
+        let e = parse_isobaric_design(&sdrf(DESIGN_H, &rows)).unwrap_err();
+        assert!(e.contains("not an isobaric"), "{e}");
+    }
+
+    #[test]
+    fn a_technical_replicate_per_channel_keeps_the_fractions_of_a_plex_together() {
+        let h = [
+            "source name",
+            "comment[label]",
+            "comment[technical replicate]",
+            "comment[fraction identifier]",
+            "comment[data file]",
+        ];
+        let rows: [&[&str]; 8] = [
+            &["S1", "TMT126", "2", "1", "p_Fr01.raw"],
+            &["S2", "TMT127N", "3", "1", "p_Fr01.raw"],
+            &["S1", "TMT126", "2", "2", "p_Fr02.raw"],
+            &["S2", "TMT127N", "3", "2", "p_Fr02.raw"],
+            &["S1", "TMT126", "4", "1", "q_Fr01.raw"],
+            &["S2", "TMT127N", "4", "1", "q_Fr01.raw"],
+            &["S1", "TMT126", "2", "3", "p_Fr03.raw"],
+            &["S2", "TMT127N", "3", "3", "p_Fr03.raw"],
+        ];
+        let d = parse_isobaric_design(&sdrf(&h, &rows)).unwrap();
+        let plex = |r: &str| d.runs[r].plex;
+        assert_eq!((plex("p_Fr01"), plex("p_Fr02"), plex("p_Fr03")), (1, 1, 1));
+        assert_eq!(
+            plex("q_Fr01"),
+            2,
+            "a repeat injection of the plex is its own plex"
         );
     }
 }

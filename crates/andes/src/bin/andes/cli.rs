@@ -1102,11 +1102,6 @@ pub(crate) struct SearchArgs {
           hide_short_help = true, help_heading = H_ISOBARIC)]
     pub(crate) tmt_min_purity: f64,
 
-    /// Quantification gate: largest Percolator PEP (1: off; needs --rescore)
-    #[arg(long, value_name = "PEP", default_value = "0.05", value_parser = parse_unit_fraction,
-          hide_short_help = true, help_heading = H_ISOBARIC)]
-    pub(crate) tmt_max_pep: f64,
-
     /// Quantification gate: least summed reporter signal-to-noise (0: off)
     ///
     /// Applies where the reporter scan records noise (Thermo .raw, or mzML converted with
@@ -1529,7 +1524,11 @@ pub(crate) enum QuantCommand {
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's extract table
     ///
-    /// Writes <base>.mbr.parquet and <base>.mbr_validation.parquet.
+    /// Writes <base>.mbr.parquet and <base>.mbr_validation.parquet. On a TMT study (a
+    /// directory of per-run <stem>.tmt.parquet tables from searches without rescoring, and no
+    /// library), joins the pooled rescoring (--psms, --decoy-psms) onto every run's reporter
+    /// rows, applies the quantification gate again, links the rows to the study's protein
+    /// groups (--database) and writes <base>.tmt.parquet.
     Finalize(Box<QuantFinalizeArgs>),
 }
 
@@ -1638,11 +1637,11 @@ pub(crate) struct QuantExtractArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct QuantFinalizeArgs {
-    /// Directory with the library and every run's <stem>.extract.parquet
+    /// Directory with the library and every run's <stem>.extract.parquet (on a TMT study, every run's <stem>.tmt.parquet)
     #[arg(long = "quant-dir", value_name = "DIR")]
     pub(crate) quant_dir: PathBuf,
 
-    /// Output base: writes <base>.mbr.parquet and <base>.mbr_validation.parquet
+    /// Output base: writes <base>.mbr.parquet and <base>.mbr_validation.parquet (<base>.tmt.parquet on a TMT study)
     #[arg(short = 'o', long = "output", value_name = "BASE")]
     pub(crate) output: PathBuf,
 
@@ -1754,6 +1753,24 @@ pub(crate) struct QuantFinalizeArgs {
           default_value_t = crate::quant_finalize::DEFAULT_TRACE_FRACTION,
           value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) quant_trace_fraction: f64,
+
+    /// TMT study: the SDRF of the runs, for each run's plex, fraction, instrument and channel samples
+    ///
+    /// The runs are matched by data file name. A channel is a reference when
+    /// characteristics[pooled sample] is pooled or SN=..., or characteristics[biological
+    /// replicate] is pooled; blank when a characteristics cell, or the last word of the source
+    /// name, is blank or empty. A plex is the files whose channels have the same samples and
+    /// technical replicates.
+    #[arg(long, value_name = "FILE", help_heading = H_ISOBARIC)]
+    pub(crate) sdrf: Option<PathBuf>,
+
+    /// TMT study: PEP threshold of a quantified PSM, applied with --psm-fdr [default: none]
+    ///
+    /// The pooled Percolator posterior_error_prob column, as the search's --pep. Every
+    /// quantified row is weighted by 1 - PEP in quant_weight.
+    #[arg(long = "pep", value_name = "PEP", value_parser = parse_unit_fraction,
+          help_heading = H_FDR)]
+    pub(crate) pep: Option<f64>,
 
     /// Worker threads [default: the number of logical CPUs]
     #[arg(long, value_name = "N")]

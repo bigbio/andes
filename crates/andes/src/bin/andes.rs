@@ -62,6 +62,8 @@ mod search;
 mod spectra;
 #[path = "andes/tmt_mbr.rs"]
 mod tmt_mbr;
+#[path = "andes/tmt_study.rs"]
+mod tmt_study;
 #[path = "andes/train.rs"]
 mod train;
 #[path = "andes/train_intensity.rs"]

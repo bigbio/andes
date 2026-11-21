@@ -77,7 +77,9 @@ pub(crate) const GAP_FEATURES: [&str; 6] = [
     "beta_gap_missing",
 ];
 
-fn spec_id(r: &XlSpectrumResult) -> String {
+/// The PIN `SpecId` of a spectrum's crosslink row; the CSM table repeats it in `spec_id`, so a
+/// rescored PIN joins back to the table by it.
+pub(crate) fn spec_id(r: &XlSpectrumResult) -> String {
     format!("xl{}", r.spec_idx)
 }
 

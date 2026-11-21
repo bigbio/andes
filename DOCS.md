@@ -1399,6 +1399,9 @@ search's pair score, which is on one scale across runs, or `percolator` when the
 rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
 not comparable, so pooling a `percolator` row is an error; search those runs without the
 flags, or search them together and rescore once.
+Each CSM table also has a `spec_id` column, the `SpecId` of the spectrum's row in the run's
+`<base>.xl.pin`. Pooled rescoring joins its scores back to the table by that column, not by
+scan number: one search can read several spectrum files, and MGF spectra may carry no scan.
 The pooled q-values control the error of the whole list, not of each project's part of it:
 a project whose decoys score higher than the others' can hold more false CSMs than the cut.
 The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share

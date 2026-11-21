@@ -915,7 +915,7 @@ fn modifications_of(cand: &Candidate) -> Vec<ModRecord> {
         .residues
         .iter()
         .enumerate()
-        .filter_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
+        .flat_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
         .collect()
 }
 

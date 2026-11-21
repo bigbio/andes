@@ -319,6 +319,7 @@ pub(crate) fn search_secondary(
             z,
             Some(psm.edge_score),
             full,
+            None,
         );
         f.delta_raw_score = delta_raw_score;
         f.listwise_score_gap = listwise_score_gap;

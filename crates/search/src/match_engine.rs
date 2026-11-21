@@ -197,6 +197,7 @@ pub struct PreparedSearch<'a> {
     form_rt_model: Option<Arc<crate::dia_rt_rank::FormRtModel>>,
     dia_rt_prior: RwLock<Option<Arc<crate::dia_rt_rank::DiaRtPrior>>>,
     form_rt_cache: crate::dia_rt_rank::FormRtCache,
+    frag_pred_cache: crate::frag_pred_cache::FragPredCache,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -512,6 +513,7 @@ impl<'a> PreparedSearch<'a> {
             form_rt_model: None,
             dia_rt_prior: RwLock::new(None),
             form_rt_cache: crate::dia_rt_rank::FormRtCache::default(),
+            frag_pred_cache: crate::frag_pred_cache::FragPredCache::default(),
         }
     }
 
@@ -784,11 +786,13 @@ impl<'a> PreparedSearch<'a> {
             || params.charge_range.clone().count() < 2
             || spectra.iter().all(has_charge)
         {
-            return self
+            let queues = self
                 .run_chunk_inner(spectra, spectrum_idx_offset, params, false)
                 .into_iter()
                 .map(|(queue, _pool)| queue)
                 .collect();
+            self.frag_pred_cache.clear();
+            return queues;
         }
         let mass = crate::fragment_index::index_order_mass;
         let (lo, hi) = spectra
@@ -835,6 +839,7 @@ impl<'a> PreparedSearch<'a> {
         if complete_later {
             self.complete_kept_features(spectra, &mut merged);
         }
+        self.frag_pred_cache.clear();
         merged
     }
 
@@ -884,7 +889,14 @@ impl<'a> PreparedSearch<'a> {
                             scored.push((z, ScoredSpectrum::new(spec, scorer, z)));
                         }
                         let ss = &scored.iter().find(|(c, _)| *c == z).expect("scored").1;
-                        complete_psm_features(&mut psm.features, ss, &peps[k], scorer, z);
+                        complete_psm_features(
+                            &mut psm.features,
+                            ss,
+                            &peps[k],
+                            scorer,
+                            z,
+                            Some(&self.frag_pred_cache),
+                        );
                         k += 1;
                     });
                 });
@@ -1589,6 +1601,7 @@ impl<'a> PreparedSearch<'a> {
                         psm.charge_used,
                         Some(psm.edge_score),
                         full,
+                        Some(&self.frag_pred_cache),
                     );
 
                     features.delta_raw_score = delta_raw_score;
@@ -1657,6 +1670,7 @@ impl<'a> PreparedSearch<'a> {
                             &cand.peptide,
                             scorer,
                             psm.charge_used,
+                            Some(&self.frag_pred_cache),
                         );
                     });
                 }
@@ -2079,7 +2093,20 @@ pub(crate) fn compute_psm_features(
     scorer: &RankScorer,
     charge: u8,
 ) -> PsmFeatures {
-    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true)
+    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true, None)
+}
+
+/// [`predict_frag_intensities`], through `cache` when one is given.
+fn predict_frag_with(
+    model: &scoring_crate::gbdt_eval::GbdtPeakModel,
+    peptide: &Peptide,
+    charge: u8,
+    cache: Option<&crate::frag_pred_cache::FragPredCache>,
+) -> Vec<f64> {
+    match cache {
+        Some(c) => c.intensities(model, peptide, charge),
+        None => predict_frag_intensities(model, peptide, charge),
+    }
 }
 
 /// The PSM features that only a full feature pass computes: the fragment-intensity LLR
@@ -2134,13 +2161,15 @@ fn kept_psm_feature_values(
 }
 
 /// Completes `features`, computed by a pass with `full = false` for `peptide` at `charge`,
-/// with the full-pass-only features, giving the same values as a full pass.
+/// with the full-pass-only features, giving the same values as a full pass. `frag_cache`
+/// shares fragment-intensity predictions within a chunk.
 pub(crate) fn complete_psm_features(
     features: &mut PsmFeatures,
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
+    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
 ) {
     if peptide.length() < 2 {
         return;
@@ -2149,7 +2178,7 @@ pub(crate) fn complete_psm_features(
         .param()
         .frag_intensity_model
         .as_deref()
-        .map(|g| predict_frag_intensities(g, peptide, charge));
+        .map(|g| predict_frag_with(g, peptide, charge, frag_cache));
     let kept = kept_psm_feature_values(scored_spec, peptide, scorer, charge, frag_pred.as_deref());
     features.frag_pred_explained = kept.frag_pred_explained;
     features.frag_pred_chance_llr = kept.frag_pred_chance_llr;
@@ -2169,6 +2198,7 @@ pub(crate) fn compute_psm_features_with_edge(
     charge: u8,
     known_edge_score: Option<i32>,
     full: bool,
+    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
@@ -2493,7 +2523,7 @@ pub(crate) fn compute_psm_features_with_edge(
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
     let frag_pred: Option<Vec<f64>> = frag_intensity_model
         .filter(|_| peptide.length() >= 2)
-        .map(|g| predict_frag_intensities(g, peptide, charge));
+        .map(|g| predict_frag_with(g, peptide, charge, frag_cache));
     let frag_pred_slice = frag_pred.as_deref();
     let intensity_signal_val = intensity_signal(
         frag_intensity_model,

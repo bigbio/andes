@@ -4,6 +4,7 @@ mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
 pub mod dia_rt_rank;
+pub mod frag_pred_cache;
 pub mod fragment_error;
 pub mod fragment_index;
 pub mod glyco_fragment_index;

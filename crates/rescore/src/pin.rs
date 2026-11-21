@@ -17,8 +17,9 @@ pub enum Sizing {
     /// The budget is `MemLimit::bytes`, as given.
     Fixed,
     /// `MemLimit::bytes` is the memory the job or machine allows; the budget is what the PIN
-    /// needs to stay in memory, within that. The text says where the allowance comes from.
-    FitInput(String),
+    /// needs to stay in memory, never above `cap` nor above the allowance. `why` says where the
+    /// allowance comes from.
+    FitInput { cap: u64, why: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,7 +336,11 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         hcells: &hcells,
         path,
     };
-    let budget = Budget::new(limit.bytes, &limit.spill_dir);
+    let reading_budget = match &limit.sizing {
+        Sizing::Fixed => limit.bytes,
+        Sizing::FitInput { cap, .. } => limit.bytes.min(*cap),
+    };
+    let budget = Budget::new(reading_budget, &limit.spill_dir);
     let mut builder = StoreBuilder::new(nfeat, &budget);
     let mut texts = TextsBuilder::new(&budget);
     let mut meta: Vec<RowMeta> = Vec::new();
@@ -405,8 +410,8 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         budget,
         _per_row: per_row,
     };
-    if let Sizing::FitInput(why) = &limit.sizing {
-        fit_budget_to_input(&pin, limit.bytes, why, &limit.spill_dir);
+    if let Sizing::FitInput { cap, why } = &limit.sizing {
+        fit_budget_to_input(&pin, limit.bytes, *cap, why, &limit.spill_dir);
     }
     Ok(pin)
 }
@@ -450,12 +455,12 @@ fn thousands(n: usize) -> String {
 
 static BUDGET_LOGGED: AtomicBool = AtomicBool::new(false);
 
-fn fit_budget_to_input(pin: &Pin, allowed: u64, why: &str, spill_dir: &Path) {
+fn fit_budget_to_input(pin: &Pin, allowed: u64, cap: u64, why: &str, spill_dir: &Path) {
     let n = pin.meta.len();
     let nfeat = pin.rows.nfeat();
     let need = in_memory_need(n, nfeat, pin.texts.bytes(), rayon::current_num_threads());
     let room = allowed.saturating_sub(n as u64 * UNBUDGETED_BYTES_PER_ROW);
-    pin.budget.shrink_to(need.min(room));
+    pin.budget.shrink_to(need.min(cap).min(room));
     let budget = pin.budget.total();
     let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
     let spills = need > budget;
@@ -465,13 +470,20 @@ fn fit_budget_to_input(pin: &Pin, allowed: u64, why: &str, spill_dir: &Path) {
     } else {
         log::Level::Debug
     };
-    if spills {
+    let psms = thousands(n);
+    if !spills {
         log::log!(
             target: "rescore",
             level,
-            "storage budget {:.1} GB, all the memory allowed ({why}): {} PSMs x {nfeat} features need {:.1} GB, so part of them spills to {}",
+            "storage budget {:.1} GB, what {psms} PSMs x {nfeat} features need to stay in memory ({why})",
+            gb(budget)
+        );
+    } else if cap < room {
+        log::log!(
+            target: "rescore",
+            level,
+            "storage budget {:.1} GB, the default cap (--rescore-memory-gb sets another): {psms} PSMs x {nfeat} features need {:.1} GB, so part of them spills to {}",
             gb(budget),
-            thousands(n),
             gb(need),
             spill_dir.display()
         );
@@ -479,9 +491,10 @@ fn fit_budget_to_input(pin: &Pin, allowed: u64, why: &str, spill_dir: &Path) {
         log::log!(
             target: "rescore",
             level,
-            "storage budget {:.1} GB, what {} PSMs x {nfeat} features need to stay in memory ({why})",
+            "storage budget {:.1} GB, all the memory allowed ({why}): {psms} PSMs x {nfeat} features need {:.1} GB, so part of them spills to {}",
             gb(budget),
-            thousands(n)
+            gb(need),
+            spill_dir.display()
         );
     }
 }

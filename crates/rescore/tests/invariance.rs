@@ -290,7 +290,10 @@ fn output_identical_when_the_budget_is_sized_to_the_input() {
             &sub,
             3,
             allowed,
-            rescore::Sizing::FitInput("test allowance".to_string()),
+            rescore::Sizing::FitInput {
+            cap: u64::MAX,
+            why: "test allowance".to_string(),
+        },
         );
         same(
             &format!("automatic budget within {allowed} bytes"),

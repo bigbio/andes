@@ -42,9 +42,9 @@ impl PercolatorBackend {
                     memory.bytes as f64 / (1u64 << 30) as f64,
                     memory.spill_dir.display()
                 ),
-                rescore::Sizing::FitInput(_) => format!(
+                rescore::Sizing::FitInput { cap, .. } => format!(
                     "native (memory sized to the PIN, up to {:.1} GB, spill to {})",
-                    memory.bytes as f64 / (1u64 << 30) as f64,
+                    memory.bytes.min(cap) as f64 / (1u64 << 30) as f64,
                     memory.spill_dir.display()
                 ),
             },

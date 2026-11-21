@@ -160,9 +160,10 @@ const RESCORE_MARGIN_MIN_BYTES: u64 = 1 << 30;
 const RESCORE_FALLBACK_BYTES: u64 = 16 << 30;
 
 /// The native rescoring engine's memory limit. `gb` (`--rescore-memory-gb`) is a fixed
-/// budget. Without it the engine sizes the budget to the PIN, within the memory free to this
-/// process now: the cgroup limit less what the process holds (when there is a limit) and
-/// `MemAvailable`, whichever is lower, less a margin.
+/// budget. Without it the engine sizes the budget to the PIN, never above
+/// `DEFAULT_RESCORE_MEMORY_GB` nor above the memory free to this process now: the cgroup limit
+/// less what the process holds (when there is a limit) and `MemAvailable`, whichever is lower,
+/// less a margin.
 pub(crate) fn rescore_memory(gb: Option<u64>, spill_dir: PathBuf) -> output::MemLimit {
     match gb {
         Some(gb) => output::MemLimit {
@@ -179,7 +180,10 @@ pub(crate) fn rescore_memory(gb: Option<u64>, spill_dir: PathBuf) -> output::Mem
             output::MemLimit {
                 bytes,
                 spill_dir,
-                sizing: output::Sizing::FitInput(why),
+                sizing: output::Sizing::FitInput {
+                    cap: crate::cli::DEFAULT_RESCORE_MEMORY_GB << 30,
+                    why,
+                },
             }
         }
     }
@@ -390,7 +394,7 @@ mod tests {
         assert_eq!(m.bytes, 3 * GIB);
         assert_eq!(m.sizing, output::Sizing::Fixed);
         let m = rescore_memory(None, PathBuf::from("/s"));
-        assert!(matches!(m.sizing, output::Sizing::FitInput(_)));
+        assert!(matches!(m.sizing, output::Sizing::FitInput { .. }));
     }
 
     #[test]

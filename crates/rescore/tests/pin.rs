@@ -162,7 +162,10 @@ fn an_automatic_budget_is_what_the_pin_needs_within_the_allowance() {
     let auto = |bytes: u64| MemLimit {
         bytes,
         spill_dir: d.path().to_path_buf(),
-        sizing: rescore::Sizing::FitInput("test allowance".to_string()),
+        sizing: rescore::Sizing::FitInput {
+            cap: u64::MAX,
+            why: "test allowance".to_string(),
+        },
     };
     let roomy = read_pin(&p, auto(1 << 40)).unwrap();
     let need = roomy.budget.total();
@@ -174,4 +177,23 @@ fn an_automatic_budget_is_what_the_pin_needs_within_the_allowance() {
     let tight = read_pin(&p, auto(need / 4)).unwrap();
     assert!(tight.budget.total() <= need / 4);
     assert_eq!(blocks(&tight.rows), blocks(&fixed.rows));
+}
+
+#[test]
+fn an_automatic_budget_never_exceeds_its_cap() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "x.pin", PIN);
+    let capped = |cap: u64| MemLimit {
+        bytes: 1 << 40,
+        spill_dir: d.path().to_path_buf(),
+        sizing: rescore::Sizing::FitInput {
+            cap,
+            why: "test allowance".to_string(),
+        },
+    };
+    let need = read_pin(&p, capped(u64::MAX)).unwrap().budget.total();
+    let pin = read_pin(&p, capped(need / 3)).unwrap();
+    assert!(pin.budget.total() <= need / 3);
+    let fixed = read_pin(&p, ram(d.path())).unwrap();
+    assert_eq!(blocks(&pin.rows), blocks(&fixed.rows));
 }

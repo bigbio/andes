@@ -344,7 +344,7 @@ fn encode_rescore(backend: &PercolatorBackend, args: &[String]) -> String {
             "native\n{}\n{}",
             match memory.sizing {
                 output::Sizing::Fixed => memory.bytes.to_string(),
-                output::Sizing::FitInput(_) => "auto".to_string(),
+                output::Sizing::FitInput { .. } => "auto".to_string(),
             },
             memory.spill_dir.display()
         ),
@@ -426,7 +426,7 @@ fn study_rescore(
                         spill_dir: scratch.to_path_buf(),
                         sizing: output::Sizing::Fixed,
                     },
-                    output::Sizing::FitInput(_) => {
+                    output::Sizing::FitInput { .. } => {
                         crate::memlimit::rescore_memory(None, scratch.to_path_buf())
                     }
                 },
@@ -1142,7 +1142,7 @@ mod tests {
         assert!(stored.starts_with("native\nauto\n/tmp/x\n"), "{stored:?}");
         match decode_rescore(&stored).unwrap() {
             (PercolatorBackend::Native { memory }, a) => {
-                assert!(matches!(memory.sizing, output::Sizing::FitInput(_)));
+                assert!(matches!(memory.sizing, output::Sizing::FitInput { .. }));
                 assert_eq!(memory.spill_dir, PathBuf::from("/tmp/x"));
                 assert_eq!(a, args);
             }
@@ -1151,7 +1151,7 @@ mod tests {
         let (study, _) = study_rescore(&[("run01", stored)], Path::new("/fin")).unwrap();
         match study {
             PercolatorBackend::Native { memory } => {
-                assert!(matches!(memory.sizing, output::Sizing::FitInput(_)));
+                assert!(matches!(memory.sizing, output::Sizing::FitInput { .. }));
                 assert_eq!(memory.spill_dir, PathBuf::from("/fin"));
             }
             other => panic!("expected the native engine, got {}", other.describe()),

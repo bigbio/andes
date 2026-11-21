@@ -1754,7 +1754,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     crate::memlimit::mark_stage("pool released");
     let mut rerank_dropped = std::collections::HashSet::new();
     if pooled {
-        rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+        rerank_dropped = crate::dia::rerank_pin(
+            &output_pin_path,
+            cli.top_n as usize,
+            cli.output_parquet.is_some() || quant.is_some(),
+        )?;
         crate::memlimit::mark_stage("per-scan cut");
     }
     if cli.dia {

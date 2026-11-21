@@ -1420,8 +1420,10 @@ pub(crate) enum CohortCommand {
     Plan(CohortPlanArgs),
     /// Crosslink FDR over the CSM tables of several runs, as one search would compute it
     ///
-    /// Reads each run's <base>.xl.tsv, groups all CSMs into residue pairs and protein pairs,
-    /// and gives every level its q-values once over all runs. Writes <output>.xl.tsv,
+    /// Reads each run's <base>.xl.tsv, rescores the intra-protein links with one Percolator
+    /// model over all runs' <base>.xl.pin (the native engine; homotypic and inter-links keep
+    /// the pair score), groups all CSMs into residue pairs and protein pairs, and gives every level
+    /// its q-values once over all runs. Writes <output>.xl.tsv,
     /// <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv and each project's share of the
     /// pooled list, <output>.xl.projects.parquet.
     #[command(name = "xl-fdr", hide = true)]

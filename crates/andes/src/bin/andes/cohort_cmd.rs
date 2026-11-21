@@ -318,10 +318,15 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
 /// One CSM read from a run's table.
 struct CsmRow {
     run: String,
+    /// The index of its table among the tables read, and its scan in that table: the key of
+    /// its row in the table's sibling PIN.
+    table: usize,
+    scan: String,
     spectrum: String,
     class: xl::decoy::PairClass,
     link: xl::rollup::LinkClass,
     score: f64,
+    score_source: &'static str,
     residue_pair: String,
     protein_pair: String,
 }
@@ -340,7 +345,7 @@ fn link_class(s: &str) -> Option<xl::rollup::LinkClass> {
 /// Read one run's CSM table into `out`. Rows with the score `NA` (spectra without a CSM)
 /// are counted, not read; any other score that is not a number, or a scored row without
 /// its residue pair or protein pair, is an error. Returns (scored, unscored).
-fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), String> {
+fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize, usize), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let name = path
@@ -362,6 +367,7 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), Strin
     let (sp, cl, li, sc) = (col("spectrum")?, col("class")?, col("link")?, col("score")?);
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
     let src = col("score_source")?;
+    let scan = col("scan")?;
     let (mut n, mut unscored) = (0, 0);
     for (k, line) in lines.enumerate() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -394,10 +400,13 @@ fn read_csms(path: &Path, out: &mut Vec<CsmRow>) -> Result<(usize, usize), Strin
         };
         out.push(CsmRow {
             run: run.clone(),
+            table,
+            scan: get(scan).to_string(),
             spectrum: get(sp).to_string(),
             class: pair_class(get(cl)).ok_or_else(|| bad("class"))?,
             link: link_class(get(li)).ok_or_else(|| bad("link"))?,
             score,
+            score_source: "pair",
             residue_pair: pair(rp, "residue_pair")?,
             protein_pair: pair(pp, "protein_pair")?,
         });
@@ -524,6 +533,159 @@ fn report_project_error(rows: &[output::xl_projects::XlProjectRow]) {
     }
 }
 
+/// The sibling PIN of a run's CSM table: `<base>.xl.pin` beside `<base>.xl.tsv`.
+fn pin_of(table: &Path) -> PathBuf {
+    let name = table
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    table.with_file_name(format!(
+        "{}.xl.pin",
+        name.strip_suffix(".xl.tsv").unwrap_or(&name)
+    ))
+}
+
+/// Replace the pair score of every intra-protein CSM with the score of one Percolator model
+/// trained on all CSMs of `tables` (their sibling PINs pooled), so that the intra-protein
+/// q-values use the evidence of the whole group. Homotypic and inter-link CSMs keep the
+/// pair score: rescored, their decoys undercount the false targets on a proteome-sized
+/// database. Does nothing, with a warning, when a table has no PIN beside it.
+fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn Error>> {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    if !csms.iter().any(|c| c.link == xl::rollup::LinkClass::Intra) {
+        return Ok(());
+    }
+    let pins: Vec<PathBuf> = tables.iter().map(|t| pin_of(t)).collect();
+    if let Some(missing) = pins.iter().find(|p| !p.exists()) {
+        log::warn!(
+            target: "cohort",
+            "{} not found; intra-protein links keep the pair score (rescoring pools every run's PIN)",
+            missing.display()
+        );
+        return Ok(());
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("andes-xl-rescore")
+        .tempdir()?;
+    let pooled = dir.path().join("intra.pin");
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&pooled)?);
+    let mut key_of: HashMap<String, (usize, String)> = HashMap::new();
+    let mut head: Option<Vec<String>> = None;
+    let mut keep: Vec<usize> = Vec::new();
+    let (mut si, mut sc) = (0, 0);
+    for (k, pin) in pins.iter().enumerate() {
+        let mut lines = BufReader::new(
+            std::fs::File::open(pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
+        )
+        .lines();
+        let h: Vec<String> = lines
+            .next()
+            .transpose()?
+            .unwrap_or_default()
+            .split('\t')
+            .map(str::to_string)
+            .collect();
+        match &head {
+            None => {
+                let pos = |c: &str| {
+                    h.iter()
+                        .position(|x| x == c)
+                        .ok_or_else(|| format!("{}: no `{c}` column", pin.display()))
+                };
+                si = pos("SpecId")?;
+                sc = pos("ScanNr")?;
+                keep = (0..h.len())
+                    .filter(|&i| {
+                        let c = h[i].as_str();
+                        !["FileName", "ExpMass", "CalcMass"].contains(&c)
+                    })
+                    .collect();
+                let cols: Vec<&str> = keep.iter().map(|&i| h[i].as_str()).collect();
+                writeln!(out, "{}", cols.join("\t"))?;
+                head = Some(h);
+            }
+            Some(first) if *first != h => {
+                return Err(format!(
+                    "{}: its PIN columns differ from {}; search all runs with the same andes version",
+                    pin.display(),
+                    pins[0].display()
+                )
+                .into());
+            }
+            Some(_) => {}
+        }
+        for line in lines {
+            let line = line?;
+            let mut f: Vec<String> = line.split('\t').map(str::to_string).collect();
+            let scan = f.get(sc).cloned().unwrap_or_default();
+            let n: u64 = scan
+                .parse()
+                .map_err(|_| format!("{}: ScanNr `{scan}` is not a number", pin.display()))?;
+            let id = format!("{k}|{}", f[si]);
+            f[si] = id.clone();
+            f[sc] = (k as u64 * 1_000_000_000 + n).to_string();
+            key_of.insert(id, (k, scan));
+            let cols: Vec<&str> = keep
+                .iter()
+                .filter_map(|&i| f.get(i).map(String::as_str))
+                .collect();
+            writeln!(out, "{}", cols.join("\t"))?;
+        }
+    }
+    out.flush()?;
+    drop(out);
+    let backend = output::PercolatorBackend::Native {
+        memory: output::MemLimit {
+            bytes: crate::cli::default_value::<crate::cli::PercolatorArgs>("rescore_memory_gb")
+                .parse::<u64>()
+                .unwrap_or(16)
+                .saturating_mul(1 << 30),
+            spill_dir: dir.path().to_path_buf(),
+        },
+    };
+    let t = std::time::Instant::now();
+    let mut scored = output::run_percolator_pooled(&backend, &pooled, &[])
+        .map_err(|e| format!("intra-protein rescoring: {e}"))?;
+    let decoy_text = std::fs::read_to_string(output::decoy_results_path(&pooled))?;
+    scored.extend(output::parse_psm_results(&decoy_text).map_err(|e| format!("{e}"))?);
+    let mut score: HashMap<(usize, &str), f64> = HashMap::new();
+    for (id, psm) in &scored {
+        if let (Some((k, scan)), Some(s)) = (key_of.get(id), psm.score) {
+            score.insert((*k, scan.as_str()), s);
+        }
+    }
+    let mut unscored = 0usize;
+    let mut n = 0usize;
+    for c in csms
+        .iter_mut()
+        .filter(|c| c.link == xl::rollup::LinkClass::Intra)
+    {
+        match score.get(&(c.table, c.scan.as_str())) {
+            Some(&s) => {
+                c.score = s;
+                c.score_source = "percolator";
+                n += 1;
+            }
+            None => {
+                c.score = f64::NEG_INFINITY;
+                c.score_source = "percolator";
+                unscored += 1;
+            }
+        }
+    }
+    log::info!(
+        target: "cohort",
+        "intra-protein links rescored by one Percolator model over {} runs: {} CSMs ({} \
+         without a score, ranked last) [{:.1}s]",
+        thousands(tables.len()),
+        thousands(n),
+        thousands(unscored),
+        t.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`.
 fn xl_fdr_tables(
     tables: &[PathBuf],
@@ -531,8 +693,8 @@ fn xl_fdr_tables(
     projects: &Projects,
 ) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
-    for t in tables {
-        let (n, unscored) = read_csms(t, &mut csms)?;
+    for (k, t) in tables.iter().enumerate() {
+        let (n, unscored) = read_csms(t, k, &mut csms)?;
         log::info!(
             target: "cohort",
             "{}: {} scored CSMs, {} spectra without a CSM",
@@ -541,6 +703,7 @@ fn xl_fdr_tables(
             thousands(unscored)
         );
     }
+    rescore_intra(tables, &mut csms)?;
     let items: Vec<xl::rollup::Item> = csms
         .iter()
         .map(|c| xl::rollup::Item {
@@ -568,7 +731,7 @@ fn xl_fdr_tables(
     use std::io::Write;
     writeln!(
         w,
-        "run\tspectrum\tclass\tlink\tscore\tq_value\tresidue_pair\tprotein_pair"
+        "run\tspectrum\tclass\tlink\tscore\tscore_source\tq_value\tresidue_pair\tprotein_pair"
     )?;
     let mut q = vec![None; csms.len()];
     for (&row, v) in levels.csm_rows.iter().zip(&levels.csm_q) {
@@ -577,12 +740,13 @@ fn xl_fdr_tables(
     for (c, q) in csms.iter().zip(&q) {
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
             c.run,
             c.spectrum,
             c.class.name(),
             c.link.name(),
             c.score,
+            c.score_source,
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             c.residue_pair,
             c.protein_pair
@@ -661,20 +825,22 @@ mod tests {
         let p = t.path().join("A.r1.xl.tsv");
         std::fs::write(
             &p,
-            "spectrum\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
-             A.r1/s1\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
-             A.r1/s2\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
-             A.r1/s3\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
+            "spectrum\tscan\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
+             A.r1/s1\t1\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
+             A.r1/s2\t2\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
+             A.r1/s3\t3\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
         )
         .unwrap();
         let mut rows = Vec::new();
-        assert_eq!(read_csms(&p, &mut rows).unwrap(), (2, 1));
+        assert_eq!(read_csms(&p, 4, &mut rows).unwrap(), (2, 1));
         assert_eq!(rows[0].run, "A.r1");
+        assert_eq!((rows[0].table, rows[0].scan.as_str()), (4, "1"));
+        assert_eq!(rows[1].scan, "3");
         assert_eq!(rows[0].class, xl::decoy::PairClass::TT);
         assert_eq!(rows[1].link, xl::rollup::LinkClass::Homotypic);
         let old = t.path().join("B.xl.tsv");
         std::fs::write(&old, "spectrum\tclass\tlink\tscore\n").unwrap();
-        assert!(read_csms(&old, &mut rows)
+        assert!(read_csms(&old, 0, &mut rows)
             .unwrap_err()
             .contains("residue_pair"));
     }
@@ -682,39 +848,60 @@ mod tests {
     #[test]
     fn a_malformed_score_or_missing_pair_is_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let head = "spectrum\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
+        let head = "spectrum\tscan\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
         for (name, row, what) in [
             (
                 "a.xl.tsv",
-                "s1\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
                 "row 2: bad score",
             ),
             (
                 "b.xl.tsv",
-                "s1\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
                 "bad score",
             ),
             (
                 "c.xl.tsv",
-                "s1\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
+                "s1\t1\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
                 "bad residue_pair",
             ),
             (
                 "e.xl.tsv",
-                "s1\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
                 "rescored on its own",
             ),
             (
                 "d.xl.tsv",
-                "s1\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
+                "s1\t1\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
                 "bad protein_pair",
             ),
         ] {
             let p = t.path().join(name);
             std::fs::write(&p, format!("{head}{row}\n")).unwrap();
-            let e = read_csms(&p, &mut Vec::new()).unwrap_err();
+            let e = read_csms(&p, 0, &mut Vec::new()).unwrap_err();
             assert!(e.contains(what), "{name}: {e}");
         }
+    }
+
+    #[test]
+    fn a_table_pin_is_its_sibling_and_without_one_intra_links_keep_the_pair_score() {
+        let t = tempfile::tempdir().unwrap();
+        let table = t.path().join("A.r1.xl.tsv");
+        assert_eq!(pin_of(&table), t.path().join("A.r1.xl.pin"));
+        let mut rows = vec![CsmRow {
+            run: "A.r1".into(),
+            table: 0,
+            scan: "7".into(),
+            spectrum: "A.r1/s7".into(),
+            class: xl::decoy::PairClass::TT,
+            link: xl::rollup::LinkClass::Intra,
+            score: 12.5,
+            score_source: "pair",
+            residue_pair: "P1:5 -- P2:9".into(),
+            protein_pair: "P1 -- P2".into(),
+        }];
+        rescore_intra(&[table], &mut rows).unwrap();
+        assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
     }
 
     #[test]
@@ -796,10 +983,13 @@ mod tests {
         use xl::rollup::LinkClass::{Homotypic, Intra};
         let row = |run: &str, class, link| CsmRow {
             run: run.to_string(),
+            table: 0,
+            scan: String::new(),
             spectrum: String::new(),
             class,
             link,
             score: 0.0,
+            score_source: "pair",
             residue_pair: String::new(),
             protein_pair: String::new(),
         };

@@ -1522,7 +1522,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let spectra = all_spectra;
+    let mut spectra = all_spectra;
     let mut queues = all_queues;
 
     if standalone {
@@ -1876,6 +1876,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 pass1_q = n;
                 pass1_best = best;
+                if fact_rows.is_some() {
+                    for s in &mut spectra {
+                        s.peaks = Vec::new();
+                    }
+                    crate::memlimit::release_free_memory();
+                }
                 crate::memlimit::mark_stage("precursor q");
                 log::info!(
                     target: "rescore",

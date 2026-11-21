@@ -952,13 +952,7 @@ fn rescore(
     out.flush()?;
     drop(out);
     let backend = output::PercolatorBackend::Native {
-        memory: output::MemLimit {
-            bytes: crate::cli::default_value::<crate::cli::RescoreArgs>("rescore_memory_gb")
-                .parse::<u64>()
-                .unwrap_or(16)
-                .saturating_mul(1 << 30),
-            spill_dir: dir.path().to_path_buf(),
-        },
+        memory: crate::memlimit::rescore_memory(None, dir.path().to_path_buf()),
     };
     let t = std::time::Instant::now();
     let mut scored = output::run_percolator_pooled(&backend, &pooled, &[])

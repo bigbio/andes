@@ -27,8 +27,15 @@ fn run_name(path: &Path) -> String {
     name
 }
 
-fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>, String> {
+/// The PSMs of every file, and the runs they come from: the distinct values of a file's run
+/// column in first-seen order (a pooled Percolator result names each PSM's spectrum file), or
+/// the file's own name when it has no such column.
+type PsmFiles = (HashMap<String, output::PercolatorPsm>, Vec<String>);
+
+fn read_all(paths: &[PathBuf]) -> Result<PsmFiles, String> {
     let mut all = HashMap::new();
+    let mut runs: Vec<String> = Vec::new();
+    let mut known_runs: HashSet<String> = HashSet::new();
     for p in paths {
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
         let file = std::fs::File::open(p).map_err(|e| err(&e))?;
@@ -36,7 +43,15 @@ fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>,
             output::PsmResultReader::new(std::io::BufReader::with_capacity(1 << 20, file))
                 .map_err(|e| err(&e))?;
         let mut seen: HashSet<u128> = HashSet::new();
+        let mut named_runs = false;
         while let Some(row) = reader.next_row().map_err(|e| err(&e))? {
+            if let Some(run) = row.run.filter(|r| !r.is_empty()) {
+                named_runs = true;
+                if !known_runs.contains(run) {
+                    known_runs.insert(run.to_string());
+                    runs.push(run.to_string());
+                }
+            }
             if !seen.insert(id_hash(row.psm_id)) {
                 return Err(err(&format!(
                     "Percolator result has duplicate PSMId `{}` (join key must be unique)",
@@ -54,9 +69,15 @@ fn read_all(paths: &[PathBuf]) -> Result<HashMap<String, output::PercolatorPsm>,
             };
             all.insert(all.len().to_string(), psm);
         }
+        if !named_runs {
+            let run = run_name(p);
+            if known_runs.insert(run.clone()) {
+                runs.push(run);
+            }
+        }
     }
     all.shrink_to_fit();
-    Ok(all)
+    Ok((all, runs))
 }
 
 fn id_hash(id: &str) -> u128 {
@@ -84,12 +105,13 @@ fn annotated_site_masses(db: &DatabaseArgs) -> Result<SiteMods, Box<dyn std::err
     ))
 }
 
+/// Protein inference over Percolator result files, with the runs the target PSMs come from.
 pub(crate) fn infer_from_files(
     database: &Path,
     a: &ProteinArgs,
     psms: &[PathBuf],
     decoy_psms: &[PathBuf],
-) -> Result<output::Inference, Box<dyn std::error::Error>> {
+) -> Result<(output::Inference, Vec<String>), Box<dyn std::error::Error>> {
     if psms.len() != decoy_psms.len() {
         return Err(format!(
             "--psms has {} files and --decoy-psms {}: give the decoy results of each target file",
@@ -98,9 +120,9 @@ pub(crate) fn infer_from_files(
         )
         .into());
     }
-    let targets = read_all(psms)?;
-    let decoys = read_all(decoy_psms)?;
-    infer_from_maps(database, a, targets, &decoys)
+    let (targets, runs) = read_all(psms)?;
+    let (decoys, _) = read_all(decoy_psms)?;
+    Ok((infer_from_maps(database, a, targets, &decoys)?, runs))
 }
 
 /// Protein inference over Percolator results already in memory (target and decoy PSMs).
@@ -160,12 +182,12 @@ pub(crate) fn infer_from_maps(
 }
 
 pub(crate) fn run_inference(a: InferenceArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (inf, file_runs) = infer_from_files(&a.database, &a.proteins, &a.psms, &a.decoy_psms)?;
     let runs: Vec<String> = if a.runs.is_empty() {
-        a.psms.iter().map(|p| run_name(p)).collect()
+        file_runs
     } else {
         a.runs.clone()
     };
-    let inf = infer_from_files(&a.database, &a.proteins, &a.psms, &a.decoy_psms)?;
 
     let path = {
         let mut p = a.output.clone().into_os_string();
@@ -229,11 +251,34 @@ mod tests {
             "b.txt",
             &[row, "b_1_1\t1.0\t0.02\t0.03\tK.OTHERK.R\tsp|P3"],
         );
-        let all = read_all(&[a, b]).unwrap();
+        let (all, runs) = read_all(&[a, b]).unwrap();
         assert_eq!(all.len(), 3);
+        assert_eq!(runs, ["a", "b"]);
         let first = all.values().find(|p| p.peptide == "R.PEPTIDEK.A").unwrap();
         assert_eq!(first.proteins, "sp|P1;sp|P2");
         assert_eq!(first.score, Some(2.5));
+    }
+
+    #[test]
+    fn a_pooled_result_names_the_runs_of_its_run_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pooled.target.psms.txt");
+        std::fs::write(
+            &path,
+            "PSMId\tfilename\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+             a_1_1\tFr02\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\n\
+             a_2_1\tFr01\t2.0\t0.002\t0.001\tR.OTHERK.A\tsp|P2\n\
+             a_3_1\tFr02\t1.0\t0.003\t0.002\tR.THIRDK.A\tsp|P3\n",
+        )
+        .unwrap();
+        let plain = write(
+            dir.path(),
+            "single.txt",
+            &["b_1_1\t1.0\t0.02\t0.03\tK.OTHERK.R\tsp|P3"],
+        );
+        let (all, runs) = read_all(&[path, plain]).unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(runs, ["Fr02", "Fr01", "single"]);
     }
 
     #[test]
@@ -286,7 +331,7 @@ mod tests {
         let m = ProteinWrap::command().try_get_matches_from(argv).unwrap();
         let mut a = ProteinWrap::from_arg_matches(&m).unwrap().proteins;
         crate::config::apply_protein_config(&mut a, &m).unwrap();
-        let inf = infer_from_files(&db, &a, &[targets], &[decoys]).unwrap();
+        let (inf, _) = infer_from_files(&db, &a, &[targets], &[decoys]).unwrap();
         let group = inf
             .groups
             .iter()

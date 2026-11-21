@@ -734,7 +734,13 @@ searches and scores fragments at 7 ppm unless `--fragment-tol-*` is set: the per
 error measurement needs 100 confident PSMs, which a DIA sample rarely yields (+135 / +72 precursors
 at 1 % true FDP against 20 ppm on the Astral benchmark). The PIN is PSM-level; precursor-level FDR
 is the best PSM per (peptidoform, charge) after target-decoy competition, as in
-`docs/benchmarks/dia/eval_dia.py`. On the ProteoBench Astral entrapment set, andes reaches 1,800 /
+`docs/benchmarks/dia/eval_dia.py`. Minimum input size: on subsets of Astral raw01 (retention-time
+segments and isolation-window subsets, reversed and mutated decoys) the precursor q-value at 0.01
+was calibrated from about 2,500 precursors upward (true FDP 0.6-1.5 % per run, 1.0-1.1 % pooled
+per input). Below about 2,000 it was optimistic: three 4.5-10 min segments of 1,500-1,900
+precursors gave 1.0-2.4 % (1.7 % pooled), and 6-window subsets of 1,000-1,400 precursors 0-2.3 %
+(1.2 % pooled). Treat the q-values of a run with fewer than about 2,500 precursors at q 0.01 as
+approximate. On the ProteoBench Astral entrapment set, andes reaches 1,800 /
 1,821 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
 Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 

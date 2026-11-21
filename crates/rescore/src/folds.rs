@@ -105,10 +105,23 @@ pub fn fold_groups(meta: &[RowMeta]) -> Vec<u32> {
     unit
 }
 
+fn largest_unit(unit: &[u32]) -> usize {
+    let mut sorted = unit.to_vec();
+    sorted.par_sort_unstable();
+    sorted
+        .chunk_by(|a, b| a == b)
+        .map(<[u32]>::len)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Cross-validation folds in which no precursor is split: every unit of `fold_groups` goes
 /// to one fold, so no spectrum is scored by a model trained on another spectrum whose best
 /// match is the same peptide sequence. Units are placed as `folds_by_spectrum` places
 /// spectra: a random fold per unit, sizes balanced, no fold left empty while units remain.
+/// When one unit holds more than half a fold's share of the rows (a PIN whose peptide cells
+/// collapse to few sequences), folds cannot be balanced by unit and the folds are made by
+/// spectrum instead.
 pub fn folds_by_precursor(meta: &[RowMeta], k: usize, seed: u64) -> Vec<u8> {
     let k = k.max(1);
     let n = meta.len();
@@ -117,6 +130,9 @@ pub fn folds_by_precursor(meta: &[RowMeta], k: usize, seed: u64) -> Vec<u8> {
         return fold;
     }
     let unit = fold_groups(meta);
+    if largest_unit(&unit) * 2 * k > n {
+        return folds_by_spectrum(meta, k, seed);
+    }
     let mut order: Vec<(u32, u32, i8, u32)> = (0..n)
         .into_par_iter()
         .map(|i| (fast_uint_hash(unit[i]), unit[i], -meta[i].label, i as u32))

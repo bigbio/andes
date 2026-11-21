@@ -221,3 +221,12 @@ fn precursor_folds_fill_every_fold_with_few_units() {
     assert_eq!(rescore::folds_by_precursor(&one, 3, 1).len(), 2);
     assert!(rescore::folds_by_precursor(&[], 3, 1).is_empty());
 }
+
+#[test]
+fn one_dominant_sequence_falls_back_to_spectrum_folds() {
+    let meta: Vec<_> = (0..600u64).map(|s| row(0, s, if s % 2 == 0 { 1 } else { -1 }, "K.PEPTWDE.R")).collect();
+    let fold = rescore::folds_by_precursor(&meta, 3, 42);
+    assert_eq!(fold, rescore::folds_by_spectrum(&meta, 3, 42));
+    let sizes: Vec<usize> = (0..3u8).map(|f| fold.iter().filter(|&&x| x == f).count()).collect();
+    assert!(sizes.iter().all(|&c| c > 150), "{sizes:?}");
+}

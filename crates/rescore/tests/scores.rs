@@ -150,6 +150,7 @@ fn meta(file: u32, scan: u64, mass: f64) -> RowMeta {
         file,
         scan,
         exp_mass: mass,
+        sequence: scan as u32,
     }
 }
 

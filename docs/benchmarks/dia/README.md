@@ -515,6 +515,16 @@ DIA-NN's own-q count (99-100 %), behind it by at least 4-5 % at matched true FDP
 FDP_c table, cost and limits (transferred class 1.28 % on raw01, replicate runs only, diaPASEF
 untested, about 36 GB per run): [pb_full/README.md](pb_full/README.md#full-stack-pass-2-learned-score-study-mode-and-transfer).
 
+## Quantification: ProteoBench DIA Astral module
+
+The six-run ProteoBench "Quant LFQ DIA ion" Astral module (human/yeast/E. coli mix), run as one
+study and scored with `proteobench` 0.17.6. At ≥ 3 of 6 runs, andes quantifies 115,232 precursors
+with a median |ε| of 0.270 and a median CV of 0.164. DIA-NN 2.5.0's leaderboard entry has 103,720,
+0.207 and 0.150. Verdicts: well ahead on depth, well behind on ratio accuracy (strongest for
+E. coli), slightly behind on CV. The fragment quantity is the default; it beat the MS1 quantity on
+both error and depth. Details, both arms, cost and limits:
+[proteobench_astral/README.md](proteobench_astral/README.md).
+
 ## Reproduce
 
 ```bash

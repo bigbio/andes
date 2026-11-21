@@ -834,6 +834,16 @@ metadata.
 | `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
 | `<base>.dia_quant.parquet` | `andes.dia_quant.schema` 1.0 | One row per run and target precursor at reported q ≤ `--quant-fdr` (default 0.01), own and transferred: `filename peptide charge proteins evidence_type q_value quantity quantity_frag quantity_ms1 quantity_normalized`. `evidence_type` is `identified` (the run's own nominee) or `transfer`; `peptide` is as in the precursor PIN; `quantity` is the fragment quantity (`quantity_frag`; the metadata key `andes.dia_quant.default` names the arm), `quantity_ms1` the MS1 quantity, both from the pass-2 table; `quantity_normalized` divides `quantity` by the run's median-level factor over the precursors quantified in every normalised run (a run sharing fewer than 20 with the others is left unscaled and logged). Missing quantities are null, never 0; precursors above the q threshold have no row and are not filled from other runs |
 
+**Quantities.** Pass 2 measures every precursor's quantity in its run, and finalize writes the
+rows at reported q ≤ `--quant-fdr` to `<base>.dia_quant.parquet` (table above).
+- The window is the apex ± the run's learned peak width: the median half-maximum width of its
+  confident targets' summed fragment traces, at least 2 cycles.
+- The fragment quantity sums up to 6 fragments that co-elute with the summed trace. It is the
+  default because it had the lower fold-change error and more precursors than the MS1 quantity on
+  the ProteoBench DIA Astral module.
+- On that module the quantities compress large fold changes: E. coli log2(A/B) measured −1.27
+  against −2. See [the benchmark](docs/benchmarks/dia/proteobench_astral/README.md).
+
 **Resources.** Per Astral run (15 min gradient, 3.5 million nominees): the search with `--dia
 --predict rt,ms2 --rescore --quant-dir` takes about 20 minutes and a peak of about 36 GB; the
 extract step 9 minutes and 14 GB; finalize for three runs about 65 minutes and 23 GB. The learned

@@ -84,7 +84,9 @@ andes quant extract  --quant-dir q/ --run a      # once per run, after all searc
 andes quant finalize --quant-dir q/ -o experiment --database db.fasta
 ```
 
-Finalize writes a precursor PIN and results per run, and the protein groups of all runs. Cost per
+Finalize writes a precursor PIN and results per run, the protein groups of all runs, and the
+per-run precursor quantities (`<base>.dia_quant.parquet`): a fragment quantity (the default) and an
+MS1 quantity for every precursor at q ≤ 0.01, with a per-run median-level normalised column. Cost per
 Astral run: about 20 min and 36 GB for the search, 9 min for the extract, and about 65 min for
 finalize over three runs.
 
@@ -94,6 +96,11 @@ FDP andes is at least 4 to 5 % behind it. Limits: replicate runs only, diaPASEF 
 pass 2, and one transferred class measured 1.28 % true FDP at q 0.01. Details:
 [benchmark](../benchmarks/dia.md) and the
 [full reference](../reference.md#dia-pass-2-learned-score-and-study-mode).
+
+On the ProteoBench DIA Astral quantification module (six runs, human/yeast/E. coli), andes
+quantifies 115,200 precursors in at least 3 runs, against 103,700 for DIA-NN 2.5.0's public entry.
+Its fold changes are less accurate: median |ε| 0.270 against 0.207, with E. coli and yeast ratios
+compressed toward 0. Its CV is 0.164 against 0.150.
 
 ## What it changes
 

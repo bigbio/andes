@@ -1751,8 +1751,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &spectra,
                 &run_ends,
                 &dia_ms1,
-                &pool,
-                &predicted,
+                pool,
+                predicted,
                 nominees_out.as_deref().map(|path| crate::dia_xfer::NomineesOut {
                     path,
                     spectrum: spectrum_path.as_path(),

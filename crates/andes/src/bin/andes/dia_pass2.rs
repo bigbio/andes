@@ -1217,26 +1217,32 @@ pub(crate) fn extract(
 
 /// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN. With
 /// `nominees_out` (study mode), the nominees are also stored for the study's candidate
-/// transfer (`dia_xfer`).
+/// transfer (`dia_xfer`). The pool table and the kept predictions are only needed to
+/// nominate, so they are taken by value and freed before the extraction.
 pub(crate) fn run(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
     ms1: &[Option<Ms1RunIndex>],
-    pool: &crate::dia_llr::PoolScores,
-    predicted: &PredictedMs2,
+    pool: crate::dia_llr::PoolScores,
+    predicted: PredictedMs2,
     nominees_out: Option<crate::dia_xfer::NomineesOut>,
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
-    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
+    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, &predicted)?;
+    let shift_ppm = pool.shift_ppm.clone();
+    let rt_cal = predicted.rt_cal.first().cloned().flatten();
+    drop(pool);
+    drop(predicted);
+    crate::memlimit::release_free_memory();
     log::info!(
         target: "dia",
         "pass 2: nominated {} precursors [{:.2}s]",
         noms.len(),
         t0.elapsed().as_secs_f64()
     );
-    let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
-    let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);
+    let shift = shift_ppm.first().copied().unwrap_or(0.0);
+    let rt_cal = rt_cal.as_ref();
     let (stored, p2) = std::thread::scope(|scope| {
         let stored = nominees_out.map(|out| {
             let noms = &noms;
@@ -1246,7 +1252,7 @@ pub(crate) fn run(
                     .map(|()| t.elapsed().as_secs_f64())
             })
         });
-        let p2 = extract(&noms, spectra, run_ends, ms1, &pool.shift_ppm);
+        let p2 = extract(&noms, spectra, run_ends, ms1, &shift_ppm);
         let stored = stored.map(|h| {
             h.join()
                 .unwrap_or_else(|_| Err("writing the nominee table panicked".to_string()))

@@ -1716,6 +1716,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
+    let n_dia_ms1: usize = dia_ms1.iter().map(Vec::len).sum();
+    let dia_ms1 = if cli.dia {
+        crate::dia::ms1_indexes(dia_ms1)
+    } else {
+        Vec::new()
+    };
     let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
@@ -1762,9 +1768,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         crate::memlimit::mark_stage("per-scan cut");
     }
     if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, &dia_ms1, n_dia_ms1)?;
         crate::memlimit::mark_stage("co-elution");
     }
+    drop(dia_ms1);
     if cli.refine {
         if refine_merged {
             log::info!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");

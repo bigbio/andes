@@ -30,7 +30,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use model::scan::Ms1Scan;
 use model::stats::MAD_TO_SD;
 use model::Spectrum;
 use onnx_infer::predictors::form::{Mass, H2O, PROTON};
@@ -341,7 +340,7 @@ pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: &[Vec<Ms1Scan>],
+    ms1: &[Option<Ms1RunIndex>],
     predicted: &PredictedMs2,
     tol0: FragmentTolerance,
 ) -> Result<PoolScores, String> {
@@ -352,10 +351,6 @@ pub(crate) fn add_to_pin(
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
     let n_runs = run_ends.len().max(1);
     let (slot, windows) = crate::dia::windows(spectra, run_ends);
-    let ms1: Vec<Option<Ms1RunIndex>> = ms1
-        .iter()
-        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
-        .collect();
 
     let mut by_spec: Vec<Vec<u32>> = vec![Vec::new(); spectra.len()];
     for (i, r) in table.rows.iter().enumerate() {

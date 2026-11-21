@@ -1222,7 +1222,7 @@ pub(crate) fn run(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: &[Vec<model::scan::Ms1Scan>],
+    ms1: &[Option<Ms1RunIndex>],
     pool: &crate::dia_llr::PoolScores,
     predicted: &PredictedMs2,
     nominees_out: Option<crate::dia_xfer::NomineesOut>,
@@ -1246,11 +1246,7 @@ pub(crate) fn run(
                     .map(|()| t.elapsed().as_secs_f64())
             })
         });
-        let idx: Vec<Option<Ms1RunIndex>> = ms1
-            .iter()
-            .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
-            .collect();
-        let p2 = extract(&noms, spectra, run_ends, &idx, &pool.shift_ppm);
+        let p2 = extract(&noms, spectra, run_ends, ms1, &pool.shift_ppm);
         let stored = stored.map(|h| {
             h.join()
                 .unwrap_or_else(|_| Err("writing the nominee table panicked".to_string()))

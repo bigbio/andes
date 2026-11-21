@@ -369,11 +369,14 @@ pub(crate) fn neighbours<'a>(
     (scans, p - lo)
 }
 
+/// Adds the co-elution `COLUMNS` to every row of the PIN; `ms1` is [`ms1_indexes`] of the run's
+/// MS1 scans, `n_ms1` their number before indexing (for the log).
 pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: Vec<Vec<Ms1Scan>>,
+    ms1: &[Option<Ms1RunIndex>],
+    n_ms1: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
@@ -381,11 +384,6 @@ pub(crate) fn add_to_pin(
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
     let rt = |i: u32| spectra[i as usize].rt_seconds.unwrap_or(0.0);
     let (slot, windows) = windows(spectra, run_ends);
-    let n_ms1: usize = ms1.iter().map(Vec::len).sum();
-    let ms1: Vec<Option<Ms1RunIndex>> = ms1
-        .into_iter()
-        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
-        .collect();
 
     let mut best_of_spec: HashMap<u32, f64> = HashMap::new();
     for r in &table.rows {
@@ -477,6 +475,14 @@ pub(crate) fn add_to_pin(
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// The MS1 index of each run's scans, `None` for a run without MS1 scans; built once and shared
+/// by the pool scores, pass 2 and the co-elution columns.
+pub(crate) fn ms1_indexes(ms1: Vec<Vec<Ms1Scan>>) -> Vec<Option<Ms1RunIndex>> {
+    ms1.into_iter()
+        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
+        .collect()
 }
 
 pub(crate) const EVIDENCE_COLUMNS: [&str; 5] = [

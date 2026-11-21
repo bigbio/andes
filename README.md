@@ -646,7 +646,7 @@ The code is a Cargo workspace under `crates/`:
 | `model`, `scoring` | shared types and constants; the scoring models and features |
 | `search` | candidate index, matching, chimeric, refine and the other search passes |
 | `output` | PIN, TSV and QPX Parquet writers |
-| `quant`, `percolator-native` | quantification and match between runs; the in-process Percolator engine |
+| `quant`, `rescore` | quantification and match between runs; the in-process rescoring engine (the Percolator algorithm) |
 | `model-train`, `onnx-infer` | training the scoring models; ONNX inference of the predictors |
 | glyco and cross-link crates | the `--glyco` and `--xl` searches |
 

@@ -4,7 +4,7 @@ use std::process::Command;
 
 fn pin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../percolator-native/tests/data/svm_ref.pin")
+        .join("../rescore/tests/data/svm_ref.pin")
         .canonicalize()
         .expect("svm_ref.pin")
 }
@@ -19,12 +19,12 @@ fn ids(path: &Path, column: usize) -> BTreeSet<String> {
 }
 
 #[test]
-fn percolator_subcommand_runs_the_native_engine() {
+fn rescore_subcommand_runs_the_native_engine() {
     let dir = tempfile::tempdir().expect("tempdir");
     let d = dir.path();
     let (t, dc, w) = (d.join("t.psms"), d.join("d.psms"), d.join("w.txt"));
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))
-        .arg("percolator")
+        .arg("rescore")
         .args(["--rescore-memory-gb", "1", "--temp-dir"])
         .arg(d.join("scratch"))
         .args(["--seed", "42", "--only-psms", "-Y", "--num-threads", "2"])
@@ -36,7 +36,7 @@ fn percolator_subcommand_runs_the_native_engine() {
         .arg(&w)
         .arg(pin())
         .output()
-        .expect("run andes percolator");
+        .expect("run andes rescore");
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -56,11 +56,11 @@ fn percolator_subcommand_runs_the_native_engine() {
 }
 
 #[test]
-fn percolator_subcommand_reports_engine_errors() {
+fn rescore_subcommand_reports_engine_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let d = dir.path();
     let out = Command::new(env!("CARGO_BIN_EXE_andes"))
-        .args(["percolator", "--temp-dir"])
+        .args(["rescore", "--temp-dir"])
         .arg(d)
         .arg("--results-psms")
         .arg(d.join("t.psms"))
@@ -68,7 +68,7 @@ fn percolator_subcommand_reports_engine_errors() {
         .arg(d.join("d.psms"))
         .arg(pin())
         .output()
-        .expect("run andes percolator");
+        .expect("run andes rescore");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -79,7 +79,7 @@ fn percolator_subcommand_reports_engine_errors() {
 }
 
 #[test]
-fn percolator_subcommand_is_hidden_from_help() {
+fn rescore_subcommand_is_hidden_from_help() {
     for flag in ["-h", "--help"] {
         let out = Command::new(env!("CARGO_BIN_EXE_andes"))
             .arg(flag)
@@ -88,9 +88,7 @@ fn percolator_subcommand_is_hidden_from_help() {
         let help = String::from_utf8_lossy(&out.stdout);
         assert!(help.contains("inference"), "{help}");
         assert!(
-            !help
-                .lines()
-                .any(|l| l.trim_start().starts_with("percolator")),
+            !help.lines().any(|l| l.trim_start().starts_with("rescore")),
             "{help}"
         );
     }

@@ -28,7 +28,7 @@ impl PercolatorPsm {
 pub enum PercolatorBackend {
     Binary(PathBuf),
     Docker { image: String },
-    Native { memory: percolator_native::MemLimit },
+    Native { memory: rescore::MemLimit },
 }
 
 impl PercolatorBackend {
@@ -64,8 +64,8 @@ impl Invocation {
         }
     }
 
-    fn of_native(args: &[String], memory: &percolator_native::MemLimit) -> Self {
-        match percolator_native::run(args, memory.clone()) {
+    fn of_native(args: &[String], memory: &rescore::MemLimit) -> Self {
+        match rescore::run(args, memory.clone()) {
             Ok(()) => Invocation {
                 success: true,
                 status: "finished".to_string(),
@@ -1243,7 +1243,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let native = PercolatorBackend::Native {
-            memory: percolator_native::MemLimit {
+            memory: rescore::MemLimit {
                 bytes: 1 << 30,
                 spill_dir: dir.path().to_path_buf(),
             },
@@ -1605,8 +1605,8 @@ mod tests {
     }
 
     fn native_fixture_pin(dir: &Path) -> PathBuf {
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../percolator-native/tests/data/svm_ref.pin");
+        let src =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rescore/tests/data/svm_ref.pin");
         let text = std::fs::read_to_string(src).unwrap();
         let mut lines = text.lines();
         let (id, rest) = lines.next().unwrap().split_once('\t').unwrap();
@@ -1635,7 +1635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = native_fixture_pin(dir.path());
         let backend = PercolatorBackend::Native {
-            memory: percolator_native::MemLimit {
+            memory: rescore::MemLimit {
                 bytes: 1 << 30,
                 spill_dir: dir.path().to_path_buf(),
             },

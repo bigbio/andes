@@ -187,7 +187,7 @@ impl StoreBuilder {
                 } else {
                     let n = SPILL_COUNTER.fetch_add(1, Ordering::Relaxed);
                     let path = self.budget.spill_dir().join(format!(
-                        "percolator-native-{}-{}.f32",
+                        "rescore-{}-{}.f32",
                         std::process::id(),
                         n
                     ));

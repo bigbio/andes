@@ -153,9 +153,13 @@ enum Command {
 
     #[command(
         hide = true,
-        about = "Run the native Percolator engine (Percolator master a9783ee8) on a Percolator command line"
+        about = "Run the native rescoring engine on a Percolator command line",
+        long_about = "Run the native rescoring engine on a Percolator command line\n\n\
+The engine implements the Percolator algorithm (Käll et al., Nat. Methods 2007) and tracks \
+upstream Percolator master (commit a9783ee8); it takes Percolator's arguments and writes \
+Percolator's result files."
     )]
-    Percolator(Box<cli::PercolatorArgs>),
+    Rescore(Box<cli::RescoreArgs>),
 }
 
 const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
@@ -234,7 +238,7 @@ fn main() -> ExitCode {
             }
             inference_cmd::run_inference(*args)
         }
-        Some(Command::Percolator(args)) => run_native_percolator(*args),
+        Some(Command::Rescore(args)) => run_rescore(*args),
         Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
@@ -308,7 +312,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_native_percolator(args: cli::PercolatorArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_rescore(args: cli::RescoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     cli::ensure_scratch_dir(&args.temp_dir)?;
     let limit = output::MemLimit {
         bytes: args.rescore_memory_gb.saturating_mul(1 << 30),

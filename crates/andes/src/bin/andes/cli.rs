@@ -617,8 +617,8 @@ pub(crate) struct SearchArgs {
     /// posterior_error_probability and a q-value score) and the filtered <stem>.q<fdr>.tsv
     /// is written. Every Percolator pass (the main run, the per-run q-values, the PEP
     /// repair and the scores of every PIN row) runs in process with the native engine, which
-    /// follows upstream Percolator master (commit a9783ee8) and writes Percolator's output
-    /// files; no Percolator binary or Docker is needed. --percolator-bin or
+    /// implements the Percolator algorithm (Käll et al., Nat. Methods 2007), tracks upstream
+    /// Percolator master (commit a9783ee8) and writes Percolator's output files; no Percolator binary or Docker is needed. --percolator-bin or
     /// --percolator-docker runs an external Percolator instead. --xl does not use the native
     /// engine: its Percolator passes always run an external Percolator, --percolator-bin,
     /// else `percolator` on PATH, else the Docker image.
@@ -1332,7 +1332,7 @@ pub(crate) struct SearchArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct PercolatorArgs {
+pub(crate) struct RescoreArgs {
     /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
     #[arg(long, value_name = "GB", default_value_t = 16,
           value_parser = clap::value_parser!(u64).range(1..))]

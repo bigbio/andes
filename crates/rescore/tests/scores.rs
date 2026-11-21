@@ -1,4 +1,4 @@
-use percolator_native::{
+use rescore::{
     count_at, folds_by_spectrum, raw_weights, read_pin, score, stdv, tdc_q, tdc_winners,
     training_sets, MemLimit, Pin, RowMeta,
 };

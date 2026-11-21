@@ -467,6 +467,13 @@ pub fn run_refinement(
         );
         return None;
     }
+    if decoy_strategy == DecoyStrategy::Mutate {
+        log::info!(
+            target: "refine",
+            "Pass-2 decoys are reversed: a refinement entry is one peptide, and a one-residue \
+             mutant of a short peptide can keep its target sequence"
+        );
+    }
 
     let base_with_src = confident_base_peptides_with_source(
         pass1_queues,

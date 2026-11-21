@@ -1613,6 +1613,9 @@ fn run_library(a: QuantLibraryArgs) -> Result<(), String> {
 }
 
 fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
+    if crate::dia_xrun::is_study_run(&a.quant_dir, &a.run) {
+        return crate::dia_xfer::extract_run(&a.quant_dir, &a.run);
+    }
     let ep = evidence_params(a.lfq_tol)?;
     let stored = read_library(&a.quant_dir)?;
     let run = stored
@@ -1655,6 +1658,10 @@ fn release_free_memory() {
 }
 
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
+    let dia_runs = crate::dia_xrun::study_runs(&a.quant_dir)?;
+    if !dia_runs.is_empty() {
+        return crate::dia_xrun::finalize(&a, &dia_runs);
+    }
     let stored = read_library(&a.quant_dir)?;
     let fingerprint = library_fingerprint(&stored);
     let mut paths = Vec::with_capacity(stored.runs.len());

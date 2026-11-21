@@ -67,7 +67,13 @@ fn score_mass_ordered(
     mut quant: Option<&mut QuantCollector>,
     measurer: &mut FragmentErrorMeasurer,
 ) {
+    if prepared.params.dia {
+        prepared.set_dia_rt_prior(None);
+    }
     measurer.measure(prepared, pending.iter(), Some(span_da));
+    if prepared.params.dia {
+        calibrate_dia_rt(prepared, &pending, span_da);
+    }
     pending.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
     log::info!(
         target: "fragment-index",
@@ -94,6 +100,130 @@ fn score_mass_ordered(
         }
         report_search_progress(all_spectra.len(), t_search_start);
     }
+    if prepared.params.dia {
+        prepared.set_dia_rt_prior(None);
+    }
+}
+
+/// Share of a DIA run's spectra searched first, with the plain vote rank, to fit the RT prior.
+const DIA_RT_CAL_FRACTION: f64 = 0.02;
+/// Fewest calibration spectra (all of them in a smaller run).
+const DIA_RT_CAL_MIN_SPECTRA: usize = 2_000;
+/// Target-decoy q-value of the calibration winners that become RT anchors.
+const DIA_RT_CAL_Q: f64 = 0.01;
+const SECS_PER_MIN: f64 = 60.0;
+
+/// Calibration sample sizes in search order: the first sample (`DIA_RT_CAL_FRACTION` of the
+/// run, at least `DIA_RT_CAL_MIN_SPECTRA`), then doubling up to every spectrum of the run.
+fn dia_rt_cal_sizes(n_spectra: usize) -> Vec<usize> {
+    let mut n = ((n_spectra as f64 * DIA_RT_CAL_FRACTION).round() as usize)
+        .max(DIA_RT_CAL_MIN_SPECTRA)
+        .min(n_spectra);
+    let mut sizes = vec![n];
+    while n < n_spectra {
+        n = (2 * n).min(n_spectra);
+        sizes.push(n);
+    }
+    sizes
+}
+
+/// Fits the run's RT prior for the DIA vote cut and installs it on `prepared`: a deterministic
+/// subsample of the run is searched with the plain vote rank, the top match of each sample
+/// spectrum that is a target at q <= `DIA_RT_CAL_Q` becomes an anchor (andes-rt raw prediction
+/// of its peptide, scan minutes), and [`search::dia_rt_rank::DiaRtPrior::fit`] maps raw
+/// predictions to minutes. While the anchors are fewer than the map needs for its full
+/// resolution ([`search::dia_rt_rank::FULL_MAP_ANCHORS`]) the sample grows (sizes of
+/// `dia_rt_cal_sizes`, each adding the next spectra of the same hash order), so a short or
+/// sparse run gets the anchors of a long one when its spectra hold them. With too few anchors
+/// no prior is installed and the cut keeps the vote rank.
+fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f64) {
+    let Some(model) = prepared.form_rt_model() else {
+        return;
+    };
+    if spectra.is_empty() {
+        return;
+    }
+    let t = std::time::Instant::now();
+    let mut order: Vec<(u64, usize)> = (0..spectra.len())
+        .map(|i| (splitmix64(i as u64), i))
+        .collect();
+    order.sort_unstable();
+    let mut tops: Vec<(u32, f64)> = Vec::new();
+    let mut labels: Vec<search::tdc::ScoredLabel> = Vec::new();
+    let mut anchors: Vec<(f64, f64)> = Vec::new();
+    let mut searched = 0;
+    for n in dia_rt_cal_sizes(spectra.len()) {
+        let mut part: Vec<&Spectrum> = order[searched..n]
+            .iter()
+            .map(|&(_, i)| &spectra[i])
+            .collect();
+        part.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
+        let part: Vec<Spectrum> = part.into_iter().cloned().collect();
+        let mut start = 0;
+        while start < part.len() {
+            let take = index_chunk_len(&part[start..], index_order_mass, span_da);
+            let chunk = &part[start..start + take];
+            for (s, q) in chunk.iter().zip(prepared.run_chunk(chunk, searched + start)) {
+                if let Some(p) = q.peek_top() {
+                    let idx = p.primary_candidate_idx();
+                    let rt = s
+                        .rt_seconds
+                        .filter(|t| t.is_finite())
+                        .map_or(f64::NAN, |t| t / SECS_PER_MIN);
+                    tops.push((idx, rt));
+                    labels.push(search::tdc::ScoredLabel {
+                        score: p.score,
+                        is_decoy: prepared.candidate_is_decoy(idx),
+                    });
+                }
+            }
+            start += take;
+        }
+        searched = n;
+        let q = search::tdc::qvalues(&labels);
+        anchors = tops
+            .iter()
+            .zip(&labels)
+            .zip(&q)
+            .filter(|((top, l), q)| !l.is_decoy && **q <= DIA_RT_CAL_Q && top.1.is_finite())
+            .map(|((top, _), _)| (f64::from(model(&prepared.candidate_peptide(top.0))), top.1))
+            .collect();
+        if anchors.len() >= search::dia_rt_rank::FULL_MAP_ANCHORS {
+            break;
+        }
+    }
+    match search::dia_rt_rank::DiaRtPrior::fit(&anchors) {
+        Some(prior) => {
+            log::info!(
+                target: "dia-rt-rank",
+                "RT prior from {searched} of {} spectra: {} anchors at q <= {DIA_RT_CAL_Q} ({} \
+                 within the trimming band), {} knots, sigma {:.3} min; the vote cut ranks by \
+                 votes and RT [{:.1}s]",
+                spectra.len(),
+                prior.anchors(),
+                prior.kept(),
+                prior.knots(),
+                prior.sigma_min(),
+                t.elapsed().as_secs_f64()
+            );
+            prepared.set_dia_rt_prior(Some(prior));
+        }
+        None => log::info!(
+            target: "dia-rt-rank",
+            "no RT prior: {} anchors at q <= {DIA_RT_CAL_Q} from {searched} sample spectra (at \
+             least {} needed); the vote cut ranks by votes [{:.1}s]",
+            anchors.len(),
+            search::dia_rt_rank::MIN_ANCHORS,
+            t.elapsed().as_secs_f64()
+        ),
+    }
+}
+
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 fn recalibrate_dia_ms1(prepared: &mut PreparedSearch, pending: &[Spectrum], span_da: f64) {
@@ -497,6 +627,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         prepared = prepared.with_per_scan_scorers(routed_activation, loader);
     }
+    if cli.dia {
+        prepared.set_form_rt_model(crate::predicted::andes_rt_form_model()?);
+    }
     log::info!(
         target: "candidate_index_open",
         "done in {:.2} s",
@@ -590,6 +723,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if !cli.glyco {
             log::info!(target: "quant", "{}", s.describe());
         }
+    }
+    if cli.dia && cli.quant_dir.is_some() && spectrum_paths.len() > 1 {
+        return Err(
+            "--dia --quant-dir takes one input per process (each run's pass-2 table and PIN go \
+             to the quant directory); run andes once per run, then `andes quant finalize`"
+                .into(),
+        );
     }
     let predictors = if standalone {
         None
@@ -1543,11 +1683,41 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "done in {:.2} s",
         t_total.elapsed().as_secs_f64()
     );
+    let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
+    let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
-        p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
+        let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
+        if let Some(predicted) = kept.filter(|_| pooled) {
+            let pool = crate::dia_llr::add_to_pin(
+                &output_pin_path,
+                &spectra,
+                &run_ends,
+                &dia_ms1,
+                &predicted,
+                p.tolerance(),
+            )?;
+            let nominees_out = cli
+                .quant_dir
+                .as_deref()
+                .filter(|_| run_ends.len() == 1)
+                .map(|d| crate::dia_xfer::nominee_path(d, &crate::quant_run::run_stem(&spectrum_path)));
+            dia_pass2 = Some(crate::dia_pass2::run(
+                &output_pin_path,
+                &spectra,
+                &run_ends,
+                &dia_ms1,
+                &pool,
+                &predicted,
+                nominees_out.as_deref().map(|path| crate::dia_xfer::NomineesOut {
+                    path,
+                    spectrum: spectrum_path.as_path(),
+                    mobility_slices: cli.dia_mobility_slices,
+                }),
+            )?);
+        }
     }
     let mut rerank_dropped = std::collections::HashSet::new();
-    if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
+    if pooled {
         rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
     }
     if cli.dia {
@@ -1590,6 +1760,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .is_some_and(|a| !a.site_claims.is_empty())
     });
     let mut row_scores: Option<output::RowScores> = None;
+    let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = if use_native {
@@ -1631,6 +1803,83 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
             }
+            let path = output::decoy_results_path(&output_pin_path);
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            rescore_decoy_psms =
+                output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut pass1_q = 0;
+            let mut pass1_best = Vec::new();
+            if cli.dia {
+                let ((t, d, n), best) = crate::dia::precursor_q(
+                    &output_pin_path,
+                    &spectra,
+                    &mut map,
+                    &rescore_decoy_psms,
+                )?;
+                pass1_q = n;
+                pass1_best = best;
+                log::info!(
+                    target: "rescore",
+                    "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
+                );
+            }
+            let mut results_pin = output_pin_path.clone();
+            if let (Some(t), Some(dir)) = (dia_pass2.as_ref(), cli.quant_dir.as_deref()) {
+                crate::dia_xrun::store_run(
+                    dir,
+                    &spectrum_path,
+                    &output_pin_path,
+                    t,
+                    Some((&backend, &user_args)),
+                )?;
+                dia_pass2 = None;
+            }
+            if let Some(t) = dia_pass2.take() {
+                let seed = crate::dia_score::percolator_seed(&user_args);
+                let rescore = |pin: &Path| -> Result<crate::dia_score::Rescored, String> {
+                    let (targets, decoy_ids) =
+                        output::run_percolator_with_decoys(&backend, pin, &extra)
+                            .map_err(|e| format!("{e}"))?;
+                    let path = output::decoy_results_path(pin);
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    let decoys = output::parse_psm_results(&text)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    Ok(crate::dia_score::Rescored {
+                        targets,
+                        decoy_ids,
+                        decoys,
+                    })
+                };
+                match crate::dia_score::rescore_precursors(
+                    &output_pin_path,
+                    &t,
+                    seed,
+                    &pass1_best,
+                    rescore,
+                ) {
+                    Ok(r) => {
+                        log::info!(
+                            target: "dia",
+                            "precursor PIN used: {} target precursors at q <= 0.01 (pass 1: \
+                             {pass1_q}), {} degenerate learned-score folds",
+                            r.n_q,
+                            r.ids.degenerate_folds
+                        );
+                        map = r.rescored.targets;
+                        decoys = r.rescored.decoy_ids;
+                        rescore_decoy_psms = r.rescored.decoys;
+                        dia_replaced = r.replaced;
+                        dia_precursor_ids = r.ids.targets.into_iter().chain(r.ids.decoys).collect();
+                        results_pin = r.pin;
+                    }
+                    Err(why) => log::info!(
+                        target: "dia",
+                        "pass-1 results kept, the precursor PIN is not used: {why}"
+                    ),
+                }
+            }
             rescore_decoys = Some(decoys);
             log::info!(
                 target: "rescore",
@@ -1638,25 +1887,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
-            let path = output::decoy_results_path(&output_pin_path);
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            rescore_decoy_psms =
-                output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             if has_site_claims {
                 row_scores = Some(
-                    output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {
+                    output::score_all_rows(&backend, &results_pin, &extra).map_err(|e| {
                         format!("scoring every PIN row for the site posteriors: {e}")
                     })?,
                 );
             }
             if cli.mbr {
-                mbr_source = format!("the Percolator results of {}", output_pin_path.display());
+                mbr_source = format!("the Percolator results of {}", results_pin.display());
             }
             Some(map)
         } else {
             None
         };
+
+    if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
+        crate::dia_xrun::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+    }
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;
@@ -2051,6 +2299,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     knockoff_rows.extend(rerank_dropped);
+    if !dia_precursor_ids.is_empty() {
+        knockoff_rows.extend(dia_replaced);
+        knockoff_rows.retain(|id| !dia_precursor_ids.contains(id));
+    }
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()
@@ -2426,5 +2678,21 @@ mod filtered_tsv_tests {
         assert!(text.starts_with("PSMId\tq-value\t"));
         assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
         assert!(!output::ms1_table::partial_path(&path).exists());
+    }
+}
+
+#[cfg(test)]
+mod dia_rt_cal_tests {
+    use super::dia_rt_cal_sizes;
+
+    #[test]
+    fn the_rt_calibration_sample_doubles_up_to_the_whole_run() {
+        assert_eq!(
+            dia_rt_cal_sizes(292_883),
+            [5_858, 11_716, 23_432, 46_864, 93_728, 187_456, 292_883]
+        );
+        assert_eq!(dia_rt_cal_sizes(12_032), [2_000, 4_000, 8_000, 12_032]);
+        assert_eq!(dia_rt_cal_sizes(1_500), [1_500]);
+        assert_eq!(dia_rt_cal_sizes(4_000), [2_000, 4_000]);
     }
 }

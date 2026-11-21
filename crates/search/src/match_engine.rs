@@ -192,6 +192,8 @@ pub struct PreparedSearch<'a> {
     candidate_filter: Option<CandidateFilter>,
     open_index: Option<Box<ChunkFragmentIndex>>,
     per_scan: Option<PerScanScorers>,
+    form_rt_model: Option<Arc<crate::dia_rt_rank::FormRtModel>>,
+    dia_rt_prior: RwLock<Option<Arc<crate::dia_rt_rank::DiaRtPrior>>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -504,7 +506,24 @@ impl<'a> PreparedSearch<'a> {
             candidate_filter: None,
             open_index: None,
             per_scan: None,
+            form_rt_model: None,
+            dia_rt_prior: RwLock::new(None),
         }
+    }
+
+    /// Installs the per-form RT predictor of the DIA vote cut.
+    pub fn set_form_rt_model(&mut self, model: Arc<crate::dia_rt_rank::FormRtModel>) {
+        self.form_rt_model = Some(model);
+    }
+
+    pub fn form_rt_model(&self) -> Option<&crate::dia_rt_rank::FormRtModel> {
+        self.form_rt_model.as_deref()
+    }
+
+    /// Sets (or with `None` clears) the run's RT prior; while set, every DIA chunk index
+    /// carries calibrated per-form RTs and its vote cut uses the RT term.
+    pub fn set_dia_rt_prior(&self, prior: Option<crate::dia_rt_rank::DiaRtPrior>) {
+        *self.dia_rt_prior.write().expect("RT prior lock") = prior.map(Arc::new);
     }
 
     pub fn with_per_scan_scorers(
@@ -1000,14 +1019,21 @@ impl<'a> PreparedSearch<'a> {
                         }
                         _ => Vec::new(),
                     };
-                    ChunkFragmentIndex::build(
+                    let mut index = ChunkFragmentIndex::build(
                         recs,
                         self.idx,
                         params,
                         self.scorer.feature_match_tolerance(),
                         lo,
                         hi,
-                    )
+                    );
+                    let prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
+                    if let (true, Some(model), Some(prior)) =
+                        (params.dia, self.form_rt_model.as_deref(), prior)
+                    {
+                        index.attach_rt(self.idx, params, model, &prior);
+                    }
+                    index
                 });
                 (Some(MmapRecordCache::default()), owned_index.as_ref())
             } else {

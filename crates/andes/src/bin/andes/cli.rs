@@ -215,6 +215,12 @@ pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
         "shuffle, then restore the segment's N-X-S/T sequon count; use it with --glyco",
     ),
     (
+        "mutate",
+        "substitute one interior residue per tryptic segment of 7 or more (mass change > 1.1 Da); \
+         near-variant decoys that share most fragments with their target, for --dia on \
+         wide-window data such as diaPASEF",
+    ),
+    (
         "none",
         "no decoys: the database already holds them (--decoy-prefix, --decoy-suffix), or \
          the FDR is computed elsewhere",
@@ -855,7 +861,7 @@ pub(crate) struct SearchArgs {
     pub(crate) rescore_native: bool,
 
     /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = 16,
+    #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
     pub(crate) rescore_memory_gb: u64,
@@ -1493,7 +1499,9 @@ pub(crate) enum QuantCommand {
     Library(QuantLibraryArgs),
     /// Measure every library precursor in one run from its MS1 table
     ///
-    /// Writes <stem>.extract.parquet.
+    /// Writes <stem>.extract.parquet. On a DIA study (runs searched with --dia --quant-dir),
+    /// scores the precursors nominated in the other runs in this run's spectra instead and
+    /// writes dia_pass2/xfer/<stem>.parquet for finalize.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's extract table
     ///
@@ -1617,7 +1625,8 @@ pub(crate) struct QuantFinalizeArgs {
     /// Quantification FDR: q-value threshold of the transfers
     ///
     /// A quantification-quality q-value, not an identification FDR. The search's
-    /// --quant-fdr gives the result of --mbr.
+    /// --quant-fdr gives the result of --mbr. In a DIA study, the reported precursor q of the
+    /// rows written to <base>.dia_quant.parquet.
     #[arg(long = "quant-fdr", value_name = "FDR", default_value = "0.01",
           value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: f64,
@@ -1704,7 +1713,7 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "temp-dir", value_name = "DIR")]
     pub(crate) temp_dir: Option<PathBuf>,
 
-    /// Seed of the transfer FDR folds and models and of the samples
+    /// Seed of the transfer FDR folds and models and of the samples; on a DIA study, of the learned score and the rescoring
     #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,
@@ -1726,6 +1735,9 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
+
+/// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
+pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;
 
 pub(crate) type Cli = SearchArgs;
 
@@ -1907,7 +1919,7 @@ pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -
 
 pub(crate) fn parse_decoy_strategy(s: &str) -> Result<DecoyStrategy, String> {
     DecoyStrategy::from_name(s).ok_or_else(|| {
-        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/none)")
+        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/mutate/none)")
     })
 }
 
@@ -1916,6 +1928,7 @@ pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
         DecoyStrategy::Shuffle => "shuffle",
         DecoyStrategy::Reverse => "reverse",
         DecoyStrategy::Sequon => "sequon",
+        DecoyStrategy::Mutate => "mutate",
         DecoyStrategy::None => "none",
     }
 }

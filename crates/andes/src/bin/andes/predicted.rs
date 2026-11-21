@@ -29,11 +29,41 @@ static ANDES_MS2_WEIGHTS: &[u8] =
 
 pub(crate) const ANCHOR_Q: f64 = 0.01;
 
+/// The bundled andes-rt model as the per-form RT predictor of the DIA vote cut: the raw
+/// prediction of a peptidoform's own sequence, NaN when the model cannot encode it.
+pub(crate) fn andes_rt_form_model(
+) -> Result<std::sync::Arc<search::dia_rt_rank::FormRtModel>, String> {
+    use onnx_infer::rt_native::{RtModel, RtPeptide, Scratch};
+    thread_local! {
+        static RT_SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
+    }
+    let rt_model =
+        RtModel::from_bytes(ANDES_RT_WEIGHTS).map_err(|e| format!("andes-rt weights: {e}"))?;
+    Ok(std::sync::Arc::new(move |p: &model::peptide::Peptide| {
+        RtPeptide::from_andes(&p.to_string())
+            .and_then(|f| RT_SCRATCH.with(|s| rt_model.predict_with(&f, &mut s.borrow_mut())))
+            .unwrap_or(f32::NAN)
+    }))
+}
+
 struct Source {
     pred: Box<dyn Predictor>,
     sessions: Vec<OnnxSession>,
     rt: bool,
     ms2: bool,
+}
+
+/// Predicted fragment intensities of the first MS2 source, kept for the DIA pool scores.
+/// `by_form[(form, charge)]` holds one value per cleavage site and ion of `ions`, site-major.
+pub(crate) struct PredictedMs2 {
+    pub(crate) ions: Vec<onnx_infer::predictors::spectral::Ion>,
+    pub(crate) by_form: HashMap<(Form, u8), Vec<f32>>,
+    /// The andes-rt source's raw (uncalibrated) prediction of every peptidoform of the PIN
+    /// table, by form id (NaN where it has none); empty without that source.
+    pub(crate) rt_raw: Vec<f32>,
+    /// Each run's andes-rt calibration from raw prediction to minutes (`andesrt_predicted_rt`);
+    /// `None` for a run with too few anchors.
+    pub(crate) rt_cal: Vec<Option<RtCalibration>>,
 }
 
 pub(crate) struct Predictors {
@@ -213,6 +243,10 @@ impl Predictors {
         }))
     }
 
+    pub(crate) fn tolerance(&self) -> FragmentTolerance {
+        self.tol
+    }
+
     pub(crate) fn needs_peaks(&self) -> bool {
         self.sources.iter().any(|s| s.ms2)
     }
@@ -258,12 +292,15 @@ impl Predictors {
         cols
     }
 
+    /// Adds the predicted-feature columns to the PIN; with `keep_ms2`, also returns the first
+    /// MS2 source's predictions.
     pub(crate) fn add_to_pin(
         &self,
         pin: &Path,
         spectra: &[Spectrum],
         run_ends: &[usize],
-    ) -> Result<(), String> {
+        keep_ms2: bool,
+    ) -> Result<Option<PredictedMs2>, String> {
         let t0 = Instant::now();
         let c0 = process_cpu_seconds();
         let new_cols = self.columns();
@@ -287,12 +324,16 @@ impl Predictors {
 
         let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
+        let mut kept: Option<PredictedMs2> = None;
+        let mut kept_rt: Option<(Vec<f32>, Vec<Option<RtCalibration>>)> = None;
         for src in &self.sources {
             let pred = src.pred.as_ref();
             let mut miss = vec![false; n];
             let mut cols: Vec<Vec<f64>> = Vec::new();
             if src.ms2 {
-                let (ms2_cols, msg) = self.ms2_block(src, &table, spectra, run_ends, &mut miss)?;
+                let keep = (keep_ms2 && kept.is_none()).then_some(&mut kept);
+                let (ms2_cols, msg) =
+                    self.ms2_block(src, &table, spectra, run_ends, &mut miss, keep)?;
                 cols.extend(ms2_cols);
                 report.push(msg);
             }
@@ -301,6 +342,7 @@ impl Predictors {
                 let mut diff = vec![f64::NAN; n];
                 let mut cal_rt = vec![f64::NAN; n];
                 let mut per_run = Vec::new();
+                let mut run_cals: Vec<Option<RtCalibration>> = Vec::with_capacity(anchors.len());
                 for (run, rows) in anchors.iter().enumerate() {
                     let pts: Vec<(f64, f64)> = rows
                         .iter()
@@ -324,6 +366,7 @@ impl Predictors {
                             ", median |residual| {m:.2} min"
                         ))
                     ));
+                    run_cals.push(cal.clone());
                     if let Some(c) = cal {
                         for (i, r) in table.rows.iter().enumerate() {
                             if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
@@ -341,6 +384,9 @@ impl Predictors {
                     *m |= !d.is_finite();
                 }
                 report.push(format!("{} RT: {}", pred.prefix(), per_run.join("; ")));
+                if keep_ms2 && kept_rt.is_none() && pred.prefix() == ANDES_RT_PREFIX {
+                    kept_rt = Some((raw, run_cals));
+                }
                 cols.push(diff);
                 cols.push(cal_rt);
             }
@@ -393,7 +439,11 @@ impl Predictors {
             t0.elapsed().as_secs_f64(),
             process_cpu_seconds() - c0
         );
-        Ok(())
+        if let (Some(k), Some((raw, cals))) = (kept.as_mut(), kept_rt) {
+            k.rt_raw = raw;
+            k.rt_cal = cals;
+        }
+        Ok(kept)
     }
 
     fn predict_rt(&self, src: &Source, forms: &[(Form, Mass)]) -> Result<Vec<f32>, String> {
@@ -433,6 +483,7 @@ impl Predictors {
         spectra: &[Spectrum],
         run_ends: &[usize],
         miss: &mut [bool],
+        keep: Option<&mut Option<PredictedMs2>>,
     ) -> Result<(Vec<Vec<f64>>, String), String> {
         let pred = src.pred.as_ref();
         let forms = &table.forms;
@@ -512,6 +563,8 @@ impl Predictors {
             v
         };
         let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
+        let kept_pred: Option<Mutex<Vec<Vec<f32>>>> =
+            keep.is_some().then(|| Mutex::new(vec![Vec::new(); fz.len()]));
         let t = Instant::now();
         run_parallel(&src.sessions, self.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job
@@ -533,6 +586,13 @@ impl Predictors {
                     c[row as usize] = x;
                 }
             }
+            drop(g);
+            if let Some(kp) = &kept_pred {
+                let mut g = kp.lock().expect("MS2 prediction lock");
+                for (&i, x) in job.iter().zip(v) {
+                    g[i] = x;
+                }
+            }
             Ok(())
         })?;
         let cols = out.into_inner().expect("MS2 output lock");
@@ -550,11 +610,26 @@ impl Predictors {
             fz.len(),
             jobs.len()
         );
+        if let (Some(slot), Some(kp)) = (keep, kept_pred) {
+            let by_form = fz
+                .iter()
+                .zip(kp.into_inner().expect("MS2 prediction lock"))
+                .map(|(&(f, z), v)| ((forms[f as usize].0.clone(), z), v))
+                .collect();
+            *slot = Some(PredictedMs2 {
+                ions: pred.ions().to_vec(),
+                by_form,
+                rt_raw: Vec::new(),
+                rt_cal: Vec::new(),
+            });
+        }
         Ok((cols, msg))
     }
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
+/// Column prefix of the andes-rt source, whose calibrated prediction is `andesrt_predicted_rt`.
+const ANDES_RT_PREFIX: &str = "andesrt";
 
 /// The index of each row's (peptidoform, charge) prediction, or `NONE` for a row that gets no
 /// MS2 features: one whose spectrum was not located or has no peaks, or whose pair has no
@@ -769,7 +844,11 @@ pub(crate) fn read_pin(
     })
 }
 
-fn anchor_rows(rows: &[PinRow], n_runs: usize, run_of: &dyn Fn(u32) -> usize) -> Vec<Vec<usize>> {
+pub(crate) fn anchor_rows(
+    rows: &[PinRow],
+    n_runs: usize,
+    run_of: &dyn Fn(u32) -> usize,
+) -> Vec<Vec<usize>> {
     let mut best: HashMap<u32, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if r.spec == NONE {
@@ -1173,7 +1252,9 @@ mod tests {
             batch: 7,
             dia: false,
         };
-        preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
+        preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .unwrap();
         let out = std::fs::read_to_string(&pin).unwrap();
         let mut lines = out.lines();
         assert_eq!(
@@ -1190,13 +1271,17 @@ mod tests {
             assert!(d.is_finite() && d >= 0.0);
         }
         assert!(!dir.path().join("x.pin.predict.tmp").exists());
-        assert!(preds.add_to_pin(&pin, &spectra, &[spectra.len()]).is_err());
+        assert!(preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .is_err());
 
         std::fs::write(&pin, &text).unwrap();
         for s in &mut spectra {
             s.rt_seconds = None;
         }
-        preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
+        preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .unwrap();
         let out = std::fs::read_to_string(&pin).unwrap();
         let mut lines = out.lines();
         assert_eq!(

@@ -89,7 +89,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--protocol` | enum | `auto` | `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol model. `auto` keeps the model; if it finds TMT/iTRAQ reporter ions it turns on the isobaric peak filter and (with no `--fixed-mods`) adds the tag as a fixed mod. | Java `-protocol` |
 | `--score` | enum | `auto` | What ranks candidates and fills `RawScore`: `rank` (low-res), `strong` (high-res), or `auto` (by the model's instrument class). | — |
 | `--gbdt-max-trees` | u32 | `100` | Trees per GBDT ensemble, `0` = all. 100 is 33–41% faster and identification-neutral (2026-09). `--glyco` uses all trees unless set. | — |
-| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. | — |
+| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. With `--dia` on `.d` input, the filter applies to the fragment-index vote only, and scoring uses every peak. | — |
 | `--ethcd-activation` | enum | `ethcd` | EThcD/ETciD label: `ethcd` (EThcD model, b/y + c/z ions) or `etd` (ETD label; the `--glyco` c/z path). | — |
 | `--model-store` | path | *(bundled)* | Model store instead of `resources/models/` (directory or one `models.parquet`). | — |
 | `--model` | string | *(auto-select)* | Load this model id, skipping selection. | — |
@@ -197,7 +197,7 @@ search uses the segments: its fully specific peptides keep their composition.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. |
+| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, `mutate`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. `mutate` changes one interior residue in each segment of 7 or more residues to a residue with a mass difference of more than 1.1 Da. It does not add or remove a cleavage site, and it does not change a modification site. A segment that more than one entry holds gets one decoy: andes protects every position that any of these entries annotates as a site, so the decoy depends only on the residues. When the change gives a target peptide, andes draws a new position and residue (up to 20 times). Each decoy keeps most of its target's fragment ions. Use `mutate` with `--dia` on wide-window data such as diaPASEF: there, a wrong peptide that is one residue from a co-isolated real peptide shares its fragments, and a shuffled or reversed decoy does not model that error (see `docs/benchmarks/dia/README.md`). DIA-NN 2.0 uses the same model in its Proteoforms mode. `mutate` needs fully specific digestion, and andes stops with an error for semi- or non-specific searches: their decoy peptides that skip the changed residue are target peptides. `--refine` builds its Pass-2 decoys with `reverse`, because a refinement entry is one peptide and a short peptide can have no segment of 7 or more residues. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
 | `--decoy-seed` | u64 | fixed | *(internal, in neither help)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
@@ -714,7 +714,14 @@ alike:
 | `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
 | `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
 | `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
+| `dia_llr` | With `--predict ms2` (`crates/andes/src/bin/andes/dia_llr.rs`): log-likelihood ratio of the row's predicted b/y ions being present in the scan against chance. P(present \| true) is learned per run from the confident rows by predicted-intensity rank and MS1 intensity quartile, P(present \| chance) from the decoy rows by ion length, m/z and charge, each on one half of the peptidoforms and applied to the other half. |
+| `dia_apex_llr` | `−ln P(X ≥ m)`, binomial: how many of the ions seen in the scan or an adjacent cycle peak in this scan, against the decoy rows' share. |
+| `dia_ion_frac`, `dia_ppm_rms` | Per-ion presence: share of the row's six top predicted ions seen in the scan or an adjacent cycle, and the RMS ppm error of those seen in the scan after the run's fragment shift (median error of the confident rows' top ions, learned per run) is removed. |
+| `dia_llr_greedy`, `dia_llr_soft`, `dia_angle_soft` | Explaining away within a scan: the greedy LLR after the peaks of better rows are taken out, the LLR with each matched peak's intensity shared among the rows that match it, and the spectral angle against those shared intensities. |
 
+With `--predict ms2`, `--dia` keeps 100 rows per scan in the search, scores every one with the five
+`dia_llr*` columns, and then trims each scan to `--top-n` rows by z(RawScore) + z(andes-ms2 spectral
+angle), so the scores reach Percolator for the whole pool and the trimmed PIN keeps their columns.
 Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
 intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
 `--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP
@@ -730,6 +737,135 @@ is the best PSM per (peptidoform, charge) after target-decoy competition, as in
 `docs/benchmarks/dia/eval_dia.py`. On the ProteoBench Astral entrapment set, andes reaches 1,800 /
 1,821 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
 Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
+
+#### DIA pass 2, learned score and study mode
+
+With `--dia --predict rt,ms2 --rescore`, andes does more than score single scans. The steps after
+the pool scores:
+
+1. **Pass 2.** Each (run, peptidoform, charge) is nominated by its best pool row (`dia_llr` > −15,
+   targets and decoys alike). The nominee is traced over 73 cycles of its isolation window around a
+   per-run calibration of its predicted RT, and its top 12 predicted fragments are scored per cycle
+   against per-run chance rates. The best cycle gives 27 `p2_*` columns (fragment, co-elution, MS1
+   and peak-sharing evidence). A joint model of the traces adds ten `dia_jf_*` columns: a
+   likelihood ratio over elution offset, peak shape and amplitude, learned per run from confident
+   targets and a sample of decoys.
+2. **Learned score and precursor PIN.** A precursor PIN is written beside the pass-1 PIN
+   (`<stem>.precursor.pin`) with one row per nominated precursor: the pass-2 columns, the best
+   pass-1 row of the precursor (`p1_*`, `p1_present`) and `dia_gb_score`, an out-of-fold
+   gradient-boosted score (3 folds keyed by protein, so a decoy is never scored by a model that saw
+   its source target, whatever the decoy strategy). A fold with too few positives (910 per fold)
+   or a constant score is degenerate; the score then stays at the previous round, or is left out
+   when the first round is degenerate. Percolator rescores
+   this PIN (results `<stem>.precursor.percolator.*`). Its results replace the pass-1 results only
+   when pass 2 has at least as many targets as pass 1 has precursors at q 0.01, Percolator's
+   training is not degenerate, and it reaches at least as many target precursors at q 0.01 as
+   pass 1; otherwise pass 1 is kept and the log says why. With one row per precursor,
+   Percolator's q is the precursor-level q.
+3. **RT-aware candidate cut.** Under `--dia` the fragment-index cut (best 100 forms per scan and
+   charge) ranks by votes minus a squared RT-agreement term. The RT map and its spread are fitted
+   per run on a 2 % subsample searched first. With fewer than 50 anchors (for example a model that
+   predicts RT poorly on the chemistry) the cut keeps the plain vote rank and logs it. The pool
+   re-rank uses the same term.
+
+A single run does all of this in one `andes` call and writes the pass-2 table next to the PIN
+(`<pin>.dia_pass2.parquet`, about 3.5 million rows on an Astral run).
+
+**Study mode** (two or more runs of one experiment) adds evidence across runs. Three commands, in
+this order:
+
+```bash
+# 1. per run (any machine): search, store the run's PIN, pass-2 table and nominees in q/dia_pass2/
+andes --spectrum a.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin a.pin --quant-dir q/
+andes --spectrum b.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin b.pin --quant-dir q/
+# 2. per run, after every search is done: transfer candidates from the other runs, re-run pass 2
+andes quant extract  --quant-dir q/ --run a
+andes quant extract  --quant-dir q/ --run b
+# 3. once: cross-run columns, learned score, rescoring, precursor q, protein groups
+andes quant finalize --quant-dir q/ -o experiment --database db.fasta [--seed 42]
+```
+
+`--dia --quant-dir` takes one input per process. Step 1 does not write the precursor PIN or the
+final results; it stores what finalize needs. Step 2 gives each run every (peptide string, charge,
+target or decoy) key that another run nominated and this run did not, from the run with the highest
+`dia_llr`, re-reads the run's spectra and scores those transferred nominees like its own. Transferred
+rows carry `xfer` 1 and `dia_llr` −50 (a flag); they are left out of the RT calibration, the chance
+rates and the joint-model fits, so the run's own nominees alone set the null. A transferred
+nominee's predicted RT is its raw andes-rt prediction through the receiving run's own calibration.
+Targets and decoys follow one rule, and a decoy key only matches the same decoy. Step 2 is
+optional: without it, finalize uses the runs' own nominees only. Run it for every run or for none;
+finalize checks that the tables belong to the study's runs and were built from the runs' current
+inputs (a run searched and stored again after step 2 makes every transfer table stale, and
+finalize names the run).
+
+Finalize compares the runs' Percolator engine and arguments (not the storage budget or the spill
+directory, which do not change results) and spills into its own `--temp-dir`, or the directory of
+the output base.
+
+Finalize adds three cross-run columns to every precursor, from the other runs' tables: `xr_max`
+(largest `p2_llr` of the same key in another run), `xr_n` (other runs where it is detected) and
+`xr_rtd` (smallest unaligned |RT difference|, capped). Per run it then writes the precursor PIN,
+rescores it with the native Percolator engine, applies the precursor-level q and infers protein
+groups across all runs. `--seed` seeds the learned score and the rescoring (default 42). The study
+needs `--database` for the protein groups and does not accept `--output-parquet`.
+
+**What the reported q means.** It is a precursor-level target-decoy q, `(D + 1) / T` over
+precursors, one row per precursor. With transfer, the q is class-wise: one competition among the
+run's own nominees and one among its transferred nominees. A user who filters at q ≤ 0.01 then gets
+about 1 % false precursors in each class. Under one pooled competition the transferred targets
+measured 2.2–2.7 % true FDP at q 0.01 while the total stayed near 1 %, so the pooled count is only
+logged. The class-wise q costs about 300–580 precursors per run against the pooled one. On the
+PB-Astral-full benchmark the own class measured 1.04–1.06 % true FDP at q 0.01 and the transferred
+class 0.90–1.28 %
+([numbers and limits](docs/benchmarks/dia/pb_full/README.md#full-stack-pass-2-learned-score-study-mode-and-transfer)).
+
+**Files.** All new tables are versioned Parquet with the schema name and version in the file
+metadata.
+
+| File | Schema | Content |
+|---|---|---|
+| `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.1 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns and the row's quantities in its run: `quant_frag` (summed intensity, over the apex ± the run's learned peak width, of up to 6 fragments whose traces correlate best and positively with the summed trace), `quant_ms1` (monoisotopic and M+1 MS1 traces over the same span) and `quant_n_frag` (fragments summed); a quantity is null when the elution window is not contained in the traced cycles or has no signal, never 0. The quantities are not PIN features |
+| `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.1 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
+| `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.2 | The run's nominees (precursor, predicted RT, raw andes-rt prediction and missing flag, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window), with the run's andes-rt calibration and `--dia-mobility-slices` in the metadata |
+| `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.1 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
+| `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
+| `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
+| `<base>.dia_quant.parquet` | `andes.dia_quant.schema` 1.0 | One row per run and target precursor at reported q ≤ `--quant-fdr` (default 0.01), own and transferred: `filename peptide charge proteins evidence_type q_value quantity quantity_frag quantity_ms1 quantity_normalized`. `evidence_type` is `identified` (the run's own nominee) or `transfer`; `peptide` is as in the precursor PIN; `quantity` is the fragment quantity (`quantity_frag`; the metadata key `andes.dia_quant.default` names the arm), `quantity_ms1` the MS1 quantity, both from the pass-2 table; `quantity_normalized` divides `quantity` by the run's median-level factor over the precursors quantified in every normalised run (a run sharing fewer than 20 with the others is left unscaled and logged). Missing quantities are null, never 0; precursors above the q threshold have no row and are not filled from other runs |
+
+**Quantities.** Pass 2 measures every precursor's quantity in its run, and finalize writes the
+rows at reported q ≤ `--quant-fdr` to `<base>.dia_quant.parquet` (table above).
+- The window is the apex ± the run's learned peak width: the median half-maximum width of its
+  confident targets' summed fragment traces, at least 2 cycles.
+- The fragment quantity sums up to 6 fragments that co-elute with the summed trace. It is the
+  default because it had the lower fold-change error and more precursors than the MS1 quantity on
+  the ProteoBench DIA Astral module.
+- On that module the quantities compress large fold changes: E. coli log2(A/B) measured −1.27
+  against −2. See [the benchmark](docs/benchmarks/dia/proteobench_astral/README.md).
+
+**Resources.** Per Astral run (15 min gradient, 3.5 million nominees): the search with `--dia
+--predict rt,ms2 --rescore --quant-dir` takes about 20 minutes and a peak of about 36 GB; the
+extract step 9 minutes and 14 GB; finalize for three runs about 65 minutes and 23 GB. The learned
+score is the largest single cost of finalize. The RT-aware cut adds about 20 % to the search time.
+Plan memory for the search step by the 36 GB peak.
+
+**Limits.**
+
+- Measured on three replicate injections of one sample only. Cross-run columns and transfer across
+  different samples, with RT drift, are not measured, and `xr_rtd` compares retention times
+  unaligned.
+- diaPASEF is untested with pass 2 and transfer. The mobility-aware window placement has a unit
+  test only.
+- The RT-aware cut needs a usable RT prediction. On chemistry that andes-rt predicts poorly it
+  falls back to the vote rank.
+- The fold key assumes a decoy protein's accession is the decoy prefix plus its target's
+  accession (true for every built-in decoy strategy). The prefix is read from the accessions.
+- Study-mode memory grows with the number of runs times the union of their nominees: each
+  extract step holds its run's own nominees plus every key nominated elsewhere, and finalize
+  holds the cross-run keys of all runs (about 24 bytes a precursor per run).
+- The transferred class of one benchmark run measured 1.28 % true FDP at q 0.01 (about 3,000
+  transferred precursors, noisy); the other two runs measured 0.90 and 0.94 %.
 
 ### Refine — secondary chemistry cascade
 

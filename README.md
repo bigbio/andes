@@ -408,8 +408,9 @@ gets 16 columns from the neighbouring cycles of the same window (fragment and MS
 summed apex, support across cycles). With `--rescore`, Percolator trains at `--trainFDR 0.05`,
 andes refines each run's predicted RT on the first pass's confident targets, and Percolator runs
 again. On Orbitrap Astral the fragment tolerance is 7 ppm unless `--fragment-tol-*` is set. With
-`--predict ms2`, the search keeps 50 rows per scan and trims them to `--top-n` by RawScore plus the
-andes-ms2 spectral angle (both z-scored) before the DIA columns, and adds summed-spectrum and
+`--predict ms2`, the search keeps 100 rows per scan, scores each with five fragment-evidence
+columns (`dia_llr` and four variants, below), trims the scan to `--top-n` rows by RawScore plus the
+andes-ms2 spectral angle (both z-scored) before the other DIA columns, and adds summed-spectrum and
 elution-profile columns that score each candidate's predicted fragments over neighbouring cycles.
 
 On the ProteoBench Astral entrapment set OpenDIA uses (two 15-min, 2 Th window runs), at an

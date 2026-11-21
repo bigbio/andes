@@ -73,6 +73,9 @@ pub use quant_out::{
 pub mod run_quant_table;
 
 pub mod extract_table;
+pub mod dia_nominee_table;
+pub mod dia_pass2_table;
+pub mod dia_quant_table;
 pub mod library_table;
 pub mod ms1_table;
 pub mod ms2_table;

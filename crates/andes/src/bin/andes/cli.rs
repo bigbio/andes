@@ -748,6 +748,20 @@ pub(crate) struct SearchArgs {
     )]
     pub(crate) xl_oracle: usize,
 
+    /// With --xl: search only linear and monolinked peptides and write their protein groups
+    ///
+    /// The search runs with the variable modifications --xl implies (the default ones plus
+    /// the linker's water-quenched monolink) and no cross-link search; with --rescore it
+    /// writes <stem>.protein_groups.tsv. `andes cohort run` uses it once
+    /// per project to choose the proteins its cross-link searches look in.
+    #[arg(
+        long = "xl-linear-only",
+        requires = "xl",
+        hide_short_help = true,
+        help_heading = H_MODES
+    )]
+    pub(crate) xl_linear_only: bool,
+
     /// With --xl: rescore the intra-link CSMs with Percolator (comparison only)
     ///
     /// Trains a Percolator model on the intra-link rows alone (<base>.xl.intra.pin) and

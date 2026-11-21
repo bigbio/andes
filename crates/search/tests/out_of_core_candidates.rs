@@ -313,11 +313,18 @@ fn bare(c: &Candidate) -> Vec<u8> {
     c.peptide.residues.iter().map(|a| a.residue).collect()
 }
 
+fn folded(c: &Candidate) -> Vec<u8> {
+    bare(c)
+        .into_iter()
+        .map(|r| if r == b'I' { b'L' } else { r })
+        .collect()
+}
+
 fn enumeration_oracle(idx: &SearchIndex, params: &SearchParams) -> Vec<Candidate> {
     let mut all: Vec<Candidate> = enumerate_candidates(idx, params, "XXX").collect();
-    let targets: HashSet<Vec<u8>> = all.iter().filter(|c| !c.is_decoy).map(bare).collect();
+    let targets: HashSet<Vec<u8>> = all.iter().filter(|c| !c.is_decoy).map(folded).collect();
     for c in all.iter_mut().filter(|c| c.is_decoy) {
-        if targets.contains(&bare(c)) {
+        if targets.contains(&folded(c)) {
             c.is_decoy = false;
         }
     }

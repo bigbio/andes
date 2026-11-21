@@ -288,6 +288,17 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
     })
 }
 
+/// Missed cleavages per peptide: --max-missed-cleavages, raised to 3 under --glyco unless it was
+/// given explicitly.
+fn max_missed_cleavages(cli: &Cli) -> u32 {
+    let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
+    if cli.glyco && !explicit {
+        cli.max_missed_cleavages.max(3)
+    } else {
+        cli.max_missed_cleavages
+    }
+}
+
 /// Parses the enzymes, loads the protein database and builds the search index.
 pub(super) fn load_search_database(
     cli: &Cli,
@@ -370,6 +381,9 @@ pub(super) fn load_search_database(
             EnzymeSpecificity::Semi => 1,
             EnzymeSpecificity::NonSpecific => 0,
         },
+        min_length: cli.min_length,
+        max_length: cli.max_length,
+        max_missed_cleavages: max_missed_cleavages(cli),
     };
     if decoy_strategy == search::decoy::DecoyStrategy::Mutate
         && (proteases.is_non_specific() || proteases.num_tolerable_termini < 2)
@@ -896,23 +910,19 @@ pub(super) fn resolve_search_params(
     });
     params.dia_vote_filter = vote_filter;
 
-    params.max_missed_cleavages = if cli.glyco {
-        let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
-        if explicit && cli.max_missed_cleavages < 3 {
-            log::info!(target: "search",
-                "--glyco normally raises missed cleavages to 3 (sequon-bearing \
-                 tryptic peptides often need a third to reach a scoreable length); \
-                 honouring your explicit --max-missed-cleavages {}. Expect fewer \
-                 glycopeptide IDs in exchange for a smaller candidate index.",
-                cli.max_missed_cleavages
-            );
+    if cli.glyco
+        && *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false)
+        && cli.max_missed_cleavages < 3
+    {
+        log::info!(target: "search",
+            "--glyco normally raises missed cleavages to 3 (sequon-bearing \
+             tryptic peptides often need a third to reach a scoreable length); \
+             honouring your explicit --max-missed-cleavages {}. Expect fewer \
+             glycopeptide IDs in exchange for a smaller candidate index.",
             cli.max_missed_cleavages
-        } else {
-            cli.max_missed_cleavages.max(3)
-        }
-    } else {
-        cli.max_missed_cleavages
-    };
+        );
+    }
+    params.max_missed_cleavages = max_missed_cleavages(cli);
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;

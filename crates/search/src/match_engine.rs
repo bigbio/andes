@@ -3415,8 +3415,33 @@ pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
     h.finish()
 }
 
+/// I and L are isobaric, so a decoy peptide that equals a target peptide with I and L folded is
+/// the same precursor and fragment ladder as that target.
+fn fold_isoleucine(r: u8) -> u8 {
+    if r == b'I' {
+        b'L'
+    } else {
+        r
+    }
+}
+
+/// The residues of a candidate with I folded to L, the key of the target peptide set.
 fn bare_residues(cand: &Candidate) -> Box<[u8]> {
-    cand.peptide.residues.iter().map(|aa| aa.residue).collect()
+    cand.peptide
+        .residues
+        .iter()
+        .map(|aa| fold_isoleucine(aa.residue))
+        .collect()
+}
+
+fn folded_set(spans: Vec<&[u8]>) -> FxHashSet<Box<[u8]>> {
+    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
+    set.extend(
+        spans
+            .into_iter()
+            .map(|s| s.iter().map(|&r| fold_isoleucine(r)).collect::<Box<[u8]>>()),
+    );
+    set
 }
 
 fn relabel_collision_decoys_with(candidates: &mut [Candidate], target_seqs: &FxHashSet<Box<[u8]>>) {
@@ -3446,9 +3471,7 @@ fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSe
         .collect();
     spans.par_sort_unstable();
     spans.dedup();
-    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
-    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
-    set
+    folded_set(spans)
 }
 
 fn build_target_bare_seqs_where(
@@ -3476,9 +3499,7 @@ fn build_target_bare_seqs_where(
         .collect();
     spans.par_sort_unstable();
     spans.dedup();
-    let mut set = FxHashSet::with_capacity_and_hasher(spans.len(), Default::default());
-    set.extend(spans.into_iter().map(|s| s.to_vec().into_boxed_slice()));
-    set
+    folded_set(spans)
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -3639,14 +3660,17 @@ mod dedup_tests {
             cand(b"PEPTIDEK", false),
             cand(b"PEPTIDEK", true),
             cand(b"EDITPEPK", true),
+            cand(b"PEPTLDEK", true),
         ];
-        let targets: FxHashSet<Box<[u8]>> = [b"PEPTIDEK".to_vec().into_boxed_slice()]
-            .into_iter()
-            .collect();
+        let targets = folded_set(vec![b"PEPTIDEK".as_slice()]);
         relabel_collision_decoys_with(&mut cands, &targets);
         assert!(!cands[0].is_decoy, "target unchanged");
         assert!(!cands[1].is_decoy, "collision decoy relabeled to target");
         assert!(cands[2].is_decoy, "genuine decoy left as decoy");
+        assert!(
+            !cands[3].is_decoy,
+            "a decoy equal to a target with I and L folded is relabeled to target"
+        );
     }
 
     #[test]

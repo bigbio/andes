@@ -140,8 +140,30 @@ pub(crate) fn parse_enzymes(
             all.push(e);
         }
     }
+    all.sort_by_key(|&e| primary_rank(e));
     let (primary, extras) = all.split_first().ok_or("empty --enzyme")?;
     Ok((*primary, extras.to_vec()))
+}
+
+/// Sort key that puts a protease set in one order whatever order it was listed in; the
+/// first one is the primary protease, which selects the scoring model and the cleavage
+/// feature.
+///
+/// The primary is the protease whose cleavage rule sets the C-terminal residue of most
+/// peptides of the union digest: a specific protease before `NoCleavage`/`NonSpecific`, a
+/// C-terminal one (cleaving after its residues) before an N-terminal one, then the one
+/// with more cleavage residues, a stand-in for the share of peptide C-termini it makes.
+/// Trypsin (K/R) therefore leads Lys-C (K) and Arg-C (R), whose sites are a subset of its
+/// own. Ties fall back to the declaration order of [`model::enzyme::Enzyme`].
+fn primary_rank(e: model::enzyme::Enzyme) -> (bool, bool, std::cmp::Reverse<usize>, u8) {
+    use model::enzyme::Enzyme;
+    let specific = !matches!(e, Enzyme::NoCleavage | Enzyme::NonSpecific);
+    (
+        !specific,
+        !e.is_c_term(),
+        std::cmp::Reverse(e.residues().len()),
+        e as u8,
+    )
 }
 
 pub(crate) fn warn_if_universal_protease_combo(
@@ -1073,6 +1095,64 @@ mod param_resolver_tests {
                 "hcd_lowres_probe"
             );
         }
+    }
+
+    #[test]
+    fn lysc_and_trypsin_route_alike_in_either_order() {
+        let store = ModelStore::open(&bundled_store_path()).expect("bundled store");
+        let entries = store.selection_entries();
+        let route = |spec: &str, act, inst, prot| {
+            let (primary, _) = parse_enzymes(spec).unwrap();
+            choose_model(&entries, act, inst, prot, primary)
+        };
+        for act in [
+            ActivationMethod::CID,
+            ActivationMethod::HCD,
+            ActivationMethod::ETD,
+            ActivationMethod::EThcD,
+        ] {
+            for inst in [
+                None,
+                Some(InstrumentType::LowRes),
+                Some(InstrumentType::QExactive),
+                Some(InstrumentType::OrbitrapAstral),
+            ] {
+                for prot in [Protocol::Auto, Protocol::Tmt] {
+                    let lysc_first = route("lysc,trypsin", act, inst, prot);
+                    let tryp_first = route("trypsin,lysc", act, inst, prot);
+                    let trypsin = route("trypsin", act, inst, prot);
+                    assert_eq!(
+                        lysc_first.model_id, tryp_first.model_id,
+                        "{act:?}/{inst:?}/{prot:?}"
+                    );
+                    assert_eq!(
+                        lysc_first.model_id, trypsin.model_id,
+                        "{act:?}/{inst:?}/{prot:?}"
+                    );
+                }
+            }
+        }
+        let ion_trap = Some(InstrumentType::LowRes);
+        let tmt = route(
+            "lysc,trypsin",
+            ActivationMethod::CID,
+            ion_trap,
+            Protocol::Tmt,
+        );
+        assert_eq!(
+            (tmt.model_id.as_str(), tmt.warning.is_none()),
+            ("cid_lowres_tryp_tmt", true)
+        );
+        let label_free = route(
+            "lysc,trypsin",
+            ActivationMethod::CID,
+            ion_trap,
+            Protocol::Auto,
+        );
+        assert_eq!(
+            (label_free.model_id.as_str(), label_free.warning.is_none()),
+            ("cid_lowres_tryp", true)
+        );
     }
 
     #[test]

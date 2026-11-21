@@ -563,8 +563,9 @@ pub(crate) fn finalize(
              samples"
         );
     }
-    let inf = crate::inference_cmd::infer_from_files(database, &a.proteins, &a.psms, &a.decoy_psms)
-        .map_err(|e| e.to_string())?;
+    let (inf, _) =
+        crate::inference_cmd::infer_from_files(database, &a.proteins, &a.psms, &a.decoy_psms)
+            .map_err(|e| e.to_string())?;
     let groups = ProteinGroups {
         inf: &inf,
         max_q: a.proteins.protein_fdr,

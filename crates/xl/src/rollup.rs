@@ -8,10 +8,19 @@ pub enum LinkClass {
     Intra,
     Homotypic,
     Inter,
+    /// An inter-link with a peptide that has a near-identical copy in a protein the CSM
+    /// does not list: its partner may be a homolog of the true one, an error decoys
+    /// cannot model, so its FDR is estimated apart from the other inter-links.
+    InterAmbiguous,
 }
 
 impl LinkClass {
-    pub const ALL: [LinkClass; 3] = [LinkClass::Intra, LinkClass::Homotypic, LinkClass::Inter];
+    pub const ALL: [LinkClass; 4] = [
+        LinkClass::Intra,
+        LinkClass::Homotypic,
+        LinkClass::Inter,
+        LinkClass::InterAmbiguous,
+    ];
 
     pub fn of(intra: bool, homotypic: bool) -> Self {
         match (intra, homotypic) {
@@ -22,7 +31,7 @@ impl LinkClass {
     }
 
     pub fn is_intra(self) -> bool {
-        self != LinkClass::Inter
+        matches!(self, LinkClass::Intra | LinkClass::Homotypic)
     }
 
     pub fn name(self) -> &'static str {
@@ -30,6 +39,7 @@ impl LinkClass {
             LinkClass::Intra => "intra",
             LinkClass::Homotypic => "homotypic",
             LinkClass::Inter => "inter",
+            LinkClass::InterAmbiguous => "inter_ambiguous",
         }
     }
 }

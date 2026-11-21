@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub struct Budget {
     total: u64,
     remaining: AtomicU64,
+    peak: AtomicU64,
     spill_dir: PathBuf,
 }
 
@@ -13,6 +14,7 @@ impl Budget {
         Arc::new(Budget {
             total: bytes,
             remaining: AtomicU64::new(bytes),
+            peak: AtomicU64::new(0),
             spill_dir: spill_dir.to_path_buf(),
         })
     }
@@ -25,16 +27,32 @@ impl Budget {
         self.remaining.load(Ordering::Relaxed)
     }
 
+    /// The most bytes reserved at once so far.
+    pub fn peak(&self) -> u64 {
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    fn note_reserved(&self, remaining: u64) {
+        self.peak
+            .fetch_max(self.total.saturating_sub(remaining), Ordering::Relaxed);
+    }
+
     pub fn spill_dir(&self) -> &Path {
         &self.spill_dir
     }
 
     pub fn reserve_keeping(&self, bytes: u64, keep: u64) -> bool {
-        self.remaining
+        match self
+            .remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |r| {
                 r.checked_sub(bytes).filter(|&left| left >= keep)
-            })
-            .is_ok()
+            }) {
+            Ok(before) => {
+                self.note_reserved(before - bytes);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn reserve(&self, bytes: u64) -> bool {
@@ -43,12 +61,15 @@ impl Budget {
 
     pub fn take_up_to(&self, bytes: u64) -> u64 {
         let mut got = 0;
-        let _ = self
+        if let Ok(before) = self
             .remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |r| {
                 got = r.min(bytes);
                 Some(r - got)
-            });
+            })
+        {
+            self.note_reserved(before - got);
+        }
         got
     }
 

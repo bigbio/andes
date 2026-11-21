@@ -1,17 +1,32 @@
 use crate::budget::{Budget, Reservation};
+use crate::cv::TASK_BYTES_PER_EXAMPLE;
 use crate::store::{Store, StoreBuilder};
+use crate::svm::{Rows, GRAM_BYTES};
 use crate::text::{append_record, RowText, Texts, TextsBuilder};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// How the engine's storage budget is chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sizing {
+    /// The budget is `MemLimit::bytes`, as given.
+    Fixed,
+    /// `MemLimit::bytes` is the memory the job or machine allows; the budget is what the PIN
+    /// needs to stay in memory, never above `cap` nor above the allowance. `why` says where the
+    /// allowance comes from.
+    FitInput { cap: u64, why: String },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLimit {
     pub bytes: u64,
     pub spill_dir: PathBuf,
+    pub sizing: Sizing,
 }
 
 pub struct RowMeta {
@@ -321,7 +336,11 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         hcells: &hcells,
         path,
     };
-    let budget = Budget::new(limit.bytes, &limit.spill_dir);
+    let reading_budget = match &limit.sizing {
+        Sizing::Fixed => limit.bytes,
+        Sizing::FitInput { cap, .. } => limit.bytes.min(*cap),
+    };
+    let budget = Budget::new(reading_budget, &limit.spill_dir);
     let mut builder = StoreBuilder::new(nfeat, &budget);
     let mut texts = TextsBuilder::new(&budget);
     let mut meta: Vec<RowMeta> = Vec::new();
@@ -381,7 +400,7 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         chunks = next?;
     }
     drop(in_flight);
-    Ok(Pin {
+    let pin = Pin {
         feature_names,
         file_names,
         default_direction,
@@ -390,12 +409,116 @@ pub fn read_pin(path: &Path, limit: MemLimit) -> Result<Pin, String> {
         texts: texts.finish()?,
         budget,
         _per_row: per_row,
-    })
+    };
+    if let Sizing::FitInput { cap, why } = &limit.sizing {
+        fit_budget_to_input(&pin, limit.bytes, *cap, why, &limit.spill_dir);
+    }
+    Ok(pin)
+}
+
+/// SVM fits the automatic budget leaves room for at once. Each fit is itself parallel, so
+/// more at once mostly adds memory.
+const AUTO_CONCURRENT_FITS: u64 = 4;
+
+/// Bytes per PSM the engine allocates outside the storage budget (fold row lists, label and
+/// score vectors); the automatic budget leaves them room in the allowance.
+const UNBUDGETED_BYTES_PER_ROW: u64 = 96;
+
+/// The storage budget at which the PIN's stores, the normalised training rows and
+/// `AUTO_CONCURRENT_FITS` SVM fits all stay in memory: the stores take at most half of the
+/// budget while the PIN is read, and the training rows, the fit reserve and the fits come on
+/// top of the stores afterwards.
+pub(crate) fn in_memory_need(rows: usize, nfeat: usize, text_bytes: u64, threads: usize) -> u64 {
+    let n = rows as u64;
+    let stores = n * PER_ROW_BYTES + n * nfeat as u64 * 4 + text_bytes;
+    let reading = chunks_in_flight(u64::MAX, threads) as u64 * IN_FLIGHT_BYTES_PER_CHUNK;
+    let examples = n * 2 / 3;
+    let fit = examples * TASK_BYTES_PER_EXAMPLE + GRAM_BYTES as u64;
+    let training = stores
+        + Rows::bytes_for(rows, nfeat)
+        + examples * TASK_BYTES_PER_EXAMPLE
+        + AUTO_CONCURRENT_FITS * fit;
+    (2 * (stores + reading)).max(training)
+}
+
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+static BUDGET_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn fit_budget_to_input(pin: &Pin, allowed: u64, cap: u64, why: &str, spill_dir: &Path) {
+    let n = pin.meta.len();
+    let nfeat = pin.rows.nfeat();
+    let need = in_memory_need(n, nfeat, pin.texts.bytes(), rayon::current_num_threads());
+    let room = allowed.saturating_sub(n as u64 * UNBUDGETED_BYTES_PER_ROW);
+    pin.budget.shrink_to(need.min(cap).min(room));
+    let budget = pin.budget.total();
+    let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let spills = need > budget;
+    let first = !BUDGET_LOGGED.swap(true, Ordering::Relaxed);
+    let level = if spills || first {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    };
+    let psms = thousands(n);
+    if !spills {
+        log::log!(
+            target: "rescore",
+            level,
+            "storage budget {:.1} GB, what {psms} PSMs x {nfeat} features need to stay in memory ({why})",
+            gb(budget)
+        );
+    } else if cap < room {
+        log::log!(
+            target: "rescore",
+            level,
+            "storage budget {:.1} GB, the default cap (--rescore-memory-gb sets another): {psms} PSMs x {nfeat} features need {:.1} GB, so part of them spills to {}",
+            gb(budget),
+            gb(need),
+            spill_dir.display()
+        );
+    } else {
+        log::log!(
+            target: "rescore",
+            level,
+            "storage budget {:.1} GB, all the memory allowed ({why}): {psms} PSMs x {nfeat} features need {:.1} GB, so part of them spills to {}",
+            gb(budget),
+            gb(need),
+            spill_dir.display()
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_are_grouped_by_thousands() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(61_234_567), "61,234,567");
+    }
+
+    #[test]
+    fn the_in_memory_need_covers_twice_the_stores_and_grows_with_the_pin() {
+        let small = in_memory_need(1_000, 20, 50_000, 16);
+        let large = in_memory_need(1_000_000, 20, 50_000_000, 16);
+        assert!(large > small);
+        let stores = 1_000_000 * (PER_ROW_BYTES + 80) + 50_000_000;
+        assert!(large >= 2 * stores);
+    }
 
     #[test]
     fn chunks_in_flight_follow_the_budget() {

@@ -91,6 +91,7 @@ fn rows_gather_normalises_and_appends_bias() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: dir.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -137,6 +138,7 @@ fn mfn_matches_reference_weights() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: dir.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -207,6 +209,7 @@ fn rows_gather_panics_on_unreached_index() {
         MemLimit {
             bytes: u64::MAX,
             spill_dir: dir.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();

@@ -314,10 +314,7 @@ fn main() -> ExitCode {
 
 fn run_rescore(args: cli::RescoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     cli::ensure_scratch_dir(&args.temp_dir)?;
-    let limit = output::MemLimit {
-        bytes: args.rescore_memory_gb.saturating_mul(1 << 30),
-        spill_dir: args.temp_dir,
-    };
+    let limit = memlimit::rescore_memory(args.rescore_memory_gb, args.temp_dir);
     output::run_native_percolator(&args.args, limit)?;
     Ok(())
 }

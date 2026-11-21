@@ -27,7 +27,7 @@ pub use folds::folds_by_spectrum;
 pub use merge::{merge_folds, normalize_fold_scores};
 pub use normalize::{raw_weights, score, stdv, Norm};
 pub use pep::{estimate_pi0, pep_from_q, too_good_separation};
-pub use pin::{read_pin, MemLimit, Pin, RowMeta};
+pub use pin::{read_pin, MemLimit, Pin, RowMeta, Sizing};
 pub use run::run;
 pub use scores::{count_at, mix_max_q, tdc_q, tdc_winners, training_sets};
 pub use store::Store;

@@ -60,7 +60,7 @@ struct TrainSet {
     negatives: usize,
 }
 
-const TASK_BYTES_PER_EXAMPLE: u64 = 96;
+pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = 96;
 
 fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
     let nf = pin.rows.nfeat();
@@ -277,9 +277,13 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
 
     let keep = fit_reserve(&folds);
     let full = Rows::all_in_ram(&pin.rows, norm, &pin.budget, keep);
+    if full.is_none() {
+        log::debug!(target: "rescore", "training rows gathered per iteration (the budget does not hold every row)");
+    }
     let mut warm: Vec<Option<Vec<f64>>> = vec![None; pairs.len()];
     let mut fixed: Option<[usize; FOLDS]> = None;
     let (mut found_old_old, mut found_old) = (0i64, 0i64);
+    let mut widest = 0usize;
     for it in 0..cfg.iterations {
         let fdr = if it == 0 {
             cfg.initial_selection_fdr
@@ -297,6 +301,9 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
             None => {
                 let union = example_union(&sets);
                 compact = Rows::gather_within(&pin.rows, norm, &union, &pin.budget)?;
+                if compact.is_spilled() {
+                    log::debug!(target: "rescore", "iteration {}: training rows spilled", it + 1);
+                }
                 for t in sets.iter_mut() {
                     to_positions(&mut t.ex.rows, &union);
                 }
@@ -350,6 +357,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
                     }
                 }
                 let end = (done + held.len()).max(done + 1);
+                widest = widest.max(end - done);
                 let batch = &ks[done..end];
                 let starts: Vec<Option<&[f64]>> =
                     batch.iter().map(|&k| warm[k].as_deref()).collect();
@@ -457,6 +465,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         found_old = estimated;
     }
 
+    log::debug!(target: "rescore", "at most {widest} SVM fits ran at once");
     let mut test: Vec<Vec<f64>> = folds
         .iter()
         .zip(&w)

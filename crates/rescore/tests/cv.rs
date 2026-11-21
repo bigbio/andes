@@ -55,6 +55,7 @@ fn load_within(
         MemLimit {
             bytes,
             spill_dir: d.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();

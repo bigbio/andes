@@ -128,6 +128,7 @@ fn svm_ref_rows() -> (tempfile::TempDir, Pin) {
         MemLimit {
             bytes: 1 << 30,
             spill_dir: dir.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();

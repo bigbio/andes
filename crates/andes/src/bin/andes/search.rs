@@ -1541,6 +1541,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             search_elapsed.as_secs_f64()
         );
     }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
+    }
     crate::memlimit::mark_stage("search");
     if cli.open_search {
         let (attempts, wins) = prepared.open_search_stats();
@@ -1709,6 +1712,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
     if fact_rows.is_some() {
         queues = Vec::new();
+        crate::memlimit::release_free_memory();
     }
     log::info!(
         target: "total",
@@ -1758,6 +1762,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             crate::memlimit::mark_stage("pass 2");
         }
     }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
+    }
     crate::memlimit::mark_stage("pool released");
     let mut rerank_dropped = std::collections::HashSet::new();
     if pooled {
@@ -1766,6 +1773,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.top_n as usize,
             cli.output_parquet.is_some() || quant.is_some(),
         )?;
+        crate::memlimit::release_free_memory();
         crate::memlimit::mark_stage("per-scan cut");
     }
     if cli.dia {
@@ -1773,6 +1781,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         crate::memlimit::mark_stage("co-elution");
     }
     drop(dia_ms1);
+    if cli.dia {
+        crate::memlimit::release_free_memory();
+    }
     if cli.refine {
         if refine_merged {
             log::info!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
@@ -1953,6 +1964,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
         crate::dia_xrun::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+    }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
     }
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();

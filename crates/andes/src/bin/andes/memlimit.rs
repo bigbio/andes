@@ -116,6 +116,17 @@ pub(crate) fn available_memory_budget() -> Option<MemoryBudget> {
     budget_from(meminfo_available_bytes(), cgroup_memory_limit())
 }
 
+/// Returns the free pages of the heap to the system (glibc `malloc_trim`), so memory freed by a
+/// finished stage no longer counts as resident and the next stage's large allocations do not
+/// stack on top of it. A no-op on other platforms.
+pub(crate) fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap memory; it is thread safe.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Logs, at debug level (`--verbose`), the resident memory at the end of `stage` and the peak
 /// since the previous mark, then resets the kernel's peak counter so the next mark reports
 /// its own stage. Reads `/proc/self/status`; does nothing where that file is missing.

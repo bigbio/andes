@@ -436,6 +436,7 @@ fn read_run_spectra(
         }
         #[cfg(not(feature = "timstof"))]
         {
+            let _ = mobility_slices;
             return Err(format!(
                 "{}: this andes build has no Bruker .d support; rebuild with `--features timstof`",
                 path.display()

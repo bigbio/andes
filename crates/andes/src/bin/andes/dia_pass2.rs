@@ -8,9 +8,12 @@
 //! Each row also gets its quantities in the run, over the elution window: the apex ± the run's
 //! learned peak width, the median half-maximum width (cycles) of the summed fragment traces of
 //! the run's confident targets. The apex is the local maximum of the row's summed fragment
-//! trace reached from its best cycle. The fragment quantity is the summed
-//! intensity over that window of the [`QUANT_TOP_FRAGMENTS`] fragments whose traces correlate
-//! best (and positively) with the summed trace; the MS1 quantity is the summed intensity of the
+//! trace reached from its best cycle. The fragment quantity is the summed intensity over that
+//! window of the [`QUANT_TOP_FRAGMENTS`] most intense predicted fragments, each above its
+//! background: the median of its trace over the cycles beyond one more learned width on each
+//! side of the window, out to [`QUANT_BACKGROUND_REACH`] learned widths from the apex. The same
+//! fragments are summed in every run, whatever their per-run interference, so a ratio between
+//! runs compares like with like; the MS1 quantity is the summed intensity of the
 //! monoisotopic and M+1 MS1 traces over the same retention-time span. A row whose window does
 //! not lie inside its traced cycles (the peak is cut by the run's first or last spectrum or by
 //! the trace) or that has no signal has no quantity; a quantity is never 0.
@@ -73,8 +76,12 @@ const AA: &[u8; 20] = b"ACDEFGHIKLMNPQRSTVWY";
 /// RT prior spread when a run has too few confident targets to measure it.
 const RT_SIGMA_FALLBACK_MIN: f64 = 0.5;
 const RT_TERMS: usize = 4 + 20;
-/// Fragments summed into the fragment quantity: the best correlated with the summed trace.
+/// Fragments summed into the fragment quantity: the most intense predicted.
 const QUANT_TOP_FRAGMENTS: usize = 6;
+/// Reach (learned half-widths from the apex) of the cycles that give a fragment's background.
+const QUANT_BACKGROUND_REACH: usize = 6;
+/// Background cycles a fragment's background needs; with fewer it is 0.
+const QUANT_BACKGROUND_MIN_CYCLES: usize = 4;
 /// Smallest half-width (cycles) of the quantity window.
 const QUANT_MIN_HALF_CYCLES: usize = 2;
 /// Half-width (cycles) of the quantity window when a run has too few confident targets to
@@ -806,34 +813,52 @@ fn quant_window(
     (ok(lo) && ok(hi)).then_some(lo..hi + 1)
 }
 
-/// Fragment quantity over `window`: the summed intensity of the (at most
-/// [`QUANT_TOP_FRAGMENTS`]) traces with signal there whose correlation with `consensus` is
-/// positive and highest, and how many were summed. `None` (and 0) when no trace qualifies.
+/// Fragment quantity over `window` (the apex ± `half`): the summed intensity there of the first
+/// [`QUANT_TOP_FRAGMENTS`] of `traces` (most intense predicted first), each less its background
+/// and floored at 0 per cycle, and how many of them have signal above background. The background
+/// of a trace is its median over the `valid` cycles at most [`QUANT_BACKGROUND_REACH`] × `half`
+/// from the apex and more than `half` outside the window; 0 with fewer than
+/// [`QUANT_BACKGROUND_MIN_CYCLES`] such cycles. `None` (and 0) without signal above background.
 pub(crate) fn fragment_quantity(
     traces: &[Vec<f32>],
-    consensus: &[f32],
+    valid: &[bool],
     window: Range<usize>,
+    half: usize,
 ) -> (Option<f64>, u8) {
-    let end = window.end.min(consensus.len());
-    let w = window.start.min(end)..end;
-    let cons: Vec<f64> = consensus[w.clone()].iter().map(|&v| f64::from(v)).collect();
-    let mut ranked: Vec<(f64, f64, usize)> = traces
-        .iter()
-        .enumerate()
-        .filter_map(|(j, tr)| {
-            let x: Vec<f64> = tr.get(w.clone())?.iter().map(|&v| f64::from(v)).collect();
-            let area: f64 = x.iter().sum();
-            let r = pearson(&x, &cons);
-            (area > 0.0 && area.is_finite() && r > 0.0).then_some((r, area, j))
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)));
-    ranked.truncate(QUANT_TOP_FRAGMENTS);
-    let area: f64 = ranked.iter().map(|r| r.1).sum();
-    if ranked.is_empty() || !area.is_finite() || area <= 0.0 {
+    if window.is_empty() {
         return (None, 0);
     }
-    (Some(area), ranked.len() as u8)
+    let apex = (window.start + window.end - 1) / 2;
+    let reach = QUANT_BACKGROUND_REACH * half;
+    let background_cycles: Vec<usize> = (apex.saturating_sub(reach)..=apex + reach)
+        .filter(|&k| valid.get(k).copied().unwrap_or(false))
+        .filter(|&k| k + half < window.start || k >= window.end + half)
+        .collect();
+    let mut total = 0f64;
+    let mut n_frag = 0u8;
+    for tr in traces.iter().take(QUANT_TOP_FRAGMENTS) {
+        let Some(x) = tr.get(window.clone()) else {
+            continue;
+        };
+        let background = if background_cycles.len() < QUANT_BACKGROUND_MIN_CYCLES {
+            0.0
+        } else {
+            let mut b: Vec<f64> = background_cycles
+                .iter()
+                .filter_map(|&k| tr.get(k).map(|&v| f64::from(v)))
+                .collect();
+            model::stats::median_mut(&mut b, model::stats::Even::Mean).unwrap_or(0.0)
+        };
+        let above: f64 = x.iter().map(|&v| (f64::from(v) - background).max(0.0)).sum();
+        if above > 0.0 && above.is_finite() {
+            total += above;
+            n_frag += 1;
+        }
+    }
+    if n_frag == 0 || !total.is_finite() || total <= 0.0 {
+        return (None, 0);
+    }
+    (Some(total), n_frag)
 }
 
 /// MS1 quantity over `window`: the summed intensity of the monoisotopic and M+1 traces;
@@ -857,7 +882,7 @@ fn row_quantity(t: &Trace, nj: usize, best: usize, half: usize) -> (RowQuant, Op
     let traces: Vec<Vec<f32>> = (0..nj)
         .map(|j| (0..CYCLES).map(|k| t.x[k][j]).collect())
         .collect();
-    let (frag, n_frag) = fragment_quantity(&traces, &consensus, win.clone());
+    let (frag, n_frag) = fragment_quantity(&traces, &t.valid, win.clone(), half);
     (
         RowQuant {
             frag,
@@ -1625,27 +1650,20 @@ mod tests {
             .collect()
     }
 
-    fn consensus(traces: &[Vec<f32>]) -> Vec<f32> {
-        (0..traces[0].len())
-            .map(|k| traces.iter().map(|t| t[k]).sum())
-            .collect()
-    }
-
     fn area(t: &[f32], w: Range<usize>) -> f64 {
         t[w].iter().map(|&v| f64::from(v)).sum()
     }
 
     #[test]
-    fn fragment_quantity_uses_top_six_by_correlation() {
-        let g = gauss(21, 10.0, 2.0);
+    fn fragment_quantity_sums_the_six_most_intense_predicted_fragments() {
+        let g = gauss(41, 20.0, 2.0);
+        let valid = [true; 41];
         let mut traces: Vec<Vec<f32>> = (0..6)
             .map(|j| g.iter().map(|v| v * 1000.0 * (j + 1) as f32).collect())
             .collect();
-        for _ in 0..2 {
-            traces.push(g.iter().map(|v| 400.0 * (1.0 - v) + 1.0).collect());
-        }
-        let w = 4..17;
-        let (q, n) = fragment_quantity(&traces, &consensus(&traces), w.clone());
+        traces.push(g.iter().map(|v| v * 1e6).collect());
+        let w = 17..24;
+        let (q, n) = fragment_quantity(&traces, &valid, w.clone(), 3);
         assert_eq!(n, 6);
         let want: f64 = traces[..6].iter().map(|t| area(t, w.clone())).sum();
         let got = q.unwrap();
@@ -1653,27 +1671,42 @@ mod tests {
     }
 
     #[test]
-    fn fragment_quantity_with_three_fragments() {
-        let g = gauss(21, 10.0, 2.0);
+    fn fragment_quantity_subtracts_each_fragment_background() {
+        let g = gauss(41, 20.0, 2.0);
+        let valid = [true; 41];
+        let floor = [50.0f32, 0.0, 400.0];
         let traces: Vec<Vec<f32>> = [300.0f32, 900.0, 150.0]
             .iter()
-            .map(|a| g.iter().map(|v| v * a).collect())
+            .zip(floor)
+            .map(|(a, b)| g.iter().map(|v| v * a + b).collect())
             .collect();
-        let w = 6..15;
-        let (q, n) = fragment_quantity(&traces, &consensus(&traces), w.clone());
+        let w = 17..24;
+        let (q, n) = fragment_quantity(&traces, &valid, w.clone(), 3);
         assert_eq!(n, 3);
-        let want: f64 = traces.iter().map(|t| area(t, w.clone())).sum();
-        assert!((q.unwrap() - want).abs() < 1e-6 * want);
+        let want: f64 = [300.0f64, 900.0, 150.0]
+            .iter()
+            .map(|a| a * area(&g, w.clone()))
+            .sum();
+        assert!((q.unwrap() - want).abs() < 1e-3 * want, "{q:?} vs {want}");
+        let mut few = [false; 41];
+        few[14..27].fill(true);
+        let (q, _) = fragment_quantity(&traces, &few, w.clone(), 3);
+        let raw: f64 = traces.iter().map(|t| area(t, w.clone())).sum();
+        assert!((q.unwrap() - raw).abs() < 1e-6 * raw, "without background cycles nothing is subtracted");
     }
 
     #[test]
     fn quantity_missing_without_signal() {
-        let zero = vec![vec![0f32; 21]; 6];
-        assert_eq!(fragment_quantity(&zero, &consensus(&zero), 4..17), (None, 0));
-        let g = gauss(21, 10.0, 2.0);
+        let valid = [true; 41];
+        let zero = vec![vec![0f32; 41]; 6];
+        assert_eq!(fragment_quantity(&zero, &valid, 17..24, 3), (None, 0));
+        let flat = vec![vec![70f32; 41]; 6];
+        assert_eq!(fragment_quantity(&flat, &valid, 17..24, 3), (None, 0), "background only");
+        let g = gauss(41, 20.0, 2.0);
         let one = vec![g.clone()];
-        assert_eq!(fragment_quantity(&one, &g, 9..9), (None, 0), "empty window");
-        assert_eq!(fragment_quantity(&[], &g, 4..17), (None, 0), "no fragments");
+        assert_eq!(fragment_quantity(&one, &valid, 20..20, 3), (None, 0), "empty window");
+        assert_eq!(fragment_quantity(&[], &valid, 17..24, 3), (None, 0), "no fragments");
+        let g = gauss(21, 10.0, 2.0);
         assert_eq!(ms1_quantity(&[0.0; 9], &[0.0; 9], 0..9), None);
         assert_eq!(ms1_quantity(&[0.0; 9], &[5.0; 9], 0..9), None, "M+1 alone is not a quantity");
         let mono: Vec<f32> = g.iter().map(|v| v * 1e4).collect();

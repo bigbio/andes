@@ -11,9 +11,9 @@
 //! trace reached from its best cycle. The fragment quantity is the summed intensity over that
 //! window of the [`QUANT_TOP_FRAGMENTS`] most intense predicted fragments, each above its
 //! background: the median of its trace over the cycles beyond one more learned width on each
-//! side of the window, out to [`QUANT_BACKGROUND_REACH`] learned widths from the apex. The same
-//! fragments are summed in every run, whatever their per-run interference, so a ratio between
-//! runs compares like with like; the MS1 quantity is the summed intensity of the
+//! side of the window, out to [`QUANT_BACKGROUND_REACH_HALF_WIDTHS`] learned widths from the
+//! apex. The same fragments are summed in every run, whatever their per-run interference, so a
+//! ratio between runs compares like with like; the MS1 quantity is the summed intensity of the
 //! monoisotopic and M+1 MS1 traces over the same retention-time span. A row whose window does
 //! not lie inside its traced cycles (the peak is cut by the run's first or last spectrum or by
 //! the trace) or that has no signal has no quantity; a quantity is never 0.
@@ -79,7 +79,7 @@ const RT_TERMS: usize = 4 + 20;
 /// Fragments summed into the fragment quantity: the most intense predicted.
 const QUANT_TOP_FRAGMENTS: usize = 6;
 /// Reach (learned half-widths from the apex) of the cycles that give a fragment's background.
-const QUANT_BACKGROUND_REACH: usize = 6;
+const QUANT_BACKGROUND_REACH_HALF_WIDTHS: usize = 6;
 /// Background cycles a fragment's background needs; with fewer it is 0.
 const QUANT_BACKGROUND_MIN_CYCLES: usize = 4;
 /// Smallest half-width (cycles) of the quantity window.
@@ -816,9 +816,9 @@ fn quant_window(
 /// Fragment quantity over `window` (the apex ± `half`): the summed intensity there of the first
 /// [`QUANT_TOP_FRAGMENTS`] of `traces` (most intense predicted first), each less its background
 /// and floored at 0 per cycle, and how many of them have signal above background. The background
-/// of a trace is its median over the `valid` cycles at most [`QUANT_BACKGROUND_REACH`] × `half`
-/// from the apex and more than `half` outside the window; 0 with fewer than
-/// [`QUANT_BACKGROUND_MIN_CYCLES`] such cycles. `None` (and 0) without signal above background.
+/// of a trace is its median over the `valid` cycles at most
+/// [`QUANT_BACKGROUND_REACH_HALF_WIDTHS`] × `half` from the apex and more than `half` outside the
+/// window; 0 with fewer than [`QUANT_BACKGROUND_MIN_CYCLES`] such cycles. `None` (and 0) without signal above background.
 pub(crate) fn fragment_quantity(
     traces: &[Vec<f32>],
     valid: &[bool],
@@ -829,7 +829,7 @@ pub(crate) fn fragment_quantity(
         return (None, 0);
     }
     let apex = (window.start + window.end - 1) / 2;
-    let reach = QUANT_BACKGROUND_REACH * half;
+    let reach = QUANT_BACKGROUND_REACH_HALF_WIDTHS * half;
     let background_cycles: Vec<usize> = (apex.saturating_sub(reach)..=apex + reach)
         .filter(|&k| valid.get(k).copied().unwrap_or(false))
         .filter(|&k| k + half < window.start || k >= window.end + half)

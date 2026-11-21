@@ -33,6 +33,11 @@ pub struct Texts {
 }
 
 impl Texts {
+    /// Bytes of every record together.
+    pub fn bytes(&self) -> u64 {
+        self.offsets.last().copied().unwrap_or(0)
+    }
+
     pub fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
     }

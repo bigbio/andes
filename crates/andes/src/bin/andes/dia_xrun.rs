@@ -342,7 +342,10 @@ fn encode_rescore(backend: &PercolatorBackend, args: &[String]) -> String {
         PercolatorBackend::Docker { image } => format!("docker\n{image}"),
         PercolatorBackend::Native { memory } => format!(
             "native\n{}\n{}",
-            memory.bytes,
+            match memory.sizing {
+                output::Sizing::Fixed => memory.bytes.to_string(),
+                output::Sizing::FitInput(_) => "auto".to_string(),
+            },
             memory.spill_dir.display()
         ),
     };
@@ -361,11 +364,18 @@ fn decode_rescore(s: &str) -> Result<(PercolatorBackend, Vec<String>), String> {
             },
             args(a),
         )),
+        ["native", "auto", spill, a] => Ok((
+            PercolatorBackend::Native {
+                memory: crate::memlimit::rescore_memory(None, PathBuf::from(spill)),
+            },
+            args(a),
+        )),
         ["native", bytes, spill, a] => Ok((
             PercolatorBackend::Native {
                 memory: output::MemLimit {
                     bytes: bytes.parse().map_err(|_| bad())?,
                     spill_dir: PathBuf::from(spill),
+                    sizing: output::Sizing::Fixed,
                 },
             },
             args(a),
@@ -389,8 +399,9 @@ fn scoring_settings(stored: &str) -> Result<String, String> {
 
 /// The study's rescoring backend and arguments from the settings stored by each run (`(stem,
 /// stored)`, study order, at least one): an error when two runs differ in their scoring
-/// settings. The study is always rescored by the native engine, with the first run's storage
-/// budget (or the default one when the runs used another engine) and spilling to `scratch`.
+/// settings. The study is always rescored by the native engine, with the first run's fixed
+/// storage budget, else a budget sized to the study's PIN within the memory free now, spilling
+/// to `scratch`.
 fn study_rescore(
     stored: &[(&str, String)],
     scratch: &Path,
@@ -409,9 +420,15 @@ fn study_rescore(
     Ok(match searched {
         PercolatorBackend::Native { memory } => (
             PercolatorBackend::Native {
-                memory: output::MemLimit {
-                    bytes: memory.bytes,
-                    spill_dir: scratch.to_path_buf(),
+                memory: match memory.sizing {
+                    output::Sizing::Fixed => output::MemLimit {
+                        bytes: memory.bytes,
+                        spill_dir: scratch.to_path_buf(),
+                        sizing: output::Sizing::Fixed,
+                    },
+                    output::Sizing::FitInput(_) => {
+                        crate::memlimit::rescore_memory(None, scratch.to_path_buf())
+                    }
                 },
             },
             searched_args,
@@ -420,15 +437,11 @@ fn study_rescore(
             log::info!(
                 target: "dia",
                 "the runs were rescored with Percolator {}; the study is rescored with the \
-                 native engine ({} GB storage budget, spill to {})",
+                 native engine (storage budget sized to the study's PIN, spill to {})",
                 other.describe(),
-                crate::cli::DEFAULT_RESCORE_MEMORY_GB,
                 scratch.display()
             );
-            let memory = output::MemLimit {
-                bytes: crate::cli::DEFAULT_RESCORE_MEMORY_GB.saturating_mul(1 << 30),
-                spill_dir: scratch.to_path_buf(),
-            };
+            let memory = crate::memlimit::rescore_memory(None, scratch.to_path_buf());
             (PercolatorBackend::Native { memory }, Vec::new())
         }
     })
@@ -1079,6 +1092,7 @@ mod tests {
                     memory: output::MemLimit {
                         bytes: gb << 30,
                         spill_dir: PathBuf::from(dir),
+                        sizing: output::Sizing::Fixed,
                     },
                 },
                 &args,
@@ -1116,10 +1130,32 @@ mod tests {
             memory: output::MemLimit {
                 bytes: 1 << 33,
                 spill_dir: PathBuf::from("/tmp/x"),
+                sizing: output::Sizing::Fixed,
             },
         };
         let (n2, _) = decode_rescore(&encode_rescore(&n, &[])).unwrap();
         assert_eq!(n2.describe(), n.describe());
+        let auto = PercolatorBackend::Native {
+            memory: crate::memlimit::rescore_memory(None, PathBuf::from("/tmp/x")),
+        };
+        let stored = encode_rescore(&auto, &args);
+        assert!(stored.starts_with("native\nauto\n/tmp/x\n"), "{stored:?}");
+        match decode_rescore(&stored).unwrap() {
+            (PercolatorBackend::Native { memory }, a) => {
+                assert!(matches!(memory.sizing, output::Sizing::FitInput(_)));
+                assert_eq!(memory.spill_dir, PathBuf::from("/tmp/x"));
+                assert_eq!(a, args);
+            }
+            (other, _) => panic!("expected the native engine, got {}", other.describe()),
+        }
+        let (study, _) = study_rescore(&[("run01", stored)], Path::new("/fin")).unwrap();
+        match study {
+            PercolatorBackend::Native { memory } => {
+                assert!(matches!(memory.sizing, output::Sizing::FitInput(_)));
+                assert_eq!(memory.spill_dir, PathBuf::from("/fin"));
+            }
+            other => panic!("expected the native engine, got {}", other.describe()),
+        }
         assert!(decode_rescore("binary").is_err());
     }
 }

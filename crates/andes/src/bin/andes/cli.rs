@@ -855,11 +855,11 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
+    /// Fixed storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory [default: automatic, what the PIN needs to stay in memory, within the memory free to the job or machine less a margin]
+    #[arg(long, value_name = "GB",
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
-    pub(crate) rescore_memory_gb: u64,
+    pub(crate) rescore_memory_gb: Option<u64>,
 
     /// PEP threshold applied with --psm-fdr: a PSM must pass both [default: none]
     #[arg(long, value_name = "PEP", value_parser = parse_unit_fraction, hide_short_help = true,
@@ -1333,10 +1333,10 @@ pub(crate) struct SearchArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RescoreArgs {
-    /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = 16,
+    /// Fixed storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory [default: automatic, what the PIN needs to stay in memory, within the memory free to the job or machine less a margin]
+    #[arg(long, value_name = "GB",
           value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) rescore_memory_gb: u64,
+    pub(crate) rescore_memory_gb: Option<u64>,
 
     /// Directory of the spill files, created if missing
     #[arg(long, value_name = "DIR", required = true)]
@@ -1736,9 +1736,6 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
-
-/// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
-pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;
 
 pub(crate) type Cli = SearchArgs;
 

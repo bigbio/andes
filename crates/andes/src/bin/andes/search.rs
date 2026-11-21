@@ -523,10 +523,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let optimize_dir = scratch_tempdir("andes-optimize-", &scratch_dir)?;
                 let rescorer = crate::optimize::SampleRescorer {
                     backend: output::PercolatorBackend::Native {
-                        memory: output::MemLimit {
-                            bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
-                            spill_dir: optimize_dir.path().to_path_buf(),
-                        },
+                        memory: crate::memlimit::rescore_memory(
+                            cli.rescore_memory_gb,
+                            optimize_dir.path().to_path_buf(),
+                        ),
                     },
                     args: output::percolator_args_with_threads(&[], cli.threads),
                     dir: optimize_dir.path().to_path_buf(),
@@ -1766,10 +1766,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let backend = if use_native {
                 crate::cli::ensure_scratch_dir(&scratch_dir)?;
                 output::PercolatorBackend::Native {
-                    memory: output::MemLimit {
-                        bytes: cli.rescore_memory_gb.saturating_mul(1 << 30),
-                        spill_dir: scratch_dir.clone(),
-                    },
+                    memory: crate::memlimit::rescore_memory(
+                        cli.rescore_memory_gb,
+                        scratch_dir.clone(),
+                    ),
                 }
             } else {
                 output::resolve_backend(

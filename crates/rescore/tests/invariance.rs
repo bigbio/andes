@@ -91,6 +91,16 @@ fn strs(v: &[String]) -> Vec<String> {
 }
 
 fn training(pin: &Path, dir: &Path, threads: usize, limit: u64) -> Outputs {
+    training_sized(pin, dir, threads, limit, rescore::Sizing::Fixed)
+}
+
+fn training_sized(
+    pin: &Path,
+    dir: &Path,
+    threads: usize,
+    limit: u64,
+    sizing: rescore::Sizing,
+) -> Outputs {
     let t = dir.join("t.psms");
     let d = dir.join("d.psms");
     let w = dir.join("w.tsv");
@@ -114,6 +124,7 @@ fn training(pin: &Path, dir: &Path, threads: usize, limit: u64) -> Outputs {
         MemLimit {
             bytes: limit,
             spill_dir: dir.to_path_buf(),
+            sizing,
         },
     )
     .unwrap();
@@ -161,6 +172,7 @@ fn static_pass(
         MemLimit {
             bytes: limit,
             spill_dir: dir.to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -259,6 +271,40 @@ fn output_identical_at_1_and_16_threads() {
             &format!("static (weights {with_weights}) at 16 threads"),
             &statics[0],
             &statics[1],
+        );
+    }
+}
+
+#[test]
+fn output_identical_when_the_budget_is_sized_to_the_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = write_pin(dir.path());
+    let fixed = dir.path().join("fixed");
+    std::fs::create_dir(&fixed).unwrap();
+    let reference = training(&pin, &fixed, 3, 64 << 30);
+    for (i, allowed) in [64u64 << 30, 1 << 20, 0].into_iter().enumerate() {
+        let sub = dir.path().join(format!("auto{i}"));
+        std::fs::create_dir(&sub).unwrap();
+        let o = training_sized(
+            &pin,
+            &sub,
+            3,
+            allowed,
+            rescore::Sizing::FitInput("test allowance".to_string()),
+        );
+        same(
+            &format!("automatic budget within {allowed} bytes"),
+            &reference,
+            &o,
+        );
+        let left: Vec<_> = std::fs::read_dir(&sub)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("rescore-"))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "spill files left behind at {allowed} bytes"
         );
     }
 }

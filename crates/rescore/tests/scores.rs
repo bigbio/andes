@@ -21,6 +21,7 @@ fn pin_from(rows: &[(i8, u32, u64, f64, [f32; 3])]) -> (tempfile::TempDir, Pin) 
         MemLimit {
             bytes: u64::MAX,
             spill_dir: d.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();

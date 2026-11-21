@@ -21,6 +21,7 @@ fn ram(dir: &Path) -> MemLimit {
     MemLimit {
         bytes: u64::MAX,
         spill_dir: dir.to_path_buf(),
+        sizing: rescore::Sizing::Fixed,
     }
 }
 
@@ -123,6 +124,7 @@ fn spilled_store_equals_ram_store() {
         MemLimit {
             bytes: 1,
             spill_dir: spill.path().to_path_buf(),
+            sizing: rescore::Sizing::Fixed,
         },
     )
     .unwrap();
@@ -151,4 +153,25 @@ fn rejects_non_finite_feature_values() {
         assert!(err.contains("column 8"), "{err}");
         assert!(err.contains("f2"), "{err}");
     }
+}
+
+#[test]
+fn an_automatic_budget_is_what_the_pin_needs_within_the_allowance() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "x.pin", PIN);
+    let auto = |bytes: u64| MemLimit {
+        bytes,
+        spill_dir: d.path().to_path_buf(),
+        sizing: rescore::Sizing::FitInput("test allowance".to_string()),
+    };
+    let roomy = read_pin(&p, auto(1 << 40)).unwrap();
+    let need = roomy.budget.total();
+    assert!(need < 1 << 40, "the budget stayed at the allowance");
+    assert!(!roomy.rows.is_spilled());
+    let fixed = read_pin(&p, ram(d.path())).unwrap();
+    assert_eq!(blocks(&roomy.rows), blocks(&fixed.rows));
+    drop(roomy);
+    let tight = read_pin(&p, auto(need / 4)).unwrap();
+    assert!(tight.budget.total() <= need / 4);
+    assert_eq!(blocks(&tight.rows), blocks(&fixed.rows));
 }

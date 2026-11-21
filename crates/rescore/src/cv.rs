@@ -60,7 +60,7 @@ struct TrainSet {
     negatives: usize,
 }
 
-const TASK_BYTES_PER_EXAMPLE: u64 = 96;
+pub(crate) const TASK_BYTES_PER_EXAMPLE: u64 = 96;
 
 fn score_fits(pin: &Pin, norm: &Norm, rows: &[usize], ws: &[&[f64]]) -> Vec<Vec<f64>> {
     let nf = pin.rows.nfeat();

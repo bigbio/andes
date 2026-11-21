@@ -99,7 +99,7 @@ rescoring:
   # psm_fdr: 0.01                  # --psm-fdr: PSM q-value threshold
   # protein_fdr: 0.01              # --protein-fdr: protein-group q-value threshold; unset: none (example)
   # proteoform_fdr: 0.05           # --proteoform-fdr (advanced): unset: the larger of psm_fdr and 0.05
-  # memory_gb: 16                  # --rescore-memory-gb (advanced): native engine storage budget, not a memory cap: features, texts and training rows spill to --temp-dir within it; per-PSM metadata (~160 B a PSM) stays in memory
+  # memory_gb: 16                  # --rescore-memory-gb (advanced): fixed native engine storage budget (default: sized to the PIN within the free memory), not a memory cap: features, texts and training rows spill to --temp-dir within it; per-PSM metadata (~160 B a PSM) stays in memory
   # pep: 0.05                      # --pep (advanced): PEP threshold with psm_fdr; unset: none (example)
   # percolator_bin: percolator     # --percolator-bin (advanced): external Percolator instead of the native engine; with --xl unset: percolator on PATH, else Docker (example)
   # percolator_docker: false       # --percolator-docker (advanced): external Percolator from its Docker image instead of the native engine

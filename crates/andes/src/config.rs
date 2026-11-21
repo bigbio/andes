@@ -631,7 +631,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         cfg.rescoring.percolator_args
     );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
-    set!(
+    set_opt!(
         "rescore_memory_gb",
         rescore_memory_gb,
         cfg.rescoring.memory_gb
@@ -814,7 +814,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     if let Some(v) = args.psm_fdr {
         check_unit_fraction("psm_fdr", v)?;
     }
-    if args.rescore_memory_gb == 0 {
+    if args.rescore_memory_gb == Some(0) {
         return Err("config: `memory_gb` must be at least 1 (GB)".to_string());
     }
     if let Some(v) = args.proteoform_fdr {
@@ -1487,15 +1487,15 @@ glyco:
     #[test]
     fn config_memory_gb_inherits() {
         let a = applied("rescoring:\n  keep_pin: true\n", &[]).unwrap();
-        assert_eq!(a.rescore_memory_gb, 16);
+        assert_eq!(a.rescore_memory_gb, None);
         let a = applied("rescoring:\n  memory_gb: 4\n", &[]).unwrap();
-        assert_eq!(a.rescore_memory_gb, 4);
+        assert_eq!(a.rescore_memory_gb, Some(4));
         let a = applied(
             "rescoring:\n  memory_gb: 4\n",
             &["--rescore-memory-gb", "8"],
         )
         .unwrap();
-        assert_eq!(a.rescore_memory_gb, 8);
+        assert_eq!(a.rescore_memory_gb, Some(8));
         assert!(applied("rescoring:\n  memory_gb: 0\n", &[]).is_err());
     }
 

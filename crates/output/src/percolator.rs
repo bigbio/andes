@@ -36,11 +36,18 @@ impl PercolatorBackend {
         match self {
             PercolatorBackend::Binary(p) => format!("binary {}", p.display()),
             PercolatorBackend::Docker { image } => format!("docker {image}"),
-            PercolatorBackend::Native { memory } => format!(
-                "native ({:.1} GB in memory, spill to {})",
-                memory.bytes as f64 / (1u64 << 30) as f64,
-                memory.spill_dir.display()
-            ),
+            PercolatorBackend::Native { memory } => match memory.sizing {
+                rescore::Sizing::Fixed => format!(
+                    "native ({:.1} GB in memory, spill to {})",
+                    memory.bytes as f64 / (1u64 << 30) as f64,
+                    memory.spill_dir.display()
+                ),
+                rescore::Sizing::FitInput(_) => format!(
+                    "native (memory sized to the PIN, up to {:.1} GB, spill to {})",
+                    memory.bytes as f64 / (1u64 << 30) as f64,
+                    memory.spill_dir.display()
+                ),
+            },
         }
     }
 }
@@ -1246,6 +1253,7 @@ mod tests {
             memory: rescore::MemLimit {
                 bytes: 1 << 30,
                 spill_dir: dir.path().to_path_buf(),
+                sizing: rescore::Sizing::Fixed,
             },
         };
         let pin = native_fixture_pin(dir.path());
@@ -1638,6 +1646,7 @@ mod tests {
             memory: rescore::MemLimit {
                 bytes: 1 << 30,
                 spill_dir: dir.path().to_path_buf(),
+                sizing: rescore::Sizing::Fixed,
             },
         };
         assert!(backend.describe().contains("native"));

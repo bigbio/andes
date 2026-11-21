@@ -366,6 +366,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         {
             cli.db.variable_mods = Some(v);
         }
+        if cli.xl_linear_only {
+            log::info!(
+                target: "xl",
+                "--xl-linear-only: linear and monolinked peptides only; no cross-link search"
+            );
+            cli.xl = None;
+        }
     }
     check_flag_combinations(&cli)?;
     let RunPaths {

@@ -104,7 +104,11 @@ fn strings<'a>(v: &'a serde_yaml::Value, out: &mut Vec<&'a str>) {
 /// each file by path, size and modification time. A finished search is kept only while its
 /// fingerprint is unchanged, so editing the cohort section to add a project does not search
 /// the other projects again, while replacing the database at the same path does.
-fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn Error>> {
+fn fingerprint(
+    r: &cohort::PlannedRun,
+    args: &[String],
+    config: &Path,
+) -> Result<String, Box<dyn Error>> {
     let meta = std::fs::metadata(&r.file)
         .map_err(|e| format!("{}: cannot read {}: {e}", r.run, r.file.display()))?;
     let (len, mtime) = identity(&meta);
@@ -117,7 +121,7 @@ fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn 
     let base = config.parent().unwrap_or_else(|| Path::new("."));
     let mut named = Vec::new();
     strings(&yaml, &mut named);
-    named.extend(r.args.iter().map(String::as_str));
+    named.extend(args.iter().map(String::as_str));
     let mut inputs = std::collections::BTreeSet::new();
     for s in named {
         let p = Path::new(s);
@@ -134,7 +138,7 @@ fn fingerprint(r: &cohort::PlannedRun, config: &Path) -> Result<String, Box<dyn 
     Ok(format!(
         "file\t{}\t{len}\t{mtime}\nargs\t{}\n{}\nconfig\t{}",
         r.file.display(),
-        r.args.join("\u{1f}"),
+        args.join("\u{1f}"),
         inputs.into_iter().collect::<Vec<_>>().join("\n"),
         serde_yaml::to_string(&yaml)?
     ))
@@ -179,6 +183,267 @@ fn projects_of_plan(path: &Path) -> Result<Projects, Box<dyn Error>> {
     Ok(out)
 }
 
+/// The protein q-value cut that picks a project's protein space.
+const PROTEIN_SPACE_Q: f64 = 0.01;
+
+/// Marks a finished linear stage; holds the fingerprint of the runs it searched.
+const SPACE_DONE: &str = "protein_space.done";
+
+/// A run's search flags, with the database set to its project's protein space when it has
+/// one.
+fn search_args(
+    r: &cohort::PlannedRun,
+    spaces: &std::collections::BTreeMap<String, PathBuf>,
+) -> Vec<String> {
+    let mut a = r.args.clone();
+    if r.kind == cohort::Kind::Xl {
+        if let Some(fasta) = spaces.get(&r.project) {
+            let fasta = fasta.display().to_string();
+            match a.iter().position(|x| x == "--database") {
+                Some(i) if i + 1 < a.len() => a[i + 1] = fasta,
+                _ => a.extend(["--database".to_string(), fasta]),
+            }
+        }
+    }
+    a
+}
+
+/// The group's run outputs by project, in plan order.
+fn inputs_by_project(plan: &Plan, inputs: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
+    let mut out: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for p in inputs {
+        let project = plan
+            .runs
+            .iter()
+            .find(|r| p.starts_with(&r.dir))
+            .map_or_else(String::new, |r| r.project.clone());
+        match out.iter_mut().find(|(q, _)| *q == project) {
+            Some((_, v)) => v.push(p.clone()),
+            None => out.push((project, vec![p.clone()])),
+        }
+    }
+    out
+}
+
+/// The database a run searches: its `--database` flag, else the config's.
+fn database_of(r: &cohort::PlannedRun, cfg: &RunConfig, config: &Path) -> Option<PathBuf> {
+    let flag = r
+        .args
+        .iter()
+        .position(|a| a == "--database")
+        .and_then(|i| r.args.get(i + 1))
+        .map(PathBuf::from);
+    let p = flag.or_else(|| cfg.io.database.clone())?;
+    Some(if p.is_absolute() {
+        p
+    } else {
+        config.parent().unwrap_or_else(|| Path::new(".")).join(p)
+    })
+}
+
+/// Each cross-link project's protein space: one linear and monolink search of all its
+/// runs (`--xl-linear-only --rescore`), whose protein groups at protein q <=
+/// `PROTEIN_SPACE_Q` become the FASTA its cross-link searches look in. A project whose runs
+/// have different search flags, or whose database is unknown, keeps the full database.
+/// The search is kept while its runs, settings and database are unchanged.
+fn protein_spaces(
+    plan: &Plan,
+    cfg: &RunConfig,
+    config: &Path,
+    exe: &Path,
+    threads: Option<usize>,
+) -> Result<std::collections::BTreeMap<String, PathBuf>, Box<dyn Error>> {
+    let mut spaces = std::collections::BTreeMap::new();
+    let mut projects: Vec<&str> = plan
+        .runs
+        .iter()
+        .filter(|r| r.kind == cohort::Kind::Xl)
+        .map(|r| r.project.as_str())
+        .collect();
+    projects.sort_unstable();
+    projects.dedup();
+    for project in projects {
+        let runs: Vec<&cohort::PlannedRun> = plan
+            .runs
+            .iter()
+            .filter(|r| r.kind == cohort::Kind::Xl && r.project == project)
+            .collect();
+        if runs.iter().any(|r| r.args != runs[0].args) {
+            log::warn!(
+                target: "cohort",
+                "{project}: its runs have different search flags; its cross-link searches use \
+                 the full database"
+            );
+            continue;
+        }
+        let Some(db) = database_of(runs[0], cfg, config) else {
+            log::warn!(
+                target: "cohort",
+                "{project}: no database found; its cross-link searches use the full database"
+            );
+            continue;
+        };
+        let dir = plan.output_dir.join("protein_space").join(project);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let fasta = dir.join(format!("{project}.fasta"));
+        let mut print = String::new();
+        for r in &runs {
+            print.push_str(&fingerprint(r, &r.args, config)?);
+            print.push('\n');
+        }
+        let done = dir.join(SPACE_DONE);
+        let fresh = std::fs::read_to_string(&done).is_ok_and(|old| old == print) && fasta.exists();
+        if !fresh {
+            let _ = std::fs::remove_file(&done);
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--config").arg(config);
+            for r in &runs {
+                std::fs::create_dir_all(&r.dir)
+                    .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
+                let staged = r.dir.join(&r.stage_as);
+                stage(&r.file, &staged).map_err(|e| {
+                    format!(
+                        "cannot stage {} as {}: {e}",
+                        r.file.display(),
+                        staged.display()
+                    )
+                })?;
+                cmd.arg("--spectrum").arg(staged);
+            }
+            cmd.arg("--output-pin")
+                .arg(dir.join(format!("{project}.pin")))
+                .args(&runs[0].args)
+                .args(["--xl-linear-only", "--rescore"]);
+            if let Some(t) = threads {
+                cmd.arg("--threads").arg(t.to_string());
+            }
+            let log_path = dir.join("andes.log");
+            let log = std::fs::File::create(&log_path)
+                .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+            cmd.stdout(log.try_clone()?).stderr(log);
+            let start = std::time::Instant::now();
+            log::info!(
+                target: "cohort",
+                "{project}: linear search of {} runs for its protein space",
+                runs.len()
+            );
+            let status = cmd
+                .status()
+                .map_err(|e| format!("{project}: cannot start {}: {e}", exe.display()))?;
+            if !status.success() {
+                return Err(format!(
+                    "{project}: the linear search failed ({status}); see {}",
+                    log_path.display()
+                )
+                .into());
+            }
+            let groups = dir.join(format!("{project}.protein_groups.tsv"));
+            let (accessions, cut) = space_accessions(&groups)?;
+            let n = write_space_fasta(&db, &accessions, &fasta)?;
+            log::info!(
+                target: "cohort",
+                "{project}: protein space of {} proteins (protein q <= {cut:.3}) [{:.0} s]",
+                thousands(n),
+                start.elapsed().as_secs_f64()
+            );
+            std::fs::write(&done, &print)?;
+        }
+        spaces.insert(project.to_string(), fasta);
+    }
+    Ok(spaces)
+}
+
+/// The accessions of the protein groups at protein q <= `PROTEIN_SPACE_Q` in a
+/// `protein_groups.tsv`, and the cut used. When no group reaches it (a sample of few
+/// proteins cannot: the decoy pseudo-count keeps every q above it), the groups at the
+/// lowest q any group reaches, with a warning.
+fn space_accessions(groups: &Path) -> Result<(Vec<String>, f64), Box<dyn Error>> {
+    let text = std::fs::read_to_string(groups)
+        .map_err(|e| format!("cannot read {}: {e}", groups.display()))?;
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split('\t').collect();
+    let col = |c: &str| {
+        header
+            .iter()
+            .position(|h| *h == c)
+            .ok_or_else(|| format!("{}: no `{c}` column", groups.display()))
+    };
+    let (acc, q) = (col("accessions")?, col("protein_q")?);
+    let rows: Vec<(f64, &str)> = lines
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            Some((f.get(q)?.parse::<f64>().ok()?, *f.get(acc)?))
+        })
+        .collect();
+    let best = rows.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+    if !best.is_finite() {
+        return Err(format!("{}: no protein groups", groups.display()).into());
+    }
+    let cut = if best <= PROTEIN_SPACE_Q {
+        PROTEIN_SPACE_Q
+    } else {
+        log::warn!(
+            target: "cohort",
+            "{}: no protein group reaches protein q <= {PROTEIN_SPACE_Q}; the protein space \
+             takes the groups at the lowest q reached, {best:.3}",
+            groups.display()
+        );
+        best
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (_, a) in rows.iter().filter(|r| r.0 <= cut) {
+        for x in a.split(';').map(str::trim).filter(|x| !x.is_empty()) {
+            if !out.iter().any(|y| y == x) {
+                out.push(x.to_string());
+            }
+        }
+    }
+    Ok((out, cut))
+}
+
+/// Write the entries of `db` whose accession (the header's first word, or its UniProt
+/// accession) is in `accessions` to `out`, in database order, unless `out` already holds
+/// exactly them (so that its unchanged file keeps the searches' fingerprints). Returns the
+/// number of entries.
+fn write_space_fasta(
+    db: &Path,
+    accessions: &[String],
+    out: &Path,
+) -> Result<usize, Box<dyn Error>> {
+    let wanted: std::collections::HashSet<&str> = accessions.iter().map(String::as_str).collect();
+    let text =
+        std::fs::read_to_string(db).map_err(|e| format!("cannot read {}: {e}", db.display()))?;
+    let mut kept = String::new();
+    let mut n = 0;
+    let mut keep = false;
+    for line in text.lines() {
+        if let Some(h) = line.strip_prefix('>') {
+            let word = h.split_whitespace().next().unwrap_or("");
+            let uniprot = word.split('|').nth(1).unwrap_or("");
+            keep = wanted.contains(word) || (!uniprot.is_empty() && wanted.contains(uniprot));
+            n += usize::from(keep);
+        }
+        if keep {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    if n == 0 {
+        return Err(format!(
+            "{}: none of the {} protein-space accessions is in {}",
+            out.display(),
+            accessions.len(),
+            db.display()
+        )
+        .into());
+    }
+    if std::fs::read_to_string(out).ok().as_deref() != Some(kept.as_str()) {
+        std::fs::write(out, kept).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    }
+    Ok(n)
+}
+
 fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
     let config = std::fs::canonicalize(&args.config)
         .map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
@@ -186,11 +451,14 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
     report(&plan);
     write_plan(&plan, &plan.output_dir.join("plan.json"))?;
     let exe = std::env::current_exe()?;
+    let cfg = RunConfig::load(&config)?;
+    let spaces = protein_spaces(&plan, &cfg, &config, &exe, args.threads)?;
     let n = plan.runs.len();
     let mut skipped = 0;
     let mut redone = 0;
     for (i, r) in plan.runs.iter().enumerate() {
-        let print = fingerprint(r, &config)?;
+        let run_args = search_args(r, &spaces);
+        let print = fingerprint(r, &run_args, &config)?;
         let missing = planned_outputs(&plan, r).into_iter().find(|p| !p.exists());
         match std::fs::read_to_string(r.dir.join(DONE)) {
             Ok(old) if old == print && missing.is_none() => {
@@ -241,7 +509,7 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
         if let Some(t) = args.threads {
             cmd.arg("--threads").arg(t.to_string());
         }
-        cmd.args(&r.args).stdout(log.try_clone()?).stderr(log);
+        cmd.args(&run_args).stdout(log.try_clone()?).stderr(log);
         let start = std::time::Instant::now();
         log::info!(target: "cohort", "search {}/{n}: {}", i + 1, r.run);
         let status = cmd
@@ -292,8 +560,19 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
                 "xl-fdr" => {
                     std::fs::create_dir_all(&g.dir)
                         .map_err(|e| format!("cannot create {}: {e}", g.dir.display()))?;
-                    log::info!(target: "cohort", "group {}: crosslink FDR over {} runs", g.name, g.inputs.len());
-                    xl_fdr_tables(&g.inputs, &g.dir.join(&g.name), &projects)?;
+                    for (project, inputs) in inputs_by_project(&plan, &g.inputs) {
+                        log::info!(
+                            target: "cohort",
+                            "group {}, project {project}: crosslink FDR over {} runs",
+                            g.name,
+                            inputs.len()
+                        );
+                        xl_fdr_tables(
+                            &inputs,
+                            &g.dir.join(format!("{}.{project}", g.name)),
+                            &projects,
+                        )?;
+                    }
                 }
                 other => {
                     if !not_run.contains(&other) {
@@ -905,6 +1184,90 @@ mod tests {
     }
 
     #[test]
+    fn the_protein_space_takes_the_groups_at_one_percent_or_the_best_q_reached() {
+        let t = tempfile::tempdir().unwrap();
+        let g = t.path().join("P.protein_groups.tsv");
+        let head = "protein_group\tlead\taccessions\tprotein_q\n";
+        std::fs::write(
+            &g,
+            format!("{head}1\tA\tsp|A|X;sp|B|Y\t0.002\n2\tC\tsp|C|Z\t0.01\n3\tD\tsp|D|W\t0.2\n"),
+        )
+        .unwrap();
+        let (acc, cut) = space_accessions(&g).unwrap();
+        assert_eq!(cut, PROTEIN_SPACE_Q);
+        assert_eq!(acc, ["sp|A|X", "sp|B|Y", "sp|C|Z"]);
+        std::fs::write(
+            &g,
+            format!("{head}1\tA\tsp|A|X\t0.032\n2\tC\tsp|C|Z\t0.032\n3\tD\tsp|D|W\t0.06\n"),
+        )
+        .unwrap();
+        let (acc, cut) = space_accessions(&g).unwrap();
+        assert!(
+            (cut - 0.032).abs() < 1e-12,
+            "a sample of few proteins cannot reach 1 %"
+        );
+        assert_eq!(acc, ["sp|A|X", "sp|C|Z"]);
+    }
+
+    #[test]
+    fn the_space_fasta_keeps_the_chosen_entries_and_an_unchanged_file() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("db.fasta");
+        std::fs::write(
+            &db,
+            ">sp|A|X one\nPEPK\nTIDE\n>sp|B|Y two\nAAAK\n>C three\nKKK\n",
+        )
+        .unwrap();
+        let out = t.path().join("P.fasta");
+        let n = write_space_fasta(&db, &["A".into(), "C".into()], &out).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            ">sp|A|X one\nPEPK\nTIDE\n>C three\nKKK\n"
+        );
+        let before = std::fs::metadata(&out).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_space_fasta(&db, &["A".into(), "C".into()], &out).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().modified().unwrap(), before);
+        assert!(write_space_fasta(&db, &["Q".into()], &out).is_err());
+    }
+
+    #[test]
+    fn a_crosslink_run_searches_its_project_space_in_place_of_its_database() {
+        let run = |args: &[&str], kind| cohort::PlannedRun {
+            run: "A.r1".into(),
+            project: "A".into(),
+            sdrf: PathBuf::from("a.sdrf.tsv"),
+            file: PathBuf::from("r1.raw"),
+            dir: PathBuf::from("runs/A.r1"),
+            stage_as: "A.r1.raw".into(),
+            kind,
+            group: "xl".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut spaces = std::collections::BTreeMap::new();
+        spaces.insert("A".to_string(), PathBuf::from("space/A.fasta"));
+        assert_eq!(
+            search_args(&run(&["--xl", "DSSO"], cohort::Kind::Xl), &spaces),
+            ["--xl", "DSSO", "--database", "space/A.fasta"]
+        );
+        assert_eq!(
+            search_args(
+                &run(
+                    &["--database", "db.fasta", "--xl", "DSSO"],
+                    cohort::Kind::Xl
+                ),
+                &spaces
+            ),
+            ["--database", "space/A.fasta", "--xl", "DSSO"]
+        );
+        assert_eq!(
+            search_args(&run(&["--lfq"], cohort::Kind::Lfq), &spaces),
+            ["--lfq"]
+        );
+    }
+
+    #[test]
     fn staging_replaces_a_link_to_another_file() {
         let t = tempfile::tempdir().unwrap();
         let (a, b, at) = (
@@ -938,23 +1301,70 @@ mod tests {
             args: args.iter().map(|s| s.to_string()).collect(),
         };
         std::fs::write(&config, "search: {threads: 4}\ncohort: {name: one}\n").unwrap();
-        let base = fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap();
+        let base = fingerprint(
+            &run(&["--xl", "DSSO"]),
+            &["--xl".into(), "DSSO".into()],
+            &config,
+        )
+        .unwrap();
         std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
-        assert_eq!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
-        assert_ne!(fingerprint(&run(&["--xl", "DSBU"]), &config).unwrap(), base);
+        assert_eq!(
+            fingerprint(
+                &run(&["--xl", "DSSO"]),
+                &["--xl".into(), "DSSO".into()],
+                &config
+            )
+            .unwrap(),
+            base
+        );
+        assert_ne!(
+            fingerprint(
+                &run(&["--xl", "DSBU"]),
+                &["--xl".into(), "DSBU".into()],
+                &config
+            )
+            .unwrap(),
+            base
+        );
         std::fs::write(&config, "search: {threads: 8}\ncohort: {name: two}\n").unwrap();
-        assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+        assert_ne!(
+            fingerprint(
+                &run(&["--xl", "DSSO"]),
+                &["--xl".into(), "DSSO".into()],
+                &config
+            )
+            .unwrap(),
+            base
+        );
         std::fs::write(&config, "search: {threads: 4}\ncohort: {name: two}\n").unwrap();
         std::fs::write(&file, "other spectra").unwrap();
-        assert_ne!(fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(), base);
+        assert_ne!(
+            fingerprint(
+                &run(&["--xl", "DSSO"]),
+                &["--xl".into(), "DSSO".into()],
+                &config
+            )
+            .unwrap(),
+            base
+        );
 
         std::fs::write(t.path().join("db.fasta"), ">P1\nPEPTIDEK\n").unwrap();
         std::fs::write(&config, "io: {database: db.fasta}\ncohort: {name: two}\n").unwrap();
-        let with_db = fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap();
+        let with_db = fingerprint(
+            &run(&["--xl", "DSSO"]),
+            &["--xl".into(), "DSSO".into()],
+            &config,
+        )
+        .unwrap();
         assert!(with_db.contains("db.fasta"), "{with_db}");
         std::fs::write(t.path().join("db.fasta"), ">P1\nPEPTIDEKR\n").unwrap();
         assert_ne!(
-            fingerprint(&run(&["--xl", "DSSO"]), &config).unwrap(),
+            fingerprint(
+                &run(&["--xl", "DSSO"]),
+                &["--xl".into(), "DSSO".into()],
+                &config
+            )
+            .unwrap(),
             with_db,
             "a database replaced at the same path"
         );

@@ -44,7 +44,12 @@ pub struct ChunkFragmentIndex {
     rt_sigma_min: f64,
 }
 
-const ENTRIES_PER_CELL: usize = 16;
+/// Mean ion entries per (bin, form-id block) cell; sets the block granularity a query's
+/// form-id range is cut to inside each bin.
+const ENTRIES_PER_CELL: usize = 4;
+/// m/z at which one bin is one fragment tolerance wide. Bins are narrower than the tolerance
+/// above it, so a peak reads little more than its own tolerance window of ions.
+const VOTE_BIN_REF_MZ: f64 = 500.0;
 
 fn by_ions_from_masses(masses: &[f64], out: &mut Vec<f32>) {
     let n = masses.len();
@@ -77,7 +82,7 @@ impl ChunkFragmentIndex {
         mass_lo: f64,
         mass_hi: f64,
     ) -> Self {
-        let bin_width = fragment_tol.as_da(2500.0).max(0.001);
+        let bin_width = fragment_tol.as_da(VOTE_BIN_REF_MZ).max(0.001);
         let tables = FormWalkTables::new(params);
         let records: Vec<IndexRecord> = records
             .into_par_iter()

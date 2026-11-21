@@ -78,7 +78,7 @@ docs/benchmarks/reproduce/run_proteobench.sh qe "$DATA"/ProteoBenchFASTA_MixedSp
       "$DATA"/LFQ_Orbitrap_DDA_Condition_{A,B}_Sample_Alpha_0{1,2,3}.mzML
 ```
 
-Per run it searches and rescores (`--rescore`, which runs Percolator 3.7.1) and writes the run's MS1, MS2 and PSM tables to `q/`; then it builds the library from every run's
+Per run it searches and rescores (`--rescore --percolator-docker`, which runs the pinned Percolator 3.7.1 image) and writes the run's MS1, MS2 and PSM tables to `q/`; then it builds the library from every run's
 Percolator results (one `--psms`/`--decoy-psms` per run), extracts each run and finalizes twice
 (the default `--quant-fdr` is 0.01, plus the 0.05 run in `pb05/`), and writes the ProteoBench
 "Custom" table with `proteobench/andes_to_proteobench.py --column quantity_normalized`. It needs

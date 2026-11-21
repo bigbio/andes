@@ -583,8 +583,8 @@ pub(crate) struct SearchArgs {
     ///
     /// It sets the filtered <stem>.q<fdr>.tsv output (target PSMs at q <= this), the PSMs
     /// that quantification measures, the match-between-runs donors and the confident
-    /// anchors of --refine. andes computes q-values only with --rescore or
-    /// --rescore-native; without either, setting it warns and writes no filtered output.
+    /// anchors of --refine. andes computes q-values only with --rescore; without it,
+    /// setting it warns and writes no filtered output.
     #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) psm_fdr: Option<f64>,
 
@@ -611,12 +611,17 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: Option<f64>,
 
-    /// Run Percolator on the PIN and write q-values, PEPs and the PSMs at --psm-fdr
+    /// Rescore the PIN with Percolator and write q-values, PEPs and the PSMs at --psm-fdr
     ///
     /// Percolator's PEP and q-value are joined into the outputs (QPX
     /// posterior_error_probability and a q-value score) and the filtered <stem>.q<fdr>.tsv
-    /// is written. Percolator is --percolator-bin, else `percolator` on PATH, else the
-    /// Docker image.
+    /// is written. Every Percolator pass (the main run, the per-run q-values, the PEP
+    /// repair and the scores of every PIN row) runs in process with the native engine, which
+    /// follows upstream Percolator master (commit a9783ee8) and writes Percolator's output
+    /// files; no Percolator binary or Docker is needed. --percolator-bin or
+    /// --percolator-docker runs an external Percolator instead. --xl does not use the native
+    /// engine: its Percolator passes always run an external Percolator, --percolator-bin,
+    /// else `percolator` on PATH, else the Docker image.
     #[arg(long, help_heading = H_FDR)]
     pub(crate) rescore: bool,
 
@@ -667,7 +672,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) refine: bool,
 
-    /// Site localization of variable modifications (`ipf`); needs --rescore or --rescore-native
+    /// Site localization of variable modifications (`ipf`); needs --rescore
     ///
     /// `ipf`: inference of peptidoforms (the OpenSWATH/PyProphet hierarchical Bayesian
     /// model) over every placement of each identified PSM's variable mods, after
@@ -850,16 +855,6 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Rescore as --rescore, with the native Percolator engine instead of the binary
-    ///
-    /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
-    /// repair and the scores of every PIN row) runs in process with the algorithm of
-    /// upstream Percolator master (commit a9783ee8) and Percolator's output files; no
-    /// Percolator binary or Docker is needed. Takes no --percolator-args, --percolator-bin,
-    /// --percolator-docker or --percolator-image.
-    #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
-    pub(crate) rescore_native: bool,
-
     /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
     #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
@@ -871,20 +866,26 @@ pub(crate) struct SearchArgs {
           help_heading = H_RESCORING)]
     pub(crate) pep: Option<f64>,
 
-    /// Percolator binary [default: percolator on PATH, else the Docker image]
+    /// Run --rescore with this external Percolator binary instead of the native engine
+    ///
+    /// With --xl the default is `percolator` on PATH, else the Docker image.
     #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_bin: Option<PathBuf>,
 
-    /// Run Percolator from its Docker image (needs the docker command)
+    /// Run --rescore with Percolator from its Docker image instead of the native engine
+    ///
+    /// Needs the docker command.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_docker: bool,
 
-    /// Docker image of Percolator
+    /// Docker image of Percolator, with --percolator-docker or --xl
     #[arg(long, value_name = "IMAGE", default_value = output::DEFAULT_PERCOLATOR_IMAGE,
           hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_image: String,
 
-    /// Extra arguments for Percolator, e.g. "--testFDR 0.05"
+    /// Extra arguments for an external Percolator, e.g. "--testFDR 0.05"
+    ///
+    /// Only with --percolator-bin, --percolator-docker or --xl; the native engine takes none.
     #[arg(long, value_name = "ARGS", default_value = "", hide_default_value = true,
           hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_args: String,
@@ -1744,6 +1745,12 @@ pub(crate) type Cli = SearchArgs;
 impl SearchArgs {
     pub(crate) fn psm_fdr(&self) -> f64 {
         self.psm_fdr.unwrap_or(DEFAULT_FDR)
+    }
+
+    /// True when --rescore runs an external Percolator (--percolator-bin or
+    /// --percolator-docker) instead of the native engine.
+    pub(crate) fn external_percolator(&self) -> bool {
+        self.percolator_bin.is_some() || self.percolator_docker
     }
 
     pub(crate) fn proteoform_fdr(&self) -> f64 {

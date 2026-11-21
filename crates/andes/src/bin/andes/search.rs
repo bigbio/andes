@@ -713,9 +713,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
-        if !cli.glyco && !cli.rescore && !cli.rescore_native && (s.plex.is_some() || s.lfq) {
+        if !cli.glyco && !cli.rescore && (s.plex.is_some() || s.lfq) {
             log::warn!(
-                "--tmt/--lfq without --rescore or --rescore-native: every rank-1 target \
+                "--tmt/--lfq without --rescore: every rank-1 target \
                  PSM is quantified; filter the tables by the q-values you compute downstream, \
                  or add --rescore so only PSMs at q<=--psm-fdr are quantified."
             );
@@ -1733,8 +1733,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let fdr_threshold = cli.psm_fdr();
     let proteoform_fdr = cli.proteoform_fdr();
-    let use_native = cli.rescore_native;
-    let use_percolator = cli.rescore || cli.rescore_native;
+    let use_native = !cli.external_percolator();
+    let use_percolator = cli.rescore;
     if !use_percolator && (cli.psm_fdr.is_some() || cli.pep.is_some()) {
         let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
             (true, true) => "--psm-fdr and --pep",
@@ -1742,10 +1742,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             _ => "--pep",
         };
         log::warn!(
-            "{which} set without --rescore or --rescore-native, so no rescoring \
-             runs and no filtered .tsv is written. andes does not compute FDR on its \
-             own; the PIN is written for Percolator. Add --rescore to run Percolator \
-             in-process."
+            "{which} set without --rescore, so no rescoring runs and no filtered .tsv \
+             is written. andes does not compute FDR on its own; the PIN is written for \
+             Percolator. Add --rescore to rescore with the native Percolator engine."
         );
     }
     let mut mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =

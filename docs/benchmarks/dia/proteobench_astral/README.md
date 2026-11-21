@@ -13,7 +13,7 @@ scored locally with the `proteobench` package and compared with the public DIA-N
 - **Database:** `ProteoBenchFASTA_MixedSpecies_HYE.fasta`: human, yeast, E. coli and `Cont_`
   contaminants, 31,889 proteins. andes adds its own `XXX_` decoys.
 - **andes:** commit 6759d761 (`dia/09-quant`, stacked on `dia/08-transfer` df04b452).
-  - Search: `--dia --model hcd_astral_tryp --predict rt,ms2 --rescore-native`, `--enzyme trypsin`
+  - Search: `--dia --model hcd_astral_tryp --predict rt,ms2 --rescore`, `--enzyme trypsin`
     (no proline rule, as Trypsin/P), `--max-missed-cleavages 1`, peptide length 6–30, charge 1–5,
     Carbamidomethyl (C) fixed, Oxidation (M) variable, at most 1 variable mod. 14 threads.
     These match DIA-NN's leaderboard entry where andes has the setting.

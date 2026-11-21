@@ -622,7 +622,7 @@ pub(crate) fn finalize(
             .map(|(_, v)| v)
             .ok_or_else(|| {
                 format!(
-                    "{}: run {s} was searched without --rescore or --rescore-native; a DIA study \
+                    "{}: run {s} was searched without --rescore; a DIA study \
                      is rescored with the settings of its runs",
                     p.display()
                 )

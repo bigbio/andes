@@ -283,18 +283,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
+            if search.output_pin.is_none() && !search.rescore {
                 log::error!("--output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
-            if (search.psm_fdr.is_some() || search.pep.is_some())
-                && !search.rescore
-                && !search.rescore_native
-            {
+            if (search.psm_fdr.is_some() || search.pep.is_some()) && !search.rescore {
                 log::warn!(
-                    "--psm-fdr/--pep set without --rescore or --rescore-native; \
-                     they are ignored (add --rescore to run Percolator, or feed the PIN \
-                     to Percolator yourself)."
+                    "--psm-fdr/--pep set without --rescore; they are ignored (add --rescore \
+                     to rescore with Percolator, or feed the PIN to Percolator yourself)."
                 );
             }
             run(Cli {

@@ -163,8 +163,8 @@ flowchart TD
    whose fragment ions best match the spectrum.
 4. **Optional passes** `--chimeric`, `--dia`, `--refine`, and the separate `--glyco` and `--xl`
    pipelines (below).
-5. **Rescore** with Percolator, run by you, by `--rescore`, or by the in-process engine
-   `--rescore-native`. andes computes no production FDR of its own.
+5. **Rescore** with Percolator, run by you or by `--rescore` (the in-process native engine, or an
+   external Percolator with `--percolator-bin`). andes computes no production FDR of its own.
 6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`), MS1 features (`--lfq`)
    or labelled pairs (`--label`).
 
@@ -298,13 +298,15 @@ andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
 
-**In-process rescoring.** `--rescore` runs Percolator (`--percolator-bin`, else `percolator` on
-`$PATH`, else the pinned Docker image). `--rescore-native` runs the same passes with the
-native Percolator engine in process (the algorithm of upstream Percolator master, commit
-a9783ee8, and Percolator's result files; `--rescore` runs Percolator 3.7.1, so the two differ), for when
-Percolator is not available. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
-q ≤ `--psm-fdr`, default 0.01, e.g. `--rescore --psm-fdr 0.01`). `--psm-fdr` and `--pep` do nothing
-without one of them.
+**In-process rescoring.** `--rescore` runs every Percolator pass with the native Percolator
+engine in process (the algorithm of upstream Percolator master, commit a9783ee8, and
+Percolator's result files); no Percolator binary or Docker is needed. `--percolator-bin FILE`
+or `--percolator-docker` runs an external Percolator instead (the pinned image is Percolator
+3.7.1, which differs from master), and only then does `--percolator-args` apply. `--xl` always
+rescores with an external Percolator (`--percolator-bin`, else `percolator` on `$PATH`, else
+the Docker image). Rescoring adds a q-value and PEP to the outputs and writes `<stem>.q<fdr>.tsv`
+(targets at q ≤ `--psm-fdr`, default 0.01, e.g. `--rescore --psm-fdr 0.01`). `--psm-fdr` and
+`--pep` do nothing without `--rescore`.
 
 **Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
 by parsimony over protein families (a canonical entry with its isoform, variant and chain
@@ -569,7 +571,7 @@ andes --spectrum sample.mzML \
 - A glycan database is required: `--glyco-species` (`human`, `mouse`,
   `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
 - Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore`,
-  `--rescore-native`, `--refine`, `--psm-fdr` and `--pep` are rejected. Run Percolator on it with `--trainFDR 0.05`.
+  `--refine`, `--psm-fdr` and `--pep` are rejected. Run Percolator on it with `--trainFDR 0.05`.
 - Use `--decoy-strategy sequon`; the other generated decoys carry fewer sequons than their targets,
   which makes q-values anti-conservative.
 - Search each fraction separately, concatenate the `.glyco.pin` files (one header) and run

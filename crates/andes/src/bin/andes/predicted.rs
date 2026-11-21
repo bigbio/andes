@@ -352,7 +352,7 @@ impl Predictors {
             .collect();
         let anchors = anchor_rows(&table.rows, n_runs, &run_of);
 
-        let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
+        let mut blocks: Vec<(Vec<Vec<f64>>, Vec<bool>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
         let mut kept: Option<PredictedMs2> = None;
         let mut kept_rt: Option<(Vec<f32>, Vec<Option<RtCalibration>>)> = None;
@@ -432,15 +432,14 @@ impl Predictors {
                     100.0 * n_miss as f64 / n as f64
                 );
             }
-            let flags: Vec<f64> = miss.iter().map(|&m| f64::from(u8::from(m))).collect();
             for col in &mut cols {
-                impute_median(col, &flags);
+                impute_median(col, &miss);
             }
-            blocks.push((cols, flags));
+            blocks.push((cols, miss));
         }
 
         for (src, (_, flags)) in self.sources.iter().zip(&blocks) {
-            if n > 0 && flags.iter().all(|&m| m != 0.0) {
+            if n > 0 && flags.iter().all(|&m| m) {
                 log::warn!(
                     target: "predict",
                     "{} scored no PIN row; its columns are constant",
@@ -449,16 +448,15 @@ impl Predictors {
             }
         }
         let mut values: Vec<Vec<f64>> = Vec::new();
-        let mut flag_values: Vec<Vec<f64>> = Vec::new();
+        let mut flag_values: Vec<Vec<bool>> = Vec::new();
         for (cols, flags) in blocks {
             values.extend(cols);
             flag_values.push(flags);
         }
-        values.extend(flag_values);
         crate::memlimit::mark_stage("predictions: columns computed");
 
-        write_pin(pin, &table, &new_cols, &values)?;
-        drop(values);
+        write_pin_with_flags(pin, &table, &new_cols, &values, &flag_values)?;
+        drop((values, flag_values));
         table.peptide_col += new_cols.len();
         for line in &report {
             log::info!(target: "predict", "{line}");
@@ -932,16 +930,16 @@ pub(crate) fn anchor_rows(
         .collect()
 }
 
-fn impute_median(col: &mut [f64], miss: &[f64]) {
+fn impute_median(col: &mut [f64], miss: &[bool]) {
     let mut ok: Vec<f64> = col
         .iter()
         .zip(miss)
-        .filter(|(v, m)| v.is_finite() && **m == 0.0)
+        .filter(|(v, m)| v.is_finite() && !**m)
         .map(|(v, _)| *v)
         .collect();
     let med = median_mut(&mut ok, Even::Mean).unwrap_or(0.0);
     for (v, m) in col.iter_mut().zip(miss) {
-        if !v.is_finite() || *m != 0.0 {
+        if !v.is_finite() || *m {
             *v = med;
         }
     }
@@ -952,6 +950,18 @@ pub(crate) fn write_pin(
     table: &PinTable,
     cols: &[String],
     values: &[Vec<f64>],
+) -> Result<(), String> {
+    write_pin_with_flags(pin, table, cols, values, &[])
+}
+
+/// [`write_pin`] with 0/1 flag columns after the `values` columns; `cols` names both, values
+/// first.
+pub(crate) fn write_pin_with_flags(
+    pin: &Path,
+    table: &PinTable,
+    cols: &[String],
+    values: &[Vec<f64>],
+    flags: &[Vec<bool>],
 ) -> Result<(), String> {
     let tmp = pin.with_file_name(format!(
         "{}.predict.tmp",
@@ -995,6 +1005,10 @@ pub(crate) fn write_pin(
         for v in values {
             buf.push('\t');
             push_value(&mut buf, v[row]);
+        }
+        for f in flags {
+            buf.push('\t');
+            push_value(&mut buf, f64::from(u8::from(f[row])));
         }
         buf.push('\t');
         buf.push_str(tail);
@@ -1214,7 +1228,7 @@ mod tests {
     #[test]
     fn impute_uses_the_median_of_scored_rows() {
         let mut col = vec![1.0, f64::NAN, 3.0, 100.0, 2.0];
-        let miss = vec![0.0, 1.0, 0.0, 1.0, 0.0];
+        let miss = vec![false, true, false, true, false];
         impute_median(&mut col, &miss);
         assert_eq!(col, vec![1.0, 2.0, 3.0, 2.0, 2.0]);
     }

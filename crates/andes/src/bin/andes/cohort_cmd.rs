@@ -567,10 +567,17 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
                             g.name,
                             inputs.len()
                         );
+                        let db = spaces.get(&project).cloned().or_else(|| {
+                            plan.runs
+                                .iter()
+                                .find(|r| r.project == project)
+                                .and_then(|r| database_of(r, &cfg, &config))
+                        });
                         xl_fdr_tables(
                             &inputs,
                             &g.dir.join(format!("{}.{project}", g.name)),
                             &projects,
+                            db.as_deref(),
                         )?;
                     }
                 }
@@ -608,6 +615,10 @@ struct CsmRow {
     score_source: &'static str,
     residue_pair: String,
     protein_pair: String,
+    /// The two peptides (bare, I read as L) and the proteins each maps to, for the
+    /// near-copy check of inter-links; empty when the table has no such columns.
+    peptides: [Vec<u8>; 2],
+    proteins: [Vec<String>; 2],
 }
 
 fn pair_class(s: &str) -> Option<xl::decoy::PairClass> {
@@ -647,6 +658,11 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
     let src = col("score_source")?;
     let scan = col("scan")?;
+    let opt = |c: &str| header.iter().position(|h| *h == c);
+    let sides = [
+        (opt("alpha_peptide"), opt("alpha_proteins")),
+        (opt("beta_peptide"), opt("beta_proteins")),
+    ];
     let (mut n, mut unscored) = (0, 0);
     for (k, line) in lines.enumerate() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -688,6 +704,17 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
             score_source: "pair",
             residue_pair: pair(rp, "residue_pair")?,
             protein_pair: pair(pp, "protein_pair")?,
+            peptides: sides
+                .map(|(p, _)| p.map_or_else(Vec::new, |i| crate::xl_ambiguity::folded(get(i)))),
+            proteins: sides.map(|(_, a)| {
+                a.map_or_else(Vec::new, |i| {
+                    get(i)
+                        .split(';')
+                        .filter(|x| !x.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+            }),
         });
         n += 1;
     }
@@ -699,7 +726,12 @@ fn xl_fdr(args: CohortXlFdrArgs) -> Result<(), Box<dyn Error>> {
         Some(p) => projects_of_plan(p)?,
         None => Projects::new(),
     };
-    xl_fdr_tables(&args.tables, &args.output, &projects)
+    xl_fdr_tables(
+        &args.tables,
+        &args.output,
+        &projects,
+        args.database.as_deref(),
+    )
 }
 
 /// The q cuts of the per-project error report.
@@ -824,22 +856,27 @@ fn pin_of(table: &Path) -> PathBuf {
     ))
 }
 
-/// Replace the pair score of every intra-protein CSM with the score of one Percolator model
-/// trained on all CSMs of `tables` (their sibling PINs pooled), so that the intra-protein
-/// q-values use the evidence of the whole group. Homotypic and inter-link CSMs keep the
-/// pair score: rescored, their decoys undercount the false targets on a proteome-sized
-/// database. Does nothing, with a warning, when a table has no PIN beside it.
-fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn Error>> {
+/// Replace the pair score of the CSMs of `classes` with the score of one Percolator model
+/// trained on all CSMs of `tables` (their sibling PINs pooled, the `dropped` features left
+/// out), so that their q-values use the evidence of the whole group. Does nothing, with a
+/// warning, when a table has no PIN beside it.
+fn rescore(
+    tables: &[PathBuf],
+    csms: &mut [CsmRow],
+    classes: &[xl::rollup::LinkClass],
+    dropped: &[&str],
+    what: &str,
+) -> Result<(), Box<dyn Error>> {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
-    if !csms.iter().any(|c| c.link == xl::rollup::LinkClass::Intra) {
+    if !csms.iter().any(|c| classes.contains(&c.link)) {
         return Ok(());
     }
     let pins: Vec<PathBuf> = tables.iter().map(|t| pin_of(t)).collect();
     if let Some(missing) = pins.iter().find(|p| !p.exists()) {
         log::warn!(
             target: "cohort",
-            "{} not found; intra-protein links keep the pair score (rescoring pools every run's PIN)",
+            "{} not found; {what} keep the pair score (rescoring pools every run's PIN)",
             missing.display()
         );
         return Ok(());
@@ -847,7 +884,7 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     let dir = tempfile::Builder::new()
         .prefix("andes-xl-rescore")
         .tempdir()?;
-    let pooled = dir.path().join("intra.pin");
+    let pooled = dir.path().join("rescore.pin");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&pooled)?);
     let mut key_of: HashMap<String, (usize, String)> = HashMap::new();
     let mut head: Option<Vec<String>> = None;
@@ -877,7 +914,7 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
                 keep = (0..h.len())
                     .filter(|&i| {
                         let c = h[i].as_str();
-                        !["FileName", "ExpMass", "CalcMass"].contains(&c)
+                        !["FileName", "ExpMass", "CalcMass"].contains(&c) && !dropped.contains(&c)
                     })
                     .collect();
                 let cols: Vec<&str> = keep.iter().map(|&i| h[i].as_str()).collect();
@@ -919,7 +956,7 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     };
     let t = std::time::Instant::now();
     let mut scored = output::run_percolator_pooled(&backend, &pooled, &[])
-        .map_err(|e| format!("intra-protein rescoring: {e}"))?;
+        .map_err(|e| format!("rescoring {what}: {e}"))?;
     let decoy_text = std::fs::read_to_string(output::decoy_results_path(&pooled))?;
     scored.extend(output::parse_psm_results(&decoy_text).map_err(|e| format!("{e}"))?);
     let mut score: HashMap<(usize, &str), f64> = HashMap::new();
@@ -930,10 +967,7 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     }
     let mut unscored = 0usize;
     let mut n = 0usize;
-    for c in csms
-        .iter_mut()
-        .filter(|c| c.link == xl::rollup::LinkClass::Intra)
-    {
+    for c in csms.iter_mut().filter(|c| classes.contains(&c.link)) {
         match score.get(&(c.table, c.scan.as_str())) {
             Some(&s) => {
                 c.score = s;
@@ -949,8 +983,8 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     }
     log::info!(
         target: "cohort",
-        "intra-protein links rescored by one Percolator model over {} runs: {} CSMs ({} \
-         without a score, ranked last) [{:.1}s]",
+        "{what} rescored by one Percolator model over {} runs: {} CSMs ({} without a \
+         score, ranked last) [{:.1}s]",
         thousands(tables.len()),
         thousands(n),
         thousands(unscored),
@@ -959,11 +993,63 @@ fn rescore_intra(tables: &[PathBuf], csms: &mut [CsmRow]) -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`.
+/// Proteins a peptide's near-copies are collected for, at most; a CSM lists fewer.
+const NEAR_COPY_CAP: usize = 64;
+
+/// Move to `LinkClass::InterAmbiguous` every inter-link CSM with a peptide that has a
+/// near-identical copy (`xl_ambiguity`) in a protein of `db` the CSM does not list for it.
+/// Returns the number moved.
+fn flag_ambiguous(csms: &mut [CsmRow], db: &Path) -> Result<usize, Box<dyn Error>> {
+    use std::collections::HashMap;
+    let t = std::time::Instant::now();
+    let mut ids: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut peptides: Vec<Vec<u8>> = Vec::new();
+    for c in csms
+        .iter()
+        .filter(|c| c.link == xl::rollup::LinkClass::Inter)
+    {
+        for p in &c.peptides {
+            if !p.is_empty() && !ids.contains_key(p) {
+                ids.insert(p.clone(), peptides.len());
+                peptides.push(p.clone());
+            }
+        }
+    }
+    let copies = crate::xl_ambiguity::near_copies(db, &peptides, NEAR_COPY_CAP)?;
+    let mut n = 0;
+    for c in csms
+        .iter_mut()
+        .filter(|c| c.link == xl::rollup::LinkClass::Inter)
+    {
+        let ambiguous = (0..2).any(|side| {
+            ids.get(&c.peptides[side])
+                .is_some_and(|&i| copies[i].iter().any(|a| !c.proteins[side].contains(a)))
+        });
+        if ambiguous {
+            c.link = xl::rollup::LinkClass::InterAmbiguous;
+            n += 1;
+        }
+    }
+    log::info!(
+        target: "cohort",
+        "{} of the inter-link CSMs have a peptide with a near-identical copy in another protein \
+         of {}; their FDR is estimated apart (inter_ambiguous) [{:.1}s]",
+        thousands(n),
+        db.display(),
+        t.elapsed().as_secs_f64()
+    );
+    Ok(n)
+}
+
+/// Crosslink q-values over every CSM of `tables`, written to `<output>.xl.*`. With the
+/// database the runs searched, inter-links whose peptide has a near-copy in another protein
+/// are estimated apart and every inter-link is rescored; without it inter-links keep the
+/// pair score.
 fn xl_fdr_tables(
     tables: &[PathBuf],
     output: &Path,
     projects: &Projects,
+    database: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let mut csms = Vec::new();
     for (k, t) in tables.iter().enumerate() {
@@ -976,7 +1062,33 @@ fn xl_fdr_tables(
             thousands(unscored)
         );
     }
-    rescore_intra(tables, &mut csms)?;
+    rescore(
+        tables,
+        &mut csms,
+        &[xl::rollup::LinkClass::Intra],
+        &[],
+        "intra-protein links",
+    )?;
+    match database {
+        Some(db) => {
+            flag_ambiguous(&mut csms, db)?;
+            rescore(
+                tables,
+                &mut csms,
+                &[
+                    xl::rollup::LinkClass::Inter,
+                    xl::rollup::LinkClass::InterAmbiguous,
+                ],
+                &crate::xl_fdr::GAP_FEATURES,
+                "inter-links",
+            )?;
+        }
+        None => log::warn!(
+            target: "cohort",
+            "no database given; inter-links keep the pair score and are not checked for \
+             near-copies"
+        ),
+    }
     let items: Vec<xl::rollup::Item> = csms
         .iter()
         .map(|c| xl::rollup::Item {
@@ -1172,8 +1284,17 @@ mod tests {
             score_source: "pair",
             residue_pair: "P1:5 -- P2:9".into(),
             protein_pair: "P1 -- P2".into(),
+            peptides: [Vec::new(), Vec::new()],
+            proteins: [Vec::new(), Vec::new()],
         }];
-        rescore_intra(&[table], &mut rows).unwrap();
+        rescore(
+            &[table],
+            &mut rows,
+            &[xl::rollup::LinkClass::Intra],
+            &[],
+            "intra-protein links",
+        )
+        .unwrap();
         assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
     }
 
@@ -1259,6 +1380,45 @@ mod tests {
             search_args(&run(&["--lfq"], cohort::Kind::Lfq), &spaces),
             ["--lfq"]
         );
+    }
+
+    #[test]
+    fn an_inter_link_with_a_near_copy_in_an_unlisted_protein_is_ambiguous() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("db.fasta");
+        std::fs::write(
+            &db,
+            ">P1\nMKTLDEAGHSKR\n>P2\nAKTIDEAGNSKR\n>P3\nMKAAAAWWWKR\n>P4\nMKGGGGYYYKR\n",
+        )
+        .unwrap();
+        let row = |a: &str, pa: &str, b: &str, pb: &str| CsmRow {
+            run: "A.r1".into(),
+            table: 0,
+            scan: "1".into(),
+            spectrum: "s".into(),
+            class: xl::decoy::PairClass::TT,
+            link: xl::rollup::LinkClass::Inter,
+            score: 1.0,
+            score_source: "pair",
+            residue_pair: String::new(),
+            protein_pair: String::new(),
+            peptides: [
+                crate::xl_ambiguity::folded(a),
+                crate::xl_ambiguity::folded(b),
+            ],
+            proteins: [vec![pa.to_string()], vec![pb.to_string()]],
+        };
+        let mut rows = vec![
+            row("K.TLDEAGHSK.R", "P1", "K.AAAAWWWK.R", "P3"),
+            row("K.GGGGYYYK.R", "P4", "K.AAAAWWWK.R", "P3"),
+        ];
+        assert_eq!(flag_ambiguous(&mut rows, &db).unwrap(), 1);
+        assert_eq!(
+            rows[0].link,
+            xl::rollup::LinkClass::InterAmbiguous,
+            "P2 holds a one-substitution copy"
+        );
+        assert_eq!(rows[1].link, xl::rollup::LinkClass::Inter);
     }
 
     #[test]
@@ -1396,6 +1556,8 @@ mod tests {
             score_source: "pair",
             residue_pair: String::new(),
             protein_pair: String::new(),
+            peptides: [Vec::new(), Vec::new()],
+            proteins: [Vec::new(), Vec::new()],
         };
         let csms = vec![
             row("A.r1", TT, Intra),

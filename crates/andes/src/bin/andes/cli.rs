@@ -1482,6 +1482,10 @@ pub(crate) struct CohortXlFdrArgs {
     /// table [default: the run name up to its first `.`]
     #[arg(long, value_name = "PLAN_JSON")]
     pub(crate) plan: Option<PathBuf>,
+    /// The database the runs searched; with it, inter-links whose peptide has a near-copy in
+    /// another protein are estimated apart (inter_ambiguous) and inter-links are rescored
+    #[arg(long, value_name = "FASTA")]
+    pub(crate) database: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

@@ -65,6 +65,18 @@ const FEATURES: [&str; 46] = [
     "min_decoupled",
 ];
 
+/// The PIN features that compare a CSM with the next-best candidate of its spectrum. With
+/// them a rescorer separates target-decoy from false target-target inter-links, so the
+/// inter-link model leaves them out.
+pub(crate) const GAP_FEATURES: [&str; 6] = [
+    "pair_gap",
+    "pair_gap_missing",
+    "alpha_gap",
+    "alpha_gap_missing",
+    "beta_gap",
+    "beta_gap_missing",
+];
+
 fn spec_id(r: &XlSpectrumResult) -> String {
     format!("xl{}", r.spec_idx)
 }

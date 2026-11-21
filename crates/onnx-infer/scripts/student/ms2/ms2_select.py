@@ -41,17 +41,17 @@ from ms2_common import CARBAMIDOMETHYL, ITRAQ_MODS, TMT_MODS, label_of_mods, par
 # run with its own FDR control at q <= 0.01 on the same FASTA, modifications and enzyme. A PSM is a
 # training label only when at least MIN_VOTES independent non-andes identifications of the same scan agree
 # on its peptidoform (the andes column is recorded but never counts); a hard example needs MIN_VOTES_HARD.
-# Independent votes: every panel engine but andes, the submitters' identifications, and the source's own
-# identification when its engine is outside the panel and not in NO_VOTE_SOURCES (MS-GF+ is excluded
-# because andes descends from it; "consensus" marks rows selected from a multi-engine consensus table,
-# whose engines vote through their own columns).
+# Independent votes: every panel engine but andes, and the submitters' identifications. The source a row
+# was selected from never votes on its own: a panel engine votes through its column, and an identification
+# of unknown engines (MsNet, which may include MS-GF+, the engine andes descends from) is only recorded in
+# the informational INFO_SOURCES columns.
 HARD_MAX_LENGTH = 9
 HARD_EXPLAINED_QUANTILE = 0.25
 COMMON_MODS = frozenset({CARBAMIDOMETHYL, 35, 21}) | TMT_MODS | ITRAQ_MODS
 VOTE_ENGINES = ("andes", "comet", "msfragger", "sage", "maxquant")
 VOTE_SOURCES = VOTE_ENGINES + ("submitter",)
 NON_VOTING = ("andes",)
-NO_VOTE_SOURCES = ("andes", "msgf+", "msgfplus", "consensus")
+INFO_SOURCES = ("msnet",)
 MIN_VOTES = 2
 MIN_VOTES_HARD = 3
 # A run is labelled TMT / iTRAQ when at least this share of its PSMs carries the tag.
@@ -122,8 +122,8 @@ def annotate_rows(rows: list[dict], source_engine: str) -> list[dict]:
         r["hard"] = (len(r["sequence"]) <= HARD_MAX_LENGTH or r["explained"] < cut[r["activation"]]
                      or any(uid not in COMMON_MODS for _, uid in r["mods"]))
         r["source_engine"] = source_engine
-        for e in VOTE_SOURCES:
-            r[f"agree_{e}"] = None
+        for e in VOTE_SOURCES + INFO_SOURCES:
+            r[f"agree_{e}" if e in VOTE_SOURCES else f"{e}_agree"] = None
         r["n_engines"] = None
         del r["mods"]
     return rows
@@ -135,7 +135,8 @@ def finalize_rows(rows: list[dict], votes: dict):
     ``votes`` maps each ``VOTE_SOURCES`` name to ``{(run, scan): peptidoform}`` of that source's confident
     identifications, or to None when the source did not run (the column stays null). ``agree_<e>`` is True
     when the source names the same identification, False when it names another or none. ``n_engines``
-    counts the independent agreeing votes (see the module constants). Kept: ``n_engines >= MIN_VOTES``, hard
+    counts the independent agreeing votes (see the module constants). ``msnet_agree`` is informational
+    only: True for a row selected from MsNet, else from ``votes["msnet"]`` when given, else null. Kept: ``n_engines >= MIN_VOTES``, hard
     rows ``>= MIN_VOTES_HARD``. Returns (kept rows, counts)."""
     st = {"rows": len(rows), "hard": 0, "dropped_votes": 0, "dropped_hard": 0, "kept": 0}
     for e in VOTE_SOURCES:
@@ -143,8 +144,14 @@ def finalize_rows(rows: list[dict], votes: dict):
     kept = []
     for r in rows:
         key = (r["run"], int(r["scan"]))
-        src = str(r["source_engine"]).lower()
-        n = 0 if src in VOTE_ENGINES or src in NO_VOTE_SOURCES else 1
+        n = 0
+        if str(r["source_engine"]).lower().startswith("msnet"):
+            r["msnet_agree"] = True
+        elif votes.get("msnet") is not None:
+            theirs = votes["msnet"].get(key)
+            r["msnet_agree"] = theirs is not None and same_identification(r["peptidoform"], theirs)
+        else:
+            r["msnet_agree"] = None
         for e in VOTE_SOURCES:
             v = votes.get(e)
             if v is None:

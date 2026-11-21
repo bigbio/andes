@@ -72,7 +72,8 @@ One row per annotated PSM. Shards carry the key metadata `andes.ms2_shard.schema
 | `hard` | Hard example: at most 9 residues, matched-intensity share in the bottom quartile (per extraction unit and activation), or a modification outside Carbamidomethyl/Oxidation/Phospho/TMT/iTRAQ |
 | `source_engine` | Engine of the identification the row was selected from (`comet` for quantms qpx tables) |
 | `agree_andes`, `agree_comet`, `agree_msfragger`, `agree_sage`, `agree_maxquant`, `agree_submitter` | That source identifies the scan with the same peptidoform (I = L, carbamidomethylation ignored); null when the source did not run |
-| `n_engines` | Independent agreeing non-andes votes: the true `agree_*` columns except andes, plus the source when its engine is outside the panel and is not MS-GF+ (andes descends from it) |
+| `msnet_agree` | Informational only, never a vote: MsNet's own identification (unknown engines, possibly MS-GF+) agrees; true for MsNet-sourced rows |
+| `n_engines` | Independent agreeing non-andes votes: the true `agree_*` columns except andes. The row's own source never adds a vote |
 
 Two stages. The extractors write *candidate* shards (`andes.ms2_shard.finalized` = `false`, agreement columns
 null, nothing dropped). `ms2_finalize.py --votes ENGINE=PATH ...` sets the agreement columns from each engine's

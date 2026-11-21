@@ -3,7 +3,8 @@
 
 Candidate shards (``andes.ms2_shard.finalized`` = ``false``) come from the extractors with the agreement
 columns null. Each ``--votes ENGINE=PATH`` gives one source's confident identifications (ENGINE is andes,
-comet, msfragger, sage, maxquant or submitter; PATH a parquet with ``run``, ``scan``, ``peptidoform`` as ProForma with Unimod
+comet, msfragger, sage, maxquant or submitter, or msnet for the informational ``msnet_agree`` column, which
+never counts; PATH a parquet with ``run``, ``scan``, ``peptidoform`` as ProForma with Unimod
 accessions, and optionally ``dataset``; for an engine, its own Percolator at q <= 0.01 on the same FASTA,
 modifications and enzyme). A source without ``--votes`` did not run: its column stays null and gives no vote.
 ``ms2_select.finalize_rows`` sets the columns and keeps a row when at least two independent non-andes
@@ -30,7 +31,9 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ms2_common import shard_table  # noqa: E402
-from ms2_select import VOTE_SOURCES as SOURCES, finalize_rows, load_votes  # noqa: E402
+from ms2_select import INFO_SOURCES, VOTE_SOURCES, finalize_rows, load_votes  # noqa: E402
+
+SOURCES = VOTE_SOURCES + INFO_SOURCES
 
 
 def main():

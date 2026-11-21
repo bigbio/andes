@@ -420,7 +420,7 @@ SHARD_SCHEMA_VERSION = "2.0"
 SHARD_COLUMNS = [
     "dataset", "run", "scan", "peptidoform", "sequence", "charge", "nce", "activation",
     "instrument", "pep", "n_matched", "explained", "intensities", "label", "hard", "source_engine",
-    "agree_andes", "agree_comet", "agree_msfragger", "agree_sage", "agree_maxquant", "agree_submitter", "n_engines",
+    "agree_andes", "agree_comet", "agree_msfragger", "agree_sage", "agree_maxquant", "agree_submitter", "msnet_agree", "n_engines",
 ]
 
 
@@ -448,6 +448,7 @@ def shard_table(rows: list[dict], finalized: bool = False):
         "source_engine": pa.array([r["source_engine"] for r in rows], pa.string()),
         **{f"agree_{e}": pa.array([r[f"agree_{e}"] for r in rows], pa.bool_())
            for e in ("andes", "comet", "msfragger", "sage", "maxquant", "submitter")},
+        "msnet_agree": pa.array([r.get("msnet_agree") for r in rows], pa.bool_()),
         "n_engines": pa.array([r["n_engines"] for r in rows], pa.int8()),
     })
     return t.replace_schema_metadata({"andes.ms2_shard.schema": SHARD_SCHEMA_VERSION,

@@ -207,7 +207,8 @@ def test_shard_schema_version(tmp_path):
            "nce": 27.0, "activation": "HCD-FTMS", "instrument": "Q Exactive", "pep": 0.001, "n_matched": 6,
            "explained": 0.5, "intensities": np.zeros((7, 19), np.float32), "label": "TMT", "hard": True,
            "source_engine": "comet", "agree_andes": None, "agree_comet": True, "agree_msfragger": False,
-           "agree_sage": None, "agree_maxquant": None, "agree_submitter": None, "n_engines": 1}
+           "agree_sage": None, "agree_maxquant": None, "agree_submitter": None, "msnet_agree": None,
+           "n_engines": 1}
     t = shard_table([row])
     assert t.schema.metadata[b"andes.ms2_shard.schema"] == b"2.0"
     assert t.schema.metadata[b"andes.ms2_shard.finalized"] == b"false"
@@ -269,12 +270,19 @@ def test_hard_requires_agree():
     assert by[1]["n_engines"] == 3 and by[3]["n_engines"] == 2 and by[5]["n_engines"] == 2
     assert by[3]["agree_andes"] is False and by[1]["agree_maxquant"] is False
     assert st["dropped_hard"] == 1 and st["dropped_votes"] == 4
-    # a source outside the panel (MsNet's own identification) is one extra vote; a panel engine is not
+    # the source never votes: MsNet's own identification is only the informational msnet_agree column
     one = [_row("LONGPEPTIDEK", 0.7, scan=4), _row("ANOTHERLONGPEPK", 0.7, scan=9)]
-    kept, _ = finalize_rows(annotate_rows([dict(r) for r in one], "msnet"), {"comet": {("r", 4): "LONGPEPTIDEK"}})
-    assert [r["scan"] for r in kept] == [4] and kept[0]["n_engines"] == 2
-    kept, _ = finalize_rows(annotate_rows([dict(r) for r in one], "comet"), {"comet": {("r", 4): "LONGPEPTIDEK"}})
+    rows_m = annotate_rows([dict(r) for r in one], "msnet-consensus")
+    kept, _ = finalize_rows([dict(r) for r in rows_m], {"comet": {("r", 4): "LONGPEPTIDEK"}})
     assert kept == []
+    kept, _ = finalize_rows([dict(r) for r in rows_m], {"comet": {("r", 4): "LONGPEPTIDEK"},
+                                                       "sage": {("r", 4): "LONGPEPTIDEK"}})
+    assert [r["scan"] for r in kept] == [4] and kept[0]["n_engines"] == 2 and kept[0]["msnet_agree"] is True
+    rows_c = annotate_rows([dict(r) for r in one], "comet")
+    kept, _ = finalize_rows(rows_c, {"comet": {("r", 4): "LONGPEPTIDEK"}, "sage": {("r", 4): "LONGPEPTIDEK"},
+                                     "msnet": {("r", 4): "LONGPEPTIDEK"}})
+    assert kept[0]["msnet_agree"] is True and kept[0]["n_engines"] == 2
+    assert all(r["msnet_agree"] is None for r in finalize_rows([dict(r) for r in rows], votes)[0])
     # engines that did not run leave their column null
     kept, _ = finalize_rows([dict(r) for r in rows], {"comet": {}, "msfragger": {}})
     assert kept == []

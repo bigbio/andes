@@ -78,6 +78,11 @@ fn schema(features: &[(String, Vec<f32>)]) -> Arc<Schema> {
 }
 
 pub fn write_pass2(path: &Path, t: &Pass2Table) -> Result<(), String> {
+    write_pass2_with(path, t, &[])
+}
+
+/// Writes a pass-2 table with extra key-value metadata (e.g. the rescoring settings of a run).
+pub fn write_pass2_with(path: &Path, t: &Pass2Table, meta: &[(&str, String)]) -> Result<(), String> {
     let sch = schema(&t.features);
     let n = t.len();
     let batches = (0..n.div_ceil(BATCH_ROWS).max(1)).map(|b| {
@@ -99,11 +104,11 @@ pub fn write_pass2(path: &Path, t: &Pass2Table) -> Result<(), String> {
         );
         RecordBatch::try_new(sch.clone(), cols).map_err(|e| e.to_string())
     });
-    write_table(path, &TABLE, SCHEMA_VERSION, sch.clone(), batches, &[])
+    write_table(path, &TABLE, SCHEMA_VERSION, sch.clone(), batches, meta)
 }
 
-/// Reads a pass-2 table; with `only`, the metadata columns and just the named features.
-pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, String> {
+/// Opens a pass-2 table and checks its schema version.
+fn open(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<File>, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let f = File::open(path).map_err(|e| err(&e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(f).map_err(|e| err(&e))?;
@@ -126,6 +131,79 @@ pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, Stri
             TABLE.what
         ));
     }
+    Ok(builder)
+}
+
+/// The key-value metadata of a pass-2 table.
+pub fn read_pass2_meta(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let builder = open(path)?;
+    Ok(builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .map(|kv| {
+            kv.iter()
+                .map(|k| (k.key.clone(), k.value.clone().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The precursor keys of a pass-2 table with two of its features, for study-level joins.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pass2Keys {
+    pub decoy: Vec<bool>,
+    pub charge: Vec<u8>,
+    pub peptide: Vec<String>,
+    pub features: [Vec<f32>; 2],
+}
+
+/// Reads only `decoy`, `charge`, `peptide` and the two named features of a pass-2 table.
+pub fn read_pass2_keys(path: &Path, features: [&str; 2]) -> Result<Pass2Keys, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let builder = open(path)?;
+    let want = ["decoy", "charge", "peptide", features[0], features[1]];
+    let fields = builder.schema().fields();
+    let mut keep = Vec::with_capacity(want.len());
+    for w in want {
+        keep.push(
+            fields
+                .iter()
+                .position(|f| f.name() == w)
+                .ok_or_else(|| format!("{}: no column {w}", path.display()))?,
+        );
+    }
+    let mask = ProjectionMask::roots(builder.parquet_schema(), keep.iter().copied());
+    let reader = builder
+        .with_projection(mask)
+        .with_batch_size(BATCH_ROWS)
+        .build()
+        .map_err(|e| err(&e))?;
+    let mut t = Pass2Keys::default();
+    for b in reader {
+        let b = b.map_err(|e| err(&e))?;
+        let bad = |n: &str| format!("{}: column {n} is missing or has the wrong type", path.display());
+        let get = |n: &str| b.column_by_name(n).map(|c| c.as_any());
+        let decoy = get("decoy").and_then(|c| c.downcast_ref::<BooleanArray>()).ok_or_else(|| bad("decoy"))?;
+        let charge = get("charge").and_then(|c| c.downcast_ref::<UInt8Array>()).ok_or_else(|| bad("charge"))?;
+        let pep = get("peptide").and_then(|c| c.downcast_ref::<StringArray>()).ok_or_else(|| bad("peptide"))?;
+        for i in 0..b.num_rows() {
+            t.decoy.push(decoy.value(i));
+            t.charge.push(charge.value(i));
+            t.peptide.push(pep.value(i).to_string());
+        }
+        for (k, n) in features.iter().enumerate() {
+            let a = get(n).and_then(|c| c.downcast_ref::<Float32Array>()).ok_or_else(|| bad(n))?;
+            t.features[k].extend(a.values().iter().copied());
+        }
+    }
+    Ok(t)
+}
+
+/// Reads a pass-2 table; with `only`, the metadata columns and just the named features.
+pub fn read_pass2(path: &Path, only: Option<&[&str]>) -> Result<Pass2Table, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let builder = open(path)?;
     let names: Vec<String> = builder
         .schema()
         .fields()
@@ -216,6 +294,22 @@ mod tests {
         let t = table();
         write_pass2(&p, &t).unwrap();
         assert_eq!(read_pass2(&p, None).unwrap(), t);
+    }
+
+    #[test]
+    fn pass2_keys_and_metadata_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("run.parquet");
+        write_pass2_with(&p, &table(), &[("andes.test", "a b".to_string())]).unwrap();
+        let k = read_pass2_keys(&p, ["p2_llr", "p2_rtstar"]).unwrap();
+        assert_eq!(k.peptide, table().peptide);
+        assert_eq!(k.decoy, vec![false, true, false]);
+        assert_eq!(k.charge, vec![2, 3, 2]);
+        assert_eq!(k.features[0], vec![12.5, -3.0, 9.0]);
+        assert_eq!(k.features[1], vec![10.1, 11.0, 10.2]);
+        let meta = read_pass2_meta(&p).unwrap();
+        assert!(meta.iter().any(|(k, v)| k == "andes.test" && v == "a b"));
+        assert!(read_pass2_keys(&p, ["p2_llr", "p2_none"]).is_err());
     }
 
     #[test]

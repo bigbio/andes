@@ -724,6 +724,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             log::info!(target: "quant", "{}", s.describe());
         }
     }
+    if cli.dia && cli.quant_dir.is_some() && spectrum_paths.len() > 1 {
+        return Err(
+            "--dia --quant-dir takes one input per process (each run's pass-2 table and PIN go \
+             to the quant directory); run andes once per run, then `andes quant finalize`"
+                .into(),
+        );
+    }
     let predictors = if standalone {
         None
     } else {
@@ -1778,6 +1785,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let mut results_pin = output_pin_path.clone();
+            if let (Some(t), Some(dir)) = (dia_pass2.as_ref(), cli.quant_dir.as_deref()) {
+                crate::dia_xrun::store_run(
+                    dir,
+                    &spectrum_path,
+                    &output_pin_path,
+                    t,
+                    Some((&backend, &user_args)),
+                )?;
+                dia_pass2 = None;
+            }
             if let Some(t) = dia_pass2.take() {
                 let seed = crate::dia_score::percolator_seed(&user_args);
                 let rescore = |pin: &Path| -> Result<crate::dia_score::Rescored, String> {
@@ -1844,6 +1861,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
+
+    if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
+        crate::dia_xrun::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+    }
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ipf_qpx: Option<std::collections::HashMap<String, output::ipf::IpfQpx>> = None;

@@ -1655,6 +1655,10 @@ fn release_free_memory() {
 }
 
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
+    let dia_runs = crate::dia_xrun::study_runs(&a.quant_dir)?;
+    if !dia_runs.is_empty() {
+        return crate::dia_xrun::finalize(&a, &dia_runs);
+    }
     let stored = read_library(&a.quant_dir)?;
     let fingerprint = library_fingerprint(&stored);
     let mut paths = Vec::with_capacity(stored.runs.len());

@@ -855,7 +855,7 @@ pub(crate) struct SearchArgs {
     pub(crate) rescore_native: bool,
 
     /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = 16,
+    #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
     pub(crate) rescore_memory_gb: u64,
@@ -1632,7 +1632,7 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "temp-dir", value_name = "DIR")]
     pub(crate) temp_dir: Option<PathBuf>,
 
-    /// Seed of the transfer FDR folds and models and of the samples
+    /// Seed of the transfer FDR folds and models and of the samples; on a DIA study, of the learned score and the rescoring
     #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,
@@ -1654,6 +1654,9 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long, value_name = "N")]
     pub(crate) threads: Option<usize>,
 }
+
+/// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
+pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;
 
 pub(crate) type Cli = SearchArgs;
 

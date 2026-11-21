@@ -1012,14 +1012,15 @@ pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
 /// keeping rows with q <= x keeps the precursors whose best row passes, at precursor FDR x.
 /// Rows Percolator did not report keep no entry. Returns the precursor counts (targets,
 /// decoys, target precursors at q <= 0.01) and the best `(score, is decoy)` of every precursor,
-/// for comparing the run's precursor-level target-decoy curve at other q-values.
+/// for comparing the run's precursor-level target-decoy curve at other q-values. A precursor
+/// PIN (one with the `dia_score::PRESENT_COLUMN` column) is keyed by its Peptide string and
+/// charge columns and needs no spectra.
 pub(crate) fn precursor_q(
     pin: &Path,
     spectra: &[Spectrum],
     targets: &mut HashMap<String, output::PercolatorPsm>,
     decoys: &HashMap<String, output::PercolatorPsm>,
 ) -> Result<PrecursorQ, String> {
-    let table = read_pin(pin, spectra, &[])?;
     let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = text.lines().filter(|l| !l.is_empty());
     let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
@@ -1028,26 +1029,56 @@ pub(crate) fn precursor_q(
             .position(|c| *c == n)
             .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
     };
-    let (c_id, c_pep) = (at("SpecId")?, at("Peptide")?);
+    let (c_id, c_pep, c_label) = (at("SpecId")?, at("Peptide")?, at("Label")?);
     let c_file = h.iter().position(|c| *c == "FileName");
+    let charge_cols: Vec<(usize, u8)> = h
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
+        .collect();
+    let table = if h.contains(&crate::dia_score::PRESENT_COLUMN) {
+        None
+    } else {
+        Some(read_pin(pin, spectra, &[])?)
+    };
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
-    for (line, r) in lines.zip(&table.rows) {
+    for (i, line) in lines.enumerate() {
         let x: Vec<&str> = line.split('\t').collect();
+        if x.len() <= c_pep.max(c_label).max(c_id) {
+            return Err(format!("{}: short PIN row {}", pin.display(), i + 2));
+        }
+        let (decoy, peptide, charge) = match &table {
+            Some(t) => {
+                let r = t
+                    .rows
+                    .get(i)
+                    .ok_or_else(|| format!("{}: row {} not read", pin.display(), i + 2))?;
+                let peptide = if r.form == NONE {
+                    x[c_pep].to_string()
+                } else {
+                    format!("#{}", r.form)
+                };
+                (r.decoy, peptide, r.charge)
+            }
+            None => (
+                x[c_label].trim() == "-1",
+                x[c_pep].to_string(),
+                charge_cols
+                    .iter()
+                    .find(|(c, _)| x.get(*c) == Some(&"1"))
+                    .map_or(0, |c| c.1),
+            ),
+        };
         let id = x[c_id];
-        let psm = if r.decoy { decoys.get(id) } else { targets.get(id) };
+        let psm = if decoy { decoys.get(id) } else { targets.get(id) };
         let Some(score) = psm.and_then(|p| p.score) else {
             continue;
         };
         let run = c_file.map_or("", |i| x[i]).to_string();
-        let peptide = if r.form == NONE {
-            x[c_pep].to_string()
-        } else {
-            format!("#{}", r.form)
-        };
         let n = keys.len() as u32;
-        let k = *keys.entry((run, peptide, r.charge)).or_insert(n);
-        rows.push((k, score, r.decoy, id.to_string()));
+        let k = *keys.entry((run, peptide, charge)).or_insert(n);
+        rows.push((k, score, decoy, id.to_string()));
     }
     let q = precursor_q_values(keys.len(), &rows);
     let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();

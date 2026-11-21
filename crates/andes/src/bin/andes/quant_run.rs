@@ -1697,7 +1697,7 @@ pub(crate) fn run_quant(
         }
         if s.tmt_mbr {
             let input = mbr.ok_or("--mbr with --tmt: the rescoring result is missing")?;
-            let targets = rescore.ok_or("--mbr with --tmt needs --rescore or --rescore-native")?;
+            let targets = rescore.ok_or("--mbr with --tmt needs --rescore")?;
             let quant_dir = s
                 .quant_dir
                 .as_deref()

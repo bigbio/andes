@@ -456,7 +456,7 @@ fn duplicate_run_stems_are_rejected_before_the_search() {
     ];
     for extra in [
         &["--quant-dir", s(&q)][..],
-        &["--lfq", "--mbr", "--rescore-native"][..],
+        &["--lfq", "--mbr", "--rescore"][..],
     ] {
         let out = andes(&[&common[..], extra].concat());
         assert!(!out.status.success(), "{extra:?}");
@@ -867,7 +867,7 @@ fn mbr_needs_two_inputs_and_rescoring() {
         "--lfq",
         "--mbr",
     ];
-    let out = andes(&[&base[..], &["--rescore-native"]].concat());
+    let out = andes(&[&base[..], &["--rescore"]].concat());
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("two or more"));
 

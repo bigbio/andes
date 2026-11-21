@@ -1,3 +1,9 @@
+//! Native rescoring engine: the Percolator algorithm (Käll et al., Nat. Methods 2007;4:923-925,
+//! https://doi.org/10.1038/nmeth1113) run in process. A linear SVM is trained semi-supervised on
+//! target and decoy PSMs with cross-validation, and its scores give q-values and PEPs. The engine
+//! tracks upstream Percolator master (https://github.com/percolator/percolator, commit
+//! a9783ee8) and writes Percolator's result files.
+
 mod args;
 mod budget;
 mod cv;

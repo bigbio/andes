@@ -1,4 +1,4 @@
-use percolator_native::{
+use rescore::{
     count_at, folds_by_spectrum, init_direction, read_pin, score, stdv, tdc_q, MemLimit,
 };
 use std::path::PathBuf;

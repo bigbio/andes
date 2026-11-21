@@ -20,7 +20,7 @@ for s in "${RUNS[@]}"; do
   "$ANDES" --spectrum "$RAW/$s.raw" --database "$FASTA" \
     --enzyme trypsin --max-missed-cleavages 1 --min-length 6 --max-length 30 --charge 1..5 \
     --fixed-mods "Carbamidomethyl (C)" --variable-mods "Oxidation (M)" --max-mods 1 \
-    --dia --model hcd_astral_tryp --predict rt,ms2 --rescore-native --threads "$THREADS" \
+    --dia --model hcd_astral_tryp --predict rt,ms2 --rescore --threads "$THREADS" \
     --quant-dir "$OUT/q" --output-pin "$OUT/$s.pin" > "$OUT/$s.search.log" 2>&1
 done
 for s in "${RUNS[@]}"; do

@@ -1,4 +1,4 @@
-use percolator_native::{estimate_pi0, mix_max_q, pep_from_q, tdc_q, too_good_separation};
+use rescore::{estimate_pi0, mix_max_q, pep_from_q, tdc_q, too_good_separation};
 use std::path::PathBuf;
 
 fn data(name: &str) -> PathBuf {

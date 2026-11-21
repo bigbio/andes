@@ -1,4 +1,4 @@
-use percolator_native::{l2_svm_mfn, read_pin, stdv, MemLimit, MfnOpts, Rows};
+use rescore::{l2_svm_mfn, read_pin, stdv, MemLimit, MfnOpts, Rows};
 use std::path::PathBuf;
 
 fn data_path(name: &str) -> PathBuf {
@@ -108,7 +108,7 @@ fn rows_gather_normalises_and_appends_bias() {
     assert_eq!(full.row(200), x.row(2));
 }
 
-fn split(pin: &percolator_native::Pin, skip: Option<u64>) -> (Vec<usize>, Vec<usize>) {
+fn split(pin: &rescore::Pin, skip: Option<u64>) -> (Vec<usize>, Vec<usize>) {
     let mut pos = Vec::new();
     let mut neg = Vec::new();
     for (i, m) in pin.meta.iter().enumerate() {

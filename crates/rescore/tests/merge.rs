@@ -1,4 +1,4 @@
-use percolator_native::{
+use rescore::{
     fmt_fixed, fmt_g, merge_folds, normalize_fold_scores, read_pin, write_results, write_weights,
     CvResult, MemLimit, Pin, Results,
 };

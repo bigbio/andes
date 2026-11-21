@@ -530,7 +530,13 @@ impl ChunkFragmentIndex {
                     return;
                 }
                 let span = ((tol_da / self.bin_width).ceil() as usize).max(1);
-                for bb in b.saturating_sub(span)..=(b + span).min(n_bins - 1) {
+                let first = (((mz - tol_da - VOTE_BIN_MARGIN_DA).max(0.0) / self.bin_width)
+                    as usize)
+                    .max(b.saturating_sub(span));
+                let last = (((mz + tol_da + VOTE_BIN_MARGIN_DA) / self.bin_width) as usize)
+                    .min(b + span)
+                    .min(n_bins - 1);
+                for bb in first..=last {
                     let base = self.bin_start[bb] as usize;
                     let row = &self.block_off[bb * row_len..(bb + 1) * row_len];
                     let seg =
@@ -626,6 +632,10 @@ impl ChunkFragmentIndex {
 }
 
 const PRECURSOR_GATE_MARGIN_DA: f64 = 1e-6;
+/// Slack (Da) on the fragment tolerance when choosing the bins a peak votes in: far above the
+/// rounding of the bin arithmetic, far below a bin, so no bin that holds a matching ion is
+/// skipped.
+const VOTE_BIN_MARGIN_DA: f64 = 1e-6;
 /// Records per parallel task when attaching predicted RTs to a chunk's forms.
 const RT_ATTACH_RECORDS_PER_TASK: usize = 4096;
 const SECS_PER_MIN: f64 = 60.0;

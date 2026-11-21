@@ -1687,6 +1687,29 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64()
     );
     crate::memlimit::mark_stage("PIN written");
+    let run_stats = output::RunStatistics::compute(
+        &queues,
+        &pin_candidates,
+        &params,
+        &scorer.feature_match_tolerance(),
+        &scorer.pin_match_tolerance(),
+        &scorer.node_score_window(),
+    );
+    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
+        p.annotation
+            .as_deref()
+            .is_some_and(|a| !a.site_claims.is_empty())
+    });
+    let fact_rows = (cli.dia
+        && !has_site_claims
+        && ipf_scoring.is_none()
+        && quant.is_none()
+        && cli.output_parquet.is_none()
+        && cli.output_tsv.is_none())
+    .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
+    if fact_rows.is_some() {
+        queues = Vec::new();
+    }
     log::info!(
         target: "total",
         "done in {:.2} s",
@@ -1768,11 +1791,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
-    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
-        p.annotation
-            .as_deref()
-            .is_some_and(|a| !a.site_claims.is_empty())
-    });
     let mut row_scores: Option<output::RowScores> = None;
     let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2238,25 +2256,27 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         identified = Some((accepted, pep_note));
     }
 
-    let run_stats = output::RunStatistics::compute(
-        &queues,
-        &pin_candidates,
-        &params,
-        &scorer.feature_match_tolerance(),
-        &scorer.pin_match_tolerance(),
-        &scorer.node_score_window(),
-    );
     let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
-        let facts = output::psm_facts(
-            &spectra,
-            &queues,
-            &pin_candidates,
-            &params,
-            &run_ends,
-            &wanted,
-        );
+        let facts = match &fact_rows {
+            Some(rows) => output::psm_facts_of_rows(
+                &spectra,
+                rows,
+                &pin_candidates,
+                &params,
+                &run_ends,
+                &wanted,
+            ),
+            None => output::psm_facts(
+                &spectra,
+                &queues,
+                &pin_candidates,
+                &params,
+                &run_ends,
+                &wanted,
+            ),
+        };
         let linked: Vec<output::PsmFacts> = accepted
             .iter()
             .filter_map(|p| facts.get(p.psm_id.as_str()).cloned())

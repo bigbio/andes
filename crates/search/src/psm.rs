@@ -240,6 +240,20 @@ impl TopNQueue {
     pub fn len(&self) -> usize {
         self.heap.len()
     }
+
+    /// Moves the PSMs into an allocation of exactly their number and frees the reserved one
+    /// whole, so the next queue of the same capacity can reuse it (shrinking in place would
+    /// leave a fragment too small for that). The PSMs and their heap order are unchanged:
+    /// rebuilding an array that is already a heap moves nothing.
+    pub fn shrink_to_fit(&mut self) {
+        if self.heap.len() == self.heap.capacity() {
+            return;
+        }
+        let reserved = std::mem::take(&mut self.heap).into_vec();
+        let mut exact = Vec::with_capacity(reserved.len());
+        exact.extend(reserved);
+        self.heap = BinaryHeap::from(exact);
+    }
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }
@@ -384,6 +398,20 @@ mod tests {
         q.update_in_place(|m| m.features.strong_score += 1.0);
         assert_eq!(order(&q), before);
         assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
+    }
+
+    #[test]
+    fn shrinking_a_queue_keeps_its_psms_in_order() {
+        let mut q = TopNQueue::new(100);
+        for (i, s) in [3.0, 9.0, 1.0, 7.0, 9.0, 3.0, 3.0, 5.0, 1.0].into_iter().enumerate() {
+            q.push(make_match(i % 4, s));
+        }
+        let before: Vec<usize> = q.iter_psms().map(|p| p.spectrum_idx).collect();
+        q.shrink_to_fit();
+        let after: Vec<usize> = q.iter_psms().map(|p| p.spectrum_idx).collect();
+        assert_eq!(before, after);
+        assert_eq!(q.len(), 9);
+        assert_eq!(q.heap.capacity(), 9);
     }
 
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {

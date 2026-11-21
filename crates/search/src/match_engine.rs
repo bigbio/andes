@@ -741,7 +741,23 @@ impl<'a> PreparedSearch<'a> {
         self.run_chunk_with_params(spectra, spectrum_idx_offset, self.params)
     }
 
+    /// Scores a chunk of spectra; each returned queue holds exactly its PSMs, without the spare
+    /// capacity reserved while scoring (the queues of a whole run are kept until the PIN is
+    /// written).
     pub fn run_chunk_with_params(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
+        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params);
+        for q in &mut queues {
+            q.shrink_to_fit();
+        }
+        queues
+    }
+
+    fn score_chunk(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,

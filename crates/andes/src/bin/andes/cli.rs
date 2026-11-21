@@ -318,7 +318,7 @@ pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
 /// a decoy is recognised. Inference and finalize take the search's values.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct DatabaseArgs {
-    /// Protease; a list (gluc,trypsin or gluc+trypsin) cleaves at the sites of each one
+    /// Protease; a comma list (gluc,trypsin) cleaves at the sites of each one
     ///
     /// The first protease of a list is the primary one: it selects the model and the
     /// cleavage feature. A non-specific protease in a list makes the whole digest
@@ -1416,6 +1416,78 @@ pub(crate) struct ProteinArgs {
     pub(crate) protein_fdr: f64,
 }
 
+/// `andes cohort`: plan, search and run the stages of several projects' SDRFs together.
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum CohortCommand {
+    /// Check a cohort and write its plan: every run's search settings and the FDR groups
+    ///
+    /// Searches nothing. Prints the groups and every problem found, and writes the plan
+    /// only when there is no error.
+    Plan(CohortPlanArgs),
+    /// Crosslink FDR over the CSM tables of several runs, as one search would compute it
+    ///
+    /// Reads each run's <base>.xl.tsv, groups all CSMs into residue pairs and protein pairs,
+    /// and gives every level its q-values once over all runs. Writes <output>.xl.tsv,
+    /// <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv and each project's share of the
+    /// pooled list, <output>.xl.projects.parquet.
+    #[command(name = "xl-fdr", hide = true)]
+    XlFdr(CohortXlFdrArgs),
+    /// Plan the cohort, search every run, then run each group's stages
+    ///
+    /// Each run's outputs go to <output_dir>/runs/<run>/, each group's to
+    /// <output_dir>/groups/<group>/. A finished search is kept while its spectrum file, its
+    /// settings, the files they name and its outputs are unchanged, so a rerun searches only
+    /// new, failed or changed runs.
+    Run(CohortRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortRunArgs {
+    /// Config file with a `cohort` section
+    #[arg(value_name = "CONFIG")]
+    pub(crate) config: PathBuf,
+    /// Worker threads of each search [default: the number of logical CPUs]
+    #[arg(long, value_name = "N")]
+    pub(crate) threads: Option<usize>,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortXlFdrArgs {
+    /// The runs' CSM tables (<base>.xl.tsv from `andes --xl`)
+    #[arg(value_name = "CSM_TABLE", required = true)]
+    pub(crate) tables: Vec<PathBuf>,
+    /// Output base name: <output>.xl.tsv, <output>.xl.residue_pairs.tsv, <output>.xl.ppi.tsv
+    #[arg(long, short, value_name = "BASE")]
+    pub(crate) output: PathBuf,
+    /// The cohort's plan.json, which gives each run's project for the per-project error
+    /// table [default: the run name up to its first `.`]
+    #[arg(long, value_name = "PLAN_JSON")]
+    pub(crate) plan: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CohortPlanArgs {
+    /// Config file with a `cohort` section; its other sections are the settings every
+    /// run shares
+    #[arg(value_name = "CONFIG")]
+    pub(crate) config: PathBuf,
+    /// Where to write the plan [default: <output_dir>/plan.json]
+    #[arg(long, short, value_name = "FILE")]
+    pub(crate) output: Option<PathBuf>,
+}
+
+/// The `default_value` of the flag `id` of the clap arguments `A`, so that code which
+/// needs a flag's default reads it from the one place it is declared.
+pub(crate) fn default_value<A: clap::Args>(id: &str) -> String {
+    let cmd = A::augment_args(clap::Command::new("defaults"));
+    let value = cmd
+        .get_arguments()
+        .find(|a| a.get_id() == id)
+        .and_then(|a| a.get_default_values().first())
+        .map(|v| v.to_string_lossy().into_owned());
+    value.unwrap_or_else(|| panic!("flag {id} has no default value"))
+}
+
 /// `andes quant`: the match-between-runs stages over a quant directory
 /// written by a search with `--quant-dir`.
 #[derive(clap::Subcommand, Debug)]
@@ -2173,17 +2245,14 @@ mod enzyme_cli_tests {
     }
 
     #[test]
-    fn comma_and_plus_separators_both_parse() {
-        let (p1, e1) = parse_enzymes("gluc,trypsin").unwrap();
-        let (p2, e2) = parse_enzymes("gluc+trypsin").unwrap();
+    fn proteases_are_a_comma_list() {
+        let (p, e) = parse_enzymes("gluc,trypsin").unwrap();
         assert_eq!(
-            (p1, e1.as_slice()),
+            (p, e.as_slice()),
             (Enzyme::GluC, [Enzyme::Trypsin].as_slice())
         );
-        assert_eq!(
-            (p2, e2.as_slice()),
-            (Enzyme::GluC, [Enzyme::Trypsin].as_slice())
-        );
+        let err = parse_enzymes("gluc+trypsin").unwrap_err().to_string();
+        assert!(err.contains("separate proteases with a comma"), "{err}");
     }
 
     #[test]
@@ -2498,13 +2567,16 @@ mod spelling_tests {
                 "trypsin", "Trypsin", "tryp", "chymotrypsin", "chymo", "lysc", "lys-c", "aspn",
                 "Asp-N", "gluc", "glu-c", "lysn", "lys-n", "argc", "arg-c", "alp", "alpha-lp",
                 "alphalp", "nocleavage", "none", "nonspecific", "all", "elastase",
-                "gluc,trypsin", "gluc+trypsin", "  lysc , , trypsin ",
+                "gluc,trypsin", "  lysc , , trypsin ",
             ],
         );
-        rejects("--enzyme", &["bogus", "", " , ", "trypsin,bogus"]);
+        rejects(
+            "--enzyme",
+            &["bogus", "", " , ", "trypsin,bogus", "gluc+trypsin"],
+        );
         assert_eq!(
-            parse("--enzyme", "gluc+trypsin").unwrap().db.enzyme,
-            "gluc+trypsin",
+            parse("--enzyme", "gluc,trypsin").unwrap().db.enzyme,
+            "gluc,trypsin",
             "the value is kept as given"
         );
 

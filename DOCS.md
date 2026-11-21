@@ -1290,7 +1290,7 @@ config file).
 | SDRF column | andes setting |
 |---|---|
 | `comment[data file]` | `--spectrum`: the files, looked up in the SDRF's directory; `--spectrum` on the command line or in the config replaces them |
-| `comment[cleavage agent details]` (each such column) | `--enzyme`, as a protease list (`Trypsin` + `Lys-C` -> `trypsin+lysc`) |
+| `comment[cleavage agent details]` (each such column) | `--enzyme`, as a comma list of proteases (`Trypsin` and `Lys-C` -> `trypsin,lysc`) |
 | `comment[modification parameters]` (each such column) | `--fixed-mods` / `--variable-mods` by `MT=`; the UNIMOD accession (`AC=`) or name (`NT=`), `TA=` residues and `PP=` position give `Name (sites)` (§2). With modification columns the SDRF lists are complete: no column leaves the defaults |
 | `comment[precursor mass tolerance]` | `--precursor-tol` (`10 ppm`, `0.02 Da`, `20 mmu`) |
 | `comment[label]` | every row `label free sample`: `--lfq`; TMT / iTRAQ: `--tmt` with the smallest plex holding the labels; SILAC light / medium / heavy: `--label` with the channels from the `Label:` modifications (which then leave the modification lists); DIMETHYL0/4(/8): `--label dimethyl2` (`dimethyl3`). A quantification flag on the command line or in the config replaces it |
@@ -1303,6 +1303,97 @@ modifications, precursor tolerance, dissociation method and label kind; rows tha
 an error naming the column and two files (split the SDRF by setting). Empty cells,
 `not available` and `not applicable` count as absent. The run prints what it took from the SDRF
 and what the command line or config kept.
+
+### Cohorts (`andes cohort plan` / `run`, experimental)
+
+A cohort is the SDRFs of several projects analysed together. The config file's `cohort`
+section lists the SDRFs, the folder with the spectrum files (`data_dir`) and the output folder
+(`output_dir`; see `config.example.yaml`); its other sections are the settings every run
+shares (database, charge, decoys, FDR).
+
+- `andes cohort plan cohort.yaml` checks the cohort and writes `<output_dir>/plan.json` (or
+  `--output`): one entry per spectrum file and one per group. It searches nothing. Every
+  problem is reported in one pass, and no plan is written while any remains.
+- `andes cohort run cohort.yaml [--threads N]` plans, searches every run into
+  `<output_dir>/runs/<run>/`, then runs each group's stages into
+  `<output_dir>/groups/<group>/`. `--threads` is passed to each search (default: the number
+  of logical CPUs). A finished search is kept while its spectrum file (path, size,
+  modification time), the config's sections other than `cohort`, its search flags, every
+  file those name (the database, a model; each by path, size and modification time) and the
+  outputs its group reads are unchanged, so a rerun searches only new, failed or changed runs;
+  adding a project to the `cohort` section does not search the others again. It runs the `xl-fdr` stage; the other
+  stages are not run yet and are named in a warning.
+
+- **Runs.** Each SDRF is read as with `--sdrf`, except that rows which disagree on the
+  protease, modifications, precursor tolerance, dissociation method, label kind or
+  crosslinker are split into settings groups instead of being an error. A run's `args` are the
+  search flags its settings give, with the precedence `cohort.overrides > config section >
+  SDRF`; a key the config sets is left out of `args`, so the runner's `--config` applies it.
+- **Files.** Each name in `comment[data file]` is found below `data_dir`, or else a converted
+  copy with the same stem (`.mzML`, `.mzML.gz`, `.d`, `.d.zip`, ...); two converted copies
+  (`x.mzML` and `x.mgf`) are ambiguous, an error, and a link whose target is missing is not a
+  match. When `<data_dir>/<project>/`
+  exists only that folder is searched; otherwise all of `data_dir` is searched except the
+  other projects' folders, so projects whose files share a name never swap them. One name
+  matching two files in the searched tree is an error naming both, and so is one spectrum
+  file given to two runs (for example two SDRFs next to each other naming the same file). Without
+  `data_dir` the files are looked up next to the SDRF, and missing ones are a warning.
+- **Run names.** `cohort.run_name` (default `{project}.{stem}`) gives each spectrum file a
+  name unique in the cohort. The file is staged under that name (`stage_as`) in the run's
+  folder, so its stem, the PIN `SpecId` prefix, is unique across projects. Two files with one
+  run name are an error, and so is a name that is not a single file name (a project with a
+  path separator).
+- **Quantification.** A config `quant` section that sets `tmt`, `lfq` or `label` decides the
+  kind of data (`tmt` before `label` before `lfq: true`; `lfq: false` alone is `dda`), as it
+  wins over the SDRF in `--sdrf`; the runner's `--config` applies it, so it is not in `args`.
+  A label column it overrules with another kind is a warning. Without it, the label column
+  decides (`--lfq`, `--tmt <plex>` or `--label` in `args`).
+- **Linked folders.** Symbolic links to folders below `data_dir` are followed; each folder is
+  listed once under its real path, so a link loop ends, and a file reached through a link
+  belongs to the project folder it really sits in.
+- **Groups.** A cohort is one integrated analysis: runs share a group, and later one FDR,
+  when they share the kind of data (`dda`, `lfq`, `tmt`, `label`, `xl`), and the group is
+  named after it. The enzyme, crosslinker, tolerance and instrument set each run's search,
+  not its group, so projects with different settings are pooled. Each group lists the
+  stages it runs after the searches: `percolator > inference` (`dda`), then `quant` (`lfq`,
+  `label`) or `tmt-quant` (`tmt`); `xl-fdr` for crosslinking.
+- **Checks.** Unreadable SDRFs, rows with too few fields, unknown proteases, modifications or
+  crosslinker accessions, a key given twice in one cell, overrides or exclusions naming a
+  project not listed, invalid override values or SDRF precursor tolerances, duplicate run names
+  and empty data files (an interrupted download) are errors; every missing data file is listed; an SDRF that splits into several settings groups,
+  or that gives no precursor tolerance, is a warning.
+
+On a cluster, a job array can run `andes` once per entry in `runs`: link the entry's `file`
+into its `dir` as `stage_as` (`ln -s <file> <dir>/<stage_as>`, so the spectrum's stem is the
+run name), then run `andes --config cohort.yaml --spectrum <dir>/<stage_as> --output-pin
+<dir>/<run>.pin` with the entry's `args`; then each group's stages over its `inputs`
+(`andes cohort xl-fdr <inputs> --output <dir>/<group> --plan plan.json`). The SDRF's
+dissociation method splits settings groups but is not passed to the search, so unlike
+`--sdrf` the search does not compare it with the activation the spectra record.
+
+**Crosslink FDR over a cohort.** The `xl-fdr` stage reads every run's CSM table, with each
+CSM's TT/TD/DD class and its residue-pair and protein-pair keys (the `residue_pair` and
+`protein_pair` columns), and computes the CSM, residue-pair and protein-pair q-values once
+over the group, with the rules of one search (above). The per-run q-values each search writes
+are superseded by the group's. `andes cohort xl-fdr <CSM_TABLE>... --output <BASE>` runs the
+stage on its own over any runs' `<base>.xl.tsv` tables and writes `<BASE>.xl.tsv`,
+`<BASE>.xl.residue_pairs.tsv` and `<BASE>.xl.ppi.tsv`. Rows with the score `NA` (spectra
+without a CSM) are counted and skipped; any other unreadable score, or a scored row without
+its residue pair or protein pair, is an error naming the table and row.
+Each CSM table's `score_source` column says where a row's score comes from: `pair` for the
+search's pair score, which is on one scale across runs, or `percolator` when the run was
+rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
+not comparable, so pooling a `percolator` row is an error; search those runs without the
+flags, or search them together and rescore once.
+The pooled q-values control the error of the whole list, not of each project's part of it:
+a project whose decoys score higher than the others' can hold more false CSMs than the cut.
+The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
+of the CSMs the pooled 1 % and 5 % cuts accept, per link class (`project`, `link`, `q_cut`,
+`tt`, `td`, `dd`, `decoy_fdr`). Each run's project comes from the plan: `andes cohort run`
+passes it, and `andes cohort xl-fdr --plan plan.json` reads it; without `--plan` it is the part
+of the run name before the first `.`, which is right for the default run name
+`{project}.{stem}` and a project name without a `.`. `decoy_fdr` is the decoy estimate of the
+share's false target-target CSMs, (TD - DD) / TT, and (TD + DD) / TT for homotypic links.
 
 ---
 

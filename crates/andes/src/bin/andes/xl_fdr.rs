@@ -308,6 +308,19 @@ fn pair_key(a: String, b: String) -> String {
     }
 }
 
+/// The residue-pair and protein-pair keys of a CSM: each side's accessions with the linked
+/// residue's position (`P12345:120`), or the accessions alone, the two sides in sorted order.
+pub(crate) fn pair_keys(
+    c: &Csm,
+    table: &XlCandidates,
+    prepared: &PreparedSearch,
+) -> (String, String) {
+    (
+        pair_key(rp_side(&c.alpha, table, prepared), rp_side(&c.beta, table, prepared)),
+        pair_key(ppi_side(&c.alpha, table, prepared), ppi_side(&c.beta, table, prepared)),
+    )
+}
+
 pub(crate) struct Levels {
     pub csm_items: Vec<Item>,
     pub csm_rows: Vec<usize>,
@@ -332,23 +345,28 @@ pub(crate) fn roll_up(
         let (Some(c), Some(s)) = (&r.csm, s) else {
             continue;
         };
-        let table = &runs[r.linker].table;
+        let (rp_key, ppi_key) = pair_keys(c, &runs[r.linker].table, prepared);
         csm_items.push(Item {
-            key: pair_key(
-                rp_side(&c.alpha, table, prepared),
-                rp_side(&c.beta, table, prepared),
-            ),
+            key: rp_key,
             score: *s,
             class: c.class,
             link: LinkClass::of(c.intra, c.homotypic),
             n_csms: 1,
         });
-        ppi_of_csm.push(pair_key(
-            ppi_side(&c.alpha, table, prepared),
-            ppi_side(&c.beta, table, prepared),
-        ));
+        ppi_of_csm.push(ppi_key);
         csm_rows.push(i);
     }
+    levels_of(csm_items, ppi_of_csm, csm_rows)
+}
+
+/// The CSM, residue-pair and protein-pair levels with their q-values, from scored CSMs:
+/// `csm_items` keyed by residue pair, `ppi_of_csm` the protein-pair key of each, and
+/// `csm_rows` each CSM's row in the caller's own table.
+pub(crate) fn levels_of(
+    csm_items: Vec<Item>,
+    ppi_of_csm: Vec<String>,
+    csm_rows: Vec<usize>,
+) -> Levels {
     let csm_groups: Vec<Group> = csm_items
         .iter()
         .enumerate()
@@ -448,12 +466,13 @@ fn fmt_q(q: Option<f64>) -> String {
     q.map_or("NA".to_string(), |v| format!("{v:.5}"))
 }
 
+/// Write the residue-pair and protein-pair tables; `title_of` names the spectrum of the CSM
+/// at a `csm_rows` value.
 pub(crate) fn write_levels(
     rp_path: &PathBuf,
     ppi_path: &PathBuf,
     l: &Levels,
-    results: &[XlSpectrumResult],
-    spectra: &[Spectrum],
+    title_of: &dyn Fn(usize) -> String,
 ) -> std::io::Result<()> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(rp_path)?);
     writeln!(
@@ -461,7 +480,6 @@ pub(crate) fn write_levels(
         "residue_pair\tclass\tlink\tscore\tq_value\tq_value_min2\tn_csms\tbest_spectrum"
     )?;
     for (g, (q, q2)) in l.rp.iter().zip(l.rp_q.iter().zip(&l.rp_q2)) {
-        let r = &results[l.csm_rows[g.best]];
         writeln!(
             w,
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
@@ -472,7 +490,7 @@ pub(crate) fn write_levels(
             fmt_q(*q),
             fmt_q(*q2),
             g.n_csms,
-            spectra[r.spec_idx].title
+            title_of(l.csm_rows[g.best])
         )?;
     }
     w.flush()?;
@@ -482,7 +500,6 @@ pub(crate) fn write_levels(
         "protein_pair\tclass\tlink\tscore\tq_value\tn_residue_pairs\tn_csms\tbest_spectrum"
     )?;
     for (g, q) in l.ppi.iter().zip(&l.ppi_q) {
-        let r = &results[l.csm_rows[l.rp[g.best].best]];
         writeln!(
             w,
             "{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
@@ -493,7 +510,7 @@ pub(crate) fn write_levels(
             fmt_q(*q),
             g.n_members,
             g.n_csms,
-            spectra[r.spec_idx].title
+            title_of(l.csm_rows[l.rp[g.best].best])
         )?;
     }
     w.flush()

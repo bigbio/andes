@@ -124,15 +124,16 @@ pub(crate) fn parse_enzymes(
 ) -> Result<(model::enzyme::Enzyme, Vec<model::enzyme::Enzyme>), Box<dyn std::error::Error>> {
     use model::enzyme::Enzyme;
     let mut all: Vec<Enzyme> = Vec::new();
-    for tok in spec
-        .split([',', '+'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    for tok in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let e = Enzyme::from_name(tok).ok_or_else(|| {
+            let hint = if tok.contains('+') {
+                "; separate proteases with a comma, as in trypsin,lysc"
+            } else {
+                ""
+            };
             format!(
                 "unknown --enzyme '{tok}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/\
-             alphalp/nocleavage/nonspecific/elastase)"
+             alphalp/nocleavage/nonspecific/elastase){hint}"
             )
         })?;
         if !all.contains(&e) {

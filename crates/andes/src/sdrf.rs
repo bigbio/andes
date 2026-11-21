@@ -14,6 +14,9 @@ pub enum Quant {
 pub struct SdrfSettings {
     pub path: PathBuf,
     pub data_files: Vec<PathBuf>,
+    /// The file names the SDRF gives, in the order of `data_files` (which may be a converted
+    /// copy found next to the SDRF instead).
+    pub data_names: Vec<String>,
     pub enzyme: Option<String>,
     pub precursor_tol: Option<String>,
     pub fragment_tol: Option<String>,
@@ -46,6 +49,47 @@ pub fn read(path: &Path) -> Result<SdrfSettings, String> {
 }
 
 pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
+    let (rows, has_mods) = parse_rows(text)?;
+    settings_of(&rows, has_mods, dir)
+}
+
+/// The SDRF's rows split into groups that agree on every setting andes reads, one
+/// [`SdrfSettings`] per group, in the order each group's first row appears. A file whose
+/// rows all agree gives one group, the same settings [`parse`] gives.
+pub fn split(text: &str, dir: &Path) -> Result<Vec<SdrfSettings>, String> {
+    let mut groups: Vec<(Vec<String>, Vec<RowSettings>)> = Vec::new();
+    let (rows, has_mods) = parse_rows(text)?;
+    for row in rows {
+        let key: Vec<String> = SETTINGS.iter().map(|(_, k)| k(&row)).collect();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(_, rows)| settings_of(rows, has_mods, dir))
+        .collect()
+}
+
+type SettingKey = fn(&RowSettings) -> String;
+
+/// The settings every row of one andes run must share: the SDRF column and the row's value.
+const SETTINGS: [(&str, SettingKey); 6] = [
+    (CLEAVAGE, |r| r.enzymes.join(",")),
+    (MODS, |r| {
+        let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
+        m.sort();
+        m.join(", ")
+    }),
+    (PRECURSOR_TOL, |r| r.precursor_tol.clone().unwrap_or_default()),
+    (DISSOCIATION, |r| r.dissociation.clone().unwrap_or_default()),
+    (LABEL, |r| r.label.as_deref().map(label_kind).unwrap_or("").to_string()),
+    (XL, |r| r.xl.clone().unwrap_or_default()),
+];
+
+/// The data rows, and whether the file has any modification column.
+fn parse_rows(text: &str) -> Result<(Vec<RowSettings>, bool), String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header: Vec<String> = lines
         .next()
@@ -81,11 +125,12 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
             ));
         }
         let cell = |i: usize| value(cells[i]);
+        let at = |e: String| format!("row {}: {e}", n + 2);
         let file = cell(data_col).ok_or_else(|| format!("row {}: no data file", n + 2))?;
         let mut enzymes = Vec::new();
         for &i in &cleave {
             if let Some(v) = cell(i) {
-                let e = enzyme_of(&v)?;
+                let e = enzyme_of(&v).map_err(at)?;
                 if !enzymes.contains(&e) {
                     enzymes.push(e);
                 }
@@ -94,7 +139,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         let mut row_mods = Vec::new();
         for &i in &mods {
             if let Some(v) = cell(i) {
-                row_mods.push(ModParam::parse(&v)?);
+                row_mods.push(ModParam::parse(&v).map_err(at)?);
             }
         }
         rows.push(RowSettings {
@@ -107,30 +152,29 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
                 .map(|v| tolerance(&v))
                 .transpose()?,
             fragment_tol: ftol.first().and_then(|&i| cell(i)),
-            label: label_col.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
-            dissociation: diss.first().and_then(|&i| cell(i)).map(|v| nt(&v)),
+            label: label_col
+                .first()
+                .and_then(|&i| cell(i))
+                .map(|v| nt(&v).map_err(|e| at(format!("`{LABEL}` {e}"))))
+                .transpose()?,
+            dissociation: diss
+                .first()
+                .and_then(|&i| cell(i))
+                .map(|v| nt(&v).map_err(|e| at(format!("`{DISSOCIATION}` {e}"))))
+                .transpose()?,
             xl: xl_col.first().and_then(|&i| cell(i)),
         });
     }
     if rows.is_empty() {
         return Err("no data rows".into());
     }
+    Ok((rows, !mods.is_empty()))
+}
 
-    agree(&rows, CLEAVAGE, |r| r.enzymes.join("+"))?;
-    agree(&rows, MODS, |r| {
-        let mut m: Vec<String> = r.mods.iter().map(|m| m.key()).collect();
-        m.sort();
-        m.join(", ")
-    })?;
-    agree(&rows, PRECURSOR_TOL, |r| {
-        r.precursor_tol.clone().unwrap_or_default()
-    })?;
-    agree(&rows, DISSOCIATION, |r| {
-        r.dissociation.clone().unwrap_or_default()
-    })?;
-    agree(&rows, LABEL, |r| {
-        r.label.as_deref().map(label_kind).unwrap_or("").to_string()
-    })?;
+fn settings_of(rows: &[RowSettings], has_mods: bool, dir: &Path) -> Result<SdrfSettings, String> {
+    for (column, key) in &SETTINGS[..5] {
+        agree(rows, column, key)?;
+    }
     let mut linkers: Vec<String> = Vec::new();
     for v in rows.iter().filter_map(|r| r.xl.clone()) {
         if !linkers.contains(&v) {
@@ -148,10 +192,12 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
 
     let first = &rows[0];
     let mut data_files: Vec<PathBuf> = Vec::new();
-    for r in &rows {
+    let mut data_names: Vec<String> = Vec::new();
+    for r in rows {
         let p = resolve_data_file(dir, &r.file);
         if !data_files.contains(&p) {
             data_files.push(p);
+            data_names.push(r.file.clone());
         }
     }
     let labels: BTreeSet<String> = rows.iter().filter_map(|r| r.label.clone()).collect();
@@ -160,7 +206,7 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
         Some(Quant::Label(_)) => !m.is_label_channel(),
         _ => true,
     };
-    let (fixed_mods, variable_mods) = if mods.is_empty() {
+    let (fixed_mods, variable_mods) = if !has_mods {
         (None, None)
     } else {
         let list = |fixed: bool| -> Result<Vec<String>, String> {
@@ -177,7 +223,8 @@ pub fn parse(text: &str, dir: &Path) -> Result<SdrfSettings, String> {
     Ok(SdrfSettings {
         path: PathBuf::new(),
         data_files,
-        enzyme: (!first.enzymes.is_empty()).then(|| first.enzymes.join("+")),
+        data_names,
+        enzyme: (!first.enzymes.is_empty()).then(|| first.enzymes.join(",")),
         precursor_tol: first.precursor_tol.clone(),
         fragment_tol: first.fragment_tol.clone(),
         fixed_mods,
@@ -255,31 +302,45 @@ fn value(cell: &str) -> Option<String> {
     }
 }
 
-fn key_values(v: &str) -> BTreeMap<String, String> {
+/// The `KEY=value` pairs of an SDRF cell. A key given twice is an error: the cell holds two
+/// terms (`NT=Trypsin/P;AC=MS:1001313;NT=Lys-C;AC=MS:1001309`), and each needs its own
+/// repeated column; reading only one of them would search with the wrong settings.
+fn key_values(v: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for part in v.split(';') {
         match part.split_once('=') {
             Some((k, val)) => {
-                out.insert(k.trim().to_ascii_uppercase(), val.trim().to_string());
+                let key = k.trim().to_ascii_uppercase();
+                if out.insert(key.clone(), val.trim().to_string()).is_some() {
+                    return Err(format!(
+                        "`{v}`: {key}= appears twice in one cell; give each term its own \
+                         column (repeat the column header)"
+                    ));
+                }
             }
             None if !part.trim().is_empty() => {
-                out.entry("NT".to_string())
-                    .or_insert_with(|| part.trim().to_string());
+                if out.insert("NT".to_string(), part.trim().to_string()).is_some() {
+                    return Err(format!(
+                        "`{v}`: two terms in one cell; give each term its own column (repeat \
+                         the column header)"
+                    ));
+                }
             }
             None => {}
         }
     }
-    out
+    Ok(out)
 }
 
-fn nt(v: &str) -> String {
-    key_values(v)
+fn nt(v: &str) -> Result<String, String> {
+    Ok(key_values(v)?
         .remove("NT")
-        .unwrap_or_else(|| v.trim().to_string())
+        .unwrap_or_else(|| v.trim().to_string()))
 }
 
 fn enzyme_of(v: &str) -> Result<String, String> {
-    let name = nt(v).to_ascii_lowercase();
+    let given = nt(v).map_err(|e| format!("`{CLEAVAGE}` {e}"))?;
+    let name = given.to_ascii_lowercase();
     let andes = match name.as_str() {
         "trypsin" | "trypsin/p" => "trypsin",
         "lys-c" | "lys-c/p" | "lysc" | "endoproteinase lys-c" => "lysc",
@@ -293,8 +354,7 @@ fn enzyme_of(v: &str) -> Result<String, String> {
         "no cleavage" | "nocleavage" => "nocleavage",
         _ => {
             return Err(format!(
-                "`{CLEAVAGE}`: protease `{}` has no andes equivalent; give --enzyme",
-                nt(v)
+                "`{CLEAVAGE}`: protease `{given}` has no andes equivalent; give --enzyme"
             ))
         }
     };
@@ -327,7 +387,7 @@ struct ModParam {
 
 impl ModParam {
     fn parse(v: &str) -> Result<Self, String> {
-        let kv = key_values(v);
+        let kv = key_values(v).map_err(|e| format!("`{MODS}` {e}"))?;
         let mut names: Vec<String> = kv.get("NT").cloned().into_iter().collect();
         if let Some(ac) = kv
             .get("AC")
@@ -1012,6 +1072,16 @@ mod tests {
         assert_eq!(tolerance("20 mmu").unwrap(), "0.02da");
         assert_eq!(norm_header("Comment [ Data File ]"), "comment[data file]");
         assert!(enzyme_of("NT=Pepsin").is_err());
+        let two = enzyme_of("NT=Trypsin/P;AC=MS:1001313;NT=Lys-C;AC=MS:1001309").unwrap_err();
+        assert!(
+            two.contains("NT= appears twice") && two.contains(CLEAVAGE),
+            "{two}"
+        );
+        assert_eq!(enzyme_of("NT=Trypsin/P;AC=MS:1001313").unwrap(), "trypsin");
+        for both in ["NT=Trypsin;Lys-C", "Lys-C;NT=Trypsin"] {
+            assert!(enzyme_of(both).is_err(), "{both}");
+        }
+        assert_eq!(enzyme_of("Trypsin").unwrap(), "trypsin");
     }
 
     const HX: &[&str] = &[

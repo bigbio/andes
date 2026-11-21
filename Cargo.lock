@@ -80,6 +80,7 @@ dependencies = [
  "scoring",
  "search",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "xl",

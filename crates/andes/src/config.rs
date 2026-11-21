@@ -17,6 +17,8 @@ pub struct RunConfig {
     pub glyco: GlycoCfg,
     #[serde(default)]
     pub quant: QuantCfg,
+    /// Read by `andes cohort plan`; a search ignores it.
+    pub cohort: Option<crate::cohort::CohortCfg>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -213,6 +213,27 @@ impl ThermoRawReader {
         })
     }
 
+    /// The MS3+ scan at `index`, linked to its parent scan by the master scan number.
+    fn product_scan(&self, index: usize, raw: &RawSpectrum) -> ProductScan {
+        let parent_id = master_scan_number(&self.handle, index)
+            .map(|scan| with_scan_number(&raw.native_id(), scan));
+        ProductScan {
+            id: raw.native_id(),
+            scan: Some(raw.index() as i32 + 1),
+            rt_seconds: Some(raw.time() * 60.0),
+            ms_level: raw.ms_level(),
+            parent_id,
+            precursor_mz: raw
+                .filter_string()
+                .and_then(last_reaction_mz)
+                .or_else(|| raw.precursor().map(|p| p.mz()))
+                .unwrap_or(0.0),
+            scan_window: scan_window(raw),
+            peaks: extract_peaks(raw),
+            noise: self.noise_of(index),
+        }
+    }
+
     pub fn read_with_ms1_chunked<F>(
         &mut self,
         chunk_size: usize,
@@ -230,13 +251,17 @@ impl ThermoRawReader {
         let mut skipped_higher_ms = 0usize;
 
         for i in 0..self.len {
-            if cap > 0 && emitted_ms2 >= cap {
+            let capped = cap > 0 && emitted_ms2 >= cap;
+            if capped && !self.capture_product_scans {
                 break;
             }
             let raw = match self.handle.get(i) {
                 Some(raw) => raw,
                 None => continue,
             };
+            if capped && raw.ms_level() < 3 {
+                break;
+            }
             match raw.ms_level() {
                 1 => {
                     let idx = ms1_peaks.len();
@@ -254,7 +279,12 @@ impl ThermoRawReader {
                     tracker.push(idx, faims_cv(&raw));
                 }
                 level if level >= 3 => {
-                    skipped_higher_ms += 1;
+                    if self.capture_product_scans {
+                        let p = self.product_scan(i, &raw);
+                        self.product_scans.push(p);
+                    } else {
+                        skipped_higher_ms += 1;
+                    }
                 }
                 2 => {
                     let spec = match Self::convert(&raw, &self.handle) {
@@ -355,6 +385,17 @@ fn is_master_scan_label(label: &str) -> bool {
         .trim_end_matches(':')
         .trim()
         .eq_ignore_ascii_case("Master Scan Number")
+}
+
+/// The precursor m/z of the last reaction in a scan filter: `375.5128` in
+/// `ITMS + c NSI r d Full ms3 405.5227@cid25.00 375.5128@cid35.00 [99.0000-1137.0000]`, the
+/// ion an MS3 scan fragments (the first reaction is its MS2 precursor).
+fn last_reaction_mz(filter: &str) -> Option<f64> {
+    filter
+        .split_whitespace()
+        .filter_map(|t| t.split_once('@'))
+        .filter_map(|(mz, _)| mz.parse::<f64>().ok())
+        .rfind(|mz| mz.is_finite() && *mz > 0.0)
 }
 
 fn with_scan_number(native_id: &str, scan: usize) -> String {
@@ -598,19 +639,8 @@ impl Iterator for ThermoRawReader {
                 });
             }
             if level >= 3 && self.capture_product_scans {
-                let parent_id = master_scan_number(&self.handle, i)
-                    .map(|scan| with_scan_number(&raw.native_id(), scan));
-                self.product_scans.push(ProductScan {
-                    id: raw.native_id(),
-                    scan: Some(raw.index() as i32 + 1),
-                    rt_seconds: Some(raw.time() * 60.0),
-                    ms_level: level,
-                    parent_id,
-                    precursor_mz: raw.precursor().map(|p| p.mz()).unwrap_or(0.0),
-                    scan_window: scan_window(&raw),
-                    peaks: extract_peaks(&raw),
-                    noise: self.noise_of(i),
-                });
+                let p = self.product_scan(i, &raw);
+                self.product_scans.push(p);
                 continue;
             }
             if let Some(want) = self.ms_level_filter {
@@ -633,6 +663,21 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ms3_precursor_is_the_last_reaction_of_its_filter() {
+        let f = "ITMS + c NSI cv=-75.00 r d Full ms3 405.5227@cid25.00 375.5128@cid35.00 \
+                 [99.0000-1137.0000]";
+        assert_eq!(last_reaction_mz(f), Some(375.5128));
+        assert_eq!(
+            last_reaction_mz("FTMS + p NSI d Full ms2 784.37@hcd28.00 [120.00-2000.00]"),
+            Some(784.37)
+        );
+        assert_eq!(
+            last_reaction_mz("FTMS + p NSI Full ms [375.0000-1600.0000]"),
+            None
+        );
+    }
 
     fn tally(pairs: &[(u8, usize)]) -> HashMap<u8, usize> {
         pairs.iter().copied().collect()

@@ -328,13 +328,15 @@ pub fn from_sdrf_in(
         if part.is_empty() {
             continue;
         }
-        match part.split_once('=') {
-            Some((k, v)) => {
-                kv.insert(k.trim().to_ascii_uppercase(), v.trim().to_string());
-            }
-            None => {
-                kv.entry("NT".into()).or_insert_with(|| part.to_string());
-            }
+        let (key, val) = match part.split_once('=') {
+            Some((k, v)) => (k.trim().to_ascii_uppercase(), v.trim().to_string()),
+            None => ("NT".to_string(), part.to_string()),
+        };
+        if kv.insert(key.clone(), val).is_some() {
+            return Err(err(format!(
+                "{key}= appears twice in one cell; give each crosslinker its own \
+                 `comment[cross-linker]` column"
+            )));
         }
     }
     let num = |key: &str| -> Result<Option<f64>, XlSpecError> {
@@ -718,6 +720,19 @@ mod tests {
             e.contains("AC=XLMOD:02010 is EDC but NT=DSSO is DSSO"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_crosslinker_cell_gives_each_key_once() {
+        for cell in [
+            "NT=DSSO;NT=DSBU",
+            "DSSO;NT=DSBU",
+            "NT=DSSO;AC=XLMOD:02126;AC=XLMOD:02001",
+        ] {
+            let e = sdrf(cell).unwrap_err().to_string();
+            assert!(e.contains("appears twice in one cell"), "{cell}: {e}");
+        }
+        assert_eq!(sdrf("NT=DSSO;AC=XLMOD:02126").unwrap().name, "DSSO");
     }
 
     #[test]

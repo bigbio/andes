@@ -80,6 +80,7 @@ fn peptide_cols(
         h.gap_next.map_or("NA".to_string(), |g| format!("{g:.3}")),
         format!("{:.2}", h.mass_err_ppm),
         p.peptide.length().to_string(),
+        h.ms3.map_or("NA".to_string(), |v| format!("{v:.3}")),
     ]);
     cols
 }
@@ -109,11 +110,61 @@ fn pep_cols(linker: &Crosslinker, stub_cols: Option<usize>) -> Vec<String> {
         }
     }
     v.extend(
-        ["n_sites", "gap_next", "mass_err_ppm", "length"]
+        ["n_sites", "gap_next", "mass_err_ppm", "length", "ms3"]
             .iter()
             .map(|s| s.to_string()),
     );
     v
+}
+
+/// The scan number in a native spectrum id (`... scan=<n>`).
+fn native_scan(id: &str) -> Option<i32> {
+    let rest = &id[id.rfind("scan=")? + "scan=".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Files `ms3` under the MS2 scan each was taken from: `ms2` are one run's spectra, at
+/// `offset` in the search's spectrum list, their titles the file's native ids after
+/// `title_prefix`, and `out[offset + i]` receives the MS3 scans of `ms2[i]`. An MS3 scan is
+/// linked by its parent's native id (`scan=`, `index=` or any other form the file uses),
+/// else by the scan number in it. Returns how many were linked.
+pub(crate) fn link_ms3(
+    ms2: &[Spectrum],
+    offset: usize,
+    title_prefix: Option<&str>,
+    ms3: Vec<model::scan::ProductScan>,
+    out: &mut Vec<Vec<model::scan::ProductScan>>,
+) -> usize {
+    out.resize_with(offset + ms2.len(), Vec::new);
+    let id_of = |s: &Spectrum| -> String {
+        let t = s.title.as_str();
+        title_prefix
+            .and_then(|p| t.strip_prefix(p))
+            .unwrap_or(t)
+            .to_string()
+    };
+    let by_id: std::collections::HashMap<String, usize> =
+        ms2.iter().enumerate().map(|(i, s)| (id_of(s), i)).collect();
+    let by_scan: std::collections::HashMap<i32, usize> = ms2
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.scan.map(|n| (n, i)))
+        .collect();
+    let mut linked = 0;
+    for p in ms3 {
+        let Some(parent) = p.parent_id.as_deref() else {
+            continue;
+        };
+        let hit = by_id
+            .get(parent)
+            .or_else(|| native_scan(parent).and_then(|n| by_scan.get(&n)));
+        if let Some(&i) = hit {
+            out[offset + i].push(p);
+            linked += 1;
+        }
+    }
+    linked
 }
 
 fn scan_of(spec: &Spectrum) -> String {
@@ -122,11 +173,33 @@ fn scan_of(spec: &Spectrum) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Which link classes had their CSM scores replaced by this run's own Percolator scores
+/// (`--xl-rescore-intra`, `--xl-rescore-inter`).
+#[derive(Clone, Copy)]
+struct Rescored {
+    intra: bool,
+    inter: bool,
+}
+
+impl Rescored {
+    /// The `score_source` column: `pair` for the search's pair score, which is on one scale
+    /// across runs, or `percolator` for a score learned on this run alone.
+    fn source(self, intra: bool) -> &'static str {
+        if (intra && self.intra) || (!intra && self.inter) {
+            "percolator"
+        } else {
+            "pair"
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_csms(
     path: &Path,
     spectra: &[Spectrum],
     results: &[XlSpectrumResult],
     score: &[Option<f64>],
+    rescored: Rescored,
     q: &[Option<f64>],
     runs: &[XlRun],
     prepared: &PreparedSearch,
@@ -147,6 +220,7 @@ fn write_csms(
         "class",
         "link",
         "score",
+        "score_source",
         "q_value",
         "pair_score",
         "second_pair_score",
@@ -171,6 +245,7 @@ fn write_csms(
     if stub_cols.is_some() {
         head.push("crosslinker".into());
     }
+    head.extend(["residue_pair".to_string(), "protein_pair".to_string()]);
     writeln!(w, "{}", head.join("\t"))?;
     let mut n = 0;
     for ((r, s), q) in results.iter().zip(score).zip(q) {
@@ -185,7 +260,8 @@ fn write_csms(
             xl::rollup::LinkClass::of(c.intra, c.homotypic)
                 .name()
                 .to_string(),
-            s.map_or("NA".to_string(), |v| format!("{v:.4}")),
+            s.map_or("NA".to_string(), |v| v.to_string()),
+            rescored.source(c.intra).to_string(),
             q.map_or("NA".to_string(), |v| format!("{v:.5}")),
             format!("{:.3}", c.pair_score),
             c.second_pair_score
@@ -216,6 +292,8 @@ fn write_csms(
         if stub_cols.is_some() {
             row.push(run.linker.name.clone());
         }
+        let (rp_key, ppi_key) = crate::xl_fdr::pair_keys(c, &run.table, prepared);
+        row.extend([rp_key, ppi_key]);
         writeln!(w, "{}", row.join("\t"))?;
         n += 1;
     }
@@ -345,6 +423,32 @@ fn write_doublets(
     w.flush()
 }
 
+/// How many searched spectra had MS3 scans, and how many CSMs an MS3 scan supports on one
+/// or both peptides.
+fn report_ms3(results: &[XlSpectrumResult], ms3: &[Vec<model::scan::ProductScan>]) {
+    let with = results
+        .iter()
+        .filter(|r| ms3.get(r.spec_idx).is_some_and(|v| !v.is_empty()))
+        .count();
+    if with == 0 {
+        return;
+    }
+    let (mut one, mut both, mut csms) = (0usize, 0usize, 0usize);
+    for c in results.iter().filter_map(|r| r.csm.as_ref()) {
+        csms += 1;
+        match (c.alpha.ms3.is_some(), c.beta.ms3.is_some()) {
+            (true, true) => both += 1,
+            (true, false) | (false, true) => one += 1,
+            _ => {}
+        }
+    }
+    log::info!(
+        target: "xl",
+        "{with} searched spectra have MS3 scans; of {csms} CSMs, an MS3 scan matches both \
+         peptides in {both} and one peptide in {one}"
+    );
+}
+
 fn report(results: &[XlSpectrumResult]) {
     let n = results.len();
     let mut hist = [0usize; 4];
@@ -455,9 +559,11 @@ pub(crate) fn xl_default_variable_mods(
     Some(crate::cli::ModList(mods))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_xl(
     cli: &Cli,
     spectra: &[Spectrum],
+    ms3: &[Vec<model::scan::ProductScan>],
     prepared: &PreparedSearch,
     report_base: &Path,
     spectrum_paths: &[PathBuf],
@@ -497,7 +603,7 @@ pub(crate) fn run_xl(
             cfg.isotope_offsets = lo..=hi;
         }
         let t = std::time::Instant::now();
-        let mut found = xl_search_run(spectra_for_xl, prepared, &table, &cfg);
+        let mut found = xl_search_run(spectra_for_xl, ms3, prepared, &table, &cfg);
         log::info!(
             target: "xl",
             "{}: searched {} spectra, {} CSMs [{:.2}s]",
@@ -507,6 +613,7 @@ pub(crate) fn run_xl(
             t.elapsed().as_secs_f64()
         );
         report(&found);
+        report_ms3(&found, ms3);
         for r in found.iter_mut() {
             r.linker = li;
         }
@@ -594,6 +701,10 @@ pub(crate) fn run_xl(
         spectra_for_xl,
         &results,
         &score,
+        Rescored {
+            intra: cli.xl_rescore_intra,
+            inter: cli.xl_rescore_inter,
+        },
         &q,
         &runs,
         prepared,
@@ -602,8 +713,7 @@ pub(crate) fn run_xl(
         &sibling(report_base, ".xl.residue_pairs.tsv"),
         &sibling(report_base, ".xl.ppi.tsv"),
         &levels,
-        &results,
-        spectra_for_xl,
+        &|row| spectra_for_xl[results[row].spec_idx].title.clone(),
     )?;
     let dbl_path = sibling(report_base, ".xl.doublets.tsv");
     write_doublets(&dbl_path, spectra_for_xl, &results, &runs)?;
@@ -706,6 +816,7 @@ mod tests {
             n_sites: 1,
             gap_next: None,
             mass_err_ppm: 0.0,
+            ms3: None,
         };
         let pairs: Vec<_> = pairs.iter().map(|(p, s)| (key(p), *s)).collect();
         XlSpectrumResult {
@@ -803,6 +914,60 @@ mod tests {
             ),
             (0, 4, 110.0, Some(109.0))
         );
+    }
+
+    #[test]
+    fn ms3_scans_are_filed_under_their_parent_ms2_scan() {
+        use model::scan::ProductScan;
+        let ms2 = |scan: i32| Spectrum {
+            scan: Some(scan),
+            ..Default::default()
+        };
+        let child = |id: &str, parent: Option<&str>| ProductScan {
+            id: id.to_string(),
+            parent_id: parent.map(str::to_string),
+            ..Default::default()
+        };
+        let run = [ms2(10), ms2(14)];
+        let mut out = vec![Vec::new(); 3];
+        let linked = link_ms3(
+            &run,
+            3,
+            None,
+            vec![
+                child("a", Some("controllerType=0 controllerNumber=1 scan=14")),
+                child("b", Some("controllerType=0 controllerNumber=1 scan=10")),
+                child("c", Some("controllerType=0 controllerNumber=1 scan=14")),
+                child("d", Some("controllerType=0 controllerNumber=1 scan=99")),
+                child("e", None),
+            ],
+            &mut out,
+        );
+        assert_eq!(linked, 3);
+        assert_eq!(out.len(), 5);
+        let ids = |v: &Vec<ProductScan>| v.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&out[3]), ["b"]);
+        assert_eq!(ids(&out[4]), ["a", "c"]);
+        assert!(out[..3].iter().all(Vec::is_empty));
+        assert_eq!(native_scan("scan=7"), Some(7));
+        assert_eq!(native_scan("index=7"), None);
+
+        let titled = |title: &str, scan: i32| Spectrum {
+            title: title.to_string(),
+            scan: Some(scan),
+            ..Default::default()
+        };
+        let run = [titled("R1/index=100", 101), titled("R1/index=101", 102)];
+        let mut out = Vec::new();
+        let linked = link_ms3(
+            &run,
+            0,
+            Some("R1/"),
+            vec![child("m", Some("index=101")), child("n", Some("index=7"))],
+            &mut out,
+        );
+        assert_eq!(linked, 1);
+        assert_eq!(ids(&out[1]), ["m"]);
     }
 
     #[test]

@@ -22,7 +22,7 @@ PSMS=()
 for spec in "$@"; do
   R="$(basename "$spec")"
   R="${R%.*}"
-  "$ANDES" --spectrum "$spec" --database "$FASTA" --rescore --output-pin "$R.pin" --quant-dir q/ --threads "$THREADS"
+  "$ANDES" --spectrum "$spec" --database "$FASTA" --rescore --percolator-docker --output-pin "$R.pin" --quant-dir q/ --threads "$THREADS"
   PSMS+=(--psms "$R=$R.percolator.target.psms.txt" --decoy-psms "$R=$R.percolator.decoy.psms.txt")
 done
 "$ANDES" quant library --quant-dir q/ "${PSMS[@]}"

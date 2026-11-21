@@ -1,4 +1,4 @@
-use percolator_native::{mix_max_q, run, tdc_q, MemLimit};
+use rescore::{mix_max_q, run, tdc_q, MemLimit};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

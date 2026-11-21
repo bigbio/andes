@@ -16,7 +16,7 @@ a measurement or override a derivation. A few test hooks and diagnostics are in 
 | Modes | `--chimeric`, `--refine`, `--glyco`, `--glyco-species` | `--chimeric-max-coisolated`, `--chimeric-max-kl`, `--refine-config` |
 | Quantification | `--tmt`, `--lfq`, `--label`, `--mbr`, `--quant-dir` | |
 | Database variants | | `--uniprot-variants`, `--uniprot-isoforms`, `--uniprot-chains`, `--uniprot-evidence`, `--annotations`, `--knockoffs` |
-| Rescoring | | `--rescore-native`, `--pep`, `--percolator-bin`, `--percolator-docker`, `--percolator-image`, `--percolator-args`, `--keep-pin` |
+| Rescoring | | `--pep`, `--percolator-bin`, `--percolator-docker`, `--percolator-image`, `--percolator-args`, `--keep-pin` |
 | Calibration and runtime | | `--precursor-cal`, `--score`, `--fragmentation`, `--protocol`, `--fragment-tol-ppm`, `--fragment-tol-da`, `--peak-filter`, `--ethcd-activation`, `--ms-level`, `--fragment-index`, `--fragment-index-slice-da`, `--index-cache-dir`, `--temp-dir`, `--model-store`, `--model`, `--gbdt-max-trees` |
 | Prediction | | `--predict`, `--predictor-models`, `--predictor-backend`, `--predictor-nce`, `--predictor-instrument`, `--predictor-batch` |
 | Isobaric (TMT, iTRAQ) | | `--tmt-level`, `--tmt-tol`, `--tmt-correction`, `--tmt-min-purity`, `--tmt-max-pep`, `--tmt-min-sn`, `--tmt-unmix`, `--mbr-wrong-log2` |
@@ -89,7 +89,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--protocol` | enum | `auto` | `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol model. `auto` keeps the model; if it finds TMT/iTRAQ reporter ions it turns on the isobaric peak filter and (with no `--fixed-mods`) adds the tag as a fixed mod. | Java `-protocol` |
 | `--score` | enum | `auto` | What ranks candidates and fills `RawScore`: `rank` (low-res), `strong` (high-res), or `auto` (by the model's instrument class). | — |
 | `--gbdt-max-trees` | u32 | `100` | Trees per GBDT ensemble, `0` = all. 100 is 33–41% faster and identification-neutral (2026-09). `--glyco` uses all trees unless set. | — |
-| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. | — |
+| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Keep the `PEAKS` most intense peaks per `WINDOW_DA`. Unset = `100:20` for isobaric data, else off; window `0` forces off. With `--dia` on `.d` input, the filter applies to the fragment-index vote only, and scoring uses every peak. | — |
 | `--ethcd-activation` | enum | `ethcd` | EThcD/ETciD label: `ethcd` (EThcD model, b/y + c/z ions) or `etd` (ETD label; the `--glyco` c/z path). | — |
 | `--model-store` | path | *(bundled)* | Model store instead of `resources/models/` (directory or one `models.parquet`). | — |
 | `--model` | string | *(auto-select)* | Load this model id, skipping selection. | — |
@@ -197,7 +197,7 @@ search uses the segments: its fully specific peptides keep their composition.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. |
+| `--decoy-strategy` | enum | `shuffle` | `shuffle` (seeded shuffle of each segment), `reverse` (pseudo-reverse each segment: `PEPTIDEK` → `EDITPEPK`), `sequon`, `mutate`, or `none`. **Use `sequon` with `--glyco`**: a permutation leaves fewer N-X-S/T sequons than the target, which makes glyco q-values anti-conservative; `sequon` shuffles and then restores each segment's sequon count. `reverse` is not the default because a pseudo-reversed peptide ending in K shares c/z ions with its target at every I/L (the decoy's z ion i+1 and the target's c ion i+1 differ by 0.024 Da), so on ETD spectra the decoy scores on its target's spectrum. `mutate` changes one interior residue in each segment of 7 or more residues to a residue with a mass difference of more than 1.1 Da. It does not add or remove a cleavage site, and it does not change a modification site. A segment that more than one entry holds gets one decoy: andes protects every position that any of these entries annotates as a site, so the decoy depends only on the residues. When the change gives a target peptide, andes draws a new position and residue (up to 20 times). Each decoy keeps most of its target's fragment ions. Use `mutate` with `--dia` on wide-window data such as diaPASEF: there, a wrong peptide that is one residue from a co-isolated real peptide shares its fragments, and a shuffled or reversed decoy does not model that error (see `docs/benchmarks/dia/README.md`). DIA-NN 2.0 uses the same model in its Proteoforms mode. `mutate` needs fully specific digestion, and andes stops with an error for semi- or non-specific searches: their decoy peptides that skip the changed residue are target peptides. `--refine` builds its Pass-2 decoys with `reverse`, because a refinement entry is one peptide and a short peptide can have no segment of 7 or more residues. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix marking a decoy. |
 | `--decoy-suffix` | string | *(off)* | Decoy accession suffix (quantms `_rev` convention). |
 | `--decoy-seed` | u64 | fixed | *(internal, in neither help)* Seed of the decoy shuffles (`shuffle`, and the redraw of a segment whose decoy reads as a target). |
@@ -311,7 +311,7 @@ is 1 when a canonical candidate with another peptidoform was scored for the spec
 alternative explains the spectrum than the best canonical peptide. `IsotopeMimic` is 1 when the precursor fits better if the row's isotope-like deltas
 (deamidation, or an N→D / Q→E substitution) are read as isotope steps, the signature of an
 unmodified canonical peptide picked on its M+1 peak. Decoy rows carry their target entry's
-class. All six are Percolator features. With `--rescore` or `--rescore-native`, andes also
+class. All six are Percolator features. With `--rescore`, andes also
 estimates FDR within each class: every PSM gets the class of its most canonical protein
 (`canonical`, else `isoform`, `variant`, `chain` or a `+` combination). Each target gets an
 empirical p-value against every decoy of the run, and Storey q-values are computed within its
@@ -544,7 +544,7 @@ do not change.
 
 ### Site localization (IPF, experimental)
 
-`--localize ipf` (with `--rescore` or `--rescore-native`) localizes the variable modifications of
+`--localize ipf` (with `--rescore`) localizes the variable modifications of
 every PSM by inference of peptidoforms, the hierarchical Bayesian model of OpenSWATH/PyProphet IPF
 (Rosenberger et al. 2017). For one PSM the hypotheses are every placement of its variable mods on
 the residues each may occupy, plus "the PSM is wrong" (h0):
@@ -592,7 +592,7 @@ value. Fitted on any two of them (finer grid), it is again 0.237 and gives the s
 third as fitting on all. `--ipf-debug` adds a `forms_debug`
 column: every placement as `sites|search score|IPF log-evidence`.
 
-Measured with the built-in rescorer that `--rescore-native` ran before 2026-11-16, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than
+Measured with native rescoring and the built-in rescorer it ran before 2026-11-16, PSM q ≤ 0.01, PSMs needing localization (more S/T/Y than
 phospho groups). Against synthetic phosphopeptides of known site (PXD007058, Ferries et al. 2017,
 10 HCD-OT files, fully tryptic, 1,429 PSMs, scored against the key of the file's own pool):
 
@@ -714,7 +714,14 @@ alike:
 | `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
 | `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
 | `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
+| `dia_llr` | With `--predict ms2` (`crates/andes/src/bin/andes/dia_llr.rs`): log-likelihood ratio of the row's predicted b/y ions being present in the scan against chance. P(present \| true) is learned per run from the confident rows by predicted-intensity rank and MS1 intensity quartile, P(present \| chance) from the decoy rows by ion length, m/z and charge, each on one half of the peptidoforms and applied to the other half. |
+| `dia_apex_llr` | `−ln P(X ≥ m)`, binomial: how many of the ions seen in the scan or an adjacent cycle peak in this scan, against the decoy rows' share. |
+| `dia_ion_frac`, `dia_ppm_rms` | Per-ion presence: share of the row's six top predicted ions seen in the scan or an adjacent cycle, and the RMS ppm error of those seen in the scan after the run's fragment shift (median error of the confident rows' top ions, learned per run) is removed. |
+| `dia_llr_greedy`, `dia_llr_soft`, `dia_angle_soft` | Explaining away within a scan: the greedy LLR after the peaks of better rows are taken out, the LLR with each matched peak's intensity shared among the rows that match it, and the spectral angle against those shared intensities. |
 
+With `--predict ms2`, `--dia` keeps 100 rows per scan in the search, scores every one with the five
+`dia_llr*` columns, and then trims each scan to `--top-n` rows by z(RawScore) + z(andes-ms2 spectral
+angle), so the scores reach Percolator for the whole pool and the trimmed PIN keeps their columns.
 Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
 intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
 `--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP
@@ -730,6 +737,135 @@ is the best PSM per (peptidoform, charge) after target-decoy competition, as in
 `docs/benchmarks/dia/eval_dia.py`. On the ProteoBench Astral entrapment set, andes reaches 1,800 /
 1,821 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
 Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
+
+#### DIA pass 2, learned score and study mode
+
+With `--dia --predict rt,ms2 --rescore`, andes does more than score single scans. The steps after
+the pool scores:
+
+1. **Pass 2.** Each (run, peptidoform, charge) is nominated by its best pool row (`dia_llr` > −15,
+   targets and decoys alike). The nominee is traced over 73 cycles of its isolation window around a
+   per-run calibration of its predicted RT, and its top 12 predicted fragments are scored per cycle
+   against per-run chance rates. The best cycle gives 27 `p2_*` columns (fragment, co-elution, MS1
+   and peak-sharing evidence). A joint model of the traces adds ten `dia_jf_*` columns: a
+   likelihood ratio over elution offset, peak shape and amplitude, learned per run from confident
+   targets and a sample of decoys.
+2. **Learned score and precursor PIN.** A precursor PIN is written beside the pass-1 PIN
+   (`<stem>.precursor.pin`) with one row per nominated precursor: the pass-2 columns, the best
+   pass-1 row of the precursor (`p1_*`, `p1_present`) and `dia_gb_score`, an out-of-fold
+   gradient-boosted score (3 folds keyed by protein, so a decoy is never scored by a model that saw
+   its source target, whatever the decoy strategy). A fold with too few positives (910 per fold)
+   or a constant score is degenerate; the score then stays at the previous round, or is left out
+   when the first round is degenerate. Percolator rescores
+   this PIN (results `<stem>.precursor.percolator.*`). Its results replace the pass-1 results only
+   when pass 2 has at least as many targets as pass 1 has precursors at q 0.01, Percolator's
+   training is not degenerate, and it reaches at least as many target precursors at q 0.01 as
+   pass 1; otherwise pass 1 is kept and the log says why. With one row per precursor,
+   Percolator's q is the precursor-level q.
+3. **RT-aware candidate cut.** Under `--dia` the fragment-index cut (best 100 forms per scan and
+   charge) ranks by votes minus a squared RT-agreement term. The RT map and its spread are fitted
+   per run on a 2 % subsample searched first. With fewer than 50 anchors (for example a model that
+   predicts RT poorly on the chemistry) the cut keeps the plain vote rank and logs it. The pool
+   re-rank uses the same term.
+
+A single run does all of this in one `andes` call and writes the pass-2 table next to the PIN
+(`<pin>.dia_pass2.parquet`, about 3.5 million rows on an Astral run).
+
+**Study mode** (two or more runs of one experiment) adds evidence across runs. Three commands, in
+this order:
+
+```bash
+# 1. per run (any machine): search, store the run's PIN, pass-2 table and nominees in q/dia_pass2/
+andes --spectrum a.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin a.pin --quant-dir q/
+andes --spectrum b.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin b.pin --quant-dir q/
+# 2. per run, after every search is done: transfer candidates from the other runs, re-run pass 2
+andes quant extract  --quant-dir q/ --run a
+andes quant extract  --quant-dir q/ --run b
+# 3. once: cross-run columns, learned score, rescoring, precursor q, protein groups
+andes quant finalize --quant-dir q/ -o experiment --database db.fasta [--seed 42]
+```
+
+`--dia --quant-dir` takes one input per process. Step 1 does not write the precursor PIN or the
+final results; it stores what finalize needs. Step 2 gives each run every (peptide string, charge,
+target or decoy) key that another run nominated and this run did not, from the run with the highest
+`dia_llr`, re-reads the run's spectra and scores those transferred nominees like its own. Transferred
+rows carry `xfer` 1 and `dia_llr` −50 (a flag); they are left out of the RT calibration, the chance
+rates and the joint-model fits, so the run's own nominees alone set the null. A transferred
+nominee's predicted RT is its raw andes-rt prediction through the receiving run's own calibration.
+Targets and decoys follow one rule, and a decoy key only matches the same decoy. Step 2 is
+optional: without it, finalize uses the runs' own nominees only. Run it for every run or for none;
+finalize checks that the tables belong to the study's runs and were built from the runs' current
+inputs (a run searched and stored again after step 2 makes every transfer table stale, and
+finalize names the run).
+
+Finalize compares the runs' Percolator engine and arguments (not the storage budget or the spill
+directory, which do not change results) and spills into its own `--temp-dir`, or the directory of
+the output base.
+
+Finalize adds three cross-run columns to every precursor, from the other runs' tables: `xr_max`
+(largest `p2_llr` of the same key in another run), `xr_n` (other runs where it is detected) and
+`xr_rtd` (smallest unaligned |RT difference|, capped). Per run it then writes the precursor PIN,
+rescores it with the native Percolator engine, applies the precursor-level q and infers protein
+groups across all runs. `--seed` seeds the learned score and the rescoring (default 42). The study
+needs `--database` for the protein groups and does not accept `--output-parquet`.
+
+**What the reported q means.** It is a precursor-level target-decoy q, `(D + 1) / T` over
+precursors, one row per precursor. With transfer, the q is class-wise: one competition among the
+run's own nominees and one among its transferred nominees. A user who filters at q ≤ 0.01 then gets
+about 1 % false precursors in each class. Under one pooled competition the transferred targets
+measured 2.2–2.7 % true FDP at q 0.01 while the total stayed near 1 %, so the pooled count is only
+logged. The class-wise q costs about 300–580 precursors per run against the pooled one. On the
+PB-Astral-full benchmark the own class measured 1.04–1.06 % true FDP at q 0.01 and the transferred
+class 0.90–1.28 %
+([numbers and limits](docs/benchmarks/dia/pb_full/README.md#full-stack-pass-2-learned-score-study-mode-and-transfer)).
+
+**Files.** All new tables are versioned Parquet with the schema name and version in the file
+metadata.
+
+| File | Schema | Content |
+|---|---|---|
+| `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.1 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns and the row's quantities in its run: `quant_frag` (summed intensity, over the apex ± the run's learned peak width, of up to 6 fragments whose traces correlate best and positively with the summed trace), `quant_ms1` (monoisotopic and M+1 MS1 traces over the same span) and `quant_n_frag` (fragments summed); a quantity is null when the elution window is not contained in the traced cycles or has no signal, never 0. The quantities are not PIN features |
+| `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.1 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
+| `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.2 | The run's nominees (precursor, predicted RT, raw andes-rt prediction and missing flag, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window), with the run's andes-rt calibration and `--dia-mobility-slices` in the metadata |
+| `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.1 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
+| `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
+| `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
+| `<base>.dia_quant.parquet` | `andes.dia_quant.schema` 1.0 | One row per run and target precursor at reported q ≤ `--quant-fdr` (default 0.01), own and transferred: `filename peptide charge proteins evidence_type q_value quantity quantity_frag quantity_ms1 quantity_normalized`. `evidence_type` is `identified` (the run's own nominee) or `transfer`; `peptide` is as in the precursor PIN; `quantity` is the fragment quantity (`quantity_frag`; the metadata key `andes.dia_quant.default` names the arm), `quantity_ms1` the MS1 quantity, both from the pass-2 table; `quantity_normalized` divides `quantity` by the run's median-level factor over the precursors quantified in every normalised run (a run sharing fewer than 20 with the others is left unscaled and logged). Missing quantities are null, never 0; precursors above the q threshold have no row and are not filled from other runs |
+
+**Quantities.** Pass 2 measures every precursor's quantity in its run, and finalize writes the
+rows at reported q ≤ `--quant-fdr` to `<base>.dia_quant.parquet` (table above).
+- The window is the apex ± the run's learned peak width: the median half-maximum width of its
+  confident targets' summed fragment traces, at least 2 cycles.
+- The fragment quantity sums up to 6 fragments that co-elute with the summed trace. It is the
+  default because it had the lower fold-change error and more precursors than the MS1 quantity on
+  the ProteoBench DIA Astral module.
+- On that module the quantities compress large fold changes: E. coli log2(A/B) measured −1.27
+  against −2. See [the benchmark](docs/benchmarks/dia/proteobench_astral/README.md).
+
+**Resources.** Per Astral run (15 min gradient, 3.5 million nominees): the search with `--dia
+--predict rt,ms2 --rescore --quant-dir` takes about 20 minutes and a peak of about 36 GB; the
+extract step 9 minutes and 14 GB; finalize for three runs about 65 minutes and 23 GB. The learned
+score is the largest single cost of finalize. The RT-aware cut adds about 20 % to the search time.
+Plan memory for the search step by the 36 GB peak.
+
+**Limits.**
+
+- Measured on three replicate injections of one sample only. Cross-run columns and transfer across
+  different samples, with RT drift, are not measured, and `xr_rtd` compares retention times
+  unaligned.
+- diaPASEF is untested with pass 2 and transfer. The mobility-aware window placement has a unit
+  test only.
+- The RT-aware cut needs a usable RT prediction. On chemistry that andes-rt predicts poorly it
+  falls back to the vote rank.
+- The fold key assumes a decoy protein's accession is the decoy prefix plus its target's
+  accession (true for every built-in decoy strategy). The prefix is read from the accessions.
+- Study-mode memory grows with the number of runs times the union of their nominees: each
+  extract step holds its run's own nominees plus every key nominated elsewhere, and finalize
+  holds the cross-run keys of all runs (about 24 bytes a precursor per run).
+- The transferred class of one benchmark run measured 1.28 % true FDP at q 0.01 (about 3,000
+  transferred precursors, noisy); the other two runs measured 0.90 and 0.94 %.
 
 ### Refine — secondary chemistry cascade
 
@@ -788,7 +924,7 @@ re-score is capped at 64 per spectrum.
 | `--open-search-delta` | Da, `MIN..MAX` | `-100..300` | Accepted offset window; must contain 0 and be at most 2000 Da wide. |
 | `--open-search-top-k` | integer | `100` | Base peptides scored per spectrum, best fragment votes first. |
 
-**Mass-offset report.** With `--rescore` or `--rescore-native`, an open search also writes
+**Mass-offset report.** With `--rescore`, an open search also writes
 two versioned Parquet tables, and prints the ten largest peaks:
 - `<stem>.open_offsets.parquet` (schema key `andes.open_offsets.schema`);
 - `<stem>.open_psms.parquet` (schema key `andes.open_psms.schema`).
@@ -951,14 +1087,13 @@ inherit `--quant-fdr` once they are finer.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--rescore` | flag | *(off)* | Run Percolator and write rescored, filtered output. |
-| `--rescore-native` | flag | *(off)* | *(advanced)* `--rescore` with the native Percolator engine (crate `percolator-native`) instead of the binary or Docker: every Percolator pass (the main run, the per-run q-values, the PEP repair and the scores of every PIN row) runs in process with the algorithm of upstream Percolator master (commit a9783ee8, github.com/percolator/percolator, Apache-2.0) and writes result files in Percolator's format. `--rescore` runs the Percolator binary or Docker image (3.7.1), so the two engines give different results by design. Needs no Percolator; takes no `--percolator-args`, `--percolator-bin`, `--percolator-docker` or `--percolator-image` (an error). `--rescore-memory-gb` (default 16, config `rescoring.memory_gb`) is a storage budget, not a cap on process memory: PIN features, PSM texts, the normalised training rows and the score buffers of the grid, the direction check and PIN reading are sized from it, and each spills to `--temp-dir` when the budget left would not cover it (the PIN feature and text stores already once they would take more than half of it), so spilling can start before the budget is used up. Per-PSM metadata (label, file, scan, mass and text offset, about 160 bytes a PSM) is charged to the budget while it lasts but never spills, and the read and spill buffers (a few MiB) stay outside it. Outputs are byte-identical whatever the budget. |
+| `--rescore` | flag | *(off)* | Rescore with Percolator and write rescored, filtered output. Every Percolator pass (the main run, the per-run q-values, the PEP repair and the scores of every PIN row) runs in process with the native rescoring engine (crate `rescore`), which implements the Percolator algorithm (Käll et al., Nat. Methods 2007, [doi:10.1038/nmeth1113](https://doi.org/10.1038/nmeth1113)) and tracks upstream Percolator master (commit a9783ee8, github.com/percolator/percolator, Apache-2.0), and writes result files in Percolator's format; no Percolator binary or Docker is needed. `--percolator-bin` or `--percolator-docker` runs an external Percolator instead (the pinned Docker image is 3.7.1, which gives different results from master by design). With `--xl` the Percolator passes always run an external Percolator: `--percolator-bin`, else `percolator` on `$PATH`, else the Docker image. `--rescore-memory-gb` (default 16, config `rescoring.memory_gb`) is a storage budget, not a cap on process memory: PIN features, PSM texts, the normalised training rows and the score buffers of the grid, the direction check and PIN reading are sized from it, and each spills to `--temp-dir` when the budget left would not cover it (the PIN feature and text stores already once they would take more than half of it), so spilling can start before the budget is used up. Per-PSM metadata (label, file, scan, mass and text offset, about 160 bytes a PSM) is charged to the budget while it lasts but never spills, and the read and spill buffers (a few MiB) stay outside it. Outputs are byte-identical whatever the budget. `andes rescore --temp-dir DIR <Percolator arguments> <PIN>` runs the same engine on a PIN with Percolator's command line (`--rescore-memory-gb` as above). |
 | `--psm-fdr` | fraction | `0.01` | Identification FDR at PSM level: q-value threshold applied by a rescoring run (filtered TSV, quantification targets, `--mbr` donors), and the confident anchors of `--refine`. With UniProt isoform, variant or chain entries, a PSM must also pass it within its class (§1a, provenance). |
 | `--proteoform-fdr` | fraction | max(`--psm-fdr`, 0.05) | *(advanced)* q-value threshold for proteoform claims: variant-class PSMs (every protein a UniProt variant entry) in the filtered TSV, the proteoform table and quantification; every other PSM keeps `--psm-fdr`. |
 | `--protein-fdr` | fraction | *(off)* | Protein-group q-value cutoff: the filtered TSV keeps only PSMs whose peptide counts for a group at or below it, and the proteoform table only families of such groups. `<stem>.protein_groups.tsv` is written either way ([protein groups](#protein-groups-and-protein-fdr)). With `--mbr --output-parquet`, the QPX pg and feature views keep the groups at or below it, 0.01 unless given. |
 | `--pep` | fraction | *(off)* | *(advanced)* PEP threshold, ANDed with `--psm-fdr` (also for quantification targets and `--mbr` donors). |
-| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Backend: `--percolator-bin`, else `$PATH`, else Docker; `--percolator-args` passes flags through. Percolator runs with target-decoy competition (`-Y`: the best PSM of each spectrum competes, and q-values come from the winners), as every andes benchmark was measured, and with `--num-threads` set to `--threads` unless `--percolator-args` sets it: about twice as fast as its default of three threads on a 16-core node, with the same result (the PSM count can differ by about 0.2% between thread counts). `--subset-max-train <N>` trains on N PSMs and is 5–10 times faster, but on an entrapment benchmark it raised the true FDP at q ≤ 0.01 from 1.00% to 1.09–1.16%, so it is not the default. |
-| `--keep-pin` | bool | `true` | *(advanced)* With `--rescore`/`--rescore-native` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN in `--temp-dir`, deleted at exit. An explicit `--output-pin` is always kept. |
+| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | native engine | *(advanced)* External Percolator instead of the native engine: `--percolator-bin`, or the Docker image (`--percolator-image`, only with `--percolator-docker`); with `--xl`, `--percolator-bin`, else `$PATH`, else Docker. `--percolator-args` passes flags through and is an error without an external Percolator. Percolator runs with target-decoy competition (`-Y`: the best PSM of each spectrum competes, and q-values come from the winners), as every andes benchmark was measured, and with `--num-threads` set to `--threads` unless `--percolator-args` sets it: about twice as fast as its default of three threads on a 16-core node, with the same result (the PSM count can differ by about 0.2% between thread counts). `--subset-max-train <N>` trains on N PSMs and is 5–10 times faster, but on an entrapment benchmark it raised the true FDP at q ≤ 0.01 from 1.00% to 1.09–1.16%, so it is not the default. |
+| `--keep-pin` | bool | `true` | *(advanced)* With `--rescore` and no `--output-pin`: `true` writes the PIN (and Percolator's result files) as `<base>.pin`, where `<base>` is `--output-tsv`, else `--output-parquet`, else `./andes`; `false` uses a temporary PIN in `--temp-dir`, deleted at exit. An explicit `--output-pin` is always kept. |
 | `--predict` | list | `rt` | Predicted-spectrum and retention-time features added to the PIN (§3a, predicted features): `rt` (bundled andes-rt model), `ms2` (bundled andes-ms2 fragment-intensity model), `peptdeep-ms2` (AlphaPeptDeep fragment intensities), `peptdeep-rt`, `deeplc-rt`, comma-separated, or `none`. They are Percolator features; andes computes no FDR from them. |
 | `--predictor-models` | dir | *(none)* | Directory with the exported AlphaPeptDeep (`peptdeep_mods.json`, `peptdeep_{ms2,rt}_dynamic.{json,onnx}`) and DeepLC (`deeplc_rt.{json,onnx}`) models that `peptdeep-ms2`, `peptdeep-rt` and `deeplc-rt` load. A requested model that is missing stops the run before the search. |
 | `--predictor-backend` | `tract`\|`ort` | `tract` | *(advanced)* ONNX engine for those models: tract (pure Rust, built in) or ONNX Runtime (a build with `--features ort`; the runtime library is found through `ORT_DYLIB_PATH`). |
@@ -1100,7 +1235,7 @@ See [§7](#7-isobaric-labeling) for the search (label as a fixed mod, TMT model)
 | `--label-reference` | channel | `1` | Reference channel (1-based) of the `--label` log-ratios. |
 | `--label-arg-pro` | flag | off | SILAC: fit the heavy proline cells make from heavy arginine (Arg6 → 13C5 Pro, +5.0168 Da; Arg10 → 13C5 15N1 Pro, +6.0138 Da) as a satellite of every proline-containing peptide's arginine-labelled channels and add it back to the channel; `converted_fraction` in `label.parquet`. Without it, conversion lowers the heavy/light ratios of proline peptides by the converted share. |
 | `--label-2h-enrichment-silac`, `--label-2h-enrichment-chemical`, `--label-heavy-enrichment` | 0..1 | `0.96`, `0.99`, `0.99` | *(advanced)* Per-atom enrichment of metabolic 2H labels (Lys4, Leu3), chemical 2H labels (dimethyl) and 13C/15N labels: the lower isotopologues of each channel's pattern. |
-| `--mbr` | flag | off | Match-between-runs across two or more inputs (§10): label-free quantification with `--lfq`, or with `--tmt` the transfer of reporter ions (high-resolution MS2 reporters only; refused for SPS-MS3 and ion-trap MS2; see *Match between runs for reporter ions*). Needs `--rescore` (or `--rescore-native`); `--lfq` and `--tmt` are not combined. The label-free form: Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
+| `--mbr` | flag | off | Match-between-runs across two or more inputs (§10): label-free quantification with `--lfq`, or with `--tmt` the transfer of reporter ions (high-resolution MS2 reporters only; refused for SPS-MS3 and ion-trap MS2; see *Match between runs for reporter ions*). Needs `--rescore`; `--lfq` and `--tmt` are not combined. The label-free form: Writes `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet`; with `--output-parquet`, `quantms.feature.parquet` holds these rows (without the below-threshold transfers) instead of the per-run features. Uses `--quant-dir`, or a temporary directory removed at exit. With `--rescore` (Percolator), same result as `andes quant library`, `extract` and `finalize` on the same Percolator results. |
 | `--quant-fdr` | 0..1 | `0.01` | Quantification FDR: the q-value cut of the values measured without their own identification (match-between-runs transfers, `--label` channels matched without an identification) and, with `--lfq`, of `accepted` in `lfq.parquet` (target/decoy competition of each feature against its +11 Th twin). Quant-quality q-values, not an identification FDR. Unset, the `--label` channels and transfers, `lfq.parquet` `accepted` and the `--glyco --lfq --mbr` transfers use 0.05 (coarse q-values; see *Rescoring & FDR filtering*). The PSMs quantified, and the PSM q-value at which a run identifies a precursor with `--mbr`, follow `--psm-fdr`. |
 | `--mbr-donor-fdr` | 0..1 | `--psm-fdr` | *(advanced)* Library entry gate (precursor-level): best-PSM-per-precursor target/decoy q-value over the rescored PSM scores of all runs. |
 | `--quant-transfer-fdr` | 0..1 | `--quant-fdr` | *(advanced)* Transfer quality q-value: transfers at or below it are `transfer_ms2` (an MS2 scan of the run supports them) or `transfer_ms1`. An internal quant-quality q-value, not an identification FDR. It counts both wrong peaks and the transfers of false donor identifications (identity decoys, §10). On the ProteoBench QExactive module (2026-11-05, defaults), `0.05` adds about 7k precursors quantified in at least 3 runs to 0.01 (63.8k to 71.3k) at an accuracy cost (median \|eps\| 0.161 to 0.175, E. coli 0.26 to 0.44, CV 0.117 to 0.132); in an earlier measurement the wrong-peak rate rose from 1.7% to 2.7%. Use `0.05` for a deeper, less accurate set. Also the cut of the `--tmt --mbr` reporter transfers, of the `--label --mbr` transfers (the identity-decoy false-donor rate included; 0.05 when `--quant-fdr` is unset too) and of the `--glyco --lfq --mbr` transfers (likewise 0.05). |
@@ -1694,7 +1829,7 @@ until rescoring. Each modification lists its sites in the QPX layout: `position`
 Percolator result, except where target-decoy competition (`-Y`, which andes always passes)
 kept another PSM of its input file, scan and `ExpMass` group: those target rows are left out of the bundle, as
 they are out of Percolator's output; so are the decoys that lost that competition, and knockoff
-PSMs, which are never reported. `--rescore-native` runs the same passes with the native engine. Scan numbers repeat across inputs, so the groups are per input: Percolator reads
+PSMs, which are never reported; the native engine and an external Percolator run the same passes. Scan numbers repeat across inputs, so the groups are per input: Percolator reads
 the input from the PIN `FileName` column. In the match-between-runs feature parquet (`andes quant finalize`),
 `posterior_error_probability` is null on every row: a row is a precursor in a run, not a PSM.
 
@@ -1718,8 +1853,8 @@ major version marks an incompatible layout, a new minor version only adds column
 | File | Rows | Columns |
 |---|---|---|
 | `<stem>.tmt.parquet` | one per PSM with reporter ions (`psm_q_value`: the per-run q-value when the PIN had several runs), including the PSMs the quantification gate (§10) failed | `filename scannr spec_id quant_scan quant_ms_level rt peptide charge proteins is_decoy psm_q_value psm_pep purity`, then one `tmt_<channel>` (or `itraq_<channel>`) per channel (float32, corrected when a correction matrix was applied), then `raw_<...>` when one was, then `reporter_intensity_sum reporter_sn_sum quant_weight quant_gate_passed`, then one `sn_<prefix>_<channel>` per channel (null without noise values), then, unless `--tmt-unmix off`, `interference` and one `unmix_<prefix>_<channel>` per channel (null for a scan the interference model could not cover; §10). A gated PSM has `quant_gate_passed` false and `quant_weight` 0. Metadata `andes.tmt.plex` (kit), `andes.tmt.corrected`, `andes.tmt.unmix` (`off`, `on` or `auto`) and `andes.tmt.unmix_strength` (each run's λ) |
-| `<stem>.protein_groups.tsv` (`--rescore`/`--rescore-native`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
-| `<stem>.proteoforms.tsv` (`--rescore`/`--rescore-native` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--psm-fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
+| `<stem>.protein_groups.tsv` (`--rescore`) | one per target protein group, best score first | `protein_group lead accessions families peptides unique_peptides razor_peptides psms best_score protein_q subsumed` ([protein groups](#protein-groups-and-protein-fdr)) |
+| `<stem>.proteoforms.tsv` (`--rescore` with UniProt isoform, variant or chain entries) | one per family member with a target PSM at q ≤ `--psm-fdr` (a specific one for isoform, variant and chain entries) | `family member kind feature q_value evidence specific_peptides shared_peptides psms best_psm alternative_explanation source prior_tier`, then `quantity_<run or channel>` with `--lfq`/`--tmt` (§1a, proteoform table) |
 | `<stem>.lfq.parquet` | one per feature per run (all target features, with their q-value; `psm_q_value` is the per-run q-value when the PIN had several runs) | `filename peptide charge proteins scannr spec_id psm_q_value calc_mz rt_anchor rt_apex rt_start rt_stop n_scans area apex_intensity isotope_areas cosine n_isotopes score decoy_score feature_q_value accepted`; `isotope_areas` is a list (monoisotope first); `accepted` is feature q ≤ `--quant-fdr` (0.05 when unset) and cosine ≥ `--lfq-min-cosine`. The per-run wide view is the `accepted` rows pivoted on (`peptide`, `charge`) × `filename` over `area` (the highest `score` if a run has two). Metadata `andes.lfq.runs` (input stems, newline-joined, including runs without features), `andes.lfq.feature_fdr`, `andes.lfq.min_cosine` |
 | `<stem>.label.parquet` (`--label`) | one per (label group, run, channel) for every group identified in the run (in any channel) or transferred into it (`--mbr`) | `filename peptide sequence charge proteins channel channel_name label status spec_id psm_q_value rt_psm labelled_peptidoform mz rt_apex rt_shift width quantity quantity_se quantity_upper llr envelope_cos coherence m1_ratio mass_err_ppm channel_q_value group_llr transfer transfer_q_value log2_ratio log2_ratio_se log2_ratio_normalized converted_fraction trace_quantity`; `peptide` is the peptide identity (the peptidoform without its channel labels), `labelled_peptidoform` the identified channel's peptidoform as searched; `channel` is 1-based, `label` the SDRF/QPX label (null outside that vocabulary); `status` is `identified` (a PSM of the run in this channel), `match_channel` (no PSM, measured at the channel's position at `channel_q_value` ≤ `--quant-channel-fdr`), `transfer` (the group transferred from another run at `transfer_q_value` ≤ `--quant-transfer-fdr`), `below_detection` (no signal: `quantity_upper` = quantity + 2 SE bounds it) or `not_quantifiable` (something else is there: another identified peptide, a pattern or elution that is not the channel's, or a quality q-value above the cut); `quantity` is the area of the channel's fitted profile (its whole isotope pattern), `rt_apex` the channel's apex (the shared profile's plus `rt_shift`); `log2_ratio` is log2(channel / reference) when both are measured (`identified`, `match_channel` or `transfer`), `log2_ratio_normalized` the same minus the run's median log-ratio of the channel over its groups identified in both; `converted_fraction` (`--label-arg-pro`) the share of the channel's quantity in its heavy-proline form (null when not fitted); `trace_quantity` a shape-free quantity of the channel (its own isotope traces, the other channels' modelled parts and the background removed, integrated over the apex ± (−3 w, +4 w), scaled to the whole pattern), for checks against the profile fit. Metadata `andes.label.channels` (`<n>: <name>` per line), `andes.label.reference`, `andes.label.runs`, and with `--mbr` `andes.label.identity_decoy_transfers` (accepted / probed) and `andes.label.identity_decoy_rate` |
 | `<stem>.label_proteins.tsv` (`--label`) | one per (protein group, run, channel other than the reference) with at least 2 peptide ratios | `protein_group lead filename channel channel_name log2_ratio log2_ratio_normalized ratio_count inferred_ratio_count`: the median of the peptides' log-ratios, each the median of its evidence (charges, channel rows) in `label.parquet`, as MaxQuant computes protein ratios; `log2_ratio_normalized` from the normalised evidence (`NA` below 2 peptides); `inferred_ratio_count` counts the peptides whose channel is only matched or transferred in the run. The group is the protein group at `--protein-fdr` when protein inference ran, else the peptide's accessions |
@@ -2046,8 +2181,8 @@ needs them to place a threshold.
 andes quantifies at the **feature level** inside the search run and leaves normalization across
 samples, peptide-to-protein roll-up and statistics to quantms (with MSstats / MSstatsTMT),
 which knows the experimental design. Both modules run after rescoring, on
-the rank-1 target PSMs at `q ≤ --psm-fdr` (default 0.01); without `--rescore` /
-`--rescore-native` every rank-1 target PSM is quantified and the tables must be filtered
+the rank-1 target PSMs at `q ≤ --psm-fdr` (default 0.01); without `--rescore`
+every rank-1 target PSM is quantified and the tables must be filtered
 downstream (a warning says so).
 
 MS1 scans are stored losslessly in private temporary files after each input run is
@@ -2114,7 +2249,7 @@ single input run's MS1 scans still need to fit in memory while it is processed.
 * **Quantification gate.** A PSM passes the gate (`quant_gate_passed` in `tmt.parquet`) only if its precursor purity is at least
   `--tmt-min-purity` (0.7), its Percolator PEP is at most `--tmt-max-pep` (0.05) and its summed
   reporter signal-to-noise is at least `--tmt-min-sn` (off). A PSM without the value a criterion
-  needs (no MS1 or isolation window for purity, no `--rescore` or `--rescore-native` for PEP, no
+  needs (no MS1 or isolation window for purity, no `--rescore` for PEP, no
   noise for S/N) is not
   held to that criterion. The gate only chooses which PSMs are quantified: every PSM stays in the
   identification output (PIN, TSV, `psms.parquet`), and `tmt.parquet` and the quantms feature
@@ -2678,8 +2813,8 @@ The stage path and the in-process run use the same code on the same files. With 
 (Percolator) they give identical `<stem>.mbr.parquet` and `<stem>.mbr_validation.parquet` rows
 for the same Percolator results,
 `--psm-fdr`, `--mbr-donor-fdr`, `--pep` and `--lfq-tol`: pass the search's `<pin>.percolator.target.psms.txt` and
-`<pin>.percolator.decoy.psms.txt` to `quant library`. `--rescore-native` writes the same
-files.
+`<pin>.percolator.decoy.psms.txt` to `quant library`. The native engine and an external
+Percolator write the same files.
 
 **Known limits (memory).** The library stage holds every run's rank-1 PSMs (targets and
 decoys) with their joined scores at once, so its memory grows with the total PSM count across
@@ -2694,7 +2829,7 @@ flag. On, a precursor identified at PSM q ≤ `--psm-fdr` in one run gets report
 runs that lack it, from an MS2 scan that carries no identification there. Only high-resolution
 MS2 reporters qualify: the run is refused for SPS-MS3 reporters (`--tmt-level 3`, or the level
 resolved from the data) and for ion-trap MS2, whose transferred scans are not quantified reliably.
-It needs two or more inputs, `--rescore` (or `--rescore-native`) and `--tmt <plex>`, not `--lfq`;
+It needs two or more inputs, `--rescore` and `--tmt <plex>`, not `--lfq`;
 the per-run tables of `--quant-dir` (or a temporary directory removed at exit) are used as in the
 label-free form, and each run's `<stem>.ms2.parquet` additionally holds the raw reporter
 intensities, the precursor purity and the summed signal-to-noise of every MS2 scan (schema 1.1;
@@ -2878,7 +3013,7 @@ log-ratios to the reference channel; protein-level summaries are left to quantms
   charges), from 2 peptides up, raw and normalised. quantms / MSstats remain the place for
   experimental designs, fractions and statistics.
 
-**Real data** (release build, 4 threads, `--rescore-native` with the built-in rescorer it ran before 2026-11-16, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's joint fit, before they were read at the identified channels' profile (*Null channels* below), except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
+**Real data** (release build, 4 threads, native rescoring with the built-in rescorer it ran before 2026-11-16, defaults unless stated; every run with the code of 2026-11-13, decoys of match between channels pinned to the group's joint fit, before they were read at the identified channels' profile (*Null channels* below), except the PXD003327 comparison with MaxQuant, run with that of 2026-11-11).
 OpenMS is FeatureFinderMultiplex (pyOpenMS 3.6, the multiplet detection of MS1LabeledWorkflow)
 with the same labels and missed cleavages, its multiplets matched to andes's groups by light-channel
 m/z (10 ppm; 20 ppm on TOF), charge and apex (±30 s). MaxQuant is 2.0.3.0 from Bioconda under Mono, with the
@@ -3006,7 +3141,7 @@ does not hold, every one of whose matches is false, competing in the same per-ru
 | unlabelled `silac3`: absent candidates passing q ≤ 0.05 (of 138,075) | 568 | 0 |
 | unlabelled: false `match_channel` (`silac2` / `silac3`) | 118 / 131 | 0 / 0 |
 
-On the PXD022659 HeLa runs (`--rescore-native --label silac2 --mbr`, with the built-in rescorer of before 2026-11-16, reviewed human proteome), reading
+On the PXD022659 HeLa runs (`--rescore --label silac2 --mbr` with native rescoring and the built-in rescorer of before 2026-11-16, reviewed human proteome), reading
 at the identified channels' profile keeps about 94 % of the matched channels, with the same or lower
 error: in 10/90 the matched heavy channels go from 2,818 (median absolute error 0.298, 2.7 %
 gross) to 2,664 (0.276, 1.1 % gross); pairs with both channels identified are unchanged.

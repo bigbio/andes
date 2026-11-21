@@ -1,4 +1,4 @@
-use percolator_native::{read_pin, MemLimit};
+use rescore::{read_pin, MemLimit};
 use std::path::{Path, PathBuf};
 
 const PIN: &str =
@@ -24,7 +24,7 @@ fn ram(dir: &Path) -> MemLimit {
     }
 }
 
-fn blocks(s: &percolator_native::Store) -> Vec<(usize, Vec<f32>)> {
+fn blocks(s: &rescore::Store) -> Vec<(usize, Vec<f32>)> {
     let mut v = Vec::new();
     s.for_each_block(|start, b| v.push((start, b.to_vec())));
     v

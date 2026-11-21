@@ -170,11 +170,9 @@ impl Rows {
             return Ok(rows);
         }
         let k = ROWS_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = budget.spill_dir().join(format!(
-            "percolator-native-{}-{}.rows",
-            std::process::id(),
-            k
-        ));
+        let path = budget
+            .spill_dir()
+            .join(format!("rescore-{}-{}.rows", std::process::id(), k));
         let rows = Rows {
             data: RowData::Spill(path.clone()),
             nrows: idx.len(),

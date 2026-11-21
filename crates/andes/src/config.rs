@@ -118,7 +118,6 @@ pub struct RefineCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct RescoringCfg {
     pub enabled: Option<bool>,
-    pub native: Option<bool>,
     pub psm_fdr: Option<f64>,
     pub proteoform_fdr: Option<f64>,
     pub protein_fdr: Option<f64>,
@@ -602,10 +601,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("refine", refine, cfg.refine.enabled);
     set_opt!("refine_config", refine_config, cfg.refine.config);
 
-    if !cli_set(m, "rescore") && !cli_set(m, "rescore_native") {
-        set!("rescore", rescore, cfg.rescoring.enabled);
-        set!("rescore_native", rescore_native, cfg.rescoring.native);
-    }
+    set!("rescore", rescore, cfg.rescoring.enabled);
     set_opt!("psm_fdr", psm_fdr, cfg.rescoring.psm_fdr);
     set_opt!(
         "proteoform_fdr",
@@ -1504,18 +1500,27 @@ glyco:
     }
 
     #[test]
-    fn cli_rescore_backend_wins_over_yaml() {
-        let a = applied("rescoring:\n  enabled: true\n", &["--rescore-native"]).unwrap();
-        assert!(
-            a.rescore_native && !a.rescore,
-            "CLI --rescore-native must win"
-        );
-        let a = applied("rescoring:\n  native: true\n", &["--rescore"]).unwrap();
-        assert!(a.rescore && !a.rescore_native);
+    fn rescoring_backend_comes_from_the_binary_keys() {
         let a = applied("rescoring:\n  enabled: true\n", &[]).unwrap();
-        assert!(a.rescore && !a.rescore_native);
-        let a = applied("rescoring:\n  native: true\n", &[]).unwrap();
-        assert!(a.rescore_native && !a.rescore);
+        assert!(a.rescore && !a.external_percolator());
+        let a = applied(
+            "rescoring:\n  enabled: true\n  percolator_bin: /opt/percolator\n",
+            &[],
+        )
+        .unwrap();
+        assert!(a.rescore && a.external_percolator());
+        let a = applied(
+            "rescoring:\n  enabled: true\n  percolator_docker: true\n",
+            &[],
+        )
+        .unwrap();
+        assert!(a.rescore && a.external_percolator());
+        let a = applied("rescoring:\n  enabled: false\n", &["--rescore"]).unwrap();
+        assert!(a.rescore, "CLI --rescore must win");
+        assert!(
+            applied("rescoring:\n  native: true\n", &[]).is_err(),
+            "rescoring.native is no longer a key"
+        );
     }
 
     #[test]

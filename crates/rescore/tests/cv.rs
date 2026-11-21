@@ -1,4 +1,4 @@
-use percolator_native::{
+use rescore::{
     count_at, init_direction, l2_svm_mfn, read_pin, score, stdv, tdc_q, train, CvConfig, CvResult,
     MemLimit, MfnOpts, Pin, Rows,
 };

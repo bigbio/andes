@@ -102,29 +102,21 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
     if !cli.dia_ms1_tol_ppm.is_finite() || cli.dia_ms1_tol_ppm <= 0.0 {
         return Err("--dia-ms1-tol-ppm must be a positive number".into());
     }
-    if cli.localize.is_some() && !cli.rescore && !cli.rescore_native {
-        return Err("--localize ipf needs --rescore or --rescore-native".into());
+    if cli.localize.is_some() && !cli.rescore {
+        return Err("--localize ipf needs --rescore".into());
     }
-    if cli.rescore_native && !cli.percolator_args.trim().is_empty() {
-        return Err(
-            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
-                .into(),
-        );
-    }
-    if cli.rescore_native {
-        let ignored = set_flags(&[
-            (cli.percolator_bin.is_some(), "--percolator-bin"),
-            (cli.percolator_docker, "--percolator-docker"),
-            (
-                cli.percolator_image != output::DEFAULT_PERCOLATOR_IMAGE,
-                "--percolator-image",
-            ),
-        ]);
-        if !ignored.is_empty() {
-            return Err(format!(
-                "native rescoring runs no Percolator binary, so {} has no effect; drop it, or drop --rescore-native to run Percolator",
-                ignored.join(", ")
-            ));
+    if cli.xl.is_none() && !cli.external_percolator() {
+        if !cli.percolator_args.trim().is_empty() {
+            return Err(
+                "native rescoring takes no percolator_args; add --percolator-bin or --percolator-docker to run an external Percolator"
+                    .into(),
+            );
+        }
+        if cli.percolator_image != output::DEFAULT_PERCOLATOR_IMAGE {
+            return Err(
+                "--percolator-image has no effect without --percolator-docker; add --percolator-docker to run Percolator from that image"
+                    .into(),
+            );
         }
     }
     if cli.dia {
@@ -187,7 +179,6 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
         let unsupported = set_flags(&[
             (cli.output_tsv.is_some(), "--output-tsv"),
             (cli.output_parquet.is_some(), "--output-parquet"),
-            (cli.rescore_native, "--rescore-native"),
             (cli.refine, "--refine"),
             (cli.psm_fdr.is_some(), "--psm-fdr"),
             (cli.pep.is_some(), "--pep"),
@@ -212,7 +203,6 @@ pub(super) fn check_flag_combinations(cli: &Cli) -> Result<(), String> {
             (cli.output_tsv.is_some(), "--output-tsv"),
             (cli.output_parquet.is_some(), "--output-parquet"),
             (cli.rescore, "--rescore"),
-            (cli.rescore_native, "--rescore-native"),
             (cli.refine, "--refine"),
             (cli.psm_fdr.is_some(), "--psm-fdr"),
             (cli.pep.is_some(), "--pep"),
@@ -381,6 +371,16 @@ pub(super) fn load_search_database(
             EnzymeSpecificity::NonSpecific => 0,
         },
     };
+    if decoy_strategy == search::decoy::DecoyStrategy::Mutate
+        && (proteases.is_non_specific() || proteases.num_tolerable_termini < 2)
+    {
+        return Err(
+            "--decoy-strategy mutate needs fully specific digestion: a semi- or non-specific \
+             search reads sub-sequences of each decoy segment, and the ones without the changed \
+             residue are also target peptides. Use --decoy-strategy reverse or shuffle."
+                .into(),
+        );
+    }
     if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
         && proteases.is_non_specific()
         && target_db.proteins.iter().any(|p| {
@@ -885,12 +885,16 @@ pub(super) fn resolve_search_params(
             "isobaric windowed peak filter: off (high-resolution MS2; --peak-filter WINDOW:K turns it on)"
         );
     }
+    let dia_d = cli.dia && cli.spectrum.iter().all(|p| input_format_flags(p).2);
+    let vote_filter = peak_filter.filter(|&(w, k)| dia_d && w > 0.0 && k > 0);
     scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
-        peak_filter,
+        peak_filter: if vote_filter.is_some() {
+            Some((0.0, 0))
+        } else {
+            peak_filter
+        },
     });
-    if cli.dia && cli.spectrum.iter().all(|p| input_format_flags(p).2) {
-        params.dia_vote_filter = peak_filter.filter(|&(w, k)| w > 0.0 && k > 0);
-    }
+    params.dia_vote_filter = vote_filter;
 
     params.max_missed_cleavages = if cli.glyco {
         let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
@@ -1538,10 +1542,9 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
                 .into(),
         );
     }
-    if !cli.rescore && !cli.rescore_native {
+    if !cli.rescore {
         return Err(
-            "--mbr needs --rescore (or --rescore-native): the library ranks precursors by the rescored PSM scores"
-                .into(),
+            "--mbr needs --rescore: the library ranks precursors by the rescored PSM scores".into(),
         );
     }
     if cli.tmt.is_some() {
@@ -1893,7 +1896,7 @@ mod flag_combination_tests {
         accepted(&[]);
         accepted(&["--rescore"]);
         accepted(&["--rescore", "--localize", "ipf"]);
-        accepted(&["--rescore-native", "--chimeric", "--refine"]);
+        accepted(&["--rescore", "--chimeric", "--refine"]);
         accepted(&["--dia"]);
         accepted(&["--open-search"]);
         accepted(&["--lfq", "--mbr", "--rescore"]);
@@ -1913,23 +1916,54 @@ mod flag_combination_tests {
     }
 
     #[test]
-    fn native_rescoring_takes_no_percolator_options() {
+    fn rescore_alone_selects_the_native_engine() {
+        let cli = args(&["--rescore"]);
+        assert!(cli.rescore && !cli.external_percolator());
+    }
+
+    #[test]
+    fn a_percolator_binary_or_docker_selects_the_external_percolator() {
+        let cli = args(&["--rescore", "--percolator-bin", "/opt/percolator"]);
+        assert!(cli.rescore && cli.external_percolator());
+        accepted(&["--rescore", "--percolator-bin", "/opt/percolator"]);
+        let cli = args(&["--rescore", "--percolator-docker"]);
+        assert!(cli.rescore && cli.external_percolator());
+        accepted(&[
+            "--rescore",
+            "--percolator-docker",
+            "--percolator-image",
+            "other:1",
+        ]);
+        accepted(&[
+            "--rescore",
+            "--percolator-bin",
+            "/opt/percolator",
+            "--percolator-args=--maxiter 3",
+        ]);
+    }
+
+    #[test]
+    fn percolator_options_need_an_external_percolator() {
         rejected(
-            &["--rescore-native", "--percolator-args=--maxiter 3"],
+            &["--rescore", "--percolator-args=--maxiter 3"],
             "native rescoring takes no percolator_args",
         );
         rejected(
-            &["--rescore-native", "--percolator-docker"],
-            "--percolator-docker has no effect",
+            &["--percolator-args=--maxiter 3"],
+            "native rescoring takes no percolator_args",
         );
         rejected(
-            &["--rescore-native", "--percolator-bin", "percolator"],
-            "--percolator-bin has no effect",
+            &["--rescore", "--percolator-image", "other:1"],
+            "--percolator-image has no effect without --percolator-docker",
         );
-        rejected(
-            &["--rescore-native", "--percolator-image", "other:1"],
-            "--percolator-image has no effect",
-        );
+        accepted(&["--xl", "DSSO", "--percolator-args=--maxiter 3"]);
+    }
+
+    #[test]
+    fn rescore_native_is_an_unknown_flag() {
+        let argv = ["andes", "--rescore-native"];
+        let err = Wrap::try_parse_from(argv).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -1977,10 +2011,6 @@ mod flag_combination_tests {
                 "--refine",
             ],
             "--xl does not support: --output-tsv, --refine, --lfq",
-        );
-        rejected(
-            &["--xl", "DSSO", "--rescore-native"],
-            "--xl does not support: --rescore-native",
         );
         rejected(
             &["--xl", "DSSO", "--tmt", "tmt10plex"],

@@ -46,11 +46,9 @@ impl Texts {
             return Ok(());
         };
         let k = TEXT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = budget.spill_dir().join(format!(
-            "percolator-native-{}-{}.txt",
-            std::process::id(),
-            k
-        ));
+        let path = budget
+            .spill_dir()
+            .join(format!("rescore-{}-{}.txt", std::process::id(), k));
         let res = std::fs::write(&path, v).and_then(|()| File::open(&path));
         let file = match res {
             Ok(f) => f,
@@ -174,7 +172,7 @@ impl TextsBuilder {
             } else {
                 let k = TEXT_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let path = self.budget.spill_dir().join(format!(
-                    "percolator-native-{}-{}.txt",
+                    "rescore-{}-{}.txt",
                     std::process::id(),
                     k
                 ));

@@ -163,8 +163,8 @@ flowchart TD
    whose fragment ions best match the spectrum.
 4. **Optional passes** `--chimeric`, `--dia`, `--refine`, and the separate `--glyco` and `--xl`
    pipelines (below).
-5. **Rescore** with Percolator, run by you, by `--rescore`, or by the in-process engine
-   `--rescore-native`. andes computes no production FDR of its own.
+5. **Rescore** with Percolator, run by you or by `--rescore` (the in-process native engine, or an
+   external Percolator with `--percolator-bin`). andes computes no production FDR of its own.
 6. **Quantify** the confident PSMs on request: reporter ions (`--tmt`), MS1 features (`--lfq`)
    or labelled pairs (`--label`).
 
@@ -298,13 +298,15 @@ andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
 
-**In-process rescoring.** `--rescore` runs Percolator (`--percolator-bin`, else `percolator` on
-`$PATH`, else the pinned Docker image). `--rescore-native` runs the same passes with the
-native Percolator engine in process (the algorithm of upstream Percolator master, commit
-a9783ee8, and Percolator's result files; `--rescore` runs Percolator 3.7.1, so the two differ), for when
-Percolator is not available. Both add a q-value and PEP to the outputs and write `<stem>.q<fdr>.tsv` (targets at
-q ≤ `--psm-fdr`, default 0.01, e.g. `--rescore --psm-fdr 0.01`). `--psm-fdr` and `--pep` do nothing
-without one of them.
+**In-process rescoring.** `--rescore` runs every Percolator pass with the native Percolator
+engine in process (the algorithm of upstream Percolator master, commit a9783ee8, and
+Percolator's result files); no Percolator binary or Docker is needed. `--percolator-bin FILE`
+or `--percolator-docker` runs an external Percolator instead (the pinned image is Percolator
+3.7.1, which differs from master), and only then does `--percolator-args` apply. `--xl` always
+rescores with an external Percolator (`--percolator-bin`, else `percolator` on `$PATH`, else
+the Docker image). Rescoring adds a q-value and PEP to the outputs and writes `<stem>.q<fdr>.tsv`
+(targets at q ≤ `--psm-fdr`, default 0.01, e.g. `--rescore --psm-fdr 0.01`). `--psm-fdr` and
+`--pep` do nothing without `--rescore`.
 
 **Protein groups.** Every rescored run also writes `<stem>.protein_groups.tsv`: protein groups
 by parsimony over protein families (a canonical entry with its isoform, variant and chain
@@ -408,8 +410,9 @@ gets 16 columns from the neighbouring cycles of the same window (fragment and MS
 summed apex, support across cycles). With `--rescore`, Percolator trains at `--trainFDR 0.05`,
 andes refines each run's predicted RT on the first pass's confident targets, and Percolator runs
 again. On Orbitrap Astral the fragment tolerance is 7 ppm unless `--fragment-tol-*` is set. With
-`--predict ms2`, the search keeps 50 rows per scan and trims them to `--top-n` by RawScore plus the
-andes-ms2 spectral angle (both z-scored) before the DIA columns, and adds summed-spectrum and
+`--predict ms2`, the search keeps 100 rows per scan, scores each with five fragment-evidence
+columns (`dia_llr` and four variants, below), trims the scan to `--top-n` rows by RawScore plus the
+andes-ms2 spectral angle (both z-scored) before the other DIA columns, and adds summed-spectrum and
 elution-profile columns that score each candidate's predicted fragments over neighbouring cycles.
 
 On the ProteoBench Astral entrapment set OpenDIA uses (two 15-min, 2 Th window runs), at an
@@ -568,7 +571,7 @@ andes --spectrum sample.mzML \
 - A glycan database is required: `--glyco-species` (`human`, `mouse`,
   `mouse-large`, `high-mannose`) or your own `.gdb` with `--glyco-glycan-gdb`.
 - Output is only `results.glyco.pin`; `--output-tsv`, `--output-parquet`, `--rescore`,
-  `--rescore-native`, `--refine`, `--psm-fdr` and `--pep` are rejected. Run Percolator on it with `--trainFDR 0.05`.
+  `--refine`, `--psm-fdr` and `--pep` are rejected. Run Percolator on it with `--trainFDR 0.05`.
 - Use `--decoy-strategy sequon`; the other generated decoys carry fewer sequons than their targets,
   which makes q-values anti-conservative.
 - Search each fraction separately, concatenate the `.glyco.pin` files (one header) and run
@@ -643,7 +646,7 @@ The code is a Cargo workspace under `crates/`:
 | `model`, `scoring` | shared types and constants; the scoring models and features |
 | `search` | candidate index, matching, chimeric, refine and the other search passes |
 | `output` | PIN, TSV and QPX Parquet writers |
-| `quant`, `percolator-native` | quantification and match between runs; the in-process Percolator engine |
+| `quant`, `rescore` | quantification and match between runs; the in-process rescoring engine (the Percolator algorithm) |
 | `model-train`, `onnx-infer` | training the scoring models; ONNX inference of the predictors |
 | glyco and cross-link crates | the `--glyco` and `--xl` searches |
 

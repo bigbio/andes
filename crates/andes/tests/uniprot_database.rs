@@ -206,7 +206,7 @@ fn rescoring_estimates_fdr_within_each_class() {
             "--uniprot-chains",
             "--uniprot-evidence",
             "curated",
-            "--rescore-native",
+            "--rescore",
             "--psm-fdr",
             "1",
         ],
@@ -233,7 +233,7 @@ fn rescoring_estimates_fdr_within_each_class() {
     let plain = search(
         "test-fixtures/BSA.fasta",
         &dir.path().join("fasta.pin"),
-        &["--rescore-native"],
+        &["--rescore"],
     );
     let stderr = String::from_utf8_lossy(&plain.stderr);
     assert!(!stderr.contains("FDR within each class"), "{stderr}");
@@ -250,7 +250,7 @@ fn knockoff_variants_are_searched_but_never_reported() {
             "--uniprot-variants",
             "--uniprot-evidence",
             "any",
-            "--rescore-native",
+            "--rescore",
             "--psm-fdr",
             "1",
         ],
@@ -307,7 +307,7 @@ fn annotated_sites_get_knockoff_sites_and_a_site_table() {
             mods.to_str().unwrap(),
             "--uniprot-evidence",
             "curated",
-            "--rescore-native",
+            "--rescore",
             "--psm-fdr",
             "1",
         ],

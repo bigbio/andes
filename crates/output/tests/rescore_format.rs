@@ -1,10 +1,10 @@
 use output::percolator::{parse_psm_results, PsmResultReader};
-use percolator_native::{read_pin, run, write_results, MemLimit, Results};
+use rescore::{read_pin, run, write_results, MemLimit, Results};
 use std::path::{Path, PathBuf};
 
 fn data(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../percolator-native/tests/data")
+        .join("../rescore/tests/data")
         .join(name)
 }
 

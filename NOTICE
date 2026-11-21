@@ -29,8 +29,9 @@ satisfy Apache-2.0 §4's notice requirement:
 
   - pGlyco  (Liu et al., Nat. Commun. 2017;8:15473)
 
-The crate `crates/percolator-native/` is a port of Percolator
-(https://github.com/percolator/percolator), following upstream master at commit
+The crate `crates/rescore/` is a port of Percolator
+(https://github.com/percolator/percolator; Käll et al., Nat. Methods 2007;4:923-925),
+following upstream master at commit
 a9783ee8ded0af8148566bdff4d43d2ba444ce5e, licensed under the Apache License,
 Version 2.0. Upstream's license file (license.txt) carries the notice:
 

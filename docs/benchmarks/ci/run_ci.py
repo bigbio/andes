@@ -10,7 +10,7 @@ database carries an entrapment, and the precursor ratio accuracy of an --lfq --m
 failed run is recorded too (status "failed"), so a regression shows up on the page. The CI page
 (website/pages/ci.md) reads these lines.
 
-Needs python3, pyarrow for quant datasets, and Percolator (on PATH, else its Docker image).
+Needs python3 and pyarrow for quant datasets; `--rescore` runs the native Percolator engine.
 """
 import argparse
 import glob

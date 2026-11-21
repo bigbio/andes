@@ -14,6 +14,18 @@ mod cohort_cmd;
 mod config;
 #[path = "andes/dia.rs"]
 mod dia;
+#[path = "andes/dia_joint.rs"]
+mod dia_joint;
+#[path = "andes/dia_llr.rs"]
+mod dia_llr;
+#[path = "andes/dia_pass2.rs"]
+mod dia_pass2;
+#[path = "andes/dia_score.rs"]
+mod dia_score;
+#[path = "andes/dia_xfer.rs"]
+mod dia_xfer;
+#[path = "andes/dia_xrun.rs"]
+mod dia_xrun;
 #[path = "andes/glyco_match.rs"]
 mod glyco_match;
 #[path = "andes/glyco_quant.rs"]
@@ -141,9 +153,13 @@ enum Command {
 
     #[command(
         hide = true,
-        about = "Run the native Percolator engine (Percolator master a9783ee8) on a Percolator command line"
+        about = "Run the native rescoring engine on a Percolator command line",
+        long_about = "Run the native rescoring engine on a Percolator command line\n\n\
+The engine implements the Percolator algorithm (Käll et al., Nat. Methods 2007) and tracks \
+upstream Percolator master (commit a9783ee8); it takes Percolator's arguments and writes \
+Percolator's result files."
     )]
-    Percolator(Box<cli::PercolatorArgs>),
+    Rescore(Box<cli::RescoreArgs>),
 }
 
 const USAGE: &str = "andes --spectrum <FILE>... --database <FILE> --output-pin <FILE> [OPTIONS]
@@ -222,7 +238,7 @@ fn main() -> ExitCode {
             }
             inference_cmd::run_inference(*args)
         }
-        Some(Command::Percolator(args)) => run_native_percolator(*args),
+        Some(Command::Rescore(args)) => run_rescore(*args),
         Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
@@ -271,18 +287,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
+            if search.output_pin.is_none() && !search.rescore {
                 log::error!("--output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
-            if (search.psm_fdr.is_some() || search.pep.is_some())
-                && !search.rescore
-                && !search.rescore_native
-            {
+            if (search.psm_fdr.is_some() || search.pep.is_some()) && !search.rescore {
                 log::warn!(
-                    "--psm-fdr/--pep set without --rescore or --rescore-native; \
-                     they are ignored (add --rescore to run Percolator, or feed the PIN \
-                     to Percolator yourself)."
+                    "--psm-fdr/--pep set without --rescore; they are ignored (add --rescore \
+                     to rescore with Percolator, or feed the PIN to Percolator yourself)."
                 );
             }
             run(Cli {
@@ -300,7 +312,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_native_percolator(args: cli::PercolatorArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_rescore(args: cli::RescoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     cli::ensure_scratch_dir(&args.temp_dir)?;
     let limit = output::MemLimit {
         bytes: args.rescore_memory_gb.saturating_mul(1 << 30),

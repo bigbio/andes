@@ -96,7 +96,7 @@ fn silac_duplex_quantifies_matches_and_transfers() {
             "--label-heavy-enrichment",
             "1",
             "--mbr",
-            "--rescore-native",
+            "--rescore",
         ])
         .output()
         .expect("run andes");
@@ -232,7 +232,7 @@ fn dimethyl_triplex_learns_shifts_and_unmixes_channels() {
             "dimethyl3",
             "--label-heavy-enrichment",
             "1",
-            "--rescore-native",
+            "--rescore",
         ])
         .output()
         .expect("run andes");

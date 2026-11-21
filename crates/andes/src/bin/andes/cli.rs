@@ -215,6 +215,12 @@ pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
         "shuffle, then restore the segment's N-X-S/T sequon count; use it with --glyco",
     ),
     (
+        "mutate",
+        "substitute one interior residue per tryptic segment of 7 or more (mass change > 1.1 Da); \
+         near-variant decoys that share most fragments with their target, for --dia on \
+         wide-window data such as diaPASEF",
+    ),
+    (
         "none",
         "no decoys: the database already holds them (--decoy-prefix, --decoy-suffix), or \
          the FDR is computed elsewhere",
@@ -577,8 +583,8 @@ pub(crate) struct SearchArgs {
     ///
     /// It sets the filtered <stem>.q<fdr>.tsv output (target PSMs at q <= this), the PSMs
     /// that quantification measures, the match-between-runs donors and the confident
-    /// anchors of --refine. andes computes q-values only with --rescore or
-    /// --rescore-native; without either, setting it warns and writes no filtered output.
+    /// anchors of --refine. andes computes q-values only with --rescore; without it,
+    /// setting it warns and writes no filtered output.
     #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) psm_fdr: Option<f64>,
 
@@ -605,12 +611,17 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "FDR", value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: Option<f64>,
 
-    /// Run Percolator on the PIN and write q-values, PEPs and the PSMs at --psm-fdr
+    /// Rescore the PIN with Percolator and write q-values, PEPs and the PSMs at --psm-fdr
     ///
     /// Percolator's PEP and q-value are joined into the outputs (QPX
     /// posterior_error_probability and a q-value score) and the filtered <stem>.q<fdr>.tsv
-    /// is written. Percolator is --percolator-bin, else `percolator` on PATH, else the
-    /// Docker image.
+    /// is written. Every Percolator pass (the main run, the per-run q-values, the PEP
+    /// repair and the scores of every PIN row) runs in process with the native engine, which
+    /// implements the Percolator algorithm (Käll et al., Nat. Methods 2007), tracks upstream
+    /// Percolator master (commit a9783ee8) and writes Percolator's output files; no Percolator binary or Docker is needed. --percolator-bin or
+    /// --percolator-docker runs an external Percolator instead. --xl does not use the native
+    /// engine: its Percolator passes always run an external Percolator, --percolator-bin,
+    /// else `percolator` on PATH, else the Docker image.
     #[arg(long, help_heading = H_FDR)]
     pub(crate) rescore: bool,
 
@@ -661,7 +672,7 @@ pub(crate) struct SearchArgs {
     #[arg(long, help_heading = H_MODES)]
     pub(crate) refine: bool,
 
-    /// Site localization of variable modifications (`ipf`); needs --rescore or --rescore-native
+    /// Site localization of variable modifications (`ipf`); needs --rescore
     ///
     /// `ipf`: inference of peptidoforms (the OpenSWATH/PyProphet hierarchical Bayesian
     /// model) over every placement of each identified PSM's variable mods, after
@@ -844,18 +855,8 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "DIR", help_heading = H_QUANT)]
     pub(crate) quant_dir: Option<PathBuf>,
 
-    /// Rescore as --rescore, with the native Percolator engine instead of the binary
-    ///
-    /// Every Percolator pass of --rescore (the main run, the per-run q-values, the PEP
-    /// repair and the scores of every PIN row) runs in process with the algorithm of
-    /// upstream Percolator master (commit a9783ee8) and Percolator's output files; no
-    /// Percolator binary or Docker is needed. Takes no --percolator-args, --percolator-bin,
-    /// --percolator-docker or --percolator-image.
-    #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
-    pub(crate) rescore_native: bool,
-
     /// Storage budget of the native Percolator engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
-    #[arg(long, value_name = "GB", default_value_t = 16,
+    #[arg(long, value_name = "GB", default_value_t = DEFAULT_RESCORE_MEMORY_GB,
           value_parser = clap::value_parser!(u64).range(1..), hide = true,
           help_heading = H_RESCORING)]
     pub(crate) rescore_memory_gb: u64,
@@ -865,20 +866,26 @@ pub(crate) struct SearchArgs {
           help_heading = H_RESCORING)]
     pub(crate) pep: Option<f64>,
 
-    /// Percolator binary [default: percolator on PATH, else the Docker image]
+    /// Run --rescore with this external Percolator binary instead of the native engine
+    ///
+    /// With --xl the default is `percolator` on PATH, else the Docker image.
     #[arg(long, value_name = "FILE", hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_bin: Option<PathBuf>,
 
-    /// Run Percolator from its Docker image (needs the docker command)
+    /// Run --rescore with Percolator from its Docker image instead of the native engine
+    ///
+    /// Needs the docker command.
     #[arg(long, hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_docker: bool,
 
-    /// Docker image of Percolator
+    /// Docker image of Percolator, with --percolator-docker or --xl
     #[arg(long, value_name = "IMAGE", default_value = output::DEFAULT_PERCOLATOR_IMAGE,
           hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_image: String,
 
-    /// Extra arguments for Percolator, e.g. "--testFDR 0.05"
+    /// Extra arguments for an external Percolator, e.g. "--testFDR 0.05"
+    ///
+    /// Only with --percolator-bin, --percolator-docker or --xl; the native engine takes none.
     #[arg(long, value_name = "ARGS", default_value = "", hide_default_value = true,
           hide_short_help = true, help_heading = H_RESCORING)]
     pub(crate) percolator_args: String,
@@ -1325,7 +1332,7 @@ pub(crate) struct SearchArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct PercolatorArgs {
+pub(crate) struct RescoreArgs {
     /// Storage budget of the engine in GB, not a process-memory cap: PIN features, PSM texts, normalised training rows and score buffers spill to --temp-dir once they would take more than their share of it; per-PSM metadata (about 160 bytes a PSM) is charged to it but always stays in memory
     #[arg(long, value_name = "GB", default_value_t = 16,
           value_parser = clap::value_parser!(u64).range(1..))]
@@ -1495,7 +1502,9 @@ pub(crate) enum QuantCommand {
     Library(QuantLibraryArgs),
     /// Measure every library precursor in one run from its MS1 table
     ///
-    /// Writes <stem>.extract.parquet.
+    /// Writes <stem>.extract.parquet. On a DIA study (runs searched with --dia --quant-dir),
+    /// scores the precursors nominated in the other runs in this run's spectra instead and
+    /// writes dia_pass2/xfer/<stem>.parquet for finalize.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's extract table
     ///
@@ -1619,7 +1628,8 @@ pub(crate) struct QuantFinalizeArgs {
     /// Quantification FDR: q-value threshold of the transfers
     ///
     /// A quantification-quality q-value, not an identification FDR. The search's
-    /// --quant-fdr gives the result of --mbr.
+    /// --quant-fdr gives the result of --mbr. In a DIA study, the reported precursor q of the
+    /// rows written to <base>.dia_quant.parquet.
     #[arg(long = "quant-fdr", value_name = "FDR", default_value = "0.01",
           value_parser = parse_unit_fraction, help_heading = H_FDR)]
     pub(crate) quant_fdr: f64,
@@ -1706,7 +1716,7 @@ pub(crate) struct QuantFinalizeArgs {
     #[arg(long = "temp-dir", value_name = "DIR")]
     pub(crate) temp_dir: Option<PathBuf>,
 
-    /// Seed of the transfer FDR folds and models and of the samples
+    /// Seed of the transfer FDR folds and models and of the samples; on a DIA study, of the learned score and the rescoring
     #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,
@@ -1729,11 +1739,20 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) threads: Option<usize>,
 }
 
+/// Default storage budget of the native Percolator engine (--rescore-memory-gb), in GB.
+pub(crate) const DEFAULT_RESCORE_MEMORY_GB: u64 = 16;
+
 pub(crate) type Cli = SearchArgs;
 
 impl SearchArgs {
     pub(crate) fn psm_fdr(&self) -> f64 {
         self.psm_fdr.unwrap_or(DEFAULT_FDR)
+    }
+
+    /// True when --rescore runs an external Percolator (--percolator-bin or
+    /// --percolator-docker) instead of the native engine.
+    pub(crate) fn external_percolator(&self) -> bool {
+        self.percolator_bin.is_some() || self.percolator_docker
     }
 
     pub(crate) fn proteoform_fdr(&self) -> f64 {
@@ -1909,7 +1928,7 @@ pub(crate) fn parse_enum<E: ValueEnum>(what: &str, s: &str, ignore_case: bool) -
 
 pub(crate) fn parse_decoy_strategy(s: &str) -> Result<DecoyStrategy, String> {
     DecoyStrategy::from_name(s).ok_or_else(|| {
-        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/none)")
+        format!("unknown --decoy-strategy '{s}' (expected shuffle/reverse/sequon/mutate/none)")
     })
 }
 
@@ -1918,6 +1937,7 @@ pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
         DecoyStrategy::Shuffle => "shuffle",
         DecoyStrategy::Reverse => "reverse",
         DecoyStrategy::Sequon => "sequon",
+        DecoyStrategy::Mutate => "mutate",
         DecoyStrategy::None => "none",
     }
 }

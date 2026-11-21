@@ -648,33 +648,43 @@ fn predict_rt_keeps_the_pin_well_formed() {
 }
 
 #[test]
-fn native_rejects_percolator_backend_flags() {
-    for flags in [
-        &["--percolator-bin", "/usr/bin/percolator"][..],
-        &["--percolator-docker"][..],
-        &["--percolator-image", "example/percolator:1"][..],
-    ] {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let out = base_cmd(
-            "test-fixtures/test.mgf.gz",
-            "test-fixtures/BSA.fasta",
-            &dir.path().join("out.pin"),
-        )
-        .arg("--rescore-native")
-        .args(flags)
-        .output()
-        .expect("run andes");
-        assert!(!out.status.success(), "{flags:?} is refused");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(&format!(
-                "native rescoring runs no Percolator binary, so {} has no effect",
-                flags[0]
-            )),
-            "stderr: {stderr}"
-        );
-        assert!(!dir.path().join("out.pin").exists());
-    }
+fn rescore_native_is_an_unknown_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("out.pin"),
+    )
+    .arg("--rescore-native")
+    .output()
+    .expect("run andes");
+    assert!(!out.status.success(), "--rescore-native is refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--rescore-native'"),
+        "stderr: {stderr}"
+    );
+    assert!(!dir.path().join("out.pin").exists());
+}
+
+#[test]
+fn native_rejects_a_percolator_image_without_docker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &dir.path().join("out.pin"),
+    )
+    .args(["--rescore", "--percolator-image", "example/percolator:1"])
+    .output()
+    .expect("run andes");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--percolator-image has no effect without --percolator-docker"),
+        "stderr: {stderr}"
+    );
+    assert!(!dir.path().join("out.pin").exists());
 }
 
 #[test]
@@ -685,14 +695,14 @@ fn native_rejects_percolator_args() {
         "test-fixtures/BSA.fasta",
         &dir.path().join("out.pin"),
     )
-    .args(["--rescore-native", "--percolator-args", "--testFDR 0.05"])
+    .args(["--rescore", "--percolator-args", "--testFDR 0.05"])
     .output()
     .expect("run andes");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains(
-            "native rescoring takes no percolator_args; drop --rescore-native to run Percolator"
+            "native rescoring takes no percolator_args; add --percolator-bin or --percolator-docker"
         ),
         "stderr: {stderr}"
     );

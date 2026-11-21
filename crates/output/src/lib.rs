@@ -54,7 +54,7 @@ pub use percolator::{
     run_percolator_with_decoys, score_all_rows, PercolatorBackend, PercolatorError, PercolatorPsm,
     PsmResultReader, PsmResultRow, RowScores, DEFAULT_PERCOLATOR_IMAGE,
 };
-pub use percolator_native::{run as run_native_percolator, MemLimit};
+pub use rescore::{run as run_native_percolator, MemLimit};
 
 pub(crate) mod percolator_enz;
 pub(crate) mod row_context;
@@ -73,6 +73,9 @@ pub use quant_out::{
 pub mod run_quant_table;
 
 pub mod extract_table;
+pub mod dia_nominee_table;
+pub mod dia_pass2_table;
+pub mod dia_quant_table;
 pub mod library_table;
 pub mod ms1_table;
 pub mod ms2_table;

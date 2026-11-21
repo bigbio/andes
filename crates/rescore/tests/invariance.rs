@@ -1,4 +1,4 @@
-use percolator_native::{run, MemLimit};
+use rescore::{run, MemLimit};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 

@@ -381,6 +381,16 @@ pub(super) fn load_search_database(
             EnzymeSpecificity::NonSpecific => 0,
         },
     };
+    if decoy_strategy == search::decoy::DecoyStrategy::Mutate
+        && (proteases.is_non_specific() || proteases.num_tolerable_termini < 2)
+    {
+        return Err(
+            "--decoy-strategy mutate needs fully specific digestion: a semi- or non-specific \
+             search reads sub-sequences of each decoy segment, and the ones without the changed \
+             residue are also target peptides. Use --decoy-strategy reverse or shuffle."
+                .into(),
+        );
+    }
     if decoy_strategy == search::decoy::DecoyStrategy::Shuffle
         && proteases.is_non_specific()
         && target_db.proteins.iter().any(|p| {
@@ -885,12 +895,16 @@ pub(super) fn resolve_search_params(
             "isobaric windowed peak filter: off (high-resolution MS2; --peak-filter WINDOW:K turns it on)"
         );
     }
+    let dia_d = cli.dia && cli.spectrum.iter().all(|p| input_format_flags(p).2);
+    let vote_filter = peak_filter.filter(|&(w, k)| dia_d && w > 0.0 && k > 0);
     scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
-        peak_filter,
+        peak_filter: if vote_filter.is_some() {
+            Some((0.0, 0))
+        } else {
+            peak_filter
+        },
     });
-    if cli.dia && cli.spectrum.iter().all(|p| input_format_flags(p).2) {
-        params.dia_vote_filter = peak_filter.filter(|&(w, k)| w > 0.0 && k > 0);
-    }
+    params.dia_vote_filter = vote_filter;
 
     params.max_missed_cleavages = if cli.glyco {
         let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);

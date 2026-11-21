@@ -293,8 +293,8 @@ deconvolving the apex scans or an empirical fragment library from the run.
 ## diaPASEF (timsTOF `.d`)
 
 Summary: the search options below (`--dia-mobility-slices 16`, `--dia-ms1-tol-ppm 8`,
-`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,050-3,100 /
-2,450-2,950 precursors at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
+`--peak-filter 100:20` for the filtered vote, MS1 recentring) find about 3,100 / 2,800 precursors
+at q ≤ 1%, against about 1,100 for the diaPASEF reader alone and about
 4,900 for DIA-NN. With reversed decoys, the measured FDP_c at q ≤ 1% is 4-5%. Near-variant decoys
 bring it to about 2%. The FDR of diaPASEF results is not calibrated yet, so andes writes a warning
 for `.d` input.
@@ -374,6 +374,7 @@ slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
 | + fragment-index top-K 300 (default 100) | 2,980 / 1.8% | 2,771 / 2.4% |
 | + vote filter 100:40 (default 100:20) | 3,103 / 1.6% | 2,668 / 2.0% |
 | Gate 8 ppm, after the fix that gives the prepass its own 25 ppm MS1 gate | 3,053 / 1.8% | 2,465 / 2.0% |
+| + scoring on every peak (the filter applies to the vote only) | **3,114 / 1.8%** | **2,802 / 1.5%** |
 | DIA-NN 2.2 | ~4,900 / 1.8% | ~4,900 / 1.7% |
 
 - The MS1 offset is measured on a first pass over 20,000 mid-mass spectra with a 25 ppm gate:
@@ -383,6 +384,15 @@ slices, filtered vote, near-variant decoys, Percolator 3 seeds (mean).
   its q ≤ 1% count is lower (2,465 against 2,928) because that cut is on a steep step of the
   q-value curve. At q ≤ 2% and 5% it finds 3,467 and 4,206 (before: 3,415 and 4,093, seed 42). A
   3,000-spectrum sample had too few confident PSMs on B18 (about 100).
+- Until the last row, `--peak-filter` also filtered the peaks for scoring: a peak outside the
+  windowed top 20 had no rank, so it could not match a fragment ion. On a FASTA of only the
+  DIA-NN precursors that andes never reports plus 300 that it does, every one of them is retrieved
+  and ranks first in at least one spectrum. With the filtered scoring they match a median of 4
+  b/y ions against 7 for the found ones, and in the full search a stronger candidate wins their
+  spectra. With scoring on every peak they match 10 ions against 12, and B18 at q ≤ 1% / 2% / 5%
+  rises from 2,454 / 3,467 / 4,206 to 2,814 / 3,662 / 4,456 (seed 42). O4 is +2% at q ≤ 1% and
+  +7% at 5%. With reversed decoys FDP_c stays at 5.0% / 5.7% (before: 4.7% / 5.5%). Wall time is
+  12-15 min per run, the same as before.
 - After calibration andes finds 63% / 60% of DIA-NN's q ≤ 1% count. Of DIA-NN's HYE
   precursors at q ≤ 1%, andes reports 56% / 51% at q ≤ 1%. 24% / 31% never reach the PIN
   (their MS1 area is 0.25-0.3 log10 lower than the ones that do), and the rest are in the PIN
@@ -401,11 +411,14 @@ near-variant FASTA has one decoy per target protein, made as described above, wi
 |---|---:|---:|
 | Near-variant FASTA, seed 7 | 3,105 / 1.7% | 2,928 / 2.3% |
 | Near-variant FASTA, seed 11 | 3,287 / 2.6% | 2,698 / 2.4% |
+| `--decoy-strategy mutate` (default seed) | 3,206 / 2.9% | 3,007 / 3.2% |
+| `--decoy-strategy mutate --decoy-seed 7` | 3,163 / 2.2% | 2,995 / 2.7% |
 | Near-variant FASTA, 2 substitutions per segment, seed 7 | 3,515 / 3.4% | 3,125 / 4.6% |
 | Near-variant FASTA, 2 substitutions per segment, seed 11 | 3,478 / 3.5% | 3,072 / 4.0% |
 
 - One decoy set against another moves FDP_c by up to 1 point at the same q ≤ 1% count, so the
-  1.7% / 2.3% of the first row is partly a lucky draw.
+  1.7% / 2.3% of the first row is partly a lucky draw. The built-in `mutate` sets and the FASTA
+  sets overlap in that range. Across the four one-substitution sets the mean is 2.3% / 2.7%.
 - At andes's top 4,000 precursors, decoys are 1.4-1.5 times the entrapment hits. Decoys that
   modelled entrapment exactly would give 1/r = 2.1, so near-variant decoys still undercount the
   wrong targets by about a third.
@@ -428,8 +441,7 @@ same length and differs at 1 or 2 residues (I = L). The winner can be a target o
 | Near-variant, 4 sets (mean), new Percolator run | none | 3,190 / 2.3% | 2,907 / 2.7% |
 | Near-variant, 4 sets (mean), new Percolator run | before Percolator (on the PIN) | 3,238 / 2.3% | 2,929 / 2.5% |
 
-The 4 near-variant sets are the two one-substitution FASTA sets above and two sets made inside
-andes with the same rule (`--decoy-strategy mutate`, a separate change). The "after" rows apply
+The 4 near-variant sets are the four one-substitution sets above. The "after" rows apply
 the rule to Percolator's PSM scores and then compute precursor q-values again. The last two rows
 run Percolator on a new PIN, so compare each row with the "none" row above it.
 
@@ -439,6 +451,37 @@ run Percolator on a new PIN, so compare each row with the "none" row above it.
   PIN, and the wrong variants that remain are those that already win their spectrum.
 - The contest and the near-variant decoys fix the same error, so their gains do not add up. The
   best combination (near-variant decoys + contest after Percolator) is still at 1.8-2.0%.
+
+### Precursors andes scores in only 1-2 spectra (offline test, B18)
+
+A DIA-NN precursor elutes in a median of 16 andes spectra: its isolation window, its RT peak
+(DIA-NN RT.Start..RT.Stop) and the 16-slice mobility slices that hold its IM. In these 16
+spectra andes keeps a PIN row for a found precursor in 5 and ranks it first in 1. For a lost
+precursor (in the PIN, but not at q ≤ 1%) it keeps a row in 1 and ranks it first in none. For an
+absent one it keeps no row. 83% of spectra fill the 10-row limit.
+
+Paired test: every DIA-NN HYE precursor against its own one-residue mutant and its own
+pseudo-reverse, read in the same 16 spectra. Share of pairs in which the true precursor has the
+higher value (0.5 = no separation), mutant / reverse:
+
+| andes class | most ions in one spectrum | ions in ≥ 3 spectra | trace correlation | co-eluting ions |
+|---|---:|---:|---:|---:|
+| found (2,297) | 0.97 / 0.99 | 0.95 / 0.98 | 0.79 / 0.90 | 0.93 / 0.98 |
+| lost (1,117) | 0.92 / 0.97 | 0.87 / 0.93 | 0.75 / 0.80 | 0.86 / 0.93 |
+| absent (1,379) | 0.85 / 0.92 | 0.81 / 0.87 | 0.69 / 0.73 | 0.79 / 0.85 |
+
+- Against its own decoys, the single best spectrum already separates the true precursor best.
+  Evidence pooled over the RT x mobility area separates it less well, not better.
+- The real competitors are other peptides. In the spectra a lost or absent precursor does not
+  win, the winner is a target in 73-76% of cases. Half of these winners are also DIA-NN
+  precursors (48% / 61%) and 11-16% are entrapment. Against a winning target, the lost
+  precursor ties (most ions in one spectrum: 8 against 8). The absent one loses (8 against 10),
+  and it loses on every pooled measure too (co-eluting ions 4 against 6).
+- So pooled evidence does not bring these precursors in. Two co-eluting real peptides share the
+  same spectra, and andes keeps only the stronger one. DIA-NN reports both. A score per
+  spectrum cannot do this. It needs each candidate to be scored on its own fragments after the
+  fragments of the stronger peptide are taken out, or a fixed slot per precursor in each
+  spectrum instead of a top-10 list.
 
 - The timsTOF model was trained with `andes train-from-search` on three public ddaPASEF runs of
   a human, yeast and E. coli benchmark set (213,326 labels). On a held-out QC ddaPASEF run of the

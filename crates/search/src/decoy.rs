@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::enzyme::Enzyme;
 use model::hash::{fnv1a64, splitmix64};
@@ -61,6 +61,7 @@ pub enum DecoyStrategy {
     Shuffle,
     Reverse,
     Sequon,
+    Mutate,
     None,
 }
 
@@ -70,6 +71,7 @@ impl DecoyStrategy {
             "reverse" | "rev" => Some(Self::Reverse),
             "shuffle" | "shuf" => Some(Self::Shuffle),
             "sequon" => Some(Self::Sequon),
+            "mutate" => Some(Self::Mutate),
             "none" | "off" => Some(Self::None),
             _ => None,
         }
@@ -86,6 +88,7 @@ pub fn decoy_db(
     let prefix = normalize_decoy_prefix(prefix);
     let proteins = match strategy {
         DecoyStrategy::None => Vec::new(),
+        DecoyStrategy::Mutate => mutated_decoys(target, &prefix, seed, proteases),
         _ if proteases.is_non_specific() => {
             whole_sequence_decoys(target, &prefix, strategy, seed, proteases)
         }
@@ -103,9 +106,124 @@ pub(crate) fn whole_sequence_decoy_db(
     let prefix = normalize_decoy_prefix(prefix);
     let proteins = match strategy {
         DecoyStrategy::None => Vec::new(),
+        DecoyStrategy::Mutate => whole_sequence_decoys(
+            target,
+            &prefix,
+            DecoyStrategy::Reverse,
+            seed,
+            &Proteases::default(),
+        ),
         _ => whole_sequence_decoys(target, &prefix, strategy, seed, &Proteases::default()),
     };
     ProteinDb { proteins }
+}
+
+const MUTATE_MIN_SEGMENT: usize = 7;
+const MUTATE_POOL: &[u8] = b"GASVTLNDQEHFYW";
+
+fn mutated_decoys(
+    target: &ProteinDb,
+    prefix: &str,
+    seed: u64,
+    proteases: &Proteases,
+) -> Vec<Protein> {
+    let segments = TargetSegments::new(target, proteases);
+    let mut protected: FxHashMap<(u64, bool), Vec<usize>> = FxHashMap::default();
+    for p in &target.proteins {
+        let sites = p.mod_sites();
+        if sites.is_empty() {
+            continue;
+        }
+        let met = has_met_cleaved_walk(p);
+        let cuts = compute_cleavage_positions(&p.sequence, proteases.primary, &proteases.extra);
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            let local = sites
+                .iter()
+                .map(|s| s.position as usize)
+                .filter(|&i| (a..b).contains(&i))
+                .map(|i| i - a);
+            let key = (fnv1a64(&p.sequence[a..b]), met && a == 0);
+            protected.entry(key).or_default().extend(local);
+        }
+    }
+    target
+        .proteins
+        .iter()
+        .map(|p| {
+            let mut sequence = p.sequence.clone();
+            let met = has_met_cleaved_walk(p);
+            let cuts = compute_cleavage_positions(&sequence, proteases.primary, &proteases.extra);
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0] as usize, w[1] as usize);
+                let seg = &p.sequence[a..b];
+                let fixed = protected
+                    .get(&(fnv1a64(seg), met && a == 0))
+                    .map_or(&[][..], Vec::as_slice);
+                if let Some((at, r)) =
+                    segment_mutation(seg, met && a == 0, fixed, seed, proteases, &segments)
+                {
+                    sequence[a + at] = r;
+                }
+            }
+            Protein {
+                accession: format!("{}_{}", prefix, p.accession),
+                description: p.description.clone(),
+                sequence,
+                annotation: p.annotation.clone(),
+            }
+        })
+        .collect()
+}
+
+fn segment_mutation(
+    seg: &[u8],
+    lead_met: bool,
+    fixed: &[usize],
+    seed: u64,
+    proteases: &Proteases,
+    targets: &TargetSegments,
+) -> Option<(usize, u8)> {
+    let m = seg.len();
+    if m < MUTATE_MIN_SEGMENT {
+        return None;
+    }
+    let mass = |r: u8| model::AminoAcid::standard(r).map(|a| a.mass);
+    let open: Vec<usize> = (1..m - 1)
+        .filter(|&i| {
+            let fixed = (lead_met && i == 1)
+                || fixed.contains(&i)
+                || proteases.makes_cut(seg[i])
+                || mass(seg[i]).is_none();
+            !fixed
+        })
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    let mut fallback = None;
+    for k in 0..=MAX_REDRAWS {
+        let h = segment_seed(seed, seg, lead_met, k);
+        let at = open[(h % open.len() as u64) as usize];
+        let old = mass(seg[at])?;
+        let pool: Vec<u8> = MUTATE_POOL
+            .iter()
+            .copied()
+            .filter(|&r| mass(r).is_some_and(|m| (m - old).abs() > 1.1) && !proteases.makes_cut(r))
+            .collect();
+        if pool.is_empty() {
+            continue;
+        }
+        let r = pool[(splitmix64(h) % pool.len() as u64) as usize];
+        let mut s = seg.to_vec();
+        s[at] = r;
+        let identity: Vec<u32> = (0..m as u32).collect();
+        if !targets.collides(&s, &identity, lead_met) {
+            return Some((at, r));
+        }
+        fallback.get_or_insert((at, r));
+    }
+    fallback
 }
 
 fn decoy_protein(p: &Protein, prefix: &str, source: Vec<u32>, proteases: &Proteases) -> Protein {
@@ -801,6 +919,82 @@ mod tests {
         Proteases {
             primary,
             ..Proteases::default()
+        }
+    }
+
+    #[test]
+    fn mutate_changes_one_interior_residue_per_long_segment() {
+        let db = make_db(&[("P1", b"PEPTIDELSAGRVLSK"), ("P2", b"MAGCTFYHRQGILW")]);
+        let d = decoys(&db, DecoyStrategy::Mutate, &Proteases::default());
+        let mass = |r: u8| model::AminoAcid::standard(r).unwrap().mass;
+        for (t, s) in db.proteins.iter().zip(&d) {
+            assert_eq!(t.sequence.len(), s.len());
+            let cuts = compute_cleavage_positions(&t.sequence, Enzyme::Trypsin, &[]);
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0] as usize, w[1] as usize);
+                let diff: Vec<usize> = (a..b).filter(|&i| t.sequence[i] != s[i]).collect();
+                if b - a < MUTATE_MIN_SEGMENT {
+                    assert!(diff.is_empty());
+                    continue;
+                }
+                assert_eq!(diff.len(), 1, "{:?}", std::str::from_utf8(s));
+                let i = diff[0];
+                assert!(i > a && i + 1 < b);
+                assert!(!(t.sequence[0] == b'M' && a == 0 && i == 1));
+                assert!(!b"KRP".contains(&s[i]));
+                assert!((mass(s[i]) - mass(t.sequence[i])).abs() > 1.1);
+            }
+        }
+        assert_eq!(d, decoys(&db, DecoyStrategy::Mutate, &Proteases::default()));
+        assert_eq!(
+            DecoyStrategy::from_name("mutate"),
+            Some(DecoyStrategy::Mutate)
+        );
+    }
+
+    #[test]
+    fn mutate_gives_a_shared_segment_one_decoy() {
+        let seg = b"AGLSTVEFK";
+        let site = |position: u32| ModSite {
+            position,
+            mass_delta: 79.96633,
+            anchor: SiteAnchor::Residue,
+        };
+        let entry = |acc: &str, open: usize| Protein {
+            accession: acc.to_string(),
+            description: String::new(),
+            sequence: [b"WWK".as_slice(), seg].concat(),
+            annotation: Some(Arc::new(ProteinAnnotation::new(
+                (1..seg.len() - 1)
+                    .filter(|&i| i != open && i != 4)
+                    .map(|i| site(3 + i as u32))
+                    .collect(),
+                None,
+            ))),
+        };
+        let db = ProteinDb {
+            proteins: vec![entry("P1", 2), entry("P2", 6)],
+        };
+        let d = decoys(&db, DecoyStrategy::Mutate, &Proteases::default());
+        let tail = |s: &[u8]| s[3..].to_vec();
+        assert_eq!(tail(&d[0]), tail(&d[1]));
+        let changed: Vec<usize> = (0..seg.len())
+            .filter(|&i| tail(&d[0])[i] != seg[i])
+            .collect();
+        assert_eq!(changed, vec![4]);
+    }
+
+    #[test]
+    fn refinement_mutate_decoys_are_reversed() {
+        let db = make_db(&[("P1", b"PEPKTIDE"), ("P2", b"ACDEFGHIK")]);
+        let d = whole_sequence_decoy_db(&db, "XXX", DecoyStrategy::Mutate, 7);
+        let r = whole_sequence_decoy_db(&db, "XXX", DecoyStrategy::Reverse, 7);
+        let seqs = |db: &ProteinDb| -> Vec<Vec<u8>> {
+            db.proteins.iter().map(|p| p.sequence.clone()).collect()
+        };
+        assert_eq!(seqs(&d), seqs(&r));
+        for (t, s) in db.proteins.iter().zip(&d.proteins) {
+            assert_ne!(t.sequence, s.sequence);
         }
     }
 

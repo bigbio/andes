@@ -199,3 +199,25 @@ fn analyzer_is_read_from_an_mzml_without_activation() {
         .unwrap_or_else(|| panic!("no model line:\n{err}"));
     assert!(model.contains("hcd_"), "{model}");
 }
+
+#[test]
+fn mutate_decoys_need_fully_specific_digestion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spectra = fixture("test-fixtures/orbitrap_lumos_120.mzML.gz");
+    for specificity in ["semi", "non-specific"] {
+        let out = search(
+            dir.path(),
+            &[&spectra],
+            &fixture("test-fixtures/BSA.fasta"),
+            &[
+                "--decoy-strategy",
+                "mutate",
+                "--enzyme-specificity",
+                specificity,
+            ],
+        );
+        let err = stderr_of(&out);
+        assert!(!out.status.success(), "{specificity}: andes ran:\n{err}");
+        assert!(err.contains("--decoy-strategy mutate"), "{err}");
+    }
+}

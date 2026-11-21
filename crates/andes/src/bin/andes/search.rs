@@ -1624,6 +1624,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             rescore_decoy_psms =
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            if cli.dia {
+                let (t, d, n) = crate::dia::precursor_q(
+                    &output_pin_path,
+                    &spectra,
+                    &mut map,
+                    &rescore_decoy_psms,
+                )?;
+                log::info!(
+                    target: "rescore",
+                    "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
+                );
+            }
             if has_site_claims {
                 row_scores = Some(
                     output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {

@@ -879,10 +879,180 @@ pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
     }
 }
 
+/// Reports precursor-level q-values for DIA: target-decoy competition over the best
+/// Percolator score of each precursor (run, peptide form, charge), with q = (D + 1) / T
+/// and monotone in the score. A row receives the q of the threshold at its own score, so
+/// keeping rows with q <= x keeps the precursors whose best row passes, at precursor FDR x.
+/// Rows Percolator did not report keep no entry. Returns the precursor counts (targets,
+/// decoys) and the number of target precursors at q <= 0.01.
+pub(crate) fn precursor_q(
+    pin: &Path,
+    spectra: &[Spectrum],
+    targets: &mut HashMap<String, output::PercolatorPsm>,
+    decoys: &HashMap<String, output::PercolatorPsm>,
+) -> Result<(usize, usize, usize), String> {
+    let table = read_pin(pin, spectra, &[])?;
+    let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    let mut lines = text.lines().filter(|l| !l.is_empty());
+    let h: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    let at = |n: &str| {
+        h.iter()
+            .position(|c| *c == n)
+            .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
+    };
+    let (c_id, c_pep) = (at("SpecId")?, at("Peptide")?);
+    let c_file = h.iter().position(|c| *c == "FileName");
+    let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
+    let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
+    for (line, r) in lines.zip(&table.rows) {
+        let x: Vec<&str> = line.split('\t').collect();
+        let id = x[c_id];
+        let psm = if r.decoy { decoys.get(id) } else { targets.get(id) };
+        let Some(score) = psm.and_then(|p| p.score) else {
+            continue;
+        };
+        let run = c_file.map_or("", |i| x[i]).to_string();
+        let peptide = if r.form == NONE {
+            x[c_pep].to_string()
+        } else {
+            format!("#{}", r.form)
+        };
+        let n = keys.len() as u32;
+        let k = *keys.entry((run, peptide, r.charge)).or_insert(n);
+        rows.push((k, score, r.decoy, id.to_string()));
+    }
+    let q = precursor_q_values(keys.len(), &rows);
+    let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();
+    let n_decoys = q.iter().filter(|p| p.is_some_and(|p| p.1)).count();
+    let passing = q.iter().flatten().filter(|p| !p.1 && p.2 <= 0.01).count();
+    let curve = q_curve(&q);
+    for (_, score, decoy, id) in &rows {
+        if *decoy {
+            continue;
+        }
+        if let Some(p) = targets.get_mut(id) {
+            p.q_value = curve_at(&curve, *score);
+        }
+    }
+    Ok((n_targets, n_decoys, passing))
+}
+
+/// Best score of each precursor and its precursor-level q: `(best score, is decoy, q)`,
+/// `None` for a key no row reached. Ties in score count decoys first.
+fn precursor_q_values(
+    n_keys: usize,
+    rows: &[(u32, f64, bool, String)],
+) -> Vec<Option<(f64, bool, f64)>> {
+    let mut best: Vec<Option<(f64, bool)>> = vec![None; n_keys];
+    for (k, score, decoy, _) in rows {
+        let b = &mut best[*k as usize];
+        if b.is_none_or(|(s, _)| *score > s) {
+            *b = Some((*score, *decoy));
+        }
+    }
+    let mut order: Vec<usize> = (0..n_keys).filter(|&i| best[i].is_some()).collect();
+    order.sort_by(|&a, &b| {
+        let (sa, da) = best[a].unwrap_or((f64::NEG_INFINITY, true));
+        let (sb, db) = best[b].unwrap_or((f64::NEG_INFINITY, true));
+        sb.total_cmp(&sa).then(db.cmp(&da))
+    });
+    let mut q = vec![1.0f64; n_keys];
+    let (mut t, mut d) = (0usize, 0usize);
+    let mut i = 0;
+    while i < order.len() {
+        let s = best[order[i]].map_or(f64::NEG_INFINITY, |b| b.0);
+        let mut j = i;
+        while j < order.len() && best[order[j]].map_or(f64::NEG_INFINITY, |b| b.0) == s {
+            if best[order[j]].is_some_and(|b| b.1) {
+                d += 1;
+            } else {
+                t += 1;
+            }
+            j += 1;
+        }
+        let fdr = ((d + 1) as f64 / t.max(1) as f64).min(1.0);
+        for &k in &order[i..j] {
+            q[k] = fdr;
+        }
+        i = j;
+    }
+    let mut running = 1.0f64;
+    for &k in order.iter().rev() {
+        running = running.min(q[k]);
+        q[k] = running;
+    }
+    best.iter()
+        .zip(q)
+        .map(|(b, qv)| b.map(|(s, d)| (s, d, qv)))
+        .collect()
+}
+
+/// Score thresholds in descending order with the precursor q at each.
+fn q_curve(q: &[Option<(f64, bool, f64)>]) -> Vec<(f64, f64)> {
+    let mut c: Vec<(f64, f64)> = q.iter().flatten().map(|p| (p.0, p.2)).collect();
+    c.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)));
+    c
+}
+
+/// The precursor q a row with this score gets: the q of the lowest precursor best score
+/// that is still at or above it; 1 below every precursor.
+fn curve_at(curve: &[(f64, f64)], score: f64) -> f64 {
+    let n = curve.partition_point(|p| p.0 >= score);
+    if n == 0 {
+        1.0
+    } else {
+        curve[n - 1].1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use onnx_infer::predictors::form::parse_peptide;
+
+    fn row(k: u32, score: f64, decoy: bool) -> (u32, f64, bool, String) {
+        (k, score, decoy, format!("r{k}_{score}"))
+    }
+
+    #[test]
+    fn precursor_q_counts_each_precursor_once() {
+        let rows = vec![
+            row(0, 10.0, false),
+            row(0, 9.0, false),
+            row(0, 8.0, false),
+            row(1, 7.0, false),
+            row(2, 6.0, true),
+            row(3, 5.0, false),
+        ];
+        let q = precursor_q_values(4, &rows);
+        assert_eq!(q[0], Some((10.0, false, 0.5)));
+        assert_eq!(q[1], Some((7.0, false, 0.5)));
+        assert_eq!(q[2], Some((6.0, true, 2.0 / 3.0)));
+        assert_eq!(q[3], Some((5.0, false, 2.0 / 3.0)));
+    }
+
+    #[test]
+    fn precursor_q_takes_the_best_row_and_counts_tied_decoys_first() {
+        let rows = vec![row(0, 3.0, false), row(0, 4.0, false), row(1, 4.0, true)];
+        let q = precursor_q_values(2, &rows);
+        assert_eq!(q[0], Some((4.0, false, 1.0)));
+        assert_eq!(q[1], Some((4.0, true, 1.0)));
+    }
+
+    #[test]
+    fn row_q_is_the_precursor_threshold_at_its_score() {
+        let q = vec![
+            Some((10.0, false, 0.1)),
+            Some((7.0, false, 0.2)),
+            Some((6.0, true, 0.3)),
+        ];
+        let curve = q_curve(&q);
+        assert_eq!(curve_at(&curve, 11.0), 1.0);
+        assert_eq!(curve_at(&curve, 10.0), 0.1);
+        assert_eq!(curve_at(&curve, 8.0), 0.1);
+        assert_eq!(curve_at(&curve, 7.0), 0.2);
+        assert_eq!(curve_at(&curve, 1.0), 0.3);
+    }
 
     #[test]
     fn coeluting_fragments_and_precursor_score_high() {

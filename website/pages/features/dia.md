@@ -19,6 +19,7 @@ flowchart TD
     D --> E["Percolator, --trainFDR 0.05"]
     E --> F["Per-run RT refinement on the<br/>first pass's confident targets"]
     F --> G["Percolator again"]
+    G --> H["Precursor-level q: best row per<br/>precursor, (D + 1) / T"]
 ```
 
 - **Window search.** A scan accepts every peptide (at every `--charge`) whose precursor m/z lies
@@ -48,6 +49,12 @@ flowchart TD
 - **Rescoring.** A DIA PIN has about ten rows per scan and few PSMs at 1%, so Percolator trains at
   `--trainFDR 0.05`. A gradient-boosted model of each run's predicted-RT residual, fitted out of
   fold on the first pass's targets at q ≤ 1%, adds `dia_rt_refined_err`, and Percolator runs again.
+- **Precursor-level q-values.** A precursor (run, peptidoform, charge) has several PSM rows across
+  the scans of its elution, so Percolator's PSM-level q undercounts errors per precursor. After
+  rescoring, each precursor is scored by its best row and target-decoy competition gives
+  q = (D + 1) / T over precursors. Every reported row carries the q of that threshold at its own
+  score, so keeping rows at q ≤ 0.01 keeps the precursors whose best row passes, at 1%
+  precursor FDR.
 - **Fragment tolerance.** On Orbitrap Astral, 7 ppm unless `--fragment-tol-*` is set: the per-run
   fragment-error measurement needs 100 confident PSMs, which a DIA sample rarely has.
 

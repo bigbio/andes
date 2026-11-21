@@ -43,14 +43,15 @@ from ms2_common import CARBAMIDOMETHYL, ITRAQ_MODS, TMT_MODS, label_of_mods, par
 # on its peptidoform (the andes column is recorded but never counts); a hard example needs MIN_VOTES_HARD.
 # Independent votes: every panel engine but andes, the submitters' identifications, and the source's own
 # identification when its engine is outside the panel and not in NO_VOTE_SOURCES (MS-GF+ is excluded
-# because andes descends from it).
+# because andes descends from it; "consensus" marks rows selected from a multi-engine consensus table,
+# whose engines vote through their own columns).
 HARD_MAX_LENGTH = 9
 HARD_EXPLAINED_QUANTILE = 0.25
 COMMON_MODS = frozenset({CARBAMIDOMETHYL, 35, 21}) | TMT_MODS | ITRAQ_MODS
 VOTE_ENGINES = ("andes", "comet", "msfragger", "sage", "maxquant")
 VOTE_SOURCES = VOTE_ENGINES + ("submitter",)
 NON_VOTING = ("andes",)
-NO_VOTE_SOURCES = ("andes", "msgf+", "msgfplus")
+NO_VOTE_SOURCES = ("andes", "msgf+", "msgfplus", "consensus")
 MIN_VOTES = 2
 MIN_VOTES_HARD = 3
 # A run is labelled TMT / iTRAQ when at least this share of its PSMs carries the tag.

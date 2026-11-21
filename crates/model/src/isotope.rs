@@ -24,6 +24,40 @@ const N_ISO: &[f64] = &[0.996_36, 0.003_64];
 const O_ISO: &[f64] = &[0.997_57, 0.000_38, 0.002_05];
 const S_ISO: &[f64] = &[0.9499, 0.0075, 0.0425, 0.0, 0.0001];
 
+/// The highest isotope peak (0 is the monoisotopic one) an instrument may have isolated
+/// for an analyte of neutral `mass`. Data-dependent selection takes the most intense peak
+/// of the envelope, M+1 or M+2 for a heavy analyte, so a selected precursor may sit on any
+/// peak from the monoisotopic one to one above the averagine envelope's most abundant (the
+/// next peak is nearly as intense when the mass sits near a change of the most abundant).
+pub fn max_isolated_isotope(mass: f64) -> usize {
+    averagine_isotope_envelope(mass, 8)
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map_or(0, |(k, _)| k)
+        + 1
+}
+
+/// The isotope peak, from the monoisotopic one (0) to `max_isotope`, that a selected
+/// precursor at `mz` sits on for an analyte of neutral `mass` at `charge`, within `tol_th`
+/// Th; `None` when it sits on none of them or `charge` is 0.
+pub fn isolated_isotope_peak(
+    mz: f64,
+    mass: f64,
+    charge: u8,
+    max_isotope: usize,
+    tol_th: f64,
+) -> Option<usize> {
+    if charge == 0 {
+        return None;
+    }
+    let z = charge as f64;
+    (0..=max_isotope).find(|&k| {
+        let target = (mass + k as f64 * crate::mass::ISOTOPE) / z + crate::mass::PROTON;
+        (mz - target).abs() <= tol_th
+    })
+}
+
 /// Averagine atoms per dalton of neutral mass: C, H, N, O, S.
 const AVERAGINE_ATOMS_PER_DA: [f64; 5] = [
     4.9384 / 111.1254,
@@ -218,6 +252,28 @@ mod tests {
         assert!(
             env[0] > env[1] && env[1] > env[2],
             "a ~1000 Da peptide's envelope should decay from the monoisotope: {env:?}"
+        );
+    }
+
+    #[test]
+    fn a_heavy_analyte_may_be_isolated_on_a_later_isotope_peak() {
+        assert_eq!(max_isolated_isotope(600.0), 1);
+        assert_eq!(max_isolated_isotope(2550.0), 2);
+        assert!(max_isolated_isotope(5000.0) >= 3);
+        let mass = 2550.26;
+        let mono = mass / 2.0 + crate::mass::PROTON;
+        let m1 = (mass + crate::mass::ISOTOPE) / 2.0 + crate::mass::PROTON;
+        let max = max_isolated_isotope(mass);
+        assert_eq!(isolated_isotope_peak(mono, mass, 2, max, 0.01), Some(0));
+        assert_eq!(isolated_isotope_peak(m1, mass, 2, max, 0.01), Some(1));
+        assert_eq!(isolated_isotope_peak(m1 + 0.02, mass, 2, max, 0.01), None);
+        assert_eq!(isolated_isotope_peak(mono, mass, 3, max, 0.01), None);
+        assert_eq!(isolated_isotope_peak(mono, mass, 0, max, 0.01), None);
+        let small = 600.0;
+        let m3 = (small + 3.0 * crate::mass::ISOTOPE) / 2.0 + crate::mass::PROTON;
+        assert_eq!(
+            isolated_isotope_peak(m3, small, 2, max_isolated_isotope(small), 0.01),
+            None
         );
     }
 

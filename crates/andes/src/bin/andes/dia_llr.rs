@@ -322,6 +322,10 @@ fn binom_tail_nlog(k: usize, m: usize, p: f64) -> f64 {
     -(mx + s.ln()).min(0.0)
 }
 
+/// Spectra whose pool-score rows are computed together before they are written into the
+/// columns, so the per-row results of the whole run are never held at once.
+const SCATTER_BLOCK: usize = 16_384;
+
 struct RowOut {
     row: u32,
     vals: [f64; COLUMNS.len()],
@@ -547,64 +551,66 @@ pub(crate) fn add_to_pin(
         .map(|k| Tables::from_counts(&counts[k ^ 1]))
         .collect();
 
-    let per_spec: Vec<Vec<RowOut>> = (0..spectra.len())
-        .into_par_iter()
-        .filter(|&s| !by_spec[s].is_empty())
-        .map(|s| {
-            let run = run_of(s).min(n_runs - 1);
-            let rows = spec_rows(s, &cals);
-            let mut outs = Vec::with_capacity(rows.len());
-            let mut terms: Vec<Vec<(f64, f64)>> = Vec::with_capacity(rows.len());
-            for (i, ions) in &rows {
-                let i = *i as usize;
-                let r = &table.rows[i];
-                let t = &tables[run * 2 + fold(r.form)];
-                let b = ms1_bin(i, run);
-                let tv: Vec<(f64, f64)> = ions.iter().map(|o| t.terms(o, b)).collect();
-                let llr: f64 = ions
-                    .iter()
-                    .zip(&tv)
-                    .map(|(o, (pos, neg))| if o.present() { *pos } else { *neg })
-                    .sum();
-                let top: Vec<&IonObs> = ions
-                    .iter()
-                    .filter(|o| o.rank <= CALIB_RANK && o.pred > 0.0)
-                    .collect();
-                let frac = if top.is_empty() {
-                    0.0
-                } else {
-                    top.iter().filter(|o| o.any()).count() as f64 / top.len() as f64
-                };
-                let hit: Vec<f64> = top
-                    .iter()
-                    .filter(|o| o.present())
-                    .map(|o| f64::from(o.ppm) - cals[run].shift_ppm)
-                    .collect();
-                let rms = if hit.is_empty() {
-                    TOL_FLOOR_PPM
-                } else {
-                    (hit.iter().map(|x| x * x).sum::<f64>() / hit.len() as f64).sqrt()
-                };
-                let k = ions.iter().filter(|o| o.any()).count();
-                let m = ions.iter().filter(|o| o.any() && o.apex_here()).count();
-                let apex = binom_tail_nlog(k, m, t.pi0);
-                outs.push(RowOut {
-                    row: i as u32,
-                    vals: [llr, apex, llr, llr, 0.0, frac, rms],
-                });
-                terms.push(tv);
-            }
-            explain_greedy(&rows, &terms, &mut outs);
-            explain_soft(&rows, &terms, &spectra[s].peaks, &mut outs);
-            outs
-        })
-        .collect();
-
     let mut values = vec![vec![0.0; n]; COLUMNS.len()];
-    for outs in &per_spec {
-        for o in outs {
-            for (c, v) in values.iter_mut().zip(o.vals) {
-                c[o.row as usize] = v;
+    for lo in (0..spectra.len()).step_by(SCATTER_BLOCK) {
+        let hi = (lo + SCATTER_BLOCK).min(spectra.len());
+        let per_spec: Vec<Vec<RowOut>> = (lo..hi)
+            .into_par_iter()
+            .filter(|&s| !by_spec[s].is_empty())
+            .map(|s| {
+                let run = run_of(s).min(n_runs - 1);
+                let rows = spec_rows(s, &cals);
+                let mut outs = Vec::with_capacity(rows.len());
+                let mut terms: Vec<Vec<(f64, f64)>> = Vec::with_capacity(rows.len());
+                for (i, ions) in &rows {
+                    let i = *i as usize;
+                    let r = &table.rows[i];
+                    let t = &tables[run * 2 + fold(r.form)];
+                    let b = ms1_bin(i, run);
+                    let tv: Vec<(f64, f64)> = ions.iter().map(|o| t.terms(o, b)).collect();
+                    let llr: f64 = ions
+                        .iter()
+                        .zip(&tv)
+                        .map(|(o, (pos, neg))| if o.present() { *pos } else { *neg })
+                        .sum();
+                    let top: Vec<&IonObs> = ions
+                        .iter()
+                        .filter(|o| o.rank <= CALIB_RANK && o.pred > 0.0)
+                        .collect();
+                    let frac = if top.is_empty() {
+                        0.0
+                    } else {
+                        top.iter().filter(|o| o.any()).count() as f64 / top.len() as f64
+                    };
+                    let hit: Vec<f64> = top
+                        .iter()
+                        .filter(|o| o.present())
+                        .map(|o| f64::from(o.ppm) - cals[run].shift_ppm)
+                        .collect();
+                    let rms = if hit.is_empty() {
+                        TOL_FLOOR_PPM
+                    } else {
+                        (hit.iter().map(|x| x * x).sum::<f64>() / hit.len() as f64).sqrt()
+                    };
+                    let k = ions.iter().filter(|o| o.any()).count();
+                    let m = ions.iter().filter(|o| o.any() && o.apex_here()).count();
+                    let apex = binom_tail_nlog(k, m, t.pi0);
+                    outs.push(RowOut {
+                        row: i as u32,
+                        vals: [llr, apex, llr, llr, 0.0, frac, rms],
+                    });
+                    terms.push(tv);
+                }
+                explain_greedy(&rows, &terms, &mut outs);
+                explain_soft(&rows, &terms, &spectra[s].peaks, &mut outs);
+                outs
+            })
+            .collect();
+        for outs in &per_spec {
+            for o in outs {
+                for (c, v) in values.iter_mut().zip(o.vals) {
+                    c[o.row as usize] = v;
+                }
             }
         }
     }

@@ -248,7 +248,7 @@ mod tests {
     fn psm(candidate_idx: u32, rank_score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![candidate_idx],
+            candidate_idxs: vec![candidate_idx].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: rank_score,

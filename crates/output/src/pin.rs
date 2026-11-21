@@ -835,7 +835,7 @@ mod tests {
     ) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![candidate_idx],
+            candidate_idxs: vec![candidate_idx].into(),
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,

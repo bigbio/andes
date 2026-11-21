@@ -51,6 +51,33 @@ ratios against the human-normalised expectation (A/B 1.078; A/C 1.688, nominal 3
 | proteins evaluated | 10,797 | 8,427 | 🟢 ahead | +28% |
 | cost, one process, 16 threads | 9.2 min; 17.8 GB | — | ⚪ not compared | |
 
+## Identification confidence in the TMT study step: PEP cut against PEP weight
+
+Setup: `andes quant finalize` on a TMT study (per-run searches without rescoring, one pooled native
+Percolator run, seed 42), the same pooled results in both arms. A: rows quantified at pooled PEP ≤ 0.05,
+weight purity² (`71962a08`, the former `--tmt-max-pep`). B: every row at PSM q ≤ 0.01 quantified,
+weight purity² × (1 − pooled PEP) (`30dd8216`). Proteins: unique peptides in a group at protein q ≤ 0.01,
+summed reporter intensity × weight per plex. Null log2 ratios are median-centred per channel pair;
+CIs are 500 bootstrap resamples over the proteins of both arms. Script: `tmt_study_precision.py`.
+2026-11-21.
+
+| dataset | metric | A: PEP ≤ 0.05 cut | B: 1 − PEP weight | verdict |
+|---|---|---:|---:|---|
+| PXD007683 (11 fractions, TMT11 SPS-MS3) | SD of null log2 ratio (126/127N, 128N/128C, 129N/129C, 130N/130C, 131N/131C), common proteins | 0.1527 | 0.1464 | 🟢 ahead: −0.0063, CI [−0.0085, −0.0043] |
+| | robust SD / share \|x\| > 0.5 | 0.0894 / 1.19 % | 0.0875 / 1.11 % | 🟢 ahead |
+| | proteins quantified | 9,769 | 9,798 | 🟡 on par: +29 |
+| GTEx PXD016999 pilot (2 plexes × 12 fractions, two instruments) | SD of log2(126/131) (both the pooled reference), common proteins | 0.1883 | 0.1851 | 🟢 ahead: −0.0031, CI [−0.0056, −0.0001] |
+| | robust SD / share \|x\| > 0.5 | 0.1190 / 2.46 % | 0.1154 / 2.30 % | 🟢 ahead |
+| | Pearson of log2(sample/reference), same sample on both instruments, common proteins (3 samples) | 0.8410 / 0.8780 / 0.8121 | 0.8403 / 0.8747 / 0.8092 | 🟡 on par: −0.0007 to −0.0033, every CI includes 0 |
+| | same, all proteins of each arm | 0.8437 (mean) | 0.8377 (mean) | 🟡 on par: B adds 97-99 proteins per sample |
+| | blank-channel share (127N, intensity-weighted) | 0.031 % | 0.031 % | 🟡 on par |
+| | proteins quantified | 8,408 | 8,444 | 🟡 on par: +36 |
+
+B quantifies the PSMs above PEP 0.05 that A dropped (PXD007683 +5,593 rows, GTEx +8,117) at a weight
+below 0.95 of their purity². Null precision improves on both sets; the cross-instrument correlation
+is unchanged within the bootstrap interval on the common proteins and slightly lower over all of B's
+proteins, which include the extra, lower-abundance ones.
+
 ## Match between runs for reporter ions (PXD014750, hrMS2)
 
 Setup: opt-in `--tmt --mbr` (hrMS2 only; refused for SPS-MS3 and ion-trap MS2). Six files (three

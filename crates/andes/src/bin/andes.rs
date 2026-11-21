@@ -18,6 +18,8 @@ mod dia_llr;
 mod dia_pass2;
 #[path = "andes/dia_score.rs"]
 mod dia_score;
+#[path = "andes/dia_xfer.rs"]
+mod dia_xfer;
 #[path = "andes/dia_xrun.rs"]
 mod dia_xrun;
 #[path = "andes/glyco_match.rs"]

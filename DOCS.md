@@ -738,6 +738,124 @@ is the best PSM per (peptidoform, charge) after target-decoy competition, as in
 1,821 precursors at 1 % true FDP against DIA-NN 2.2's 2,067 / 2,301 and OpenDIA's 1,694 / 1,628.
 Measured results and the gap to DIA-NN: [`docs/benchmarks/dia/`](docs/benchmarks/dia/README.md).
 
+#### DIA pass 2, learned score and study mode
+
+With `--dia --predict rt,ms2 --rescore`, andes does more than score single scans. The steps after
+the pool scores:
+
+1. **Pass 2.** Each (run, peptidoform, charge) is nominated by its best pool row (`dia_llr` > −15,
+   targets and decoys alike). The nominee is traced over 73 cycles of its isolation window around a
+   per-run calibration of its predicted RT, and its top 12 predicted fragments are scored per cycle
+   against per-run chance rates. The best cycle gives 27 `p2_*` columns (fragment, co-elution, MS1
+   and peak-sharing evidence). A joint model of the traces adds ten `dia_jf_*` columns: a
+   likelihood ratio over elution offset, peak shape and amplitude, learned per run from confident
+   targets and a sample of decoys.
+2. **Learned score and precursor PIN.** A precursor PIN is written beside the pass-1 PIN
+   (`<stem>.precursor.pin`) with one row per nominated precursor: the pass-2 columns, the best
+   pass-1 row of the precursor (`p1_*`, `p1_present`) and `dia_gb_score`, an out-of-fold
+   gradient-boosted score (3 folds keyed by protein, so a decoy is never scored by a model that saw
+   its source target, whatever the decoy strategy). A fold with too few positives (910 per fold)
+   or a constant score is degenerate; the score then stays at the previous round, or is left out
+   when the first round is degenerate. Percolator rescores
+   this PIN (results `<stem>.precursor.percolator.*`). Its results replace the pass-1 results only
+   when pass 2 has at least as many targets as pass 1 has precursors at q 0.01, Percolator's
+   training is not degenerate, and it reaches at least as many target precursors at q 0.01 as
+   pass 1; otherwise pass 1 is kept and the log says why. With one row per precursor,
+   Percolator's q is the precursor-level q.
+3. **RT-aware candidate cut.** Under `--dia` the fragment-index cut (best 100 forms per scan and
+   charge) ranks by votes minus a squared RT-agreement term. The RT map and its spread are fitted
+   per run on a 2 % subsample searched first. With fewer than 50 anchors (for example a model that
+   predicts RT poorly on the chemistry) the cut keeps the plain vote rank and logs it. The pool
+   re-rank uses the same term.
+
+A single run does all of this in one `andes` call and writes the pass-2 table next to the PIN
+(`<pin>.dia_pass2.parquet`, about 3.5 million rows on an Astral run).
+
+**Study mode** (two or more runs of one experiment) adds evidence across runs. Three commands, in
+this order:
+
+```bash
+# 1. per run (any machine): search, store the run's PIN, pass-2 table and nominees in q/dia_pass2/
+andes --spectrum a.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin a.pin --quant-dir q/
+andes --spectrum b.mzML --database db.fasta --dia --predict rt,ms2 --rescore \
+      --output-pin b.pin --quant-dir q/
+# 2. per run, after every search is done: transfer candidates from the other runs, re-run pass 2
+andes quant extract  --quant-dir q/ --run a
+andes quant extract  --quant-dir q/ --run b
+# 3. once: cross-run columns, learned score, rescoring, precursor q, protein groups
+andes quant finalize --quant-dir q/ -o experiment --database db.fasta [--seed 42]
+```
+
+`--dia --quant-dir` takes one input per process. Step 1 does not write the precursor PIN or the
+final results; it stores what finalize needs. Step 2 gives each run every (peptide string, charge,
+target or decoy) key that another run nominated and this run did not, from the run with the highest
+`dia_llr`, re-reads the run's spectra and scores those transferred nominees like its own. Transferred
+rows carry `xfer` 1 and `dia_llr` −50 (a flag); they are left out of the RT calibration, the chance
+rates and the joint-model fits, so the run's own nominees alone set the null. A transferred
+nominee's predicted RT is its raw andes-rt prediction through the receiving run's own calibration.
+Targets and decoys follow one rule, and a decoy key only matches the same decoy. Step 2 is
+optional: without it, finalize uses the runs' own nominees only. Run it for every run or for none;
+finalize checks that the tables belong to the study's runs and were built from the runs' current
+inputs (a run searched and stored again after step 2 makes every transfer table stale, and
+finalize names the run).
+
+Finalize compares the runs' Percolator engine and arguments (not the storage budget or the spill
+directory, which do not change results) and spills into its own `--temp-dir`, or the directory of
+the output base.
+
+Finalize adds three cross-run columns to every precursor, from the other runs' tables: `xr_max`
+(largest `p2_llr` of the same key in another run), `xr_n` (other runs where it is detected) and
+`xr_rtd` (smallest unaligned |RT difference|, capped). Per run it then writes the precursor PIN,
+rescores it with the native Percolator engine, applies the precursor-level q and infers protein
+groups across all runs. `--seed` seeds the learned score and the rescoring (default 42). The study
+needs `--database` for the protein groups and does not accept `--output-parquet`.
+
+**What the reported q means.** It is a precursor-level target-decoy q, `(D + 1) / T` over
+precursors, one row per precursor. With transfer, the q is class-wise: one competition among the
+run's own nominees and one among its transferred nominees. A user who filters at q ≤ 0.01 then gets
+about 1 % false precursors in each class. Under one pooled competition the transferred targets
+measured 2.2–2.7 % true FDP at q 0.01 while the total stayed near 1 %, so the pooled count is only
+logged. The class-wise q costs about 300–580 precursors per run against the pooled one. On the
+PB-Astral-full benchmark the own class measured 1.04–1.06 % true FDP at q 0.01 and the transferred
+class 0.90–1.28 %
+([numbers and limits](docs/benchmarks/dia/pb_full/README.md#full-stack-pass-2-learned-score-study-mode-and-transfer)).
+
+**Files.** All new tables are versioned Parquet with the schema name and version in the file
+metadata.
+
+| File | Schema | Content |
+|---|---|---|
+| `<pin>.dia_pass2.parquet` (single run) | `andes.dia_pass2.schema` 1.0 | One row per nominated precursor, targets and decoys, with the `p2_*` and `dia_jf_*` columns |
+| `<quant-dir>/dia_pass2/<stem>.pin`, `<stem>.parquet` | pass-1 PIN, `andes.dia_pass2.schema` 1.0 | A study run's pass-1 PIN and pass-2 table, with the run's rescoring settings in the metadata |
+| `<quant-dir>/dia_pass2/nominees/<stem>.parquet` | `andes.dia_nominees.schema` 1.2 | The run's nominees (precursor, predicted RT, raw andes-rt prediction and missing flag, nominating scan RT, `dia_llr`, top predicted fragments, mobility centre of the window), with the run's andes-rt calibration and `--dia-mobility-slices` in the metadata |
+| `<quant-dir>/dia_pass2/xfer/<stem>.parquet` | `andes.dia_pass2.schema` 1.0 | The pass-2 table over own and transferred nominees; column `xfer` is 1 for a transferred row |
+| `<base>.<stem>.pin` and the Percolator results beside it | PIN, Percolator output | Per run: the precursor PIN and its results with the precursor-level q |
+| `<base>.pg.parquet` | protein groups | Protein groups over all runs (with `--database`) |
+
+**Resources.** Per Astral run (15 min gradient, 3.5 million nominees): the search with `--dia
+--predict rt,ms2 --rescore --quant-dir` takes about 20 minutes and a peak of about 36 GB; the
+extract step 9 minutes and 14 GB; finalize for three runs about 65 minutes and 23 GB. The learned
+score is the largest single cost of finalize. The RT-aware cut adds about 20 % to the search time.
+Plan memory for the search step by the 36 GB peak.
+
+**Limits.**
+
+- Measured on three replicate injections of one sample only. Cross-run columns and transfer across
+  different samples, with RT drift, are not measured, and `xr_rtd` compares retention times
+  unaligned.
+- diaPASEF is untested with pass 2 and transfer. The mobility-aware window placement has a unit
+  test only.
+- The RT-aware cut needs a usable RT prediction. On chemistry that andes-rt predicts poorly it
+  falls back to the vote rank.
+- The fold key assumes a decoy protein's accession is the decoy prefix plus its target's
+  accession (true for every built-in decoy strategy). The prefix is read from the accessions.
+- Study-mode memory grows with the number of runs times the union of their nominees: each
+  extract step holds its run's own nominees plus every key nominated elsewhere, and finalize
+  holds the cross-run keys of all runs (about 24 bytes a precursor per run).
+- The transferred class of one benchmark run measured 1.28 % true FDP at q 0.01 (about 3,000
+  transferred precursors, noisy); the other two runs measured 0.90 and 0.94 %.
+
 ### Refine — secondary chemistry cascade
 
 A second pass over confident proteins, on the spectra pass 1 missed, with a **fixed tier**:

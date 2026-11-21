@@ -462,6 +462,16 @@ run Percolator on a new PIN, so compare each row with the "none" row above it.
   30-75 Th diaPASEF window can. Near-variant decoys share fragments in the same way, so they
   restore most of the calibration (table above).
 
+## Full stack on the full FASTA
+
+The full stack (pass 2, learned score, joint columns, RT-aware cut, study mode and transfer) is
+measured on the PB-Astral-full runs, not on this PAIRLIB set. With three replicate Astral runs as
+one study, andes reaches 84,271 ± 202 / 85,268 ± 102 / 84,609 ± 113 precursors at a true (entrapment)
+FDP of 1 %. DIA-NN 2.3.2 reports 85,127 / 85,238 / 85,158 at its own q ≤ 0.01. Verdicts: on par with
+DIA-NN's own-q count (99-100 %), behind it by at least 4-5 % at matched true FDP. Conditions, the
+FDP_c table, cost and limits (transferred class 1.28 % on raw01, replicate runs only, diaPASEF
+untested, about 36 GB per run): [pb_full/README.md](pb_full/README.md#full-stack-pass-2-learned-score-study-mode-and-transfer).
+
 ## Reproduce
 
 ```bash

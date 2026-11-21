@@ -1421,7 +1421,9 @@ pub(crate) enum QuantCommand {
     Library(QuantLibraryArgs),
     /// Measure every library precursor in one run from its MS1 table
     ///
-    /// Writes <stem>.extract.parquet.
+    /// Writes <stem>.extract.parquet. On a DIA study (runs searched with --dia --quant-dir),
+    /// scores the precursors nominated in the other runs in this run's spectra instead and
+    /// writes dia_pass2/xfer/<stem>.parquet for finalize.
     Extract(QuantExtractArgs),
     /// Transfer q-values and the match-between-runs tables from every run's extract table
     ///

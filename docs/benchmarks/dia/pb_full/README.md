@@ -106,6 +106,72 @@ DIA-NN 2.3.2 first pass is 82068 / 83424 / 81598 at q <= 0.01, so andes is at 79
 matched true FDP of 1 %. On raw03 main's nominal q <= 0.01 is already at 1.04-1.07 % true FDP, and the
 change does not move it. PAIRLIB was not run (its inputs are not on the cluster).
 
+## Full stack: pass 2, learned score, study mode and transfer
+
+Data as above: the full paired entrapment FASTA, the three runs `LFQ_Astral_DIA_15min_50ng_Human`
+01, 02 and 03, treated as one study. andes: per run `--dia --predict rt,ms2 --rescore --quant-dir`,
+then `andes quant extract --run <stem>` per run, then `andes quant finalize`, with finalize seeds
+42, 1, 2, 3 and 4. The q reported by andes is class-wise (own and transferred precursors each have
+their own competition). DIA-NN 2.3.2 on the same FASTA, three runs in one job. The columns are
+raw01 / raw02 / raw03.
+
+| measure | raw01 | raw02 | raw03 |
+|---|---|---|---|
+| N@FDP_c 1 %, mean ± sd over 5 finalize seeds | 84,271 ± 202 | 85,268 ± 102 | 84,609 ± 113 |
+| N@FDP_c 1 %, pooled q instead of class-wise | 84,542 | 85,652 | 85,007 |
+| N at reported q ≤ 0.01 | 84,804 | 85,591 | 84,935 |
+| FDP_c at q ≤ 0.01, all rows | 1.06 % | 1.04 % | 1.03 % |
+| FDP_c at q ≤ 0.01, own nominees | 1.06 % | 1.05 % | 1.04 % |
+| FDP_c at q ≤ 0.01, transferred (N about 3,000) | 1.28 ± 0.14 % | 0.90 ± 0.13 % | 0.94 ± 0.06 % |
+| FDP_c at q ≤ 0.005 / 0.02, all rows | 0.55 / 2.03 % | 0.52 / 2.08 % | 0.52 / 2.05 % |
+| DIA-NN 2.3.2, own q ≤ 0.01 (FDP_c 0.53 %) | 85,127 | 85,238 | 85,158 |
+| DIA-NN 2.3.2, N@FDP_c 1 % | at least 88.8k | | |
+
+Protein groups at q 0.01 over the three runs: 82,121 ± 148. DIA-NN's N@FDP_c 1 % is a lower bound:
+its report is capped at q 0.05.
+
+Verdicts:
+
+- **Against the build before this work** (about 57-58k at N@FDP_c 1 %, measured on the base of the
+  stack; the stack's own base commit was not re-measured per raw): well ahead, about +27k per run.
+  The layers add up as follows, each measured on its own and not additive in general: pool scores
+  and recentring, learned score (+7 % / +8 %), joint columns (+1.6 % / +1.8 %), RT-aware cut
+  (+3.1 % to +3.6 %), cross-run columns (about +5.0k / +4.2k), transfer (+5.5k to +6.3k).
+- **Against DIA-NN at matched true FDP of 1 %:** behind, by at least 4 to 5 % (andes is at most
+  94.9-96.0 % of DIA-NN's lower bound).
+- **Against DIA-NN's own q count:** on par, about 99-100 %.
+- **Found of the DIA-NN precursors that andes never nominated before this work** (8,934 on
+  raw01): 4,865.
+- **Error control, all rows:** slightly above nominal at q 0.01 (1.03-1.06 %). It comes from decoy
+  versus entrapment non-exchangeability that is present before Percolator; N@FDP_c 1 % accounts
+  for it.
+- **Error control, transferred class:** above nominal on raw01 (1.28 %), at or below it on raw02
+  and raw03. Under one pooled competition the transferred targets measured 2.2-2.7 % at q 0.01,
+  which is why the q is class-wise. The cost of class-wise q is about 300-580 precursors per run.
+- **Leakage:** entrapment-versus-decoy AUC of the learned score, the Percolator score among
+  transferred rows, `xfer` and the cross-run columns is 0.499-0.501 (0.4993-0.5008 on every run).
+
+Cost per Astral run (15 min gradient): search 19.7 min on one node (37.7-37.9 min on a slower node,
+same code), peak 35.3-35.8 GB; extract with transfer 8.7 min, 13.8 GB; finalize over three runs
+64.7 ± 1.2 min, 22.6 GB. The RT-aware cut adds about 20 % to the search time. The learned score
+takes about 570 s per run.
+
+Limits:
+
+- The three runs are injections of one sample. Cross-run columns and transfer across different
+  samples, with RT drift, are not measured. This is the best case for them.
+- diaPASEF is untested with pass 2 and transfer.
+- The raw01 transferred class is above nominal at every finalize seed. About 3,000 transferred
+  precursors pass per run, so E is about 20 and the estimate is noisy. A minimum class size or a
+  +1 decoy correction for the class has not been tested.
+- The per-run search peaks at about 36 GB.
+- The RT-aware cut falls back to votes when the RT prediction gives fewer than 50 anchors.
+- The layers other than the full stack were each measured with one seed or one raw in places
+  (joint columns, RT-aware cut); the full-stack numbers above use 5 finalize seeds.
+- Behind DIA-NN at matched true FDP, as stated.
+
+User description: [DOCS.md](../../../../DOCS.md), "DIA pass 2, learned score and study mode".
+
 ## Per-ion measurements (`--dia-dump`, raw01; raw02 agrees to ±0.01)
 
 Anchors are Percolator q ≤ 1 % targets. Decoy rows are all decoy rows of the 50-row pool. Ions are

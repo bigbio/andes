@@ -1165,10 +1165,122 @@ fn curve_at(curve: &[(f64, f64)], score: f64) -> f64 {
     }
 }
 
+/// Precursor-level q of every row computed within its class only: one target-decoy competition
+/// per class (rows of class `false` against each other, rows of class `true` against each
+/// other), with the rules of [`precursor_q`]. Returns the q of each row, 1 for a row whose
+/// class holds no precursor at or above its score.
+pub(crate) fn classwise_q_values(
+    n_keys: usize,
+    rows: &[(u32, f64, bool, String)],
+    class: &[bool],
+) -> Vec<f64> {
+    let mut q = vec![1.0; rows.len()];
+    for c in [false, true] {
+        let idx: Vec<usize> = (0..rows.len()).filter(|&i| class[i] == c).collect();
+        let sub: Vec<(u32, f64, bool, String)> = idx.iter().map(|&i| rows[i].clone()).collect();
+        let curve = q_curve(&precursor_q_values(n_keys, &sub));
+        for &i in &idx {
+            q[i] = curve_at(&curve, rows[i].1);
+        }
+    }
+    q
+}
+
+/// Replaces the targets' q-values of a precursor PIN by the class-wise q
+/// ([`classwise_q_values`], classes by `class_col` 0 or 1) and counts the target precursors at
+/// q <= 0.01 by class under the pooled q they had and under the class-wise q. Returns
+/// `[[pooled class 0, pooled class 1], [class-wise class 0, class-wise class 1]]`.
+pub(crate) fn precursor_q_by_class(
+    pin: &Path,
+    class_col: &str,
+    targets: &mut HashMap<String, output::PercolatorPsm>,
+    decoys: &HashMap<String, output::PercolatorPsm>,
+) -> Result<[[usize; 2]; 2], String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", pin.display());
+    let f = std::fs::File::open(pin).map_err(|e| err(&e))?;
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(f));
+    let header = lines
+        .next()
+        .ok_or_else(|| err(&"empty PIN"))?
+        .map_err(|e| err(&e))?;
+    let h: Vec<&str> = header.split('\t').collect();
+    let at = |n: &str| {
+        h.iter()
+            .position(|c| *c == n)
+            .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
+    };
+    let (c_id, c_pep, c_label, c_class) = (at("SpecId")?, at("Peptide")?, at("Label")?, at(class_col)?);
+    let charge_cols: Vec<(usize, u8)> = h
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
+        .collect();
+    let mut keys: HashMap<(String, u8), u32> = HashMap::new();
+    let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
+    let mut class: Vec<bool> = Vec::new();
+    for line in lines {
+        let line = line.map_err(|e| err(&e))?;
+        if line.is_empty() {
+            continue;
+        }
+        let x: Vec<&str> = line.split('\t').collect();
+        if x.len() <= c_pep.max(c_label).max(c_id).max(c_class) {
+            return Err(err(&"short PIN row"));
+        }
+        let decoy = x[c_label].trim() == "-1";
+        let psm = if decoy { decoys.get(x[c_id]) } else { targets.get(x[c_id]) };
+        let Some(score) = psm.and_then(|p| p.score) else {
+            continue;
+        };
+        let charge = charge_cols
+            .iter()
+            .find(|(c, _)| x.get(*c) == Some(&"1"))
+            .map_or(0, |c| c.1);
+        let n = keys.len() as u32;
+        let k = *keys.entry((x[c_pep].to_string(), charge)).or_insert(n);
+        rows.push((k, score, decoy, x[c_id].to_string()));
+        class.push(x[c_class].trim().parse::<f32>().unwrap_or(0.0) > 0.5);
+    }
+    let q = classwise_q_values(keys.len(), &rows, &class);
+    let mut counts = [[0usize; 2]; 2];
+    for (i, (_, _, decoy, id)) in rows.iter().enumerate() {
+        if *decoy {
+            continue;
+        }
+        let c = usize::from(class[i]);
+        if let Some(p) = targets.get_mut(id) {
+            counts[0][c] += usize::from(p.q_value <= 0.01);
+            counts[1][c] += usize::from(q[i] <= 0.01);
+            p.q_value = q[i];
+        }
+    }
+    Ok(counts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use onnx_infer::predictors::form::parse_peptide;
+
+    #[test]
+    fn classwise_q_competes_within_each_class() {
+        let rows = vec![
+            row(0, 10.0, false),
+            row(1, 9.0, true),
+            row(2, 8.0, false),
+            row(3, 7.0, false),
+            row(4, 6.0, true),
+        ];
+        let class = [false, true, false, true, false];
+        let q = classwise_q_values(5, &rows, &class);
+        assert!((q[0] - 0.5).abs() < 1e-12, "{}", q[0]);
+        assert!((q[2] - 0.5).abs() < 1e-12, "{}", q[2]);
+        assert_eq!(q[3], 1.0);
+        let pooled = classwise_q_values(5, &rows, &[false; 5]);
+        for i in [0, 2, 3] {
+            assert!((pooled[i] - 2.0 / 3.0).abs() < 1e-12, "pooled q[{i}] = {}", pooled[i]);
+        }
+    }
 
     fn row(k: u32, score: f64, decoy: bool) -> (u32, f64, bool, String) {
         (k, score, decoy, format!("r{k}_{score}"))

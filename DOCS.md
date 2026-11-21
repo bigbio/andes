@@ -1199,8 +1199,9 @@ andes inference \
   and the decoy groups at or below it, so the decoys show the FDR at the cut. `--protein-fdr 1`
   keeps every group.
 - `pg.parquet`: one row per target group and per decoy group that won its family's competition
-  (`is_decoy`), at or below the cut, with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else one name
-  per `--psms` file), `global_qvalue` (the protein q-value), `pg_qvalue` (only for one run),
+  (`is_decoy`), at or below the cut, with `pg_accessions`, `anchor_protein`, `grouped_runs` (`--runs`, else the runs in
+  the `--psms` files' `FileName` column, so a pooled result lists every run, or one name per file without that
+  column), `global_qvalue` (the protein q-value), `pg_qvalue` (only for one run),
   `peptides` (peptides per accession), `peptide_counts`, the best peptide score in
   `additional_scores` and families, PSMs, razor peptides and subsumed families in `cv_params`.
 

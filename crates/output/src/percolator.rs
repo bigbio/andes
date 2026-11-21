@@ -1023,6 +1023,8 @@ pub struct PsmResultRow<'a> {
     pub pep: f64,
     pub score: Option<f64>,
     pub peptide: &'a str,
+    /// The run (spectrum file) column a pooled result carries, `FileName` or `filename`.
+    pub run: Option<&'a str>,
     protein_fields: Vec<&'a str>,
 }
 
@@ -1041,6 +1043,7 @@ struct ResultColumns {
     peptide: usize,
     proteins: usize,
     score: Option<usize>,
+    run: Option<usize>,
 }
 
 impl ResultColumns {
@@ -1070,6 +1073,7 @@ impl ResultColumns {
             peptide: find("peptide")?,
             proteins: find("proteinIds")?,
             score: cols.iter().position(|c| *c == "score"),
+            run: cols.iter().position(|c| c.eq_ignore_ascii_case(RUN_COLUMN)),
         })
     }
 
@@ -1101,6 +1105,7 @@ impl ResultColumns {
             pep,
             score,
             peptide: fields[self.peptide],
+            run: self.run.and_then(|c| fields.get(c)).copied(),
             protein_fields,
         })
     }
@@ -1284,6 +1289,7 @@ mod tests {
             ("a_1_1", Some(2.5), "R.PEPTIDEK.A")
         );
         assert_eq!(a.proteins(), "sp|P1;sp|P2");
+        assert_eq!(a.run, None);
         let b = r.next_row().unwrap().unwrap();
         assert_eq!((b.psm_id, b.q_value, b.pep), ("b_1_1", 0.02, 0.03));
         assert_eq!(b.proteins(), "");
@@ -1391,6 +1397,11 @@ mod tests {
                     sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGTPEPK.L\tDECOY_x\n";
         let m = parse_psm_results(text).unwrap();
         let r = &m["sc_5_1"];
+        let mut rows = PsmResultReader::new(text.as_bytes()).unwrap();
+        assert_eq!(rows.next_row().unwrap().unwrap().run, Some("run.mzML"));
+        let lower = text.replacen("FileName", "filename", 1);
+        let mut rows = PsmResultReader::new(lower.as_bytes()).unwrap();
+        assert_eq!(rows.next_row().unwrap().unwrap().run, Some("run.mzML"));
         assert_eq!(r.q_value, 0.004);
         assert_eq!(r.pep, 0.002);
         assert_eq!(r.peptide, "K.SAGTPEPK.L");

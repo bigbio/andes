@@ -1373,7 +1373,8 @@ pub(crate) struct InferenceArgs {
     #[command(flatten)]
     pub(crate) proteins: ProteinArgs,
 
-    /// Run names of the groups' grouped_runs [default: one per --psms file, named after it]
+    /// Run names of the groups' grouped_runs [default: the runs in the --psms files' FileName
+    /// column; one per file, named after it, for a file without that column]
     #[arg(long = "runs", value_name = "NAME", num_args = 1..)]
     pub(crate) runs: Vec<String>,
 

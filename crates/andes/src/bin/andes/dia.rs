@@ -40,7 +40,8 @@ const FRAG_PPM: f64 = 20.0;
 const SUM_PPM: f64 = 10.0;
 const MS1_PPM: f64 = 10.0;
 pub(crate) const FRAGMENT_TOL_PPM: f64 = 7.0;
-pub(crate) const RERANK_POOL: u32 = 50;
+/// Rows kept per scan in the search, before the pool scores re-rank them down to `--top-n`.
+pub(crate) const RERANK_POOL: u32 = 100;
 const RERANK_FEATURE: &str = "andesms2_spectral_angle";
 
 fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {

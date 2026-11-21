@@ -714,7 +714,14 @@ alike:
 | `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
 | `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
 | `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
+| `dia_llr` | With `--predict ms2` (`crates/andes/src/bin/andes/dia_llr.rs`): log-likelihood ratio of the row's predicted b/y ions being present in the scan against chance. P(present \| true) is learned per run from the confident rows by predicted-intensity rank and MS1 intensity quartile, P(present \| chance) from the decoy rows by ion length, m/z and charge, each on one half of the peptidoforms and applied to the other half. |
+| `dia_apex_llr` | `−ln P(X ≥ m)`, binomial: how many of the ions seen in the scan or an adjacent cycle peak in this scan, against the decoy rows' share. |
+| `dia_ion_frac`, `dia_ppm_rms` | Per-ion presence: share of the row's six top predicted ions seen in the scan or an adjacent cycle, and the RMS ppm error of those seen in the scan after the run's fragment shift (median error of the confident rows' top ions, learned per run) is removed. |
+| `dia_llr_greedy`, `dia_llr_soft`, `dia_angle_soft` | Explaining away within a scan: the greedy LLR after the peaks of better rows are taken out, the LLR with each matched peak's intensity shared among the rows that match it, and the spectral angle against those shared intensities. |
 
+With `--predict ms2`, `--dia` keeps 100 rows per scan in the search, scores every one with the five
+`dia_llr*` columns, and then trims each scan to `--top-n` rows by z(RawScore) + z(andes-ms2 spectral
+angle), so the scores reach Percolator for the whole pool and the trimmed PIN keeps their columns.
 Use `--rescore` (Percolator) on the PIN, and `--predict rt,ms2` for predicted RT and fragment
 intensities. With `--dia`, `--rescore` passes Percolator `--trainFDR 0.05` unless
 `--percolator-args` sets `--trainFDR` (on the Astral benchmark +139 / +17 precursors at 1 % true FDP

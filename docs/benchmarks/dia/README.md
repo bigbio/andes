@@ -99,6 +99,13 @@ true (entrapment) FDP of 1 %, a ranking measure that does not depend on how q-va
   by RawScore 1801 / 1861; keep 100, RawScore + angle 1832 / 1867; keep 50, RawScore + angle
   1833 / 1884. Cost: search plus prediction 1.0 → 2.0 min, peak memory 13 → 15 GB per run
   (keeping 100 rows took 49 GB).
+- **Pool scores and a pool of 100 rows** (2026-11-18, kept; measured on the full ProteoBench entrapment
+  FASTA, not PAIRLIB, in [`pb_full/`](pb_full/README.md)). The pool is now 100 rows per scan, and
+  every row carries five fragment-evidence scores (`dia_llr`, `dia_apex_llr`, `dia_llr_greedy`,
+  `dia_llr_soft`, `dia_angle_soft`) as Percolator features. N@FDP_c 1 % over 5 seeds: 65055 / 66366 /
+  65237 on raw01 / raw02 / raw03 against 57413 / 58167 / 57426 for main, higher on 5 of 5 seeds on each
+  raw; peak memory 20.1 → 29.6 GB, search 19.7 → 23.8 min on raw01.
+
 - **Soft MS1 gate** (not kept). Letting a gate-failing candidate through when it has at least *v*
   fragment-index votes (the gate-failing misses match a median of 7 ions at DIA-NN's peak, and for
   about 75 % of them DIA-NN has no MS1 apex either). Slice, with re-ranking, DIA-NN precursors in the

@@ -36,6 +36,13 @@ struct Source {
     ms2: bool,
 }
 
+/// Predicted fragment intensities of the first MS2 source, kept for the DIA pool scores.
+/// `by_form[(form, charge)]` holds one value per cleavage site and ion of `ions`, site-major.
+pub(crate) struct PredictedMs2 {
+    pub(crate) ions: Vec<onnx_infer::predictors::spectral::Ion>,
+    pub(crate) by_form: HashMap<(Form, u8), Vec<f32>>,
+}
+
 pub(crate) struct Predictors {
     sources: Vec<Source>,
     tol: FragmentTolerance,
@@ -213,6 +220,10 @@ impl Predictors {
         }))
     }
 
+    pub(crate) fn tolerance(&self) -> FragmentTolerance {
+        self.tol
+    }
+
     pub(crate) fn needs_peaks(&self) -> bool {
         self.sources.iter().any(|s| s.ms2)
     }
@@ -258,12 +269,15 @@ impl Predictors {
         cols
     }
 
+    /// Adds the predicted-feature columns to the PIN; with `keep_ms2`, also returns the first
+    /// MS2 source's predictions.
     pub(crate) fn add_to_pin(
         &self,
         pin: &Path,
         spectra: &[Spectrum],
         run_ends: &[usize],
-    ) -> Result<(), String> {
+        keep_ms2: bool,
+    ) -> Result<Option<PredictedMs2>, String> {
         let t0 = Instant::now();
         let c0 = process_cpu_seconds();
         let new_cols = self.columns();
@@ -287,12 +301,15 @@ impl Predictors {
 
         let mut blocks: Vec<(Vec<Vec<f64>>, Vec<f64>)> = Vec::new();
         let mut report: Vec<String> = Vec::new();
+        let mut kept: Option<PredictedMs2> = None;
         for src in &self.sources {
             let pred = src.pred.as_ref();
             let mut miss = vec![false; n];
             let mut cols: Vec<Vec<f64>> = Vec::new();
             if src.ms2 {
-                let (ms2_cols, msg) = self.ms2_block(src, &table, spectra, run_ends, &mut miss)?;
+                let keep = (keep_ms2 && kept.is_none()).then_some(&mut kept);
+                let (ms2_cols, msg) =
+                    self.ms2_block(src, &table, spectra, run_ends, &mut miss, keep)?;
                 cols.extend(ms2_cols);
                 report.push(msg);
             }
@@ -393,7 +410,7 @@ impl Predictors {
             t0.elapsed().as_secs_f64(),
             process_cpu_seconds() - c0
         );
-        Ok(())
+        Ok(kept)
     }
 
     fn predict_rt(&self, src: &Source, forms: &[(Form, Mass)]) -> Result<Vec<f32>, String> {
@@ -433,6 +450,7 @@ impl Predictors {
         spectra: &[Spectrum],
         run_ends: &[usize],
         miss: &mut [bool],
+        keep: Option<&mut Option<PredictedMs2>>,
     ) -> Result<(Vec<Vec<f64>>, String), String> {
         let pred = src.pred.as_ref();
         let forms = &table.forms;
@@ -512,6 +530,8 @@ impl Predictors {
             v
         };
         let out = Mutex::new(vec![vec![f64::NAN; table.rows.len()]; width]);
+        let kept_pred: Option<Mutex<Vec<Vec<f32>>>> =
+            keep.is_some().then(|| Mutex::new(vec![Vec::new(); fz.len()]));
         let t = Instant::now();
         run_parallel(&src.sessions, self.threads, &jobs, |s, job| {
             let items: Vec<(&Form, u8)> = job
@@ -533,6 +553,13 @@ impl Predictors {
                     c[row as usize] = x;
                 }
             }
+            drop(g);
+            if let Some(kp) = &kept_pred {
+                let mut g = kp.lock().expect("MS2 prediction lock");
+                for (&i, x) in job.iter().zip(v) {
+                    g[i] = x;
+                }
+            }
             Ok(())
         })?;
         let cols = out.into_inner().expect("MS2 output lock");
@@ -550,6 +577,17 @@ impl Predictors {
             fz.len(),
             jobs.len()
         );
+        if let (Some(slot), Some(kp)) = (keep, kept_pred) {
+            let by_form = fz
+                .iter()
+                .zip(kp.into_inner().expect("MS2 prediction lock"))
+                .map(|(&(f, z), v)| ((forms[f as usize].0.clone(), z), v))
+                .collect();
+            *slot = Some(PredictedMs2 {
+                ions: pred.ions().to_vec(),
+                by_form,
+            });
+        }
         Ok((cols, msg))
     }
 }
@@ -769,7 +807,11 @@ pub(crate) fn read_pin(
     })
 }
 
-fn anchor_rows(rows: &[PinRow], n_runs: usize, run_of: &dyn Fn(u32) -> usize) -> Vec<Vec<usize>> {
+pub(crate) fn anchor_rows(
+    rows: &[PinRow],
+    n_runs: usize,
+    run_of: &dyn Fn(u32) -> usize,
+) -> Vec<Vec<usize>> {
     let mut best: HashMap<u32, usize> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
         if r.spec == NONE {
@@ -1173,7 +1215,9 @@ mod tests {
             batch: 7,
             dia: false,
         };
-        preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
+        preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .unwrap();
         let out = std::fs::read_to_string(&pin).unwrap();
         let mut lines = out.lines();
         assert_eq!(
@@ -1190,13 +1234,17 @@ mod tests {
             assert!(d.is_finite() && d >= 0.0);
         }
         assert!(!dir.path().join("x.pin.predict.tmp").exists());
-        assert!(preds.add_to_pin(&pin, &spectra, &[spectra.len()]).is_err());
+        assert!(preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .is_err());
 
         std::fs::write(&pin, &text).unwrap();
         for s in &mut spectra {
             s.rt_seconds = None;
         }
-        preds.add_to_pin(&pin, &spectra, &[spectra.len()]).unwrap();
+        preds
+            .add_to_pin(&pin, &spectra, &[spectra.len()], false)
+            .unwrap();
         let out = std::fs::read_to_string(&pin).unwrap();
         let mut lines = out.lines();
         assert_eq!(

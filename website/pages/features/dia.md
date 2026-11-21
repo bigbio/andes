@@ -14,7 +14,7 @@ look for each precursor's fragment chromatograms instead.
 ```mermaid
 flowchart TD
     A["Each MS2 scan: candidates are the peptides<br/>whose m/z lies in its isolation window"] --> B["MS1 gate: the monoisotopic m/z has a<br/>survey peak within 5 ppm, nearest scan ±1"]
-    B --> C["Fragment-ion retrieval and andes scoring<br/>top 50 rows per scan, trimmed to 10 by<br/>score + predicted-MS2 angle"]
+    B --> C["Fragment-ion retrieval and andes scoring<br/>top 100 rows per scan, five LLR scores each,<br/>trimmed to 10 by score + predicted-MS2 angle"]
     C --> D["16 DIA columns from the neighbouring cycles<br/>of the same window: fragment and MS1<br/>co-elution, summed apex, support"]
     D --> E["Percolator, --trainFDR 0.05"]
     E --> F["Per-run RT refinement on the<br/>first pass's confident targets"]
@@ -31,10 +31,16 @@ flowchart TD
   the same window, together with the precursor's MS1 trace and isotope pattern; the summed-apex
   columns count fragments present in at least two of three adjacent cycles, which is what
   separates weak true precursors that span only 1–3 scans.
-- **Re-ranking.** With `--predict ms2` the search keeps 50 rows per scan, and after prediction each
+- **Re-ranking.** With `--predict ms2` the search keeps 100 rows per scan, and after prediction each
   scan keeps its `--top-n` (10) rows by z-scored RawScore plus z-scored andes-ms2 spectral angle.
   In 45% of the scans where a true precursor ranked below first, the winner was a decoy, and the
   true peptide's predicted-MS2 angle was usually higher.
+- **Pool scores.** Before that cut, each of the 100 rows gets five scores from its predicted b/y
+  ions: a likelihood ratio of their presence in the scan against chance (learned per run from the
+  confident rows and the decoy rows, each on half of the peptidoforms and applied to the other
+  half), a same-apex term over the neighbouring cycles, and three variants that explain peaks away
+  between the rows of one scan. They are Percolator features (`dia_llr`, `dia_apex_llr`,
+  `dia_llr_greedy`, `dia_llr_soft`, `dia_angle_soft`).
 - **Summed-spectrum and elution-profile columns.** With `--predict ms2`, each row also gets the
   predicted-MS2 angle of the apex±1 summed spectrum and of its top 8 predicted fragments projected
   on their median elution profile, plus how well those fragments follow that profile. Weak

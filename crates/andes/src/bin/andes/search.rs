@@ -1513,11 +1513,22 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "done in {:.2} s",
         t_total.elapsed().as_secs_f64()
     );
+    let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
     if let Some(p) = &predictors {
-        p.add_to_pin(&output_pin_path, &spectra, &run_ends)?;
+        let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
+        if let Some(predicted) = kept.filter(|_| pooled) {
+            crate::dia_llr::add_to_pin(
+                &output_pin_path,
+                &spectra,
+                &run_ends,
+                &dia_ms1,
+                &predicted,
+                p.tolerance(),
+            )?;
+        }
     }
     let mut rerank_dropped = std::collections::HashSet::new();
-    if cli.dia && params.top_n_psms_per_spectrum > cli.top_n {
+    if pooled {
         rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
     }
     if cli.dia {

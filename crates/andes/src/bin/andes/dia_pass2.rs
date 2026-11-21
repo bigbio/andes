@@ -109,6 +109,7 @@ pub(crate) struct Nominee {
     pub(crate) seq: Box<str>,
     pub(crate) peptide: Box<str>,
     pub(crate) proteins: Box<str>,
+    pub(crate) spec_id: Box<str>,
 }
 
 /// Pass-2 columns of the nominees, in `COLUMNS` order; rows outside every isolation window
@@ -154,7 +155,7 @@ pub(crate) fn nominate(
     let out = want
         .par_iter()
         .zip(fields.into_par_iter())
-        .map(|(&i, (pred_rt, rt_missing, peptide, proteins))| {
+        .map(|(&i, (pred_rt, rt_missing, peptide, proteins, spec_id))| {
             let r = &table.rows[i];
             let (form, mass) = &table.forms[r.form as usize];
             let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
@@ -191,6 +192,7 @@ pub(crate) fn nominate(
                 seq: form.seq.as_str().into(),
                 peptide: peptide.into(),
                 proteins: proteins.into(),
+                spec_id: spec_id.into(),
             }
         })
         .filter(|n| !n.ions.is_empty())
@@ -198,9 +200,15 @@ pub(crate) fn nominate(
     Ok(out)
 }
 
-/// Predicted RT, its missing flag, Peptide and Proteins of the wanted PIN rows (sorted row
-/// indices).
-fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, bool, String, String)>, String> {
+/// Predicted RT, its missing flag, Peptide, Proteins and SpecId of a PIN row.
+type PinFields = (f64, bool, String, String, String);
+
+/// Predicted RT, its missing flag, Peptide, Proteins and SpecId of the wanted PIN rows (sorted
+/// row indices).
+fn pin_fields(
+    pin: &Path,
+    want: &[usize],
+) -> Result<Vec<PinFields>, String> {
     let f = std::fs::File::open(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = BufReader::new(f).lines();
     let header = lines
@@ -213,7 +221,8 @@ fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, bool, String, Stri
             .position(|c| *c == n)
             .ok_or_else(|| format!("{}: PIN has no {n} column", pin.display()))
     };
-    let (c_rt, c_miss, c_pep, c_prot) = (
+    let (c_id, c_rt, c_miss, c_pep, c_prot) = (
+        at("SpecId")?,
         at("andesrt_predicted_rt")?,
         at("andesrt_missing")?,
         at("Peptide")?,
@@ -240,6 +249,7 @@ fn pin_fields(pin: &Path, want: &[usize]) -> Result<Vec<(f64, bool, String, Stri
                 x[c_miss].trim().parse::<f64>() != Ok(0.0),
                 x[c_pep].to_string(),
                 x[c_prot..].join(";"),
+                x[c_id].to_string(),
             ));
             w += 1;
         }
@@ -853,7 +863,7 @@ pub(crate) fn run(
     ms1: &[Vec<model::scan::Ms1Scan>],
     pool: &crate::dia_llr::PoolScores,
     predicted: &PredictedMs2,
-) -> Result<Pass2, String> {
+) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
     let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
     let idx: Vec<Option<Ms1RunIndex>> = ms1
@@ -873,7 +883,7 @@ pub(crate) fn run(
         path.display(),
         t0.elapsed().as_secs_f64()
     );
-    Ok(p2)
+    Ok(table)
 }
 
 /// The rows inside an isolation window as the versioned pass-2 table.
@@ -882,6 +892,7 @@ pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia_pass2_table:
     let keep: Vec<usize> = (0..noms.len()).filter(|&i| ok[i] > 0.0).collect();
     let pick = |f: &dyn Fn(&Nominee) -> String| keep.iter().map(|&i| f(&noms[i])).collect();
     output::dia_pass2_table::Pass2Table {
+        spec_id: pick(&|n| n.spec_id.to_string()),
         run: keep.iter().map(|&i| noms[i].run).collect(),
         decoy: keep.iter().map(|&i| noms[i].decoy).collect(),
         charge: keep.iter().map(|&i| noms[i].charge).collect(),
@@ -948,6 +959,7 @@ mod tests {
             seq: "PEPTIDEK".into(),
             peptide: "-.PEPTIDEK.-".into(),
             proteins: "P1".into(),
+            spec_id: "s_1_1".into(),
         }
     }
 

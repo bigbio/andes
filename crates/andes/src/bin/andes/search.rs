@@ -1514,6 +1514,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
+    let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         if let Some(predicted) = kept.filter(|_| pooled) {
@@ -1525,7 +1526,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
-            crate::dia_pass2::run(&output_pin_path, &spectra, &run_ends, &dia_ms1, &pool, &predicted)?;
+            dia_pass2 = Some(crate::dia_pass2::run(
+                &output_pin_path,
+                &spectra,
+                &run_ends,
+                &dia_ms1,
+                &pool,
+                &predicted,
+            )?);
         }
     }
     let mut rerank_dropped = std::collections::HashSet::new();
@@ -1572,6 +1580,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .is_some_and(|a| !a.site_claims.is_empty())
     });
     let mut row_scores: Option<output::RowScores> = None;
+    let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
         if use_percolator {
             let backend = if use_native {
@@ -1613,6 +1623,73 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
             }
+            let path = output::decoy_results_path(&output_pin_path);
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            rescore_decoy_psms =
+                output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut pass1_q = 0;
+            let mut pass1_best = Vec::new();
+            if cli.dia {
+                let ((t, d, n), best) = crate::dia::precursor_q(
+                    &output_pin_path,
+                    &spectra,
+                    &mut map,
+                    &rescore_decoy_psms,
+                )?;
+                pass1_q = n;
+                pass1_best = best;
+                log::info!(
+                    target: "rescore",
+                    "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
+                );
+            }
+            let mut results_pin = output_pin_path.clone();
+            if let Some(t) = dia_pass2.take() {
+                let seed = crate::dia_score::percolator_seed(&user_args);
+                let rescore = |pin: &Path| -> Result<crate::dia_score::Rescored, String> {
+                    let (targets, decoy_ids) =
+                        output::run_percolator_with_decoys(&backend, pin, &extra)
+                            .map_err(|e| format!("{e}"))?;
+                    let path = output::decoy_results_path(pin);
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    let decoys = output::parse_psm_results(&text)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    Ok(crate::dia_score::Rescored {
+                        targets,
+                        decoy_ids,
+                        decoys,
+                    })
+                };
+                match crate::dia_score::rescore_precursors(
+                    &output_pin_path,
+                    &t,
+                    seed,
+                    &pass1_best,
+                    rescore,
+                ) {
+                    Ok(r) => {
+                        log::info!(
+                            target: "dia",
+                            "precursor PIN used: {} target precursors at q <= 0.01 (pass 1: \
+                             {pass1_q}), {} degenerate learned-score folds",
+                            r.n_q,
+                            r.ids.degenerate_folds
+                        );
+                        map = r.rescored.targets;
+                        decoys = r.rescored.decoy_ids;
+                        rescore_decoy_psms = r.rescored.decoys;
+                        dia_replaced = r.replaced;
+                        dia_precursor_ids = r.ids.targets.into_iter().chain(r.ids.decoys).collect();
+                        results_pin = r.pin;
+                    }
+                    Err(why) => log::info!(
+                        target: "dia",
+                        "pass-1 results kept, the precursor PIN is not used: {why}"
+                    ),
+                }
+            }
             rescore_decoys = Some(decoys);
             log::info!(
                 target: "rescore",
@@ -1620,32 +1697,15 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );
-            let path = output::decoy_results_path(&output_pin_path);
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            rescore_decoy_psms =
-                output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-            if cli.dia {
-                let (t, d, n) = crate::dia::precursor_q(
-                    &output_pin_path,
-                    &spectra,
-                    &mut map,
-                    &rescore_decoy_psms,
-                )?;
-                log::info!(
-                    target: "rescore",
-                    "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
-                );
-            }
             if has_site_claims {
                 row_scores = Some(
-                    output::score_all_rows(&backend, &output_pin_path, &extra).map_err(|e| {
+                    output::score_all_rows(&backend, &results_pin, &extra).map_err(|e| {
                         format!("scoring every PIN row for the site posteriors: {e}")
                     })?,
                 );
             }
             if cli.mbr {
-                mbr_source = format!("the Percolator results of {}", output_pin_path.display());
+                mbr_source = format!("the Percolator results of {}", results_pin.display());
             }
             Some(map)
         } else {
@@ -2045,6 +2105,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     knockoff_rows.extend(rerank_dropped);
+    if !dia_precursor_ids.is_empty() {
+        knockoff_rows.extend(dia_replaced);
+        knockoff_rows.retain(|id| !dia_precursor_ids.contains(id));
+    }
     if let Some(ref parquet_dir) = cli.output_parquet {
         let run_id = spectrum_path
             .file_stem()

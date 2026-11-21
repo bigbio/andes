@@ -879,18 +879,22 @@ pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
     }
 }
 
+/// Precursor counts of [`precursor_q`] and the best `(score, is decoy)` of every precursor.
+pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
+
 /// Reports precursor-level q-values for DIA: target-decoy competition over the best
 /// Percolator score of each precursor (run, peptide form, charge), with q = (D + 1) / T
 /// and monotone in the score. A row receives the q of the threshold at its own score, so
 /// keeping rows with q <= x keeps the precursors whose best row passes, at precursor FDR x.
 /// Rows Percolator did not report keep no entry. Returns the precursor counts (targets,
-/// decoys) and the number of target precursors at q <= 0.01.
+/// decoys, target precursors at q <= 0.01) and the best `(score, is decoy)` of every precursor,
+/// for comparing the run's precursor-level target-decoy curve at other q-values.
 pub(crate) fn precursor_q(
     pin: &Path,
     spectra: &[Spectrum],
     targets: &mut HashMap<String, output::PercolatorPsm>,
     decoys: &HashMap<String, output::PercolatorPsm>,
-) -> Result<(usize, usize, usize), String> {
+) -> Result<PrecursorQ, String> {
     let table = read_pin(pin, spectra, &[])?;
     let text = std::fs::read_to_string(pin).map_err(|e| format!("{}: {e}", pin.display()))?;
     let mut lines = text.lines().filter(|l| !l.is_empty());
@@ -934,7 +938,8 @@ pub(crate) fn precursor_q(
             p.q_value = curve_at(&curve, *score);
         }
     }
-    Ok((n_targets, n_decoys, passing))
+    let best = q.iter().flatten().map(|p| (p.0, p.1)).collect();
+    Ok(((n_targets, n_decoys, passing), best))
 }
 
 /// Best score of each precursor and its precursor-level q: `(best score, is decoy, q)`,

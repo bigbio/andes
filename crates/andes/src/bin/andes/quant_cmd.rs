@@ -1662,6 +1662,16 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     if !dia_runs.is_empty() {
         return crate::dia_xrun::finalize(&a, &dia_runs);
     }
+    if !a
+        .quant_dir
+        .join(output::library_table::LIBRARY_FILE)
+        .is_file()
+    {
+        let tables = crate::tmt_study::study_tables(&a.quant_dir, &a.output)?;
+        if !tables.is_empty() {
+            return crate::tmt_study::finalize(&a, &tables);
+        }
+    }
     let stored = read_library(&a.quant_dir)?;
     let fingerprint = library_fingerprint(&stored);
     let mut paths = Vec::with_capacity(stored.runs.len());

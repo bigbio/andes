@@ -194,7 +194,7 @@ pub(crate) fn nominate(
     run_ends: &[usize],
     table: &PinTable,
     llr: &[f64],
-    predicted: &PredictedMs2,
+    predicted: &mut PredictedMs2,
 ) -> Result<Vec<Nominee>, String> {
     let run_of = |s: usize| run_ends.partition_point(|&e| e <= s);
     if !predicted.rt_raw.is_empty() && predicted.rt_raw.len() != table.forms.len() {
@@ -219,6 +219,9 @@ pub(crate) fn nominate(
     }
     let mut want: Vec<usize> = best.into_values().collect();
     want.sort_unstable();
+    predicted.keep_only(want.iter().map(|&i| (table.rows[i].form, table.rows[i].charge)));
+    crate::memlimit::release_free_memory();
+    let predicted = &*predicted;
     let fields = pin_fields(pin, &want)?;
     let layout = &predicted.ions;
     let out = want
@@ -245,6 +248,7 @@ pub(crate) fn nominate(
                 }
                 ions.sort_by(|a, b| b.1.total_cmp(&a.1));
                 ions.truncate(TOP_IONS);
+                ions.shrink_to_fit();
             }
             let sp = &spectra[r.spec as usize];
             Nominee {
@@ -1229,7 +1233,8 @@ pub(crate) fn run(
     nominees_out: Option<crate::dia_xfer::NomineesOut>,
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
-    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, &predicted)?;
+    let mut predicted = predicted;
+    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, &mut predicted)?;
     let shift_ppm = pool.shift_ppm.clone();
     let rt_cal = predicted.rt_cal.first().cloned().flatten();
     drop(pool);

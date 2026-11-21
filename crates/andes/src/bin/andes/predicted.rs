@@ -75,6 +75,23 @@ impl PredictedMs2 {
             .get(&(form, charge))
             .map(|&k| self.values[k as usize].as_slice())
     }
+
+    /// Frees the predictions of every (form, charge) pair not in `keep`; [`Self::get`] then
+    /// answers `None` for them and is unchanged for the kept pairs.
+    pub(crate) fn keep_only(&mut self, keep: impl Iterator<Item = (u32, u8)>) {
+        let mut wanted = vec![false; self.values.len()];
+        for p in keep {
+            if let Some(&k) = self.pair.get(&p) {
+                wanted[k as usize] = true;
+            }
+        }
+        self.pair.retain(|_, k| wanted[*k as usize]);
+        for (v, w) in self.values.iter_mut().zip(wanted) {
+            if !w {
+                *v = Vec::new();
+            }
+        }
+    }
 }
 
 pub(crate) struct Predictors {

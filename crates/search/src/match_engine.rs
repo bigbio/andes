@@ -741,7 +741,23 @@ impl<'a> PreparedSearch<'a> {
         self.run_chunk_with_params(spectra, spectrum_idx_offset, self.params)
     }
 
+    /// Scores a chunk of spectra; each returned queue holds exactly its PSMs, without the spare
+    /// capacity reserved while scoring (the queues of a whole run are kept until the PIN is
+    /// written).
     pub fn run_chunk_with_params(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
+        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params);
+        for q in &mut queues {
+            q.shrink_to_fit();
+        }
+        queues
+    }
+
+    fn score_chunk(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
@@ -1388,7 +1404,7 @@ impl<'a> PreparedSearch<'a> {
                         };
                         let psm = PsmMatch {
                             spectrum_idx: spec_idx,
-                            candidate_idxs: vec![cand_idx],
+                            candidate_idxs: smallvec::smallvec![cand_idx],
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score: pin_score,
@@ -1805,7 +1821,7 @@ pub fn run_pass2_coisolation(
             if !emitted.insert(key) {
                 continue;
             }
-            psm.candidate_idxs = vec![accum.intern(&cand)];
+            psm.candidate_idxs = smallvec::smallvec![accum.intern(&cand)];
             psm.spectrum_idx = offset + spec_idx;
             q.force_push(psm);
         }
@@ -3553,7 +3569,7 @@ impl Ord for DedupMapKey {
     }
 }
 
-fn merge_unique_candidate_idxs(into: &mut Vec<u32>, from: &[u32]) {
+fn merge_unique_candidate_idxs(into: &mut crate::psm::CandidateIdxs, from: &[u32]) {
     if from.is_empty() {
         return;
     }
@@ -3631,7 +3647,7 @@ mod dedup_tests {
     fn psm(primary: u32, rank: f32, pin: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![primary],
+            candidate_idxs: smallvec::smallvec![primary],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: pin,

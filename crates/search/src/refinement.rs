@@ -752,7 +752,7 @@ mod tests {
     fn psm(spectrum_idx: usize, cand_idx: u32, rank_score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![cand_idx],
+            candidate_idxs: smallvec::smallvec![cand_idx],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: rank_score,
@@ -2072,7 +2072,7 @@ mod tests {
         let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
 
         let mut shared = psm(0, 0, 22.0);
-        shared.candidate_idxs = vec![0, 1];
+        shared.candidate_idxs = smallvec::smallvec![0, 1];
         let refine = RefinementOutput {
             index: SearchIndex {
                 db: ProteinDb {
@@ -2102,7 +2102,7 @@ mod tests {
         let mut idxs = refine_psm.candidate_idxs.clone();
         idxs.sort();
         assert_eq!(
-            idxs,
+            idxs.to_vec(),
             vec![2, 3],
             "every candidate_idx entry offset, not just the primary"
         );

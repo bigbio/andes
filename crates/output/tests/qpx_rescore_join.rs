@@ -600,7 +600,7 @@ fn add_runner_up(
                 continue;
             };
             let mut alt = top;
-            alt.candidate_idxs = vec![other as u32];
+            alt.candidate_idxs = vec![other as u32].into();
             alt.score -= 1.0;
             alt.rank_score -= 1.0;
             q.force_push(alt);

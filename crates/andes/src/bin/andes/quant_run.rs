@@ -2190,7 +2190,7 @@ mod tests {
     fn psm(rank_score: f32, candidate: u32, co_isolated_mz: Option<f64>) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![candidate],
+            candidate_idxs: vec![candidate].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: rank_score,

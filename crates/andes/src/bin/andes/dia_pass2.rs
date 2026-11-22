@@ -194,7 +194,7 @@ pub(crate) fn nominate(
     run_ends: &[usize],
     table: &PinTable,
     llr: &[f64],
-    predicted: &PredictedMs2,
+    predicted: &mut PredictedMs2,
 ) -> Result<Vec<Nominee>, String> {
     let run_of = |s: usize| run_ends.partition_point(|&e| e <= s);
     if !predicted.rt_raw.is_empty() && predicted.rt_raw.len() != table.forms.len() {
@@ -219,6 +219,9 @@ pub(crate) fn nominate(
     }
     let mut want: Vec<usize> = best.into_values().collect();
     want.sort_unstable();
+    predicted.keep_only(want.iter().map(|&i| (table.rows[i].form, table.rows[i].charge)));
+    crate::memlimit::release_free_memory();
+    let predicted = &*predicted;
     let fields = pin_fields(pin, &want)?;
     let layout = &predicted.ions;
     let out = want
@@ -229,7 +232,7 @@ pub(crate) fn nominate(
             let (form, mass) = &table.forms[r.form as usize];
             let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
             let mut ions: Vec<(f64, f32)> = Vec::new();
-            if let Some(pred) = predicted.by_form.get(&(form.clone(), r.charge)) {
+            if let Some(pred) = predicted.get(r.form, r.charge) {
                 let mut prefix = mass.nterm;
                 for site in 0..mass.res.len().saturating_sub(1) {
                     prefix += mass.res[site];
@@ -245,6 +248,7 @@ pub(crate) fn nominate(
                 }
                 ions.sort_by(|a, b| b.1.total_cmp(&a.1));
                 ions.truncate(TOP_IONS);
+                ions.shrink_to_fit();
             }
             let sp = &spectra[r.spec as usize];
             Nominee {
@@ -1217,26 +1221,33 @@ pub(crate) fn extract(
 
 /// Nominates, extracts and writes `<pin>.dia_pass2.parquet` beside the PIN. With
 /// `nominees_out` (study mode), the nominees are also stored for the study's candidate
-/// transfer (`dia_xfer`).
+/// transfer (`dia_xfer`). The pool table and the kept predictions are only needed to
+/// nominate, so they are taken by value and freed before the extraction.
 pub(crate) fn run(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: &[Vec<model::scan::Ms1Scan>],
-    pool: &crate::dia_llr::PoolScores,
-    predicted: &PredictedMs2,
+    ms1: &[Option<Ms1RunIndex>],
+    pool: crate::dia_llr::PoolScores,
+    predicted: PredictedMs2,
     nominees_out: Option<crate::dia_xfer::NomineesOut>,
 ) -> Result<output::dia_pass2_table::Pass2Table, String> {
     let t0 = std::time::Instant::now();
-    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, predicted)?;
+    let mut predicted = predicted;
+    let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, &mut predicted)?;
+    let shift_ppm = pool.shift_ppm.clone();
+    let rt_cal = predicted.rt_cal.first().cloned().flatten();
+    drop(pool);
+    drop(predicted);
+    crate::memlimit::release_free_memory();
     log::info!(
         target: "dia",
         "pass 2: nominated {} precursors [{:.2}s]",
         noms.len(),
         t0.elapsed().as_secs_f64()
     );
-    let shift = pool.shift_ppm.first().copied().unwrap_or(0.0);
-    let rt_cal = predicted.rt_cal.first().and_then(Option::as_ref);
+    let shift = shift_ppm.first().copied().unwrap_or(0.0);
+    let rt_cal = rt_cal.as_ref();
     let (stored, p2) = std::thread::scope(|scope| {
         let stored = nominees_out.map(|out| {
             let noms = &noms;
@@ -1246,11 +1257,7 @@ pub(crate) fn run(
                     .map(|()| t.elapsed().as_secs_f64())
             })
         });
-        let idx: Vec<Option<Ms1RunIndex>> = ms1
-            .iter()
-            .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s.clone())))
-            .collect();
-        let p2 = extract(&noms, spectra, run_ends, &idx, &pool.shift_ppm);
+        let p2 = extract(&noms, spectra, run_ends, ms1, &shift_ppm);
         let stored = stored.map(|h| {
             h.join()
                 .unwrap_or_else(|_| Err("writing the nominee table panicked".to_string()))

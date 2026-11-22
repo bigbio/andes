@@ -53,10 +53,42 @@ pub struct ScoredSpectrum<'a> {
     pub(crate) parent_mass: f64,
     pub(crate) charge: u8,
     segment_partition_cache: SegmentPartitionCache,
-    prefix_score_cache: Vec<f32>,
-    suffix_score_cache: Vec<f32>,
+    prefix_score_cache: LazyNodeScores,
+    suffix_score_cache: LazyNodeScores,
+    node_peaks: Vec<(f64, f32)>,
+    node_ranks: Vec<u32>,
+    node_scorer: Option<&'a RankScorer>,
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
     gbdt_logit_by_rank: Vec<f32>,
+}
+
+/// Prefix or suffix node scores by nominal mass, each computed on its first lookup.
+#[derive(Debug, Clone, Default)]
+struct LazyNodeScores {
+    values: Vec<std::cell::Cell<f32>>,
+    known: Vec<std::cell::Cell<bool>>,
+}
+
+impl LazyNodeScores {
+    /// `len` scores, none computed yet except nominal mass 0 (score 0).
+    fn pending(len: usize) -> Self {
+        let mut known = vec![std::cell::Cell::new(false); len];
+        if let Some(k) = known.first_mut() {
+            *k = std::cell::Cell::new(true);
+        }
+        Self {
+            values: vec![std::cell::Cell::new(0.0); len],
+            known,
+        }
+    }
+
+    /// Scores already computed.
+    fn known(values: Vec<f32>) -> Self {
+        Self {
+            known: vec![std::cell::Cell::new(true); values.len()],
+            values: values.into_iter().map(std::cell::Cell::new).collect(),
+        }
+    }
 }
 
 enum PeakFilterEnv {
@@ -97,7 +129,7 @@ fn peak_filter_env() -> &'static PeakFilterEnv {
 }
 
 impl<'a> ScoredSpectrum<'a> {
-    pub fn new(spec: &'a Spectrum, scorer: &RankScorer, charge: u8) -> Self {
+    pub fn new(spec: &'a Spectrum, scorer: &'a RankScorer, charge: u8) -> Self {
         let param = scorer.param();
         let n = spec.peaks.len();
 
@@ -224,8 +256,6 @@ impl<'a> ScoredSpectrum<'a> {
             .collect();
 
         let cache_len = (nominal_from(parent_mass).max(0) as usize) + 1;
-        let mut prefix_score_cache = vec![0.0; cache_len];
-        let mut suffix_score_cache = vec![0.0; cache_len];
         let (cache_peaks, cache_ranks): (&[(f64, f32)], &[u32]) =
             match (&deconv_peaks, &deconv_ranks) {
                 (Some(dp), Some(dr)) => (dp.as_slice(), dr.as_slice()),
@@ -275,32 +305,6 @@ impl<'a> ScoredSpectrum<'a> {
             .filter(|&(_, &r)| r != u32::MAX)
             .map(|(&p, &r)| (p, r))
             .unzip();
-        for nominal_mass in 1..cache_len {
-            let node_nominal = nominal_mass as f64;
-            prefix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                &fill_peaks,
-                &fill_ranks,
-                &segment_partition_cache,
-                scorer,
-                node_nominal,
-                true,
-                charge,
-                parent_mass,
-                &gbdt_logit_by_rank,
-            );
-            suffix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                &fill_peaks,
-                &fill_ranks,
-                &segment_partition_cache,
-                scorer,
-                node_nominal,
-                false,
-                charge,
-                parent_mass,
-                &gbdt_logit_by_rank,
-            );
-        }
-
         let parent_nominal = nominal_from(parent_mass).max(0) as usize;
         let observed_mass_cache =
             std::cell::RefCell::new(vec![f64::NEG_INFINITY; parent_nominal + 1]);
@@ -321,8 +325,11 @@ impl<'a> ScoredSpectrum<'a> {
             parent_mass,
             charge,
             segment_partition_cache,
-            prefix_score_cache,
-            suffix_score_cache,
+            prefix_score_cache: LazyNodeScores::pending(cache_len),
+            suffix_score_cache: LazyNodeScores::pending(cache_len),
+            node_peaks: fill_peaks,
+            node_ranks: fill_ranks,
+            node_scorer: Some(scorer),
             deconv_peaks,
             deconv_ranks,
             observed_mass_cache,
@@ -393,8 +400,11 @@ impl<'a> ScoredSpectrum<'a> {
             parent_mass: ctx.parent_mass,
             charge: ctx.charge,
             segment_partition_cache: ctx.segment_partition_cache,
-            prefix_score_cache: ctx.prefix_score_cache,
-            suffix_score_cache: ctx.suffix_score_cache,
+            prefix_score_cache: LazyNodeScores::known(ctx.prefix_score_cache),
+            suffix_score_cache: LazyNodeScores::known(ctx.suffix_score_cache),
+            node_peaks: Vec::new(),
+            node_ranks: Vec::new(),
+            node_scorer: None,
             deconv_peaks: None,
             deconv_ranks: None,
             observed_mass_cache: std::cell::RefCell::new(Vec::new()),
@@ -439,8 +449,8 @@ impl<'a> ScoredSpectrum<'a> {
         if prefix_nominal < 0 || suffix_nominal < 0 {
             return None;
         }
-        let pref = *self.prefix_score_cache.get(prefix_nominal as usize)?;
-        let suff = *self.suffix_score_cache.get(suffix_nominal as usize)?;
+        let pref = self.cached_node_score(prefix_nominal as usize, true)?;
+        let suff = self.cached_node_score(suffix_nominal as usize, false)?;
         Some((pref + suff).round() as i32)
     }
 
@@ -448,8 +458,8 @@ impl<'a> ScoredSpectrum<'a> {
         if prefix_nominal < 0 || suffix_nominal < 0 {
             return None;
         }
-        let pref = *self.prefix_score_cache.get(prefix_nominal as usize)?;
-        let suff = *self.suffix_score_cache.get(suffix_nominal as usize)?;
+        let pref = self.cached_node_score(prefix_nominal as usize, true)?;
+        let suff = self.cached_node_score(suffix_nominal as usize, false)?;
         Some(pref + suff)
     }
 
@@ -457,22 +467,47 @@ impl<'a> ScoredSpectrum<'a> {
         if prefix_nominal < 0 {
             return None;
         }
-        self.prefix_score_cache
-            .get(prefix_nominal as usize)
-            .copied()
+        self.cached_node_score(prefix_nominal as usize, true)
     }
 
     pub fn cached_suffix_score(&self, suffix_nominal: i32) -> Option<f32> {
         if suffix_nominal < 0 {
             return None;
         }
-        self.suffix_score_cache
-            .get(suffix_nominal as usize)
-            .copied()
+        self.cached_node_score(suffix_nominal as usize, false)
     }
 
     pub fn charge(&self) -> u8 {
         self.charge
+    }
+
+    /// The prefix (or suffix) node score at nominal mass `nominal`, computed on first use;
+    /// `None` beyond the parent mass.
+    fn cached_node_score(&self, nominal: usize, is_prefix: bool) -> Option<f32> {
+        let cache = if is_prefix {
+            &self.prefix_score_cache
+        } else {
+            &self.suffix_score_cache
+        };
+        let value = cache.values.get(nominal)?;
+        if !cache.known[nominal].get() {
+            let scorer = self
+                .node_scorer
+                .expect("a node score left to compute has its scorer");
+            value.set(Self::directional_node_score_inner(
+                &self.node_peaks,
+                &self.node_ranks,
+                &self.segment_partition_cache,
+                scorer,
+                nominal as f64,
+                is_prefix,
+                self.charge,
+                self.parent_mass,
+                &self.gbdt_logit_by_rank,
+            ));
+            cache.known[nominal].set(true);
+        }
+        Some(value.get())
     }
 
     pub fn set_main_ion_for_test(&mut self, ion: IonType) {

@@ -9,6 +9,17 @@ pub fn predict_frag_intensities(
     peptide: &Peptide,
     precursor_charge: u8,
 ) -> Vec<f64> {
+    frag_intensities_from_raw(&predict_frag_raw(frag_model, peptide, precursor_charge))
+}
+
+/// The model's raw (log relative) value per b/y ion of charge 1 and 2 of `peptide`, in the
+/// order of [`predict_by_ions`]; [`frag_intensities_from_raw`] turns them into the
+/// intensities of [`predict_frag_intensities`].
+pub fn predict_frag_raw(
+    frag_model: &GbdtPeakModel,
+    peptide: &Peptide,
+    precursor_charge: u8,
+) -> Vec<f32> {
     let ions = predict_by_ions(peptide, 1..=2);
     let feats: Vec<[f32; crate::frag_features::N_FRAG_FEATURES]> = ions
         .iter()
@@ -23,7 +34,11 @@ pub fn predict_frag_intensities(
             )
         })
         .collect();
-    let raw = predict_frag_values_memo(frag_model, &feats);
+    predict_frag_values_memo(frag_model, &feats)
+}
+
+/// Linear intensities from the raw values of [`predict_frag_raw`].
+pub fn frag_intensities_from_raw(raw: &[f32]) -> Vec<f64> {
     raw.iter()
         .map(|&log_rel| {
             let v = f64::from(log_rel);

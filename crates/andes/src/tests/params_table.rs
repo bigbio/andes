@@ -187,3 +187,57 @@ fn cli_only_matches_config_mapping() {
         "CliOnly rows: {cli_only:?}"
     );
 }
+
+/// The value a help text states as `[default: X]`, whitespace collapsed.
+fn stated_default(help: &str) -> Option<String> {
+    let text = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = text.find("[default: ")? + "[default: ".len();
+    let end = text[start..].find(']')? + start;
+    Some(text[start..end].to_string())
+}
+
+#[test]
+fn help_defaults_match_the_table() {
+    let cmd = search_command();
+    let mut mismatches = Vec::new();
+    for p in PARAMS {
+        let Unset::Auto(phrase) = p.unset else {
+            continue;
+        };
+        let Some(arg) = cmd.get_arguments().find(|a| a.get_id().as_str() == p.id) else {
+            continue;
+        };
+        let help = format!(
+            "{} {}",
+            arg.get_help().map(|h| h.to_string()).unwrap_or_default(),
+            arg.get_long_help().map(|h| h.to_string()).unwrap_or_default()
+        );
+        if let Some(stated) = stated_default(&help) {
+            if stated != phrase {
+                mismatches.push(format!("{}: --help says {stated:?}, the table {phrase:?}", p.id));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn possible_values_come_from_clap() {
+    let cmd = search_command();
+    let mut problems = Vec::new();
+    for p in PARAMS {
+        if p.range == Some("enum") {
+            problems.push(format!("{}: the range is the placeholder \"enum\"", p.id));
+        }
+        let Some(arg) = cmd.get_arguments().find(|a| a.get_id().as_str() == p.id) else {
+            continue;
+        };
+        if !arg.get_possible_values().is_empty() && p.range.is_some() {
+            problems.push(format!(
+                "{}: clap lists the possible values, so the row's range {:?} repeats them",
+                p.id, p.range
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

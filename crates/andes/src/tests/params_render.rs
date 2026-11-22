@@ -90,7 +90,7 @@ fn internal_flags_are_not_advertised() {
 
 #[test]
 fn effective_config_parses() {
-    let text = effective_config(&ParamSources::default());
+    let text = effective_config(&ParamSources::default()).expect("printable");
     RunConfig::from_yaml_str(&text).expect("the default effective config parses");
 }
 
@@ -99,7 +99,7 @@ fn effective_config_names_sources() {
     let mut sources = ParamSources::default();
     sources.record_as("psm_fdr", Source::CommandLine, &0.02);
     sources.record_as("max_spectra", Source::Config, &5u64);
-    let text = effective_config(&sources);
+    let text = effective_config(&sources).expect("printable");
     let line = |key: &str| text.lines().find(|l| l.trim_start().starts_with(key));
     assert!(line("psm_fdr: 0.02").is_some_and(|l| l.contains("# command line")));
     assert!(line("max_spectra: 5").is_some_and(|l| l.contains("# config")));
@@ -112,7 +112,8 @@ fn effective_config_names_sources() {
 fn effective_config_leaves_defaults_unset() {
     let mut sources = ParamSources::default();
     sources.record_as("top_n", Source::CommandLine, &7u64);
-    let cfg = RunConfig::from_yaml_str(&effective_config(&sources)).expect("parses");
+    let text = effective_config(&sources).expect("printable");
+    let cfg = RunConfig::from_yaml_str(&text).expect("parses");
     assert_eq!(cfg.search.max_missed_cleavages, None);
     assert_eq!(cfg.search.top_n, Some(7));
 }
@@ -125,8 +126,69 @@ fn example_config_sets_only_the_paths() {
 
 #[test]
 fn effective_config_hides_internal_flags_until_set() {
-    let text = effective_config(&ParamSources::default());
+    let text = effective_config(&ParamSources::default()).expect("printable");
     assert!(!text.contains("max_spectra"), "internal key shown by default");
+}
+
+#[test]
+fn printed_strings_read_back_unchanged() {
+    let texts = [
+        "line\nbreak",
+        "tab\there",
+        "quote \" and \\ backslash",
+        "yes",
+        "- dash",
+        "#hash",
+        "colon: space",
+        "ünïcode",
+        "bell\u{7}",
+        "123",
+        "",
+    ];
+    for text in texts {
+        let mut sources = ParamSources::default();
+        sources.record_as("percolator_image", Source::CommandLine, text);
+        let printed = effective_config(&sources).expect("printable");
+        let cfg = RunConfig::from_yaml_str(&printed)
+            .unwrap_or_else(|e| panic!("{text:?}: {e}\n{printed}"));
+        assert_eq!(
+            cfg.rescoring.percolator_image.as_deref(),
+            Some(text),
+            "{printed}"
+        );
+    }
+}
+
+#[test]
+fn printed_config_closes_with_the_command_line_only_flags() {
+    let mut sources = ParamSources::default();
+    sources.record_as("xl_oracle", Source::CommandLine, &5u64);
+    sources.record_as("ipf_debug", Source::CommandLine, &true);
+    sources.record_as("quiet", Source::CommandLine, &true);
+    let text = effective_config(&sources).expect("printable");
+    let note = "# set on the command line, no config key (pass again to reproduce): ";
+    assert!(text.contains(&format!("{note}--xl-oracle 5\n")), "{text}");
+    assert!(text.contains(&format!("{note}--ipf-debug\n")), "{text}");
+    assert!(!text.contains("--quiet"), "{text}");
+    RunConfig::from_yaml_str(&text).expect("the closing comments keep the YAML valid");
+}
+
+/// A value whose serialisation always fails, as a value YAML cannot hold.
+struct Unwritable;
+
+impl serde::Serialize for Unwritable {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("no YAML form"))
+    }
+}
+
+#[test]
+fn a_value_without_config_form_refuses_to_print() {
+    let mut sources = ParamSources::default();
+    sources.record_as("percolator_image", Source::CommandLine, &Unwritable);
+    assert_eq!(sources.source("percolator_image"), Source::CommandLine);
+    assert_eq!(sources.unwritable().len(), 1);
+    assert!(effective_config(&sources).is_err());
 }
 
 #[test]

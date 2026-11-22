@@ -1,3 +1,8 @@
+//! `--print-config` end to end: the printed config parses, names each value's source, keeps
+//! defaults and internal flags out, round-trips lists, modifications, crosslinkers and odd
+//! paths, lists the command-line-only flags it cannot hold, and reproduces the run's PIN byte
+//! for byte when replayed with `--config`.
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -227,4 +232,51 @@ fn print_config_names_sources() {
         "{line}"
     );
     assert!(!text.contains("print_config"));
+}
+
+#[test]
+fn print_config_lists_command_line_only_flags() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spectrum = fixture(SPECTRUM);
+    let database = fixture(DATABASE);
+    let pin = dir.path().join("out.pin");
+    let mut args = vec![
+        os("--spectrum"),
+        spectrum.as_os_str(),
+        os("--database"),
+        database.as_os_str(),
+        os("--output-pin"),
+        pin.as_os_str(),
+        os("--xl"),
+        os("DSSO; DSBU"),
+        os("--xl-linear-only"),
+        os("--xl-oracle"),
+        os("5"),
+    ];
+    let text = printed(&args);
+    let note = "# set on the command line, no config key (pass again to reproduce): ";
+    assert!(text.contains(&format!("{note}--xl-oracle 5")), "{text}");
+    let doc = parse(&text);
+    assert_eq!(doc["search"]["xl_linear_only"].as_bool(), Some(true), "{text}");
+    let linkers: Vec<&str> = doc["search"]["xl"]
+        .as_sequence()
+        .expect("xl list")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(linkers, vec!["DSSO", "DSBU"], "{text}");
+
+    args.push(os("--print-config"));
+    args.push(os("-"));
+    let out = andes(&args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--xl-oracle 5") && stderr.contains("no config key"),
+        "no warning naming the flag: {stderr}"
+    );
+
+    let cfg = dir.path().join("printed.yaml");
+    std::fs::write(&cfg, &text).expect("write config");
+    let again = parse(&printed(&[os("--config"), cfg.as_os_str()]));
+    assert_eq!(doc["search"], again["search"]);
 }

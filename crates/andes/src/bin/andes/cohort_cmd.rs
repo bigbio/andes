@@ -926,7 +926,8 @@ fn pin_of(table: &Path) -> PathBuf {
 /// Replace the pair score of the CSMs of `classes` with the score of one Percolator model
 /// trained on all CSMs of `tables` (their sibling PINs pooled, the `dropped` features left
 /// out), so that their q-values use the evidence of the whole group. Does nothing, with a
-/// warning, when a table has no PIN beside it.
+/// warning, when a table has no PIN beside it or Percolator cannot train a model on the
+/// pooled PIN (too few confident targets, as in a small purified-complex project).
 fn rescore(
     tables: &[PathBuf],
     csms: &mut [CsmRow],
@@ -1022,8 +1023,16 @@ fn rescore(
         memory: crate::memlimit::rescore_memory(None, dir.path().to_path_buf()),
     };
     let t = std::time::Instant::now();
-    let mut scored = output::run_percolator_pooled(&backend, &pooled, &[])
-        .map_err(|e| format!("rescoring {what}: {e}"))?;
+    let mut scored = match output::run_percolator_pooled(&backend, &pooled, &[]) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                target: "cohort",
+                "{what} keep the pair score: Percolator could not rescore them ({e})"
+            );
+            return Ok(());
+        }
+    };
     let decoy_text = std::fs::read_to_string(output::decoy_results_path(&pooled))?;
     scored.extend(output::parse_psm_results(&decoy_text).map_err(|e| format!("{e}"))?);
     let mut score: HashMap<(usize, &str), f64> = HashMap::new();
@@ -1351,6 +1360,42 @@ mod tests {
             score_source: "pair",
             residue_pair: "P1:5 -- P2:9".into(),
             protein_pair: "P1 -- P2".into(),
+            peptides: [Vec::new(), Vec::new()],
+            proteins: [Vec::new(), Vec::new()],
+        }];
+        rescore(
+            &[table],
+            &mut rows,
+            &[xl::rollup::LinkClass::Intra],
+            &[],
+            "intra-protein links",
+        )
+        .unwrap();
+        assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
+    }
+
+    #[test]
+    fn intra_links_keep_the_pair_score_when_percolator_cannot_train() {
+        let t = tempfile::tempdir().unwrap();
+        let table = t.path().join("A.r1.xl.tsv");
+        std::fs::write(
+            pin_of(&table),
+            "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tpair_score\tPeptide\tProteins\n\
+             s7\t1\t7\t1000.0\t1000.0\t12.5\tK.PEPK.R\tP1\n\
+             s8\t-1\t8\t1000.0\t1000.0\t3.0\tK.KPEP.R\tdecoy_P1\n",
+        )
+        .unwrap();
+        let mut rows = vec![CsmRow {
+            run: "A.r1".into(),
+            table: 0,
+            scan: "7".into(),
+            spectrum: "A.r1/s7".into(),
+            class: xl::decoy::PairClass::TT,
+            link: xl::rollup::LinkClass::Intra,
+            score: 12.5,
+            score_source: "pair",
+            residue_pair: "P1:5 -- P1:9".into(),
+            protein_pair: "P1 -- P1".into(),
             peptides: [Vec::new(), Vec::new()],
             proteins: [Vec::new(), Vec::new()],
         }];

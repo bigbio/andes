@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Glyco LFQ + MBR benchmark: 5 mouse liver fractions in one invocation.
 set -uo pipefail
-export DOTNET_ROOT=/home/daichengxin/.dotnet
+if [ "$#" -ne 4 ]; then
+  echo "usage: $0 <andes-binary> <mouse_entrap.fasta> <glycan.gdb> <dotnet-root>" >&2
+  exit 2
+fi
+BIN=$1
+DB=$2
+GDB=$3
+export DOTNET_ROOT=$4
 
-BIN=/home/daichengxin/gitrepo/andes/target/release/andes
-DB=/home/daichengxin/andes-bench/databases/mouse_entrap.fasta
-GDB=/home/daichengxin/gitrepo/pro/pGlyco-N-Mouse.gdb
 RAWDIR=/Data/daicx/glyco-mouse
 OUT=/tmp/glyco_quant_bench
 PIN=$OUT/mouseliver5.glyco.pin

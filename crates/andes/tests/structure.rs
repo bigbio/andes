@@ -352,3 +352,101 @@ fn registry_entries_are_complete_and_unique() {
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+const SITE_LITERALS: [&str; 6] = [
+    "/homes/",
+    "/hps/",
+    "/nfs/",
+    "pst_prd",
+    "codon-slurm",
+    "hl-codon",
+];
+
+/// The site-specific patterns found in `text`, one entry per occurrence.
+///
+/// A path under `/home/<name>/` or `/Users/<name>/` is a hit (`/home/runner/` is the
+/// GitHub CI home and is allowed), as is any of [`SITE_LITERALS`].
+fn site_hits(text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for literal in SITE_LITERALS {
+        for _ in text.matches(literal) {
+            hits.push(literal.to_string());
+        }
+    }
+    for prefix in ["/home/", "/Users/"] {
+        for (at, _) in text.match_indices(prefix) {
+            let rest = &text[at + prefix.len()..];
+            let word = rest
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+                .count();
+            if word == 0 || rest.as_bytes().get(word) != Some(&b'/') {
+                continue;
+            }
+            if prefix == "/home/" && &rest[..word] == "runner" {
+                continue;
+            }
+            hits.push(format!("{prefix}<name>/"));
+        }
+    }
+    hits
+}
+
+#[test]
+fn site_patterns_ignore_public_urls() {
+    assert!(site_hits(
+        "ftp.pride.ebi.ac.uk/pride/data https://www.ebi.ac.uk/pride doi.org/10.1/x"
+    )
+    .is_empty());
+    assert_eq!(site_hits("/home/alice/x").len(), 1);
+    assert_eq!(site_hits("/Users/bob/y").len(), 1);
+    assert_eq!(site_hits("/hps/nobackup/x").len(), 1);
+    assert_eq!(site_hits("pst_prd").len(), 1);
+    assert!(site_hits("/home/runner/work").is_empty());
+}
+
+/// Committed text names no cluster, host or user path: paths are placeholders or
+/// arguments. This file is exempt because its tests spell the patterns out.
+#[test]
+fn no_site_identifiers_in_committed_text() {
+    let root = source_scan::workspace_root();
+    let this_file = "crates/andes/tests/structure.rs";
+    let mut files = source_scan::text_files(
+        &["crates", "docs", "scripts", "website", ".claude", ".github"],
+        &["rs", "md", "py", "sh", "yml", "yaml", "toml", "tsv", "json"],
+    );
+    for name in [
+        "README.md",
+        "DOCS.md",
+        "TRAIN.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "ARCHITECTURE.md",
+    ] {
+        let path = root.join(name);
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    let mut found = Vec::new();
+    for file in files {
+        let key = rel_key(&root, &file);
+        if key == this_file {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for (n, line) in text.lines().enumerate() {
+            for hit in site_hits(line) {
+                found.push(format!("{key}:{}: {hit}", n + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "site identifiers in committed text; replace each with a placeholder or an argument:\n{}",
+        found.join("\n")
+    );
+}

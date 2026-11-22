@@ -317,12 +317,12 @@ The analysis scripts need `numpy`, `pandas`, `matplotlib` and `scipy`.
 cargo build --release -p andes --bin andes --features thermo
 
 # 1. search + quantify (5 fractions -> one PIN + lfq/matrix tables)
-DOTNET_ROOT=/home/daichengxin/.dotnet \
-/home/daichengxin/gitrepo/andes/target/release/andes \
+DOTNET_ROOT=<dotnet-root> \
+<andes> \
   --spectrum /Data/daicx/glyco-mouse/MouseLiver-Z-T-{1,2,3,4,5}.raw \
-  --database /home/daichengxin/andes-bench/databases/mouse_entrap.fasta \
+  --database <mouse_entrap.fasta> \
   --decoy-strategy sequon \
-  --glyco --glyco-glycan-gdb /home/daichengxin/gitrepo/pro/pGlyco-N-Mouse.gdb \
+  --glyco --glyco-glycan-gdb <pGlyco-N-Mouse.gdb> \
   --fragmentation HCD --fragment-tol-ppm 20 \
   --lfq --mbr --threads 112 \
   --output-pin /tmp/glyco_quant_bench/mouseliver5.glyco.pin
@@ -335,11 +335,11 @@ docker run --rm -v "$OUT":/r quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2 
   /r/mouseliver5.glyco.glyco.pin
 
 # 3. identification checks (run from $OUT; H = this directory)
-H=/home/daichengxin/gitrepo/andes/docs/benchmarks/glyco
+H=<andes-repo>/docs/benchmarks/glyco
 cd "$OUT"
 python3 "$H/eval_yield.py"  mouseliver5.glyco.glyco.pin out.psms
 python3 "$H/eval_entrap.py" mouseliver5.glyco.glyco.pin out.psms 0.01 \
-  /home/daichengxin/andes-bench/databases/mouse_entrap.fasta
+  <mouse_entrap.fasta>
 python3 "$H/score_vs_truth.py" "$H/truth/pglyco2_mouse_liver.tsv.gz" \
   mouseliver5.glyco.glyco.pin out.psms 0.01
 python3 "$H/score_vs_truth.py" "$H/truth/msfragger_glyco_mouse_liver.tsv.gz" \
@@ -349,16 +349,16 @@ python3 "$H/score_vs_truth.py" "$H/truth/msfragger_glyco_mouse_liver.tsv.gz" \
 python3 "$H/quant_mouse_liver/glyco_quant_bench.py" --dir "$OUT" \
   --stem mouseliver5.glyco --out "$OUT/report" \
   --psms "$OUT/out.psms" \
-  --fasta /home/daichengxin/andes-bench/databases/mouse_entrap.fasta
+  --fasta <mouse_entrap.fasta>
 python3 "$H/quant_mouse_liver/glyco_quant_figs.py" \
   --json "$OUT/report/glyco_quant_numbers.json" --out "$OUT/report"
 
 # 5. retrain the MBR match scorer (optional; the shipped model is compiled in)
 #    Re-run step 1 with --glyco-mbr-match-train "$OUT/match_train.tsv" added,
 #    then train and rebuild:
-python3 -I /home/daichengxin/gitrepo/andes/scripts/train_glyco_mbr.py \
+python3 -I <andes-repo>/scripts/train_glyco_mbr.py \
   "$OUT/match_train.tsv" \
-  --out /home/daichengxin/gitrepo/andes/resources/quant/glyco_mbr_model.txt \
+  --out <andes-repo>/resources/quant/glyco_mbr_model.txt \
   --epochs 100 --max-negatives 5 \
   --source "5 mouse-liver fractions, --decoy-strategy sequon"
 cargo build --release -p andes --bin andes --features thermo   # include_str! refresh

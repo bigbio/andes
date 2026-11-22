@@ -1690,15 +1690,13 @@ pub fn match_spectra_out_of_core(
     Ok((queues, prepared.candidates))
 }
 
+/// The isolation window around its target m/z (the precursor m/z when the scan records no
+/// target), and the precursor tolerance in Da.
 fn coisolation_window(spec: &Spectrum, params: &SearchParams) -> (f64, f64, f64) {
-    let lo = spec.precursor_mz
-        - spec
-            .isolation_lower_offset
-            .unwrap_or(params.chimeric_isolation_halfwidth_da);
-    let hi = spec.precursor_mz
-        + spec
-            .isolation_upper_offset
-            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let (lo, hi) = crate::precursor_matching::isolation_window_mz(
+        spec,
+        params.chimeric_isolation_halfwidth_da,
+    );
     let tol = params
         .precursor_tolerance
         .left
@@ -2654,6 +2652,17 @@ mod chargeless_unit_tests {
             isolation_target_mz: None,
             mobility_window: None,
         }
+    }
+
+    #[test]
+    fn the_chimeric_window_is_centred_on_the_isolation_target() {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let mut spec = spectrum(500.3, Some(2), &[]);
+        (spec.isolation_target_mz, spec.isolation_lower_offset) = (Some(500.0), Some(1.0));
+        spec.isolation_upper_offset = Some(1.0);
+        let (lo, hi, _) = coisolation_window(&spec, &params);
+        assert_eq!((lo, hi), (499.0, 501.0));
     }
 
     #[test]

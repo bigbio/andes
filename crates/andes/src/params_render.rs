@@ -20,6 +20,7 @@ const EXAMPLE_HEADER: &str = r##"# andes run configuration: `andes --config this
 # out and shows its default, or an example value marked "(example)" when it has none; uncomment a
 # key to set it. Only the example input and output paths are uncommented.
 # Each comment names the key's flag; "advanced" flags are listed by `andes --help` only,
+# "internal" ones by neither help. DOCS.md §1b describes the file.
 
 "##;
 
@@ -157,11 +158,15 @@ fn scalar(s: &str) -> String {
     let first_ok = s
         .chars()
         .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '/' || c == '.');
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '/');
+    let lower = s.to_ascii_lowercase();
     let reserved = matches!(
-        s.to_ascii_lowercase().as_str(),
+        lower.as_str(),
         "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "y" | "n" | "~"
-    );
+    ) || lower.starts_with("0x")
+        || lower.starts_with("0o")
+        || lower.starts_with("0b")
+        || lower.starts_with('.');
     if first_ok && s.chars().all(word) && !reserved && s.parse::<f64>().is_err() {
         s.to_string()
     } else {
@@ -305,7 +310,16 @@ fn cell(text: &str) -> String {
 }
 
 fn code_cell(text: Option<&str>) -> String {
-    text.map_or_else(|| "—".to_string(), |t| format!("`{}`", cell(t)))
+    text.map_or_else(
+        || "—".to_string(),
+        |t| {
+            if t.contains('`') {
+                format!("`` {} ``", cell(t))
+            } else {
+                format!("`{}`", cell(t))
+            }
+        },
+    )
 }
 
 fn default_cell(arg: &Arg, p: &ParamSpec) -> String {
@@ -325,7 +339,7 @@ fn default_cell(arg: &Arg, p: &ParamSpec) -> String {
 }
 
 fn description(arg: &Arg) -> String {
-    cell(&first_sentence(&help_of(arg)))
+    cell(&collapsed(&help_of(arg)))
 }
 
 /// The DOCS.md flag tables: one per help heading, in declaration order, public flags only. Only

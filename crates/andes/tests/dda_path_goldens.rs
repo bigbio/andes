@@ -43,19 +43,24 @@ fn float_columns(rows: &[String]) -> Vec<bool> {
 
 fn identity_digest(header: &str, rows: &[String]) -> (usize, u64) {
     let float = float_columns(rows);
+    let mut projected: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            row.split('\t')
+                .enumerate()
+                .filter(|(i, _)| !float[*i])
+                .map(|(_, v)| v)
+                .collect::<Vec<&str>>()
+                .join("\t")
+        })
+        .collect();
+    projected.sort();
     let mut h = model::hash::FNV1A64_OFFSET;
     let mut feed = |bytes: &[u8]| h = model::hash::fnv1a64_extend(h, bytes);
     feed(header.as_bytes());
     feed(b"\n");
-    for row in rows {
-        for (i, v) in row.split('\t').enumerate() {
-            if i > 0 {
-                feed(b"\t");
-            }
-            if !float[i] {
-                feed(v.as_bytes());
-            }
-        }
+    for row in &projected {
+        feed(row.as_bytes());
         feed(b"\n");
     }
     (rows.len(), h)
@@ -66,8 +71,7 @@ fn text_digest(path: &Path) -> PathGolden {
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines();
     let header = lines.next().expect("header line");
-    let mut rows: Vec<String> = lines.map(str::to_string).collect();
-    rows.sort();
+    let rows: Vec<String> = lines.map(str::to_string).collect();
     identity_digest(header, &rows)
 }
 
@@ -109,6 +113,7 @@ fn parquet_digest(path: &Path) -> PathGolden {
                 f.data_type(),
                 DataType::Utf8
                     | DataType::LargeUtf8
+                    | DataType::Boolean
                     | DataType::Int8
                     | DataType::Int16
                     | DataType::Int32

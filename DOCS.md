@@ -52,18 +52,35 @@ Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli.rs
 Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
 <!-- generated:search-flags:start -->
-### Other
+### Calibration and runtime
 
 | Flag | Unit | Default | Range | Description | Legacy form |
 |---|---|---|---|---|---|
 | `--quiet` | — | *(off)* | — | Print only warnings and errors to stderr | — |
 | `--verbose` | — | *(off)* | — | Also print debug lines to stderr | — |
+| `--precursor-cal` (advanced) | — | `off` | `off\|auto\|on` | Precursor mass calibration pre-pass | `Java -precursorCal auto\|on\|off` |
+| `--score` (advanced) | — | `auto` | `enum` | What ranks the candidates and fills the PIN RawScore | — |
+| `--fragmentation` (advanced) | — | `auto` | `enum` | Fragmentation of MGF spectra (mzML, .raw and .d record it) | `Java -m` |
+| `--protocol` (advanced) | — | `auto` | `enum` | Labelling or enrichment protocol, which selects the protocol model | `Java -protocol` |
+| `--fragment-tol-ppm` (advanced) | ppm | *(measured per run)* | `> 0` | Fragment tolerance in ppm of the PIN features, replacing the per-run measurement | — |
+| `--fragment-tol-da` (advanced) | Da | *(measured per run)* | `> 0` | Fragment tolerance in Da of the PIN features, replacing the per-run measurement | — |
+| `--peak-filter` (advanced) | — | *(100:20 for isobaric data, else off)* | `WINDOW_DA:PEAKS` | Peak filter WINDOW_DA:PEAKS, e.g. 100:20 [default: 100:20 for isobaric data, else off] | — |
+| `--ethcd-activation` (advanced) | — | `ethcd` | `enum` | How EThcD and ETciD spectra are labelled | — |
+| `--ms-level` (advanced) | count | `2` | — | MS level searched in mzML (MGF, .raw, .d and --chimeric search MS2) | — |
+| `--fragment-index` (advanced) | — | `auto` | `enum` | Candidate retrieval | — |
+| `--fragment-index-slice-da` (advanced) | Da | *(from the memory budget)* | — | Precursor-mass width of one fragment-index slice, in Da [default: from the memory budget] | — |
+| `--index-cache-dir` (advanced) | path | *(the directory of the outputs)* | — | Directory of the candidate-index cache [default: the directory of the outputs] | — |
+| `--temp-dir` (advanced) | path | *(the directory of the outputs)* | — | Directory of the run's temporary files [default: the directory of the outputs] | — |
+| `--model-store` (advanced) | path | *(the bundled store)* | — | Parquet model store (a file or a partitioned directory) instead of the bundled one | — |
+| `--model` (advanced) | — | *(selected from the data)* | — | Model id to load from the model store, skipping the automatic selection | — |
+| `--gbdt-max-trees` (advanced) | count | *(100; all with --glyco)* | — | Trees evaluated per GBDT ensemble, 0 for all [default: 100; all with --glyco] | — |
 
 ### Input and output
 
 | Flag | Unit | Default | Range | Description | Legacy form |
 |---|---|---|---|---|---|
 | `--config` | path | *(off)* | — | YAML file of options (config.example.yaml); a flag on the command line wins | — |
+| `--print-config` (advanced) | path | *(off)* | — | Write the resolved settings as a config file that reproduces the run, then exit | — |
 | `--sdrf` | path | *(off)* | — | SDRF-Proteomics file: data files, protease, modifications, tolerance and labels | — |
 | `--spectrum` | path | *(required)* | — | Spectrum file: mzML, MGF, Thermo .raw or Bruker .d; repeat for several runs | `Java -s <FILE>` |
 | `--database` | path | *(required)* | — | Protein database: FASTA, or UniProt XML (.xml); either may be gzipped | `Java -d <FILE>` |
@@ -155,27 +172,6 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--percolator-image` (advanced) | — | `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` | — | Docker image of Percolator, with --percolator-docker or --xl | — |
 | `--percolator-args` (advanced) | — | *(no extra arguments)* | — | Extra arguments for an external Percolator, e.g. "--testFDR 0.05" | — |
 | `--keep-pin` (advanced) | — | `true` | — | Keep the PIN after rescoring | — |
-
-### Calibration and runtime
-
-| Flag | Unit | Default | Range | Description | Legacy form |
-|---|---|---|---|---|---|
-| `--precursor-cal` (advanced) | — | `off` | `off\|auto\|on` | Precursor mass calibration pre-pass | `Java -precursorCal auto\|on\|off` |
-| `--score` (advanced) | — | `auto` | `enum` | What ranks the candidates and fills the PIN RawScore | — |
-| `--fragmentation` (advanced) | — | `auto` | `enum` | Fragmentation of MGF spectra (mzML, .raw and .d record it) | `Java -m` |
-| `--protocol` (advanced) | — | `auto` | `enum` | Labelling or enrichment protocol, which selects the protocol model | `Java -protocol` |
-| `--fragment-tol-ppm` (advanced) | ppm | *(measured per run)* | `> 0` | Fragment tolerance in ppm of the PIN features, replacing the per-run measurement | — |
-| `--fragment-tol-da` (advanced) | Da | *(measured per run)* | `> 0` | Fragment tolerance in Da of the PIN features, replacing the per-run measurement | — |
-| `--peak-filter` (advanced) | — | *(100:20 for isobaric data, else off)* | `WINDOW_DA:PEAKS` | Peak filter WINDOW_DA:PEAKS, e.g. 100:20 [default: 100:20 for isobaric data, else off] | — |
-| `--ethcd-activation` (advanced) | — | `ethcd` | `enum` | How EThcD and ETciD spectra are labelled | — |
-| `--ms-level` (advanced) | count | `2` | — | MS level searched in mzML (MGF, .raw, .d and --chimeric search MS2) | — |
-| `--fragment-index` (advanced) | — | `auto` | `enum` | Candidate retrieval | — |
-| `--fragment-index-slice-da` (advanced) | Da | *(from the memory budget)* | — | Precursor-mass width of one fragment-index slice, in Da [default: from the memory budget] | — |
-| `--index-cache-dir` (advanced) | path | *(the directory of the outputs)* | — | Directory of the candidate-index cache [default: the directory of the outputs] | — |
-| `--temp-dir` (advanced) | path | *(the directory of the outputs)* | — | Directory of the run's temporary files [default: the directory of the outputs] | — |
-| `--model-store` (advanced) | path | *(the bundled store)* | — | Parquet model store (a file or a partitioned directory) instead of the bundled one | — |
-| `--model` (advanced) | — | *(selected from the data)* | — | Model id to load from the model store, skipping the automatic selection | — |
-| `--gbdt-max-trees` (advanced) | count | *(100; all with --glyco)* | — | Trees evaluated per GBDT ensemble, 0 for all [default: 100; all with --glyco] | — |
 
 ### Prediction
 

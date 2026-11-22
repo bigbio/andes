@@ -399,8 +399,7 @@ fn source_text(source: Source) -> &'static str {
 /// value some source set is written as a key; a default is commented out, so that replaying the
 /// file keeps every default and its auto-adjustment. A parameter with no value is commented out
 /// with what unset means. Internal parameters appear
-/// only when something set them. `--print-config` (andes P1 task 4) is its reader.
-#[allow(dead_code)]
+/// only when something set them. `--print-config` writes it.
 pub fn effective_config(sources: &ParamSources) -> String {
     let cmd = command();
     let body = write_sections(&cmd, &|arg, p| {

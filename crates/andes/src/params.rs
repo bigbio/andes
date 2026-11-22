@@ -272,6 +272,7 @@ pub const PARAMS: &[ParamSpec] = &[
     with_example(row("quant_transfer_fdr", Section::Quant, "quant_transfer_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("inherits --quant-fdr"), None), "0.01"),
     with_example(row("quant_channel_fdr", Section::Quant, "quant_channel_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("inherits --quant-fdr"), None), "0.05"),
     row("config", Section::CliOnly, "config", Unit::Path, None, Unset::Off, None),
+    row("print_config", Section::CliOnly, "print_config", Unit::Path, None, Unset::Off, None),
     row("ipf_debug", Section::CliOnly, "ipf_debug", Unit::None, None, Unset::Off, None),
     row("xl_oracle", Section::CliOnly, "xl_oracle", Unit::Count, None, Unset::ClapDefault, None),
     row("xl_linear_only", Section::CliOnly, "xl_linear_only", Unit::None, None, Unset::Off, None),

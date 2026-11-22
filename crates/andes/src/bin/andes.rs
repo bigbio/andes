@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 mod acquisition;
 #[path = "andes/cli.rs"]
 mod cli;
+#[path = "andes/cli_parse.rs"]
+mod cli_parse;
 #[path = "../cohort.rs"]
 mod cohort;
 #[path = "andes/cohort_cmd.rs"]
@@ -203,11 +205,11 @@ struct TopCli {
     command: Option<Command>,
 
     /// Print only warnings and errors to stderr
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = cli::H_RUNTIME)]
     quiet: bool,
 
     /// Also print debug lines to stderr
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = cli::H_RUNTIME)]
     verbose: bool,
 
     #[command(flatten)]
@@ -282,6 +284,9 @@ fn main() -> ExitCode {
                 log::error!("{e}");
                 return ExitCode::from(2);
             }
+            if let Some(dest) = top.search.print_config.as_deref() {
+                return print_config(dest, &sources);
+            }
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
                 matches.value_source("max_missed_cleavages"),
                 cfg_missed_cleavages,
@@ -318,6 +323,23 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log::error!("{e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_config(dest: &std::path::Path, sources: &param_sources::ParamSources) -> ExitCode {
+    let text = params_render::effective_config(sources);
+    let written = if dest == std::path::Path::new("-") {
+        use std::io::Write;
+        std::io::stdout().write_all(text.as_bytes())
+    } else {
+        std::fs::write(dest, &text)
+    };
+    match written {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            log::error!("cannot write the config to {}: {e}", dest.display());
             ExitCode::from(1)
         }
     }

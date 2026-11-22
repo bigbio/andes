@@ -1419,6 +1419,12 @@ glyco:
   enabled: true
 ```
 
+`andes <flags> --print-config run.yaml` writes the settings the run resolves to (the command
+line, `--config` and `--sdrf` merged) and exits without searching; `-` writes to stdout.
+Settings that came from a config file, the SDRF or the command line are written as keys with a
+comment naming the source; defaults stay commented out, so replaying the file with
+`andes --config run.yaml` reproduces the run and keeps every default's own adjustments.
+
 ### SDRF input (`--sdrf`)
 
 `andes --sdrf design.sdrf.tsv --database human.fasta --output-pin out.pin` reads the search

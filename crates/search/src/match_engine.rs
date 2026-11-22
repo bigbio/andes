@@ -805,6 +805,7 @@ impl<'a> PreparedSearch<'a> {
             }
         }
         for (queue, pool) in merged.iter_mut().zip(&pools) {
+            queue.trim_to_capacity(params.top_n_psms_per_spectrum);
             recalibrate_strong_over_spectrum(queue, pool);
         }
         merged
@@ -2696,6 +2697,17 @@ mod chargeless_unit_tests {
             let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
             assert_eq!(pep.residues, truth.residues, "spectrum {i}");
         }
+
+        let mut top1 = params.clone();
+        top1.top_n_psms_per_spectrum = 1;
+        let one = PreparedSearch::prepare_in_memory(&idx, &top1, &scorer, 0.02, "XXX").unwrap();
+        let mut queues = one.run_chunk(&spectra[1..], 0);
+        let psms = queues[0].drain_into_vec();
+        let best = psms.iter().map(|p| p.rank_score).fold(f32::MIN, f32::max);
+        assert!(
+            psms.iter().all(|p| p.rank_score == best),
+            "the merged charge queues keep the top PSM and its ties only"
+        );
     }
 }
 

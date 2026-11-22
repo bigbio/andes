@@ -451,3 +451,47 @@ fn no_site_identifiers_in_committed_text() {
         found.join("\n")
     );
 }
+
+#[test]
+fn codeowners_paths_exist() {
+    let root = workspace_root();
+    let text = read(&root.join(".github").join("CODEOWNERS"));
+    let mut checked = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let pattern = line.split_whitespace().next().unwrap_or("");
+        if pattern == "*" {
+            continue;
+        }
+        let relative = pattern.trim_start_matches('/').trim_end_matches('/');
+        assert!(
+            root.join(relative).exists(),
+            ".github/CODEOWNERS names `{pattern}`, which does not exist"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, ".github/CODEOWNERS has no path patterns");
+}
+
+#[test]
+fn architecture_names_every_crate() {
+    let root = workspace_root();
+    let text = read(&root.join("ARCHITECTURE.md"));
+    let mut checked = 0;
+    for entry in fs::read_dir(root.join("crates")).expect("read crates") {
+        let dir = entry.expect("crate entry").path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            text.contains(&format!("`crates/{name}`")),
+            "ARCHITECTURE.md must name `crates/{name}`"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no crates found under crates/");
+}

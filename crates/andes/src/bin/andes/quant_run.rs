@@ -1363,6 +1363,9 @@ fn write_feature_outputs(
             None => false,
         });
     }
+    for r in &records {
+        tally.quantify(r, &r.run_file_name)?;
+    }
     let path = pdir.join("quantms.feature.parquet");
     output::write_feature_parquet(&path, &records)
         .map_err(|e| format!("write {}: {e}", path.display()))?;

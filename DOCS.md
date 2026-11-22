@@ -2361,8 +2361,11 @@ andes quant finalize --quant-dir tmt/ -o study --database human.fasta --sdrf stu
   the run table's reporter columns (`tmt_<ch>`, `raw_`, `sn_`, `unmix_`) and the columns above.
   With `--output-parquet DIR`, `quantms.feature.parquet` (the rows in a group; m/z computed
   from the peptidoform, `observed_mz` equal to it) and `quantms.pg.parquet`.
-* **Not done here:** reference-channel ratios, normalisation, protein quantities and the
-  sample annotation beyond the source name (downstream, from the SDRF).
+* **Protein quantities.** `quantms.pg.parquet` carries the default protein quantities per plex
+  and channel (see the QPX views below); a plex is every run with the same SDRF plex, a run
+  when the SDRF gives none, and rows that fail the gate are left out.
+* **Not done here:** reference-channel ratios, normalisation and the sample annotation beyond
+  the source name (downstream, from the SDRF).
 
 ### Label-free MS1 features (`--lfq`)
 
@@ -2453,6 +2456,24 @@ protein groups once over every run's PSMs, then:
 - `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the
   decoy groups at the cut, and `feature_counts` (features of the group's unique peptides, and
   all). `contaminant` is true for groups with a `CONTAMINANT_` accession.
+- **Default protein quantities** (QPX 1.1 flattened rows, footer `andes_protein_quant_version`
+  1.0). A group with quantified features has one row per quantification unit and label: the unit
+  is a run with label `LFQ` (label-free) or a plex with one row per reporter channel, reference
+  channels included (TMT study); `grouped_runs` lists the unit's runs. `intensity` and
+  `additional_intensities` `total_intensity` are the sum of the group's unique peptides;
+  `additional_intensities` `top3` is the mean of its three most intense unique peptides in the
+  unit, or of the ones it has when fewer. A peptide is a peptidoform, summed over its charge
+  states, fractions and feature rows; on a plex the three are ranked on their intensity summed
+  over the channels, so every channel averages the same peptides; ties go to the peptidoform
+  that sorts first (tied peptides have equal intensity). Shared and razor peptides are left out;
+  values that are zero or not finite are missing (`intensity` null when no peptide has one).
+  Values are the feature intensities as written: not normalised, not divided by the reference
+  channels (label-free: the feature quantity, transfers included; TMT: the run tables' reporter
+  intensities, raw or impurity-corrected as searched). `cv_params` gives `quantification_method`
+  `total_intensity` and `andes:group_id`. A group without a quantified feature keeps one
+  identification row (`label` and `intensity` null, `grouped_runs` every run). Rows are numbered
+  from 1 (`pg_id`); without quantities `pg_id` is the group id. Better protein quantities
+  (reference ratios, normalisation, summarisation) are downstream, in mokume.
 - Each row of `quantms.feature.parquet` carries its peptide's group: `pg_accessions` (the group's
   accessions), `anchor_protein` (its lead), `unique` (false for a peptide another group also
   contains, assigned to this one as razor) and `pg_global_qvalue`. Features whose peptide counts

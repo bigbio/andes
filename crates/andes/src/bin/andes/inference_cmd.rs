@@ -204,6 +204,7 @@ pub(crate) fn run_inference(a: InferenceArgs) -> Result<(), Box<dyn std::error::
         runs.len() == 1,
         a.proteins.protein_fdr,
         None,
+        None,
     )?;
     let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
     log::info!(

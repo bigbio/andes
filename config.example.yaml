@@ -13,7 +13,7 @@ io:
   # uniprot_variants: false               # --uniprot-variants (advanced): UniProt XML: also search each natural sequence variant as its own entry
   # uniprot_isoforms: false               # --uniprot-isoforms (advanced): UniProt XML: also search each described isoform as its own entry
   # uniprot_chains: false                 # --uniprot-chains (advanced): UniProt XML: also search each mature chain or peptide whose ends differ from the precursor's
-  # uniprot_evidence: experimental        # --uniprot-evidence (advanced): UniProt XML: least evidence of a variant, annotated site or chain that is used
+  # uniprot_evidence: experimental        # --uniprot-evidence (advanced): UniProt XML: least evidence of a variant, annotated site or chain that is used; experimental | curated | any
   # annotations: [db.annotations.parquet] # --annotations (advanced): Annotation file (<name>.annotations.parquet) of variants, sites and chains; repeatable (example)
   # knockoffs: 4                          # --knockoffs (advanced): Knockoff entries per single-residue variant, which estimate the variant FDR (0: none)
   # sdrf: design.sdrf.tsv                 # --sdrf: SDRF-Proteomics file: data files, protease, modifications, tolerance and labels (example)
@@ -26,8 +26,8 @@ io:
 
 # ── Search ──────────────────────────────────────────────────────────────────
 search:
-  # enzyme: trypsin                     # --enzyme: Protease; a comma list (gluc,trypsin) cleaves at the sites of each one
-  # fixed_mods: ["Carbamidomethyl (C)"] # --fixed-mods: Fixed modifications, a list of Name (sites) [default: Carbamidomethyl (C)] (example)
+  # enzyme: trypsin                     # --enzyme: Protease; a comma list (gluc,trypsin) cleaves at the sites of each one; trypsin | chymotrypsin | lysc | aspn | gluc | lysn | argc | alphalp | nocleavage | nonspecific
+  # fixed_mods: ["Carbamidomethyl (C)"] # --fixed-mods: Fixed modifications, a list of Name (sites) [default: Carbamidomethyl (C)]
   # variable_mods: ["Oxidation (M)"]    # --variable-mods: Variable modifications, a list of Name (sites) [default: Oxidation (M), Acetyl (Protein N-term)] (example)
   # A list item is the command-line string or a map that adds the config-only settings (example):
   # variable_mods:
@@ -44,7 +44,7 @@ search:
   # open_search_top_k: 100              # --open-search-top-k (advanced): Candidates scored per spectrum under --open-search [default: 100]
   # optimize: false                     # --optimize (advanced): Parameter search: grid precursor tolerance, top-N and charge on a sample, then run
   # max_missed_cleavages: 2             # --max-missed-cleavages (advanced): Missed cleavages per peptide (not applied to a non-specific digest)
-  # enzyme_specificity: fully           # --enzyme-specificity (advanced): Peptide ends that must be cleavage sites
+  # enzyme_specificity: fully           # --enzyme-specificity (advanced): Peptide ends that must be cleavage sites; non-specific | semi | fully
   # min_length: 6                       # --min-length (advanced): Shortest peptide, in residues
   # max_length: 50                      # --max-length (advanced): Longest peptide, in residues
   # max_mods: 3                         # --max-mods (advanced): Variable modifications per peptide
@@ -53,7 +53,7 @@ search:
   # dia: false                          # --dia: Data-independent acquisition: search every MS2 scan across its isolation window
   # dia_mobility_slices: 1              # --dia-mobility-slices (advanced): diaPASEF (.d) only: split each isolation window's mobility range into N slices
   # dia_ms1_tol_ppm: 5                  # --dia-ms1-tol-ppm (advanced): --dia MS1 gate: ppm tolerance for a candidate's monoisotopic peak in the survey scans
-  # localize: ...                       # --localize (advanced): Site localization of variable modifications (`ipf`); needs --rescore
+  # localize: ipf                       # --localize (advanced): Site localization of variable modifications (`ipf`); needs --rescore; ipf (example)
   # xl: "DSSO (K, Protein N-term)"      # --xl (advanced): Crosslink search into <base>.xl.tsv, linker as Name (sites), e.g. "DSSO"; several as "DSSO; DSBU" (experimental) (example)
   # A reagent the table (resources/crosslinkers.yaml) lacks is an entry of that file's schema (example):
   # xl:
@@ -63,32 +63,33 @@ search:
   #   stubs: [{name: alkene, mass: 54.010565}, {name: thiol, mass: 85.982635}]   # MS-cleavage stubs
   #   doublets: [[alkene, thiol]]    # reporter doublets, [light, heavy] stub names
   #   monolinks: [{name: water, mass: 176.01433}]
-  # fragment_index: auto                # --fragment-index (advanced): Candidate retrieval
+  # xl_linear_only: false               # --xl-linear-only (advanced): With --xl: search only linear and monolinked peptides and write their protein groups
+  # fragment_index: auto                # --fragment-index (advanced): Candidate retrieval; auto | on | off
   # fragment_index_slice_da: 80         # --fragment-index-slice-da (advanced): Precursor-mass width of one fragment-index slice, in Da [default: from the memory budget] (example)
   # index_cache_dir: cache              # --index-cache-dir (advanced): Directory of the candidate-index cache [default: the directory of the outputs] (example)
 
 # ── Calibration, model and runtime ──────────────────────────────────────────
 scoring:
-  # threads: ...                # --threads: Worker threads [default: the number of logical CPUs]
-  # precursor_cal: "off"        # --precursor-cal (advanced): Precursor mass calibration pre-pass
-  # score: auto                 # --score (advanced): What ranks the candidates and fills the PIN RawScore
-  # fragmentation: auto         # --fragmentation (advanced): Fragmentation of MGF spectra (mzML, .raw and .d record it)
-  # protocol: auto              # --protocol (advanced): Labelling or enrichment protocol, which selects the protocol model
+  # threads: 8                  # --threads: Worker threads [default: the number of logical CPUs] (example)
+  # precursor_cal: "off"        # --precursor-cal (advanced): Precursor mass calibration pre-pass; off | auto | on
+  # score: auto                 # --score (advanced): What ranks the candidates and fills the PIN RawScore; auto | rank | strong
+  # fragmentation: auto         # --fragmentation (advanced): Fragmentation of MGF spectra (mzML, .raw and .d record it); auto | CID | ETD | HCD | UVPD
+  # protocol: auto              # --protocol (advanced): Labelling or enrichment protocol, which selects the protocol model; auto | phospho | iTRAQ | iTRAQ-phospho | TMT | standard
   # fragment_tol_ppm: 20        # --fragment-tol-ppm (advanced): Fragment tolerance in ppm of the PIN features, replacing the per-run measurement (example)
   # fragment_tol_da: 0.5        # --fragment-tol-da (advanced): Fragment tolerance in Da of the PIN features, replacing the per-run measurement (example)
   # peak_filter: "100:20"       # --peak-filter (advanced): Peak filter WINDOW_DA:PEAKS, e.g. 100:20 [default: 100:20 for isobaric data, else off] (example)
-  # ethcd_activation: ethcd     # --ethcd-activation (advanced): How EThcD and ETciD spectra are labelled
+  # ethcd_activation: ethcd     # --ethcd-activation (advanced): How EThcD and ETciD spectra are labelled; ethcd | etd
   # ms_level: 2                 # --ms-level (advanced): MS level searched in mzML (MGF, .raw, .d and --chimeric search MS2)
   # model_store: models.parquet # --model-store (advanced): Parquet model store (a file or a partitioned directory) instead of the bundled one (example)
   # model: hcd_qexactive_tryp   # --model (advanced): Model id to load from the model store, skipping the automatic selection (example)
   # gbdt_max_trees: 100         # --gbdt-max-trees (advanced): Trees evaluated per GBDT ensemble, 0 for all [default: 100; all with --glyco] (example)
-  # precursor_mono: auto        # --precursor-mono (advanced): Correct each precursor to the monoisotopic peak of its MS1 envelope (--glyco)
+  # precursor_mono: auto        # --precursor-mono (advanced): Correct each precursor to the monoisotopic peak of its MS1 envelope (--glyco); off | auto
 
 # ── Decoys ──────────────────────────────────────────────────────────────────
 decoys:
   # prefix: XXX_      # --decoy-prefix (advanced): Accession prefix that marks a decoy, given to the generated decoys
   # suffix: rev       # --decoy-suffix (advanced): Accession suffix that also marks a decoy (e.g. rev for <accession>_rev decoys) (example)
-  # strategy: shuffle # --decoy-strategy: How decoys are generated
+  # strategy: shuffle # --decoy-strategy: How decoys are generated; shuffle | reverse | sequon | mutate | none
 
 # ── Modes ───────────────────────────────────────────────────────────────────
 chimeric:
@@ -102,7 +103,7 @@ refine:
 
 # ── Rescoring and FDR ───────────────────────────────────────────────────────
 rescoring:
-  # psm_fdr: 0.01                     # --psm-fdr: PSM-level FDR: the q-value threshold of the reported PSMs [default: 0.01] (example)
+  # psm_fdr: 0.01                     # --psm-fdr: PSM-level FDR: the q-value threshold of the reported PSMs [default: 0.01]
   # protein_fdr: 0.01                 # --protein-fdr: Protein-group q-value threshold of the filtered output [default: none] (example)
   # enabled: false                    # --rescore: Rescore the PIN with Percolator and write q-values, PEPs and the PSMs at --psm-fdr
   # pep: 0.05                         # --pep (advanced): PEP threshold applied with --psm-fdr: a PSM must pass both [default: none] (example)
@@ -110,10 +111,10 @@ rescoring:
   # percolator_docker: false          # --percolator-docker (advanced): Run --rescore with Percolator from its Docker image instead of the native engine
   # percolator_image: "quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2" # --percolator-image (advanced): Docker image of Percolator, with --percolator-docker or --xl
   # percolator_args: "--testFDR 0.05" # --percolator-args (advanced): Extra arguments for an external Percolator, e.g. "--testFDR 0.05" (example)
-  # keep_pin: true                    # --keep-pin (advanced): Keep the PIN after rescoring
-  # predict: [rt]                     # --predict (advanced): Predicted features added to the PIN, comma-separated
+  # keep_pin: true                    # --keep-pin (advanced): Keep the PIN after rescoring; true | false
+  # predict: [rt]                     # --predict (advanced): Predicted features added to the PIN, comma-separated; rt | ms2 | peptdeep-ms2 | peptdeep-rt | deeplc-rt | none
   # predictor_models: models/         # --predictor-models (advanced): Directory of the exported AlphaPeptDeep and DeepLC models (example)
-  # predictor_backend: tract          # --predictor-backend (advanced): ONNX engine of the AlphaPeptDeep and DeepLC models
+  # predictor_backend: tract          # --predictor-backend (advanced): ONNX engine of the AlphaPeptDeep and DeepLC models; tract | ort
   # predictor_nce: 28                 # --predictor-nce (advanced): Collision energy given to the MS2 model [default: 28 on Q Exactive, else 30] (example)
   # predictor_instrument: QE          # --predictor-instrument (advanced): Instrument given to the MS2 model, e.g. QE, Lumos, timsTOF [default: from the instrument] (example)
   # predictor_batch: 256              # --predictor-batch (advanced): Peptides per predictor batch
@@ -122,13 +123,13 @@ rescoring:
 # ── Glycopeptides ───────────────────────────────────────────────────────────
 glyco:
   # enabled: false            # --glyco: Intact glycopeptide search into a .glyco.pin (needs a glycan database, e.g. --glyco-species)
-  # species: human            # --glyco-species: Bundled N-glycan database of --glyco (example)
+  # species: human            # --glyco-species: Bundled N-glycan database of --glyco; human | mouse | mouse-large | high-mannose (example)
   # glycan_gdb: glycans.gdb   # --glyco-glycan-gdb (advanced): External .gdb glycan database of --glyco (instead of --glyco-species) (example)
   # glycan_wurcs: glycans.csv # --glyco-glycan-wurcs (advanced): WURCS 2.0 glycan database CSV of --glyco (instead of --glyco-species) (example)
-  # core: "n"                 # --glyco-core (advanced): Glycan core of --glyco
+  # core: "n"                 # --glyco-core (advanced): Glycan core of --glyco; n | o
   # tol_ppm: 20               # --glyco-tol-ppm (advanced): Fragment tolerance in ppm of the glyco matching: oxonium ions, core Y ions, backbone, c/z
   # min_core_y: 0             # --glyco-min-core-y (advanced): Fewest trimannosyl-core Y ions of a reported --glyco PSM (0: off)
-  # hcd_pair: true            # --glyco-hcd-pair (advanced): On ETD scans, take the candidate backbones from the paired HCD scan of the same precursor
+  # hcd_pair: true            # --glyco-hcd-pair (advanced): On ETD scans, take the candidate backbones from the paired HCD scan of the same precursor; true | false
   # max_peaks: 0              # --glyco-max-peaks (advanced): Most intense peaks considered when generating --glyco candidates (0: all)
   # cz_max_charge: 1          # --glyco-cz-max-charge (advanced): Largest c/z fragment charge of --glyco ETD scoring [default: from whether the spectrum is deconvoluted] (example)
   # y_max_charge: 3           # --glyco-y-max-charge (advanced): Largest glycan Y fragment charge of --glyco
@@ -138,8 +139,8 @@ glyco:
 
 # ── Quantification ──────────────────────────────────────────────────────────
 quant:
-  # quant_fdr: 0.01                    # --quant-fdr: Quantification FDR: q-value threshold of values measured without an identification [default: 0.01] (example)
-  # tmt: tmt10                         # --tmt: Isobaric reporter-ion quantification with this labelling kit (example)
+  # quant_fdr: 0.01                    # --quant-fdr: Quantification FDR: q-value threshold of values measured without an identification [default: 0.01]
+  # tmt: tmt10                         # --tmt: Isobaric reporter-ion quantification with this labelling kit; tmt6 | tmt10 | tmt11 | tmt16 | tmt18 | tmt32 | tmt35 | itraq4 | itraq8 (example)
   # lfq: false                         # --lfq: Label-free MS1 quantification of the identified precursors
   # label: silac2                      # --label: MS1 labelled-pair quantification (SILAC, dimethyl): a preset or one bracket per channel (example)
   # mbr: false                         # --mbr: Match between runs across two or more inputs (needs --rescore, and --lfq, --tmt or --label)
@@ -149,9 +150,9 @@ quant:
   # tmt_correction: lot.txt            # --tmt-correction (advanced): Isotope impurity matrix of the kit lot, in quantms text form [default: no correction] (example)
   # tmt_min_purity: 0.7                # --tmt-min-purity (advanced): Quantification gate: least precursor isolation purity (0: off)
   # tmt_min_sn: 0                      # --tmt-min-sn (advanced): Quantification gate: least summed reporter signal-to-noise (0: off)
-  # tmt_unmix: auto                    # --tmt-unmix (advanced): Remove the co-isolation interference of high-resolution MS2 reporters
+  # tmt_unmix: auto                    # --tmt-unmix (advanced): Remove the co-isolation interference of high-resolution MS2 reporters; auto | off | on
   # mbr_wrong_log2: 0.5                # --mbr-wrong-log2 (advanced): With --tmt --mbr: RMS log2 deviation from its reference scan above which a transferred profile counts as wrong
-  # lfq_tol: 10ppm                     # --lfq-tol (advanced): MS1 m/z tolerance of the isotope chromatograms, e.g. 10ppm [default: 10ppm] (example)
+  # lfq_tol: 10ppm                     # --lfq-tol (advanced): MS1 m/z tolerance of the isotope chromatograms, e.g. 10ppm [default: 10ppm]
   # lfq_rt_window: 60                  # --lfq-rt-window (advanced): Retention-time half-window around the identifying PSM, in seconds [default: 60; 120 with --glyco] (example)
   # lfq_gaussian_width: 12             # --lfq-gaussian-width (advanced): Experimental: Gaussian peak width for peak detection, in seconds (eight sigma) [default: Savitzky-Golay smoothing] (example)
   # lfq_min_cosine: 0.7                # --lfq-min-cosine (advanced): Least isotope-envelope cosine of a feature marked accepted in lfq.parquet

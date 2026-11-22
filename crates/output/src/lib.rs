@@ -32,6 +32,7 @@ pub mod ipf;
 pub mod knockoff_fdr;
 pub mod site_fdr;
 pub mod site_identity;
+mod spectra_tally;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 

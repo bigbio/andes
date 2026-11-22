@@ -12,6 +12,8 @@ use search::candidate_gen::Candidate;
 use search::psm::TopNQueue;
 use search::search_params::SearchParams;
 
+pub use crate::spectra_tally::SpectraTally;
+
 pub struct RunStatistics {
     pub precursor_tolerance: String,
     pub precursor_calibration: String,
@@ -403,19 +405,22 @@ pub fn psm_facts(
     candidates: &[Candidate],
     params: &SearchParams,
     run_ends: &[usize],
+    file_cal: &[search::FileCalibration],
     wanted: &HashSet<&str>,
 ) -> HashMap<String, PsmFacts> {
     let rows = fact_rows(spectra, queues, candidates);
-    psm_facts_of_rows(spectra, &rows, candidates, params, run_ends, wanted)
+    psm_facts_of_rows(spectra, &rows, candidates, params, run_ends, file_cal, wanted)
 }
 
-/// The [`PsmFacts`] of the `wanted` SpecIds among `rows`.
+/// The [`PsmFacts`] of the `wanted` SpecIds among `rows`. `file_cal` holds each run's precursor
+/// calibration; a run past its end (or no per-file calibration) uses `params`' shift.
 pub fn psm_facts_of_rows(
     spectra: &[Spectrum],
     rows: &[Box<[FactRow]>],
     candidates: &[Candidate],
     params: &SearchParams,
     run_ends: &[usize],
+    file_cal: &[search::FileCalibration],
     wanted: &HashSet<&str>,
 ) -> HashMap<String, PsmFacts> {
     use crate::pin::{emitted_spec_id, precursor_error};
@@ -426,7 +431,6 @@ pub fn psm_facts_of_rows(
     let fixed = FixedModSpec::declared(params);
     let declared_mods = params.aa_set.distinct_mods();
     let declared: Vec<&str> = declared_mods.iter().map(|m| m.name.as_str()).collect();
-    let shift_ppm = params.precursor_mass_shift_ppm;
     (0..rows.len())
         .into_par_iter()
         .flat_map_iter(|i| rows[i].iter().map(move |row| (i, row)))
@@ -437,6 +441,9 @@ pub fn psm_facts_of_rows(
                 return None;
             }
             let run = run_ends.partition_point(|&end| end <= i);
+            let shift_ppm = file_cal
+                .get(run)
+                .map_or(params.precursor_mass_shift_ppm, |f| f.shift_ppm);
             let cand = &candidates[row.candidate as usize];
             let precursor_mz = if row.has_mz_override {
                 row.mz_override
@@ -496,41 +503,6 @@ pub fn psm_facts_of_rows(
             ))
         })
         .collect()
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SpectraTally {
-    pub per_run: Vec<usize>,
-    pub by_charge: BTreeMap<u8, usize>,
-    pub unknown_charge: usize,
-}
-
-impl SpectraTally {
-    pub fn of(spectra: &[Spectrum], run_ends: &[usize]) -> Self {
-        let mut per_run = Vec::with_capacity(run_ends.len());
-        let mut start = 0usize;
-        for &end in run_ends {
-            per_run.push(end.saturating_sub(start));
-            start = start.max(end);
-        }
-        let mut by_charge: BTreeMap<u8, usize> = BTreeMap::new();
-        let mut unknown_charge = 0usize;
-        for s in spectra {
-            match s.precursor_charge.and_then(|z| u8::try_from(z).ok()) {
-                Some(z) if z > 0 => *by_charge.entry(z).or_insert(0) += 1,
-                _ => unknown_charge += 1,
-            }
-        }
-        Self {
-            per_run,
-            by_charge,
-            unknown_charge,
-        }
-    }
-
-    fn total(&self) -> usize {
-        self.by_charge.values().sum::<usize>() + self.unknown_charge
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

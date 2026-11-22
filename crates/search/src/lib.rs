@@ -20,6 +20,7 @@ pub mod precursor_matching;
 pub mod precursor_mono;
 pub mod psm;
 pub mod refine_config;
+mod refine_mods;
 pub mod refinement;
 pub mod search_index;
 pub mod search_params;
@@ -31,7 +32,8 @@ pub use candidate_gen::enumerate_candidates;
 pub use decoy::{decoy_db, normalize_decoy_prefix, DEFAULT_DECOY_PREFIX};
 pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
-    learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
+    learn_calibration_stats, prepass_search_params, run_by_file, CalibrationStats,
+    FileCalibration, SpecKey,
 };
 pub use match_engine::{
     match_spectra_out_of_core, run_pass2_coisolation, PreparedSearch, ScorerLoader,

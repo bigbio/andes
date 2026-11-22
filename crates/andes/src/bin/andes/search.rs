@@ -12,8 +12,8 @@ use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::report_search_progress;
 use crate::spectra::{
     add_mzml_skipped, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_spectra,
-    send_chunks, send_linked_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    learn_file_calibrations, prefix_spectrum_titles, require_spectra, sample_spectra,
+    send_chunks, send_linked_chunks, title_prefix_for, ParseStats,
 };
 use input::{MgfReader, Ms1Link, MzMLReader};
 use model::{activation::ActivationMethod, Spectrum};
@@ -21,10 +21,7 @@ use scoring_crate::RankScorer;
 use search::candidate_index::index_cache_path;
 use search::fragment_index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
 use search::precursor_mono::MonoCorrection;
-use search::{
-    apply_shift_for_mode, apply_tightened_precursor_tolerance, PrecursorCalMode, PreparedSearch,
-    TopNQueue,
-};
+use search::{FileCalibration, PrecursorCalMode, PreparedSearch, TopNQueue};
 
 #[path = "search/resolve.rs"]
 mod resolve;
@@ -451,16 +448,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
-        log::warn!(
-            "--precursor-cal is not yet supported for Thermo .raw input; \
-             proceeding without calibration."
-        );
-        params.precursor_cal_mode = PrecursorCalMode::Off;
-    }
-
     let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
     let index_path = index_cache_path(&idx, &params, &cache_dir);
+    let mut file_cal: Vec<(f64, model::tolerance::PrecursorTolerance)> = Vec::new();
     if params.precursor_cal_mode != PrecursorCalMode::Off {
         let t_cal = std::time::Instant::now();
         let mut cal_prepared = PreparedSearch::prepare_mmap(
@@ -472,9 +462,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &index_path,
         )
         .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-        let cal_stats = run_precursor_calibration(
-            &spectrum_path,
-            is_mzml,
+        file_cal = learn_file_calibrations(
+            spectrum_paths,
             ms_level_u32,
             bench_cap,
             &params,
@@ -486,29 +475,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "done in {:.2} s (includes opening or building the candidate index)",
             t_cal.elapsed().as_secs_f64()
         );
-        params.precursor_mass_shift_ppm =
-            apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
-        let tol_before = params.precursor_tolerance;
-        apply_tightened_precursor_tolerance(&mut params, cal_stats);
-        if cal_stats.has_reliable_stats() {
-            let left_before = tolerance_ppm_display(tol_before.left);
-            let right_before = tolerance_ppm_display(tol_before.right);
-            let left_after = tolerance_ppm_display(params.precursor_tolerance.left);
-            let right_after = tolerance_ppm_display(params.precursor_tolerance.right);
-            if left_after.is_some()
-                && right_after.is_some()
-                && (left_after != left_before || right_after != right_before)
-            {
-                log::info!(
-                    target: "calibration",
-                    "Tightened precursor tolerance for main pass: left {:.3} ppm -> {:.3} ppm, right {:.3} ppm -> {:.3} ppm",
-                    left_before.unwrap_or(0.0),
-                    left_after.unwrap_or(0.0),
-                    right_before.unwrap_or(0.0),
-                    right_after.unwrap_or(0.0),
-                );
-            }
-        }
+        (params.precursor_mass_shift_ppm, params.precursor_tolerance) = file_cal[0];
     }
 
     if cli.optimize {
@@ -563,6 +530,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let file_params: Vec<search::SearchParams> = file_cal
+        .iter()
+        .map(|&(shift, tolerance)| {
+            let mut p = params.clone();
+            p.precursor_mass_shift_ppm = shift;
+            if params.precursor_tolerance == file_cal[0].1 {
+                p.precursor_tolerance = tolerance;
+            }
+            p
+        })
+        .collect();
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
@@ -805,6 +783,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if bench_mode && all_spectra.len() >= bench_cap {
             break;
         }
+        if let Some(p) = file_params.get(file_idx) {
+            prepared.params = p;
+        }
         measurer.start_file(&prepared);
         let remaining_cap = if bench_mode {
             bench_cap.saturating_sub(all_spectra.len())
@@ -1020,7 +1001,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|m| chunk_link.ms1_peaks.get(m))
                             .map(|peaks| {
                                 let (lo, hi) =
-                                    search::match_engine::coisolation_ms1_bounds(&spec, &params);
+                                    search::match_engine::coisolation_ms1_bounds(
+                                        &spec,
+                                        prepared.params,
+                                    );
                                 let a = peaks.partition_point(|p| p.0 < lo);
                                 let b = peaks.partition_point(|p| p.0 <= hi);
                                 peaks[a..b.max(a)].to_vec()
@@ -1037,7 +1021,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         &prepared,
                         &chunk_spectra,
                         &mut queues,
-                        &params,
+                        prepared.params,
                         &chunk_link,
                         offset,
                     );
@@ -1094,7 +1078,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &prepared,
                     &scored,
                     &mut queues,
-                    &params,
+                    prepared.params,
                     &link,
                     base,
                 );
@@ -1379,6 +1363,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         run_ends.push(all_spectra.len());
     }
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
+    prepared.params = &params;
+    let file_calibrations: Vec<FileCalibration> = file_params
+        .iter()
+        .zip(&run_ends)
+        .map(|(p, &end)| FileCalibration {
+            end,
+            shift_ppm: p.precursor_mass_shift_ppm,
+            tolerance: p.precursor_tolerance,
+        })
+        .collect();
 
     if parse_stats.error_count > 0 {
         log::warn!(
@@ -1633,7 +1627,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fragment_tol_da,
                 &cli.db.decoy_prefix,
                 decoy_strategy,
-                1,
+                cli.decoy_seed,
+                &file_calibrations,
             );
             log::info!(
                 target: "refinement",
@@ -2299,6 +2294,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &pin_candidates,
                 &params,
                 &run_ends,
+                &file_calibrations,
                 &wanted,
             ),
             None => output::psm_facts(
@@ -2307,6 +2303,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &pin_candidates,
                 &params,
                 &run_ends,
+                &file_calibrations,
                 &wanted,
             ),
         };
@@ -2349,7 +2346,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )
                 }),
                 fixed: &fixed,
-                calibration_shift_ppm: params.precursor_mass_shift_ppm,
+                calibration_shift_ppm: match file_calibrations.len() {
+                    0 | 1 => params.precursor_mass_shift_ppm,
+                    n => file_calibrations.iter().map(|f| f.shift_ppm).sum::<f64>() / n as f64,
+                },
             },
         )
     });

@@ -6,9 +6,10 @@ use input::{detect_instrument_type, MgfReader, Ms1Link, MzMLReader};
 use model::scan::Ms1Scan;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum, Tolerance};
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
+use model::tolerance::PrecursorTolerance;
 use search::{
-    learn_calibration_stats, CalibrationStats, PrecursorCalMode, PreparedSearch, SearchParams,
-    SpecKey,
+    apply_shift_for_mode, apply_tightened_precursor_tolerance, learn_calibration_stats,
+    CalibrationStats, PrecursorCalMode, PreparedSearch, SearchParams, SpecKey,
 };
 
 #[derive(Debug, Default)]
@@ -587,6 +588,53 @@ pub(crate) fn run_precursor_calibration(
         );
     }
     Ok(stats)
+}
+
+/// Learns the precursor calibration of each spectrum file on its own spectra: the mass shift
+/// and the tightened tolerance it searches with. A Thermo `.raw` file is searched without one.
+pub(crate) fn learn_file_calibrations(
+    paths: &[std::path::PathBuf],
+    ms_level: u32,
+    bench_cap: usize,
+    params: &SearchParams,
+    prepared: &mut PreparedSearch<'_>,
+) -> Result<Vec<(f64, PrecursorTolerance)>, Box<dyn std::error::Error>> {
+    let mut out = Vec::with_capacity(paths.len());
+    for (i, path) in paths.iter().enumerate() {
+        if paths.len() > 1 {
+            log::info!(target: "calibration", "spectrum file {}/{}", i + 1, paths.len());
+        }
+        let (is_mzml, is_raw, _, _) = input_format_flags(path);
+        let stats = if is_raw {
+            log::warn!(
+                target: "calibration",
+                "--precursor-cal is not yet supported for Thermo .raw input; {} is searched \
+                 without calibration",
+                path.display()
+            );
+            CalibrationStats::default()
+        } else {
+            run_precursor_calibration(path, is_mzml, ms_level, bench_cap, params, prepared)?
+        };
+        let mut p = params.clone();
+        p.precursor_mass_shift_ppm = apply_shift_for_mode(p.precursor_cal_mode, stats);
+        apply_tightened_precursor_tolerance(&mut p, stats);
+        let (before, after) = (params.precursor_tolerance, p.precursor_tolerance);
+        let ppm = |t: PrecursorTolerance| {
+            tolerance_ppm_display(t.left).zip(tolerance_ppm_display(t.right))
+        };
+        if let (Some((l0, r0)), Some((l1, r1))) = (ppm(before), ppm(after)) {
+            if (l0, r0) != (l1, r1) {
+                log::info!(
+                    target: "calibration",
+                    "Tightened precursor tolerance for main pass: left {l0:.3} ppm -> {l1:.3} ppm, \
+                     right {r0:.3} ppm -> {r1:.3} ppm"
+                );
+            }
+        }
+        out.push((p.precursor_mass_shift_ppm, p.precursor_tolerance));
+    }
+    Ok(out)
 }
 
 pub(crate) fn detect_dominant_activation(

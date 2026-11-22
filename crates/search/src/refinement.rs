@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
-use model::modification::{ModLocation, Modification, ResidueSpec};
-use model::peptide::Peptide;
+use model::modification::ModLocation;
 use model::protein::ProteinDb;
 use scoring_crate::RankScorer;
 
@@ -11,6 +9,7 @@ use crate::decoy::{build_search_db, whole_sequence_decoy_db, DecoyStrategy};
 use crate::match_engine::PreparedSearch;
 use crate::psm::TopNQueue;
 use crate::refine_config::RefineConfig;
+pub use crate::refine_mods::{mod_count_and_class, refinement_aa_set};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use crate::tdc::{confident_target_indices, ScoredLabel};
@@ -305,136 +304,6 @@ fn refinement_supported(decoy_strategy: DecoyStrategy) -> bool {
     !matches!(decoy_strategy, DecoyStrategy::None)
 }
 
-fn parse_location(loc: &str) -> ModLocation {
-    match loc.trim().to_ascii_lowercase().as_str() {
-        "n_term" | "n-term" | "nterm" => ModLocation::NTerm,
-        "c_term" | "c-term" | "cterm" => ModLocation::CTerm,
-        "protein_n_term" | "prot-n-term" | "prot_n_term" => ModLocation::ProtNTerm,
-        "protein_c_term" | "prot-c-term" | "prot_c_term" => ModLocation::ProtCTerm,
-        _ => ModLocation::Anywhere,
-    }
-}
-
-fn parse_residue_spec(res: &str) -> ResidueSpec {
-    let b = res.as_bytes();
-    if b.len() == 1 && b[0].is_ascii_uppercase() {
-        ResidueSpec::Specific(b[0])
-    } else {
-        ResidueSpec::Wildcard
-    }
-}
-
-pub fn refinement_aa_set(
-    base: &AminoAcidSet,
-    cfg: &RefineConfig,
-    high_res: bool,
-) -> Result<AminoAcidSet, String> {
-    let mut builder = AminoAcidSetBuilder::new_standard();
-
-    let mod_key = |residue: ResidueSpec, location: ModLocation, delta: f64| {
-        (residue, location, (delta * 1e4).round() as i64)
-    };
-    let mut present: HashSet<(ResidueSpec, ModLocation, i64)> = HashSet::new();
-    let mut fixed_slots: Vec<(ResidueSpec, ModLocation)> = Vec::new();
-
-    for m in base.distinct_mods() {
-        if m.annotated_site_mass.is_some() {
-            continue;
-        }
-        present.insert(mod_key(m.residue, m.location, m.mass_delta));
-        if m.fixed {
-            fixed_slots.push((m.residue, m.location));
-            builder = builder.add_fixed_mod((*m).clone());
-        } else {
-            builder = builder.add_variable_mod((*m).clone());
-        }
-    }
-
-    let residue_overlaps = |a: ResidueSpec, b: ResidueSpec| {
-        a == ResidueSpec::Wildcard || b == ResidueSpec::Wildcard || a == b
-    };
-
-    for rm in &cfg.mods {
-        if !high_res && rm.class == "deamidation" {
-            continue;
-        }
-        let location = parse_location(&rm.location);
-        for res in &rm.residues {
-            let residue = parse_residue_spec(res);
-            if fixed_slots
-                .iter()
-                .any(|&(fr, fl)| fl == location && residue_overlaps(fr, residue))
-            {
-                continue;
-            }
-            if !present.insert(mod_key(residue, location, rm.delta)) {
-                continue;
-            }
-            let m = Modification {
-                name: rm.name.clone(),
-                mass_delta: rm.delta,
-                residue,
-                location,
-                fixed: false,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-                annotated_site_mass: None,
-                blocks_cleavage: false,
-                parts: Vec::new(),
-                diagnostic_ions: Vec::new(),
-            };
-            builder = builder.add_variable_mod(m);
-        }
-    }
-
-    builder
-        .with_label_channels(base.label_channels().to_vec())
-        .build()
-        .map_err(|e| format!("refinement_aa_set: {e}"))
-}
-
-pub fn mod_count_and_class(
-    peptide: &Peptide,
-    cfg: &RefineConfig,
-    aa_set: &AminoAcidSet,
-) -> (u32, u32) {
-    let mut num_mods = 0u32;
-    let mut class_id = 0u32;
-
-    for aa in &peptide.residues {
-        let Some(m) = aa.mod_ else { continue };
-        let single = [m];
-        let parts: &[&Modification] = if m.parts.is_empty() {
-            aa_set.stack_parts(m).unwrap_or(&single)
-        } else {
-            &m.parts
-        };
-        for part in parts {
-            if part.fixed {
-                continue;
-            }
-            let matched = cfg.mods.iter().find(|rm| {
-                (rm.delta - part.mass_delta).abs() < 1e-4
-                    && parse_location(&rm.location) == part.location
-                    && rm
-                        .residues
-                        .iter()
-                        .any(|r| r == "*" || (r.len() == 1 && r.as_bytes()[0] == aa.residue))
-            });
-            let Some(rm) = matched else { continue };
-            num_mods += 1;
-            let this_class = RefineConfig::class_id(&rm.class);
-            let pending = class_id == 0 || class_id == 99;
-            if pending && (class_id == 0 || this_class != 99) {
-                class_id = this_class;
-            }
-        }
-    }
-
-    (num_mods, class_id)
-}
-
 pub struct RefinementOutput {
     pub index: SearchIndex,
     pub candidates: Vec<Candidate>,
@@ -457,6 +326,7 @@ pub fn run_refinement(
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
+    files: &[crate::mass_calibrator::FileCalibration],
 ) -> Option<RefinementOutput> {
     if !refinement_supported(decoy_strategy) {
         log::warn!(
@@ -603,9 +473,13 @@ pub fn run_refinement(
             let a = c.protein_index % n_anchors;
             anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
         }));
-        let subset: Vec<model::spectrum::Spectrum> =
-            unident.iter().map(|&i| all_spectra[i].clone()).collect();
-        let queues = refine_prepared.run_chunk(&subset, 0);
+        let queues = crate::mass_calibrator::run_by_file(
+            &refine_prepared,
+            all_spectra,
+            &unident,
+            &refine_params,
+            files,
+        );
         refine_prepared.sync_materialized_candidates();
         let base_peptides = refine_prepared.mmap_index.len();
         (
@@ -733,6 +607,8 @@ pub fn merge_into_pass1(
 mod tests {
     use super::*;
     use crate::psm::{PsmFeatures, PsmMatch};
+    use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
+    use model::modification::{Modification, ResidueSpec};
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use model::protein::Protein;
@@ -1780,6 +1656,7 @@ mod tests {
             "XXX",
             DecoyStrategy::None,
             42,
+            &[],
         );
         assert!(out.is_none());
     }
@@ -1812,6 +1689,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         );
         assert!(out.is_none());
         assert_eq!(queues[0].len(), before_len);
@@ -1844,6 +1722,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         );
         assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
@@ -1929,6 +1808,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         )
     }
 

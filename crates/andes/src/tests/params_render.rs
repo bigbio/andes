@@ -103,9 +103,24 @@ fn effective_config_names_sources() {
     let line = |key: &str| text.lines().find(|l| l.trim_start().starts_with(key));
     assert!(line("psm_fdr: 0.02").is_some_and(|l| l.contains("# command line")));
     assert!(line("max_spectra: 5").is_some_and(|l| l.contains("# config")));
-    assert!(line("min_length: 6").is_some_and(|l| l.contains("# default")));
+    assert!(line("# min_length: 6").is_some_and(|l| l.contains("# default")));
     assert!(line("# xl:").is_some_and(|l| l.contains("unset: off")));
     RunConfig::from_yaml_str(&text).expect("an effective config with set values parses");
+}
+
+#[test]
+fn effective_config_leaves_defaults_unset() {
+    let mut sources = ParamSources::default();
+    sources.record_as("top_n", Source::CommandLine, &7u64);
+    let cfg = RunConfig::from_yaml_str(&effective_config(&sources)).expect("parses");
+    assert_eq!(cfg.search.max_missed_cleavages, None);
+    assert_eq!(cfg.search.top_n, Some(7));
+}
+
+#[test]
+fn example_config_sets_only_the_paths() {
+    let cfg = RunConfig::from_yaml_str(&config_example()).expect("parses");
+    assert_eq!(cfg.search.max_missed_cleavages, None);
 }
 
 #[test]

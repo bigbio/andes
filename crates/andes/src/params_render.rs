@@ -16,8 +16,9 @@ const EXAMPLE_HEADER: &str = r##"# andes run configuration: `andes --config this
 #
 # Every key is optional; a key left out keeps its default. A flag on the command line wins over
 # this file (command line > config > default). Unknown keys are an error.
-# Values are written as on the command line ("20ppm", "2..5", auto). The values below are the
-# defaults, except the example paths; a commented key without a default shows an example value.
+# Values are written as on the command line ("20ppm", "2..5", auto). Every key below is commented
+# out and shows its default, or an example value marked "(example)" when it has none; uncomment a
+# key to set it. Only the example input and output paths are uncommented.
 # Each comment names the key's flag; "advanced" flags are listed by `andes --help` only,
 
 "##;
@@ -257,10 +258,10 @@ pub fn config_example() -> String {
             return None;
         }
         let default = default_value(arg, p);
-        let required = p.unset == Unset::Required;
+        let path = matches!(p.id, "spectrum" | "database" | "output_pin");
         let (value, example, commented) = match (default, example_value(arg, p)) {
-            (Some(d), _) => (flow(&d), false, false),
-            (None, Some(e)) => (flow(&e), true, !required),
+            (Some(d), _) => (flow(&d), false, true),
+            (None, Some(e)) => (flow(&e), true, !path),
             (None, None) => ("...".to_string(), false, true),
         };
         let advanced = if arg.is_hide_short_help_set() {
@@ -324,8 +325,7 @@ fn default_cell(arg: &Arg, p: &ParamSpec) -> String {
 }
 
 fn description(arg: &Arg) -> String {
-    let long = arg.get_long_help().map(ToString::to_string);
-    cell(&collapsed(&long.unwrap_or_else(|| help_of(arg))))
+    cell(&first_sentence(&help_of(arg)))
 }
 
 /// The DOCS.md flag tables: one per help heading, in declaration order, public flags only. Only
@@ -382,8 +382,10 @@ fn source_text(source: Source) -> &'static str {
 }
 
 /// The `--print-config` YAML: every config parameter under its section with the value the run
-/// uses (the recorded value, else the clap default) and a comment naming its source. A
-/// parameter with neither is commented out with what unset means. Internal parameters appear
+/// uses (the recorded value, else the clap default) and a comment naming its source. Only a
+/// value some source set is written as a key; a default is commented out, so that replaying the
+/// file keeps every default and its auto-adjustment. A parameter with no value is commented out
+/// with what unset means. Internal parameters appear
 /// only when something set them. `--print-config` (andes P1 task 4) is its reader.
 #[allow(dead_code)]
 pub fn effective_config(sources: &ParamSources) -> String {
@@ -399,6 +401,10 @@ pub fn effective_config(sources: &ParamSources) -> String {
             .or_else(|| default_value(arg, p))
             .filter(|_| source == Source::Default || sources.value(p.id).is_some());
         let (key, note) = match value {
+            Some(v) if source == Source::Default => (
+                format!("# {}: {}", p.key, flow(&v)),
+                source_text(source).to_string(),
+            ),
             Some(v) => (
                 format!("{}: {}", p.key, flow(&v)),
                 source_text(source).to_string(),

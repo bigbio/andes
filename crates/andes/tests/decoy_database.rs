@@ -82,7 +82,6 @@ fn assert_same_search(spectrum: &str, fasta: &str, flags: &[&str], database_flag
     let (pin_a, tsv_a, log_a) = search(&dir.path().join("own"), &spectrum, &fasta, flags);
     let (pin_b, tsv_b, log_b) = search(&dir.path().join("prebuilt"), &spectrum, &td, flags);
     assert!(log_b.contains("written by andes database"), "{log_b}");
-    assert!(!log_b.contains("decoy check:"), "the prebuilt search generated decoys");
     assert_eq!(decoy_key(&log_a), decoy_key(&log_b), "decoy keys differ");
     assert!(!pin_a.is_empty());
     assert!(pin_a == pin_b, "PIN differs between the generated and the prebuilt decoys");

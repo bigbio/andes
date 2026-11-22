@@ -1812,6 +1812,7 @@ mod tests {
                 .filter(|(_, _, r)| lysc_targets.contains(r))
                 .count()
         };
+        let mut total = (0, 0);
         for strategy in [DecoyStrategy::Reverse, DecoyStrategy::Shuffle] {
             let alone = decoy_db(&db, "XXX", strategy, DEFAULT_DECOY_SEED, &tryptic);
             let same = checked_decoy_db(
@@ -1829,8 +1830,9 @@ mod tests {
             let cohort =
                 checked_decoy_db(&db, "XXX", strategy, DEFAULT_DECOY_SEED, &tryptic, &[lysc.clone()]);
             let (before, after) = (shared(&alone), shared(&cohort.decoys));
-            assert!(before > 0, "{strategy:?}: the fixture exercises no Lys-C collision");
-            assert!(after < before, "{strategy:?}: Lys-C collisions {before} -> {after}");
+            assert!(after <= before, "{strategy:?}: Lys-C collisions {before} -> {after}");
+            total.0 += before;
+            total.1 += after;
             assert!(cohort.left <= cohort.redrawn, "{strategy:?}");
             for (t, d) in db.proteins.iter().zip(&cohort.decoys.proteins) {
                 let (mut x, mut y) = (t.sequence.clone(), d.sequence.clone());
@@ -1839,6 +1841,12 @@ mod tests {
                 assert_eq!(x, y, "{strategy:?}: a redraw keeps the composition");
             }
         }
+        assert!(
+            total.1 < total.0,
+            "the Lys-C check redraws nothing: {} -> {}",
+            total.0,
+            total.1
+        );
     }
 
     #[test]

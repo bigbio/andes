@@ -1,8 +1,18 @@
 //! Structure checks on the contributor rules: every skill points to its `docs/dev` page,
 //! `AGENTS.md` lists every page, and `CONTRIBUTING.md` points to the rules.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[path = "support/source_scan.rs"]
+mod source_scan;
+
+#[path = "support/ratchet.rs"]
+mod ratchet;
+
+use ratchet::compare;
+use source_scan::{line_count, live_code, rel_key};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -75,4 +85,59 @@ fn contributing_points_to_the_rules() {
         contributing.contains("AGENTS.md"),
         "CONTRIBUTING.md must link AGENTS.md"
     );
+}
+
+fn map(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
+    entries.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+}
+
+#[test]
+fn ratchet_passes_equal_counts() {
+    let m = map(&[("a/x.rs", 3), ("a/y.rs", 1)]);
+    assert!(compare("r", &m, &m).is_empty());
+}
+
+#[test]
+fn ratchet_fails_growth_and_names_file_and_counts() {
+    let messages = compare("r", &map(&[("a/x.rs", 5)]), &map(&[("a/x.rs", 3)]));
+    assert_eq!(messages.len(), 1);
+    let m = &messages[0];
+    assert!(m.contains("a/x.rs") && m.contains('5') && m.contains('3'), "{m}");
+}
+
+#[test]
+fn ratchet_asks_to_lower_a_shrunk_baseline() {
+    let messages = compare("r", &map(&[("a/x.rs", 2)]), &map(&[("a/x.rs", 3)]));
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("lower the baseline to 2"), "{}", messages[0]);
+}
+
+#[test]
+fn ratchet_reports_a_moved_file_by_name() {
+    let messages = compare("r", &map(&[("a/y.rs", 7)]), &map(&[("a/x.rs", 7)]));
+    assert!(
+        messages.iter().any(|m| m.contains("moved?") && m.contains("a/y.rs")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn ratchet_keys_use_forward_slashes() {
+    let root = source_scan::workspace_root();
+    let path = root.join("crates").join("a").join("b.rs");
+    assert_eq!(rel_key(&root, &path), "crates/a/b.rs");
+}
+
+#[test]
+fn line_count_ignores_crlf() {
+    assert_eq!(line_count("a\r\nb\r\n"), 2);
+    assert_eq!(line_count("a\nb"), 2);
+}
+
+#[test]
+fn live_code_skips_strings_comments_and_test_items() {
+    let src = "let s = \"x.unwrap()\"; // y.unwrap()\n#[cfg(test)] mod t { fn f() { z.unwrap(); } }\nfn g() { w.unwrap(); }";
+    let code = live_code(src);
+    assert_eq!(code.len(), src.len());
+    assert_eq!(code.matches(".unwrap()").count(), 1);
 }

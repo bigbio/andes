@@ -1,7 +1,7 @@
 # Source files over 1,500 lines and their line counts.
 # Lines are path<TAB>count; a count may only go down. After a cleanup, lower the counts with:
 # cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline (it refuses to raise any count)
-crates/andes/src/bin/andes/cli.rs	2845
+crates/andes/src/bin/andes/cli.rs	2833
 crates/andes/src/bin/andes/cohort_cmd.rs	1596
 crates/andes/src/bin/andes/dia.rs	1675
 crates/andes/src/bin/andes/dia_pass2.rs	1810

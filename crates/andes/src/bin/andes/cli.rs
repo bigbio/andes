@@ -6,7 +6,11 @@ use model::Tolerance;
 use model_train::geometry::GeometryConfig;
 use search::decoy::DecoyStrategy;
 use search::PrecursorCalMode;
-pub(crate) use crate::cli_parse::*;
+pub(crate) use crate::cli_parse::{
+    parse_charge_range, parse_isotope_error_range, parse_non_negative, parse_non_negative_f32,
+    parse_open_search_delta, parse_positive_tol, parse_precursor_tol, parse_unit_fraction,
+    parse_xl,
+};
 
 pub(crate) const H_IO: &str = "Input and output";
 pub(crate) const H_SEARCH: &str = "Search";
@@ -297,22 +301,6 @@ impl XlSet {
         }
         Ok(Self(linkers))
     }
-}
-
-pub(crate) fn parse_xl_one(s: &str) -> Result<xl::crosslinker::Crosslinker, String> {
-    xl::spec::XlDecl::parse(s)
-        .and_then(|d| d.resolve(model::unimod::bundled()))
-        .map_err(|e| e.to_string())
-}
-
-pub(crate) fn parse_xl(s: &str) -> Result<XlSet, String> {
-    let linkers = s
-        .split(';')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(parse_xl_one)
-        .collect::<Result<Vec<_>, _>>()?;
-    XlSet::new("--xl", linkers)
 }
 
 /// The protein database options shared by the search, `andes inference` and

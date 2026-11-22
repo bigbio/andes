@@ -14,8 +14,8 @@ mod cohort;
 mod cohort_cmd;
 #[path = "../config.rs"]
 mod config;
-#[path = "../config_decl.rs"]
-mod config_decl;
+#[path = "../config_mods.rs"]
+mod config_mods;
 #[path = "andes/dia.rs"]
 mod dia;
 #[path = "andes/dia_joint.rs"]
@@ -205,11 +205,11 @@ struct TopCli {
     command: Option<Command>,
 
     /// Print only warnings and errors to stderr
-    #[arg(long, global = true, help_heading = cli::H_RUNTIME)]
+    #[arg(long, global = true)]
     quiet: bool,
 
     /// Also print debug lines to stderr
-    #[arg(long, global = true, help_heading = cli::H_RUNTIME)]
+    #[arg(long, global = true)]
     verbose: bool,
 
     #[command(flatten)]
@@ -329,7 +329,21 @@ fn main() -> ExitCode {
 }
 
 fn print_config(dest: &std::path::Path, sources: &param_sources::ParamSources) -> ExitCode {
-    let text = params_render::effective_config(sources);
+    let text = match params_render::effective_config(sources) {
+        Ok(text) => text,
+        Err(e) => {
+            log::error!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let cli_only = params_render::command_line_only(sources);
+    if !cli_only.is_empty() {
+        log::warn!(
+            "--print-config: {} has no config key; the printed config lists it as a comment, \
+             pass it again on the command line to reproduce the run",
+            cli_only.join(" ")
+        );
+    }
     let written = if dest == std::path::Path::new("-") {
         use std::io::Write;
         std::io::stdout().write_all(text.as_bytes())

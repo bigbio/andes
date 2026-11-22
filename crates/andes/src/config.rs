@@ -60,6 +60,7 @@ pub struct SearchCfg {
     pub fixed_mods: Option<Vec<serde_yaml::Value>>,
     pub variable_mods: Option<Vec<serde_yaml::Value>>,
     pub xl: Option<serde_yaml::Value>,
+    pub xl_linear_only: Option<bool>,
     pub localize: Option<String>,
     pub fragment_index: Option<String>,
     pub fragment_index_slice_da: Option<f64>,
@@ -297,7 +298,7 @@ pub fn apply_protein_config(
     Ok(())
 }
 
-pub use crate::config_decl::{mod_list, xl_linker};
+use crate::config_mods::{mod_list, xl_set};
 
 pub fn apply(
     cfg: RunConfig,
@@ -645,16 +646,10 @@ pub fn apply(
     if let Some(v) = &cfg.search.xl {
         if !cli_set(m, "xl") {
             src.record_config("xl", &cfg.written);
-            let linkers = match v {
-                serde_yaml::Value::Sequence(items) => items
-                    .iter()
-                    .map(|i| xl_linker("search.xl", i))
-                    .collect::<Result<Vec<_>, _>>()?,
-                _ => vec![xl_linker("search.xl", v)?],
-            };
-            args.xl = Some(crate::cli::XlSet::new("search.xl", linkers)?);
+            args.xl = Some(xl_set(v)?);
         }
     }
+    set!("xl_linear_only", xl_linear_only, cfg.search.xl_linear_only);
     set_parsed!("glyco_core", glyco_core, cfg.glyco.core, parse_glyco_core);
     set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_max_peaks", glyco_max_peaks, cfg.glyco.max_peaks);

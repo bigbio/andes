@@ -1,6 +1,7 @@
 //! Value parsers for the search command-line arguments: numeric ranges, tolerances with units,
-//! charge and isotope-error ranges and enumerated values. `cli.rs` declares the arguments and
-//! re-exports these parsers; config files reuse them so both paths accept the same text.
+//! charge and isotope-error ranges, fractions and crosslinker lists. `cli.rs` declares the
+//! arguments, keeps the enumerated-value parser `parse_enum`, and re-exports these parsers by
+//! name; config files and `--print-config` reuse them so every path reads the same text.
 use model::Tolerance;
 
 pub(crate) fn dash_sep_index(s: &str) -> Option<usize> {
@@ -158,4 +159,23 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
         ));
     }
     Ok(v)
+}
+
+/// The crosslinker items of an `--xl` value: split at `;`, trimmed, empty items dropped.
+pub(crate) fn split_xl(s: &str) -> Vec<&str> {
+    s.split(';').map(str::trim).filter(|x| !x.is_empty()).collect()
+}
+
+pub(crate) fn parse_xl_one(s: &str) -> Result<xl::crosslinker::Crosslinker, String> {
+    xl::spec::XlDecl::parse(s)
+        .and_then(|d| d.resolve(model::unimod::bundled()))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn parse_xl(s: &str) -> Result<crate::cli::XlSet, String> {
+    let linkers = split_xl(s)
+        .into_iter()
+        .map(parse_xl_one)
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::cli::XlSet::new("--xl", linkers)
 }

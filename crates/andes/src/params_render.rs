@@ -5,6 +5,7 @@
 //! heading) joined with the `PARAMS` table (section, key, unit, range, unset meaning, legacy
 //! form, example). Nothing here holds a flag name or a default of its own. A hidden argument is
 //! internal and is never advertised; an argument hidden from the short help is "(advanced)".
+//! The values an enumerated argument accepts come from its clap possible values.
 
 use clap::{Arg, ArgAction, CommandFactory};
 use serde_yaml::Value;
@@ -52,6 +53,33 @@ const BANNERS: &[(&[Section], &str)] = &[
     (&[Section::Quant], "Quantification"),
 ];
 
+/// The order of the DOCS.md flag tables by help heading; a heading missing here follows in
+/// declaration order, and arguments without a heading come last under [`NO_HEADING`].
+const HEADING_ORDER: &[&str] = &[
+    crate::cli::H_IO,
+    crate::cli::H_SEARCH,
+    crate::cli::H_DATABASE,
+    crate::cli::H_FDR,
+    crate::cli::H_MODES,
+    crate::cli::H_QUANT,
+    crate::cli::H_RESCORING,
+    crate::cli::H_PREDICTION,
+    crate::cli::H_ISOBARIC,
+    crate::cli::H_LFQ,
+    crate::cli::H_LABEL,
+    crate::cli::H_GLYCO,
+    crate::cli::H_RUNTIME,
+    crate::cli::ADVANCED_FDR,
+    crate::cli::H_ADVANCED,
+];
+
+/// The DOCS.md heading of arguments clap lists under no heading (its own "Options").
+const NO_HEADING: &str = "Options";
+
+/// Command-line-only arguments that do not change what a run computes; `--print-config` does
+/// not list them.
+const NOT_RUN_SETTINGS: &[&str] = &["config", "print_config", "quiet", "verbose"];
+
 /// Widest key text that the comments of a section line up behind.
 const ALIGN_CAP: usize = 40;
 
@@ -98,6 +126,32 @@ fn first_sentence(help: &str) -> String {
 
 fn help_of(arg: &Arg) -> String {
     arg.get_help().map(ToString::to_string).unwrap_or_default()
+}
+
+/// The visible values clap accepts for an argument that takes a value; empty for a switch or
+/// free text.
+fn possible_values(arg: &Arg) -> Vec<String> {
+    if matches!(
+        arg.get_action(),
+        ArgAction::SetTrue | ArgAction::SetFalse | ArgAction::Count
+    ) {
+        return Vec::new();
+    }
+    arg.get_possible_values()
+        .iter()
+        .filter(|v| !v.is_hide_set())
+        .map(|v| v.get_name().to_string())
+        .collect()
+}
+
+/// The accepted values: clap's possible values as `a | b | c`, else the row's range text.
+fn range_text(arg: &Arg, p: &ParamSpec) -> Option<String> {
+    let values = possible_values(arg);
+    if values.is_empty() {
+        p.range.map(str::to_string)
+    } else {
+        Some(values.join(" | "))
+    }
 }
 
 fn is_list(arg: &Arg, p: &ParamSpec) -> bool {
@@ -170,8 +224,30 @@ fn scalar(s: &str) -> String {
     if first_ok && s.chars().all(word) && !reserved && s.parse::<f64>().is_err() {
         s.to_string()
     } else {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        double_quoted(s)
     }
+}
+
+/// `s` as a YAML double-quoted scalar: backslash, quote and every control character escaped,
+/// so any string reads back unchanged.
+fn double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}') => {
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// One-line YAML of a value: scalars plain where that is safe, lists and maps in flow style.
@@ -274,11 +350,22 @@ pub fn config_example() -> String {
         } else {
             ""
         };
-        let marker = if example { " (example)" } else { "" };
+        let is_default = matches!(p.unset, Unset::Auto(a) if Some(a) == p.example);
+        let marker = if example && !is_default {
+            " (example)"
+        } else {
+            ""
+        };
+        let values = possible_values(arg);
+        let values = if values.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", values.join(" | "))
+        };
         Some(Line {
             key: format!("{}{}: {value}", if commented { "# " } else { "" }, p.key),
             note: format!(
-                "{}{advanced}: {}{marker}",
+                "{}{advanced}: {}{values}{marker}",
                 flag(arg),
                 first_sentence(&help_of(arg))
             ),
@@ -337,12 +424,32 @@ fn default_cell(arg: &Arg, p: &ParamSpec) -> String {
     }
 }
 
+/// The short help, then the paragraphs the long help adds after it, whitespace collapsed.
 fn description(arg: &Arg) -> String {
-    cell(&collapsed(&help_of(arg)))
+    let mut text = collapsed(&help_of(arg));
+    let long = arg.get_long_help().map(ToString::to_string).unwrap_or_default();
+    for paragraph in long.split("\n\n").skip(1) {
+        let paragraph = collapsed(paragraph);
+        if !paragraph.is_empty() {
+            text.push(' ');
+            text.push_str(&paragraph);
+        }
+    }
+    cell(&text)
 }
 
-/// The DOCS.md flag tables: one per help heading, in declaration order, public flags only. Only
-/// the tests that keep DOCS.md in step call it.
+/// The position of a help heading in [`HEADING_ORDER`]; unlisted headings, then arguments
+/// without one, sort after it.
+fn heading_rank(heading: &str) -> usize {
+    match HEADING_ORDER.iter().position(|h| *h == heading) {
+        Some(i) => i,
+        None if heading == NO_HEADING => HEADING_ORDER.len() + 1,
+        None => HEADING_ORDER.len(),
+    }
+}
+
+/// The DOCS.md flag tables: one per help heading, in [`HEADING_ORDER`], public flags only, rows
+/// in declaration order. Only the tests that keep DOCS.md in step call it.
 #[allow(dead_code)]
 pub fn docs_reference() -> String {
     let cmd = command();
@@ -351,19 +458,24 @@ pub fn docs_reference() -> String {
         let Some(p) = PARAMS.iter().find(|p| arg.get_id() == p.id) else {
             continue;
         };
-        let heading = arg.get_help_heading().unwrap_or("Other").to_string();
+        let heading = arg.get_help_heading().unwrap_or(NO_HEADING).to_string();
         let advanced = if arg.is_hide_short_help_set() {
             " (advanced)"
         } else {
             ""
         };
+        let cli_only = if p.section == Section::CliOnly {
+            " (command line only)"
+        } else {
+            ""
+        };
         let unit = unit_text(p.unit);
         let row = format!(
-            "| `{}`{advanced} | {} | {} | {} | {} | {} |",
+            "| `{}`{advanced}{cli_only} | {} | {} | {} | {} | {} |",
             flag(arg),
             if unit.is_empty() { "—" } else { unit },
             default_cell(arg, p),
-            code_cell(p.range),
+            code_cell(range_text(arg, p).as_deref()),
             description(arg),
             code_cell(p.legacy),
         );
@@ -372,6 +484,7 @@ pub fn docs_reference() -> String {
             None => tables.push((heading, vec![row])),
         }
     }
+    tables.sort_by_key(|(heading, _)| heading_rank(heading));
     let rendered: Vec<String> = tables
         .iter()
         .map(|(heading, rows)| {
@@ -394,13 +507,52 @@ fn source_text(source: Source) -> &'static str {
     }
 }
 
+/// The command-line-only settings that change the run and were set, as the command-line text
+/// that sets them again (`--xl-oracle 5`). A config file has no key for them.
+pub fn command_line_only(sources: &ParamSources) -> Vec<String> {
+    let cmd = command();
+    PARAMS
+        .iter()
+        .filter(|p| p.section == Section::CliOnly && !NOT_RUN_SETTINGS.contains(&p.id))
+        .filter(|p| sources.source(p.id) != Source::Default)
+        .filter_map(|p| {
+            let arg = cmd.get_arguments().find(|a| a.get_id() == p.id)?;
+            Some(command_line_text(arg, sources.value(p.id)))
+        })
+        .collect()
+}
+
+/// The flag and value text of one setting, a list as the flag repeated.
+fn command_line_text(arg: &Arg, value: Option<&Value>) -> String {
+    let flag = flag(arg);
+    let switch = matches!(arg.get_action(), ArgAction::SetTrue);
+    match value {
+        None => flag,
+        Some(Value::Bool(true)) if switch => flag,
+        Some(Value::Sequence(items)) => items
+            .iter()
+            .map(|v| format!("{flag} {}", flow(v)))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(v) => format!("{flag} {}", flow(v)),
+    }
+}
+
 /// The `--print-config` YAML: every config parameter under its section with the value the run
 /// uses (the recorded value, else the clap default) and a comment naming its source. Only a
 /// value some source set is written as a key; a default is commented out, so that replaying the
 /// file keeps every default and its auto-adjustment. A parameter with no value is commented out
-/// with what unset means. Internal parameters appear
-/// only when something set them. `--print-config` writes it.
-pub fn effective_config(sources: &ParamSources) -> String {
+/// with what unset means. Internal parameters appear only when something set them. The
+/// command-line-only settings that were set close the file as comments, since no key holds
+/// them. A setting whose value has no config form is an error: the file would not reproduce the
+/// run. `--print-config` writes it.
+pub fn effective_config(sources: &ParamSources) -> Result<String, String> {
+    if !sources.unwritable().is_empty() {
+        return Err(format!(
+            "--print-config: no config form of {}",
+            sources.unwritable().join("; ")
+        ));
+    }
     let cmd = command();
     let body = write_sections(&cmd, &|arg, p| {
         let source = sources.source(p.id);
@@ -436,7 +588,17 @@ pub fn effective_config(sources: &ParamSources) -> String {
             block: None,
         })
     });
-    format!(
+    let mut text = format!(
         "# The settings this run uses (`--print-config`); each comment names where the value came from.\n\n{body}"
-    )
+    );
+    let cli_only = command_line_only(sources);
+    if !cli_only.is_empty() {
+        text.push('\n');
+        for flag in cli_only {
+            text.push_str(&format!(
+                "# set on the command line, no config key (pass again to reproduce): {flag}\n"
+            ));
+        }
+    }
+    Ok(text)
 }

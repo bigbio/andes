@@ -129,3 +129,15 @@ pub fn xl_linker(key: &str, v: &serde_yaml::Value) -> Result<xl::crosslinker::Cr
         _ => Err(at("expected `Name (sites)` or a map with `name`".into())),
     }
 }
+
+/// The crosslinkers of the `search.xl` value: one declaration, or a list of them.
+pub fn xl_set(v: &serde_yaml::Value) -> Result<crate::cli::XlSet, String> {
+    let linkers = match v {
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .map(|i| xl_linker("search.xl", i))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => vec![xl_linker("search.xl", v)?],
+    };
+    crate::cli::XlSet::new("search.xl", linkers)
+}

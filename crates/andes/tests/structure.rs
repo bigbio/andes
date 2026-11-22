@@ -12,7 +12,7 @@ mod source_scan;
 mod ratchet;
 
 use ratchet::{baseline, compare, write_baseline};
-use source_scan::{line_count, live_code, rel_key, source_files};
+use source_scan::{line_count, live_code, macro_calls, rel_key, source_files};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -180,4 +180,57 @@ fn no_source_file_grows_past_the_budget() {
 #[ignore = "writes crates/andes/tests/ratchets/file_lines.tsv"]
 fn write_file_lines_baseline() {
     write_baseline("file_lines", &oversized_file_lines());
+}
+
+fn unwrap_expect_counts() -> BTreeMap<String, usize> {
+    per_file(|src| {
+        let code = live_code(src);
+        code.matches(".unwrap()").count() + code.matches(".expect(").count()
+    })
+}
+
+#[test]
+fn no_new_unwrap_or_expect_in_live_code() {
+    let messages = compare("unwrap_expect", &unwrap_expect_counts(), &baseline("unwrap_expect"));
+    assert!(
+        messages.is_empty(),
+        "return an error or document the invariant instead of unwrap/expect:\n{}",
+        messages.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "writes crates/andes/tests/ratchets/unwrap_expect.tsv"]
+fn write_unwrap_expect_baseline() {
+    write_baseline("unwrap_expect", &unwrap_expect_counts());
+}
+
+/// Files that may use print macros, with the reason. Everything else logs through `log`.
+const PRINT_ALLOWED: &[(&str, &str)] = &[(
+    "crates/andes/src/bin/andes/logging.rs",
+    "the logger itself: the one place that writes log lines to stderr",
+)];
+
+#[test]
+fn no_print_macros_in_live_code() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for path in source_files() {
+        let key = rel_key(&root, &path);
+        if PRINT_ALLOWED.iter().any(|&(allowed, _)| allowed == key) {
+            continue;
+        }
+        let code = live_code(&read(&path));
+        for name in ["println", "eprintln", "print", "eprint", "dbg"] {
+            let n = macro_calls(&code, name).len();
+            if n > 0 {
+                found.push(format!("{key}: {n} x {name}!"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "use log:: macros (docs/dev/clean-logs.md), or add the file to PRINT_ALLOWED with the command whose output it is:\n{}",
+        found.join("\n")
+    );
 }

@@ -140,7 +140,6 @@ pub(crate) fn typed_text(unit: Unit, text: &str) -> Value {
             | Unit::Number
             | Unit::Fraction
             | Unit::Gb
-            | Unit::Minutes
             | Unit::Seconds
             | Unit::Ppm
             | Unit::Da

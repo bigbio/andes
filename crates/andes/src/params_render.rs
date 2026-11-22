@@ -294,7 +294,6 @@ fn unit_text(unit: Unit) -> &'static str {
         Unit::Ppm => "ppm",
         Unit::Da => "Da",
         Unit::PpmOrDa => "ppm or Da",
-        Unit::Minutes => "min",
         Unit::Seconds => "s",
         Unit::Gb => "GB",
         Unit::Fraction => "fraction",

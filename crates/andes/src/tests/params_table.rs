@@ -40,7 +40,6 @@ pub(crate) fn unit_sample(unit: Unit) -> &'static str {
         Unit::Path | Unit::None => "x",
         Unit::Ppm
         | Unit::Da
-        | Unit::Minutes
         | Unit::Seconds
         | Unit::Gb
         | Unit::Count

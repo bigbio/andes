@@ -69,7 +69,7 @@ fn internal_flags_are_not_advertised() {
         let Some(long) = arg.get_long() else { continue };
         let flag = format!("--{long}");
         if mentions(&example, &flag) || mentions(&docs, &flag) {
-            leaks.push(flag);
+            leaks.push(flag.clone());
         }
         let key = PARAMS
             .iter()

@@ -50,7 +50,6 @@ pub enum Unit {
     Ppm,
     Da,
     PpmOrDa,
-    Minutes,
     Seconds,
     Gb,
     Fraction,

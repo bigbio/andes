@@ -126,14 +126,14 @@ pub fn from_command_line(m: &clap::ArgMatches) -> ParamSources {
 }
 
 /// Whether clap collects more than one value for the argument.
-fn takes_several(arg: &clap::Arg) -> bool {
+pub(crate) fn takes_several(arg: &clap::Arg) -> bool {
     matches!(arg.get_action(), ArgAction::Append)
         || arg.get_value_delimiter().is_some()
         || arg.get_num_args().is_some_and(|n| n.max_values() > 1)
 }
 
 /// A YAML number when the unit is numeric (a charge range such as `2..5` stays text) and the text is a number, otherwise the text.
-fn typed_text(unit: Unit, text: &str) -> Value {
+pub(crate) fn typed_text(unit: Unit, text: &str) -> Value {
     let numeric = matches!(
         unit,
         Unit::Count

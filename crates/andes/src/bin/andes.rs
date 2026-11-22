@@ -58,12 +58,12 @@ mod quant_run;
 mod sdrf;
 #[path = "andes/optimize.rs"]
 mod optimize;
-#[allow(dead_code)]
 #[path = "../param_sources.rs"]
 mod param_sources;
-#[allow(dead_code)]
 #[path = "../params.rs"]
 mod params;
+#[path = "../params_render.rs"]
+mod params_render;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -392,3 +392,7 @@ mod params_table;
 #[cfg(test)]
 #[path = "../tests/params_sources.rs"]
 mod params_sources;
+
+#[cfg(test)]
+#[path = "../tests/params_render.rs"]
+mod params_render_tests;

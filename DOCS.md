@@ -51,6 +51,7 @@ Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli.rs
 
 Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 
+<!-- generated:search-flags:start -->
 ### Required
 
 | Flag | Type | Default | Description | Legacy form |
@@ -94,10 +95,6 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | `--model-store` | path | *(bundled)* | Model store instead of `resources/models/` (directory or one `models.parquet`). | — |
 | `--model` | string | *(auto-select)* | Load this model id, skipping selection. | — |
 
-**Model selection** tries an exact (activation, instrument class, enzyme, protocol) match, then
-drops the protocol, then takes the closest instrument class. The instrument class comes from
-the file; use `--model-store` plus `--model` for an unbundled model.
-
 ### Calibration
 
 | Flag | Type | Default | Description | Legacy form |
@@ -110,6 +107,34 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 |---|---|---|---|
 | `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native Percolator engine (in `--temp-dir`, removed afterwards); the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
 | `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
+
+### Runtime
+
+| Flag | Type | Default | Description | Legacy form |
+|---|---|---|---|---|
+| `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
+| `--quiet` | bool | `false` | Print only warnings and errors to stderr. Every subcommand takes it. Does not change any result. | — |
+| `--verbose` | bool | `false` | Also print debug lines to stderr. Every subcommand takes it; `--quiet` wins over it. Does not change any result. | — |
+| `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
+| `--temp-dir` | dir | output directory | Directory of the run's private temporary files (MS1 scans between searching and quantification, the `--mbr` directory without `--quant-dir`, the PIN of `--keep-pin false`); created if missing, emptied at exit; config key `io.temp_dir`. An unwritable directory is an error. | — |
+| `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
+| `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
+
+### Output
+
+| Flag | Type | Default | Description | Legacy form |
+|---|---|---|---|---|
+| `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
+| `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
+<!-- generated:search-flags:end -->
+
+### Notes on the flags
+
+**Model selection** tries an exact (activation, instrument class, enzyme, protocol) match, then
+drops the protocol, then takes the closest instrument class. The instrument class comes from
+the file; use `--model-store` plus `--model` for an unbundled model.
+
+#### Parameter search (`--optimize`)
 
 This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
 Commun.* 2020), scoped to the parameters andes does not derive from the data. The **fragment**
@@ -143,25 +168,6 @@ score every candidate in each precursor window, because the b/y-only fragment-io
 hold their c/z and a/x ions. The engine prints
 its choice; `--fragment-index off` scores every candidate in each precursor window instead
 ([benchmarks](docs/benchmarks/README.md)).
-
-### Runtime
-
-| Flag | Type | Default | Description | Legacy form |
-|---|---|---|---|---|
-| `--threads` | usize | logical CPU count | Worker threads. | Java `-thread N` |
-| `--quiet` | bool | `false` | Print only warnings and errors to stderr. Every subcommand takes it. Does not change any result. | — |
-| `--verbose` | bool | `false` | Also print debug lines to stderr. Every subcommand takes it; `--quiet` wins over it. Does not change any result. | — |
-| `--ms-level` | u8 | `2` | MS level to search in mzML. `.raw`/`.d`, MGF and `--chimeric` always search MS2. | — |
-| `--temp-dir` | dir | output directory | Directory of the run's private temporary files (MS1 scans between searching and quantification, the `--mbr` directory without `--quant-dir`, the PIN of `--keep-pin false`); created if missing, emptied at exit; config key `io.temp_dir`. An unwritable directory is an error. | — |
-| `--index-cache-dir` | dir | output directory | Directory of the candidate-index cache (`andes-candidx-<key>.bin`), created if missing; config key `search.index_cache_dir`. A shared directory builds the index once for several tasks, a node-local one gives a cache per node. A directory that cannot be written is an error. | — |
-| `--max-spectra` | usize | `0` | Bench mode: first N MS2 spectra only (`0` = all); skips TSV output. | — |
-
-### Output
-
-| Flag | Type | Default | Description | Legacy form |
-|---|---|---|---|---|
-| `--output-tsv` | path | *(off)* | Tab-separated PSM report (§3b). | Java `-outputFormat 1` with output path |
-| `--output-parquet` | dir | *(off)* | QPX `.idparquet/` bundle (§3e). | — |
 
 No environment variable changes a search result; the binary reads no `ANDES_*` variable.
 Search settings come from command-line flags or the `--config` YAML file; `--quiet` and

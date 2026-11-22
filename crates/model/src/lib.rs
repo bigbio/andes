@@ -1,3 +1,7 @@
+//! Shared domain types used by every other crate: amino acids, modifications, peptides,
+//! proteins, spectra, tolerances, instruments, enzymes and FDR helpers. It sits at the bottom of
+//! the dependency graph and holds no pipeline stage of its own.
+
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;

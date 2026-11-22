@@ -1,3 +1,8 @@
+//! Feature computation and learned scoring of candidate PSMs: fragment and ion features,
+//! peak features, the retention-time model and the gradient-boosted tree evaluator. It sits
+//! between candidate matching in `search` and the rescoring step, producing the features each
+//! PSM carries.
+
 pub mod frag_features;
 pub mod gbdt_eval;
 pub mod ion_features;

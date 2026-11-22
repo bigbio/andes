@@ -234,3 +234,33 @@ fn no_print_macros_in_live_code() {
         found.join("\n")
     );
 }
+
+/// 1 when the file's first non-blank line is not a `//!` doc; inner attributes before it are
+/// allowed.
+fn lacks_module_doc(src: &str) -> usize {
+    let first = src
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("#!["));
+    usize::from(!first.is_some_and(|l| l.starts_with("//!")))
+}
+
+fn module_doc_counts() -> BTreeMap<String, usize> {
+    per_file(lacks_module_doc)
+}
+
+#[test]
+fn every_new_module_has_a_doc() {
+    let messages = compare("module_docs", &module_doc_counts(), &baseline("module_docs"));
+    assert!(
+        messages.is_empty(),
+        "start each source file with a `//!` doc of 2-4 lines:\n{}",
+        messages.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "writes crates/andes/tests/ratchets/module_docs.tsv"]
+fn write_module_docs_baseline() {
+    write_baseline("module_docs", &module_doc_counts());
+}

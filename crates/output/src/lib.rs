@@ -1,3 +1,7 @@
+//! Writers and tables for the results of a run: PIN files, Parquet and QPX views, atomic file
+//! writes, FDR and protein-inference outputs and run provenance. It sits at the end of the
+//! pipeline, turning search, rescoring and quantification results into files.
+
 mod atomic;
 pub use atomic::write_atomic;
 pub mod tsv;

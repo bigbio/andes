@@ -37,3 +37,14 @@ Verify every reference (PubMed or the journal) before writing it; never cite fro
 
 If a design comes from andes's own experiments, say so and describe the measurement that
 justified it (in the commit or PR, per CLAUDE.md), rather than attributing it to a paper.
+
+## Registry and markers
+
+`docs/citations.yaml` lists the works the code and docs rest on, as a YAML list of
+`{key, authors, title, year, journal, doi | url}`. Keys are lowercase letters, digits and
+underscores, for example `kall2007_percolator`; each entry has a `doi` or a `url`.
+
+A doc comment (`///` or `//!`) or a page under `docs/` credits a registry entry with the
+marker `[cite:` followed by the key and `]`. A structure test fails when a marker names a key
+that is not in the registry, or when an entry is incomplete or its key is duplicated. Add the
+entry (checked against the journal or PubMed) before writing the marker.

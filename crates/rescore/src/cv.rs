@@ -185,6 +185,8 @@ fn positives(s: &[f64], decoy: &[bool], fdr: f64, skip_decoys_plus_one: bool) ->
     tdc_cut(s, decoy, fdr, skip_decoys_plus_one).below
 }
 
+/// Trains the cross-validated semi-supervised rescorer on a PIN table, after the Percolator
+/// recipe [cite:kall2007_percolator].
 pub fn train(
     pin: &Pin,
     norm: &Norm,

@@ -214,6 +214,8 @@ fn parsimony(rows: Vec<(String, f64, BTreeSet<String>)>) -> Side {
     }
 }
 
+/// Infers protein groups and their q-values by picked target-decoy competition
+/// [cite:savitski2015_picked_fdr].
 pub fn infer_protein_groups(
     targets: &HashMap<String, PercolatorPsm>,
     decoys: &HashMap<String, PercolatorPsm>,

@@ -264,3 +264,91 @@ fn every_new_module_has_a_doc() {
 fn write_module_docs_baseline() {
     write_baseline("module_docs", &module_doc_counts());
 }
+
+fn citation_registry() -> Vec<serde_yaml::Value> {
+    let text = read(&workspace_root().join("docs/citations.yaml"));
+    serde_yaml::from_str(&text).expect("docs/citations.yaml is a YAML list")
+}
+
+fn entry_text<'a>(entry: &'a serde_yaml::Value, field: &str) -> &'a str {
+    entry
+        .get(field)
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("")
+        .trim()
+}
+
+fn is_citation_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn cited_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("[cite:") {
+        rest = &rest[at + "[cite:".len()..];
+        if let Some(end) = rest.find(']') {
+            if is_citation_key(&rest[..end]) {
+                keys.push(rest[..end].to_string());
+            }
+        }
+    }
+    keys
+}
+
+#[test]
+fn every_cited_key_is_in_the_registry() {
+    let known: Vec<String> = citation_registry()
+        .iter()
+        .map(|e| entry_text(e, "key").to_string())
+        .collect();
+    let mut files = source_files();
+    files.extend(source_scan::text_files(&["docs"], &["md"]));
+    let mut missing = Vec::new();
+    for file in files {
+        for key in cited_keys(&read(&file)) {
+            if !known.contains(&key) {
+                missing.push(format!("{}: [cite:{key}]", file.display()));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "citation keys missing from docs/citations.yaml:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn registry_entries_are_complete_and_unique() {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut problems = Vec::new();
+    for entry in citation_registry() {
+        let key = entry_text(&entry, "key").to_string();
+        if !is_citation_key(&key) {
+            problems.push(format!("key {key:?} is empty or not [a-z0-9_]+"));
+        }
+        if !seen.insert(key.clone()) {
+            problems.push(format!("{key}: duplicate key"));
+        }
+        for field in ["authors", "title"] {
+            if entry_text(&entry, field).is_empty() {
+                problems.push(format!("{key}: empty {field}"));
+            }
+        }
+        let year = entry
+            .get("year")
+            .and_then(serde_yaml::Value::as_u64)
+            .unwrap_or(0);
+        if !(1900..=2100).contains(&year) {
+            problems.push(format!("{key}: year {year} outside 1900-2100"));
+        }
+        if entry_text(&entry, "doi").is_empty() && entry_text(&entry, "url").is_empty() {
+            problems.push(format!("{key}: needs a doi or a url"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

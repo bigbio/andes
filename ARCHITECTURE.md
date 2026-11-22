@@ -61,7 +61,9 @@ Each stage and where it lives:
 
 Library crates never print: they return values or errors, and the binary reports through the
 `log` crate (`crates/andes/src/bin/andes/logging.rs`, rules in
-[`docs/dev/clean-logs.md`](docs/dev/clean-logs.md)). A structure test enforces it.
+[`docs/dev/clean-logs.md`](docs/dev/clean-logs.md)). A structure test enforces it: no print
+macros outside `logging.rs` and the files on the allowlist in `structure.rs` (`PRINT_ALLOWED`),
+library crates and binary alike.
 
 ## 4. DDA data flow
 
@@ -128,7 +130,7 @@ runs through `xl_run.rs`, `xl_fdr.rs`; glyco through `glyco_run.rs`.
 |---|---|---|
 | PIN | `crates/output/src/pin.rs` | Tab-separated, the rescoring input; one file per search. |
 | Rescoring results | `crates/rescore/src/write.rs` | Percolator-format PSM and decoy result files. |
-| QPX `psms`, `proteins`, `search_params`, `protein_groups` | `crates/output/src/qpx.rs` | Parquet files written to the output directory. |
+| QPX `psms`, `proteins`, `search_params`, `protein_groups` | `crates/output/src/qpx.rs` | Parquet files written to the output directory. `protein_groups` is a schema-only placeholder; real protein groups come from `crates/output/src/pg_parquet.rs`. |
 | Protein groups | `crates/output/src/pg_parquet.rs`, `protein_inference.rs` | `pg_schema()` defines the columns. |
 | Quantification tables | `crates/output/src/quant_out.rs` | LFQ, TMT and label tables, each with its own schema key. |
 | Match-between-runs library and alignment | `crates/output/src/library_table.rs` | `library.parquet` and `alignment.parquet`. |

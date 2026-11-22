@@ -36,7 +36,7 @@ Verify every reference (PubMed or the journal) before writing it; never cite fro
 ## Ideas without a paper
 
 If a design comes from andes's own experiments, say so and describe the measurement that
-justified it (in the commit or PR, per CLAUDE.md), rather than attributing it to a paper.
+justified it (in the commit or PR, per AGENTS.md), rather than attributing it to a paper.
 
 ## Registry and markers
 

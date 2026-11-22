@@ -24,10 +24,12 @@ Read the page that matches the task before starting it.
 | [`docs/dev/parameters-and-constants.md`](docs/dev/parameters-and-constants.md) | proposing an algorithm, adding a flag, or a number, threshold, default or mass |
 | [`docs/dev/cli-flags-not-env-vars.md`](docs/dev/cli-flags-not-env-vars.md) | adding a setting or switch, or code that reads `std::env` |
 | [`docs/dev/mass-spec-correctness.md`](docs/dev/mass-spec-correctness.md) | masses, tolerances, modifications, digestion, decoys, readers |
+| [`docs/dev/structure-checks.md`](docs/dev/structure-checks.md) | a structure test fails, or you change a ratchet baseline |
 
 ## Enforcement
 
 These rules are checked by tests, not only by review: `crates/andes/tests/structure.rs`
 checks that every page above exists and is listed here, and further structure tests in the
 same crate and in `crates/search/tests` fail the build when a rule is broken. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to work with them.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to work with them and
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the crate map and data flow.

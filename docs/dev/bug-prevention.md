@@ -15,7 +15,9 @@
 
 - No `unwrap()`/`expect()` on data from a file, the CLI or the network. Return an error
   that names the file, the scan or the flag. `unwrap()` is acceptable on invariants the
-  code itself establishes, with a `///` doc on why it holds where it is not obvious.
+  code itself establishes, with a `///` doc on why it holds where it is not obvious. A new
+  `unwrap`/`expect` in `crates/*/src` still fails the unwrap ratchet in
+  `docs/dev/structure-checks.md`; a documented invariant is not exempt yet.
 - No silent fallbacks. If input is malformed, either reject it with a clear message or
   count it and report the count once (see `docs/dev/clean-logs.md`). Never drop spectra,
   PSMs or proteins without a counter.
@@ -58,4 +60,4 @@ the entrapment FDP in the commit message (see `fdr-validation`).
 ## Review your own diff
 
 Read `git diff` once as a reviewer before committing: dead code, leftover debug prints,
-new `//` comments (not allowed, see CLAUDE.md), flags missing from `--help` or DOCS.md.
+new `//` comments (not allowed, see AGENTS.md), flags missing from `--help` or DOCS.md.

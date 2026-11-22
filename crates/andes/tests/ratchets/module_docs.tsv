@@ -1,6 +1,6 @@
 # Files whose first non-blank line is not a //! module doc (count 1).
-# Lines are path<TAB>count; a count may only go down. Regenerate with:
-# cargo test -p andes --release --test structure -- --ignored write_module_docs_baseline
+# Lines are path<TAB>count; a count may only go down. After a cleanup, lower the counts with:
+# cargo test -p andes --release --test structure -- --ignored write_module_docs_baseline (it refuses to raise any count)
 crates/andes/src/bin/andes.rs	1
 crates/andes/src/bin/andes/acquisition.rs	1
 crates/andes/src/bin/andes/cli.rs	1

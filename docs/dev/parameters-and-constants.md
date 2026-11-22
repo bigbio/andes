@@ -74,7 +74,7 @@ an algorithm constant that a benchmark shows is right for every dataset.
 - **Defined once.** Two crates that must agree import one definition; they never each
   type the value.
 - **A `///` doc comment** states what it bounds and its unit. Why that value was chosen
-  goes in the commit message (CLAUDE.md), with the measurement.
+  goes in the commit message (AGENTS.md), with the measurement.
 - **No `static mut`**, no mutable globals. A value that comes from the CLI and reaches hot
   code is installed once at startup into a `OnceLock` (`init_scoring_settings`,
   `init_y_max_charge`), then read-only.

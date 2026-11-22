@@ -60,11 +60,14 @@ pub fn compare(
             Some(&allowed) if count > allowed => out.push(format!(
                 "{rule}: {file} has {count}, baseline is {allowed}; remove the new occurrences (do not raise the baseline)"
             )),
+            Some(&allowed) if count == 0 && allowed > 0 => out.push(format!(
+                "{rule}: {file} has 0, below its baseline {allowed}; remove its baseline line"
+            )),
             Some(&allowed) if count < allowed => out.push(format!(
                 "{rule}: {file} has {count}, below its baseline {allowed}; lower the baseline to {count}"
             )),
             None if count > 0 => out.push(format!(
-                "{rule}: {file} has {count} and no baseline line (baseline 0); remove the occurrences"
+                "{rule}: {file} has {count} and no baseline line (baseline 0); remove the occurrences. If this file was split from or renamed from another, move or split its baseline line, keeping the total from rising"
             )),
             _ => {}
         }
@@ -85,16 +88,45 @@ pub fn compare(
     out
 }
 
-/// Writes the baseline of `rule` from `counts`: entries above 0 only, sorted by path.
+/// The files whose count in `counts` is above their baseline, or that have a count above 0
+/// and no baseline line. A regeneration may only lower or remove baseline lines, so any entry
+/// here blocks it.
+pub fn raised(counts: &BTreeMap<String, usize>, base: &BTreeMap<String, usize>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (file, &count) in counts {
+        match base.get(file) {
+            Some(&allowed) if count > allowed => {
+                out.push(format!("{file}: {count} is above its baseline {allowed}"));
+            }
+            None if count > 0 => out.push(format!("{file}: {count} has no baseline line")),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Rewrites the baseline of `rule` from `counts`: entries above 0 only, sorted by path, under
+/// the existing leading `#` header lines. Panics, listing the files, when any count would rise
+/// or a new line would appear; a baseline can only be lowered or shortened.
 pub fn write_baseline(rule: &str, counts: &BTreeMap<String, usize>) {
     let path = baseline_path(rule);
+    let refused = raised(counts, &baseline(rule));
+    assert!(
+        refused.is_empty(),
+        "refusing to raise the {rule} baseline; fix the code instead:\n{}",
+        refused.join("\n")
+    );
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).expect("create ratchets dir");
     }
-    let text: String = counts
-        .iter()
-        .filter(|&(_, &c)| c > 0)
-        .map(|(file, c)| format!("{file}\t{c}\n"))
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text: String = existing
+        .lines()
+        .take_while(|l| l.starts_with('#'))
+        .map(|l| format!("{l}\n"))
         .collect();
+    for (file, c) in counts.iter().filter(|&(_, &c)| c > 0) {
+        text.push_str(&format!("{file}\t{c}\n"));
+    }
     std::fs::write(&path, text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }

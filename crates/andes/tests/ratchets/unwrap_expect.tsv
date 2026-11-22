@@ -1,6 +1,6 @@
 # Count of .unwrap() and .expect( calls in live (non-test) code per file.
-# Lines are path<TAB>count; a count may only go down. Regenerate with:
-# cargo test -p andes --release --test structure -- --ignored write_unwrap_expect_baseline
+# Lines are path<TAB>count; a count may only go down. After a cleanup, lower the counts with:
+# cargo test -p andes --release --test structure -- --ignored write_unwrap_expect_baseline (it refuses to raise any count)
 crates/andes/src/bin/andes/glyco_match.rs	1
 crates/andes/src/bin/andes/glyco_quant.rs	1
 crates/andes/src/bin/andes/predicted.rs	10

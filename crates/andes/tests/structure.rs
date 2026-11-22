@@ -1,9 +1,12 @@
-//! Structure checks on the contributor rules: every skill points to its `docs/dev` page,
-//! `AGENTS.md` lists every page, and `CONTRIBUTING.md` points to the rules.
+//! Structure checks on the contributor rules: skills, `AGENTS.md`, `CONTRIBUTING.md`,
+//! `CODEOWNERS` and `ARCHITECTURE.md` stay in step with `docs/dev`; source files stay under the
+//! line budget, avoid print macros and new unwrap/expect calls, and start with a module doc;
+//! citation markers resolve in the registry; committed text names no site. The rule, the
+//! baseline and the fix for each test are in `docs/dev/structure-checks.md`.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[path = "support/source_scan.rs"]
 mod source_scan;
@@ -11,16 +14,8 @@ mod source_scan;
 #[path = "support/ratchet.rs"]
 mod ratchet;
 
-use ratchet::{baseline, compare, write_baseline};
-use source_scan::{line_count, live_code, macro_calls, rel_key, source_files};
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf()
-}
+use ratchet::{baseline, compare, raised, write_baseline};
+use source_scan::{line_count, live_code, macro_calls, rel_key, source_files, workspace_root};
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
@@ -113,6 +108,24 @@ fn ratchet_asks_to_lower_a_shrunk_baseline() {
 }
 
 #[test]
+fn ratchet_asks_to_remove_a_line_at_zero() {
+    let messages = compare("r", &map(&[("a/x.rs", 0)]), &map(&[("a/x.rs", 3)]));
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("remove its baseline line"), "{}", messages[0]);
+}
+
+#[test]
+fn regeneration_refuses_to_raise_or_add() {
+    let base = map(&[("a/x.rs", 3), ("a/y.rs", 1), ("a/z.rs", 5)]);
+    let counts = map(&[("a/x.rs", 4), ("a/y.rs", 1), ("a/z.rs", 2), ("a/n.rs", 1), ("a/o.rs", 0)]);
+    let refused = raised(&counts, &base);
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert!(refused.iter().any(|m| m.starts_with("a/x.rs")), "{refused:?}");
+    assert!(refused.iter().any(|m| m.starts_with("a/n.rs")), "{refused:?}");
+    assert!(raised(&map(&[("a/x.rs", 3), ("a/z.rs", 0)]), &base).is_empty());
+}
+
+#[test]
 fn ratchet_reports_a_moved_file_by_name() {
     let messages = compare("r", &map(&[("a/y.rs", 7)]), &map(&[("a/x.rs", 7)]));
     assert!(
@@ -194,7 +207,7 @@ fn no_new_unwrap_or_expect_in_live_code() {
     let messages = compare("unwrap_expect", &unwrap_expect_counts(), &baseline("unwrap_expect"));
     assert!(
         messages.is_empty(),
-        "return an error or document the invariant instead of unwrap/expect:\n{}",
+        "return an error, or restructure (`let ... else`, `match`), instead of unwrap/expect:\n{}",
         messages.join("\n")
     );
 }
@@ -285,18 +298,58 @@ fn is_citation_key(key: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-fn cited_keys(text: &str) -> Vec<String> {
+const MARKER_WINDOW: usize = 64;
+
+/// The registry keys named by `[cite:` markers in `text`, and the malformed markers.
+///
+/// A marker is the text after `[cite:` up to the first `]`. When whitespace comes first the
+/// text is prose that mentions the marker and is ignored. Otherwise the marker is malformed
+/// when its content is not `[a-z0-9_]+` or when no `]` closes it within [`MARKER_WINDOW`]
+/// characters.
+fn citation_markers(text: &str) -> (Vec<String>, Vec<String>) {
     let mut keys = Vec::new();
+    let mut malformed = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find("[cite:") {
         rest = &rest[at + "[cite:".len()..];
-        if let Some(end) = rest.find(']') {
-            if is_citation_key(&rest[..end]) {
-                keys.push(rest[..end].to_string());
+        let mut closed = None;
+        let mut prose = false;
+        for (i, c) in rest.char_indices().take(MARKER_WINDOW + 1) {
+            if c == ']' {
+                closed = Some(i);
+                break;
+            }
+            if c.is_whitespace() {
+                prose = true;
+                break;
+            }
+        }
+        if prose {
+            continue;
+        }
+        match closed {
+            Some(end) if is_citation_key(&rest[..end]) => keys.push(rest[..end].to_string()),
+            Some(end) => malformed.push(format!("[cite:{}]", &rest[..end])),
+            None => {
+                let shown: String = rest.chars().take(MARKER_WINDOW).collect();
+                malformed.push(format!("[cite:{shown} (no closing bracket)"));
             }
         }
     }
-    keys
+    (keys, malformed)
+}
+
+#[test]
+fn citation_markers_are_parsed_strictly() {
+    let (keys, bad) = citation_markers("see [cite:kall2007_percolator] and [cite:Kall-2007] ok");
+    assert_eq!(keys, vec!["kall2007_percolator".to_string()]);
+    assert_eq!(bad, vec!["[cite:Kall-2007]".to_string()]);
+    let (keys, bad) = citation_markers("[cite:] [cite:a\nb] the marker `[cite:` then key");
+    assert!(keys.is_empty(), "{keys:?}");
+    assert_eq!(bad, vec!["[cite:]".to_string()]);
+    let (keys, bad) = citation_markers("[cite:unclosed_key_without_bracket");
+    assert!(keys.is_empty(), "{keys:?}");
+    assert_eq!(bad.len(), 1, "{bad:?}");
 }
 
 #[test]
@@ -305,16 +358,30 @@ fn every_cited_key_is_in_the_registry() {
         .iter()
         .map(|e| entry_text(e, "key").to_string())
         .collect();
+    let root = workspace_root();
     let mut files = source_files();
     files.extend(source_scan::text_files(&["docs"], &["md"]));
-    let mut missing = Vec::new();
-    for file in files {
-        for key in cited_keys(&read(&file)) {
-            if !known.contains(&key) {
-                missing.push(format!("{}: [cite:{key}]", file.display()));
-            }
+    for name in ["README.md", "DOCS.md", "TRAIN.md", "ARCHITECTURE.md"] {
+        let path = root.join(name);
+        if path.is_file() {
+            files.push(path);
         }
     }
+    let mut missing = Vec::new();
+    let mut malformed = Vec::new();
+    for file in files {
+        let (keys, bad) = citation_markers(&read(&file));
+        let key = rel_key(&root, &file);
+        for k in keys.iter().filter(|k| !known.contains(k)) {
+            missing.push(format!("{key}: [cite:{k}]"));
+        }
+        malformed.extend(bad.into_iter().map(|m| format!("{key}: {m}")));
+    }
+    assert!(
+        malformed.is_empty(),
+        "malformed citation markers (the key is lowercase letters, digits and underscores):\n{}",
+        malformed.join("\n")
+    );
     assert!(
         missing.is_empty(),
         "citation keys missing from docs/citations.yaml:\n{}",
@@ -353,24 +420,46 @@ fn registry_entries_are_complete_and_unique() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-const SITE_LITERALS: [&str; 6] = [
-    "/homes/",
-    "/hps/",
-    "/nfs/",
-    "pst_prd",
-    "codon-slurm",
-    "hl-codon",
+/// Directory prefixes of shared cluster storage. They are built from pieces so this file does
+/// not itself contain the patterns it scans for.
+const SITE_LITERALS: [&str; 3] = [
+    concat!("/ho", "mes/"),
+    concat!("/h", "ps/"),
+    concat!("/n", "fs/"),
 ];
+
+/// FNV-1a 64 hashes of the lowercase site-specific tokens (a service account and two cluster
+/// names). They are stored hashed so the names are not committed.
+const SITE_TOKEN_HASHES: [u64; 3] = [
+    0x8a35_4f35_cc64_7b31,
+    0x1a0b_cbc3_1db6_df67,
+    0xe164_0004_4a7d_b772,
+];
+
+fn fnv1a(token: &str) -> u64 {
+    token.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
 
 /// The site-specific patterns found in `text`, one entry per occurrence.
 ///
 /// A path under `/home/<name>/`, `/Users/<name>/` or `/Data/<name>/` is a hit (`/home/runner/` is the
-/// GitHub CI home and is allowed), as is any of [`SITE_LITERALS`].
+/// GitHub CI home and is allowed), as is any of [`SITE_LITERALS`] and any word, split on
+/// characters outside `[A-Za-z0-9_-]` and lowercased, whose hash is in [`SITE_TOKEN_HASHES`].
 fn site_hits(text: &str) -> Vec<String> {
     let mut hits = Vec::new();
     for literal in SITE_LITERALS {
         for _ in text.matches(literal) {
             hits.push(literal.to_string());
+        }
+    }
+    let words = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .filter(|w| !w.is_empty());
+    for word in words {
+        if SITE_TOKEN_HASHES.contains(&fnv1a(&word.to_ascii_lowercase())) {
+            hits.push("site-specific name (hashed)".to_string());
         }
     }
     for prefix in ["/home/", "/Users/", "/Data/"] {
@@ -398,20 +487,22 @@ fn site_patterns_ignore_public_urls() {
         "ftp.pride.ebi.ac.uk/pride/data https://www.ebi.ac.uk/pride doi.org/10.1/x"
     )
     .is_empty());
-    assert_eq!(site_hits("/home/alice/x").len(), 1);
-    assert_eq!(site_hits("/Users/bob/y").len(), 1);
-    assert_eq!(site_hits("/hps/nobackup/x").len(), 1);
-    assert_eq!(site_hits("pst_prd").len(), 1);
-    assert_eq!(site_hits("/Data/carol/raw").len(), 1);
-    assert!(site_hits("/home/runner/work").is_empty());
+    assert_eq!(site_hits(concat!("/ho", "me/alice/x")).len(), 1);
+    assert_eq!(site_hits(concat!("/Us", "ers/bob/y")).len(), 1);
+    assert_eq!(site_hits(concat!("/h", "ps/nobackup/x")).len(), 1);
+    assert_eq!(site_hits(concat!("/Da", "ta/carol/raw")).len(), 1);
+    assert_eq!(site_hits(concat!("pst", "_prd")).len(), 1);
+    assert_eq!(site_hits(concat!("HL", "-codon")).len(), 1);
+    assert_eq!(site_hits(concat!("node ", "codon", "-slurm", " up")).len(), 1);
+    assert!(site_hits("codon pst hl").is_empty());
+    assert!(site_hits(concat!("/ho", "me/runner/work")).is_empty());
 }
 
-/// Committed text names no cluster, host or user path: paths are placeholders or
-/// arguments. This file is exempt because its tests spell the patterns out.
+/// Committed text names no cluster, host or user path: paths are placeholders or arguments.
+/// This file is scanned like any other; its test strings are built from pieces.
 #[test]
 fn no_site_identifiers_in_committed_text() {
     let root = source_scan::workspace_root();
-    let this_file = "crates/andes/tests/structure.rs";
     let mut files = source_scan::text_files(
         &["crates", "docs", "scripts", "website", ".claude", ".github"],
         &["rs", "md", "py", "sh", "yml", "yaml", "toml", "tsv", "json"],
@@ -433,9 +524,6 @@ fn no_site_identifiers_in_committed_text() {
     let mut found = Vec::new();
     for file in files {
         let key = rel_key(&root, &file);
-        if key == this_file {
-            continue;
-        }
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
         };

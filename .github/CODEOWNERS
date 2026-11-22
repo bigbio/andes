@@ -12,3 +12,8 @@
 /crates/scoring/ @ypriverol
 /crates/search/ @ypriverol
 /crates/xl/ @ypriverol
+/crates/andes/tests/ratchets/ @ypriverol
+/crates/andes/tests/structure.rs @ypriverol
+/docs/dev/ @ypriverol
+/AGENTS.md @ypriverol
+/.github/ @ypriverol

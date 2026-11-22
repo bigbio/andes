@@ -58,10 +58,10 @@ mod quant_run;
 mod sdrf;
 #[path = "andes/optimize.rs"]
 mod optimize;
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[path = "../param_sources.rs"]
 mod param_sources;
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[path = "../params.rs"]
 mod params;
 #[path = "andes/search.rs"]

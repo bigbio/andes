@@ -244,7 +244,9 @@ fn database_of(r: &cohort::PlannedRun, cfg: &RunConfig, config: &Path) -> Option
 /// Each cross-link project's protein space: one linear and monolink search of all its
 /// runs (`--xl-linear-only --rescore`), whose protein groups at protein q <=
 /// `PROTEIN_SPACE_Q` become the FASTA its cross-link searches look in. A project whose runs
-/// have different search flags, or whose database is unknown, keeps the full database.
+/// differ in fragment resolution gets one such search per resolution, and its space is the
+/// union of theirs. A project whose runs have different search flags, or whose database is
+/// unknown, keeps the full database.
 /// The search is kept while its runs, settings and database are unchanged.
 fn protein_spaces(
     plan: &Plan,
@@ -296,50 +298,34 @@ fn protein_spaces(
         let fresh = std::fs::read_to_string(&done).is_ok_and(|old| old == print) && fasta.exists();
         if !fresh {
             let _ = std::fs::remove_file(&done);
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--config").arg(config);
-            for r in &runs {
-                std::fs::create_dir_all(&r.dir)
-                    .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
-                let staged = r.dir.join(&r.stage_as);
-                stage(&r.file, &staged).map_err(|e| {
-                    format!(
-                        "cannot stage {} as {}: {e}",
-                        r.file.display(),
-                        staged.display()
-                    )
-                })?;
-                cmd.arg("--spectrum").arg(staged);
-            }
-            cmd.arg("--output-pin")
-                .arg(dir.join(format!("{project}.pin")))
-                .args(&runs[0].args)
-                .args(["--xl-linear-only", "--rescore"]);
-            if let Some(t) = threads {
-                cmd.arg("--threads").arg(t.to_string());
-            }
-            let log_path = dir.join("andes.log");
-            let log = std::fs::File::create(&log_path)
-                .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
-            cmd.stdout(log.try_clone()?).stderr(log);
             let start = std::time::Instant::now();
-            log::info!(
-                target: "cohort",
-                "{project}: linear search of {} runs for its protein space",
-                runs.len()
-            );
-            let status = cmd
-                .status()
-                .map_err(|e| format!("{project}: cannot start {}: {e}", exe.display()))?;
-            if !status.success() {
-                return Err(format!(
-                    "{project}: the linear search failed ({status}); see {}",
-                    log_path.display()
-                )
-                .into());
+            let high: Vec<Option<bool>> = runs
+                .iter()
+                .map(|r| {
+                    crate::spectra::detect_acquisition_metadata(&r.file)
+                        .1
+                        .map(|i| i.is_high_resolution())
+                })
+                .collect();
+            let groups = resolution_groups(&high);
+            let mut accessions: Vec<String> = Vec::new();
+            let mut cut = 0.0_f64;
+            for (res, members) in &groups {
+                let stem = match (groups.len(), res) {
+                    (1, _) | (_, None) => project.to_string(),
+                    (_, Some(true)) => format!("{project}.high-res"),
+                    (_, Some(false)) => format!("{project}.low-res"),
+                };
+                let group: Vec<&cohort::PlannedRun> = members.iter().map(|&i| runs[i]).collect();
+                let table = space_search(project, &stem, &group, &dir, config, exe, threads)?;
+                let (found, c) = space_accessions(&table)?;
+                cut = cut.max(c);
+                for a in found {
+                    if !accessions.contains(&a) {
+                        accessions.push(a);
+                    }
+                }
             }
-            let groups = dir.join(format!("{project}.protein_groups.tsv"));
-            let (accessions, cut) = space_accessions(&groups)?;
             let n = write_space_fasta(&db, &accessions, &fasta)?;
             log::info!(
                 target: "cohort",
@@ -352,6 +338,87 @@ fn protein_spaces(
         spaces.insert(project.to_string(), fasta);
     }
     Ok(spaces)
+}
+
+/// The runs of a project split by fragment resolution (`high[i]`: run `i` has high-resolution
+/// MS2, `None` when its file does not record it), in order of first appearance, because one
+/// search takes its model, fragment tolerance and score features from its first input. A run
+/// of unknown resolution joins the first group of known resolution.
+fn resolution_groups(high: &[Option<bool>]) -> Vec<(Option<bool>, Vec<usize>)> {
+    let mut groups: Vec<(Option<bool>, Vec<usize>)> = Vec::new();
+    for (i, h) in high.iter().enumerate() {
+        if let Some(h) = h {
+            match groups.iter_mut().find(|g| g.0 == Some(*h)) {
+                Some(g) => g.1.push(i),
+                None => groups.push((Some(*h), vec![i])),
+            }
+        }
+    }
+    let unknown: Vec<usize> = (0..high.len()).filter(|&i| high[i].is_none()).collect();
+    match groups.first_mut() {
+        Some(g) => {
+            g.1.extend(unknown);
+            g.1.sort_unstable();
+        }
+        None if !unknown.is_empty() => groups.push((None, unknown)),
+        None => {}
+    }
+    groups
+}
+
+/// One linear and monolink search (`--xl-linear-only --rescore`) of `runs` into `dir`, its
+/// files named after `stem`. Returns its `protein_groups.tsv`.
+fn space_search(
+    project: &str,
+    stem: &str,
+    runs: &[&cohort::PlannedRun],
+    dir: &Path,
+    config: &Path,
+    exe: &Path,
+    threads: Option<usize>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--config").arg(config);
+    for r in runs {
+        std::fs::create_dir_all(&r.dir)
+            .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
+        let staged = r.dir.join(&r.stage_as);
+        stage(&r.file, &staged).map_err(|e| {
+            format!(
+                "cannot stage {} as {}: {e}",
+                r.file.display(),
+                staged.display()
+            )
+        })?;
+        cmd.arg("--spectrum").arg(staged);
+    }
+    cmd.arg("--output-pin")
+        .arg(dir.join(format!("{stem}.pin")))
+        .args(&runs[0].args)
+        .args(["--xl-linear-only", "--rescore"]);
+    if let Some(t) = threads {
+        cmd.arg("--threads").arg(t.to_string());
+    }
+    let log_path = dir.join(format!("{stem}.andes.log"));
+    let log = std::fs::File::create(&log_path)
+        .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    cmd.stdout(log.try_clone()?).stderr(log);
+    log::info!(
+        target: "cohort",
+        "{project}: linear search of {} runs for its protein space ({stem})",
+        runs.len()
+    );
+    let status = cmd
+        .status()
+        .map_err(|e| format!("{project}: cannot start {}: {e}", exe.display()))?;
+    if !status.success() {
+        return Err(format!(
+            "{project}: the linear search failed ({status}); see {}",
+            log_path.display()
+        )
+        .into());
+    }
+    Ok(dir.join(format!("{stem}.protein_groups.tsv")))
 }
 
 /// The accessions of the protein groups at protein q <= `PROTEIN_SPACE_Q` in a
@@ -1341,6 +1408,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
+    }
+
+    #[test]
+    fn a_project_mixing_fragment_resolutions_is_searched_once_per_resolution() {
+        assert_eq!(
+            resolution_groups(&[Some(false), Some(true), None, Some(false)]),
+            vec![(Some(false), vec![0, 2, 3]), (Some(true), vec![1])]
+        );
+        assert_eq!(
+            resolution_groups(&[Some(true), Some(true)]),
+            vec![(Some(true), vec![0, 1])]
+        );
+        assert_eq!(resolution_groups(&[None, None]), vec![(None, vec![0, 1])]);
+        assert!(resolution_groups(&[]).is_empty());
     }
 
     #[test]

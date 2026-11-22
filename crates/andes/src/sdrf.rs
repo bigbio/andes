@@ -814,7 +814,7 @@ pub fn apply(
                 .collect();
             applied.push(format!("crosslink search --xl {}", names.join("; ")));
             args.xl = Some(crate::cli::XlSet(set));
-            src.record_as("xl", Source::Sdrf, &s.xl);
+            src.record_without_value("xl", Source::Sdrf);
         }
     }
     args.sdrf_dissociation = s.dissociation;

@@ -86,3 +86,60 @@ fn untouched_flag_is_default() {
     assert_eq!(s.source("precursor_tol"), Source::Default);
     assert_eq!(s.value("precursor_tol"), None);
 }
+
+/// The YAML text `<section>:\n  <key>: <value>` that would set `id` to its recorded value.
+fn config_text(id: &str, value: &Value) -> Option<String> {
+    let p = crate::params::spec(id)?;
+    let mut inner = serde_yaml::Mapping::new();
+    inner.insert(text(p.key), value.clone());
+    let mut outer = serde_yaml::Mapping::new();
+    outer.insert(text(p.section.yaml_name()?), Value::Mapping(inner));
+    serde_yaml::to_string(&Value::Mapping(outer)).ok()
+}
+
+#[test]
+fn recorded_values_parse_as_config() {
+    let cases: [&[&str]; 4] = [
+        &["--spectrum", "a.mzML"],
+        &["--spectrum", "a.mzML", "--spectrum", "b.mzML"],
+        &["--fixed-mods", "Carbamidomethyl (C)", "--lfq"],
+        &["--min-peaks", "10", "--tmt-min-purity", "0.5", "--precursor-tol", "20ppm"],
+    ];
+    for args in cases {
+        let all: Vec<&str> = ["andes", "--database", "y", "--output-pin", "o"]
+            .into_iter()
+            .chain(args.iter().copied())
+            .collect();
+        let m = crate::TopCli::command().try_get_matches_from(all).unwrap();
+        let sources = from_command_line(&m);
+        for p in crate::params::PARAMS {
+            let Some(value) = sources.value(p.id) else {
+                continue;
+            };
+            let Some(yaml) = config_text(p.id, value) else {
+                continue;
+            };
+            let cfg = RunConfig::from_yaml_str(&yaml)
+                .unwrap_or_else(|e| panic!("{} recorded as {yaml:?}: {e}", p.id));
+            match p.id {
+                "spectrum" => {
+                    let want: Vec<std::path::PathBuf> = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i > 0 && args[i - 1] == "--spectrum")
+                        .map(|(_, a)| std::path::PathBuf::from(a))
+                        .collect();
+                    assert_eq!(cfg.io.spectrum, Some(want));
+                }
+                "fixed_mods" => {
+                    assert_eq!(cfg.search.fixed_mods, Some(vec![text("Carbamidomethyl (C)")]));
+                }
+                "lfq" => assert_eq!(cfg.quant.lfq, Some(true)),
+                "min_peaks" => assert_eq!(value, &Value::from(10)),
+                "tmt_min_purity" => assert_eq!(value, &Value::from(0.5)),
+                "precursor_tol" => assert_eq!(value, &text("20ppm")),
+                _ => {}
+            }
+        }
+    }
+}

@@ -246,8 +246,8 @@ pub fn apply_db(
         ($id:literal, $field:ident, $val:expr, $parse:expr) => {
             if let Some(s) = &$val {
                 if !cli_set(m, $id) {
-                    src.record_config($id, &cfg.written);
                     db.$field = ($parse)(s)?;
+                    src.record_config($id, &cfg.written);
                 }
             }
         };
@@ -329,8 +329,8 @@ pub fn apply(
         ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
             if let Some(s) = $val {
                 if !cli_set(m, $id) {
-                    src.record_config($id, &cfg.written);
                     args.$($field).+ = ($parse)(&s)?;
+                    src.record_config($id, &cfg.written);
                 }
             }
         };
@@ -388,11 +388,11 @@ pub fn apply(
     );
     set!("dia_ms1_tol_ppm", dia_ms1_tol_ppm, cfg.search.dia_ms1_tol_ppm);
     if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
-        src.record_config("localize", &cfg.written);
         if v != "ipf" {
             return Err(format!("search.localize: '{v}' is not one of: ipf"));
         }
         args.localize = Some(v);
+        src.record_config("localize", &cfg.written);
     }
     set_parsed!(
         "fragment_index",

@@ -3,16 +3,18 @@
 //!
 //! The merge in `main` starts from [`from_command_line`] and lets `config::apply` and
 //! `sdrf::apply` add what they set. A setting nobody recorded is a [`Source::Default`]. Each
-//! record carries the value as it was written: the raw command-line text, the YAML value of the
-//! config key, or the SDRF cell. Later consumers (the run report, `--print-config`) read the
+//! record carries the value as a config value, in the shape the `RunConfig` key expects: the
+//! command-line text typed by the argument, the YAML value of the config key, or the SDRF cell
+//! turned into that shape. Later consumers (the run report, `--print-config`) read the
 //! result through [`ParamSources::source`] and [`ParamSources::value`].
 
 use std::collections::BTreeMap;
 
 use clap::parser::ValueSource;
+use clap::{ArgAction, CommandFactory};
 use serde_yaml::Value;
 
-use crate::params::{spec, PARAMS};
+use crate::params::{spec, Unit, PARAMS};
 
 /// Where a setting's value came from. The command line beats the config file, which beats the
 /// SDRF, which beats the default.
@@ -47,6 +49,13 @@ impl ParamSources {
         self.record(id, source, serde_yaml::to_value(v).unwrap_or_default());
     }
 
+    /// Notes that `id` was set from `source` and that no config form of its value is known.
+    pub fn record_without_value(&mut self, id: &str, source: Source) {
+        if let Some(p) = spec(id) {
+            self.0.insert(p.id, (source, None));
+        }
+    }
+
     /// Notes that `id` was set by the config file whose parsed text is `written`, with the value
     /// of its section and key in that file.
     pub fn record_config(&mut self, id: &str, written: &Value) {
@@ -62,32 +71,81 @@ impl ParamSources {
         self.0.get(id).map_or(Source::Default, |(s, _)| *s)
     }
 
-    /// The value recorded for `id`, as written.
+    /// The value recorded for `id` as a config value; `None` when the source set the setting but
+    /// no config form of its value is known (an SDRF crosslinker cell).
     pub fn value(&self, id: &str) -> Option<&Value> {
         self.0.get(id).and_then(|(_, v)| v.as_ref())
     }
 }
 
-/// Every search setting given on the command line, with its raw text: one string, or a list
-/// when the flag was given more than one value. A flag without a value is `true`.
+/// Every search setting given on the command line, as the config value that would set it: a
+/// list for an argument that takes several values (and for the modification lists, split as the
+/// parser splits them), a boolean for a switch, a number for a numeric unit when the text is
+/// one, otherwise the raw text.
 pub fn from_command_line(m: &clap::ArgMatches) -> ParamSources {
+    let mut cmd = crate::TopCli::command();
+    cmd.build();
     let mut out = ParamSources::default();
     for p in PARAMS {
         let given = matches!(m.try_contains_id(p.id), Ok(true))
             && m.value_source(p.id) == Some(ValueSource::CommandLine);
+        let Some(arg) = cmd.get_arguments().find(|a| a.get_id() == p.id) else {
+            continue;
+        };
         if !given {
             continue;
         }
-        let mut raw: Vec<Value> = m
-            .get_raw(p.id)
-            .map(|vals| vals.map(|v| Value::from(v.to_string_lossy().into_owned())).collect())
-            .unwrap_or_default();
-        let value = match raw.len() {
-            0 => Value::Bool(true),
-            1 => raw.remove(0),
-            _ => Value::Sequence(raw),
+        let value = if matches!(arg.get_action(), ArgAction::SetTrue | ArgAction::SetFalse) {
+            Value::Bool(m.get_flag(p.id))
+        } else {
+            let raw: Vec<String> = m
+                .get_raw(p.id)
+                .map(|vals| vals.map(|v| v.to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            let typed = |t: &String| typed_text(p.unit, t);
+            if matches!(p.id, "fixed_mods" | "variable_mods") {
+                let joined = raw.join(", ");
+                let items = model::mod_spec::split_list(&joined)
+                    .map(|v| v.into_iter().map(Value::from).collect::<Vec<_>>());
+                Value::Sequence(items.unwrap_or_else(|_| raw.iter().map(typed).collect()))
+            } else if takes_several(arg) {
+                Value::Sequence(raw.iter().map(typed).collect())
+            } else {
+                raw.first().map_or(Value::Bool(true), typed)
+            }
         };
         out.record(p.id, Source::CommandLine, value);
     }
     out
+}
+
+/// Whether clap collects more than one value for the argument.
+fn takes_several(arg: &clap::Arg) -> bool {
+    matches!(arg.get_action(), ArgAction::Append)
+        || arg.get_value_delimiter().is_some()
+        || arg.get_num_args().is_some_and(|n| n.max_values() > 1)
+}
+
+/// A YAML number when the unit is numeric and the text is a number, otherwise the text.
+fn typed_text(unit: Unit, text: &str) -> Value {
+    let numeric = matches!(
+        unit,
+        Unit::Count
+            | Unit::Number
+            | Unit::Fraction
+            | Unit::Gb
+            | Unit::Minutes
+            | Unit::Seconds
+            | Unit::Ppm
+            | Unit::Da
+    );
+    let number = || match text.parse::<i64>() {
+        Ok(i) => Some(Value::from(i)),
+        Err(_) => text.parse::<f64>().ok().filter(|f| f.is_finite()).map(Value::from),
+    };
+    if numeric {
+        number().unwrap_or_else(|| Value::from(text))
+    } else {
+        Value::from(text)
+    }
 }

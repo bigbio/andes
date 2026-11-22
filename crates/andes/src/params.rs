@@ -5,9 +5,7 @@
 //! means when clap has no default, the legacy form of the flag, and an optional example. One row
 //! exists for every argument of the search command, and the tests in
 //! `tests/params_table.rs` keep the table and the CLI in step. The table is read by tests today;
-//! later consumers (documentation, `--print-config`) read it through [`spec`] and [`PARAMS`],
-//! so the module allows unused items.
-#![allow(dead_code)]
+//! later consumers (documentation, `--print-config`) read it through [`spec`] and [`PARAMS`].
 
 /// The `RunConfig` section a parameter belongs to; the YAML name is the field name of
 /// `RunConfig`. `CliOnly` arguments have no config key.
@@ -44,6 +42,7 @@ impl Section {
 }
 
 /// The unit of a numeric value, or the kind of a path; `None` for a name, a list or a switch.
+/// `Count` is an integer, `Number` a plain real number without a unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     None,
@@ -55,6 +54,7 @@ pub enum Unit {
     Gb,
     Fraction,
     Count,
+    Number,
     Charge,
     Path,
 }
@@ -127,7 +127,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("sdrf", Section::Io, "sdrf", Unit::Path, None, Unset::Off, None),
     row("spectrum", Section::Io, "spectrum", Unit::Path, None, Unset::Required, Some("Java -s <FILE>")),
     row("database", Section::Io, "database", Unit::Path, None, Unset::Required, Some("Java -d <FILE>")),
-    row("output_pin", Section::Io, "output_pin", Unit::Path, None, Unset::Required, Some("Java -o <FILE> (when -outputFormat pin)")),
+    row("output_pin", Section::Io, "output_pin", Unit::Path, None, Unset::Auto("required unless --rescore"), Some("Java -o <FILE> (when -outputFormat pin)")),
     row("output_tsv", Section::Io, "output_tsv", Unit::Path, None, Unset::Off, Some("Java -outputFormat 1 with output path")),
     row("output_parquet", Section::Io, "output_parquet", Unit::Path, None, Unset::Off, None),
     row("temp_dir", Section::Io, "temp_dir", Unit::Path, None, Unset::Auto("the directory of the outputs"), None),
@@ -178,10 +178,10 @@ pub const PARAMS: &[ParamSpec] = &[
     row("decoy_seed", Section::Decoys, "seed", Unit::Count, None, Unset::ClapDefault, None),
     row("chimeric", Section::Chimeric, "enabled", Unit::None, None, Unset::Off, None),
     row("chimeric_max_coisolated", Section::Chimeric, "max_coisolated", Unit::Count, None, Unset::ClapDefault, None),
-    row("chimeric_max_kl", Section::Chimeric, "max_kl", Unit::Count, Some(">= 0"), Unset::ClapDefault, None),
+    row("chimeric_max_kl", Section::Chimeric, "max_kl", Unit::Number, Some(">= 0"), Unset::ClapDefault, None),
     row("refine", Section::Refine, "enabled", Unit::None, None, Unset::Off, None),
     row("refine_config", Section::Refine, "config", Unit::Path, None, Unset::Auto("the built-in tier"), None),
-    row("psm_fdr", Section::Rescoring, "psm_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("0.01"), None),
+    row("psm_fdr", Section::Rescoring, "psm_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("0.01; no filtered output without --rescore"), None),
     row("protein_fdr", Section::Rescoring, "protein_fdr", Unit::Fraction, Some("0..1"), Unset::Off, None),
     row("rescore", Section::Rescoring, "enabled", Unit::None, None, Unset::Off, None),
     row("rescore_memory_gb", Section::Rescoring, "memory_gb", Unit::Gb, Some(">= 1"), Unset::Auto("what the PIN needs, at most 16 GB and the free memory less a margin"), None),
@@ -194,7 +194,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("predict", Section::Rescoring, "predict", Unit::None, Some("list of predicted features"), Unset::ClapDefault, None),
     row("predictor_models", Section::Rescoring, "predictor_models", Unit::Path, None, Unset::Off, None),
     row("predictor_backend", Section::Rescoring, "predictor_backend", Unit::None, Some("enum"), Unset::ClapDefault, None),
-    row("predictor_nce", Section::Rescoring, "predictor_nce", Unit::Count, None, Unset::Auto("28 on Q Exactive, else 30"), None),
+    row("predictor_nce", Section::Rescoring, "predictor_nce", Unit::Number, None, Unset::Auto("28 on Q Exactive, else 30"), None),
     row("predictor_instrument", Section::Rescoring, "predictor_instrument", Unit::None, None, Unset::Auto("from the instrument"), None),
     row("predictor_batch", Section::Rescoring, "predictor_batch", Unit::Count, None, Unset::ClapDefault, None),
     row("proteoform_fdr", Section::Rescoring, "proteoform_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("the larger of --psm-fdr and 0.05"), None),
@@ -213,7 +213,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("glyco_peptide_first", Section::Glyco, "peptide_first", Unit::None, None, Unset::Off, None),
     row("glyco_index_sequon_only", Section::Glyco, "index_sequon_only", Unit::None, None, Unset::Off, None),
     row("debug_glyco", Section::Glyco, "debug", Unit::None, None, Unset::Off, None),
-    row("quant_fdr", Section::Quant, "quant_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("0.01"), None),
+    row("quant_fdr", Section::Quant, "quant_fdr", Unit::Fraction, Some("0..1"), Unset::Auto("0.01; 0.05 for --label and transfers"), None),
     row("tmt", Section::Quant, "tmt", Unit::None, Some("plex name, e.g. tmt10"), Unset::Off, None),
     row("lfq", Section::Quant, "lfq", Unit::None, None, Unset::Off, None),
     row("label", Section::Quant, "label", Unit::None, Some("preset or one bracket per channel"), Unset::Off, None),
@@ -223,9 +223,9 @@ pub const PARAMS: &[ParamSpec] = &[
     row("tmt_tol", Section::Quant, "tmt_tol", Unit::PpmOrDa, Some("> 0, VALUE+unit, e.g. 20ppm or 0.02da"), Unset::Auto("20ppm (10ppm for tmt32/tmt35), 0.3da on ion-trap MS2"), None),
     row("tmt_correction", Section::Quant, "tmt_correction", Unit::Path, None, Unset::Off, None),
     row("tmt_min_purity", Section::Quant, "tmt_min_purity", Unit::Fraction, Some("0..1"), Unset::ClapDefault, None),
-    row("tmt_min_sn", Section::Quant, "tmt_min_sn", Unit::Count, Some(">= 0"), Unset::ClapDefault, None),
+    row("tmt_min_sn", Section::Quant, "tmt_min_sn", Unit::Number, Some(">= 0"), Unset::ClapDefault, None),
     row("tmt_unmix", Section::Quant, "tmt_unmix", Unit::None, Some("auto|off|on"), Unset::ClapDefault, None),
-    row("mbr_wrong_log2", Section::Quant, "mbr_wrong_log2", Unit::Count, Some("> 0"), Unset::ClapDefault, None),
+    row("mbr_wrong_log2", Section::Quant, "mbr_wrong_log2", Unit::Number, Some("> 0"), Unset::ClapDefault, None),
     row("lfq_tol", Section::Quant, "lfq_tol", Unit::PpmOrDa, Some("> 0, VALUE+unit, e.g. 20ppm or 0.02da"), Unset::Auto("10ppm"), None),
     row("lfq_rt_window", Section::Quant, "lfq_rt_window", Unit::Seconds, Some("> 0"), Unset::Auto("60 s, 120 s with --glyco"), None),
     row("lfq_gaussian_width", Section::Quant, "lfq_gaussian_width", Unit::Seconds, Some("> 0"), Unset::Auto("Savitzky-Golay smoothing"), None),

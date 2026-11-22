@@ -44,6 +44,7 @@ fn unit_sample(unit: Unit) -> &'static str {
         | Unit::Seconds
         | Unit::Gb
         | Unit::Count
+        | Unit::Number
         | Unit::Charge => "1",
     }
 }

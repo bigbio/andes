@@ -158,7 +158,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("dia_mobility_slices", Section::Search, "dia_mobility_slices", Unit::Count, None, Unset::ClapDefault, None),
     row("dia_ms1_tol_ppm", Section::Search, "dia_ms1_tol_ppm", Unit::Ppm, None, Unset::ClapDefault, None),
     row("localize", Section::Search, "localize", Unit::None, Some("ipf"), Unset::Off, None),
-    row("xl", Section::Search, "xl", Unit::None, None, Unset::Off, None),
+    with_example(row("xl", Section::Search, "xl", Unit::None, None, Unset::Off, None), "DSSO (K, Protein N-term)"),
     row("fragment_index", Section::Search, "fragment_index", Unit::None, Some("enum"), Unset::ClapDefault, None),
     row("fragment_index_slice_da", Section::Search, "fragment_index_slice_da", Unit::Da, None, Unset::Auto("from the memory budget"), None),
     row("index_cache_dir", Section::Search, "index_cache_dir", Unit::Path, None, Unset::Auto("the directory of the outputs"), None),

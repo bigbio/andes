@@ -1755,7 +1755,7 @@ pub(crate) fn run_quant(
                     corrected: t.corrected.clone(),
                     sn: None,
                     quant_weight: if t.accepted {
-                        quant_weight(t.purity, None)
+                        quant_weight(t.purity, Some(f64::from(t.info.p_wrong)))
                     } else {
                         0.0
                     },

@@ -12,6 +12,8 @@ mod cohort;
 mod cohort_cmd;
 #[path = "../config.rs"]
 mod config;
+#[path = "andes/database_cmd.rs"]
+mod database_cmd;
 #[path = "andes/dia.rs"]
 mod dia;
 #[path = "andes/dia_joint.rs"]
@@ -150,6 +152,13 @@ enum Command {
     #[command(subcommand)]
     Cohort(cli::CohortCommand),
 
+    /// Target + decoy database of a study or cohort, with the decoy-target overlap report
+    ///
+    /// Writes the FASTA of the targets and their decoys, a settings table and an overlap
+    /// report. Every search given the FASTA as --database searches these decoys, and stops
+    /// when its decoy settings or digest are not the database's.
+    Database(Box<cli::DatabaseCmdArgs>),
+
     /// Protein groups with protein-level q-values over the rescored PSMs of one or more runs
     ///
     /// Writes the QPX protein-group view.
@@ -243,6 +252,7 @@ fn main() -> ExitCode {
             inference_cmd::run_inference(*args)
         }
         Some(Command::Rescore(args)) => run_rescore(*args),
+        Some(Command::Database(args)) => database_cmd::run(*args),
         Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;

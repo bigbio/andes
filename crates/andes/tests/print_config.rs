@@ -186,7 +186,10 @@ fn print_config_omits_default_internal_flags() {
     for key in ["optimize_sample", "max_spectra", "seed"] {
         assert!(key_line(&text, key).is_none(), "{key} printed:\n{text}");
     }
-    assert!(!text.contains("print_config") && !text.contains("config:"));
+    assert!(!text.contains("print_config"));
+    let doc = parse(&text);
+    assert!(doc["io"]["config"].is_null() && doc["io"]["print_config"].is_null());
+    assert!(doc["config"].is_null());
 
     let mut set = base.to_vec();
     set.push(os("--max-spectra"));

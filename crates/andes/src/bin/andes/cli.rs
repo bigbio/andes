@@ -442,7 +442,7 @@ pub(crate) struct SearchArgs {
     /// Write the resolved settings as a config file that reproduces the run, then exit
     ///
     /// FILE, or `-` for stdout. Nothing is searched. Replay with --config FILE.
-    #[arg(long, value_name = "FILE", help_heading = H_IO)]
+    #[arg(long, value_name = "FILE", help_heading = H_IO, hide_short_help = true)]
     pub(crate) print_config: Option<PathBuf>,
 
     /// SDRF-Proteomics file: data files, protease, modifications, tolerance and labels

@@ -457,6 +457,7 @@ pub fn run_refinement(
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
+    files: &[crate::mass_calibrator::FileCalibration],
 ) -> Option<RefinementOutput> {
     if !refinement_supported(decoy_strategy) {
         log::warn!(
@@ -603,9 +604,13 @@ pub fn run_refinement(
             let a = c.protein_index % n_anchors;
             anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
         }));
-        let subset: Vec<model::spectrum::Spectrum> =
-            unident.iter().map(|&i| all_spectra[i].clone()).collect();
-        let queues = refine_prepared.run_chunk(&subset, 0);
+        let queues = crate::mass_calibrator::run_by_file(
+            &refine_prepared,
+            all_spectra,
+            &unident,
+            &refine_params,
+            files,
+        );
         refine_prepared.sync_materialized_candidates();
         let base_peptides = refine_prepared.mmap_index.len();
         (
@@ -1780,6 +1785,7 @@ mod tests {
             "XXX",
             DecoyStrategy::None,
             42,
+            &[],
         );
         assert!(out.is_none());
     }
@@ -1812,6 +1818,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         );
         assert!(out.is_none());
         assert_eq!(queues[0].len(), before_len);
@@ -1844,6 +1851,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         );
         assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
@@ -1929,6 +1937,7 @@ mod tests {
             "XXX",
             DecoyStrategy::Reverse,
             42,
+            &[],
         )
     }
 

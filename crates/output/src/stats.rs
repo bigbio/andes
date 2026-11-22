@@ -344,12 +344,15 @@ pub fn classify_mods(
     }
 }
 
+/// The facts of the `wanted` PSMs. `run_shift_ppm` is each run's precursor calibration shift;
+/// a run past its end uses `params.precursor_mass_shift_ppm`.
 pub fn psm_facts(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     candidates: &[Candidate],
     params: &SearchParams,
     run_ends: &[usize],
+    run_shift_ppm: &[f64],
     wanted: &HashSet<&str>,
 ) -> HashMap<String, PsmFacts> {
     use crate::pin::{emitted_spec_ids, precursor_error};
@@ -360,7 +363,6 @@ pub fn psm_facts(
     let fixed = FixedModSpec::declared(params);
     let declared_mods = params.aa_set.distinct_mods();
     let declared: Vec<&str> = declared_mods.iter().map(|m| m.name.as_str()).collect();
-    let shift_ppm = params.precursor_mass_shift_ppm;
     (0..queues.len())
         .into_par_iter()
         .filter(|&i| !queues[i].is_empty())
@@ -368,6 +370,10 @@ pub fn psm_facts(
             let spec = &spectra[i];
             let psms = queues[i].clone().into_rank_sorted_vec();
             let run = run_ends.partition_point(|&end| end <= i);
+            let shift_ppm = run_shift_ppm
+                .get(run)
+                .copied()
+                .unwrap_or(params.precursor_mass_shift_ppm);
             let mut out = Vec::new();
             for (id, psm) in emitted_spec_ids(spec, &psms, candidates) {
                 if !wanted.contains(id.as_str()) {

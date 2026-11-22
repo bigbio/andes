@@ -3,7 +3,8 @@
 //! Both are computed from the rows of the feature view, the same way for label-free and
 //! isobaric data:
 //! - **Unit and label.** A quantity belongs to one protein group, one quantification unit and one
-//!   label. Label-free: the unit is a run and the label is `LFQ`. Isobaric: the unit is a plex
+//!   label. Label-free: the unit is a run and the label is `LFQ`. Labelled pairs (`--label`): the
+//!   unit is a run with one label per channel. Isobaric: the unit is a plex
 //!   (every fraction of the plex together; a run when the design gives no plex) and the label is a
 //!   reporter channel, reference channels included. Values are the feature intensities as written
 //!   (label-free: the feature quantity; isobaric: the reporter intensities of the run tables, raw
@@ -69,8 +70,9 @@ impl ProteinQuant {
     }
 
     /// Adds one feature row of `group` (its anchor accession): its peptidoform and its
-    /// intensity per label, in the unit `unit` from the run `run`. The first row of a unit sets
-    /// its labels; a later row with other labels is an error.
+    /// intensity per label, in the unit `unit` from the run `run`. A unit's labels are those of
+    /// its rows in order of first appearance (a plex's channels in channel order; a labelled
+    /// pair's rows may carry one label or both).
     pub fn add(
         &mut self,
         group: &str,
@@ -88,25 +90,30 @@ impl ProteinQuant {
             ));
         }
         let u = match self.unit_index.get(unit) {
-            Some(&u) => {
-                if self.units[u].labels != labels {
-                    return Err(format!(
-                        "protein quantity: unit {unit} has labels {:?} and {:?}",
-                        self.units[u].labels, labels
-                    ));
-                }
-                u
-            }
+            Some(&u) => u,
             None => {
                 self.units.push(QuantUnit {
                     name: unit.to_string(),
                     runs: Vec::new(),
-                    labels: labels.to_vec(),
+                    labels: Vec::new(),
                 });
                 self.unit_index.insert(unit.to_string(), self.units.len() - 1);
                 self.units.len() - 1
             }
         };
+        let positions: Vec<usize> = labels
+            .iter()
+            .map(|l| {
+                let unit_labels = &mut self.units[u].labels;
+                match unit_labels.iter().position(|x| x == l) {
+                    Some(i) => i,
+                    None => {
+                        unit_labels.push(l.clone());
+                        unit_labels.len() - 1
+                    }
+                }
+            })
+            .collect();
         let runs = &mut self.units[u].runs;
         if !runs.iter().any(|r| r == run) {
             runs.push(run.to_string());
@@ -116,11 +123,14 @@ impl ProteinQuant {
             .entry((group.to_string(), u))
             .or_default()
             .entry(peptidoform.to_string())
-            .or_insert_with(|| vec![0.0; labels.len()]);
-        for (acc, &v) in peptide.iter_mut().zip(values) {
+            .or_default();
+        for (&i, &v) in positions.iter().zip(values) {
+            if peptide.len() <= i {
+                peptide.resize(i + 1, 0.0);
+            }
             let v = f64::from(v);
             if present(v) {
-                *acc += v;
+                peptide[i] += v;
             }
         }
         Ok(())
@@ -169,12 +179,13 @@ pub fn roll_up(peptides: &BTreeMap<String, Vec<f64>>, n_labels: usize) -> Vec<La
         .collect();
     (0..n_labels)
         .map(|l| {
+            let at = |v: &Vec<f64>| v.get(l).copied().unwrap_or(0.0);
             let all: Vec<f64> = peptides
                 .values()
-                .map(|v| v[l])
+                .map(at)
                 .filter(|&x| present(x))
                 .collect();
-            let best: Vec<f64> = top.iter().map(|v| v[l]).filter(|&x| present(x)).collect();
+            let best: Vec<f64> = top.iter().map(|v| at(v)).filter(|&x| present(x)).collect();
             LabelQuantity {
                 total_intensity: (!all.is_empty()).then(|| all.iter().sum()),
                 top3: (!best.is_empty()).then(|| best.iter().sum::<f64>() / best.len() as f64),
@@ -264,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn units_are_separate_and_labels_must_agree_within_a_unit() {
+    fn units_are_separate_and_a_value_needs_its_label() {
         let mut q = ProteinQuant::new();
         let l = labels(&["LFQ"]);
         q.add("P1", "r1", "r1", "A", &l, &[1.0]).unwrap();
@@ -273,9 +284,20 @@ mod tests {
         assert_eq!(g.len(), 2);
         assert_eq!(g[1].1[0].total_intensity, Some(3.0));
         assert!(q.group("P2").is_empty());
-        assert!(q
-            .add("P1", "r1", "r1", "A", &labels(&["TMT126"]), &[1.0])
-            .is_err());
         assert!(q.add("P1", "r1", "r1", "A", &l, &[1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn a_unit_collects_the_labels_of_its_rows_in_order_of_appearance() {
+        let mut q = ProteinQuant::new();
+        q.add("P1", "r", "r", "A", &labels(&["SILAC light"]), &[4.0])
+            .unwrap();
+        q.add("P1", "r", "r", "B", &labels(&["SILAC heavy", "SILAC light"]), &[6.0, 2.0])
+            .unwrap();
+        assert_eq!(q.units()[0].labels, labels(&["SILAC light", "SILAC heavy"]));
+        let g = &q.group("P1")[0].1;
+        assert_eq!(g[0].total_intensity, Some(6.0));
+        assert_eq!(g[1].total_intensity, Some(6.0));
+        assert_eq!(g[1].top3, Some(6.0));
     }
 }

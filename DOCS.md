@@ -2458,8 +2458,9 @@ protein groups once over every run's PSMs, then:
   all). `contaminant` is true for groups with a `CONTAMINANT_` accession.
 - **Default protein quantities** (QPX 1.1 flattened rows, footer `andes_protein_quant_version`
   1.0). A group with quantified features has one row per quantification unit and label: the unit
-  is a run with label `LFQ` (label-free) or a plex with one row per reporter channel, reference
-  channels included (TMT study); `grouped_runs` lists the unit's runs. `intensity` and
+  is a run with label `LFQ` (label-free), a run with one row per label (`--label` pairs), or a plex
+  with one row per reporter channel, reference channels included (TMT study); `grouped_runs` lists
+  the unit's runs. `intensity` and
   `additional_intensities` `total_intensity` are the sum of the group's unique peptides;
   `additional_intensities` `top3` is the mean of its three most intense unique peptides in the
   unit, or of the ones it has when fewer. A peptide is a peptidoform, summed over its charge

@@ -38,6 +38,8 @@ pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow
 pub mod pg_parquet;
 pub use pg_parquet::{write_pg_parquet, FeatureCounts};
 pub mod protein_inference;
+pub mod protein_quant;
+pub use protein_quant::ProteinQuant;
 pub use protein_inference::{
     infer_protein_groups, write_protein_groups_tsv, GroupAt, Inference, ProteinGroup,
 };

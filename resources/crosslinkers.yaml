@@ -159,6 +159,19 @@
     - {name: water, composition: H(8) C(5) O(2)}
   source: "Belsom et al. 2016, Mol Cell Proteomics 15:1105; XLMOD (photo-linker: the diazirine carbene inserts at any residue)"
 
+- name: DHSO
+  xlmod: [XLMOD:02226]
+  sites: D, E, Protein C-term
+  intact: {composition: H(10) C(6) N(4) O S}
+  stubs:
+    - {name: alkene, composition: H(4) C(3) N(2)}
+    - {name: thiol, composition: H(4) C(3) N(2) S}
+    - {name: sulfenic, composition: H(6) C(3) N(2) O S}
+  doublets: [[alkene, thiol]]
+  monolinks:
+    - {name: water, composition: H(12) C(6) N(4) O(2) S}
+  source: "Gutierrez et al. 2016, Anal Chem 88:8315; XLMOD (sulfoxide dihydrazide linking two carboxyls activated by DMTMM; MS-cleavable at the C-S bonds as DSSO)"
+
 - name: ADH
   xlmod: [XLMOD:02059]
   sites: D, E, Protein C-term

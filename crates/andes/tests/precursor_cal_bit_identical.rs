@@ -98,3 +98,59 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
         }
     }
 }
+
+fn calibration_outcomes(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|l| {
+            l.contains("Precursor mass shift learned:")
+                || l.contains("Precursor mass calibration skipped")
+        })
+        .count()
+}
+
+/// Two spectrum files: `--precursor-cal on` runs the calibration pre-pass on each file, instead
+/// of learning it on the first file and applying it to both.
+#[test]
+#[ignore = "two E. coli searches; run with --ignored"]
+fn precursor_cal_is_learned_per_spectrum_file() {
+    use std::io::Read;
+    let root = workspace_root();
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(
+        std::fs::File::open(root.join("test-fixtures/test.mgf.gz")).expect("open fixture"),
+    )
+    .read_to_string(&mut text)
+    .expect("inflate fixture");
+    let shifted: String = text
+        .lines()
+        .map(|l| match l.strip_prefix("PEPMASS=") {
+            Some(v) => {
+                let mz: f64 = v.split_whitespace().next().unwrap().parse().unwrap();
+                format!("PEPMASS={:.9}\n", mz * (1.0 + 8e-6))
+            }
+            None => format!("{l}\n"),
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let second = dir.path().join("shifted.mgf");
+    std::fs::write(&second, shifted).expect("write shifted copy");
+    let output = Command::new(env!("CARGO_BIN_EXE_andes"))
+        .arg("--spectrum")
+        .arg(root.join("test-fixtures/test.mgf.gz"))
+        .arg("--spectrum")
+        .arg(&second)
+        .arg("--database")
+        .arg(root.join("test-fixtures/ecoli.fasta"))
+        .args(["--fragmentation", "HCD", "--fragment-tol-ppm", "20"])
+        .args(["--predict", "none", "--max-missed-cleavages", "1"])
+        .args(["--precursor-cal", "on", "--cal-min-spec-keys", "1000"])
+        .arg("--output-pin")
+        .arg(dir.path().join("run.pin"))
+        .output()
+        .expect("run andes");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "andes failed:\n{stderr}");
+    assert!(stderr.contains("calibration: spectrum file 2/2"), "{stderr}");
+    assert_eq!(calibration_outcomes(&stderr), 2, "one pre-pass per file:\n{stderr}");
+}

@@ -655,10 +655,13 @@ fn append_modifications_scored(
 ) {
     let sb = builder.values();
     let len = cand.peptide.residues.len();
-    for (i, aa) in cand.peptide.residues.iter().enumerate() {
-        let Some(m) = ModRecord::of_residue(i, len, aa) else {
-            continue;
-        };
+    for m in cand
+        .peptide
+        .residues
+        .iter()
+        .enumerate()
+        .flat_map(|(i, aa)| ModRecord::of_residue(i, len, aa))
+    {
         sb.field_builder::<StringBuilder>(0)
             .unwrap()
             .append_value(&m.name);

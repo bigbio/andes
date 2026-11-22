@@ -197,6 +197,49 @@ pub fn apply_tightened_precursor_tolerance(params: &mut SearchParams, stats: Cal
     );
 }
 
+/// One spectrum file's learned precursor calibration: the file holds the spectra before `end`
+/// (and after the previous file's `end`), searched with this shift and tolerance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FileCalibration {
+    pub end: usize,
+    pub shift_ppm: f64,
+    pub tolerance: PrecursorTolerance,
+}
+
+impl FileCalibration {
+    pub fn apply(&self, params: &mut SearchParams) {
+        params.precursor_mass_shift_ppm = self.shift_ppm;
+        params.precursor_tolerance = self.tolerance;
+    }
+}
+
+/// Searches the spectra `idx` (ascending) of `all` file by file, each with its file's precursor
+/// shift and tolerance on top of `params`; one search with `params` when `files` is empty. The
+/// queues come back in the order of `idx`.
+pub fn run_by_file(
+    prepared: &PreparedSearch<'_>,
+    all: &[Spectrum],
+    idx: &[usize],
+    params: &SearchParams,
+    files: &[FileCalibration],
+) -> Vec<crate::TopNQueue> {
+    let subset =
+        |range: &[usize]| -> Vec<Spectrum> { range.iter().map(|&i| all[i].clone()).collect() };
+    if files.is_empty() {
+        return prepared.run_chunk_with_params(&subset(idx), 0, params);
+    }
+    let mut out = Vec::with_capacity(idx.len());
+    let mut start = 0;
+    for f in files {
+        let n = idx[start..].partition_point(|&i| i < f.end);
+        let mut p = params.clone();
+        f.apply(&mut p);
+        out.extend(prepared.run_chunk_with_params(&subset(&idx[start..start + n]), start, &p));
+        start += n;
+    }
+    out
+}
+
 fn ppm_value(t: Tolerance) -> Option<f64> {
     match t {
         Tolerance::Ppm(v) => Some(v),

@@ -37,17 +37,22 @@ pub fn emitted_spec_ids<'a>(
 ) -> Vec<(String, Cow<'a, PsmMatch>)> {
     let ranked = emitted_rows(spec, psms_sorted, candidates);
     let multi_row = ranked.len() > 1;
-    let scan = spec.scan.unwrap_or(0);
-    let title = if spec.title.is_empty() {
-        format!("scan={scan}")
-    } else {
-        spec.title.clone()
-    };
     ranked
         .into_iter()
         .enumerate()
-        .map(|(row_idx, (rank, psm))| (format_spec_id(&title, scan, rank, row_idx, multi_row), psm))
+        .map(|(row_idx, (rank, psm))| (emitted_spec_id(spec, rank, row_idx, multi_row), psm))
         .collect()
+}
+
+/// The SpecId of the emitted row `row_idx` (of rank `rank`) of a spectrum; `multi_row` when the
+/// spectrum emits more than one row.
+pub fn emitted_spec_id(spec: &Spectrum, rank: u32, row_idx: usize, multi_row: bool) -> String {
+    let scan = spec.scan.unwrap_or(0);
+    if spec.title.is_empty() {
+        format_spec_id(&format!("scan={scan}"), scan, rank, row_idx, multi_row)
+    } else {
+        format_spec_id(&spec.title, scan, rank, row_idx, multi_row)
+    }
 }
 
 pub fn emitted_row_evidence(
@@ -830,7 +835,7 @@ mod tests {
     ) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![candidate_idx],
+            candidate_idxs: vec![candidate_idx].into(),
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,

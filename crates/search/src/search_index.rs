@@ -99,6 +99,18 @@ impl SearchIndex {
         }
     }
 
+    /// The index of a target + decoy database written by `andes database`: the proteins are
+    /// searched as given (targets, then decoys), exactly as [`Self::from_target_db_for`] holds
+    /// the targets and the decoys it generates with the same decoy key.
+    pub fn from_prebuilt(db: ProteinDb, decoy_prefix: &str, decoy_suffix: Option<&str>) -> Self {
+        Self {
+            has_alternative_entries: holds_alternative_entries(&db),
+            db,
+            decoy_prefix: normalize_decoy_prefix(decoy_prefix),
+            decoy_suffix: decoy_suffix.map(str::to_string),
+        }
+    }
+
     pub fn protein_at(&self, idx: usize) -> Option<&model::protein::Protein> {
         self.db.proteins.get(idx)
     }

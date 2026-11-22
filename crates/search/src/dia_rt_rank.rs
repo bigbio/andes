@@ -38,7 +38,54 @@ const TRIM_ROUNDS: usize = 5;
 /// Residuals beyond this many sigmas leave the next fitting round.
 const TRIM_SIGMAS: f64 = 3.0;
 /// Predicts the raw andes-rt value of one peptidoform; NaN when the model cannot encode it.
+/// The prediction is a function of the peptide's text (`Display`): [`FormRtCache`] keys it so.
 pub type FormRtModel = dyn Fn(&Peptide) -> f32 + Send + Sync;
+
+/// Shards of [`FormRtCache`]; a power of two well above the thread count keeps lock waits rare.
+const FORM_RT_CACHE_SHARDS: usize = 64;
+
+/// Raw [`FormRtModel`] predictions keyed by the peptidoform's text. The DIA chunk indexes of
+/// one search overlap (each chunk indexes the precursor windows of its scans at every
+/// charge), so a form is indexed by several chunks and predicted once here.
+pub struct FormRtCache {
+    shards: Vec<std::sync::Mutex<rustc_hash::FxHashMap<Box<str>, f32>>>,
+}
+
+impl Default for FormRtCache {
+    fn default() -> Self {
+        Self {
+            shards: (0..FORM_RT_CACHE_SHARDS)
+                .map(|_| std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
+                .collect(),
+        }
+    }
+}
+
+impl FormRtCache {
+    /// The raw prediction of `peptide`, computed with `model` on its first request.
+    pub fn get_or_predict(&self, peptide: &Peptide, model: &FormRtModel) -> f32 {
+        use std::hash::BuildHasher;
+        let key = peptide.to_string();
+        let h = rustc_hash::FxBuildHasher.hash_one(key.as_str());
+        let shard = &self.shards[(h >> 58) as usize % FORM_RT_CACHE_SHARDS];
+        if let Some(&v) = shard.lock().expect("RT cache lock").get(key.as_str()) {
+            return v;
+        }
+        let v = model(peptide);
+        shard
+            .lock()
+            .expect("RT cache lock")
+            .insert(key.into_boxed_str(), v);
+        v
+    }
+
+    /// Drops every cached prediction.
+    pub fn clear(&self) {
+        for s in &self.shards {
+            *s.lock().expect("RT cache lock") = rustc_hash::FxHashMap::default();
+        }
+    }
+}
 
 /// The run's map from raw RT predictions to minutes and the spread around it.
 #[derive(Clone, Debug, PartialEq)]

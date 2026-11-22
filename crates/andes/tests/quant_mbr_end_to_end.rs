@@ -42,6 +42,9 @@ NR == 1 {
 : > "$W"
 "#;
 
+#[path = "support/pg_quant.rs"]
+mod pg_quant;
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -309,6 +312,13 @@ fn stages_equal_all_in_one_and_transfer_the_untriggered_peptide() {
     ]);
     assert!(qpx.join("quantms.feature.parquet").is_file());
     assert!(qpx.join("quantms.pg.parquet").is_file());
+    let (pg_total, feature_total, quantified, labels) = pg_quant::totals(&qpx, false);
+    assert!(quantified > 0, "the finalize pg view carries protein quantities");
+    assert_eq!(labels, ["LFQ"]);
+    assert!(
+        (pg_total - feature_total).abs() <= 1e-4 * feature_total.max(1.0),
+        "total intensity of the groups {pg_total} vs the unique feature rows {feature_total}"
+    );
 
     let aio = tmp.path().join("aio");
     std::fs::create_dir_all(&aio).unwrap();

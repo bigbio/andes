@@ -589,7 +589,7 @@ fn ms3_spectrum(p: &ProductScan) -> Spectrum {
     }
 }
 
-fn ms3_contexts<'a>(specs: &'a [Spectrum], scorer: &RankScorer, z: u8) -> Vec<Ms3Ctx<'a>> {
+fn ms3_contexts<'a>(specs: &'a [Spectrum], scorer: &'a RankScorer, z: u8) -> Vec<Ms3Ctx<'a>> {
     specs
         .iter()
         .filter(|s| s.precursor_mz > 0.0 && !s.peaks.is_empty())

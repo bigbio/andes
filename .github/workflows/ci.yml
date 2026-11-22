@@ -40,6 +40,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
 
+      - name: DDA rescore path goldens
+        # `#[ignore]`d because each runs a full E. coli search with rescoring;
+        # run explicitly here, on one lane, so they stay required.
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p andes --release --test dda_path_goldens -- --ignored
+
       - name: onnx-infer (tract + fixture models)
         # Default workspace test builds onnx-infer without engines. Tract is
         # opt-in; this lane exercises committed fixtures (double, intensity_mlp)

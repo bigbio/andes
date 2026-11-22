@@ -719,6 +719,12 @@ pub(crate) fn run_train_from_search(
             })
         })
         .transpose()?;
+    let protocol = model::protocol::Protocol::from_name(&args.protocol).ok_or_else(|| {
+        format!(
+            "unknown --protocol '{}' (expected Automatic/TMT/iTRAQ/iTRAQPhospho/Phosphorylation/Standard)",
+            args.protocol
+        )
+    })?;
 
     let mut runs: Vec<TrainRun> = Vec::with_capacity(args.spectra.len());
     for (i, spectra_path) in args.spectra.iter().enumerate() {
@@ -834,6 +840,7 @@ pub(crate) fn run_train_from_search(
     if let Some(act) = activation {
         trained_param.data_type.activation = act;
     }
+    trained_param.data_type.protocol = protocol;
     let instrument = match &args.instrument {
         Some(name) => {
             trained_param.data_type.instrument =
@@ -892,7 +899,7 @@ pub(crate) fn run_train_from_search(
             train_fdr: args.train_fdr as f32,
             decay_half_life_days: None,
             instrument: instrument.clone(),
-            experiment_class: args.protocol.clone(),
+            experiment_class: protocol.name().to_string(),
         };
         sources.push((ledger, run_stats));
     }
@@ -1542,7 +1549,7 @@ pub(crate) fn run_train_update(
                 .instrument
                 .clone()
                 .unwrap_or_else(|| current_param.data_type.instrument.name().to_string()),
-            experiment_class: args.protocol.clone(),
+            experiment_class: current_param.data_type.protocol.name().to_string(),
         };
 
         update_add(store_path, model_id, ledger, stats, cfg)

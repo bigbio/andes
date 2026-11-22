@@ -625,22 +625,77 @@ pub fn bare_sequence(cand: &Candidate) -> String {
         .collect()
 }
 
+/// ProForma 2.0 text of a candidate: a residue's modification follows it in brackets, an
+/// N-terminal one precedes the sequence as `[mod]-` and a C-terminal one follows it as `-[mod]`.
+/// The tag is the modification's accession, or its signed mass delta when it has none.
 pub fn peptidoform_string(cand: &Candidate) -> String {
-    let mut s = String::new();
-    for aa in &cand.peptide.residues {
-        s.push(aa.residue as char);
+    use model::modification::ModLocation::{CTerm, NTerm, ProtCTerm, ProtNTerm};
+    let residues = &cand.peptide.residues;
+    let last = residues.len().saturating_sub(1);
+    let mut n_term = String::new();
+    let mut body = String::new();
+    let mut c_term = String::new();
+    for (i, aa) in residues.iter().enumerate() {
+        body.push(aa.residue as char);
         for m in aa.mod_.iter().flat_map(|m| m.components()) {
-            match m.accession.as_deref() {
-                Some(acc) if !acc.is_empty() => {
-                    s.push('[');
-                    s.push_str(acc);
-                    s.push(']');
-                }
-                _ => s.push_str(&format!("[{:+.5}]", m.mass_delta)),
-            }
+            let out = match m.location {
+                NTerm | ProtNTerm if i == 0 => &mut n_term,
+                CTerm | ProtCTerm if i == last => &mut c_term,
+                _ => &mut body,
+            };
+            push_mod_tag(out, m);
         }
     }
+    let mut s = n_term;
+    if !s.is_empty() {
+        s.push('-');
+    }
+    s.push_str(&body);
+    if !c_term.is_empty() {
+        s.push('-');
+        s.push_str(&c_term);
+    }
     s
+}
+
+/// Reads a ProForma peptidoform as written by `peptidoform_string`: `[mod]-` before the sequence is
+/// N-terminal (position 0) and `-[mod]` after it C-terminal (position length + 1).
+pub fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
+    let (mut seq, mut mods, mut c_term) = (String::new(), Vec::new(), false);
+    let mut chars = peptidoform.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '-' => c_term = !seq.is_empty(),
+            '[' => {
+                let tag: String = chars.by_ref().take_while(|&c| c != ']').collect();
+                let n = seq.chars().count() as i32;
+                let (position, amino_acid) = match (n, c_term) {
+                    (0, _) => (0, None),
+                    (_, true) => (n + 1, None),
+                    _ => (n, seq.chars().last()),
+                };
+                mods.push(ModRecord {
+                    accession: tag.starts_with("UNIMOD:").then(|| tag.clone()),
+                    name: tag,
+                    position,
+                    amino_acid,
+                });
+            }
+            _ => seq.push(c),
+        }
+    }
+    (seq, mods)
+}
+
+fn push_mod_tag(s: &mut String, m: &model::modification::Modification) {
+    match m.accession.as_deref() {
+        Some(acc) if !acc.is_empty() => {
+            s.push('[');
+            s.push_str(acc);
+            s.push(']');
+        }
+        _ => s.push_str(&format!("[{:+.5}]", m.mass_delta)),
+    }
 }
 
 #[cfg(test)]
@@ -1211,6 +1266,86 @@ mod rescore_join_tests {
     }
 
     #[test]
+    fn peptidoform_tags_become_modifications() {
+        let (seq, mods) = parse_peptidoform("LC[UNIMOD:4]AK[+8.01420]");
+        assert_eq!(seq, "LCAK");
+        assert_eq!(mods.len(), 2);
+        assert_eq!(
+            (
+                mods[0].position,
+                mods[0].amino_acid,
+                mods[0].accession.as_deref()
+            ),
+            (2, Some('C'), Some("UNIMOD:4"))
+        );
+        assert_eq!((mods[1].position, mods[1].accession.clone()), (4, None));
+        let (seq, mods) = parse_peptidoform("[UNIMOD:1]-AM[UNIMOD:35]K-[UNIMOD:2]");
+        let at: Vec<_> = mods.iter().map(|m| (m.position, m.amino_acid)).collect();
+        assert_eq!(seq, "AMK");
+        assert_eq!(at, vec![(0, None), (2, Some('M')), (4, None)]);
+    }
+
+    #[test]
+    fn terminal_modifications_are_written_as_proforma_terminal_tags() {
+        use model::amino_acid::AminoAcid;
+        use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
+        let mk = |acc: &str, mass: f64, residue: ResidueSpec, location: ModLocation| {
+            let mut m = Modification::new(acc, mass, residue, location, false);
+            m.accession = Some(acc.to_string());
+            m
+        };
+        let acetyl = mk(
+            "UNIMOD:1",
+            42.010565,
+            ResidueSpec::Wildcard,
+            ModLocation::ProtNTerm,
+        );
+        let oxidation = mk(
+            "UNIMOD:35",
+            15.994915,
+            ResidueSpec::Specific(b'M'),
+            ModLocation::Anywhere,
+        );
+        let amidated = mk(
+            "UNIMOD:2",
+            -0.984016,
+            ResidueSpec::Wildcard,
+            ModLocation::CTerm,
+        );
+        let cand = |residues: Vec<AminoAcid>| Candidate {
+            peptide: model::peptide::Peptide::new(residues, b'-', b'R'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: true,
+            is_protein_c_term: false,
+        };
+        let aa = |r: u8| AminoAcid::standard(r).unwrap();
+
+        let n_acetyl = cand(vec![
+            aa(b'A').with_mod(leak_mod(acetyl.clone())),
+            aa(b'P'),
+            aa(b'S'),
+            aa(b'K'),
+        ]);
+        assert_eq!(peptidoform_string(&n_acetyl), "[UNIMOD:1]-APSK");
+
+        let mut stacked = Modification::new(
+            "UNIMOD:1+UNIMOD:35",
+            58.00548,
+            ResidueSpec::Specific(b'M'),
+            ModLocation::ProtNTerm,
+            false,
+        );
+        stacked.parts = vec![leak_mod(acetyl), leak_mod(oxidation)];
+        let both = cand(vec![aa(b'M').with_mod(leak_mod(stacked)), aa(b'K')]);
+        assert_eq!(peptidoform_string(&both), "[UNIMOD:1]-M[UNIMOD:35]K");
+
+        let c_amide = cand(vec![aa(b'P'), aa(b'K').with_mod(leak_mod(amidated))]);
+        assert_eq!(peptidoform_string(&c_amide), "PK-[UNIMOD:2]");
+    }
+
+    #[test]
     fn modification_positions_follow_the_qpx_layout() {
         use arrow::array::{Array, Int32Array, ListArray, StringArray, StructArray};
         use model::amino_acid::AminoAcid;
@@ -1283,6 +1418,10 @@ mod rescore_join_tests {
             ));
         }
         assert_eq!(got, vec![(0, None), (3, Some("S".to_string())), (5, None)]);
+        assert_eq!(
+            peptidoform_string(&cand),
+            "[+14.00000]-APS[+14.00000]K-[+14.00000]"
+        );
 
         let mut b = list_struct_builder(modification_fields());
         let probs: HashMap<(i32, String), f64> =

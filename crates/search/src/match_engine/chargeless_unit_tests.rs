@@ -87,4 +87,15 @@ fn chargeless_spectrum_is_searched_per_charge() {
         let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
         assert_eq!(pep.residues, truth.residues, "spectrum {i}");
     }
+
+    let mut top1 = params.clone();
+    top1.top_n_psms_per_spectrum = 1;
+    let one = PreparedSearch::prepare_in_memory(&idx, &top1, &scorer, 0.02, "XXX").unwrap();
+    let mut queues = one.run_chunk(&spectra[1..], 0);
+    let psms = queues[0].drain_into_vec();
+    let best = psms.iter().map(|p| p.rank_score).fold(f32::MIN, f32::max);
+    assert!(
+        psms.iter().all(|p| p.rank_score == best),
+        "the merged charge queues keep the top PSM and its ties only"
+    );
 }

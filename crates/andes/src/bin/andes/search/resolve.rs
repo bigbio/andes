@@ -423,7 +423,8 @@ pub(super) fn load_search_database(
             .into());
         }
         log::info!(target: "database",
-            "{} targets and {decoys} decoys ({}) written by andes database, searched as              written; decoy key {}",
+            "{} targets and {decoys} decoys ({}) written by andes database, searched as written; \
+             decoy key {}",
             target_db.proteins.len(),
             settings.decoy_strategy,
             settings.decoy_key

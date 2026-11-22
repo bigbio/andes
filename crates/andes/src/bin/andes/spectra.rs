@@ -473,13 +473,40 @@ pub(crate) fn sample_spectra(
     Some(loaded.into_values().collect())
 }
 
+/// Every k-th of `items`, k = len / want (at least 1), at most `want` of them: a sample that
+/// spans the whole run in its order.
+pub(crate) fn strided<T>(items: Vec<T>, want: usize) -> Vec<T> {
+    let stride = (items.len() / want.max(1)).max(1);
+    items.into_iter().step_by(stride).take(want).collect()
+}
+
+/// A sample of `want` spectra spread across the run (every k-th), for mzML and Thermo .raw;
+/// `None` for other formats, which fall back to the first spectra.
 pub(crate) fn sample_spectra_strided(
     path: &Path,
     is_mzml: bool,
+    is_raw: bool,
     ms_level: u32,
     want: usize,
 ) -> Option<Vec<Spectrum>> {
-    if !is_mzml || want == 0 {
+    if want == 0 {
+        return None;
+    }
+    if is_raw {
+        #[cfg(feature = "thermo")]
+        {
+            let level = u8::try_from(ms_level).ok()?;
+            if level >= 3 {
+                return None;
+            }
+            let reader = input::ThermoRawReader::open(path).ok()?.with_ms_level(Some(level));
+            let all: Vec<Spectrum> = reader.filter_map(Result::ok).collect();
+            return (!all.is_empty()).then(|| strided(all, want));
+        }
+        #[cfg(not(feature = "thermo"))]
+        return None;
+    }
+    if !is_mzml {
         return None;
     }
     let meta = scan_spectrum_metadata(path, true, ms_level, usize::MAX).ok()?;
@@ -487,9 +514,7 @@ pub(crate) fn sample_spectra_strided(
     if n == 0 {
         return None;
     }
-    let want = want.min(n);
-    let stride = (n / want).max(1);
-    let indices: HashSet<usize> = (0..n).step_by(stride).take(want).collect();
+    let indices: HashSet<usize> = strided((0..n).collect(), want).into_iter().collect();
     let loaded = load_spectra_by_index(path, true, ms_level, &indices, usize::MAX).ok()?;
     let mut ordered: Vec<(usize, Spectrum)> = loaded.into_iter().collect();
     ordered.sort_by_key(|(i, _)| *i);
@@ -921,5 +946,25 @@ mod title_tests {
         let mut spectra = vec![titled("a\tb\r\nc", Some(1))];
         prefix_spectrum_titles(&mut spectra, "ru\tn/");
         assert_eq!(spectra[0].title, "ru n/a b  c");
+    }
+}
+
+#[cfg(test)]
+mod strided_sample_tests {
+    use super::strided;
+
+    #[test]
+    fn a_strided_sample_spans_the_whole_run_in_order() {
+        let s = strided((0..10_000).collect::<Vec<usize>>(), 1_000);
+        assert_eq!(s.len(), 1_000);
+        assert_eq!(s[0], 0);
+        assert_eq!(s[999], 9_990);
+        assert!(s.windows(2).all(|w| w[1] - w[0] == 10));
+    }
+
+    #[test]
+    fn a_sample_larger_than_the_run_keeps_every_spectrum() {
+        assert_eq!(strided(vec![1, 2, 3], 5), vec![1, 2, 3]);
+        assert!(strided(Vec::<u8>::new(), 5).is_empty());
     }
 }

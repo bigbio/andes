@@ -518,6 +518,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let sample = crate::spectra::sample_spectra_strided(
             &spectrum_path,
             is_mzml,
+            is_raw,
             cli.ms_level as u32,
             cli.optimize_sample,
         )

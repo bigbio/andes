@@ -1390,13 +1390,14 @@ built-in default`**; unknown keys are a hard error. The UniProt XML options are 
 (`uniprot_variants: true`, `uniprot_isoforms: true`, `uniprot_chains: true`,
 `uniprot_evidence: curated`). Values use the CLI strings
 (`precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `enzyme: gluc,trypsin`).
-Every search flag has a key; a key is the flag name without its section prefix
-(`--glyco-species` is `glyco.species`, `--glyco-glycan-gdb` is `glyco.glycan_gdb`,
-`--fragment-index` is `search.fragment_index`, `--gbdt-max-trees` is
+Every search flag listed in the reference (§1) has a key, except the ones marked "(command
+line only)" there: `--config`, `--print-config`, `--quiet` and `--verbose`. The internal
+diagnostics flags, which neither help lists, have no key either. A key is the flag name
+without its section prefix (`--glyco-species` is `glyco.species`, `--glyco-glycan-gdb` is
+`glyco.glycan_gdb`, `--fragment-index` is `search.fragment_index`, `--gbdt-max-trees` is
 `scoring.gbdt_max_trees`, `--lfq-gaussian-width` is `quant.lfq_gaussian_width`, `--quant-dir`
 is `quant.dir`). Each key's comment in the template names its flag and marks the advanced
-ones. Five flags are CLI-only: `--config`, and the diagnostics `--cal-min-spec-keys`,
-`--precursor-mono-dump`, `--glyco-scans` and `--glyco-mbr-match-train`. Setting
+ones. Setting
 `search.max_missed_cleavages` or `search.isotope_error` counts as an explicit value, which
 `--glyco` then keeps instead of its own (3 missed cleavages, isotope errors 0..2). `glyco.enabled: true` needs `glyco.glycan_gdb` or `glyco.species` (or the
 CLI flag), checked after the merge; setting either glycan source on the command line replaces
@@ -1419,7 +1420,13 @@ glyco:
 line, `--config` and `--sdrf` merged) and exits without searching; `-` writes to stdout.
 Settings that came from a config file, the SDRF or the command line are written as keys with a
 comment naming the source; defaults stay commented out, so replaying the file with
-`andes --config run.yaml` reproduces the run and keeps every default's own adjustments.
+`andes --config run.yaml` reproduces the run and keeps every default's own adjustments. Paths
+are written as they were given, so a relative path is relative to the working directory of the
+run: replay the file from the same directory. A command-line-only diagnostics flag that was set
+has no key; the file ends with a comment naming it (`# set on the command line, no config key
+(pass again to reproduce): --xl-oracle 5`), a warning names it too, and it must be given again
+with `--config` to reproduce the run. A value with no config form (a path that is not UTF-8
+text) stops `--print-config` with an error.
 
 ### SDRF input (`--sdrf`)
 

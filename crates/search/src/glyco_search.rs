@@ -1252,7 +1252,7 @@ fn score_spectrum_glyco(
         };
         let psm = PsmMatch {
             spectrum_idx: spec_idx,
-            candidate_idxs: vec![w.cand_slot as u32],
+            candidate_idxs: smallvec::smallvec![w.cand_slot as u32],
             charge_used: w.z,
             mass_error_ppm,
             score: w.score,
@@ -1738,7 +1738,7 @@ mod tests {
     fn full_glyco_psm_is_clone() {
         let psm = PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![0],
+            candidate_idxs: smallvec::smallvec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: 0.0,

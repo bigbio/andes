@@ -12,8 +12,8 @@ use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
 use crate::report_search_progress;
 use crate::spectra::{
     add_mzml_skipped, input_format_flags, merge_parse_stats, ms3_carries_reporters,
-    prefix_spectrum_titles, require_spectra, run_precursor_calibration, sample_spectra,
-    send_chunks, send_linked_chunks, title_prefix_for, tolerance_ppm_display, ParseStats,
+    learn_file_calibrations, prefix_spectrum_titles, require_spectra, sample_spectra,
+    send_chunks, send_linked_chunks, title_prefix_for, ParseStats,
 };
 use input::{MgfReader, Ms1Link, MzMLReader};
 use model::{activation::ActivationMethod, Spectrum};
@@ -21,10 +21,7 @@ use scoring_crate::RankScorer;
 use search::candidate_index::index_cache_path;
 use search::fragment_index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
 use search::precursor_mono::MonoCorrection;
-use search::{
-    apply_shift_for_mode, apply_tightened_precursor_tolerance, PrecursorCalMode, PreparedSearch,
-    TopNQueue,
-};
+use search::{FileCalibration, PrecursorCalMode, PreparedSearch, TopNQueue};
 
 #[path = "search/resolve.rs"]
 mod resolve;
@@ -451,16 +448,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
-        log::warn!(
-            "--precursor-cal is not yet supported for Thermo .raw input; \
-             proceeding without calibration."
-        );
-        params.precursor_cal_mode = PrecursorCalMode::Off;
-    }
-
     let cache_dir = crate::cli::dir_or_output_dir(cli.index_cache_dir.as_deref(), &report_base);
     let index_path = index_cache_path(&idx, &params, &cache_dir);
+    let mut file_cal: Vec<(f64, model::tolerance::PrecursorTolerance)> = Vec::new();
     if params.precursor_cal_mode != PrecursorCalMode::Off {
         let t_cal = std::time::Instant::now();
         let mut cal_prepared = PreparedSearch::prepare_mmap(
@@ -472,9 +462,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &index_path,
         )
         .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-        let cal_stats = run_precursor_calibration(
-            &spectrum_path,
-            is_mzml,
+        file_cal = learn_file_calibrations(
+            spectrum_paths,
             ms_level_u32,
             bench_cap,
             &params,
@@ -486,29 +475,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "done in {:.2} s (includes opening or building the candidate index)",
             t_cal.elapsed().as_secs_f64()
         );
-        params.precursor_mass_shift_ppm =
-            apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
-        let tol_before = params.precursor_tolerance;
-        apply_tightened_precursor_tolerance(&mut params, cal_stats);
-        if cal_stats.has_reliable_stats() {
-            let left_before = tolerance_ppm_display(tol_before.left);
-            let right_before = tolerance_ppm_display(tol_before.right);
-            let left_after = tolerance_ppm_display(params.precursor_tolerance.left);
-            let right_after = tolerance_ppm_display(params.precursor_tolerance.right);
-            if left_after.is_some()
-                && right_after.is_some()
-                && (left_after != left_before || right_after != right_before)
-            {
-                log::info!(
-                    target: "calibration",
-                    "Tightened precursor tolerance for main pass: left {:.3} ppm -> {:.3} ppm, right {:.3} ppm -> {:.3} ppm",
-                    left_before.unwrap_or(0.0),
-                    left_after.unwrap_or(0.0),
-                    right_before.unwrap_or(0.0),
-                    right_after.unwrap_or(0.0),
-                );
-            }
-        }
+        (params.precursor_mass_shift_ppm, params.precursor_tolerance) = file_cal[0];
     }
 
     if cli.optimize {
@@ -518,6 +485,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let sample = crate::spectra::sample_spectra_strided(
             &spectrum_path,
             is_mzml,
+            is_raw,
             cli.ms_level as u32,
             cli.optimize_sample,
         )
@@ -562,6 +530,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let file_params: Vec<search::SearchParams> = file_cal
+        .iter()
+        .map(|&(shift, tolerance)| {
+            let mut p = params.clone();
+            p.precursor_mass_shift_ppm = shift;
+            if params.precursor_tolerance == file_cal[0].1 {
+                p.precursor_tolerance = tolerance;
+            }
+            p
+        })
+        .collect();
     let t_index = std::time::Instant::now();
     let mut prepared = PreparedSearch::prepare_mmap(
         &idx,
@@ -804,6 +783,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if bench_mode && all_spectra.len() >= bench_cap {
             break;
         }
+        if let Some(p) = file_params.get(file_idx) {
+            prepared.params = p;
+        }
         measurer.start_file(&prepared);
         let remaining_cap = if bench_mode {
             bench_cap.saturating_sub(all_spectra.len())
@@ -1019,7 +1001,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|m| chunk_link.ms1_peaks.get(m))
                             .map(|peaks| {
                                 let (lo, hi) =
-                                    search::match_engine::coisolation_ms1_bounds(&spec, &params);
+                                    search::match_engine::coisolation_ms1_bounds(
+                                        &spec,
+                                        prepared.params,
+                                    );
                                 let a = peaks.partition_point(|p| p.0 < lo);
                                 let b = peaks.partition_point(|p| p.0 <= hi);
                                 peaks[a..b.max(a)].to_vec()
@@ -1036,7 +1021,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         &prepared,
                         &chunk_spectra,
                         &mut queues,
-                        &params,
+                        prepared.params,
                         &chunk_link,
                         offset,
                     );
@@ -1093,7 +1078,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &prepared,
                     &scored,
                     &mut queues,
-                    &params,
+                    prepared.params,
                     &link,
                     base,
                 );
@@ -1378,6 +1363,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         run_ends.push(all_spectra.len());
     }
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
+    prepared.params = &params;
+    let file_calibrations: Vec<FileCalibration> = file_params
+        .iter()
+        .zip(&run_ends)
+        .map(|(p, &end)| FileCalibration {
+            end,
+            shift_ppm: p.precursor_mass_shift_ppm,
+            tolerance: p.precursor_tolerance,
+        })
+        .collect();
 
     if parse_stats.error_count > 0 {
         log::warn!(
@@ -1522,7 +1517,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let spectra = all_spectra;
+    let mut spectra = all_spectra;
     let mut queues = all_queues;
 
     if standalone {
@@ -1541,6 +1536,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             search_elapsed.as_secs_f64()
         );
     }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
+    }
+    crate::memlimit::mark_stage("search");
     if cli.open_search {
         let (attempts, wins) = prepared.open_search_stats();
         log::info!(
@@ -1628,7 +1627,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fragment_tol_da,
                 &cli.db.decoy_prefix,
                 decoy_strategy,
-                1,
+                cli.decoy_seed,
+                &file_calibrations,
             );
             log::info!(
                 target: "refinement",
@@ -1685,24 +1685,58 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         output_pin_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
+    crate::memlimit::mark_stage("PIN written");
+    let run_stats = output::RunStatistics::compute(
+        &queues,
+        &pin_candidates,
+        &params,
+        &scorer.feature_match_tolerance(),
+        &scorer.pin_match_tolerance(),
+        &scorer.node_score_window(),
+    );
+    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
+        p.annotation
+            .as_deref()
+            .is_some_and(|a| !a.site_claims.is_empty())
+    });
+    let fact_rows = (cli.dia
+        && !has_site_claims
+        && ipf_scoring.is_none()
+        && quant.is_none()
+        && cli.output_parquet.is_none()
+        && cli.output_tsv.is_none())
+    .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
+    if fact_rows.is_some() {
+        queues = Vec::new();
+        crate::memlimit::release_free_memory();
+    }
     log::info!(
         target: "total",
         "done in {:.2} s",
         t_total.elapsed().as_secs_f64()
     );
     let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
+    let n_dia_ms1: usize = dia_ms1.iter().map(Vec::len).sum();
+    let dia_ms1 = if cli.dia {
+        crate::dia::ms1_indexes(dia_ms1)
+    } else {
+        Vec::new()
+    };
     let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
-        if let Some(predicted) = kept.filter(|_| pooled) {
+        crate::memlimit::mark_stage("predictions");
+        if let Some((predicted, table)) = kept.filter(|_| pooled) {
             let pool = crate::dia_llr::add_to_pin(
                 &output_pin_path,
                 &spectra,
                 &run_ends,
                 &dia_ms1,
+                table,
                 &predicted,
                 p.tolerance(),
             )?;
+            crate::memlimit::mark_stage("pool scores");
             let nominees_out = cli
                 .quant_dir
                 .as_deref()
@@ -1713,22 +1747,38 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &spectra,
                 &run_ends,
                 &dia_ms1,
-                &pool,
-                &predicted,
+                pool,
+                predicted,
                 nominees_out.as_deref().map(|path| crate::dia_xfer::NomineesOut {
                     path,
                     spectrum: spectrum_path.as_path(),
                     mobility_slices: cli.dia_mobility_slices,
                 }),
             )?);
+            crate::memlimit::mark_stage("pass 2");
         }
     }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
+    }
+    crate::memlimit::mark_stage("pool released");
     let mut rerank_dropped = std::collections::HashSet::new();
     if pooled {
-        rerank_dropped = crate::dia::rerank_pin(&output_pin_path, cli.top_n as usize)?;
+        rerank_dropped = crate::dia::rerank_pin(
+            &output_pin_path,
+            cli.top_n as usize,
+            cli.output_parquet.is_some() || quant.is_some(),
+        )?;
+        crate::memlimit::release_free_memory();
+        crate::memlimit::mark_stage("per-scan cut");
     }
     if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, dia_ms1)?;
+        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, &dia_ms1, n_dia_ms1)?;
+        crate::memlimit::mark_stage("co-elution");
+    }
+    drop(dia_ms1);
+    if cli.dia {
+        crate::memlimit::release_free_memory();
     }
     if cli.refine {
         if refine_merged {
@@ -1760,11 +1810,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut rescore_decoys: Option<std::collections::HashSet<String>> = None;
     let mut rescore_decoy_psms: std::collections::HashMap<String, output::PercolatorPsm> =
         std::collections::HashMap::new();
-    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
-        p.annotation
-            .as_deref()
-            .is_some_and(|a| !a.site_claims.is_empty())
-    });
     let mut row_scores: Option<output::RowScores> = None;
     let mut dia_replaced: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut dia_precursor_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1800,6 +1845,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
+            crate::memlimit::mark_stage("rescoring");
             if cli.dia
                 && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
                     map.get(id).is_some_and(|p| p.q_value <= 0.01)
@@ -1808,6 +1854,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 (map, decoys) =
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
+                crate::memlimit::mark_stage("rescoring after the RT refit");
             }
             let path = output::decoy_results_path(&output_pin_path);
             let text =
@@ -1825,6 +1872,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 pass1_q = n;
                 pass1_best = best;
+                if fact_rows.is_some() {
+                    for s in &mut spectra {
+                        s.peaks = Vec::new();
+                    }
+                    crate::memlimit::release_free_memory();
+                }
+                crate::memlimit::mark_stage("precursor q");
                 log::info!(
                     target: "rescore",
                     "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
@@ -1839,6 +1893,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     t,
                     Some((&backend, &user_args)),
                 )?;
+                crate::memlimit::mark_stage("study tables stored");
                 dia_pass2 = None;
             }
             if let Some(t) = dia_pass2.take() {
@@ -1885,6 +1940,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "pass-1 results kept, the precursor PIN is not used: {why}"
                     ),
                 }
+                crate::memlimit::mark_stage("precursor rescoring");
             }
             rescore_decoys = Some(decoys);
             log::info!(
@@ -1910,6 +1966,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
         crate::dia_xrun::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+    }
+    if cli.dia {
+        crate::memlimit::release_free_memory();
     }
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2225,25 +2284,29 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         identified = Some((accepted, pep_note));
     }
 
-    let run_stats = output::RunStatistics::compute(
-        &queues,
-        &pin_candidates,
-        &params,
-        &scorer.feature_match_tolerance(),
-        &scorer.pin_match_tolerance(),
-        &scorer.node_score_window(),
-    );
     let mut id_summary = identified.as_ref().map(|(accepted, cut_note)| {
         let wanted: std::collections::HashSet<&str> =
             accepted.iter().map(|p| p.psm_id.as_str()).collect();
-        let facts = output::psm_facts(
-            &spectra,
-            &queues,
-            &pin_candidates,
-            &params,
-            &run_ends,
-            &wanted,
-        );
+        let facts = match &fact_rows {
+            Some(rows) => output::psm_facts_of_rows(
+                &spectra,
+                rows,
+                &pin_candidates,
+                &params,
+                &run_ends,
+                &file_calibrations,
+                &wanted,
+            ),
+            None => output::psm_facts(
+                &spectra,
+                &queues,
+                &pin_candidates,
+                &params,
+                &run_ends,
+                &file_calibrations,
+                &wanted,
+            ),
+        };
         let linked: Vec<output::PsmFacts> = accepted
             .iter()
             .filter_map(|p| facts.get(p.psm_id.as_str()).cloned())
@@ -2283,7 +2346,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     )
                 }),
                 fixed: &fixed,
-                calibration_shift_ppm: params.precursor_mass_shift_ppm,
+                calibration_shift_ppm: match file_calibrations.len() {
+                    0 | 1 => params.precursor_mass_shift_ppm,
+                    n => file_calibrations.iter().map(|f| f.shift_ppm).sum::<f64>() / n as f64,
+                },
             },
         )
     });
@@ -2476,6 +2542,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
     }
 
+    crate::memlimit::mark_stage("outputs");
     let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
         release_at_exit(pin_candidates);
         return Ok(());

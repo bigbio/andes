@@ -126,6 +126,8 @@ fn train_from_several_runs_records_one_source_per_run() {
         .arg("0.5")
         .arg("--instrument")
         .arg("TimsTOF")
+        .arg("--protocol")
+        .arg("TMT")
         .arg("--model-id")
         .arg("bsa_two_runs")
         .status()
@@ -148,9 +150,15 @@ fn train_from_several_runs_records_one_source_per_run() {
     assert!(sources[0].n_psms > 0);
     assert!(sources.iter().all(|l| l.dataset == "test.mgf.gz"));
     assert!(sources.iter().all(|l| l.instrument == "TimsTOF"));
+    assert!(sources.iter().all(|l| l.experiment_class == "TMT"));
 
     let param = store.load_param("bsa_two_runs").expect("load param");
     assert_eq!(param.data_type.instrument.name(), "TimsTOF");
+    assert_eq!(
+        param.data_type.protocol.name(),
+        "TMT",
+        "the trained model carries --protocol, so routing selects it for TMT searches"
+    );
     assert_eq!(param.data_type.activation.name(), "HCD");
     assert_eq!(format!("{:?}", param.mme), "Da(0.5)");
 }

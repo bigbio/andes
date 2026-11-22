@@ -4,6 +4,9 @@ use std::process::Command;
 
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 
+#[path = "support/pg_quant.rs"]
+mod pg_quant;
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -312,6 +315,13 @@ fn tmt_study_joins_pooled_scores_gates_groups_and_maps_channels() {
         );
     }
     assert!(qpx.join("quantms.pg.parquet").is_file());
+    let (pg_total, feature_total, quantified, labels) = pg_quant::totals(&qpx, true);
+    assert!(quantified > 0, "the study pg view carries protein quantities");
+    assert!(labels.iter().all(|l| l.starts_with("TMT")), "{labels:?}");
+    assert!(
+        (pg_total - feature_total).abs() <= 1e-4 * feature_total.max(1.0),
+        "total intensity of the groups {pg_total} vs the unique gated feature rows {feature_total}"
+    );
 }
 
 #[test]

@@ -548,7 +548,7 @@ mod tests {
     fn make_minimal_psm(spectrum_idx: usize, score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![0],
+            candidate_idxs: vec![0].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,

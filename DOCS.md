@@ -56,7 +56,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--spectrum` | path | *(required)* | Input spectrum file; reader chosen by extension (see above). | Java `-s <FILE>` |
-| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
+| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`), or taken from a target + decoy FASTA written by `andes database` ([§1d](#1d-decoy-databases-andes-database)). | Java `-d <FILE>` |
 | `--output-pin` | path | *(required)* | Output Percolator `.pin`. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
 ### Search parameters
@@ -109,7 +109,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native Percolator engine (in `--temp-dir`, removed afterwards); the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
-| `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
+| `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML and Thermo .raw); other formats fall back to the first 1,000 spectra. |
 
 This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
 Commun.* 2020), scoped to the parameters andes does not derive from the data. The **fragment**
@@ -970,7 +970,9 @@ The run summary gives the precursor tolerance as the offset window.
   - With several input files, each run (the PIN's `FileName`) is calibrated on its own zero-offset
     PSMs before the runs are pooled. A run with fewer than 20 such PSMs uses the pooled shift.
   - An offset that localisation refined from the fragment ions keeps its value. The fragments are
-    already recentred.
+    already recentred. The refinement runs only when the fragment matching window is at most 0.1 Da
+    (the largest correction it may apply); with low-resolution ion-trap MS2 (about 0.5 Da) the
+    offset measured on the precursor is kept.
   - The PIN marks such a row by a `DeltaMass` that differs from
     `ExpMass − isotope_error × 1.003355 − CalcMass` by more than 0.0005 Da.
 - **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.
@@ -1407,8 +1409,12 @@ search's pair score, which is on one scale across runs, or `percolator` when the
 rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
 not comparable, so pooling a `percolator` row is an error; search those runs without the
 flags, or search them together and rescore once.
-Given tables of several projects, its pooled q-values control the error of the whole list,
-not of each project's part of it. The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
+Each CSM table also has a `spec_id` column, the `SpecId` of the spectrum's row in the run's
+`<base>.xl.pin`. Pooled rescoring joins its scores back to the table by that column, not by
+scan number: one search can read several spectrum files, and MGF spectra may carry no scan.
+The pooled q-values control the error of the whole list, not of each project's part of it:
+a project whose decoys score higher than the others' can hold more false CSMs than the cut.
+The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
 of the CSMs the pooled 1 % and 5 % cuts accept, per link class (`project`, `link`, `q_cut`,
 `tt`, `td`, `dd`, `decoy_fdr`). Each run's project comes from the plan: `andes cohort run`
 passes it, and `andes cohort xl-fdr --plan plan.json` reads it; without `--plan` it is the part
@@ -1452,6 +1458,55 @@ Percolator once per settings group, not across groups with different search spac
 `chargeN` columns follow the charge range, glyco PINs have another schema, and one Percolator over
 groups with different search spaces controls the FDR only overall. Combine groups at the
 peptide, protein or quantification level.
+
+## 1d. Decoy databases (`andes database`)
+
+`andes database` builds the decoys of a study or cohort once, so every search of it uses the same
+decoys, and reports how many decoy peptides equal a target peptide:
+
+```bash
+andes database --fasta human.fasta --output td.fasta \
+    [--enzyme trypsin] [--enzyme-specificity fully] [--min-length 6] [--max-length 50] \
+    [--max-missed-cleavages 2] [--check-digest lysc/fully/7-30/2 ...] \
+    [--decoy-strategy shuffle] [--decoy-prefix XXX_] [--decoy-suffix S] [--threads N]
+```
+
+**Decoy key.** The decoys depend on the target proteins, the decoy strategy, seed, prefix and
+suffix, and on the digests the peptide-level decoy check covers (enzymes, specificity, peptide
+lengths, missed cleavages): the check redraws every decoy peptide those settings enumerate that
+equals a target peptide. That is the decoy key. Modifications, tolerances, charges, the
+instrument and every other search setting are not part of it, so runs with different
+modifications (a phospho and a full-proteome arm) can share one database. The candidate index
+stays keyed by the search settings (`--index-cache-dir`, §1c). Every search logs the key of its
+decoys (`decoy key <32 hex>`), whether it generated them or read them; pool FDR only over runs
+with one key.
+
+**Digests.** The digest options take the search's names and defaults. The decoys are built for
+that digest; each `--check-digest ENZYMES/SPECIFICITY/MIN-MAX/MISSED` adds a digest of the cohort
+whose decoy peptides are also checked against its target peptides. A database built for trypsin
+alone and searched with Lys-C keeps more decoy peptides equal to a target than one checked for
+both. Give the digest a `--glyco` search resolves (3 missed cleavages unless set).
+
+**Files.**
+- `td.fasta`: the targets as read (accession, description, residues) in input order, then the
+  decoys.
+- `td.database.parquet` (`andes.database.schema` 1.0): one row per digest, `role` (`build`, then
+  `check`), `enzymes`, `specificity`, `min_length`, `max_length`, `max_missed_cleavages`;
+  key-value metadata `decoy_strategy`, `decoy_seed`, `decoy_prefix`, `decoy_suffix`,
+  `targets_sha256`, `fasta_sha256`, `decoy_key`, `targets`, `decoys`, `andes_version`.
+- `td.overlap.parquet` (`andes.decoy_overlap.schema` 1.0): one row per digest and peptide length,
+  the digest columns, `length`, `target_peptides`, `decoy_peptides` and `shared_peptides`
+  (distinct decoy sequences equal to a target sequence, I = L); metadata `redrawn` and `left`, the
+  decoy peptides the check redrew and the ones still equal to a target, which the search scores
+  as targets.
+
+**Searching it.** Give `td.fasta` as `--database`. When `td.database.parquet` is beside it, the
+search reads the targets and decoys as written and generates none; the PIN and TSV are the same,
+byte for byte, as those of a search of the target FASTA with the same key. The search stops, naming
+each setting that differs, when `td.fasta` changed after it was written, when its
+`--decoy-strategy`, `--decoy-seed`, `--decoy-prefix` or `--decoy-suffix` differ, when its digest
+is none of the table's, or with `--annotations`. Only FASTA input is read; a FASTA whose entries
+already carry the decoy prefix or suffix is refused.
 
 ---
 
@@ -2368,8 +2423,11 @@ andes quant finalize --quant-dir tmt/ -o study --database human.fasta --sdrf stu
   the run table's reporter columns (`tmt_<ch>`, `raw_`, `sn_`, `unmix_`) and the columns above.
   With `--output-parquet DIR`, `quantms.feature.parquet` (the rows in a group; m/z computed
   from the peptidoform, `observed_mz` equal to it) and `quantms.pg.parquet`.
-* **Not done here:** reference-channel ratios, normalisation, protein quantities and the
-  sample annotation beyond the source name (downstream, from the SDRF).
+* **Protein quantities.** `quantms.pg.parquet` carries the default protein quantities per plex
+  and channel (see the QPX views below); a plex is every run with the same SDRF plex, a run
+  when the SDRF gives none, and rows that fail the gate are left out.
+* **Not done here:** reference-channel ratios, normalisation and the sample annotation beyond
+  the source name (downstream, from the SDRF).
 
 ### Label-free MS1 features (`--lfq`)
 
@@ -2460,6 +2518,25 @@ protein groups once over every run's PSMs, then:
 - `quantms.pg.parquet` holds the groups at or below `--protein-fdr` (default 0.01), with the
   decoy groups at the cut, and `feature_counts` (features of the group's unique peptides, and
   all). `contaminant` is true for groups with a `CONTAMINANT_` accession.
+- **Default protein quantities** (QPX 1.1 flattened rows, footer `andes_protein_quant_version`
+  1.0). A group with quantified features has one row per quantification unit and label: the unit
+  is a run with label `LFQ` (label-free), a run with one row per label (`--label` pairs), or a plex
+  with one row per reporter channel, reference channels included (TMT study); `grouped_runs` lists
+  the unit's runs. `intensity` and
+  `additional_intensities` `total_intensity` are the sum of the group's unique peptides;
+  `additional_intensities` `top3` is the mean of its three most intense unique peptides in the
+  unit, or of the ones it has when fewer. A peptide is a peptidoform, summed over its charge
+  states, fractions and feature rows; on a plex the three are ranked on their intensity summed
+  over the channels, so every channel averages the same peptides; ties go to the peptidoform
+  that sorts first (tied peptides have equal intensity). Shared and razor peptides are left out;
+  values that are zero or not finite are missing (`intensity` null when no peptide has one).
+  Values are the feature intensities as written: not normalised, not divided by the reference
+  channels (label-free: the feature quantity, transfers included; TMT: the run tables' reporter
+  intensities, raw or impurity-corrected as searched). `cv_params` gives `quantification_method`
+  `total_intensity` and `andes:group_id`. A group without a quantified feature keeps one
+  identification row (`label` and `intensity` null, `grouped_runs` every run). Rows are numbered
+  from 1 (`pg_id`); without quantities `pg_id` is the group id. Better protein quantities
+  (reference ratios, normalisation, summarisation) are downstream, in mokume.
 - Each row of `quantms.feature.parquet` carries its peptide's group: `pg_accessions` (the group's
   accessions), `anchor_protein` (its lead), `unique` (false for a peptide another group also
   contains, assigned to this one as razor) and `pg_global_qvalue`. Features whose peptide counts
@@ -2925,7 +3002,7 @@ tables of runs without `--mbr` stay 1.0).
   one plex mixture load alike). The `quant_q` of a transfer is the running mean, over the transfers at least as
   reliable, of its predicted excess error: the identity risk plus the value risk above the noise floor. It is an internal
   quant-quality q-value, not an identification FDR. Transfers at `quant_q <= --quant-transfer-fdr` (0.01) pass the
-  quantification gate (`quant_gate_passed` true, `quant_weight` purity²) and enter the QPX feature
+  quantification gate (`quant_gate_passed` true, `quant_weight` purity² × (1 − `p_wrong`), as an identified row weighs purity² × (1 − PEP)) and enter the QPX feature
   view as `transfer_ms2`; the others stay in `tmt.parquet` with weight 0. With fewer than 100 masked
   siblings the noise floor stands in for the value model (a WARN names it); with too few rows for another
   model no transfer is accepted.

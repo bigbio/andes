@@ -820,10 +820,12 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
 /// One CSM read from a run's table.
 struct CsmRow {
     run: String,
-    /// The index of its table among the tables read, and its scan in that table: the key of
-    /// its row in the table's sibling PIN.
+    /// The index of its table among the tables read, and its `spec_id` in that table (the
+    /// `SpecId` of its row in the table's sibling PIN): the key that joins rescored PIN rows
+    /// back to it. Scan numbers are not unique (one search may read several spectrum files)
+    /// and not always present (MGF without scans), so they are not used for the join.
     table: usize,
-    scan: String,
+    spec_id: String,
     spectrum: String,
     class: xl::decoy::PairClass,
     link: xl::rollup::LinkClass,
@@ -873,7 +875,7 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
     let (sp, cl, li, sc) = (col("spectrum")?, col("class")?, col("link")?, col("score")?);
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
     let src = col("score_source")?;
-    let scan = col("scan")?;
+    let spec_id = col("spec_id")?;
     let opt = |c: &str| header.iter().position(|h| *h == c);
     let sides = [
         (opt("alpha_peptide"), opt("alpha_proteins")),
@@ -912,7 +914,7 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
         out.push(CsmRow {
             run: run.clone(),
             table,
-            scan: get(scan).to_string(),
+            spec_id: get(spec_id).to_string(),
             spectrum: get(sp).to_string(),
             class: pair_class(get(cl)).ok_or_else(|| bad("class"))?,
             link: link_class(get(li)).ok_or_else(|| bad("link"))?,
@@ -1156,9 +1158,9 @@ fn rescore(
                 .parse()
                 .map_err(|_| format!("{}: ScanNr `{scan}` is not a number", pin.display()))?;
             let id = format!("{k}|{}", f[si]);
-            f[si] = id.clone();
+            let spec_id = std::mem::replace(&mut f[si], id.clone());
             f[sc] = (k as u64 * 1_000_000_000 + n).to_string();
-            key_of.insert(id, (k, scan));
+            key_of.insert(id, (k, spec_id));
             let cols: Vec<&str> = keep
                 .iter()
                 .filter_map(|&i| f.get(i).map(String::as_str))
@@ -1186,14 +1188,14 @@ fn rescore(
     scored.extend(output::parse_psm_results(&decoy_text).map_err(|e| format!("{e}"))?);
     let mut score: HashMap<(usize, &str), f64> = HashMap::new();
     for (id, psm) in &scored {
-        if let (Some((k, scan)), Some(s)) = (key_of.get(id), psm.score) {
-            score.insert((*k, scan.as_str()), s);
+        if let (Some((k, spec_id)), Some(s)) = (key_of.get(id), psm.score) {
+            score.insert((*k, spec_id.as_str()), s);
         }
     }
     let mut unscored = 0usize;
     let mut n = 0usize;
     for c in csms.iter_mut().filter(|c| classes.contains(&c.link)) {
-        match score.get(&(c.table, c.scan.as_str())) {
+        match score.get(&(c.table, c.spec_id.as_str())) {
             Some(&s) => {
                 c.score = s;
                 c.score_source = "percolator";
@@ -1435,17 +1437,20 @@ mod tests {
         let p = t.path().join("A.r1.xl.tsv");
         std::fs::write(
             &p,
-            "spectrum\tscan\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
-             A.r1/s1\t1\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
-             A.r1/s2\t2\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
-             A.r1/s3\t3\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
+            "spectrum\tscan\tspec_id\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
+             A.r1/s1\t1\txl0\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
+             A.r1/s2\t2\txl1\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
+             A.r1/s3\t1\txl2\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
         )
         .unwrap();
         let mut rows = Vec::new();
         assert_eq!(read_csms(&p, 4, &mut rows).unwrap(), (2, 1));
         assert_eq!(rows[0].run, "A.r1");
-        assert_eq!((rows[0].table, rows[0].scan.as_str()), (4, "1"));
-        assert_eq!(rows[1].scan, "3");
+        assert_eq!((rows[0].table, rows[0].spec_id.as_str()), (4, "xl0"));
+        assert_eq!(
+            rows[1].spec_id, "xl2",
+            "a second file's spectrum with the same scan number keeps its own key"
+        );
         assert_eq!(rows[0].class, xl::decoy::PairClass::TT);
         assert_eq!(rows[1].link, xl::rollup::LinkClass::Homotypic);
         let old = t.path().join("B.xl.tsv");
@@ -1458,31 +1463,31 @@ mod tests {
     #[test]
     fn a_malformed_score_or_missing_pair_is_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let head = "spectrum\tscan\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
+        let head = "spectrum\tscan\tspec_id\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
         for (name, row, what) in [
             (
                 "a.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
                 "row 2: bad score",
             ),
             (
                 "b.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
                 "bad score",
             ),
             (
                 "c.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
                 "bad residue_pair",
             ),
             (
                 "e.xl.tsv",
-                "s1\t1\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
                 "rescored on its own",
             ),
             (
                 "d.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
+                "s1\t1\txl0\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
                 "bad protein_pair",
             ),
         ] {
@@ -1501,7 +1506,7 @@ mod tests {
         let mut rows = vec![CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "7".into(),
+            spec_id: "xl7".into(),
             spectrum: "A.r1/s7".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Intra,
@@ -1537,7 +1542,7 @@ mod tests {
         let mut rows = vec![CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "7".into(),
+            spec_id: "s7".into(),
             spectrum: "A.r1/s7".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Intra,
@@ -1717,7 +1722,7 @@ mod tests {
         let row = |a: &str, pa: &str, b: &str, pb: &str| CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "1".into(),
+            spec_id: "xl1".into(),
             spectrum: "s".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Inter,
@@ -1871,7 +1876,7 @@ mod tests {
         let row = |run: &str, class, link| CsmRow {
             run: run.to_string(),
             table: 0,
-            scan: String::new(),
+            spec_id: String::new(),
             spectrum: String::new(),
             class,
             link,

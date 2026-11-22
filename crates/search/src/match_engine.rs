@@ -42,6 +42,8 @@ use scoring_crate::scoring::{
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
 const DIA_MS1_GATE_SCANS: usize = 1;
+/// Spectra whose kept PSMs get their full-pass-only features per lock of the candidate store.
+const KEPT_FEATURE_BATCH_SPECTRA: usize = 2048;
 
 fn windowed_top_k(peaks: &[(f64, f32)], width: f64, k: usize) -> Vec<(f64, f32)> {
     let mut by_window: Vec<(i64, f32, usize)> = peaks
@@ -194,6 +196,8 @@ pub struct PreparedSearch<'a> {
     per_scan: Option<PerScanScorers>,
     form_rt_model: Option<Arc<crate::dia_rt_rank::FormRtModel>>,
     dia_rt_prior: RwLock<Option<Arc<crate::dia_rt_rank::DiaRtPrior>>>,
+    form_rt_cache: crate::dia_rt_rank::FormRtCache,
+    frag_pred_cache: crate::frag_pred_cache::FragPredCache,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -508,6 +512,8 @@ impl<'a> PreparedSearch<'a> {
             per_scan: None,
             form_rt_model: None,
             dia_rt_prior: RwLock::new(None),
+            form_rt_cache: crate::dia_rt_rank::FormRtCache::default(),
+            frag_pred_cache: crate::frag_pred_cache::FragPredCache::default(),
         }
     }
 
@@ -522,7 +528,11 @@ impl<'a> PreparedSearch<'a> {
 
     /// Sets (or with `None` clears) the run's RT prior; while set, every DIA chunk index
     /// carries calibrated per-form RTs and its vote cut uses the RT term.
+    /// Clearing also drops the cached per-form RT predictions.
     pub fn set_dia_rt_prior(&self, prior: Option<crate::dia_rt_rank::DiaRtPrior>) {
+        if prior.is_none() {
+            self.form_rt_cache.clear();
+        }
         *self.dia_rt_prior.write().expect("RT prior lock") = prior.map(Arc::new);
     }
 
@@ -741,7 +751,23 @@ impl<'a> PreparedSearch<'a> {
         self.run_chunk_with_params(spectra, spectrum_idx_offset, self.params)
     }
 
+    /// Scores a chunk of spectra; each returned queue holds exactly its PSMs, without the spare
+    /// capacity reserved while scoring (the queues of a whole run are kept until the PIN is
+    /// written).
     pub fn run_chunk_with_params(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
+        let mut queues = self.score_chunk(spectra, spectrum_idx_offset, params);
+        for q in &mut queues {
+            q.shrink_to_fit();
+        }
+        queues
+    }
+
+    fn score_chunk(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
@@ -760,11 +786,13 @@ impl<'a> PreparedSearch<'a> {
             || params.charge_range.clone().count() < 2
             || spectra.iter().all(has_charge)
         {
-            return self
-                .run_chunk_inner(spectra, spectrum_idx_offset, params)
+            let queues = self
+                .run_chunk_inner(spectra, spectrum_idx_offset, params, false)
                 .into_iter()
                 .map(|(queue, _pool)| queue)
                 .collect();
+            self.frag_pred_cache.clear();
+            return queues;
         }
         let mass = crate::fragment_index::index_order_mass;
         let (lo, hi) = spectra
@@ -789,11 +817,12 @@ impl<'a> PreparedSearch<'a> {
             .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
             .collect();
         let mut pools: Vec<Vec<f32>> = vec![Vec::new(); spectra.len()];
+        let complete_later = params.score_mode == ScoreMode::Strong && params.open_search.is_none();
         while !units.is_empty() {
             let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
             for ((mut q, pool), i) in self
-                .run_chunk_inner(&chunk, 0, params)
+                .run_chunk_inner(&chunk, 0, params, complete_later)
                 .into_iter()
                 .zip(owners)
             {
@@ -807,7 +836,71 @@ impl<'a> PreparedSearch<'a> {
         for (queue, pool) in merged.iter_mut().zip(&pools) {
             recalibrate_strong_over_spectrum(queue, pool);
         }
+        if complete_later {
+            self.complete_kept_features(spectra, &mut merged);
+        }
+        self.frag_pred_cache.clear();
         merged
+    }
+
+    /// Completes the features of the PSMs each spectrum keeps after its charges were merged
+    /// (the charge searches of [`Self::score_chunk`] leave the full-pass-only features unset),
+    /// so only the kept PSMs pay for them. Peptides are copied out of the candidate store in
+    /// batches of spectra to keep the lock short.
+    fn complete_kept_features(&self, spectra: &[Spectrum], queues: &mut [TopNQueue]) {
+        let scorer_set = self.scorer_set(&[]);
+        for (specs, batch) in spectra
+            .chunks(KEPT_FEATURE_BATCH_SPECTRA)
+            .zip(queues.chunks_mut(KEPT_FEATURE_BATCH_SPECTRA))
+        {
+            let peptides: Vec<Vec<Peptide>> = {
+                let accum = self.mmap_accum.lock().unwrap();
+                batch
+                    .iter()
+                    .map(|q| {
+                        q.iter_psms()
+                            .map(|p| {
+                                let idx = p.primary_candidate_idx() as usize;
+                                accum
+                                    .candidates
+                                    .get(idx)
+                                    .unwrap_or_else(|| &self.candidates[idx])
+                                    .peptide
+                                    .clone()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            };
+            batch
+                .par_iter_mut()
+                .zip(specs.par_iter())
+                .zip(peptides.par_iter())
+                .for_each(|((queue, spec), peps)| {
+                    if queue.is_empty() {
+                        return;
+                    }
+                    let scorer = scorer_set.for_spec(spec);
+                    let mut scored: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> = SmallVec::new();
+                    let mut k = 0;
+                    queue.update_in_place(|psm| {
+                        let z = psm.charge_used;
+                        if scored.iter().all(|(c, _)| *c != z) {
+                            scored.push((z, ScoredSpectrum::new(spec, scorer, z)));
+                        }
+                        let ss = &scored.iter().find(|(c, _)| *c == z).expect("scored").1;
+                        complete_psm_features(
+                            &mut psm.features,
+                            ss,
+                            &peps[k],
+                            scorer,
+                            z,
+                            Some(&self.frag_pred_cache),
+                        );
+                        k += 1;
+                    });
+                });
+        }
     }
 
     fn expand_mmap_window_candidates(
@@ -951,17 +1044,36 @@ impl<'a> PreparedSearch<'a> {
     /// Scores each spectrum of `spectra` at every charge it is searched with and returns, per
     /// spectrum, its retained PSMs and the strong scores of the pool its `strong_score_cal` was
     /// calibrated against (empty when the spectrum was skipped).
+    /// With `complete_later` (strong mode) the full-pass-only features of the retained PSMs are
+    /// left unset for the caller to complete with [`complete_psm_features`] once it knows which
+    /// PSMs it keeps.
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
         params: &SearchParams,
+        complete_later: bool,
     ) -> Vec<(TopNQueue, Vec<f32>)> {
         let scorer_set = self.scorer_set(spectra);
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
 
         let t_chunk_prep = std::time::Instant::now();
+        let rt_prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
+        let rt_source = match (
+            params.dia,
+            self.form_rt_model.as_deref(),
+            rt_prior.as_deref(),
+        ) {
+            (true, Some(model), Some(prior)) => Some(crate::fragment_index::FormRtSource {
+                db: self.idx,
+                params,
+                model,
+                cache: &self.form_rt_cache,
+                prior,
+            }),
+            _ => None,
+        };
         let owned_index: Option<ChunkFragmentIndex>;
         let (record_cache, frag_index): (Option<MmapRecordCache>, Option<&ChunkFragmentIndex>) = {
             let mi = &self.mmap_index;
@@ -1027,11 +1139,8 @@ impl<'a> PreparedSearch<'a> {
                         lo,
                         hi,
                     );
-                    let prior = self.dia_rt_prior.read().expect("RT prior lock").clone();
-                    if let (true, Some(model), Some(prior)) =
-                        (params.dia, self.form_rt_model.as_deref(), prior)
-                    {
-                        index.attach_rt(self.idx, params, model, &prior);
+                    if let Some(src) = &rt_source {
+                        index.enable_rt(src.prior);
                     }
                     index
                 });
@@ -1158,6 +1267,7 @@ impl<'a> PreparedSearch<'a> {
                         crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
                         crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
                         &gate,
+                        rt_source.as_ref(),
                     );
                     let relabel = |v: &mut [Candidate]| {
                         relabel_collision_decoys_with(v, &self.target_bare_seqs)
@@ -1388,7 +1498,7 @@ impl<'a> PreparedSearch<'a> {
                         };
                         let psm = PsmMatch {
                             spectrum_idx: spec_idx,
-                            candidate_idxs: vec![cand_idx],
+                            candidate_idxs: smallvec::smallvec![cand_idx],
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score: pin_score,
@@ -1504,6 +1614,7 @@ impl<'a> PreparedSearch<'a> {
                         psm.charge_used,
                         Some(psm.edge_score),
                         full,
+                        Some(&self.frag_pred_cache),
                     );
 
                     features.delta_raw_score = delta_raw_score;
@@ -1555,13 +1666,25 @@ impl<'a> PreparedSearch<'a> {
                     queue.reorder_by_strong_score();
                     queue.trim_to_capacity(params.top_n_psms_per_spectrum);
                 }
-                if strong_mode {
+                if strong_mode && params.open_search.is_some() {
                     queue.update_in_place(|psm| {
                         let strong = psm.features.strong_score;
                         let strong_cal = psm.features.strong_score_cal;
                         psm.features = make_features(psm, true);
                         debug_assert_eq!(psm.features.strong_score.to_bits(), strong.to_bits());
                         psm.features.strong_score_cal = strong_cal;
+                    });
+                } else if strong_mode && !complete_later {
+                    queue.update_in_place(|psm| {
+                        let cand = &cand_slice[psm.primary_candidate_idx() as usize];
+                        complete_psm_features(
+                            &mut psm.features,
+                            scored_spec_for_charge(psm.charge_used),
+                            &cand.peptide,
+                            scorer,
+                            psm.charge_used,
+                            Some(&self.frag_pred_cache),
+                        );
                     });
                 }
 
@@ -1690,15 +1813,13 @@ pub fn match_spectra_out_of_core(
     Ok((queues, prepared.candidates))
 }
 
+/// The isolation window around its target m/z (the precursor m/z when the scan records no
+/// target), and the precursor tolerance in Da.
 fn coisolation_window(spec: &Spectrum, params: &SearchParams) -> (f64, f64, f64) {
-    let lo = spec.precursor_mz
-        - spec
-            .isolation_lower_offset
-            .unwrap_or(params.chimeric_isolation_halfwidth_da);
-    let hi = spec.precursor_mz
-        + spec
-            .isolation_upper_offset
-            .unwrap_or(params.chimeric_isolation_halfwidth_da);
+    let (lo, hi) = crate::precursor_matching::isolation_window_mz(
+        spec,
+        params.chimeric_isolation_halfwidth_da,
+    );
     let tol = params
         .precursor_tolerance
         .left
@@ -1805,7 +1926,7 @@ pub fn run_pass2_coisolation(
             if !emitted.insert(key) {
                 continue;
             }
-            psm.candidate_idxs = vec![accum.intern(&cand)];
+            psm.candidate_idxs = smallvec::smallvec![accum.intern(&cand)];
             psm.spectrum_idx = offset + spec_idx;
             q.force_push(psm);
         }
@@ -1983,7 +2104,102 @@ pub(crate) fn compute_psm_features(
     scorer: &RankScorer,
     charge: u8,
 ) -> PsmFeatures {
-    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true)
+    compute_psm_features_with_edge(scored_spec, peptide, scorer, charge, None, true, None)
+}
+
+/// [`predict_frag_intensities`], through `cache` when one is given.
+fn predict_frag_with(
+    model: &scoring_crate::gbdt_eval::GbdtPeakModel,
+    peptide: &Peptide,
+    charge: u8,
+    cache: Option<&crate::frag_pred_cache::FragPredCache>,
+) -> Vec<f64> {
+    match cache {
+        Some(c) => c.intensities(model, peptide, charge),
+        None => predict_frag_intensities(model, peptide, charge),
+    }
+}
+
+/// The PSM features that only a full feature pass computes: the fragment-intensity LLR
+/// battery, the rich-ion LLR and the modification-site features.
+#[derive(Default)]
+struct KeptPsmFeatureValues {
+    frag_pred_explained: f32,
+    frag_pred_chance_llr: f32,
+    frag_topk_observed: f32,
+    rich_ion_llr: f32,
+    mod_site: [f32; scoring_crate::mod_site_features::N_MOD_SITE_FEATURES],
+}
+
+/// Computes the full-pass-only features of `peptide` at `charge`. `frag_pred` is the
+/// fragment-intensity prediction of the scorer's model for this peptide and charge (`None`
+/// without a model).
+fn kept_psm_feature_values(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    frag_pred: Option<&[f64]>,
+) -> KeptPsmFeatureValues {
+    let model_tol = scorer.feature_match_tolerance();
+    let model_tol_is_ppm = matches!(model_tol, model::tolerance::Tolerance::Ppm(_));
+    let model_tol = model_tol.raw_value();
+    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed) = frag_llr_battery(
+        scorer.param().frag_intensity_model.as_deref(),
+        scored_spec,
+        peptide,
+        charge,
+        model_tol,
+        model_tol_is_ppm,
+        frag_pred,
+    );
+    let rich_ion_llr = rich_ion_llr(
+        scorer.param().rich_ion_model.as_deref(),
+        scored_spec,
+        peptide,
+        charge,
+        model_tol,
+        model_tol_is_ppm,
+    );
+    let mod_site = mod_site_features(peptide, scored_spec, model_tol, model_tol_is_ppm);
+    KeptPsmFeatureValues {
+        frag_pred_explained,
+        frag_pred_chance_llr,
+        frag_topk_observed,
+        rich_ion_llr,
+        mod_site,
+    }
+}
+
+/// Completes `features`, computed by a pass with `full = false` for `peptide` at `charge`,
+/// with the full-pass-only features, giving the same values as a full pass. `frag_cache`
+/// shares fragment-intensity predictions within a chunk.
+pub(crate) fn complete_psm_features(
+    features: &mut PsmFeatures,
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
+) {
+    if peptide.length() < 2 {
+        return;
+    }
+    let frag_pred: Option<Vec<f64>> = scorer
+        .param()
+        .frag_intensity_model
+        .as_deref()
+        .map(|g| predict_frag_with(g, peptide, charge, frag_cache));
+    let kept = kept_psm_feature_values(scored_spec, peptide, scorer, charge, frag_pred.as_deref());
+    features.frag_pred_explained = kept.frag_pred_explained;
+    features.frag_pred_chance_llr = kept.frag_pred_chance_llr;
+    features.frag_topk_observed = kept.frag_topk_observed;
+    features.rich_ion_llr = kept.rich_ion_llr;
+    features.mod_site_shifted_matched = kept.mod_site[FEAT_SITE_SHIFTED_MATCHED];
+    features.mod_site_shifted_frac = kept.mod_site[FEAT_SITE_SHIFTED_FRAC];
+    features.mod_site_intens_frac = kept.mod_site[FEAT_SITE_INTENS_FRAC];
+    features.mod_site_localized = kept.mod_site[FEAT_SITE_LOCALIZED];
+    features.mod_site_det_count = kept.mod_site[FEAT_SITE_DET_COUNT];
 }
 
 pub(crate) fn compute_psm_features_with_edge(
@@ -1993,6 +2209,7 @@ pub(crate) fn compute_psm_features_with_edge(
     charge: u8,
     known_edge_score: Option<i32>,
     full: bool,
+    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
@@ -2317,7 +2534,7 @@ pub(crate) fn compute_psm_features_with_edge(
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
     let frag_pred: Option<Vec<f64>> = frag_intensity_model
         .filter(|_| peptide.length() >= 2)
-        .map(|g| predict_frag_intensities(g, peptide, charge));
+        .map(|g| predict_frag_with(g, peptide, charge, frag_cache));
     let frag_pred_slice = frag_pred.as_deref();
     let intensity_signal_val = intensity_signal(
         frag_intensity_model,
@@ -2329,30 +2546,18 @@ pub(crate) fn compute_psm_features_with_edge(
         frag_pred_slice,
     );
 
-    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed, rich_ion_llr_val, mod_site) =
-        if full {
-            let (e, c, t) = frag_llr_battery(
-                frag_intensity_model,
-                scored_spec,
-                peptide,
-                charge,
-                model_tol,
-                model_tol_is_ppm,
-                frag_pred_slice,
-            );
-            let r = rich_ion_llr(
-                scorer.param().rich_ion_model.as_deref(),
-                scored_spec,
-                peptide,
-                charge,
-                model_tol,
-                model_tol_is_ppm,
-            );
-            let m = mod_site_features(peptide, scored_spec, model_tol, model_tol_is_ppm);
-            (e, c, t, r, m)
-        } else {
-            (0.0, 0.0, 0.0, 0.0, Default::default())
-        };
+    let kept = if full {
+        kept_psm_feature_values(scored_spec, peptide, scorer, charge, frag_pred_slice)
+    } else {
+        KeptPsmFeatureValues::default()
+    };
+    let KeptPsmFeatureValues {
+        frag_pred_explained,
+        frag_pred_chance_llr,
+        frag_topk_observed,
+        rich_ion_llr: rich_ion_llr_val,
+        mod_site,
+    } = kept;
 
     PsmFeatures {
         num_matched_main_ions: num_matched,
@@ -2620,84 +2825,7 @@ mod per_scan_scorer_tests {
 }
 
 #[cfg(test)]
-mod chargeless_unit_tests {
-    use super::*;
-    use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
-    use scoring_crate::scoring::fragment_ions::predict_by_ions;
-
-    fn peptide(residues: &[u8]) -> Peptide {
-        let aas: Vec<AminoAcid> = residues
-            .iter()
-            .map(|&r| AminoAcid::standard(r).unwrap())
-            .collect();
-        Peptide::new(aas, b'K', b'K')
-    }
-
-    fn spectrum(precursor_mz: f64, charge: Option<i32>, peptides: &[&Peptide]) -> Spectrum {
-        let mut peaks: Vec<(f64, f32)> = peptides
-            .iter()
-            .flat_map(|p| predict_by_ions(p, 1..=1))
-            .map(|ion| (ion.mz, 100.0_f32))
-            .collect();
-        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Spectrum {
-            title: "chargeless".into(),
-            precursor_mz,
-            precursor_intensity: None,
-            precursor_charge: charge,
-            rt_seconds: None,
-            scan: None,
-            peaks,
-            activation_method: None,
-            isolation_lower_offset: None,
-            isolation_upper_offset: None,
-            isolation_target_mz: None,
-            mobility_window: None,
-        }
-    }
-
-    #[test]
-    fn chargeless_spectrum_is_searched_per_charge() {
-        let db = ProteinDb {
-            proteins: vec![Protein {
-                accession: "P1".into(),
-                description: "".into(),
-                sequence: b"GKDAFLGSFLYEYSRKSAFLWEYSPLLTNNGVRK".to_vec(),
-                annotation: None,
-            }],
-        };
-        let idx = SearchIndex::from_target_db(&db, "XXX");
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = SearchParams::default_tryptic(aa_set);
-        params.charge_range = 2..=5;
-        params.fragment_index_top_k = 1;
-        let scorer = crate::coisolation::tests::tiny_scorer();
-        let prepared =
-            PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
-
-        let truth = peptide(b"DAFLGSFLYEYSR");
-        let bait = peptide(b"SAFLWEYSPLLTNNGVR");
-        let mz3 = (truth.mass() + 3.0 * PROTON) / 3.0;
-        let spectra = [
-            spectrum(mz3, Some(3), &[&truth, &bait]),
-            spectrum(mz3, None, &[&truth, &bait]),
-        ];
-        let mut queues = prepared.run_chunk(&spectra, 7);
-        assert_eq!(queues.len(), 2);
-        for (i, q) in queues.iter_mut().enumerate() {
-            let psms = q.drain_into_vec();
-            let best = psms
-                .iter()
-                .max_by(|a, b| a.rank_score.total_cmp(&b.rank_score))
-                .unwrap_or_else(|| panic!("spectrum {i} came back empty"));
-            assert_eq!(best.spectrum_idx, 7 + i);
-            assert_eq!(best.charge_used, 3, "spectrum {i}");
-            let accum = prepared.mmap_accum.lock().unwrap();
-            let pep = &accum.candidates[best.primary_candidate_idx() as usize].peptide;
-            assert_eq!(pep.residues, truth.residues, "spectrum {i}");
-        }
-    }
-}
+mod chargeless_unit_tests;
 
 #[cfg(test)]
 mod charges_to_try_tests {
@@ -3553,7 +3681,7 @@ impl Ord for DedupMapKey {
     }
 }
 
-fn merge_unique_candidate_idxs(into: &mut Vec<u32>, from: &[u32]) {
+fn merge_unique_candidate_idxs(into: &mut crate::psm::CandidateIdxs, from: &[u32]) {
     if from.is_empty() {
         return;
     }
@@ -3631,7 +3759,7 @@ mod dedup_tests {
     fn psm(primary: u32, rank: f32, pin: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![primary],
+            candidate_idxs: smallvec::smallvec![primary],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: pin,

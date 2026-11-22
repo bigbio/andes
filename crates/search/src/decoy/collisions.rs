@@ -32,22 +32,26 @@ pub(super) struct Repair {
     pub(super) left: usize,
 }
 
-/// Hashes of every target peptide the search enumerates, I and L folded.
+/// Hashes of every target peptide that one or more digests enumerate, I and L folded. The first
+/// digest is the one the decoys are built for; the others are the further digests of a cohort
+/// that searches the same decoys.
 pub(super) struct TargetPeptides {
     hashes: Vec<u64>,
-    proteases: Proteases,
+    digests: Vec<Proteases>,
 }
 
 impl TargetPeptides {
-    pub(super) fn new(db: &ProteinDb, proteases: &Proteases) -> Self {
+    pub(super) fn union(db: &ProteinDb, digests: &[Proteases]) -> Self {
         let mut hashes: Vec<u64> = db
             .proteins
             .par_iter()
             .flat_map_iter(|p| {
                 let mut out = Vec::new();
-                for_each_span(&p.sequence, has_met_cleaved_walk(p), proteases, |s, e| {
-                    out.push(peptide_hash(&p.sequence[s..e]));
-                });
+                for d in digests {
+                    for_each_span(&p.sequence, has_met_cleaved_walk(p), d, |s, e| {
+                        out.push(peptide_hash(&p.sequence[s..e]));
+                    });
+                }
                 out
             })
             .collect();
@@ -55,7 +59,7 @@ impl TargetPeptides {
         hashes.dedup();
         Self {
             hashes,
-            proteases: proteases.clone(),
+            digests: digests.to_vec(),
         }
     }
 
@@ -67,18 +71,84 @@ impl TargetPeptides {
         self.hashes.binary_search(&peptide_hash(residues)).is_ok()
     }
 
-    /// The `[start, end)` spans of the peptides the search enumerates from `decoy` that equal a
-    /// target peptide.
+    /// Whether a residue is a cleavage site of any of the digests.
+    fn makes_cut(&self, r: u8) -> bool {
+        self.digests.iter().any(|d| d.makes_cut(r))
+    }
+
+    /// The `[start, end)` spans of the peptides any of the digests enumerates from `decoy` that
+    /// equal a target peptide: the build digest's in its enumeration order, then the spans only
+    /// a further digest enumerates.
     pub(super) fn collisions(&self, decoy: &Protein) -> Vec<(usize, usize)> {
         let seq = &decoy.sequence;
+        let met = has_met_cleaved_walk(decoy);
         let mut out = Vec::new();
-        for_each_span(seq, has_met_cleaved_walk(decoy), &self.proteases, |s, e| {
-            if self.contains(&seq[s..e]) {
-                out.push((s, e));
-            }
-        });
+        for (k, d) in self.digests.iter().enumerate() {
+            let before = out.len();
+            for_each_span(seq, met, d, |s, e| {
+                if self.contains(&seq[s..e]) && (k == 0 || !out[..before].contains(&(s, e))) {
+                    out.push((s, e));
+                }
+            });
+        }
         out
     }
+}
+
+/// Distinct peptides of one length that a digest enumerates from the targets and from the
+/// decoys, and how many of the decoy ones equal a target one (I and L folded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LengthOverlap {
+    pub length: u32,
+    pub target_peptides: u64,
+    pub decoy_peptides: u64,
+    pub shared_peptides: u64,
+}
+
+fn length_keyed_peptides(db: &ProteinDb, digest: &Proteases) -> Vec<(u32, u64)> {
+    let mut keys: Vec<(u32, u64)> = db
+        .proteins
+        .par_iter()
+        .flat_map_iter(|p| {
+            let mut out = Vec::new();
+            for_each_span(&p.sequence, has_met_cleaved_walk(p), digest, |s, e| {
+                out.push(((e - s) as u32, peptide_hash(&p.sequence[s..e])));
+            });
+            out
+        })
+        .collect();
+    keys.par_sort_unstable();
+    keys.dedup();
+    keys
+}
+
+/// Per peptide length, the distinct target and decoy peptides `digest` enumerates and the decoy
+/// peptides equal to a target peptide (I and L folded), shortest length first.
+pub(super) fn peptide_overlap(
+    targets: &ProteinDb,
+    decoys: &ProteinDb,
+    digest: &Proteases,
+) -> Vec<LengthOverlap> {
+    let t = length_keyed_peptides(targets, digest);
+    let d = length_keyed_peptides(decoys, digest);
+    let mut counts: std::collections::BTreeMap<u32, (u64, u64, u64)> = Default::default();
+    for &(len, _) in &t {
+        counts.entry(len).or_default().0 += 1;
+    }
+    for &(len, h) in &d {
+        let c = counts.entry(len).or_default();
+        c.1 += 1;
+        c.2 += u64::from(t.binary_search(&(len, h)).is_ok());
+    }
+    counts
+        .into_iter()
+        .map(|(length, (t, d, s))| LengthOverlap {
+            length,
+            target_peptides: t,
+            decoy_peptides: d,
+            shared_peptides: s,
+        })
+        .collect()
 }
 
 fn peptide_hash(residues: &[u8]) -> u64 {
@@ -307,7 +377,6 @@ pub(super) fn repair_mutated(
     p: &Protein,
     mut decoy: Protein,
     seed: u64,
-    proteases: &Proteases,
     peptides: &TargetPeptides,
 ) -> (Protein, Repair) {
     let mut hits = peptides.collisions(&decoy);
@@ -333,7 +402,7 @@ pub(super) fn repair_mutated(
                 .filter(|&i| {
                     let fixed = (met && i == 1)
                         || sites.contains(&i)
-                        || proteases.makes_cut(seq[i])
+                        || peptides.makes_cut(seq[i])
                         || mass(p.sequence[i]).is_none();
                     !fixed
                 })
@@ -352,7 +421,7 @@ pub(super) fn repair_mutated(
                 .filter(|&r| {
                     r != seq[at]
                         && mass(r).is_some_and(|m| (m - old).abs() > 1.1)
-                        && !proteases.makes_cut(r)
+                        && !peptides.makes_cut(r)
                 })
                 .collect();
             if pool.is_empty() {

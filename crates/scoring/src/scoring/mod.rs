@@ -17,9 +17,10 @@ pub use scored_spectrum::{
     init_scoring_settings, scored_for_charge, IonMatchFact, ScoredSpectrum, ScoringSettings,
 };
 pub use strong_score::{
-    candidate_rank_entropy, frag_llr_battery, fragment_ambiguity, fuse_strong_score,
-    intensity_signal, listwise_score_gap, mass_competition_evidence, predict_frag_intensities,
-    rich_ion_llr, strong_score_calibrated, strong_score_calibrated_loo, strong_score_zscore,
-    theoretical_fragment_ions, FragmentIon, FragmentLoss, MatchedIon, OnlineStats,
-    StrongScoreInputs, TheoreticalIons, DENSITY_HW, STRONG_CAL_MIN_CANDIDATES,
+    candidate_rank_entropy, frag_intensities_from_raw, frag_llr_battery, fragment_ambiguity,
+    fuse_strong_score, intensity_signal, listwise_score_gap, mass_competition_evidence,
+    predict_frag_intensities, predict_frag_raw, rich_ion_llr, strong_score_calibrated,
+    strong_score_calibrated_loo, strong_score_zscore, theoretical_fragment_ions, FragmentIon,
+    FragmentLoss, MatchedIon, OnlineStats, StrongScoreInputs, TheoreticalIons, DENSITY_HW,
+    STRONG_CAL_MIN_CANDIDATES,
 };

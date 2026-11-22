@@ -14,6 +14,18 @@ fn noise(state: &mut u64) -> f64 {
     lcg(state) + lcg(state) + lcg(state) - 1.5
 }
 
+fn letters(mut i: usize) -> String {
+    const ALPHABET: &[u8] = b"ACDEFGHKMNPQRSTVWY";
+    let mut s = String::new();
+    loop {
+        s.push(ALPHABET[i % 18] as char);
+        i /= 18;
+        if i == 0 {
+            return s;
+        }
+    }
+}
+
 fn pin_text(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> String {
     let nf = rows[0].2.len();
     let names: Vec<String> = (1..=nf).map(|j| format!("f{j}")).collect();
@@ -31,8 +43,9 @@ fn pin_text(rows: &[(i8, u64, Vec<f64>)], default: Option<&[f64]>) -> String {
     for (i, (label, scan, f)) in rows.iter().enumerate() {
         let cells: Vec<String> = f.iter().map(|v| format!("{v:.6}")).collect();
         text.push_str(&format!(
-            "r{i}\t{label}\t{scan}\t1000.0\tfile0\t{}\tK.PEPTIDE{i}.R\tP{i}\n",
-            cells.join("\t")
+            "r{i}\t{label}\t{scan}\t1000.0\tfile0\t{}\tK.PEPTWDE{}.R\tP{i}\n",
+            cells.join("\t"),
+            letters(i)
         ));
     }
     text

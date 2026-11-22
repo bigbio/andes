@@ -34,6 +34,36 @@ pub struct RowMeta {
     pub file: u32,
     pub scan: u64,
     pub exp_mass: f64,
+    /// Hash of the row's peptide sequence without flanking residues or modifications, with
+    /// I and L treated alike; rows that share it share cross-validation folds.
+    pub sequence: u32,
+}
+
+/// FNV-1a hash of the residue letters of a PIN `Peptide` cell: flanking residues
+/// (`K.PEPTIDE.R`), bracketed or parenthesised modification text and everything that is not
+/// an upper-case residue letter (terminus markers such as `n`, mass deltas) are dropped, and
+/// I is read as L, so every peptidoform of one sequence gets the same key.
+pub fn sequence_key(peptide: &str) -> u32 {
+    let p = peptide.trim().as_bytes();
+    let core = if p.len() > 4 && p[1] == b'.' && p[p.len() - 2] == b'.' {
+        &p[2..p.len() - 2]
+    } else {
+        p
+    };
+    let mut depth = 0u32;
+    let mut h = 0x811c_9dc5u32;
+    for &c in core {
+        match c {
+            b'[' | b'(' => depth += 1,
+            b']' | b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && c.is_ascii_uppercase() => {
+                let c = if c == b'I' { b'L' } else { c };
+                h = (h ^ u32::from(c)).wrapping_mul(0x0100_0193);
+            }
+            _ => {}
+        }
+    }
+    h
 }
 
 pub struct Pin {
@@ -255,6 +285,7 @@ fn parse_chunk(
             file: file_idx,
             scan,
             exp_mass,
+            sequence: sequence_key(cells[peptide_col]),
         });
         out.feats.extend_from_slice(&row);
     }

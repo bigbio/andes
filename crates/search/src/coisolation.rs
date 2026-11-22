@@ -267,7 +267,7 @@ pub(crate) fn search_secondary(
 
             let psm = PsmMatch {
                 spectrum_idx: 0,
-                candidate_idxs: vec![ci as u32],
+                candidate_idxs: smallvec::smallvec![ci as u32],
                 charge_used: z,
                 mass_error_ppm: (cand.peptide.mass() - co_neutral) / co_neutral * 1e6,
                 score: raw_score,
@@ -319,6 +319,7 @@ pub(crate) fn search_secondary(
             z,
             Some(psm.edge_score),
             full,
+            None,
         );
         f.delta_raw_score = delta_raw_score;
         f.listwise_score_gap = listwise_score_gap;

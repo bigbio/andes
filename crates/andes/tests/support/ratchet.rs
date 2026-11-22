@@ -109,7 +109,6 @@ pub fn raised(counts: &BTreeMap<String, usize>, base: &BTreeMap<String, usize>) 
 /// the existing leading `#` header lines. Panics, listing the files, when any count would rise
 /// or a new line would appear; a baseline can only be lowered or shortened.
 pub fn write_baseline(rule: &str, counts: &BTreeMap<String, usize>) {
-    let path = baseline_path(rule);
     let refused = raised(counts, &baseline(rule));
     assert!(
         refused.is_empty(),

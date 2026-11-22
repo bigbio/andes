@@ -56,6 +56,8 @@ mod quant_run;
 mod sdrf;
 #[path = "andes/optimize.rs"]
 mod optimize;
+#[path = "../params.rs"]
+mod params;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -377,3 +379,7 @@ mod missed_cleavages_explicit_tests {
         assert!(!missed_cleavages_explicit(None, false));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/params_table.rs"]
+mod params_table;

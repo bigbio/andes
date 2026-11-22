@@ -1275,20 +1275,9 @@ glyco:
         Ok(a)
     }
 
-    const CLI_ONLY: &[&str] = &[
-        "config",
-        "cal_min_spec_keys",
-        "precursor_mono_dump",
-        "glyco_scans",
-        "glyco_mbr_match_train",
-        "ipf_debug",
-        "xl_oracle",
-        "xl_linear_only",
-        "xl_rescore_intra",
-        "xl_rescore_inter",
-        "quiet",
-        "verbose",
-    ];
+    fn cli_only(id: &str) -> bool {
+        crate::params::spec(id).is_some_and(|p| p.section == crate::params::Section::CliOnly)
+    }
 
     #[test]
     fn every_search_flag_has_a_config_key() {
@@ -1306,7 +1295,7 @@ glyco:
             .get_arguments()
             .map(|a| a.get_id().to_string())
             .filter(|id| !matches!(id.as_str(), "help" | "version"))
-            .filter(|id| !CLI_ONLY.contains(&id.as_str()) && !mapped(id))
+            .filter(|id| !cli_only(id) && !mapped(id))
             .collect();
         assert!(missing.is_empty(), "flags with no config key: {missing:?}");
     }

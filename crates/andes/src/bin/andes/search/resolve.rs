@@ -385,6 +385,63 @@ pub(super) fn load_search_database(
         max_length: cli.max_length,
         max_missed_cleavages: max_missed_cleavages(cli),
     };
+    let prebuilt = crate::database_cmd::prebuilt_settings(
+        database_path,
+        &crate::database_cmd::SearchDecoys {
+            strategy: decoy_strategy,
+            seed: cli.decoy_seed,
+            prefix: &cli.db.decoy_prefix,
+            suffix: cli.db.decoy_suffix.as_deref(),
+            digest: &proteases,
+        },
+    )?;
+    if let Some(settings) = prebuilt {
+        if !cli.db.annotations.is_empty() {
+            return Err(format!(
+                "--annotations cannot be used with {}, a database written by andes database:                  annotated sites change the decoys. Search the target FASTA instead.",
+                database_path.display()
+            )
+            .into());
+        }
+        let t_phase = std::time::Instant::now();
+        let idx = SearchIndex::from_prebuilt(
+            target_db,
+            &cli.db.decoy_prefix,
+            cli.db.decoy_suffix.as_deref(),
+        );
+        let target_db = idx.target_db();
+        let decoys = idx.db.proteins.len() - target_db.proteins.len();
+        if (target_db.proteins.len() as u64, decoys as u64) != (settings.targets, settings.decoys)
+        {
+            return Err(format!(
+                "{}: {} targets and {decoys} decoys, but andes database wrote {} and {}",
+                database_path.display(),
+                target_db.proteins.len(),
+                settings.targets,
+                settings.decoys
+            )
+            .into());
+        }
+        log::info!(target: "database",
+            "{} targets and {decoys} decoys ({}) written by andes database, searched as              written; decoy key {}",
+            target_db.proteins.len(),
+            settings.decoy_strategy,
+            settings.decoy_key
+        );
+        log::info!(
+            target: "search_index_build",
+            "done in {:.2} s",
+            t_phase.elapsed().as_secs_f64()
+        );
+        return Ok(SearchDatabase {
+            target_db,
+            idx,
+            search_enzyme,
+            extra_enzymes,
+            proteases,
+            decoy_strategy,
+        });
+    }
     if decoy_strategy == search::decoy::DecoyStrategy::Mutate
         && (proteases.is_non_specific() || proteases.num_tolerable_termini < 2)
     {
@@ -416,6 +473,19 @@ pub(super) fn load_search_database(
         if let Some(warning) = search::decoy::ForeignDecoys::scan(&target_db).verdict()? {
             warn_search(&warning);
         }
+        let suffix = cli.db.decoy_suffix.as_deref().filter(|s| !s.is_empty());
+        log::info!(target: "database",
+            "decoy key {} (the key of these decoys; andes database writes the same decoys \
+             for these settings)",
+            search::decoy::decoy_key(
+                &search::decoy::targets_sha256(&target_db, &cli.db.decoy_prefix, suffix),
+                decoy_strategy,
+                cli.decoy_seed,
+                &cli.db.decoy_prefix,
+                suffix,
+                std::slice::from_ref(&proteases),
+            )
+        );
     }
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db_for(

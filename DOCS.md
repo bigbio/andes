@@ -56,7 +56,7 @@ Native `.raw`/`.d` search MS2 only (MS3 reporter scans are filtered at load).
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--spectrum` | path | *(required)* | Input spectrum file; reader chosen by extension (see above). | Java `-s <FILE>` |
-| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`). | Java `-d <FILE>` |
+| `--database` | path | *(required)* | Target FASTA, or UniProt XML when the name ends in `.xml` / `.xml.gz` ([§1a](#uniprot-xml-databases)). Gzip is read directly. Decoys are generated (see `--decoy-strategy`, `--decoy-prefix`), or taken from a target + decoy FASTA written by `andes database` ([§1d](#1d-decoy-databases-andes-database)). | Java `-d <FILE>` |
 | `--output-pin` | path | *(required)* | Output Percolator `.pin`. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
 ### Search parameters
@@ -1445,6 +1445,55 @@ Percolator once per settings group, not across groups with different search spac
 `chargeN` columns follow the charge range, glyco PINs have another schema, and one Percolator over
 groups with different search spaces controls the FDR only overall. Combine groups at the
 peptide, protein or quantification level.
+
+## 1d. Decoy databases (`andes database`)
+
+`andes database` builds the decoys of a study or cohort once, so every search of it uses the same
+decoys, and reports how many decoy peptides equal a target peptide:
+
+```bash
+andes database --fasta human.fasta --output td.fasta \
+    [--enzyme trypsin] [--enzyme-specificity fully] [--min-length 6] [--max-length 50] \
+    [--max-missed-cleavages 2] [--check-digest lysc/fully/7-30/2 ...] \
+    [--decoy-strategy shuffle] [--decoy-prefix XXX_] [--decoy-suffix S] [--threads N]
+```
+
+**Decoy key.** The decoys depend on the target proteins, the decoy strategy, seed, prefix and
+suffix, and on the digests the peptide-level decoy check covers (enzymes, specificity, peptide
+lengths, missed cleavages): the check redraws every decoy peptide those settings enumerate that
+equals a target peptide. That is the decoy key. Modifications, tolerances, charges, the
+instrument and every other search setting are not part of it, so runs with different
+modifications (a phospho and a full-proteome arm) can share one database. The candidate index
+stays keyed by the search settings (`--index-cache-dir`, §1c). Every search logs the key of its
+decoys (`decoy key <32 hex>`), whether it generated them or read them; pool FDR only over runs
+with one key.
+
+**Digests.** The digest options take the search's names and defaults. The decoys are built for
+that digest; each `--check-digest ENZYMES/SPECIFICITY/MIN-MAX/MISSED` adds a digest of the cohort
+whose decoy peptides are also checked against its target peptides. A database built for trypsin
+alone and searched with Lys-C keeps more decoy peptides equal to a target than one checked for
+both. Give the digest a `--glyco` search resolves (3 missed cleavages unless set).
+
+**Files.**
+- `td.fasta`: the targets as read (accession, description, residues) in input order, then the
+  decoys.
+- `td.database.parquet` (`andes.database.schema` 1.0): one row per digest, `role` (`build`, then
+  `check`), `enzymes`, `specificity`, `min_length`, `max_length`, `max_missed_cleavages`;
+  key-value metadata `decoy_strategy`, `decoy_seed`, `decoy_prefix`, `decoy_suffix`,
+  `targets_sha256`, `fasta_sha256`, `decoy_key`, `targets`, `decoys`, `andes_version`.
+- `td.overlap.parquet` (`andes.decoy_overlap.schema` 1.0): one row per digest and peptide length,
+  the digest columns, `length`, `target_peptides`, `decoy_peptides` and `shared_peptides`
+  (distinct decoy sequences equal to a target sequence, I = L); metadata `redrawn` and `left`, the
+  decoy peptides the check redrew and the ones still equal to a target, which the search scores
+  as targets.
+
+**Searching it.** Give `td.fasta` as `--database`. When `td.database.parquet` is beside it, the
+search reads the targets and decoys as written and generates none; the PIN and TSV are the same,
+byte for byte, as those of a search of the target FASTA with the same key. The search stops, naming
+each setting that differs, when `td.fasta` changed after it was written, when its
+`--decoy-strategy`, `--decoy-seed`, `--decoy-prefix` or `--decoy-suffix` differ, when its digest
+is none of the table's, or with `--annotations`. Only FASTA input is read; a FASTA whose entries
+already carry the decoy prefix or suffix is refused.
 
 ---
 

@@ -18,6 +18,8 @@ const MAX_REDRAWS: u64 = 20;
 
 mod collisions;
 
+pub use collisions::LengthOverlap;
+
 /// The digestion the decoys are built for: the enzymes and specificity that place the cleavage
 /// sites, and the peptide length and missed-cleavage limits of the search, so every decoy peptide
 /// the search enumerates is checked against the target peptides it enumerates.
@@ -70,6 +72,96 @@ impl Proteases {
         self.all()
             .any(|e| e.is_cleavable_after(r) || e.is_cleavable_before(r))
     }
+
+    /// The enzymes, the primary one first: `Trypsin` or `Trypsin,LysC`.
+    pub fn enzymes_name(&self) -> String {
+        self.all().map(Enzyme::name).collect::<Vec<_>>().join(",")
+    }
+
+    /// The specificity as the search's `--enzyme-specificity` names it.
+    pub fn specificity_name(&self) -> &'static str {
+        match self.num_tolerable_termini {
+            2 => "fully",
+            1 => "semi",
+            _ => "non-specific",
+        }
+    }
+}
+
+/// SHA-256 (hex) of the target proteins a decoy database is built from: the accession and the
+/// residues of every entry that carries neither decoy affix, in order. Descriptions are left out;
+/// the decoys do not depend on them.
+pub fn targets_sha256(db: &ProteinDb, prefix: &str, suffix: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in db
+        .proteins
+        .iter()
+        .filter(|p| !is_decoy_accession_affix(&p.accession, prefix, suffix))
+    {
+        h.update((p.accession.len() as u64).to_le_bytes());
+        h.update(p.accession.as_bytes());
+        h.update((p.sequence.len() as u64).to_le_bytes());
+        h.update(&p.sequence);
+    }
+    hex(&h.finalize())
+}
+
+/// SHA-256 (hex) of a file's bytes.
+pub fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex(&h.finalize()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(2 * bytes.len()), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The decoy key: what the decoys of a database depend on and nothing else, the target proteins
+/// (`targets_sha256`), the strategy, the seed, the decoy prefix and suffix, and the digests the
+/// peptide-level check covered (the build digest first). Mods, tolerances, charges and every
+/// other search setting are left out. 32 hex characters.
+pub fn decoy_key(
+    targets_sha256: &str,
+    strategy: DecoyStrategy,
+    seed: u64,
+    prefix: &str,
+    suffix: Option<&str>,
+    digests: &[Proteases],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let mut put = |s: &str| {
+        h.update((s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    };
+    put("andes.decoy_key.1");
+    put(targets_sha256);
+    put(strategy.name());
+    put(&seed.to_string());
+    put(&normalize_decoy_prefix(prefix));
+    put(suffix.unwrap_or(""));
+    for d in digests {
+        put(&d.enzymes_name());
+        put(d.specificity_name());
+        put(&format!("{}-{}/{}", d.min_length, d.max_length, d.max_missed_cleavages));
+    }
+    hex(&h.finalize()[..16])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -83,6 +175,17 @@ pub enum DecoyStrategy {
 }
 
 impl DecoyStrategy {
+    /// The `--decoy-strategy` name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Shuffle => "shuffle",
+            Self::Reverse => "reverse",
+            Self::Sequon => "sequon",
+            Self::Mutate => "mutate",
+            Self::None => "none",
+        }
+    }
+
     pub fn from_name(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "reverse" | "rev" => Some(Self::Reverse),
@@ -107,24 +210,83 @@ pub fn decoy_db(
             proteins: Vec::new(),
         };
     }
-    let t0 = std::time::Instant::now();
-    let (proteins, repairs, target_peptides) =
-        build_decoys(target, prefix, strategy, seed, proteases);
-    collisions::log_repairs(&repairs, target_peptides, t0.elapsed().as_secs_f64());
-    ProteinDb { proteins }
+    checked_decoy_db(target, prefix, strategy, seed, proteases, &[]).decoys
 }
 
-/// The decoy proteins of `strategy` (not `None`), the outcome of the peptide-level check for
-/// each, and the number of distinct target peptides checked against.
+/// Decoys built for one digest and checked against the target peptides of further digests.
+#[derive(Debug, Clone)]
+pub struct CheckedDecoys {
+    pub decoys: ProteinDb,
+    /// Decoy peptides that equalled a target peptide and were redrawn.
+    pub redrawn: usize,
+    /// Decoy peptides that still equal a target peptide after the redraws.
+    pub left: usize,
+    /// Distinct target peptides (I and L folded) of all digests together.
+    pub target_peptides: usize,
+}
+
+/// The decoys of `strategy` built for the `build` digest, as [`decoy_db`] builds them, with the
+/// peptide-level check run against the target peptides of `build` and of every digest in
+/// `also`: a cohort whose runs search the same decoys with different enzymes, specificities,
+/// lengths or missed cleavages lists its other digests there. With `also` empty the decoys are
+/// those of [`decoy_db`].
+pub fn checked_decoy_db(
+    target: &ProteinDb,
+    prefix: &str,
+    strategy: DecoyStrategy,
+    seed: u64,
+    build: &Proteases,
+    also: &[Proteases],
+) -> CheckedDecoys {
+    if strategy == DecoyStrategy::None {
+        return CheckedDecoys {
+            decoys: ProteinDb {
+                proteins: Vec::new(),
+            },
+            redrawn: 0,
+            left: 0,
+            target_peptides: 0,
+        };
+    }
+    let t0 = std::time::Instant::now();
+    let digests: Vec<Proteases> = std::iter::once(build.clone())
+        .chain(also.iter().filter(|d| *d != build).cloned())
+        .collect();
+    let (proteins, repairs, target_peptides) =
+        build_decoys(target, prefix, strategy, seed, &digests);
+    collisions::log_repairs(&repairs, target_peptides, t0.elapsed().as_secs_f64());
+    CheckedDecoys {
+        decoys: ProteinDb { proteins },
+        redrawn: repairs.iter().map(|r| r.found).sum(),
+        left: repairs.iter().map(|r| r.left).sum(),
+        target_peptides,
+    }
+}
+
+/// Per peptide length, the distinct target and decoy peptides that `digest` enumerates and the
+/// decoy peptides equal to a target peptide (I and L folded): the overlap report of a decoy
+/// database.
+pub fn peptide_overlap(
+    targets: &ProteinDb,
+    decoys: &ProteinDb,
+    digest: &Proteases,
+) -> Vec<LengthOverlap> {
+    collisions::peptide_overlap(targets, decoys, digest)
+}
+
+/// The decoy proteins of `strategy` (not `None`) built for `digests[0]`, the outcome of the
+/// peptide-level check against the target peptides of every digest for each, and the number of
+/// distinct target peptides checked against.
 fn build_decoys(
     target: &ProteinDb,
     prefix: &str,
     strategy: DecoyStrategy,
     seed: u64,
-    proteases: &Proteases,
+    digests: &[Proteases],
 ) -> (Vec<Protein>, Vec<collisions::Repair>, usize) {
+    let proteases = &digests[0];
     let prefix = normalize_decoy_prefix(prefix);
-    let peptides = collisions::TargetPeptides::new(target, proteases);
+    let peptides = collisions::TargetPeptides::union(target, digests);
     let built = match strategy {
         DecoyStrategy::Mutate => mutated_decoys(target, &prefix, seed, proteases, &peptides),
         _ if proteases.is_non_specific() => {
@@ -215,7 +377,7 @@ fn mutated_decoys(
                 sequence,
                 annotation: p.annotation.clone(),
             };
-            collisions::repair_mutated(p, decoy, seed, proteases, peptides)
+            collisions::repair_mutated(p, decoy, seed, peptides)
         })
         .collect()
 }
@@ -1610,8 +1772,13 @@ mod tests {
                 .map(|(_, _, r)| r)
                 .collect();
             for strategy in strategies {
-                let (proteins, repairs, _) =
-                    build_decoys(&db, "XXX", strategy, DEFAULT_DECOY_SEED, proteases);
+                let (proteins, repairs, _) = build_decoys(
+                    &db,
+                    "XXX",
+                    strategy,
+                    DEFAULT_DECOY_SEED,
+                    std::slice::from_ref(proteases),
+                );
                 let found: usize = repairs.iter().map(|r| r.found).sum();
                 let left: usize = repairs.iter().map(|r| r.left).sum();
                 let still = search_peptides(&ProteinDb { proteins }, proteases)
@@ -1625,5 +1792,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_further_digest_is_checked_and_an_empty_list_changes_nothing() {
+        let db = ecoli(300);
+        let tryptic = digest(7, 30);
+        let lysc = Proteases {
+            primary: Enzyme::LysC,
+            ..digest(7, 30)
+        };
+        let lysc_targets: FxHashSet<Vec<u8>> = search_peptides(&db, &lysc)
+            .into_iter()
+            .map(|(_, _, r)| r)
+            .collect();
+        let shared = |decoys: &ProteinDb| {
+            search_peptides(decoys, &lysc)
+                .into_iter()
+                .filter(|(_, _, r)| lysc_targets.contains(r))
+                .count()
+        };
+        for strategy in [DecoyStrategy::Reverse, DecoyStrategy::Shuffle] {
+            let alone = decoy_db(&db, "XXX", strategy, DEFAULT_DECOY_SEED, &tryptic);
+            let same = checked_decoy_db(
+                &db,
+                "XXX",
+                strategy,
+                DEFAULT_DECOY_SEED,
+                &tryptic,
+                std::slice::from_ref(&tryptic),
+            );
+            let seqs = |d: &ProteinDb| -> Vec<Vec<u8>> {
+                d.proteins.iter().map(|p| p.sequence.clone()).collect()
+            };
+            assert_eq!(seqs(&alone), seqs(&same.decoys), "{strategy:?}");
+            let cohort =
+                checked_decoy_db(&db, "XXX", strategy, DEFAULT_DECOY_SEED, &tryptic, &[lysc.clone()]);
+            let (before, after) = (shared(&alone), shared(&cohort.decoys));
+            assert!(before > 0, "{strategy:?}: the fixture exercises no Lys-C collision");
+            assert!(after < before, "{strategy:?}: Lys-C collisions {before} -> {after}");
+            assert!(cohort.left <= cohort.redrawn, "{strategy:?}");
+            for (t, d) in db.proteins.iter().zip(&cohort.decoys.proteins) {
+                let (mut x, mut y) = (t.sequence.clone(), d.sequence.clone());
+                x.sort_unstable();
+                y.sort_unstable();
+                assert_eq!(x, y, "{strategy:?}: a redraw keeps the composition");
+            }
+        }
+    }
+
+    #[test]
+    fn overlap_counts_distinct_peptides_per_length_with_i_and_l_folded() {
+        let targets = make_db(&[("T1", b"AAAAAAKLLLLLLKGGGGGGKAAAAAAKGGGGGGGGK")]);
+        let decoys = make_db(&[("XXX_T1", b"AAAAAAKIIIIIIKCCCCCCK")]);
+        let rows = peptide_overlap(&targets, &decoys, &digest(7, 7));
+        assert_eq!(
+            rows,
+            vec![LengthOverlap {
+                length: 7,
+                target_peptides: 3,
+                decoy_peptides: 3,
+                shared_peptides: 2,
+            }]
+        );
     }
 }

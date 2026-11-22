@@ -12,6 +12,8 @@ mod cohort;
 mod cohort_cmd;
 #[path = "../config.rs"]
 mod config;
+#[path = "../config_decl.rs"]
+mod config_decl;
 #[path = "andes/dia.rs"]
 mod dia;
 #[path = "andes/dia_joint.rs"]
@@ -56,6 +58,9 @@ mod quant_run;
 mod sdrf;
 #[path = "andes/optimize.rs"]
 mod optimize;
+#[cfg_attr(not(test), allow(dead_code))]
+#[path = "../param_sources.rs"]
+mod param_sources;
 #[cfg_attr(not(test), allow(dead_code))]
 #[path = "../params.rs"]
 mod params;
@@ -249,12 +254,11 @@ fn main() -> ExitCode {
         Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
-            let mut cfg_keys = sdrf::ConfigKeys::default();
+            let mut sources = param_sources::from_command_line(&matches);
             if let Some(cfg_path) = top.search.config.clone() {
                 if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
                     cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
-                    cfg_keys = sdrf::ConfigKeys::of(&c);
-                    config::apply(c, &mut top.search, &matches)
+                    config::apply(c, &mut top.search, &matches, &mut sources)
                 }) {
                     log::error!("{e}");
                     return ExitCode::from(2);
@@ -262,7 +266,7 @@ fn main() -> ExitCode {
             }
             if let Some(sdrf_path) = top.search.sdrf.clone() {
                 match sdrf::read(&sdrf_path)
-                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
+                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, &mut sources))
                 {
                     Ok(lines) => lines.iter().for_each(|l| match l.strip_prefix("WARN: ") {
                         Some(w) => log::warn!(target: "sdrf", "{w}"),
@@ -384,3 +388,7 @@ mod missed_cleavages_explicit_tests {
 #[cfg(test)]
 #[path = "../tests/params_table.rs"]
 mod params_table;
+
+#[cfg(test)]
+#[path = "../tests/params_sources.rs"]
+mod params_sources;

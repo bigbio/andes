@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::param_sources::ParamSources;
 use crate::SearchArgs;
 
 #[derive(Debug, Default, Deserialize)]
@@ -19,6 +20,9 @@ pub struct RunConfig {
     pub quant: QuantCfg,
     /// Read by `andes cohort plan`; a search ignores it.
     pub cohort: Option<crate::cohort::CohortCfg>,
+    /// The file as parsed, so a recorded setting keeps the value as written.
+    #[serde(skip)]
+    pub written: serde_yaml::Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -192,7 +196,10 @@ pub struct GlycoCfg {
 
 impl RunConfig {
     pub fn from_yaml_str(s: &str) -> Result<Self, String> {
-        serde_yaml::from_str(s).map_err(|e| format!("--config parse error: {e}"))
+        let mut cfg: Self =
+            serde_yaml::from_str(s).map_err(|e| format!("--config parse error: {e}"))?;
+        cfg.written = serde_yaml::from_str(s).unwrap_or_default();
+        Ok(cfg)
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
@@ -213,11 +220,13 @@ pub fn apply_db(
     cfg: &RunConfig,
     db: &mut crate::cli::DatabaseArgs,
     m: &clap::ArgMatches,
+    src: &mut ParamSources,
 ) -> Result<(), String> {
     macro_rules! set {
         ($id:literal, $field:ident, $val:expr) => {
             if let Some(v) = &$val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     db.$field = v.clone();
                 }
             }
@@ -227,6 +236,7 @@ pub fn apply_db(
         ($id:literal, $field:ident, $val:expr) => {
             if let Some(v) = &$val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     db.$field = Some(v.clone());
                 }
             }
@@ -236,6 +246,7 @@ pub fn apply_db(
         ($id:literal, $field:ident, $val:expr, $parse:expr) => {
             if let Some(s) = &$val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     db.$field = ($parse)(s)?;
                 }
             }
@@ -260,11 +271,13 @@ pub fn apply_db(
     );
     if let Some(items) = &cfg.search.fixed_mods {
         if !cli_set(m, "fixed_mods") {
+            src.record_config("fixed_mods", &cfg.written);
             db.fixed_mods = Some(mod_list("search.fixed_mods", items, true)?);
         }
     }
     if let Some(items) = &cfg.search.variable_mods {
         if !cli_set(m, "variable_mods") {
+            src.record_config("variable_mods", &cfg.written);
             db.variable_mods = Some(mod_list("search.variable_mods", items, false)?);
         }
     }
@@ -278,142 +291,25 @@ pub fn apply_protein_config(
     m: &clap::ArgMatches,
 ) -> Result<(), String> {
     if let Some(path) = p.config.clone() {
-        apply_db(&RunConfig::load(&path)?, &mut p.db, m)?;
+        let cfg = RunConfig::load(&path)?;
+        apply_db(&cfg, &mut p.db, m, &mut ParamSources::default())?;
     }
     Ok(())
 }
 
-pub fn mod_list(
-    key: &str,
-    items: &[serde_yaml::Value],
-    fixed: bool,
-) -> Result<crate::cli::ModList, String> {
-    use model::mod_spec::ModDecl;
-    let mut mods = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        let at = |e: String| format!("{key}[{i}]: {e}");
-        let decl = match item {
-            serde_yaml::Value::String(s) => ModDecl::parse(s).map_err(|e| at(e.to_string()))?,
-            serde_yaml::Value::Mapping(map) => mod_decl(map).map_err(at)?,
-            _ => {
-                return Err(at(
-                    "expected `Name (sites)` or a map with `name` or `mass` and `sites`".into(),
-                ))
-            }
-        };
-        mods.extend(
-            decl.resolve(fixed, model::unimod::bundled())
-                .map_err(|e| at(e.to_string()))?,
-        );
-    }
-    Ok(crate::cli::ModList(mods))
-}
+pub use crate::config_decl::{mod_list, xl_linker};
 
-fn mod_decl(map: &serde_yaml::Mapping) -> Result<model::mod_spec::ModDecl, String> {
-    use serde_yaml::Value;
-    let text = |key: &str, v: &Value| -> Result<String, String> {
-        match v {
-            Value::String(s) => Ok(s.clone()),
-            _ => Err(format!("`{key}` must be a string")),
-        }
-    };
-    let numbers = |key: &str, v: &Value| -> Result<Vec<f64>, String> {
-        let one = |v: &Value| v.as_f64().ok_or_else(|| format!("`{key}` takes numbers"));
-        match v {
-            Value::Sequence(seq) => seq.iter().map(one).collect(),
-            v => Ok(vec![one(v)?]),
-        }
-    };
-    let mut d = model::mod_spec::ModDecl::default();
-    let mut sites = None;
-    for (k, v) in map {
-        let key = k.as_str().ok_or("modification keys are strings")?;
-        match key {
-            "name" => d.name = Some(text(key, v)?),
-            "mass" => {
-                d.mass = Some(
-                    v.as_f64()
-                        .ok_or("`mass` is a number (the mass shift in Da)")?,
-                )
-            }
-            "sites" => sites = Some(text(key, v)?),
-            "neutral_loss" => d.neutral_loss = numbers(key, v)?,
-            "loss_class" => d.loss_class = Some(text(key, v)?),
-            "restrict_to" => d.restrict_to = Some(text(key, v)?),
-            "cleavage" => d.cleavage = Some(text(key, v)?),
-            "diagnostic_ions" => d.diagnostic_ions = numbers(key, v)?,
-            other => {
-                return Err(format!(
-                    "unknown key `{other}` (expected name, mass, sites, neutral_loss, \
-                     loss_class, restrict_to, cleavage, diagnostic_ions)"
-                ))
-            }
-        }
-    }
-    match (sites, d.name.clone(), d.mass) {
-        (Some(s), _, _) => d.sites = s,
-        (None, Some(name), None) => {
-            let parsed = model::mod_spec::ModDecl::parse(&name).map_err(|e| e.to_string())?;
-            d.name = parsed.name;
-            d.sites = parsed.sites;
-        }
-        (None, _, _) => return Err("`sites` is missing".into()),
-    }
-    Ok(d)
-}
-
-pub fn xl_linker(key: &str, v: &serde_yaml::Value) -> Result<xl::crosslinker::Crosslinker, String> {
-    use serde_yaml::Value;
-    use xl::spec::XlDecl;
-    let at = |e: String| format!("{key}: {e}");
-    let db = model::unimod::bundled();
-    match v {
-        Value::String(s) => XlDecl::parse(s)
-            .and_then(|d| d.resolve(db))
-            .map_err(|e| at(e.to_string())),
-        Value::Mapping(map) if map.contains_key("intact") => {
-            let r: model::xl_reagents::Reagent =
-                serde_yaml::from_value(v.clone()).map_err(|e| at(e.to_string()))?;
-            xl::spec::custom(&r, db).map_err(|e| at(e.to_string()))
-        }
-        Value::Mapping(map) => {
-            let mut name = None;
-            let mut sites = None;
-            for (k, val) in map {
-                let text = || {
-                    val.as_str().map(str::to_string).ok_or_else(|| {
-                        at(format!("`{}` must be a string", k.as_str().unwrap_or("?")))
-                    })
-                };
-                match k.as_str() {
-                    Some("name") => name = Some(text()?),
-                    Some("sites") => sites = Some(text()?),
-                    other => {
-                        return Err(at(format!(
-                            "unknown key `{}` (a named reagent takes name and sites; a custom \
-                             reagent also takes intact, stubs, doublets, monolinks, aliases, \
-                             xlmod, source)",
-                            other.unwrap_or("?")
-                        )))
-                    }
-                }
-            }
-            let name = name.ok_or_else(|| at("`name` is missing".into()))?;
-            let mut d = XlDecl::parse(&name).map_err(|e| at(e.to_string()))?;
-            if sites.is_some() {
-                d.sites = sites;
-            }
-            d.resolve(db).map_err(|e| at(e.to_string()))
-        }
-        _ => Err(at("expected `Name (sites)` or a map with `name`".into())),
-    }
-}
-
-pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
+pub fn apply(
+    cfg: RunConfig,
+    args: &mut SearchArgs,
+    m: &clap::ArgMatches,
+    src: &mut ParamSources,
+) -> Result<(), String> {
     macro_rules! set {
         ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     args.$($field).+ = v;
                 }
             }
@@ -423,6 +319,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         ($id:literal, $($field:ident).+, $val:expr) => {
             if let Some(v) = $val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     args.$($field).+ = Some(v);
                 }
             }
@@ -432,13 +329,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         ($id:literal, $($field:ident).+, $val:expr, $parse:expr) => {
             if let Some(s) = $val {
                 if !cli_set(m, $id) {
+                    src.record_config($id, &cfg.written);
                     args.$($field).+ = ($parse)(&s)?;
                 }
             }
         };
     }
 
-    apply_db(&cfg, &mut args.db, m)?;
+    apply_db(&cfg, &mut args.db, m, src)?;
 
     set_opt!("sdrf", sdrf, cfg.io.sdrf);
     set!("spectrum", spectrum, cfg.io.spectrum);
@@ -462,6 +360,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     if let Some(s) = cfg.search.isotope_error {
         if !cli_set(m, "isotope_error") {
+            src.record_config("isotope_error", &cfg.written);
             args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
         }
     }
@@ -489,6 +388,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     set!("dia_ms1_tol_ppm", dia_ms1_tol_ppm, cfg.search.dia_ms1_tol_ppm);
     if let Some(v) = cfg.search.localize.filter(|_| !cli_set(m, "localize")) {
+        src.record_config("localize", &cfg.written);
         if v != "ipf" {
             return Err(format!("search.localize: '{v}' is not one of: ipf"));
         }
@@ -637,6 +537,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     );
     if let Some(list) = cfg.rescoring.predict {
         if !cli_set(m, "predict") {
+            src.record_config("predict", &cfg.written);
             args.predict = list
                 .iter()
                 .map(|s| crate::cli::parse_enum("predict entry", s, true))
@@ -668,12 +569,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     if let Some(v) = cfg.quant.tmt {
         if !cli_set(m, "tmt") {
+            src.record_config("tmt", &cfg.written);
             args.tmt = Some(crate::cli::parse_plex(&v)?);
         }
     }
     set_opt!("tmt_level", tmt_level, cfg.quant.tmt_level);
     if let Some(v) = cfg.quant.tmt_tol {
         if !cli_set(m, "tmt_tol") {
+            src.record_config("tmt_tol", &cfg.written);
             args.tmt_tol = Some(parse_tol("tmt_tol", &v)?);
         }
     }
@@ -689,6 +592,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("lfq", lfq, cfg.quant.lfq);
     if let Some(v) = cfg.quant.lfq_tol {
         if !cli_set(m, "lfq_tol") {
+            src.record_config("lfq_tol", &cfg.written);
             args.lfq_tol = Some(parse_tol("lfq_tol", &v)?);
         }
     }
@@ -740,6 +644,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco", glyco, cfg.glyco.enabled);
     if let Some(v) = &cfg.search.xl {
         if !cli_set(m, "xl") {
+            src.record_config("xl", &cfg.written);
             let linkers = match v {
                 serde_yaml::Value::Sequence(items) => items
                     .iter()
@@ -770,12 +675,15 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
             );
         }
         if let Some(p) = cfg.glyco.glycan_gdb {
+            src.record_config("glyco_glycan_gdb", &cfg.written);
             args.glyco_glycan_gdb = Some(p);
         }
         if let Some(p) = cfg.glyco.glycan_wurcs {
+            src.record_config("glyco_glycan_wurcs", &cfg.written);
             args.glyco_glycan_wurcs = Some(p);
         }
         if let Some(s) = cfg.glyco.species {
+            src.record_config("glyco_species", &cfg.written);
             args.glyco_species = Some(
                 parse_value_enum::<crate::cli::GlycoSpeciesFlag>(&s)
                     .map_err(|e| format!("config: `glyco.species`: {e}"))?,
@@ -932,6 +840,10 @@ fn check_positive(field: &str, v: f64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply(cfg: RunConfig, a: &mut SearchArgs, m: &clap::ArgMatches) -> Result<(), String> {
+        super::apply(cfg, a, m, &mut ParamSources::default())
+    }
 
     #[test]
     fn unknown_key_is_rejected() {

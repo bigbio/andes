@@ -1,0 +1,3 @@
+# Source files over 1,500 lines and their line counts.
+# Lines are path<TAB>count; a count may only go down. Regenerate with:
+# cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline

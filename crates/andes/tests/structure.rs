@@ -11,8 +11,8 @@ mod source_scan;
 #[path = "support/ratchet.rs"]
 mod ratchet;
 
-use ratchet::compare;
-use source_scan::{line_count, live_code, rel_key};
+use ratchet::{baseline, compare, write_baseline};
+use source_scan::{line_count, live_code, rel_key, source_files};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -140,4 +140,44 @@ fn live_code_skips_strings_comments_and_test_items() {
     let code = live_code(src);
     assert_eq!(code.len(), src.len());
     assert_eq!(code.matches(".unwrap()").count(), 1);
+}
+
+const MAX_FILE_LINES: usize = 1500;
+
+/// For every source file, `measure` applied to its text, keyed by workspace-relative path.
+/// Files with a zero measure stay in the map so the ratchet can tell a cleaned file from a
+/// deleted one.
+fn per_file(measure: impl Fn(&str) -> usize) -> BTreeMap<String, usize> {
+    let root = workspace_root();
+    source_files()
+        .iter()
+        .map(|path| (rel_key(&root, path), measure(&read(path))))
+        .collect()
+}
+
+fn oversized_file_lines() -> BTreeMap<String, usize> {
+    per_file(|src| {
+        let lines = line_count(src);
+        if lines > MAX_FILE_LINES {
+            lines
+        } else {
+            0
+        }
+    })
+}
+
+#[test]
+fn no_source_file_grows_past_the_budget() {
+    let messages = compare("file_lines", &oversized_file_lines(), &baseline("file_lines"));
+    assert!(
+        messages.is_empty(),
+        "source files over {MAX_FILE_LINES} lines may not grow; split them instead:\n{}",
+        messages.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "writes crates/andes/tests/ratchets/file_lines.tsv"]
+fn write_file_lines_baseline() {
+    write_baseline("file_lines", &oversized_file_lines());
 }

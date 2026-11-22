@@ -2918,7 +2918,7 @@ tables of runs without `--mbr` stay 1.0).
   one plex mixture load alike). The `quant_q` of a transfer is the running mean, over the transfers at least as
   reliable, of its predicted excess error: the identity risk plus the value risk above the noise floor. It is an internal
   quant-quality q-value, not an identification FDR. Transfers at `quant_q <= --quant-transfer-fdr` (0.01) pass the
-  quantification gate (`quant_gate_passed` true, `quant_weight` purity²) and enter the QPX feature
+  quantification gate (`quant_gate_passed` true, `quant_weight` purity² × (1 − `p_wrong`), as an identified row weighs purity² × (1 − PEP)) and enter the QPX feature
   view as `transfer_ms2`; the others stay in `tmt.parquet` with weight 0. With fewer than 100 masked
   siblings the noise floor stands in for the value model (a WARN names it); with too few rows for another
   model no transfer is accepted.

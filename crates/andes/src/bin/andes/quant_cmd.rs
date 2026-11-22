@@ -12,8 +12,7 @@ use output::mbr_out::EvidenceType;
 use output::ms2_table::read_ms2_table;
 use output::run_quant_table::{open_run_quant_table, read_run_quant_mods};
 use output::{
-    FeatureCounts, FeatureParquetWriter, GroupAt, Inference, ModRecord, PercolatorPsm,
-    ProteinPosition,
+    FeatureCounts, FeatureParquetWriter, GroupAt, Inference, PercolatorPsm, ProteinPosition,
 };
 use quant::align::AlignParams;
 use quant::evidence::EvidenceParams;
@@ -1293,27 +1292,7 @@ pub(crate) fn split_key(key: &str) -> &str {
     key.rsplit_once('/').map_or(key, |(p, _)| p)
 }
 
-pub(crate) fn parse_peptidoform(peptidoform: &str) -> (String, Vec<ModRecord>) {
-    let mut seq = String::new();
-    let mut mods = Vec::new();
-    let mut chars = peptidoform.chars();
-    while let Some(c) = chars.next() {
-        if c != '[' {
-            seq.push(c);
-            continue;
-        }
-        let tag: String = chars.by_ref().take_while(|&c| c != ']').collect();
-        if let Some(aa) = seq.chars().last() {
-            mods.push(ModRecord {
-                accession: tag.starts_with("UNIMOD:").then(|| tag.clone()),
-                name: tag,
-                position: seq.chars().count() as i32,
-                amino_acid: Some(aa),
-            });
-        }
-    }
-    (seq, mods)
-}
+pub(crate) use output::qpx::parse_peptidoform;
 
 pub(crate) struct ProteinGroups<'a> {
     pub inf: &'a Inference,
@@ -1761,19 +1740,7 @@ mod tests {
     use quant::library::build_library;
 
     #[test]
-    fn peptidoform_tags_become_modifications() {
-        let (seq, mods) = parse_peptidoform("LC[UNIMOD:4]AK[+8.01420]");
-        assert_eq!(seq, "LCAK");
-        assert_eq!(mods.len(), 2);
-        assert_eq!(
-            (
-                mods[0].position,
-                mods[0].amino_acid,
-                mods[0].accession.as_deref()
-            ),
-            (2, Some('C'), Some("UNIMOD:4"))
-        );
-        assert_eq!((mods[1].position, mods[1].accession.clone()), (4, None));
+    fn a_precursor_key_ends_in_its_charge() {
         assert_eq!(split_key("LC[UNIMOD:4]AK/3"), "LC[UNIMOD:4]AK");
     }
 

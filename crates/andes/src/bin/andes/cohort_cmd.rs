@@ -412,7 +412,8 @@ fn space_search(
                 )
             })?;
             let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--config")
+            cmd.current_dir(config.parent().unwrap_or(config))
+                .arg("--config")
                 .arg(config)
                 .arg("--spectrum")
                 .arg(&staged)
@@ -714,7 +715,8 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
         let log = std::fs::File::create(&log_path)
             .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
         let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("--config")
+        cmd.current_dir(config.parent().unwrap_or(&config))
+            .arg("--config")
             .arg(&config)
             .arg("--spectrum")
             .arg(&staged)

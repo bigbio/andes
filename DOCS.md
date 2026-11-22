@@ -1336,7 +1336,10 @@ shares (database, charge, decoys, FDR).
   file those name (the database, a model; each by path, size and modification time) and the
   outputs its group reads are unchanged, so a rerun searches only new, failed or changed runs;
   adding a project to the `cohort` section does not search the others again. It runs the `xl-fdr` stage; the other
-  stages are not run yet and are named in a warning.
+  stages are not run yet and are named in a warning. A relative path in the config (the
+  database, a model, `data_dir`, an SDRF) is read from the config file's folder, and every
+  search runs in that folder, so `andes cohort run sub/cohort.yaml` reads the same files as
+  `cd sub && andes cohort run cohort.yaml`.
 
 - **Runs.** Each SDRF is read as with `--sdrf`, except that rows which disagree on the
   protease, modifications, precursor tolerance, dissociation method, label kind or
@@ -1381,16 +1384,21 @@ On a cluster, a job array can run `andes` once per entry in `runs`: link the ent
 into its `dir` as `stage_as` (`ln -s <file> <dir>/<stage_as>`, so the spectrum's stem is the
 run name), then run `andes --config cohort.yaml --spectrum <dir>/<stage_as> --output-pin
 <dir>/<run>.pin` with the entry's `args`; then each group's stages over its `inputs`
-(`andes cohort xl-fdr <inputs> --output <dir>/<group> --plan plan.json`). The SDRF's
+(for `xl`, once per project: `andes cohort xl-fdr <the project's inputs> --output
+<dir>/<group>.<project> --plan plan.json`). The SDRF's
 dissociation method splits settings groups but is not passed to the search, so unlike
 `--sdrf` the search does not compare it with the activation the spectra record.
 
 **Crosslink FDR over a cohort.** The `xl-fdr` stage reads every run's CSM table, with each
 CSM's TT/TD/DD class and its residue-pair and protein-pair keys (the `residue_pair` and
 `protein_pair` columns), and computes the CSM, residue-pair and protein-pair q-values once
-over the group, with the rules of one search (above). The per-run q-values each search writes
-are superseded by the group's. `andes cohort xl-fdr <CSM_TABLE>... --output <BASE>` runs the
-stage on its own over any runs' `<base>.xl.tsv` tables and writes `<BASE>.xl.tsv`,
+per project of the group, over all of that project's runs, with the rules of one search
+(above). `andes cohort run` writes each project's lists as `<group>.<project>.xl.tsv`,
+`.xl.residue_pairs.tsv` and `.xl.ppi.tsv` in the group's folder. Projects are not pooled into
+one list: a project whose decoys score higher than the others' could then hold more false
+CSMs than the cut. The per-run q-values each search writes are superseded by the project's.
+`andes cohort xl-fdr <CSM_TABLE>... --output <BASE>` runs the stage on its own over the
+`<base>.xl.tsv` tables it is given, as one list, and writes `<BASE>.xl.tsv`,
 `<BASE>.xl.residue_pairs.tsv` and `<BASE>.xl.ppi.tsv`. Rows with the score `NA` (spectra
 without a CSM) are counted and skipped; any other unreadable score, or a scored row without
 its residue pair or protein pair, is an error naming the table and row.
@@ -1399,9 +1407,8 @@ search's pair score, which is on one scale across runs, or `percolator` when the
 rescored on its own (`--xl-rescore-intra`, `--xl-rescore-inter`). Rescored runs' scores are
 not comparable, so pooling a `percolator` row is an error; search those runs without the
 flags, or search them together and rescore once.
-The pooled q-values control the error of the whole list, not of each project's part of it:
-a project whose decoys score higher than the others' can hold more false CSMs than the cut.
-The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
+Given tables of several projects, its pooled q-values control the error of the whole list,
+not of each project's part of it. The stage therefore logs, and writes to `<BASE>.xl.projects.parquet`, each project's share
 of the CSMs the pooled 1 % and 5 % cuts accept, per link class (`project`, `link`, `q_cut`,
 `tt`, `td`, `dd`, `decoy_fdr`). Each run's project comes from the plan: `andes cohort run`
 passes it, and `andes cohort xl-fdr --plan plan.json` reads it; without `--plan` it is the part

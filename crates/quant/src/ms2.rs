@@ -97,7 +97,7 @@ pub fn residue_masses(peptidoform: &str, mods: &HashMap<String, f64>) -> Result<
             }
             continue;
         }
-        if c == '-' && masses.is_empty() {
+        if c == '-' {
             continue;
         }
         let aa = u8::try_from(c)
@@ -402,6 +402,8 @@ mod tests {
         assert!((d[4] - plain[4] - 8.0142).abs() < 1e-9);
         let n = residue_masses("[+42.01057]-PEPCK", &mods).unwrap();
         assert!((n[0] - plain[0] - 42.01057).abs() < 1e-9);
+        let c = residue_masses("PEPCK-[-0.98402]", &mods).unwrap();
+        assert!((c[4] - plain[4] + 0.98402).abs() < 1e-9);
         assert!(residue_masses("PEPC[UNIMOD:999]K", &mods)
             .unwrap_err()
             .contains("UNIMOD:999"));

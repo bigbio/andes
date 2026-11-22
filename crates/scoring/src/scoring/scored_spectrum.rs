@@ -1689,12 +1689,15 @@ mod tests {
         );
     }
 
+    /// The scorer blends with σ equal to the full fragment tolerance (`soft_blend(.., tol_da)`),
+    /// so a peak at the window edge keeps exp(-1/2), about 61 %, of the matched credit.
+    const TOL_DA: f32 = 0.5;
+
     #[test]
     fn soft_match_centre_gives_full_credit() {
         let matched = 4.0_f32;
         let missing = -2.0_f32;
-        let sigma = 0.5 * 0.5;
-        let s = soft_blend(matched, missing, 0.0, sigma);
+        let s = soft_blend(matched, missing, 0.0, TOL_DA);
         assert!(
             (s - matched).abs() < 1e-6,
             "centre peak must keep full matched credit, got {s}"
@@ -1702,18 +1705,15 @@ mod tests {
     }
 
     #[test]
-    fn soft_match_edge_gives_mostly_missing() {
+    fn soft_match_edge_keeps_most_of_the_matched_credit() {
         let matched = 4.0_f32;
         let missing = -2.0_f32;
-        let tol = 0.5_f32;
-        let factor = 0.5_f32;
-        let sigma = factor * tol;
-        let s = soft_blend(matched, missing, tol, sigma);
+        let s = soft_blend(matched, missing, TOL_DA, TOL_DA);
         assert!(
-            s < 0.5 * (matched + missing),
-            "edge peak must lean toward missing, got {s}"
+            s > 0.5 * (matched + missing),
+            "with σ = tolerance an edge peak leans toward matched, got {s}"
         );
-        let w = (-0.5f32 * 2.0 * 2.0).exp();
+        let w = (-0.5f32).exp();
         let expected = w * matched + (1.0 - w) * missing;
         assert!(
             (s - expected).abs() < 1e-5,
@@ -1725,19 +1725,18 @@ mod tests {
     fn soft_match_monotonic_in_abs_dm() {
         let matched = 5.0_f32;
         let missing = -1.0_f32;
-        let sigma = 0.5 * 0.5;
         let mut prev = f32::INFINITY;
-        for k in 0..20 {
+        for k in 0..=25 {
             let dm = k as f32 * 0.02;
-            let s = soft_blend(matched, missing, dm, sigma);
+            let s = soft_blend(matched, missing, dm, TOL_DA);
             assert!(
                 s <= prev + 1e-6,
                 "blend must be non-increasing in |Δm|: dm={dm} s={s} prev={prev}"
             );
             prev = s;
         }
-        let plus = soft_blend(matched, missing, 0.1, sigma);
-        let minus = soft_blend(matched, missing, -0.1, sigma);
+        let plus = soft_blend(matched, missing, 0.1, TOL_DA);
+        let minus = soft_blend(matched, missing, -0.1, TOL_DA);
         assert!(
             (plus - minus).abs() < 1e-6,
             "blend must be symmetric in Δm sign"

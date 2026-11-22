@@ -108,12 +108,23 @@ fn parse_header(h: &str) -> (String, Vec<(String, String)>) {
     (accession.to_string(), keys)
 }
 
+/// Splits a PEFF value into its `(a|b|c)` groups. A group ends at the parenthesis that balances
+/// its opening one, so a modification name with parentheses, such as
+/// `N-linked (GlcNAc...) asparagine`, stays inside its group.
 fn groups(value: &str) -> Option<Vec<Vec<&str>>> {
     let mut out = Vec::new();
     let mut rest = value.trim();
     while !rest.is_empty() {
         let inner = rest.strip_prefix('(')?;
-        let end = inner.find(')')?;
+        let mut depth = 1usize;
+        let end = inner.char_indices().find_map(|(i, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(i)
+        })?;
         out.push(inner[..end].split('|').map(str::trim).collect());
         rest = inner[end + 1..].trim_start();
     }
@@ -329,6 +340,22 @@ mod tests {
             .map(|m| m.position)
             .collect();
         assert_eq!(positions, [9, 19]);
+    }
+
+    #[test]
+    fn a_modification_name_with_parentheses_stays_in_its_group() {
+        let text = peff().replace(
+            "\\ModResPsi=(20|MOD:00000|not a UniProt name)",
+            "\\ModRes=(4||N-linked (GlcNAc) asparagine)(20||N-linked (GlcNAc...) asparagine)",
+        );
+        assert!(text.contains("(GlcNAc...)"));
+        let (_, stats) = load_peff(text.as_bytes(), Some(KO)).unwrap();
+        assert_eq!(stats.sites_without_mass, 1);
+        let unbalanced = peff().replace("(10|UNIMOD:121|GG)", "(10|UNIMOD:121|GG (x)");
+        assert!(matches!(
+            load_peff(unbalanced.as_bytes(), None),
+            Err(PeffError::Malformed { .. })
+        ));
     }
 
     #[test]

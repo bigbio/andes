@@ -69,6 +69,7 @@ fn bare(peptidoform: &str) -> String {
         match c {
             '[' => depth += 1,
             ']' => depth = depth.saturating_sub(1),
+            '-' if depth == 0 => {}
             _ if depth == 0 => out.push(c),
             _ => {}
         }

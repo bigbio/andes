@@ -215,6 +215,7 @@ fn write_csms(
     let mut head: Vec<String> = [
         "spectrum",
         "scan",
+        "spec_id",
         "charge",
         "precursor_mass",
         "class",
@@ -254,6 +255,7 @@ fn write_csms(
         let mut row = vec![
             spec.title.clone(),
             scan_of(spec),
+            crate::xl_fdr::spec_id(r),
             r.charge.to_string(),
             format!("{:.5}", r.precursor_mass),
             c.class.name().to_string(),

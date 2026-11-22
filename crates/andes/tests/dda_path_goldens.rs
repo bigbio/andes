@@ -12,10 +12,10 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 type PathGolden = (usize, u64);
 
-const RESCORE_TARGETS: PathGolden = (1691, 0x335a384a34095436);
-const RESCORE_DECOYS: PathGolden = (1657, 0x92d264f11ec204eb);
-const PROTEIN_GROUPS: PathGolden = (1293, 0x87a42c685fbcf15c);
-const QPX_PSMS: PathGolden = (3348, 0xab050da9e2da38fa);
+const RESCORE_TARGETS: PathGolden = (1636, 0x3b8124c7918e16dd);
+const RESCORE_DECOYS: PathGolden = (1712, 0x63b797d633b82619);
+const PROTEIN_GROUPS: PathGolden = (1264, 0xf23641f48de4283e);
+const QPX_PSMS: PathGolden = (3348, 0x00a6175aafd4b9cc);
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -467,8 +467,11 @@ impl ModParam {
         )
     }
 
+    /// A SILAC label on every residue it names (`TA=K,R` holds Lys6 and Arg6), or dimethyl.
     fn is_label_channel(&self) -> bool {
-        self.silac_token(&self.residues).is_some() || self.names.iter().any(|n| dimethyl_name(n))
+        let silac = !self.residues.is_empty()
+            && self.residues.chars().all(|r| self.silac_token(&r.to_string()).is_some());
+        silac || self.names.iter().any(|n| dimethyl_name(n))
     }
 
     fn silac_token(&self, residues: &str) -> Option<(&'static str, f64)> {
@@ -1181,27 +1184,20 @@ mod tests {
 
     #[test]
     fn silac_channels_come_from_the_label_mods_and_leave_the_search_lists() {
-        let row = |l: &str| -> Vec<String> {
-            vec![
-                "s".into(),
-                "a.raw".into(),
-                l.into(),
-                "NT=Trypsin".into(),
-                "NT=Label:13C(6)15N(2);TA=K;MT=Variable;PP=Anywhere".into(),
-                "NT=Label:13C(6)15N(4);TA=R;MT=Variable;PP=Anywhere".into(),
-                "10 ppm".into(),
-                "".into(),
-                "".into(),
-            ]
+        let silac = |mods: [&str; 2]| {
+            let rows = ["SILAC light", "SILAC heavy"]
+                .map(|l| ["s", "a.raw", l, "NT=Trypsin", mods[0], mods[1], "10 ppm", "", ""]);
+            let slices: Vec<&[&str]> = rows.iter().map(|r| r.as_slice()).collect();
+            parse(&sdrf(H, &slices), Path::new(".")).unwrap()
         };
-        let rows = [row("SILAC light"), row("SILAC heavy")];
-        let refs: Vec<Vec<&str>> = rows
-            .iter()
-            .map(|r| r.iter().map(String::as_str).collect())
-            .collect();
-        let slices: Vec<&[&str]> = refs.iter().map(|r| r.as_slice()).collect();
-        let s = parse(&sdrf(H, &slices), Path::new(".")).unwrap();
+        let s = silac([
+            "NT=Label:13C(6)15N(2);TA=K;MT=Variable;PP=Anywhere",
+            "NT=Label:13C(6)15N(4);TA=R;MT=Variable;PP=Anywhere",
+        ]);
         assert_eq!(s.quant, Some(Quant::Label("[][Lys8,Arg10]".into())));
+        assert_eq!(s.variable_mods, Some(vec![]));
+        let s = silac(["NT=Label:13C(6);TA=K,R;MT=Variable;PP=Anywhere", ""]);
+        assert_eq!(s.quant, Some(Quant::Label("[][Lys6,Arg6]".into())));
         assert_eq!(s.variable_mods, Some(vec![]));
     }
 

@@ -241,10 +241,12 @@ fn database_of(r: &cohort::PlannedRun, cfg: &RunConfig, config: &Path) -> Option
     })
 }
 
-/// Each cross-link project's protein space: one linear and monolink search of all its
-/// runs (`--xl-linear-only --rescore`), whose protein groups at protein q <=
+/// Each cross-link project's protein space: a linear and monolink search of its runs
+/// (`--xl-linear-only`, rescored together, see `space_search`), whose protein groups at protein q <=
 /// `PROTEIN_SPACE_Q` become the FASTA its cross-link searches look in. A project whose runs
-/// have different search flags, or whose database is unknown, keeps the full database.
+/// differ in fragment resolution gets one such search per resolution, and its space is the
+/// union of theirs. A project whose runs have different search flags, or whose database is
+/// unknown, keeps the full database.
 /// The search is kept while its runs, settings and database are unchanged.
 fn protein_spaces(
     plan: &Plan,
@@ -296,50 +298,34 @@ fn protein_spaces(
         let fresh = std::fs::read_to_string(&done).is_ok_and(|old| old == print) && fasta.exists();
         if !fresh {
             let _ = std::fs::remove_file(&done);
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--config").arg(config);
-            for r in &runs {
-                std::fs::create_dir_all(&r.dir)
-                    .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
-                let staged = r.dir.join(&r.stage_as);
-                stage(&r.file, &staged).map_err(|e| {
-                    format!(
-                        "cannot stage {} as {}: {e}",
-                        r.file.display(),
-                        staged.display()
-                    )
-                })?;
-                cmd.arg("--spectrum").arg(staged);
-            }
-            cmd.arg("--output-pin")
-                .arg(dir.join(format!("{project}.pin")))
-                .args(&runs[0].args)
-                .args(["--xl-linear-only", "--rescore"]);
-            if let Some(t) = threads {
-                cmd.arg("--threads").arg(t.to_string());
-            }
-            let log_path = dir.join("andes.log");
-            let log = std::fs::File::create(&log_path)
-                .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
-            cmd.stdout(log.try_clone()?).stderr(log);
             let start = std::time::Instant::now();
-            log::info!(
-                target: "cohort",
-                "{project}: linear search of {} runs for its protein space",
-                runs.len()
-            );
-            let status = cmd
-                .status()
-                .map_err(|e| format!("{project}: cannot start {}: {e}", exe.display()))?;
-            if !status.success() {
-                return Err(format!(
-                    "{project}: the linear search failed ({status}); see {}",
-                    log_path.display()
-                )
-                .into());
+            let high: Vec<Option<bool>> = runs
+                .iter()
+                .map(|r| {
+                    crate::spectra::detect_acquisition_metadata(&r.file)
+                        .1
+                        .map(|i| i.is_high_resolution())
+                })
+                .collect();
+            let groups = resolution_groups(&high);
+            let mut accessions: Vec<String> = Vec::new();
+            let mut cut = 0.0_f64;
+            for (res, members) in &groups {
+                let stem = match (groups.len(), res) {
+                    (1, _) | (_, None) => project.to_string(),
+                    (_, Some(true)) => format!("{project}.high-res"),
+                    (_, Some(false)) => format!("{project}.low-res"),
+                };
+                let group: Vec<&cohort::PlannedRun> = members.iter().map(|&i| runs[i]).collect();
+                let table = space_search(project, &stem, &group, &dir, config, &db, exe, threads)?;
+                let (found, c) = space_accessions(&table)?;
+                cut = cut.max(c);
+                for a in found {
+                    if !accessions.contains(&a) {
+                        accessions.push(a);
+                    }
+                }
             }
-            let groups = dir.join(format!("{project}.protein_groups.tsv"));
-            let (accessions, cut) = space_accessions(&groups)?;
             let n = write_space_fasta(&db, &accessions, &fasta)?;
             log::info!(
                 target: "cohort",
@@ -352,6 +338,235 @@ fn protein_spaces(
         spaces.insert(project.to_string(), fasta);
     }
     Ok(spaces)
+}
+
+/// The runs of a project split by fragment resolution (`high[i]`: run `i` has high-resolution
+/// MS2, `None` when its file does not record it), in order of first appearance, because one
+/// search takes its model, fragment tolerance and score features from its first input. A run
+/// of unknown resolution joins the first group of known resolution.
+fn resolution_groups(high: &[Option<bool>]) -> Vec<(Option<bool>, Vec<usize>)> {
+    let mut groups: Vec<(Option<bool>, Vec<usize>)> = Vec::new();
+    for (i, h) in high.iter().enumerate() {
+        if let Some(h) = h {
+            match groups.iter_mut().find(|g| g.0 == Some(*h)) {
+                Some(g) => g.1.push(i),
+                None => groups.push((Some(*h), vec![i])),
+            }
+        }
+    }
+    let unknown: Vec<usize> = (0..high.len()).filter(|&i| high[i].is_none()).collect();
+    match groups.first_mut() {
+        Some(g) => {
+            g.1.extend(unknown);
+            g.1.sort_unstable();
+        }
+        None if !unknown.is_empty() => groups.push((None, unknown)),
+        None => {}
+    }
+    groups
+}
+
+/// The protein groups of `runs` written to `dir`, their files named after `stem`: one linear
+/// and monolink search (`--xl-linear-only`) of each run on its own, kept while that run and its
+/// settings are unchanged, then one native Percolator run over their pooled PINs and protein
+/// inference over its PSMs. Searching run by run bounds the memory by one run, where one
+/// search of all the runs holds every spectrum's candidates until it writes its PIN. Returns
+/// the `protein_groups.tsv`.
+#[allow(clippy::too_many_arguments)]
+fn space_search(
+    project: &str,
+    stem: &str,
+    runs: &[&cohort::PlannedRun],
+    dir: &Path,
+    config: &Path,
+    db: &Path,
+    exe: &Path,
+    threads: Option<usize>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let run_dir = dir.join("runs");
+    std::fs::create_dir_all(&run_dir)
+        .map_err(|e| format!("cannot create {}: {e}", run_dir.display()))?;
+    log::info!(
+        target: "cohort",
+        "{project}: linear search of {} runs for its protein space ({stem})",
+        runs.len()
+    );
+    let mut pins = Vec::with_capacity(runs.len());
+    for (i, r) in runs.iter().enumerate() {
+        let name = Path::new(&r.stage_as)
+            .file_stem()
+            .map_or_else(|| r.run.clone(), |s| s.to_string_lossy().into_owned());
+        let pin = run_dir.join(format!("{name}.pin"));
+        let done = run_dir.join(format!("{name}.done"));
+        let print = fingerprint(r, &r.args, config)?;
+        if !(std::fs::read_to_string(&done).is_ok_and(|old| old == print) && pin.exists()) {
+            let _ = std::fs::remove_file(&done);
+            std::fs::create_dir_all(&r.dir)
+                .map_err(|e| format!("cannot create {}: {e}", r.dir.display()))?;
+            let staged = r.dir.join(&r.stage_as);
+            stage(&r.file, &staged).map_err(|e| {
+                format!(
+                    "cannot stage {} as {}: {e}",
+                    r.file.display(),
+                    staged.display()
+                )
+            })?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.current_dir(config.parent().unwrap_or(config))
+                .arg("--config")
+                .arg(config)
+                .arg("--spectrum")
+                .arg(&staged)
+                .arg("--output-pin")
+                .arg(&pin)
+                .args(&r.args)
+                .arg("--xl-linear-only");
+            if let Some(t) = threads {
+                cmd.arg("--threads").arg(t.to_string());
+            }
+            let log_path = run_dir.join(format!("{name}.andes.log"));
+            let log = std::fs::File::create(&log_path)
+                .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+            cmd.stdout(log.try_clone()?).stderr(log);
+            let status = cmd
+                .status()
+                .map_err(|e| format!("{project}: cannot start {}: {e}", exe.display()))?;
+            if !status.success() {
+                return Err(format!(
+                    "{project}: the linear search of run {} failed ({status}); see {}",
+                    r.run,
+                    log_path.display()
+                )
+                .into());
+            }
+            std::fs::write(&done, &print)?;
+            log::info!(
+                target: "cohort",
+                "{project}: protein-space run {}/{} searched",
+                i + 1,
+                runs.len()
+            );
+        }
+        pins.push(pin);
+    }
+    let pooled = dir.join(format!("{stem}.pin"));
+    let rows = pool_pins(&pins, &pooled)?;
+    let spill = dir.join("rescore-spill");
+    crate::cli::ensure_scratch_dir(&spill)?;
+    let backend = output::PercolatorBackend::Native {
+        memory: crate::memlimit::rescore_memory(None, spill),
+    };
+    let n_threads = threads.unwrap_or_else(|| {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    });
+    let extra = output::percolator_args_with_threads(&[], n_threads);
+    log::info!(
+        target: "cohort",
+        "{project}: rescoring {} PSM rows of {} runs ({stem})",
+        thousands(rows),
+        runs.len()
+    );
+    let (targets, _) = output::run_percolator_with_decoys(&backend, &pooled, &extra)
+        .map_err(|e| format!("{project}: rescoring the protein-space PSMs: {e}"))?;
+    let decoy_path = output::decoy_results_path(&pooled);
+    let text = std::fs::read_to_string(&decoy_path)
+        .map_err(|e| format!("cannot read {}: {e}", decoy_path.display()))?;
+    let decoys =
+        output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", decoy_path.display()))?;
+    let proteins = protein_args(&runs[0].args, config)?;
+    let inf = crate::inference_cmd::infer_from_maps(db, &proteins, targets, &decoys)?;
+    let table = dir.join(format!("{stem}.protein_groups.tsv"));
+    output::write_protein_groups_tsv(&table, &inf)
+        .map_err(|e| format!("cannot write {}: {e}", table.display()))?;
+    Ok(table)
+}
+
+/// Concatenate the PINs of single-run searches into `out`, header once. Their SpecIds are
+/// already distinct (each starts with its run's file name) and their FileName column keeps
+/// the runs apart for Percolator. Returns the number of PSM rows.
+fn pool_pins(pins: &[PathBuf], out: &Path) -> Result<usize, Box<dyn Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut w = std::io::BufWriter::new(
+        std::fs::File::create(out).map_err(|e| format!("cannot write {}: {e}", out.display()))?,
+    );
+    let mut head: Option<String> = None;
+    let mut rows = 0;
+    for pin in pins {
+        let mut lines = BufReader::new(
+            std::fs::File::open(pin).map_err(|e| format!("cannot read {}: {e}", pin.display()))?,
+        )
+        .lines();
+        let h = lines
+            .next()
+            .transpose()?
+            .ok_or_else(|| format!("{}: empty PIN", pin.display()))?;
+        match &head {
+            None => {
+                writeln!(w, "{h}")?;
+                head = Some(h);
+            }
+            Some(first) if *first != h => {
+                return Err(format!(
+                    "{}: its PIN columns differ from {}",
+                    pin.display(),
+                    pins[0].display()
+                )
+                .into());
+            }
+            Some(_) => {}
+        }
+        for line in lines {
+            let line = line?;
+            if !line.is_empty() {
+                writeln!(w, "{line}")?;
+                rows += 1;
+            }
+        }
+    }
+    w.flush()?;
+    Ok(rows)
+}
+
+/// The flags of `andes inference` (`ProteinArgs`) parsed from a search's flags and its
+/// `--config`: the database digestion, modifications and decoy affixes the search used. The
+/// search's other flags are not inference flags and are left out.
+fn protein_args(
+    search: &[String],
+    config: &Path,
+) -> Result<crate::cli::ProteinArgs, Box<dyn Error>> {
+    use clap::{CommandFactory, FromArgMatches};
+    #[derive(clap::Parser)]
+    struct Proteins {
+        #[command(flatten)]
+        proteins: crate::cli::ProteinArgs,
+    }
+    let known: Vec<String> = Proteins::command()
+        .get_arguments()
+        .filter_map(|a| a.get_long())
+        .filter(|l| *l != "config")
+        .map(|l| format!("--{l}"))
+        .collect();
+    let mut argv = vec![
+        "andes".to_string(),
+        "--config".to_string(),
+        config.display().to_string(),
+    ];
+    let mut keep = false;
+    for a in search {
+        let is_flag =
+            a.starts_with('-') && !a[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.');
+        if is_flag {
+            let name = a.split('=').next().unwrap_or(a);
+            keep = known.iter().any(|k| k == name);
+        }
+        if keep {
+            argv.push(a.clone());
+        }
+    }
+    let m = Proteins::command().try_get_matches_from(argv)?;
+    let mut p = Proteins::from_arg_matches(&m)?.proteins;
+    crate::config::apply_protein_config(&mut p, &m)?;
+    Ok(p)
 }
 
 /// The accessions of the protein groups at protein q <= `PROTEIN_SPACE_Q` in a
@@ -500,7 +715,8 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
         let log = std::fs::File::create(&log_path)
             .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
         let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("--config")
+        cmd.current_dir(config.parent().unwrap_or(&config))
+            .arg("--config")
             .arg(&config)
             .arg("--spectrum")
             .arg(&staged)
@@ -604,10 +820,12 @@ fn run_cohort(args: CohortRunArgs) -> Result<(), Box<dyn Error>> {
 /// One CSM read from a run's table.
 struct CsmRow {
     run: String,
-    /// The index of its table among the tables read, and its scan in that table: the key of
-    /// its row in the table's sibling PIN.
+    /// The index of its table among the tables read, and its `spec_id` in that table (the
+    /// `SpecId` of its row in the table's sibling PIN): the key that joins rescored PIN rows
+    /// back to it. Scan numbers are not unique (one search may read several spectrum files)
+    /// and not always present (MGF without scans), so they are not used for the join.
     table: usize,
-    scan: String,
+    spec_id: String,
     spectrum: String,
     class: xl::decoy::PairClass,
     link: xl::rollup::LinkClass,
@@ -657,7 +875,7 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
     let (sp, cl, li, sc) = (col("spectrum")?, col("class")?, col("link")?, col("score")?);
     let (rp, pp) = (col("residue_pair")?, col("protein_pair")?);
     let src = col("score_source")?;
-    let scan = col("scan")?;
+    let spec_id = col("spec_id")?;
     let opt = |c: &str| header.iter().position(|h| *h == c);
     let sides = [
         (opt("alpha_peptide"), opt("alpha_proteins")),
@@ -696,7 +914,7 @@ fn read_csms(path: &Path, table: usize, out: &mut Vec<CsmRow>) -> Result<(usize,
         out.push(CsmRow {
             run: run.clone(),
             table,
-            scan: get(scan).to_string(),
+            spec_id: get(spec_id).to_string(),
             spectrum: get(sp).to_string(),
             class: pair_class(get(cl)).ok_or_else(|| bad("class"))?,
             link: link_class(get(li)).ok_or_else(|| bad("link"))?,
@@ -859,7 +1077,8 @@ fn pin_of(table: &Path) -> PathBuf {
 /// Replace the pair score of the CSMs of `classes` with the score of one Percolator model
 /// trained on all CSMs of `tables` (their sibling PINs pooled, the `dropped` features left
 /// out), so that their q-values use the evidence of the whole group. Does nothing, with a
-/// warning, when a table has no PIN beside it.
+/// warning, when a table has no PIN beside it or Percolator cannot train a model on the
+/// pooled PIN (too few confident targets, as in a small purified-complex project).
 fn rescore(
     tables: &[PathBuf],
     csms: &mut [CsmRow],
@@ -939,9 +1158,9 @@ fn rescore(
                 .parse()
                 .map_err(|_| format!("{}: ScanNr `{scan}` is not a number", pin.display()))?;
             let id = format!("{k}|{}", f[si]);
-            f[si] = id.clone();
+            let spec_id = std::mem::replace(&mut f[si], id.clone());
             f[sc] = (k as u64 * 1_000_000_000 + n).to_string();
-            key_of.insert(id, (k, scan));
+            key_of.insert(id, (k, spec_id));
             let cols: Vec<&str> = keep
                 .iter()
                 .filter_map(|&i| f.get(i).map(String::as_str))
@@ -955,20 +1174,28 @@ fn rescore(
         memory: crate::memlimit::rescore_memory(None, dir.path().to_path_buf()),
     };
     let t = std::time::Instant::now();
-    let mut scored = output::run_percolator_pooled(&backend, &pooled, &[])
-        .map_err(|e| format!("rescoring {what}: {e}"))?;
+    let mut scored = match output::run_percolator_pooled(&backend, &pooled, &[]) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                target: "cohort",
+                "{what} keep the pair score: Percolator could not rescore them ({e})"
+            );
+            return Ok(());
+        }
+    };
     let decoy_text = std::fs::read_to_string(output::decoy_results_path(&pooled))?;
     scored.extend(output::parse_psm_results(&decoy_text).map_err(|e| format!("{e}"))?);
     let mut score: HashMap<(usize, &str), f64> = HashMap::new();
     for (id, psm) in &scored {
-        if let (Some((k, scan)), Some(s)) = (key_of.get(id), psm.score) {
-            score.insert((*k, scan.as_str()), s);
+        if let (Some((k, spec_id)), Some(s)) = (key_of.get(id), psm.score) {
+            score.insert((*k, spec_id.as_str()), s);
         }
     }
     let mut unscored = 0usize;
     let mut n = 0usize;
     for c in csms.iter_mut().filter(|c| classes.contains(&c.link)) {
-        match score.get(&(c.table, c.scan.as_str())) {
+        match score.get(&(c.table, c.spec_id.as_str())) {
             Some(&s) => {
                 c.score = s;
                 c.score_source = "percolator";
@@ -1210,17 +1437,20 @@ mod tests {
         let p = t.path().join("A.r1.xl.tsv");
         std::fs::write(
             &p,
-            "spectrum\tscan\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
-             A.r1/s1\t1\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
-             A.r1/s2\t2\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
-             A.r1/s3\t3\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
+            "spectrum\tscan\tspec_id\tscore_source\tclass\tlink\tq_value\tscore\tresidue_pair\tprotein_pair\n\
+             A.r1/s1\t1\txl0\tpair\tTT\tinter\t0.01\t12.5\tP1:5 -- P2:9\tP1 -- P2\n\
+             A.r1/s2\t2\txl1\tpair\tTD\tintra\tNA\tNA\tP1:5 -- P1:30\tP1 -- P1\n\
+             A.r1/s3\t1\txl2\tpair\tDD\thomotypic\t0.5\t3.0\tP3:7 -- P3:7\tP3 -- P3\n",
         )
         .unwrap();
         let mut rows = Vec::new();
         assert_eq!(read_csms(&p, 4, &mut rows).unwrap(), (2, 1));
         assert_eq!(rows[0].run, "A.r1");
-        assert_eq!((rows[0].table, rows[0].scan.as_str()), (4, "1"));
-        assert_eq!(rows[1].scan, "3");
+        assert_eq!((rows[0].table, rows[0].spec_id.as_str()), (4, "xl0"));
+        assert_eq!(
+            rows[1].spec_id, "xl2",
+            "a second file's spectrum with the same scan number keeps its own key"
+        );
         assert_eq!(rows[0].class, xl::decoy::PairClass::TT);
         assert_eq!(rows[1].link, xl::rollup::LinkClass::Homotypic);
         let old = t.path().join("B.xl.tsv");
@@ -1233,31 +1463,31 @@ mod tests {
     #[test]
     fn a_malformed_score_or_missing_pair_is_an_error() {
         let t = tempfile::tempdir().unwrap();
-        let head = "spectrum\tscan\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
+        let head = "spectrum\tscan\tspec_id\tscore_source\tclass\tlink\tscore\tresidue_pair\tprotein_pair\n";
         for (name, row, what) in [
             (
                 "a.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\t12x\tP1:5 -- P2:9\tP1 -- P2",
                 "row 2: bad score",
             ),
             (
                 "b.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\tnan\tP1:5 -- P2:9\tP1 -- P2",
                 "bad score",
             ),
             (
                 "c.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
+                "s1\t1\txl0\tpair\tTT\tinter\t12.5\t\tP1 -- P2",
                 "bad residue_pair",
             ),
             (
                 "e.xl.tsv",
-                "s1\t1\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
+                "s1\t1\txl0\tpercolator\tTT\tinter\t2.1\tP1:5 -- P2:9\tP1 -- P2",
                 "rescored on its own",
             ),
             (
                 "d.xl.tsv",
-                "s1\t1\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
+                "s1\t1\txl0\tpair\tTT\tinter\t12.5\tP1:5 -- P2:9",
                 "bad protein_pair",
             ),
         ] {
@@ -1276,7 +1506,7 @@ mod tests {
         let mut rows = vec![CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "7".into(),
+            spec_id: "xl7".into(),
             spectrum: "A.r1/s7".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Intra,
@@ -1296,6 +1526,104 @@ mod tests {
         )
         .unwrap();
         assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
+    }
+
+    #[test]
+    fn intra_links_keep_the_pair_score_when_percolator_cannot_train() {
+        let t = tempfile::tempdir().unwrap();
+        let table = t.path().join("A.r1.xl.tsv");
+        std::fs::write(
+            pin_of(&table),
+            "SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tpair_score\tPeptide\tProteins\n\
+             s7\t1\t7\t1000.0\t1000.0\t12.5\tK.PEPK.R\tP1\n\
+             s8\t-1\t8\t1000.0\t1000.0\t3.0\tK.KPEP.R\tdecoy_P1\n",
+        )
+        .unwrap();
+        let mut rows = vec![CsmRow {
+            run: "A.r1".into(),
+            table: 0,
+            spec_id: "s7".into(),
+            spectrum: "A.r1/s7".into(),
+            class: xl::decoy::PairClass::TT,
+            link: xl::rollup::LinkClass::Intra,
+            score: 12.5,
+            score_source: "pair",
+            residue_pair: "P1:5 -- P1:9".into(),
+            protein_pair: "P1 -- P1".into(),
+            peptides: [Vec::new(), Vec::new()],
+            proteins: [Vec::new(), Vec::new()],
+        }];
+        rescore(
+            &[table],
+            &mut rows,
+            &[xl::rollup::LinkClass::Intra],
+            &[],
+            "intra-protein links",
+        )
+        .unwrap();
+        assert_eq!((rows[0].score, rows[0].score_source), (12.5, "pair"));
+    }
+
+    #[test]
+    fn a_project_mixing_fragment_resolutions_is_searched_once_per_resolution() {
+        assert_eq!(
+            resolution_groups(&[Some(false), Some(true), None, Some(false)]),
+            vec![(Some(false), vec![0, 2, 3]), (Some(true), vec![1])]
+        );
+        assert_eq!(
+            resolution_groups(&[Some(true), Some(true)]),
+            vec![(Some(true), vec![0, 1])]
+        );
+        assert_eq!(resolution_groups(&[None, None]), vec![(None, vec![0, 1])]);
+        assert!(resolution_groups(&[]).is_empty());
+    }
+
+    #[test]
+    fn single_run_pins_pool_under_one_header_and_differing_columns_are_an_error() {
+        let t = tempfile::tempdir().unwrap();
+        let pin = |name: &str, text: &str| {
+            let p = t.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let a = pin(
+            "a.pin",
+            "SpecId\tLabel\tFileName\na/1_1\t1\ta\na/2_1\t-1\ta\n",
+        );
+        let b = pin("b.pin", "SpecId\tLabel\tFileName\nb/1_1\t1\tb\n");
+        let out = t.path().join("pooled.pin");
+        assert_eq!(pool_pins(&[a.clone(), b], &out).unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "SpecId\tLabel\tFileName\na/1_1\t1\ta\na/2_1\t-1\ta\nb/1_1\t1\tb\n"
+        );
+        let c = pin("c.pin", "SpecId\tLabel\tScanNr\nc/1_1\t1\t1\n");
+        let err = pool_pins(&[a, c], &out).unwrap_err().to_string();
+        assert!(err.contains("PIN columns differ"), "{err}");
+    }
+
+    #[test]
+    fn inference_takes_the_database_flags_of_a_search_and_leaves_its_others_out() {
+        let t = tempfile::tempdir().unwrap();
+        let config = t.path().join("run.yaml");
+        std::fs::write(&config, "search: {}\n").unwrap();
+        let search: Vec<String> = [
+            "--enzyme",
+            "trypsin,lysc",
+            "--fixed-mods",
+            "Carbamidomethyl (C)",
+            "--xl",
+            "DSSO (K, S, T, Y, Protein N-term)",
+            "--variable-mods",
+            "Oxidation (M)",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let p = protein_args(&search, &config).unwrap();
+        assert_eq!(p.db.enzyme, "trypsin,lysc");
+        assert!(p.db.fixed_mods.is_some());
+        assert!(p.db.variable_mods.is_some());
     }
 
     #[test]
@@ -1394,7 +1722,7 @@ mod tests {
         let row = |a: &str, pa: &str, b: &str, pb: &str| CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "1".into(),
+            spec_id: "xl1".into(),
             spectrum: "s".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Inter,
@@ -1548,7 +1876,7 @@ mod tests {
         let row = |run: &str, class, link| CsmRow {
             run: run.to_string(),
             table: 0,
-            scan: String::new(),
+            spec_id: String::new(),
             spectrum: String::new(),
             class,
             link,

@@ -915,7 +915,7 @@ fn modifications_of(cand: &Candidate) -> Vec<ModRecord> {
         .residues
         .iter()
         .enumerate()
-        .filter_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
+        .flat_map(|(i, aa)| ModRecord::of_residue(i, cand.peptide.residues.len(), aa))
         .collect()
 }
 
@@ -1363,6 +1363,9 @@ fn write_feature_outputs(
             None => false,
         });
     }
+    for r in &records {
+        tally.quantify(r, &r.run_file_name)?;
+    }
     let path = pdir.join("quantms.feature.parquet");
     output::write_feature_parquet(&path, &records)
         .map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -1752,7 +1755,7 @@ pub(crate) fn run_quant(
                     corrected: t.corrected.clone(),
                     sn: None,
                     quant_weight: if t.accepted {
-                        quant_weight(t.purity, None)
+                        quant_weight(t.purity, Some(f64::from(t.info.p_wrong)))
                     } else {
                         0.0
                     },
@@ -2190,7 +2193,7 @@ mod tests {
     fn psm(rank_score: f32, candidate: u32, co_isolated_mz: Option<f64>) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![candidate],
+            candidate_idxs: vec![candidate].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: rank_score,

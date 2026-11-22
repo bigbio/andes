@@ -22,20 +22,32 @@ pub struct ModRecord {
 }
 
 impl ModRecord {
-    pub fn of_residue(index: usize, len: usize, aa: &model::amino_acid::AminoAcid) -> Option<Self> {
+    /// One record per modification on the residue at `index` of a peptide of `len` residues.
+    /// A residue that carries several modifications (a side-chain mod together with a terminal
+    /// one, as a fixed TMT label on a peptide that starts with K) holds them as one stacked
+    /// entry; each component is written as its own record, with its own accession and position.
+    pub fn of_residue(index: usize, len: usize, aa: &model::amino_acid::AminoAcid) -> Vec<Self> {
         use model::modification::ModLocation::{CTerm, NTerm, ProtCTerm, ProtNTerm};
-        let m = aa.mod_?;
-        let (position, amino_acid) = match m.location {
-            NTerm | ProtNTerm if index == 0 => (0, None),
-            CTerm | ProtCTerm if index + 1 == len => (len as i32 + 1, None),
-            _ => (index as i32 + 1, Some(aa.residue as char)),
+        let Some(stacked) = aa.mod_ else {
+            return Vec::new();
         };
-        Some(ModRecord {
-            name: m.name.clone(),
-            accession: m.accession.clone().filter(|a| !a.is_empty()),
-            position,
-            amino_acid,
-        })
+        stacked
+            .components()
+            .into_iter()
+            .map(|m| {
+                let (position, amino_acid) = match m.location {
+                    NTerm | ProtNTerm if index == 0 => (0, None),
+                    CTerm | ProtCTerm if index + 1 == len => (len as i32 + 1, None),
+                    _ => (index as i32 + 1, Some(aa.residue as char)),
+                };
+                ModRecord {
+                    name: m.name.clone(),
+                    accession: m.accession.clone().filter(|a| !a.is_empty()),
+                    position,
+                    amino_acid,
+                }
+            })
+            .collect()
     }
 }
 
@@ -860,7 +872,11 @@ mod tests {
 
     #[test]
     fn terminal_modifications_use_the_terminal_positions() {
-        let at = |i, len, loc, acc| ModRecord::of_residue(i, len, &modified(b'K', loc, acc));
+        let at = |i, len, loc, acc| {
+            let mut v = ModRecord::of_residue(i, len, &modified(b'K', loc, acc));
+            assert!(v.len() <= 1);
+            v.pop()
+        };
         let nterm = at(0, 8, ModLocation::NTerm, Some("UNIMOD:1")).unwrap();
         assert_eq!((nterm.position, nterm.amino_acid), (0, None));
         let prot = at(0, 8, ModLocation::ProtNTerm, None).unwrap();
@@ -871,7 +887,54 @@ mod tests {
         assert_eq!((side.position, side.amino_acid), (1, Some('K')));
         let inner = at(3, 8, ModLocation::Anywhere, Some("")).unwrap();
         assert_eq!((inner.position, inner.accession), (4, None));
-        assert!(ModRecord::of_residue(0, 8, &AminoAcid::standard(b'K').unwrap()).is_none());
+        assert!(ModRecord::of_residue(0, 8, &AminoAcid::standard(b'K').unwrap()).is_empty());
+    }
+
+    #[test]
+    fn stacked_modifications_are_written_one_record_each() {
+        let part = |name: &str, location, accession: &str| -> &'static Modification {
+            leak_mod(Modification {
+                name: name.into(),
+                mass_delta: 229.162932,
+                residue: ResidueSpec::Wildcard,
+                location,
+                fixed: true,
+                accession: Some(accession.into()),
+                neutral_losses: Vec::new(),
+                loss_class: 0,
+                annotated_site_mass: None,
+                blocks_cleavage: false,
+                parts: Vec::new(),
+                diagnostic_ions: Vec::new(),
+            })
+        };
+        let nterm = part("TMT6plex", ModLocation::NTerm, "UNIMOD:737");
+        let side = part("TMT6plex", ModLocation::Anywhere, "UNIMOD:737");
+        let stacked = leak_mod(Modification {
+            name: "TMT6plex+TMT6plex".into(),
+            mass_delta: 2.0 * 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+            annotated_site_mass: None,
+            blocks_cleavage: false,
+            parts: vec![side, nterm],
+            diagnostic_ions: Vec::new(),
+        });
+        let aa = AminoAcid::standard(b'K').unwrap().with_mod(stacked);
+        let mut got = ModRecord::of_residue(0, 9, &aa);
+        got.sort_by_key(|r| r.position);
+        let want: Vec<(i32, Option<char>, Option<&str>)> =
+            vec![(0, None, Some("UNIMOD:737")), (1, Some('K'), Some("UNIMOD:737"))];
+        let seen: Vec<(i32, Option<char>, Option<&str>)> = got
+            .iter()
+            .map(|r| (r.position, r.amino_acid, r.accession.as_deref()))
+            .collect();
+        assert_eq!(seen, want);
+        assert!(got.iter().all(|r| r.name == "TMT6plex"));
     }
     use crate::versioned_parquet::{column, opt};
     use arrow::array::{

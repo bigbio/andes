@@ -12,8 +12,9 @@ pub use pin::{emitted_row_candidates, emitted_row_evidence, format_spec_id, spec
 
 pub mod stats;
 pub use stats::{
-    classify_mods, psm_facts, write_statistics_log, FixedModSpec, IdentificationSummary,
-    PeptideMods, PsmFacts, RunStatistics, SpectraTally, SummaryContext,
+    classify_mods, fact_rows, psm_facts, psm_facts_of_rows, write_statistics_log, FactRow,
+    FactRows, FixedModSpec, IdentificationSummary, PeptideMods, PsmFacts, RunStatistics,
+    SpectraTally, SummaryContext,
 };
 
 pub mod qpx;
@@ -35,12 +36,15 @@ pub mod ipf;
 pub mod knockoff_fdr;
 pub mod site_fdr;
 pub mod site_identity;
+mod spectra_tally;
 pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
 pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
 
 pub mod pg_parquet;
 pub use pg_parquet::{write_pg_parquet, FeatureCounts};
 pub mod protein_inference;
+pub mod protein_quant;
+pub use protein_quant::ProteinQuant;
 pub use protein_inference::{
     infer_protein_groups, write_protein_groups_tsv, GroupAt, Inference, ProteinGroup,
 };
@@ -79,6 +83,7 @@ pub mod run_quant_table;
 pub mod extract_table;
 pub mod dia_nominee_table;
 pub mod dia_pass2_table;
+pub mod decoy_database;
 pub mod dia_quant_table;
 pub mod tmt_study_table;
 pub mod library_table;

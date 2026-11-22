@@ -340,6 +340,26 @@ mod tests {
     }
 
     #[test]
+    fn the_dihydrazides_link_carboxyls_with_their_xlmod_masses() {
+        for (name, bridge, monolink) in [
+            ("ADH", 138.090_546_35, 156.101_111_05),
+            ("PDH", 152.106_196_42, 170.116_761_12),
+        ] {
+            let r = table()
+                .reagents
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert!((mass_of(&r.intact) - bridge).abs() < 1e-6, "{name} bridge");
+            assert!(
+                (mass_of(&r.monolinks[0]) - monolink).abs() < 1e-6,
+                "{name} monolink"
+            );
+            assert_eq!(r.sites, "D, E, Protein C-term");
+        }
+    }
+
+    #[test]
     fn cleavable_stubs_split_the_intact_linker() {
         let h2o = composition_mass("H(2) O").unwrap();
         for r in table().reagents.iter().filter(|r| !r.stubs.is_empty()) {

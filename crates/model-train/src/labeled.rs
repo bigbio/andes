@@ -200,7 +200,7 @@ mod tests {
     fn queued(score: f32, edge: i32) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![0],
+            candidate_idxs: vec![0].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,

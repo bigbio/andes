@@ -319,7 +319,7 @@ cargo build --release -p andes --bin andes --features thermo
 # 1. search + quantify (5 fractions -> one PIN + lfq/matrix tables)
 DOTNET_ROOT=<dotnet-root> \
 <andes> \
-  --spectrum /Data/daicx/glyco-mouse/MouseLiver-Z-T-{1,2,3,4,5}.raw \
+  --spectrum <raw-dir>/MouseLiver-Z-T-{1,2,3,4,5}.raw \
   --database <mouse_entrap.fasta> \
   --decoy-strategy sequon \
   --glyco --glyco-glycan-gdb <pGlyco-N-Mouse.gdb> \

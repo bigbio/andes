@@ -364,7 +364,7 @@ const SITE_LITERALS: [&str; 6] = [
 
 /// The site-specific patterns found in `text`, one entry per occurrence.
 ///
-/// A path under `/home/<name>/` or `/Users/<name>/` is a hit (`/home/runner/` is the
+/// A path under `/home/<name>/`, `/Users/<name>/` or `/Data/<name>/` is a hit (`/home/runner/` is the
 /// GitHub CI home and is allowed), as is any of [`SITE_LITERALS`].
 fn site_hits(text: &str) -> Vec<String> {
     let mut hits = Vec::new();
@@ -373,7 +373,7 @@ fn site_hits(text: &str) -> Vec<String> {
             hits.push(literal.to_string());
         }
     }
-    for prefix in ["/home/", "/Users/"] {
+    for prefix in ["/home/", "/Users/", "/Data/"] {
         for (at, _) in text.match_indices(prefix) {
             let rest = &text[at + prefix.len()..];
             let word = rest
@@ -383,7 +383,7 @@ fn site_hits(text: &str) -> Vec<String> {
             if word == 0 || rest.as_bytes().get(word) != Some(&b'/') {
                 continue;
             }
-            if prefix == "/home/" && &rest[..word] == "runner" {
+            if prefix == "/home/" && rest.get(..word) == Some("runner") {
                 continue;
             }
             hits.push(format!("{prefix}<name>/"));
@@ -402,6 +402,7 @@ fn site_patterns_ignore_public_urls() {
     assert_eq!(site_hits("/Users/bob/y").len(), 1);
     assert_eq!(site_hits("/hps/nobackup/x").len(), 1);
     assert_eq!(site_hits("pst_prd").len(), 1);
+    assert_eq!(site_hits("/Data/carol/raw").len(), 1);
     assert!(site_hits("/home/runner/work").is_empty());
 }
 

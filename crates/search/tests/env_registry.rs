@@ -1,6 +1,6 @@
 //! Every `ANDES_*` environment variable named in the code must be a test-harness variable
 //! listed in [`TEST_HARNESS_VARS`], and only test code may name one; the policy is in the
-//! `cli-flags-not-env-vars` skill (`.claude/skills/cli-flags-not-env-vars/SKILL.md`).
+//! `docs/dev/cli-flags-not-env-vars.md` page.
 //!
 //! The scan looks for `ANDES_*` names inside any string literal of live code (comments are
 //! ignored), so a key held in a constant or read through an imported `var` is found too.

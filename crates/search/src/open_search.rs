@@ -41,7 +41,7 @@ pub fn refine_offset(
     tol_da: f64,
 ) -> f64 {
     let n = peptide.length();
-    if !delta.is_finite() || site0 >= n || n < 2 || !(tol_da <= MAX_REFINE_DA) {
+    if !delta.is_finite() || site0 >= n || n < 2 || tol_da.is_nan() || tol_da > MAX_REFINE_DA {
         return delta;
     }
     let base: Vec<f64> = peptide

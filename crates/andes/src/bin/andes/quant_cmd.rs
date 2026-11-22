@@ -1325,9 +1325,30 @@ pub(crate) struct GroupTally {
     pub counts: HashMap<usize, FeatureCounts>,
     pub no_group: usize,
     pub above_cut: usize,
+    pub quant: output::ProteinQuant,
 }
 
 impl GroupTally {
+    /// Adds a feature row to the group's default protein quantities in `unit` (the run, or the
+    /// plex of an isobaric run); rows of shared peptides, rows without intensities and isobaric
+    /// rows that failed the quantification gate (`quant_weight` 0) add nothing.
+    pub(crate) fn quantify(&mut self, r: &FeatureRecord, unit: &str) -> Result<(), String> {
+        let Some(g) = r.group.as_ref().filter(|g| g.unique) else {
+            return Ok(());
+        };
+        let gated_out = r
+            .additional_scores
+            .iter()
+            .any(|(name, w, _)| name == "quant_weight" && *w <= 0.0);
+        if r.intensities.is_empty() || gated_out {
+            return Ok(());
+        }
+        let labels: Vec<String> = r.intensities.iter().map(|(l, _)| l.clone()).collect();
+        let values: Vec<f32> = r.intensities.iter().map(|(_, v)| *v).collect();
+        self.quant
+            .add(&g.anchor, unit, &r.run_file_name, &r.peptidoform, &labels, &values)
+    }
+
     pub(crate) fn assign(
         &mut self,
         pg: &ProteinGroups<'_>,
@@ -1376,6 +1397,7 @@ impl GroupTally {
             runs.len() == 1,
             pg.max_q,
             Some(&self.counts),
+            (!self.quant.is_empty()).then_some(&self.quant),
         )
         .map_err(|e| format!("write {}: {e}", path.display()))?;
         let kept = pg.inf.groups.iter().filter(|g| g.q_value <= pg.max_q);
@@ -1515,7 +1537,11 @@ pub(crate) fn finalize_and_write(
     let mut tally = GroupTally::default();
     let summary = finalize_stream(&stored.runs, &stored.library, source, &params, &mut |f| {
         if let Some((w, path, last_id)) = feature_out.as_mut() {
-            w.push(feature_records(stored, &f, last_id, groups, &mut tally))
+            let recs = feature_records(stored, &f, last_id, groups, &mut tally);
+            for r in &recs {
+                tally.quantify(r, &r.run_file_name)?;
+            }
+            w.push(recs)
                 .map_err(|e| format!("write {}: {e}", path.display()))?;
         }
         Ok(())
@@ -1649,14 +1675,6 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     .map(|_| ())
 }
 
-fn release_free_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: malloc_trim only releases free heap memory; it is thread safe.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let dia_runs = crate::dia_xrun::study_runs(&a.quant_dir)?;
     if !dia_runs.is_empty() {
@@ -1722,7 +1740,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         _ => None,
     };
     if inf.is_some() {
-        release_free_memory();
+        crate::memlimit::release_free_memory();
     }
     let groups = inf.as_ref().map(|inf| ProteinGroups {
         inf,

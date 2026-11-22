@@ -686,10 +686,14 @@ pub(crate) fn finalize(
             w.push_run(&rows, &d)?;
             if let Some((fw, fpath)) = features.as_mut() {
                 let mut recs = Vec::new();
+                let unit = d.plex.map_or_else(|| run.clone(), |p| format!("plex {p}"));
                 for r in rows.iter().filter(|r| r.group.is_some()) {
                     feature_id += 1;
                     match feature_record(r, layout.plex, feature_id) {
-                        Some(f) => recs.push(f),
+                        Some(f) => {
+                            tally.quantify(&f, &unit)?;
+                            recs.push(f)
+                        }
                         None => {
                             feature_id -= 1;
                             no_mz += 1;

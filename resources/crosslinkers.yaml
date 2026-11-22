@@ -159,6 +159,22 @@
     - {name: water, composition: H(8) C(5) O(2)}
   source: "Belsom et al. 2016, Mol Cell Proteomics 15:1105; XLMOD (photo-linker: the diazirine carbene inserts at any residue)"
 
+- name: ADH
+  xlmod: [XLMOD:02059]
+  sites: D, E, Protein C-term
+  intact: {composition: H(10) C(6) N(4)}
+  monolinks:
+    - {name: water, composition: H(12) C(6) N(4) O}
+  source: "Leitner et al. 2014, Proc Natl Acad Sci USA 111:9455; XLMOD (dihydrazide linking two carboxyls activated by DMTMM)"
+
+- name: PDH
+  xlmod: [XLMOD:02209]
+  sites: D, E, Protein C-term
+  intact: {composition: H(12) C(7) N(4)}
+  monolinks:
+    - {name: water, composition: H(14) C(7) N(4) O}
+  source: "Leitner et al. 2014, Proc Natl Acad Sci USA 111:9455; XLMOD (dihydrazide linking two carboxyls activated by DMTMM)"
+
 - name: EDC
   aliases: [DMTMM]
   xlmod: [XLMOD:02010, XLMOD:02208]

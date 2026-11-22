@@ -37,6 +37,17 @@ fn spectrum(precursor_mz: f64, charge: Option<i32>, peptides: &[&Peptide]) -> Sp
 }
 
 #[test]
+fn the_chimeric_window_is_centred_on_the_isolation_target() {
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let params = SearchParams::default_tryptic(aa_set);
+    let mut spec = spectrum(500.3, Some(2), &[]);
+    (spec.isolation_target_mz, spec.isolation_lower_offset) = (Some(500.0), Some(1.0));
+    spec.isolation_upper_offset = Some(1.0);
+    let (lo, hi, _) = coisolation_window(&spec, &params);
+    assert_eq!((lo, hi), (499.0, 501.0));
+}
+
+#[test]
 fn chargeless_spectrum_is_searched_per_charge() {
     let db = ProteinDb {
         proteins: vec![Protein {

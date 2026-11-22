@@ -60,9 +60,13 @@ fn spectrum_key<'a>(spec_id: &'a str, scan: &str) -> &'a str {
     }
 }
 
+/// Keeps the best `keep` rows of every scan of the PIN (by RawScore, the MS2 spectral angle and
+/// the RT term) and returns the SpecIds of the dropped rows when `want_dropped`; an empty set
+/// otherwise, which saves holding every dropped id when no output needs them.
 pub(crate) fn rerank_pin(
     pin: &Path,
     keep: usize,
+    want_dropped: bool,
 ) -> Result<std::collections::HashSet<String>, String> {
     use std::io::{BufRead, BufReader, BufWriter, Write};
     let t0 = Instant::now();
@@ -186,7 +190,8 @@ pub(crate) fn rerank_pin(
     }
     drop((order, score, group));
     let kept = keep_row.iter().filter(|k| **k).count();
-    let mut dropped = std::collections::HashSet::with_capacity(n_rows - kept);
+    let mut dropped =
+        std::collections::HashSet::with_capacity(if want_dropped { n_rows - kept } else { 0 });
     let tmp = pin.with_file_name(format!(
         "{}.rerank.tmp",
         pin.file_name()
@@ -211,7 +216,9 @@ pub(crate) fn rerank_pin(
                     w.write_all(b"\n").map_err(io)?;
                 }
                 Some(false) => {
-                    dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
+                    if want_dropped {
+                        dropped.insert(l.split('\t').next().unwrap_or_default().to_string());
+                    }
                 }
                 None => {
                     return Err(format!("{}: changed while re-ranking", pin.display()));
@@ -362,11 +369,14 @@ pub(crate) fn neighbours<'a>(
     (scans, p - lo)
 }
 
+/// Adds the co-elution `COLUMNS` to every row of the PIN; `ms1` is [`ms1_indexes`] of the run's
+/// MS1 scans, `n_ms1` their number before indexing (for the log).
 pub(crate) fn add_to_pin(
     pin: &Path,
     spectra: &[Spectrum],
     run_ends: &[usize],
-    ms1: Vec<Vec<Ms1Scan>>,
+    ms1: &[Option<Ms1RunIndex>],
+    n_ms1: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cols: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
@@ -374,11 +384,6 @@ pub(crate) fn add_to_pin(
     let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
     let rt = |i: u32| spectra[i as usize].rt_seconds.unwrap_or(0.0);
     let (slot, windows) = windows(spectra, run_ends);
-    let n_ms1: usize = ms1.iter().map(Vec::len).sum();
-    let ms1: Vec<Option<Ms1RunIndex>> = ms1
-        .into_iter()
-        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
-        .collect();
 
     let mut best_of_spec: HashMap<u32, f64> = HashMap::new();
     for r in &table.rows {
@@ -470,6 +475,14 @@ pub(crate) fn add_to_pin(
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// The MS1 index of each run's scans, `None` for a run without MS1 scans; built once and shared
+/// by the pool scores, pass 2 and the co-elution columns.
+pub(crate) fn ms1_indexes(ms1: Vec<Vec<Ms1Scan>>) -> Vec<Option<Ms1RunIndex>> {
+    ms1.into_iter()
+        .map(|s| (!s.is_empty()).then(|| Ms1RunIndex::new(s)))
+        .collect()
 }
 
 pub(crate) const EVIDENCE_COLUMNS: [&str; 5] = [
@@ -1524,8 +1537,16 @@ mod tests {
         for (id, scan, raw, ms2) in rows {
             s.push_str(&format!("{id}\t1\t{scan}\t{raw}\t{ms2}\n"));
         }
+        let quiet = dir.path().join("q.pin");
+        std::fs::write(&quiet, &s).unwrap();
         std::fs::write(&pin, s).unwrap();
-        let dropped = rerank_pin(&pin, 1).unwrap();
+        let dropped = rerank_pin(&pin, 1, true).unwrap();
+        assert!(rerank_pin(&quiet, 1, false).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(&quiet).unwrap(),
+            std::fs::read(&pin).unwrap(),
+            "the kept rows do not depend on collecting the dropped ids"
+        );
         let want: std::collections::HashSet<String> = [
             "r/c=1 scan=1_1_1_0",
             "r/c=1 scan=1_1_3_2",
@@ -1566,12 +1587,12 @@ mod tests {
         s.push_str(&format!("{}\t1\t1\tr\t10.5\t0.5\t5.0\t0\n", id(1, 3)));
         s.push_str(&format!("{}\t1\t1\tr\t10.2\t0.5\t0.0\t0\n", id(1, 4)));
         std::fs::write(&pin, &s).unwrap();
-        let dropped = rerank_pin(&pin, 2).unwrap();
+        let dropped = rerank_pin(&pin, 2, true).unwrap();
         assert_eq!(dropped, [id(1, 3)].into());
 
         let bare = s.replace("andesrt_rt_diff", "other");
         std::fs::write(&pin, &bare).unwrap();
-        let dropped = rerank_pin(&pin, 2).unwrap();
+        let dropped = rerank_pin(&pin, 2, true).unwrap();
         assert_eq!(dropped, [id(1, 2)].into(), "no RT column, no RT term");
     }
 
@@ -1587,7 +1608,7 @@ mod tests {
                  r_8_8_2\t1\t8\t1.0\tx\n\
                  r_7_7_3\t1\t7\t1.0\t0.1";
         std::fs::write(&pin, s).unwrap();
-        let dropped = rerank_pin(&pin, 1).unwrap();
+        let dropped = rerank_pin(&pin, 1, true).unwrap();
         let want: std::collections::HashSet<String> =
             ["r_7_7_2", "r_8_8_2", "r_7_7_3"].map(String::from).into();
         assert_eq!(dropped, want);

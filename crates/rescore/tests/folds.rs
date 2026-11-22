@@ -149,3 +149,84 @@ fn seeds_reduce_modulo_the_generator_and_zero_acts_as_one() {
         folds_by_spectrum(&pin.meta, 3, u64::MAX % m)
     );
 }
+
+fn letters(mut i: u64) -> String {
+    const ALPHABET: &[u8] = b"ACDEFGHKMNPQRSTVWY";
+    let mut s = String::new();
+    loop {
+        s.push(ALPHABET[(i % 18) as usize] as char);
+        i /= 18;
+        if i == 0 {
+            return s;
+        }
+    }
+}
+
+fn row(file: u32, scan: u64, label: i8, peptide: &str) -> rescore::RowMeta {
+    rescore::RowMeta {
+        label,
+        file,
+        scan,
+        exp_mass: 1000.0,
+        sequence: rescore::sequence_key(peptide),
+    }
+}
+
+#[test]
+fn sequence_key_ignores_flanks_modifications_and_isoleucine() {
+    use rescore::sequence_key;
+    let base = sequence_key("K.PEPTLDEM.R");
+    assert_eq!(sequence_key("PEPTLDEM"), base);
+    assert_eq!(sequence_key("-.PEPTIDEM[15.9949].-"), base);
+    assert_eq!(sequence_key("n[42.0106]PEPTIDEM(UNIMOD:35)"), base);
+    assert_eq!(sequence_key("PEPTIDEM+15.995"), base);
+    assert_ne!(sequence_key("PEPTIDEK"), base);
+}
+
+#[test]
+fn spectra_with_the_same_best_peptide_share_a_fold() {
+    let mut meta = Vec::new();
+    for s in 0..600u64 {
+        let best = format!("K.PEPTWDE{}K.R", letters(s / 6));
+        meta.push(row((s % 2) as u32, s, 1, &best));
+        meta.push(row((s % 2) as u32, s, -1, &format!("K.DCQY{}K.R", letters(s))));
+        meta.push(row((s % 2) as u32, s, 1, &format!("K.QTHER{}K.R", letters(s % 7))));
+    }
+    for seed in [1u64, 42, 7] {
+        let fold = rescore::folds_by_precursor(&meta, 3, seed);
+        for s in 0..600usize {
+            let f = fold[3 * s];
+            assert_eq!(fold[3 * s + 1], f, "rows of one spectrum split");
+            assert_eq!(fold[3 * s + 2], f, "rows of one spectrum split");
+            let first = 3 * (s / 6 * 6);
+            assert_eq!(fold[first], f, "spectra of one best peptide split");
+        }
+        let sizes: Vec<usize> = (0..3u8).map(|f| fold.iter().filter(|&&x| x == f).count()).collect();
+        assert!(sizes.iter().all(|&c| c > 400), "unbalanced folds {sizes:?}");
+    }
+}
+
+#[test]
+fn precursor_folds_fill_every_fold_with_few_units() {
+    let meta: Vec<_> = (0..3u64).map(|s| row(0, s, 1, &format!("PEPTWDE{}", letters(s)))).collect();
+    for seed in [1u64, 2, 3, 42] {
+        let fold = rescore::folds_by_precursor(&meta, 3, seed);
+        let mut seen = [false; 3];
+        for &f in &fold {
+            seen[f as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "seed {seed}: {fold:?}");
+    }
+    let one = vec![row(0, 0, 1, "PEPTIDE"), row(0, 1, -1, "PEPTIDE")];
+    assert_eq!(rescore::folds_by_precursor(&one, 3, 1).len(), 2);
+    assert!(rescore::folds_by_precursor(&[], 3, 1).is_empty());
+}
+
+#[test]
+fn one_dominant_sequence_falls_back_to_spectrum_folds() {
+    let meta: Vec<_> = (0..600u64).map(|s| row(0, s, if s % 2 == 0 { 1 } else { -1 }, "K.PEPTWDE.R")).collect();
+    let fold = rescore::folds_by_precursor(&meta, 3, 42);
+    assert_eq!(fold, rescore::folds_by_spectrum(&meta, 3, 42));
+    let sizes: Vec<usize> = (0..3u8).map(|f| fold.iter().filter(|&&x| x == f).count()).collect();
+    assert!(sizes.iter().all(|&c| c > 150), "{sizes:?}");
+}

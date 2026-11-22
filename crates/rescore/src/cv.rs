@@ -1,6 +1,6 @@
 use crate::budget::Reservation;
 use crate::direction::{init_directions, pin_direction};
-use crate::folds::folds_by_spectrum;
+use crate::folds::folds_by_precursor;
 use crate::normalize::{per_row_sorted, raw_weights, score, Norm};
 use crate::pin::Pin;
 use crate::scores::tdc_cut;
@@ -197,7 +197,7 @@ pub fn train(
 fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, String> {
     let n = pin.meta.len();
     let nf = pin.rows.nfeat();
-    let fold = folds_by_spectrum(&pin.meta, FOLDS, cfg.seed);
+    let fold = folds_by_precursor(&pin.meta, FOLDS, cfg.seed);
     let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
     let folds: Vec<Fold> = (0..FOLDS)
         .into_par_iter()

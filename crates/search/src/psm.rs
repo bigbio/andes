@@ -117,10 +117,13 @@ pub fn tailor_denominator<S: std::hash::BuildHasher>(
     }
 }
 
+/// The candidates a PSM names, primary first; one to a few, so they are stored inline.
+pub type CandidateIdxs = smallvec::SmallVec<[u32; 4]>;
+
 #[derive(Debug, Clone)]
 pub struct PsmMatch {
     pub spectrum_idx: usize,
-    pub candidate_idxs: Vec<u32>,
+    pub candidate_idxs: CandidateIdxs,
     pub charge_used: u8,
     pub mass_error_ppm: f64,
     pub score: f32,
@@ -240,6 +243,20 @@ impl TopNQueue {
     pub fn len(&self) -> usize {
         self.heap.len()
     }
+
+    /// Moves the PSMs into an allocation of exactly their number and frees the reserved one
+    /// whole, so the next queue of the same capacity can reuse it (shrinking in place would
+    /// leave a fragment too small for that). The PSMs and their heap order are unchanged:
+    /// rebuilding an array that is already a heap moves nothing.
+    pub fn shrink_to_fit(&mut self) {
+        if self.heap.len() == self.heap.capacity() {
+            return;
+        }
+        let reserved = std::mem::take(&mut self.heap).into_vec();
+        let mut exact = Vec::with_capacity(reserved.len());
+        exact.extend(reserved);
+        self.heap = BinaryHeap::from(exact);
+    }
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }
@@ -350,7 +367,7 @@ mod tests {
     fn make_match(spectrum_idx: usize, score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![0],
+            candidate_idxs: smallvec::smallvec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
@@ -370,7 +387,7 @@ mod tests {
         let mut q = TopNQueue::new(32);
         for i in 0..20usize {
             let mut m = make_match(i, (i % 3) as f32);
-            m.candidate_idxs = vec![i as u32];
+            m.candidate_idxs = smallvec::smallvec![i as u32];
             q.force_push(m);
         }
         let order = |q: &TopNQueue| -> Vec<u32> {
@@ -384,6 +401,20 @@ mod tests {
         q.update_in_place(|m| m.features.strong_score += 1.0);
         assert_eq!(order(&q), before);
         assert!(q.iter_psms().all(|m| m.features.strong_score == 1.0));
+    }
+
+    #[test]
+    fn shrinking_a_queue_keeps_its_psms_in_order() {
+        let mut q = TopNQueue::new(100);
+        for (i, s) in [3.0, 9.0, 1.0, 7.0, 9.0, 3.0, 3.0, 5.0, 1.0].into_iter().enumerate() {
+            q.push(make_match(i % 4, s));
+        }
+        let before: Vec<usize> = q.iter_psms().map(|p| p.spectrum_idx).collect();
+        q.shrink_to_fit();
+        let after: Vec<usize> = q.iter_psms().map(|p| p.spectrum_idx).collect();
+        assert_eq!(before, after);
+        assert_eq!(q.len(), 9);
+        assert_eq!(q.heap.capacity(), 9);
     }
 
     fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
@@ -459,7 +490,7 @@ mod tests {
         let mut q = TopNQueue::new(1);
         q.push(make_match(0, 100.0));
         let mut secondary = make_match(0, 50.0);
-        secondary.candidate_idxs = vec![1];
+        secondary.candidate_idxs = smallvec::smallvec![1];
         q.force_push(secondary);
         let drained = q.drain_into_vec();
         assert_eq!(
@@ -473,11 +504,11 @@ mod tests {
     fn dedup_pepseq_score_aggregates_candidate_idxs() {
         let mut q = TopNQueue::new(10);
         let mut a = make_match(0, 50.0);
-        a.candidate_idxs = vec![10];
+        a.candidate_idxs = smallvec::smallvec![10];
         let mut b = make_match(0, 50.0);
-        b.candidate_idxs = vec![20];
+        b.candidate_idxs = smallvec::smallvec![20];
         let mut c = make_match(0, 40.0);
-        c.candidate_idxs = vec![30];
+        c.candidate_idxs = smallvec::smallvec![30];
 
         q.push(a);
         q.push(b);
@@ -499,7 +530,7 @@ mod tests {
             .clone();
         score_50.sort();
         assert_eq!(
-            score_50,
+            score_50.to_vec(),
             vec![10, 20],
             "score=50 should aggregate both idxs"
         );
@@ -509,7 +540,7 @@ mod tests {
             .find(|p| (p.score as i32) == 40)
             .unwrap()
             .candidate_idxs;
-        assert_eq!(*score_40, vec![30]);
+        assert_eq!(score_40.to_vec(), vec![30]);
     }
 
     fn simple_dedup_by_score_for_test(psms: Vec<PsmMatch>) -> Vec<PsmMatch> {
@@ -633,7 +664,7 @@ mod tests {
         let mut q = TopNQueue::new(2);
         let low = PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![0],
+            candidate_idxs: smallvec::smallvec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: 50.0,
@@ -650,7 +681,7 @@ mod tests {
             tie_key: 0,
         };
         let mut high = low.clone();
-        high.candidate_idxs = vec![1];
+        high.candidate_idxs = smallvec::smallvec![1];
         high.score = 100.0;
         high.rank_score = 100.0;
         high.features.strong_score = 5.0;
@@ -798,7 +829,7 @@ mod tests {
     fn tied(tie_key: u64, cand: u32) -> PsmMatch {
         let mut m = make_match(0, 10.0);
         m.tie_key = tie_key;
-        m.candidate_idxs = vec![cand];
+        m.candidate_idxs = smallvec::smallvec![cand];
         m
     }
 

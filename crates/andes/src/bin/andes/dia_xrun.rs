@@ -815,6 +815,7 @@ pub(crate) fn finalize(
             stems.len() == 1,
             a.proteins.protein_fdr,
             None,
+            None,
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
         let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();

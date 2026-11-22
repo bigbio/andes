@@ -203,6 +203,9 @@ pub(crate) const ENZYMES: &[(&str, &str)] = &[
     ("nonspecific", ""),
 ];
 
+/// The `--decoy-strategy` of the search and of `andes database`.
+pub(crate) const DEFAULT_DECOY_STRATEGY: &str = "shuffle";
+
 pub(crate) const DECOY_STRATEGIES: &[(&str, &str)] = &[
     ("shuffle", "seeded shuffle of each segment"),
     (
@@ -462,7 +465,8 @@ pub(crate) struct SearchArgs {
 
     /// Protein database: FASTA, or UniProt XML (.xml); either may be gzipped
     ///
-    /// Target sequences only: andes generates the decoys (--decoy-strategy). A UniProt XML
+    /// Target sequences only: andes generates the decoys (--decoy-strategy), unless it is the
+    /// target + decoy FASTA of `andes database`, whose decoys are searched as written. A UniProt XML
     /// database searches like the UniProt FASTA and also carries annotated modification
     /// sites (used by `restrict_to: annotated` modifications) and the entries of the Database
     /// variants options.
@@ -502,7 +506,7 @@ pub(crate) struct SearchArgs {
     /// included) is checked against the target peptides with I and L folded; one that
     /// equals a target is redrawn, and the few that still do are scored as targets. With
     /// none and a target-only database the search has no decoys and warns.
-    #[arg(long, value_name = "STRATEGY", default_value = "shuffle", help_heading = H_SEARCH,
+    #[arg(long, value_name = "STRATEGY", default_value = DEFAULT_DECOY_STRATEGY, help_heading = H_SEARCH,
           value_parser = Listed::new(DECOY_STRATEGIES, parse_decoy_strategy))]
     pub(crate) decoy_strategy: DecoyStrategy,
 
@@ -1361,6 +1365,110 @@ pub(crate) struct RescoreArgs {
     #[arg(value_name = "PERCOLATOR_ARGS", required = true, num_args = 1..,
           trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
+}
+
+/// `andes database`: the target + decoy database of a study or cohort.
+#[derive(Args, Debug)]
+pub(crate) struct DatabaseCmdArgs {
+    /// Target protein FASTA, may be gzipped
+    #[arg(long, value_name = "FILE")]
+    pub(crate) fasta: PathBuf,
+
+    /// Target + decoy FASTA to write
+    ///
+    /// The settings table <stem>.database.parquet and the overlap report
+    /// <stem>.overlap.parquet are written beside it. A search given this FASTA as --database
+    /// reads the settings table and searches these decoys.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) output: PathBuf,
+
+    /// Protease of the searches, as the search's --enzyme
+    #[arg(long, value_name = "ENZYME", default_value = "trypsin",
+          value_parser = Listed::new(ENZYMES, parse_enzyme_list))]
+    pub(crate) enzyme: String,
+
+    /// Peptide ends that must be cleavage sites, as the search's --enzyme-specificity
+    #[arg(long, value_name = "SPECIFICITY", value_enum, ignore_case = true,
+          default_value = "fully")]
+    pub(crate) enzyme_specificity: EnzymeSpecificity,
+
+    /// Shortest peptide, as the search's --min-length
+    #[arg(long, value_name = "N", default_value = "6")]
+    pub(crate) min_length: u32,
+
+    /// Longest peptide, as the search's --max-length
+    #[arg(long, value_name = "N", default_value = "50")]
+    pub(crate) max_length: u32,
+
+    /// Missed cleavages, as the search's --max-missed-cleavages (give 3 for --glyco searches)
+    #[arg(long, value_name = "N", default_value = "2")]
+    pub(crate) max_missed_cleavages: u32,
+
+    /// Another digest the cohort searches these decoys with, as ENZYMES/SPECIFICITY/MIN-MAX/MISSED; repeatable
+    ///
+    /// For example lysc/fully/7-30/2 or trypsin,gluc/semi/6-50/2. The decoys are built for
+    /// the digest of the options above and every decoy peptide that any listed digest
+    /// enumerates is checked against that digest's target peptides; a search may use the
+    /// database with any one of the digests.
+    #[arg(long, value_name = "DIGEST", value_parser = parse_check_digest)]
+    pub(crate) check_digest: Vec<CheckDigest>,
+
+    /// How decoys are generated, as the search's --decoy-strategy
+    #[arg(long, value_name = "STRATEGY", default_value = DEFAULT_DECOY_STRATEGY,
+          value_parser = Listed::new(DECOY_STRATEGIES, parse_decoy_strategy))]
+    pub(crate) decoy_strategy: DecoyStrategy,
+
+    /// Accession prefix of the decoys, as the search's --decoy-prefix
+    #[arg(long, value_name = "PREFIX", default_value = "XXX_", hide_short_help = true)]
+    pub(crate) decoy_prefix: String,
+
+    /// Accession suffix that also marks a decoy, as the search's --decoy-suffix
+    #[arg(long, value_name = "SUFFIX", hide_short_help = true)]
+    pub(crate) decoy_suffix: Option<String>,
+
+    /// Seed of the decoy shuffles, as the search's --decoy-seed.
+    #[arg(long, hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    pub(crate) decoy_seed: u64,
+
+    /// Worker threads [default: the number of logical CPUs]
+    #[arg(long, value_name = "N", default_value_t = num_cpus::get(), hide_default_value = true)]
+    pub(crate) threads: usize,
+}
+
+/// One `--check-digest` of `andes database`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckDigest {
+    pub(crate) enzyme: String,
+    pub(crate) specificity: EnzymeSpecificity,
+    pub(crate) min_length: u32,
+    pub(crate) max_length: u32,
+    pub(crate) max_missed_cleavages: u32,
+}
+
+pub(crate) fn parse_check_digest(s: &str) -> Result<CheckDigest, String> {
+    let usage = || format!("'{s}': expected ENZYMES/SPECIFICITY/MIN-MAX/MISSED, e.g. lysc/fully/7-30/2");
+    let parts: Vec<&str> = s.split('/').map(str::trim).collect();
+    let [enzyme, specificity, lengths, missed] = parts.as_slice() else {
+        return Err(usage());
+    };
+    let enzyme = parse_enzyme_list(enzyme)?;
+    let specificity = <EnzymeSpecificity as clap::ValueEnum>::from_str(specificity, true)
+        .map_err(|_| format!("{}: specificity is fully, semi or non-specific", usage()))?;
+    let (min, max) = lengths
+        .split_once('-')
+        .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
+        .filter(|(a, b)| a <= b)
+        .ok_or_else(|| format!("{}: lengths are MIN-MAX with MIN <= MAX", usage()))?;
+    let missed = missed
+        .parse::<u32>()
+        .map_err(|_| format!("{}: missed cleavages are a number", usage()))?;
+    Ok(CheckDigest {
+        enzyme,
+        specificity,
+        min_length: min,
+        max_length: max,
+        max_missed_cleavages: missed,
+    })
 }
 
 /// `andes inference`: protein groups over the rescored PSMs of one or more runs.

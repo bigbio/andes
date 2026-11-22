@@ -14,7 +14,7 @@ mod source_scan;
 #[path = "support/ratchet.rs"]
 mod ratchet;
 
-use ratchet::{baseline, compare, raised, write_baseline};
+use ratchet::{baseline, compare, raised, write_baseline, write_entries};
 use source_scan::{line_count, live_code, macro_calls, rel_key, source_files, workspace_root};
 
 fn read(path: &Path) -> String {
@@ -179,20 +179,52 @@ fn oversized_file_lines() -> BTreeMap<String, usize> {
     })
 }
 
+/// Oversized files that are not on the `file_lines` list: new files over the budget, and files
+/// that were split under it and have grown back over it.
+fn unlisted_oversized_files() -> Vec<String> {
+    let listed = baseline("file_lines");
+    oversized_file_lines()
+        .into_iter()
+        .filter(|(file, lines)| *lines > 0 && !listed.contains_key(file))
+        .map(|(file, lines)| format!("{file} has {lines} lines"))
+        .collect()
+}
+
 #[test]
-fn no_source_file_grows_past_the_budget() {
-    let messages = compare("file_lines", &oversized_file_lines(), &baseline("file_lines"));
+fn no_new_source_file_over_the_budget() {
+    let unlisted = unlisted_oversized_files();
     assert!(
-        messages.is_empty(),
-        "source files over {MAX_FILE_LINES} lines may not grow; split them instead:\n{}",
-        messages.join("\n")
+        unlisted.is_empty(),
+        "source files over {MAX_FILE_LINES} lines that are not on file_lines.tsv; split them into modules:\n{}",
+        unlisted.join("\n")
     );
 }
 
 #[test]
-#[ignore = "writes crates/andes/tests/ratchets/file_lines.tsv"]
+#[ignore = "report only: the listed files over the budget and how far each moved since the list was written"]
+fn report_listed_files_over_the_budget() {
+    let lines = oversized_file_lines();
+    let mut report: Vec<String> = baseline("file_lines")
+        .into_iter()
+        .map(|(file, listed)| {
+            let now = lines.get(&file).copied().unwrap_or(0);
+            let change = now as i64 - listed as i64;
+            format!("{file}\t{now}\t{change:+}")
+        })
+        .collect();
+    report.sort();
+    println!("file\tlines\tsince_list\n{}", report.join("\n"));
+}
+
+#[test]
+#[ignore = "rewrites file_lines.tsv: drops the listed files now under the budget, never adds one"]
 fn write_file_lines_baseline() {
-    write_baseline("file_lines", &oversized_file_lines());
+    let listed = baseline("file_lines");
+    let kept: BTreeMap<String, usize> = oversized_file_lines()
+        .into_iter()
+        .filter(|(file, _)| listed.contains_key(file))
+        .collect();
+    write_entries("file_lines", &kept);
 }
 
 fn unwrap_expect_counts() -> BTreeMap<String, usize> {

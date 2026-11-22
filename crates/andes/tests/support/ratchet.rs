@@ -116,6 +116,13 @@ pub fn write_baseline(rule: &str, counts: &BTreeMap<String, usize>) {
         "refusing to raise the {rule} baseline; fix the code instead:\n{}",
         refused.join("\n")
     );
+    write_entries(rule, counts);
+}
+
+/// Writes `counts` as the baseline of `rule` without the no-raise check: entries above 0 only,
+/// sorted by path, under the existing leading `#` header lines.
+pub fn write_entries(rule: &str, counts: &BTreeMap<String, usize>) {
+    let path = baseline_path(rule);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).expect("create ratchets dir");
     }

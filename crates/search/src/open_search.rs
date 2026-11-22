@@ -28,6 +28,11 @@ fn nearest_peak(peaks: &[(f64, f32)], mz: f64, tol_da: f64) -> Option<usize> {
         .find(|&j| j < peaks.len() && (peaks[j].0 - mz).abs() <= tol_da)
 }
 
+/// Refines a precursor offset from the localised fragment ions: the median mass error of the
+/// ions that carry the offset, matched within `tol_da`, is subtracted, up to `MAX_REFINE_DA`.
+/// A matching window wider than `MAX_REFINE_DA` (low-resolution ion-trap MS2) admits fragment
+/// errors larger than any correction the refinement may apply, so the median is noise at that
+/// scale and the offset measured on the precursor is kept.
 pub fn refine_offset(
     peptide: &Peptide,
     site0: usize,
@@ -36,7 +41,7 @@ pub fn refine_offset(
     tol_da: f64,
 ) -> f64 {
     let n = peptide.length();
-    if !delta.is_finite() || site0 >= n || n < 2 {
+    if !delta.is_finite() || site0 >= n || n < 2 || !(tol_da <= MAX_REFINE_DA) {
         return delta;
     }
     let base: Vec<f64> = peptide
@@ -364,6 +369,17 @@ mod tests {
             loc.delta
         );
         assert!(loc.margin > 0.1, "margin {}", loc.margin);
+    }
+
+    #[test]
+    fn a_low_resolution_fragment_window_keeps_the_precursor_offset() {
+        let seq = "PEPTIDEK";
+        let pep = peptide(seq);
+        let true_delta = 15.99491;
+        let inferred = true_delta + 0.025;
+        let peaks = sorted_peaks(&spectrum(seq, 4, true_delta));
+        assert_eq!(refine_offset(&pep, 4, inferred, &peaks, 0.5), inferred);
+        assert_eq!(refine_offset(&pep, 4, inferred, &peaks, f64::NAN), inferred);
     }
 
     #[test]

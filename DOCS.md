@@ -970,7 +970,9 @@ The run summary gives the precursor tolerance as the offset window.
   - With several input files, each run (the PIN's `FileName`) is calibrated on its own zero-offset
     PSMs before the runs are pooled. A run with fewer than 20 such PSMs uses the pooled shift.
   - An offset that localisation refined from the fragment ions keeps its value. The fragments are
-    already recentred.
+    already recentred. The refinement runs only when the fragment matching window is at most 0.1 Da
+    (the largest correction it may apply); with low-resolution ion-trap MS2 (about 0.5 Da) the
+    offset measured on the precursor is kept.
   - The PIN marks such a row by a `DeltaMass` that differs from
     `ExpMass − isotope_error × 1.003355 − CalcMass` by more than 0.0005 Da.
 - **Peaks.** The calibrated offsets of the accepted target PSMs are grouped into peaks.

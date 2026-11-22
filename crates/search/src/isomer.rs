@@ -94,7 +94,7 @@ mod tests {
     fn psm(idx: u32, charge: u8) -> PsmMatch {
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![idx],
+            candidate_idxs: smallvec::smallvec![idx],
             charge_used: charge,
             mass_error_ppm: 0.0,
             score: 0.0,

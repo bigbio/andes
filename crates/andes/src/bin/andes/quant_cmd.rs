@@ -1649,14 +1649,6 @@ fn run_extract(a: QuantExtractArgs) -> Result<(), String> {
     .map(|_| ())
 }
 
-fn release_free_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: malloc_trim only releases free heap memory; it is thread safe.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
 fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     let dia_runs = crate::dia_xrun::study_runs(&a.quant_dir)?;
     if !dia_runs.is_empty() {
@@ -1722,7 +1714,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
         _ => None,
     };
     if inf.is_some() {
-        release_free_memory();
+        crate::memlimit::release_free_memory();
     }
     let groups = inf.as_ref().map(|inf| ProteinGroups {
         inf,

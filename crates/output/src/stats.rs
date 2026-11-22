@@ -346,18 +346,84 @@ pub fn classify_mods(
     }
 }
 
-/// The facts of the `wanted` PSMs. `run_shift_ppm` is each run's precursor calibration shift;
-/// a run past its end uses `params.precursor_mass_shift_ppm`.
+/// One emitted PIN row reduced to what [`psm_facts_of_rows`] reads: the parts of its SpecId,
+/// and the matched candidate, charge, isotope offset and precursor m/z. 24 bytes a row, where
+/// the queue's `PsmMatch` with its features is over 300.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactRow {
+    rank: u32,
+    row_idx: u32,
+    candidate: u32,
+    charge: u8,
+    isotope: i8,
+    multi_row: bool,
+    has_mz_override: bool,
+    mz_override: f64,
+}
+
+/// The emitted PIN rows of each spectrum (indexed like the queues), in PIN order.
+pub type FactRows = Vec<Box<[FactRow]>>;
+
+/// The emitted PIN rows of every spectrum as [`FactRow`]s.
+pub fn fact_rows(
+    spectra: &[Spectrum],
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+) -> FactRows {
+    use crate::row_context::emitted_rows;
+    queues
+        .par_iter()
+        .enumerate()
+        .map(|(i, q)| {
+            if q.is_empty() {
+                return Box::default();
+            }
+            let psms = q.clone().into_rank_sorted_vec();
+            let ranked = emitted_rows(&spectra[i], &psms, candidates);
+            let multi_row = ranked.len() > 1;
+            ranked
+                .into_iter()
+                .enumerate()
+                .map(|(row_idx, (rank, psm))| FactRow {
+                    rank,
+                    row_idx: row_idx as u32,
+                    candidate: psm.primary_candidate_idx(),
+                    charge: psm.charge_used,
+                    isotope: psm.isotope_offset,
+                    multi_row,
+                    has_mz_override: psm.precursor_mz_override.is_some(),
+                    mz_override: psm.precursor_mz_override.unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .collect()
+}
+
 pub fn psm_facts(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     candidates: &[Candidate],
     params: &SearchParams,
     run_ends: &[usize],
-    run_shift_ppm: &[f64],
+    file_cal: &[search::FileCalibration],
     wanted: &HashSet<&str>,
 ) -> HashMap<String, PsmFacts> {
-    use crate::pin::{emitted_spec_ids, precursor_error};
+    let rows = fact_rows(spectra, queues, candidates);
+    psm_facts_of_rows(spectra, &rows, candidates, params, run_ends, file_cal, wanted)
+}
+
+/// The [`PsmFacts`] of the `wanted` SpecIds among `rows`. `file_cal` holds each run's precursor
+/// calibration; a run past its end (or no per-file calibration) uses `params`' shift.
+pub fn psm_facts_of_rows(
+    spectra: &[Spectrum],
+    rows: &[Box<[FactRow]>],
+    candidates: &[Candidate],
+    params: &SearchParams,
+    run_ends: &[usize],
+    file_cal: &[search::FileCalibration],
+    wanted: &HashSet<&str>,
+) -> HashMap<String, PsmFacts> {
+    use crate::pin::{emitted_spec_id, precursor_error};
     use crate::qpx::{bare_sequence, peptidoform_string};
     use model::mass::{ISOTOPE, PROTON};
     use search::precursor_cal::adjusted_observed_neutral_mass;
@@ -365,82 +431,76 @@ pub fn psm_facts(
     let fixed = FixedModSpec::declared(params);
     let declared_mods = params.aa_set.distinct_mods();
     let declared: Vec<&str> = declared_mods.iter().map(|m| m.name.as_str()).collect();
-    (0..queues.len())
+    (0..rows.len())
         .into_par_iter()
-        .filter(|&i| !queues[i].is_empty())
-        .flat_map_iter(|i| {
+        .flat_map_iter(|i| rows[i].iter().map(move |row| (i, row)))
+        .filter_map(|(i, row)| {
             let spec = &spectra[i];
-            let psms = queues[i].clone().into_rank_sorted_vec();
-            let run = run_ends.partition_point(|&end| end <= i);
-            let shift_ppm = run_shift_ppm
-                .get(run)
-                .copied()
-                .unwrap_or(params.precursor_mass_shift_ppm);
-            let mut out = Vec::new();
-            for (id, psm) in emitted_spec_ids(spec, &psms, candidates) {
-                if !wanted.contains(id.as_str()) {
-                    continue;
-                }
-                let cand = &candidates[psm.primary_candidate_idx() as usize];
-                let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-                let (dm, theo_mz) = precursor_error(
-                    precursor_mz,
-                    f64::from(psm.charge_used),
-                    i32::from(psm.isotope_offset),
-                    cand.peptide.mass(),
-                );
-                let (_, _, enz_int) = crate::percolator_enz::enzyme_features(
-                    cand,
-                    params.enzyme,
-                    &params.extra_enzymes,
-                );
-                let residues: Vec<(u8, Option<&str>)> = cand
-                    .peptide
-                    .residues
-                    .iter()
-                    .map(|aa| (aa.residue, aa.mod_.map(|m| m.name.as_str())))
-                    .collect();
-                let mods = classify_mods(
-                    &residues,
-                    cand.is_protein_n_term,
-                    cand.is_protein_c_term,
-                    &fixed,
-                    &declared,
-                );
-                let ppm = dm / theo_mz * 1e6;
-                let ppm_calibrated = if shift_ppm == 0.0 {
-                    ppm
-                } else {
-                    let z = f64::from(psm.charge_used);
-                    let observed =
-                        adjusted_observed_neutral_mass(precursor_mz * z - z * PROTON, shift_ppm);
-                    let dm =
-                        (observed - ISOTOPE * f64::from(psm.isotope_offset) - cand.peptide.mass())
-                            / z;
-                    dm / theo_mz * 1e6
-                };
-                out.push((
-                    id,
-                    PsmFacts {
-                        run,
-                        charge: psm.charge_used,
-                        peptidoform: peptidoform_string(cand),
-                        sequence: bare_sequence(cand),
-                        ppm,
-                        ppm_calibrated,
-                        spectrum_charge: spec
-                            .precursor_charge
-                            .and_then(|z| u8::try_from(z).ok())
-                            .filter(|&z| z > 0),
-                        secondary: psm.precursor_mz_override.is_some(),
-                        missed_cleavages: enz_int.max(0) as u32,
-                        variable_mods: mods.variable,
-                        fixed_carried: mods.fixed_carried,
-                        fixed_eligible: mods.fixed_eligible,
-                    },
-                ));
+            let id = emitted_spec_id(spec, row.rank, row.row_idx as usize, row.multi_row);
+            if !wanted.contains(id.as_str()) {
+                return None;
             }
-            out
+            let run = run_ends.partition_point(|&end| end <= i);
+            let shift_ppm = file_cal
+                .get(run)
+                .map_or(params.precursor_mass_shift_ppm, |f| f.shift_ppm);
+            let cand = &candidates[row.candidate as usize];
+            let precursor_mz = if row.has_mz_override {
+                row.mz_override
+            } else {
+                spec.precursor_mz
+            };
+            let (dm, theo_mz) = precursor_error(
+                precursor_mz,
+                f64::from(row.charge),
+                i32::from(row.isotope),
+                cand.peptide.mass(),
+            );
+            let (_, _, enz_int) =
+                crate::percolator_enz::enzyme_features(cand, params.enzyme, &params.extra_enzymes);
+            let residues: Vec<(u8, Option<&str>)> = cand
+                .peptide
+                .residues
+                .iter()
+                .map(|aa| (aa.residue, aa.mod_.map(|m| m.name.as_str())))
+                .collect();
+            let mods = classify_mods(
+                &residues,
+                cand.is_protein_n_term,
+                cand.is_protein_c_term,
+                &fixed,
+                &declared,
+            );
+            let ppm = dm / theo_mz * 1e6;
+            let ppm_calibrated = if shift_ppm == 0.0 {
+                ppm
+            } else {
+                let z = f64::from(row.charge);
+                let observed =
+                    adjusted_observed_neutral_mass(precursor_mz * z - z * PROTON, shift_ppm);
+                let dm = (observed - ISOTOPE * f64::from(row.isotope) - cand.peptide.mass()) / z;
+                dm / theo_mz * 1e6
+            };
+            Some((
+                id,
+                PsmFacts {
+                    run,
+                    charge: row.charge,
+                    peptidoform: peptidoform_string(cand),
+                    sequence: bare_sequence(cand),
+                    ppm,
+                    ppm_calibrated,
+                    spectrum_charge: spec
+                        .precursor_charge
+                        .and_then(|z| u8::try_from(z).ok())
+                        .filter(|&z| z > 0),
+                    secondary: row.has_mz_override,
+                    missed_cleavages: enz_int.max(0) as u32,
+                    variable_mods: mods.variable,
+                    fixed_carried: mods.fixed_carried,
+                    fixed_eligible: mods.fixed_eligible,
+                },
+            ))
         })
         .collect()
 }

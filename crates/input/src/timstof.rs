@@ -169,6 +169,7 @@ pub(crate) fn finite_sorted_peaks(peaks: impl Iterator<Item = (f64, f32)>) -> Ve
     if peaks.windows(2).any(|w| w[0].0 > w[1].0) {
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
+    peaks.shrink_to_fit();
     peaks
 }
 

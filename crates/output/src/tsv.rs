@@ -330,7 +330,7 @@ mod tests {
     fn make_psm(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idxs: vec![0],
+            candidate_idxs: vec![0].into(),
             charge_used: 2,
             mass_error_ppm: 1.5,
             score,
@@ -491,7 +491,7 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         for (cidx, score) in [(0u32, 10.0f32), (1, 8.0), (2, 6.0)] {
             let mut psm = make_psm(0, score, score);
-            psm.candidate_idxs = vec![cidx];
+            psm.candidate_idxs = vec![cidx].into();
             queue.push(psm);
         }
         let queues = vec![queue];
@@ -550,7 +550,7 @@ mod tests {
 
         let psm = PsmMatch {
             spectrum_idx: 0,
-            candidate_idxs: vec![0],
+            candidate_idxs: vec![0].into(),
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: 10.0,

@@ -36,7 +36,8 @@ parquet = "53"
 tempfile = "3.10"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-# `malloc_trim` after the protein inference of `quant finalize`.
+# `malloc_trim` after the protein inference of `quant finalize` and between the stages of a
+# `--dia` search.
 libc = "0.2"
 
 [features]

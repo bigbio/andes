@@ -344,15 +344,18 @@ impl Predictors {
                 let mut per_run = Vec::new();
                 let mut run_cals: Vec<Option<RtCalibration>> = Vec::with_capacity(anchors.len());
                 for (run, rows) in anchors.iter().enumerate() {
-                    let pts: Vec<(f64, f64)> = rows
+                    let anchor_pts: Vec<(usize, f64, f64)> = rows
                         .iter()
                         .filter_map(|&i| {
                             let f = table.rows[i].form;
-                            (f != NONE).then(|| (raw[f as usize] as f64, obs[i]))
+                            (f != NONE).then(|| (i, raw[f as usize] as f64, obs[i]))
                         })
-                        .filter(|(p, o)| p.is_finite() && o.is_finite())
+                        .filter(|(_, p, o)| p.is_finite() && o.is_finite())
                         .collect();
+                    let pts: Vec<(f64, f64)> =
+                        anchor_pts.iter().map(|&(_, p, o)| (p, o)).collect();
                     let cal = RtCalibration::fit(&pts);
+                    let held_out = cross_fit_calibrations(&table.rows, &anchor_pts);
                     let resid = cal.as_ref().map(|c| {
                         let mut r: Vec<f64> =
                             pts.iter().map(|(p, o)| (o - c.apply(*p)).abs()).collect();
@@ -368,13 +371,18 @@ impl Predictors {
                     ));
                     run_cals.push(cal.clone());
                     if let Some(c) = cal {
+                        let fold_of: HashMap<usize, usize> = anchor_pts
+                            .iter()
+                            .map(|&(i, _, _)| (i, rt_fold(&table.rows[i])))
+                            .collect();
                         for (i, r) in table.rows.iter().enumerate() {
                             if r.spec == NONE || run_of(r.spec) != run || r.form == NONE {
                                 continue;
                             }
                             let p = raw[r.form as usize] as f64;
                             if p.is_finite() && obs[i].is_finite() {
-                                cal_rt[i] = c.apply(p);
+                                let own = fold_of.get(&i).and_then(|&k| held_out[k].as_ref());
+                                cal_rt[i] = own.unwrap_or(&c).apply(p);
                                 diff[i] = (obs[i] - cal_rt[i]).abs();
                             }
                         }
@@ -844,6 +852,33 @@ pub(crate) fn read_pin(
     })
 }
 
+/// Folds of the RT calibration's cross-fit; a peptidoform's anchors share a fold.
+const RT_FOLDS: usize = 3;
+
+fn rt_fold(row: &PinRow) -> usize {
+    ((u64::from(row.form).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) % RT_FOLDS as u64) as usize
+}
+
+/// The run's RT calibration fitted without each fold's anchors: an anchor's `cal_rt` comes
+/// from the calibration that did not see it, so the rescorer's RT error of an anchor is not
+/// shrunk by its own fit. `None` for a fold whose other anchors are too few to fit; that fold
+/// takes the calibration of all anchors.
+fn cross_fit_calibrations(
+    rows: &[PinRow],
+    anchors: &[(usize, f64, f64)],
+) -> Vec<Option<RtCalibration>> {
+    (0..RT_FOLDS)
+        .map(|k| {
+            let train: Vec<(f64, f64)> = anchors
+                .iter()
+                .filter(|&&(i, _, _)| rt_fold(&rows[i]) != k)
+                .map(|&(_, p, o)| (p, o))
+                .collect();
+            RtCalibration::fit(&train)
+        })
+        .collect()
+}
+
 pub(crate) fn anchor_rows(
     rows: &[PinRow],
     n_runs: usize,
@@ -1165,6 +1200,36 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].len(), 39);
         assert!(a[0].iter().all(|&i| i % 2 == 0 && !rows[i].decoy));
+    }
+
+    #[test]
+    fn an_anchor_is_calibrated_without_its_own_retention_time() {
+        let rows: Vec<PinRow> = (0..90u32)
+            .map(|f| PinRow {
+                spec: f,
+                form: f,
+                charge: 2,
+                decoy: false,
+                score: 1.0,
+            })
+            .collect();
+        let anchors: Vec<(usize, f64, f64)> = (0..90)
+            .map(|i| (i, i as f64, if i == 45 { 90.0 } else { i as f64 }))
+            .collect();
+        let held = cross_fit_calibrations(&rows, &anchors);
+        for (k, cal) in held.iter().enumerate() {
+            let outside: Vec<(f64, f64)> = anchors
+                .iter()
+                .filter(|&&(i, _, _)| rt_fold(&rows[i]) != k)
+                .map(|&(_, p, o)| (p, o))
+                .collect();
+            assert_eq!(cal, &RtCalibration::fit(&outside));
+        }
+        let all: Vec<(f64, f64)> = anchors.iter().map(|&(_, p, o)| (p, o)).collect();
+        let full = RtCalibration::fit(&all).unwrap();
+        let own = held[rt_fold(&rows[45])].as_ref().unwrap();
+        assert!((own.apply(45.0) - 45.0).abs() < 1e-9);
+        assert!(full.apply(45.0) > 50.0, "{}", full.apply(45.0));
     }
 
     #[test]

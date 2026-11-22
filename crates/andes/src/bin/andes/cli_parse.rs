@@ -1,3 +1,6 @@
+//! Value parsers for the search command-line arguments: numeric ranges, tolerances with units,
+//! charge and isotope-error ranges and enumerated values. `cli.rs` declares the arguments and
+//! re-exports these parsers; config files reuse them so both paths accept the same text.
 use model::Tolerance;
 
 pub(crate) fn dash_sep_index(s: &str) -> Option<usize> {

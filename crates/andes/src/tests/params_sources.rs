@@ -151,7 +151,8 @@ fn flag_text(arg: &clap::Arg) -> Option<String> {
     arg.get_long().map(|l| format!("--{l}"))
 }
 
-/// Values worth trying for an argument, most specific first: the row's example, defaults, the listed possible
+/// Values worth trying for an argument, most specific first: the row's example, defaults, the
+/// listed possible
 /// values (`false` before `true`), then a sample of the unit.
 fn candidates(arg: &clap::Arg, unit: crate::params::Unit, example: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = example.map(String::from).into_iter().collect();

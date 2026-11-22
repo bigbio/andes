@@ -19,6 +19,7 @@ pub mod precursor_matching;
 pub mod precursor_mono;
 pub mod psm;
 pub mod refine_config;
+mod refine_mods;
 pub mod refinement;
 pub mod search_index;
 pub mod search_params;

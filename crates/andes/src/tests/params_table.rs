@@ -33,7 +33,7 @@ fn yaml_scalar(v: &str) -> String {
     }
 }
 
-fn unit_sample(unit: Unit) -> &'static str {
+pub(crate) fn unit_sample(unit: Unit) -> &'static str {
     match unit {
         Unit::PpmOrDa => "20ppm",
         Unit::Fraction => "0.5",

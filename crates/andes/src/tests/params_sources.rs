@@ -143,3 +143,112 @@ fn recorded_values_parse_as_config() {
         }
     }
 }
+
+/// Parameters whose sample cannot be given alone, with the reason; none today.
+const EXEMPT: &[(&str, &str)] = &[];
+
+fn flag_text(arg: &clap::Arg) -> Option<String> {
+    arg.get_long().map(|l| format!("--{l}"))
+}
+
+/// Values worth trying for an argument, most specific first: defaults, the listed possible
+/// values (`false` before `true`), then a sample of the unit.
+fn candidates(arg: &clap::Arg, unit: crate::params::Unit) -> Vec<String> {
+    let mut out: Vec<String> = arg
+        .get_default_values()
+        .iter()
+        .map(|v| v.to_string_lossy().into_owned())
+        .collect();
+    let mut possible: Vec<String> = arg
+        .get_possible_values()
+        .iter()
+        .map(|v| v.get_name().to_string())
+        .collect();
+    possible.sort_by_key(|v| v != "false");
+    out.extend(possible);
+    out.push(crate::params_table::unit_sample(unit).to_string());
+    out.extend(["x", "1", "0.5", "20ppm"].map(String::from));
+    out
+}
+
+fn takes_no_value(arg: &clap::Arg) -> bool {
+    arg.get_num_args().is_some_and(|n| n.max_values() == 0)
+}
+
+#[test]
+fn every_cli_value_records_as_a_config_value() {
+    let mut cmd = crate::TopCli::command();
+    cmd.build();
+    let base = [
+        ("--database", "y"),
+        ("--output-pin", "o"),
+        ("--spectrum", "x"),
+    ];
+    let mut failures = Vec::new();
+    for p in crate::params::PARAMS
+        .iter()
+        .filter(|p| p.section != crate::params::Section::CliOnly)
+    {
+        if EXEMPT.iter().any(|(id, _)| *id == p.id) {
+            continue;
+        }
+        let Some(arg) = cmd.get_arguments().find(|a| a.get_id() == p.id) else {
+            failures.push(format!("{}: no clap argument", p.id));
+            continue;
+        };
+        let Some(flag) = flag_text(arg) else {
+            failures.push(format!("{}: no long flag", p.id));
+            continue;
+        };
+        let delimiter = arg.get_value_delimiter();
+        let mut tried: Vec<Vec<String>> = Vec::new();
+        if takes_no_value(arg) {
+            tried.push(vec![flag.clone()]);
+        } else {
+            let pieces = candidates(arg, p.unit);
+            for (i, piece) in pieces.iter().enumerate() {
+                let value = match delimiter {
+                    Some(d) => format!("{piece}{d}{}", pieces.get(i + 1).unwrap_or(piece)),
+                    None => piece.clone(),
+                };
+                tried.push(vec![flag.clone(), value]);
+            }
+        }
+        let mut last_error = String::new();
+        let mut parsed = None;
+        for t in &tried {
+            let mut all: Vec<String> = vec!["andes".to_string()];
+            for &(f, v) in base.iter().filter(|b| b.0 != flag) {
+                all.extend([f.to_string(), v.to_string()]);
+            }
+            all.extend(t.iter().cloned());
+            match crate::TopCli::command().try_get_matches_from(all) {
+                Ok(m) => {
+                    parsed = Some(m);
+                    break;
+                }
+                Err(e) => last_error = e.to_string(),
+            }
+        }
+        let Some(m) = parsed else {
+            failures.push(format!("{}: no sample parses ({last_error})", p.id));
+            continue;
+        };
+        let sources = from_command_line(&m);
+        let Some(value) = sources.value(p.id) else {
+            failures.push(format!("{}: nothing recorded", p.id));
+            continue;
+        };
+        if delimiter.is_some() && !matches!(value, Value::Sequence(v) if v.len() == 2) {
+            failures.push(format!("{}: a delimited list recorded as {value:?}", p.id));
+        }
+        let Some(yaml) = config_text(p.id, value) else {
+            failures.push(format!("{}: no config text", p.id));
+            continue;
+        };
+        if let Err(e) = RunConfig::from_yaml_str(&yaml) {
+            failures.push(format!("{}: recorded {yaml:?}: {e}", p.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

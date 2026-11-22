@@ -87,21 +87,27 @@ pub fn from_command_line(m: &clap::ArgMatches) -> ParamSources {
     cmd.build();
     let mut out = ParamSources::default();
     for p in PARAMS {
-        let given = matches!(m.try_contains_id(p.id), Ok(true))
-            && m.value_source(p.id) == Some(ValueSource::CommandLine);
         let Some(arg) = cmd.get_arguments().find(|a| a.get_id() == p.id) else {
+            debug_assert!(false, "`{}` has a row but no clap argument", p.id);
             continue;
         };
+        let given = matches!(m.try_contains_id(p.id), Ok(true))
+            && m.value_source(p.id) == Some(ValueSource::CommandLine);
         if !given {
             continue;
         }
-        let value = if matches!(arg.get_action(), ArgAction::SetTrue | ArgAction::SetFalse) {
-            Value::Bool(m.get_flag(p.id))
+        let value = if let Ok(Some(flag)) = m.try_get_one::<bool>(p.id) {
+            Value::Bool(*flag)
         } else {
+            let delimiter = arg.get_value_delimiter();
             let raw: Vec<String> = m
                 .get_raw(p.id)
                 .map(|vals| vals.map(|v| v.to_string_lossy().into_owned()).collect())
                 .unwrap_or_default();
+            let raw: Vec<String> = match delimiter {
+                Some(d) => raw.iter().flat_map(|r| r.split(d)).map(str::to_string).collect(),
+                None => raw,
+            };
             let typed = |t: &String| typed_text(p.unit, t);
             if matches!(p.id, "fixed_mods" | "variable_mods") {
                 let joined = raw.join(", ");
@@ -126,7 +132,7 @@ fn takes_several(arg: &clap::Arg) -> bool {
         || arg.get_num_args().is_some_and(|n| n.max_values() > 1)
 }
 
-/// A YAML number when the unit is numeric and the text is a number, otherwise the text.
+/// A YAML number when the unit is numeric (a charge range such as `2..5` stays text) and the text is a number, otherwise the text.
 fn typed_text(unit: Unit, text: &str) -> Value {
     let numeric = matches!(
         unit,
@@ -138,6 +144,7 @@ fn typed_text(unit: Unit, text: &str) -> Value {
             | Unit::Seconds
             | Unit::Ppm
             | Unit::Da
+            | Unit::Charge
     );
     let number = || match text.parse::<i64>() {
         Ok(i) => Some(Value::from(i)),

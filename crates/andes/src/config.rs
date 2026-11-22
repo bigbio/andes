@@ -271,14 +271,14 @@ pub fn apply_db(
     );
     if let Some(items) = &cfg.search.fixed_mods {
         if !cli_set(m, "fixed_mods") {
-            src.record_config("fixed_mods", &cfg.written);
             db.fixed_mods = Some(mod_list("search.fixed_mods", items, true)?);
+            src.record_config("fixed_mods", &cfg.written);
         }
     }
     if let Some(items) = &cfg.search.variable_mods {
         if !cli_set(m, "variable_mods") {
-            src.record_config("variable_mods", &cfg.written);
             db.variable_mods = Some(mod_list("search.variable_mods", items, false)?);
+            src.record_config("variable_mods", &cfg.written);
         }
     }
     set!("decoy_prefix", decoy_prefix, cfg.decoys.prefix);
@@ -537,11 +537,11 @@ pub fn apply(
     );
     if let Some(list) = cfg.rescoring.predict {
         if !cli_set(m, "predict") {
-            src.record_config("predict", &cfg.written);
             args.predict = list
                 .iter()
                 .map(|s| crate::cli::parse_enum("predict entry", s, true))
                 .collect::<Result<_, _>>()?;
+            src.record_config("predict", &cfg.written);
         }
     }
     set_opt!(

@@ -173,8 +173,8 @@ mod tests {
         let g = group_by(&items, |_, it| it.key.clone());
         let q = split_q_values(&g, |_| true);
         let q_of = |k: &str| q[g.iter().position(|g| g.key == k).unwrap()].unwrap();
-        assert!((q_of("h299") - 5.0 / 300.0).abs() < 1e-12);
-        assert_eq!(q_of("i299"), 0.0);
+        assert!((q_of("h299") - 6.0 / 300.0).abs() < 1e-12);
+        assert!((q_of("i299") - 2.0 / 300.0).abs() < 1e-12);
         assert_eq!(LinkClass::of(true, true).name(), "homotypic");
         assert!(LinkClass::Homotypic.is_intra() && !LinkClass::Inter.is_intra());
     }

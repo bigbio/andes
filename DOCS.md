@@ -109,7 +109,7 @@ the file; use `--model-store` plus `--model` for an unbundled model.
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--optimize` | flag | *(off)* | Parameter search on a sample of the run: first the precursor tolerance (5/10/20/50 ppm, at the resolved top-N and charge range), then top-N (1/2/3/5 and the resolved value) x charge range (the resolved range and `2..=3`). Each combination's PIN is rescored with the native Percolator engine (in `--temp-dir`, removed afterwards); the combination with the most target PSMs at `q ≤ 0.01` is used for the whole run. On a tie the resolved value wins. The tolerance stage is skipped with `--open-search` (the tolerance is the offset window) and for a Da tolerance; the top-N/charge stage still runs on the sample. Refused with `--glyco`. |
-| `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML); other formats fall back to the first spectra. |
+| `--optimize-sample` | integer | `5000` | Spectra the grid scores, taken every k-th across the file (mzML and Thermo .raw); other formats fall back to the first 1,000 spectra. |
 
 This is the parameter-optimization step of MSFragger's open-search pipeline (Yu et al., *Nat.
 Commun.* 2020), scoped to the parameters andes does not derive from the data. The **fragment**

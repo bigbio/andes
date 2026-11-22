@@ -151,14 +151,15 @@ fn flag_text(arg: &clap::Arg) -> Option<String> {
     arg.get_long().map(|l| format!("--{l}"))
 }
 
-/// Values worth trying for an argument, most specific first: defaults, the listed possible
+/// Values worth trying for an argument, most specific first: the row's example, defaults, the listed possible
 /// values (`false` before `true`), then a sample of the unit.
-fn candidates(arg: &clap::Arg, unit: crate::params::Unit) -> Vec<String> {
-    let mut out: Vec<String> = arg
-        .get_default_values()
-        .iter()
-        .map(|v| v.to_string_lossy().into_owned())
-        .collect();
+fn candidates(arg: &clap::Arg, unit: crate::params::Unit, example: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = example.map(String::from).into_iter().collect();
+    out.extend(
+        arg.get_default_values()
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned()),
+    );
     let mut possible: Vec<String> = arg
         .get_possible_values()
         .iter()
@@ -205,7 +206,7 @@ fn every_cli_value_records_as_a_config_value() {
         if takes_no_value(arg) {
             tried.push(vec![flag.clone()]);
         } else {
-            let pieces = candidates(arg, p.unit);
+            let pieces = candidates(arg, p.unit, p.example);
             for (i, piece) in pieces.iter().enumerate() {
                 let value = match delimiter {
                     Some(d) => format!("{piece}{d}{}", pieces.get(i + 1).unwrap_or(piece)),

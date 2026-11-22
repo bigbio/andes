@@ -110,6 +110,11 @@ const fn row(
     }
 }
 
+const fn with_example(mut p: ParamSpec, example: &'static str) -> ParamSpec {
+    p.example = Some(example);
+    p
+}
+
 /// The row of the argument with clap id `id`.
 pub fn spec(id: &str) -> Option<&'static ParamSpec> {
     PARAMS.iter().find(|p| p.id == id)
@@ -132,11 +137,11 @@ pub const PARAMS: &[ParamSpec] = &[
     row("output_parquet", Section::Io, "output_parquet", Unit::Path, None, Unset::Off, None),
     row("temp_dir", Section::Io, "temp_dir", Unit::Path, None, Unset::Auto("the directory of the outputs"), None),
     row("enzyme", Section::Search, "enzyme", Unit::None, Some("comma list of protease names"), Unset::ClapDefault, Some("Java -e")),
-    row("fixed_mods", Section::Search, "fixed_mods", Unit::None, Some("list of Name (sites)"), Unset::Auto("Carbamidomethyl (C)"), Some("Java -mod <FILE>")),
-    row("variable_mods", Section::Search, "variable_mods", Unit::None, Some("list of Name (sites)"), Unset::Auto("Oxidation (M), Acetyl (Protein N-term)"), Some("Java -mod <FILE>")),
+    with_example(row("fixed_mods", Section::Search, "fixed_mods", Unit::None, Some("list of Name (sites)"), Unset::Auto("Carbamidomethyl (C)"), Some("Java -mod <FILE>")), "Carbamidomethyl (C)"),
+    with_example(row("variable_mods", Section::Search, "variable_mods", Unit::None, Some("list of Name (sites)"), Unset::Auto("Oxidation (M), Acetyl (Protein N-term)"), Some("Java -mod <FILE>")), "Oxidation (M)"),
     row("precursor_tol", Section::Search, "precursor_tol", Unit::PpmOrDa, Some("> 0, VALUE+unit, e.g. 20ppm or 0.02da"), Unset::ClapDefault, Some("Java -t 20ppm")),
     row("charge", Section::Search, "charge", Unit::Charge, Some("MIN..MAX, 1..50, MIN <= MAX"), Unset::ClapDefault, Some("no direct Java flag; set via param file in Java")),
-    row("isotope_error", Section::Search, "isotope_error", Unit::None, Some("MIN..MAX, MIN <= MAX"), Unset::Auto("-1..2, 0..2 with --glyco or --xl"), Some("Java -ti -1,2")),
+    with_example(row("isotope_error", Section::Search, "isotope_error", Unit::None, Some("MIN..MAX, MIN <= MAX"), Unset::Auto("-1..2, 0..2 with --glyco or --xl"), Some("Java -ti -1,2")), "0..1"),
     row("open_search", Section::Search, "open_search", Unit::None, None, Unset::Off, None),
     row("open_search_delta", Section::Search, "open_search_delta", Unit::Da, Some("MIN..MAX in Da, contains 0, width <= 2000"), Unset::ClapDefault, None),
     row("open_search_top_k", Section::Search, "open_search_top_k", Unit::Count, None, Unset::ClapDefault, None),

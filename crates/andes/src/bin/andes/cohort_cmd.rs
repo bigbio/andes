@@ -1540,7 +1540,7 @@ mod tests {
         let mut rows = vec![CsmRow {
             run: "A.r1".into(),
             table: 0,
-            scan: "7".into(),
+            spec_id: "s7".into(),
             spectrum: "A.r1/s7".into(),
             class: xl::decoy::PairClass::TT,
             link: xl::rollup::LinkClass::Intra,

@@ -2,11 +2,11 @@ use std::io::BufRead;
 
 use model::{PriorTier, Protein, ProteinDb, SiteAnchor};
 
-use crate::annotation::{change_label, KnockoffOptions};
-use crate::annotations_file::{
+use crate::annotations::entries::{change_label, KnockoffOptions};
+use crate::annotations::{
     add_claims, sequence_md5, AnnotationLoadStats, AnnotationsError, Row,
 };
-use crate::uniprot_ptm::{clean_description, ptm_mass};
+use crate::uniprot::ptm::{clean_description, ptm_mass};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PeffLoadStats {

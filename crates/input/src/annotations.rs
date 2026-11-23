@@ -1,3 +1,5 @@
+pub mod entries;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
@@ -13,7 +15,7 @@ use model::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::annotation::{
+use crate::annotations::entries::{
     build_entry, knockoff_annotations, primary_accession, KnockoffOptions, KNOCKOFF_MIN_DISTANCE,
 };
 

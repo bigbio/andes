@@ -2,36 +2,28 @@
 //! protein databases (FASTA, UniProt, PEFF) and acquisition metadata. It is the first stage of
 //! the pipeline and hands the other crates normalised spectra and protein entries.
 
-pub mod acq_meta;
-pub mod annotation;
-pub mod annotations_file;
+pub mod annotations;
 pub mod database;
 pub mod fasta;
 pub mod isobaric;
 pub mod mgf;
-pub mod ms1_link;
+pub mod ms1;
 pub mod mzml;
 pub mod peff;
+pub mod resolution;
 #[cfg(feature = "thermo")]
 pub mod thermo;
 #[cfg(feature = "timstof")]
 pub mod timstof;
-#[cfg(feature = "timstof")]
-pub mod timstof_archive;
-#[cfg(feature = "timstof")]
-mod timstof_ms1;
-#[cfg(feature = "timstof")]
-mod timstof_ms2;
 pub mod uniprot;
-mod uniprot_ptm;
 
-pub use acq_meta::{
+pub use resolution::{
     infer_fragment_resolution, sample_mzml_ms2_meta, Ms2MetaSample, ResolutionEvidence,
 };
-pub use annotation::{
+pub use annotations::entries::{
     add_site_knockoffs, build_entry, knockoff_annotations, KnockoffOptions, SiteKnockoffStats,
 };
-pub use annotations_file::{load_annotations, sequence_md5, AnnotationLoadStats, AnnotationsError};
+pub use annotations::{load_annotations, sequence_md5, AnnotationLoadStats, AnnotationsError};
 pub use database::{load_protein_database, DatabaseError, DatabaseFormat, LoadedDatabase};
 pub use fasta::{FastaParseError, FastaReader};
 pub use isobaric::{detect_isobaric, IsobaricLabel};
@@ -46,7 +38,7 @@ pub use thermo::{ThermoParseError, ThermoRawReader};
 #[cfg(feature = "timstof")]
 pub use timstof::{TimsTofParseError, TimsTofReader};
 #[cfg(feature = "timstof")]
-pub use timstof_archive::{d_archive_kind, unpack_d_archive, DArchiveError, DArchiveKind};
+pub use timstof::archive::{d_archive_kind, unpack_d_archive, DArchiveError, DArchiveKind};
 pub use uniprot::{
     load_uniprot_xml, EvidenceLevel, UniProtLoadStats, UniProtOptions, UniProtParseError,
     UniProtXmlReader,

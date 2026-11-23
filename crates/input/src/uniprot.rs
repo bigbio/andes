@@ -1,3 +1,5 @@
+pub(crate) mod ptm;
+
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::Arc;
@@ -7,11 +9,11 @@ use model::{
     ProteinAnnotation, ProteinDb, SiteAnchor, SiteClaim,
 };
 
-use crate::annotation::{build_entry, change_label, knockoff_annotations, KnockoffOptions};
+use crate::annotations::entries::{build_entry, change_label, knockoff_annotations, KnockoffOptions};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use crate::uniprot_ptm::{
+use crate::uniprot::ptm::{
     clean_description, ptm_mass, GLYGLY_CROSSLINK_PREFIX, GLYGLY_MASS, GLYGLY_MODIFIERS,
 };
 
@@ -1067,7 +1069,7 @@ fn attr(e: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, quick_xml::Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotation::{enzymatic_span, knockoff_positions};
+    use crate::annotations::entries::{enzymatic_span, knockoff_positions};
     use model::ChainEnds;
     use model::{Enzyme, VariantRegion};
 

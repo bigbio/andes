@@ -161,7 +161,7 @@ pub(super) struct PepDedupKey {
 }
 
 impl PepDedupKey {
-    fn from_peptide(peptide: &model::Peptide) -> Self {
+    pub(super) fn from_peptide(peptide: &model::Peptide) -> Self {
         let len = peptide.residues.len();
         let mut residues = Vec::with_capacity(len);
         let mut mod_units = Vec::with_capacity(len);

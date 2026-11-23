@@ -42,8 +42,8 @@ use scoring_crate::scoring::{
 mod dedup;
 mod features;
 mod out_of_core;
-pub use dedup::*;
-pub use features::*;
+pub(crate) use dedup::*;
+pub(crate) use features::*;
 pub use out_of_core::*;
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;

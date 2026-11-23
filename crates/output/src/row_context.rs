@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
 use model::spectrum::Spectrum;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::isomer::collapse_isomers;
 use search::psm::PsmMatch;
-use search::search_index::SearchIndex;
+use search::index::SearchIndex;
 
 pub(crate) struct RowContext {
     pub scan: i32,

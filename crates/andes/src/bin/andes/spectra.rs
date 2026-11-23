@@ -5,7 +5,7 @@ use std::sync::mpsc::SyncSender;
 use input::{detect_instrument_type, MgfReader, Ms1Link, MzMLReader};
 use model::scan::Ms1Scan;
 use model::{activation::ActivationMethod, InstrumentType, Spectrum, Tolerance};
-use search::precursor_cal::{constants as cal_constants, sample_every_nth};
+use search::precursor::calibration::{constants as cal_constants, sample_every_nth};
 use model::tolerance::PrecursorTolerance;
 use search::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, learn_calibration_stats,
@@ -312,7 +312,7 @@ pub(crate) fn build_spec_keys_from_metadata(
     charge_range: std::ops::RangeInclusive<u8>,
     min_peaks: u32,
 ) -> Vec<SpecKey> {
-    search::mass_calibrator::build_spec_keys_from_counts(
+    search::precursor::prepass::build_spec_keys_from_counts(
         meta.iter().map(|m| (m.precursor_charge, m.num_peaks)),
         &charge_range,
         min_peaks,

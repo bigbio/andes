@@ -8,11 +8,11 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 use model::Spectrum;
 
 use crate::engine::PreparedSearch;
-use crate::precursor_cal::{
+use crate::precursor::calibration::{
     constants, median, residual_ppm, robust_sigma_ppm, sample_every_nth, tightened_tolerance_ppm,
     PrecursorCalMode,
 };
-use crate::search_params::SearchParams;
+use crate::params::SearchParams;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecKey {
@@ -85,7 +85,7 @@ pub fn prepass_search_params(main: &SearchParams) -> SearchParams {
     p.isotope_error_range = 0..=0;
     p.top_n_psms_per_spectrum = 1;
     p.precursor_mass_shift_ppm = 0.0;
-    p.score_mode = crate::search_params::ScoreMode::Rank;
+    p.score_mode = crate::params::ScoreMode::Rank;
     p.fragment_index_top_k = 0;
     p
 }
@@ -272,7 +272,7 @@ fn extract_residuals(
     sampled: &[SpecKey],
     queues: &[crate::TopNQueue],
     originals: &HashMap<usize, Spectrum>,
-    candidates: &[crate::candidate_gen::Candidate],
+    candidates: &[crate::candidates::Candidate],
     min_rank_score: f32,
     keep_top_n: usize,
 ) -> (Vec<f64>, CalFilterCounts) {
@@ -401,7 +401,7 @@ mod tests {
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
-            score_mode: crate::search_params::ScoreMode::Rank,
+            score_mode: crate::params::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             require_nxst_sequon: false,
             open_search: None,

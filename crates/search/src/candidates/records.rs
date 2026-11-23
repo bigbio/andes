@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::candidate_gen::enumerate_candidates;
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
+use crate::candidates::enumerate_candidates;
+use crate::index::SearchIndex;
+use crate::params::SearchParams;
 
 pub const INDEX_RECORD_SIZE: usize = 20;
 
@@ -494,9 +494,9 @@ impl MmapCandidateIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::candidate_gen::enumerate_candidates;
-    use crate::search_index::SearchIndex;
-    use crate::search_params::SearchParams;
+    use crate::candidates::enumerate_candidates;
+    use crate::index::SearchIndex;
+    use crate::params::SearchParams;
     use model::aa_set::AminoAcidSetBuilder;
     use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::protein::{Protein, ProteinDb};

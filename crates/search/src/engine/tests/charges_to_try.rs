@@ -1,5 +1,5 @@
 use super::charges_to_try;
-use crate::search_params::SearchParams;
+use crate::params::SearchParams;
 use model::aa_set::AminoAcidSetBuilder;
 use model::Spectrum;
 

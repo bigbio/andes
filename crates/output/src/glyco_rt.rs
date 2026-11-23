@@ -1,7 +1,7 @@
 use model::spectrum::Spectrum;
 use scoring_crate::rt_model::{calibrate, RtIndexModel};
-use search::candidate_gen::Candidate;
-use search::glyco_search::GlycoSpectrumResult;
+use search::candidates::Candidate;
+use search::glycopeptides::GlycoSpectrumResult;
 
 use glyco::glycan_db::GlycanComp;
 use glyco::rt_offset::{glyco_index, GlycanRtCoeffs};
@@ -145,7 +145,7 @@ pub fn populate_glyco_rt_features(
     }
 }
 
-pub fn delta_rt_rank(hits: &[search::glyco_search::FullGlycoPsm], emitted_hit_idx: usize) -> f64 {
+pub fn delta_rt_rank(hits: &[search::glycopeptides::FullGlycoPsm], emitted_hit_idx: usize) -> f64 {
     let n = hits.len();
     if n < 2 {
         return 0.0;
@@ -164,7 +164,7 @@ pub fn delta_rt_rank(hits: &[search::glyco_search::FullGlycoPsm], emitted_hit_id
     }
 }
 
-fn glycan_tiebreak_key(hit: &search::glyco_search::FullGlycoPsm) -> (u8, u8, u8, u8, u8, u8) {
+fn glycan_tiebreak_key(hit: &search::glycopeptides::FullGlycoPsm) -> (u8, u8, u8, u8, u8, u8) {
     match &hit.glycan_key.glycan {
         Some(g) => (0, g.hexnac, g.hex, g.fuc, g.neuac, g.neugc),
         None => (1, 0, 0, 0, 0, 0),
@@ -180,7 +180,7 @@ mod tests {
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;
-    use search::glyco_search::FullGlycoPsm;
+    use search::glycopeptides::FullGlycoPsm;
     use search::psm::{PsmFeatures, PsmMatch};
 
     fn pep(seq: &[u8]) -> Peptide {

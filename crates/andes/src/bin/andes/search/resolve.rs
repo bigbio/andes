@@ -26,7 +26,7 @@ use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, PrecursorTolerance,
 };
 use scoring_crate::{Param, RankScorer};
-use search::precursor_mono::MonoParams;
+use search::precursor::monoisotopic::MonoParams;
 use search::{PrecursorCalMode, SearchIndex, SearchParams};
 
 /// The temporary directories a run owns. They are removed when this value is dropped, in the
@@ -1043,7 +1043,7 @@ pub(super) fn resolve_search_params(
         Some("--glyco looks candidates up by backbone mass")
     } else if cli.xl.is_some() {
         Some("--xl looks candidates up by peptide mass")
-    } else if !search::fragment_index::covers_activation(param.data_type.activation) {
+    } else if !search::fragments::index::covers_activation(param.data_type.activation) {
         Some(
             "it holds only b/y ions, and this activation method fragments into \
              c/z or a/x ions",
@@ -1064,7 +1064,7 @@ pub(super) fn resolve_search_params(
         cli.fragment_index,
     );
     params.fragment_index_top_k = if choice.use_index {
-        search::search_params::FRAGMENT_INDEX_TOP_K
+        search::params::FRAGMENT_INDEX_TOP_K
     } else {
         0
     };
@@ -1079,7 +1079,7 @@ pub(super) fn resolve_search_params(
         }
         let (delta_min, delta_max) = cli.open_search_delta;
         let top_k = cli.open_search_top_k.max(1);
-        let open = search::search_params::OpenSearch {
+        let open = search::params::OpenSearch {
             delta_min,
             delta_max,
             top_k,
@@ -1106,7 +1106,7 @@ pub(super) fn resolve_search_params(
                 "fragment-ion index ({reason}; {} candidates per spectrum, \
                  >= {} matched b/y ions)",
                 params.fragment_index_top_k,
-                search::search_params::FRAGMENT_INDEX_MIN_MATCHED
+                search::params::FRAGMENT_INDEX_MIN_MATCHED
             );
         } else {
             log::info!(target: "candidate-retrieval", "per-spectrum enumeration ({reason})");
@@ -1306,7 +1306,7 @@ pub(crate) fn retrieval_choice(
             refused_because: None,
         },
         FragmentIndexFlag::Auto | FragmentIndexFlag::On => {
-            let report = match search::fragment_index::vote_peaks_for(fragment_tol) {
+            let report = match search::fragments::index::vote_peaks_for(fragment_tol) {
                 0 => format!("out-of-core index, high-resolution fragments at {tol_text}"),
                 n => format!(
                     "out-of-core index, low-resolution fragments at {tol_text}; \
@@ -1788,10 +1788,10 @@ mod retrieval_choice_tests {
             ActivationMethod::PQD,
             ActivationMethod::EThcD,
         ] {
-            assert!(search::fragment_index::covers_activation(a), "{a:?}");
+            assert!(search::fragments::index::covers_activation(a), "{a:?}");
         }
         for a in [ActivationMethod::ETD, ActivationMethod::UVPD] {
-            assert!(!search::fragment_index::covers_activation(a), "{a:?}");
+            assert!(!search::fragments::index::covers_activation(a), "{a:?}");
         }
         const ETD: Option<&str> = Some("b/y only");
         for tol in [HI, LO] {

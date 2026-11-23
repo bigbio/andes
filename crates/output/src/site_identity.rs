@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use search::site_evidence::SiteEvidence;
+use search::sites::SiteEvidence;
 
 const W_SCORE: f64 = 2.0;
 const W_ISOTOPE_1: f64 = -1.0;
@@ -176,7 +176,7 @@ pub fn row_posteriors(
 mod tests {
     use super::*;
     use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
-    use search::site_evidence::ModMark;
+    use search::sites::ModMark;
 
     fn psm(id: &str, score: f64) -> (String, f64) {
         (id.into(), score)

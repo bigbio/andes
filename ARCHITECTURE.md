@@ -33,8 +33,8 @@ Each stage and where it lives:
 | Stage | Crate | Entry points |
 |---|---|---|
 | Read spectra and database | `crates/input` | `mzml.rs`, `mgf.rs`, `thermo.rs`, `timstof.rs`, `database.rs` |
-| Digestion, decoys | `crates/search` | `candidate_gen.rs`, `decoy.rs` |
-| Index and match | `crates/search` | `fragment_index.rs`, `precursor_matching.rs`, `engine.rs` |
+| Digestion, decoys | `crates/search` | `candidates.rs`, `decoy.rs` |
+| Index and match | `crates/search` | `fragments/index.rs`, `precursor/matching.rs`, `engine.rs` |
 | Features and learned scores | `crates/scoring` | `frag_features.rs`, `gbdt_eval.rs`, `rt_model.rs` |
 | PIN | `crates/output` | `pin.rs` |
 | Rescoring | `crates/rescore` | `run.rs`, `svm.rs`, `pep.rs` |
@@ -71,10 +71,10 @@ library crates and binary alike.
    scans linked through `Ms1Link` (`crates/input/src/mzml.rs`), and a `model::ProteinDb`
    (`crates/model/src/protein.rs`) from `load_protein_database` (`crates/input/src/database.rs`).
 2. **Database.** `search::decoy::build_search_db` adds decoys under a `DecoyStrategy`
-   (`crates/search/src/decoy.rs`). `SearchIndex` (`crates/search/src/search_index.rs`) holds the
-   peptides; `ChunkFragmentIndex` (`crates/search/src/fragment_index.rs`) is the fragment index, built
+   (`crates/search/src/decoy.rs`). `SearchIndex` (`crates/search/src/index.rs`) holds the
+   peptides; `ChunkFragmentIndex` (`crates/search/src/fragments/index.rs`) is the fragment index, built
    in mass-ordered chunks so memory stays bounded.
-3. **Search.** `SearchParams` (`crates/search/src/search_params.rs`) carries every setting.
+3. **Search.** `SearchParams` (`crates/search/src/params.rs`) carries every setting.
    `engine.rs` retrieves candidates per spectrum and scores them into `PsmMatch` values
    (`crates/search/src/psm.rs`), each holding its `PsmFeatures`. `TopNQueue` keeps the best few
    per spectrum. `refinement.rs` runs a second pass restricted to confident proteins.

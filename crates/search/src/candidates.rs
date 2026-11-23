@@ -1,6 +1,8 @@
+pub mod records;
+
 use crate::decoy::is_decoy_accession_affix;
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
+use crate::index::SearchIndex;
+use crate::params::SearchParams;
 use model::aa_set::label_code::LabelState;
 use model::aa_set::{form_index, label_code, AminoAcidSet, Terminus, FORM_TABLE_LEN};
 use model::amino_acid::AminoAcid;
@@ -564,7 +566,7 @@ fn span_mass_bounds(
 pub fn record_may_have_forms_in(
     db: &SearchIndex,
     tables: &FormWalkTables,
-    rec: &crate::candidate_index::IndexRecord,
+    rec: &crate::candidates::records::IndexRecord,
     mass_lo: f64,
     mass_hi: f64,
 ) -> bool {
@@ -587,7 +589,7 @@ pub fn record_may_have_forms_in(
 pub fn retain_records_with_forms_in(
     db: &SearchIndex,
     tables: &FormWalkTables,
-    recs: &mut Vec<crate::candidate_index::IndexRecord>,
+    recs: &mut Vec<crate::candidates::records::IndexRecord>,
     mass_lo: f64,
     mass_hi: f64,
 ) {
@@ -774,9 +776,9 @@ struct RecordSpan<'a> {
 
 fn record_span<'a>(
     db: &'a SearchIndex,
-    rec: &crate::candidate_index::IndexRecord,
+    rec: &crate::candidates::records::IndexRecord,
 ) -> Option<RecordSpan<'a>> {
-    use crate::candidate_index::flags;
+    use crate::candidates::records::flags;
     let protein = db.db.proteins.get(rec.protein_index as usize)?;
     let seq = &protein.sequence;
     let abs_start = rec.start_offset as usize;
@@ -808,7 +810,7 @@ pub fn for_each_record_form_masses_bounded(
     db: &SearchIndex,
     params: &SearchParams,
     tables: &FormWalkTables,
-    rec: &crate::candidate_index::IndexRecord,
+    rec: &crate::candidates::records::IndexRecord,
     mass_lo: f64,
     mass_hi: f64,
     mut f: impl FnMut(usize, &[f64]),
@@ -841,12 +843,12 @@ pub fn expand_base_record_bounded(
     db: &SearchIndex,
     params: &SearchParams,
     tables: &FormWalkTables,
-    rec: &crate::candidate_index::IndexRecord,
+    rec: &crate::candidates::records::IndexRecord,
     mass_lo: f64,
     mass_hi: f64,
     ks: &[u32],
 ) -> Vec<Candidate> {
-    use crate::candidate_index::flags;
+    use crate::candidates::records::flags;
     let Some(RecordSpan {
         span,
         n_term,
@@ -1161,14 +1163,14 @@ fn milli_of(mass: f64) -> u64 {
 }
 
 pub fn lazy_candidates_for_precursor(
-    mi: &crate::candidate_index::MmapCandidateIndex,
+    mi: &crate::candidates::records::MmapCandidateIndex,
     db: &SearchIndex,
     params: &SearchParams,
     precursor_mass: f64,
     tol_left_da: f64,
     tol_right_da: f64,
 ) -> Vec<Candidate> {
-    use crate::candidate_index::{flags, IndexRecord};
+    use crate::candidates::records::{flags, IndexRecord};
 
     let offsets = distinct_mod_mass_offsets(params);
 
@@ -1244,17 +1246,17 @@ pub fn lazy_candidates_for_precursor(
 
 pub type BaseRecordKey = (u32, u32, u16, u16);
 
-pub fn base_record_key(rec: &crate::candidate_index::IndexRecord) -> BaseRecordKey {
+pub fn base_record_key(rec: &crate::candidates::records::IndexRecord) -> BaseRecordKey {
     (rec.protein_index, rec.start_offset, rec.length, rec.flags)
 }
 
 pub fn base_records_for_nominal_window(
-    mi: &crate::candidate_index::MmapCandidateIndex,
+    mi: &crate::candidates::records::MmapCandidateIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
-) -> Vec<(crate::candidate_index::IndexRecord, u32)> {
-    use crate::candidate_index::IndexRecord;
+) -> Vec<(crate::candidates::records::IndexRecord, u32)> {
+    use crate::candidates::records::IndexRecord;
     use model::mass::{H2O, INTEGER_MASS_SCALER};
 
     if min_nominal > max_nominal {
@@ -1300,12 +1302,12 @@ pub fn base_records_for_nominal_window(
 }
 
 pub fn distinct_base_records_for_nominal_window(
-    mi: &crate::candidate_index::MmapCandidateIndex,
+    mi: &crate::candidates::records::MmapCandidateIndex,
     params: &SearchParams,
     min_nominal: i32,
     max_nominal: i32,
-    keep: impl Fn(&mut Vec<crate::candidate_index::IndexRecord>) + Sync,
-) -> Vec<crate::candidate_index::IndexRecord> {
+    keep: impl Fn(&mut Vec<crate::candidates::records::IndexRecord>) + Sync,
+) -> Vec<crate::candidates::records::IndexRecord> {
     use model::mass::{H2O, INTEGER_MASS_SCALER};
     use rayon::prelude::*;
 
@@ -1346,7 +1348,7 @@ pub fn distinct_base_records_for_nominal_window(
             )
         })
         .collect();
-    let mut out: Vec<crate::candidate_index::IndexRecord> = slices
+    let mut out: Vec<crate::candidates::records::IndexRecord> = slices
         .par_iter()
         .flat_map_iter(|&(a, b)| {
             let mut recs = mi.mass_window(a, b);
@@ -1367,9 +1369,9 @@ pub fn distinct_base_records_for_nominal_window(
 pub fn expand_base_record(
     db: &SearchIndex,
     params: &SearchParams,
-    rec: &crate::candidate_index::IndexRecord,
+    rec: &crate::candidates::records::IndexRecord,
 ) -> Vec<Candidate> {
-    use crate::candidate_index::flags;
+    use crate::candidates::records::flags;
 
     let Some(protein) = db.db.proteins.get(rec.protein_index as usize) else {
         return Vec::new();
@@ -1412,7 +1414,7 @@ pub fn expand_base_record(
 }
 
 pub fn lazy_candidates_for_nominal_window(
-    mi: &crate::candidate_index::MmapCandidateIndex,
+    mi: &crate::candidates::records::MmapCandidateIndex,
     db: &SearchIndex,
     params: &SearchParams,
     min_nominal: i32,
@@ -1435,9 +1437,9 @@ pub(crate) fn missed_cleavages_between(cleavage_positions: &[u32], start: u32, e
 }
 
 #[cfg(test)]
-#[path = "candidate_gen/tests/missed_cleavage.rs"]
+#[path = "candidates/tests/missed_cleavage.rs"]
 mod missed_cleavage_tests;
 
 #[cfg(test)]
-#[path = "candidate_gen/tests/candidate_gen.rs"]
+#[path = "candidates/tests/candidates.rs"]
 mod tests;

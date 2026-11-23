@@ -4,9 +4,9 @@ use std::path::Path;
 use crate::pin::{PIN_FEATURE_COLUMNS, PIN_LEAD_COLUMNS};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
-use search::candidate_gen::Candidate;
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::candidates::Candidate;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 use glyco::glycan_first::GlycanCore;
 use glyco::glyco_psm::{
@@ -17,8 +17,8 @@ use glyco::hybrid::Source;
 use crate::percolator_enz::enzyme_features;
 use crate::pin::{psm_feature_values, FeatureFmt};
 use crate::row_context::RowContext;
-use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
-use search::precursor_mono::MonoCorrection;
+use search::glycopeptides::{FullGlycoPsm, GlycoSpectrumResult};
+use search::precursor::monoisotopic::MonoCorrection;
 
 pub const GLYCO_PIN_MONO_COLS: [&str; 4] = ["MonoShift", "MonoFit", "MonoFitGain", "MonoSNR"];
 
@@ -542,7 +542,7 @@ mod tests {
     use glyco::glycan_db::GlycanComp;
     use glyco::glyco_psm::GlycoPsmKey;
     use glyco::hybrid::Source;
-    use search::glyco_search::{FullGlycoPsm, GlycoSpectrumResult};
+    use search::glycopeptides::{FullGlycoPsm, GlycoSpectrumResult};
     use search::psm::{PsmFeatures, PsmMatch};
 
     fn make_minimal_psm(spectrum_idx: usize, score: f32) -> PsmMatch {
@@ -716,8 +716,8 @@ mod tests {
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
     use model::tolerance::{PrecursorTolerance, Tolerance};
-    use search::candidate_gen::Candidate;
-    use search::search_params::SearchParams;
+    use search::candidates::Candidate;
+    use search::params::SearchParams;
 
     fn make_glyco_search_index(accession: &str) -> SearchIndex {
         let target = ProteinDb {
@@ -779,7 +779,7 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Off,
-            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            cal_min_spec_keys: search::precursor::calibration::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,

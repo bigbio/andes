@@ -11,7 +11,7 @@ use model::{
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::TopNQueue;
 use search::{coisolation_pass, PreparedSearch, SearchIndex, SearchParams};
 
@@ -258,7 +258,7 @@ fn rows(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Row>> {
 fn run(fragment_index: bool) -> Vec<Vec<Row>> {
     let (idx, mut params) = fixture();
     if fragment_index {
-        params.fragment_index_top_k = search::search_params::FRAGMENT_INDEX_TOP_K;
+        params.fragment_index_top_k = search::params::FRAGMENT_INDEX_TOP_K;
     }
     let scorer = make_scorer(FRAG_TOL_DA);
     let (spectra, link) = spectra_and_link();

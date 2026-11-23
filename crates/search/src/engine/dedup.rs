@@ -108,7 +108,7 @@ pub(super) fn relabel_collision_decoys_with(candidates: &mut [Candidate], target
 }
 
 pub(super) fn build_target_bare_seqs(mi: &MmapCandidateIndex, db: &SearchIndex) -> FxHashSet<Box<[u8]>> {
-    use crate::candidate_index::flags as rec_flags;
+    use crate::candidates::records::flags as rec_flags;
     let mut spans: Vec<&[u8]> = (0..mi.len())
         .into_par_iter()
         .filter_map(|i| {
@@ -132,7 +132,7 @@ pub(super) fn build_target_bare_seqs_where(
     params: &SearchParams,
     keep: &CandidateFilter,
 ) -> FxHashSet<Box<[u8]>> {
-    use crate::candidate_index::flags as rec_flags;
+    use crate::candidates::records::flags as rec_flags;
     let mut spans: Vec<&[u8]> = (0..mi.len())
         .into_par_iter()
         .filter_map(|i| {

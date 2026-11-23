@@ -4,8 +4,8 @@ use model::peptide::Peptide;
 use model::protein::{Protein, ProteinDb};
 use model::tolerance::PrecursorTolerance;
 use model::tolerance::Tolerance;
-use search::candidate_gen::Candidate;
-use search::search_index::SearchIndex;
+use search::candidates::Candidate;
+use search::index::SearchIndex;
 
 #[test]
 fn write_mass_keeps_micro_dalton_precision() {
@@ -174,7 +174,7 @@ fn make_params(charge_range: std::ops::RangeInclusive<u8>) -> SearchParams {
         num_tolerable_termini: 2,
         min_peaks: 10,
         precursor_cal_mode: search::PrecursorCalMode::Auto,
-        cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+        cal_min_spec_keys: search::precursor::calibration::constants::MIN_SPECKEYS_FOR_PREPASS,
         fragment_index_top_k: 0,
         precursor_mass_shift_ppm: 0.0,
         chimeric: false,
@@ -523,7 +523,7 @@ fn pin_enz_n_is_one_for_met_clipped_targets_and_decoys() {
     let idx = SearchIndex::from_target_db(&target, "XXX_");
     let params = make_params(2..=3);
     let cands: Vec<Candidate> =
-        search::candidate_gen::enumerate_candidates(&idx, &params, &idx.decoy_prefix).collect();
+        search::candidates::enumerate_candidates(&idx, &params, &idx.decoy_prefix).collect();
     let met_clipped = |decoy: bool| {
         cands
             .iter()

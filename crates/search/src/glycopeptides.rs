@@ -1,3 +1,5 @@
+pub mod fragments;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::mass::{H2O, ISOTOPE, PROTON};
@@ -40,7 +42,7 @@ use glyco::oxonium::{
     hex_diagnostic_evidence, oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC,
 };
 
-use crate::glyco_fragment_index::FragmentIndex;
+use crate::glycopeptides::fragments::FragmentIndex;
 
 use crate::engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmFeatures;
@@ -235,7 +237,7 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
 }
 
 pub struct GlycoCandidates {
-    candidates: Vec<crate::candidate_gen::Candidate>,
+    candidates: Vec<crate::candidates::Candidate>,
     mass_order: Vec<u32>,
 }
 
@@ -243,20 +245,20 @@ impl GlycoCandidates {
     pub fn from_index(prepared: &PreparedSearch<'_>, core: GlycanCore) -> Self {
         Self::from_candidates(
             prepared.candidates_where(move |residues, post| match core {
-                GlycanCore::NGlycan => crate::candidate_gen::span_has_nxst_sequon(residues, post),
-                GlycanCore::OGlycan => crate::candidate_gen::span_has_ser_or_thr(residues, post),
+                GlycanCore::NGlycan => crate::candidates::span_has_nxst_sequon(residues, post),
+                GlycanCore::OGlycan => crate::candidates::span_has_ser_or_thr(residues, post),
             }),
             core,
         )
     }
 
     pub fn from_candidates(
-        candidates: Vec<crate::candidate_gen::Candidate>,
+        candidates: Vec<crate::candidates::Candidate>,
         core: GlycanCore,
     ) -> Self {
         debug_assert!(candidates.iter().all(match core {
-            GlycanCore::NGlycan => crate::candidate_gen::candidate_has_nxst_sequon,
-            GlycanCore::OGlycan => crate::candidate_gen::candidate_has_ser_or_thr,
+            GlycanCore::NGlycan => crate::candidates::candidate_has_nxst_sequon,
+            GlycanCore::OGlycan => crate::candidates::candidate_has_ser_or_thr,
         }));
         let mass_order = crate::engine::build_mass_order(&candidates);
         Self {
@@ -265,16 +267,16 @@ impl GlycoCandidates {
         }
     }
 
-    pub fn candidates(&self) -> &[crate::candidate_gen::Candidate] {
+    pub fn candidates(&self) -> &[crate::candidates::Candidate] {
         &self.candidates
     }
 }
 
 pub struct GlycoScoreCtx<'a> {
-    pub params: &'a crate::search_params::SearchParams,
+    pub params: &'a crate::params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
     pub core: GlycanCore,
-    pub candidates: &'a [crate::candidate_gen::Candidate],
+    pub candidates: &'a [crate::candidates::Candidate],
     pub mass_order: &'a [u32],
     pub fragment_tolerance_da: f64,
     pub frag_index: &'a FragmentIndex,
@@ -318,7 +320,7 @@ pub struct GlycoCtxOwned {
 
 impl GlycoCtxOwned {
     pub fn build(
-        candidates: &[crate::candidate_gen::Candidate],
+        candidates: &[crate::candidates::Candidate],
         glycan_list: &[GlycanComp],
         fragment_tolerance_da: f64,
         cfg: GlycoConfig,
@@ -542,14 +544,14 @@ fn hex_gate_passes(core: GlycanCore, glycan: Option<&GlycanComp>, hex_evidence: 
     core != GlycanCore::OGlycan || glycan.is_none_or(|g| g.hex == 0) || hex_evidence
 }
 
-fn precursor_window_da(params: &crate::search_params::SearchParams, mass: f64) -> f64 {
+fn precursor_window_da(params: &crate::params::SearchParams, mass: f64) -> f64 {
     let t = &params.precursor_tolerance;
     t.left.as_da(mass).max(t.right.as_da(mass))
 }
 
 fn backbone_candidates(
     mass_order: &[u32],
-    candidates: &[crate::candidate_gen::Candidate],
+    candidates: &[crate::candidates::Candidate],
     bb_residue: f64,
     tol_da: f64,
 ) -> Vec<usize> {
@@ -1438,9 +1440,9 @@ pub fn glyco_search_run(
 }
 
 #[cfg(test)]
-#[path = "glyco_search/tests/glycan_source.rs"]
+#[path = "glycopeptides/tests/glycan_source.rs"]
 mod glycan_source_tests;
 
 #[cfg(test)]
-#[path = "glyco_search/tests/glyco_search.rs"]
+#[path = "glycopeptides/tests/glycopeptides.rs"]
 mod tests;

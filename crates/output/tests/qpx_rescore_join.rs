@@ -23,7 +23,7 @@ fn fixture(rel: &str) -> PathBuf {
 fn run_bsa_search() -> (
     Vec<model::spectrum::Spectrum>,
     Vec<search::psm::TopNQueue>,
-    Vec<search::candidate_gen::Candidate>,
+    Vec<search::candidates::Candidate>,
     SearchIndex,
     SearchParams,
 ) {
@@ -585,11 +585,11 @@ fn competition_result_by(
 
 fn add_runner_up(
     queues: &mut [search::psm::TopNQueue],
-    candidates: &[search::candidate_gen::Candidate],
+    candidates: &[search::candidates::Candidate],
 ) {
     for q in queues.iter_mut() {
         if let Some(top) = q.peek_top().cloned() {
-            let residues = |c: &search::candidate_gen::Candidate| -> Vec<u8> {
+            let residues = |c: &search::candidates::Candidate| -> Vec<u8> {
                 c.peptide.residues.iter().map(|aa| aa.residue).collect()
             };
             let top_residues = residues(&candidates[top.primary_candidate_idx() as usize]);

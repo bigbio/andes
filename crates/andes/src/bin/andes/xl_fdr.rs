@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 use model::Spectrum;
-use search::xl_search::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
+use search::crosslinks::{Csm, PeptideHit, XlCandidates, XlPeptide, XlSpectrumResult};
 use xl::crosslinker::Crosslinker;
 use xl::crosslinker::{LinkForm, MAX_STUBS};
 use xl::decoy::PairClass;
@@ -140,7 +140,7 @@ fn features(r: &XlSpectrumResult, c: &Csm, table: &XlCandidates) -> Vec<f64> {
         c.beta.mass_err_ppm.abs(),
         (c.alpha.mass_err_ppm - c.beta.mass_err_ppm).abs(),
         c.iso as f64,
-        u8::from(c.kind == search::xl_search::PairKind::Full) as f64,
+        u8::from(c.kind == search::crosslinks::PairKind::Full) as f64,
         c.b_stub_ions as f64,
         (c.n_mass_pairs as f64).ln_1p(),
         r.doublets.masses.len() as f64,

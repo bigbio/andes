@@ -1,4 +1,4 @@
-use crate::candidate_gen::Candidate;
+use crate::candidates::Candidate;
 use crate::psm::PsmMatch;
 use model::IsomerClass;
 

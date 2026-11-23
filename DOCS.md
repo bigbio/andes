@@ -3527,22 +3527,22 @@ here only where the value is a fixed choice rather than a documented option.
 | Peptide length | 6 to 50 | `andes/src/bin/andes/cli.rs` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
 | Variable mods per peptide | 3 | `andes/src/bin/andes/cli.rs` | combinatorial candidates | `--max-mods` | No recorded evidence |
 | Precursor charge range | 2..5 | `andes/src/bin/andes/cli.rs` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
-| Isotope-error range | -1..2 | `search/src/search_params.rs:171` | precursor isotope offsets tried | `--isotope-error` | Inherited from the Java engine default (`-ti -1,2`); glyco narrows it to a window learned from MS1 |
+| Isotope-error range | -1..2 | `search/src/params.rs:171` | precursor isotope offsets tried | `--isotope-error` | Inherited from the Java engine default (`-ti -1,2`); glyco narrows it to a window learned from MS1 |
 | PSMs kept per spectrum | 10 | `andes/src/bin/andes/cli.rs` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |
 | Minimum peaks | 10 | `andes/src/bin/andes/cli.rs` | spectra skipped | `--min-peaks` | Inherited default |
 | Precursor tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | candidate window | `--precursor-tol`, `--precursor-cal` | No recorded evidence for 20 |
 | Precursor calibration | off | `andes/src/bin/andes/cli.rs` | ppm shift pre-pass | `--precursor-cal` | Pre-pass cost 9-17% of the run on the benchmark sets (see [§1](#calibration-and-runtime)) |
-| Pre-pass sample and floors | stride 10, at most 500 spectra, 10,000 spectrum keys, 150 confident PSMs, residual cap 200 | `search/src/precursor_cal.rs:76-89` | when the pre-pass runs and how many residuals feed the median | no | 150 chosen so ion-trap sets (about 193 confident PSMs in the sample) still calibrate (code comment); the others: no recorded evidence |
-| Tightened precursor window | floor 2 ppm, margin 0.5 ppm, 3 sigma, MAD scale 1.4826 | `precursor_cal.rs:92-95` | post-calibration tolerance | no | No recorded evidence (1.4826 is the Gaussian MAD factor) |
-| Calibration q cutoff | 0.01 | `search/src/mass_calibrator.rs:360` | PSMs trusted for the precursor residual | no | Standard 1% target-decoy cutoff |
-| Residual rejection | 50 ppm | `mass_calibrator.rs:30` | residuals dropped as isotope contamination | no | No recorded evidence |
-| Fragment-index candidates | top 100 by votes, at least 3 matched b/y | `search_params.rs:24,28` | peptidoforms scored per spectrum | `--fragment-index` (advanced) only chooses the mode | 50-1000 within seed noise on phospho (code comment); +22.2% PSMs over window enumeration on Astral at 1.00% true FDP ([§1](#calibration-and-runtime)) |
-| Low-res voting peaks | 150 most intense | `search_params.rs:34` | peaks that vote at a low-resolution fragment tolerance | no | TMT low-res: all peaks 4,368 PSMs at 1%; 50/100/150 peaks 12,285/12,276/12,347 (code comment) |
+| Pre-pass sample and floors | stride 10, at most 500 spectra, 10,000 spectrum keys, 150 confident PSMs, residual cap 200 | `search/src/precursor/calibration.rs:76-89` | when the pre-pass runs and how many residuals feed the median | no | 150 chosen so ion-trap sets (about 193 confident PSMs in the sample) still calibrate (code comment); the others: no recorded evidence |
+| Tightened precursor window | floor 2 ppm, margin 0.5 ppm, 3 sigma, MAD scale 1.4826 | `search/src/precursor/calibration.rs:92-95` | post-calibration tolerance | no | No recorded evidence (1.4826 is the Gaussian MAD factor) |
+| Calibration q cutoff | 0.01 | `search/src/precursor/prepass.rs:360` | PSMs trusted for the precursor residual | no | Standard 1% target-decoy cutoff |
+| Residual rejection | 50 ppm | `search/src/precursor/prepass.rs:30` | residuals dropped as isotope contamination | no | No recorded evidence |
+| Fragment-index candidates | top 100 by votes, at least 3 matched b/y | `search/src/params.rs:24,28` | peptidoforms scored per spectrum | `--fragment-index` (advanced) only chooses the mode | 50-1000 within seed noise on phospho (code comment); +22.2% PSMs over window enumeration on Astral at 1.00% true FDP ([§1](#calibration-and-runtime)) |
+| Low-res voting peaks | 150 most intense | `search/src/params.rs:34` | peaks that vote at a low-resolution fragment tolerance | no | TMT low-res: all peaks 4,368 PSMs at 1%; 50/100/150 peaks 12,285/12,276/12,347 (code comment) |
 | Index slice width | 80 Da | `search/src/engine/slices.rs` (`INDEX_SLICE_DA`) | precursor-mass span of one search slice | no | Changes which candidates share a vote table; no recorded evidence beyond the pinned value |
-| Strong-score retention | 25 | `search_params.rs:20` | candidates the strong re-rank can promote (strong mode only) | no | Code comment: larger pool recovers top-1 flips; no recorded measurement |
+| Strong-score retention | 25 | `search/src/params.rs:20` | candidates the strong re-rank can promote (strong mode only) | no | Code comment: larger pool recovers top-1 flips; no recorded measurement |
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
-| Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragment_error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
-| Isotope-mimic tolerance | 0.05 Da | `search/src/isotope_mimic.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
+| Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragments/error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
+| Isotope-mimic tolerance | 0.05 Da | `search/src/mimics.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
 | Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws per segment and 20 rounds of peptide-level redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
 | Entrapment prefix | `ENT_` | `search/src/refinement.rs:431` | which proteins count as entrapment | no | Naming convention |
 | Refine mods per peptide | 5 | `refinement.rs:883` | combinatorial ceiling of the second pass | the refine tier's `max_mods` is clamped to it | Memory guard (code comment) |
@@ -3619,9 +3619,9 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Backbone candidates | top 150 per spectrum | `search/src/glyco_search.rs:48` | candidates kept after truncation | no | No recorded evidence |
-| Peptide-first pool | charges 1..2, at most 1,024 peptides | `glyco_search.rs:53,62` | peptide-first candidate pool | no | Cap sweep on one glyco set: 64 gives 218 at 1%, 256 gives 232, 1024 gives 253, no cap 268; 1024 kept best precision (code comment) |
-| Peptide-first filters | at least 6 matched b/y; minimum glycan 406 (N) and 203 (O) Da; backbone at least 500 Da | `glyco_search.rs:932,188,194`, `glyco/src/backbone.rs:180,184` | candidate filters | no | 406 is two HexNAc, 203 one HexNAc (the Tn core); 6: no recorded evidence |
+| Backbone candidates | top 150 per spectrum | `search/src/glycopeptides.rs:48` | candidates kept after truncation | no | No recorded evidence |
+| Peptide-first pool | charges 1..2, at most 1,024 peptides | `search/src/glycopeptides.rs:53,62` | peptide-first candidate pool | no | Cap sweep on one glyco set: 64 gives 218 at 1%, 256 gives 232, 1024 gives 253, no cap 268; 1024 kept best precision (code comment) |
+| Peptide-first filters | at least 6 matched b/y; minimum glycan 406 (N) and 203 (O) Da; backbone at least 500 Da | `search/src/glycopeptides.rs:932,188,194`, `glyco/src/backbone.rs:180,184` | candidate filters | no | 406 is two HexNAc, 203 one HexNAc (the Tn core); 6: no recorded evidence |
 | Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `glyco/src/glyco_psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |

@@ -6,10 +6,10 @@ use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 pub fn format_spec_id(
     spec_id: &str,
@@ -59,7 +59,7 @@ pub fn emitted_row_evidence(
     spec: &Spectrum,
     queue: &TopNQueue,
     candidates: &[Candidate],
-) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
+) -> Vec<(String, i8, Option<Box<search::sites::SiteEvidence>>)> {
     let psms = queue.clone().into_rank_sorted_vec();
     emitted_spec_ids(spec, &psms, candidates)
         .into_iter()

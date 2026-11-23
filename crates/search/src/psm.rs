@@ -133,11 +133,11 @@ pub struct PsmMatch {
     pub features: PsmFeatures,
     pub isotope_offset: i8,
     pub precursor_mz_override: Option<f64>,
-    pub site_evidence: Option<Box<crate::site_evidence::SiteEvidence>>,
+    pub site_evidence: Option<Box<crate::sites::SiteEvidence>>,
     pub tie_key: u64,
 }
 
-pub fn tie_key_of(cand: &crate::candidate_gen::Candidate) -> u64 {
+pub fn tie_key_of(cand: &crate::candidates::Candidate) -> u64 {
     (crate::engine::peptidoform_key(&cand.peptide) << 1) | u64::from(cand.is_decoy)
 }
 

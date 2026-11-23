@@ -706,7 +706,7 @@ fn search_peptides(
     params.max_length = proteases.max_length;
     params.max_missed_cleavages = proteases.max_missed_cleavages;
     params.max_variable_mods_per_peptide = 0;
-    let idx = crate::search_index::SearchIndex::from_target_db_for(
+    let idx = crate::index::SearchIndex::from_target_db_for(
         db,
         "NONE",
         None,
@@ -715,7 +715,7 @@ fn search_peptides(
         proteases,
     );
     let mut out: Vec<(usize, usize, Vec<u8>)> =
-        crate::candidate_gen::enumerate_candidates(&idx, &params, "NONE")
+        crate::candidates::enumerate_candidates(&idx, &params, "NONE")
             .map(|c| {
                 let r: Vec<u8> = c.peptide.residues.iter().map(|a| a.residue).collect();
                 (c.protein_index, c.start_offset_in_protein, folded(&r))

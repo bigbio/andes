@@ -14,10 +14,10 @@ use parquet::file::properties::WriterProperties;
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::{PrecursorTolerance, Tolerance};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
 use crate::pin::{

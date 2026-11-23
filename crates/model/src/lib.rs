@@ -4,6 +4,7 @@
 pub mod activation;
 pub mod amino_acid;
 pub mod annotation;
+pub mod crosslinkers;
 pub mod enzyme;
 pub mod fdr;
 pub mod glycans;
@@ -22,7 +23,6 @@ pub mod spectrum;
 pub mod stats;
 pub mod tolerance;
 pub mod unimod;
-pub mod crosslinkers;
 
 pub use amino_acid::set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;

@@ -3,17 +3,14 @@
 //! between candidate matching in `search` and the rescoring step, producing the features each
 //! PSM carries.
 
-pub mod frag_features;
-pub mod gbdt_eval;
-pub mod ion_features;
-pub mod mod_site_features;
-pub mod param_model;
-pub mod peak_features;
-pub mod rt_model;
-pub mod scoring;
+pub mod features;
+pub mod gbdt;
+pub mod params;
+pub mod psm;
+pub mod rt;
 
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use param_model::Param;
-pub use scoring::{IonMatchFact, RankScorer, ScoredSpectrum};
+pub use params::Param;
+pub use psm::{IonMatchFact, RankScorer, ScoredSpectrum};

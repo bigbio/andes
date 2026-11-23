@@ -2,7 +2,7 @@ use glyco::glycan::first::PPM_FLOOR_DA;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::psm::ions::predict_by_ions;
 
 pub struct FragmentIndex {
     bin_width: f64,

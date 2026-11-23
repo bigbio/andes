@@ -3,8 +3,8 @@ use std::path::Path;
 use model::amino_acid::AminoAcid;
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::param_model::Param;
-use scoring_crate::scoring::rank_scorer::RankScorer;
+use scoring_crate::params::Param;
+use scoring_crate::psm::rank::RankScorer;
 
 use model_train::accumulate::StatsAccumulator;
 use model_train::counts::CountStats;

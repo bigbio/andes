@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{IonType, Partition};
+use scoring_crate::params::{IonType, Partition};
 
 #[inline]
 fn ensure_len(vec: &mut Vec<u64>, idx: usize) {

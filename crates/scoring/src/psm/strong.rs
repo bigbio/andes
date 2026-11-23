@@ -21,7 +21,7 @@ pub fn predict_frag_raw(
     precursor_charge: u8,
 ) -> Vec<f32> {
     let ions = predict_by_ions(peptide, 1..=2);
-    let feats: Vec<[f32; crate::frag_features::N_FRAG_FEATURES]> = ions
+    let feats: Vec<[f32; crate::features::fragment::N_FRAG_FEATURES]> = ions
         .iter()
         .map(|ion| {
             extract_frag_features(
@@ -50,7 +50,7 @@ pub fn frag_intensities_from_raw(raw: &[f32]) -> Vec<f64> {
         .collect()
 }
 
-type FragRowKey = [u32; crate::frag_features::N_FRAG_FEATURES];
+type FragRowKey = [u32; crate::features::fragment::N_FRAG_FEATURES];
 
 const FRAG_MEMO_CAP: usize = 1 << 17;
 
@@ -61,11 +61,11 @@ thread_local! {
 
 fn predict_frag_values_memo(
     frag_model: &GbdtPeakModel,
-    feats: &[[f32; crate::frag_features::N_FRAG_FEATURES]],
+    feats: &[[f32; crate::features::fragment::N_FRAG_FEATURES]],
 ) -> Vec<f32> {
     let model_id = frag_model.trees.as_ptr() as usize ^ frag_model.trees.len().rotate_left(48);
     let key =
-        |f: &[f32; crate::frag_features::N_FRAG_FEATURES]| -> FragRowKey { f.map(f32::to_bits) };
+        |f: &[f32; crate::features::fragment::N_FRAG_FEATURES]| -> FragRowKey { f.map(f32::to_bits) };
     FRAG_MEMO.with(|cell| {
         let mut memo = cell.borrow_mut();
         if memo.0 != model_id {
@@ -107,11 +107,11 @@ fn predicted_linear_intensity(g: &GbdtPeakModel, feats: &[f32]) -> f64 {
         .exp()
 }
 
-use crate::frag_features::extract_frag_features;
-use crate::gbdt_eval::GbdtPeakModel;
-use crate::ion_features::extract_ion_features;
-use crate::scoring::fragment_ions::{predict_by_ions, IonKind, PredictedIon};
-use crate::scoring::ScoredSpectrum;
+use crate::features::fragment::extract_frag_features;
+use crate::gbdt::GbdtPeakModel;
+use crate::features::ion::extract_ion_features;
+use crate::psm::ions::{predict_by_ions, IonKind, PredictedIon};
+use crate::psm::ScoredSpectrum;
 
 pub fn spectral_cosine_similarity(pred: &[f64], obs: &[f64]) -> f64 {
     if pred.is_empty() || pred.len() != obs.len() {
@@ -507,7 +507,7 @@ pub fn rich_ion_llr(
     if peptide.length() < 2 {
         return 0.0;
     }
-    let mut rows_buf: Vec<[f32; crate::ion_features::N_ION_FEATURES]> = Vec::new();
+    let mut rows_buf: Vec<[f32; crate::features::ion::N_ION_FEATURES]> = Vec::new();
     for ion in predict_by_ions(peptide, 1..=2) {
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -729,13 +729,13 @@ mod tests {
         assert_eq!(listwise_score_gap(&[5.0]), 0.0);
     }
 
-    fn const_leaf_gbdt(leaf_value: f32) -> crate::gbdt_eval::GbdtPeakModel {
-        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+    fn const_leaf_gbdt(leaf_value: f32) -> crate::gbdt::GbdtPeakModel {
+        use crate::gbdt::{GbdtPeakModel, Tree};
         let m = GbdtPeakModel {
             packed: Default::default(),
-            n_features: crate::frag_features::N_FRAG_FEATURES as u32,
-            feature_names: crate::gbdt_eval::indexed_feature_names(
-                crate::frag_features::N_FRAG_FEATURES as u32,
+            n_features: crate::features::fragment::N_FRAG_FEATURES as u32,
+            feature_names: crate::gbdt::indexed_feature_names(
+                crate::features::fragment::N_FRAG_FEATURES as u32,
             ),
             apply_sigmoid: false,
             trees: vec![Tree {
@@ -757,20 +757,20 @@ mod tests {
         let g_big = const_leaf_gbdt(1.0e6);
         let v = super::predicted_linear_intensity(
             &g_big,
-            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+            &[0.0f32; crate::features::fragment::N_FRAG_FEATURES],
         );
         assert!(v.is_finite(), "clamped exp must be finite, got {v}");
         assert!(v > 0.0);
         let g_small = const_leaf_gbdt(-1.0e6);
         let v2 = super::predicted_linear_intensity(
             &g_small,
-            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+            &[0.0f32; crate::features::fragment::N_FRAG_FEATURES],
         );
         assert!(v2.is_finite() && v2 >= 0.0, "got {v2}");
         let g0 = const_leaf_gbdt(0.0);
         let v3 = super::predicted_linear_intensity(
             &g0,
-            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+            &[0.0f32; crate::features::fragment::N_FRAG_FEATURES],
         );
         assert!((v3 - 1.0).abs() < 1e-9, "exp(0) must be 1.0, got {v3}");
     }

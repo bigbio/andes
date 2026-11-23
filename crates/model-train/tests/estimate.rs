@@ -4,8 +4,8 @@ use model::amino_acid::AminoAcid;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::param_model::{IonType, Param, Partition};
-use scoring_crate::scoring::rank_scorer::RankScorer;
+use scoring_crate::params::{IonType, Param, Partition};
+use scoring_crate::psm::rank::RankScorer;
 
 use model_train::accumulate::StatsAccumulator;
 use model_train::counts::CountStats;
@@ -16,7 +16,7 @@ use model::instrument::InstrumentType;
 use model::protocol::Protocol;
 use model::tolerance::Tolerance;
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
+use scoring_crate::params::{FragmentOffsetFrequency, SpecDataType};
 
 fn one_partition_template(max_rank: i32) -> Param {
     let part = Partition {

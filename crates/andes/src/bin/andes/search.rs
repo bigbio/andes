@@ -261,7 +261,7 @@ fn recalibrate_dia_ms1(prepared: &mut PreparedSearch, pending: &[Spectrum], span
 struct FragmentErrorMeasurer {
     enabled: bool,
     done: bool,
-    per_file: Vec<Option<scoring_crate::scoring::FragmentErrorModel>>,
+    per_file: Vec<Option<scoring_crate::psm::FragmentErrorModel>>,
 }
 
 impl FragmentErrorMeasurer {

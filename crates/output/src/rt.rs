@@ -1,5 +1,5 @@
 use model::spectrum::Spectrum;
-use scoring_crate::rt_model::{calibrate, RtIndexModel};
+use scoring_crate::rt::{calibrate, RtIndexModel};
 use search::candidates::Candidate;
 use search::psm::TopNQueue;
 
@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
-    use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;
+    use scoring_crate::rt::MIN_CALIBRATION_ANCHORS;
     use search::psm::{PsmFeatures, PsmMatch};
 
     fn pep(seq: &[u8]) -> Peptide {

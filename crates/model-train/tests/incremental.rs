@@ -9,7 +9,7 @@ use model_train::{
         write_model_with_sources, ModelStore, SourceLedger,
     },
 };
-use scoring_crate::{param_model::Param, scoring::rank_scorer::RankScorer};
+use scoring_crate::{params::Param, psm::rank::RankScorer};
 
 fn fixture_param() -> Param {
     let bundled = Path::new(concat!(
@@ -23,7 +23,7 @@ fn fixture_param() -> Param {
 }
 
 fn make_stats_s0() -> CountStats {
-    use scoring_crate::param_model::{IonType, Partition};
+    use scoring_crate::params::{IonType, Partition};
     let pa = Partition {
         charge: 2,
         parent_mass: 800.0_f32,
@@ -51,7 +51,7 @@ fn make_stats_s0() -> CountStats {
 }
 
 fn make_stats_s1() -> CountStats {
-    use scoring_crate::param_model::{IonType, Partition};
+    use scoring_crate::params::{IonType, Partition};
     let pa = Partition {
         charge: 2,
         parent_mass: 800.0_f32,
@@ -482,7 +482,7 @@ fn attach_to_model_keeps_existing_model_content() {
         .as_deref()
         .expect("bundled rich-ion model");
     assert!(stored.trees.len() > 1);
-    let replacement = std::sync::Arc::new(scoring_crate::gbdt_eval::GbdtPeakModel {
+    let replacement = std::sync::Arc::new(scoring_crate::gbdt::GbdtPeakModel {
         n_features: stored.n_features,
         feature_names: stored.feature_names.clone(),
         apply_sigmoid: stored.apply_sigmoid,

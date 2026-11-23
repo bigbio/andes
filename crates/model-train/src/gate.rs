@@ -4,7 +4,7 @@ use std::path::Path;
 
 use input::FastaReader;
 use model::spectrum::Spectrum;
-use scoring_crate::scoring::rank_scorer::RankScorer;
+use scoring_crate::psm::rank::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
 use search::{match_spectra, SearchIndex, SearchParams};
 

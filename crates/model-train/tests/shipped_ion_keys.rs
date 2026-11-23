@@ -1,6 +1,6 @@
 use model::mass::{H2O, NH3, PROTON, Z_DOT_OFFSET};
-use scoring_crate::param_model::IonType;
-use scoring_crate::scoring::rank_scorer::RankScorer;
+use scoring_crate::params::IonType;
+use scoring_crate::psm::rank::RankScorer;
 use std::path::Path;
 
 const KEY_TOLERANCE_DA: f64 = 1e-6;

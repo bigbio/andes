@@ -8,7 +8,7 @@ use model_train::store::{
     write_all_models_with_sources_and_gbdt_pub, write_models, write_models_with_gbdt, ModelStore,
 };
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{
+use scoring_crate::params::{
     FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType,
 };
 use std::path::Path;
@@ -230,12 +230,12 @@ fn loss_class_survives_store_round_trip() {
 
 #[test]
 fn gbdt_blob_roundtrips_through_store() {
-    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use scoring_crate::gbdt::{GbdtPeakModel, Tree};
 
     let model = GbdtPeakModel {
         packed: Default::default(),
-        n_features: scoring_crate::peak_features::N_FEATURES as u32,
-        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+        n_features: scoring_crate::features::peaks::N_FEATURES as u32,
+        feature_names: scoring_crate::features::peaks::FEATURE_NAMES
             .iter()
             .map(|n| n.to_string())
             .collect(),
@@ -322,12 +322,12 @@ fn bundled_store_ion_types_have_zero_loss_class() {
 
 #[test]
 fn multi_model_write_preserves_blobs_and_sources() {
-    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use scoring_crate::gbdt::{GbdtPeakModel, Tree};
 
     let model = GbdtPeakModel {
         packed: Default::default(),
-        n_features: scoring_crate::peak_features::N_FEATURES as u32,
-        feature_names: scoring_crate::peak_features::FEATURE_NAMES
+        n_features: scoring_crate::features::peaks::N_FEATURES as u32,
+        feature_names: scoring_crate::features::peaks::FEATURE_NAMES
             .iter()
             .map(|n| n.to_string())
             .collect(),
@@ -408,13 +408,13 @@ fn multi_model_write_preserves_blobs_and_sources() {
 
 #[test]
 fn frag_intensity_model_roundtrips_through_store() {
-    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use scoring_crate::gbdt::{GbdtPeakModel, Tree};
     use std::sync::Arc;
 
     let model = GbdtPeakModel {
         packed: Default::default(),
-        n_features: scoring_crate::frag_features::N_FRAG_FEATURES as u32,
-        feature_names: scoring_crate::frag_features::FRAG_FEATURE_NAMES
+        n_features: scoring_crate::features::fragment::N_FRAG_FEATURES as u32,
+        feature_names: scoring_crate::features::fragment::FRAG_FEATURE_NAMES
             .iter()
             .map(|n| n.to_string())
             .collect(),
@@ -465,13 +465,13 @@ fn frag_intensity_model_roundtrips_through_store() {
 
 #[test]
 fn rich_ion_model_round_trips_through_store() {
-    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use scoring_crate::gbdt::{GbdtPeakModel, Tree};
     use std::sync::Arc;
 
     let model = GbdtPeakModel {
         packed: Default::default(),
-        n_features: scoring_crate::ion_features::N_ION_FEATURES as u32,
-        feature_names: scoring_crate::ion_features::ION_FEATURE_NAMES
+        n_features: scoring_crate::features::ion::N_ION_FEATURES as u32,
+        feature_names: scoring_crate::features::ion::ION_FEATURE_NAMES
             .iter()
             .map(|n| n.to_string())
             .collect(),

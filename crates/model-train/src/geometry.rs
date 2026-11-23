@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition};
+use scoring_crate::params::{FragmentOffsetFrequency, IonType, Param, Partition};
 
 use crate::labeled::LabeledMatch;
 
@@ -214,7 +214,7 @@ mod tests {
     use model::instrument::InstrumentType;
     use model::protocol::Protocol;
     use model::tolerance::Tolerance;
-    use scoring_crate::param_model::SpecDataType;
+    use scoring_crate::params::SpecDataType;
 
     fn base_param() -> Param {
         let part = Partition {

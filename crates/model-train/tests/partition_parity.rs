@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use model_train::store::{split_store_by_protocol, ModelStore};
-use scoring_crate::param_model::Param;
+use scoring_crate::params::Param;
 
 fn bundled_single_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

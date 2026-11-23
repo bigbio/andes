@@ -1,10 +1,10 @@
 use std::sync::OnceLock;
 
-use crate::param_model::Partition;
-use crate::scoring::fragment_ions::{predict_cz_ions, IonKind};
-use crate::scoring::rank_scorer::RankScorer;
-use crate::scoring::scored_spectrum::ScoredSpectrum;
-use crate::scoring::strong_score::DENSITY_HW;
+use crate::params::Partition;
+use crate::psm::ions::{predict_cz_ions, IonKind};
+use crate::psm::rank::RankScorer;
+use crate::psm::spectrum::ScoredSpectrum;
+use crate::psm::strong::DENSITY_HW;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 
@@ -210,8 +210,8 @@ pub fn score_psm(
         total += contribution;
 
         if score_losses {
-            let prefix_losses = crate::scoring::scored_spectrum::span_losses(peptide, 0..s);
-            let suffix_losses = crate::scoring::scored_spectrum::span_losses(peptide, s..n);
+            let prefix_losses = crate::psm::spectrum::span_losses(peptide, 0..s);
+            let suffix_losses = crate::psm::spectrum::span_losses(peptide, s..n);
             total += scored_spec.loss_node_score(
                 prefix_nominal as f64,
                 suffix_nominal as f64,
@@ -471,9 +471,9 @@ pub fn score_psm_float(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
-    use crate::scoring::rank_scorer::RankScorer;
-    use crate::scoring::scored_spectrum::ScoredSpectrum;
+    use crate::params::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
+    use crate::psm::rank::RankScorer;
+    use crate::psm::spectrum::ScoredSpectrum;
     use crate::testutil::tiny_param;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;

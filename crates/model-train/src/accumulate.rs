@@ -1,9 +1,9 @@
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::param_model::IonType;
-use scoring_crate::scoring::psm_edge_existence_facts;
-use scoring_crate::scoring::rank_scorer::RankScorer;
-use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
+use scoring_crate::params::IonType;
+use scoring_crate::psm::psm_edge_existence_facts;
+use scoring_crate::psm::rank::RankScorer;
+use scoring_crate::psm::spectrum::ScoredSpectrum;
 
 use crate::counts::CountStats;
 

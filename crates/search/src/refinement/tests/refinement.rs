@@ -946,7 +946,7 @@ fn tiny_scorer() -> RankScorer {
     use model::protocol::Protocol;
     use model::tolerance::Tolerance;
     use rustc_hash::FxHashMap;
-    use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+    use scoring_crate::params::{IonType, Partition, SpecDataType};
     use scoring_crate::Param;
 
     let part = Partition {

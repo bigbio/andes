@@ -1,7 +1,7 @@
 use model::peptide::Peptide;
-use scoring_crate::ion_features::{extract_ion_features, ION_FEATURE_NAMES, N_ION_FEATURES};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
-use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
+use scoring_crate::features::ion::{extract_ion_features, ION_FEATURE_NAMES, N_ION_FEATURES};
+use scoring_crate::psm::ions::predict_by_ions;
+use scoring_crate::psm::spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
 
 use crate::gbdt::dataset::{group_id, PsmRow};

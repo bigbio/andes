@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use crate::param_model::{IonType, Param};
+use crate::params::{IonType, Param};
 use model::amino_acid::AminoAcid;
 use model::mass::{H2O, PROTON};
 use model::peptide::Peptide;
@@ -27,7 +27,7 @@ pub fn ions_for_node(
 }
 
 #[inline]
-pub fn for_each_ion_for_node<F: FnMut(IonType, f64, crate::param_model::Partition)>(
+pub fn for_each_ion_for_node<F: FnMut(IonType, f64, crate::params::Partition)>(
     nominal_mass: f64,
     is_prefix: bool,
     param: &Param,

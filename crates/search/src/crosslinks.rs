@@ -8,7 +8,7 @@ use model::peptide::Peptide;
 use model::scan::ProductScan;
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
-use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
+use scoring_crate::psm::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
 use xl::crosslinker::{Crosslinker, LinkForm, ISOTOPE_SPACING, N_FORMS, PROTON};
 use xl::decoy::PairClass;
 use xl::doublet::{find_doublets, group_by_mass, stub_ions_present, DoubletMass, DoubletParams};

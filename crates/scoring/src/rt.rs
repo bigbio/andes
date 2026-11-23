@@ -1,6 +1,6 @@
 use model::peptide::Peptide;
 
-use crate::frag_features::hydropathy;
+use crate::features::fragment::hydropathy;
 
 pub const AA_ORDER: [u8; 20] = *b"ARNDCQEGHILKMFPSTWYV";
 

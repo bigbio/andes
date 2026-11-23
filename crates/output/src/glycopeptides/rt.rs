@@ -1,5 +1,5 @@
 use model::spectrum::Spectrum;
-use scoring_crate::rt_model::{calibrate, RtIndexModel};
+use scoring_crate::rt::{calibrate, RtIndexModel};
 use search::candidates::Candidate;
 use search::glycopeptides::GlycoSpectrumResult;
 
@@ -179,7 +179,7 @@ mod tests {
     use glyco::rt::glycan_index_offset;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
-    use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;
+    use scoring_crate::rt::MIN_CALIBRATION_ANCHORS;
     use search::glycopeptides::FullGlycoPsm;
     use search::psm::{PsmFeatures, PsmMatch};
 

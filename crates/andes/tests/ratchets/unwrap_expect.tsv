@@ -50,8 +50,8 @@ crates/rescore/src/normalize.rs	1
 crates/rescore/src/store.rs	2
 crates/rescore/src/svm.rs	6
 crates/rescore/src/text.rs	1
-crates/scoring/src/gbdt_eval.rs	10
-crates/scoring/src/scoring/scored_spectrum.rs	3
+crates/scoring/src/gbdt.rs	10
+crates/scoring/src/psm/spectrum.rs	3
 crates/search/src/candidates.rs	2
 crates/search/src/candidates/records.rs	8
 crates/search/src/crosslinks.rs	1

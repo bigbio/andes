@@ -79,7 +79,7 @@ pub(crate) fn compute_psm_features(
 
 /// [`predict_frag_intensities`], through `cache` when one is given.
 pub(super) fn predict_frag_with(
-    model: &scoring_crate::gbdt_eval::GbdtPeakModel,
+    model: &scoring_crate::gbdt::GbdtPeakModel,
     peptide: &Peptide,
     charge: u8,
     cache: Option<&crate::fragments::predictions::FragPredCache>,
@@ -98,7 +98,7 @@ pub(super) struct KeptPsmFeatureValues {
     frag_pred_chance_llr: f32,
     frag_topk_observed: f32,
     rich_ion_llr: f32,
-    mod_site: [f32; scoring_crate::mod_site_features::N_MOD_SITE_FEATURES],
+    mod_site: [f32; scoring_crate::features::sites::N_MOD_SITE_FEATURES],
 }
 
 /// Computes the full-pass-only features of `peptide` at `charge`. `frag_pred` is the
@@ -300,7 +300,7 @@ pub(crate) fn compute_psm_features_with_edge(
     let mut prm_accurate: f64 = 0.0;
     let mut srm_accurate: f64 = 0.0;
 
-    let segment_ions: SmallVec<[&[scoring_crate::param_model::IonType]; 8]> = (0..num_segments)
+    let segment_ions: SmallVec<[&[scoring_crate::params::IonType]; 8]> = (0..num_segments)
         .map(|seg| {
             scorer
                 .param()
@@ -321,7 +321,7 @@ pub(crate) fn compute_psm_features_with_edge(
             let ions = segment_ions[seg];
             for &ion in ions {
                 let (is_prefix, residue_mass) = match ion {
-                    scoring_crate::param_model::IonType::Prefix {
+                    scoring_crate::params::IonType::Prefix {
                         charge: ic,
                         offset_bits,
                         ..
@@ -330,7 +330,7 @@ pub(crate) fn compute_psm_features_with_edge(
                         let z = ic as f64;
                         (true, (prm_accurate / z + offset, ion))
                     }
-                    scoring_crate::param_model::IonType::Suffix {
+                    scoring_crate::params::IonType::Suffix {
                         charge: ic,
                         offset_bits,
                         ..
@@ -339,7 +339,7 @@ pub(crate) fn compute_psm_features_with_edge(
                         let z = ic as f64;
                         (false, (srm_accurate / z + offset, ion))
                     }
-                    scoring_crate::param_model::IonType::Noise => continue,
+                    scoring_crate::params::IonType::Noise => continue,
                 };
                 let theo_mz = residue_mass.0;
                 if scorer.param().segment_num(theo_mz, parent_mass) != seg {

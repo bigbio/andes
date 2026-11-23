@@ -174,10 +174,10 @@ pub(crate) fn learned_score(
     let mut positive: Vec<bool> = target.to_vec();
     let mut kept: Option<Vec<f32>> = None;
     let mut degenerate_folds = 0usize;
-    let mut prev: Vec<Vec<scoring_crate::gbdt_eval::Tree>> = vec![Vec::new(); FOLDS as usize];
+    let mut prev: Vec<Vec<scoring_crate::gbdt::Tree>> = vec![Vec::new(); FOLDS as usize];
     for (round, &round_q) in ROUND_Q.iter().enumerate() {
         let t_round = std::time::Instant::now();
-        type Fit = (Vec<(usize, f32)>, Vec<scoring_crate::gbdt_eval::Tree>);
+        type Fit = (Vec<(usize, f32)>, Vec<scoring_crate::gbdt::Tree>);
         let fits: Vec<Result<Fit, String>> = (0..FOLDS)
             .into_par_iter()
             .map(|f| {

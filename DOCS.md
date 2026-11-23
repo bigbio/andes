@@ -3558,13 +3558,13 @@ here only where the value is a fixed choice rather than a documented option.
 |---|---|---|---|---|---|
 | GBDT trees | 100 | `andes/src/bin/andes/cli.rs` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
 | Isobaric peak filter | 100 Da window, 20 peaks | `andes/src/bin/andes/search.rs:273` (resolution), `--peak-filter` text in [§1](#scoring) | spectra filtered for TMT/iTRAQ data | `--peak-filter` | No recorded evidence |
-| Feature window | 50 Da | `scoring/src/peak_features.rs:43`, `scoring/src/scoring/strong_score.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
-| Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/scoring/fragment_error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
+| Feature window | 50 Da | `scoring/src/features/peaks.rs:43`, `scoring/src/psm/strong.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
+| Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/psm/error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
 | Nominal-mass node window | 6 sigma | `fragment_error.rs:13` | low-resolution fragment window | learned spread, fixed multiple | Fixed 0.15-0.25 Da windows are the plateau on five high-res sets; measured spreads 0.035-0.05 Da (code comment) |
 | ppm-Gaussian term | width 1.5 x spread, default 7 ppm, minimum 1 ppm | `fragment_error.rs:20-24` | fragment ppm score term | learned spread, fixed multiple | 1.5-1.8 x scored best on Astral (code comment); default and minimum: no recorded evidence |
 | Strong-score calibration minimum | 100 candidates | `strong_score.rs:427` | per-spectrum z-score calibration | no | Mirrors the Tailor minimum |
 | Predicted-intensity top-K | 6 fragments | `strong_score.rs:271` | fragments from the intensity predictor entering the score | no | No recorded evidence |
-| RT calibration anchors | 5 | `scoring/src/rt_model.rs:236` | smallest per-run RT fit | no | Needed for a robust slope and outlier trim (code comment) |
+| RT calibration anchors | 5 | `scoring/src/rt.rs:236` | smallest per-run RT fit | no | Needed for a robust slope and outlier trim (code comment) |
 | Artefact masses | 0.984016, 15.994915, 43.005814, 14.01565 | `andes/src/bin/andes/search.rs:3201` | substitutions warned as mimicking modifications | no | Chemistry (deamidation, oxidation, carbamylation, methylation) |
 
 ### FDR and rescoring

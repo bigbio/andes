@@ -7,12 +7,12 @@ mod manifest;
 mod session;
 mod tensor;
 
-pub mod peptide;
 pub mod backend;
 pub mod deeplc;
 pub mod ms2;
 pub mod ms2pip;
 pub mod peptdeep;
+pub mod peptide;
 pub mod predictors;
 pub mod prosit;
 pub mod rescoring;

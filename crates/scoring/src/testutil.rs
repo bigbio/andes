@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 
-use crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
+use crate::params::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
 use model::protocol::Protocol;

@@ -10,7 +10,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use scoring_crate::param_model::{IonType, Param, Partition};
+use scoring_crate::params::{IonType, Param, Partition};
 
 use crate::counts::CountStats;
 use crate::store::schema::combined_schema;

@@ -6,7 +6,7 @@ use model::protocol::Protocol;
 use model::{
     AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, Tolerance, PROTON,
 };
-use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+use scoring_crate::params::{IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
 use search::candidates::Candidate;
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};

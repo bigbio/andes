@@ -34,7 +34,7 @@ pub(crate) fn run_glyco(
     t_total: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let t_glyco = std::time::Instant::now();
-    scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
+    scoring_crate::psm::init_cz_settings(scoring_crate::psm::CzSettings {
         zmax_override: cli.glyco_cz_max_charge,
     });
     glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);

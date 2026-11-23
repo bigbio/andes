@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use scoring_crate::gbdt_eval::Tree;
+use scoring_crate::gbdt::Tree;
 
 /// Nodes with fewer rows than this build their histograms on the calling thread.
 const PAR_MIN_ROWS: usize = 4096;
@@ -315,7 +315,7 @@ pub fn fit_tree_cols(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scoring_crate::gbdt_eval::Tree;
+    use scoring_crate::gbdt::Tree;
 
     #[test]
     fn leaves_match_eval_on_continuous_features() {
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn emitted_tree_passes_walker_decode() {
-        use scoring_crate::gbdt_eval::GbdtPeakModel;
+        use scoring_crate::gbdt::GbdtPeakModel;
         let n = 60usize;
         let nf = 1usize;
         let nb = 3usize;
@@ -419,7 +419,7 @@ mod tests {
         let model = GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(1),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(1),
             apply_sigmoid: false,
             trees: vec![tree],
             iso_x: vec![],

@@ -1,6 +1,6 @@
 use model::hash::{splitmix64_next, SPLITMIX_GOLDEN};
 use rayon::prelude::*;
-use scoring_crate::gbdt_eval::GbdtPeakModel;
+use scoring_crate::gbdt::GbdtPeakModel;
 
 use super::isotonic::pava;
 use super::tree::{fit_tree_cols, TreeParams};
@@ -217,7 +217,7 @@ fn split_rows_by_group(groups: &[u32], seed: u64, val_fraction: f32) -> (Vec<usi
 fn gbdt_model(
     feature_names: &[String],
     apply_sigmoid: bool,
-    trees: Vec<scoring_crate::gbdt_eval::Tree>,
+    trees: Vec<scoring_crate::gbdt::Tree>,
 ) -> GbdtPeakModel {
     GbdtPeakModel {
         packed: Default::default(),
@@ -240,7 +240,7 @@ pub fn train_gbdt_from(
     ds: &Dataset,
     p: &TrainParams,
     seed: u64,
-    init: Vec<scoring_crate::gbdt_eval::Tree>,
+    init: Vec<scoring_crate::gbdt::Tree>,
 ) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
@@ -392,7 +392,7 @@ pub fn train_gbdt_from(
         n_features: nf,
     };
 
-    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = init.clone();
+    let mut trees: Vec<scoring_crate::gbdt::Tree> = init.clone();
     let mut best_loss = if trees.is_empty() {
         f32::INFINITY
     } else {
@@ -656,7 +656,7 @@ pub fn train_gbdt_regression(
         n_features: nf,
     };
 
-    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = Vec::new();
+    let mut trees: Vec<scoring_crate::gbdt::Tree> = Vec::new();
     let mut best_loss = f32::INFINITY;
     let mut best_round: usize = 0;
     let mut no_improve = 0u32;
@@ -786,7 +786,7 @@ mod tests {
             y,
             groups,
             n_features: nf,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(nf as u32),
         }
     }
 
@@ -829,7 +829,7 @@ mod tests {
             y: vec![0u8; 10],
             groups: (0..10).collect(),
             n_features: 3,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(3),
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 1);
         assert!(matches!(m, Err(TrainError::QualityGate(_))), "got {m:?}");
@@ -849,7 +849,7 @@ mod tests {
             y,
             groups: (0..n as u32).collect(),
             n_features: 3,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(3),
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 7);
         assert!(
@@ -865,7 +865,7 @@ mod tests {
             y: vec![0u8; 10],
             groups: (0..10).collect(),
             n_features: 3,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(3),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(3),
         };
         let p = TrainParams {
             allow_degenerate: true,
@@ -905,7 +905,7 @@ mod tests {
             y,
             groups: g,
             n_features: nf,
-            feature_names: scoring_crate::gbdt_eval::indexed_feature_names(nf as u32),
+            feature_names: scoring_crate::gbdt::indexed_feature_names(nf as u32),
         };
         let p = TrainParams::default();
         let model = train_gbdt_regression(&ds, &p, 42).expect("linear target passes gate");

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::gbdt_eval::GbdtPeakModel;
+use crate::gbdt::GbdtPeakModel;
 use model::activation::ActivationMethod;
 use model::enzyme::Enzyme;
 use model::instrument::InstrumentType;
@@ -706,12 +706,12 @@ mod tests {
 
     #[test]
     fn frag_intensity_model_can_be_set_and_read() {
-        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+        use crate::gbdt::{GbdtPeakModel, Tree};
         use std::sync::Arc;
         let model = Arc::new(GbdtPeakModel {
             packed: Default::default(),
             n_features: 1,
-            feature_names: crate::gbdt_eval::indexed_feature_names(1),
+            feature_names: crate::gbdt::indexed_feature_names(1),
             apply_sigmoid: false,
             trees: vec![Tree {
                 feature: vec![-1],

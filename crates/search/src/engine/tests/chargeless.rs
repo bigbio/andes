@@ -3,7 +3,7 @@
 
 use super::*;
 use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
-use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use scoring_crate::psm::ions::predict_by_ions;
 
 fn peptide(residues: &[u8]) -> Peptide {
     let aas: Vec<AminoAcid> = residues

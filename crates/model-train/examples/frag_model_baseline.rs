@@ -7,9 +7,9 @@ use model::amino_acid::AminoAcid;
 use model::modification::{leak_mod, ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
 use model_train::store::ModelStore;
-use scoring_crate::rt_model::{rt_features, RtIndexModel};
-use scoring_crate::scoring::fragment_ions::IonKind;
-use scoring_crate::scoring::{predict_by_ions, predict_frag_intensities};
+use scoring_crate::rt::{rt_features, RtIndexModel};
+use scoring_crate::psm::ions::IonKind;
+use scoring_crate::psm::{predict_by_ions, predict_frag_intensities};
 
 const PROTON: f64 = 1.007_276_466_8;
 const C13: f64 = 1.003_354_835;

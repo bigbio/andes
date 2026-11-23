@@ -17,7 +17,7 @@ use super::{
     decoy_protein, draw_segment, folded_hash, shuffle_in_place, DecoyStrategy, Proteases,
     MAX_REDRAWS, MUTATE_POOL,
 };
-use crate::candidate_gen::{
+use crate::candidates::{
     compute_cleavage_positions, has_met_cleaved_walk, missed_cleavages_between,
 };
 
@@ -156,7 +156,7 @@ fn peptide_hash(residues: &[u8]) -> u64 {
 }
 
 /// Calls `f(start, end)` for every peptide span the search enumerates from a protein with
-/// sequence `seq` (`candidate_gen::enumerate_protein`): cleavage sites of the enzymes, the
+/// sequence `seq` (`candidates::enumerate_protein`): cleavage sites of the enzymes, the
 /// specificity, the length and missed-cleavage limits, the initiator-Met-cleaved walk, and no
 /// span holding a residue without a standard mass. Variant and chain windows are not applied, so
 /// the spans are a superset of the search's for annotated entries.
@@ -550,7 +550,7 @@ mod tests {
             .build()
             .expect("standard amino acids");
         for proteases in &digests {
-            let mut params = crate::search_params::SearchParams::default_tryptic(aa.clone());
+            let mut params = crate::params::SearchParams::default_tryptic(aa.clone());
             params.enzyme = proteases.primary;
             params.extra_enzymes = proteases.extra.clone();
             params.num_tolerable_termini = proteases.num_tolerable_termini;
@@ -558,7 +558,7 @@ mod tests {
             params.max_length = proteases.max_length;
             params.max_missed_cleavages = proteases.max_missed_cleavages;
             params.max_variable_mods_per_peptide = 0;
-            let idx = crate::search_index::SearchIndex::from_target_db_for(
+            let idx = crate::index::SearchIndex::from_target_db_for(
                 &db,
                 "NONE",
                 None,
@@ -567,7 +567,7 @@ mod tests {
                 proteases,
             );
             let want: BTreeSet<(usize, usize, usize)> =
-                crate::candidate_gen::enumerate_candidates(&idx, &params, "NONE")
+                crate::candidates::enumerate_candidates(&idx, &params, "NONE")
                     .map(|c| {
                         let s = c.start_offset_in_protein;
                         (c.protein_index, s, s + c.peptide.residues.len())

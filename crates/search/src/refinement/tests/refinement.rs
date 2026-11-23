@@ -382,7 +382,7 @@ fn anchored_decoys_keep_termini_and_pair_full_length_with_targets() {
     params.min_length = 6;
     params.max_variable_mods_per_peptide = 2;
     let cands: Vec<Candidate> =
-        crate::candidate_gen::enumerate_candidates(&idx, &params, "XXX").collect();
+        crate::candidates::enumerate_candidates(&idx, &params, "XXX").collect();
     for (i, a) in anchors.iter().enumerate() {
         let full = |prot: usize| {
             cands

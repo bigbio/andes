@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::Cli;
 use crate::xl_fdr::XlRun;
 use model::Spectrum;
-use search::xl_search::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
+use search::crosslinks::{xl_search_run, PeptideHit, XlCandidates, XlConfig, XlSpectrumResult};
 use search::PreparedSearch;
 use xl::crosslinker::Crosslinker;
 use xl::crosslinker::LinkForm;
@@ -426,7 +426,7 @@ fn write_doublets(
 }
 
 /// How many spectra had doublets explained by chance, and how many doublet masses were left
-/// out of the pairs for it (`search::xl_search::paired_masses`).
+/// out of the pairs for it (`search::crosslinks::paired_masses`).
 fn report_chance_doublets(results: &[XlSpectrumResult]) {
     let (mut spectra, mut dropped, mut total) = (0usize, 0usize, 0usize);
     for r in results {
@@ -794,7 +794,7 @@ fn merge_one(r: XlSpectrumResult, o: XlSpectrumResult) -> XlSpectrumResult {
 fn settle_runner_ups(results: &mut [XlSpectrumResult]) {
     for r in results.iter_mut() {
         if let Some(c) = r.csm.as_mut() {
-            c.second_pair_score = search::xl_search::runner_up(&r.pairs, &c.pair_key);
+            c.second_pair_score = search::crosslinks::runner_up(&r.pairs, &c.pair_key);
         }
     }
 }
@@ -823,7 +823,7 @@ mod tests {
     }
 
     fn result(linker: usize, csm: Option<(&str, f32)>, pairs: &[(&str, f32)]) -> XlSpectrumResult {
-        use search::xl_search::{Csm, PeptideHit};
+        use search::crosslinks::{Csm, PeptideHit};
         use xl::crosslinker::LinkForm;
         use xl::sites::LinkSite;
         let key = |p: &str| [p.as_bytes().to_vec(), b"PEPTIDEK".to_vec()];
@@ -853,8 +853,8 @@ mod tests {
                 beta: hit,
                 pair_key: key(p),
                 pair_score: score,
-                second_pair_score: search::xl_search::runner_up(&pairs, &key(p)),
-                kind: search::xl_search::PairKind::Full,
+                second_pair_score: search::crosslinks::runner_up(&pairs, &key(p)),
+                kind: search::crosslinks::PairKind::Full,
                 iso: 0,
                 class: xl::decoy::PairClass::TT,
                 intra: true,

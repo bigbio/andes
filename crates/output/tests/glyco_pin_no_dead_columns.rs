@@ -3,7 +3,7 @@ use std::io::Cursor;
 #[test]
 fn glyco_pin_default_header_carries_no_dead_columns() {
     let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
+    output::glycopeptides::pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
     let hdr = String::from_utf8(buf.into_inner()).unwrap();
     let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
     for dead in [
@@ -49,7 +49,7 @@ fn retired_research_columns_are_gone() {
         "ExplainedMasked",
     ];
     let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
+    output::glycopeptides::pin::write_glyco_header_for_test(&mut buf, 2, 4).unwrap();
     let hdr = String::from_utf8(buf.into_inner()).unwrap();
     let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
     for c in retired {

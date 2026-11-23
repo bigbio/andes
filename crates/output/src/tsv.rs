@@ -1,15 +1,15 @@
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{emitted_rows, RowContext};
+use crate::rows::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::protein::{EntryKind, EntryOrigin};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 pub(crate) fn modifications_field(peptide: &Peptide) -> String {
     let mut parts: Vec<String> = peptide
@@ -277,8 +277,8 @@ mod tests {
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
     use model::tolerance::PrecursorTolerance;
-    use search::candidate_gen::Candidate;
-    use search::search_index::SearchIndex;
+    use search::candidates::Candidate;
+    use search::index::SearchIndex;
 
     fn make_search_index(accession: &str) -> SearchIndex {
         let target = ProteinDb {
@@ -364,7 +364,7 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
-            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            cal_min_spec_keys: search::precursor::calibration::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
@@ -404,7 +404,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        let cands: Vec<search::candidates::Candidate> = vec![];
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )
@@ -443,7 +443,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        let cands: Vec<search::candidates::Candidate> = vec![];
         write_tsv_to(
             &mut buf,
             &spectra,
@@ -473,7 +473,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        let cands: Vec<search::candidates::Candidate> = vec![];
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )
@@ -717,7 +717,7 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        let cands: Vec<search::candidates::Candidate> = vec![];
         write_tsv_to(
             &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
         )

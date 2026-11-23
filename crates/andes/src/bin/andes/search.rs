@@ -18,9 +18,9 @@ use crate::spectra::{
 use input::{MgfReader, Ms1Link, MzMLReader};
 use model::{activation::ActivationMethod, Spectrum};
 use scoring_crate::RankScorer;
-use search::candidate_index::index_cache_path;
-use search::fragment_index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
-use search::precursor_mono::MonoCorrection;
+use search::candidates::records::index_cache_path;
+use search::fragments::index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SIZE};
+use search::precursor::monoisotopic::MonoCorrection;
 use search::{FileCalibration, PrecursorCalMode, PreparedSearch, TopNQueue};
 
 #[path = "search/resolve.rs"]
@@ -127,9 +127,9 @@ fn dia_rt_cal_sizes(n_spectra: usize) -> Vec<usize> {
 /// Fits the run's RT prior for the DIA vote cut and installs it on `prepared`: a deterministic
 /// subsample of the run is searched with the plain vote rank, the top match of each sample
 /// spectrum that is a target at q <= `DIA_RT_CAL_Q` becomes an anchor (andes-rt raw prediction
-/// of its peptide, scan minutes), and [`search::dia_rt_rank::DiaRtPrior::fit`] maps raw
+/// of its peptide, scan minutes), and [`search::dia::DiaRtPrior::fit`] maps raw
 /// predictions to minutes. While the anchors are fewer than the map needs for its full
-/// resolution ([`search::dia_rt_rank::FULL_MAP_ANCHORS`]) the sample grows (sizes of
+/// resolution ([`search::dia::FULL_MAP_ANCHORS`]) the sample grows (sizes of
 /// `dia_rt_cal_sizes`, each adding the next spectra of the same hash order), so a short or
 /// sparse run gets the anchors of a long one when its spectra hold them. With too few anchors
 /// no prior is installed and the cut keeps the vote rank.
@@ -185,11 +185,11 @@ fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f6
             .filter(|((top, l), q)| !l.is_decoy && **q <= DIA_RT_CAL_Q && top.1.is_finite())
             .map(|((top, _), _)| (f64::from(model(&prepared.candidate_peptide(top.0))), top.1))
             .collect();
-        if anchors.len() >= search::dia_rt_rank::FULL_MAP_ANCHORS {
+        if anchors.len() >= search::dia::FULL_MAP_ANCHORS {
             break;
         }
     }
-    match search::dia_rt_rank::DiaRtPrior::fit(&anchors) {
+    match search::dia::DiaRtPrior::fit(&anchors) {
         Some(prior) => {
             log::info!(
                 target: "dia-rt-rank",
@@ -210,7 +210,7 @@ fn calibrate_dia_rt(prepared: &PreparedSearch, spectra: &[Spectrum], span_da: f6
             "no RT prior: {} anchors at q <= {DIA_RT_CAL_Q} from {searched} sample spectra (at \
              least {} needed); the vote cut ranks by votes [{:.1}s]",
             anchors.len(),
-            search::dia_rt_rank::MIN_ANCHORS,
+            search::dia::MIN_ANCHORS,
             t.elapsed().as_secs_f64()
         ),
     }
@@ -242,7 +242,7 @@ fn recalibrate_dia_ms1(prepared: &mut PreparedSearch, pending: &[Spectrum], span
         queues.extend(prepared.run_chunk_with_params(&sample[start..start + take], start, &wide));
         start += take;
     }
-    match search::fragment_error::dia_ms1_offset_ppm(prepared, &sample, &queues, WINDOW_PPM) {
+    match search::fragments::error::dia_ms1_offset_ppm(prepared, &sample, &queues, WINDOW_PPM) {
         Some((ppm, n)) => {
             prepared.shift_dia_ms1_ppm(ppm);
             log::info!(
@@ -287,7 +287,7 @@ impl FragmentErrorMeasurer {
         let t = std::time::Instant::now();
         let mut refs: Vec<&Spectrum> = spectra.filter(|s| s.peaks.len() >= 10).collect();
         refs.sort_by(|a, b| index_order_mass(a).total_cmp(&index_order_mass(b)));
-        let n = search::fragment_error::SAMPLE_SPECTRA.min(refs.len());
+        let n = search::fragments::error::SAMPLE_SPECTRA.min(refs.len());
         let lo = (refs.len() / 2).saturating_sub(n / 2);
         let sample: Vec<Spectrum> = refs[lo..lo + n].iter().map(|s| (*s).clone()).collect();
         drop(refs);
@@ -303,7 +303,7 @@ impl FragmentErrorMeasurer {
             }
             None => queues.extend(prepared.run_chunk(&sample, 0)),
         }
-        match search::fragment_error::measure_on_queues(prepared, &sample, &queues) {
+        match search::fragments::error::measure_on_queues(prepared, &sample, &queues) {
             Ok(m) => {
                 prepared.set_fragment_error(Some(m));
                 if let Some(last) = self.per_file.last_mut() {
@@ -589,7 +589,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let (model_id, mut p) = route;
-            if index_on && !search::fragment_index::covers_activation(p.data_type.activation) {
+            if index_on && !search::fragments::index::covers_activation(p.data_type.activation) {
                 return None;
             }
             if gbdt_max_trees > 0 {
@@ -966,11 +966,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .flatten()
                             .and_then(|m| chunk_link.ms1_peaks.get(m));
                         if let Some(mz) = ms1.and_then(|p| {
-                            search::precursor_mono::snap_precursor_mz(
+                            search::precursor::monoisotopic::snap_precursor_mz(
                                 p,
                                 spec.precursor_mz,
-                                search::xl_search::PRECURSOR_SNAP_PPM,
-                                search::xl_search::PRECURSOR_SNAP_RATIO,
+                                search::crosslinks::PRECURSOR_SNAP_PPM,
+                                search::crosslinks::PRECURSOR_SNAP_RATIO,
                             )
                         }) {
                             spec.precursor_mz = mz;
@@ -1554,7 +1554,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             log::info!(
                 target: "xl",
                 "{xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
-                search::xl_search::PRECURSOR_SNAP_PPM
+                search::crosslinks::PRECURSOR_SNAP_PPM
             );
         }
         crate::xl_run::run_xl(
@@ -1722,7 +1722,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Vec::new()
     };
-    let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
+    let mut dia_pass2: Option<output::dia::pass2::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         crate::memlimit::mark_stage("predictions");
@@ -2048,7 +2048,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let posteriors = row_scores.as_ref().map(|(target_scores, decoy_scores)| {
-            let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
+            let rows: std::collections::HashMap<String, output::fdr::identity::RowEvidence> =
                 queues
                     .iter()
                     .enumerate()
@@ -2059,7 +2059,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .map(move |(id, isotope_offset, evidence)| {
                                 (
                                     id,
-                                    output::site_identity::RowEvidence {
+                                    output::fdr::identity::RowEvidence {
                                         spectrum: i as u32,
                                         isotope_offset,
                                         evidence,
@@ -2068,7 +2068,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             })
                     })
                     .collect();
-            output::site_identity::row_posteriors(target_scores, decoy_scores, &rows)
+            output::fdr::identity::row_posteriors(target_scores, decoy_scores, &rows)
         });
         let sites = output::site_claims(
             map,
@@ -2602,7 +2602,7 @@ pub(crate) fn load_claim_database(
     })
 }
 
-fn release_at_exit(candidates: Vec<search::candidate_gen::Candidate>) {
+fn release_at_exit(candidates: Vec<search::candidates::Candidate>) {
     std::mem::forget(candidates);
 }
 
@@ -2613,7 +2613,7 @@ fn write_open_offsets(
     accepted: &[&output::PercolatorPsm],
     decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
 ) -> Option<String> {
-    let report = match output::open_offsets::report_from_results(
+    let report = match output::offsets::report_from_results(
         pin,
         accepted,
         decoys,
@@ -2627,8 +2627,8 @@ fn write_open_offsets(
     };
     let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
     let psms_path = dir.join(format!("{stem}.open_psms.parquet"));
-    let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
-        .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
+    let written = output::offsets::write_peaks_table(&peaks_path, &report)
+        .and_then(|()| output::offsets::write_psms_table(&psms_path, &report));
     if let Err(e) = written {
         let mut left = Vec::new();
         for stale in [&peaks_path, &psms_path] {
@@ -2661,7 +2661,7 @@ fn write_open_offsets(
         psms_path.display(),
         report.assignments.len()
     );
-    Some(output::open_offsets::summary_block(&report))
+    Some(output::offsets::summary_block(&report))
 }
 
 pub(crate) fn write_filtered_tsv(
@@ -2693,7 +2693,7 @@ pub(crate) fn write_filtered_tsv(
 }
 
 /// Whether a crosslink search moves this file's precursor m/z values to the dominant MS1 peak
-/// (`search::xl_search::PRECURSOR_SNAP_PPM`): an MS2 search of a file that carries its MS1
+/// (`search::crosslinks::PRECURSOR_SNAP_PPM`): an MS2 search of a file that carries its MS1
 /// scans (mzML, Thermo `.raw`). Decided per file, so the order of the inputs does not matter.
 pub(crate) fn xl_precursor_snap(
     xl: bool,
@@ -2750,7 +2750,7 @@ mod filtered_tsv_tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("PSMId\tq-value\t"));
         assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
-        assert!(!output::ms1_table::partial_path(&path).exists());
+        assert!(!output::ms1::partial_path(&path).exists());
     }
 }
 

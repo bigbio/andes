@@ -8,14 +8,14 @@ use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::stats::{median_mad, Even, MAD_TO_SD};
 use model::Tolerance;
-use output::glyco_pin::select_emitted_hits;
+use output::glycopeptides::pin::select_emitted_hits;
 use quant::formula::Formula;
 use quant::lfq::{competition_score, quantify, quantify_decoy, FeatureQuant, LfqParams, LfqTarget};
 use quant::tdc::{picked_qvalues, Pair};
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
-use search::glyco_search::GlycoSpectrumResult;
-use search::search_index::SearchIndex;
+use search::candidates::Candidate;
+use search::glycopeptides::GlycoSpectrumResult;
+use search::index::SearchIndex;
 
 use crate::cli::Cli;
 use crate::glyco_match;

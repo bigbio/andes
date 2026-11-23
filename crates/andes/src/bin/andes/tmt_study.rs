@@ -14,7 +14,7 @@
 //!    of `andes inference` over the same pooled results);
 //! 4. adds the run's plex, fraction, instrument and the sample and role (sample, reference or
 //!    blank) of every channel from `--sdrf`;
-//! 5. writes `<base>.tmt.parquet` (`output::tmt_study_table`) and with `--output-parquet` the
+//! 5. writes `<base>.tmt.parquet` (`output::tmt`) and with `--output-parquet` the
 //!    QPX views `quantms.feature.parquet` (the rows in a group) and `quantms.pg.parquet`.
 //!
 //! The reporter values are those of the run tables (raw or impurity-corrected, as the runs
@@ -28,9 +28,9 @@ use arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, StringArray, UInt8Array,
 };
 use arrow::record_batch::RecordBatch;
-use output::feature_parquet::{FeatureGroup, FeatureRecord};
-use output::quant_out::{TMT_CORRECTED_KEY, TMT_MBR_KEY, TMT_PLEX_KEY, TMT_UNMIX_KEY};
-use output::tmt_study_table::{
+use output::features::{FeatureGroup, FeatureRecord};
+use output::quantities::{TMT_CORRECTED_KEY, TMT_MBR_KEY, TMT_PLEX_KEY, TMT_UNMIX_KEY};
+use output::tmt::{
     is_tmt_study_table, RunDesignColumns, StudyGroup, TmtStudyLayout, TmtStudyRow, TmtStudyWriter,
     TMT_STUDY_PEP_KEY, TMT_STUDY_PROTEIN_FDR_KEY, TMT_STUDY_PSM_FDR_KEY, TMT_STUDY_RUNS_KEY,
     TMT_STUDY_SDRF_KEY,
@@ -851,7 +851,7 @@ mod tests {
     fn inference(peptides: &[(&str, &str)]) -> output::Inference {
         let mut inf = output::Inference::default();
         for (i, (pep, prot)) in peptides.iter().enumerate() {
-            inf.groups.push(output::protein_inference::ProteinGroup {
+            inf.groups.push(output::protein::inference::ProteinGroup {
                 id: i,
                 lead: prot.to_string(),
                 families: vec![prot.to_string()],

@@ -8,7 +8,7 @@ use model::tolerance::Tolerance;
 use model::{AminoAcidSetBuilder, Protein, ProteinDb, Spectrum};
 use scoring_crate::param_model::{IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
-use search::precursor_cal::{
+use search::precursor::calibration::{
     adjusted_observed_neutral_mass, constants as cal_constants, tightened_tolerance_ppm,
     PrecursorCalMode,
 };

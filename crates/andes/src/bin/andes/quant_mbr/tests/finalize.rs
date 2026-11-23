@@ -1,4 +1,4 @@
-use output::mbr_out::{
+use output::mbr::{
     write_mbr_validation, Accepted, EvidenceType, MbrClaim, MbrParquetWriter, MbrRow,
     MbrValidation, VALIDATION_Q,
 };
@@ -158,7 +158,7 @@ fn stems() -> Vec<String> {
 }
 
 fn table(path: &Path) -> Vec<Vec<String>> {
-    use output::mbr_out::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
+    use output::mbr::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
     let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
     if path.to_string_lossy().ends_with(".mbr_validation.parquet") {
         let cells = read_mbr_validation(path).unwrap();
@@ -1333,7 +1333,7 @@ fn trace_fraction_reports_the_trace_area_of_the_brightest_precursors() {
             .enumerate()
             .map(|(r, rows)| {
                 let path = dir.path().join(format!("{r}.extract.parquet"));
-                output::extract_table::write_extract_table(&path, rows).unwrap();
+                output::extract::write_extract_table(&path, rows).unwrap();
                 path
             })
             .collect(),
@@ -1559,7 +1559,7 @@ fn identified_quality_q_separates_clean_from_wrong_and_interfered_peaks() {
             assert!(f.quant_q >= f.transfer_q, "{f:?}");
         }
     }
-    let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+    let rows = output::mbr::read_mbr_parquet(&mbr).unwrap();
     let accepted = |t: &str| matches!(t, "transfer_ms2" | "transfer_ms1" | "shared_feature");
     assert!(rows.iter().any(|r| accepted(r.evidence_type.as_str())));
     for r in &rows {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::search_index::SearchIndex;
+use crate::index::SearchIndex;
 use model::isotope::averagine_isotope_envelope;
 
 fn envelope(mono_mz: f64, charge: u8, neutral: f64, scale: f32) -> Vec<(f64, f32)> {
@@ -485,7 +485,7 @@ fn secondary_features_share_the_primary_scales() {
     let primary = peptide(b"WVTFISLLR", b'K', b'K');
     let (spec, co) = planted_secondary_spectrum(&planted, &primary);
 
-    let run = |mode: crate::search_params::ScoreMode| {
+    let run = |mode: crate::params::ScoreMode| {
         let mut params = SearchParams::default_tryptic(aa_set.clone());
         params.score_mode = mode;
         let prepared =
@@ -506,7 +506,7 @@ fn secondary_features_share_the_primary_scales() {
         .expect("planted secondary must be found")
         .0
     };
-    let rank = run(crate::search_params::ScoreMode::Rank);
+    let rank = run(crate::params::ScoreMode::Rank);
     let f = &rank.features;
     assert_ne!(f.rank_score_float, 0.0);
     assert!(
@@ -519,7 +519,7 @@ fn secondary_features_share_the_primary_scales() {
     assert!(f.strong_score_cal.is_finite());
     assert_ne!(f.strong_score_cal, f.strong_score);
 
-    let strong = run(crate::search_params::ScoreMode::Strong);
+    let strong = run(crate::params::ScoreMode::Strong);
     assert_eq!(strong.score, rank.score);
     assert_eq!(strong.rank_score, strong.features.strong_score);
 }

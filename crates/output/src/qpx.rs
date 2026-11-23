@@ -14,18 +14,18 @@ use parquet::file::properties::WriterProperties;
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::{PrecursorTolerance, Tolerance};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
 use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
     spec_id_run,
 };
-use crate::quant_out::ModRecord;
-use crate::row_context::{emitted_rows, resolve_accession};
+use crate::quantities::ModRecord;
+use crate::rows::{emitted_rows, resolve_accession};
 
 const QPX_VERSION: &str = "1.0";
 const CREATOR: &str = "andes";
@@ -219,7 +219,7 @@ fn modification_fields() -> Fields {
             "positions",
             DataType::List(Arc::new(Field::new(
                 "element",
-                DataType::Struct(crate::feature_parquet::position_fields()),
+                DataType::Struct(crate::features::position_fields()),
                 true,
             ))),
             true,

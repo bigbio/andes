@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use model_train::gbdt::train::{train_gbdt_from, Dataset, TrainParams, MIN_VAL_AUC};
-use output::dia_pass2_table::Pass2Table;
+use output::dia::pass2::Pass2Table;
 use output::PercolatorPsm;
 use rayon::prelude::*;
 

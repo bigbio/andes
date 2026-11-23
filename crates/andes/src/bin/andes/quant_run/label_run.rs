@@ -11,7 +11,7 @@ use quant::label::{
 };
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 
 use super::{faims_groups, group_of, peptidoform_of, Hit, QuantCollector};
 use model::spectrum::Spectrum;
@@ -537,7 +537,7 @@ pub(super) fn quantify(
     target_hits: &[Hit<'_>],
     decoy_hits: &[Hit<'_>],
     candidates: &[Candidate],
-    index: &search::search_index::SearchIndex,
+    index: &search::index::SearchIndex,
     with_records: bool,
     next_feature_id: &mut i64,
 ) -> Result<LabelOutputs, String> {
@@ -1131,7 +1131,7 @@ pub(super) fn quantify(
                     rec.mass_error_ppm = err.map(|e| e as f32);
                 }
                 if any_transfer {
-                    rec.mbr = Some(output::feature_parquet::MbrColumns {
+                    rec.mbr = Some(output::features::MbrColumns {
                         evidence_type: if f.transfer_q.is_some() {
                             "transfer_ms1"
                         } else {

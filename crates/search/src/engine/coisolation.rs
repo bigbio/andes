@@ -3,11 +3,11 @@
 //! Part of the match engine; `PreparedSearch` runs the pass.
 
 use super::*;
-use crate::candidate_gen::Candidate;
-use crate::chimeric_features::precursor_isotope_match;
-use crate::precursor_cal::adjusted_observed_neutral_mass;
+use crate::candidates::Candidate;
+use crate::chimeric::precursor_isotope_match;
+use crate::precursor::calibration::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch};
-use crate::search_params::SearchParams;
+use crate::params::SearchParams;
 use model::aa_set::AminoAcidSet;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
@@ -19,7 +19,7 @@ use scoring_crate::scoring::{
 /// The isolation window around its target m/z (the precursor m/z when the scan records no
 /// target), and the precursor tolerance in Da.
 pub(super) fn coisolation_window(spec: &Spectrum, params: &SearchParams) -> (f64, f64, f64) {
-    let (lo, hi) = crate::precursor_matching::isolation_window_mz(
+    let (lo, hi) = crate::precursor::matching::isolation_window_mz(
         spec,
         params.chimeric_isolation_halfwidth_da,
     );
@@ -564,7 +564,7 @@ pub(crate) fn search_secondary(
         .map(|p| make_features(p, false).strong_score)
         .collect();
 
-    let winner_pos = if params.score_mode == crate::search_params::ScoreMode::Strong {
+    let winner_pos = if params.score_mode == crate::params::ScoreMode::Strong {
         (0..retained.len())
             .reduce(|a, b| {
                 if retained_strong[b] > retained_strong[a] {
@@ -581,7 +581,7 @@ pub(crate) fn search_secondary(
     let mut features = make_features(&best, true);
     features.strong_score_cal =
         strong_score_calibrated(features.strong_score, &retained_strong, &strong_null);
-    if params.score_mode == crate::search_params::ScoreMode::Strong {
+    if params.score_mode == crate::params::ScoreMode::Strong {
         best.rank_score = features.strong_score;
     }
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;

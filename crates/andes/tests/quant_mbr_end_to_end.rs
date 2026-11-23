@@ -109,13 +109,13 @@ fn s(p: &Path) -> &str {
 type MbrRows = HashMap<(String, String), Vec<String>>;
 
 fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
-    let mut header: Vec<String> = output::mbr_out::MBR_COLUMNS[..10]
+    let mut header: Vec<String> = output::mbr::MBR_COLUMNS[..10]
         .iter()
         .map(|c| c.to_string())
         .collect();
     header.extend(["claimed_by", "claim_co_apex", "claim_n_co_apex"].map(String::from));
     let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
-    let rows = output::mbr_out::read_mbr_parquet(path)
+    let rows = output::mbr::read_mbr_parquet(path)
         .unwrap_or_else(|e| panic!("{e}"))
         .into_iter()
         .map(|r| {
@@ -144,9 +144,9 @@ fn read_mbr(path: &Path) -> (Vec<String>, MbrRows) {
 
 fn same_mbr_tables(a: &Path, b: &Path) -> bool {
     let with = |p: &Path, s: &str| PathBuf::from(format!("{}{s}", p.display()));
-    let rows = |p: &Path| output::mbr_out::read_mbr_parquet(&with(p, ".mbr.parquet")).unwrap();
+    let rows = |p: &Path| output::mbr::read_mbr_parquet(&with(p, ".mbr.parquet")).unwrap();
     let val = |p: &Path| {
-        output::mbr_out::read_mbr_validation(&with(p, ".mbr_validation.parquet")).unwrap()
+        output::mbr::read_mbr_validation(&with(p, ".mbr_validation.parquet")).unwrap()
     };
     rows(a) == rows(b) && val(a) == val(b)
 }

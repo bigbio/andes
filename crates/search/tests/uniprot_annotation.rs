@@ -5,11 +5,11 @@ use model::enzyme::Enzyme;
 use model::{
     AminoAcidSetBuilder, Modification, Protein, ProteinAnnotation, ProteinDb, VariantRegion,
 };
-use search::candidate_gen::{
+use search::candidates::{
     expand_base_record, expand_base_record_bounded, for_each_record_form_masses_bounded,
     lazy_candidates_for_precursor, Candidate, FormWalkTables,
 };
-use search::candidate_index::MmapCandidateIndex;
+use search::candidates::records::MmapCandidateIndex;
 use search::decoy::{decoy_db, DecoyStrategy, Proteases};
 use search::{enumerate_candidates, SearchIndex, SearchParams};
 
@@ -466,7 +466,7 @@ fn variant_window_walk_equals_filtering_the_whole_protein() {
 #[test]
 fn index_cache_key_tells_variant_entries_apart() {
     use model::{ProteinAnnotation, VariantRegion};
-    use search::candidate_index::index_cache_path;
+    use search::candidates::records::index_cache_path;
     use std::sync::Arc;
     let plain = target_db(EvidenceLevel::Experimental, false);
     let mut variant = plain.clone();

@@ -7,9 +7,9 @@ use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::stats::{median_f32_mut, Even};
 use model::{IsomerClass, Tolerance};
-use output::feature_parquet::{FeatureRecord, MbrColumns};
-use output::ms2_table::{write_ms2_table, Ms2Table};
-use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+use output::features::{FeatureRecord, MbrColumns};
+use output::ms2::{write_ms2_table, Ms2Table};
+use output::quantities::runs::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
 use quant::isobaric::{extract_reporters, reporter_noise, signal_to_noise, CorrectionMatrix, Plex};
@@ -21,9 +21,9 @@ use quant::ms2::{Ms2Scan, ScanReporters};
 use quant::tdc::{picked_qvalues, Pair};
 use quant::unmix::{unmix_run, window_record, ScanInput, Strength, Survey, UnmixRun, WindowRecord};
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
+use search::index::SearchIndex;
 
 use crate::cli::{Cli, TmtUnmix};
 
@@ -1459,7 +1459,7 @@ fn quantify_label(
         |seq| {
             let pg = groups?;
             match pg.inf.group_at(seq, pg.max_q) {
-                output::protein_inference::GroupAt::Group { group, .. } => {
+                output::protein::inference::GroupAt::Group { group, .. } => {
                     Some((group.accessions.join(";"), group.lead.clone()))
                 }
                 _ => None,

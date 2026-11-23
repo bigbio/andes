@@ -1231,7 +1231,7 @@ pub(crate) fn run(
     pool: crate::dia_llr::PoolScores,
     predicted: PredictedMs2,
     nominees_out: Option<crate::dia_xfer::NomineesOut>,
-) -> Result<output::dia_pass2_table::Pass2Table, String> {
+) -> Result<output::dia::pass2::Pass2Table, String> {
     let t0 = std::time::Instant::now();
     let mut predicted = predicted;
     let noms = nominate(pin, spectra, run_ends, &pool.table, &pool.llr, &mut predicted)?;
@@ -1272,7 +1272,7 @@ pub(crate) fn run(
     }
     let table = to_table(&noms, &p2);
     let path = pin.with_extension("dia_pass2.parquet");
-    output::dia_pass2_table::write_pass2(&path, &table)?;
+    output::dia::pass2::write_pass2(&path, &table)?;
     let targets = noms.iter().filter(|n| !n.decoy).count();
     log::info!(
         target: "dia",
@@ -1286,11 +1286,11 @@ pub(crate) fn run(
 }
 
 /// The rows inside an isolation window as the versioned pass-2 table.
-pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia_pass2_table::Pass2Table {
+pub(crate) fn to_table(noms: &[Nominee], p2: &Pass2) -> output::dia::pass2::Pass2Table {
     let ok = p2.col("p2_ok");
     let keep: Vec<usize> = (0..noms.len()).filter(|&i| ok[i] > 0.0).collect();
     let pick = |f: &dyn Fn(&Nominee) -> String| keep.iter().map(|&i| f(&noms[i])).collect();
-    output::dia_pass2_table::Pass2Table {
+    output::dia::pass2::Pass2Table {
         spec_id: pick(&|n| n.spec_id.to_string()),
         run: keep.iter().map(|&i| noms[i].run).collect(),
         decoy: keep.iter().map(|&i| noms[i].decoy).collect(),

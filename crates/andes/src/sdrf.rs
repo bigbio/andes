@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use model::activation::ActivationMethod;
 
+use crate::param_sources::{ParamSources, Source};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Quant {
     Lfq,
@@ -663,31 +665,6 @@ fn dissociation_of(v: &str) -> Option<ActivationMethod> {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ConfigKeys {
-    spectrum: bool,
-    enzyme: bool,
-    fixed_mods: bool,
-    variable_mods: bool,
-    precursor_tol: bool,
-    quant: bool,
-    xl: bool,
-}
-
-impl ConfigKeys {
-    pub fn of(cfg: &crate::config::RunConfig) -> Self {
-        ConfigKeys {
-            spectrum: cfg.io.spectrum.is_some(),
-            enzyme: cfg.search.enzyme.is_some(),
-            fixed_mods: cfg.search.fixed_mods.is_some(),
-            variable_mods: cfg.search.variable_mods.is_some(),
-            precursor_tol: cfg.search.precursor_tol.is_some(),
-            quant: cfg.quant.tmt.is_some() || cfg.quant.lfq.is_some() || cfg.quant.label.is_some(),
-            xl: cfg.search.xl.is_some(),
-        }
-    }
-}
-
 /// Two crosslinker definitions that link the same way: equal once each end's residues are
 /// taken as a set (`TA=K,S` and `TA=S,K`).
 fn same_linker(a: &xl::crosslinker::Crosslinker, b: &xl::crosslinker::Crosslinker) -> bool {
@@ -706,9 +683,11 @@ pub fn apply(
     s: &SdrfSettings,
     args: &mut crate::SearchArgs,
     m: &clap::ArgMatches,
-    cfg: ConfigKeys,
+    src: &mut ParamSources,
 ) -> Result<Vec<String>, String> {
-    let cli = |id: &str| crate::config::cli_set(m, id);
+    let held = |src: &ParamSources, id: &str| {
+        crate::config::cli_set(m, id) || src.source(id) == Source::Config
+    };
     let mut applied = Vec::new();
     let mut kept = Vec::new();
     let mut warnings = Vec::new();
@@ -720,7 +699,7 @@ pub fn apply(
         }
     };
 
-    if cli("spectrum") || cfg.spectrum {
+    if held(src, "spectrum") {
         let sdrf_stems: BTreeSet<_> = s.data_files.iter().filter_map(|p| p.file_stem()).collect();
         let extra: Vec<String> = args
             .spectrum
@@ -749,62 +728,70 @@ pub fn apply(
             ));
         }
         args.spectrum = s.data_files.clone();
+        src.record_as("spectrum", Source::Sdrf, &s.data_files);
         applied.push(format!("{} data files", s.data_files.len()));
     }
     if let Some(e) = &s.enzyme {
-        if cli("enzyme") || cfg.enzyme {
+        if held(src, "enzyme") {
             kept.push("enzyme");
         } else {
             args.db.enzyme = crate::cli::parse_enzyme_list(e)?;
+            src.record_as("enzyme", Source::Sdrf, e);
             applied.push(format!("enzyme {e}"));
         }
     }
     if let Some(t) = &s.precursor_tol {
-        if cli("precursor_tol") || cfg.precursor_tol {
+        if held(src, "precursor_tol") {
             kept.push("precursor_tol");
         } else {
             args.precursor_tol = crate::parse_precursor_tol(t)?;
+            src.record_as("precursor_tol", Source::Sdrf, t);
             applied.push(format!("precursor tolerance {t}"));
         }
     }
     if let Some(f) = &s.fixed_mods {
-        if cli("fixed_mods") || cfg.fixed_mods {
+        if held(src, "fixed_mods") {
             kept.push("fixed_mods");
         } else {
             args.db.fixed_mods = Some(crate::cli::parse_fixed_mods(&f.join(", "))?);
+            src.record_as("fixed_mods", Source::Sdrf, f);
             applied.push(format!("fixed mods {}", names(f)));
         }
     }
     if let Some(v) = &s.variable_mods {
-        if cli("variable_mods") || cfg.variable_mods {
+        if held(src, "variable_mods") {
             kept.push("variable_mods");
         } else {
             args.db.variable_mods = Some(crate::cli::parse_variable_mods(&v.join(", "))?);
+            src.record_as("variable_mods", Source::Sdrf, v);
             applied.push(format!("variable mods {}", names(v)));
         }
     }
     if let Some(q) = &s.quant {
-        if cli("tmt") || cli("lfq") || cli("label") || cfg.quant {
+        if ["tmt", "lfq", "label"].iter().any(|&id| held(src, id)) {
             kept.push("quantification");
         } else {
             match q {
                 Quant::Lfq => {
                     args.lfq = true;
+                    src.record_as("lfq", Source::Sdrf, &true);
                     applied.push("label-free quantification (--lfq)".into());
                 }
                 Quant::Isobaric(p) => {
                     args.tmt = Some(quant::Plex::parse(p)?);
+                    src.record_as("tmt", Source::Sdrf, p);
                     applied.push(format!("--tmt {p}"));
                 }
                 Quant::Label(spec) => {
                     args.label = Some(spec.clone());
+                    src.record_as("label", Source::Sdrf, spec);
                     applied.push(format!("--label {spec}"));
                 }
             }
         }
     }
     if !s.xl.is_empty() {
-        if cli("xl") || cfg.xl {
+        if held(src, "xl") {
             kept.push("xl");
         } else {
             let mut set: Vec<xl::crosslinker::Crosslinker> = Vec::new();
@@ -830,6 +817,7 @@ pub fn apply(
                 .collect();
             applied.push(format!("crosslink search --xl {}", names.join("; ")));
             args.xl = Some(crate::cli::XlSet(set));
+            src.record_without_value("xl", Source::Sdrf);
         }
     }
     args.sdrf_dissociation = s.dissociation;
@@ -1367,13 +1355,12 @@ mod tests {
                 .try_get_matches_from(base.iter().chain(extra))
                 .unwrap();
             let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
-            let mut keys = ConfigKeys::default();
+            let mut src = ParamSources::default();
             if let Some(y) = yaml {
                 let c = crate::config::RunConfig::from_yaml_str(y).unwrap();
-                keys = ConfigKeys::of(&c);
-                crate::config::apply(c, &mut a, &m).unwrap();
+                crate::config::apply(c, &mut a, &m, &mut src).unwrap();
             }
-            apply(&s, &mut a, &m, keys).unwrap();
+            apply(&s, &mut a, &m, &mut src).unwrap();
             a
         };
         let x = run(&[], None).xl.unwrap().0.remove(0);
@@ -1410,7 +1397,7 @@ mod tests {
             ];
             let m = crate::TopCli::command().try_get_matches_from(base).unwrap();
             let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
-            apply(&s, &mut a, &m, ConfigKeys::default())?;
+            apply(&s, &mut a, &m, &mut ParamSources::default())?;
             Ok(a.xl.unwrap().0.into_iter().map(|x| x.name).collect())
         };
         assert_eq!(
@@ -1443,7 +1430,7 @@ mod tests {
         ];
         let m = crate::TopCli::command().try_get_matches_from(base).unwrap();
         let mut a = crate::SearchArgs::from_arg_matches(&m).unwrap();
-        let lines = apply(&s, &mut a, &m, ConfigKeys::default()).unwrap();
+        let lines = apply(&s, &mut a, &m, &mut ParamSources::default()).unwrap();
         assert!(!lines[0].contains("WARN"), "{lines:?}");
         assert!(
             lines

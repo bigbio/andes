@@ -15,8 +15,7 @@ crates/andes/src/bin/andes/quant_run/label_run.rs	1998
 crates/andes/src/bin/andes/search.rs	2704
 crates/andes/src/bin/andes/search/resolve.rs	2062
 crates/andes/src/bin/andes/train.rs	1748
-crates/andes/src/config.rs	1585
-crates/andes/src/sdrf.rs	1604
+crates/andes/src/sdrf.rs	1591
 crates/andes/src/transfer_fdr.rs	1846
 crates/input/src/mzml.rs	4146
 crates/input/src/uniprot.rs	1756

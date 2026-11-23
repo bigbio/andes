@@ -804,7 +804,7 @@ mod tests {
     use super::*;
 
     fn linker(spec: &str) -> Crosslinker {
-        crate::cli::parse_xl_one(spec).unwrap()
+        crate::cli_parse::parse_xl_one(spec).unwrap()
     }
 
     #[test]

@@ -6,12 +6,16 @@ use clap::{Parser, Subcommand};
 mod acquisition;
 #[path = "andes/cli.rs"]
 mod cli;
+#[path = "andes/cli_parse.rs"]
+mod cli_parse;
 #[path = "../cohort.rs"]
 mod cohort;
 #[path = "andes/cohort_cmd.rs"]
 mod cohort_cmd;
 #[path = "../config.rs"]
 mod config;
+#[path = "../config_mods.rs"]
+mod config_mods;
 #[path = "andes/database_cmd.rs"]
 mod database_cmd;
 #[path = "andes/dia.rs"]
@@ -58,6 +62,12 @@ mod quant_run;
 mod sdrf;
 #[path = "andes/optimize.rs"]
 mod optimize;
+#[path = "../param_sources.rs"]
+mod param_sources;
+#[path = "../params.rs"]
+mod params;
+#[path = "../params_render.rs"]
+mod params_render;
 #[path = "andes/search.rs"]
 mod search;
 #[path = "andes/spectra.rs"]
@@ -256,12 +266,11 @@ fn main() -> ExitCode {
         Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
-            let mut cfg_keys = sdrf::ConfigKeys::default();
+            let mut sources = param_sources::from_command_line(&matches);
             if let Some(cfg_path) = top.search.config.clone() {
                 if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
                     cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
-                    cfg_keys = sdrf::ConfigKeys::of(&c);
-                    config::apply(c, &mut top.search, &matches)
+                    config::apply(c, &mut top.search, &matches, &mut sources)
                 }) {
                     log::error!("{e}");
                     return ExitCode::from(2);
@@ -269,7 +278,7 @@ fn main() -> ExitCode {
             }
             if let Some(sdrf_path) = top.search.sdrf.clone() {
                 match sdrf::read(&sdrf_path)
-                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, cfg_keys))
+                    .and_then(|s| sdrf::apply(&s, &mut top.search, &matches, &mut sources))
                 {
                     Ok(lines) => lines.iter().for_each(|l| match l.strip_prefix("WARN: ") {
                         Some(w) => log::warn!(target: "sdrf", "{w}"),
@@ -284,6 +293,9 @@ fn main() -> ExitCode {
             if let Err(e) = config::check_resolved(&top.search) {
                 log::error!("{e}");
                 return ExitCode::from(2);
+            }
+            if let Some(dest) = top.search.print_config.as_deref() {
+                return print_config(dest, &sources);
             }
             let _ = EXPLICIT_MISSED_CLEAVAGES.set(missed_cleavages_explicit(
                 matches.value_source("max_missed_cleavages"),
@@ -321,6 +333,37 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log::error!("{e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_config(dest: &std::path::Path, sources: &param_sources::ParamSources) -> ExitCode {
+    let text = match params_render::effective_config(sources) {
+        Ok(text) => text,
+        Err(e) => {
+            log::error!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let cli_only = params_render::command_line_only(sources);
+    if !cli_only.is_empty() {
+        log::warn!(
+            "--print-config: {} has no config key; the printed config lists it as a comment, \
+             pass it again on the command line to reproduce the run",
+            cli_only.join(" ")
+        );
+    }
+    let written = if dest == std::path::Path::new("-") {
+        use std::io::Write;
+        std::io::stdout().write_all(text.as_bytes())
+    } else {
+        std::fs::write(dest, &text)
+    };
+    match written {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            log::error!("cannot write the config to {}: {e}", dest.display());
             ExitCode::from(1)
         }
     }
@@ -387,3 +430,15 @@ mod missed_cleavages_explicit_tests {
         assert!(!missed_cleavages_explicit(None, false));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/params_table.rs"]
+mod params_table;
+
+#[cfg(test)]
+#[path = "../tests/params_sources.rs"]
+mod params_sources;
+
+#[cfg(test)]
+#[path = "../tests/params_render.rs"]
+mod params_render_tests;

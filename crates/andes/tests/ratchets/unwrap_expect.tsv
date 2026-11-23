@@ -60,7 +60,6 @@ crates/search/src/fragment_index.rs	2
 crates/search/src/glyco_search.rs	1
 crates/search/src/ipf.rs	1
 crates/search/src/match_engine.rs	20
-crates/search/src/match_engine/chargeless_unit_tests.rs	6
 crates/search/src/xl_search.rs	1
 crates/xl/src/crosslinker.rs	1
 crates/xl/src/doublet.rs	1

@@ -62,6 +62,5 @@ crates/search/src/ipf.rs	1
 crates/search/src/engine.rs	17
 crates/search/src/engine/coisolation.rs	2
 crates/search/src/engine/slices.rs	1
-crates/search/src/xl_search.rs	1
 crates/xl/src/crosslinker.rs	1
 crates/xl/src/doublet.rs	1

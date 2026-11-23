@@ -25,10 +25,10 @@ crates/input/src/uniprot.rs	1
 crates/model-train/src/select.rs	1
 crates/model-train/src/store/write.rs	7
 crates/model/src/aa_set.rs	1
-crates/onnx-infer/src/deeplc/mod.rs	1
+crates/onnx-infer/src/deeplc.rs	1
 crates/onnx-infer/src/predictors/calibration.rs	3
 crates/onnx-infer/src/predictors/form.rs	1
-crates/onnx-infer/src/rt_native/mod.rs	8
+crates/onnx-infer/src/rt_native.rs	8
 crates/output/src/fdr/knockoff.rs	2
 crates/output/src/fdr/sites.rs	1
 crates/output/src/features.rs	29

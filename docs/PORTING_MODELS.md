@@ -137,7 +137,7 @@ What exists:
 Not built:
 
 - A predictor that is neither AlphaPeptDeep, DeepLC nor andes-rt needs a `Predictor`
-  implementation (`predictors/mod.rs`): the input packing for its graph, the modifications it
+  implementation (`predictors.rs`): the input packing for its graph, the modifications it
   can encode, and its output layout. The export scripts and `ms2pip`/`prosit` input modules
   in `onnx-infer` are the starting point, but only the three predictors above are reachable
   from `--predict`.

@@ -36,7 +36,8 @@ fn mentions(text: &str, flag: &str) -> bool {
 #[test]
 fn config_example_is_generated() {
     let committed = std::fs::read_to_string(repo_file("config.example.yaml"))
-        .expect("read config.example.yaml");
+        .expect("read config.example.yaml")
+        .replace("\r\n", "\n");
     assert!(
         committed == config_example(),
         "config.example.yaml is out of date; run `cargo test -p andes write_config_example -- --ignored`"
@@ -45,7 +46,9 @@ fn config_example_is_generated() {
 
 #[test]
 fn docs_reference_is_generated() {
-    let docs = std::fs::read_to_string(repo_file("DOCS.md")).expect("read DOCS.md");
+    let docs = std::fs::read_to_string(repo_file("DOCS.md"))
+        .expect("read DOCS.md")
+        .replace("\r\n", "\n");
     let (start, end) = generated_span(&docs);
     assert!(
         docs[start..end] == docs_reference(),

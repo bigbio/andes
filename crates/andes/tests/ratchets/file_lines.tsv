@@ -23,8 +23,6 @@ crates/output/src/open_offsets.rs	1546
 crates/output/src/percolator.rs	1681
 crates/output/src/pin.rs	1723
 crates/output/src/stats.rs	1537
-crates/quant/src/align.rs	1743
-crates/quant/src/evidence.rs	2568
 crates/quant/src/label.rs	2195
 crates/scoring/src/scoring/scored_spectrum.rs	2702
 crates/search/src/candidate_gen.rs	2712

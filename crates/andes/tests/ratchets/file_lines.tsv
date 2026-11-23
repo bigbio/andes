@@ -18,7 +18,6 @@ crates/andes/src/bin/andes/train.rs	1748
 crates/andes/src/sdrf.rs	1591
 crates/andes/src/transfer_fdr.rs	1846
 crates/input/src/mzml.rs	4146
-crates/input/src/uniprot.rs	1756
 crates/output/src/open_offsets.rs	1546
 crates/output/src/percolator.rs	1681
 crates/output/src/pin.rs	1723

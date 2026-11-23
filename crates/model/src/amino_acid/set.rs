@@ -757,7 +757,7 @@ mod tests {
     use crate::modification::{ModLocation, Modification, ResidueSpec};
 
     fn spec(list: &str, fixed: bool) -> Vec<Modification> {
-        crate::mod_spec::parse_mod_list(list, fixed).unwrap()
+        crate::modification::spec::parse_mod_list(list, fixed).unwrap()
     }
 
     fn annotated(item: &str) -> Modification {

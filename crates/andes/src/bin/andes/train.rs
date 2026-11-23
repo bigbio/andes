@@ -458,7 +458,7 @@ pub(crate) fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
 pub(crate) fn load_labels_from_tsv(
     path: &std::path::Path,
     spectra: &[model::spectrum::Spectrum],
-    aa_set: &model::aa_set::AminoAcidSet,
+    aa_set: &model::amino_acid::set::AminoAcidSet,
 ) -> Result<Vec<model_train::labeled::LabeledMatch>, Box<dyn std::error::Error>> {
     use model::peptide::Peptide;
     use std::collections::HashMap;

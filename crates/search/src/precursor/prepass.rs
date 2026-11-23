@@ -369,7 +369,7 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::enzyme::Enzyme;
     use model::tolerance::{PrecursorTolerance, Tolerance};
 

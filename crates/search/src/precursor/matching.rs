@@ -123,7 +123,7 @@ pub fn matches_isolation_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::tolerance::Tolerance;
 
     fn peptide() -> Peptide {

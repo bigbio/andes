@@ -186,7 +186,7 @@ fn cz_spanning_shifts(glycan_mass: f64, remnant: bool) -> Vec<f64> {
     if glycan_mass == 0.0 || !remnant {
         return vec![glycan_mass];
     }
-    use model::glycan_residue::{HEX, HEXNAC};
+    use model::glycans::{HEX, HEXNAC};
     const REMNANTS: [f64; 5] = [
         0.0,
         HEXNAC,
@@ -398,7 +398,7 @@ mod tests {
         let s = cz_spanning_shifts(1000.0, true);
         assert_eq!(s[0], 1000.0, "intact glycan must be first");
         assert_eq!(s.len(), 6, "intact glycan + 5 remnants, no collision");
-        use model::glycan_residue::{HEX, HEXNAC};
+        use model::glycans::{HEX, HEXNAC};
         for r in [
             0.0,
             HEXNAC,

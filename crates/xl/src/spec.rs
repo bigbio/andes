@@ -1,6 +1,6 @@
 use model::modification::{ModLocation, ResidueSpec};
 use model::unimod::UnimodDb;
-use model::xl_reagents::{Reagent, ReagentTable};
+use model::crosslinkers::{Reagent, ReagentTable};
 
 use crate::crosslinker::{Cleavage, Crosslinker, LinkEnd, Monolink, Stub, MAX_STUBS};
 
@@ -101,7 +101,7 @@ impl XlDecl {
     }
 
     pub fn resolve(&self, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
-        self.resolve_in(model::xl_reagents::bundled(), db)
+        self.resolve_in(model::crosslinkers::bundled(), db)
     }
 
     pub fn resolve_in(
@@ -154,7 +154,7 @@ fn lookup<'t>(
 }
 
 fn unknown_hint(table: &ReagentTable, name: &str) -> String {
-    if let Some(e) = model::xl_reagents::bundled_error() {
+    if let Some(e) = model::crosslinkers::bundled_error() {
         return format!(" (the reagent table could not be loaded: {e})");
     }
     let s = suggest(table, name);
@@ -214,7 +214,7 @@ pub fn from_reagent(
     spec: &str,
     sites: Option<&str>,
 ) -> Result<Crosslinker, XlSpecError> {
-    let mass = |p: &model::xl_reagents::Part| {
+    let mass = |p: &model::crosslinkers::Part| {
         p.resolve(db).map_err(|why| XlSpecError::BadMass {
             spec: spec.to_string(),
             why: format!("{}: {why}", r.name),
@@ -309,7 +309,7 @@ fn check_cleavage(c: &Cleavage) -> Result<(), String> {
 pub const SDRF_STUB_TOL_DA: f64 = 0.02;
 
 pub fn from_sdrf(value: &str, db: &UnimodDb) -> Result<Crosslinker, XlSpecError> {
-    from_sdrf_in(model::xl_reagents::bundled(), value, db)
+    from_sdrf_in(model::crosslinkers::bundled(), value, db)
 }
 
 pub fn from_sdrf_in(
@@ -385,17 +385,17 @@ pub fn from_sdrf_in(
                     .unwrap_or_else(|| "custom".to_string()),
                 xlmod: kv.get("AC").cloned().into_iter().collect(),
                 sites: ta_sites(ta).map_err(err)?,
-                intact: model::xl_reagents::Part {
+                intact: model::crosslinkers::Part {
                     mass: Some(light + heavy),
                     ..Default::default()
                 },
                 stubs: vec![
-                    model::xl_reagents::Part {
+                    model::crosslinkers::Part {
                         name: "light".into(),
                         mass: Some(light),
                         ..Default::default()
                     },
-                    model::xl_reagents::Part {
+                    model::crosslinkers::Part {
                         name: "heavy".into(),
                         mass: Some(heavy),
                         ..Default::default()
@@ -536,7 +536,7 @@ fn parse_end(spec: &str, sites: &str, end: &str) -> Result<LinkEnd, XlSpecError>
         if item.is_empty() {
             return Err(bad("an empty site".into()));
         }
-        let parsed = model::mod_spec::parse_sites(spec, item).map_err(|e| bad(e.to_string()))?;
+        let parsed = model::modification::spec::parse_sites(spec, item).map_err(|e| bad(e.to_string()))?;
         for (residue, location) in parsed {
             match (residue, location) {
                 (ResidueSpec::Specific(r), ModLocation::Anywhere) => {
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn every_table_reagent_resolves_with_its_default_sites() {
-        for r in &model::xl_reagents::bundled().reagents {
+        for r in &model::crosslinkers::bundled().reagents {
             let x = resolve(&r.name).unwrap_or_else(|e| panic!("{}: {e}", r.name));
             assert_eq!(x.name, r.name);
             assert_eq!(x.cleavage.is_some(), !r.stubs.is_empty());

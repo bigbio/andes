@@ -11,7 +11,7 @@ use quant::isobaric::{CorrectionMatrix, Plex};
 use quant::ms2::{
     fragment_ladder, residue_masses, score_scan, Fragment, LibrarySpectrum, Ms2RunIndex, ScanMatch,
 };
-use quant::tmt_transfer::{
+use quant::transfer::{
     calibration, fragment_evidence, learn_rt_multiplier, log2_deviation, quant_q, scan_features,
     PpmWindow, RunProfile, Training, TransferRisk, N_SCAN, N_XFER,
 };
@@ -607,9 +607,9 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         seen.len(),
         ppm.centre,
         ppm.half_width,
-        if ppm_errors.len() < quant::tmt_transfer::MIN_CALIBRATION { " (fallback)" } else { "" },
+        if ppm_errors.len() < quant::transfer::MIN_CALIBRATION { " (fallback)" } else { "" },
         k,
-        quant::tmt_transfer::median_finite(&half_windows),
+        quant::transfer::median_finite(&half_windows),
         if k_learned { "" } else { " (fallback)" },
         out.profile.empty.len(),
         out.floor.len(),

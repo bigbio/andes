@@ -497,7 +497,7 @@ mod tests {
     use crate::candidates::enumerate_candidates;
     use crate::index::SearchIndex;
     use crate::params::SearchParams;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::protein::{Protein, ProteinDb};
 

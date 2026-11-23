@@ -114,7 +114,7 @@ impl Peptide {
     }
 }
 
-use crate::aa_set::AminoAcidSet;
+use crate::amino_acid::set::AminoAcidSet;
 
 #[derive(thiserror::Error, Debug)]
 pub enum PeptideParseError {
@@ -448,9 +448,9 @@ mod tests {
         assert_eq!(p.charge, Some(2));
     }
 
-    use crate::aa_set::AminoAcidSetBuilder;
+    use crate::amino_acid::set::AminoAcidSetBuilder;
 
-    fn aa_set_with_carbamidomethyl_and_oxidation() -> crate::aa_set::AminoAcidSet {
+    fn aa_set_with_carbamidomethyl_and_oxidation() -> crate::amino_acid::set::AminoAcidSet {
         let cam = Modification {
             name: "Carbamidomethyl".to_string(),
             mass_delta: 57.02146,

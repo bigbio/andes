@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use glyco::glycan_db::GlycanComp;
-use glyco::glycan_first::GlycanCore;
+use glyco::glycan::db::GlycanComp;
+use glyco::glycan::first::GlycanCore;
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::stats::{median_mad, Even, MAD_TO_SD};
@@ -389,7 +389,7 @@ fn measure(
 }
 
 fn measure_identified(
-    ms1: &quant::ms1_index::Ms1RunIndex,
+    ms1: &quant::ms1::Ms1RunIndex,
     t: &Target,
     params: &LfqParams,
 ) -> Measurement {
@@ -416,7 +416,7 @@ fn measure_with(
     runs: &[RunMs1<'_>],
     settings: &Settings,
     phase: &str,
-    f: impl Fn(&quant::ms1_index::Ms1RunIndex, &Target, &LfqParams) -> Measurement + Sync,
+    f: impl Fn(&quant::ms1::Ms1RunIndex, &Target, &LfqParams) -> Measurement + Sync,
 ) -> Result<(usize, Vec<Measurement>), String> {
     let mut by_run: Vec<Vec<usize>> = vec![Vec::new(); runs.len()];
     for (i, t) in targets.iter().enumerate() {
@@ -1681,7 +1681,7 @@ mod tests {
         }
     }
 
-    fn synthetic_run(t: &Target) -> quant::ms1_index::Ms1RunIndex {
+    fn synthetic_run(t: &Target) -> quant::ms1::Ms1RunIndex {
         let z = t.charge as f64;
         let scans = (0..200)
             .map(|i| {
@@ -1702,7 +1702,7 @@ mod tests {
                 }
             })
             .collect();
-        quant::ms1_index::Ms1RunIndex::new(scans)
+        quant::ms1::Ms1RunIndex::new(scans)
     }
 
     #[test]
@@ -1734,7 +1734,7 @@ mod tests {
         assert!(f.cosine > 0.99, "{f:?}");
     }
 
-    fn synthetic_run_mono_only(t: &Target) -> quant::ms1_index::Ms1RunIndex {
+    fn synthetic_run_mono_only(t: &Target) -> quant::ms1::Ms1RunIndex {
         let scans = (0..200)
             .map(|i| {
                 let rt = i as f64;
@@ -1752,7 +1752,7 @@ mod tests {
                 }
             })
             .collect();
-        quant::ms1_index::Ms1RunIndex::new(scans)
+        quant::ms1::Ms1RunIndex::new(scans)
     }
 
     #[test]

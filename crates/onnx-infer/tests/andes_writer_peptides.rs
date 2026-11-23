@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use model::mod_spec::parse_mod_list;
+use model::modification::spec::parse_mod_list;
 use model::{AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Peptide};
-use onnx_infer::rt_native::RtPeptide;
+use onnx_infer::rt::RtPeptide;
 
 fn aa_set(fixed: &str, variable: &str) -> AminoAcidSet {
     AminoAcidSetBuilder::new_standard()

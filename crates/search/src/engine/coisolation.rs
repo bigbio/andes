@@ -8,7 +8,7 @@ use crate::chimeric::precursor_isotope_match;
 use crate::precursor::calibration::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch};
 use crate::params::SearchParams;
-use model::aa_set::AminoAcidSet;
+use model::amino_acid::set::AminoAcidSet;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;

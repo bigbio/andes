@@ -1,4 +1,4 @@
-use glyco::glycan_first::PPM_FLOOR_DA;
+use glyco::glycan::first::PPM_FLOOR_DA;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;
@@ -174,9 +174,9 @@ mod tests {
     }
 
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
 
-    fn aa() -> model::aa_set::AminoAcidSet {
+    fn aa() -> model::amino_acid::set::AminoAcidSet {
         AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
             .build()
             .unwrap()

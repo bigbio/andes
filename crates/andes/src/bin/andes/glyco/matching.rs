@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use model::mass::ISOTOPE;
 use model::Tolerance;
-use quant::ms1_index::Ms1RunIndex;
+use quant::ms1::Ms1RunIndex;
 use quant::xic::cosine;
 
 pub(crate) const N_FEATURES: usize = 10;

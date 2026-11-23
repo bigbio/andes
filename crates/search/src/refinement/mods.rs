@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
+use model::amino_acid::set::{AminoAcidSet, AminoAcidSetBuilder};
 use model::modification::{ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
 

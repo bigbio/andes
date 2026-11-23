@@ -18,7 +18,7 @@ use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::index::SearchIndex;
 use crate::params::{ScoreMode, SearchParams};
 use input::Ms1Link;
-use model::aa_set::AminoAcidSet;
+use model::amino_acid::set::AminoAcidSet;
 use model::activation::ActivationMethod;
 use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};

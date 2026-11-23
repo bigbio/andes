@@ -340,7 +340,7 @@ pub fn split_nterm_residue(delta: f64, residue: u8, tol: f64) -> Option<(u32, u3
         .filter(|e| e.sites.as_bytes().contains(&residue))
         .map(|e| (e.id, e.mono))
         .collect();
-    crate::andes_peptide::split_nterm_residue_delta(delta, tol, &nterm, &on_residue)
+    crate::peptide::split_nterm_residue_delta(delta, tol, &nterm, &on_residue)
 }
 
 pub fn features(e: &UnimodEntry) -> [f32; N_COMP] {

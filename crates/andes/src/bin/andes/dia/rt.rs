@@ -33,7 +33,7 @@ pub(crate) const ANCHOR_Q: f64 = 0.01;
 /// prediction of a peptidoform's own sequence, NaN when the model cannot encode it.
 pub(crate) fn andes_rt_form_model(
 ) -> Result<std::sync::Arc<search::dia::FormRtModel>, String> {
-    use onnx_infer::rt_native::{RtModel, RtPeptide, Scratch};
+    use onnx_infer::rt::{RtModel, RtPeptide, Scratch};
     thread_local! {
         static RT_SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
     }

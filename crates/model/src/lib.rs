@@ -1,20 +1,17 @@
 //! Shared domain types used by every other crate: amino acids, modifications, peptides,
 //! proteins, spectra, tolerances, instruments, enzymes and FDR helpers. It sits at the bottom of
 //! the dependency graph and holds no pipeline stage of its own.
-
-pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
 pub mod annotation;
 pub mod enzyme;
 pub mod fdr;
-pub mod glycan_residue;
+pub mod glycans;
 pub mod hash;
 pub mod instrument;
-pub mod isomer_class;
+pub mod isomers;
 pub mod isotope;
 pub mod mass;
-pub mod mod_spec;
 pub mod modification;
 pub mod peptide;
 pub mod protein;
@@ -25,17 +22,17 @@ pub mod spectrum;
 pub mod stats;
 pub mod tolerance;
 pub mod unimod;
-pub mod xl_reagents;
+pub mod crosslinkers;
 
-pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
+pub use amino_acid::set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder, Terminus};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
 pub use annotation::{Annotation, Edit, Processing};
 pub use enzyme::Enzyme;
 pub use instrument::InstrumentType;
-pub use isomer_class::IsomerClass;
+pub use isomers::IsomerClass;
 pub use mass::{nominal_from, H2O, PROTON};
-pub use mod_spec::{ModDecl, ModSpecError};
+pub use modification::spec::{ModDecl, ModSpecError};
 pub use modification::{ModLocation, Modification, ResidueSpec};
 pub use peptide::Peptide;
 pub use protein::{

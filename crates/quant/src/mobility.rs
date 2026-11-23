@@ -1,4 +1,4 @@
-use crate::ms1_index::{MobilityGate, Ms1RunIndex};
+use crate::ms1::{MobilityGate, Ms1RunIndex};
 use model::stats::{median_mad, Even, MAD_TO_SD};
 
 pub const SEARCH_K0: f64 = 0.1;
@@ -109,7 +109,7 @@ pub fn learn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ms1_index::Ms1Scan;
+    use crate::ms1::Ms1Scan;
 
     fn run(n: usize, shift: f32) -> Ms1RunIndex {
         let scans = (0..(20 * n + 200))

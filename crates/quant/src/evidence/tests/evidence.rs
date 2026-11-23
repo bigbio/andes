@@ -1,6 +1,6 @@
 use super::*;
 use crate::decoys::{Hypothesis, PEPTIDE_MASS_SLOPE};
-use crate::ms1_index::Ms1Scan;
+use crate::ms1::Ms1Scan;
 use model::mass::ISOTOPE;
 
 type Feature = (f64, u8, [f32; 4], f64, f64, f64);

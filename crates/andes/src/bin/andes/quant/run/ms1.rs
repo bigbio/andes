@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use output::ms1::{partial_path, read_ms1, write_ms1};
-use quant::ms1_index::Ms1RunIndex;
+use quant::ms1::Ms1RunIndex;
 use tempfile::NamedTempFile;
 
 pub(crate) struct Ms1Cache {

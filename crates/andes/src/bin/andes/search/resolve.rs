@@ -1232,7 +1232,7 @@ pub(super) fn log_resolved_parameters(
             .distinct_mods()
             .iter()
             .filter(|m| m.fixed == fixed && m.parts.is_empty())
-            .map(|m| model::mod_spec::describe(m))
+            .map(|m| model::modification::spec::describe(m))
             .collect();
         if names.is_empty() {
             "none".to_string()

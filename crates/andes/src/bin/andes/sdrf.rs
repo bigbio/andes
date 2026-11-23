@@ -446,7 +446,7 @@ impl ModParam {
         let mut last = String::new();
         for name in &self.names {
             let item = format!("{name} ({sites})");
-            match model::mod_spec::parse_mod_list(&item, self.fixed) {
+            match model::modification::spec::parse_mod_list(&item, self.fixed) {
                 Ok(_) => return Ok(item),
                 Err(e) => last = e.to_string(),
             }

@@ -1,3 +1,4 @@
+pub mod set;
 use crate::mass::{nominal_from, C, H, N, O, S};
 use crate::modification::Modification;
 use std::hash::{Hash, Hasher};

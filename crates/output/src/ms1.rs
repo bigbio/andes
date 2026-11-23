@@ -14,7 +14,7 @@ use parquet::basic::Encoding;
 use parquet::file::properties::WriterProperties;
 use parquet::format::KeyValue;
 use parquet::schema::types::ColumnPath;
-use quant::ms1_index::{Ms1RunIndex, Ms1Scan};
+use quant::ms1::{Ms1RunIndex, Ms1Scan};
 
 use crate::atomic::write_atomic_str;
 use crate::versioned::{column_at_unpathed as column, zstd_props};

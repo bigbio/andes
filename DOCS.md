@@ -1654,7 +1654,7 @@ already carry the decoy prefix or suffix is refused.
 The modifications are two lists, `--fixed-mods` and `--variable-mods` on the command line or
 `search.fixed_mods` and `search.variable_mods` in the config file (§1b). Each item is
 `Name (sites)`; the command line takes a comma-separated list
-(`crates/model/src/mod_spec.rs`).
+(`crates/model/src/modification/spec.rs`).
 
 ```bash
 andes ... --fixed-mods "Carbamidomethyl (C)" \
@@ -3549,8 +3549,8 @@ here only where the value is a fixed choice rather than a documented option.
 | Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |
 | Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (advanced) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
 | Co-isolation isotope walk | 3 steps | `search/src/coisolation.rs:115` | steps below an accepted peak when finding the monoisotope | no | No recorded evidence |
-| Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomer_class.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
-| Implausible residue mass | 5000 Da | `model/src/aa_set.rs:17` | residues rejected as unusable | no | Sanity bound |
+| Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomers.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
+| Implausible residue mass | 5000 Da | `model/src/amino_acid/set.rs:17` | residues rejected as unusable | no | Sanity bound |
 
 ### Scoring
 
@@ -3596,7 +3596,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Width refinement | 16 golden-section steps, apex spacing 0.5 x width, profile reach 9 widths | `evidence.rs:1207,290,272` | numerical precision of the fit | no | Numerical bounds (profile reach: exp(-81/2) below 3e-18) |
 | Isotopes and scans | 4 isotopes, at least 5 scans | `evidence.rs:99,101` | envelope and fit eligibility | no | No recorded evidence |
 | Isotope exclusion | z 3.0 | `evidence.rs:114` | isotope traces excluded from the fit | no | No recorded evidence |
-| Detection limit | 5th percentile of a scan's centroid intensities; noise floor 0.5 x limit | `quant/src/ms1_index.rs:87`, `evidence.rs:109` | censoring and noise floor | learned per scan; fractions fixed | No recorded evidence |
+| Detection limit | 5th percentile of a scan's centroid intensities; noise floor 0.5 x limit | `quant/src/ms1.rs:87`, `evidence.rs:109` | censoring and noise floor | learned per scan; fractions fixed | No recorded evidence |
 | Trace integration range | 3 widths before the apex, 4 after | `evidence.rs:121,122` | area integration range | no | Longer after the apex because peaks tail (code comment) |
 | Trace baseline | at least 3 scans a side; sides differ at 3 standard errors, then the lower side alone | `evidence.rs:125,128` | baseline of each trace | no | No recorded evidence |
 | Peak boundaries | 2 half-widths at half maximum; deep valley 0.5, rise 1.5 | `quant/src/xic.rs:78-83` | LFQ peak bounds | no | 2 half-widths = 2.35 sigma, 98% of a Gaussian area (code comment); valley rule: no recorded evidence |
@@ -3622,10 +3622,10 @@ here only where the value is a fixed choice rather than a documented option.
 | Backbone candidates | top 150 per spectrum | `search/src/glycopeptides.rs:48` | candidates kept after truncation | no | No recorded evidence |
 | Peptide-first pool | charges 1..2, at most 1,024 peptides | `search/src/glycopeptides.rs:53,62` | peptide-first candidate pool | no | Cap sweep on one glyco set: 64 gives 218 at 1%, 256 gives 232, 1024 gives 253, no cap 268; 1024 kept best precision (code comment) |
 | Peptide-first filters | at least 6 matched b/y; minimum glycan 406 (N) and 203 (O) Da; backbone at least 500 Da | `search/src/glycopeptides.rs:932,188,194`, `glyco/src/backbone.rs:180,184` | candidate filters | no | 406 is two HexNAc, 203 one HexNAc (the Tn core); 6: no recorded evidence |
-| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `glyco/src/glyco_psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
+| Glyco score weights | K 10, J 5, H 1, isotope 1, c/z 15 | `glyco/src/psm.rs:23-76` | terms of the glycopeptide score | no | K 10 with c/z 15 raised backbone-correct IDs at 1% from 1,912 to 2,207 on one AI-ETD set; J 5 moved top-1 by mass from 318 to 334; H 1 from 334 to 344 (code comments) |
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |
-| Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `glyco/src/glycan_first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
+| Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `glyco/src/glycan/first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
 | Y-ion charge | 3 | `andes/src/bin/andes/cli.rs` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
 | Glyco tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
 | Glycan mass share in isotope model | 0.5 | `model/src/isotope.rs:126` | share of the mass from the glycan in the envelope model | no | No recorded evidence |

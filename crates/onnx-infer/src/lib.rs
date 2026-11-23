@@ -7,16 +7,16 @@ mod manifest;
 mod session;
 mod tensor;
 
-pub mod andes_peptide;
+pub mod peptide;
 pub mod backend;
 pub mod deeplc;
-pub mod ms2_native;
+pub mod ms2;
 pub mod ms2pip;
 pub mod peptdeep;
 pub mod predictors;
 pub mod prosit;
 pub mod rescoring;
-pub mod rt_native;
+pub mod rt;
 
 pub use error::{BackendKind, Error, Result};
 pub use manifest::{ModelManifest, ModelTask, Provenance, TensorSpec};

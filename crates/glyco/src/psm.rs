@@ -1,4 +1,4 @@
-use crate::glycan_db::GlycanComp;
+use crate::glycan::db::GlycanComp;
 use crate::hybrid::Source;
 use std::cmp::Ordering;
 

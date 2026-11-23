@@ -49,7 +49,7 @@ fn render_lists_ptms_desc_and_unmodified() {
 #[test]
 fn high_res_run_reports_matching_tolerance_apart_from_node_score_bin() {
     let params = SearchParams::default_tryptic(
-        model::aa_set::AminoAcidSetBuilder::new_standard()
+        model::amino_acid::set::AminoAcidSetBuilder::new_standard()
             .build()
             .unwrap(),
     );

@@ -137,7 +137,7 @@ pub fn from_command_line(m: &clap::ArgMatches) -> ParamSources {
             let typed = |t: &String| typed_text(p.unit, t);
             if matches!(p.id, "fixed_mods" | "variable_mods") {
                 let joined = raw.join(", ");
-                let items = model::mod_spec::split_list(&joined)
+                let items = model::modification::spec::split_list(&joined)
                     .map(|v| v.into_iter().map(|i| Value::from(i.trim())).collect::<Vec<_>>());
                 Value::Sequence(items.unwrap_or_else(|_| raw.iter().map(typed).collect()))
             } else if p.id == "xl" {

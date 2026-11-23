@@ -1,7 +1,7 @@
 use model::mass::ISOTOPE;
 use model::Tolerance;
 
-use crate::ms1_index::Ms1RunIndex;
+use crate::ms1::Ms1RunIndex;
 use crate::xic::{cosine, find_peak, gaussian_smooth, integrate, savitzky_golay5};
 
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ pub fn competition_score(fq: &FeatureQuant, params: &LfqParams, max_apex: f32) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ms1_index::Ms1Scan;
+    use crate::ms1::Ms1Scan;
 
     fn synthetic_run() -> (Ms1RunIndex, LfqTarget) {
         let env = [0.5, 0.3, 0.15, 0.05];

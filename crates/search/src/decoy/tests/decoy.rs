@@ -695,7 +695,7 @@ fn search_peptides(
     db: &ProteinDb,
     proteases: &Proteases,
 ) -> Vec<(usize, usize, Vec<u8>)> {
-    let aa = model::aa_set::AminoAcidSetBuilder::new_standard()
+    let aa = model::amino_acid::set::AminoAcidSetBuilder::new_standard()
         .build()
         .expect("standard amino acids");
     let mut params = SearchParams::default_tryptic(aa);

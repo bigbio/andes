@@ -1,4 +1,4 @@
-use crate::rt_native::{self, RtPeptide};
+use crate::rt::{self, RtPeptide};
 
 pub const PROTON: f64 = model::mass::PROTON;
 pub const H2O: f64 = model::mass::H2O;
@@ -184,7 +184,7 @@ pub fn parse_peptide(s: &str) -> Option<(Form, Mass)> {
     let mut mods = Vec::with_capacity(p.mods.len());
     for &(site, id) in &p.mods {
         let m = Mod::at(id, site, seq)?;
-        let delta = rt_native::mods::by_id(id)?.mono;
+        let delta = rt::mods::by_id(id)?.mono;
         if site == 0 {
             nterm += delta;
         } else {
@@ -316,7 +316,7 @@ mod tests {
     }
 
     fn andes_cam_acetyl_nterm_cys() -> String {
-        use model::mod_spec::parse_mod_list;
+        use model::modification::spec::parse_mod_list;
         use model::{AminoAcidSetBuilder, ModLocation, Peptide};
         let aa_set = AminoAcidSetBuilder::new_standard()
             .add_mods(parse_mod_list("Carbamidomethyl (C)", true).unwrap())

@@ -10,9 +10,9 @@ use glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
-use glyco::glycan_db::{GlycanComp, DENOVO_TOPOLOGY_ID};
-use glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use glyco::glyco_psm::{
+use glyco::glycan::db::{GlycanComp, DENOVO_TOPOLOGY_ID};
+use glyco::glycan::first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
+use glyco::psm::{
     glyco_gp_fused_score_iso, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
@@ -424,8 +424,8 @@ impl GlycoCtxOwned {
             min_core_ions: 1,
             top_k: 100,
             diagnostic_ions: match cfg.core {
-                GlycanCore::NGlycan => glyco::glycan_first::default_diagnostic_ions(),
-                GlycanCore::OGlycan => glyco::glycan_first::o_glycan_diagnostic_ions(),
+                GlycanCore::NGlycan => glyco::glycan::first::default_diagnostic_ions(),
+                GlycanCore::OGlycan => glyco::glycan::first::o_glycan_diagnostic_ions(),
             },
             diagnostic_filter: true,
             score_weights: (1.0, 1.0, 0.5),

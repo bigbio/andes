@@ -64,7 +64,7 @@ use super::{
 use crate::candidates::records::{build_base_peptide_index, MmapCandidateIndex};
 use crate::index::SearchIndex;
 use crate::params::SearchParams;
-use model::aa_set::AminoAcidSetBuilder;
+use model::amino_acid::set::AminoAcidSetBuilder;
 use model::modification::{ModLocation, Modification, ResidueSpec};
 use model::protein::{Protein, ProteinDb};
 
@@ -952,7 +952,7 @@ fn met_cleaved_walk_adds_only_post_met_n_term_peptides() {
 
 #[test]
 fn stacked_terminal_forms_enumerate_and_match_lazy() {
-    use model::mod_spec::parse_mod_list;
+    use model::modification::spec::parse_mod_list;
     let aa_set = AminoAcidSetBuilder::new_standard()
         .add_mods(
             parse_mod_list(

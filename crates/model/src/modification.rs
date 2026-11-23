@@ -1,3 +1,4 @@
+pub mod spec;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModLocation {
     Anywhere,

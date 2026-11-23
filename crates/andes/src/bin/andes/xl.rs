@@ -562,7 +562,7 @@ pub(crate) fn water_monolink_mods(linker: &Crosslinker) -> Vec<model::Modificati
 }
 
 fn water_record(name: &str) -> bool {
-    model::xl_reagents::bundled().reagents.iter().any(|r| {
+    model::crosslinkers::bundled().reagents.iter().any(|r| {
         r.monolinks
             .iter()
             .any(|m| m.name == "water" && m.unimod.as_deref() == Some(name))

@@ -1,9 +1,9 @@
 use std::env;
 use std::io::BufRead;
 
-use glyco::glycan_db::{load_glycan_gdb, GlycanComp};
-use glyco::glycan_first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
-use glyco::glycan_mass::PROTON;
+use glyco::glycan::db::{load_glycan_gdb, GlycanComp};
+use glyco::glycan::first::{search_glycans, Glycan, GlycanConfig, GlycanCore, GlycanIonIndex};
+use glyco::glycan::mass::PROTON;
 
 struct MgfSpectrum {
     pepmass: f64,

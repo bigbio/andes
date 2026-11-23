@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use crate::glycan_db::GlycanComp;
-use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC, PROTON};
+use crate::glycan::db::GlycanComp;
+use crate::glycan::mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC, PROTON};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Monosaccharide {
@@ -25,7 +25,7 @@ impl Monosaccharide {
     }
 
     pub fn neutral_mass(self) -> f64 {
-        self.residue_mass() + crate::glycan_mass::WATER
+        self.residue_mass() + crate::glycan::mass::WATER
     }
 
     pub fn symbol(self) -> &'static str {
@@ -73,7 +73,7 @@ impl DiagnosticIon {
 }
 
 pub fn default_diagnostic_ions() -> Vec<DiagnosticIon> {
-    use crate::glycan_mass::WATER;
+    use crate::glycan::mass::WATER;
     const IONS: [(f64, u8, u8, u8, u8, u8); 28] = [
         (84.04439, 0, 1, 0, 0, 0),
         (85.02841, 1, 0, 0, 0, 0),
@@ -721,7 +721,7 @@ mod tests {
             Ok(path) => {
                 let content =
                     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-                crate::glycan_db::load_glycan_gdb(&content)
+                crate::glycan::db::load_glycan_gdb(&content)
                     .unwrap_or_else(|e| panic!("parse {path}: {e}"))
             }
             Err(_) => {

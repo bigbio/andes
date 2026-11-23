@@ -8,8 +8,8 @@ use search::candidates::Candidate;
 use search::index::SearchIndex;
 use search::params::SearchParams;
 
-use glyco::glycan_first::GlycanCore;
-use glyco::glyco_psm::{
+use glyco::glycan::first::GlycanCore;
+use glyco::psm::{
     glyco_gp_fused_score_iso, GLYCO_GP_ISO_DEFAULT, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
 use glyco::hybrid::Source;
@@ -241,7 +241,7 @@ fn write_glyco_psm_row<W: Write>(
 }
 
 fn glycan_tag_with_site(
-    g: &glyco::glycan_db::GlycanComp,
+    g: &glyco::glycan::db::GlycanComp,
     residues: &[u8],
     post: u8,
     core: GlycanCore,
@@ -539,8 +539,8 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glyco::glycan_db::GlycanComp;
-    use glyco::glyco_psm::GlycoPsmKey;
+    use glyco::glycan::db::GlycanComp;
+    use glyco::psm::GlycoPsmKey;
     use glyco::hybrid::Source;
     use search::glycopeptides::{FullGlycoPsm, GlycoSpectrumResult};
     use search::psm::{PsmFeatures, PsmMatch};
@@ -712,7 +712,7 @@ mod tests {
         );
     }
 
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
     use model::tolerance::{PrecursorTolerance, Tolerance};
@@ -803,7 +803,7 @@ mod tests {
         let params = make_glyco_params();
 
         let glycan_mass =
-            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX;
+            2.0 * glyco::glycan::mass::HEXNAC + 3.0 * glyco::glycan::mass::HEX;
         let peptide_neutral_mass = candidates[0].peptide.mass();
 
         let intact_neutral = peptide_neutral_mass + glycan_mass;
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
-        use glyco::glyco_psm::{
+        use glyco::psm::{
             glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
         };
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
@@ -997,7 +997,7 @@ mod tests {
         let params = make_glyco_params();
 
         let glycan_mass =
-            2.0 * glyco::glycan_mass::HEXNAC + 3.0 * glyco::glycan_mass::HEX;
+            2.0 * glyco::glycan::mass::HEXNAC + 3.0 * glyco::glycan::mass::HEX;
         let z = 2.0_f64;
         let intact_neutral = candidates[0].peptide.mass() + glycan_mass;
         let precursor_mz = (intact_neutral + z * PROTON) / z;

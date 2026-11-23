@@ -2,7 +2,7 @@ use model::fdr::{ranked_q, Counts, Eval};
 use model::mass::ISOTOPE;
 use model::stats::{median_mut, nan_low, Even, MAD_TO_SD};
 
-use crate::ms1_index::{MobilityGate, Ms1RunIndex};
+use crate::ms1::{MobilityGate, Ms1RunIndex};
 
 pub const D_H: f64 = model::mass::D_H;
 pub const LOWEST_OFFSET: i32 = -2;
@@ -1703,7 +1703,7 @@ pub fn median(mut v: Vec<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ms1_index::Ms1Scan;
+    use crate::ms1::Ms1Scan;
 
     #[test]
     fn presets_parse() {

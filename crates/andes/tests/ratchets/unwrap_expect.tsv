@@ -15,7 +15,7 @@ crates/andes/src/bin/andes/search.rs	2
 crates/andes/src/bin/andes/train.rs	2
 crates/andes/src/bin/andes/train/intensity.rs	2
 crates/andes/src/bin/andes/transfers.rs	1
-crates/glyco/src/glycan_db.rs	1
+crates/glyco/src/glycan/db.rs	1
 crates/input/src/annotations.rs	3
 crates/input/src/ms1.rs	1
 crates/input/src/mzml.rs	4
@@ -24,11 +24,11 @@ crates/input/src/timstof/archive.rs	1
 crates/input/src/uniprot.rs	1
 crates/model-train/src/select.rs	1
 crates/model-train/src/store/write.rs	7
-crates/model/src/aa_set.rs	1
+crates/model/src/amino_acid/set.rs	1
 crates/onnx-infer/src/deeplc.rs	1
 crates/onnx-infer/src/predictors/calibration.rs	3
 crates/onnx-infer/src/predictors/form.rs	1
-crates/onnx-infer/src/rt_native.rs	8
+crates/onnx-infer/src/rt.rs	8
 crates/output/src/fdr/knockoff.rs	2
 crates/output/src/fdr/sites.rs	1
 crates/output/src/features.rs	29

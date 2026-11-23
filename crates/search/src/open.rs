@@ -289,7 +289,7 @@ fn site_score(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::set::AminoAcidSetBuilder;
 
     fn peptide(seq: &str) -> Peptide {
         let aa = AminoAcidSetBuilder::new_standard().build().unwrap();

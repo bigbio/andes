@@ -13,7 +13,7 @@ fn glycan_subtraction_uses_the_precursor_tolerance() {
 #[test]
 fn o_glycan_floor_admits_a_light_tn_precursor() {
     use super::{min_glycan_floor, GlycanCore};
-    use glyco::glycan_mass::HEXNAC;
+    use glyco::glycan::mass::HEXNAC;
     assert!(HEXNAC - 0.01 >= min_glycan_floor(GlycanCore::OGlycan));
     assert!(HEXNAC < min_glycan_floor(GlycanCore::NGlycan));
 }
@@ -164,8 +164,8 @@ fn order_peptide_first_is_deterministic_across_input_orders() {
 
 #[test]
 fn isotope_sweep_annotates_glycan_only_at_correct_offset() {
-    use glyco::glycan_db::GlycanComp;
-    use glyco::glycan_mass::{CORE_Y_STEPS, PROTON as GLY_PROTON};
+    use glyco::glycan::db::GlycanComp;
+    use glyco::glycan::mass::{CORE_Y_STEPS, PROTON as GLY_PROTON};
     use glyco::hybrid::hybrid_candidates_with_isotope;
 
     let true_backbone_residue = 1500.0_f64;
@@ -314,7 +314,7 @@ fn glyco_spectrum_result_is_clone() {
 #[test]
 fn core_y_ranking_promotes_supported_backbone_over_unsupported() {
     use glyco::backbone::{count_core_y_hits, SpectrumStats};
-    use glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
+    use glyco::glycan::mass::{CORE_Y_STEPS, PROTON};
 
     let true_bb = 1100.0_f64;
 

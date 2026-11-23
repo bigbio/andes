@@ -3,9 +3,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use onnx_infer::ms2_native::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
+use onnx_infer::ms2::{Ms2Conditions, Ms2Model, Ms2Scratch, N_BASE_ION, N_ION};
 use onnx_infer::prosit::{self, PrositPeptide, ResidueState};
-use onnx_infer::rt_native::RtPeptide;
+use onnx_infer::rt::RtPeptide;
 use onnx_infer::{ms2pip, BackendKind, BackendOptions, OnnxSession, Result};
 
 pub use onnx_infer::predictors::form::{parse_peptide, Form, Mass, Mod};

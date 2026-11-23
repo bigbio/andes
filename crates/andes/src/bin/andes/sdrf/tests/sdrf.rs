@@ -62,8 +62,8 @@ fn label_free_trypsin_phospho() {
     assert_eq!(s.quant, Some(Quant::Lfq));
     assert_eq!(s.dissociation, Some(ActivationMethod::HCD));
     assert_eq!(s.fragment_tol.as_deref(), Some("0.02 Da"));
-    model::mod_spec::parse_mod_list(&s.fixed_mods.unwrap().join(", "), true).unwrap();
-    model::mod_spec::parse_mod_list(&s.variable_mods.unwrap().join(", "), false).unwrap();
+    model::modification::spec::parse_mod_list(&s.fixed_mods.unwrap().join(", "), true).unwrap();
+    model::modification::spec::parse_mod_list(&s.variable_mods.unwrap().join(", "), false).unwrap();
 }
 
 #[test]

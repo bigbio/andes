@@ -3,8 +3,8 @@ use scoring_crate::rt_model::{calibrate, RtIndexModel};
 use search::candidates::Candidate;
 use search::glycopeptides::GlycoSpectrumResult;
 
-use glyco::glycan_db::GlycanComp;
-use glyco::rt_offset::{glyco_index, GlycanRtCoeffs};
+use glyco::glycan::db::GlycanComp;
+use glyco::rt::{glyco_index, GlycanRtCoeffs};
 
 const SECONDS_PER_MINUTE: f64 = 60.0;
 
@@ -174,9 +174,9 @@ fn glycan_tiebreak_key(hit: &search::glycopeptides::FullGlycoPsm) -> (u8, u8, u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glyco::glyco_psm::GlycoPsmKey;
+    use glyco::psm::GlycoPsmKey;
     use glyco::hybrid::Source;
-    use glyco::rt_offset::glycan_index_offset;
+    use glyco::rt::glycan_index_offset;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use scoring_crate::rt_model::MIN_CALIBRATION_ANCHORS;

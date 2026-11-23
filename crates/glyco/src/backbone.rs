@@ -1,5 +1,5 @@
-use crate::glycan_first::GlycanCore;
-use crate::glycan_mass::{CORE_Y_STEPS, O_CORE_Y_STEPS, PROTON};
+use crate::glycan::first::GlycanCore;
+use crate::glycan::mass::{CORE_Y_STEPS, O_CORE_Y_STEPS, PROTON};
 use model::hash::{splitmix64, SPLITMIX_GOLDEN};
 
 #[inline]
@@ -349,7 +349,7 @@ pub fn partial_glycan_by_intensity(
     tol_ppm: f64,
     max_charge: u8,
 ) -> f64 {
-    use crate::glycan_mass::{HEX, HEXNAC};
+    use crate::glycan::mass::{HEX, HEXNAC};
     let n = residues.len();
     if n < 2 {
         return 0.0;
@@ -382,7 +382,7 @@ pub fn glycan_y_intensity(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
     bb_neutral: f64,
-    comp: &crate::glycan_db::GlycanComp,
+    comp: &crate::glycan::db::GlycanComp,
     tol_ppm: f64,
     max_charge: u8,
 ) -> f64 {
@@ -422,7 +422,7 @@ pub fn glycan_y_intensity_decoy(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
     bb_neutral: f64,
-    comp: &crate::glycan_db::GlycanComp,
+    comp: &crate::glycan::db::GlycanComp,
     tol_ppm: f64,
     max_charge: u8,
     seed: u64,
@@ -452,7 +452,7 @@ pub fn glycan_y_hit_frac(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
     bb_neutral: f64,
-    comp: &crate::glycan_db::GlycanComp,
+    comp: &crate::glycan::db::GlycanComp,
     tol_ppm: f64,
     max_charge: u8,
     decoy_seed: Option<u64>,
@@ -486,7 +486,7 @@ pub fn y0y1_anchor_intensity(
     prec_z: u8,
     tol_ppm: f64,
 ) -> f64 {
-    use crate::glycan_mass::HEXNAC;
+    use crate::glycan::mass::HEXNAC;
     let match_int = |ion_mz: f64| -> f64 {
         let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
         let (lo, hi) = (ion_mz - tol, ion_mz + tol);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn complement_score_finds_the_by_pairs_of_a_known_peptide() {
-        let proton = crate::glycan_mass::PROTON;
+        let proton = crate::glycan::mass::PROTON;
         let residues = [
             129.042593, 113.084064, 99.068414, 113.084064, 87.032028, 113.084064, 113.084064,
             99.068414, 129.042593, 87.032028, 128.094963,
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn solve_finds_backbone_with_minimal_2hexnac_core_glycan() {
-        use crate::glycan_mass::HEXNAC;
+        use crate::glycan::mass::HEXNAC;
         let bb_neutral = 1500.0_f64;
         let bb_res = bb_neutral - H2O;
         let glycan = 2.0 * HEXNAC;
@@ -725,11 +725,11 @@ mod tests {
     #[test]
     fn solve_backbone_recovers_known_mass_from_core_ladder() {
         let bb = 1500.0;
-        let mut peaks: Vec<(f64, f32)> = crate::glycan_mass::CORE_Y_STEPS
+        let mut peaks: Vec<(f64, f32)> = crate::glycan::mass::CORE_Y_STEPS
             .iter()
-            .map(|&s| (bb + s + crate::glycan_mass::PROTON, 50.0))
+            .map(|&s| (bb + s + crate::glycan::mass::PROTON, 50.0))
             .collect();
-        peaks.push((bb + crate::glycan_mass::PROTON, 40.0));
+        peaks.push((bb + crate::glycan::mass::PROTON, 40.0));
         peaks.push((999.9, 5.0));
         let precursor = bb + 1444.53;
         let out = solve_backbone(&peaks, precursor, 2, 20.0, 5);
@@ -750,8 +750,8 @@ mod tests {
 
     #[test]
     fn glycan_y_intensity_prefers_true_composition_over_same_mass_decoy() {
-        use crate::glycan_db::GlycanComp;
-        use crate::glycan_mass::{HEX, HEXNAC};
+        use crate::glycan::db::GlycanComp;
+        use crate::glycan::mass::{HEX, HEXNAC};
         let proton = PROTON;
         let bb = 1500.0_f64;
 
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn y0y1_anchor_scores_and_discriminates() {
-        use crate::glycan_mass::HEXNAC;
+        use crate::glycan::mass::HEXNAC;
         let bb_a = 1500.0_f64;
         let bb_b = 1650.0_f64;
         let peaks: Vec<(f64, f32)> = vec![
@@ -807,8 +807,8 @@ mod tests {
 
     #[test]
     fn glycan_y_intensity_decoy_scores_below_target_on_true_spectrum() {
-        use crate::glycan_db::GlycanComp;
-        use crate::glycan_mass::{HEX, HEXNAC};
+        use crate::glycan::db::GlycanComp;
+        use crate::glycan::mass::{HEX, HEXNAC};
         let proton = PROTON;
         let bb = 1500.0_f64;
         let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
@@ -837,8 +837,8 @@ mod tests {
 
     #[test]
     fn glycan_y_intensity_decoy_matches_multicharge_anchors() {
-        use crate::glycan_db::GlycanComp;
-        use crate::glycan_mass::{HEX, HEXNAC};
+        use crate::glycan::db::GlycanComp;
+        use crate::glycan::mass::{HEX, HEXNAC};
         let bb = 3200.0_f64;
         let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         let mz2 = |neutral: f64| (neutral + 2.0 * PROTON) / 2.0;
@@ -871,8 +871,8 @@ mod tests {
 
     #[test]
     fn glycan_y_intensity_decoy_keeps_top_rung() {
-        use crate::glycan_db::GlycanComp;
-        use crate::glycan_mass::{HEX, HEXNAC};
+        use crate::glycan::db::GlycanComp;
+        use crate::glycan::mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
         let truth = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         let full = 2.0 * HEXNAC + 3.0 * HEX;
@@ -929,8 +929,8 @@ mod tests {
 
     #[test]
     fn glycan_y_hit_frac_full_vs_partial_vs_decoy() {
-        use crate::glycan_db::GlycanComp;
-        use crate::glycan_mass::{HEX, HEXNAC};
+        use crate::glycan::db::GlycanComp;
+        use crate::glycan::mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
         let g = GlycanComp::from_tree_str("(N(N(H(H)(H))))").unwrap();
         let mut full: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
@@ -1007,8 +1007,8 @@ mod tests {
 
     #[test]
     fn solve_backbone_reports_cluster_centroid_not_low_edge() {
-        let proton = crate::glycan_mass::PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let proton = crate::glycan::mass::PROTON;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
         let bb = 1500.005_f64;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 50.0)];
         for &s in steps.iter() {
@@ -1027,8 +1027,8 @@ mod tests {
 
     #[test]
     fn solve_backbone_is_deterministic_under_ties() {
-        let proton = crate::glycan_mass::PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let proton = crate::glycan::mass::PROTON;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let bb1 = 1200.0_f64;
         let bb2 = 1800.0_f64;
@@ -1065,8 +1065,8 @@ mod tests {
 
     #[test]
     fn solve_backbone_complement_pairs_promote_true_backbone() {
-        let proton = crate::glycan_mass::PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let proton = crate::glycan::mass::PROTON;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let true_bb = 1500.0_f64;
         let spurious_bb = 1300.0_f64;
@@ -1114,8 +1114,8 @@ mod tests {
 
     #[test]
     fn solve_backbone_intensity_weighted_prefers_bright_ladder() {
-        let proton = crate::glycan_mass::PROTON;
-        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let proton = crate::glycan::mass::PROTON;
+        let steps = crate::glycan::mass::CORE_Y_STEPS;
 
         let true_bb = 1500.0_f64;
         let mut peaks: Vec<(f64, f32)> = vec![(true_bb + proton, 10000.0)];
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn o_core_y_intensity_matches_single_galnac_rung() {
-        use crate::glycan_mass::{HEXNAC, PROTON};
+        use crate::glycan::mass::{HEXNAC, PROTON};
         let bb = 1500.0_f64;
         let mut peaks = vec![(bb + PROTON, 1000.0f32), (bb + HEXNAC + PROTON, 900.0f32)];
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));

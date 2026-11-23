@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use model::hash::fnv1a64;
 
-use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
+use crate::glycan::mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
 
 pub const DENOVO_TOPOLOGY_ID: u64 = u64::MAX;
 
@@ -762,10 +762,10 @@ pub fn load_glycan_wurcs_csv(content: &str) -> Result<Vec<GlycanComp>, GdbLoadEr
 
 pub fn load_species_glycan_db(species: &str) -> Result<Vec<GlycanComp>, GdbLoadError> {
     let content = match species {
-        "human" => include_str!("../glycan-db/N-glycan-human.gdb"),
-        "mouse" => include_str!("../glycan-db/N-glycan-mouse.gdb"),
-        "mouse-large" => include_str!("../glycan-db/N-glycan-mouse-large.gdb"),
-        "high-mannose" => include_str!("../glycan-db/N-glycan-high-mannose.gdb"),
+        "human" => include_str!("../../glycan-db/N-glycan-human.gdb"),
+        "mouse" => include_str!("../../glycan-db/N-glycan-mouse.gdb"),
+        "mouse-large" => include_str!("../../glycan-db/N-glycan-mouse-large.gdb"),
+        "high-mannose" => include_str!("../../glycan-db/N-glycan-high-mannose.gdb"),
         _ => {
             return Err(GdbLoadError::UnknownSpecies {
                 species: species.to_string(),

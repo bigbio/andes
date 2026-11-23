@@ -138,7 +138,7 @@ pub struct PsmMatch {
 }
 
 pub fn tie_key_of(cand: &crate::candidate_gen::Candidate) -> u64 {
-    (crate::match_engine::peptidoform_key(&cand.peptide) << 1) | u64::from(cand.is_decoy)
+    (crate::engine::peptidoform_key(&cand.peptide) << 1) | u64::from(cand.is_decoy)
 }
 
 #[inline]
@@ -613,7 +613,7 @@ mod tests {
         let m = make_match(0, 1.0);
         assert_eq!(
             m.isotope_offset, 0,
-            "isotope_offset sentinel should be 0 before match_engine populates it"
+            "isotope_offset sentinel should be 0 before engine populates it"
         );
     }
 

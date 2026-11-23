@@ -14,10 +14,10 @@ fn sync_resets_the_identity_map() {
     let idx = SearchIndex::from_target_db(&db, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let params = SearchParams::default_tryptic(aa_set);
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let mut prepared =
         PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
-    let cands = prepared.out_of_core_candidates_where(|_, _| true);
+    let cands = prepared.candidates_where(|_, _| true);
     assert!(cands.len() >= 2);
     {
         let mut accum = prepared.mmap_accum.lock().unwrap();
@@ -45,7 +45,7 @@ fn dia_ms1_gate_reads_neighbouring_survey_scans() {
     let idx = SearchIndex::from_target_db(&db, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let params = SearchParams::default_tryptic(aa_set);
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let mut prepared =
         PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
     let scan = |rt: f64, mz: f64| model::scan::Ms1Scan {

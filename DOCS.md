@@ -2228,7 +2228,7 @@ cargo test --release --workspace
 ```
 
 CI runs the whole workspace suite with no skips; the out-of-core PIN goldens
-(`cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored`) and
+(`cargo test -p andes --release --test pin_goldens -- --ignored`) and
 `cargo test -p onnx-infer --release --features tract` run as separate steps.
 
 ---
@@ -3538,7 +3538,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Residual rejection | 50 ppm | `mass_calibrator.rs:30` | residuals dropped as isotope contamination | no | No recorded evidence |
 | Fragment-index candidates | top 100 by votes, at least 3 matched b/y | `search_params.rs:24,28` | peptidoforms scored per spectrum | `--fragment-index` (advanced) only chooses the mode | 50-1000 within seed noise on phospho (code comment); +22.2% PSMs over window enumeration on Astral at 1.00% true FDP ([§1](#calibration-and-runtime)) |
 | Low-res voting peaks | 150 most intense | `search_params.rs:34` | peaks that vote at a low-resolution fragment tolerance | no | TMT low-res: all peaks 4,368 PSMs at 1%; 50/100/150 peaks 12,285/12,276/12,347 (code comment) |
-| Index slice width | 80 Da | `search/src/match_engine.rs:1464` | precursor-mass span of an out-of-core chunk | no | Changes which candidates share a vote table; no recorded evidence beyond the pinned value |
+| Index slice width | 80 Da | `search/src/engine/slices.rs` (`INDEX_SLICE_DA`) | precursor-mass span of one search slice | no | Changes which candidates share a vote table; no recorded evidence beyond the pinned value |
 | Strong-score retention | 25 | `search_params.rs:20` | candidates the strong re-rank can promote (strong mode only) | no | Code comment: larger pool recovers top-1 flips; no recorded measurement |
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
 | Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragment_error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |

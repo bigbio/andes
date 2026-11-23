@@ -5,7 +5,7 @@ use model::stats::{median_mad, Even, MAD_TO_SD};
 use scoring_crate::scoring::fragment_ions::{predict_by_ions, IonKind, PredictedIon};
 use scoring_crate::scoring::FragmentErrorModel;
 
-use crate::match_engine::PreparedSearch;
+use crate::engine::PreparedSearch;
 use crate::tdc::{confident_target_indices, ScoredLabel};
 
 pub const MEASURE_WINDOW_PPM: f64 = 50.0;

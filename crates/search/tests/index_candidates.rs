@@ -372,7 +372,7 @@ fn out_of_core_candidate_list_equals_the_enumeration() {
         let prepared = PreparedSearch::prepare_mmap(idx, params, &scorer, 0.05, "XXX", tmp.path())
             .expect("prepare_mmap");
         let mut got: Vec<CandSig> = prepared
-            .out_of_core_candidates_where(|_, _| true)
+            .candidates_where(|_, _| true)
             .iter()
             .map(cand_sig)
             .collect();
@@ -703,7 +703,7 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
 }
 
 #[test]
-fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit() {
+fn match_spectra_keeps_input_order_and_finds_the_enumeration_top_hit() {
     let (mut spectra, idx, params) = small_search_fixture();
     spectra.sort_by(|a, b| {
         search::fragment_index::index_order_mass(b)
@@ -719,7 +719,7 @@ fn match_spectra_out_of_core_keeps_input_order_and_finds_the_enumeration_top_hit
         "the fixture must exercise the mass reordering"
     );
     let cache_dir = tempfile::tempdir().expect("cache dir");
-    let (queues, cands) = search::match_spectra_out_of_core(
+    let (queues, cands) = search::match_spectra(
         &spectra,
         &idx,
         &params,
@@ -813,7 +813,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
     let mmap = PreparedSearch::prepare_mmap(&idx, &params, &scorer, 0.05, "XXX", tmp.path())
         .expect("prepare_mmap");
     let table =
-        GlycoCandidates::from_out_of_core(&mmap, glyco::glycan_first::GlycanCore::NGlycan);
+        GlycoCandidates::from_index(&mmap, glyco::glycan_first::GlycanCore::NGlycan);
 
     type Sig = (usize, usize, Vec<(u8, i64)>, u8, u8, bool, bool, bool);
     let sig = |c: &Candidate| -> Sig {

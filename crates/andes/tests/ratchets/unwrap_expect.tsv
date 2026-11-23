@@ -59,8 +59,9 @@ crates/search/src/frag_pred_cache.rs	3
 crates/search/src/fragment_index.rs	2
 crates/search/src/glyco_search.rs	1
 crates/search/src/ipf.rs	1
-crates/search/src/match_engine.rs	17
-crates/search/src/match_engine/out_of_core.rs	3
+crates/search/src/engine.rs	17
+crates/search/src/engine/coisolation.rs	2
+crates/search/src/engine/slices.rs	1
 crates/search/src/xl_search.rs	1
 crates/xl/src/crosslinker.rs	1
 crates/xl/src/doublet.rs	1

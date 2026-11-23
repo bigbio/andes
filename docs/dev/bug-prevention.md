@@ -50,7 +50,7 @@ cargo test --release --workspace
 If the change can touch the PIN, also run the bit-identity goldens:
 
 ```bash
-cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
+cargo test -p andes --release --test pin_goldens -- --ignored
 ```
 
 A change that is meant to be result-neutral (refactor, speed-up) must keep the PIN

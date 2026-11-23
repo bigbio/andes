@@ -7,7 +7,7 @@ use model::stats::nan_low_f32;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 use model::Spectrum;
 
-use crate::match_engine::PreparedSearch;
+use crate::engine::PreparedSearch;
 use crate::precursor_cal::{
     constants, median, residual_ppm, robust_sigma_ppm, sample_every_nth, tightened_tolerance_ppm,
     PrecursorCalMode,

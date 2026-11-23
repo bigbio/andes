@@ -23,7 +23,7 @@ the pull request.
 | `codeowners_paths_exist` | Every path in `.github/CODEOWNERS` exists. | none | Update the path. |
 | `architecture_names_every_crate` | `ARCHITECTURE.md` names every directory under `crates/` as `` `crates/<name>` ``. | none | Add the crate to the document. |
 
-Test modules kept in their own files go under a `tests/` directory next to the module they test (for example `crates/search/src/match_engine/tests/dedup.rs`, declared with `#[cfg(test)] #[path = "match_engine/tests/dedup.rs"] mod dedup_tests;`). Files under `tests/` are not live code, so the unwrap, module-doc, print-macro and size checks skip them.
+Test modules kept in their own files go under a `tests/` directory next to the module they test (for example `crates/search/src/engine/tests/dedup.rs`, declared with `#[cfg(test)] #[path = "engine/tests/dedup.rs"] mod dedup_tests;`). Files under `tests/` are not live code, so the unwrap, module-doc, print-macro and size checks skip them.
 
 ## Baselines
 

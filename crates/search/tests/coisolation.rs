@@ -13,7 +13,7 @@ use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
 use search::candidate_gen::Candidate;
 use search::psm::TopNQueue;
-use search::{run_pass2_coisolation, PreparedSearch, SearchIndex, SearchParams};
+use search::{coisolation_pass, PreparedSearch, SearchIndex, SearchParams};
 
 const FRAG_TOL_DA: f64 = 0.05;
 
@@ -267,7 +267,7 @@ fn run(fragment_index: bool) -> Vec<Vec<Row>> {
         PreparedSearch::prepare_mmap(&idx, &params, &scorer, FRAG_TOL_DA, "XXX", tmp.path())
             .expect("prepare_mmap accepts --chimeric");
     let mut queues = prepared.run_chunk(&spectra, 0);
-    run_pass2_coisolation(&prepared, &spectra, &mut queues, &params, &link, 0);
+    coisolation_pass(&prepared, &spectra, &mut queues, &params, &link, 0);
     prepared.sync_materialized_candidates();
     rows(&queues, &prepared.candidates)
 }

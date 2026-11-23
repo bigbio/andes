@@ -6,7 +6,7 @@ use input::FastaReader;
 use model::spectrum::Spectrum;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
-use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
+use search::{match_spectra, SearchIndex, SearchParams};
 
 use crate::labeled::BOOTSTRAP_DECOY_PREFIX;
 use crate::TrainError;
@@ -64,7 +64,7 @@ pub(crate) fn count_target_psms(
     fdr: f64,
     cache_dir: &Path,
 ) -> Result<usize, TrainError> {
-    let (queues, candidates) = match_spectra_out_of_core(
+    let (queues, candidates) = match_spectra(
         spectra,
         idx,
         search_params,

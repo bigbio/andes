@@ -34,7 +34,7 @@ Each stage and where it lives:
 |---|---|---|
 | Read spectra and database | `crates/input` | `mzml.rs`, `mgf.rs`, `thermo.rs`, `timstof.rs`, `database.rs` |
 | Digestion, decoys | `crates/search` | `candidate_gen.rs`, `decoy.rs` |
-| Index and match | `crates/search` | `fragment_index.rs`, `precursor_matching.rs`, `match_engine.rs` |
+| Index and match | `crates/search` | `fragment_index.rs`, `precursor_matching.rs`, `engine.rs` |
 | Features and learned scores | `crates/scoring` | `frag_features.rs`, `gbdt_eval.rs`, `rt_model.rs` |
 | PIN | `crates/output` | `pin.rs` |
 | Rescoring | `crates/rescore` | `run.rs`, `svm.rs`, `pep.rs` |
@@ -75,7 +75,7 @@ library crates and binary alike.
    peptides; `ChunkFragmentIndex` (`crates/search/src/fragment_index.rs`) is the fragment index, built
    in mass-ordered chunks so memory stays bounded.
 3. **Search.** `SearchParams` (`crates/search/src/search_params.rs`) carries every setting.
-   `match_engine.rs` retrieves candidates per spectrum and scores them into `PsmMatch` values
+   `engine.rs` retrieves candidates per spectrum and scores them into `PsmMatch` values
    (`crates/search/src/psm.rs`), each holding its `PsmFeatures`. `TopNQueue` keeps the best few
    per spectrum. `refinement.rs` runs a second pass restricted to confident proteins.
 4. **Features.** `scoring` adds fragment, retention-time and tree-model features to each PSM;
@@ -150,7 +150,7 @@ New intermediate and output files are Parquet; PIN and Percolator files are the 
 - **End-to-end tests** run the binary on small fixtures from `test-fixtures/`; they are in
   `crates/andes/tests/` (for example `quant_end_to_end.rs`, `qpx_output_end_to_end.rs`).
 - **Goldens** are fixed expected outputs under `test-fixtures/goldens/` and
-  `test-fixtures/parity/goldens/`, compared in `out_of_core_pin_goldens.rs`,
+  `test-fixtures/parity/goldens/`, compared in `pin_goldens.rs`,
   `glyco_golden.rs` and `precursor_cal_bit_identical.rs`. A golden changes only with a stated
   reason in the PR.
 - **Structure tests and ratchets** are in `crates/andes/tests/structure.rs`. They check the

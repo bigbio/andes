@@ -11,7 +11,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 The PIN goldens are ignored by default because they are slow; CI runs them with
 
 ```bash
-cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
+cargo test -p andes --release --test pin_goldens -- --ignored
 ```
 
 Format only the files you change (`rustfmt <file>`); never run `cargo fmt --all`, because

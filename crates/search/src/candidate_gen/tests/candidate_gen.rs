@@ -1040,7 +1040,7 @@ fn ram_window_keys(
     z: u8,
 ) -> std::collections::HashSet<(bool, usize, usize, String, u64)> {
     let (min_nominal, max_nominal) =
-        crate::match_engine::candidate_nominal_bounds(spec, z, params, 0.0);
+        crate::engine::candidate_nominal_bounds(spec, z, params, 0.0);
     enumerate_candidates(db, params, "XXX")
         .filter(|c| {
             let k = c.peptide.nominal_residue_mass();
@@ -1094,7 +1094,7 @@ fn mmap_nominal_window_equals_ram_bucket_window_on_boundary() {
             let ram = ram_window_keys(&db, &params, &spec, z);
 
             let (min_nominal, max_nominal) =
-                crate::match_engine::candidate_nominal_bounds(&spec, z, &params, 0.0);
+                crate::engine::candidate_nominal_bounds(&spec, z, &params, 0.0);
             let mmap_nominal: HashSet<_> =
                 lazy_candidates_for_nominal_window(&mi, &db, &params, min_nominal, max_nominal)
                     .iter()

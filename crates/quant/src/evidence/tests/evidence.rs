@@ -152,18 +152,6 @@ fn recovers_amplitude_apex_and_width() {
     let apex = 300.4;
     let run = synth_run(&[(MZ, 2, ENV, apex, 5.0, AMP)], NOISE, dt);
     let e = fit(&run, &probe(MZ, 303.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "recover: A/A_true-1 = {:.4}, t0-apex = {:.3} s, width_ratio = {}, llr = {:.0}, \
-         envelope_cos = {:.4}, coherence = {:.4}, m1_ratio = {:.4}, used = {:#06b}",
-        e.amplitude / AMP - 1.0,
-        e.t0 - apex,
-        e.width_ratio,
-        e.llr,
-        e.envelope_cos,
-        e.coherence,
-        e.m1_ratio,
-        e.isotopes_used
-    );
     assert_finite(&e);
     assert!((e.amplitude / AMP - 1.0).abs() < 0.05);
     assert!((e.t0 - apex).abs() < dt);
@@ -185,11 +173,6 @@ fn width_is_recovered_between_grid_points() {
                 20 + k as u64,
             ));
             let e = fit(&run, &probe(MZ, 300.0, 6.0, 6.0), 2, &ENV, &params()).unwrap();
-            eprintln!(
-                "width: true {w_true}, fitted {:.3} (noise {noise}), A/A_true = {:.4}",
-                e.w,
-                e.amplitude / AMP
-            );
             assert!((e.w / w_true - 1.0).abs() < 0.03, "{w_true}: {}", e.w);
             assert!((e.amplitude / AMP - 1.0).abs() < 0.03);
         }
@@ -232,10 +215,6 @@ fn fixture_noise_is_set_by_the_differences_not_the_floor() {
     let limit = detection_limit(&run, scans.clone(), &mut Vec::new());
     let y = run.xic(MZ, MZ * 10e-6, scans);
     let sigma = noise_sigma(&y, 0.0, &mut Vec::new());
-    eprintln!(
-        "fixture: sigma = {sigma:.0}, 0.5 L = {:.0}, noise = {NOISE}",
-        0.5 * limit
-    );
     assert!(sigma > 0.5 * limit);
     assert!((sigma / NOISE as f64 - 1.0).abs() < 0.3);
 }
@@ -246,12 +225,6 @@ fn amplitude_unbiased_across_window_regimes() {
     let run = synth_run(&[(MZ, 2, ENV, 300.0, w, AMP)], NOISE, 1.0);
     for ratio in [0.25, 0.5, 1.0, 2.0] {
         let e = fit(&run, &probe(MZ, 300.0, ratio * w, w), 2, &ENV, &params()).unwrap();
-        eprintln!(
-            "regime s/w_prior = {ratio}: A/A_true = {:.4}, t0 = {}, w = {}",
-            e.amplitude / AMP,
-            e.t0,
-            e.w
-        );
         assert!(
             (e.amplitude / AMP - 1.0).abs() < 0.05,
             "s/w_prior = {ratio}"
@@ -288,12 +261,6 @@ fn dense_scans_fit_the_same_peak() {
     let run = synth_run(&[(MZ, 2, ENV, 300.3, w, AMP)], NOISE, 0.3);
     let p = probe(MZ, 300.0, 8.0, w);
     let e = fit(&run, &p, 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "dense: t0 = {}, w = {}, A/A_true = {:.4}",
-        e.t0,
-        e.w,
-        e.amplitude / AMP
-    );
     assert!((e.t0 - 300.3).abs() < 0.5, "t0 = {}", e.t0);
     assert!((e.w / w - 1.0).abs() < 0.1, "w = {}", e.w);
     assert!((e.amplitude / AMP - 1.0).abs() < 0.05);
@@ -303,7 +270,6 @@ fn dense_scans_fit_the_same_peak() {
 fn mass_error_is_the_weighted_centroid_offset() {
     let run = synth_run(&[(MZ * (1.0 + 3e-6), 2, ENV, 300.0, 5.0, AMP)], NOISE, 1.0);
     let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
-    eprintln!("mass error: {:.3} ppm (true 3)", e.mass_err_ppm);
     assert!((e.mass_err_ppm - 3.0).abs() < 0.2);
 }
 
@@ -311,13 +277,6 @@ fn mass_error_is_the_weighted_centroid_offset() {
 fn absent_precursor_has_small_llr() {
     let run = synth_run(&[(MZ, 2, ENV, 300.0, 5.0, 0.0)], NOISE, 1.0);
     let e = fit(&run, &probe(MZ, 300.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "absent: llr = {:.2}, amplitude = {:.0} ({:.4} of AMP, {:.2} SE)",
-        e.llr,
-        e.amplitude,
-        e.amplitude / AMP,
-        e.amplitude / e.amplitude_se
-    );
     assert_finite(&e);
     assert!(e.llr < NULL_LLR_BOUND);
     assert!(e.amplitude < 0.05 * AMP);
@@ -338,12 +297,6 @@ fn interfered_isotope_is_excluded_and_quantity_unbiased() {
     let run = synth_run(&[(MZ, 2, ENV, 300.0, w, AMP), interferer], NOISE, 1.0);
     let e = fit(&run, &probe(MZ, 300.0, 6.0, w), 2, &ENV, &params()).unwrap();
     let truth = AMP * w * (2.0 * std::f64::consts::PI).sqrt();
-    eprintln!(
-        "interfered: used = {:#06b}, quantity/true-1 = {:.4}, w = {}",
-        e.isotopes_used,
-        e.quantity / truth - 1.0,
-        e.w
-    );
     assert_finite(&e);
     assert_eq!(e.isotopes_used & 0b0100, 0);
     assert_eq!(e.isotopes_used & 0b0001, 1);
@@ -366,14 +319,6 @@ fn apex_is_refitted_after_an_isotope_is_excluded() {
         );
         let run = synth_run(&[(MZ, 2, ENV, 100.0, w, AMP), interferer], NOISE, dt);
         let e = fit(&run, &probe(MZ, 100.0, 6.0, w), 2, &ENV, &params()).unwrap();
-        eprintln!(
-            "M+1 interferer at 114 s ({strength}x): used = {:#06b}, t0 = {}, w = {}, \
-             quantity/true = {:.4}",
-            e.isotopes_used,
-            e.t0,
-            e.w,
-            e.quantity / truth
-        );
         assert_finite(&e);
         assert_eq!(e.isotopes_used & 0b0010, 0, "M+1 is excluded");
         assert!((e.t0 - 100.0).abs() <= dt, "t0 = {}", e.t0);
@@ -391,10 +336,6 @@ fn rt_prior_prefers_peak_near_prediction() {
     );
     let near = fit(&run, &probe(MZ, 300.0, 3.0, 1.0), 2, &ENV, &params()).unwrap();
     let far = fit(&run, &probe(MZ, 305.0, 3.0, 1.0), 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "rt prior: t0 = {} (t_hat 300), {} (t_hat 305)",
-        near.t0, far.t0
-    );
     assert!((near.t0 - 300.0).abs() < dt);
     assert!((far.t0 - 305.0).abs() < dt);
 }
@@ -411,10 +352,6 @@ fn m1_ratio_flags_non_monoisotopic_hypothesis() {
         &params(),
     )
     .unwrap();
-    eprintln!(
-        "m1_ratio: mono = {:.4}, +1 = {:.4}",
-        mono.m1_ratio, plus1.m1_ratio
-    );
     assert_finite(&mono);
     assert_finite(&plus1);
     assert!(mono.m1_ratio < 0.1);
@@ -436,7 +373,6 @@ fn decoy_probe_in_empty_region_scores_below_target() {
     let mut dp = probe(decoy_mz, 300.0, 6.0, 5.0);
     dp.kind = Hypothesis::MassShiftDecoy(7);
     let d = fit(&run, &dp, 2, &ENV, &params()).unwrap();
-    eprintln!("decoy: llr target = {:.0}, llr decoy = {:.2}", t.llr, d.llr);
     assert_finite(&d);
     assert!(t.llr > 20.0 * d.llr.max(1.0));
 }
@@ -460,12 +396,6 @@ fn extract_uses_donor_faims_group() {
     let pr = probe(MZ, 300.0, 6.0, 5.0);
     let on = fit(group(-45.0), &pr, 2, &ENV, &params()).unwrap();
     let off = fit(group(-60.0), &pr, 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "faims: -45 llr = {:.0}, A/A_true = {:.4}; -60 llr = {:.2}",
-        on.llr,
-        on.amplitude / AMP,
-        off.llr
-    );
     assert!((on.amplitude / AMP - 1.0).abs() < 0.1);
     assert!(off.llr < NULL_LLR_BOUND);
 }
@@ -545,14 +475,6 @@ fn missing_isotope_trace_does_not_collapse_amplitude() {
     let pr = probe(MZ, 300.0, 6.0, 5.0);
     let intact = fit(&Ms1RunIndex::new(scans), &pr, 2, &ENV, &params()).unwrap();
     let missing = fit(&Ms1RunIndex::new(without_m3), &pr, 2, &ENV, &params()).unwrap();
-    eprintln!(
-        "missing M+3: A/A_true = {:.4} (intact {:.4}), llr = {:.0} (intact {:.0}), used = {:#06b}",
-        missing.amplitude / AMP,
-        intact.amplitude / AMP,
-        missing.llr,
-        intact.llr,
-        missing.isotopes_used
-    );
     assert_finite(&missing);
     assert!((missing.amplitude / AMP - 1.0).abs() < 0.15);
     assert_eq!(missing.isotopes_used & 0b0010, 0b0010, "isotope 1 kept");
@@ -803,7 +725,6 @@ fn fit_many_equals_fit() {
     };
     for p in [params(), narrow] {
         let fitted = assert_fit_many_matches(&run, &jobs, &p);
-        eprintln!("fit_many == fit: {fitted} of {} fitted", jobs.len());
         assert!(fitted > 1900 && fitted < jobs.len());
     }
 }
@@ -938,7 +859,7 @@ fn timing_fit_many_50k_probes_on_3000_scan_run() {
     let time = |label: &str, f: &dyn Fn() -> Vec<Option<Evidence>>| {
         let (start, cpu0) = (std::time::Instant::now(), cpu());
         let out = f();
-        eprintln!(
+        println!(
             "timing {label}: {:.3} s wall, {:.2} s CPU for {} probes on {} scans ({} centroids)",
             start.elapsed().as_secs_f64(),
             cpu() - cpu0,
@@ -999,7 +920,7 @@ fn timing_10k_probes_on_3000_scan_run() {
             fitted += 1;
         }
     }
-    eprintln!(
+    println!(
         "timing: {} probes ({} fitted) on {} scans ({} centroids) in {:.3} s",
         probes.len(),
         fitted,
@@ -1129,12 +1050,6 @@ fn trace_area_matches_the_template_on_a_gaussian_peak() {
             40 + k as u64,
         ));
         let e = fit(&run, &probe(MZ, 301.0, 6.0, 5.0), 2, &ENV, &params()).unwrap();
-        eprintln!(
-            "gaussian dt {dt}: trace/template = {:.4}, trace/truth = {:.4}, se/trace = {:.5}",
-            e.trace_quantity / e.quantity,
-            e.trace_quantity / truth,
-            e.trace_quantity_se / e.trace_quantity
-        );
         assert!((e.trace_quantity / e.quantity - 1.0).abs() < 0.02);
         assert!((e.trace_quantity / truth - 1.0).abs() < 0.03);
         assert!(e.trace_quantity_se > 0.0 && e.trace_quantity_se < 0.02 * e.trace_quantity);
@@ -1158,13 +1073,6 @@ fn trace_area_follows_a_tailing_peak() {
                 * step
         })
         .sum();
-    eprintln!(
-        "tailing: template/truth = {:.4}, trace/truth = {:.4} (t0 {:.1}, w {:.2})",
-        e.quantity / truth,
-        e.trace_quantity / truth,
-        e.t0,
-        e.w
-    );
     assert!((e.quantity / truth - 1.0).abs() > 0.1);
     assert!((e.trace_quantity / truth - 1.0).abs() < 0.08);
 }
@@ -1191,9 +1099,6 @@ fn trace_area_of_an_absent_analyte_averages_zero() {
     let mean = z_sum / n as f64;
     let sd = (z2_sum / n as f64 - mean * mean).sqrt();
     let template = template_sum / n as f64;
-    eprintln!(
-        "absent: trace z mean {mean:.3}, sd {sd:.3}; template in trace SEs {template:.3}"
-    );
     assert!(mean.abs() < 0.5, "{mean}");
     assert!((0.5..2.0).contains(&sd), "{sd}");
     assert!(template > mean);

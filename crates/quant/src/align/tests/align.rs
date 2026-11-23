@@ -71,17 +71,6 @@ fn recovers_monotone_warps() {
         .map(|o| (a.predict_excluding(o.precursor, o.run).unwrap().0 - o.rt).abs())
         .collect();
     let mh = median(&held);
-    eprintln!("recovers_monotone_warps: median |t_hat - rt| = {m:.3}, held out = {mh:.3}");
-    let sds: Vec<f64> = a.residual_sd[0]
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|k| k.1)
-        .collect();
-    eprintln!(
-        "recovers_monotone_warps: run 0 median sigma_r = {:.3} (noise 5)",
-        median(&sds)
-    );
     assert!(m < 7.5, "{m}");
     assert!(mh < 7.5, "{mh}");
 }
@@ -114,10 +103,6 @@ fn robust_to_ten_percent_outliers() {
         })
         .collect();
     let mt = median(&errs_truth);
-    eprintln!(
-        "robust_to_ten_percent_outliers: median |t_hat - rt| = {m:.3}, \
-         median |t_hat - truth| (inliers) = {mt:.3}"
-    );
     assert!(m < 7.5, "{m}");
     assert!(mt < 5.0, "{mt}");
 }
@@ -367,9 +352,6 @@ fn transfer_sd_shrinks_with_more_donors() {
     assert_eq!(a.n_runs_seen[1501], 6);
     let (t2, s2) = a.predict(1500, 0).unwrap();
     let (t6, s6) = a.predict(1501, 0).unwrap();
-    eprintln!(
-        "transfer_sd_shrinks_with_more_donors: s(2 donors) = {s2:.3}, s(6 donors) = {s6:.3}"
-    );
     assert!(
         (t2 - 2000.0).abs() < 5.0 && (t6 - 2000.0).abs() < 5.0,
         "{t2} {t6}"
@@ -418,10 +400,6 @@ fn transfer_window_includes_the_donor_uncertainty() {
 
     let (a, sd0) = noisy_singleton_donor();
     let (t_hat, s) = a.predict(300, 1).unwrap();
-    eprintln!(
-        "transfer_window_includes_the_donor_uncertainty: donor sigma = {sd0:.2}, \
-         t_hat = {t_hat:.2}, s = {s:.3}"
-    );
     let probe = Probe {
         kind: Hypothesis::Target,
         mz: 600.0,
@@ -453,10 +431,6 @@ fn transfer_window_includes_the_donor_uncertainty() {
         .collect();
     let run = Ms1RunIndex::new(scans);
     let e = fit(&run, &probe, 2, &env, &EvidenceParams::default()).unwrap();
-    eprintln!(
-        "transfer_window_includes_the_donor_uncertainty: quantity = {:.0}, t0 = {:.2}",
-        e.quantity, e.t0
-    );
     assert!(e.quantity > 0.0, "{e:?}");
     assert!((e.t0 - 2000.0).abs() <= 1.0, "{e:?}");
     assert!((2000.0 - t_hat).abs() <= 3.0 * s, "{t_hat} {s}");
@@ -469,10 +443,6 @@ fn transfer_window_includes_the_donor_uncertainty() {
 fn excluded_prediction_carries_the_donor_uncertainty() {
     let (a, sd0) = noisy_singleton_donor();
     let (_, s) = a.predict_excluding(0, 1).unwrap();
-    eprintln!(
-        "excluded_prediction_carries_the_donor_uncertainty: s = {s:.3}, \
-         donor sigma = {sd0:.2}"
-    );
     assert!(s > 0.2 * sd0 && s < 0.6 * sd0, "{s}");
     let (_, s) = a.predict_excluding(301, 1).unwrap();
     assert!(s >= 0.8 * sd0, "{s}");
@@ -568,10 +538,6 @@ fn precursor_seen_in_two_components_uses_the_destination_component() {
     assert_eq!(a.n_components(), 2);
     let (t1, _) = a.predict(1200, 1).unwrap();
     let (t3, _) = a.predict(1200, 3).unwrap();
-    eprintln!(
-        "precursor_seen_in_two_components_uses_the_destination_component: \
-         run 1 {t1:.2} (1500), run 3 {t3:.2} (1620)"
-    );
     assert!((t1 - 1500.0).abs() < 3.0, "{t1}");
     assert!((t3 - 1620.0).abs() < 3.0, "{t3}");
     assert!(a.predict_excluding(1200, 2).is_none());
@@ -662,11 +628,6 @@ fn predict_excluding_ignores_own_observation() {
     let a = align(&obs, 2001, 3, &AlignParams::default());
     let (own, _) = a.predict(2000, 0).unwrap();
     let (excl, s_excl) = a.predict_excluding(2000, 0).unwrap();
-    eprintln!(
-        "predict_excluding_ignores_own_observation: predict = {own:.3}, \
-         predict_excluding = {excl:.3}, truth = {:.3}",
-        warps[0](t)
-    );
     assert!((own - warps[0](t)).abs() > 100.0, "{own}");
     assert!((excl - warps[0](t)).abs() < 3.0, "{excl}");
     let (_, s_other) = a.predict(1, 0).unwrap();
@@ -693,10 +654,6 @@ fn mean_map_is_the_identity_after_the_gauge_fix() {
         .collect();
     let mean = dev.iter().sum::<f64>() / dev.len() as f64;
     let worst = dev.iter().fold(0.0f64, |w, d| w.max(d.abs()));
-    eprintln!(
-        "mean_map_is_the_identity_after_the_gauge_fix: mean (g(t) - t) = {mean:.3}, \
-         max |g(t) - t| = {worst:.3}"
-    );
     assert!(mean.abs() < 0.5, "{mean}");
     assert!(worst < 4.0, "{worst}");
 }
@@ -718,7 +675,6 @@ fn sigma_tracks_true_noise() {
         for (r, knots) in a.residual_sd.iter().enumerate() {
             let sds: Vec<f64> = knots.as_ref().unwrap().iter().map(|k| k.1).collect();
             let m = median(&sds);
-            eprintln!("sigma_tracks_true_noise: {name}, run {r}: median sigma_r = {m:.3}");
             assert!((m - 5.0).abs() < 1.25, "{name} run {r}: {m}");
         }
     }

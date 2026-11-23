@@ -19,10 +19,6 @@ crates/andes/src/sdrf.rs	1591
 crates/andes/src/transfer_fdr.rs	1846
 crates/input/src/mzml.rs	4146
 crates/input/src/uniprot.rs	1756
-crates/output/src/open_offsets.rs	1546
-crates/output/src/percolator.rs	1681
-crates/output/src/pin.rs	1723
-crates/output/src/stats.rs	1537
 crates/quant/src/align.rs	1743
 crates/quant/src/evidence.rs	2568
 crates/quant/src/label.rs	2195

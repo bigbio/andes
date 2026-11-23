@@ -1,3 +1,7 @@
+//! Quantification: chromatogram extraction, retention-time alignment, label-free and
+//! isobaric (TMT/iTRAQ) intensities, match-between-runs transfers and normalisation. It runs
+//! after identification and turns the confident PSMs into per-run precursor intensities.
+
 pub mod align;
 pub mod claims;
 pub mod decoys;

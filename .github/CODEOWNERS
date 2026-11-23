@@ -1,0 +1,19 @@
+# Review groups are added per area as contributors join.
+* @ypriverol
+/crates/andes/ @ypriverol
+/crates/glyco/ @ypriverol
+/crates/input/ @ypriverol
+/crates/model/ @ypriverol
+/crates/model-train/ @ypriverol
+/crates/onnx-infer/ @ypriverol
+/crates/output/ @ypriverol
+/crates/quant/ @ypriverol
+/crates/rescore/ @ypriverol
+/crates/scoring/ @ypriverol
+/crates/search/ @ypriverol
+/crates/xl/ @ypriverol
+/crates/andes/tests/ratchets/ @ypriverol
+/crates/andes/tests/structure.rs @ypriverol
+/docs/dev/ @ypriverol
+/AGENTS.md @ypriverol
+/.github/ @ypriverol

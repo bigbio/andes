@@ -153,6 +153,8 @@ pub fn psm_edge_existence_facts(
     facts
 }
 
+/// Scores a peptide against a spectrum with the MS-GF+ rank-based scoring model
+/// [cite:kim2014_msgfplus].
 pub fn score_psm(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,

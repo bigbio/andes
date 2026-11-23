@@ -207,6 +207,107 @@ pub fn macro_calls(code: &str, name: &str) -> Vec<usize> {
     out
 }
 
+/// The workspace root: the nearest ancestor of the calling crate whose `Cargo.toml` declares
+/// `[workspace]`.
+pub fn workspace_root() -> PathBuf {
+    let mut dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+        if manifest.contains("[workspace]") {
+            return dir.to_path_buf();
+        }
+        dir = dir.parent().expect("no workspace root above the crate");
+    }
+}
+
+/// `path` relative to `root`, with `/` separators on every platform.
+pub fn rel_key(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The source with comments, literals and `#[cfg(test)]` items blanked with spaces. Byte
+/// length and newlines are preserved.
+pub fn live_code(src: &str) -> String {
+    let code = blank(src, Keep::Code);
+    let mut out = code.clone().into_bytes();
+    for range in test_item_ranges(&code) {
+        for byte in &mut out[range] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(out).expect("blanking keeps UTF-8")
+}
+
+/// Every `crates/*/src/**/*.rs` file, sorted, excluding test-only paths.
+pub fn source_files() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let Ok(crates) = std::fs::read_dir(root.join("crates")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in crates.flatten() {
+        for file in rust_files(&entry.path().join("src")) {
+            let rel = file.strip_prefix(&root).unwrap_or(&file).to_path_buf();
+            if !is_test_path(&rel) {
+                out.push(file);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every file under the workspace-relative `dirs` whose extension is in `exts`, sorted.
+pub fn text_files(dirs: &[&str], exts: &[&str]) -> Vec<PathBuf> {
+    fn walk(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == "target" || n == ".git")
+                {
+                    continue;
+                }
+                walk(&path, exts, out);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+            {
+                out.push(path);
+            }
+        }
+    }
+    let root = workspace_root();
+    let mut out = Vec::new();
+    for dir in dirs {
+        walk(&root.join(dir), exts, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// The number of lines: each `\n` ends one (so `\r\n` counts once) and a final line without
+/// a line end counts too.
+pub fn line_count(src: &str) -> usize {
+    let ends = src.bytes().filter(|&b| b == b'\n').count();
+    if src.is_empty() || src.ends_with('\n') {
+        ends
+    } else {
+        ends + 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

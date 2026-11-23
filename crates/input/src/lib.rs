@@ -1,3 +1,7 @@
+//! Everything read from disk before a search: spectra (mzML, MGF, Thermo raw, timsTOF),
+//! protein databases (FASTA, UniProt, PEFF) and acquisition metadata. It is the first stage of
+//! the pipeline and hands the other crates normalised spectra and protein entries.
+
 pub mod acq_meta;
 pub mod annotation;
 pub mod annotations_file;

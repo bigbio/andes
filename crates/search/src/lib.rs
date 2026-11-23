@@ -1,3 +1,7 @@
+//! The search engine: candidate peptide generation, the fragment index, precursor matching,
+//! open and chimeric search, decoy handling and PSM scoring and refinement. It turns spectra from
+//! `input` and a protein database into scored PSMs that `rescore` then calibrates.
+
 pub mod candidate_gen;
 pub mod candidate_index;
 mod chimeric_features;

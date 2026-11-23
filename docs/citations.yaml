@@ -1,0 +1,18 @@
+- key: kall2007_percolator
+  authors: Käll L, Canterbury JD, Weston J, Noble WS, MacCoss MJ
+  title: Semi-supervised learning for peptide identification from shotgun proteomics datasets
+  year: 2007
+  journal: Nature Methods
+  doi: 10.1038/nmeth1113
+- key: kim2014_msgfplus
+  authors: Kim S, Pevzner PA
+  title: MS-GF+ makes progress towards a universal database search tool for proteomics
+  year: 2014
+  journal: Nature Communications
+  doi: 10.1038/ncomms6277
+- key: savitski2015_picked_fdr
+  authors: Savitski MM, Wilhelm M, Hahne H, Kuster B, Bantscheff M
+  title: A scalable approach for protein false discovery rate estimation in large proteomic data sets
+  year: 2015
+  journal: Molecular & Cellular Proteomics
+  doi: 10.1074/mcp.M114.046995

@@ -659,7 +659,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 CI runs the same commands, plus the PIN goldens
 (`cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored`). Format only the
 files you change (`rustfmt <file>`); `main` is not fully formatted. Before changing code read
-[`AGENTS.md`](AGENTS.md) and the guides in [`.claude/skills/`](.claude/skills/) (bug prevention,
+[`AGENTS.md`](AGENTS.md) and the guides in [`docs/dev/`](docs/dev/) (bug prevention,
 logging, CLI reports, performance, citations, FDR validation, benchmarks, constants, CLI flags).
 Benchmark methods and the scripts that regenerate the tables above are in
 [`docs/benchmarks/`](docs/benchmarks/README.md); model training is in [`TRAIN.md`](TRAIN.md).

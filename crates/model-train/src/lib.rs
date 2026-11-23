@@ -1,3 +1,7 @@
+//! Training of the learned models: accumulating labelled PSMs, selecting and gating training
+//! data, fitting gradient-boosted trees and storing the resulting model artifacts. It runs
+//! offline, outside a search, and produces the models that `scoring` and `search` load.
+
 pub mod accumulate;
 pub mod catalog;
 pub mod counts;

@@ -184,7 +184,7 @@ fn deamidation_and_an_isotope_step_split_at_the_density_valley() {
     let mut sorted: Vec<f64> = Vec::new();
     for i in 0..60 {
         sorted.push(0.9840 + 0.0004 * ((i % 7) as f64 - 3.0));
-        sorted.push(1.0034 + 0.0004 * ((i % 7) as f64 - 3.0));
+        sorted.push(ISOTOPE_DA + 0.0004 * ((i % 7) as f64 - 3.0));
     }
     for i in 0..8 {
         sorted.push(0.9900 + 0.0014 * i as f64);
@@ -195,7 +195,7 @@ fn deamidation_and_an_isotope_step_split_at_the_density_valley() {
     assert_eq!(big.len(), 2, "{groups:?}");
     let centre = |g: &std::ops::Range<usize>| median(&mut sorted[g.clone()].to_vec());
     assert!((centre(big[0]) - 0.9840).abs() < 0.002);
-    assert!((centre(big[1]) - 1.0034).abs() < 0.002);
+    assert!((centre(big[1]) - ISOTOPE_DA).abs() < 0.002);
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn a_mixed_peak_reports_both_explanations_in_proportion() {
         row(&format!("n{i}"), false, 0.9840 + 0.0005 * (i % 5) as f64 - 0.001, 3, "PENTIDEK")
     }));
     rows.extend((0..20).map(|i| {
-        row(&format!("j{i}"), false, 1.0034 + 0.0005 * (i % 5) as f64 - 0.001, 0, "PEPTIDEK")
+        row(&format!("j{i}"), false, ISOTOPE_DA + 0.0005 * (i % 5) as f64 - 0.001, 0, "PEPTIDEK")
     }));
     rows.extend((0..12).map(|i| row(&format!("b{i}"), false, 0.9870 + 0.0013 * i as f64, 0, "PEPTIDEK")));
     let r = report(&rows);
@@ -244,7 +244,7 @@ fn refined_offsets_are_judged_by_the_spread_of_refined_peaks() {
 #[test]
 fn a_peak_one_neutron_up_is_an_isotope_error() {
     let rows: Vec<PinOffset> = (0..10)
-        .map(|i| row(&format!("i{i}"), false, 1.0034 + 0.0002 * (i % 2) as f64, 0, "PEPTIDEK"))
+        .map(|i| row(&format!("i{i}"), false, ISOTOPE_DA + 0.0002 * (i % 2) as f64, 0, "PEPTIDEK"))
         .collect();
     let r = report(&rows);
     assert_eq!(r.peaks.len(), 1);

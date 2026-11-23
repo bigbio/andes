@@ -1,3 +1,7 @@
+pub mod archive;
+pub(crate) mod ms1;
+pub(crate) mod ms2;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -8,13 +12,13 @@ use timsrust::MSLevel;
 
 use model::scan::{Ms1Scan, ScanContext};
 
-use crate::timstof_ms1::{
+use crate::timstof::ms1::{
     centroid_frame, centroid_profile, fit_calibration, match_precursors, offset_curve,
     sum_over_mobility, CalibrationFit, FrameConditions, MobilityCentroid, MzCalibration,
     OffsetCurve, MIN_REFINE_WINDOW_PPM, NARROW_WINDOW_PPM, REFINE_ROUNDS, REFINE_SIGMAS,
     WIDE_WINDOW_PPM,
 };
-use crate::timstof_ms2::{
+use crate::timstof::ms2::{
     has_table, ms2_peaks, push_scans, read_dia_windows, read_frame_rows, read_pasef_precursors,
     slice_dia_windows, FrameRow, PasefPrecursor,
 };
@@ -146,17 +150,17 @@ fn read_tables(dir: &Path) -> Result<TdfTables, rusqlite::Error> {
     })
 }
 
-fn frame_centroids(frame: &timsrust::Frame) -> Vec<crate::timstof_ms1::TofCentroid> {
+fn frame_centroids(frame: &timsrust::Frame) -> Vec<crate::timstof::ms1::TofCentroid> {
     centroid_profile(&sum_over_mobility(&frame.tof_indices, &frame.intensities))
 }
 
 fn to_peaks(
-    centroids: &[crate::timstof_ms1::TofCentroid],
+    centroids: &[crate::timstof::ms1::TofCentroid],
     calibration: &MzCalibration,
     frame: FrameConditions,
 ) -> Vec<(f64, f32)> {
     finite_sorted_peaks(centroids.iter().map(|c| {
-        let cond = crate::timstof_ms1::conditions(frame, c.intensity);
+        let cond = crate::timstof::ms1::conditions(frame, c.intensity);
         (calibration.mz(c.tof, cond), c.intensity as f32)
     }))
 }
@@ -182,7 +186,7 @@ fn to_resolved_peaks(
     let mut rows: Vec<(f64, f32, f32)> = centroids
         .iter()
         .map(|c| {
-            let cond = crate::timstof_ms1::conditions(frame, c.intensity);
+            let cond = crate::timstof::ms1::conditions(frame, c.intensity);
             (
                 calibration.mz(c.tof, cond),
                 c.intensity as f32,
@@ -277,7 +281,7 @@ impl Ms1Frames {
             .collect();
         let stride = (with_precursors.len() / CALIBRATION_FRAMES).max(1);
         let sample: Vec<usize> = with_precursors.into_iter().step_by(stride).collect();
-        type Decoded = (usize, FrameConditions, Vec<crate::timstof_ms1::TofCentroid>);
+        type Decoded = (usize, FrameConditions, Vec<crate::timstof::ms1::TofCentroid>);
         let decoded: Vec<Decoded> = sample
             .par_iter()
             .filter_map(|&k| {
@@ -878,7 +882,7 @@ impl Iterator for TimsTofReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timstof_ms2::Selection;
+    use crate::timstof::ms2::Selection;
 
     #[test]
     fn compression_type_1_gets_a_conversion_hint() {

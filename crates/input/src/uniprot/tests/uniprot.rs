@@ -1,5 +1,5 @@
 use super::*;
-use crate::annotation::{enzymatic_span, knockoff_positions};
+use crate::annotations::entries::{enzymatic_span, knockoff_positions};
 use model::ChainEnds;
 use model::{Enzyme, VariantRegion};
 

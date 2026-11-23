@@ -246,7 +246,7 @@ impl ThermoRawReader {
         let mut chunk: Vec<Spectrum> = Vec::new();
         let mut ms1_peaks: Vec<Vec<(f64, f32)>> = Vec::new();
         let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
-        let mut tracker = crate::ms1_link::Ms1Tracker::default();
+        let mut tracker = crate::ms1::Ms1Tracker::default();
         let mut emitted_ms2 = 0usize;
         let mut skipped_higher_ms = 0usize;
 

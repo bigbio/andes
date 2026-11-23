@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::timstof_ms1::{
+use crate::timstof::ms1::{
     centroid_profile, conditions, sum_over_mobility, FrameConditions, MzCalibration,
 };
 

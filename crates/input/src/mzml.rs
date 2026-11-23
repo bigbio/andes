@@ -342,7 +342,7 @@ pub struct MzMLReader<R: BufRead> {
     done: bool,
     capture_ms1: bool,
     captured_ms1: Vec<Vec<(f64, f32)>>,
-    ms1_tracker: crate::ms1_link::Ms1Tracker,
+    ms1_tracker: crate::ms1::Ms1Tracker,
     last_faims_cv: Option<f32>,
     capture_run_ms1: bool,
     run_ms1: Vec<Ms1Scan>,
@@ -1372,7 +1372,7 @@ fn read_ms1_linked_in_pieces(
         out.contexts.extend(piece.contexts);
     }
     // Link in acquisition order across the pieces.
-    let mut tracker = crate::ms1_link::Ms1Tracker::default();
+    let mut tracker = crate::ms1::Ms1Tracker::default();
     let mut next = 0usize;
     out.ms2_to_ms1 = seen
         .into_iter()

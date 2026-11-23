@@ -3577,10 +3577,10 @@ here only where the value is a fixed choice rather than a documented option.
 | PSM and protein FDR | 0.01 each | `andes/src/bin/andes/cli.rs` | reported cutoffs | `--psm-fdr`, `--protein-fdr` | Convention |
 | Proteoform FDR | max(`--psm-fdr`, 0.05) | `cli.rs` (`--proteoform-fdr` text) | variant-class claims | `--proteoform-fdr` | No recorded evidence |
 | Knockoffs per variant | 4 | `andes/src/bin/andes/cli.rs` | variant FDR resolution | `--knockoffs` | No recorded evidence |
-| Knockoff strata | substitution classes at 0.984016, 14.01565, 15.994915 Da within 0.02 Da; at least 50 tested PSMs per stratum | `output/src/knockoff_fdr.rs:21-32` | which error-rate class a variant belongs to | no | Classes differ several-fold in error rate (code comment); 50: no recorded evidence |
-| Site-FDR stratum | 50 tested claims | `output/src/site_fdr.rs:30` | stratum size | no | No recorded evidence |
-| Class-FDR guard | 20 decoys | `output/src/class_fdr.rs:144` | when a class uses its own competition | no | No recorded evidence |
-| Site identity weights | score 2.0, isotope -1.0 and -5.7, hit fraction 25, unique hit 0.08, miss -0.02, decoy -11, confident 0.9 | `output/src/site_identity.rs:25-33` | posterior of the modification identity | no | No recorded evidence in code comments |
+| Knockoff strata | substitution classes at 0.984016, 14.01565, 15.994915 Da within 0.02 Da; at least 50 tested PSMs per stratum | `output/src/fdr/knockoff.rs:21-32` | which error-rate class a variant belongs to | no | Classes differ several-fold in error rate (code comment); 50: no recorded evidence |
+| Site-FDR stratum | 50 tested claims | `output/src/fdr/sites.rs:30` | stratum size | no | No recorded evidence |
+| Class-FDR guard | 20 decoys | `output/src/fdr/class.rs:144` | when a class uses its own competition | no | No recorded evidence |
+| Site identity weights | score 2.0, isotope -1.0 and -5.7, hit fraction 25, unique hit 0.08, miss -0.02, decoy -11, confident 0.9 | `output/src/fdr/identity.rs:25-33` | posterior of the modification identity | no | No recorded evidence in code comments |
 | Transfer classifier | 3 folds, learning rate 0.3, at most 16 strata, EB level 0.01 | `andes/src/transfer_fdr.rs:86,130,134,348` | transfer q-values | no | Learning rate 0.3: held-out scores separate targets from decoys better than 0.05 (code comment) |
 | Join mismatch limit | 1% | `andes/src/bin/andes/quant_cmd.rs:337` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
 
@@ -3635,9 +3635,9 @@ here only where the value is a fixed choice rather than a documented option.
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
 | MS2 table peaks | 100 most intense per scan | `quant_run.rs:54` | `<stem>.ms2.parquet` content | no | No recorded evidence |
-| MBR validation q | 0.01 | `output/src/mbr_out.rs:126` | threshold at which the validation is always reported | no | Convention |
-| Reference-sharing cap | 8 | `output/src/isobaric_sharing.rs:19` | references named on a variant-class row | no | Output size bound |
-| Contaminant prefix | `CONTAMINANT_` | `output/src/pg_parquet.rs:28` | proteins flagged as contaminants | no | Naming convention |
+| MBR validation q | 0.01 | `output/src/mbr.rs:126` | threshold at which the validation is always reported | no | Convention |
+| Reference-sharing cap | 8 | `output/src/isobaric.rs:19` | references named on a variant-class row | no | Output size bound |
+| Contaminant prefix | `CONTAMINANT_` | `output/src/protein/groups.rs:28` | proteins flagged as contaminants | no | Naming convention |
 | Random seeds | 42 (decoys, MBR, Percolator) | `search/src/decoy.rs:52`, `quant_cmd.rs:58`, `percolator.rs:295` | reproducibility | `--decoy-seed`, `--seed` | Fixed for reproducibility |
 
 ---

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use model::stats::{median_mad_mut, median_mut, Even};
-use output::ms1_table::read_ms1_table;
+use output::ms1::read_ms1_table;
 use quant::align::RunMap;
 use quant::claims;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use crate::transfer_fdr::{IDENTIFIED_FEATURES, TRANSFER_FEATURES};
 
-pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
+pub(crate) use output::extract::{ExtractRole as Role, ExtractRow};
 
 const SEED_WIDTH_S: f64 = 6.0;
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];
@@ -1468,8 +1468,8 @@ mod tests {
 
     use model::mass::ISOTOPE;
     use model::scan::Ms1Scan;
-    use output::extract_table::{read_extract_table, write_extract_table};
-    use output::ms1_table::write_ms1_table;
+    use output::extract::{read_extract_table, write_extract_table};
+    use output::ms1::write_ms1_table;
     use quant::align::AlignParams;
     use quant::decoys::Hypothesis;
     use quant::library::{build_library, PrecursorMeta, PsmIn};
@@ -2026,7 +2026,7 @@ mod tests {
         let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
         let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
         finalize(&stems, &fx.lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
-        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let rows = output::mbr::read_mbr_parquet(&mbr).unwrap();
         let in_r2: Vec<_> = rows.iter().filter(|r| r.run == "r2").collect();
         assert_eq!(in_r2.len(), 1, "{rows:?}");
         assert_eq!(
@@ -2409,7 +2409,7 @@ mod tests {
 
 #[cfg(test)]
 mod finalize_tests {
-    use output::mbr_out::{
+    use output::mbr::{
         write_mbr_validation, Accepted, EvidenceType, MbrClaim, MbrParquetWriter, MbrRow,
         MbrValidation, VALIDATION_Q,
     };
@@ -2569,7 +2569,7 @@ mod finalize_tests {
     }
 
     fn table(path: &Path) -> Vec<Vec<String>> {
-        use output::mbr_out::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
+        use output::mbr::{read_mbr_parquet, read_mbr_validation, ValidationCell, MBR_COLUMNS};
         let num = |v: Option<f64>| v.map_or_else(|| "NA".to_string(), |v| v.to_string());
         if path.to_string_lossy().ends_with(".mbr_validation.parquet") {
             let cells = read_mbr_validation(path).unwrap();
@@ -3753,7 +3753,7 @@ mod finalize_tests {
                 .enumerate()
                 .map(|(r, rows)| {
                     let path = dir.path().join(format!("{r}.extract.parquet"));
-                    output::extract_table::write_extract_table(&path, rows).unwrap();
+                    output::extract::write_extract_table(&path, rows).unwrap();
                     path
                 })
                 .collect(),
@@ -3980,7 +3980,7 @@ mod finalize_tests {
                 assert!(f.quant_q >= f.transfer_q, "{f:?}");
             }
         }
-        let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+        let rows = output::mbr::read_mbr_parquet(&mbr).unwrap();
         let accepted = |t: &str| matches!(t, "transfer_ms2" | "transfer_ms1" | "shared_feature");
         assert!(rows.iter().any(|r| accepted(r.evidence_type.as_str())));
         for r in &rows {

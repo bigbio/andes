@@ -8,7 +8,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::versioned_parquet::{
+use crate::versioned::{
     column, opt, read_table, write_table, TableVersion, TableWriter, BATCH_ROWS,
 };
 

@@ -5,13 +5,13 @@
 //! the digests the peptide-level check covered (enzymes, specificity, peptide lengths, missed
 //! cleavages): that is the decoy key (`search::decoy::decoy_key`). Modifications, tolerances,
 //! charges and every other search setting are not part of it. The file layout is described in
-//! `output::decoy_database`.
+//! `output::decoys`.
 
 use std::io::Write;
 use std::path::Path;
 
 use model::protein::ProteinDb;
-use output::decoy_database::{self, DatabaseSettings, Digest, OverlapRow};
+use output::decoys::{self, DatabaseSettings, Digest, OverlapRow};
 use search::decoy::{DecoyStrategy, Proteases};
 
 use crate::cli::{CheckDigest, DatabaseCmdArgs, EnzymeSpecificity};
@@ -168,8 +168,8 @@ pub(crate) fn run(args: DatabaseCmdArgs) -> Result<(), Box<dyn std::error::Error
         targets: targets.proteins.len() as u64,
         decoys: built.decoys.proteins.len() as u64,
     };
-    let settings_path = decoy_database::settings_path(&args.output);
-    decoy_database::write_settings(&settings_path, &settings)?;
+    let settings_path = decoys::settings_path(&args.output);
+    decoys::write_settings(&settings_path, &settings)?;
 
     let mut rows = Vec::new();
     for d in &digests {
@@ -190,8 +190,8 @@ pub(crate) fn run(args: DatabaseCmdArgs) -> Result<(), Box<dyn std::error::Error
             shared_peptides: r.shared_peptides,
         }));
     }
-    let overlap_path = decoy_database::overlap_path(&args.output);
-    decoy_database::write_overlap(&overlap_path, &rows, built.redrawn, built.left)?;
+    let overlap_path = decoys::overlap_path(&args.output);
+    decoys::write_overlap(&overlap_path, &rows, built.redrawn, built.left)?;
     log::info!(target: "database",
         "wrote {} ({} targets, {} decoys), {} and {}; decoy key {decoy_key}; {:.1} s",
         args.output.display(),
@@ -267,11 +267,11 @@ pub(crate) fn prebuilt_settings(
     database: &Path,
     search: &SearchDecoys,
 ) -> Result<Option<DatabaseSettings>, String> {
-    let path = decoy_database::settings_path(database);
+    let path = decoys::settings_path(database);
     if !path.is_file() {
         return Ok(None);
     }
-    let s = decoy_database::read_settings(&path)?;
+    let s = decoys::read_settings(&path)?;
     let fasta = search::decoy::file_sha256(database)
         .map_err(|e| format!("{}: {e}", database.display()))?;
     if fasta != s.fasta_sha256 {
@@ -368,7 +368,7 @@ mod tests {
         let fasta = dir.join("td.fasta");
         std::fs::write(&fasta, ">P1\nPEPTIDEK\n>XXX_P1\nEDITPEPK\n").unwrap();
         let sha = search::decoy::file_sha256(&fasta).unwrap();
-        decoy_database::write_settings(&decoy_database::settings_path(&fasta), &settings(sha))
+        decoys::write_settings(&decoys::settings_path(&fasta), &settings(sha))
             .unwrap();
         fasta
     }

@@ -12,11 +12,11 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::feature_parquet::{
+use crate::features::{
     cv_fields, cv_list_builder, list_type, score_fields, score_list_builder, struct_list,
 };
-use crate::protein_inference::{Inference, ProteinGroup};
-use crate::protein_quant::{
+use crate::protein::inference::{Inference, ProteinGroup};
+use crate::protein::quantities::{
     LabelQuantity, ProteinQuant, QuantUnit, PROTEIN_QUANT_VERSION, TOP3, TOTAL_INTENSITY,
 };
 

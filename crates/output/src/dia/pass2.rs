@@ -18,7 +18,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ProjectionMask;
 
-use crate::versioned_parquet::{write_table, TableVersion, BATCH_ROWS};
+use crate::versioned::{write_table, TableVersion, BATCH_ROWS};
 
 pub const DIA_PASS2_SCHEMA_MAJOR: u32 = 1;
 const SCHEMA_VERSION: &str = "1.1";

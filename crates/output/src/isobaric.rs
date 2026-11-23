@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
-use crate::proteoform_table::bare_sequence;
+use crate::protein::proteoforms::bare_sequence;
 
 const MAX_ADDED: usize = 8;
 

@@ -17,7 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::versioned_parquet::{write_table, TableVersion, BATCH_ROWS};
+use crate::versioned::{write_table, TableVersion, BATCH_ROWS};
 
 pub const DIA_QUANT_SCHEMA_MAJOR: u32 = 1;
 const SCHEMA_VERSION: &str = "1.0";
@@ -203,7 +203,7 @@ mod tests {
         );
         assert_eq!(read_dia_quant(&p).unwrap(), rows);
         let other = dir.path().join("pass2.parquet");
-        crate::dia_pass2_table::write_pass2(&other, &Default::default()).unwrap();
+        crate::dia::pass2::write_pass2(&other, &Default::default()).unwrap();
         assert!(read_dia_quant(&other).unwrap_err().contains("not a DIA quantity table"));
     }
 }

@@ -85,7 +85,7 @@ library crates and binary alike.
 6. **Rescore.** `rescore::run` (`crates/rescore/src/run.rs`) trains the semi-supervised model
    with cross-validation and writes scores, q-values and PEPs as Percolator result files. `output::percolator` reads the
    results back into `PercolatorPsm` (`crates/output/src/percolator.rs`).
-7. **Inference.** `output::infer_protein_groups` (`crates/output/src/protein_inference.rs`)
+7. **Inference.** `output::infer_protein_groups` (`crates/output/src/protein/inference.rs`)
    builds `ProteinGroup` values with protein-level q-values.
 8. **Quantification.** `quant` extracts chromatograms (`xic.rs`), aligns runs (`align.rs`),
    builds the match-between-runs `Library` (`library.rs`), quantifies precursors (`lfq.rs`,
@@ -116,7 +116,7 @@ runs through `xl_run.rs`, `xl_fdr.rs`; glyco through `glyco_run.rs`.
   [`docs/dev/parameters-and-constants.md`](docs/dev/parameters-and-constants.md)).
 - **An output column.** In the writer of that table in `crates/output/src/` (for example
   `qpx.rs` or `quant_out.rs`), raise the table's schema version in its `TableVersion`
-  (`crates/output/src/versioned_parquet.rs`), and update the end-to-end test that reads it
+  (`crates/output/src/versioned.rs`), and update the end-to-end test that reads it
   (`crates/andes/tests/qpx_output_end_to_end.rs`).
 - **A model.** Training code in `crates/model-train`, inference in `crates/scoring` or
   `crates/onnx-infer`, and the licence and data rules in
@@ -130,15 +130,15 @@ runs through `xl_run.rs`, `xl_fdr.rs`; glyco through `glyco_run.rs`.
 |---|---|---|
 | PIN | `crates/output/src/pin.rs` | Tab-separated, the rescoring input; one file per search. |
 | Rescoring results | `crates/rescore/src/write.rs` | Percolator-format PSM and decoy result files. |
-| QPX `psms`, `proteins`, `search_params`, `protein_groups` | `crates/output/src/qpx.rs` | Parquet files written to the output directory. `protein_groups` is a schema-only placeholder; real protein groups come from `crates/output/src/pg_parquet.rs`. |
-| Protein groups | `crates/output/src/pg_parquet.rs`, `protein_inference.rs` | `pg_schema()` defines the columns. |
-| Quantification tables | `crates/output/src/quant_out.rs` | LFQ, TMT and label tables, each with its own schema key. |
-| Match-between-runs library and alignment | `crates/output/src/library_table.rs` | `library.parquet` and `alignment.parquet`. |
-| TMT study table | `crates/output/src/tmt_study_table.rs` | Study-level isobaric table. |
-| MBR output | `crates/output/src/mbr_out.rs` | Transfers and their validation table. |
-| Cross-link projects | `crates/output/src/xl_projects.rs` | Per-project cross-link results. |
+| QPX `psms`, `proteins`, `search_params`, `protein_groups` | `crates/output/src/qpx.rs` | Parquet files written to the output directory. `protein_groups` is a schema-only placeholder; real protein groups come from `crates/output/src/protein/groups.rs`. |
+| Protein groups | `crates/output/src/protein/groups.rs`, `protein_inference.rs` | `pg_schema()` defines the columns. |
+| Quantification tables | `crates/output/src/quantities.rs` | LFQ, TMT and label tables, each with its own schema key. |
+| Match-between-runs library and alignment | `crates/output/src/library.rs` | `library.parquet` and `alignment.parquet`. |
+| TMT study table | `crates/output/src/tmt.rs` | Study-level isobaric table. |
+| MBR output | `crates/output/src/mbr.rs` | Transfers and their validation table. |
+| Cross-link projects | `crates/output/src/crosslinks.rs` | Per-project cross-link results. |
 
-Every Parquet table is versioned: `TableVersion` in `crates/output/src/versioned_parquet.rs`
+Every Parquet table is versioned: `TableVersion` in `crates/output/src/versioned.rs`
 holds a schema key (`andes.<table>.schema`), a version and a major number, written to the file
 footer; readers reject a major they do not know. Files are written through
 `write_atomic` (`crates/output/src/atomic.rs`), so an interrupted run leaves no partial result.

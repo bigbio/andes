@@ -156,7 +156,7 @@ fn peptide_hash(residues: &[u8]) -> u64 {
 }
 
 /// Calls `f(start, end)` for every peptide span the search enumerates from a protein with
-/// sequence `seq` (`candidate_gen::enumerate_protein`): cleavage sites of the enzymes, the
+/// sequence `seq` (`candidates::enumerate_protein`): cleavage sites of the enzymes, the
 /// specificity, the length and missed-cleavage limits, the initiator-Met-cleaved walk, and no
 /// span holding a residue without a standard mass. Variant and chain windows are not applied, so
 /// the spans are a superset of the search's for annotated entries.

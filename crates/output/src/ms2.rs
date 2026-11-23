@@ -18,7 +18,7 @@ use parquet::schema::types::ColumnPath;
 use quant::ms2::{Ms2Scan, ScanReporters};
 
 use crate::atomic::write_atomic_str;
-use crate::versioned_parquet::{column_at_unpathed as column, zstd_props};
+use crate::versioned::{column_at_unpathed as column, zstd_props};
 
 pub const MS2_SCHEMA_MAJOR: u32 = 1;
 
@@ -518,7 +518,7 @@ mod tests {
         );
 
         let ms1 = dir.path().join("x.ms1.parquet");
-        crate::ms1_table::write_ms1_table(&ms1, "x", &quant::ms1_index::Ms1RunIndex::default())
+        crate::ms1::write_ms1_table(&ms1, "x", &quant::ms1_index::Ms1RunIndex::default())
             .unwrap();
         let e = read_ms2_table(&ms1).unwrap_err();
         assert!(e.contains("x.ms1.parquet") && e.contains(SCHEMA_KEY), "{e}");

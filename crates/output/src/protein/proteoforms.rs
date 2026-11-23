@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use model::{EntryKind, Protein};
 use search::SearchIndex;
 
-use crate::class_fdr::Cutoffs;
+use crate::fdr::class::Cutoffs;
 use crate::percolator::PercolatorPsm;
 
 #[derive(Debug, Clone, Default)]

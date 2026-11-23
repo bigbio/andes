@@ -11,7 +11,7 @@ use model::stats::{median_mad, median_mut, Even, MAD_TO_SD};
 use model::unimod::{Specificity, UnimodDb};
 
 use crate::percolator::PercolatorPsm;
-use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
+use crate::versioned::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
 const ISOTOPE_DA: f64 = model::mass::ISOTOPE;
 const REFINED_DA: f64 = 0.0005;

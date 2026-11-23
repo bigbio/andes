@@ -12,8 +12,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use output::extract_table::ExtractTableReader;
-use output::mbr_out::{
+use output::extract::ExtractTableReader;
+use output::mbr::{
     write_mbr_validation, Accepted, EvidenceType, MbrClaim, MbrParquetWriter, MbrRow,
     MbrValidation, VALIDATION_Q,
 };

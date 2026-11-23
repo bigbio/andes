@@ -8,7 +8,7 @@ use arrow::array::{ArrayRef, Float64Array, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
+use crate::versioned::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
 const TABLE: TableVersion = TableVersion {
     key: "andes.xl_projects.schema",
@@ -80,7 +80,7 @@ pub fn read_xl_projects(path: &Path) -> Result<ReadTable, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::versioned_parquet::column;
+    use crate::versioned::column;
 
     #[test]
     fn rows_round_trip_with_the_schema_version() {

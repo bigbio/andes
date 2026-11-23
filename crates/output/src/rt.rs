@@ -3,7 +3,7 @@ use scoring_crate::rt_model::{calibrate, RtIndexModel};
 use search::candidates::Candidate;
 use search::psm::TopNQueue;
 
-use crate::row_context::iter_ranked_by_rank_score;
+use crate::rows::iter_ranked_by_rank_score;
 
 const SECONDS_PER_MINUTE: f64 = 60.0;
 

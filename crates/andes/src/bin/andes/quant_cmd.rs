@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use model::isomer_class::{bundled_unimod_mass, mod_units_match};
 use model::{IsomerClass, Tolerance};
-use output::extract_table::{read_extract_tags, write_extract_table_tagged};
-use output::feature_parquet::{FeatureGroup, FeatureRecord, MbrColumns};
-use output::library_table::{
+use output::extract::{read_extract_tags, write_extract_table_tagged};
+use output::features::{FeatureGroup, FeatureRecord, MbrColumns};
+use output::library::{
     library_fingerprint, read_library, write_library, StoredLibrary, FINGERPRINT_KEY,
 };
-use output::mbr_out::EvidenceType;
-use output::ms2_table::read_ms2_table;
-use output::run_quant_table::{open_run_quant_table, read_run_quant_mods};
+use output::mbr::EvidenceType;
+use output::ms2::read_ms2_table;
+use output::quantities::runs::{open_run_quant_table, read_run_quant_mods};
 use output::{
     FeatureCounts, FeatureParquetWriter, GroupAt, Inference, PercolatorPsm, ProteinPosition,
 };
@@ -423,7 +423,7 @@ fn envelope_of(v: &[f32]) -> Result<[f32; ENVELOPE_LEN], usize> {
 }
 
 impl KeyMeta {
-    fn of(row: &output::run_quant_table::RunPsmRow, run: usize) -> Self {
+    fn of(row: &output::quantities::runs::RunPsmRow, run: usize) -> Self {
         Self {
             has_target: !row.is_decoy,
             run,
@@ -462,7 +462,7 @@ fn align_params(dir: &Path, stems: &[String]) -> AlignParams {
         .iter()
         .map(|stem| {
             let path = artifact(dir, stem, MS1_SUFFIX);
-            let spacing = output::ms1_table::read_ms1_scan_spacing(&path)
+            let spacing = output::ms1::read_ms1_scan_spacing(&path)
                 .ok()
                 .flatten();
             let floor = spacing.map_or(ap.min_spacing_s, |s| s / 2.0);
@@ -933,8 +933,8 @@ pub(crate) fn build_and_write_library(
     log::info!(
         target: "mbr",
         "wrote {} and {}",
-        dir.join(output::library_table::LIBRARY_FILE).display(),
-        dir.join(output::library_table::ALIGNMENT_FILE).display()
+        dir.join(output::library::LIBRARY_FILE).display(),
+        dir.join(output::library::ALIGNMENT_FILE).display()
     );
     Ok(stored)
 }
@@ -1661,7 +1661,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
     }
     if !a
         .quant_dir
-        .join(output::library_table::LIBRARY_FILE)
+        .join(output::library::LIBRARY_FILE)
         .is_file()
     {
         let tables = crate::tmt_study::study_tables(&a.quant_dir, &a.output)?;
@@ -1681,7 +1681,7 @@ fn run_finalize(a: QuantFinalizeArgs) -> Result<(), String> {
             return Err(format!(
                 "{}: extracted with another library than {} (stale extract); run `andes quant extract` again",
                 path.display(),
-                a.quant_dir.join(output::library_table::LIBRARY_FILE).display()
+                a.quant_dir.join(output::library::LIBRARY_FILE).display()
             ));
         }
         let t = get(TOL_KEY).ok_or_else(|| format!("{}: no {TOL_KEY}", path.display()))?;
@@ -2089,7 +2089,7 @@ mod tests {
         pep: f64,
         wrong: Option<(&str, &str)>,
     ) -> (Vec<String>, HashMap<String, PercolatorPsm>) {
-        use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+        use output::quantities::runs::{write_run_quant_table, RunPsmRow};
         let peptide = |i: usize| -> String {
             let aa = b"ACDEFGHIKLMNPQRSTVWY";
             let tail: String = [aa[i % 20], aa[(i / 20) % 20]]
@@ -2144,9 +2144,9 @@ mod tests {
                 }
             })
             .collect();
-        output::ms2_table::write_ms2_table(
+        output::ms2::write_ms2_table(
             &artifact(dir, "a", MS2_SUFFIX),
-            &output::ms2_table::Ms2Table {
+            &output::ms2::Ms2Table {
                 run: "a".into(),
                 fragment_tol: Tolerance::Ppm(20.0),
                 top_peaks: 100,
@@ -2297,7 +2297,7 @@ mod tests {
 
     #[test]
     fn site_forms_of_one_peptide_are_one_precursor() {
-        use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+        use output::quantities::runs::{write_run_quant_table, RunPsmRow};
         let dir = tempfile::tempdir().unwrap();
         let s_form = "PEPS[UNIMOD:21]TIDEK";
         let t_form = "PEPST[UNIMOD:21]IDEK";
@@ -2357,9 +2357,9 @@ mod tests {
                 &[("UNIMOD:21".to_string(), 79.966331)],
             )
             .unwrap();
-            output::ms2_table::write_ms2_table(
+            output::ms2::write_ms2_table(
                 &artifact(dir.path(), stem, MS2_SUFFIX),
-                &output::ms2_table::Ms2Table {
+                &output::ms2::Ms2Table {
                     run: stem.clone(),
                     fragment_tol: Tolerance::Ppm(20.0),
                     top_peaks: 100,

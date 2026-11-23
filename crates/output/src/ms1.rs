@@ -17,7 +17,7 @@ use parquet::schema::types::ColumnPath;
 use quant::ms1_index::{Ms1RunIndex, Ms1Scan};
 
 use crate::atomic::write_atomic_str;
-use crate::versioned_parquet::{column_at_unpathed as column, zstd_props};
+use crate::versioned::{column_at_unpathed as column, zstd_props};
 
 pub const MS1_SCHEMA_MAJOR: u32 = 1;
 

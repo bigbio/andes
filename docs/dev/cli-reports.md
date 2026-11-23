@@ -3,7 +3,7 @@
 The end-of-run summary is the part of the output most users read. It is logged with
 `log::info!(target: "summary", ...)`, so each line carries the standard log prefix (see
 `clean-logs`), and the same content without the prefix goes to `<run>.statistics.log`
-(`crates/output/src/stats.rs`). The layout below is the message part of those lines.
+(`crates/output/src/statistics.rs`). The layout below is the message part of those lines.
 
 ## Layout
 

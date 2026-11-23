@@ -1131,7 +1131,7 @@ pub(super) fn quantify(
                     rec.mass_error_ppm = err.map(|e| e as f32);
                 }
                 if any_transfer {
-                    rec.mbr = Some(output::feature_parquet::MbrColumns {
+                    rec.mbr = Some(output::features::MbrColumns {
                         evidence_type: if f.transfer_q.is_some() {
                             "transfer_ms1"
                         } else {

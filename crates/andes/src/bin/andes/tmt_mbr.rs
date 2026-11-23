@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use model::Tolerance;
-use output::library_table::StoredLibrary;
-use output::ms2_table::read_ms2_table;
-use output::run_quant_table::{open_run_quant_table, read_run_quant_mods};
+use output::library::StoredLibrary;
+use output::ms2::read_ms2_table;
+use output::quantities::runs::{open_run_quant_table, read_run_quant_mods};
 use output::TransferInfo;
 use quant::decoys::{probes, Hypothesis};
 use quant::isobaric::{CorrectionMatrix, Plex};

@@ -318,7 +318,7 @@ pub fn site_claims(
             )
         });
         let offset =
-            crate::knockoff_fdr::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
+            crate::fdr::knockoff::finite_sample_term(parts.iter().map(|(_, _, part)| match *part {
                 Part::Claim { k, .. } | Part::Knockoff { k, .. } => k,
             }));
         let mut fdp = Vec::with_capacity(parts.len());

@@ -31,7 +31,7 @@ use arrow::record_batch::RecordBatch;
 
 use quant::isobaric::Plex;
 
-use crate::versioned_parquet::{read_table, ReadTable, TableVersion, TableWriter, BATCH_ROWS};
+use crate::versioned::{read_table, ReadTable, TableVersion, TableWriter, BATCH_ROWS};
 
 const TABLE: TableVersion = TableVersion {
     key: "andes.tmt_study.schema",

@@ -14,9 +14,9 @@ use glyco::glyco_psm::{
 };
 use glyco::hybrid::Source;
 
-use crate::percolator_enz::enzyme_features;
+use crate::percolator::enzyme::enzyme_features;
 use crate::pin::{psm_feature_values, FeatureFmt};
-use crate::row_context::RowContext;
+use crate::rows::RowContext;
 use search::glycopeptides::{FullGlycoPsm, GlycoSpectrumResult};
 use search::precursor::monoisotopic::MonoCorrection;
 
@@ -203,7 +203,7 @@ fn write_glyco_psm_row<W: Write>(
     }
 
     if glyco_col_kept("DeltaRTRank") {
-        write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?;
+        write_double_tab(writer, crate::glycopeptides::rt::delta_rt_rank(scan_hits, row_idx))?;
     }
 
     write_double_tab(writer, psm.features.isobaric_rt_margin as f64)?;
@@ -234,7 +234,7 @@ fn write_glyco_psm_row<W: Write>(
 
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
-        let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
+        let accession = crate::rows::resolve_accession(cand_for_acc, search_index);
         write!(writer, "\t{}", accession)?;
     }
     writeln!(writer)

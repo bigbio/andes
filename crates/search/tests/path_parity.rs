@@ -78,7 +78,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
 fn glyco_path_fills_every_feature_the_standard_path_fills() {
     let standard = include_str!("../src/engine.rs");
     let glyco_driver = include_str!("../src/glycopeptides.rs");
-    let glyco_rt = include_str!("../../output/src/glyco_rt.rs");
+    let glyco_rt = include_str!("../../output/src/glycopeptides/rt.rs");
 
     let expected = standard_post_topn_fields(standard);
     assert!(
@@ -104,7 +104,7 @@ fn glyco_path_fills_every_feature_the_standard_path_fills() {
          NEITHER glyco site, so they reach Percolator as constant defaults and silently \
          cost identifications: {missing:?}\n\
          Fix by mirroring the assignment in glycopeptides.rs (score-derived) or \
-         glyco_rt.rs (retention-time). If a field genuinely cannot be computed on the \
+         glycopeptides/rt.rs (retention-time). If a field genuinely cannot be computed on the \
          glyco path, add it to `exceptions` WITH THE REASON."
     );
 }

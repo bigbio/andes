@@ -24,8 +24,8 @@ use crate::pin::{
     exp_mass_text, feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
     spec_id_run,
 };
-use crate::quant_out::ModRecord;
-use crate::row_context::{emitted_rows, resolve_accession};
+use crate::quantities::ModRecord;
+use crate::rows::{emitted_rows, resolve_accession};
 
 const QPX_VERSION: &str = "1.0";
 const CREATOR: &str = "andes";
@@ -219,7 +219,7 @@ fn modification_fields() -> Fields {
             "positions",
             DataType::List(Arc::new(Field::new(
                 "element",
-                DataType::Struct(crate::feature_parquet::position_fields()),
+                DataType::Struct(crate::features::position_fields()),
                 true,
             ))),
             true,

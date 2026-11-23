@@ -572,11 +572,11 @@ fn quant_dir_writes_ms1_and_psm_tables() {
     let qpx = out.path().join("lfq.idparquet");
     run_lfq_fixture(&pin, &qpx, &["--quant-dir", qdir.to_str().unwrap()]);
     let stem = "lfq_synthetic";
-    let ms1 = output::ms1_table::read_ms1_table(&qdir.join(format!("{stem}.ms1.parquet"))).unwrap();
+    let ms1 = output::ms1::read_ms1_table(&qdir.join(format!("{stem}.ms1.parquet"))).unwrap();
     assert!(!ms1.is_empty());
     assert!(!qdir.join(format!("{stem}.ms1.parquet.partial")).exists());
     let (run, rows) =
-        output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
+        output::quantities::runs::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
             .unwrap();
     assert_eq!(run, stem);
     assert!(
@@ -630,7 +630,7 @@ fn quant_dir_table_contains_decoys() {
     let stem = "astral_pxd070049_slice";
     assert!(qdir.join(format!("{stem}.ms1.parquet")).exists());
     let (run, rows) =
-        output::run_quant_table::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
+        output::quantities::runs::read_run_quant_table(&qdir.join(format!("{stem}.quant.parquet")))
             .unwrap();
     assert_eq!(run, stem);
     assert!(
@@ -644,7 +644,7 @@ fn quant_dir_table_contains_decoys() {
         assert!((r.envelope.iter().sum::<f32>() - 1.0).abs() < 1e-3);
     }
 
-    let ms2 = output::ms2_table::read_ms2_table(&qdir.join(format!("{stem}.ms2.parquet"))).unwrap();
+    let ms2 = output::ms2::read_ms2_table(&qdir.join(format!("{stem}.ms2.parquet"))).unwrap();
     assert!(!qdir.join(format!("{stem}.ms2.parquet.partial")).exists());
     assert_eq!(ms2.run, stem);
     assert!(ms2.scans.windows(2).all(|w| w[0].rt <= w[1].rt));
@@ -659,9 +659,9 @@ fn quant_dir_table_contains_decoys() {
     let by_key: std::collections::HashMap<&str, &quant::ms2::Ms2Scan> =
         ms2.scans.iter().map(|s| (s.spec_key.as_str(), s)).collect();
     let mods =
-        output::run_quant_table::read_run_quant_mods(&qdir.join(format!("{stem}.quant.parquet")))
+        output::quantities::runs::read_run_quant_mods(&qdir.join(format!("{stem}.quant.parquet")))
             .unwrap();
-    let mut targets: Vec<&output::run_quant_table::RunPsmRow> =
+    let mut targets: Vec<&output::quantities::runs::RunPsmRow> =
         rows.iter().filter(|r| !r.is_decoy).collect();
     targets.sort_by(|a, b| b.search_score.total_cmp(&a.search_score));
     let best = &targets[..targets.len().min(20)];

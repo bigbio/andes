@@ -18,7 +18,7 @@ use quant::library::{DonorPsm, Library, LibraryEntry, PrecursorMeta};
 use quant::ms2::{Ion, LibraryFragment, LibrarySpectrum};
 
 use crate::atomic::write_atomic_str;
-use crate::versioned_parquet::{column_at as column, zstd_props};
+use crate::versioned::{column_at as column, zstd_props};
 
 pub const LIBRARY_SCHEMA_MAJOR: u32 = 5;
 pub const LIBRARY_FILE: &str = "library.parquet";

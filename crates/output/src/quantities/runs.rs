@@ -14,7 +14,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::format::KeyValue;
 
 use crate::atomic::write_atomic_str;
-use crate::versioned_parquet::{column_at as column, zstd_props};
+use crate::versioned::{column_at as column, zstd_props};
 
 pub const RUN_QUANT_SCHEMA_MAJOR: u32 = 2;
 

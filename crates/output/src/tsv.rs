@@ -1,6 +1,6 @@
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{emitted_rows, RowContext};
+use crate::rows::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::protein::{EntryKind, EntryOrigin};

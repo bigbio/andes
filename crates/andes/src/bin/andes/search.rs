@@ -1722,7 +1722,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Vec::new()
     };
-    let mut dia_pass2: Option<output::dia_pass2_table::Pass2Table> = None;
+    let mut dia_pass2: Option<output::dia::pass2::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
         crate::memlimit::mark_stage("predictions");
@@ -2048,7 +2048,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let posteriors = row_scores.as_ref().map(|(target_scores, decoy_scores)| {
-            let rows: std::collections::HashMap<String, output::site_identity::RowEvidence> =
+            let rows: std::collections::HashMap<String, output::fdr::identity::RowEvidence> =
                 queues
                     .iter()
                     .enumerate()
@@ -2059,7 +2059,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .map(move |(id, isotope_offset, evidence)| {
                                 (
                                     id,
-                                    output::site_identity::RowEvidence {
+                                    output::fdr::identity::RowEvidence {
                                         spectrum: i as u32,
                                         isotope_offset,
                                         evidence,
@@ -2068,7 +2068,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             })
                     })
                     .collect();
-            output::site_identity::row_posteriors(target_scores, decoy_scores, &rows)
+            output::fdr::identity::row_posteriors(target_scores, decoy_scores, &rows)
         });
         let sites = output::site_claims(
             map,
@@ -2613,7 +2613,7 @@ fn write_open_offsets(
     accepted: &[&output::PercolatorPsm],
     decoys: &std::collections::HashMap<String, output::PercolatorPsm>,
 ) -> Option<String> {
-    let report = match output::open_offsets::report_from_results(
+    let report = match output::offsets::report_from_results(
         pin,
         accepted,
         decoys,
@@ -2627,8 +2627,8 @@ fn write_open_offsets(
     };
     let peaks_path = dir.join(format!("{stem}.open_offsets.parquet"));
     let psms_path = dir.join(format!("{stem}.open_psms.parquet"));
-    let written = output::open_offsets::write_peaks_table(&peaks_path, &report)
-        .and_then(|()| output::open_offsets::write_psms_table(&psms_path, &report));
+    let written = output::offsets::write_peaks_table(&peaks_path, &report)
+        .and_then(|()| output::offsets::write_psms_table(&psms_path, &report));
     if let Err(e) = written {
         let mut left = Vec::new();
         for stale in [&peaks_path, &psms_path] {
@@ -2661,7 +2661,7 @@ fn write_open_offsets(
         psms_path.display(),
         report.assignments.len()
     );
-    Some(output::open_offsets::summary_block(&report))
+    Some(output::offsets::summary_block(&report))
 }
 
 pub(crate) fn write_filtered_tsv(
@@ -2750,7 +2750,7 @@ mod filtered_tsv_tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("PSMId\tq-value\t"));
         assert!(text.contains("run/scan=1_1_1\t0.001\t0.01\tK.PEPTIDEK.A\tP1\tNA\tNA"));
-        assert!(!output::ms1_table::partial_path(&path).exists());
+        assert!(!output::ms1::partial_path(&path).exists());
     }
 }
 

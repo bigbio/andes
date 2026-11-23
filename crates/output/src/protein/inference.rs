@@ -5,7 +5,7 @@ use model::{EntryKind, Protein};
 use search::SearchIndex;
 
 use crate::percolator::PercolatorPsm;
-use crate::proteoform_table::bare_sequence;
+use crate::protein::proteoforms::bare_sequence;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProteinGroup {

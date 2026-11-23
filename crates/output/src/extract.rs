@@ -15,7 +15,7 @@ use quant::evidence::Evidence;
 use quant::ms2::{Ms2Evidence, ScanMatch};
 use quant::shared::SharedEvidence;
 
-use crate::versioned_parquet::{column_at as column, TableVersion, TableWriter};
+use crate::versioned::{column_at as column, TableVersion, TableWriter};
 
 pub const EXTRACT_SCHEMA_MAJOR: u32 = 7;
 

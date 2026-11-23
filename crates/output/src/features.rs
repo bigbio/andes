@@ -11,7 +11,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::quant_out::ModRecord;
+use crate::quantities::ModRecord;
 
 const FEATURE_QPX_VERSION: &str = "1.1";
 const FEATURE_IDENTITY_COMPOSITE: &str = "run_file_name,peptidoform,charge,rt,scan,observed_mz";

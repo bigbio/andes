@@ -28,11 +28,11 @@ use model::hash::{fnv1a64_extend, FNV1A64_OFFSET};
 use model::scan::Ms1Scan;
 use model::Spectrum;
 use onnx_infer::predictors::calibration::RtCalibration;
-use output::dia_nominee_table::{
+use output::dia::nominees::{
     read_nominee_keys, read_nominee_meta, read_nominees, write_nominees, NomineeRow,
     NomineeTable,
 };
-use output::dia_pass2_table::{read_pass2_meta, write_pass2_with, Pass2Table};
+use output::dia::pass2::{read_pass2_meta, write_pass2_with, Pass2Table};
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 

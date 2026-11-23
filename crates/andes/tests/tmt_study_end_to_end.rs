@@ -223,7 +223,7 @@ fn tmt_study_joins_pooled_scores_gates_groups_and_maps_channels() {
         .collect();
     assert_eq!(before, after, "the per-run tables are not touched");
 
-    let study = output::tmt_study_table::read_tmt_study(&d.join("out/study.tmt.parquet")).unwrap();
+    let study = output::tmt::read_tmt_study(&d.join("out/study.tmt.parquet")).unwrap();
     assert_eq!(study.meta["andes.tmt.plex"], "tmt10plex");
     let rows = rows_of(&study);
     assert_eq!(rows.len(), expected.len());

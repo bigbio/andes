@@ -28,7 +28,7 @@
 //! in other runs, never its source target, and targets and decoys get the columns by the same
 //! rule.
 //!
-//! Finalize also writes `<base>.dia_quant.parquet` (`output::dia_quant_table`): every target
+//! Finalize also writes `<base>.dia_quant.parquet` (`output::dia::quantities`): every target
 //! precursor of a run at reported q <= `--quant-fdr` with its pass-2 quantities, own and
 //! transferred rows alike (one row per peptide and charge, the lowest q), nothing below it.
 //! `quantity` is the [`DEFAULT_QUANTITY`] arm; `quantity_normalized` divides it by the run's
@@ -42,10 +42,10 @@ use std::collections::BTreeSet;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use output::dia_pass2_table::{
+use output::dia::pass2::{
     read_pass2, read_pass2_keys, read_pass2_meta, write_pass2_with, Pass2Keys, Pass2Table,
 };
-use output::dia_quant_table::{write_dia_quant, DiaQuantRow};
+use output::dia::quantities::{write_dia_quant, DiaQuantRow};
 use output::PercolatorBackend;
 use rayon::prelude::*;
 

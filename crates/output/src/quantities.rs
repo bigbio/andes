@@ -1,3 +1,4 @@
+pub mod runs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::versioned_parquet::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
+use crate::versioned::{read_table, write_table, ReadTable, TableVersion, BATCH_ROWS};
 
 use quant::isobaric::Plex;
 use quant::lfq::FeatureQuant;
@@ -936,7 +937,7 @@ mod tests {
         assert_eq!(seen, want);
         assert!(got.iter().all(|r| r.name == "TMT6plex"));
     }
-    use crate::versioned_parquet::{column, opt};
+    use crate::versioned::{column, opt};
     use arrow::array::{
         Array, BooleanArray, Float32Array, Float64Array, Int32Array, ListArray, StringArray,
         UInt32Array,

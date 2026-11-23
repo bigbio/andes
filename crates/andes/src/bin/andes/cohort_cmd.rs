@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::{CohortCommand, CohortPlanArgs, CohortRunArgs, CohortXlFdrArgs};
 use crate::cohort::{self, Plan};
 use crate::config::RunConfig;
-use output::stats::thousands;
+use output::statistics::thousands;
 
 pub(crate) fn run(cmd: CohortCommand) -> Result<(), Box<dyn Error>> {
     match cmd {
@@ -984,7 +984,7 @@ fn project_error(
     csms: &[CsmRow],
     q: &[Option<f64>],
     projects: &Projects,
-) -> Vec<output::xl_projects::XlProjectRow> {
+) -> Vec<output::crosslinks::XlProjectRow> {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<(&str, usize), [xl::fdr::ClassCounts; PROJECT_REPORT_CUTS.len()]> =
         BTreeMap::new();
@@ -1006,7 +1006,7 @@ fn project_error(
     for ((project, li), at) in counts {
         let link = xl::rollup::LinkClass::ALL[li];
         for (c, cut) in at.iter().zip(PROJECT_REPORT_CUTS) {
-            rows.push(output::xl_projects::XlProjectRow {
+            rows.push(output::crosslinks::XlProjectRow {
                 project: project.to_string(),
                 link: link.name().to_string(),
                 q_cut: cut,
@@ -1020,8 +1020,8 @@ fn project_error(
     rows
 }
 
-fn report_project_error(rows: &[output::xl_projects::XlProjectRow]) {
-    let shown: Vec<&output::xl_projects::XlProjectRow> = rows.iter().filter(|r| r.tt > 0).collect();
+fn report_project_error(rows: &[output::crosslinks::XlProjectRow]) {
+    let shown: Vec<&output::crosslinks::XlProjectRow> = rows.iter().filter(|r| r.tt > 0).collect();
     if shown.is_empty() {
         return;
     }
@@ -1373,7 +1373,7 @@ fn xl_fdr_tables(
     )?;
     let shares = project_error(&csms, &q, projects);
     report_project_error(&shares);
-    output::xl_projects::write_xl_projects(&with(".xl.projects.parquet"), &shares)?;
+    output::crosslinks::write_xl_projects(&with(".xl.projects.parquet"), &shares)?;
     log::info!(
         target: "cohort",
         "wrote {} ({} CSMs from {} runs), the residue-pair and protein-pair tables and the \

@@ -21,7 +21,7 @@ use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use crate::versioned_parquet::{column, read_table, write_table, TableVersion};
+use crate::versioned::{column, read_table, write_table, TableVersion};
 
 const SETTINGS_VERSION: &str = "1.0";
 const SETTINGS: TableVersion = TableVersion {

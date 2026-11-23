@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use model::mass::ISOTOPE;
 use model::scan::Ms1Scan;
-use output::extract_table::{read_extract_table, write_extract_table};
-use output::ms1_table::write_ms1_table;
+use output::extract::{read_extract_table, write_extract_table};
+use output::ms1::write_ms1_table;
 use quant::align::AlignParams;
 use quant::decoys::Hypothesis;
 use quant::library::{build_library, PrecursorMeta, PsmIn};
@@ -560,7 +560,7 @@ fn unaligned_run_keeps_its_identified_rows() {
     let stems: Vec<String> = ["r0", "r1", "r2"].map(String::from).to_vec();
     let (mbr, val) = mbr_paths(&fx._dir.path().join("x"));
     finalize(&stems, &fx.lib, &runs, 0.01, None, 7, &mbr, &val).unwrap();
-    let rows = output::mbr_out::read_mbr_parquet(&mbr).unwrap();
+    let rows = output::mbr::read_mbr_parquet(&mbr).unwrap();
     let in_r2: Vec<_> = rows.iter().filter(|r| r.run == "r2").collect();
     assert_eq!(in_r2.len(), 1, "{rows:?}");
     assert_eq!(

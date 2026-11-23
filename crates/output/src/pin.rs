@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::io::{self, BufWriter, Write};
 
-use crate::percolator_enz::enzyme_features;
-use crate::row_context::{emitted_rows, RowContext};
+use crate::percolator::enzyme::enzyme_features;
+use crate::rows::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
@@ -587,7 +587,7 @@ fn write_psm_row<W: Write>(
     write!(writer, "\t{}", cand.peptide)?;
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
-        let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
+        let accession = crate::rows::resolve_accession(cand_for_acc, search_index);
         write!(writer, "\t{}", accession)?;
     }
     writeln!(writer)

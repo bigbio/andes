@@ -12,7 +12,7 @@ use search::candidates::Candidate;
 use search::psm::TopNQueue;
 use search::params::SearchParams;
 
-pub use crate::spectra_tally::SpectraTally;
+pub use crate::spectra::SpectraTally;
 
 pub struct RunStatistics {
     pub precursor_tolerance: String,
@@ -370,7 +370,7 @@ pub fn fact_rows(
     queues: &[TopNQueue],
     candidates: &[Candidate],
 ) -> FactRows {
-    use crate::row_context::emitted_rows;
+    use crate::rows::emitted_rows;
     queues
         .par_iter()
         .enumerate()
@@ -457,7 +457,7 @@ pub fn psm_facts_of_rows(
                 cand.peptide.mass(),
             );
             let (_, _, enz_int) =
-                crate::percolator_enz::enzyme_features(cand, params.enzyme, &params.extra_enzymes);
+                crate::percolator::enzyme::enzyme_features(cand, params.enzyme, &params.extra_enzymes);
             let residues: Vec<(u8, Option<&str>)> = cand
                 .peptide
                 .residues

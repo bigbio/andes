@@ -7,9 +7,9 @@ use model::scan::{Ms1Scan, ProductScan, ScanContext};
 use model::spectrum::Spectrum;
 use model::stats::{median_f32_mut, Even};
 use model::{IsomerClass, Tolerance};
-use output::feature_parquet::{FeatureRecord, MbrColumns};
-use output::ms2_table::{write_ms2_table, Ms2Table};
-use output::run_quant_table::{write_run_quant_table, RunPsmRow};
+use output::features::{FeatureRecord, MbrColumns};
+use output::ms2::{write_ms2_table, Ms2Table};
+use output::quantities::runs::{write_run_quant_table, RunPsmRow};
 use output::{LfqRow, ModRecord, PercolatorPsm, QuantId, TmtRow};
 use quant::formula::Formula;
 use quant::isobaric::{extract_reporters, reporter_noise, signal_to_noise, CorrectionMatrix, Plex};
@@ -1459,7 +1459,7 @@ fn quantify_label(
         |seq| {
             let pg = groups?;
             match pg.inf.group_at(seq, pg.max_q) {
-                output::protein_inference::GroupAt::Group { group, .. } => {
+                output::protein::inference::GroupAt::Group { group, .. } => {
                     Some((group.accessions.join(";"), group.lead.clone()))
                 }
                 _ => None,

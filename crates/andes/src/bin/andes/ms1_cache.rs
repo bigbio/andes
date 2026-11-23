@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use output::ms1_table::{partial_path, read_ms1, write_ms1};
+use output::ms1::{partial_path, read_ms1, write_ms1};
 use quant::ms1_index::Ms1RunIndex;
 use tempfile::NamedTempFile;
 
@@ -46,7 +46,7 @@ impl Ms1Cache {
 mod tests {
     use super::*;
     use model::scan::Ms1Scan;
-    use output::ms1_table::read_ms1_table;
+    use output::ms1::read_ms1_table;
 
     fn index() -> Ms1RunIndex {
         Ms1RunIndex::new(vec![

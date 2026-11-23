@@ -10,8 +10,8 @@ pub use tsv::{write_tsv, write_tsv_to};
 pub mod pin;
 pub use pin::{emitted_row_candidates, emitted_row_evidence, format_spec_id, spec_id_run, write_pin, write_pin_to};
 
-pub mod stats;
-pub use stats::{
+pub mod statistics;
+pub use statistics::{
     classify_mods, fact_rows, psm_facts, psm_facts_of_rows, write_statistics_log, FactRow,
     FactRows, FixedModSpec, IdentificationSummary, PeptideMods, PsmFacts, RunStatistics,
     SpectraTally, SummaryContext,
@@ -20,41 +20,29 @@ pub use stats::{
 pub mod qpx;
 pub use qpx::{omitted_psm_rows, write_qpx};
 
-pub mod rt_wiring;
-pub use rt_wiring::{populate_rt_features, populate_rt_features_per_run};
+pub mod rt;
+pub use rt::{populate_rt_features, populate_rt_features_per_run};
 
 pub mod provenance;
 pub use provenance::populate_provenance_features;
+pub use fdr::class::{apply_class_fdr, ClassCount, Cutoffs};
 
-pub mod class_fdr;
-pub use class_fdr::{apply_class_fdr, ClassCount, Cutoffs};
-
-pub mod isobaric_sharing;
-pub use isobaric_sharing::share_isobaric_references;
+pub mod isobaric;
+pub use isobaric::share_isobaric_references;
 
 pub mod ipf;
-pub mod knockoff_fdr;
-pub mod site_fdr;
-pub mod site_identity;
-mod spectra_tally;
-pub use knockoff_fdr::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
-pub use site_fdr::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
-
-pub mod pg_parquet;
-pub use pg_parquet::{write_pg_parquet, FeatureCounts};
-pub mod protein_inference;
-pub mod protein_quant;
-pub use protein_quant::ProteinQuant;
-pub use protein_inference::{
+mod spectra;
+pub use fdr::knockoff::{apply_knockoff_fdr, KnockoffCount, KnockoffOutcome};
+pub use fdr::sites::{site_claims, write_sites_tsv, SiteCount, SiteOutcome, SiteRow};
+pub use protein::groups::{write_pg_parquet, FeatureCounts};
+pub use protein::quantities::ProteinQuant;
+pub use protein::inference::{
     infer_protein_groups, write_protein_groups_tsv, GroupAt, Inference, ProteinGroup,
 };
-pub mod proteoform_table;
-pub use proteoform_table::{proteoform_table, write_proteoform_tsv, QuantSummary};
+pub use protein::proteoforms::{proteoform_table, write_proteoform_tsv, QuantSummary};
+pub use glycopeptides::rt::populate_glyco_rt_features;
 
-pub mod glyco_rt;
-pub use glyco_rt::populate_glyco_rt_features;
-
-pub mod open_offsets;
+pub mod offsets;
 pub mod percolator;
 pub use percolator::{
     apply_per_run_q, decoy_results_path, parse_psm_results, pep_is_degenerate,
@@ -63,38 +51,33 @@ pub use percolator::{
     PsmResultReader, PsmResultRow, RowScores, DEFAULT_PERCOLATOR_IMAGE,
 };
 pub use rescore::{run as run_native_percolator, MemLimit, Sizing};
+pub(crate) mod rows;
+pub use rows::emitted_rows;
+pub use glycopeptides::pin::write_glyco_pin;
 
-pub(crate) mod percolator_enz;
-pub(crate) mod row_context;
-pub use row_context::emitted_rows;
-
-pub mod glyco_pin;
-pub use glyco_pin::write_glyco_pin;
-
-pub mod quant_out;
-pub use quant_out::{
+pub mod quantities;
+pub use quantities::{
     read_label_parquet, read_lfq_parquet, read_tmt_parquet, write_label_parquet, write_lfq_parquet,
     write_tmt_parquet, write_tmt_parquet_mbr, LabelRow, LabelTableMeta, LfqRow, LfqTableMeta,
     ModRecord, QuantId, TmtRow, TransferInfo, UnmixMeta,
 };
 
-pub mod run_quant_table;
+pub mod extract;
+pub mod decoys;
+pub mod tmt;
+pub mod library;
+pub mod ms1;
+pub mod ms2;
 
-pub mod extract_table;
-pub mod dia_nominee_table;
-pub mod dia_pass2_table;
-pub mod decoy_database;
-pub mod dia_quant_table;
-pub mod tmt_study_table;
-pub mod library_table;
-pub mod ms1_table;
-pub mod ms2_table;
-
-pub mod feature_parquet;
-pub mod mbr_out;
-pub mod versioned_parquet;
-pub mod xl_projects;
-pub use feature_parquet::{
+pub mod features;
+pub mod mbr;
+pub mod versioned;
+pub mod crosslinks;
+pub mod fdr;
+pub mod protein;
+pub mod glycopeptides;
+pub mod dia;
+pub use features::{
     write_feature_parquet, FeatureGroup, FeatureParquetWriter, FeatureRecord, ProteinPosition,
 };
-pub use versioned_parquet::ReadTable;
+pub use versioned::ReadTable;

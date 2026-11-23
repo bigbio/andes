@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use model::stats::{median_mad_mut, median_mut, Even};
-use output::ms1_table::read_ms1_table;
+use output::ms1::read_ms1_table;
 use quant::align::RunMap;
 use quant::claims;
 use quant::decoys::{probes, Hypothesis, Probe, PEPTIDE_MASS_SLOPE};
@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use crate::transfer_fdr::{IDENTIFIED_FEATURES, TRANSFER_FEATURES};
 
-pub(crate) use output::extract_table::{ExtractRole as Role, ExtractRow};
+pub(crate) use output::extract::{ExtractRole as Role, ExtractRow};
 
 const SEED_WIDTH_S: f64 = 6.0;
 const WIDTH_PRIOR_GRID: [f64; 5] = [0.5, 0.7, 1.0, 1.4, 2.0];

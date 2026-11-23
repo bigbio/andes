@@ -605,7 +605,7 @@ pub(crate) fn run_xl(
     for (li, linker) in linkers.into_iter().enumerate() {
         report_linker(&linker);
         let t = std::time::Instant::now();
-        let table = XlCandidates::from_out_of_core(prepared, &linker);
+        let table = XlCandidates::from_index(prepared, &linker);
         let n_decoy = table.peptides().iter().filter(|p| p.is_decoy).count();
         log::info!(
             target: "xl",

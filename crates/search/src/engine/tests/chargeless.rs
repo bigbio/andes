@@ -1,4 +1,4 @@
-//! Unit tests of the per-charge split path and the chimeric isolation window of `match_engine`:
+//! Unit tests of the per-charge split path and the chimeric isolation window of `engine`:
 //! a chargeless spectrum searched once per charge, and the window centred on the isolation target.
 
 use super::*;
@@ -62,7 +62,7 @@ fn chargeless_spectrum_is_searched_per_charge() {
     let mut params = SearchParams::default_tryptic(aa_set);
     params.charge_range = 2..=5;
     params.fragment_index_top_k = 1;
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let prepared =
         PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX").unwrap();
 

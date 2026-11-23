@@ -34,11 +34,11 @@ jobs:
       - name: Test (release)
         run: cargo test --release --workspace
 
-      - name: Out-of-core PIN goldens (issues #65, #70)
+      - name: PIN goldens (issues #65, #70)
         # `#[ignore]`d because each runs a full E. coli search (~20 s release);
         # run explicitly here, on one lane, so they stay required.
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p andes --release --test out_of_core_pin_goldens -- --ignored
+        run: cargo test -p andes --release --test pin_goldens -- --ignored
 
       - name: DDA rescore path goldens
         # `#[ignore]`d because each runs a full E. coli search with rescoring;

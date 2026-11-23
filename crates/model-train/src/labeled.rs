@@ -10,7 +10,7 @@ use model::stats::nan_low_f32;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use search::decoy::{DecoyStrategy, Proteases, DEFAULT_DECOY_SEED};
 use search::psm::PsmMatch;
-use search::{match_spectra_out_of_core, SearchIndex, SearchParams};
+use search::{match_spectra, SearchIndex, SearchParams};
 
 use crate::TrainError;
 
@@ -46,7 +46,7 @@ pub fn bootstrap_labels(
         &Proteases::of(search_params),
     );
 
-    let (queues, candidates) = match_spectra_out_of_core(
+    let (queues, candidates) = match_spectra(
         spectra,
         &idx,
         search_params,

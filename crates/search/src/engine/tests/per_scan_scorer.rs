@@ -32,14 +32,14 @@ fn scans_route_by_their_own_activation() {
     let idx = SearchIndex::from_target_db(&db, "XXX");
     let params =
         SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&calls);
     let prepared = prepared_with(&idx, &params, &scorer).with_per_scan_scorers(
         ActivationMethod::HCD,
         Box::new(move |a| {
             seen.fetch_add(1, Ordering::Relaxed);
-            (a == ActivationMethod::EThcD).then(crate::coisolation::tests::tiny_scorer)
+            (a == ActivationMethod::EThcD).then(crate::engine::coisolation::tests::tiny_scorer)
         }),
     );
     let chunk = [
@@ -85,7 +85,7 @@ fn no_routing_keeps_the_run_scorer() {
     let idx = SearchIndex::from_target_db(&db, "XXX");
     let params =
         SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let prepared = prepared_with(&idx, &params, &scorer);
     let chunk = [spectrum(Some(ActivationMethod::EThcD))];
     let set = prepared.scorer_set(&chunk);

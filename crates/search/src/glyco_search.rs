@@ -42,7 +42,7 @@ use glyco::oxonium::{
 
 use crate::glyco_fragment_index::FragmentIndex;
 
-use crate::match_engine::{compute_psm_features, PreparedSearch};
+use crate::engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmFeatures;
 use crate::psm::PsmMatch;
 
@@ -240,9 +240,9 @@ pub struct GlycoCandidates {
 }
 
 impl GlycoCandidates {
-    pub fn from_out_of_core(prepared: &PreparedSearch<'_>, core: GlycanCore) -> Self {
+    pub fn from_index(prepared: &PreparedSearch<'_>, core: GlycanCore) -> Self {
         Self::from_candidates(
-            prepared.out_of_core_candidates_where(move |residues, post| match core {
+            prepared.candidates_where(move |residues, post| match core {
                 GlycanCore::NGlycan => crate::candidate_gen::span_has_nxst_sequon(residues, post),
                 GlycanCore::OGlycan => crate::candidate_gen::span_has_ser_or_thr(residues, post),
             }),
@@ -258,7 +258,7 @@ impl GlycoCandidates {
             GlycanCore::NGlycan => crate::candidate_gen::candidate_has_nxst_sequon,
             GlycanCore::OGlycan => crate::candidate_gen::candidate_has_ser_or_thr,
         }));
-        let mass_order = crate::match_engine::build_mass_order(&candidates);
+        let mass_order = crate::engine::build_mass_order(&candidates);
         Self {
             candidates,
             mass_order,

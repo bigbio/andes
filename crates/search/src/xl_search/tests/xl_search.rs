@@ -45,10 +45,10 @@ fn a_peptide_of_two_proteins_lists_both_whatever_its_flanks() {
             .unwrap()
     };
     assert_eq!(shared(&table).len(), 2);
-    let scorer = crate::coisolation::tests::tiny_scorer();
+    let scorer = crate::engine::coisolation::tests::tiny_scorer();
     let prepared =
         PreparedSearch::prepare_in_memory(&idx, &params, &scorer, 0.02, "XXX_").unwrap();
-    let table = XlCandidates::from_out_of_core(&prepared, &linker("DSSO"));
+    let table = XlCandidates::from_index(&prepared, &linker("DSSO"));
     assert_eq!(shared(&table).len(), 2, "{:?}", shared(&table));
 }
 

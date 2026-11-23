@@ -137,7 +137,7 @@ pub(crate) fn run_glyco(
     };
     let t_table = std::time::Instant::now();
     let table =
-        search::glyco_search::GlycoCandidates::from_out_of_core(prepared, cli.glyco_core.into());
+        search::glyco_search::GlycoCandidates::from_index(prepared, cli.glyco_core.into());
     log::info!(
         target: "glyco",
         "candidate table: {} {}-bearing candidates from the out-of-core index \

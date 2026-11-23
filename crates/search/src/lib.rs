@@ -5,7 +5,6 @@
 pub mod candidate_gen;
 pub mod candidate_index;
 mod chimeric_features;
-pub(crate) mod coisolation;
 pub mod decoy;
 pub mod dia_rt_rank;
 pub mod frag_pred_cache;
@@ -17,7 +16,7 @@ pub mod ipf;
 pub mod isomer;
 pub mod isotope_mimic;
 pub mod mass_calibrator;
-pub mod match_engine;
+pub mod engine;
 pub mod open_search;
 pub mod precursor_cal;
 pub mod precursor_matching;
@@ -39,8 +38,8 @@ pub use mass_calibrator::{
     learn_calibration_stats, prepass_search_params, run_by_file, CalibrationStats,
     FileCalibration, SpecKey,
 };
-pub use match_engine::{
-    match_spectra_out_of_core, run_pass2_coisolation, PreparedSearch, ScorerLoader,
+pub use engine::{
+    coisolation_pass, match_spectra, PreparedSearch, ScorerLoader,
 };
 pub use precursor_cal::{
     adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm, PrecursorCalMode,

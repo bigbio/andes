@@ -360,6 +360,22 @@ mod tests {
     }
 
     #[test]
+    fn dhso_is_a_cleavable_dihydrazide_with_dsso_like_stubs() {
+        let r = table()
+            .reagents
+            .iter()
+            .find(|r| r.name == "DHSO")
+            .expect("DHSO");
+        assert!((mass_of(&r.intact) - 186.057_532).abs() < 1e-5);
+        let stub = |n: &str| mass_of(r.stubs.iter().find(|s| s.name == n).unwrap());
+        assert!((stub("alkene") - 68.037_448).abs() < 1e-5);
+        assert!((stub("thiol") - 100.009_519).abs() < 1e-5);
+        assert!((stub("sulfenic") - 118.020_084).abs() < 1e-5);
+        assert!((mass_of(&r.monolinks[0]) - 204.068_097).abs() < 1e-5);
+        assert_eq!(r.sites, "D, E, Protein C-term");
+    }
+
+    #[test]
     fn cleavable_stubs_split_the_intact_linker() {
         let h2o = composition_mass("H(2) O").unwrap();
         for r in table().reagents.iter().filter(|r| !r.stubs.is_empty()) {

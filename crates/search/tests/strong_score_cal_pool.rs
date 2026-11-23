@@ -117,7 +117,7 @@ fn a_charge_less_spectrum_calibrates_its_strong_score_over_every_searched_charge
     params.precursor_tolerance =
         model::tolerance::PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
     params.charge_range = 1..=4;
-    params.fragment_index_top_k = search::search_params::FRAGMENT_INDEX_TOP_K;
+    params.fragment_index_top_k = search::params::FRAGMENT_INDEX_TOP_K;
     params.top_n_psms_per_spectrum = 1000;
 
     let prepared = PreparedSearch::prepare_in_memory(&idx, &params, &scorer, FRAG_TOL_DA, "XXX")

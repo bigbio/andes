@@ -3,7 +3,7 @@ fn probe_sizes() {
     use std::mem::size_of;
     println!(
         "FullGlycoPsm      = {}",
-        size_of::<search::glyco_search::FullGlycoPsm>()
+        size_of::<search::glycopeptides::FullGlycoPsm>()
     );
     println!(
         "GlycoPsmKey       = {}",
@@ -12,6 +12,6 @@ fn probe_sizes() {
     println!("PsmMatch          = {}", size_of::<search::psm::PsmMatch>());
     println!(
         "GlycoSpectrumResult = {}",
-        size_of::<search::glyco_search::GlycoSpectrumResult>()
+        size_of::<search::glycopeptides::GlycoSpectrumResult>()
     );
 }

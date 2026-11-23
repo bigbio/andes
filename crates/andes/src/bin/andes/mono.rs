@@ -5,7 +5,7 @@ use std::path::Path;
 
 use input::Ms1Link;
 use model::Spectrum;
-use search::precursor_mono::{
+use search::precursor::monoisotopic::{
     correct_precursor, median_nonzero_intensity, MonoCorrection, MonoParams,
 };
 

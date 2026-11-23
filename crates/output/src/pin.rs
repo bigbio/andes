@@ -6,10 +6,10 @@ use crate::row_context::{emitted_rows, RowContext};
 use model::mass::{ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
-use search::search_params::SearchParams;
+use search::index::SearchIndex;
+use search::params::SearchParams;
 
 pub fn format_spec_id(
     spec_id: &str,
@@ -59,7 +59,7 @@ pub fn emitted_row_evidence(
     spec: &Spectrum,
     queue: &TopNQueue,
     candidates: &[Candidate],
-) -> Vec<(String, i8, Option<Box<search::site_evidence::SiteEvidence>>)> {
+) -> Vec<(String, i8, Option<Box<search::sites::SiteEvidence>>)> {
     let psms = queue.clone().into_rank_sorted_vec();
     emitted_spec_ids(spec, &psms, candidates)
         .into_iter()
@@ -699,8 +699,8 @@ mod tests {
     use model::protein::{Protein, ProteinDb};
     use model::tolerance::PrecursorTolerance;
     use model::tolerance::Tolerance;
-    use search::candidate_gen::Candidate;
-    use search::search_index::SearchIndex;
+    use search::candidates::Candidate;
+    use search::index::SearchIndex;
 
     #[test]
     fn write_mass_keeps_micro_dalton_precision() {
@@ -869,7 +869,7 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
-            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            cal_min_spec_keys: search::precursor::calibration::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
@@ -1218,7 +1218,7 @@ mod tests {
         let idx = SearchIndex::from_target_db(&target, "XXX_");
         let params = make_params(2..=3);
         let cands: Vec<Candidate> =
-            search::candidate_gen::enumerate_candidates(&idx, &params, &idx.decoy_prefix).collect();
+            search::candidates::enumerate_candidates(&idx, &params, &idx.decoy_prefix).collect();
         let met_clipped = |decoy: bool| {
             cands
                 .iter()

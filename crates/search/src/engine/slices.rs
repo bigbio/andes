@@ -15,8 +15,8 @@ pub fn match_spectra(
     cache_dir: &std::path::Path,
 ) -> std::io::Result<(Vec<TopNQueue>, Vec<Candidate>)> {
     let mut params = params.clone();
-    params.fragment_index_top_k = crate::search_params::FRAGMENT_INDEX_TOP_K;
-    let cache = crate::candidate_index::index_cache_path(idx, &params, cache_dir);
+    params.fragment_index_top_k = crate::params::FRAGMENT_INDEX_TOP_K;
+    let cache = crate::candidates::records::index_cache_path(idx, &params, cache_dir);
     let mut prepared = PreparedSearch::prepare_mmap(
         idx,
         &params,
@@ -27,16 +27,16 @@ pub fn match_spectra(
     )?;
     let mut order: Vec<usize> = (0..spectra.len()).collect();
     order.sort_by(|&a, &b| {
-        crate::fragment_index::index_order_mass(&spectra[a])
-            .total_cmp(&crate::fragment_index::index_order_mass(&spectra[b]))
+        crate::fragments::index::index_order_mass(&spectra[a])
+            .total_cmp(&crate::fragments::index::index_order_mass(&spectra[b]))
             .then(a.cmp(&b))
     });
     let mut queues: Vec<Option<TopNQueue>> = (0..spectra.len()).map(|_| None).collect();
     let mut rest: &[usize] = &order;
     while !rest.is_empty() {
-        let take = crate::fragment_index::index_chunk_len(
+        let take = crate::fragments::index::index_chunk_len(
             rest,
-            |&i| crate::fragment_index::index_order_mass(&spectra[i]),
+            |&i| crate::fragments::index::index_order_mass(&spectra[i]),
             INDEX_SLICE_DA,
         );
         let (head, tail) = rest.split_at(take);

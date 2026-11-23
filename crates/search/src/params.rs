@@ -4,7 +4,7 @@ use model::aa_set::AminoAcidSet;
 use model::enzyme::Enzyme;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 
-use crate::precursor_cal::PrecursorCalMode;
+use crate::precursor::calibration::PrecursorCalMode;
 
 pub const STRONG_SCORE_RETENTION_K: u32 = 25;
 
@@ -90,7 +90,7 @@ impl SearchParams {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
-            cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            cal_min_spec_keys: crate::precursor::calibration::constants::MIN_SPECKEYS_FOR_PREPASS,
             fragment_index_top_k: 0,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
@@ -119,8 +119,8 @@ impl SearchParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::precursor_cal::PrecursorCalMode;
-    use crate::precursor_matching::matches_precursor;
+    use crate::precursor::calibration::PrecursorCalMode;
+    use crate::precursor::matching::matches_precursor;
     use model::aa_set::AminoAcidSetBuilder;
     use model::mass::PROTON;
     use model::peptide::Peptide;

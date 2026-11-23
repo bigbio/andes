@@ -1,17 +1,20 @@
+pub mod config;
+pub(crate) mod mods;
+
 use std::collections::HashSet;
 
 use model::modification::ModLocation;
 use model::protein::ProteinDb;
 use scoring_crate::RankScorer;
 
-use crate::candidate_gen::Candidate;
+use crate::candidates::Candidate;
 use crate::decoy::{build_search_db, whole_sequence_decoy_db, DecoyStrategy};
 use crate::engine::PreparedSearch;
 use crate::psm::TopNQueue;
-use crate::refine_config::RefineConfig;
-pub use crate::refine_mods::{mod_count_and_class, refinement_aa_set};
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
+use crate::refinement::config::RefineConfig;
+pub use crate::refinement::mods::{mod_count_and_class, refinement_aa_set};
+use crate::index::SearchIndex;
+use crate::params::SearchParams;
 use crate::tdc::{confident_target_indices, ScoredLabel};
 
 #[allow(dead_code)]
@@ -126,7 +129,7 @@ pub fn build_refinement_index(
     let subset = full_target_db.subset_by_index(&keep);
     let db = build_search_db(&subset, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
-        has_alternative_entries: crate::search_index::holds_alternative_entries(&db),
+        has_alternative_entries: crate::index::holds_alternative_entries(&db),
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -164,7 +167,7 @@ pub fn build_peptide_anchored_index(
     };
     let combined = anchored_target_plus_decoy(&minidb, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
-        has_alternative_entries: crate::search_index::holds_alternative_entries(&combined),
+        has_alternative_entries: crate::index::holds_alternative_entries(&combined),
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
         decoy_suffix: None,
@@ -326,7 +329,7 @@ pub fn run_refinement(
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
-    files: &[crate::mass_calibrator::FileCalibration],
+    files: &[crate::precursor::prepass::FileCalibration],
 ) -> Option<RefinementOutput> {
     if !refinement_supported(decoy_strategy) {
         log::warn!(
@@ -389,7 +392,7 @@ pub fn run_refinement(
         return None;
     }
 
-    let fmt_mod = |m: &crate::refine_config::RefineMod| {
+    let fmt_mod = |m: &crate::refinement::config::RefineMod| {
         format!("{} ({} {:+.3})", m.name, m.residues.join(","), m.delta)
     };
     let active: Vec<String> = cfg
@@ -473,7 +476,7 @@ pub fn run_refinement(
             let a = c.protein_index % n_anchors;
             anchor_nterm[a] || !uses_protein_nterm(c, starts_with_met[a])
         }));
-        let queues = crate::mass_calibrator::run_by_file(
+        let queues = crate::precursor::prepass::run_by_file(
             &refine_prepared,
             all_spectra,
             &unident,
@@ -508,9 +511,9 @@ pub fn run_refinement(
                 continue;
             }
             let pep = &refine_candidates[psm.primary_candidate_idx() as usize].peptide;
-            if crate::isotope_mimic::fits_better(
+            if crate::mimics::fits_better(
                 pep,
-                crate::isotope_mimic::mod_shift_da(pep),
+                crate::mimics::mod_shift_da(pep),
                 psm.mass_error_ppm,
             ) {
                 isotope_mimics += 1;

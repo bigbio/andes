@@ -61,9 +61,9 @@ use super::{
     enumerate_candidates, lazy_candidates_for_nominal_window, lazy_candidates_for_precursor,
     Candidate,
 };
-use crate::candidate_index::{build_base_peptide_index, MmapCandidateIndex};
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
+use crate::candidates::records::{build_base_peptide_index, MmapCandidateIndex};
+use crate::index::SearchIndex;
+use crate::params::SearchParams;
 use model::aa_set::AminoAcidSetBuilder;
 use model::modification::{ModLocation, Modification, ResidueSpec};
 use model::protein::{Protein, ProteinDb};
@@ -267,7 +267,7 @@ fn mass_offsets_of_a_large_label_allowance() {
         SearchParams::default_tryptic(b.with_label_channels(channels).build().unwrap());
     params.max_variable_mods_per_peptide = 0;
     params.max_label_sites = 100;
-    let mut got: Vec<i64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
+    let mut got: Vec<i64> = crate::candidates::distinct_mod_mass_offsets(&params)
         .iter()
         .map(|&(_, d)| d.round() as i64)
         .collect();
@@ -277,17 +277,17 @@ fn mass_offsets_of_a_large_label_allowance() {
     want.dedup();
     assert_eq!(got, want);
     assert!(std::sync::Arc::ptr_eq(
-        &crate::candidate_gen::distinct_mod_mass_offsets(&params),
-        &crate::candidate_gen::distinct_mod_mass_offsets(&params),
+        &crate::candidates::distinct_mod_mass_offsets(&params),
+        &crate::candidates::distinct_mod_mass_offsets(&params),
     ));
 }
 
 #[test]
 fn memoized_offsets_equal_the_plain_walk() {
     fn plain(params: &SearchParams) -> Vec<u64> {
-        let deltas = crate::candidate_gen::variable_mod_deltas(params);
+        let deltas = crate::candidates::variable_mod_deltas(params);
         fn rec(
-            items: &[crate::candidate_gen::FormDelta],
+            items: &[crate::candidates::FormDelta],
             start: usize,
             sum: f64,
             budget: (u32, u32),
@@ -298,11 +298,11 @@ fn memoized_offsets_equal_the_plain_walk() {
                     continue;
                 }
                 let s = sum + f.delta;
-                out.insert(crate::candidate_gen::milli_of(s));
+                out.insert(crate::candidates::milli_of(s));
                 rec(items, i, s, (budget.0 - f.mods, budget.1 - f.labels), out);
             }
         }
-        let mut out = std::collections::BTreeSet::from([crate::candidate_gen::milli_of(0.0)]);
+        let mut out = std::collections::BTreeSet::from([crate::candidates::milli_of(0.0)]);
         let mut channels: Vec<u8> = deltas.iter().map(|f| f.channel).collect();
         channels.push(0);
         channels.sort_unstable();
@@ -324,7 +324,7 @@ fn memoized_offsets_equal_the_plain_walk() {
         out.into_iter().collect()
     }
     let memo = |params: &SearchParams| -> Vec<u64> {
-        let mut v: Vec<u64> = crate::candidate_gen::distinct_mod_mass_offsets(params)
+        let mut v: Vec<u64> = crate::candidates::distinct_mod_mass_offsets(params)
             .iter()
             .map(|&(k, _)| k)
             .collect();
@@ -412,7 +412,7 @@ fn mass_offsets_keep_channels_apart() {
     params.min_length = 3;
     params.max_variable_mods_per_peptide = 1;
     params.max_label_sites = 3;
-    let offsets: Vec<f64> = crate::candidate_gen::distinct_mod_mass_offsets(&params)
+    let offsets: Vec<f64> = crate::candidates::distinct_mod_mass_offsets(&params)
         .iter()
         .map(|&(_, d)| d)
         .collect();
@@ -489,15 +489,15 @@ fn silac_labels_are_channel_consistent() {
         .residues
         .iter()
         .all(|a| a.mod_.is_none_or(|m| !m.name.contains("Oxidation")))));
-    let tables = crate::candidate_gen::FormWalkTables::new(&labelled);
+    let tables = crate::candidates::FormWalkTables::new(&labelled);
     let mut walked = 0;
-    crate::candidate_gen::walk_forms_bounded(
+    crate::candidates::walk_forms_bounded(
         b"PEPKTIDER",
         &labelled,
         &tables,
         true,
         false,
-        crate::candidate_gen::SpanSites::new(&target.proteins[0], 0),
+        crate::candidates::SpanSites::new(&target.proteins[0], 0),
         0.0,
         f64::MAX,
         |_, _, _| walked += 1,
@@ -553,15 +553,15 @@ fn max_mods_bounds_only_non_label_mods() {
         let refs: Vec<Vec<&model::amino_acid::AminoAcid>> =
             forms.iter().map(|f| f.iter().collect()).collect();
         assert_eq!(refs.iter().filter(|f| oxidised(f)).count(), with_ox);
-        let tables = crate::candidate_gen::FormWalkTables::new(&params);
+        let tables = crate::candidates::FormWalkTables::new(&params);
         let (mut walked, mut walked_ox) = (0, 0);
-        crate::candidate_gen::walk_forms_bounded(
+        crate::candidates::walk_forms_bounded(
             b"PEPMKTIDER",
             &params,
             &tables,
             true,
             false,
-            crate::candidate_gen::SpanSites::new(&target.proteins[0], 0),
+            crate::candidates::SpanSites::new(&target.proteins[0], 0),
             0.0,
             f64::MAX,
             |_, chosen, _| {

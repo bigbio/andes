@@ -245,13 +245,13 @@ pub(crate) fn rerank_pin(
     Ok(dropped)
 }
 
-/// Adds the RT term of [`search::dia_rt_rank`] to the re-rank score of every row, with the
+/// Adds the RT term of [`search::dia`] to the re-rank score of every row, with the
 /// spread fitted per run (`run`, the id of the PIN's FileName in `names`, sorted by name; one
 /// run without it): the target winners (best row of a scan `group` by the re-rank score) in the
 /// better half of their run by that score give `MAD_TO_SD * median |RT difference|`,
 /// re-estimated on the winners within `RERANK_RT_TRIM_SIGMAS` sigmas for
 /// `RERANK_RT_TRIM_ROUNDS` rounds. A run with fewer than
-/// [`search::dia_rt_rank::MIN_ANCHORS`] winners keeps the score without the term.
+/// [`search::dia::MIN_ANCHORS`] winners keeps the score without the term.
 fn add_rt_term(
     score: &mut [f64],
     rt_diff: &[f64],
@@ -291,7 +291,7 @@ fn add_rt_term(
                 .copied()
                 .filter(|v| *v < RERANK_RT_TRIM_SIGMAS * s)
                 .collect();
-            if kept.len() < search::dia_rt_rank::MIN_ANCHORS {
+            if kept.len() < search::dia::MIN_ANCHORS {
                 break;
             }
             s = MAD_TO_SD * median_mut(&mut kept);
@@ -308,7 +308,7 @@ fn add_rt_term(
     for i in 0..score.len() {
         let s = sigma[run[i] as usize];
         if s.is_finite() {
-            score[i] += search::dia_rt_rank::rt_penalty(rt_diff[i], s);
+            score[i] += search::dia::rt_penalty(rt_diff[i], s);
         }
     }
 }

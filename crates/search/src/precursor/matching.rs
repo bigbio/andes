@@ -3,7 +3,7 @@ use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::tolerance::PrecursorTolerance;
 
-use crate::precursor_cal::adjusted_observed_neutral_mass;
+use crate::precursor::calibration::adjusted_observed_neutral_mass;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MassError {

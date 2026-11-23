@@ -21,9 +21,9 @@ use quant::ms2::{Ms2Scan, ScanReporters};
 use quant::tdc::{picked_qvalues, Pair};
 use quant::unmix::{unmix_run, window_record, ScanInput, Strength, Survey, UnmixRun, WindowRecord};
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
-use search::search_index::SearchIndex;
+use search::index::SearchIndex;
 
 use crate::cli::{Cli, TmtUnmix};
 

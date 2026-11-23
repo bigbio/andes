@@ -8,7 +8,7 @@ use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
 use model::modification::{ModLocation, Modification, ResidueSpec};
 use model::peptide::Peptide;
 
-use crate::refine_config::RefineConfig;
+use crate::refinement::config::RefineConfig;
 
 fn parse_location(loc: &str) -> ModLocation {
     match loc.trim().to_ascii_lowercase().as_str() {

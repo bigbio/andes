@@ -1,6 +1,6 @@
 use model::EntryKind;
-use search::candidate_gen::Candidate;
-use search::isotope_mimic::{fits_better, isotope_gap_da, mod_shift_da};
+use search::candidates::Candidate;
+use search::mimics::{fits_better, isotope_gap_da, mod_shift_da};
 use search::psm::{PsmMatch, TopNQueue};
 use search::SearchIndex;
 

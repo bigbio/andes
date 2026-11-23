@@ -82,7 +82,7 @@ pub(super) fn predict_frag_with(
     model: &scoring_crate::gbdt_eval::GbdtPeakModel,
     peptide: &Peptide,
     charge: u8,
-    cache: Option<&crate::frag_pred_cache::FragPredCache>,
+    cache: Option<&crate::fragments::predictions::FragPredCache>,
 ) -> Vec<f64> {
     match cache {
         Some(c) => c.intensities(model, peptide, charge),
@@ -150,7 +150,7 @@ pub(crate) fn complete_psm_features(
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
-    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
+    frag_cache: Option<&crate::fragments::predictions::FragPredCache>,
 ) {
     if peptide.length() < 2 {
         return;
@@ -179,7 +179,7 @@ pub(crate) fn compute_psm_features_with_edge(
     charge: u8,
     known_edge_score: Option<i32>,
     full: bool,
-    frag_cache: Option<&crate::frag_pred_cache::FragPredCache>,
+    frag_cache: Option<&crate::fragments::predictions::FragPredCache>,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {

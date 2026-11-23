@@ -6,17 +6,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::candidate_gen::{
+use crate::candidates::{
     base_record_key, base_records_for_nominal_window, distinct_base_records_for_nominal_window,
     expand_base_record, retain_records_with_forms_in, BaseRecordKey, Candidate, FormWalkTables,
 };
-use crate::candidate_index::MmapCandidateIndex;
-use crate::fragment_index::ChunkFragmentIndex;
-use crate::precursor_cal::adjusted_observed_neutral_mass;
-use crate::precursor_matching::{matches_precursor, MassError};
+use crate::candidates::records::MmapCandidateIndex;
+use crate::fragments::index::ChunkFragmentIndex;
+use crate::precursor::calibration::adjusted_observed_neutral_mass;
+use crate::precursor::matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
-use crate::search_index::SearchIndex;
-use crate::search_params::{ScoreMode, SearchParams};
+use crate::index::SearchIndex;
+use crate::params::{ScoreMode, SearchParams};
 use input::Ms1Link;
 use model::aa_set::AminoAcidSet;
 use model::activation::ActivationMethod;
@@ -203,10 +203,10 @@ pub struct PreparedSearch<'a> {
     candidate_filter: Option<CandidateFilter>,
     open_index: Option<Box<ChunkFragmentIndex>>,
     per_scan: Option<PerScanScorers>,
-    form_rt_model: Option<Arc<crate::dia_rt_rank::FormRtModel>>,
-    dia_rt_prior: RwLock<Option<Arc<crate::dia_rt_rank::DiaRtPrior>>>,
-    form_rt_cache: crate::dia_rt_rank::FormRtCache,
-    frag_pred_cache: crate::frag_pred_cache::FragPredCache,
+    form_rt_model: Option<Arc<crate::dia::FormRtModel>>,
+    dia_rt_prior: RwLock<Option<Arc<crate::dia::DiaRtPrior>>>,
+    form_rt_cache: crate::dia::FormRtCache,
+    frag_pred_cache: crate::fragments::predictions::FragPredCache,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -333,7 +333,7 @@ pub(crate) fn candidate_nominal_bounds(
     shift_ppm: f64,
 ) -> (i32, i32) {
     if params.dia {
-        let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+        let (lo, hi) = crate::precursor::matching::dia_neutral_window(
             spec,
             z,
             &params.precursor_tolerance,
@@ -521,24 +521,24 @@ impl<'a> PreparedSearch<'a> {
             per_scan: None,
             form_rt_model: None,
             dia_rt_prior: RwLock::new(None),
-            form_rt_cache: crate::dia_rt_rank::FormRtCache::default(),
-            frag_pred_cache: crate::frag_pred_cache::FragPredCache::default(),
+            form_rt_cache: crate::dia::FormRtCache::default(),
+            frag_pred_cache: crate::fragments::predictions::FragPredCache::default(),
         }
     }
 
     /// Installs the per-form RT predictor of the DIA vote cut.
-    pub fn set_form_rt_model(&mut self, model: Arc<crate::dia_rt_rank::FormRtModel>) {
+    pub fn set_form_rt_model(&mut self, model: Arc<crate::dia::FormRtModel>) {
         self.form_rt_model = Some(model);
     }
 
-    pub fn form_rt_model(&self) -> Option<&crate::dia_rt_rank::FormRtModel> {
+    pub fn form_rt_model(&self) -> Option<&crate::dia::FormRtModel> {
         self.form_rt_model.as_deref()
     }
 
     /// Sets (or with `None` clears) the run's RT prior; while set, every DIA chunk index
     /// carries calibrated per-form RTs and its vote cut uses the RT term.
     /// Clearing also drops the cached per-form RT predictions.
-    pub fn set_dia_rt_prior(&self, prior: Option<crate::dia_rt_rank::DiaRtPrior>) {
+    pub fn set_dia_rt_prior(&self, prior: Option<crate::dia::DiaRtPrior>) {
         if prior.is_none() {
             self.form_rt_cache.clear();
         }
@@ -803,7 +803,7 @@ impl<'a> PreparedSearch<'a> {
             self.frag_pred_cache.clear();
             return queues;
         }
-        let mass = crate::fragment_index::index_order_mass;
+        let mass = crate::fragments::index::index_order_mass;
         let (lo, hi) = spectra
             .iter()
             .map(mass)
@@ -828,7 +828,7 @@ impl<'a> PreparedSearch<'a> {
         let mut pools: Vec<Vec<f32>> = vec![Vec::new(); spectra.len()];
         let complete_later = params.score_mode == ScoreMode::Strong && params.open_search.is_none();
         while !units.is_empty() {
-            let take = crate::fragment_index::index_chunk_len(&units, |u| mass(&u.1), span_da);
+            let take = crate::fragments::index::index_chunk_len(&units, |u| mass(&u.1), span_da);
             let (owners, chunk): (Vec<usize>, Vec<Spectrum>) = units.drain(..take).unzip();
             for ((mut q, pool), i) in self
                 .run_chunk_inner(&chunk, 0, params, complete_later)
@@ -921,7 +921,7 @@ impl<'a> PreparedSearch<'a> {
     ) -> Vec<Candidate> {
         let mi = &self.mmap_index;
 
-        let mut records: FxHashMap<BaseRecordKey, (crate::candidate_index::IndexRecord, u32)> =
+        let mut records: FxHashMap<BaseRecordKey, (crate::candidates::records::IndexRecord, u32)> =
             FxHashMap::default();
         for &(min_nominal, max_nominal) in windows {
             for (rec, mult) in base_records_for_nominal_window(mi, params, min_nominal, max_nominal)
@@ -929,7 +929,7 @@ impl<'a> PreparedSearch<'a> {
                 records.entry(base_record_key(&rec)).or_insert((rec, mult));
             }
         }
-        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> =
+        let mut records: Vec<(crate::candidates::records::IndexRecord, u32)> =
             records.into_values().collect();
         records.sort_unstable_by_key(|(r, _)| base_record_key(r));
 
@@ -1009,10 +1009,10 @@ impl<'a> PreparedSearch<'a> {
     pub fn records_where(
         &self,
         keep: impl Fn(&[u8], u8) -> bool + Sync,
-    ) -> Vec<(crate::candidate_index::IndexRecord, u32)> {
+    ) -> Vec<(crate::candidates::records::IndexRecord, u32)> {
         let mi = &self.mmap_index;
         let db = self.idx;
-        let mut kept: Vec<crate::candidate_index::IndexRecord> = (0..mi.len())
+        let mut kept: Vec<crate::candidates::records::IndexRecord> = (0..mi.len())
             .into_par_iter()
             .filter_map(|i| {
                 let rec = mi.record_at(i);
@@ -1025,7 +1025,7 @@ impl<'a> PreparedSearch<'a> {
             })
             .collect();
         kept.par_sort_unstable_by_key(base_record_key);
-        let mut records: Vec<(crate::candidate_index::IndexRecord, u32)> = Vec::new();
+        let mut records: Vec<(crate::candidates::records::IndexRecord, u32)> = Vec::new();
         for rec in kept {
             match records.last_mut() {
                 Some((last, n)) if base_record_key(last) == base_record_key(&rec) => *n += 1,
@@ -1075,7 +1075,7 @@ impl<'a> PreparedSearch<'a> {
             self.form_rt_model.as_deref(),
             rt_prior.as_deref(),
         ) {
-            (true, Some(model), Some(prior)) => Some(crate::fragment_index::FormRtSource {
+            (true, Some(model), Some(prior)) => Some(crate::fragments::index::FormRtSource {
                 db: self.idx,
                 params,
                 model,
@@ -1106,7 +1106,7 @@ impl<'a> PreparedSearch<'a> {
                     {
                         for z in charges_to_try(s, params) {
                             if params.dia {
-                                let (a, b) = crate::precursor_matching::dia_neutral_window(
+                                let (a, b) = crate::precursor::matching::dia_neutral_window(
                                     s,
                                     z,
                                     &params.precursor_tolerance,
@@ -1156,7 +1156,7 @@ impl<'a> PreparedSearch<'a> {
                 });
                 (Some(MmapRecordCache::default()), owned_index.as_ref())
             } else {
-                let records: FxHashMap<BaseRecordKey, crate::candidate_index::IndexRecord> =
+                let records: FxHashMap<BaseRecordKey, crate::candidates::records::IndexRecord> =
                     windows
                         .par_iter()
                         .fold(FxHashMap::default, |mut m, &(lo, hi)| {
@@ -1169,7 +1169,7 @@ impl<'a> PreparedSearch<'a> {
                             a.extend(b);
                             a
                         });
-                let budget = crate::search_params::MMAP_WINDOW_CACHE_MAX_CANDIDATES;
+                let budget = crate::params::MMAP_WINDOW_CACHE_MAX_CANDIDATES;
                 let cached_total = AtomicUsize::new(0);
                 let cache: MmapRecordCache = records
                     .into_par_iter()
@@ -1233,7 +1233,7 @@ impl<'a> PreparedSearch<'a> {
                     charges_to_try
                         .iter()
                         .map(|&z| {
-                            let (lo, hi) = crate::precursor_matching::dia_neutral_window(
+                            let (lo, hi) = crate::precursor::matching::dia_neutral_window(
                                 spec,
                                 z,
                                 &params.precursor_tolerance,
@@ -1274,8 +1274,8 @@ impl<'a> PreparedSearch<'a> {
                         params,
                         scorer.feature_match_tolerance(),
                         params.fragment_index_top_k as usize,
-                        crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
-                        crate::fragment_index::vote_peaks_for(scorer.feature_match_tolerance()),
+                        crate::params::FRAGMENT_INDEX_MIN_MATCHED,
+                        crate::fragments::index::vote_peaks_for(scorer.feature_match_tolerance()),
                         &gate,
                         rt_source.as_ref(),
                     );
@@ -1308,7 +1308,7 @@ impl<'a> PreparedSearch<'a> {
                 let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
                 let open_peaks: Option<Vec<(f64, f32)>> = params
                     .open_search
-                    .map(|_| crate::open_search::sorted_peaks(&spec.peaks));
+                    .map(|_| crate::open::sorted_peaks(&spec.peaks));
                 let mut open_attempts: usize = 0;
                 let mut open_wins: usize = 0;
 
@@ -1394,7 +1394,7 @@ impl<'a> PreparedSearch<'a> {
                                 }
                                 let loc_tol =
                                     fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
-                                let Some(loc) = crate::open_search::localize_and_refine(
+                                let Some(loc) = crate::open::localize_and_refine(
                                     &cand.peptide,
                                     peaks,
                                     z,
@@ -1409,7 +1409,7 @@ impl<'a> PreparedSearch<'a> {
                                 }
                                 open_attempts += 1;
                                 let site0 = usize::from(loc.best_site - 1);
-                                let shifted = crate::open_search::shifted_peptide(
+                                let shifted = crate::open::shifted_peptide(
                                     &cand.peptide,
                                     site0,
                                     loc.delta,
@@ -1571,7 +1571,7 @@ impl<'a> PreparedSearch<'a> {
                     let ss = scored_spec_for_charge(psm.charge_used);
                     let cand = &cand_slice[psm.primary_candidate_idx() as usize];
                     let used_shift = psm.features.open_used_shift;
-                    let mut open_loc: Option<crate::open_search::Localization> = None;
+                    let mut open_loc: Option<crate::open::Localization> = None;
                     let mut shifted_pep: Option<Peptide> = None;
                     let mut open_delta_ref: Option<f64> = None;
                     {
@@ -1588,7 +1588,7 @@ impl<'a> PreparedSearch<'a> {
                             if delta.abs() > 0.5 {
                                 let loc_tol =
                                     fragment_tolerance_da.max(2e-5 * cand.peptide.mass());
-                                if let Some(loc) = crate::open_search::localize_and_refine(
+                                if let Some(loc) = crate::open::localize_and_refine(
                                     &cand.peptide,
                                     peaks,
                                     psm.charge_used,
@@ -1599,7 +1599,7 @@ impl<'a> PreparedSearch<'a> {
                                     if loc.best_site != 0 {
                                         if used_shift {
                                             shifted_pep =
-                                                Some(crate::open_search::shifted_peptide(
+                                                Some(crate::open::shifted_peptide(
                                                     &cand.peptide,
                                                     usize::from(loc.best_site - 1),
                                                     loc.delta,
@@ -1607,7 +1607,7 @@ impl<'a> PreparedSearch<'a> {
                                         }
                                         open_delta_ref = Some(loc.delta);
                                     }
-                                    open_loc = Some(crate::open_search::Localization {
+                                    open_loc = Some(crate::open::Localization {
                                         site: loc.site,
                                         score: loc.score,
                                         margin: loc.margin,
@@ -1700,13 +1700,13 @@ impl<'a> PreparedSearch<'a> {
 
                 {
                     let psms: Vec<&PsmMatch> = queue.iter_psms().collect();
-                    let rows: Vec<crate::site_evidence::Row<'_>> = psms
+                    let rows: Vec<crate::sites::Row<'_>> = psms
                         .iter()
                         .map(|psm| {
                             let cand = &cand_slice[psm.primary_candidate_idx() as usize];
                             let z = psm.charge_used;
                             let mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
-                            crate::site_evidence::Row {
+                            crate::sites::Row {
                                 peptide: &cand.peptide,
                                 is_decoy: cand.is_decoy,
                                 charge: z,
@@ -1724,7 +1724,7 @@ impl<'a> PreparedSearch<'a> {
                     let mut evidence: FxHashMap<_, _> = psms
                         .iter()
                         .map(|p| key(p))
-                        .zip(crate::site_evidence::spectrum_evidence(
+                        .zip(crate::sites::spectrum_evidence(
                             &spec.peaks,
                             &rows,
                             scorer.pin_match_tolerance(),

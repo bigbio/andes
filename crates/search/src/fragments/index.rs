@@ -1,14 +1,14 @@
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::candidate_gen::{
+use crate::candidates::{
     expand_base_record_bounded, for_each_record_form_masses_bounded, record_may_have_forms_in,
     BaseRecordKey, Candidate, FormWalkTables,
 };
-use crate::candidate_index::IndexRecord;
-use crate::precursor_cal::adjusted_observed_neutral_mass;
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
+use crate::candidates::records::IndexRecord;
+use crate::precursor::calibration::adjusted_observed_neutral_mass;
+use crate::index::SearchIndex;
+use crate::params::SearchParams;
 use model::mass::{H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
@@ -49,9 +49,9 @@ pub struct ChunkFragmentIndex {
 pub struct FormRtSource<'a> {
     pub db: &'a SearchIndex,
     pub params: &'a SearchParams,
-    pub model: &'a crate::dia_rt_rank::FormRtModel,
-    pub cache: &'a crate::dia_rt_rank::FormRtCache,
-    pub prior: &'a crate::dia_rt_rank::DiaRtPrior,
+    pub model: &'a crate::dia::FormRtModel,
+    pub cache: &'a crate::dia::FormRtCache,
+    pub prior: &'a crate::dia::DiaRtPrior,
 }
 
 /// Mean ion entries per (bin, form-id block) cell; sets the block granularity a query's
@@ -284,11 +284,11 @@ impl ChunkFragmentIndex {
         }
     }
 
-    /// Makes the DIA queries rank the vote cut with the RT term of [`crate::dia_rt_rank`]: a
+    /// Makes the DIA queries rank the vote cut with the RT term of [`crate::dia`]: a
     /// form's calibrated RT (minutes), predicted from its own sequence and mapped by the prior
     /// of the query's [`FormRtSource`], is computed the first time a query ranks the form.
     /// Forms the model cannot encode get NaN and the capped penalty.
-    pub fn enable_rt(&mut self, prior: &crate::dia_rt_rank::DiaRtPrior) {
+    pub fn enable_rt(&mut self, prior: &crate::dia::DiaRtPrior) {
         self.form_rt_min = (0..self.form_mass.len())
             .map(|_| std::sync::OnceLock::new())
             .collect();
@@ -318,7 +318,7 @@ impl ChunkFragmentIndex {
     #[inline]
     fn rt_key(&self, id: u32, votes: u16, scan_rt_min: f64, rt: &FormRtSource<'_>) -> f64 {
         let pred = f64::from(self.form_rt(id, rt));
-        f64::from(votes) + crate::dia_rt_rank::rt_penalty(scan_rt_min - pred, self.rt_sigma_min)
+        f64::from(votes) + crate::dia::rt_penalty(scan_rt_min - pred, self.rt_sigma_min)
     }
 
     pub fn n_forms(&self) -> usize {
@@ -368,7 +368,7 @@ impl ChunkFragmentIndex {
         let mut exact: smallvec::SmallVec<[(f64, f64); 16]> = smallvec::SmallVec::new();
         for &z in charges {
             if params.dia {
-                let (w_lo, w_hi) = crate::precursor_matching::dia_neutral_window(
+                let (w_lo, w_hi) = crate::precursor::matching::dia_neutral_window(
                     spec,
                     z,
                     &params.precursor_tolerance,
@@ -677,7 +677,7 @@ pub fn vote_peaks_for(fragment_tol: Tolerance) -> usize {
     if is_high_resolution(fragment_tol) {
         0
     } else {
-        crate::search_params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
+        crate::params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
     }
 }
 
@@ -851,7 +851,7 @@ mod vote_peaks_tests {
     fn low_resolution_is_capped() {
         assert_eq!(
             vote_peaks_for(Tolerance::Da(0.5)),
-            crate::search_params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
+            crate::params::FRAGMENT_INDEX_LOWRES_VOTE_PEAKS
         );
     }
 

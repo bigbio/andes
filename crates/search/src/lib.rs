@@ -2,38 +2,29 @@
 //! open and chimeric search, decoy handling and PSM scoring and refinement. It turns spectra from
 //! `input` and a protein database into scored PSMs that `rescore` then calibrates.
 
-pub mod candidate_gen;
-pub mod candidate_index;
-mod chimeric_features;
+pub mod candidates;
+mod chimeric;
+pub mod crosslinks;
 pub mod decoy;
-pub mod dia_rt_rank;
-pub mod frag_pred_cache;
-pub mod fragment_error;
-pub mod fragment_index;
-pub mod glyco_fragment_index;
-pub mod glyco_search;
+pub mod dia;
+pub mod engine;
+pub mod fragments;
+pub mod glycopeptides;
+pub mod index;
 pub mod ipf;
 pub mod isomer;
-pub mod isotope_mimic;
-pub mod mass_calibrator;
-pub mod engine;
-pub mod open_search;
-pub mod precursor_cal;
-pub mod precursor_matching;
-pub mod precursor_mono;
+pub mod mimics;
+pub mod open;
+pub mod params;
+pub mod precursor;
 pub mod psm;
-pub mod refine_config;
-mod refine_mods;
 pub mod refinement;
-pub mod search_index;
-pub mod search_params;
-pub mod site_evidence;
+pub mod sites;
 pub mod tdc;
-pub mod xl_search;
 
-pub use candidate_gen::enumerate_candidates;
+pub use candidates::enumerate_candidates;
 pub use decoy::{decoy_db, normalize_decoy_prefix, DEFAULT_DECOY_PREFIX};
-pub use mass_calibrator::{
+pub use precursor::prepass::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
     learn_calibration_stats, prepass_search_params, run_by_file, CalibrationStats,
     FileCalibration, SpecKey,
@@ -41,12 +32,12 @@ pub use mass_calibrator::{
 pub use engine::{
     coisolation_pass, match_spectra, PreparedSearch, ScorerLoader,
 };
-pub use precursor_cal::{
+pub use precursor::calibration::{
     adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm, PrecursorCalMode,
 };
-pub use precursor_matching::{matches_precursor, MassError};
+pub use precursor::matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
-pub use refine_config::{RefineConfig, RefineMod};
-pub use search_index::SearchIndex;
-pub use search_params::{ScoreMode, SearchParams};
+pub use refinement::config::{RefineConfig, RefineMod};
+pub use index::SearchIndex;
+pub use params::{ScoreMode, SearchParams};
 pub use tdc::{confident_target_indices, ScoredLabel};

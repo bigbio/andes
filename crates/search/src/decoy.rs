@@ -7,8 +7,8 @@ use model::enzyme::Enzyme;
 use model::hash::{fnv1a64, splitmix64};
 use model::protein::{ModSite, Protein, ProteinAnnotation, ProteinDb, SiteAnchor, VariantRegion};
 
-use crate::candidate_gen::{compute_cleavage_positions, has_met_cleaved_walk};
-use crate::search_params::SearchParams;
+use crate::candidates::{compute_cleavage_positions, has_met_cleaved_walk};
+use crate::params::SearchParams;
 
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
 

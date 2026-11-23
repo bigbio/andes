@@ -32,7 +32,7 @@ pub(crate) const ANCHOR_Q: f64 = 0.01;
 /// The bundled andes-rt model as the per-form RT predictor of the DIA vote cut: the raw
 /// prediction of a peptidoform's own sequence, NaN when the model cannot encode it.
 pub(crate) fn andes_rt_form_model(
-) -> Result<std::sync::Arc<search::dia_rt_rank::FormRtModel>, String> {
+) -> Result<std::sync::Arc<search::dia::FormRtModel>, String> {
     use onnx_infer::rt_native::{RtModel, RtPeptide, Scratch};
     thread_local! {
         static RT_SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());

@@ -15,8 +15,8 @@ use xl::doublet::{find_doublets, group_by_mass, stub_ions_present, DoubletMass, 
 use xl::pair::{pairs_by_sum, MassIndex};
 use xl::sites::{link_sites, LinkSite};
 
-use crate::candidate_gen::Candidate;
-use crate::fragment_index::ChunkFragmentIndex;
+use crate::candidates::Candidate;
+use crate::fragments::index::ChunkFragmentIndex;
 use crate::engine::PreparedSearch;
 
 #[derive(Debug, Clone)]
@@ -67,7 +67,7 @@ impl XlConfig {
             top_per_mass: 4,
             oracle_spectra: 0,
             open_top_k: 50,
-            open_min_votes: crate::search_params::FRAGMENT_INDEX_MIN_MATCHED,
+            open_min_votes: crate::params::FRAGMENT_INDEX_MIN_MATCHED,
             stub_weight: STUB_ION_WEIGHT,
             secondary_site_penalty: SECONDARY_SITE_PENALTY,
             charge_by_pair_score: false,
@@ -321,7 +321,7 @@ impl XlCandidates {
             tol,
             top_k,
             min_votes,
-            crate::fragment_index::vote_peaks_for(tol),
+            crate::fragments::index::vote_peaks_for(tol),
         );
         let cands = open.index.materialise(
             &sel,
@@ -785,7 +785,7 @@ fn is_intra(prepared: &PreparedSearch<'_>, a: &XlPeptide, b: &XlPeptide) -> bool
         .any(|&p| fam_b.contains(&protein_family(prepared, p)))
 }
 
-fn precursor_window_da(params: &crate::search_params::SearchParams, mass: f64) -> f64 {
+fn precursor_window_da(params: &crate::params::SearchParams, mass: f64) -> f64 {
     let t = &params.precursor_tolerance;
     t.left.as_da(mass).max(t.right.as_da(mass))
 }
@@ -1135,7 +1135,7 @@ fn search_spectrum_at(
     mods: &StubMods,
     run_oracle: bool,
 ) -> Option<XlSpectrumResult> {
-    let precursor_mass = crate::precursor_cal::adjusted_observed_neutral_mass(
+    let precursor_mass = crate::precursor::calibration::adjusted_observed_neutral_mass(
         (spec.precursor_mz - PROTON) * z as f64,
         prepared.params.precursor_mass_shift_ppm,
     );
@@ -1468,5 +1468,5 @@ pub fn xl_search_run(
 }
 
 #[cfg(test)]
-#[path = "xl_search/tests/xl_search.rs"]
+#[path = "crosslinks/tests/crosslinks.rs"]
 mod tests;

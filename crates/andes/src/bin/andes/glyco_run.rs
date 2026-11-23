@@ -25,7 +25,7 @@ pub(crate) fn run_glyco(
     output_pin_path: &Path,
     spectrum_paths: &[PathBuf],
     acquisition_high_res: bool,
-    mono: Option<&[Option<search::precursor_mono::MonoCorrection>]>,
+    mono: Option<&[Option<search::precursor::monoisotopic::MonoCorrection>]>,
     isotope_error_override: Option<(std::ops::RangeInclusive<i8>, Vec<bool>)>,
     quant: Option<&crate::quant_run::QuantCollector>,
     t_total: std::time::Instant,
@@ -121,7 +121,7 @@ pub(crate) fn run_glyco(
             "retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
         ),
     }
-    let glyco_cfg = search::glyco_search::GlycoConfig {
+    let glyco_cfg = search::glycopeptides::GlycoConfig {
         core: cli.glyco_core.into(),
         min_core_y: cli.glyco_min_core_y,
         max_gen_peaks: cli.glyco_max_peaks,
@@ -137,7 +137,7 @@ pub(crate) fn run_glyco(
     };
     let t_table = std::time::Instant::now();
     let table =
-        search::glyco_search::GlycoCandidates::from_index(prepared, cli.glyco_core.into());
+        search::glycopeptides::GlycoCandidates::from_index(prepared, cli.glyco_core.into());
     log::info!(
         target: "glyco",
         "candidate table: {} {}-bearing candidates from the out-of-core index \
@@ -150,7 +150,7 @@ pub(crate) fn run_glyco(
         prepared.mmap_index.len(),
         t_table.elapsed().as_secs_f64()
     );
-    let pass1 = search::glyco_search::glyco_search_run(
+    let pass1 = search::glycopeptides::glyco_search_run(
         spectra_for_glyco,
         prepared,
         &table,

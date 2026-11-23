@@ -1,6 +1,6 @@
 use model::spectrum::Spectrum;
 use scoring_crate::rt_model::{calibrate, RtIndexModel};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::TopNQueue;
 
 use crate::row_context::iter_ranked_by_rank_score;

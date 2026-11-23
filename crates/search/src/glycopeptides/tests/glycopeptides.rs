@@ -2,7 +2,7 @@
 fn glycan_subtraction_uses_the_precursor_tolerance() {
     use model::tolerance::{PrecursorTolerance, Tolerance};
     let aa = model::AminoAcidSetBuilder::new_standard().build().unwrap();
-    let mut params = crate::search_params::SearchParams::default_tryptic(aa);
+    let mut params = crate::params::SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(Tolerance::Ppm(10.0));
     assert!((super::precursor_window_da(&params, 3000.0) - 0.03).abs() < 1e-12);
     params.precursor_tolerance =

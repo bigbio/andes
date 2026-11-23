@@ -1,5 +1,5 @@
 use model::enzyme::Enzyme;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 
 #[inline]
 fn is_protein_boundary(c: u8) -> bool {

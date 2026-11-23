@@ -13,7 +13,7 @@ use model::{
 };
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::TopNQueue;
 use search::{PreparedSearch, SearchIndex, SearchParams};
 
@@ -197,5 +197,5 @@ fn match_spectra_output_invariant_across_thread_counts() {
 
 #[test]
 fn fragment_index_output_invariant_across_thread_counts() {
-    assert_thread_invariant(search::search_params::FRAGMENT_INDEX_TOP_K);
+    assert_thread_invariant(search::params::FRAGMENT_INDEX_TOP_K);
 }

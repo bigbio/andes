@@ -8,7 +8,7 @@ use model::{
 };
 use scoring_crate::param_model::{IonType, Partition, SpecDataType};
 use scoring_crate::{Param, RankScorer};
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 
 fn search_enumerated(

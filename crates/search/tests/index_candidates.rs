@@ -10,7 +10,7 @@ use model::{
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::{Param, RankScorer};
-use search::candidate_gen::{enumerate_candidates, Candidate};
+use search::candidates::{enumerate_candidates, Candidate};
 use search::decoy::DecoyStrategy;
 use search::psm::TopNQueue;
 use search::{PreparedSearch, SearchIndex, SearchParams};
@@ -610,7 +610,7 @@ fn prepare_mmap_rejects_a_digest_with_no_candidates() {
 #[test]
 fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
     use model::tolerance::Tolerance;
-    use search::fragment_index::ChunkFragmentIndex;
+    use search::fragments::index::ChunkFragmentIndex;
     let (spectra, idx, params) = small_search_fixture();
     let scorer = make_scorer(0.05);
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -654,7 +654,7 @@ fn fragment_index_ranks_the_true_peptide_first_on_exact_spectra() {
 #[test]
 fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
     use model::tolerance::Tolerance;
-    use search::fragment_index::ChunkFragmentIndex;
+    use search::fragments::index::ChunkFragmentIndex;
     let (spectra, idx, params) = small_search_fixture();
     let scorer = make_scorer(0.05);
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -706,13 +706,13 @@ fn fragment_index_prunes_to_the_window_and_still_finds_the_true_peptide() {
 fn match_spectra_keeps_input_order_and_finds_the_enumeration_top_hit() {
     let (mut spectra, idx, params) = small_search_fixture();
     spectra.sort_by(|a, b| {
-        search::fragment_index::index_order_mass(b)
-            .total_cmp(&search::fragment_index::index_order_mass(a))
+        search::fragments::index::index_order_mass(b)
+            .total_cmp(&search::fragments::index::index_order_mass(a))
     });
     let scorer = make_scorer(0.05);
     let masses: Vec<f64> = spectra
         .iter()
-        .map(search::fragment_index::index_order_mass)
+        .map(search::fragments::index::index_order_mass)
         .collect();
     assert!(
         masses.windows(2).any(|w| w[0] > w[1]),
@@ -755,8 +755,8 @@ fn match_spectra_keeps_input_order_and_finds_the_enumeration_top_hit() {
 
 #[test]
 fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
-    use search::candidate_gen::candidate_has_nxst_sequon;
-    use search::glyco_search::GlycoCandidates;
+    use search::candidates::candidate_has_nxst_sequon;
+    use search::glycopeptides::GlycoCandidates;
     let target = ProteinDb {
         proteins: vec![
             Protein {
@@ -854,7 +854,7 @@ fn glyco_table_from_the_index_is_the_enumeration_sequon_subset_in_order() {
 #[test]
 fn fragment_index_open_mass_query_ignores_the_precursor() {
     use model::tolerance::Tolerance;
-    use search::fragment_index::ChunkFragmentIndex;
+    use search::fragments::index::ChunkFragmentIndex;
     let (spectra, idx, params) = small_search_fixture();
     let scorer = make_scorer(0.05);
     let tmp = tempfile::NamedTempFile::new().unwrap();

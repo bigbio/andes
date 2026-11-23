@@ -8,9 +8,9 @@ use model::spectrum::Spectrum;
 use model::stats::{quantile_sorted, MAD_TO_SD};
 use model::tolerance::Tolerance;
 use rayon::prelude::*;
-use search::candidate_gen::Candidate;
+use search::candidates::Candidate;
 use search::psm::TopNQueue;
-use search::search_params::SearchParams;
+use search::params::SearchParams;
 
 pub use crate::spectra_tally::SpectraTally;
 
@@ -426,7 +426,7 @@ pub fn psm_facts_of_rows(
     use crate::pin::{emitted_spec_id, precursor_error};
     use crate::qpx::{bare_sequence, peptidoform_string};
     use model::mass::{ISOTOPE, PROTON};
-    use search::precursor_cal::adjusted_observed_neutral_mass;
+    use search::precursor::calibration::adjusted_observed_neutral_mass;
 
     let fixed = FixedModSpec::declared(params);
     let declared_mods = params.aa_set.distinct_mods();

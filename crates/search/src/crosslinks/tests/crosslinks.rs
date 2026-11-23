@@ -31,11 +31,11 @@ fn a_peptide_of_two_proteins_lists_both_whatever_its_flanks() {
             prot("CETN1", b"MSEKAFRLFDDDETGKISFKNLK"),
         ],
     };
-    let idx = crate::search_index::SearchIndex::from_target_db(&db, "XXX_");
+    let idx = crate::index::SearchIndex::from_target_db(&db, "XXX_");
     let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
-    let params = crate::search_params::SearchParams::default_tryptic(aa);
+    let params = crate::params::SearchParams::default_tryptic(aa);
     let cands: Vec<Candidate> =
-        crate::candidate_gen::enumerate_candidates(&idx, &params, "XXX_").collect();
+        crate::candidates::enumerate_candidates(&idx, &params, "XXX_").collect();
     let table = XlCandidates::from_candidates(cands, &linker("DSSO"));
     let shared = |t: &XlCandidates| {
         t.peptides()
@@ -331,7 +331,7 @@ fn defaults_search_two_missing_isotopes_and_credit_stub_ions() {
 
 #[test]
 fn s_t_y_sites_of_an_nhs_ester_pay_the_secondary_site_penalty() {
-    let x = crate::xl_search::tests::linker("DSSO (K, S, T, Y, Protein N-term)");
+    let x = crate::crosslinks::tests::linker("DSSO (K, S, T, Y, Protein N-term)");
     let p = pep(b"SAKTY");
     let at = |pos: usize, n_term: bool| LinkSite {
         pos,
@@ -343,7 +343,7 @@ fn s_t_y_sites_of_an_nhs_ester_pay_the_secondary_site_penalty() {
     assert_eq!(site_penalty(12.0, &p, &at(3, false), &x, 0), 12.0);
     assert_eq!(site_penalty(12.0, &p, &at(0, true), &x, 0), 0.0);
     assert_eq!(site_penalty(0.0, &p, &at(0, false), &x, 0), 0.0);
-    let sda = crate::xl_search::tests::linker("SDA");
+    let sda = crate::crosslinks::tests::linker("SDA");
     let any_end = (0..2).find(|&e| sda.ends[e].reacts_with(b'G')).unwrap();
     assert_eq!(site_penalty(12.0, &p, &at(0, false), &sda, any_end), 0.0);
 }

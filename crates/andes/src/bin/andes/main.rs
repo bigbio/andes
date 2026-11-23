@@ -2,91 +2,48 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-#[path = "andes/acquisition.rs"]
 mod acquisition;
-#[path = "andes/cli.rs"]
 mod cli;
-#[path = "andes/cli_parse.rs"]
 mod cli_parse;
-#[path = "../cohort.rs"]
 mod cohort;
-#[path = "andes/cohort_cmd.rs"]
 mod cohort_cmd;
-#[path = "../config.rs"]
 mod config;
-#[path = "../config_mods.rs"]
 mod config_mods;
-#[path = "andes/database_cmd.rs"]
 mod database_cmd;
-#[path = "andes/dia.rs"]
 mod dia;
-#[path = "andes/dia_joint.rs"]
 mod dia_joint;
-#[path = "andes/dia_llr.rs"]
 mod dia_llr;
-#[path = "andes/dia_pass2.rs"]
 mod dia_pass2;
-#[path = "andes/dia_score.rs"]
 mod dia_score;
-#[path = "andes/dia_xfer.rs"]
 mod dia_xfer;
-#[path = "andes/dia_xrun.rs"]
 mod dia_xrun;
-#[path = "andes/glyco_match.rs"]
 mod glyco_match;
-#[path = "andes/glyco_quant.rs"]
 mod glyco_quant;
-#[path = "andes/glyco_run.rs"]
 mod glyco_run;
-#[path = "andes/inference_cmd.rs"]
 mod inference_cmd;
-#[path = "andes/logging.rs"]
 mod logging;
-#[path = "andes/memlimit.rs"]
 mod memlimit;
-#[path = "andes/model_select.rs"]
 mod model_select;
-#[path = "andes/mono.rs"]
 mod mono;
-#[path = "andes/predicted.rs"]
 mod predicted;
-#[path = "andes/quant_cmd.rs"]
 mod quant_cmd;
-#[path = "andes/quant_finalize.rs"]
 mod quant_finalize;
-#[path = "andes/quant_mbr.rs"]
 mod quant_mbr;
-#[path = "andes/quant_run.rs"]
 mod quant_run;
-#[path = "../sdrf.rs"]
 mod sdrf;
-#[path = "andes/optimize.rs"]
 mod optimize;
-#[path = "../param_sources.rs"]
 mod param_sources;
-#[path = "../params.rs"]
 mod params;
-#[path = "../params_render.rs"]
 mod params_render;
-#[path = "andes/search.rs"]
 mod search;
-#[path = "andes/spectra.rs"]
 mod spectra;
-#[path = "andes/tmt_mbr.rs"]
 mod tmt_mbr;
-#[path = "andes/tmt_study.rs"]
 mod tmt_study;
-#[path = "andes/train.rs"]
 mod train;
-#[path = "andes/train_intensity.rs"]
 mod train_intensity;
-#[path = "../transfer_fdr.rs"]
 mod transfer_fdr;
-#[path = "andes/xl_ambiguity.rs"]
 mod xl_ambiguity;
-#[path = "andes/xl_fdr.rs"]
 mod xl_fdr;
-#[path = "andes/xl_run.rs"]
 mod xl_run;
 
 use crate::cli::{
@@ -432,13 +389,13 @@ mod missed_cleavages_explicit_tests {
 }
 
 #[cfg(test)]
-#[path = "../tests/params_table.rs"]
+#[path = "tests/params_table.rs"]
 mod params_table;
 
 #[cfg(test)]
-#[path = "../tests/params_sources.rs"]
+#[path = "tests/params_sources.rs"]
 mod params_sources;
 
 #[cfg(test)]
-#[path = "../tests/params_render.rs"]
+#[path = "tests/params_render.rs"]
 mod params_render_tests;

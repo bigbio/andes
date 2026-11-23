@@ -9,7 +9,7 @@ change must follow see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AG
 andes is a peptide identification and quantification engine for tandem mass spectra: database
 search, rescoring, protein inference with protein-level FDR, and label-free, isobaric and SILAC
 quantification. It is one Cargo workspace of twelve crates under `crates/` that builds one
-binary, `andes` (`crates/andes/src/bin/andes.rs`). The crates are libraries with one pipeline
+binary, `andes` (`crates/andes/src/bin/andes/main.rs`). The crates are libraries with one pipeline
 role each; the binary wires them together, owns the command line and is the only place that prints.
 There is no plug-in boundary: a change that spans stages is one change in one repository.
 

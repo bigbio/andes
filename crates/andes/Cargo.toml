@@ -7,7 +7,7 @@ license.workspace = true
 
 [[bin]]
 name = "andes"
-path = "src/bin/andes.rs"
+path = "src/bin/andes/main.rs"
 
 [dependencies]
 log = { workspace = true }

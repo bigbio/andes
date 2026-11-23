@@ -1,7 +1,7 @@
 # Files whose first non-blank line is not a //! module doc (count 1).
 # Lines are path<TAB>count; a count may only go down. After a cleanup, lower the counts with:
 # cargo test -p andes --release --test structure -- --ignored write_module_docs_baseline (it refuses to raise any count)
-crates/andes/src/bin/andes.rs	1
+crates/andes/src/bin/andes/main.rs	1
 crates/andes/src/bin/andes/acquisition.rs	1
 crates/andes/src/bin/andes/cli.rs	1
 crates/andes/src/bin/andes/dia.rs	1
@@ -27,9 +27,9 @@ crates/andes/src/bin/andes/train.rs	1
 crates/andes/src/bin/andes/train_intensity.rs	1
 crates/andes/src/bin/andes/xl_fdr.rs	1
 crates/andes/src/bin/andes/xl_run.rs	1
-crates/andes/src/config.rs	1
-crates/andes/src/sdrf.rs	1
-crates/andes/src/transfer_fdr.rs	1
+crates/andes/src/bin/andes/config.rs	1
+crates/andes/src/bin/andes/sdrf.rs	1
+crates/andes/src/bin/andes/transfer_fdr.rs	1
 crates/glyco/src/backbone.rs	1
 crates/glyco/src/glycan_db.rs	1
 crates/glyco/src/glycan_first.rs	1

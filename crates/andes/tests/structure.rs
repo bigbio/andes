@@ -200,6 +200,48 @@ fn no_new_source_file_over_the_budget() {
     );
 }
 
+/// Modules are `name.rs` with children in `name/`, never `name/mod.rs`
+/// (docs/dev/structure-checks.md).
+#[test]
+fn no_mod_rs_files() {
+    let root = workspace_root();
+    let offenders: Vec<String> = source_files()
+        .into_iter()
+        .filter(|f| f.file_name().is_some_and(|n| n == "mod.rs"))
+        .map(|f| rel_key(&root, &f))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "use <name>.rs with children in <name>/ instead of <name>/mod.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// A file named `<prefix>_<rest>.rs` beside a `<prefix>.rs` or `<prefix>/` belongs in
+/// `<prefix>/<rest>.rs`: a family of files shares a folder, not a name prefix
+/// (docs/dev/structure-checks.md).
+#[test]
+fn no_prefix_family_beside_its_folder() {
+    let root = workspace_root();
+    let mut offenders = Vec::new();
+    for f in source_files() {
+        let (Some(dir), Some(stem)) = (f.parent(), f.file_stem().and_then(|s| s.to_str())) else {
+            continue;
+        };
+        let Some((prefix, rest)) = stem.split_once('_') else {
+            continue;
+        };
+        if dir.join(format!("{prefix}.rs")).is_file() || dir.join(prefix).is_dir() {
+            offenders.push(format!("{} -> {prefix}/{rest}.rs", rel_key(&root, &f)));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "move these files into their family's folder:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 #[ignore = "report only: the listed files over the budget and how far each moved since the list was written"]
 fn report_listed_files_over_the_budget() {

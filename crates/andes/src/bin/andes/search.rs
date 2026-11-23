@@ -1001,7 +1001,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|m| chunk_link.ms1_peaks.get(m))
                             .map(|peaks| {
                                 let (lo, hi) =
-                                    search::match_engine::coisolation_ms1_bounds(
+                                    search::engine::coisolation_ms1_bounds(
                                         &spec,
                                         prepared.params,
                                     );
@@ -1017,7 +1017,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 measurer.measure(&prepared, chunk_spectra.iter(), None);
                 if chimeric_active {
                     let mut queues = prepared.run_chunk(&chunk_spectra, offset);
-                    search::match_engine::run_pass2_coisolation(
+                    search::engine::coisolation_pass(
                         &prepared,
                         &chunk_spectra,
                         &mut queues,
@@ -1074,7 +1074,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     scored.extend(chunk);
                     report_search_progress(base + scored.len(), t_search_start);
                 }
-                search::match_engine::run_pass2_coisolation(
+                search::engine::coisolation_pass(
                     &prepared,
                     &scored,
                     &mut queues,

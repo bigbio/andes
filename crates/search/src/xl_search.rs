@@ -17,7 +17,7 @@ use xl::sites::{link_sites, LinkSite};
 
 use crate::candidate_gen::Candidate;
 use crate::fragment_index::ChunkFragmentIndex;
-use crate::match_engine::PreparedSearch;
+use crate::engine::PreparedSearch;
 
 #[derive(Debug, Clone)]
 pub struct XlConfig {
@@ -173,7 +173,7 @@ fn sites_of(c: &Candidate, linker: &Crosslinker, end: usize) -> Vec<LinkSite> {
 }
 
 impl XlCandidates {
-    pub fn from_out_of_core(prepared: &PreparedSearch<'_>, linker: &Crosslinker) -> Self {
+    pub fn from_index(prepared: &PreparedSearch<'_>, linker: &Crosslinker) -> Self {
         let keep = |lk: Crosslinker| {
             move |residues: &[u8], _post: u8| {
                 lk.n_term()
@@ -181,11 +181,11 @@ impl XlCandidates {
                     || residues.iter().any(|&r| lk.reacts_with(r))
             }
         };
-        let cands = prepared.out_of_core_candidates_where(keep(linker.clone()));
+        let cands = prepared.candidates_where(keep(linker.clone()));
         let mut table = Self::from_candidates(cands, linker);
         if linker.cleavage.is_none() && !table.peptides.is_empty() {
             let records: Vec<_> = prepared
-                .out_of_core_records_where(keep(linker.clone()))
+                .records_where(keep(linker.clone()))
                 .into_iter()
                 .map(|(rec, _)| rec)
                 .collect();

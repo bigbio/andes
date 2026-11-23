@@ -203,7 +203,6 @@ crates/scoring/src/testutil.rs	1
 crates/search/src/candidate_gen.rs	1
 crates/search/src/candidate_index.rs	1
 crates/search/src/chimeric_features.rs	1
-crates/search/src/coisolation.rs	1
 crates/search/src/decoy.rs	1
 crates/search/src/fragment_error.rs	1
 crates/search/src/fragment_index.rs	1
@@ -213,7 +212,7 @@ crates/search/src/ipf.rs	1
 crates/search/src/isomer.rs	1
 crates/search/src/isotope_mimic.rs	1
 crates/search/src/mass_calibrator.rs	1
-crates/search/src/match_engine.rs	1
+crates/search/src/engine.rs	1
 crates/search/src/open_search.rs	1
 crates/search/src/precursor_cal.rs	1
 crates/search/src/precursor_matching.rs	1

@@ -76,7 +76,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
 
 #[test]
 fn glyco_path_fills_every_feature_the_standard_path_fills() {
-    let standard = include_str!("../src/match_engine.rs");
+    let standard = include_str!("../src/engine.rs");
     let glyco_driver = include_str!("../src/glyco_search.rs");
     let glyco_rt = include_str!("../../output/src/glyco_rt.rs");
 
@@ -111,7 +111,7 @@ fn glyco_path_fills_every_feature_the_standard_path_fills() {
 
 #[test]
 fn every_documented_exception_is_still_a_real_gap() {
-    let standard = include_str!("../src/match_engine.rs");
+    let standard = include_str!("../src/engine.rs");
     let expected = standard_post_topn_fields(standard);
     for (name, _) in EXCEPTIONS {
         assert!(

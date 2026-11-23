@@ -39,12 +39,14 @@ use scoring_crate::scoring::{
     RankScorer, ScoredSpectrum, StrongScoreInputs, DENSITY_HW,
 };
 
+pub(crate) mod coisolation;
 mod dedup;
 mod features;
-mod out_of_core;
+mod slices;
+pub use coisolation::*;
 pub(crate) use dedup::*;
 pub(crate) use features::*;
-pub use out_of_core::*;
+pub use slices::*;
 
 pub type CandidateFilter = Box<dyn Fn(&Candidate) -> bool + Send + Sync>;
 
@@ -969,13 +971,13 @@ impl<'a> PreparedSearch<'a> {
         mmap_cands
     }
 
-    pub fn out_of_core_candidates_where(
+    pub fn candidates_where(
         &self,
         keep: impl Fn(&[u8], u8) -> bool + Sync,
     ) -> Vec<Candidate> {
         let db = self.idx;
         let params = self.params;
-        let records = self.out_of_core_records_where(keep);
+        let records = self.records_where(keep);
         let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = records
             .par_iter()
             .flat_map_iter(|(rec, mult)| {
@@ -1004,7 +1006,7 @@ impl<'a> PreparedSearch<'a> {
         cands
     }
 
-    pub fn out_of_core_records_where(
+    pub fn records_where(
         &self,
         keep: impl Fn(&[u8], u8) -> bool + Sync,
     ) -> Vec<(crate::candidate_index::IndexRecord, u32)> {
@@ -1770,27 +1772,27 @@ fn recalibrate_strong_over_spectrum(queue: &mut TopNQueue, pool: &[f32]) {
 }
 
 #[cfg(test)]
-#[path = "match_engine/tests/accumulator.rs"]
+#[path = "engine/tests/accumulator.rs"]
 mod accumulator_tests;
 
 #[cfg(test)]
-#[path = "match_engine/tests/per_scan_scorer.rs"]
+#[path = "engine/tests/per_scan_scorer.rs"]
 mod per_scan_scorer_tests;
 
 #[cfg(test)]
-#[path = "match_engine/tests/chargeless.rs"]
+#[path = "engine/tests/chargeless.rs"]
 mod chargeless_unit_tests;
 
 #[cfg(test)]
-#[path = "match_engine/tests/charges_to_try.rs"]
+#[path = "engine/tests/charges_to_try.rs"]
 mod charges_to_try_tests;
 
 #[cfg(test)]
-#[path = "match_engine/tests/feature.rs"]
+#[path = "engine/tests/feature.rs"]
 mod feature_tests;
 
 #[cfg(test)]
-#[path = "match_engine/tests/dedup.rs"]
+#[path = "engine/tests/dedup.rs"]
 mod dedup_tests;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1824,5 +1826,5 @@ impl RefTracker {
 }
 
 #[cfg(test)]
-#[path = "match_engine/tests/ref_tracker.rs"]
+#[path = "engine/tests/ref_tracker.rs"]
 mod ref_tracker_tests;

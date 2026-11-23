@@ -12,10 +12,6 @@ crates/andes/src/bin/andes/search.rs	2704
 crates/andes/src/bin/andes/search/resolve.rs	2062
 crates/andes/src/bin/andes/train.rs	1748
 crates/input/src/mzml.rs	4146
-crates/output/src/open_offsets.rs	1546
-crates/output/src/percolator.rs	1681
-crates/output/src/pin.rs	1723
-crates/output/src/stats.rs	1537
 crates/quant/src/label.rs	2195
 crates/scoring/src/scoring/scored_spectrum.rs	2702
-crates/search/src/match_engine.rs	3773
+crates/search/src/engine.rs	3773

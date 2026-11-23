@@ -6,7 +6,7 @@ use scoring_crate::RankScorer;
 
 use crate::candidate_gen::Candidate;
 use crate::decoy::{build_search_db, whole_sequence_decoy_db, DecoyStrategy};
-use crate::match_engine::PreparedSearch;
+use crate::engine::PreparedSearch;
 use crate::psm::TopNQueue;
 use crate::refine_config::RefineConfig;
 pub use crate::refine_mods::{mod_count_and_class, refinement_aa_set};

@@ -3,28 +3,15 @@
 # After a file is split under the budget, drop its line (and refresh the listed counts) with:
 # cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline
 crates/andes/src/bin/andes/cli.rs	2995
-crates/andes/src/bin/andes/cohort_cmd.rs	1917
-crates/andes/src/bin/andes/dia.rs	1675
-crates/andes/src/bin/andes/dia_pass2.rs	1810
 crates/andes/src/bin/andes/glyco_quant.rs	2099
 crates/andes/src/bin/andes/quant_cmd.rs	2439
 crates/andes/src/bin/andes/quant_finalize.rs	2955
-crates/andes/src/bin/andes/quant_mbr.rs	4689
 crates/andes/src/bin/andes/quant_run.rs	2530
 crates/andes/src/bin/andes/quant_run/label_run.rs	1998
 crates/andes/src/bin/andes/search.rs	2704
 crates/andes/src/bin/andes/search/resolve.rs	2062
 crates/andes/src/bin/andes/train.rs	1748
-crates/andes/src/sdrf.rs	1591
-crates/andes/src/transfer_fdr.rs	1846
 crates/input/src/mzml.rs	4146
-crates/input/src/uniprot.rs	1756
-crates/output/src/open_offsets.rs	1546
-crates/output/src/percolator.rs	1681
-crates/output/src/pin.rs	1723
-crates/output/src/stats.rs	1537
-crates/quant/src/align.rs	1743
-crates/quant/src/evidence.rs	2568
 crates/quant/src/label.rs	2195
 crates/scoring/src/scoring/scored_spectrum.rs	2702
 crates/search/src/engine.rs	3773

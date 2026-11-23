@@ -23,9 +23,4 @@ crates/quant/src/align.rs	1743
 crates/quant/src/evidence.rs	2568
 crates/quant/src/label.rs	2195
 crates/scoring/src/scoring/scored_spectrum.rs	2702
-crates/search/src/candidate_gen.rs	2712
-crates/search/src/decoy.rs	1629
-crates/search/src/glyco_search.rs	1891
 crates/search/src/match_engine.rs	3773
-crates/search/src/refinement.rs	2110
-crates/search/src/xl_search.rs	1848

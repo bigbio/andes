@@ -275,9 +275,3 @@ pub(super) fn mmap_secondaries(
     }
     found
 }
-
-#[inline(always)]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "hot-loop driver; all args are orthogonal cleavage parameters"
-)]

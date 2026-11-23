@@ -3,6 +3,11 @@
 
 use super::*;
 
+#[inline(always)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "hot-loop driver; all args are orthogonal cleavage parameters"
+)]
 pub(crate) fn enzyme_cleavage_credit(
     cand: &Candidate,
     enz: Enzyme,

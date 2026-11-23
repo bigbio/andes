@@ -52,11 +52,6 @@ fn separable_targets_get_low_q() {
     let rows = rows(500, 3.0, &[1, 2], 11);
     let r = transfer_qvalues(&rows, 42);
     let n = accepted_targets(&rows, &r.q);
-    eprintln!(
-        "separable: {n} of 500 targets at q <= 0.01 (mass-only {}, rt-only {})",
-        accepted_targets(&rows, &r.q_mass_only),
-        accepted_targets(&rows, &r.q_rt_only)
-    );
     assert!(n >= 400, "{n} targets at q <= 0.01");
     assert!(r.score.iter().all(|s| s.is_finite()));
 }
@@ -67,7 +62,6 @@ fn null_targets_are_not_accepted() {
         let rows = rows(500, 0.0, &[1, 2], seed);
         let r = transfer_qvalues(&rows, seed);
         let n = accepted_targets(&rows, &r.q);
-        eprintln!("null seed {seed}: {n} targets at q <= 0.01");
         assert!(n <= 5, "seed {seed}: {n} null targets at q <= 0.01");
     }
 }
@@ -89,9 +83,6 @@ fn null_experiments_rarely_accept_a_target() {
         }
     }
     let frac = with_false as f64 / n_exp as f64;
-    eprintln!(
-        "null experiments: {with_false} of {n_exp} ({frac:.4}) accept a target at q <= 0.01"
-    );
     assert!(
         frac <= 0.015,
         "{frac} of the null experiments accept a target"
@@ -138,7 +129,6 @@ fn mixture_fdp_stays_near_the_estimate() {
             }
         }
         let fdp = false_acc as f64 / acc.max(1) as f64;
-        eprintln!("mixture: q <= {thr}: {acc} accepted, {false_acc} absent, FDP {fdp:.4}");
         assert!(acc > 100, "q <= {thr}: {acc} accepted");
         assert!(fdp <= 2.0 * thr + 0.01, "q <= {thr}: FDP {fdp}");
     }
@@ -296,7 +286,6 @@ fn identity_decoys_add_their_share_to_the_estimate() {
         let r = transfer_fdr(&rows, 5).result;
         let wp = accepted_targets(&rows, &r.q_wrong_peak);
         let all = accepted_targets(&rows, &r.q);
-        eprintln!("identity: wrong-peak {wp}, combined {all} at q <= 0.01");
         assert!(wp >= 800, "{wp}");
         assert!(5 * all < wp, "{all} of {wp}");
         let at10 = rows
@@ -537,11 +526,6 @@ fn bagging_keeps_the_mixture_calibrated_and_steadier_across_seeds() {
             assert!(fdp <= 0.11, "{members} members: FDP {fdp}");
         }
         let j = jaccard(&a, &b);
-        eprintln!(
-            "{members} members: accepted {} and {}, Jaccard {j:.4}",
-            a.len(),
-            b.len()
-        );
         overlap.push(j);
     }
     assert!(overlap[1] > overlap[0], "{overlap:?}");

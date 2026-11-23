@@ -228,13 +228,6 @@ fn identity_decoys_on_real_features_count_in_the_transfer_q() {
     let lib = library_with(&on_real_features, &confident);
     let s = finalize(&stems(), &lib, &extract(), 0.2, None, 7, &mbr, &val).unwrap();
     let v = &s.validation;
-    eprintln!(
-        "q 0.01 pooled {} wrong-peak only {}; identity decoys accepted at 0.2: {} of {}",
-        v.at_q01.pooled,
-        v.at_q01.wrong_peak_only,
-        v.at_threshold.decoys[2],
-        v.decoy_transfers[2]
-    );
     assert_eq!((v.target_entries, v.identity_entries), (882, 18));
     assert_eq!(v.decoy_transfers[2], 18);
     assert!(v.at_threshold.decoys[2] >= 12, "{v:?}");
@@ -314,7 +307,6 @@ fn finalize_writes_one_row_per_target_pair_with_evidence_types() {
             }
         }
     }
-    eprintln!("finalize: {true_acc} present and {false_acc} absent transfers accepted");
     assert!(
         true_acc >= 400,
         "{true_acc} of 450 present transfers accepted"
@@ -329,7 +321,6 @@ fn finalize_reports_pseudo_transfer_validation() {
     let (mbr, val) = mbr_paths(&dir.path().join("x"));
     let s = finalize(&stems(), &library(), &extract(), 0.01, None, 7, &mbr, &val).unwrap();
     let v = &s.validation;
-    eprintln!("validation: {v:?}");
     assert_eq!(v.pseudo_transfers, N as usize);
     assert_eq!(v.wrong_peak_pairs, N as usize);
     assert_eq!(v.wrong_peak, (N / WRONG_EVERY) as usize);
@@ -1550,7 +1541,6 @@ fn identified_quality_q_separates_clean_from_wrong_and_interfered_peaks() {
     let clean = share("clean", &|x| x <= 0.01);
     let wrong = share("wrong", &|x| x > 0.05);
     let interfered = share("interfered", &|x| x > 0.05);
-    eprintln!("clean q<=0.01 {clean}, wrong q>0.05 {wrong}, interfered q>0.05 {interfered}");
     assert!(clean >= 0.95, "{clean}");
     assert!(wrong >= 0.95, "{wrong}");
     assert!(interfered >= 0.8, "{interfered}");
@@ -2193,9 +2183,6 @@ fn ms2_evidence_does_not_change_the_transfer_q_values() {
     };
     let (p0, a0) = accepted(false);
     let (p1, a1) = accepted(true);
-    eprintln!(
-        "MS1 only: {p0} present, {a0} absent accepted; with MS2: {p1} present, {a1} absent"
-    );
     assert_eq!((p0, a0), (p1, a1));
     assert!(p0 + a0 < 50, "{p0} + {a0}");
 }

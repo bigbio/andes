@@ -11,12 +11,12 @@ use crate::cli::{
     Cli, EnzymeSpecificity, EthcdActivationFlag, FragmentIndexFlag, Fragmentation,
     PrecursorMonoFlag, Protocol, ScoreFlag,
 };
-use crate::model_select::{
+use crate::models::{
     cli_fragment_tol_override, cli_fragmentation_to_activation_opt, label_from_mods,
     load_param_from_store, parse_enzymes, resolve_metadataless_selection, routing_protocol,
     search_aa_set, warn_if_universal_protease_combo,
 };
-use crate::quant_run::QuantSettings;
+use crate::quant::run::QuantSettings;
 use crate::spectra::{
     compare_with_first_input, detect_acquisition_metadata, detect_isobaric_sampled,
     input_format_flags, sample_ms2_meta, sample_spectra,
@@ -246,7 +246,7 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
     let mut _mbr_tmp: Option<tempfile::TempDir> = None;
     if cli.mbr && !cli.glyco {
         check_mbr_args(cli)?;
-        crate::quant_run::check_unique_stems(&cli.spectrum)?;
+        crate::quant::run::check_unique_stems(&cli.spectrum)?;
         if cli.quant_dir.is_none() && cli.label.is_none() {
             let dir = scratch_tempdir("andes-quant-", &scratch_dir)?;
             cli.quant_dir = Some(dir.path().to_path_buf());
@@ -254,7 +254,7 @@ pub(super) fn prepare_run(cli: &mut Cli) -> Result<RunPaths, Box<dyn std::error:
         }
     }
     if cli.quant_dir.is_some() {
-        crate::quant_run::check_unique_stems(&cli.spectrum)?;
+        crate::quant::run::check_unique_stems(&cli.spectrum)?;
     }
     QuantSettings::check_args(cli)?;
     if let Some(warning) = deuterated_tag_warning(cli.tmt, cli.precursor_tol) {
@@ -385,9 +385,9 @@ pub(super) fn load_search_database(
         max_length: cli.max_length,
         max_missed_cleavages: max_missed_cleavages(cli),
     };
-    let prebuilt = crate::database_cmd::prebuilt_settings(
+    let prebuilt = crate::database::prebuilt_settings(
         database_path,
-        &crate::database_cmd::SearchDecoys {
+        &crate::database::SearchDecoys {
             strategy: decoy_strategy,
             seed: cli.decoy_seed,
             prefix: &cli.db.decoy_prefix,
@@ -849,7 +849,7 @@ pub(super) fn resolve_search_params(
         .filter_map(|m| m.annotated_site_mass)
         .collect();
     let label_spec = match &cli.label {
-        Some(text) => Some(crate::quant_run::label_spec(cli, text)?),
+        Some(text) => Some(crate::quant::run::label_spec(cli, text)?),
         None => None,
     };
     if let Some(spec) = &label_spec {
@@ -1002,7 +1002,7 @@ pub(super) fn resolve_search_params(
         let enzymes: Vec<_> = std::iter::once(params.enzyme)
             .chain(params.extra_enzymes.iter().copied())
             .collect();
-        let extra = crate::quant_run::label_run::max_label_sites(
+        let extra = crate::quant::run::labels::max_label_sites(
             spec,
             &enzymes,
             params.num_tolerable_termini,
@@ -1645,7 +1645,7 @@ fn check_mbr_args(cli: &Cli) -> Result<(), String> {
         }
         return Ok(());
     }
-    crate::quant_cmd::evidence_params(cli.lfq_tol)?;
+    crate::quant::evidence_params(cli.lfq_tol)?;
     Ok(())
 }
 
@@ -1689,7 +1689,7 @@ fn with_label_mods(
     aa: &model::AminoAcidSet,
     spec: &quant::label::LabelSpec,
 ) -> Result<model::AminoAcidSet, String> {
-    let (mods, channels) = crate::quant_run::label_run::search_label_mods(spec);
+    let (mods, channels) = crate::quant::run::labels::search_label_mods(spec);
     let declared = aa.distinct_mods();
     let mut b = AminoAcidSetBuilder::new_standard();
     for m in &declared {

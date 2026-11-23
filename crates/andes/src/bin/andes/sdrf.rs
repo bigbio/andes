@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use model::activation::ActivationMethod;
 
-use crate::param_sources::{ParamSources, Source};
+use crate::params::sources::{ParamSources, Source};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Quant {

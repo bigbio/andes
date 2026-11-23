@@ -4,6 +4,8 @@
 //! lists, resolves each run's search settings, groups the runs that can share one FDR, and
 //! writes the plan as JSON. It searches nothing; a job array or the pipeline runs the plan.
 
+pub(crate) mod command;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

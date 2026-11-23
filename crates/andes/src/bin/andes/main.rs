@@ -4,47 +4,25 @@ use clap::{Parser, Subcommand};
 
 mod acquisition;
 mod cli;
-mod cli_parse;
 mod cohort;
-mod cohort_cmd;
 mod config;
-mod config_mods;
-mod database_cmd;
+mod database;
 mod dia;
-mod dia_joint;
-mod dia_llr;
-mod dia_pass2;
-mod dia_score;
-mod dia_xfer;
-mod dia_xrun;
-mod glyco_match;
-mod glyco_quant;
-mod glyco_run;
-mod inference_cmd;
+mod glyco;
+mod inference;
 mod logging;
-mod memlimit;
-mod model_select;
-mod mono;
-mod predicted;
-mod quant_cmd;
-mod quant_finalize;
-mod quant_mbr;
-mod quant_run;
-mod sdrf;
+mod memory;
+mod models;
+mod monoisotopic;
 mod optimize;
-mod param_sources;
 mod params;
-mod params_render;
+mod quant;
+mod sdrf;
 mod search;
 mod spectra;
-mod tmt_mbr;
-mod tmt_study;
 mod train;
-mod train_intensity;
-mod transfer_fdr;
-mod xl_ambiguity;
-mod xl_fdr;
-mod xl_run;
+mod transfers;
+mod xl;
 
 use crate::cli::{
     parse_charge_range, parse_isotope_error_range, parse_open_search_delta, parse_precursor_cal,
@@ -53,7 +31,7 @@ use crate::cli::{
 };
 use crate::search::run;
 use crate::train::{run_train, run_train_from_search, TrainArgs, TrainFromSearchArgs};
-use crate::train_intensity::{
+use crate::train::intensity::{
     run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
 
@@ -206,7 +184,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
-            quant_cmd::run_quant_command(cmd)
+            quant::run_quant_command(cmd)
         }
         Some(Command::Inference(mut args)) => {
             if let Some(Err(e)) = matches
@@ -216,14 +194,14 @@ fn main() -> ExitCode {
                 log::error!("{e}");
                 return ExitCode::from(2);
             }
-            inference_cmd::run_inference(*args)
+            inference::run_inference(*args)
         }
         Some(Command::Rescore(args)) => run_rescore(*args),
-        Some(Command::Database(args)) => database_cmd::run(*args),
-        Some(Command::Cohort(cmd)) => cohort_cmd::run(cmd),
+        Some(Command::Database(args)) => database::run(*args),
+        Some(Command::Cohort(cmd)) => cohort::command::run(cmd),
         None => {
             let mut cfg_missed_cleavages = false;
-            let mut sources = param_sources::from_command_line(&matches);
+            let mut sources = params::sources::from_command_line(&matches);
             if let Some(cfg_path) = top.search.config.clone() {
                 if let Err(e) = config::RunConfig::load(&cfg_path).and_then(|c| {
                     cfg_missed_cleavages = c.search.max_missed_cleavages.is_some();
@@ -295,15 +273,15 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_config(dest: &std::path::Path, sources: &param_sources::ParamSources) -> ExitCode {
-    let text = match params_render::effective_config(sources) {
+fn print_config(dest: &std::path::Path, sources: &params::sources::ParamSources) -> ExitCode {
+    let text = match params::render::effective_config(sources) {
         Ok(text) => text,
         Err(e) => {
             log::error!("{e}");
             return ExitCode::from(2);
         }
     };
-    let cli_only = params_render::command_line_only(sources);
+    let cli_only = params::render::command_line_only(sources);
     if !cli_only.is_empty() {
         log::warn!(
             "--print-config: {} has no config key; the printed config lists it as a comment, \
@@ -328,7 +306,7 @@ fn print_config(dest: &std::path::Path, sources: &param_sources::ParamSources) -
 
 fn run_rescore(args: cli::RescoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     cli::ensure_scratch_dir(&args.temp_dir)?;
-    let limit = memlimit::rescore_memory(args.rescore_memory_gb, args.temp_dir);
+    let limit = memory::rescore_memory(args.rescore_memory_gb, args.temp_dir);
     output::run_native_percolator(&args.args, limit)?;
     Ok(())
 }

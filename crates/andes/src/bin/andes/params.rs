@@ -8,6 +8,9 @@
 //! through [`spec`] and [`PARAMS`] to write `config.example.yaml`, the DOCS.md flag tables and
 //! `--print-config`.
 
+pub(crate) mod render;
+pub(crate) mod sources;
+
 /// The `RunConfig` section a parameter belongs to; the YAML name is the field name of
 /// `RunConfig`. `CliOnly` arguments have no config key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

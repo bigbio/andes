@@ -90,7 +90,7 @@ library crates and binary alike.
 8. **Quantification.** `quant` extracts chromatograms (`xic.rs`), aligns runs (`align.rs`),
    builds the match-between-runs `Library` (`library.rs`), quantifies precursors (`lfq.rs`,
    `isobaric.rs`) and normalises (`normalize.rs`). The staged form is the `andes quant`
-   subcommand (`crates/andes/src/bin/andes/quant_cmd.rs`, `quant_finalize.rs`).
+   subcommand (`crates/andes/src/bin/andes/quant.rs`, `quant_finalize.rs`).
 9. **Write.** `output::write_qpx` and `write_pg_parquet` write the views; the quantification
    tables come from `quant_out.rs`.
 

@@ -1,8 +1,10 @@
+pub(crate) mod mods;
+
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::param_sources::ParamSources;
+use crate::params::sources::ParamSources;
 use crate::SearchArgs;
 
 #[derive(Debug, Default, Deserialize)]
@@ -298,7 +300,7 @@ pub fn apply_protein_config(
     Ok(())
 }
 
-use crate::config_mods::{mod_list, xl_set};
+use crate::config::mods::{mod_list, xl_set};
 
 pub fn apply(
     cfg: RunConfig,

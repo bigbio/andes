@@ -4,9 +4,9 @@
 use clap::CommandFactory;
 
 use crate::config::RunConfig;
-use crate::param_sources::{ParamSources, Source};
+use crate::params::sources::{ParamSources, Source};
 use crate::params::{Section, PARAMS};
-use crate::params_render::{config_example, docs_reference, effective_config};
+use crate::params::render::{config_example, docs_reference, effective_config};
 
 const START: &str = "<!-- generated:search-flags:start -->";
 const END: &str = "<!-- generated:search-flags:end -->";

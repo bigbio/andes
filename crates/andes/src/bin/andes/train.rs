@@ -1,10 +1,12 @@
+pub(crate) mod intensity;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{parse_unit_fraction, GeometryArgs, Protocol};
-use crate::model_select::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
+use crate::models::{build_aa_set, load_param_from_store, load_seed_param, ModelEntryOwned};
 use crate::spectra::spectrum_ext_lower;
-use crate::train_intensity::GbdtMode;
+use crate::train::intensity::GbdtMode;
 use clap::Args;
 use input::{MgfReader, MzMLReader};
 use model::{

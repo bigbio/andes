@@ -5,8 +5,8 @@ use clap::{CommandFactory, FromArgMatches};
 use serde_yaml::Value;
 
 use crate::config::{apply, RunConfig};
-use crate::param_sources::{from_command_line, ParamSources, Source};
-use crate::params_render::effective_config;
+use crate::params::sources::{from_command_line, ParamSources, Source};
+use crate::params::render::effective_config;
 use crate::sdrf::{self, SdrfSettings};
 
 fn baseline_matches(extra: &[&str]) -> clap::ArgMatches {

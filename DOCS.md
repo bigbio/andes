@@ -36,7 +36,8 @@ their `--help` text.
 
 ## 1. CLI reference
 
-Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli.rs`.
+Flags are kebab-case long options, defined in `crates/andes/src/bin/andes/cli/`: the search flags in
+`options.rs`, the subcommands' in `commands.rs`, and the flag value types in `flags.rs`.
 
 ### Input formats
 
@@ -3508,7 +3509,7 @@ offsets. Neither module runs in `--glyco` mode.
 
 Values in the code that change results and that no flag or learned quantity sets. Each table
 row gives the value, where it is defined (`crates/...:line` on the commit this section was
-written against; a default of a flag points to `cli.rs`, where the flag in the override column
+written against; a default of a flag points to `cli/options.rs`, where the flag in the override column
 finds it), what it controls, whether a flag overrides it, and the recorded basis. "Learned"
 means the value is replaced by one estimated from the run or the library when enough data exist, and
 the constant is then the fallback or a bound. "No recorded evidence" means neither a code comment nor
@@ -3524,15 +3525,15 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Missed cleavages | 2 | `andes/src/bin/andes/cli.rs` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
-| Peptide length | 6 to 50 | `andes/src/bin/andes/cli.rs` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
-| Variable mods per peptide | 3 | `andes/src/bin/andes/cli.rs` | combinatorial candidates | `--max-mods` | No recorded evidence |
-| Precursor charge range | 2..5 | `andes/src/bin/andes/cli.rs` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
+| Missed cleavages | 2 | `andes/src/bin/andes/cli/options.rs` | peptides digested per protein | `--max-missed-cleavages` | 2 vs 1 missed cleavages: identifications within noise, search CPU +8-14% (internal benchmark) |
+| Peptide length | 6 to 50 | `andes/src/bin/andes/cli/options.rs` | candidate peptides | `--min-length`, `--max-length` | Max 50 follows the MSFragger and Comet defaults; 40 dropped long tryptic peptides (flag comment). Min 6: no recorded evidence |
+| Variable mods per peptide | 3 | `andes/src/bin/andes/cli/options.rs` | combinatorial candidates | `--max-mods` | No recorded evidence |
+| Precursor charge range | 2..5 | `andes/src/bin/andes/cli/options.rs` | charges tried when the spectrum has none | `--charge` | No recorded evidence |
 | Isotope-error range | -1..2 | `search/src/params.rs:171` | precursor isotope offsets tried | `--isotope-error` | Inherited from the Java engine default (`-ti -1,2`); glyco narrows it to a window learned from MS1 |
-| PSMs kept per spectrum | 10 | `andes/src/bin/andes/cli.rs` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |
-| Minimum peaks | 10 | `andes/src/bin/andes/cli.rs` | spectra skipped | `--min-peaks` | Inherited default |
-| Precursor tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | candidate window | `--precursor-tol`, `--precursor-cal` | No recorded evidence for 20 |
-| Precursor calibration | off | `andes/src/bin/andes/cli.rs` | ppm shift pre-pass | `--precursor-cal` | Pre-pass cost 9-17% of the run on the benchmark sets (see [§1](#calibration-and-runtime)) |
+| PSMs kept per spectrum | 10 | `andes/src/bin/andes/cli/options.rs` | rows per spectrum in the PIN | `--top-n` | Inherited default; no recorded evidence |
+| Minimum peaks | 10 | `andes/src/bin/andes/cli/options.rs` | spectra skipped | `--min-peaks` | Inherited default |
+| Precursor tolerance | 20 ppm | `andes/src/bin/andes/cli/options.rs` | candidate window | `--precursor-tol`, `--precursor-cal` | No recorded evidence for 20 |
+| Precursor calibration | off | `andes/src/bin/andes/cli/options.rs` | ppm shift pre-pass | `--precursor-cal` | Pre-pass cost 9-17% of the run on the benchmark sets (see [§1](#calibration-and-runtime)) |
 | Pre-pass sample and floors | stride 10, at most 500 spectra, 10,000 spectrum keys, 150 confident PSMs, residual cap 200 | `search/src/precursor/calibration.rs:76-89` | when the pre-pass runs and how many residuals feed the median | no | 150 chosen so ion-trap sets (about 193 confident PSMs in the sample) still calibrate (code comment); the others: no recorded evidence |
 | Tightened precursor window | floor 2 ppm, margin 0.5 ppm, 3 sigma, MAD scale 1.4826 | `search/src/precursor/calibration.rs:92-95` | post-calibration tolerance | no | No recorded evidence (1.4826 is the Gaussian MAD factor) |
 | Calibration q cutoff | 0.01 | `search/src/precursor/prepass.rs:360` | PSMs trusted for the precursor residual | no | Standard 1% target-decoy cutoff |
@@ -3544,11 +3545,11 @@ here only where the value is a fixed choice rather than a documented option.
 | Tailor calibration | 100 candidates minimum, quantile 0.01 | `search/src/psm.rs:284,288` | score calibration per spectrum | no | Quantile follows Yang et al.; minimum: no recorded evidence |
 | Fragment-error measurement | 50 ppm window, 7 ions per PSM, 100 PSMs, q 0.01, 3,000 spectra | `search/src/fragments/error.rs:31-39` | the run's measured fragment error spread | no | Window wider than any supported analyzer (code comment); others: no recorded evidence |
 | Isotope-mimic tolerance | 0.05 Da | `search/src/mimics.rs:16` | which mass deltas can be a wrong-isotope pick | no | No recorded evidence |
-| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws per segment and 20 rounds of peptide-level redraws | `andes/src/bin/andes/cli.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
+| Decoy settings | prefix `XXX_` (`XXX` in the library), strategy shuffle, seed 42, 20 redraws per segment and 20 rounds of peptide-level redraws | `andes/src/bin/andes/cli/options.rs`, `search/src/decoy.rs:48-55` | decoy database | `--decoy-prefix`, `--decoy-strategy`, `--decoy-seed` (internal); redraws fixed | Seed fixed for reproducibility; redraw count: no recorded evidence |
 | Entrapment prefix | `ENT_` | `search/src/refinement.rs:431` | which proteins count as entrapment | no | Naming convention |
 | Refine mods per peptide | 5 | `refinement.rs:883` | combinatorial ceiling of the second pass | the refine tier's `max_mods` is clamped to it | Memory guard (code comment) |
-| Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |
-| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (advanced) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
+| Refine selection FDR | `--psm-fdr` (0.01) | `andes/src/bin/andes/cli/options.rs` | PSMs that anchor the second pass | `--psm-fdr` | Standard 1% |
+| Chimeric cascade | 4 co-isolated peptides, envelope KL at most 0.3 | `andes/src/bin/andes/cli/options.rs` | secondary peptides searched per scan | `--chimeric-max-coisolated`, `--chimeric-max-kl` (advanced) | 4 is the measured Astral optimum, +1.4% PSMs over 2 at flat FDP; 0.3: no recorded evidence |
 | Co-isolation isotope walk | 3 steps | `search/src/coisolation.rs:115` | steps below an accepted peak when finding the monoisotope | no | No recorded evidence |
 | Mod mass match | 0.005 Da (isomer class and annotated sites), 1e-4 Da (mod delta) | `model/src/isomers.rs:29`, `model/src/protein.rs:91`, `model/src/peptide.rs:189` | when two modification masses are the same | no | Keeps phospho (79.9663) and sulfo (79.9568) apart (code comment) |
 | Implausible residue mass | 5000 Da | `model/src/amino_acid/set.rs:17` | residues rejected as unusable | no | Sanity bound |
@@ -3557,7 +3558,7 @@ here only where the value is a fixed choice rather than a documented option.
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| GBDT trees | 100 | `andes/src/bin/andes/cli.rs` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
+| GBDT trees | 100 | `andes/src/bin/andes/cli/options.rs` | trees evaluated per ensemble | `--gbdt-max-trees` | 33-41% faster, identification-neutral: Astral 300 trees 38,437 PSMs vs 100 trees 38,444 (flag comment) |
 | Isobaric peak filter | 100 Da window, 20 peaks | `andes/src/bin/andes/search.rs:273` (resolution), `--peak-filter` text in [§1](#scoring) | spectra filtered for TMT/iTRAQ data | `--peak-filter` | No recorded evidence |
 | Feature window | 50 Da | `scoring/src/features/peaks.rs:43`, `scoring/src/psm/strong.rs:11` | local rank and density features | no (must equal the training value) | Parity with the training pipeline (code comment) |
 | Fragment tolerance for features | 4 sigma, bounded 5 to 40 ppm | `scoring/src/psm/error.rs:6,15,17` | PIN feature tolerance derived from the measured error | learned from the run; bounds fixed | No recorded evidence for 4 or the bounds |
@@ -3575,9 +3576,9 @@ here only where the value is a fixed choice rather than a documented option.
 | Percolator invocation | `-Y` (target-decoy competition), `--seed 42`, `--only-psms`, threads = `--threads` | `output/src/percolator.rs:273,286,295` | q-values and PEP | `--percolator-args` can add or replace | Every benchmark and calibration figure was measured with `-Y`; threads change speed, not results (comment) |
 | Per-run pass | `--static --override --init-weights <pooled weights> -Y`, seed 42, one run at a time; `RUNS_PER_SCAN` 64 | `output/src/percolator.rs` (`static_pass_args`, `RUNS_PER_SCAN`) | per-run q-values of PINs of several runs | `--percolator-args` adds extra arguments | 64: scratch PINs written during one scan of the PIN, far below the usual limit of open files; a PIN of more runs is read once per 64 runs. Weights: first cross-validation bin (§ rescoring) |
 | Percolator image | 3.7.1 | `percolator.rs:18` | the version used with `--percolator-docker` | `--percolator-image` | Version of the benchmarks |
-| PSM and protein FDR | 0.01 each | `andes/src/bin/andes/cli.rs` | reported cutoffs | `--psm-fdr`, `--protein-fdr` | Convention |
-| Proteoform FDR | max(`--psm-fdr`, 0.05) | `cli.rs` (`--proteoform-fdr` text) | variant-class claims | `--proteoform-fdr` | No recorded evidence |
-| Knockoffs per variant | 4 | `andes/src/bin/andes/cli.rs` | variant FDR resolution | `--knockoffs` | No recorded evidence |
+| PSM and protein FDR | 0.01 each | `andes/src/bin/andes/cli/options.rs` | reported cutoffs | `--psm-fdr`, `--protein-fdr` | Convention |
+| Proteoform FDR | max(`--psm-fdr`, 0.05) | `cli/options.rs` (`--proteoform-fdr` text) | variant-class claims | `--proteoform-fdr` | No recorded evidence |
+| Knockoffs per variant | 4 | `andes/src/bin/andes/cli/options.rs` | variant FDR resolution | `--knockoffs` | No recorded evidence |
 | Knockoff strata | substitution classes at 0.984016, 14.01565, 15.994915 Da within 0.02 Da; at least 50 tested PSMs per stratum | `output/src/fdr/knockoff.rs:21-32` | which error-rate class a variant belongs to | no | Classes differ several-fold in error rate (code comment); 50: no recorded evidence |
 | Site-FDR stratum | 50 tested claims | `output/src/fdr/sites.rs:30` | stratum size | no | No recorded evidence |
 | Class-FDR guard | 20 decoys | `output/src/fdr/class.rs:144` | when a class uses its own competition | no | No recorded evidence |
@@ -3608,11 +3609,11 @@ here only where the value is a fixed choice rather than a documented option.
 | Wrong-peak model | 11 features, 4,000,000 calibration rows | `quant_finalize.rs:1544,1547` | wrong-peak probability | no | No recorded evidence |
 | MS2 evidence | 12 library fragments (at least 3), ions of at least 3 residues, support needs 4 matches and angle 0.6, isolation half-width 1.0 Th, elution window +/- 1 width bounded 1 to 20 s | `quant/src/ms2.rs:22-36` | MS2 support of a transfer | no | No recorded evidence |
 | Ion mobility window | search 0.1 V s/cm2, refit beyond 4 scales dropped, gate 3 scales, at least 50 pairs, scale floor 0.001 | `quant/src/mobility.rs:23-32` | timsTOF extraction gate | scale learned per run | Gate cut the main share bad 9.64 to 5.79% on a timsTOF set (internal benchmark) |
-| LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `andes/src/bin/andes/cli.rs` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--quant-fdr` | No recorded evidence |
-| MBR FDRs | donor `--psm-fdr` (0.01), transfer `--quant-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | which library entries and transfers are reported | `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-fdr` | Convention |
+| LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `andes/src/bin/andes/cli/options.rs` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--quant-fdr` | No recorded evidence |
+| MBR FDRs | donor `--psm-fdr` (0.01), transfer `--quant-fdr` (0.01) | `andes/src/bin/andes/cli/options.rs` | which library entries and transfers are reported | `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-fdr` | Convention |
 | Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant/run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |
 | Purity ladder | 10 steps in the window, 64 overall | `quant/src/purity.rs:21,23` | isotope ladder of the purity estimate | no | No recorded evidence |
-| TMT gate | purity 0.7, S/N 0 (off); PEP enters `quant_weight` as 1 - PEP | `andes/src/bin/andes/cli.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-min-sn` | No recorded evidence |
+| TMT gate | purity 0.7, S/N 0 (off); PEP enters `quant_weight` as 1 - PEP | `andes/src/bin/andes/cli/options.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-min-sn` | No recorded evidence |
 | TMT unmix | interference at most 0.8, 100 scans minimum (also the effective scans needed to learn λ), 10 ppm, isotopes -1 to 8, density half-width 5 Th, bisquare 4.685, 8 rounds, λ grid of 21 steps, reference weight (1 − interference)² | `quant/src/unmix.rs` | `--tmt-unmix` model | learned per run (coefficients and λ); constants bound the fit | Bisquare 4.685 is the standard 95% efficiency constant; others: no recorded evidence |
 | Mass-error ppm | 10 ppm default | `quant/src/evidence.rs:142` | centroid match tolerance | `--lfq-tol` and learned m/z window | See [§10](#10-quantification) |
 
@@ -3627,8 +3628,8 @@ here only where the value is a fixed choice rather than a documented option.
 | Core-Y rung weights | 2, 2, 1.5, 1, 1, 1; complement weight 0.3 | `glyco/src/backbone.rs:224,357` | backbone tie-breaks | no | Rationale in comments (Y0-Y2 specific, Y3-Y5 less so); no measurement recorded |
 | Oxonium gate | 10% of the expected oxonium fraction | `glyco/src/oxonium.rs:79` | spectra rejected as non-glyco | no | Documented as untuned and non-binding on the set examined |
 | Diagnostic-ion tolerance floors | 0.005 Da (fragments), 0.01 Da (oxonium) | `glyco/src/glycan/first.rs:369`, `oxonium.rs:8` | ppm window floors | no | No recorded evidence |
-| Y-ion charge | 3 | `andes/src/bin/andes/cli.rs` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
-| Glyco tolerance | 20 ppm | `andes/src/bin/andes/cli.rs` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
+| Y-ion charge | 3 | `andes/src/bin/andes/cli/options.rs` | highest Y-ion charge | `--glyco-y-max-charge` | No recorded evidence |
+| Glyco tolerance | 20 ppm | `andes/src/bin/andes/cli/options.rs` | glycan match | `--glyco-tol-ppm` | No recorded evidence |
 | Glycan mass share in isotope model | 0.5 | `model/src/isotope.rs:126` | share of the mass from the glycan in the envelope model | no | No recorded evidence |
 
 ### Outputs

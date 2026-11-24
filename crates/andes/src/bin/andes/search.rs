@@ -526,7 +526,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
 
-    let mut spectra = all_spectra;
+    let spectra = all_spectra;
     let mut queues = all_queues;
 
     if standalone {
@@ -676,195 +676,21 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         pin_index = idx;
     }
 
-    output::populate_rt_features_per_run(&spectra, &mut queues, &pin_candidates, &run_ends);
-
-    output::populate_provenance_features(&mut queues, &pin_candidates, &pin_index);
-
-    output::write_pin(
-        &output_pin_path,
-        &spectra,
-        &queues,
-        &pin_candidates,
-        &params,
-        &pin_index,
-    )?;
-    log::info!(
-        target: "output",
-        "Wrote PIN: {} in {:.2} s",
-        output_pin_path.display(),
-        t_phase.elapsed().as_secs_f64()
-    );
-    crate::memory::mark_stage("PIN written");
-    let run_stats = output::RunStatistics::compute(
-        &queues,
-        &pin_candidates,
-        &params,
-        &scorer.feature_match_tolerance(),
-        &scorer.pin_match_tolerance(),
-        &scorer.node_score_window(),
-    );
-    let has_site_claims = pin_index.iter_target_proteins().any(|p| {
-        p.annotation
-            .as_deref()
-            .is_some_and(|a| !a.site_claims.is_empty())
-    });
-    let fact_rows = (cli.dia
-        && !has_site_claims
-        && ipf_scoring.is_none()
-        && quant.is_none()
-        && cli.output_parquet.is_none()
-        && cli.output_tsv.is_none())
-    .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
-    if fact_rows.is_some() {
-        queues = Vec::new();
-        crate::memory::release_free_memory();
-    }
-    log::info!(
-        target: "total",
-        "done in {:.2} s",
-        t_total.elapsed().as_secs_f64()
-    );
-    let pooled = cli.dia && params.top_n_psms_per_spectrum > cli.top_n;
-    let n_dia_ms1: usize = dia_ms1.iter().map(Vec::len).sum();
-    let dia_ms1 = if cli.dia {
-        crate::dia::ms1_indexes(dia_ms1)
-    } else {
-        Vec::new()
-    };
-    let mut dia_pass2: Option<output::dia::pass2::Pass2Table> = None;
-    if let Some(p) = &predictors {
-        let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
-        crate::memory::mark_stage("predictions");
-        if let Some((predicted, table)) = kept.filter(|_| pooled) {
-            let pool = crate::dia::llr::add_to_pin(
-                &output_pin_path,
-                &spectra,
-                &run_ends,
-                &dia_ms1,
-                table,
-                &predicted,
-                p.tolerance(),
-            )?;
-            crate::memory::mark_stage("pool scores");
-            let nominees_out = cli
-                .quant_dir
-                .as_deref()
-                .filter(|_| run_ends.len() == 1)
-                .map(|d| {
-                    crate::dia::transfer::nominee_path(
-                        d,
-                        &crate::quant::run::run_stem(&spectrum_path),
-                    )
-                });
-            dia_pass2 = Some(crate::dia::pass2::run(
-                &output_pin_path,
-                &spectra,
-                &run_ends,
-                &dia_ms1,
-                pool,
-                predicted,
-                nominees_out
-                    .as_deref()
-                    .map(|path| crate::dia::transfer::NomineesOut {
-                        path,
-                        spectrum: spectrum_path.as_path(),
-                        mobility_slices: cli.dia_mobility_slices,
-                    }),
-            )?);
-            crate::memory::mark_stage("pass 2");
-        }
-    }
-    if cli.dia {
-        crate::memory::release_free_memory();
-    }
-    crate::memory::mark_stage("pool released");
-    let mut rerank_dropped = std::collections::HashSet::new();
-    if pooled {
-        rerank_dropped = crate::dia::rerank_pin(
-            &output_pin_path,
-            cli.top_n as usize,
-            cli.output_parquet.is_some() || quant.is_some(),
-        )?;
-        crate::memory::release_free_memory();
-        crate::memory::mark_stage("per-scan cut");
-    }
-    if cli.dia {
-        crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, &dia_ms1, n_dia_ms1)?;
-        crate::memory::mark_stage("co-elution");
-    }
-    drop(dia_ms1);
-    if cli.dia {
-        crate::memory::release_free_memory();
-    }
-    if cli.refine {
-        if refine_merged {
-            log::info!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
-        } else {
-            log::info!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
-        }
-    }
-
-    let fdr_threshold = cli.psm_fdr();
-    let proteoform_fdr = cli.proteoform_fdr();
-    let use_native = !cli.external_percolator();
-    let use_percolator = cli.rescore;
-    if !use_percolator && (cli.psm_fdr.is_some() || cli.pep.is_some()) {
-        let which = match (cli.psm_fdr.is_some(), cli.pep.is_some()) {
-            (true, true) => "--psm-fdr and --pep",
-            (true, false) => "--psm-fdr",
-            _ => "--pep",
-        };
-        log::warn!(
-            "{which} set without --rescore, so no rescoring runs and no filtered .tsv \
-             is written. andes does not compute FDR on its own; the PIN is written for \
-             Percolator. Add --rescore to rescore with the native Percolator engine."
-        );
-    }
-    let mbr_decoys: std::collections::HashMap<String, output::PercolatorPsm> =
-        std::collections::HashMap::new();
-    let rescoring = rescoring::rescore_pin(
-        &rescoring::RescoreInputs {
-            cli: &cli,
-            output_pin_path: &output_pin_path,
-            spectrum_path: &spectrum_path,
-            scratch_dir: &scratch_dir,
-            use_native,
-            use_percolator,
-            free_peaks: fact_rows.is_some(),
-            has_site_claims,
-        },
-        &mut spectra,
-        &mut dia_pass2,
-    )?;
-    let rescoring::Rescoring {
-        rescore_map,
-        mbr_source,
-        rescore_decoys,
-        rescore_decoy_psms,
-        row_scores,
-        dia_replaced,
-        dia_precursor_ids,
-    } = rescoring;
-    finish::after_rescoring(finish::AfterRescoring {
+    finish::write_pin_and_rescore(finish::PinAndRescore {
         cli,
+        t_total,
         spectrum_path,
         bench_mode,
         quant,
+        predictors,
         run_ends,
+        dia_ms1,
         measurer,
         file_calibrations,
         spectra,
         queues,
         target_db,
-        ipf_scoring,
-        run_stats,
-        fact_rows,
-        dia_pass2,
-        rerank_dropped,
-        fdr_threshold,
-        proteoform_fdr,
-        use_native,
-        mbr_decoys,
+        scratch_dir,
         original_spectrum_paths,
         output_pin_path,
         report_base,
@@ -873,13 +699,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fixed_terminal_mods,
         scorer: &scorer,
         is_mgf,
-        rescore_map,
-        mbr_source,
-        rescore_decoys,
-        rescore_decoy_psms,
-        row_scores,
-        dia_replaced,
-        dia_precursor_ids,
+        t_phase,
+        refine_merged,
+        ipf_scoring,
         pin_candidates,
         pin_index,
     })

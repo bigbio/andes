@@ -1,6 +1,7 @@
 use super::*;
 use model::{AminoAcidSetBuilder, Protein, ProteinDb};
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 fn spectrum(activation: Option<ActivationMethod>) -> Spectrum {
     Spectrum {

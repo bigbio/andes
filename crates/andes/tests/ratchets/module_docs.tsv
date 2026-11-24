@@ -14,7 +14,6 @@ crates/andes/src/bin/andes/models.rs	1
 crates/andes/src/bin/andes/monoisotopic.rs	1
 crates/andes/src/bin/andes/optimize.rs	1
 crates/andes/src/bin/andes/quant/mbr.rs	1
-crates/andes/src/bin/andes/quant/run/labels.rs	1
 crates/andes/src/bin/andes/quant/run/ms1.rs	1
 crates/andes/src/bin/andes/quant/tmt/mbr.rs	1
 crates/andes/src/bin/andes/sdrf.rs	1

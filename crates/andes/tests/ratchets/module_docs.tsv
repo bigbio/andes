@@ -193,7 +193,6 @@ crates/scoring/src/psm/error.rs	1
 crates/scoring/src/psm/ions.rs	1
 crates/scoring/src/psm/rank.rs	1
 crates/scoring/src/psm/score.rs	1
-crates/scoring/src/psm/spectrum.rs	1
 crates/scoring/src/psm/strong.rs	1
 crates/scoring/src/rt.rs	1
 crates/scoring/src/testutil.rs	1

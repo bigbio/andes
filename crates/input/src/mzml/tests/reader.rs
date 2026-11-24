@@ -270,11 +270,6 @@ fn parses_real_test_fixture() {
     let fixture =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/tiny.pwiz.mzML");
 
-    if !fixture.exists() {
-        eprintln!("SKIP: fixture not found at {}", fixture.display());
-        return;
-    }
-
     let file = std::fs::File::open(&fixture).expect("failed to open tiny.pwiz.mzML");
     let spectra: Vec<Spectrum> = MzMLReader::new(std::io::BufReader::new(file))
         .map(|r| r.expect("parse error"))

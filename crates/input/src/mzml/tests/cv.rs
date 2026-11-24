@@ -1,6 +1,5 @@
 //! Tests of the controlled-vocabulary helpers.
 
-use super::*;
 use crate::mzml::cv::is_minute_unit;
 
 #[test]

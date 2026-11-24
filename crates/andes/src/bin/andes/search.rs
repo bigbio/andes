@@ -1868,6 +1868,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &spectra,
                     &mut map,
                     &rescore_decoy_psms,
+                    cli.dia_interference,
                 )?;
                 pass1_q = n;
                 pass1_best = best;

@@ -741,7 +741,7 @@ pub(crate) fn finalize(
         let decoys =
             output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", dpath.display()))?;
         drop(text);
-        let ((nt, nd, n01), _) = crate::dia::precursor_q(&pin, &[], &mut map, &decoys)?;
+        let ((nt, nd, n01), _) = crate::dia::precursor_q(&pin, &[], &mut map, &decoys, None)?;
         log::info!(
             target: "rescore",
             "run {s}: precursor-level q (DIA): {nt} target and {nd} decoy precursors, {n01} at \

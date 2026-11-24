@@ -76,6 +76,7 @@ const HIDDEN: &[&str] = &[
     "xl_rescore_inter",
     "optimize_sample",
     "rescore_memory_gb",
+    "dia_interference",
 ];
 
 #[test]

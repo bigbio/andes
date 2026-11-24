@@ -22,9 +22,9 @@ use super::{
     PROTEOFORM_FDR_FLOOR,
 };
 use crate::cli::parse::{
-    parse_charge_range, parse_isotope_error_range, parse_non_negative, parse_non_negative_f32,
-    parse_open_search_delta, parse_positive_tol, parse_precursor_tol, parse_unit_fraction,
-    parse_xl,
+    parse_charge_range, parse_dia_interference, parse_isotope_error_range, parse_non_negative,
+    parse_non_negative_f32, parse_open_search_delta, parse_positive_tol, parse_precursor_tol,
+    parse_unit_fraction, parse_xl,
 };
 
 /// The protein database options shared by the search, `andes inference` and
@@ -391,6 +391,21 @@ pub(crate) struct SearchArgs {
     #[arg(long, value_name = "PPM", default_value = "5", hide_short_help = true,
           help_heading = H_MODES)]
     pub(crate) dia_ms1_tol_ppm: f64,
+
+    /// --dia --rescore: drop precursors whose fragments a stronger co-eluting precursor explains
+    ///
+    /// `F:DRT`, e.g. `0.4:4`, or `auto`. Before the precursor-level q, a precursor leaves the
+    /// target-decoy competition (its rows get q = 1) when a higher-scoring precursor of any label,
+    /// at precursor q <= 0.2, has its best row in the same isolation window and an overlapping
+    /// mobility slice within DRT seconds and holds at least F of its b/y fragment m/z. Labels are
+    /// not used. `auto` estimates F and DRT from the run: pairs 60-200 s apart give the chance
+    /// fragment share, DRT is where the excess share of closer pairs fades, and F is the smallest
+    /// share whose chance pairs are at most 1% of those observed within DRT. When co-eluting pairs
+    /// share fragments little more than chance, `auto` removes nothing. Off by default; measured
+    /// on diaPASEF (docs/benchmarks/dia/README.md).
+    #[arg(long, value_name = "F:DRT|auto", value_parser = parse_dia_interference,
+          hide = true, help_heading = H_MODES)]
+    pub(crate) dia_interference: Option<crate::dia::Interference>,
 
     /// Second pass for further modifications (oxidation, deamidation, ...) over the confident proteins
     ///

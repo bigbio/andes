@@ -161,6 +161,28 @@ pub(crate) fn parse_positive_tol(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
+/// --dia-interference: `auto`, or `F:DRT` with a shared-fragment fraction in (0, 1] and an RT
+/// window >= 0 s.
+pub(crate) fn parse_dia_interference(s: &str) -> Result<crate::dia::Interference, String> {
+    if s.trim().eq_ignore_ascii_case("auto") {
+        return Ok(crate::dia::Interference::Auto);
+    }
+    let err = || {
+        format!(
+            "{s}: expected auto or F:DRT, a fragment fraction in (0, 1] and seconds, e.g. 0.4:4"
+        )
+    };
+    let (f, drt) = s.split_once(':').ok_or_else(err)?;
+    let (f, drt): (f64, f64) = (
+        f.trim().parse().map_err(|_| err())?,
+        drt.trim().parse().map_err(|_| err())?,
+    );
+    if !(f > 0.0 && f <= 1.0 && drt >= 0.0 && drt.is_finite()) {
+        return Err(err());
+    }
+    Ok(crate::dia::Interference::Fixed(f, drt))
+}
+
 /// The crosslinker items of an `--xl` value: split at `;`, trimmed, empty items dropped.
 pub(crate) fn split_xl(s: &str) -> Vec<&str> {
     s.split(';').map(str::trim).filter(|x| !x.is_empty()).collect()

@@ -1,8 +1,20 @@
 //! Tests of the value parsers' domain checks (ranges, tolerances, fractions).
 
-use crate::cli::parse::{parse_non_negative_f32, parse_positive_tol};
+use crate::cli::parse::{parse_dia_interference, parse_non_negative_f32, parse_positive_tol};
 
 use super::*;
+
+#[test]
+fn dia_interference_takes_auto_or_a_fraction_and_seconds() {
+    use crate::dia::Interference::{Auto, Fixed};
+    assert_eq!(parse_dia_interference("0.4:4"), Ok(Fixed(0.4, 4.0)));
+    assert_eq!(parse_dia_interference(" 1 : 0 "), Ok(Fixed(1.0, 0.0)));
+    assert_eq!(parse_dia_interference("auto"), Ok(Auto));
+    assert_eq!(parse_dia_interference("AUTO"), Ok(Auto));
+    for bad in ["0.4", "0:4", "1.5:4", "0.4:-1", "0.4:", "a:4", "auto2", "0.4:inf"] {
+        assert!(parse_dia_interference(bad).is_err(), "{bad}");
+    }
+}
 
 #[test]
 fn charge_range_rejects_zero_and_out_of_bounds() {

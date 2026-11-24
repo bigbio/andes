@@ -282,6 +282,7 @@ pub const PARAMS: &[ParamSpec] = &[
     row("xl_oracle", Section::CliOnly, "xl_oracle", Unit::Count, None, Unset::ClapDefault, None),
     row("xl_rescore_intra", Section::CliOnly, "xl_rescore_intra", Unit::None, None, Unset::Off, None),
     row("xl_rescore_inter", Section::CliOnly, "xl_rescore_inter", Unit::None, None, Unset::Off, None),
+    row("dia_interference", Section::CliOnly, "dia_interference", Unit::None, None, Unset::Off, None),
     row("cal_min_spec_keys", Section::CliOnly, "cal_min_spec_keys", Unit::Count, None, Unset::Auto("10000"), None),
     row("precursor_mono_dump", Section::CliOnly, "precursor_mono_dump", Unit::Path, None, Unset::Off, None),
     row("glyco_scans", Section::CliOnly, "glyco_scans", Unit::Path, None, Unset::Off, None),

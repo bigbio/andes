@@ -470,7 +470,11 @@ fn rows_into<F>(
     let mut jobs = Vec::new();
     for (&i, (rows, counterparts, _)) in ids.iter().zip(&planned) {
         let meta = &lib.meta[lib.entries[i].precursor as usize];
-        for probe in rows.iter().map(|(_, p)| p).chain(counterparts.iter().map(|(_, p)| p)) {
+        for probe in rows
+            .iter()
+            .map(|(_, p)| p)
+            .chain(counterparts.iter().map(|(_, p)| p))
+        {
             let job = FitJob {
                 probe: *probe,
                 charge: meta.charge.max(1),
@@ -710,7 +714,10 @@ fn rt_pool(lib: &Library, run: u16) -> quant::decoys::RtPool {
             .filter_map(|e| {
                 let meta = lib.meta.get(e.precursor as usize)?;
                 let (t, _) = lib.alignment.predict(e.precursor, run)?;
-                Some(((meta.mz - model::mass::PROTON) * meta.charge.max(1) as f64, t))
+                Some((
+                    (meta.mz - model::mass::PROTON) * meta.charge.max(1) as f64,
+                    t,
+                ))
             })
             .collect(),
     )

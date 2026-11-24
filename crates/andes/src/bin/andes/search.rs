@@ -5,6 +5,7 @@
 mod calibrate;
 mod collect;
 mod files;
+mod finish;
 mod outputs;
 mod rescored;
 mod rescoring;
@@ -29,8 +30,8 @@ use collect::quant_collector;
 use files::{search_file, FileInputs, FileOutputs};
 pub(crate) use outputs::load_claim_database;
 use outputs::{
-    infer_and_write_groups, release_at_exit, write_filtered_tsv, write_open_offsets,
-    write_proteoform_table, write_qpx_bundle, write_search_tsv, ClaimDatabase, PsmTables,
+    infer_and_write_groups, write_filtered_tsv, write_open_offsets, write_qpx_bundle,
+    ClaimDatabase, PsmTables,
 };
 use rescored::{refine_rescored, RescoredInputs};
 use resolve::{
@@ -1063,132 +1064,26 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    let omitted_psms = match &quant {
-        Some(_) => output::omitted_psm_rows(
-            &spectra,
-            &queues,
-            &pin_candidates,
-            rescore_map.as_ref(),
-            rescore_decoys.as_ref(),
-            &knockoff_rows,
-        )
-        .map_err(|e| format!("quant: {e}"))?,
-        None => std::collections::HashSet::new(),
-    };
-    if let Some(ref mut map) = rescore_map {
-        map.retain(|id, _| !knockoff_rows.contains(id));
-    }
-
-    let qpx_groups = protein_groups
-        .as_ref()
-        .map(|inf| crate::quant::ProteinGroups {
-            inf,
-            max_q: cli.protein_fdr.unwrap_or(0.01),
-        });
-    let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant::run::TmtMbrInput {
-        decoys: &mbr_decoys,
-        source: &mbr_source,
-        library_fdr: cli.mbr_donor_fdr(),
-        accept_q: cli.quant_transfer_fdr(),
-        wrong_log2: cli.mbr_wrong_log2,
-    });
-    let quant_summary = match &quant {
-        Some(q) => Some(crate::quant::run::run_quant(
-            q,
-            &spectra,
-            &queues,
-            &pin_candidates,
-            &pin_index,
-            rescore_map.as_ref(),
-            &omitted_psms,
-            cutoffs.as_ref(),
-            &report_base,
-            cli.output_parquet.as_deref(),
-            qpx_groups.as_ref(),
-            tmt_mbr_input.as_ref(),
-            (cli.mbr && cli.label.is_some()).then_some(&mbr_decoys),
-        )?),
-        None => None,
-    };
-
-    if let (Some(map), Some(cutoffs), true) = (
-        rescore_map.as_ref(),
-        cutoffs.as_ref(),
-        pin_index.has_alternative_entries,
-    ) {
-        write_proteoform_table(
-            map,
-            &pin_index,
-            cutoffs,
-            quant_summary.as_ref(),
-            cli.protein_fdr.zip(protein_groups.as_ref()),
-            &report_base,
-        );
-    }
-
-    let mbr_job = if cli.mbr && cli.tmt.is_none() && cli.label.is_none() {
-        let (Some(dir), Some(map)) = (cli.quant_dir.clone(), rescore_map.as_ref()) else {
-            return Err("--mbr needs --quant-dir and rescoring".into());
-        };
-        let stems: Vec<String> = spectrum_paths
-            .iter()
-            .map(|p| crate::quant::run::run_stem(p))
-            .collect();
-        let scores = crate::quant::rescore_scores(map, &mbr_decoys, &mbr_source)?;
-        let ep = crate::quant::evidence_params(cli.lfq_tol)?;
-        let (donor_q, donor_pep) = quant
-            .as_ref()
-            .map(|q| (q.settings.psm_fdr, q.settings.pep_cap))
-            .ok_or("--mbr needs --lfq")?;
-        Some((dir, stems, scores, ep, donor_q, donor_pep))
-    } else {
-        None
-    };
-    drop(mbr_decoys);
-
-    if bench_mode {
-        log::info!(target: "bench", "skipping TSV write.");
-    } else if let Some(ref tsv_path) = cli.output_tsv {
-        write_search_tsv(
-            tsv_path,
-            &PsmTables {
-                spectra: &spectra,
-                queues: &queues,
-                candidates: &pin_candidates,
-                params: &params,
-                index: &pin_index,
-            },
-            spectrum_paths,
-            is_mgf,
-        )?;
-    }
-
-    crate::memory::mark_stage("outputs");
-    let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
-        release_at_exit(pin_candidates);
-        return Ok(());
-    };
-    drop(spectra);
-    drop(queues);
-    drop(pin_candidates);
-    drop(pin_index);
-    drop(quant);
-    drop(rescore_map);
-    drop(target_db);
-    crate::quant::run_in_process(
-        &dir,
-        &stems,
-        scores,
-        &ep,
-        cli.mbr_donor_fdr(),
-        donor_q,
-        donor_pep,
-        cli.quant_transfer_fdr(),
-        &report_base.with_extension(""),
-        cli.output_parquet.as_deref(),
-        qpx_groups.as_ref(),
-    )?;
-    Ok(())
+    finish::finish_outputs(finish::Finish {
+        cli,
+        bench_mode,
+        quant,
+        spectra,
+        queues,
+        target_db,
+        mbr_decoys,
+        report_base,
+        params,
+        is_mgf,
+        rescore_map,
+        mbr_source,
+        rescore_decoys,
+        pin_candidates,
+        pin_index,
+        knockoff_rows,
+        protein_groups,
+        cutoffs,
+    })
 }
 
 /// Spectra per chunk handed from the reader to the search threads.

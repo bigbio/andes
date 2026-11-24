@@ -129,6 +129,25 @@ pub(super) struct FileOutputs {
     pub(super) mono_dump: Option<MonoDump>,
 }
 
+impl FileOutputs {
+    /// Empty outputs for a search of `n_files` files, writing the monoisotopic dump to `mono_dump`.
+    pub(super) fn new(n_files: usize, mono_dump: Option<MonoDump>) -> Self {
+        FileOutputs {
+            all_spectra: Vec::new(),
+            all_queues: Vec::new(),
+            run_ends: Vec::with_capacity(n_files),
+            dia_ms1: Vec::new(),
+            xl_ms3: Vec::new(),
+            xl_snapped: 0,
+            xl_snap_files: 0,
+            parse_stats: ParseStats::default(),
+            mono_table: Vec::new(),
+            mono_stats: MonoStats::default(),
+            mono_dump,
+        }
+    }
+}
+
 /// Reads, searches and records one input file of `run`: its spectra and queues are appended to
 /// `outputs`, its quantification scans go to `quant`.
 pub(super) fn search_file<'a>(

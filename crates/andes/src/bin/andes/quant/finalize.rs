@@ -14,10 +14,11 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use output::mbr::{write_mbr_validation, Accepted, EvidenceType, MbrValidation, VALIDATION_Q};
+use quant::align::RunMap;
 use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::library::Library;
-use quant::normalize::{fit as fit_normalization, NormCell, NormParams};
+use quant::normalize::{fit as fit_normalization, NormCell, NormParams, RunNormalization};
 use quant::shared;
 
 use crate::quant::mbr::{
@@ -26,7 +27,8 @@ use crate::quant::mbr::{
 };
 use crate::transfers::{
     member_seed, row_unit, sample_hash, train_bagged_folds, train_folds, transfer_train_params,
-    Estimate, FdrCounts, FdrRow, FoldScores, QValues, TrainingSample, TRANSFER_FEATURES,
+    Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample,
+    TRANSFER_FEATURES,
 };
 #[cfg(test)]
 pub(crate) use extract::ExtractRuns;
@@ -376,162 +378,19 @@ pub(crate) fn finalize_stream(
     let all_summaries = donor_summaries(lib, source, bounds, trace_fraction, limits, dir)?;
     let summaries = &all_summaries;
 
-    let t0 = Instant::now();
-    let members = limits.transfer_models.max(1);
-    let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
-        .map(|m| {
-            Mutex::new(TrainingSample::new(
-                limits.max_train_rows,
-                member_seed(seed, m),
-            ))
-        })
-        .collect();
-    let i_sample: Mutex<TrainingSample<Key>> =
-        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
-    let w_sample: Mutex<TrainingSample<Key>> =
-        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
-    let w_seen = AtomicUsize::new(0);
-    let no_features = AtomicUsize::new(0);
-    let identified_no_features = AtomicUsize::new(0);
-    let rows_read = AtomicUsize::new(0);
-    for_each_block(
+    let inputs = StreamInputs {
         source,
-        false,
         bounds,
-        |_| (),
-        |_, chunk, first, rows| {
-            rows_read.fetch_add(rows.len(), Ordering::Relaxed);
-            let ctx = BlockContext::new(rows, maps)?;
-            let shapes = BlockShapes {
-                summaries,
-                own: &ctx.own,
-            };
-            let feats = table_features(rows, &idx, &shapes, maps, |t: Table| t != Table::Pseudo);
-            let (mut t_rows, mut i_rows) = (Vec::new(), Vec::new());
-            for (i, t, fam, x) in feats {
-                let Some(x) = x else {
-                    match t {
-                        Table::Identified => &identified_no_features,
-                        _ => &no_features,
-                    }
-                    .fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                let r = &rows[i];
-                let item = (
-                    (chunk as u32, first + i as u64),
-                    row_unit(r.precursor, r.run),
-                    FdrRow {
-                        precursor: r.precursor,
-                        is_decoy: fam != 0,
-                        family: fam,
-                        x,
-                    },
-                );
-                match t {
-                    Table::Identified => i_rows.push(item),
-                    _ => t_rows.push(item),
-                }
-            }
-            for sample in &t_samples {
-                let mut s = sample.lock().expect("training sample lock");
-                for (k, u, row) in &t_rows {
-                    if s.wants(*u) {
-                        s.push(*k, *u, row.clone());
-                    } else {
-                        s.skip();
-                    }
-                }
-            }
-            let mut s = i_sample.lock().expect("training sample lock");
-            for (k, u, row) in i_rows {
-                s.push(k, u, row);
-            }
-            drop(s);
-            let mut w_rows = Vec::new();
-            for (i, r) in rows.iter().enumerate() {
-                let Some((y, x)) = pseudo_example(r, &ctx, &idx) else {
-                    continue;
-                };
-                w_rows.push((
-                    (chunk as u32, first + i as u64),
-                    row_unit(r.precursor, r.run),
-                    FdrRow {
-                        precursor: r.precursor,
-                        is_decoy: y,
-                        family: 0,
-                        x,
-                    },
-                ));
-            }
-            w_seen.fetch_add(w_rows.len(), Ordering::Relaxed);
-            let mut s = w_sample.lock().expect("training sample lock");
-            for (k, u, row) in w_rows {
-                s.push(k, u, row);
-            }
-            Ok(())
-        },
-        |_, ()| Ok(()),
-    )?;
-    summary.no_features = no_features.into_inner();
-    summary.identified_no_features = identified_no_features.into_inner();
-    let t_samples: Vec<TrainingSample<Key>> = t_samples
-        .into_iter()
-        .map(|s| s.into_inner().expect("training sample lock"))
-        .collect();
-    let i_sample = i_sample.into_inner().expect("training sample lock");
-    for (name, s) in [
-        ("transfer", &t_samples[0]),
-        ("identified quality", &i_sample),
-    ] {
-        let (seen, kept, share) = s.stats();
-        if kept < seen {
-            log::debug!(
-                target: "mbr",
-                "{name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
-            );
-        }
-    }
-    let t1 = Instant::now();
-    let t_sets: Vec<Vec<FdrRow>> = t_samples
-        .into_iter()
-        .map(TrainingSample::into_items)
-        .collect();
-    let i_rows = i_sample.into_items();
-    let w_rows = w_sample
-        .into_inner()
-        .expect("training sample lock")
-        .into_items();
-    let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
-    let (t_models, i_models) = rayon::join(
-        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
-        || train_folds(&i_rows, seed),
-    );
-    drop(t_refs);
-    drop((t_sets, i_rows));
-    let w_models = train_folds(&w_rows, seed);
-    log::debug!(
-        target: "mbr",
-        "wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
-        w_rows.len(),
-        100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
-        w_models.failed_folds.len()
-    );
-    for f in &w_models.failed_folds {
-        log::warn!(target: "mbr", "wrong-peak model fold without a model: {f}");
-    }
-    drop(w_rows);
-    log::debug!(
-        target: "finalize",
-        "training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
-        rows_read.into_inner(),
-        (t1 - t0).as_secs_f64(),
-        secs(t1),
-        t_models.members()
-    );
+        idx: &idx,
+        maps,
+        summaries,
+        limits,
+        seed,
+    };
+    let (t_models, i_models, w_models, w_seen) = train_transfer_models(&inputs, &mut summary)?;
 
     let t0 = Instant::now();
-    let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
+    let w_stride = (w_seen / WRONG_CALIBRATION_ROWS + 1) as u64;
     let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
     let strata = idx.strata();
     let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed, strata);
@@ -664,16 +523,93 @@ pub(crate) fn finalize_stream(
 
     let t0 = Instant::now();
     let shared_feature = shared::Model::shipped();
-    let count_decoy = |v: &mut MbrValidation, q: Option<f64>, f: usize| {
-        let Some(q) = q else { return };
-        v.decoy_transfers[f] += 1;
-        for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
-            .into_iter()
-            .zip(&thresholds)
-        {
-            a.decoys[f] += usize::from(q <= t);
-        }
+    let scoring = OutputScoring {
+        lib,
+        dir,
+        shared_feature,
+        t_models: &t_models,
+        i_models: &i_models,
+        w_models: &w_models,
+        wrong_cal: wrong_cal.as_ref(),
+        fdr: &fdr,
+        id_fdr: &id_fdr,
+        norm: &norm,
+        width_weights: &width_weights,
+        thresholds,
+        mbr_fdr,
+        quant_feature_fdr,
     };
+    let (totals, paths) = write_output_rows(&inputs, &scoring)?;
+    let identity_entries = lib.entries.iter().filter(|e| e.identity_decoy).count();
+    let mut v = MbrValidation {
+        q_threshold: mbr_fdr,
+        quant_feature_threshold: quant_feature_fdr,
+        target_entries: lib.entries.len() - identity_entries,
+        identity_entries,
+        ..MbrValidation::default()
+    };
+    v.add_counts(&totals);
+    let t1 = Instant::now();
+    log_summary(
+        stems,
+        &v,
+        &summary,
+        &fdr,
+        &id_fdr,
+        &norm,
+        mbr_fdr,
+        quant_feature_fdr,
+    );
+    summary.fdr = fdr.counts.clone();
+    summary.identified_fdr = id_fdr.counts.clone();
+    drop((all_summaries, t_models, i_models, norm, fdr, id_fdr));
+
+    summary.rows_written = write_merged(&paths, dir, lib, stems, params.mbr_path, on_features)?;
+    write_mbr_validation(params.validation_path, &v)?;
+    drop(tmp);
+    log::debug!(
+        target: "finalize",
+        "output rows {:.1} s, merged outputs {:.1} s",
+        (t1 - t0).as_secs_f64(),
+        secs(t1)
+    );
+    summary.validation = v;
+    Ok(summary)
+}
+
+/// The per-run output rows of one extract block in the output pass, with the partial checks
+/// and the measurement-q pool.
+type OutputState = (RunOutput, Option<Vec<f32>>, usize);
+
+/// What the output pass reads besides the block inputs: the library and temp folder, the
+/// shared-feature model, the fold models, the wrong-peak calibration, the two q-value step
+/// functions, the run normalisation and width weights, and the thresholds.
+#[derive(Clone, Copy)]
+struct OutputScoring<'a> {
+    lib: &'a Library,
+    dir: &'a Path,
+    shared_feature: &'a shared::Model,
+    t_models: &'a FoldModels,
+    i_models: &'a FoldModels,
+    w_models: &'a FoldModels,
+    wrong_cal: Option<&'a WrongCalibration>,
+    fdr: &'a QValues,
+    id_fdr: &'a QValues,
+    norm: &'a RunNormalization,
+    width_weights: &'a [f64],
+    thresholds: [f64; 2],
+    mbr_fdr: f64,
+    quant_feature_fdr: Option<f64>,
+}
+
+/// The output pass: every block's rows are scored, typed and written to a sorted part file;
+/// returns the validation counts summed over blocks and the part paths in block order.
+fn write_output_rows(
+    inputs: &StreamInputs<'_>,
+    scoring: &OutputScoring<'_>,
+) -> Result<(MbrValidation, Vec<PathBuf>), String> {
+    let StreamInputs { source, bounds, .. } = *inputs;
+    let dir = scoring.dir;
     let parts: Mutex<Vec<(usize, PathBuf)>> = Mutex::new(Vec::new());
     let totals: Mutex<MbrValidation> = Mutex::new(MbrValidation::default());
     for_each_block(
@@ -681,209 +617,7 @@ pub(crate) fn finalize_stream(
         false,
         bounds,
         |_| (RunOutput::default(), None, 0usize),
-        |(out, cache, at), chunk, _, rows| {
-            if cache.is_none() {
-                *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
-            }
-            let cache = cache.as_deref().unwrap_or_default();
-            let ctx = BlockContext::new(rows, maps)?;
-            let shapes = BlockShapes {
-                summaries,
-                own: &ctx.own,
-            };
-            let v = &mut out.validation;
-            let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
-            for (i, r) in rows.iter().enumerate() {
-                let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
-                    continue;
-                };
-                let s = *cache.get(*at).ok_or_else(|| {
-                    format!("{}: fewer cached scores than rows", source.name(chunk))
-                })?;
-                *at += 1;
-                let fam = idx.packed(r, t, fam);
-                if s.is_finite() {
-                    scored[i] = Some((fam, Some(s)));
-                } else if t == Table::Identified && s == NO_SCORE {
-                    scored[i] = Some((fam, None));
-                }
-            }
-            for_each_scored(
-                rows,
-                &idx,
-                &shapes,
-                maps,
-                &t_models,
-                &i_models,
-                |t: Table| t == Table::Pseudo,
-                |i, _, fam, s| {
-                    scored[i] = Some((fam, s));
-                },
-            );
-            let q_of = |q: &QValues, e: Estimate, i: usize| {
-                scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
-            };
-            let reported = |r: &ExtractRow| {
-                let (k, trace) = quantity_rule(summaries, r.precursor);
-                r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
-                    whole_pattern(
-                        reported_quantity(e, k, trace, row_width_weight(r, &width_weights)),
-                        lib.meta[r.precursor as usize].isotope_share,
-                    )
-                })
-            };
-            let p_wrong = wrong_peak_probabilities(rows, &idx, &w_models, wrong_cal.as_ref());
-            for (i, r) in rows.iter().enumerate() {
-                if idx.is_identity(r.precursor) {
-                    if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
-                        count_decoy(v, q_of(&fdr, Estimate::Pooled, i), 2);
-                    }
-                    continue;
-                }
-                if r.kind != Hypothesis::Target {
-                    if r.role == Role::Transfer {
-                        let f = family(r.kind) as usize;
-                        count_decoy(v, q_of(&fdr, Estimate::Pooled, i), f - 1);
-                        if let Some(m) = &r.ms2 {
-                            v.ms2_rows[f] += 1;
-                            v.ms2_supported[f] += usize::from(m.supports());
-                        }
-                    }
-                    continue;
-                }
-                let e = r.evidence.as_ref();
-                let quantity = reported(r);
-                let quantity_normalized = quantity
-                    .zip(e)
-                    .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
-                let (evidence_type, transfer_q, quant_q) = match r.role {
-                    Role::Identified => {
-                        let q = q_of(&id_fdr, Estimate::Pooled, i);
-                        v.identified += 1;
-                        v.identified_scored += usize::from(q.is_some());
-                        v.identified_q01 += usize::from(q.is_some_and(|q| q <= VALIDATION_Q));
-                        let t = match quant_feature_fdr {
-                            Some(t) if !q.is_some_and(|q| q <= t) => {
-                                v.identified_below_threshold += 1;
-                                EvidenceType::IdentifiedBelowThreshold
-                            }
-                            _ => EvidenceType::Identified,
-                        };
-                        (t, None, q)
-                    }
-                    Role::Transfer => {
-                        let q = q_of(&fdr, Estimate::Pooled, i);
-                        v.transfers += 1;
-                        v.transfers_scored += usize::from(q.is_some());
-                        let ok = |e: Estimate, t: f64| {
-                            usize::from(
-                                scored[i]
-                                    .is_some_and(|(fam, s)| fdr.accepts(e, r.precursor, fam, s, t)),
-                            )
-                        };
-                        for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
-                            .into_iter()
-                            .zip(&thresholds)
-                        {
-                            a.pooled += usize::from(q.is_some_and(|q| q <= t));
-                            a.mass_only += ok(Estimate::MassOnly, t);
-                            a.rt_only += ok(Estimate::RtOnly, t);
-                            a.wrong_peak_only += ok(Estimate::WrongPeak, t);
-                        }
-                        let supported = r.ms2.is_some_and(|m| m.supports());
-                        if let Some(m) = &r.ms2 {
-                            v.ms2_rows[0] += 1;
-                            v.ms2_supported[0] += usize::from(m.supports());
-                        }
-                        let acc = transfer_accepted(q, mbr_fdr, quantity.is_some());
-                        let downgrade = acc
-                            && q.is_some_and(|q| {
-                                shared_feature.is_shared(&shared::Row {
-                                    claim: &r.claim,
-                                    shared: r.shared.as_deref(),
-                                    ms2_supported: supported,
-                                    transfer_q: q,
-                                    llr: e.map_or(0.0, |e| e.llr),
-                                    width: e.map_or(0.0, |e| e.w),
-                                })
-                            });
-                        let t = match (acc, supported, downgrade) {
-                            (true, _, true) => {
-                                v.shared_feature += 1;
-                                EvidenceType::SharedFeature
-                            }
-                            (true, true, false) => {
-                                v.transfer_ms2 += 1;
-                                EvidenceType::TransferMs2
-                            }
-                            (true, false, false) => EvidenceType::TransferMs1,
-                            (false, _, _) => EvidenceType::BelowThreshold,
-                        };
-                        (t, q, q)
-                    }
-                    Role::PseudoTransfer => {
-                        let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
-                        v.pseudo_transfers += 1;
-                        if let Some(m) = &r.ms2 {
-                            v.ms2_pseudo_rows += 1;
-                            v.ms2_pseudo_supported += usize::from(m.supports());
-                        }
-                        v.pseudo_scored += usize::from(q.is_some());
-                        let wrong = e
-                            .zip(ctx.identified.get(&(r.precursor, r.run)))
-                            .and_then(|(p, id)| mismatch(p, id));
-                        if let Some(m) = wrong {
-                            v.wrong_peak_pairs += 1;
-                            v.wrong_peak += usize::from(m.apex);
-                            v.wrong_measurement += usize::from(m.wrong());
-                        }
-                        for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
-                            .into_iter()
-                            .zip(&thresholds)
-                        {
-                            if !q.is_some_and(|q| q <= t) {
-                                continue;
-                            }
-                            a.pseudo += 1;
-                            if let Some(m) = wrong {
-                                a.pairs += 1;
-                                a.wrong_peak += usize::from(m.apex);
-                                a.wrong_measurement += usize::from(m.wrong());
-                            }
-                        }
-                        continue;
-                    }
-                };
-                if r.role == Role::Transfer {
-                    out.wrong.push((out.rows.len(), p_wrong[i]));
-                }
-                out.rows.push(OutRow {
-                    precursor: r.precursor,
-                    run: r.run,
-                    evidence_type,
-                    quantity: quantity.map(|q| q.0),
-                    quantity_se: quantity.map(|q| q.1),
-                    quantity_normalized,
-                    transfer_q,
-                    quant_q,
-                    apex_rt_s: e.map(|e| e.t0),
-                    measurement_q: None,
-                    library_q: r.library_q,
-                    mass_err_ppm: e.map(|e| e.mass_err_ppm),
-                    claim: if r.role == Role::Transfer {
-                        r.claim
-                    } else {
-                        Claim::default()
-                    },
-                    transfer_pep: if r.role == Role::Transfer {
-                        scored[i].and_then(|(fam, s)| fdr.pep(r.precursor, fam, s))
-                    } else {
-                        None
-                    },
-                });
-            }
-            Ok(())
-        },
+        |state, chunk, _, rows| output_block(inputs, scoring, state, chunk, rows),
         |chunk, (mut out, cache, at)| {
             if cache.is_some_and(|c| c.len() != at) {
                 return Err(format!(
@@ -937,44 +671,441 @@ pub(crate) fn finalize_stream(
             Ok(())
         },
     )?;
-    let identity_entries = lib.entries.iter().filter(|e| e.identity_decoy).count();
-    let mut v = MbrValidation {
-        q_threshold: mbr_fdr,
-        quant_feature_threshold: quant_feature_fdr,
-        target_entries: lib.entries.len() - identity_entries,
-        identity_entries,
-        ..MbrValidation::default()
-    };
-    v.add_counts(&totals.into_inner().expect("validation lock"));
     let mut parts = parts.into_inner().expect("parts lock");
     parts.sort_unstable();
     let paths: Vec<PathBuf> = parts.into_iter().map(|(_, p)| p).collect();
-    let t1 = Instant::now();
-    log_summary(
-        stems,
-        &v,
-        &summary,
-        &fdr,
-        &id_fdr,
-        &norm,
+    Ok((totals.into_inner().expect("validation lock"), paths))
+}
+
+/// One block of the output pass: reads the block's cached scores, scores the pseudo-transfers,
+/// and appends a typed output row per target row to `state`.
+fn output_block(
+    inputs: &StreamInputs<'_>,
+    scoring: &OutputScoring<'_>,
+    state: &mut OutputState,
+    chunk: usize,
+    rows: &[ExtractRow],
+) -> Result<(), String> {
+    let StreamInputs {
+        source,
+        idx,
+        maps,
+        summaries,
+        ..
+    } = *inputs;
+    let OutputScoring {
+        lib,
+        dir,
+        shared_feature,
+        t_models,
+        i_models,
+        w_models,
+        wrong_cal,
+        fdr,
+        id_fdr,
+        norm,
+        width_weights,
+        thresholds,
         mbr_fdr,
         quant_feature_fdr,
+    } = *scoring;
+    let (out, cache, at) = state;
+    let count_decoy = |v: &mut MbrValidation, q: Option<f64>, f: usize| {
+        let Some(q) = q else { return };
+        v.decoy_transfers[f] += 1;
+        for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
+            .into_iter()
+            .zip(&thresholds)
+        {
+            a.decoys[f] += usize::from(q <= t);
+        }
+    };
+    if cache.is_none() {
+        *cache = Some(read_cached_scores(&cached_scores_path(dir, chunk))?);
+    }
+    let cache = cache.as_deref().unwrap_or_default();
+    let ctx = BlockContext::new(rows, maps)?;
+    let shapes = BlockShapes {
+        summaries,
+        own: &ctx.own,
+    };
+    let v = &mut out.validation;
+    let mut scored: Vec<Option<(u32, Option<f32>)>> = vec![None; rows.len()];
+    for (i, r) in rows.iter().enumerate() {
+        let Some((t @ (Table::Transfer | Table::Identified), fam)) = idx.table(r) else {
+            continue;
+        };
+        let s = *cache
+            .get(*at)
+            .ok_or_else(|| format!("{}: fewer cached scores than rows", source.name(chunk)))?;
+        *at += 1;
+        let fam = idx.packed(r, t, fam);
+        if s.is_finite() {
+            scored[i] = Some((fam, Some(s)));
+        } else if t == Table::Identified && s == NO_SCORE {
+            scored[i] = Some((fam, None));
+        }
+    }
+    for_each_scored(
+        rows,
+        idx,
+        &shapes,
+        maps,
+        t_models,
+        i_models,
+        |t: Table| t == Table::Pseudo,
+        |i, _, fam, s| {
+            scored[i] = Some((fam, s));
+        },
     );
-    summary.fdr = fdr.counts.clone();
-    summary.identified_fdr = id_fdr.counts.clone();
-    drop((all_summaries, t_models, i_models, norm, fdr, id_fdr));
+    let q_of = |q: &QValues, e: Estimate, i: usize| {
+        scored[i].and_then(|(fam, s)| q.q(e, rows[i].precursor, fam, s))
+    };
+    let reported = |r: &ExtractRow| {
+        let (k, trace) = quantity_rule(summaries, r.precursor);
+        r.evidence.as_ref().filter(|e| e.amplitude > 0.0).map(|e| {
+            whole_pattern(
+                reported_quantity(e, k, trace, row_width_weight(r, width_weights)),
+                lib.meta[r.precursor as usize].isotope_share,
+            )
+        })
+    };
+    let p_wrong = wrong_peak_probabilities(rows, idx, w_models, wrong_cal);
+    for (i, r) in rows.iter().enumerate() {
+        if idx.is_identity(r.precursor) {
+            if (r.role, r.kind) == (Role::Transfer, Hypothesis::Target) {
+                count_decoy(v, q_of(fdr, Estimate::Pooled, i), 2);
+            }
+            continue;
+        }
+        if r.kind != Hypothesis::Target {
+            if r.role == Role::Transfer {
+                let f = family(r.kind) as usize;
+                count_decoy(v, q_of(fdr, Estimate::Pooled, i), f - 1);
+                if let Some(m) = &r.ms2 {
+                    v.ms2_rows[f] += 1;
+                    v.ms2_supported[f] += usize::from(m.supports());
+                }
+            }
+            continue;
+        }
+        let e = r.evidence.as_ref();
+        let quantity = reported(r);
+        let quantity_normalized = quantity
+            .zip(e)
+            .and_then(|((q, _), e)| norm.normalize(r.run, r.precursor, e.t0, q));
+        let (evidence_type, transfer_q, quant_q) = match r.role {
+            Role::Identified => {
+                let q = q_of(id_fdr, Estimate::Pooled, i);
+                v.identified += 1;
+                v.identified_scored += usize::from(q.is_some());
+                v.identified_q01 += usize::from(q.is_some_and(|q| q <= VALIDATION_Q));
+                let t = match quant_feature_fdr {
+                    Some(t) if !q.is_some_and(|q| q <= t) => {
+                        v.identified_below_threshold += 1;
+                        EvidenceType::IdentifiedBelowThreshold
+                    }
+                    _ => EvidenceType::Identified,
+                };
+                (t, None, q)
+            }
+            Role::Transfer => {
+                let q = q_of(fdr, Estimate::Pooled, i);
+                v.transfers += 1;
+                v.transfers_scored += usize::from(q.is_some());
+                let ok = |e: Estimate, t: f64| {
+                    usize::from(
+                        scored[i].is_some_and(|(fam, s)| fdr.accepts(e, r.precursor, fam, s, t)),
+                    )
+                };
+                for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
+                    .into_iter()
+                    .zip(&thresholds)
+                {
+                    a.pooled += usize::from(q.is_some_and(|q| q <= t));
+                    a.mass_only += ok(Estimate::MassOnly, t);
+                    a.rt_only += ok(Estimate::RtOnly, t);
+                    a.wrong_peak_only += ok(Estimate::WrongPeak, t);
+                }
+                let supported = r.ms2.is_some_and(|m| m.supports());
+                if let Some(m) = &r.ms2 {
+                    v.ms2_rows[0] += 1;
+                    v.ms2_supported[0] += usize::from(m.supports());
+                }
+                let acc = transfer_accepted(q, mbr_fdr, quantity.is_some());
+                let downgrade = acc
+                    && q.is_some_and(|q| {
+                        shared_feature.is_shared(&shared::Row {
+                            claim: &r.claim,
+                            shared: r.shared.as_deref(),
+                            ms2_supported: supported,
+                            transfer_q: q,
+                            llr: e.map_or(0.0, |e| e.llr),
+                            width: e.map_or(0.0, |e| e.w),
+                        })
+                    });
+                let t = match (acc, supported, downgrade) {
+                    (true, _, true) => {
+                        v.shared_feature += 1;
+                        EvidenceType::SharedFeature
+                    }
+                    (true, true, false) => {
+                        v.transfer_ms2 += 1;
+                        EvidenceType::TransferMs2
+                    }
+                    (true, false, false) => EvidenceType::TransferMs1,
+                    (false, _, _) => EvidenceType::BelowThreshold,
+                };
+                (t, q, q)
+            }
+            Role::PseudoTransfer => {
+                let q = scored[i].and_then(|(fam, s)| fdr.pseudo_q(r.precursor, fam, s));
+                v.pseudo_transfers += 1;
+                if let Some(m) = &r.ms2 {
+                    v.ms2_pseudo_rows += 1;
+                    v.ms2_pseudo_supported += usize::from(m.supports());
+                }
+                v.pseudo_scored += usize::from(q.is_some());
+                let wrong = e
+                    .zip(ctx.identified.get(&(r.precursor, r.run)))
+                    .and_then(|(p, id)| mismatch(p, id));
+                if let Some(m) = wrong {
+                    v.wrong_peak_pairs += 1;
+                    v.wrong_peak += usize::from(m.apex);
+                    v.wrong_measurement += usize::from(m.wrong());
+                }
+                for (a, &t) in [&mut v.at_q01, &mut v.at_threshold]
+                    .into_iter()
+                    .zip(&thresholds)
+                {
+                    if !q.is_some_and(|q| q <= t) {
+                        continue;
+                    }
+                    a.pseudo += 1;
+                    if let Some(m) = wrong {
+                        a.pairs += 1;
+                        a.wrong_peak += usize::from(m.apex);
+                        a.wrong_measurement += usize::from(m.wrong());
+                    }
+                }
+                continue;
+            }
+        };
+        if r.role == Role::Transfer {
+            out.wrong.push((out.rows.len(), p_wrong[i]));
+        }
+        out.rows.push(OutRow {
+            precursor: r.precursor,
+            run: r.run,
+            evidence_type,
+            quantity: quantity.map(|q| q.0),
+            quantity_se: quantity.map(|q| q.1),
+            quantity_normalized,
+            transfer_q,
+            quant_q,
+            apex_rt_s: e.map(|e| e.t0),
+            measurement_q: None,
+            library_q: r.library_q,
+            mass_err_ppm: e.map(|e| e.mass_err_ppm),
+            claim: if r.role == Role::Transfer {
+                r.claim
+            } else {
+                Claim::default()
+            },
+            transfer_pep: if r.role == Role::Transfer {
+                scored[i].and_then(|(fam, s)| fdr.pep(r.precursor, fam, s))
+            } else {
+                None
+            },
+        });
+    }
+    Ok(())
+}
 
-    summary.rows_written = write_merged(&paths, dir, lib, stems, params.mbr_path, on_features)?;
-    write_mbr_validation(params.validation_path, &v)?;
-    drop(tmp);
+/// What the block passes of `finalize_stream` share: the extract source and its bounds, the
+/// library index, the run maps, the donor summaries, the limits and the seed.
+#[derive(Clone, Copy)]
+struct StreamInputs<'a> {
+    source: &'a dyn ExtractSource,
+    bounds: Bounds,
+    idx: &'a EntryIndex<'a>,
+    maps: &'a [Option<RunMap>],
+    summaries: &'a Summaries,
+    limits: &'a FinalizeLimits,
+    seed: u64,
+}
+
+/// The first pass of `finalize_stream`: samples the training rows of every block (transfers,
+/// identified quality, wrong peaks) and trains the fold models on them. Records the rows without
+/// features in `summary`; returns the transfer, identified and wrong-peak models and the number of
+/// wrong-peak rows seen.
+fn train_transfer_models(
+    inputs: &StreamInputs<'_>,
+    summary: &mut FinalizeSummary,
+) -> Result<(FoldModels, FoldModels, FoldModels, usize), String> {
+    let StreamInputs {
+        source,
+        bounds,
+        idx,
+        maps,
+        summaries,
+        limits,
+        seed,
+    } = *inputs;
+    let t0 = Instant::now();
+    let members = limits.transfer_models.max(1);
+    let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
+        .map(|m| {
+            Mutex::new(TrainingSample::new(
+                limits.max_train_rows,
+                member_seed(seed, m),
+            ))
+        })
+        .collect();
+    let i_sample: Mutex<TrainingSample<Key>> =
+        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_sample: Mutex<TrainingSample<Key>> =
+        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_seen = AtomicUsize::new(0);
+    let no_features = AtomicUsize::new(0);
+    let identified_no_features = AtomicUsize::new(0);
+    let rows_read = AtomicUsize::new(0);
+    for_each_block(
+        source,
+        false,
+        bounds,
+        |_| (),
+        |_, chunk, first, rows| {
+            rows_read.fetch_add(rows.len(), Ordering::Relaxed);
+            let ctx = BlockContext::new(rows, maps)?;
+            let shapes = BlockShapes {
+                summaries,
+                own: &ctx.own,
+            };
+            let feats = table_features(rows, idx, &shapes, maps, |t: Table| t != Table::Pseudo);
+            let (mut t_rows, mut i_rows) = (Vec::new(), Vec::new());
+            for (i, t, fam, x) in feats {
+                let Some(x) = x else {
+                    match t {
+                        Table::Identified => &identified_no_features,
+                        _ => &no_features,
+                    }
+                    .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let r = &rows[i];
+                let item = (
+                    (chunk as u32, first + i as u64),
+                    row_unit(r.precursor, r.run),
+                    FdrRow {
+                        precursor: r.precursor,
+                        is_decoy: fam != 0,
+                        family: fam,
+                        x,
+                    },
+                );
+                match t {
+                    Table::Identified => i_rows.push(item),
+                    _ => t_rows.push(item),
+                }
+            }
+            for sample in &t_samples {
+                let mut s = sample.lock().expect("training sample lock");
+                for (k, u, row) in &t_rows {
+                    if s.wants(*u) {
+                        s.push(*k, *u, row.clone());
+                    } else {
+                        s.skip();
+                    }
+                }
+            }
+            let mut s = i_sample.lock().expect("training sample lock");
+            for (k, u, row) in i_rows {
+                s.push(k, u, row);
+            }
+            drop(s);
+            let mut w_rows = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                let Some((y, x)) = pseudo_example(r, &ctx, idx) else {
+                    continue;
+                };
+                w_rows.push((
+                    (chunk as u32, first + i as u64),
+                    row_unit(r.precursor, r.run),
+                    FdrRow {
+                        precursor: r.precursor,
+                        is_decoy: y,
+                        family: 0,
+                        x,
+                    },
+                ));
+            }
+            w_seen.fetch_add(w_rows.len(), Ordering::Relaxed);
+            let mut s = w_sample.lock().expect("training sample lock");
+            for (k, u, row) in w_rows {
+                s.push(k, u, row);
+            }
+            Ok(())
+        },
+        |_, ()| Ok(()),
+    )?;
+    summary.no_features = no_features.into_inner();
+    summary.identified_no_features = identified_no_features.into_inner();
+    let t_samples: Vec<TrainingSample<Key>> = t_samples
+        .into_iter()
+        .map(|s| s.into_inner().expect("training sample lock"))
+        .collect();
+    let i_sample = i_sample.into_inner().expect("training sample lock");
+    for (name, s) in [
+        ("transfer", &t_samples[0]),
+        ("identified quality", &i_sample),
+    ] {
+        let (seen, kept, share) = s.stats();
+        if kept < seen {
+            log::debug!(
+                target: "mbr",
+                "{name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
+            );
+        }
+    }
+    let t1 = Instant::now();
+    let t_sets: Vec<Vec<FdrRow>> = t_samples
+        .into_iter()
+        .map(TrainingSample::into_items)
+        .collect();
+    let i_rows = i_sample.into_items();
+    let w_rows = w_sample
+        .into_inner()
+        .expect("training sample lock")
+        .into_items();
+    let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
+    let (t_models, i_models) = rayon::join(
+        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
+        || train_folds(&i_rows, seed),
+    );
+    drop(t_refs);
+    drop((t_sets, i_rows));
+    let w_models = train_folds(&w_rows, seed);
+    log::debug!(
+        target: "mbr",
+        "wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
+        w_rows.len(),
+        100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
+        w_models.failed_folds.len()
+    );
+    for f in &w_models.failed_folds {
+        log::warn!(target: "mbr", "wrong-peak model fold without a model: {f}");
+    }
+    drop(w_rows);
     log::debug!(
         target: "finalize",
-        "output rows {:.1} s, merged outputs {:.1} s",
+        "training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
+        rows_read.into_inner(),
         (t1 - t0).as_secs_f64(),
-        secs(t1)
+        secs(t1),
+        t_models.members()
     );
-    summary.validation = v;
-    Ok(summary)
+    Ok((t_models, i_models, w_models, w_seen.into_inner()))
 }
 
 #[allow(clippy::too_many_arguments)]

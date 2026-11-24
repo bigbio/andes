@@ -8,7 +8,6 @@ crates/andes/src/bin/andes/search.rs::run	1373
 crates/andes/src/bin/andes/search/files.rs::search_file	614
 crates/andes/src/bin/andes/search/resolve.rs::resolve_search_params	344
 crates/model-train/src/store/read.rs::reconstruct_param	439
-crates/output/src/features.rs::build_batch	311
 crates/output/src/library.rs::read_library	303
 crates/quant/src/label/fit.rs::fit_group	428
 crates/rescore/src/cv.rs::train_in_pool	307

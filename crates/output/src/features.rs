@@ -409,40 +409,7 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         feature_id.append_value(r.feature_id);
         sequence.append_value(&r.sequence);
         peptidoform.append_value(&r.peptidoform);
-        {
-            let sb = modifications.values();
-            for m in &r.modifications {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_value(&m.name);
-                match &m.accession {
-                    Some(a) => sb
-                        .field_builder::<StringBuilder>(1)
-                        .unwrap()
-                        .append_value(a),
-                    None => sb.field_builder::<StringBuilder>(1).unwrap().append_null(),
-                }
-                let positions = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
-                let pb = positions.values();
-                pb.field_builder::<Int32Builder>(0)
-                    .unwrap()
-                    .append_value(m.position);
-                match m.amino_acid {
-                    Some(aa) => pb
-                        .field_builder::<StringBuilder>(1)
-                        .unwrap()
-                        .append_value(aa.to_string()),
-                    None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
-                }
-                pb.field_builder::<ListBuilder<StructBuilder>>(2)
-                    .unwrap()
-                    .append_null();
-                pb.append(true);
-                positions.append(true);
-                sb.append(true);
-            }
-            modifications.append(true);
-        }
+        append_modifications(&mut modifications, &r.modifications);
         charge.append_value(r.charge);
         match r.pep {
             Some(v) => pep.append_value(v),
@@ -668,6 +635,43 @@ fn build_batch(records: &[FeatureRecord], mbr: bool) -> std::io::Result<RecordBa
         columns.push(Arc::new(claim_co_apex.finish()));
     }
     RecordBatch::try_new(schema, columns).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Appends one record's modifications to the modifications list column: name, accession and a
+/// single position (residue index and amino acid) per modification.
+fn append_modifications(modifications: &mut ListBuilder<StructBuilder>, mods: &[ModRecord]) {
+    let sb = modifications.values();
+    for m in mods {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(&m.name);
+        match &m.accession {
+            Some(a) => sb
+                .field_builder::<StringBuilder>(1)
+                .unwrap()
+                .append_value(a),
+            None => sb.field_builder::<StringBuilder>(1).unwrap().append_null(),
+        }
+        let positions = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
+        let pb = positions.values();
+        pb.field_builder::<Int32Builder>(0)
+            .unwrap()
+            .append_value(m.position);
+        match m.amino_acid {
+            Some(aa) => pb
+                .field_builder::<StringBuilder>(1)
+                .unwrap()
+                .append_value(aa.to_string()),
+            None => pb.field_builder::<StringBuilder>(1).unwrap().append_null(),
+        }
+        pb.field_builder::<ListBuilder<StructBuilder>>(2)
+            .unwrap()
+            .append_null();
+        pb.append(true);
+        positions.append(true);
+        sb.append(true);
+    }
+    modifications.append(true);
 }
 
 const FEATURE_CHUNK: usize = 4096;

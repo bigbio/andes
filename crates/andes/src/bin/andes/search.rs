@@ -912,82 +912,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     prepared.sync_materialized_candidates();
 
     let mono_columns = mono_active;
-    let mono_active = mono_active && {
-        if mono_stats.fitted == 0 {
-            log::warn!(
-                "--precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
-                 a linked MS1 and a known charge); precursors are left as recorded and the \
-                 glyco PIN Mono columns are 0.",
-                mono_stats.seen
-            );
-            if let Some(d) = mono_dump.take() {
-                d.finish()
-                    .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
-            }
-            mono_table.clear();
-        }
-        mono_stats.fitted > 0
-    };
+    let (mono_active, glyco_isotope_override) = finish_mono_correction(
+        &cli,
+        &params,
+        &mono_params,
+        mono_active,
+        &mono_stats,
+        &mut mono_dump,
+        &mut mono_table,
+    )?;
     if mono_active {
-        let hist: Vec<String> = mono_stats
-            .by_shift
-            .iter()
-            .enumerate()
-            .skip(1)
-            .filter(|(_, &n)| n > 0)
-            .map(|(k, n)| format!("{k}:{n}"))
-            .collect();
-        log::info!(
-            target: "precursor-mono",
-            "{} of {} MS2 fitted (linked MS1 + known charge), {} shifted \
-             down [shift:count {}]",
-            mono_stats.fitted,
-            mono_stats.seen,
-            mono_stats.shifted(),
-            if hist.is_empty() {
-                "-".to_string()
-            } else {
-                hist.join(" ")
-            }
-        );
-        if let Some(d) = mono_dump.take() {
-            d.finish()
-                .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
-        }
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
-    let (window, narrowed) = crate::monoisotopic::coupled_isotope_window(
-        mono_active,
-        cli.isotope_error,
-        params.isotope_error_range.clone(),
-    );
-    let glyco_isotope_override = if narrowed {
-        let mask: Vec<bool> = mono_table
-            .iter()
-            .map(|c| {
-                c.as_ref()
-                    .is_some_and(|c| c.verified_within(mono_params.min_fit, *window.end()))
-            })
-            .collect();
-        log::info!(
-            target: "precursor-mono",
-            "isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
-             with a verified monoisotope (the others keep {}..={}; a verified monoisotope \
-             needs no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — \
-             pass --isotope-error to override)",
-            params.isotope_error_range.start(),
-            params.isotope_error_range.end(),
-            window.start(),
-            window.end(),
-            mask.iter().filter(|&&v| v).count(),
-            mono_stats.seen,
-            params.isotope_error_range.start(),
-            params.isotope_error_range.end()
-        );
-        Some((window, mask))
-    } else {
-        None
-    };
 
     let mut spectra = all_spectra;
     let mut queues = all_queues;
@@ -2119,6 +2055,100 @@ fn refine_rescored(
         }
     }
     Ok((knockoff_rows, ipf_qpx))
+}
+
+/// The isotope-error window of the glyco search and the spectra it applies to (those with a verified
+/// monoisotope).
+type GlycoIsotopeOverride = Option<(std::ops::RangeInclusive<i8>, Vec<bool>)>;
+
+/// Ends the monoisotopic correction of the search: logs what it fitted (or turns it off when no MS2
+/// could be fitted), flushes `--precursor-mono-dump`, and narrows the glyco isotope-error window for
+/// the spectra with a verified monoisotope. Returns whether the correction stays on and that window.
+fn finish_mono_correction(
+    cli: &Cli,
+    params: &SearchParams,
+    mono_params: &MonoParams,
+    mono_active: bool,
+    mono_stats: &MonoStats,
+    mono_dump: &mut Option<MonoDump>,
+    mono_table: &mut Vec<Option<MonoCorrection>>,
+) -> Result<(bool, GlycoIsotopeOverride), Box<dyn std::error::Error>> {
+    let mono_active = mono_active && {
+        if mono_stats.fitted == 0 {
+            log::warn!(
+                "--precursor-mono auto: no MS2 could be fitted ({} MS2 seen, none with \
+                 a linked MS1 and a known charge); precursors are left as recorded and the \
+                 glyco PIN Mono columns are 0.",
+                mono_stats.seen
+            );
+            if let Some(d) = mono_dump.take() {
+                d.finish()
+                    .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
+            }
+            mono_table.clear();
+        }
+        mono_stats.fitted > 0
+    };
+    if mono_active {
+        let hist: Vec<String> = mono_stats
+            .by_shift
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, &n)| n > 0)
+            .map(|(k, n)| format!("{k}:{n}"))
+            .collect();
+        log::info!(
+            target: "precursor-mono",
+            "{} of {} MS2 fitted (linked MS1 + known charge), {} shifted \
+             down [shift:count {}]",
+            mono_stats.fitted,
+            mono_stats.seen,
+            mono_stats.shifted(),
+            if hist.is_empty() {
+                "-".to_string()
+            } else {
+                hist.join(" ")
+            }
+        );
+        if let Some(d) = mono_dump.take() {
+            d.finish()
+                .map_err(|e| format!("flush --precursor-mono-dump: {e}"))?;
+        }
+    }
+    let (window, narrowed) = crate::monoisotopic::coupled_isotope_window(
+        mono_active,
+        cli.isotope_error,
+        params.isotope_error_range.clone(),
+    );
+    let glyco_isotope_override = if narrowed {
+        let mask: Vec<bool> = mono_table
+            .iter()
+            .map(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.verified_within(mono_params.min_fit, *window.end()))
+            })
+            .collect();
+        log::info!(
+            target: "precursor-mono",
+            "isotope-error window {}..={} -> {}..={} for the {} of {} MS2 \
+             with a verified monoisotope (the others keep {}..={}; a verified monoisotope \
+             needs no +2 step, which only admits the Hex+Fuc/NeuGc composition degeneracy — \
+             pass --isotope-error to override)",
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end(),
+            window.start(),
+            window.end(),
+            mask.iter().filter(|&&v| v).count(),
+            mono_stats.seen,
+            params.isotope_error_range.start(),
+            params.isotope_error_range.end()
+        );
+        Some((window, mask))
+    } else {
+        None
+    };
+    Ok((mono_active, glyco_isotope_override))
 }
 
 /// What every input file of a search shares: the flags, the resolved and per-file parameters,

@@ -9,6 +9,7 @@ mod instrument;
 mod parallel;
 mod reader;
 
+#[cfg(feature = "thermo")]
 pub(crate) use activation::log_ethcd_once;
 pub use activation::{ethcd_as_etd_policy, filter_has_supplemental_collision, init_ethcd_as_etd};
 pub use instrument::detect_instrument_type;

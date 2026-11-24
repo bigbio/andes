@@ -2,7 +2,6 @@
 # These files are reported in CI, not gated; any other file over 1,500 lines fails no_new_source_file_over_the_budget.
 # After a file is split under the budget, drop its line (and refresh the listed counts) with:
 # cargo test -p andes --release --test structure -- --ignored write_file_lines_baseline
-crates/andes/src/bin/andes/cli.rs	2995
 crates/andes/src/bin/andes/glyco/quantities.rs	2099
 crates/andes/src/bin/andes/quant/run.rs	2530
 crates/andes/src/bin/andes/quant/run/labels.rs	1998

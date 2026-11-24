@@ -2,7 +2,6 @@
 # Lines are path<TAB>count; a count may only go down. After a cleanup, lower the counts with:
 # cargo test -p andes --release --test structure -- --ignored write_module_docs_baseline (it refuses to raise any count)
 crates/andes/src/bin/andes/acquisition.rs	1
-crates/andes/src/bin/andes/cli.rs	1
 crates/andes/src/bin/andes/config.rs	1
 crates/andes/src/bin/andes/dia.rs	1
 crates/andes/src/bin/andes/dia/rt.rs	1

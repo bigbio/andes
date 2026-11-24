@@ -110,7 +110,7 @@ runs through `xl_run.rs`, `xl_fdr.rs`; glyco through `glyco_run.rs`.
   schema parity test `crates/output/tests/output_pin_schema_parity.rs` and the PIN goldens in
   `test-fixtures/goldens/` change with it; say why in the PR.
 - **A parameter.** A field in `SearchParams` or the matching args struct in
-  `crates/andes/src/bin/andes/cli.rs`, a documented default and unit, and an entry in
+  `crates/andes/src/bin/andes/cli/` (`options.rs` for the search, `commands.rs` for subcommands), a documented default and unit, and an entry in
   [`DOCS.md`](DOCS.md). Options are flags, not environment variables
   ([`docs/dev/cli-flags-not-env-vars.md`](docs/dev/cli-flags-not-env-vars.md),
   [`docs/dev/parameters-and-constants.md`](docs/dev/parameters-and-constants.md)).

@@ -1,6 +1,7 @@
 //! Side outputs of a search: the claim database, open-search offsets, filtered TSVs and the
 //! crosslink precursor snap.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -133,4 +134,170 @@ pub(crate) fn xl_precursor_snap(
     file_is_raw: bool,
 ) -> bool {
     xl && ms_level == 2 && (file_is_mzml || file_is_raw)
+}
+
+/// The search's PSM tables as the output writers read them.
+#[derive(Clone, Copy)]
+pub(super) struct PsmTables<'a> {
+    pub(super) spectra: &'a [model::Spectrum],
+    pub(super) queues: &'a [search::TopNQueue],
+    pub(super) candidates: &'a [search::candidates::Candidate],
+    pub(super) params: &'a search::SearchParams,
+    pub(super) index: &'a search::SearchIndex,
+}
+
+/// Rescoring results the QPX bundle reports: target PSMs, decoy ids, rows left out, IPF sites.
+pub(super) type QpxRescore<'a> = (
+    Option<&'a HashMap<String, output::PercolatorPsm>>,
+    Option<&'a HashSet<String>>,
+    &'a HashSet<String>,
+    Option<&'a HashMap<String, output::ipf::IpfQpx>>,
+);
+
+/// Infers the protein groups of the accepted target PSMs (q under their class cutoff, not a
+/// knockoff row) and writes them next to the report.
+pub(super) fn infer_and_write_groups(
+    map: &HashMap<String, output::PercolatorPsm>,
+    rescore_decoy_psms: &HashMap<String, output::PercolatorPsm>,
+    pin_index: &search::SearchIndex,
+    knockoff_rows: &HashSet<String>,
+    report_base: &Path,
+    (fdr_threshold, proteoform_fdr): (f64, f64),
+) -> output::Inference {
+    let cutoffs = output::Cutoffs::new(map, pin_index, fdr_threshold, proteoform_fdr);
+    let inf = output::infer_protein_groups(map, rescore_decoy_psms, pin_index, |id| {
+        map[id].q_value <= cutoffs.of(id) && !knockoff_rows.contains(id)
+    });
+    let stem = report_base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+    let path = dir.join(format!("{stem}.protein_groups.tsv"));
+    let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
+    match output::write_protein_groups_tsv(&path, &inf) {
+        Ok(()) => log::info!(
+            target: "output",
+            "Wrote protein groups: {} ({} groups; {} at protein q<=0.01, {} at q<=0.05)",
+            path.display(),
+            inf.groups.len(),
+            at(0.01),
+            at(0.05)
+        ),
+        Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
+    }
+    inf
+}
+
+/// Writes the QPX bundle (`--output-parquet`).
+pub(super) fn write_qpx_bundle(
+    parquet_dir: &Path,
+    t: &PsmTables<'_>,
+    fragment_tol: &model::tolerance::Tolerance,
+    (spectrum_path, original_spectrum_paths, run_ends): (&Path, &[PathBuf], &[usize]),
+    (rescore_map, rescore_decoys, knockoff_rows, ipf_qpx): QpxRescore<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_id = spectrum_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes_run".to_string());
+    let primary_paths: Vec<String> = original_spectrum_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    match output::write_qpx(
+        parquet_dir,
+        t.spectra,
+        t.queues,
+        t.candidates,
+        t.params,
+        t.index,
+        fragment_tol,
+        &run_id,
+        &primary_paths,
+        run_ends,
+        rescore_map,
+        rescore_decoys,
+        knockoff_rows,
+        ipf_qpx,
+    ) {
+        Ok(()) => log::info!(target: "output", "Wrote QPX bundle: {}", parquet_dir.display()),
+        Err(e) => {
+            return Err(format!(
+                "failed to write requested --output-parquet {}: {e}",
+                parquet_dir.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Writes the proteoform table of the accepted PSMs (families under `--protein-fdr` when set).
+pub(super) fn write_proteoform_table(
+    map: &HashMap<String, output::PercolatorPsm>,
+    pin_index: &search::SearchIndex,
+    cutoffs: &output::Cutoffs,
+    quant_summary: Option<&output::QuantSummary>,
+    protein_fdr_groups: Option<(f64, &output::Inference)>,
+    report_base: &Path,
+) {
+    let mut rows = output::proteoform_table(map, pin_index, cutoffs, quant_summary);
+    if let Some((t, inf)) = protein_fdr_groups {
+        let fq = inf.family_q();
+        rows.retain(|r| fq.get(r.family.as_str()).is_some_and(|&q| q <= t));
+    }
+    let stem = report_base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
+    let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
+    let path = dir.join(format!("{stem}.proteoforms.tsv"));
+    let columns = quant_summary.map(|q| q.columns.clone()).unwrap_or_default();
+    match output::write_proteoform_tsv(&path, &rows, &columns) {
+        Ok(()) => log::info!(
+            target: "output",
+            "Wrote proteoform table: {} ({} family members, {} families)",
+            path.display(),
+            rows.len(),
+            rows.iter()
+                .map(|r| r.family.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        ),
+        Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
+    }
+}
+
+/// Writes the search TSV (`--output-tsv`), naming the spectrum file(s) it came from.
+pub(super) fn write_search_tsv(
+    tsv_path: &Path,
+    t: &PsmTables<'_>,
+    spectrum_paths: &[PathBuf],
+    is_mgf: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec_file_name = if spectrum_paths.len() == 1 {
+        spectrum_paths[0]
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| spectrum_paths[0].display().to_string())
+    } else {
+        spectrum_paths
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    output::write_tsv(
+        tsv_path,
+        t.spectra,
+        t.queues,
+        t.candidates,
+        t.params,
+        t.index,
+        &spec_file_name,
+        is_mgf,
+    )?;
+    log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
+    Ok(())
 }

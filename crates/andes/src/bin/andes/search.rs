@@ -23,12 +23,15 @@ use crate::cli::{Cli, Fragmentation};
 use crate::glyco::run_glyco;
 use crate::models::search_aa_set;
 use crate::monoisotopic::{MonoDump, MonoStats};
-use crate::spectra::{learn_file_calibrations, ms3_carries_reporters, sample_spectra, ParseStats};
-use calibrate::{finish_mono_correction, FragmentErrorMeasurer};
+use crate::spectra::{learn_file_calibrations, ms3_carries_reporters, ParseStats};
+use calibrate::{finish_mono_correction, optimize_on_sample, FragmentErrorMeasurer};
 use collect::quant_collector;
 use files::{search_file, FileInputs, FileOutputs};
 pub(crate) use outputs::load_claim_database;
-use outputs::{release_at_exit, write_filtered_tsv, write_open_offsets, ClaimDatabase};
+use outputs::{
+    infer_and_write_groups, release_at_exit, write_filtered_tsv, write_open_offsets,
+    write_proteoform_table, write_qpx_bundle, write_search_tsv, ClaimDatabase, PsmTables,
+};
 use rescored::{refine_rescored, RescoredInputs};
 use resolve::{
     check_flag_combinations, detect_inputs, load_search_database, log_resolved_parameters,
@@ -176,55 +179,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.optimize {
-        if cli.glyco {
-            return Err("--optimize is not supported with --glyco".into());
-        }
-        let sample = crate::spectra::sample_spectra_strided(
+        optimize_on_sample(
+            &cli,
             &spectrum_path,
-            is_mzml,
-            is_raw,
-            cli.ms_level as u32,
-            cli.optimize_sample,
-        )
-        .or_else(|| {
-            sample_spectra(&spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
-                .map(|v| v.into_iter().take(cli.optimize_sample).collect())
-        });
-        match sample {
-            Some(sample) => {
-                let optimize_dir = scratch_tempdir("andes-optimize-", &scratch_dir)?;
-                let rescorer = crate::optimize::SampleRescorer {
-                    backend: output::PercolatorBackend::Native {
-                        memory: crate::memory::rescore_memory(
-                            cli.rescore_memory_gb,
-                            optimize_dir.path().to_path_buf(),
-                        ),
-                    },
-                    args: output::percolator_args_with_threads(&[], cli.threads),
-                    dir: optimize_dir.path().to_path_buf(),
-                };
-                crate::optimize::optimize_parameters(
-                    &idx,
-                    &scorer,
-                    fragment_tol_da,
-                    &cli.db.decoy_prefix,
-                    &index_path,
-                    &mut params,
-                    &sample,
-                    &rescorer,
-                );
-                let optimize_path = optimize_dir.path().to_path_buf();
-                if let Err(e) = optimize_dir.close() {
-                    log::warn!(
-                        "optimize: could not remove {}: {e}",
-                        optimize_path.display()
-                    );
-                }
-            }
-            None => {
-                log::warn!("--optimize could not read a sample; keeping the resolved parameters")
-            }
-        }
+            (is_mzml, is_raw, is_mgf),
+            &scratch_dir,
+            (&idx, &scorer, fragment_tol_da, &index_path),
+            &mut params,
+        )?;
     }
 
     let file_params: Vec<search::SearchParams> = file_cal
@@ -916,29 +878,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     let protein_groups = rescore_map.as_ref().map(|map| {
-        let cutoffs = output::Cutoffs::new(map, &pin_index, fdr_threshold, proteoform_fdr);
-        let inf = output::infer_protein_groups(map, &rescore_decoy_psms, &pin_index, |id| {
-            map[id].q_value <= cutoffs.of(id) && !knockoff_rows.contains(id)
-        });
-        let stem = report_base
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "andes".to_string());
-        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
-        let path = dir.join(format!("{stem}.protein_groups.tsv"));
-        let at = |q: f64| inf.groups.iter().filter(|g| g.q_value <= q).count();
-        match output::write_protein_groups_tsv(&path, &inf) {
-            Ok(()) => log::info!(
-                target: "output",
-                "Wrote protein groups: {} ({} groups; {} at protein q<=0.01, {} at q<=0.05)",
-                path.display(),
-                inf.groups.len(),
-                at(0.01),
-                at(0.05)
-            ),
-            Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
-        }
-        inf
+        infer_and_write_groups(
+            map,
+            &rescore_decoy_psms,
+            &pin_index,
+            &knockoff_rows,
+            &report_base,
+            (fdr_threshold, proteoform_fdr),
+        )
     });
     if cli.mbr {
         mbr_decoys = std::mem::take(&mut rescore_decoy_psms);
@@ -1096,39 +1043,24 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         knockoff_rows.retain(|id| !dia_precursor_ids.contains(id));
     }
     if let Some(ref parquet_dir) = cli.output_parquet {
-        let run_id = spectrum_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "andes_run".to_string());
-        let primary_paths: Vec<String> = original_spectrum_paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
-        match output::write_qpx(
+        write_qpx_bundle(
             parquet_dir,
-            &spectra,
-            &queues,
-            &pin_candidates,
-            &params,
-            &pin_index,
+            &PsmTables {
+                spectra: &spectra,
+                queues: &queues,
+                candidates: &pin_candidates,
+                params: &params,
+                index: &pin_index,
+            },
             &scorer.feature_match_tolerance(),
-            &run_id,
-            &primary_paths,
-            &run_ends,
-            rescore_map.as_ref(),
-            rescore_decoys.as_ref(),
-            &knockoff_rows,
-            ipf_qpx.as_ref(),
-        ) {
-            Ok(()) => log::info!(target: "output", "Wrote QPX bundle: {}", parquet_dir.display()),
-            Err(e) => {
-                return Err(format!(
-                    "failed to write requested --output-parquet {}: {e}",
-                    parquet_dir.display()
-                )
-                .into());
-            }
-        }
+            (&spectrum_path, &original_spectrum_paths, &run_ends),
+            (
+                rescore_map.as_ref(),
+                rescore_decoys.as_ref(),
+                &knockoff_rows,
+                ipf_qpx.as_ref(),
+            ),
+        )?;
     }
 
     let omitted_psms = match &quant {
@@ -1184,34 +1116,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cutoffs.as_ref(),
         pin_index.has_alternative_entries,
     ) {
-        let mut rows = output::proteoform_table(map, &pin_index, cutoffs, quant_summary.as_ref());
-        if let (Some(t), Some(inf)) = (cli.protein_fdr, protein_groups.as_ref()) {
-            let fq = inf.family_q();
-            rows.retain(|r| fq.get(r.family.as_str()).is_some_and(|&q| q <= t));
-        }
-        let stem = report_base
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "andes".to_string());
-        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
-        let path = dir.join(format!("{stem}.proteoforms.tsv"));
-        let columns = quant_summary
-            .as_ref()
-            .map(|q| q.columns.clone())
-            .unwrap_or_default();
-        match output::write_proteoform_tsv(&path, &rows, &columns) {
-            Ok(()) => log::info!(
-                target: "output",
-                "Wrote proteoform table: {} ({} family members, {} families)",
-                path.display(),
-                rows.len(),
-                rows.iter()
-                    .map(|r| r.family.as_str())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-            ),
-            Err(e) => log::warn!(target: "output", "could not write {}: {e}", path.display()),
-        }
+        write_proteoform_table(
+            map,
+            &pin_index,
+            cutoffs,
+            quant_summary.as_ref(),
+            cli.protein_fdr.zip(protein_groups.as_ref()),
+            &report_base,
+        );
     }
 
     let mbr_job = if cli.mbr && cli.tmt.is_none() && cli.label.is_none() {
@@ -1237,29 +1149,18 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if bench_mode {
         log::info!(target: "bench", "skipping TSV write.");
     } else if let Some(ref tsv_path) = cli.output_tsv {
-        let spec_file_name = if spectrum_paths.len() == 1 {
-            spectrum_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| spectrum_path.display().to_string())
-        } else {
-            spectrum_paths
-                .iter()
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .collect::<Vec<_>>()
-                .join("+")
-        };
-        output::write_tsv(
+        write_search_tsv(
             tsv_path,
-            &spectra,
-            &queues,
-            &pin_candidates,
-            &params,
-            &pin_index,
-            &spec_file_name,
+            &PsmTables {
+                spectra: &spectra,
+                queues: &queues,
+                candidates: &pin_candidates,
+                params: &params,
+                index: &pin_index,
+            },
+            spectrum_paths,
             is_mgf,
         )?;
-        log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
     }
 
     crate::memory::mark_stage("outputs");

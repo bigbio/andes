@@ -341,3 +341,70 @@ pub(super) fn finish_mono_correction(
     };
     Ok((mono_active, glyco_isotope_override))
 }
+
+/// `--optimize`: tunes the search parameters on a sample of the first file's spectra, rescored with
+/// the native Percolator in a scratch folder.
+pub(super) fn optimize_on_sample(
+    cli: &Cli,
+    spectrum_path: &std::path::Path,
+    (is_mzml, is_raw, is_mgf): (bool, bool, bool),
+    scratch_dir: &std::path::Path,
+    (idx, scorer, fragment_tol_da, index_path): (
+        &search::SearchIndex,
+        &scoring_crate::RankScorer,
+        f64,
+        &std::path::Path,
+    ),
+    params: &mut SearchParams,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.glyco {
+        return Err("--optimize is not supported with --glyco".into());
+    }
+    let sample = crate::spectra::sample_spectra_strided(
+        spectrum_path,
+        is_mzml,
+        is_raw,
+        cli.ms_level as u32,
+        cli.optimize_sample,
+    )
+    .or_else(|| {
+        crate::spectra::sample_spectra(spectrum_path, is_mzml, is_mgf, is_raw, cli.ms_level as u32)
+            .map(|v| v.into_iter().take(cli.optimize_sample).collect())
+    });
+    match sample {
+        Some(sample) => {
+            let optimize_dir = super::scratch_tempdir("andes-optimize-", scratch_dir)?;
+            let rescorer = crate::optimize::SampleRescorer {
+                backend: output::PercolatorBackend::Native {
+                    memory: crate::memory::rescore_memory(
+                        cli.rescore_memory_gb,
+                        optimize_dir.path().to_path_buf(),
+                    ),
+                },
+                args: output::percolator_args_with_threads(&[], cli.threads),
+                dir: optimize_dir.path().to_path_buf(),
+            };
+            crate::optimize::optimize_parameters(
+                idx,
+                scorer,
+                fragment_tol_da,
+                &cli.db.decoy_prefix,
+                index_path,
+                params,
+                &sample,
+                &rescorer,
+            );
+            let optimize_path = optimize_dir.path().to_path_buf();
+            if let Err(e) = optimize_dir.close() {
+                log::warn!(
+                    "optimize: could not remove {}: {e}",
+                    optimize_path.display()
+                );
+            }
+        }
+        None => {
+            log::warn!("--optimize could not read a sample; keeping the resolved parameters")
+        }
+    }
+    Ok(())
+}

@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use output::mbr::{write_mbr_validation, Accepted, EvidenceType, MbrValidation, VALIDATION_Q};
+use quant::align::RunMap;
 use quant::claims::Claim;
 use quant::decoys::Hypothesis;
 use quant::library::Library;
@@ -26,7 +27,8 @@ use crate::quant::mbr::{
 };
 use crate::transfers::{
     member_seed, row_unit, sample_hash, train_bagged_folds, train_folds, transfer_train_params,
-    Estimate, FdrCounts, FdrRow, FoldScores, QValues, TrainingSample, TRANSFER_FEATURES,
+    Estimate, FdrCounts, FdrRow, FoldModels, FoldScores, QValues, TrainingSample,
+    TRANSFER_FEATURES,
 };
 #[cfg(test)]
 pub(crate) use extract::ExtractRuns;
@@ -376,162 +378,19 @@ pub(crate) fn finalize_stream(
     let all_summaries = donor_summaries(lib, source, bounds, trace_fraction, limits, dir)?;
     let summaries = &all_summaries;
 
-    let t0 = Instant::now();
-    let members = limits.transfer_models.max(1);
-    let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
-        .map(|m| {
-            Mutex::new(TrainingSample::new(
-                limits.max_train_rows,
-                member_seed(seed, m),
-            ))
-        })
-        .collect();
-    let i_sample: Mutex<TrainingSample<Key>> =
-        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
-    let w_sample: Mutex<TrainingSample<Key>> =
-        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
-    let w_seen = AtomicUsize::new(0);
-    let no_features = AtomicUsize::new(0);
-    let identified_no_features = AtomicUsize::new(0);
-    let rows_read = AtomicUsize::new(0);
-    for_each_block(
+    let inputs = StreamInputs {
         source,
-        false,
         bounds,
-        |_| (),
-        |_, chunk, first, rows| {
-            rows_read.fetch_add(rows.len(), Ordering::Relaxed);
-            let ctx = BlockContext::new(rows, maps)?;
-            let shapes = BlockShapes {
-                summaries,
-                own: &ctx.own,
-            };
-            let feats = table_features(rows, &idx, &shapes, maps, |t: Table| t != Table::Pseudo);
-            let (mut t_rows, mut i_rows) = (Vec::new(), Vec::new());
-            for (i, t, fam, x) in feats {
-                let Some(x) = x else {
-                    match t {
-                        Table::Identified => &identified_no_features,
-                        _ => &no_features,
-                    }
-                    .fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                let r = &rows[i];
-                let item = (
-                    (chunk as u32, first + i as u64),
-                    row_unit(r.precursor, r.run),
-                    FdrRow {
-                        precursor: r.precursor,
-                        is_decoy: fam != 0,
-                        family: fam,
-                        x,
-                    },
-                );
-                match t {
-                    Table::Identified => i_rows.push(item),
-                    _ => t_rows.push(item),
-                }
-            }
-            for sample in &t_samples {
-                let mut s = sample.lock().expect("training sample lock");
-                for (k, u, row) in &t_rows {
-                    if s.wants(*u) {
-                        s.push(*k, *u, row.clone());
-                    } else {
-                        s.skip();
-                    }
-                }
-            }
-            let mut s = i_sample.lock().expect("training sample lock");
-            for (k, u, row) in i_rows {
-                s.push(k, u, row);
-            }
-            drop(s);
-            let mut w_rows = Vec::new();
-            for (i, r) in rows.iter().enumerate() {
-                let Some((y, x)) = pseudo_example(r, &ctx, &idx) else {
-                    continue;
-                };
-                w_rows.push((
-                    (chunk as u32, first + i as u64),
-                    row_unit(r.precursor, r.run),
-                    FdrRow {
-                        precursor: r.precursor,
-                        is_decoy: y,
-                        family: 0,
-                        x,
-                    },
-                ));
-            }
-            w_seen.fetch_add(w_rows.len(), Ordering::Relaxed);
-            let mut s = w_sample.lock().expect("training sample lock");
-            for (k, u, row) in w_rows {
-                s.push(k, u, row);
-            }
-            Ok(())
-        },
-        |_, ()| Ok(()),
-    )?;
-    summary.no_features = no_features.into_inner();
-    summary.identified_no_features = identified_no_features.into_inner();
-    let t_samples: Vec<TrainingSample<Key>> = t_samples
-        .into_iter()
-        .map(|s| s.into_inner().expect("training sample lock"))
-        .collect();
-    let i_sample = i_sample.into_inner().expect("training sample lock");
-    for (name, s) in [
-        ("transfer", &t_samples[0]),
-        ("identified quality", &i_sample),
-    ] {
-        let (seen, kept, share) = s.stats();
-        if kept < seen {
-            log::debug!(
-                target: "mbr",
-                "{name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
-            );
-        }
-    }
-    let t1 = Instant::now();
-    let t_sets: Vec<Vec<FdrRow>> = t_samples
-        .into_iter()
-        .map(TrainingSample::into_items)
-        .collect();
-    let i_rows = i_sample.into_items();
-    let w_rows = w_sample
-        .into_inner()
-        .expect("training sample lock")
-        .into_items();
-    let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
-    let (t_models, i_models) = rayon::join(
-        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
-        || train_folds(&i_rows, seed),
-    );
-    drop(t_refs);
-    drop((t_sets, i_rows));
-    let w_models = train_folds(&w_rows, seed);
-    log::debug!(
-        target: "mbr",
-        "wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
-        w_rows.len(),
-        100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
-        w_models.failed_folds.len()
-    );
-    for f in &w_models.failed_folds {
-        log::warn!(target: "mbr", "wrong-peak model fold without a model: {f}");
-    }
-    drop(w_rows);
-    log::debug!(
-        target: "finalize",
-        "training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
-        rows_read.into_inner(),
-        (t1 - t0).as_secs_f64(),
-        secs(t1),
-        t_models.members()
-    );
+        idx: &idx,
+        maps,
+        summaries,
+        limits,
+        seed,
+    };
+    let (t_models, i_models, w_models, w_seen) = train_transfer_models(&inputs, &mut summary)?;
 
     let t0 = Instant::now();
-    let w_stride = (w_seen.into_inner() / WRONG_CALIBRATION_ROWS + 1) as u64;
+    let w_stride = (w_seen / WRONG_CALIBRATION_ROWS + 1) as u64;
     let w_held: Mutex<Vec<(f32, bool)>> = Mutex::new(Vec::new());
     let strata = idx.strata();
     let t_store = ScoreStore::new("transfer", dir, limits.max_held_scores, seed, strata);
@@ -975,6 +834,192 @@ pub(crate) fn finalize_stream(
     );
     summary.validation = v;
     Ok(summary)
+}
+
+/// What the block passes of `finalize_stream` share: the extract source and its bounds, the
+/// library index, the run maps, the donor summaries, the limits and the seed.
+#[derive(Clone, Copy)]
+struct StreamInputs<'a> {
+    source: &'a dyn ExtractSource,
+    bounds: Bounds,
+    idx: &'a EntryIndex<'a>,
+    maps: &'a [Option<RunMap>],
+    summaries: &'a Summaries,
+    limits: &'a FinalizeLimits,
+    seed: u64,
+}
+
+/// The first pass of `finalize_stream`: samples the training rows of every block (transfers,
+/// identified quality, wrong peaks) and trains the fold models on them. Records the rows without
+/// features in `summary`; returns the transfer, identified and wrong-peak models and the number of
+/// wrong-peak rows seen.
+fn train_transfer_models(
+    inputs: &StreamInputs<'_>,
+    summary: &mut FinalizeSummary,
+) -> Result<(FoldModels, FoldModels, FoldModels, usize), String> {
+    let StreamInputs {
+        source,
+        bounds,
+        idx,
+        maps,
+        summaries,
+        limits,
+        seed,
+    } = *inputs;
+    let t0 = Instant::now();
+    let members = limits.transfer_models.max(1);
+    let t_samples: Vec<Mutex<TrainingSample<Key>>> = (0..members)
+        .map(|m| {
+            Mutex::new(TrainingSample::new(
+                limits.max_train_rows,
+                member_seed(seed, m),
+            ))
+        })
+        .collect();
+    let i_sample: Mutex<TrainingSample<Key>> =
+        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_sample: Mutex<TrainingSample<Key>> =
+        Mutex::new(TrainingSample::new(limits.max_train_rows, seed));
+    let w_seen = AtomicUsize::new(0);
+    let no_features = AtomicUsize::new(0);
+    let identified_no_features = AtomicUsize::new(0);
+    let rows_read = AtomicUsize::new(0);
+    for_each_block(
+        source,
+        false,
+        bounds,
+        |_| (),
+        |_, chunk, first, rows| {
+            rows_read.fetch_add(rows.len(), Ordering::Relaxed);
+            let ctx = BlockContext::new(rows, maps)?;
+            let shapes = BlockShapes {
+                summaries,
+                own: &ctx.own,
+            };
+            let feats = table_features(rows, idx, &shapes, maps, |t: Table| t != Table::Pseudo);
+            let (mut t_rows, mut i_rows) = (Vec::new(), Vec::new());
+            for (i, t, fam, x) in feats {
+                let Some(x) = x else {
+                    match t {
+                        Table::Identified => &identified_no_features,
+                        _ => &no_features,
+                    }
+                    .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let r = &rows[i];
+                let item = (
+                    (chunk as u32, first + i as u64),
+                    row_unit(r.precursor, r.run),
+                    FdrRow {
+                        precursor: r.precursor,
+                        is_decoy: fam != 0,
+                        family: fam,
+                        x,
+                    },
+                );
+                match t {
+                    Table::Identified => i_rows.push(item),
+                    _ => t_rows.push(item),
+                }
+            }
+            for sample in &t_samples {
+                let mut s = sample.lock().expect("training sample lock");
+                for (k, u, row) in &t_rows {
+                    if s.wants(*u) {
+                        s.push(*k, *u, row.clone());
+                    } else {
+                        s.skip();
+                    }
+                }
+            }
+            let mut s = i_sample.lock().expect("training sample lock");
+            for (k, u, row) in i_rows {
+                s.push(k, u, row);
+            }
+            drop(s);
+            let mut w_rows = Vec::new();
+            for (i, r) in rows.iter().enumerate() {
+                let Some((y, x)) = pseudo_example(r, &ctx, idx) else {
+                    continue;
+                };
+                w_rows.push((
+                    (chunk as u32, first + i as u64),
+                    row_unit(r.precursor, r.run),
+                    FdrRow {
+                        precursor: r.precursor,
+                        is_decoy: y,
+                        family: 0,
+                        x,
+                    },
+                ));
+            }
+            w_seen.fetch_add(w_rows.len(), Ordering::Relaxed);
+            let mut s = w_sample.lock().expect("training sample lock");
+            for (k, u, row) in w_rows {
+                s.push(k, u, row);
+            }
+            Ok(())
+        },
+        |_, ()| Ok(()),
+    )?;
+    summary.no_features = no_features.into_inner();
+    summary.identified_no_features = identified_no_features.into_inner();
+    let t_samples: Vec<TrainingSample<Key>> = t_samples
+        .into_iter()
+        .map(|s| s.into_inner().expect("training sample lock"))
+        .collect();
+    let i_sample = i_sample.into_inner().expect("training sample lock");
+    for (name, s) in [
+        ("transfer", &t_samples[0]),
+        ("identified quality", &i_sample),
+    ] {
+        let (seen, kept, share) = s.stats();
+        if kept < seen {
+            log::debug!(
+                target: "mbr",
+                "{name} classifier: trained on {kept} of {seen} rows ((precursor, run) pairs, {share} of them; every row is scored)"
+            );
+        }
+    }
+    let t1 = Instant::now();
+    let t_sets: Vec<Vec<FdrRow>> = t_samples
+        .into_iter()
+        .map(TrainingSample::into_items)
+        .collect();
+    let i_rows = i_sample.into_items();
+    let w_rows = w_sample
+        .into_inner()
+        .expect("training sample lock")
+        .into_items();
+    let t_refs: Vec<&[FdrRow]> = t_sets.iter().map(Vec::as_slice).collect();
+    let (t_models, i_models) = rayon::join(
+        || train_bagged_folds(&t_refs, seed, &transfer_train_params()),
+        || train_folds(&i_rows, seed),
+    );
+    drop(t_refs);
+    drop((t_sets, i_rows));
+    let w_models = train_folds(&w_rows, seed);
+    log::debug!(
+        target: "mbr",
+        "wrong-peak model: {} pseudo-transfers ({:.1} % wrong against the identified fit), {} failed folds",
+        w_rows.len(),
+        100.0 * w_rows.iter().filter(|r| r.is_decoy).count() as f64 / w_rows.len().max(1) as f64,
+        w_models.failed_folds.len()
+    );
+    for f in &w_models.failed_folds {
+        log::warn!(target: "mbr", "wrong-peak model fold without a model: {f}");
+    }
+    drop(w_rows);
+    log::debug!(
+        target: "finalize",
+        "training rows of {} extract rows {:.1} s, fold models {:.1} s ({} transfer classifier members per fold)",
+        rows_read.into_inner(),
+        (t1 - t0).as_secs_f64(),
+        secs(t1),
+        t_models.members()
+    );
+    Ok((t_models, i_models, w_models, w_seen.into_inner()))
 }
 
 #[allow(clippy::too_many_arguments)]

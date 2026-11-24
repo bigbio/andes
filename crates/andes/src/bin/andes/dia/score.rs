@@ -382,13 +382,16 @@ pub(crate) struct PrecursorPin {
 
 /// Writes the precursor PIN `out` from the pass-1 PIN `pin` (they may be the same file): one row
 /// per pass-2 precursor with the learned score (left out when its first round is degenerate),
-/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row.
+/// `extra` columns (e.g. cross-run), the pass-2 columns and the best pass-1 row. Target rows whose
+/// `(FileName, Peptide, charge)` is in `removed` (precursors that --dia-interference took out of
+/// the competition) are left out.
 pub(crate) fn write_precursor_pin(
     pin: &Path,
     out_pin: &Path,
     t: &Pass2Table,
     extra: &[(String, Vec<f32>)],
     seed: u64,
+    removed: &HashSet<(String, String, u8)>,
 ) -> Result<PrecursorPin, String> {
     let t0 = std::time::Instant::now();
     let own: HashMap<&str, u32> = t
@@ -459,8 +462,16 @@ pub(crate) fn write_precursor_pin(
         learned: gb.is_some(),
     };
     let mut line = String::new();
+    let mut left_out = 0usize;
     for i in 0..n {
         use std::fmt::Write as _;
+        if !t.decoy[i] && !removed.is_empty() {
+            let file = p1.run_file.get(&t.run[i]).cloned().unwrap_or_default();
+            if removed.contains(&(file, t.peptide[i].clone(), t.charge[i])) {
+                left_out += 1;
+                continue;
+            }
+        }
         line.clear();
         let p = p1_of[i];
         let _ = write!(
@@ -497,6 +508,12 @@ pub(crate) fn write_precursor_pin(
     out.flush().map_err(|e| err(&e))?;
     drop(out);
     std::fs::rename(&tmp, out_pin).map_err(|e| err(&e))?;
+    if left_out > 0 {
+        log::info!(
+            target: "dia",
+            "precursor PIN: {left_out} target rows of interference-removed precursors left out"
+        );
+    }
     log::info!(
         target: "dia",
         "precursor PIN: {n} rows ({} targets), {} learned-score features ({}, {} degenerate \
@@ -593,12 +610,16 @@ fn pass1_preferred(pass1: &[(f64, bool)], precursor: &[(f64, bool)]) -> Option<S
 ///   `(score, is decoy)` of every pass-1 precursor) by more than the decoy noise at q 0.005
 ///   and 0.01 (`pass1_preferred`).
 ///
+/// Target rows of the precursors in `removed` (by `(FileName, Peptide, charge)`, see
+/// [`write_precursor_pin`]) are left out, so interference removal holds on this path too.
+///
 /// Any error while writing or rescoring also keeps pass 1.
 pub(crate) fn rescore_precursors(
     pin: &Path,
     t: &Pass2Table,
     seed: u64,
     pass1: &[(f64, bool)],
+    removed: &HashSet<(String, String, u8)>,
     rescore: impl FnOnce(&Path) -> Result<Rescored, String>,
 ) -> Result<PrecursorRescore, String> {
     let pass1_q = tdc_counts(pass1, COMPARE_Q).0;
@@ -612,7 +633,7 @@ pub(crate) fn rescore_precursors(
     }
     let replaced = pin_ids(pin)?;
     let out = precursor_pin_path(pin);
-    let ids = write_precursor_pin(pin, &out, t, &[], seed)?;
+    let ids = write_precursor_pin(pin, &out, t, &[], seed, removed)?;
     let rescored = rescore(&out)?;
     let mut scores: Vec<f64> = rescored.targets.values().filter_map(|p| p.score).collect();
     scores.sort_by(f64::total_cmp);
@@ -946,14 +967,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pin = pass1_pin(dir.path());
         let never = |_: &Path| -> Result<Rescored, String> { panic!("no rescoring expected") };
-        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], never).is_err());
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), never).is_err());
+        let none = HashSet::new();
+        assert!(rescore_precursors(&pin, &pass2(0), 42, &[], &none, never).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &clean(200), &none, never).is_err());
         assert!(!precursor_pin_path(&pin).exists());
         let before = std::fs::read_to_string(&pin).unwrap();
         let fewer = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored_with(&[0.0, 1.0, 2.0], &[0.5]))
         };
-        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), fewer)
+        let why = rescore_precursors(&pin, &pass2(250), 42, &clean(100), &none, fewer)
             .err()
             .unwrap();
         assert!(why.contains("fewer than pass 1"), "{why}");
@@ -961,7 +983,7 @@ mod tests {
         let head = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
         assert!(!head.starts_with("SpecId\tLabel\tScanNr\tFileName\tdia_gb_score"));
         let failing = |_: &Path| -> Result<Rescored, String> { Err("Percolator failed".into()) };
-        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], failing).is_err());
+        assert!(rescore_precursors(&pin, &pass2(8), 42, &[], &none, failing).is_err());
     }
 
     #[test]
@@ -973,15 +995,23 @@ mod tests {
             assert_eq!(p, precursor_pin_path(&pin));
             Ok(rescored(&scores))
         };
-        let r = rescore_precursors(&pin, &pass2(8), 42, &[], more).unwrap();
+        let more_again = |_: &Path| -> Result<Rescored, String> { Ok(rescored(&scores)) };
+        let none = HashSet::new();
+        let r = rescore_precursors(&pin, &pass2(8), 42, &[], &none, more).unwrap();
         assert_eq!(r.n_q, 150);
         assert_eq!(r.ids.targets.len(), 4);
+        let removed = HashSet::from([("run".to_string(), "K.PEPT2K.A".to_string(), 2u8)]);
+        let r = rescore_precursors(&pin, &pass2(8), 42, &[], &removed, more_again).unwrap();
+        assert_eq!(r.ids.targets.len(), 3, "the removed precursor's target row is left out");
+        assert!(!r.ids.targets.contains(&"s3".to_string()));
+        let text = std::fs::read_to_string(precursor_pin_path(&pin)).unwrap();
+        assert!(!text.lines().any(|l| l.starts_with("s3\t")));
         assert!(!r.ids.learned, "8 rows are too few to train the learned score");
         assert_eq!(r.replaced.len(), 2);
         let degenerate = |_: &Path| -> Result<Rescored, String> {
             Ok(rescored(&[1.0; 4]))
         };
-        let why = rescore_precursors(&pin, &pass2(8), 42, &[], degenerate).err().unwrap();
+        let why = rescore_precursors(&pin, &pass2(8), 42, &[], &none, degenerate).err().unwrap();
         assert!(why.contains("degenerate"), "{why}");
     }
 

@@ -728,7 +728,7 @@ pub(crate) fn finalize(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        crate::dia::score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed)?;
+        crate::dia::score::write_precursor_pin(&pin_in, &pin, &t, &xr, seed, &Default::default())?;
         let has_xfer = t.feature(crate::dia::pass2::XFER_COLUMN).is_some();
         let cands = quant_candidates(&t);
         drop(t);
@@ -741,7 +741,7 @@ pub(crate) fn finalize(
         let decoys =
             output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", dpath.display()))?;
         drop(text);
-        let ((nt, nd, n01), _) = crate::dia::precursor_q(&pin, &[], &mut map, &decoys, None)?;
+        let ((nt, nd, n01), _, _) = crate::dia::precursor_q(&pin, &[], &mut map, &decoys, None)?;
         log::info!(
             target: "rescore",
             "run {s}: precursor-level q (DIA): {nt} target and {nd} decoy precursors, {n01} at \

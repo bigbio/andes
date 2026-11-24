@@ -1024,8 +1024,13 @@ pub(crate) fn default_train_fdr(args: &mut Vec<String>) {
     }
 }
 
-/// Precursor counts of [`precursor_q`] and the best `(score, is decoy)` of every precursor.
-pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
+/// Precursor counts of [`precursor_q`], the best `(score, is decoy)` of every precursor, and the
+/// `(FileName, Peptide, charge)` of the target precursors that interference removal dropped.
+pub(crate) type PrecursorQ = (
+    (usize, usize, usize),
+    Vec<(f64, bool)>,
+    std::collections::HashSet<(String, String, u8)>,
+);
 
 /// Reports precursor-level q-values for DIA: target-decoy competition over the best
 /// Percolator score of each precursor (run, peptide form, charge), with q = (D + 1) / T
@@ -1068,6 +1073,7 @@ pub(crate) fn precursor_q(
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
     let mut line_of: Vec<usize> = Vec::new();
+    let mut names: Vec<(String, String, u8)> = Vec::new();
     for (i, line) in lines.enumerate() {
         let x: Vec<&str> = line.split('\t').collect();
         if x.len() <= c_pep.max(c_label).max(c_id) {
@@ -1102,7 +1108,10 @@ pub(crate) fn precursor_q(
         };
         let run = c_file.map_or("", |i| x[i]).to_string();
         let n = keys.len() as u32;
-        let k = *keys.entry((run, peptide, charge)).or_insert(n);
+        let k = *keys.entry((run.clone(), peptide, charge)).or_insert(n);
+        if k == n {
+            names.push((run, x[c_pep].to_string(), charge));
+        }
         rows.push((k, score, decoy, id.to_string()));
         line_of.push(i);
     }
@@ -1116,29 +1125,38 @@ pub(crate) fn precursor_q(
                 run_of[*k as usize] = *runs.entry(run.as_str()).or_insert(n);
             }
             let mut windows = coeluting_windows(&rows, &line_of, &q0, &run_of, t, spectra);
-            let rule = match choice {
-                Interference::Fixed(f, drt) => Some((f, drt)),
-                Interference::Auto => {
-                    let e = estimate_interference(&windows);
-                    log::info!(target: "dia", "interference removal, auto: {e}");
-                    e.rule
-                }
-            };
-            match rule {
-                Some(rule) => {
-                    let removed = interference_removed(&mut windows, keys.len(), rule);
-                    log::info!(
-                        target: "dia",
-                        "interference removal (shared fragments >= {}, RT within {} s): {} \
-                         precursors removed",
-                        rule.0,
-                        rule.1,
-                        removed.iter().filter(|r| **r).count()
-                    );
-                    removed
-                }
-                None => vec![false; keys.len()],
+            let mut removed = vec![false; keys.len()];
+            let mut by_run: std::collections::BTreeMap<u32, HashMap<(u32, i64), Vec<Coeluting>>> =
+                Default::default();
+            for (k, v) in windows.drain() {
+                by_run.entry(k.0).or_default().insert(k, v);
             }
+            let run_name: HashMap<u32, &str> = runs.iter().map(|(n, &i)| (i, *n)).collect();
+            for (run, mut windows) in by_run {
+                let name = run_name.get(&run).copied().unwrap_or_default();
+                let rule = match choice {
+                    Interference::Fixed(f, drt) => Some((f, drt)),
+                    Interference::Auto => {
+                        let e = estimate_interference(&windows);
+                        log::info!(target: "dia", "interference removal, auto, run {name}: {e}");
+                        e.rule
+                    }
+                };
+                let Some(rule) = rule else { continue };
+                let hit = interference_removed(&mut windows, keys.len(), rule);
+                log::info!(
+                    target: "dia",
+                    "interference removal, run {name} (shared fragments >= {}, RT within {} s): \
+                     {} precursors removed",
+                    rule.0,
+                    rule.1,
+                    hit.iter().filter(|r| **r).count()
+                );
+                for (r, h) in removed.iter_mut().zip(hit) {
+                    *r |= h;
+                }
+            }
+            removed
         }
         _ => vec![false; keys.len()],
     };
@@ -1149,6 +1167,11 @@ pub(crate) fn precursor_q(
             }
         }
     }
+    let removed_targets = rows
+        .iter()
+        .filter(|r| removed[r.0 as usize] && !r.2)
+        .map(|r| names[r.0 as usize].clone())
+        .collect();
     rows.retain(|r| !removed[r.0 as usize]);
     let q = precursor_q_values(keys.len(), &rows);
     let n_targets = q.iter().filter(|p| p.is_some_and(|p| !p.1)).count();
@@ -1164,7 +1187,7 @@ pub(crate) fn precursor_q(
         }
     }
     let best = q.iter().flatten().map(|p| (p.0, p.1)).collect();
-    Ok(((n_targets, n_decoys, passing), best))
+    Ok(((n_targets, n_decoys, passing), best, removed_targets))
 }
 
 /// Precursor q at or below which a precursor takes part in interference removal.

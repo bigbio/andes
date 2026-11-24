@@ -1862,8 +1862,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output::parse_psm_results(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             let mut pass1_q = 0;
             let mut pass1_best = Vec::new();
+            let mut pass1_removed = std::collections::HashSet::new();
             if cli.dia {
-                let ((t, d, n), best) = crate::dia::precursor_q(
+                let ((t, d, n), best, removed) = crate::dia::precursor_q(
                     &output_pin_path,
                     &spectra,
                     &mut map,
@@ -1872,6 +1873,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 pass1_q = n;
                 pass1_best = best;
+                pass1_removed = removed;
                 if fact_rows.is_some() {
                     for s in &mut spectra {
                         s.peaks = Vec::new();
@@ -1918,6 +1920,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &t,
                     seed,
                     &pass1_best,
+                    &pass1_removed,
                     rescore,
                 ) {
                     Ok(r) => {

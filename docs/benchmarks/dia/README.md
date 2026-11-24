@@ -496,7 +496,8 @@ all of these:
 - it holds at least F of the first precursor's b/y m/z (charge 1, plus 2 for z ≥ 3, 0.02 Th
   bins).
 
-Only precursors at q ≤ 0.2 take part. The rule never reads labels, so decoys, entrapment and
+Only precursors at q ≤ 0.2 take part, both as the higher-scoring precursor and as the one
+removed. The rule never reads labels, so decoys, entrapment and
 HYE targets are removed by the same test. The flag is hidden and off by default.
 
 **How 0.4:4 was chosen.** An offline sweep replayed the rule on the PINs and Percolator scores of
@@ -558,7 +559,8 @@ On HeLa, a single species with reversed decoys, it is 33-40%. Removal acts on co
 near-identical sequences, which a three-species sample with near-variant decoys has and a
 single-species sample with reversed decoys mostly does not.
 
-**`--dia-interference auto`.** F and DRT are estimated from the run, without labels, from the
+**`--dia-interference auto`.** F and DRT are estimated from each run separately, without labels,
+from the
 pool precursors' pairs in one window with overlapping mobility slices:
 
 - **Null:** pairs 60-200 s apart cannot co-elute. Their 0.999 share quantile is the hit share,

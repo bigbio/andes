@@ -55,6 +55,8 @@ fn interference_removes_the_lower_coeluting_sharer_only() {
     // 1 is beaten by 0 (1 s apart, slices overlap); 2 is 9 s from 1 and 10 s from 0; 3 only
     // touches 0's slice edge but overlaps 1; 4 shares no fragment with any.
     assert_eq!(by_key, [false, true, false, true, false]);
+    let mut touching = vec![p(0, 5.0, 100.0, (10, 30), &f), p(1, 4.0, 100.0, (30, 50), &f)];
+    assert_eq!(interfered(&mut touching, (0.5, 4.0)), [false, false], "touching slices");
 }
 
 #[test]

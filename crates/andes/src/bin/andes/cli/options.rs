@@ -395,11 +395,12 @@ pub(crate) struct SearchArgs {
     /// --dia --rescore: drop precursors whose fragments a stronger co-eluting precursor explains
     ///
     /// `F:DRT`, e.g. `0.4:4`, or `auto`. Before the precursor-level q, a precursor leaves the
-    /// target-decoy competition (its rows get q = 1) when a higher-scoring precursor of any label,
-    /// at precursor q <= 0.2, has its best row in the same isolation window and an overlapping
-    /// mobility slice within DRT seconds and holds at least F of its b/y fragment m/z. Labels are
-    /// not used. `auto` estimates F and DRT from the run: pairs 60-200 s apart give the chance
-    /// fragment share, DRT is where the excess share of closer pairs fades, and F is the smallest
+    /// target-decoy competition (its rows get q = 1) when a higher-scoring precursor of any label
+    /// has its best row in the same isolation window and an overlapping mobility slice within DRT
+    /// seconds and holds at least F of its b/y fragment m/z. Only precursors at precursor q <= 0.2
+    /// take part, on both sides. Labels are not used. `auto` estimates F and DRT from each run:
+    /// pairs 60-200 s apart give the chance fragment share, DRT is where the excess share of closer
+    /// pairs fades, and F is the smallest
     /// share whose chance pairs are at most 1% of those observed within DRT. When co-eluting pairs
     /// share fragments little more than chance, `auto` removes nothing. Off by default; measured
     /// on diaPASEF (docs/benchmarks/dia/README.md).

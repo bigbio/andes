@@ -483,6 +483,128 @@ higher value (0.5 = no separation), mutant / reverse:
   fragments of the stronger peptide are taken out, or a fixed slot per precursor in each
   spectrum instead of a top-10 list.
 
+### Interference removal before the precursor q (`--dia-interference`)
+
+This follows DIA-NN's interference removal. With `--dia-interference F:DRT`, a precursor (the
+best row of a run, peptide form and charge) leaves the precursor-level target-decoy
+competition, and its target rows get q = 1, when a higher-scoring precursor of any label meets
+all of these:
+
+- its best row is in the same isolation window;
+- its best row is in an overlapping mobility slice;
+- its best row is within DRT seconds of RT;
+- it holds at least F of the first precursor's b/y m/z (charge 1, plus 2 for z ≥ 3, 0.02 Th
+  bins).
+
+Only precursors at q ≤ 0.2 take part. The rule never reads labels, so decoys, entrapment and
+HYE targets are removed by the same test. The flag is hidden and off by default.
+
+**How 0.4:4 was chosen.** An offline sweep replayed the rule on the PINs and Percolator scores of
+three control seeds per run, over F in {0.3, 0.4, 0.5, 0.6} and DRT in {2, 4, 8} s. Means of
+three seeds, q ≤ 1% precursors / FDP_c:
+
+| F \ DRT | O4 2 s | O4 4 s | O4 8 s | B18 2 s | B18 4 s | B18 8 s |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 3,740 / 2.22% | | | 3,040 / 2.16% | | |
+| 0.3 | 3,958 / 1.84% | 3,952 / 1.82% | 3,970 / 1.96% | 3,377 / 1.79% | 3,373 / 1.83% | 3,395 / 1.91% |
+| 0.4 | 3,933 / 1.80% | 3,929 / 1.77% | 3,919 / 1.78% | 3,378 / 1.79% | 3,376 / 1.82% | 3,368 / 1.83% |
+| 0.5 | 3,934 / 1.80% | 3,932 / 1.77% | 3,923 / 1.78% | 3,351 / 1.75% | 3,349 / 1.78% | 3,343 / 1.78% |
+| 0.6 | 3,795 / 1.92% | 3,793 / 1.89% | 3,792 / 1.90% | 3,196 / 1.90% | 3,193 / 1.90% | 3,192 / 1.90% |
+
+The gain is flat over F 0.3-0.5 and DRT 2-8 s, within about 50 precursors and 0.2 points of
+FDP_c. Seed spread is larger than that: each cell's three seeds span 150-165 precursors and
+0.3-0.6 points. F 0.6 loses about half the gain. F 0.3 at 8 s removes the most precursors and starts to
+raise FDP_c. 0.4:4 sits in the middle of the plateau. It was not chosen as the best cell, and
+the sweep cannot tell its neighbours apart. The sweep chose F and DRT on the same two runs it
+reports, so the in-tool numbers below are on these runs too. They are not a held-out test.
+
+**In andes.** `--dia-interference 0.4:4` against the same binary without it, built from this
+branch, Percolator seeds through `--percolator-args "--seed S"`. The table counts andes's own
+`<base>.q0p01.tsv` (precursors at q ≤ 1%, PIN charge, entrapment precursors map only to
+`_ARATH`).
+
+| seed | O4 control | O4 0.4:4 | B18 control | B18 0.4:4 |
+|---|---:|---:|---:|---:|
+| 42 | 3,723 / 2.57% | 4,021 / 2.61% | 3,160 / 2.15% | 3,372 / 1.83% |
+| 1 | 3,765 / 2.46% | 4,062 / 2.35% | 3,099 / 1.79% | 3,492 / 1.59% |
+| 2 | 3,833 / 2.33% | 3,997 / 2.08% | 3,030 / 1.83% | 3,500 / 1.32% |
+| mean | 3,774 / 2.45% | 4,027 / 2.35% | 3,096 / 1.92% | 3,455 / 1.58% |
+
+It removes 349-362 precursors on O4 and 414-423 on B18. Recall rises by 253 (6.7%) on O4 and
+359 (11.6%) on B18, and mean FDP_c falls on both. Entrapment counts stay at 15-34. On the DIA
+probe branch (`wip/dia-pasef-current-rerun`, which adds DIA scoring features `main` does not
+have), the same comparison gave +243 / +439 at lower FDP_c. On O4, at the control's q ≤ 1%, the
+removed precursors are 12 decoys, 10 entrapment and 44 HYE targets. Each was removed by a
+higher-scoring precursor, mostly an HYE target. Removing them takes decoys out of the count in
+step with wrong targets. That is why the q ranks improve and FDP_c does not rise. andes stays
+about 900 (O4) and 1,500 (B18) precursors short of DIA-NN.
+
+**Held-out diaPASEF: HeLa, no gain.** Two 200 ng HeLa runs on a timsTOF Pro, 24 windows of 25 Th
+(a 5.6 min gradient at 200 samples per day, and a 21 min gradient), searched against an
+FDRBench-style entrapment FASTA. Each library peptide is paired with a shuffle that keeps K, R
+and the C-terminus, so r = 1 and entrapment is the `_p_target` entries. Same flags, the default
+reversed decoys. Means of three seeds, q ≤ 1% precursors / FDP_c:
+
+| run | control | 0.4:2 | 0.4:4 |
+|---|---:|---:|---:|
+| 5.6 min | 19,407 / 1.05% | 19,461 / 1.05% | 19,469 / 1.06% |
+| 21 min | 25,089 / 1.09% | 25,110 / 1.09% | 25,134 / 1.12% |
+
+It removes 250-340 precursors and moves recall by 0.1-0.3%, inside seed spread. FDP_c is
+already about 1% there. The difference is in what the high-share co-eluting pairs are. On O4 and
+B18, 66-68% of the pairs at |dRT| ≤ 4 s that share ≥ 0.4 are the same length and at most two
+residues apart (cross-species homologs of the HYE mix, and near-variant decoys of a target).
+On HeLa, a single species with reversed decoys, it is 33-40%. Removal acts on co-eluting
+near-identical sequences, which a three-species sample with near-variant decoys has and a
+single-species sample with reversed decoys mostly does not.
+
+**`--dia-interference auto`.** F and DRT are estimated from the run, without labels, from the
+pool precursors' pairs in one window with overlapping mobility slices:
+
+- **Null:** pairs 60-200 s apart cannot co-elute. Their 0.999 share quantile is the hit share,
+  and their rate of hits is the null rate.
+- **DRT:** the hit rate in 0.5 s bins of |dRT|, less the null rate, falls as pairs stop
+  co-eluting. DRT is where it first stays at or below 5% of its value at 0 s, for two non-empty
+  bins.
+- **F:** the smallest F (0.20 to 0.80 by 0.05) at which chance, at the null rate, would explain
+  at most 1% of the pairs within DRT that share ≥ F.
+- **Off:** removal is off when the hit rate at 0 s is under 5x the null rate (co-eluting pairs
+  share fragments little more than chance). It is also off when the excess does not fade
+  within 20 s, or with fewer than 1000 null pairs or 20 hits at 0 s.
+
+Pairs of one bare sequence (charge states, modified forms) are left out: they share fragments
+at any RT gap, which raised the null's top share and pushed F to 0.55 in a first in-tool run.
+
+In andes, three seeds, q ≤ 1% precursors / FDP_c (means), with the rule each run chose:
+
+| run | control | 0.4:4 | auto | auto rule (seeds 42, 1, 2) | removed |
+|---|---:|---:|---:|---|---:|
+| O4 | 3,774 / 2.45% | 4,027 / 2.35% | 4,030 / 2.34% | 0.4:3, 0.4:3, 0.4:3 | 341-351 |
+| B18 | 3,096 / 1.92% | 3,455 / 1.58% | 3,406 / 1.48% | 0.45:4, 0.45:3.5, 0.45:3.5 | 333-345 |
+| HeLa 5.6 min | 19,407 / 1.05% | 19,469 / 1.06% | 19,407 / 1.05% | off, off, off | 0 |
+| HeLa 21 min | 25,089 / 1.09% | 25,134 / 1.12% | 25,089 / 1.09% | off, off, off | 0 |
+
+On O4, `auto` matches 0.4:4. On B18 it picks F 0.45, removes fewer precursors and keeps 310 of
+the 359 gained, at lower FDP_c. On HeLa it turns removal off, from a hit rate at 0 s of
+0.0037-0.0056 over a null of 0.0011-0.0014. The numbers equal the control's. The HeLa runs
+predate leaving out same-sequence pairs. Replayed offline with the final rule, the six HeLa
+control PINs also turn removal off.
+
+**Limits.**
+
+- **Data tested:** four diaPASEF runs from two studies. The gain is on the three-species HYE
+  runs only.
+- **Narrow windows:** on Orbitrap Astral (2 Th windows) fewer precursors share a window, so the
+  rule should remove less. This is not measured.
+- **Mobility:** without mobility slices (mzML, `.raw`) the mobility test passes for every pair,
+  so only window, RT and fragments decide.
+- **DRT:** DRT bounds the distance between the best rows, not a peak overlap.
+- **Fragment share:** the share counts theoretical b/y m/z, not observed intensities. Two
+  peptides that share theoretical fragments but not observed ones can still remove each other.
+
+Before this becomes a default, it needs a check on Astral and on more multi-species diaPASEF
+sets.
+
 - The timsTOF model was trained with `andes train-from-search` on three public ddaPASEF runs of
   a human, yeast and E. coli benchmark set (213,326 labels). On a held-out QC ddaPASEF run of the
   same set it gives 64,685 precursors vs 64,737 for `hcd_qexactive_tryp`, so the seed model

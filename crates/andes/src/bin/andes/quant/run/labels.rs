@@ -15,7 +15,7 @@ use quant::formula::Formula;
 use quant::label::{
     channel_score, classify_channel, classify_identified, classify_transferred, coelution_factor,
     log2_ratio, mass_factor, median, weighted_qvalues, ChannelFit, ChannelStatus, ClassifyParams,
-    FitParams, GroupFit, Site,
+    FitParams, GroupFit, LabelSpec, Site,
 };
 use rayon::prelude::*;
 use search::candidates::Candidate;
@@ -56,117 +56,10 @@ pub(super) fn quantify(
     let hits = &all_hits[..];
     let spec = &settings.spec;
     let n_ch = spec.len();
-    let sites = spec.sites();
     let tol = settings.tol_ppm;
 
-    let mut groups: Vec<Group> = Vec::new();
-    let mut gid_of: HashMap<(String, u8), usize> = HashMap::new();
-    let mut ids: HashMap<(usize, usize), Vec<Option<ChannelHit>>> = HashMap::new();
-    let mut best_of_group: HashMap<usize, usize> = HashMap::new();
-    let (mut mixed, mut no_rt) = (0usize, 0usize);
-    let better = |h: &Hit<'_>, o: &Hit<'_>| match (h.q_value, o.q_value) {
-        (Some(a), Some(b)) if a != b => a < b,
-        _ => h.psm.rank_score > o.psm.rank_score,
-    };
-    for (hi, h) in hits.iter().enumerate() {
-        let Some(mut lh) = labelled(h.cand, spec) else {
-            mixed += 1;
-            continue;
-        };
-        let Some(rt) = spectra[h.spec_idx].rt_seconds else {
-            no_rt += 1;
-            continue;
-        };
-        let z = h.psm.charge_used.max(1);
-        if h.cand.is_decoy {
-            lh.key = format!("DECOY:{}", lh.key);
-        }
-        let gid = *gid_of.entry((lh.key.clone(), z)).or_insert_with(|| {
-            let counts: Vec<u32> = sites
-                .iter()
-                .map(|s| lh.instances.iter().filter(|x| *x == s).count() as u32)
-                .collect();
-            let light = Formula::peptide(lh.residues.iter().copied());
-            let mut channel_mz = Vec::with_capacity(n_ch);
-            let mut envelopes = Vec::with_capacity(n_ch);
-            let mut deltas = Vec::with_capacity(n_ch);
-            let base = spec.channel_delta(0, &sites, &counts);
-            for c in 0..n_ch {
-                let delta = spec.channel_delta(c, &sites, &counts);
-                channel_mz.push((lh.light_mass + delta) / z as f64 + PROTON);
-                envelopes.push(spec.channel_envelope(c, &sites, &counts, &light));
-                deltas.push(delta - base);
-            }
-            groups.push(Group {
-                key: lh.key.clone(),
-                sequence: output::qpx::bare_sequence(h.cand),
-                charge: z,
-                proteins: super::proteins_of(&h.psm, candidates, index)
-                    .into_iter()
-                    .map(|(a, ..)| a)
-                    .collect(),
-                satellites: if settings.arg_pro {
-                    let n_pro = lh.residues.iter().filter(|r| r.0 == b'P').count();
-                    (0..n_ch)
-                        .filter(|_| n_pro > 0)
-                        .filter_map(|c| {
-                            let arg = spec.channels[c].label_at(Site::Residue(b'R'))?;
-                            let d = heavy_proline_delta(arg)?;
-                            Some((c, channel_mz[c] + d / z as f64))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                },
-                channel_mz,
-                envelopes,
-                deltas,
-                faims_cv: None,
-                identity_decoy: h.cand.is_decoy,
-            });
-            groups.len() - 1
-        });
-        let slot = ids
-            .entry((gid, h.run_idx))
-            .or_insert_with(|| vec![None; n_ch]);
-        let replace = slot[lh.channel].is_none_or(|o| better(h, hits[o.hi]));
-        if replace {
-            slot[lh.channel] = Some(ChannelHit { hi, rt });
-        }
-        let b = best_of_group.entry(gid).or_insert(hi);
-        if better(h, hits[*b]) {
-            *b = hi;
-        }
-    }
-    for (gid, &hi) in &best_of_group {
-        let h = &hits[hi];
-        let run = &collector.runs[h.run_idx];
-        groups[*gid].faims_cv = run
-            .contexts
-            .get(super::native_id(run, &spectra[h.spec_idx].title))
-            .and_then(|c| c.faims_cv);
-    }
-    log::info!(
-        target: "label",
-        "{} label groups from {} PSMs ({} without a consistent label state, \
-         {} without a retention time)",
-        groups.len(),
-        hits.len(),
-        mixed,
-        no_rt
-    );
-    let shared = groups
-        .iter()
-        .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
-        .count();
-    if shared > 0 {
-        log::warn!(
-            target: "label",
-            "{shared} groups have an Arg->Pro satellite within the MS1 tolerance \
-             of another channel's isotope; the split between the two (converted_fraction, and \
-             the ratio through it) is weakly determined there"
-        );
-    }
+    let (groups, ids, best_of_group) =
+        label_groups(hits, settings, spectra, candidates, index, collector);
 
     let fit_params = FitParams {
         tol_ppm: tol,
@@ -183,202 +76,27 @@ pub(super) fn quantify(
 
     let keep_resident = settings.mbr_fdr.is_some() && n_runs >= 2;
     let mut resident: Option<(usize, RunSeries)> = None;
+    let run_inputs = RunFitInputs {
+        hits,
+        groups: &groups,
+        ids: &ids,
+        spectra,
+        spec,
+        n_ch,
+        tol,
+        fit_params: &fit_params,
+        keep_resident,
+    };
     for (run_idx, run) in collector.runs.iter().enumerate() {
-        let Some(cache) = run.ms1.as_ref() else {
-            run_scales.push(Vec::new());
-            run_series_cv.push(Vec::new());
-            continue;
-        };
-        resident = None;
-        let ms1 = cache
-            .load()
-            .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
-        let series = faims_groups(ms1);
-        let mut scales_here: Vec<Option<Scales>> = Vec::new();
-        run_series_cv.push(series.iter().map(|(cv, _)| *cv).collect());
-        let mut by_series: Vec<Vec<(usize, Vec<Option<ChannelHit>>)>> =
-            vec![Vec::new(); series.len()];
-        let mut keys: Vec<&(usize, usize)> = ids.keys().filter(|(_, r)| *r == run_idx).collect();
-        keys.sort_unstable();
-        for &(gid, _) in keys {
-            let chans = ids[&(gid, run_idx)].clone();
-            let best = chans
-                .iter()
-                .flatten()
-                .copied()
-                .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
-                .expect("an identified group has a PSM");
-            let spec_ = &spectra[hits[best.hi].spec_idx];
-            let Some(si) = group_of(&series, run, spec_) else {
-                continue;
-            };
-            by_series[si].push((gid, chans));
-        }
-        let mut claims: Vec<(usize, u8, f64, f64, usize)> = Vec::new();
-        for (si, list) in by_series.iter().enumerate() {
-            for (gid, chans) in list.iter().filter(|(g, _)| !groups[*g].identity_decoy) {
-                for (c, ch) in chans.iter().enumerate() {
-                    if let Some(ch) = ch {
-                        let g = &groups[*gid];
-                        claims.push((si, g.charge, g.channel_mz[c], ch.rt, *gid));
-                    }
-                }
-            }
-        }
-        for h in hits
-            .iter()
-            .filter(|h| h.run_idx == run_idx && !h.cand.is_decoy)
-        {
-            if labelled(h.cand, spec).is_none() {
-                let spec_ = &spectra[h.spec_idx];
-                if let (Some(si), Some(rt)) = (group_of(&series, run, spec_), spec_.rt_seconds) {
-                    let z = h.psm.charge_used.max(1);
-                    claims.push((
-                        si,
-                        z,
-                        h.cand.peptide.mass() / z as f64 + PROTON,
-                        rt,
-                        usize::MAX,
-                    ));
-                }
-            }
-        }
-        claims.sort_by(|a, b| a.2.total_cmp(&b.2));
-        for (si, (_, ms1)) in series.iter().enumerate() {
-            let list = &by_series[si];
-            if list.is_empty() {
-                scales_here.push(None);
-                continue;
-            }
-            let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
-            let anchors: Vec<(usize, f64)> = list
-                .iter()
-                .filter(|(gid, _)| !groups[*gid].identity_decoy)
-                .map(|(gid, chans)| {
-                    let best = chans
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
-                        .unwrap();
-                    (*gid, best.rt)
-                })
-                .collect();
-            let w = learn_width(ms1, &groups, &anchors, tol);
-            let shifts = learn_shifts(ms1, &groups, &anchors, (dt, w), spec, tol);
-            log::info!(
-                target: "label",
-                "{}{}: {} identified groups, elution width {:.2} s, MS1 spacing \
-                 {:.2} s{}",
-                run.stem,
-                match series[si].0 {
-                    Some(cv) => format!(" (FAIMS {cv} V)"),
-                    None => String::new(),
-                },
-                list.len(),
-                w,
-                dt,
-                if spec.has_deuterium() {
-                    format!(
-                        ", channel RT offsets {}",
-                        shifts
-                            .iter()
-                            .map(|v| format!("{v:+.2} s"))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                } else {
-                    String::new()
-                }
-            );
-            let s = w.max(dt);
-            let rows: Vec<Fitted> = list
-                .par_iter()
-                .filter_map(|(gid, chans)| {
-                    let g = &groups[*gid];
-                    let best = chans
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(c, x)| x.map(|x| (c, x)))
-                        .reduce(|a, b| {
-                            if better(hits[b.1.hi], hits[a.1.hi]) {
-                                b
-                            } else {
-                                a
-                            }
-                        })?;
-                    let t_hat = best.1.rt - shifts[best.0];
-                    let probe = probe_of(g, t_hat, s, w, &shifts);
-                    let missing: Vec<usize> = (0..n_ch).filter(|&c| chans[c].is_none()).collect();
-                    let ((fit, converted), probe) = if missing.is_empty() {
-                        (fit_folded(ms1, g, &probe, &fit_params)?, probe)
-                    } else {
-                        let ((mut fit, conv), pinned) =
-                            fit_at_identified_profile(ms1, g, &probe, chans, &fit_params)?;
-                        if let Some((free, _)) = fit_folded(ms1, g, &probe, &fit_params) {
-                            let hits = chans.iter();
-                            for ((ch, f), hit) in
-                                fit.channels.iter_mut().zip(&free.channels).zip(hits)
-                            {
-                                if hit.is_some() {
-                                    *ch = f.clone();
-                                }
-                            }
-                        }
-                        ((fit, conv), pinned)
-                    };
-                    let mut decoy_scores = vec![Vec::new(); n_ch];
-                    if !missing.is_empty() {
-                        let seed = seed_of(&g.key, run_idx);
-                        for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
-                            let df = fit_folded(ms1, g, &dp, &fit_params).map(|x| x.0);
-                            for &c in &missing {
-                                decoy_scores[c].push(df.as_ref().map_or((0.0, None, 0.0), |d| {
-                                    let ch = &d.channels[c];
-                                    (channel_score(ch), ch.mass_err_ppm, ch.apex_offset)
-                                }));
-                            }
-                        }
-                    }
-                    let claimed = (0..n_ch)
-                        .map(|c| {
-                            chans[c].is_none() && {
-                                let mz = g.channel_mz[c];
-                                let tolda = mz * tol * 1e-6;
-                                let t = fit.t0 + shifts[c];
-                                let lo = claims.partition_point(|c| c.2 < mz - tolda);
-                                claims[lo..].iter().take_while(|c| c.2 <= mz + tolda).any(
-                                    |&(csi, z, cmz, crt, cg)| {
-                                        csi == si
-                                            && z == g.charge
-                                            && cg != *gid
-                                            && (cmz - mz).abs() <= tolda
-                                            && (crt - t).abs() <= 3.0 * fit.w + dt
-                                    },
-                                )
-                            }
-                        })
-                        .collect();
-                    Some(Fitted {
-                        gid: *gid,
-                        run: run_idx,
-                        fit,
-                        ids: chans.clone(),
-                        decoy_scores,
-                        claimed,
-                        transfer_q: None,
-                        rt_shift: shifts.clone(),
-                        converted,
-                    })
-                })
-                .collect();
-            fitted.extend(rows);
-            scales_here.push(Some(Scales { dt, w, shifts }));
-        }
-        run_scales.push(scales_here);
-        if keep_resident {
-            resident = Some((run_idx, series));
-        }
+        fit_run(
+            &run_inputs,
+            run_idx,
+            run,
+            &mut fitted,
+            &mut run_scales,
+            &mut run_series_cv,
+            &mut resident,
+        )?;
     }
 
     let calib: Vec<(f64, f64)> = (0..n_runs)
@@ -547,142 +265,38 @@ pub(super) fn quantify(
 
     let mut order: Vec<usize> = (0..fitted.len()).collect();
     order.sort_by_key(|&i| (fitted[i].run, fitted[i].gid));
-    let mut rows: Vec<output::LabelRow> = Vec::new();
-    let mut records: Vec<output::FeatureRecord> = Vec::new();
-    let mut counts = vec![[0usize; 5]; n_ch];
     let any_transfer = fitted.iter().any(|f| f.transfer_q.is_some());
+    let emit = EmitInputs {
+        collector,
+        fitted: &fitted,
+        groups: &groups,
+        statuses: &statuses,
+        hits,
+        spectra,
+        candidates,
+        index,
+        spec,
+        channel_q: &channel_q,
+        offsets: &offsets,
+        best_of_group: &best_of_group,
+        n_ch,
+        r,
+        with_records,
+        any_transfer,
+    };
+    let mut out = Emitted {
+        rows: Vec::new(),
+        records: Vec::new(),
+        counts: vec![[0usize; 5]; n_ch],
+    };
     for &fi in &order {
-        let f = &fitted[fi];
-        let g = &groups[f.gid];
-        if g.identity_decoy {
-            continue;
-        }
-        let st = &statuses[fi];
-        let run = &collector.runs[f.run];
-        for c in 0..n_ch {
-            let ch = &f.fit.channels[c];
-            let ratio = (c != r && st[c].is_quantified() && st[r].is_quantified())
-                .then(|| log2_ratio(ch, &f.fit.channels[r]))
-                .flatten();
-            let id_hit = f.ids[c].map(|x| &hits[x.hi]);
-            counts[c][match st[c] {
-                ChannelStatus::Identified => 0,
-                ChannelStatus::Matched => 1,
-                ChannelStatus::Transferred => 2,
-                ChannelStatus::BelowDetection => 3,
-                ChannelStatus::NotQuantifiable => 4,
-            }] += 1;
-            rows.push(output::LabelRow {
-                run: run.stem.clone(),
-                peptide: g.key.clone(),
-                sequence: g.sequence.clone(),
-                charge: g.charge,
-                proteins: g.proteins.clone(),
-                channel: c as u8 + 1,
-                channel_name: spec.channels[c].name.clone(),
-                label: spec.channels[c].qpx_label.clone(),
-                status: st[c].as_str().to_string(),
-                spec_id: id_hit.map(|h| h.spec_id.clone()),
-                psm_q_value: id_hit.and_then(|h| h.q_value),
-                rt_psm: f.ids[c].map(|x| x.rt),
-                labelled_peptidoform: id_hit.map(|h| peptidoform_of(h.cand)),
-                mz: g.channel_mz[c],
-                rt_apex: f.fit.t0 + f.rt_shift[c],
-                rt_shift: f.rt_shift[c],
-                width: f.fit.w,
-                quantity: ch.quantity,
-                quantity_se: ch.quantity_se,
-                quantity_upper: ch.quantity + 2.0 * ch.quantity_se,
-                llr: ch.llr,
-                envelope_cos: ch.envelope_cos,
-                coherence: ch.coherence,
-                m1_ratio: ch.m1_ratio,
-                mass_err_ppm: ch.mass_err_ppm,
-                channel_q_value: channel_q.get(&(fi, c)).copied(),
-                group_llr: f.fit.llr,
-                transfer: f.transfer_q.is_some(),
-                transfer_q_value: f.transfer_q,
-                log2_ratio: ratio.map(|x| x.0),
-                log2_ratio_se: ratio.map(|x| x.1),
-                log2_ratio_normalized: ratio
-                    .and_then(|x| offsets.get(&(f.run, c)).map(|o| x.0 - o)),
-                converted_fraction: f.converted[c],
-                trace_quantity: ch.trace_quantity,
-            });
-        }
-        if with_records {
-            let best = if f.transfer_q.is_some() {
-                best_of_group.get(&f.gid).copied()
-            } else {
-                f.ids
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
-                    .map(|x| x.hi)
-            };
-            if let Some(hi) = best {
-                let hit = hits[hi];
-                let spec_ = &spectra[hit.spec_idx];
-                let donor_run = &collector.runs[hit.run_idx];
-                let id = super::quant_id(hit, donor_run, spec_, candidates, index);
-                let proteins = super::proteins_of(&hit.psm, candidates, index);
-                let mut rec = super::base_record(&id, proteins, *next_feature_id);
-                *next_feature_id += 1;
-                if f.transfer_q.is_some() {
-                    rec.run_file_name = run.stem.clone();
-                    rec.id_run_file_name = None;
-                    rec.psm_ids = Vec::new();
-                    rec.scan = Vec::new();
-                    let c = labelled(hit.cand, spec).map_or(0, |l| l.channel);
-                    let calc = g.channel_mz[c];
-                    let err = f.fit.channels[c].mass_err_ppm;
-                    rec.calculated_mz = calc as f32;
-                    rec.observed_mz = (calc * (1.0 + err.unwrap_or(0.0) * 1e-6)) as f32;
-                    rec.mass_error_ppm = err.map(|e| e as f32);
-                }
-                if any_transfer {
-                    rec.mbr = Some(output::features::MbrColumns {
-                        evidence_type: if f.transfer_q.is_some() {
-                            "transfer_ms1"
-                        } else {
-                            "identified"
-                        }
-                        .to_string(),
-                        transfer_q: f.transfer_q,
-                        quant_q: None,
-                        quantity_se: None,
-                        claimed_by: None,
-                        claim_co_apex: None,
-                    });
-                }
-                rec.rt = Some(f.fit.t0 as f32);
-                rec.rt_start = Some((f.fit.t0 - 3.0 * f.fit.w) as f32);
-                rec.rt_stop = Some((f.fit.t0 + 3.0 * f.fit.w) as f32);
-                rec.intensities = (0..n_ch)
-                    .filter(|&c| st[c].is_quantified())
-                    .filter_map(|c| {
-                        spec.channels[c]
-                            .qpx_label
-                            .clone()
-                            .map(|l| (l, f.fit.channels[c].quantity as f32))
-                    })
-                    .collect();
-                rec.additional_scores
-                    .push(("label_group_llr".into(), f.fit.llr, true));
-                for (c, status) in st.iter().enumerate() {
-                    rec.cv_params.push((
-                        format!("label_status_{}", c + 1),
-                        status.as_str().to_string(),
-                    ));
-                }
-                rec.cv_params.push(("label_peptide".into(), g.key.clone()));
-                if !rec.intensities.is_empty() {
-                    records.push(rec);
-                }
-            }
-        }
+        emit_fitted(&emit, fi, &mut out, next_feature_id);
     }
+    let Emitted {
+        rows,
+        records,
+        counts,
+    } = out;
     for (c, k) in counts.iter().enumerate() {
         log::info!(
             target: "label",
@@ -711,6 +325,559 @@ pub(super) fn quantify(
         );
     }
     Ok((rows, records, meta))
+}
+
+/// The identified hits of a label group in one run, per channel.
+type ChannelIds = HashMap<(usize, usize), Vec<Option<ChannelHit>>>;
+
+/// Whether `h` is a better identification than `o`: lower q-value, else higher rank score.
+fn better(h: &Hit<'_>, o: &Hit<'_>) -> bool {
+    match (h.q_value, o.q_value) {
+        (Some(a), Some(b)) if a != b => a < b,
+        _ => h.psm.rank_score > o.psm.rank_score,
+    }
+}
+
+/// The label groups of the hits (one per labelled peptide key and charge), the best identified
+/// hit of each group per run and channel, and the best hit of each group overall.
+fn label_groups(
+    hits: &[&Hit<'_>],
+    settings: &LabelSettings,
+    spectra: &[Spectrum],
+    candidates: &[Candidate],
+    index: &search::index::SearchIndex,
+    collector: &QuantCollector,
+) -> (Vec<Group>, ChannelIds, HashMap<usize, usize>) {
+    let spec = &settings.spec;
+    let n_ch = spec.len();
+    let sites = spec.sites();
+    let tol = settings.tol_ppm;
+    let mut groups: Vec<Group> = Vec::new();
+    let mut gid_of: HashMap<(String, u8), usize> = HashMap::new();
+    let mut ids: HashMap<(usize, usize), Vec<Option<ChannelHit>>> = HashMap::new();
+    let mut best_of_group: HashMap<usize, usize> = HashMap::new();
+    let (mut mixed, mut no_rt) = (0usize, 0usize);
+    for (hi, h) in hits.iter().enumerate() {
+        let Some(mut lh) = labelled(h.cand, spec) else {
+            mixed += 1;
+            continue;
+        };
+        let Some(rt) = spectra[h.spec_idx].rt_seconds else {
+            no_rt += 1;
+            continue;
+        };
+        let z = h.psm.charge_used.max(1);
+        if h.cand.is_decoy {
+            lh.key = format!("DECOY:{}", lh.key);
+        }
+        let gid = *gid_of.entry((lh.key.clone(), z)).or_insert_with(|| {
+            let counts: Vec<u32> = sites
+                .iter()
+                .map(|s| lh.instances.iter().filter(|x| *x == s).count() as u32)
+                .collect();
+            let light = Formula::peptide(lh.residues.iter().copied());
+            let mut channel_mz = Vec::with_capacity(n_ch);
+            let mut envelopes = Vec::with_capacity(n_ch);
+            let mut deltas = Vec::with_capacity(n_ch);
+            let base = spec.channel_delta(0, &sites, &counts);
+            for c in 0..n_ch {
+                let delta = spec.channel_delta(c, &sites, &counts);
+                channel_mz.push((lh.light_mass + delta) / z as f64 + PROTON);
+                envelopes.push(spec.channel_envelope(c, &sites, &counts, &light));
+                deltas.push(delta - base);
+            }
+            groups.push(Group {
+                key: lh.key.clone(),
+                sequence: output::qpx::bare_sequence(h.cand),
+                charge: z,
+                proteins: super::proteins_of(&h.psm, candidates, index)
+                    .into_iter()
+                    .map(|(a, ..)| a)
+                    .collect(),
+                satellites: if settings.arg_pro {
+                    let n_pro = lh.residues.iter().filter(|r| r.0 == b'P').count();
+                    (0..n_ch)
+                        .filter(|_| n_pro > 0)
+                        .filter_map(|c| {
+                            let arg = spec.channels[c].label_at(Site::Residue(b'R'))?;
+                            let d = heavy_proline_delta(arg)?;
+                            Some((c, channel_mz[c] + d / z as f64))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                channel_mz,
+                envelopes,
+                deltas,
+                faims_cv: None,
+                identity_decoy: h.cand.is_decoy,
+            });
+            groups.len() - 1
+        });
+        let slot = ids
+            .entry((gid, h.run_idx))
+            .or_insert_with(|| vec![None; n_ch]);
+        let replace = slot[lh.channel].is_none_or(|o| better(h, hits[o.hi]));
+        if replace {
+            slot[lh.channel] = Some(ChannelHit { hi, rt });
+        }
+        let b = best_of_group.entry(gid).or_insert(hi);
+        if better(h, hits[*b]) {
+            *b = hi;
+        }
+    }
+    for (gid, &hi) in &best_of_group {
+        let h = &hits[hi];
+        let run = &collector.runs[h.run_idx];
+        groups[*gid].faims_cv = run
+            .contexts
+            .get(super::native_id(run, &spectra[h.spec_idx].title))
+            .and_then(|c| c.faims_cv);
+    }
+    log::info!(
+        target: "label",
+        "{} label groups from {} PSMs ({} without a consistent label state, \
+         {} without a retention time)",
+        groups.len(),
+        hits.len(),
+        mixed,
+        no_rt
+    );
+    let shared = groups
+        .iter()
+        .filter(|g| !g.identity_decoy && satellite_on_another_channel(g, tol))
+        .count();
+    if shared > 0 {
+        log::warn!(
+            target: "label",
+            "{shared} groups have an Arg->Pro satellite within the MS1 tolerance \
+             of another channel's isotope; the split between the two (converted_fraction, and \
+             the ratio through it) is weakly determined there"
+        );
+    }
+    (groups, ids, best_of_group)
+}
+
+/// What the per-run label fit reads: the hits and their label groups, the identified hits per
+/// group and run, the spectra, the label spec, the tolerance and the fit parameters.
+#[derive(Clone, Copy)]
+struct RunFitInputs<'a> {
+    hits: &'a [&'a Hit<'a>],
+    groups: &'a [Group],
+    ids: &'a ChannelIds,
+    spectra: &'a [Spectrum],
+    spec: &'a LabelSpec,
+    n_ch: usize,
+    tol: f64,
+    fit_params: &'a FitParams,
+    keep_resident: bool,
+}
+
+/// Fits every label group identified in one run, per FAIMS series: learns the series' elution
+/// width and channel RT shifts, fits each group's channels and decoy probes, and appends the fits
+/// and the series scales. With `keep_resident`, the run's MS1 series stay loaded for transfers.
+fn fit_run(
+    inputs: &RunFitInputs<'_>,
+    run_idx: usize,
+    run: &super::collect::RunCapture,
+    fitted: &mut Vec<Fitted>,
+    run_scales: &mut Vec<Vec<Option<Scales>>>,
+    run_series_cv: &mut Vec<Vec<Option<f32>>>,
+    resident: &mut Option<(usize, RunSeries)>,
+) -> Result<(), String> {
+    let RunFitInputs {
+        hits,
+        groups,
+        ids,
+        spectra,
+        spec,
+        n_ch,
+        tol,
+        fit_params,
+        keep_resident,
+    } = *inputs;
+    let Some(cache) = run.ms1.as_ref() else {
+        run_scales.push(Vec::new());
+        run_series_cv.push(Vec::new());
+        return Ok(());
+    };
+    *resident = None;
+    let ms1 = cache
+        .load()
+        .map_err(|e| format!("load MS1 scans for {}: {e}", run.stem))?;
+    let series = faims_groups(ms1);
+    let mut scales_here: Vec<Option<Scales>> = Vec::new();
+    run_series_cv.push(series.iter().map(|(cv, _)| *cv).collect());
+    let mut by_series: Vec<Vec<(usize, Vec<Option<ChannelHit>>)>> = vec![Vec::new(); series.len()];
+    let mut keys: Vec<&(usize, usize)> = ids.keys().filter(|(_, r)| *r == run_idx).collect();
+    keys.sort_unstable();
+    for &(gid, _) in keys {
+        let chans = ids[&(gid, run_idx)].clone();
+        let best = chans
+            .iter()
+            .flatten()
+            .copied()
+            .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
+            .expect("an identified group has a PSM");
+        let spec_ = &spectra[hits[best.hi].spec_idx];
+        let Some(si) = group_of(&series, run, spec_) else {
+            continue;
+        };
+        by_series[si].push((gid, chans));
+    }
+    let mut claims: Vec<(usize, u8, f64, f64, usize)> = Vec::new();
+    for (si, list) in by_series.iter().enumerate() {
+        for (gid, chans) in list.iter().filter(|(g, _)| !groups[*g].identity_decoy) {
+            for (c, ch) in chans.iter().enumerate() {
+                if let Some(ch) = ch {
+                    let g = &groups[*gid];
+                    claims.push((si, g.charge, g.channel_mz[c], ch.rt, *gid));
+                }
+            }
+        }
+    }
+    for h in hits
+        .iter()
+        .filter(|h| h.run_idx == run_idx && !h.cand.is_decoy)
+    {
+        if labelled(h.cand, spec).is_none() {
+            let spec_ = &spectra[h.spec_idx];
+            if let (Some(si), Some(rt)) = (group_of(&series, run, spec_), spec_.rt_seconds) {
+                let z = h.psm.charge_used.max(1);
+                claims.push((
+                    si,
+                    z,
+                    h.cand.peptide.mass() / z as f64 + PROTON,
+                    rt,
+                    usize::MAX,
+                ));
+            }
+        }
+    }
+    claims.sort_by(|a, b| a.2.total_cmp(&b.2));
+    for (si, (_, ms1)) in series.iter().enumerate() {
+        let list = &by_series[si];
+        if list.is_empty() {
+            scales_here.push(None);
+            continue;
+        }
+        let dt = ms1.median_scan_spacing().unwrap_or(1.0).max(1e-3);
+        let anchors: Vec<(usize, f64)> = list
+            .iter()
+            .filter(|(gid, _)| !groups[*gid].identity_decoy)
+            .map(|(gid, chans)| {
+                let best = chans
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
+                    .unwrap();
+                (*gid, best.rt)
+            })
+            .collect();
+        let w = learn_width(ms1, groups, &anchors, tol);
+        let shifts = learn_shifts(ms1, groups, &anchors, (dt, w), spec, tol);
+        log::info!(
+            target: "label",
+            "{}{}: {} identified groups, elution width {:.2} s, MS1 spacing \
+             {:.2} s{}",
+            run.stem,
+            match series[si].0 {
+                Some(cv) => format!(" (FAIMS {cv} V)"),
+                None => String::new(),
+            },
+            list.len(),
+            w,
+            dt,
+            if spec.has_deuterium() {
+                format!(
+                    ", channel RT offsets {}",
+                    shifts
+                        .iter()
+                        .map(|v| format!("{v:+.2} s"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                String::new()
+            }
+        );
+        let s = w.max(dt);
+        let rows: Vec<Fitted> = list
+            .par_iter()
+            .filter_map(|(gid, chans)| {
+                let g = &groups[*gid];
+                let best = chans
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(c, x)| x.map(|x| (c, x)))
+                    .reduce(|a, b| {
+                        if better(hits[b.1.hi], hits[a.1.hi]) {
+                            b
+                        } else {
+                            a
+                        }
+                    })?;
+                let t_hat = best.1.rt - shifts[best.0];
+                let probe = probe_of(g, t_hat, s, w, &shifts);
+                let missing: Vec<usize> = (0..n_ch).filter(|&c| chans[c].is_none()).collect();
+                let ((fit, converted), probe) = if missing.is_empty() {
+                    (fit_folded(ms1, g, &probe, fit_params)?, probe)
+                } else {
+                    let ((mut fit, conv), pinned) =
+                        fit_at_identified_profile(ms1, g, &probe, chans, fit_params)?;
+                    if let Some((free, _)) = fit_folded(ms1, g, &probe, fit_params) {
+                        let hits = chans.iter();
+                        for ((ch, f), hit) in fit.channels.iter_mut().zip(&free.channels).zip(hits)
+                        {
+                            if hit.is_some() {
+                                *ch = f.clone();
+                            }
+                        }
+                    }
+                    ((fit, conv), pinned)
+                };
+                let mut decoy_scores = vec![Vec::new(); n_ch];
+                if !missing.is_empty() {
+                    let seed = seed_of(&g.key, run_idx);
+                    for dp in decoy_probes(g, &probe, &missing, tol, seed, N_DECOYS) {
+                        let df = fit_folded(ms1, g, &dp, fit_params).map(|x| x.0);
+                        for &c in &missing {
+                            decoy_scores[c].push(df.as_ref().map_or((0.0, None, 0.0), |d| {
+                                let ch = &d.channels[c];
+                                (channel_score(ch), ch.mass_err_ppm, ch.apex_offset)
+                            }));
+                        }
+                    }
+                }
+                let claimed = (0..n_ch)
+                    .map(|c| {
+                        chans[c].is_none() && {
+                            let mz = g.channel_mz[c];
+                            let tolda = mz * tol * 1e-6;
+                            let t = fit.t0 + shifts[c];
+                            let lo = claims.partition_point(|c| c.2 < mz - tolda);
+                            claims[lo..].iter().take_while(|c| c.2 <= mz + tolda).any(
+                                |&(csi, z, cmz, crt, cg)| {
+                                    csi == si
+                                        && z == g.charge
+                                        && cg != *gid
+                                        && (cmz - mz).abs() <= tolda
+                                        && (crt - t).abs() <= 3.0 * fit.w + dt
+                                },
+                            )
+                        }
+                    })
+                    .collect();
+                Some(Fitted {
+                    gid: *gid,
+                    run: run_idx,
+                    fit,
+                    ids: chans.clone(),
+                    decoy_scores,
+                    claimed,
+                    transfer_q: None,
+                    rt_shift: shifts.clone(),
+                    converted,
+                })
+            })
+            .collect();
+        fitted.extend(rows);
+        scales_here.push(Some(Scales { dt, w, shifts }));
+    }
+    run_scales.push(scales_here);
+    if keep_resident {
+        *resident = Some((run_idx, series));
+    }
+    Ok(())
+}
+
+/// What writing the output rows of a fit reads: the fits, their groups and channel statuses, the
+/// hits and spectra behind them, the channel q-values and normalisation offsets, the reference
+/// channel and whether feature records are written.
+#[derive(Clone, Copy)]
+struct EmitInputs<'a> {
+    collector: &'a QuantCollector,
+    fitted: &'a [Fitted],
+    groups: &'a [Group],
+    statuses: &'a [Vec<ChannelStatus>],
+    hits: &'a [&'a Hit<'a>],
+    spectra: &'a [Spectrum],
+    candidates: &'a [Candidate],
+    index: &'a search::index::SearchIndex,
+    spec: &'a LabelSpec,
+    channel_q: &'a HashMap<(usize, usize), f64>,
+    offsets: &'a HashMap<(usize, usize), f64>,
+    best_of_group: &'a HashMap<usize, usize>,
+    n_ch: usize,
+    r: usize,
+    with_records: bool,
+    any_transfer: bool,
+}
+
+/// The rows, feature records and per-channel status counts written so far.
+struct Emitted {
+    rows: Vec<output::LabelRow>,
+    records: Vec<output::FeatureRecord>,
+    counts: Vec<[usize; 5]>,
+}
+
+/// Appends one fit's label rows (one per channel), its status counts and, with records, its
+/// feature record. Identity-decoy groups write nothing.
+fn emit_fitted(inputs: &EmitInputs<'_>, fi: usize, out: &mut Emitted, next_feature_id: &mut i64) {
+    let EmitInputs {
+        collector,
+        fitted,
+        groups,
+        statuses,
+        hits,
+        spectra,
+        candidates,
+        index,
+        spec,
+        channel_q,
+        offsets,
+        best_of_group,
+        n_ch,
+        r,
+        with_records,
+        any_transfer,
+    } = *inputs;
+    let Emitted {
+        rows,
+        records,
+        counts,
+    } = out;
+    let f = &fitted[fi];
+    let g = &groups[f.gid];
+    if g.identity_decoy {
+        return;
+    }
+    let st = &statuses[fi];
+    let run = &collector.runs[f.run];
+    for c in 0..n_ch {
+        let ch = &f.fit.channels[c];
+        let ratio = (c != r && st[c].is_quantified() && st[r].is_quantified())
+            .then(|| log2_ratio(ch, &f.fit.channels[r]))
+            .flatten();
+        let id_hit = f.ids[c].map(|x| &hits[x.hi]);
+        counts[c][match st[c] {
+            ChannelStatus::Identified => 0,
+            ChannelStatus::Matched => 1,
+            ChannelStatus::Transferred => 2,
+            ChannelStatus::BelowDetection => 3,
+            ChannelStatus::NotQuantifiable => 4,
+        }] += 1;
+        rows.push(output::LabelRow {
+            run: run.stem.clone(),
+            peptide: g.key.clone(),
+            sequence: g.sequence.clone(),
+            charge: g.charge,
+            proteins: g.proteins.clone(),
+            channel: c as u8 + 1,
+            channel_name: spec.channels[c].name.clone(),
+            label: spec.channels[c].qpx_label.clone(),
+            status: st[c].as_str().to_string(),
+            spec_id: id_hit.map(|h| h.spec_id.clone()),
+            psm_q_value: id_hit.and_then(|h| h.q_value),
+            rt_psm: f.ids[c].map(|x| x.rt),
+            labelled_peptidoform: id_hit.map(|h| peptidoform_of(h.cand)),
+            mz: g.channel_mz[c],
+            rt_apex: f.fit.t0 + f.rt_shift[c],
+            rt_shift: f.rt_shift[c],
+            width: f.fit.w,
+            quantity: ch.quantity,
+            quantity_se: ch.quantity_se,
+            quantity_upper: ch.quantity + 2.0 * ch.quantity_se,
+            llr: ch.llr,
+            envelope_cos: ch.envelope_cos,
+            coherence: ch.coherence,
+            m1_ratio: ch.m1_ratio,
+            mass_err_ppm: ch.mass_err_ppm,
+            channel_q_value: channel_q.get(&(fi, c)).copied(),
+            group_llr: f.fit.llr,
+            transfer: f.transfer_q.is_some(),
+            transfer_q_value: f.transfer_q,
+            log2_ratio: ratio.map(|x| x.0),
+            log2_ratio_se: ratio.map(|x| x.1),
+            log2_ratio_normalized: ratio.and_then(|x| offsets.get(&(f.run, c)).map(|o| x.0 - o)),
+            converted_fraction: f.converted[c],
+            trace_quantity: ch.trace_quantity,
+        });
+    }
+    if with_records {
+        let best = if f.transfer_q.is_some() {
+            best_of_group.get(&f.gid).copied()
+        } else {
+            f.ids
+                .iter()
+                .flatten()
+                .copied()
+                .reduce(|a, b| if better(hits[b.hi], hits[a.hi]) { b } else { a })
+                .map(|x| x.hi)
+        };
+        if let Some(hi) = best {
+            let hit = hits[hi];
+            let spec_ = &spectra[hit.spec_idx];
+            let donor_run = &collector.runs[hit.run_idx];
+            let id = super::quant_id(hit, donor_run, spec_, candidates, index);
+            let proteins = super::proteins_of(&hit.psm, candidates, index);
+            let mut rec = super::base_record(&id, proteins, *next_feature_id);
+            *next_feature_id += 1;
+            if f.transfer_q.is_some() {
+                rec.run_file_name = run.stem.clone();
+                rec.id_run_file_name = None;
+                rec.psm_ids = Vec::new();
+                rec.scan = Vec::new();
+                let c = labelled(hit.cand, spec).map_or(0, |l| l.channel);
+                let calc = g.channel_mz[c];
+                let err = f.fit.channels[c].mass_err_ppm;
+                rec.calculated_mz = calc as f32;
+                rec.observed_mz = (calc * (1.0 + err.unwrap_or(0.0) * 1e-6)) as f32;
+                rec.mass_error_ppm = err.map(|e| e as f32);
+            }
+            if any_transfer {
+                rec.mbr = Some(output::features::MbrColumns {
+                    evidence_type: if f.transfer_q.is_some() {
+                        "transfer_ms1"
+                    } else {
+                        "identified"
+                    }
+                    .to_string(),
+                    transfer_q: f.transfer_q,
+                    quant_q: None,
+                    quantity_se: None,
+                    claimed_by: None,
+                    claim_co_apex: None,
+                });
+            }
+            rec.rt = Some(f.fit.t0 as f32);
+            rec.rt_start = Some((f.fit.t0 - 3.0 * f.fit.w) as f32);
+            rec.rt_stop = Some((f.fit.t0 + 3.0 * f.fit.w) as f32);
+            rec.intensities = (0..n_ch)
+                .filter(|&c| st[c].is_quantified())
+                .filter_map(|c| {
+                    spec.channels[c]
+                        .qpx_label
+                        .clone()
+                        .map(|l| (l, f.fit.channels[c].quantity as f32))
+                })
+                .collect();
+            rec.additional_scores
+                .push(("label_group_llr".into(), f.fit.llr, true));
+            for (c, status) in st.iter().enumerate() {
+                rec.cv_params.push((
+                    format!("label_status_{}", c + 1),
+                    status.as_str().to_string(),
+                ));
+            }
+            rec.cv_params.push(("label_peptide".into(), g.key.clone()));
+            if !rec.intensities.is_empty() {
+                records.push(rec);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

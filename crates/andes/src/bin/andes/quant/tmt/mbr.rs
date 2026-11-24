@@ -335,32 +335,10 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         .filter_map(|(i, p)| p.map(|p| (scans[p].precursor_mz - i.mz) / i.mz * 1e6))
         .collect();
     let ppm = PpmWindow::learn(&ppm_errors).unwrap_or_else(PpmWindow::fallback);
-    let mut z = Vec::new();
-    for (i, p) in ids.iter().zip(&id_pos) {
-        if p.is_none() {
-            continue;
-        }
-        let Some(&e) = ctx.key_entry.get(i.key.as_str()) else {
-            continue;
-        };
-        let pid = lib.entries[e].precursor;
-        if let Some((t, s)) = lib.alignment.predict_excluding(pid, r16) {
-            if s > 0.0 && s.is_finite() {
-                z.push((i.rt - t) / s);
-            }
-        }
-    }
+    let z = rt_z_scores(ctx, &ids, &id_pos, r16);
     let (k, k_learned) = learn_rt_multiplier(&z);
 
-    let mut by_ident: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, p) in ids.iter().zip(&id_pos) {
-        if let Some(p) = p {
-            let v = by_ident.entry(i.key.as_str()).or_default();
-            if !v.contains(p) {
-                v.push(*p);
-            }
-        }
-    }
+    let by_ident = positions_by_ident(&ids, &id_pos);
 
     let mut out = RunOut {
         profile,
@@ -582,24 +560,7 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         }
     }
 
-    let mut winner: HashMap<&str, usize> = HashMap::new();
-    let key_of = |c: &TransferRow| (c.info.angle, c.info.n_matched);
-    for (i, c) in cands.iter().enumerate() {
-        match winner.get(c.spec_key.as_str()) {
-            Some(&w) if key_of(&cands[w]) >= key_of(c) => {}
-            _ => {
-                winner.insert(c.spec_key.as_str(), i);
-            }
-        }
-    }
-    let keep: std::collections::HashSet<usize> = winner.values().copied().collect();
-    drop(winner);
-    out.cands = cands
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| keep.contains(i))
-        .map(|(_, c)| c)
-        .collect();
+    out.cands = best_per_scan(cands);
     log::info!(
         target: "tmt-mbr",
         "{stem}: {} identified PSMs on {} scans; precursor window {:+.2} +- {:.2} ppm{}, RT window {:.1} predicted widths (median half-window {:.1} s){}; {} empty channel(s) detected; training rows: floor {}, value {}, identity {}; {} transfer candidates",
@@ -618,6 +579,68 @@ fn process_run(ctx: &Ctx<'_>, r: usize) -> Result<RunOut, String> {
         out.cands.len()
     );
     Ok(out)
+}
+
+/// The RT z-scores of the run's identified PSMs: (observed - predicted) / predicted spread, with
+/// the prediction made from the other runs' alignment.
+fn rt_z_scores(ctx: &Ctx<'_>, ids: &[IdRow], id_pos: &[Option<usize>], r16: u16) -> Vec<f64> {
+    let lib = &ctx.stored.library;
+    let mut z = Vec::new();
+    for (i, p) in ids.iter().zip(id_pos) {
+        if p.is_none() {
+            continue;
+        }
+        let Some(&e) = ctx.key_entry.get(i.key.as_str()) else {
+            continue;
+        };
+        let pid = lib.entries[e].precursor;
+        if let Some((t, s)) = lib.alignment.predict_excluding(pid, r16) {
+            if s > 0.0 && s.is_finite() {
+                z.push((i.rt - t) / s);
+            }
+        }
+    }
+    z
+}
+
+/// The distinct scan positions of each identified peptidoform key.
+fn positions_by_ident<'i>(
+    ids: &'i [IdRow],
+    id_pos: &[Option<usize>],
+) -> HashMap<&'i str, Vec<usize>> {
+    let mut by_ident: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, p) in ids.iter().zip(id_pos) {
+        if let Some(p) = p {
+            let v = by_ident.entry(i.key.as_str()).or_default();
+            if !v.contains(p) {
+                v.push(*p);
+            }
+        }
+    }
+    by_ident
+}
+
+/// One transfer candidate per scan: the one with the largest spectral angle, then the most
+/// matched reporters; on a tie the first.
+fn best_per_scan(cands: Vec<TransferRow>) -> Vec<TransferRow> {
+    let mut winner: HashMap<&str, usize> = HashMap::new();
+    let key_of = |c: &TransferRow| (c.info.angle, c.info.n_matched);
+    for (i, c) in cands.iter().enumerate() {
+        match winner.get(c.spec_key.as_str()) {
+            Some(&w) if key_of(&cands[w]) >= key_of(c) => {}
+            _ => {
+                winner.insert(c.spec_key.as_str(), i);
+            }
+        }
+    }
+    let keep: std::collections::HashSet<usize> = winner.values().copied().collect();
+    drop(winner);
+    cands
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, c)| c)
+        .collect()
 }
 
 pub(crate) fn run(

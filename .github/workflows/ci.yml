@@ -57,6 +57,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p andes --release --test structure -- --ignored report_listed_files_over_the_budget --nocapture
 
+      - name: Functions over the length budget (report)
+        # Listed functions over 300 lines and how far each moved; a report, not a gate.
+        # Functions not on the list are gated by `no_new_function_over_the_budget`.
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p andes --release --test structure -- --ignored report_listed_functions_over_the_budget --nocapture
+
       - name: onnx-infer (tract + fixture models)
         # Default workspace test builds onnx-infer without engines. Tract is
         # opt-in; this lane exercises committed fixtures (double, intensity_mlp)

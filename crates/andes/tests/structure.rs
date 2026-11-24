@@ -1,8 +1,8 @@
 //! Structure checks on the contributor rules: skills, `AGENTS.md`, `CONTRIBUTING.md`,
-//! `CODEOWNERS` and `ARCHITECTURE.md` stay in step with `docs/dev`; source files stay under the
-//! line budget, avoid print macros and new unwrap/expect calls, and start with a module doc;
-//! citation markers resolve in the registry; committed text names no site. The rule, the
-//! baseline and the fix for each test are in `docs/dev/structure-checks.md`.
+//! `CODEOWNERS` and `ARCHITECTURE.md` stay in step with `docs/dev`; source files and functions
+//! stay under their line budgets, avoid print macros and new unwrap/expect calls, and start with
+//! a module doc; citation markers resolve in the registry; committed text names no site. The
+//! rule, the baseline and the fix for each test are in `docs/dev/structure-checks.md`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -267,6 +267,126 @@ fn write_file_lines_baseline() {
         .filter(|(file, _)| listed.contains_key(file))
         .collect();
     write_entries("file_lines", &kept);
+}
+
+const MAX_FN_LINES: usize = 300;
+
+/// The name of the function a trimmed line declares, after its visibility and qualifiers.
+fn declared_fn(line: &str) -> Option<&str> {
+    let mut s = line;
+    if let Some(rest) = s.strip_prefix("pub") {
+        s = rest.trim_start();
+        if s.starts_with('(') {
+            s = s[s.find(')')? + 1..].trim_start();
+        }
+    }
+    for q in ["const ", "async ", "unsafe ", "extern \"C\" "] {
+        s = s.strip_prefix(q).unwrap_or(s);
+    }
+    let name = s.strip_prefix("fn ")?;
+    let end = name
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(name.len());
+    (end > 0).then(|| &name[..end])
+}
+
+/// Line counts of the functions in `code` (live code: comments, literals and test items are
+/// blanked), from the `fn` line to the closing brace at the same indentation, keyed by name; a
+/// name declared more than once in the file keeps its longest body. A declaration without a
+/// body (a trait method) is skipped.
+fn function_lengths(code: &str) -> BTreeMap<String, usize> {
+    let lines: Vec<&str> = code.lines().collect();
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(name) = declared_fn(trimmed) else {
+            continue;
+        };
+        let rest: String = lines[i..].join("\n");
+        let has_body = match (rest.find('{'), rest.find(';')) {
+            (Some(b), Some(s)) => b < s,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if !has_body {
+            continue;
+        }
+        let close = format!("{}}}", &line[..line.len() - trimmed.len()]);
+        let Some(end) = lines[i + 1..].iter().position(|l| l.trim_end() == close) else {
+            continue;
+        };
+        let len = end + 2;
+        let e = out.entry(name.to_string()).or_insert(0);
+        *e = (*e).max(len);
+    }
+    out
+}
+
+/// Functions over the budget, keyed `path::name`.
+fn oversized_functions() -> BTreeMap<String, usize> {
+    let root = workspace_root();
+    let mut out = BTreeMap::new();
+    for path in source_files() {
+        let key = rel_key(&root, &path);
+        for (name, lines) in function_lengths(&live_code(&read(&path))) {
+            if lines > MAX_FN_LINES {
+                out.insert(format!("{key}::{name}"), lines);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn function_lengths_skip_declarations_and_test_items() {
+    let src = "trait T {\n    fn f(&self);\n}\nfn g() {\n    let a = 1;\n}\n#[cfg(test)]\nmod t {\n    fn h() {\n    }\n}\npub(crate) fn k() {\n}\n";
+    let lens = function_lengths(&live_code(src));
+    assert_eq!(lens.get("g"), Some(&3));
+    assert_eq!(lens.get("k"), Some(&2));
+    assert!(!lens.contains_key("f") && !lens.contains_key("h"), "{lens:?}");
+}
+
+/// Functions over 300 lines that are not on `fn_lines.tsv`: new long functions, and listed
+/// ones that were split under the budget and have grown back over it (docs/dev/structure-checks.md).
+#[test]
+fn no_new_function_over_the_budget() {
+    let listed = baseline("fn_lines");
+    let unlisted: Vec<String> = oversized_functions()
+        .into_iter()
+        .filter(|(f, _)| !listed.contains_key(f))
+        .map(|(f, n)| format!("{f} has {n} lines"))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "functions over {MAX_FN_LINES} lines that are not on fn_lines.tsv; split them into steps:\n{}",
+        unlisted.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "report only: the listed functions over the budget and how far each moved since the list was written"]
+fn report_listed_functions_over_the_budget() {
+    let now = oversized_functions();
+    let mut report: Vec<String> = baseline("fn_lines")
+        .into_iter()
+        .map(|(f, listed)| {
+            let n = now.get(&f).copied().unwrap_or(0);
+            format!("{f}\t{n}\t{:+}", n as i64 - listed as i64)
+        })
+        .collect();
+    report.sort();
+    println!("function\tlines\tsince_list\n{}", report.join("\n"));
+}
+
+#[test]
+#[ignore = "rewrites fn_lines.tsv: drops the listed functions now under the budget, never adds one"]
+fn write_fn_lines_baseline() {
+    let listed = baseline("fn_lines");
+    let kept: BTreeMap<String, usize> = oversized_functions()
+        .into_iter()
+        .filter(|(f, _)| listed.contains_key(f))
+        .collect();
+    write_entries("fn_lines", &kept);
 }
 
 fn unwrap_expect_counts() -> BTreeMap<String, usize> {

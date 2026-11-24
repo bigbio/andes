@@ -107,7 +107,7 @@ Bundled stores need rewriting only if they should carry the new model.
 ## Path C: a neural model (ONNX)
 
 Part of this exists. The ONNX substrate is the `onnx-infer` crate (`crates/onnx-infer`), and
-`andes search --predict` uses it (`crates/andes/src/bin/andes/predicted.rs`). It is not a
+`andes search --predict` uses it (`crates/andes/src/bin/andes/dia/rt.rs`). It is not a
 scoring-model slot: predictors run after the search, on the rows of the written PIN, and add
 Percolator features. andes computes no FDR from them.
 

@@ -9,7 +9,7 @@ change must follow see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AG
 andes is a peptide identification and quantification engine for tandem mass spectra: database
 search, rescoring, protein inference with protein-level FDR, and label-free, isobaric and SILAC
 quantification. It is one Cargo workspace of twelve crates under `crates/` that builds one
-binary, `andes` (`crates/andes/src/bin/andes.rs`). The crates are libraries with one pipeline
+binary, `andes` (`crates/andes/src/bin/andes/main.rs`). The crates are libraries with one pipeline
 role each; the binary wires them together, owns the command line and is the only place that prints.
 There is no plug-in boundary: a change that spans stages is one change in one repository.
 
@@ -90,7 +90,7 @@ library crates and binary alike.
 8. **Quantification.** `quant` extracts chromatograms (`xic.rs`), aligns runs (`align.rs`),
    builds the match-between-runs `Library` (`library.rs`), quantifies precursors (`lfq.rs`,
    `isobaric.rs`) and normalises (`normalize.rs`). The staged form is the `andes quant`
-   subcommand (`crates/andes/src/bin/andes/quant_cmd.rs`, `quant_finalize.rs`).
+   subcommand (`crates/andes/src/bin/andes/quant.rs`, `quant_finalize.rs`).
 9. **Write.** `output::write_qpx` and `write_pg_parquet` write the views; the quantification
    tables come from `quant_out.rs`.
 

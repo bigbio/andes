@@ -849,7 +849,7 @@ alike:
 | `dia_frag_log_int`, `dia_n_frag` | log10 intensity of the traced fragments in the scan; b/y ions matched in it. |
 | `dia_support`, `dia_support_top1` | Other scans of the window within ±5 cycles with a row of the same (peptidoform, charge), and where that row is the scan's best. |
 | `dia_sum_n2`, `dia_sum_frac2`, `dia_sum_gain` | Summed apex: b/y ions (length ≥ 3, 10 ppm) present in at least two of the scan and the previous and next cycle of its window, as a count and a fraction of all ions; ions the neighbours add to the scan. |
-| `dia_llr` | With `--predict ms2` (`crates/andes/src/bin/andes/dia_llr.rs`): log-likelihood ratio of the row's predicted b/y ions being present in the scan against chance. P(present \| true) is learned per run from the confident rows by predicted-intensity rank and MS1 intensity quartile, P(present \| chance) from the decoy rows by ion length, m/z and charge, each on one half of the peptidoforms and applied to the other half. |
+| `dia_llr` | With `--predict ms2` (`crates/andes/src/bin/andes/dia/llr.rs`): log-likelihood ratio of the row's predicted b/y ions being present in the scan against chance. P(present \| true) is learned per run from the confident rows by predicted-intensity rank and MS1 intensity quartile, P(present \| chance) from the decoy rows by ion length, m/z and charge, each on one half of the peptidoforms and applied to the other half. |
 | `dia_apex_llr` | `−ln P(X ≥ m)`, binomial: how many of the ions seen in the scan or an adjacent cycle peak in this scan, against the decoy rows' share. |
 | `dia_ion_frac`, `dia_ppm_rms` | Per-ion presence: share of the row's six top predicted ions seen in the scan or an adjacent cycle, and the RMS ppm error of those seen in the scan after the run's fragment shift (median error of the confident rows' top ions, learned per run) is removed. |
 | `dia_llr_greedy`, `dia_llr_soft`, `dia_angle_soft` | Explaining away within a scan: the greedy LLR after the peaks of better rows are taken out, the LLR with each matched peak's intensity shared among the rows that match it, and the spectral angle against those shared intensities. |
@@ -3581,14 +3581,14 @@ here only where the value is a fixed choice rather than a documented option.
 | Site-FDR stratum | 50 tested claims | `output/src/fdr/sites.rs:30` | stratum size | no | No recorded evidence |
 | Class-FDR guard | 20 decoys | `output/src/fdr/class.rs:144` | when a class uses its own competition | no | No recorded evidence |
 | Site identity weights | score 2.0, isotope -1.0 and -5.7, hit fraction 25, unique hit 0.08, miss -0.02, decoy -11, confident 0.9 | `output/src/fdr/identity.rs:25-33` | posterior of the modification identity | no | No recorded evidence in code comments |
-| Transfer classifier | 3 folds, learning rate 0.3, at most 16 strata, EB level 0.01 | `andes/src/transfer_fdr.rs:86,130,134,348` | transfer q-values | no | Learning rate 0.3: held-out scores separate targets from decoys better than 0.05 (code comment) |
-| Join mismatch limit | 1% | `andes/src/bin/andes/quant_cmd.rs:337` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
+| Transfer classifier | 3 folds, learning rate 0.3, at most 16 strata, EB level 0.01 | `andes/src/bin/andes/transfers.rs:86,130,134,348` | transfer q-values | no | Learning rate 0.3: held-out scores separate targets from decoys better than 0.05 (code comment) |
+| Join mismatch limit | 1% | `andes/src/bin/andes/quant.rs:337` | largest PSM disagreement between a run's PSMs and its rescoring result | no | No recorded evidence |
 
 ### Quantification
 
 | Constant | Value | Where | Controls | Override | Basis |
 |---|---|---|---|---|---|
-| Trace-area share | 0.1 | `andes/src/bin/andes/quant_finalize.rs:156` | share of precursors that report trace areas | `--quant-trace-fraction` (advanced, `quant finalize`) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
+| Trace-area share | 0.1 | `andes/src/bin/andes/quant/finalize.rs:156` | share of precursors that report trace areas | `--quant-trace-fraction` (advanced, `quant finalize`) | Six LFQ benchmarks: 0.1 lowered gross errors of the brightest tenth by 17-43% and replicate SD on every set; 1 was worse on three of four (code comment) |
 | Fit window | scans within the RT prior t_hat +/- 3 s (s learned) | `quant/src/evidence.rs:1115` | apex candidates tried | s learned per run; 3 fixed | No recorded evidence |
 | Extraction half-window | 4 s + 4 w_prior | `evidence.rs:236` | scans extracted per probe | s and w_prior learned; multiples fixed | No recorded evidence |
 | Width grid | 0.7, 1.0, 1.4 x w_prior | `evidence.rs:103` | widths tried in the fit | w_prior learned | No recorded evidence; the run-level width scale uses 0.5-2.0 (below) |
@@ -3609,7 +3609,7 @@ here only where the value is a fixed choice rather than a documented option.
 | Ion mobility window | search 0.1 V s/cm2, refit beyond 4 scales dropped, gate 3 scales, at least 50 pairs, scale floor 0.001 | `quant/src/mobility.rs:23-32` | timsTOF extraction gate | scale learned per run | Gate cut the main share bad 9.64 to 5.79% on a timsTOF set (internal benchmark) |
 | LFQ options | RT half-window 60 s, minimum isotope cosine 0.7, feature FDR 0.05 | `andes/src/bin/andes/cli.rs` | `--lfq` feature acceptance | `--lfq-rt-window`, `--lfq-min-cosine`, `--quant-fdr` | No recorded evidence |
 | MBR FDRs | donor `--psm-fdr` (0.01), transfer `--quant-fdr` (0.01) | `andes/src/bin/andes/cli.rs` | which library entries and transfers are reported | `--mbr-donor-fdr`, `--quant-transfer-fdr`, `--quant-fdr` | Convention |
-| Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant_run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |
+| Purity and resolution checks | isotope tolerance 10 ppm; low-res if fewer than 0.5 of intense centroids find an isotope partner | `andes/src/bin/andes/quant/run.rs:43,50,51` | purity ladder; resolution warning | no | Orbitrap survey scans measured 0.70-0.93, ion-trap-sized errors 0.09-0.32 (code comment) |
 | Purity ladder | 10 steps in the window, 64 overall | `quant/src/purity.rs:21,23` | isotope ladder of the purity estimate | no | No recorded evidence |
 | TMT gate | purity 0.7, S/N 0 (off); PEP enters `quant_weight` as 1 - PEP | `andes/src/bin/andes/cli.rs` | `quant_weight` of a PSM | `--tmt-min-purity`, `--tmt-min-sn` | No recorded evidence |
 | TMT unmix | interference at most 0.8, 100 scans minimum (also the effective scans needed to learn λ), 10 ppm, isotopes -1 to 8, density half-width 5 Th, bisquare 4.685, 8 rounds, λ grid of 21 steps, reference weight (1 − interference)² | `quant/src/unmix.rs` | `--tmt-unmix` model | learned per run (coefficients and λ); constants bound the fit | Bisquare 4.685 is the standard 95% efficiency constant; others: no recorded evidence |

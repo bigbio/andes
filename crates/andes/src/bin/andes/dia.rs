@@ -1,3 +1,11 @@
+pub(crate) mod joint;
+pub(crate) mod llr;
+pub(crate) mod pass2;
+pub(crate) mod rt;
+pub(crate) mod score;
+pub(crate) mod study;
+pub(crate) mod transfer;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -12,7 +20,7 @@ use onnx_infer::predictors::spectral::FragmentTolerance;
 use quant::Ms1RunIndex;
 use rayon::prelude::*;
 
-use crate::predicted::{read_pin, write_pin, NONE};
+use crate::dia::rt::{read_pin, write_pin, NONE};
 
 pub(crate) const COLUMNS: [&str; 16] = [
     "dia_frag_corr",
@@ -1026,7 +1034,7 @@ pub(crate) type PrecursorQ = ((usize, usize, usize), Vec<(f64, bool)>);
 /// Rows Percolator did not report keep no entry. Returns the precursor counts (targets,
 /// decoys, target precursors at q <= 0.01) and the best `(score, is decoy)` of every precursor,
 /// for comparing the run's precursor-level target-decoy curve at other q-values. A precursor
-/// PIN (one with the `dia_score::PRESENT_COLUMN` column) is keyed by its Peptide string and
+/// PIN (one with the `score::PRESENT_COLUMN` column) is keyed by its Peptide string and
 /// charge columns and needs no spectra.
 pub(crate) fn precursor_q(
     pin: &Path,
@@ -1049,7 +1057,7 @@ pub(crate) fn precursor_q(
         .enumerate()
         .filter_map(|(i, c)| Some((i, c.strip_prefix("charge")?.parse().ok()?)))
         .collect();
-    let table = if h.contains(&crate::dia_score::PRESENT_COLUMN) {
+    let table = if h.contains(&crate::dia::score::PRESENT_COLUMN) {
         None
     } else {
         Some(read_pin(pin, spectra, &[])?)

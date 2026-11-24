@@ -4,11 +4,11 @@ use std::sync::mpsc::sync_channel;
 use std::thread;
 
 use crate::cli::{Cli, Fragmentation};
-use crate::glyco_run::run_glyco;
-use crate::memlimit::available_memory_budget;
-use crate::model_select::search_aa_set;
-use crate::mono::{correct_chunk, MonoDump, MonoStats};
-use crate::quant_run::{QuantCollector, QuantSettings, RunScans};
+use crate::glyco::run_glyco;
+use crate::memory::available_memory_budget;
+use crate::models::search_aa_set;
+use crate::monoisotopic::{correct_chunk, MonoDump, MonoStats};
+use crate::quant::run::{QuantCollector, QuantSettings, RunScans};
 use crate::report_search_progress;
 use crate::spectra::{
     add_mzml_skipped, input_format_flags, merge_parse_stats, ms3_carries_reporters,
@@ -23,7 +23,6 @@ use search::fragments::index::{index_chunk_len, index_order_mass, INDEX_CHUNK_SI
 use search::precursor::monoisotopic::MonoCorrection;
 use search::{FileCalibration, PrecursorCalMode, PreparedSearch, TopNQueue};
 
-#[path = "search/resolve.rs"]
 mod resolve;
 use resolve::{
     check_flag_combinations, detect_inputs, load_search_database, log_resolved_parameters,
@@ -359,7 +358,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = cli;
     if let Some(x) = &cli.xl {
         if let Some(v) =
-            crate::xl_run::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0)
+            crate::xl::xl_default_variable_mods(cli.db.variable_mods.as_ref(), &x.0)
         {
             cli.db.variable_mods = Some(v);
         }
@@ -498,7 +497,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let optimize_dir = scratch_tempdir("andes-optimize-", &scratch_dir)?;
                 let rescorer = crate::optimize::SampleRescorer {
                     backend: output::PercolatorBackend::Native {
-                        memory: crate::memlimit::rescore_memory(
+                        memory: crate::memory::rescore_memory(
                             cli.rescore_memory_gb,
                             optimize_dir.path().to_path_buf(),
                         ),
@@ -560,16 +559,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let store_path = cli
             .model_store
             .clone()
-            .unwrap_or_else(crate::model_select::bundled_store_path);
+            .unwrap_or_else(crate::models::bundled_store_path);
         let run_model_id = resolved_model_id.clone();
         let run_analyser =
-            crate::model_select::analyser_of(param.data_type.instrument.name()).to_string();
+            crate::models::analyser_of(param.data_type.instrument.name()).to_string();
         let run_protocol = param.data_type.protocol;
         let high_res = acquisition.high_res;
         let index_on = params.fragment_index_top_k > 0;
         let gbdt_max_trees = gbdt_k;
         let loader: search::ScorerLoader = Box::new(move |activation: ActivationMethod| {
-            let route = match crate::model_select::load_activation_route(
+            let route = match crate::models::load_activation_route(
                 activation,
                 routed_instrument,
                 route_protocol,
@@ -614,7 +613,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         prepared = prepared.with_per_scan_scorers(routed_activation, loader);
     }
     if cli.dia {
-        prepared.set_form_rt_model(crate::predicted::andes_rt_form_model()?);
+        prepared.set_form_rt_model(crate::dia::rt::andes_rt_form_model()?);
     }
     log::info!(
         target: "candidate_index_open",
@@ -720,7 +719,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let predictors = if standalone {
         None
     } else {
-        crate::predicted::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
+        crate::dia::rt::Predictors::from_cli(&cli, &acquisition, param.data_type.instrument)?
     };
     if let Some(p) = &predictors {
         log::info!(target: "predict", "{}", p.describe());
@@ -1335,7 +1334,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if xl_ms3_capture {
             let ms3 = std::mem::take(&mut run_scans.ms3);
             let n = ms3.len();
-            let linked = crate::xl_run::link_ms3(
+            let linked = crate::xl::link_ms3(
                 &all_spectra[spectra_before..],
                 spectra_before,
                 title_prefix.as_deref(),
@@ -1484,7 +1483,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         debug_assert_eq!(mono_table.len(), all_spectra.len());
     }
-    let (window, narrowed) = crate::mono::coupled_isotope_window(
+    let (window, narrowed) = crate::monoisotopic::coupled_isotope_window(
         mono_active,
         cli.isotope_error,
         params.isotope_error_range.clone(),
@@ -1537,9 +1536,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if cli.dia {
-        crate::memlimit::release_free_memory();
+        crate::memory::release_free_memory();
     }
-    crate::memlimit::mark_stage("search");
+    crate::memory::mark_stage("search");
     if cli.open_search {
         let (attempts, wins) = prepared.open_search_stats();
         log::info!(
@@ -1557,7 +1556,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 search::crosslinks::PRECURSOR_SNAP_PPM
             );
         }
-        crate::xl_run::run_xl(
+        crate::xl::run_xl(
             &cli,
             &spectra,
             &xl_ms3,
@@ -1685,7 +1684,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         output_pin_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
-    crate::memlimit::mark_stage("PIN written");
+    crate::memory::mark_stage("PIN written");
     let run_stats = output::RunStatistics::compute(
         &queues,
         &pin_candidates,
@@ -1708,7 +1707,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     .then(|| output::fact_rows(&spectra, &queues, &pin_candidates));
     if fact_rows.is_some() {
         queues = Vec::new();
-        crate::memlimit::release_free_memory();
+        crate::memory::release_free_memory();
     }
     log::info!(
         target: "total",
@@ -1725,9 +1724,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut dia_pass2: Option<output::dia::pass2::Pass2Table> = None;
     if let Some(p) = &predictors {
         let kept = p.add_to_pin(&output_pin_path, &spectra, &run_ends, pooled)?;
-        crate::memlimit::mark_stage("predictions");
+        crate::memory::mark_stage("predictions");
         if let Some((predicted, table)) = kept.filter(|_| pooled) {
-            let pool = crate::dia_llr::add_to_pin(
+            let pool = crate::dia::llr::add_to_pin(
                 &output_pin_path,
                 &spectra,
                 &run_ends,
@@ -1736,32 +1735,32 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &predicted,
                 p.tolerance(),
             )?;
-            crate::memlimit::mark_stage("pool scores");
+            crate::memory::mark_stage("pool scores");
             let nominees_out = cli
                 .quant_dir
                 .as_deref()
                 .filter(|_| run_ends.len() == 1)
-                .map(|d| crate::dia_xfer::nominee_path(d, &crate::quant_run::run_stem(&spectrum_path)));
-            dia_pass2 = Some(crate::dia_pass2::run(
+                .map(|d| crate::dia::transfer::nominee_path(d, &crate::quant::run::run_stem(&spectrum_path)));
+            dia_pass2 = Some(crate::dia::pass2::run(
                 &output_pin_path,
                 &spectra,
                 &run_ends,
                 &dia_ms1,
                 pool,
                 predicted,
-                nominees_out.as_deref().map(|path| crate::dia_xfer::NomineesOut {
+                nominees_out.as_deref().map(|path| crate::dia::transfer::NomineesOut {
                     path,
                     spectrum: spectrum_path.as_path(),
                     mobility_slices: cli.dia_mobility_slices,
                 }),
             )?);
-            crate::memlimit::mark_stage("pass 2");
+            crate::memory::mark_stage("pass 2");
         }
     }
     if cli.dia {
-        crate::memlimit::release_free_memory();
+        crate::memory::release_free_memory();
     }
-    crate::memlimit::mark_stage("pool released");
+    crate::memory::mark_stage("pool released");
     let mut rerank_dropped = std::collections::HashSet::new();
     if pooled {
         rerank_dropped = crate::dia::rerank_pin(
@@ -1769,16 +1768,16 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.top_n as usize,
             cli.output_parquet.is_some() || quant.is_some(),
         )?;
-        crate::memlimit::release_free_memory();
-        crate::memlimit::mark_stage("per-scan cut");
+        crate::memory::release_free_memory();
+        crate::memory::mark_stage("per-scan cut");
     }
     if cli.dia {
         crate::dia::add_to_pin(&output_pin_path, &spectra, &run_ends, &dia_ms1, n_dia_ms1)?;
-        crate::memlimit::mark_stage("co-elution");
+        crate::memory::mark_stage("co-elution");
     }
     drop(dia_ms1);
     if cli.dia {
-        crate::memlimit::release_free_memory();
+        crate::memory::release_free_memory();
     }
     if cli.refine {
         if refine_merged {
@@ -1818,7 +1817,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let backend = if use_native {
                 crate::cli::ensure_scratch_dir(&scratch_dir)?;
                 output::PercolatorBackend::Native {
-                    memory: crate::memlimit::rescore_memory(
+                    memory: crate::memory::rescore_memory(
                         cli.rescore_memory_gb,
                         scratch_dir.clone(),
                     ),
@@ -1845,7 +1844,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let (mut map, mut decoys) =
                 output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                     .map_err(|e| format!("{e}"))?;
-            crate::memlimit::mark_stage("rescoring");
+            crate::memory::mark_stage("rescoring");
             if cli.dia
                 && crate::dia::refine_rt(&output_pin_path, &spectra, &|id: &str| {
                     map.get(id).is_some_and(|p| p.q_value <= 0.01)
@@ -1854,7 +1853,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 (map, decoys) =
                     output::run_percolator_with_decoys(&backend, &output_pin_path, &extra)
                         .map_err(|e| format!("{e}"))?;
-                crate::memlimit::mark_stage("rescoring after the RT refit");
+                crate::memory::mark_stage("rescoring after the RT refit");
             }
             let path = output::decoy_results_path(&output_pin_path);
             let text =
@@ -1876,9 +1875,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     for s in &mut spectra {
                         s.peaks = Vec::new();
                     }
-                    crate::memlimit::release_free_memory();
+                    crate::memory::release_free_memory();
                 }
-                crate::memlimit::mark_stage("precursor q");
+                crate::memory::mark_stage("precursor q");
                 log::info!(
                     target: "rescore",
                     "Precursor-level q (DIA): {t} target and {d} decoy precursors, {n} at q <= 0.01"
@@ -1886,19 +1885,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
             let mut results_pin = output_pin_path.clone();
             if let (Some(t), Some(dir)) = (dia_pass2.as_ref(), cli.quant_dir.as_deref()) {
-                crate::dia_xrun::store_run(
+                crate::dia::study::store_run(
                     dir,
                     &spectrum_path,
                     &output_pin_path,
                     t,
                     Some((&backend, &user_args)),
                 )?;
-                crate::memlimit::mark_stage("study tables stored");
+                crate::memory::mark_stage("study tables stored");
                 dia_pass2 = None;
             }
             if let Some(t) = dia_pass2.take() {
-                let seed = crate::dia_score::percolator_seed(&user_args);
-                let rescore = |pin: &Path| -> Result<crate::dia_score::Rescored, String> {
+                let seed = crate::dia::score::percolator_seed(&user_args);
+                let rescore = |pin: &Path| -> Result<crate::dia::score::Rescored, String> {
                     let (targets, decoy_ids) =
                         output::run_percolator_with_decoys(&backend, pin, &extra)
                             .map_err(|e| format!("{e}"))?;
@@ -1907,13 +1906,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("{}: {e}", path.display()))?;
                     let decoys = output::parse_psm_results(&text)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
-                    Ok(crate::dia_score::Rescored {
+                    Ok(crate::dia::score::Rescored {
                         targets,
                         decoy_ids,
                         decoys,
                     })
                 };
-                match crate::dia_score::rescore_precursors(
+                match crate::dia::score::rescore_precursors(
                     &output_pin_path,
                     &t,
                     seed,
@@ -1940,7 +1939,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "pass-1 results kept, the precursor PIN is not used: {why}"
                     ),
                 }
-                crate::memlimit::mark_stage("precursor rescoring");
+                crate::memory::mark_stage("precursor rescoring");
             }
             rescore_decoys = Some(decoys);
             log::info!(
@@ -1965,10 +1964,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
 
     if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
-        crate::dia_xrun::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+        crate::dia::study::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
     }
     if cli.dia {
-        crate::memlimit::release_free_memory();
+        crate::memory::release_free_memory();
     }
 
     let mut knockoff_rows: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2320,7 +2319,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .count_passing(decoys, cli.pep);
         let run_names: Vec<String> = spectrum_paths
             .iter()
-            .map(|p| crate::quant_run::run_stem(p))
+            .map(|p| crate::quant::run::run_stem(p))
             .collect();
         let fixed = output::FixedModSpec::declared(&params);
         output::IdentificationSummary::compute(
@@ -2429,11 +2428,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let qpx_groups = protein_groups
         .as_ref()
-        .map(|inf| crate::quant_cmd::ProteinGroups {
+        .map(|inf| crate::quant::ProteinGroups {
             inf,
             max_q: cli.protein_fdr.unwrap_or(0.01),
         });
-    let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant_run::TmtMbrInput {
+    let tmt_mbr_input = (cli.mbr && cli.tmt.is_some()).then(|| crate::quant::run::TmtMbrInput {
         decoys: &mbr_decoys,
         source: &mbr_source,
         library_fdr: cli.mbr_donor_fdr(),
@@ -2441,7 +2440,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         wrong_log2: cli.mbr_wrong_log2,
     });
     let quant_summary = match &quant {
-        Some(q) => Some(crate::quant_run::run_quant(
+        Some(q) => Some(crate::quant::run::run_quant(
             q,
             &spectra,
             &queues,
@@ -2500,10 +2499,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
         let stems: Vec<String> = spectrum_paths
             .iter()
-            .map(|p| crate::quant_run::run_stem(p))
+            .map(|p| crate::quant::run::run_stem(p))
             .collect();
-        let scores = crate::quant_cmd::rescore_scores(map, &mbr_decoys, &mbr_source)?;
-        let ep = crate::quant_cmd::evidence_params(cli.lfq_tol)?;
+        let scores = crate::quant::rescore_scores(map, &mbr_decoys, &mbr_source)?;
+        let ep = crate::quant::evidence_params(cli.lfq_tol)?;
         let (donor_q, donor_pep) = quant
             .as_ref()
             .map(|q| (q.settings.psm_fdr, q.settings.pep_cap))
@@ -2542,7 +2541,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         log::info!(target: "output", "Wrote TSV: {}", tsv_path.display());
     }
 
-    crate::memlimit::mark_stage("outputs");
+    crate::memory::mark_stage("outputs");
     let Some((dir, stems, scores, ep, donor_q, donor_pep)) = mbr_job else {
         release_at_exit(pin_candidates);
         return Ok(());
@@ -2554,7 +2553,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     drop(quant);
     drop(rescore_map);
     drop(target_db);
-    crate::quant_cmd::run_in_process(
+    crate::quant::run_in_process(
         &dir,
         &stems,
         scores,

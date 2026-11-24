@@ -1,3 +1,5 @@
+pub(crate) mod parse;
+
 use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValue, TypedValueParser};
@@ -6,7 +8,7 @@ use model::Tolerance;
 use model_train::geometry::GeometryConfig;
 use search::decoy::DecoyStrategy;
 use search::PrecursorCalMode;
-pub(crate) use crate::cli_parse::{
+pub(crate) use crate::cli::parse::{
     parse_charge_range, parse_isotope_error_range, parse_non_negative, parse_non_negative_f32,
     parse_open_search_delta, parse_positive_tol, parse_precursor_tol, parse_unit_fraction,
     parse_xl,
@@ -1732,7 +1734,7 @@ pub(crate) struct QuantExtractArgs {
     /// acceptor, rounded up. A minimum leaves out some transfer fits (and their CPU time),
     /// including a few transfers that would have been accepted.
     #[arg(long = "mbr-min-donor-fraction", value_name = "FRACTION",
-          default_value_t = crate::quant_mbr::DEFAULT_MIN_DONOR_FRACTION,
+          default_value_t = crate::quant::mbr::DEFAULT_MIN_DONOR_FRACTION,
           value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) mbr_min_donor_fraction: f64,
 
@@ -1795,7 +1797,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Above it the classifier is trained on the rows of a hashed sample of (precursor,
     /// run) pairs (every row is still scored); below it every row trains.
     #[arg(long = "max-train-rows", value_name = "N",
-          default_value_t = crate::quant_finalize::DEFAULT_MAX_TRAIN_ROWS,
+          default_value_t = crate::quant::finalize::DEFAULT_MAX_TRAIN_ROWS,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_train_rows: usize,
 
@@ -1805,7 +1807,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// sample of the training rows with its own seed, which keeps the accepted transfers
     /// stable across seeds at hundreds of runs; training and scoring time grow with it.
     #[arg(long = "transfer-models", value_name = "N",
-          default_value_t = crate::quant_finalize::DEFAULT_TRANSFER_MODELS,
+          default_value_t = crate::quant::finalize::DEFAULT_TRANSFER_MODELS,
           value_parser = parse_transfer_models, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) transfer_models: usize,
 
@@ -1814,7 +1816,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Above it the fit uses a hashed sample of whole precursors, which coarsens the
     /// RT-local offsets, so keep it above the cells of the study when memory allows.
     #[arg(long = "max-norm-cells", value_name = "N",
-          default_value_t = crate::quant_finalize::DEFAULT_MAX_NORM_CELLS,
+          default_value_t = crate::quant::finalize::DEFAULT_MAX_NORM_CELLS,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_norm_cells: usize,
 
@@ -1823,7 +1825,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// With more, the precursors are summarised in groups, one pass each. The results do
     /// not depend on it.
     #[arg(long = "max-donor-fits", value_name = "N",
-          default_value_t = crate::quant_finalize::DEFAULT_MAX_DONOR_FITS,
+          default_value_t = crate::quant::finalize::DEFAULT_MAX_DONOR_FITS,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_donor_fits: usize,
 
@@ -1832,7 +1834,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// Above it they are sorted and written to temporary tables. The results do not depend
     /// on it.
     #[arg(long = "max-held-scores", value_name = "N",
-          default_value_t = crate::quant_finalize::DEFAULT_MAX_HELD_SCORES,
+          default_value_t = crate::quant::finalize::DEFAULT_MAX_HELD_SCORES,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) max_held_scores: usize,
 
@@ -1843,7 +1845,7 @@ pub(crate) struct QuantFinalizeArgs {
     pub(crate) temp_dir: Option<PathBuf>,
 
     /// Seed of the transfer FDR folds and models and of the samples; on a DIA study, of the learned score and the rescoring
-    #[arg(long = "seed", value_name = "N", default_value_t = crate::quant_cmd::MBR_SEED,
+    #[arg(long = "seed", value_name = "N", default_value_t = crate::quant::MBR_SEED,
           hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) seed: u64,
 
@@ -1856,7 +1858,7 @@ pub(crate) struct QuantFinalizeArgs {
     /// the template area everywhere, 1 switches every such precursor. quant_q and the
     /// transfer q-values do not depend on it.
     #[arg(long = "quant-trace-fraction", value_name = "FRACTION",
-          default_value_t = crate::quant_finalize::DEFAULT_TRACE_FRACTION,
+          default_value_t = crate::quant::finalize::DEFAULT_TRACE_FRACTION,
           value_parser = parse_unit_fraction, hide_short_help = true, help_heading = H_ADVANCED)]
     pub(crate) quant_trace_fraction: f64,
 
@@ -2088,7 +2090,7 @@ pub(crate) fn decoy_strategy_name(strategy: DecoyStrategy) -> &'static str {
 }
 
 pub(crate) fn parse_enzyme_list(s: &str) -> Result<String, String> {
-    crate::model_select::parse_enzymes(s)
+    crate::models::parse_enzymes(s)
         .map(|_| s.to_string())
         .map_err(|e| e.to_string())
 }
@@ -2228,7 +2230,7 @@ mod cli_domain_validator_tests {
 
 #[cfg(test)]
 mod enzyme_cli_tests {
-    use crate::model_select::parse_enzymes;
+    use crate::models::parse_enzymes;
     use model::enzyme::Enzyme;
 
     #[test]

@@ -36,7 +36,7 @@ State the before/after numbers, dataset and thread count in the commit message.
 
 - Stream inputs; never hold all spectra of a large run when a chunked pass works (see the
   out-of-core path and its goldens).
-- Respect the memory budget in `crates/andes/src/bin/andes/memlimit.rs` (cgroup limit or
+- Respect the memory budget in `crates/andes/src/bin/andes/memory.rs` (cgroup limit or
   `MemAvailable`). New large buffers must size themselves from that budget, not from the
   machine's total RAM.
 - Prefer `f32` and `u32` where precision allows and results stay identical; drop large

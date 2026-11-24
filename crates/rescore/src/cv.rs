@@ -198,7 +198,6 @@ pub fn train(
 
 fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, String> {
     let n = pin.meta.len();
-    let nf = pin.rows.nfeat();
     let fold = folds_by_precursor(&pin.meta, FOLDS, cfg.seed);
     let is_decoy: Vec<bool> = pin.meta.iter().map(|m| m.label < 0).collect();
     let folds: Vec<Fold> = (0..FOLDS)
@@ -242,34 +241,7 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         cfg.initial_selection_fdr,
         cfg.overrule,
     )?;
-    if cfg.verbose > 1 && pin_direction(pin).is_none() {
-        for (f, (fd, w)) in folds.iter().zip(&init).enumerate() {
-            let s = score(&pin.rows, &fd.train, w, Some(norm));
-            let p = positives(&s, &fd.train_decoy, cfg.initial_selection_fdr, true);
-            let j = w[..nf].iter().position(|&v| v != 0.0).map_or(0, |j| j + 1);
-            log::info!(
-                target: "rescore",
-                "Split {}:\tSelected feature {j} as initial direction. Could separate {p} training set positives with q<{} in that direction.",
-                f + 1,
-                cfg.initial_selection_fdr
-            );
-        }
-    }
-    let init_positives: usize = folds
-        .iter()
-        .zip(&init)
-        .map(|(fd, w)| {
-            let s = score(&pin.rows, &fd.test, w, Some(norm));
-            positives(&s, &fd.test_decoy, cfg.test_fdr, false)
-        })
-        .sum();
-    if cfg.verbose > 0 {
-        log::info!(
-            target: "rescore",
-            "Found {init_positives} test set positives with q<{} in initial direction",
-            cfg.test_fdr
-        );
-    }
+    let init_positives = initial_positives(pin, norm, cfg, &folds, &init);
     let mut w = init.clone();
     let mut train_scores: Vec<Vec<f64>> = folds
         .iter()
@@ -502,4 +474,45 @@ fn train_in_pool(pin: &Pin, norm: &Norm, cfg: &CvConfig) -> Result<CvResult, Str
         test_scores,
         fold,
     })
+}
+
+/// The test-set positives the initial directions separate, summed over the folds; at verbose
+/// above 1, without a fixed PIN direction, also logs each fold's chosen initial feature.
+fn initial_positives(
+    pin: &Pin,
+    norm: &Norm,
+    cfg: &CvConfig,
+    folds: &[Fold],
+    init: &[Vec<f64>],
+) -> usize {
+    let nf = pin.rows.nfeat();
+    if cfg.verbose > 1 && pin_direction(pin).is_none() {
+        for (f, (fd, w)) in folds.iter().zip(init).enumerate() {
+            let s = score(&pin.rows, &fd.train, w, Some(norm));
+            let p = positives(&s, &fd.train_decoy, cfg.initial_selection_fdr, true);
+            let j = w[..nf].iter().position(|&v| v != 0.0).map_or(0, |j| j + 1);
+            log::info!(
+                target: "rescore",
+                "Split {}:\tSelected feature {j} as initial direction. Could separate {p} training set positives with q<{} in that direction.",
+                f + 1,
+                cfg.initial_selection_fdr
+            );
+        }
+    }
+    let init_positives: usize = folds
+        .iter()
+        .zip(init)
+        .map(|(fd, w)| {
+            let s = score(&pin.rows, &fd.test, w, Some(norm));
+            positives(&s, &fd.test_decoy, cfg.test_fdr, false)
+        })
+        .sum();
+    if cfg.verbose > 0 {
+        log::info!(
+            target: "rescore",
+            "Found {init_positives} test set positives with q<{} in initial direction",
+            cfg.test_fdr
+        );
+    }
+    init_positives
 }

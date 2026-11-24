@@ -1077,8 +1077,8 @@ pub(crate) fn precursor_q(
     };
     let mut keys: HashMap<(String, String, u8), u32> = HashMap::new();
     let mut rows: Vec<(u32, f64, bool, String)> = Vec::new();
+    let mut raw: Vec<(String, String, u8)> = Vec::new();
     let mut line_of: Vec<usize> = Vec::new();
-    let mut names: Vec<(String, String, u8)> = Vec::new();
     for (i, line) in lines.enumerate() {
         let x: Vec<&str> = line.split('\t').collect();
         if x.len() <= c_pep.max(c_label).max(c_id) {
@@ -1114,9 +1114,7 @@ pub(crate) fn precursor_q(
         let run = c_file.map_or("", |i| x[i]).to_string();
         let n = keys.len() as u32;
         let k = *keys.entry((run.clone(), peptide, charge)).or_insert(n);
-        if k == n {
-            names.push((run, x[c_pep].to_string(), charge));
-        }
+        raw.push((run, x[c_pep].to_string(), charge));
         rows.push((k, score, decoy, id.to_string()));
         line_of.push(i);
     }
@@ -1174,8 +1172,9 @@ pub(crate) fn precursor_q(
     }
     let removed_targets = rows
         .iter()
-        .filter(|r| removed[r.0 as usize] && !r.2)
-        .map(|r| names[r.0 as usize].clone())
+        .zip(raw)
+        .filter(|(r, _)| removed[r.0 as usize] && !r.2)
+        .map(|(_, n)| n)
         .collect();
     rows.retain(|r| !removed[r.0 as usize]);
     let q = precursor_q_values(keys.len(), &rows);

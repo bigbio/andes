@@ -1788,7 +1788,8 @@ checked against the reagent. Monolinks are variable modifications, by UNIMOD rec
 `reagent:quencher`, e.g. `--variable-mods "Xlink:DSSO[176] (K), DSBSO:water (K)"`.
 
 Several crosslinkers are searched together as a `;`-separated list (`--xl "DSSO; DSBU"`), a
-YAML list under `search.xl`, or SDRF rows naming different reagents. Each linker is searched with
+YAML list under `search.xl`, SDRF rows naming different reagents, or a row with several
+`comment[cross-linker]` columns (PDH with DMTMM, which also forms zero-length links). Each linker is searched with
 its own candidates, each spectrum keeps the CSM with the best pair score across them (its
 `second` then also covers the other linkers' peptide pairs; a precursor without a charge keeps
 the charge of its best pair score, and its `second` covers every charge tried), and the q-values

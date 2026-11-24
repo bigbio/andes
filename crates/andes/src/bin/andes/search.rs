@@ -28,6 +28,7 @@ use crate::spectra::{learn_file_calibrations, ms3_carries_reporters, ParseStats}
 use calibrate::{finish_mono_correction, optimize_on_sample, FragmentErrorMeasurer};
 use collect::quant_collector;
 use files::{search_file, FileInputs, FileOutputs};
+use finish::{post_search, PostSearch, PostSearchOwned};
 pub(crate) use outputs::load_claim_database;
 use outputs::{
     infer_and_write_groups, write_filtered_tsv, write_open_offsets, write_qpx_bundle, ClaimDatabase,
@@ -431,9 +432,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         xl_snapped,
         xl_snap_files,
         parse_stats,
-        mut mono_table,
+        mono_table,
         mono_stats,
-        mut mono_dump,
+        mono_dump,
     } = outputs;
     run_ends.resize(spectrum_paths.len(), all_spectra.len());
     prepared.params = &params;
@@ -479,177 +480,46 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("no spectra parsed from {}", paths.join(", ")).into());
     }
 
-    let search_elapsed = t_search_start.elapsed();
-    log::info!(
-        target: "stream_search",
-        "Loaded and scored {} spectra from {} in chunks of {}, done in {:.2} s",
-        all_spectra.len(),
-        spectrum_path.display(),
-        CHUNK_SIZE,
-        t_phase.elapsed().as_secs_f64()
-    );
-    log::info!(
-        target: "chunk_candidate_prep",
-        "done in {:.2} s (part of stream_search: fragment-index build or record expansion, summed over chunks)",
-        prepared.chunk_prep_seconds()
-    );
-    for (activation, own_model, scans) in prepared.per_scan_routes() {
-        log::info!(
-            target: "routing",
-            "{scans} {} scan scorings with {} (run routed {})",
-            activation.name(),
-            if own_model {
-                "the model of their own activation"
-            } else {
-                "the run's model"
-            },
-            routed_activation.name()
-        );
-    }
-    if bench_mode {
-        log::info!(target: "bench", "capped at {} spectra", cli.max_spectra);
-    }
-
-    prepared.sync_materialized_candidates();
-
-    let mono_columns = mono_active;
-    let (mono_active, glyco_isotope_override) = finish_mono_correction(
-        &cli,
-        &params,
-        &mono_params,
-        mono_active,
-        &mono_stats,
-        &mut mono_dump,
-        &mut mono_table,
-    )?;
-    if mono_active {
-        debug_assert_eq!(mono_table.len(), all_spectra.len());
-    }
-
-    let spectra = all_spectra;
-    let mut queues = all_queues;
-
-    if standalone {
-        log::info!(
-            "Standard peptide search skipped in --{} mode (PSMs unused; the driver \
-             derives its own candidates); {} spectra loaded ({:.2}s)",
-            if cli.glyco { "glyco" } else { "xl" },
-            spectra.len(),
-            search_elapsed.as_secs_f64()
-        );
-    } else {
-        let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
-        log::info!(
-            "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
-            spectra.len(),
-            search_elapsed.as_secs_f64()
-        );
-    }
-    if cli.dia {
-        crate::memory::release_free_memory();
-    }
-    crate::memory::mark_stage("search");
-    if cli.open_search {
-        let (attempts, wins) = prepared.open_search_stats();
-        log::info!(
-            target: "open-search",
-            "{attempts} modification-aware re-scores ({wins} improved the node \
-             score)"
-        );
-    }
-
-    if cli.xl.is_some() {
-        if xl_snap_files > 0 {
-            log::info!(
-                target: "xl",
-                "{xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
-                search::crosslinks::PRECURSOR_SNAP_PPM
-            );
-        }
-        crate::xl::run_xl(
-            &cli,
-            &spectra,
-            &xl_ms3,
-            &prepared,
-            &report_base,
+    let Some((spectra, mut queues, refine_output)) = post_search(
+        &PostSearch {
+            t_phase,
+            xl_snapped,
+            cli: &cli,
+            acquisition: &acquisition,
+            decoy_strategy,
+            fragment_tol_da,
+            mono_active,
+            mono_params: &mono_params,
+            routed_activation,
             spectrum_paths,
-            &run_ends,
+            standalone,
+            t_search_start,
+            xl_snap_files,
+            bench_mode,
+            file_calibrations: &file_calibrations,
+            idx: &idx,
+            output_pin_path: &output_pin_path,
+            params: &params,
+            quant: &quant,
+            report_base: &report_base,
+            run_ends: &run_ends,
+            scorer: &scorer,
+            spectrum_path: &spectrum_path,
             t_total,
-        )?;
+        },
+        PostSearchOwned {
+            all_spectra,
+            all_queues,
+            mono_table,
+            mono_dump,
+            mono_stats,
+            xl_ms3,
+        },
+        &mut prepared,
+    )?
+    else {
         return Ok(());
-    }
-
-    if cli.glyco {
-        let unfitted: Vec<Option<MonoCorrection>>;
-        let mono_for_pin = if mono_active {
-            Some(mono_table.as_slice())
-        } else if mono_columns {
-            unfitted = vec![None; spectra.len()];
-            Some(unfitted.as_slice())
-        } else {
-            None
-        };
-        run_glyco(
-            &cli,
-            &spectra,
-            &prepared,
-            &params,
-            &idx,
-            &output_pin_path,
-            spectrum_paths,
-            acquisition.high_res,
-            mono_for_pin,
-            glyco_isotope_override,
-            quant.as_ref(),
-            t_total,
-        )?;
-        return Ok(());
-    }
-
-    let refine_output = if cli.refine {
-        let base_cfg = match &cli.refine_config {
-            Some(p) => search::RefineConfig::from_yaml_str(&std::fs::read_to_string(p)?)
-                .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
-            None => search::RefineConfig::default_tier(),
-        };
-        let cfg = base_cfg;
-
-        let high_res = acquisition.high_res;
-
-        let high_res_only = cfg.high_res_only;
-        if high_res_only && !high_res {
-            log::warn!("refine is high-res-only and the data is low-res; skipping refinement.");
-            None
-        } else {
-            let target_db = idx.target_db();
-            let t_refine = std::time::Instant::now();
-            let out = search::refinement::run_refinement(
-                &queues,
-                &spectra,
-                &prepared.candidates,
-                &target_db,
-                &params,
-                &scorer,
-                &cfg,
-                0.01,
-                high_res,
-                fragment_tol_da,
-                &cli.db.decoy_prefix,
-                decoy_strategy,
-                cli.decoy_seed,
-                &file_calibrations,
-            );
-            log::info!(
-                target: "refinement",
-                "done in {:.2} s",
-                t_refine.elapsed().as_secs_f64()
-            );
-            out
-        }
-    } else {
-        None
     };
-
     let t_phase = std::time::Instant::now();
     let refine_merged = refine_output
         .as_ref()

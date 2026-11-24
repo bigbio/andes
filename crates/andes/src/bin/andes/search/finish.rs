@@ -785,3 +785,266 @@ pub(super) fn write_pin_and_rescore(
         pin_index,
     })
 }
+
+/// The spectra, their PSM queues and the refine output, as the search leaves them.
+pub(super) type Searched = (
+    Vec<Spectrum>,
+    Vec<TopNQueue>,
+    Option<search::refinement::RefinementOutput>,
+);
+
+/// What the steps after the search read.
+#[derive(Clone, Copy)]
+pub(super) struct PostSearch<'a> {
+    pub(super) t_phase: std::time::Instant,
+    pub(super) xl_snapped: usize,
+    pub(super) cli: &'a Cli,
+    pub(super) acquisition: &'a crate::acquisition::Acquisition,
+    pub(super) decoy_strategy: search::decoy::DecoyStrategy,
+    pub(super) fragment_tol_da: f64,
+    pub(super) mono_active: bool,
+    pub(super) mono_params: &'a search::precursor::monoisotopic::MonoParams,
+    pub(super) routed_activation: ActivationMethod,
+    pub(super) spectrum_paths: &'a Vec<PathBuf>,
+    pub(super) standalone: bool,
+    pub(super) t_search_start: std::time::Instant,
+    pub(super) xl_snap_files: usize,
+    pub(super) bench_mode: bool,
+    pub(super) file_calibrations: &'a Vec<search::FileCalibration>,
+    pub(super) idx: &'a search::SearchIndex,
+    pub(super) output_pin_path: &'a PathBuf,
+    pub(super) params: &'a search::SearchParams,
+    pub(super) quant: &'a Option<QuantCollector>,
+    pub(super) report_base: &'a PathBuf,
+    pub(super) run_ends: &'a Vec<usize>,
+    pub(super) scorer: &'a RankScorer,
+    pub(super) spectrum_path: &'a PathBuf,
+    pub(super) t_total: std::time::Instant,
+}
+
+/// What the steps after the search consume.
+pub(super) struct PostSearchOwned {
+    pub(super) all_spectra: Vec<Spectrum>,
+    pub(super) all_queues: Vec<TopNQueue>,
+    pub(super) mono_table: Vec<Option<MonoCorrection>>,
+    pub(super) mono_dump: Option<MonoDump>,
+    pub(super) mono_stats: MonoStats,
+    pub(super) xl_ms3: Vec<Vec<model::scan::ProductScan>>,
+}
+
+/// The steps between the search and the PIN: the search and routing log, the monoisotopic
+/// correction, the standalone and DIA logs, open-search and cross-link summaries, the glyco pass and
+/// the refine pass. Returns the spectra, their PSM queues and the refine output, or none when
+/// the run ends there (a bench run or a glyco or cross-link search).
+pub(super) fn post_search(
+    inputs: &PostSearch<'_>,
+    owned: PostSearchOwned,
+    prepared: &mut PreparedSearch<'_>,
+) -> Result<Option<Searched>, Box<dyn std::error::Error>> {
+    let PostSearch {
+        t_phase,
+        xl_snapped,
+        cli,
+        acquisition,
+        decoy_strategy,
+        fragment_tol_da,
+        mono_active,
+        mono_params,
+        routed_activation,
+        spectrum_paths,
+        standalone,
+        t_search_start,
+        xl_snap_files,
+        bench_mode,
+        file_calibrations,
+        idx,
+        output_pin_path,
+        params,
+        quant,
+        report_base,
+        run_ends,
+        scorer,
+        spectrum_path,
+        t_total,
+    } = *inputs;
+    let PostSearchOwned {
+        all_spectra,
+        all_queues,
+        mut mono_table,
+        mut mono_dump,
+        mono_stats,
+        xl_ms3,
+    } = owned;
+    let search_elapsed = t_search_start.elapsed();
+    log::info!(
+        target: "stream_search",
+        "Loaded and scored {} spectra from {} in chunks of {}, done in {:.2} s",
+        all_spectra.len(),
+        spectrum_path.display(),
+        CHUNK_SIZE,
+        t_phase.elapsed().as_secs_f64()
+    );
+    log::info!(
+        target: "chunk_candidate_prep",
+        "done in {:.2} s (part of stream_search: fragment-index build or record expansion, summed over chunks)",
+        prepared.chunk_prep_seconds()
+    );
+    for (activation, own_model, scans) in prepared.per_scan_routes() {
+        log::info!(
+            target: "routing",
+            "{scans} {} scan scorings with {} (run routed {})",
+            activation.name(),
+            if own_model {
+                "the model of their own activation"
+            } else {
+                "the run's model"
+            },
+            routed_activation.name()
+        );
+    }
+    if bench_mode {
+        log::info!(target: "bench", "capped at {} spectra", cli.max_spectra);
+    }
+
+    prepared.sync_materialized_candidates();
+
+    let mono_columns = mono_active;
+    let (mono_active, glyco_isotope_override) = finish_mono_correction(
+        cli,
+        params,
+        mono_params,
+        mono_active,
+        &mono_stats,
+        &mut mono_dump,
+        &mut mono_table,
+    )?;
+    if mono_active {
+        debug_assert_eq!(mono_table.len(), all_spectra.len());
+    }
+
+    let spectra = all_spectra;
+    let queues = all_queues;
+
+    if standalone {
+        log::info!(
+            "Standard peptide search skipped in --{} mode (PSMs unused; the driver \
+             derives its own candidates); {} spectra loaded ({:.2}s)",
+            if cli.glyco { "glyco" } else { "xl" },
+            spectra.len(),
+            search_elapsed.as_secs_f64()
+        );
+    } else {
+        let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
+        log::info!(
+            "Search complete: {non_empty} / {} spectra have PSMs (search wall: {:.2}s)",
+            spectra.len(),
+            search_elapsed.as_secs_f64()
+        );
+    }
+    if cli.dia {
+        crate::memory::release_free_memory();
+    }
+    crate::memory::mark_stage("search");
+    if cli.open_search {
+        let (attempts, wins) = prepared.open_search_stats();
+        log::info!(
+            target: "open-search",
+            "{attempts} modification-aware re-scores ({wins} improved the node \
+             score)"
+        );
+    }
+
+    if cli.xl.is_some() {
+        if xl_snap_files > 0 {
+            log::info!(
+                target: "xl",
+                "{xl_snapped} precursor m/z values moved to the dominant MS1 peak within {} ppm",
+                search::crosslinks::PRECURSOR_SNAP_PPM
+            );
+        }
+        crate::xl::run_xl(
+            cli,
+            &spectra,
+            &xl_ms3,
+            prepared,
+            report_base,
+            spectrum_paths,
+            run_ends,
+            t_total,
+        )?;
+        return Ok(None);
+    }
+
+    if cli.glyco {
+        let unfitted: Vec<Option<MonoCorrection>>;
+        let mono_for_pin = if mono_active {
+            Some(mono_table.as_slice())
+        } else if mono_columns {
+            unfitted = vec![None; spectra.len()];
+            Some(unfitted.as_slice())
+        } else {
+            None
+        };
+        run_glyco(
+            cli,
+            &spectra,
+            prepared,
+            params,
+            idx,
+            output_pin_path,
+            spectrum_paths,
+            acquisition.high_res,
+            mono_for_pin,
+            glyco_isotope_override,
+            quant.as_ref(),
+            t_total,
+        )?;
+        return Ok(None);
+    }
+
+    let refine_output = if cli.refine {
+        let base_cfg = match &cli.refine_config {
+            Some(p) => search::RefineConfig::from_yaml_str(&std::fs::read_to_string(p)?)
+                .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
+            None => search::RefineConfig::default_tier(),
+        };
+        let cfg = base_cfg;
+
+        let high_res = acquisition.high_res;
+
+        let high_res_only = cfg.high_res_only;
+        if high_res_only && !high_res {
+            log::warn!("refine is high-res-only and the data is low-res; skipping refinement.");
+            None
+        } else {
+            let target_db = idx.target_db();
+            let t_refine = std::time::Instant::now();
+            let out = search::refinement::run_refinement(
+                &queues,
+                &spectra,
+                &prepared.candidates,
+                &target_db,
+                params,
+                scorer,
+                &cfg,
+                0.01,
+                high_res,
+                fragment_tol_da,
+                &cli.db.decoy_prefix,
+                decoy_strategy,
+                cli.decoy_seed,
+                file_calibrations,
+            );
+            log::info!(
+                target: "refinement",
+                "done in {:.2} s",
+                t_refine.elapsed().as_secs_f64()
+            );
+            out
+        }
+    } else {
+        None
+    };
+
+    Ok(Some((spectra, queues, refine_output)))
+}

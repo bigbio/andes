@@ -3,7 +3,6 @@
 # After a function is split under the budget, drop its line (and refresh the listed lengths) with:
 # cargo test -p andes --release --test structure -- --ignored write_fn_lines_baseline
 crates/andes/src/bin/andes/quant/library.rs::build_and_write_library	373
-crates/andes/src/bin/andes/quant/tmt/mbr.rs::process_run	330
 crates/andes/src/bin/andes/search.rs::run	1373
 crates/andes/src/bin/andes/search/files.rs::search_file	614
 crates/andes/src/bin/andes/search/resolve.rs::resolve_search_params	344

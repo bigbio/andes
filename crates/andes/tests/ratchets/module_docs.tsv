@@ -18,7 +18,6 @@ crates/andes/src/bin/andes/quant/run/labels.rs	1
 crates/andes/src/bin/andes/quant/run/ms1.rs	1
 crates/andes/src/bin/andes/quant/tmt/mbr.rs	1
 crates/andes/src/bin/andes/sdrf.rs	1
-crates/andes/src/bin/andes/search.rs	1
 crates/andes/src/bin/andes/spectra.rs	1
 crates/andes/src/bin/andes/train/intensity.rs	1
 crates/andes/src/bin/andes/transfers.rs	1

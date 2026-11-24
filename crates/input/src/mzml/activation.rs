@@ -1,6 +1,8 @@
 //! Activation methods: the EThcD/ETciD policy (label as EThcD, or as ETD with
 //! `--ethcd-activation etd`) and the Thermo filter-string check for supplemental activation.
 
+use super::cv::{CV_CID, CV_ETD, CV_HCD};
+
 pub(crate) fn log_ethcd_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);

@@ -20,7 +20,7 @@ pub(super) struct BinaryArrayCtx {
 }
 
 impl BinaryArrayCtx {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         BinaryArrayCtx {
             is_mz: false,
             is_intensity: false,

@@ -372,48 +372,7 @@ pub(crate) fn add_to_pin(
     }
     let fold = |form: u32| ((form as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 63) as usize;
 
-    let ms1_int: Vec<f32> = table
-        .rows
-        .par_iter()
-        .map(|r| {
-            if r.spec == NONE || r.form == NONE || r.charge == 0 {
-                return 0.0;
-            }
-            let Some(Some(idx)) = ms1.get(run_of(r.spec as usize)) else {
-                return 0.0;
-            };
-            let mass = &table.forms[r.form as usize].1;
-            let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
-            let mono = (total + H2O) / r.charge as f64 + PROTON;
-            let rt = spectra[r.spec as usize].rt_seconds.unwrap_or(0.0);
-            idx.nearest_scan(rt)
-                .and_then(|i| {
-                    let peaks = &idx.scan(i).peaks;
-                    let tol = mono * MS1_PPM * 1e-6;
-                    let lo = peaks.partition_point(|p| p.0 < mono - tol);
-                    peaks[lo..]
-                        .iter()
-                        .take_while(|p| p.0 <= mono + tol)
-                        .map(|p| p.1)
-                        .reduce(f32::max)
-                })
-                .unwrap_or(0.0)
-        })
-        .collect();
-    let mut cuts: Vec<Vec<f32>> = vec![Vec::new(); n_runs];
-    for (i, r) in table.rows.iter().enumerate() {
-        if anchor[i] && ms1_int[i] > 0.0 {
-            cuts[run_of(r.spec as usize).min(n_runs - 1)].push(ms1_int[i]);
-        }
-    }
-    let cuts: Vec<[f32; 3]> = cuts
-        .into_iter()
-        .map(|mut v| {
-            v.sort_by(f32::total_cmp);
-            let at = |f: f64| v.get((v.len() as f64 * f) as usize).copied().unwrap_or(0.0);
-            [at(0.25), at(0.5), at(0.75)]
-        })
-        .collect();
+    let (ms1_int, cuts) = ms1_intensity_cuts(&table, spectra, ms1, run_ends, &anchor);
     let ms1_bin = |i: usize, run: usize| -> usize {
         let v = ms1_int[i];
         if v <= 0.0 {
@@ -644,6 +603,63 @@ pub(crate) fn add_to_pin(
         llr,
         shift_ppm,
     })
+}
+
+/// Each PIN row's MS1 intensity (the highest peak within the MS1 tolerance of its monoisotopic
+/// m/z in the MS1 scan nearest its retention time; 0 without one) and, per run, the quartiles of
+/// the anchor rows' intensities that cut it into bins.
+fn ms1_intensity_cuts(
+    table: &PinTable,
+    spectra: &[Spectrum],
+    ms1: &[Option<Ms1RunIndex>],
+    run_ends: &[usize],
+    anchor: &[bool],
+) -> (Vec<f32>, Vec<[f32; 3]>) {
+    let run_of = |i: usize| run_ends.partition_point(|&e| e <= i);
+    let n_runs = run_ends.len().max(1);
+    let ms1_int: Vec<f32> = table
+        .rows
+        .par_iter()
+        .map(|r| {
+            if r.spec == NONE || r.form == NONE || r.charge == 0 {
+                return 0.0;
+            }
+            let Some(Some(idx)) = ms1.get(run_of(r.spec as usize)) else {
+                return 0.0;
+            };
+            let mass = &table.forms[r.form as usize].1;
+            let total: f64 = mass.res.iter().sum::<f64>() + mass.nterm;
+            let mono = (total + H2O) / r.charge as f64 + PROTON;
+            let rt = spectra[r.spec as usize].rt_seconds.unwrap_or(0.0);
+            idx.nearest_scan(rt)
+                .and_then(|i| {
+                    let peaks = &idx.scan(i).peaks;
+                    let tol = mono * MS1_PPM * 1e-6;
+                    let lo = peaks.partition_point(|p| p.0 < mono - tol);
+                    peaks[lo..]
+                        .iter()
+                        .take_while(|p| p.0 <= mono + tol)
+                        .map(|p| p.1)
+                        .reduce(f32::max)
+                })
+                .unwrap_or(0.0)
+        })
+        .collect();
+    let mut cuts: Vec<Vec<f32>> = vec![Vec::new(); n_runs];
+    for (i, r) in table.rows.iter().enumerate() {
+        if anchor[i] && ms1_int[i] > 0.0 {
+            cuts[run_of(r.spec as usize).min(n_runs - 1)].push(ms1_int[i]);
+        }
+    }
+    let cuts: Vec<[f32; 3]> = cuts
+        .into_iter()
+        .map(|mut v| {
+            v.sort_by(f32::total_cmp);
+            let at = |f: f64| v.get((v.len() as f64 * f) as usize).copied().unwrap_or(0.0);
+            [at(0.25), at(0.5), at(0.75)]
+        })
+        .collect();
+    (ms1_int, cuts)
 }
 
 fn explain_greedy(rows: &[(u32, Vec<IonObs>)], terms: &[Vec<(f64, f64)>], outs: &mut [RowOut]) {

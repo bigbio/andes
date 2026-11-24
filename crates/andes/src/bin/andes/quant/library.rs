@@ -217,11 +217,8 @@ pub(crate) fn build_and_write_library(
     };
     let started = std::time::Instant::now();
     let merged = matches!(scores, ScoreLoader::Merged(_));
-    let mut keys: BTreeMap<String, KeyMeta> = BTreeMap::new();
+    let mut merge = KeyMerge::default();
     let spec_keys = SpecIdKeys::default();
-    let mut seen: HashMap<u128, u32, rustc_hash::FxBuildHasher> = HashMap::default();
-    let mut shared: Option<(usize, usize, usize)> = None;
-    let mut n_rows = 0usize;
     let columns: Vec<&str> = META_COLUMNS
         .iter()
         .copied()
@@ -257,28 +254,15 @@ pub(crate) fn build_and_write_library(
             })
             .collect();
         for (&r, run) in group.iter().zip(read) {
-            let run = run?;
-            n_rows += run.rows;
-            for (i, h) in run.spec.iter().enumerate() {
-                let other = *seen.entry(*h).or_insert(r as u32);
-                if shared.is_none() && other as usize != r {
-                    shared = Some((other as usize, r, i));
-                }
-            }
-            for (key, m) in run.keys {
-                match keys.get_mut(key.as_str()) {
-                    Some(g) => {
-                        if m.has_target && !g.has_target {
-                            *g = m;
-                        }
-                    }
-                    None => {
-                        keys.insert(key, m);
-                    }
-                }
-            }
+            merge.add(r, run?);
         }
     }
+    let KeyMerge {
+        mut keys,
+        seen,
+        shared,
+        n_rows,
+    } = merge;
     let n_spec_ids = seen.len();
     drop(seen);
     let (merged_scores, per_run) = match scores {
@@ -298,10 +282,7 @@ pub(crate) fn build_and_write_library(
         }
         ScoreLoader::PerRun(load) => (None, Some(load)),
     };
-    let mut mod_masses: HashMap<String, f64> = HashMap::new();
-    for p in &paths {
-        mod_masses.extend(read_run_quant_mods(p)?);
-    }
+    let mod_masses = quant_mod_masses(&paths)?;
     let resolve = |tag: &str| {
         mod_masses
             .get(tag)
@@ -309,56 +290,13 @@ pub(crate) fn build_and_write_library(
             .or_else(|| bundled_unimod_mass(tag))
     };
     let site_keys: Vec<(String, KeyMeta)> = std::mem::take(&mut keys).into_iter().collect();
-    let mut classes: BTreeMap<(IsomerClass, u8), Vec<u32>> = BTreeMap::new();
-    for (i, (key, m)) in site_keys.iter().enumerate() {
-        let class = IsomerClass::parse(split_key(key), resolve)
-            .map_err(|e| format!("{}: precursor {key:?}: {e}", paths[m.run].display()))?;
-        classes.entry((class, m.charge)).or_default().push(i as u32);
-    }
-    let mut meta = Vec::with_capacity(classes.len());
-    let mut proteins = Vec::with_capacity(classes.len());
-    let mut target_key = Vec::with_capacity(classes.len());
-    let mut forms: Vec<Vec<u32>> = Vec::with_capacity(classes.len());
-    for (_, sites) in std::mem::take(&mut classes) {
-        let first = *sites
-            .iter()
-            .find(|&&i| site_keys[i as usize].1.has_target)
-            .unwrap_or(&sites[0]);
-        let (key, m) = &site_keys[first as usize];
-        let envelope = m.envelope.map_err(|len| {
-            format!(
-                "{}: precursor {key:?} has an envelope of {len} isotopes, expected {ENVELOPE_LEN}",
-                paths[m.run].display()
-            )
-        })?;
-        if !(m.isotope_share > 0.0 && m.isotope_share <= 1.0) {
-            return Err(format!(
-                "{}: precursor {key:?} has an isotope share of {}, outside (0, 1]",
-                paths[m.run].display(),
-                m.isotope_share
-            ));
-        }
-        meta.push(PrecursorMeta {
-            key: key.clone(),
-            mz: m.mz,
-            charge: m.charge,
-            envelope,
-            isotope_share: m.isotope_share,
-        });
-        proteins.push(m.proteins.clone());
-        target_key.push(m.has_target);
-        forms.push(sites);
-    }
-    let site_keys_ref = &site_keys;
-    let id_of: HashMap<&str, (u32, u32)> = forms
-        .iter()
-        .enumerate()
-        .flat_map(|(id, sites)| {
-            sites
-                .iter()
-                .map(move |&i| (site_keys_ref[i as usize].0.as_str(), (id as u32, i)))
-        })
-        .collect();
+    let IsomerTable {
+        mut meta,
+        proteins,
+        target_key,
+        forms,
+    } = isomer_classes(&paths, &site_keys, resolve)?;
+    let id_of = site_ids(&site_keys, &forms);
     let mut builder = LibraryBuilder::new(meta.len(), stems.len(), donor_q, donor_pep);
     let mut donors = DonorPsms::new(meta.len());
     let mut best = vec![None::<BestForm>; meta.len()];
@@ -479,16 +417,7 @@ pub(crate) fn build_and_write_library(
     }
     drop(id_of);
     drop(merged_scores);
-    let (mut multi, mut n_forms) = (0usize, 0usize);
-    for (id, b) in best.iter().enumerate() {
-        if let Some(b) = b {
-            meta[id].key = site_keys[b.site as usize].0.clone();
-        }
-        if target_key[id] {
-            n_forms += forms[id].len();
-            multi += usize::from(forms[id].len() > 1);
-        }
-    }
+    let (multi, n_forms) = rekey_by_best_form(&mut meta, &best, &site_keys, &target_key, &forms);
     drop(forms);
     drop(site_keys);
     log::info!(
@@ -496,10 +425,7 @@ pub(crate) fn build_and_write_library(
         "positional isomers: {} target precursors hold {n_forms} site forms; {multi} precursors join several site forms and are keyed by the site form of their best PSM",
         target_key.iter().filter(|&&t| t).count()
     );
-    let donor_gate = match donor_pep {
-        Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
-        None => format!("PSM q<={donor_q}"),
-    };
+    let donor_gate = donor_gate_text(donor_q, donor_pep);
     let ap = align_params(dir, stems);
     let aligning = std::time::Instant::now();
     let library = builder.finish(meta, max_q, &ap);
@@ -562,4 +488,164 @@ pub(crate) fn build_and_write_library(
         dir.join(output::library::ALIGNMENT_FILE).display()
     );
     Ok(stored)
+}
+
+/// Each site key's precursor id and site index, for joining PSMs to the library.
+/// The modification masses the runs' quant tables declare, keyed by tag.
+fn quant_mod_masses(paths: &[PathBuf]) -> Result<HashMap<String, f64>, String> {
+    let mut mod_masses: HashMap<String, f64> = HashMap::new();
+    for p in paths {
+        mod_masses.extend(read_run_quant_mods(p)?);
+    }
+    Ok(mod_masses)
+}
+
+/// The donor-PSM gate as logged: q-value, and PEP when one is set.
+fn donor_gate_text(donor_q: f64, donor_pep: Option<f64>) -> String {
+    match donor_pep {
+        Some(c) => format!("PSM q<={donor_q} and PEP<={c}"),
+        None => format!("PSM q<={donor_q}"),
+    }
+}
+
+fn site_ids<'k>(
+    site_keys: &'k [(String, KeyMeta)],
+    forms: &[Vec<u32>],
+) -> HashMap<&'k str, (u32, u32)> {
+    forms
+        .iter()
+        .enumerate()
+        .flat_map(|(id, sites)| {
+            sites
+                .iter()
+                .map(move |&i| (site_keys[i as usize].0.as_str(), (id as u32, i)))
+        })
+        .collect()
+}
+
+/// The precursor keys of all runs, merged: a key's metadata comes from its first target row, else
+/// its first row; with merged scores, the spec ids seen and the first one shared by two runs.
+#[derive(Default)]
+struct KeyMerge {
+    keys: BTreeMap<String, KeyMeta>,
+    seen: HashMap<u128, u32, rustc_hash::FxBuildHasher>,
+    shared: Option<(usize, usize, usize)>,
+    n_rows: usize,
+}
+
+impl KeyMerge {
+    /// Adds the keys and spec ids read from run `r`.
+    fn add(&mut self, r: usize, run: RunKeys) {
+        let KeyMerge {
+            keys,
+            seen,
+            shared,
+            n_rows,
+        } = self;
+        *n_rows += run.rows;
+        for (i, h) in run.spec.iter().enumerate() {
+            let other = *seen.entry(*h).or_insert(r as u32);
+            if shared.is_none() && other as usize != r {
+                *shared = Some((other as usize, r, i));
+            }
+        }
+        for (key, m) in run.keys {
+            match keys.get_mut(key.as_str()) {
+                Some(g) => {
+                    if m.has_target && !g.has_target {
+                        *g = m;
+                    }
+                }
+                None => {
+                    keys.insert(key, m);
+                }
+            }
+        }
+    }
+}
+
+/// Keys each precursor by the site form of its best PSM; returns the precursors that join several
+/// site forms and the site forms of the target precursors.
+fn rekey_by_best_form(
+    meta: &mut [PrecursorMeta],
+    best: &[Option<BestForm>],
+    site_keys: &[(String, KeyMeta)],
+    target_key: &[bool],
+    forms: &[Vec<u32>],
+) -> (usize, usize) {
+    let (mut multi, mut n_forms) = (0usize, 0usize);
+    for (id, b) in best.iter().enumerate() {
+        if let Some(b) = b {
+            meta[id].key = site_keys[b.site as usize].0.clone();
+        }
+        if target_key[id] {
+            n_forms += forms[id].len();
+            multi += usize::from(forms[id].len() > 1);
+        }
+    }
+    (multi, n_forms)
+}
+
+/// The library's precursor table: one precursor per isomer class and charge, its metadata,
+/// proteins and whether a target form exists, and the site keys (forms) it groups.
+struct IsomerTable {
+    meta: Vec<PrecursorMeta>,
+    proteins: Vec<String>,
+    target_key: Vec<bool>,
+    forms: Vec<Vec<u32>>,
+}
+
+/// Groups the site keys into isomer classes (per charge), resolving modification tags with the runs'
+/// quant modifications and the bundled Unimod table, and checks each class's envelope and isotope share.
+fn isomer_classes(
+    paths: &[PathBuf],
+    site_keys: &[(String, KeyMeta)],
+    resolve: impl Fn(&str) -> Option<f64> + Copy,
+) -> Result<IsomerTable, String> {
+    let mut classes: BTreeMap<(IsomerClass, u8), Vec<u32>> = BTreeMap::new();
+    for (i, (key, m)) in site_keys.iter().enumerate() {
+        let class = IsomerClass::parse(split_key(key), resolve)
+            .map_err(|e| format!("{}: precursor {key:?}: {e}", paths[m.run].display()))?;
+        classes.entry((class, m.charge)).or_default().push(i as u32);
+    }
+    let mut meta = Vec::with_capacity(classes.len());
+    let mut proteins = Vec::with_capacity(classes.len());
+    let mut target_key = Vec::with_capacity(classes.len());
+    let mut forms: Vec<Vec<u32>> = Vec::with_capacity(classes.len());
+    for (_, sites) in std::mem::take(&mut classes) {
+        let first = *sites
+            .iter()
+            .find(|&&i| site_keys[i as usize].1.has_target)
+            .unwrap_or(&sites[0]);
+        let (key, m) = &site_keys[first as usize];
+        let envelope = m.envelope.map_err(|len| {
+            format!(
+                "{}: precursor {key:?} has an envelope of {len} isotopes, expected {ENVELOPE_LEN}",
+                paths[m.run].display()
+            )
+        })?;
+        if !(m.isotope_share > 0.0 && m.isotope_share <= 1.0) {
+            return Err(format!(
+                "{}: precursor {key:?} has an isotope share of {}, outside (0, 1]",
+                paths[m.run].display(),
+                m.isotope_share
+            ));
+        }
+        meta.push(PrecursorMeta {
+            key: key.clone(),
+            mz: m.mz,
+            charge: m.charge,
+            envelope,
+            isotope_share: m.isotope_share,
+        });
+        proteins.push(m.proteins.clone());
+        target_key.push(m.has_target);
+        forms.push(sites);
+    }
+    Ok(IsomerTable {
+        meta,
+        proteins,
+        target_key,
+        forms,
+    })
 }

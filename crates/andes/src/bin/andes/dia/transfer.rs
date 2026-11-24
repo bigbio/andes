@@ -769,7 +769,7 @@ mod tests {
             features: vec![("p2_llr".into(), vec![rt as f32])],
             ..Default::default()
         };
-        crate::dia::study::store_run(quant_dir, &spectrum, &pin, &table, None).unwrap();
+        crate::dia::study::store_run(quant_dir, &spectrum, &pin, &table, None, &Default::default()).unwrap();
     }
 
     #[test]

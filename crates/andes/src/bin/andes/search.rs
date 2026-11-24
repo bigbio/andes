@@ -1894,6 +1894,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &output_pin_path,
                     t,
                     Some((&backend, &user_args)),
+                    &pass1_removed,
                 )?;
                 crate::memory::mark_stage("study tables stored");
                 dia_pass2 = None;
@@ -1968,7 +1969,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
 
     if let (Some(t), Some(dir)) = (dia_pass2.take(), cli.quant_dir.as_deref()) {
-        crate::dia::study::store_run(dir, &spectrum_path, &output_pin_path, &t, None)?;
+        crate::dia::study::store_run(dir, &spectrum_path, &output_pin_path, &t, None, &Default::default())?;
     }
     if cli.dia {
         crate::memory::release_free_memory();
